@@ -18,6 +18,7 @@ test = ["pytest>=8"]
 
 [project.scripts]
 wasm-agent = "wasm_agent.cli:main"
+wa = "wasm_agent.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -47,6 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("init", help="create or migrate the database").add_argument("--json", action="store_true")
 
+    p = sub.add_parser("chat", help="interactive agent chat (default when no command is given)")
+    p.add_argument("--session")
+    p.add_argument("--model")
+    p.add_argument("--base-url")
+    p.add_argument("--api-key")
+
     p = sub.add_parser("remember", help="store an explicit memory")
     p.add_argument("text")
     p.add_argument("--scope", default="global")
@@ -90,9 +96,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
+        argv = ["chat"]
     args = build_parser().parse_args(argv)
     memory = Memory(args.db)
     try:
+        if args.command == "chat":
+            from .agent.chat import run_chat
+            return run_chat(memory, model=args.model, base_url=args.base_url,
+                            api_key=args.api_key, session_id=args.session)
         if args.command == "init":
             _emit({"database": str(memory.store.path), "schema_version": memory.store.migrate(),
                    "journal_mode": memory.conn.execute("PRAGMA journal_mode").fetchone()[0]}, args.json)
