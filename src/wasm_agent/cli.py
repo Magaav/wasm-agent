@@ -68,6 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("forget", help="soft-delete a memory")
     p.add_argument("memory_id")
+    p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("search", help="search the message ledger")
     p.add_argument("query")
