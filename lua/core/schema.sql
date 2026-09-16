@@ -55,3 +55,29 @@ CREATE INDEX IF NOT EXISTS runs_session_idx ON runs(session_id, started_at);
 CREATE TABLE IF NOT EXISTS run_links (
   run_id TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
   PRIMARY KEY (run_id, entity_type, entity_id));
+
+-- ---------------------------------------------------------------- transcript
+-- The agent's OWN dialogue. Deliberately separate from `messages`, which is the
+-- external inbox/ledger. `runs` stays an effect/settlement record; `turns` is the
+-- conversation, and `trace` on each assistant turn is the observability payload.
+CREATE TABLE IF NOT EXISTS turns (
+  id           TEXT PRIMARY KEY,
+  session_id   TEXT NOT NULL,
+  seq          INTEGER NOT NULL,
+  role         TEXT NOT NULL,
+  content      TEXT NOT NULL DEFAULT '',
+  tool_calls   TEXT NOT NULL DEFAULT '[]',
+  tool_call_id TEXT NOT NULL DEFAULT '',
+  tool_name    TEXT NOT NULL DEFAULT '',
+  tokens       INTEGER NOT NULL DEFAULT 0,
+  ms           INTEGER NOT NULL DEFAULT 0,
+  ok           INTEGER NOT NULL DEFAULT 1,
+  debug        INTEGER NOT NULL DEFAULT 0,
+  trace        TEXT NOT NULL DEFAULT '[]',
+  created_at   REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS turns_session_idx ON turns(session_id, seq);
+CREATE INDEX IF NOT EXISTS turns_time_idx ON turns(created_at);
+CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(
+  content, session_id UNINDEXED, turn_id UNINDEXED,
+  tokenize = 'unicode61 remove_diacritics 2');

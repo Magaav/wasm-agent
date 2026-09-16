@@ -31,6 +31,17 @@ M.shared = {
     scope = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 50 } }, { "query" }),
   schema("capabilities", "List the tools available to this account (its capabilities).", {}),
+  schema("sessions", "List your own past sessions (resumable threads), most recent first.", {
+    limit = { type = "integer", minimum = 1, maximum = 100 } }),
+  schema("session", "Read one of your past sessions: the transcript, oldest first.", {
+    session_id = { type = "string" },
+    limit = { type = "integer", minimum = 1, maximum = 1000 } }, { "session_id" }),
+  schema("search_turns", "Search your own past sessions for text (what did we decide about X?).", {
+    query = { type = "string" },
+    limit = { type = "integer", minimum = 1, maximum = 50 } }, { "query" }),
+  schema("resume_session", "Fold a past session into this one: its summary and recent turns become context.", {
+    session_id = { type = "string" },
+    limit = { type = "integer", minimum = 1, maximum = 100 } }, { "session_id" }),
 }
 
 -- Admin only: the ledger and the pi-style environment tools.
@@ -60,7 +71,7 @@ M.admin = {
   schema("grep", "Search files for a pattern and return matching lines.", {
     pattern = { type = "string" }, path = { type = "string" } }, { "pattern" }),
   schema("client", "Control the wasm-agent client machine: screenshot, mouse, keyboard and a Chrome DevTools (CDP) session. CDP uses a dedicated Chrome profile and launches Chrome if needed.", {
-    action = { type = "string", enum = { "screenshot", "click", "move", "type", "key", "cdp" } },
+    action = { type = "string", enum = { "screenshot", "frame", "click", "move", "type", "key", "shell", "cdp" } },
     x = { type = "integer" }, y = { type = "integer" },
     text = { type = "string" }, key = { type = "string" },
     target = { type = "string", description = "CDP: list | open | close | activate | navigate | evaluate | launch" },
@@ -93,6 +104,11 @@ M.admin = {
     capability = { type = "string", description = "Tool to run on that node, e.g. bash, read, client, shell." },
     args = { type = "object", description = "Arguments for that tool." } }, { "node", "capability" }),
   schema("nodes", "List this node and every peer known to the rendezvous.", {}),
+  schema("session_debug", "Set a session's recording mode. debug keeps every turn verbatim and forever, so a failing task can be reproduced and exported as a fixture.", {
+    session_id = { type = "string", description = "Defaults to the current session." },
+    mode = { type = "string", enum = { "default", "debug" } } }, { "mode" }),
+  schema("session_fixture", "Export a session (turns, tool calls, traces) as a reproducible fixture for regression tests.", {
+    session_id = { type = "string", description = "Defaults to the current session." } }),
 }
 
 -- Which capability tier each tool belongs to (DESIGN.md §8). Anything not
@@ -100,6 +116,8 @@ M.admin = {
 M.tier_of = {
   remember = "memory", recall = "memory",
   capabilities = "capabilities",
+  sessions = "sessions", session = "sessions", search_turns = "sessions",
+  resume_session = "sessions", session_debug = "sessions", session_fixture = "sessions",
   bash = "environment", read = "environment", write = "environment",
   edit = "environment", ls = "environment", grep = "environment",
   shell = "shell",
@@ -111,7 +129,7 @@ M.tier_of = {
 }
 
 local TIER_ORDER = {
-  "memory", "capabilities", "environment", "shell", "ledger",
+  "memory", "sessions", "capabilities", "environment", "shell", "ledger",
   "client", "spells", "nodes", "plugins",
 }
 
@@ -186,9 +204,11 @@ local function read_lines(path, offset, limit)
   return table.concat(slice, "\n")
 end
 
-function M.dispatch(memory, name, args, role)
+function M.dispatch(memory, name, args, role, ctx)
   args = args or {}
-  role = role or "admin"
+  role = role or "master"
+  ctx = ctx or {}
+  local user_id = ctx.user_id or "master"
   if not is_master(role) and admin_names()[name] then return { error = "forbidden_for_role:" .. role } end
 
   if name == "remember" then
@@ -260,6 +280,42 @@ function M.dispatch(memory, name, args, role)
     return spellslib.get(args.name) or { error = "unknown_spell" }
   elseif name == "spell_forget" then
     return spellslib.remove(args.name)
+  elseif name == "sessions" then
+    return { sessions = memory.list_sessions(user_id, args.limit or 30) }
+  elseif name == "session" then
+    local session = memory.session(args.session_id)
+    if not session then return { error = "unknown_session" } end
+    if session.user_id ~= user_id and not is_master(role) then return { error = "forbidden" } end
+    return { session = session, turns = memory.session_turns(args.session_id, { limit = args.limit or 200 }) }
+  elseif name == "search_turns" then
+    return { matches = memory.search_turns(args.query or "", is_master(role) and nil or user_id, args.limit or 20) }
+  elseif name == "resume_session" then
+    local target = memory.session(args.session_id)
+    if not target then return { error = "unknown_session" } end
+    if target.user_id ~= user_id and not is_master(role) then return { error = "forbidden" } end
+    local turns = memory.session_turns(args.session_id, { limit = args.limit or 30 })
+    local lines = { "Resumed session " .. args.session_id .. " (" .. (target.title or "") .. "):" }
+    if target.summary and target.summary ~= "" then lines[#lines + 1] = target.summary end
+    for _, turn in ipairs(turns) do
+      if turn.role == "user" or turn.role == "assistant" then
+        lines[#lines + 1] = turn.role .. ": " .. (turn.content or ""):sub(1, 400)
+      end
+    end
+    if ctx.session_id then
+      local current = memory.session(ctx.session_id) or {}
+      local merged = current.summary or ""
+      if merged ~= "" then merged = merged .. "\n" end
+      memory.set_session_summary(ctx.session_id, current.summarized_until or 0, merged .. table.concat(lines, "\n"))
+    end
+    return { resumed = args.session_id, turns = #turns }
+  elseif name == "session_debug" then
+    local id = args.session_id or ctx.session_id
+    if not id then return { error = "session_id_required" } end
+    return { session_id = id, mode = memory.set_session_mode(id, args.mode) }
+  elseif name == "session_fixture" then
+    local fixture = memory.session_fixture(args.session_id or ctx.session_id)
+    if not fixture then return { error = "unknown_session" } end
+    return fixture
   elseif name == "nodes" then
     local list = {}
     for _, node in ipairs(nodeslib.list()) do

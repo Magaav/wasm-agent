@@ -14,12 +14,14 @@ local function emit(event)
   host.stream(json.encode(event))
 end
 
--- Rebuild the agent when the signed-in user (or their role) changes.
-local function agent_for(session)
+-- Rebuild the agent when the signed-in user, their role, or the target node
+-- changes. The session is a resumable thread keyed by (user, node).
+local function agent_for(session, node)
   local user = users.current(session)
-  if not agent or agent.user ~= user.id or agent.role ~= user.role then
+  node = node or ""
+  if not agent or agent.user ~= user.id or agent.role ~= user.role or agent.node ~= node then
     if agent then agent:close() end
-    agent = agentlib.new(nil, emit, user.role, user.id)
+    agent = agentlib.new(nil, emit, user.role, user.id, node)
   end
   return agent
 end
@@ -38,7 +40,7 @@ function wa_reply(text, session, node)
     if result and result.error then return json.encode({ error = tostring(result.error) }) end
     return json.encode({ reply = result and result.reply or "" })
   end
-  local bot = agent_for(session)
+  local bot = agent_for(session, node)
   local ok, reply = pcall(bot.turn, bot, text or "")
   if not ok then return json.encode({ error = tostring(reply) }) end
   return json.encode({ reply = reply })
@@ -52,7 +54,7 @@ function wa_reply_stream(text, session, node)
     if result and result.error then emit({ type = "error", error = tostring(result.error) }) end
     return ""
   end
-  local bot = agent_for(session)
+  local bot = agent_for(session, node)
   local ok, reply = pcall(bot.turn, bot, text or "")
   if not ok then emit({ type = "error", error = tostring(reply) }) end
   return ""
@@ -274,6 +276,43 @@ function wa_tools(session)
       { name = "cdp", args = { target = "list|open|close|activate|navigate|evaluate|launch", script = "string", id = "string", url = "string", port = "integer", profile = "string" } },
     },
   })
+end
+
+-- ---- sessions (for the engine view) -------------------------------------
+function wa_sessions(session)
+  local user = users.current(session)
+  return json.encode({ sessions = memory.list_sessions(user.id, 50) })
+end
+
+function wa_session(session_id, session)
+  local user = users.current(session)
+  local record = memory.session(session_id or "")
+  if not record then return json.encode({ error = "unknown_session" }) end
+  if record.user_id ~= user.id and not users.is_master(user.role) then
+    return json.encode({ error = "forbidden" })
+  end
+  return json.encode({
+    session = record,
+    turns = memory.session_turns(session_id, { limit = 500 }),
+  })
+end
+
+function wa_session_mode(payload, session)
+  local user = require_master(session)
+  if not user then return json.encode({ error = "forbidden" }) end
+  local ok, request = pcall(json.decode, payload)
+  if not ok or type(request) ~= "table" then return json.encode({ error = "bad_request" }) end
+  local id = request.session_id
+  if not id or id == "" then return json.encode({ error = "session_id_required" }) end
+  return json.encode({ session_id = id, mode = memory.set_session_mode(id, request.mode) })
+end
+
+function wa_session_fixture(session_id, session)
+  local user = require_master(session)
+  if not user then return json.encode({ error = "forbidden" }) end
+  local fixture = memory.session_fixture(session_id or "")
+  if not fixture then return json.encode({ error = "unknown_session" }) end
+  return json.encode(fixture)
 end
 
 function wa_users()

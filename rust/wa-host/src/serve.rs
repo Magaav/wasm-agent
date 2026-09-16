@@ -197,6 +197,33 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", payload.as_bytes());
     }
+    if route == "/sessions" {
+        let payload = lua
+            .call_string("wa_sessions", &[session.as_str()])
+            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
+        return respond(stream, 200, "application/json", payload.as_bytes());
+    }
+    if route == "/session" {
+        let id = query_value(&query, "id");
+        let payload = lua
+            .call_string("wa_session", &[id.as_str(), session.as_str()])
+            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
+        return respond(stream, 200, "application/json", payload.as_bytes());
+    }
+    if route == "/session/mode" && method == "POST" {
+        let body_text = String::from_utf8_lossy(&body).to_string();
+        let payload = lua
+            .call_string("wa_session_mode", &[body_text.as_str(), session.as_str()])
+            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
+        return respond(stream, 200, "application/json", payload.as_bytes());
+    }
+    if route == "/session/fixture" {
+        let id = query_value(&query, "id");
+        let payload = lua
+            .call_string("wa_session_fixture", &[id.as_str(), session.as_str()])
+            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
+        return respond(stream, 200, "application/json", payload.as_bytes());
+    }
     if route == "/tools" {
         let payload = lua
             .call_string("wa_tools", &[session.as_str()])

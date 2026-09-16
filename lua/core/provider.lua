@@ -169,9 +169,15 @@ end
 -- `stream` forwards content deltas to the UI and still returns the whole
 -- message (content + tool_calls + usage) so the tool loop can continue.
 function M.complete(messages, tools, stream)
+  return M.complete_with(M.settings().model, messages, tools, stream)
+end
+
+-- Same, with an explicit model: used by compaction (a cheaper summariser when
+-- WASM_AGENT_LLM_SUMMARY_MODEL is set, otherwise the main model).
+function M.complete_with(model, messages, tools, stream)
   local settings = M.settings()
   local provider = M.active()
-  local body = { model = settings.model, messages = messages }
+  local body = { model = model or settings.model, messages = messages }
   if tools and #tools > 0 then
     body.tools = tools
     body.tool_choice = "auto"
@@ -191,7 +197,7 @@ function M.complete(messages, tools, stream)
       content = result.content or "",
       tool_calls = result.tool_calls or {},
       usage = result.usage,
-      model = settings.model,
+      model = body.model,
     }
   end
 
@@ -206,7 +212,7 @@ function M.complete(messages, tools, stream)
     content = message.content or "",
     tool_calls = message.tool_calls or {},
     usage = payload.usage,
-    model = payload.model or settings.model,
+    model = payload.model or body.model,
   }
 end
 

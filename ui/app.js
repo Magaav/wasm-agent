@@ -40,6 +40,8 @@ const engineSub = document.getElementById("engine-sub");
 const spellsBox = document.getElementById("spells-box");
 const spellsNote = document.getElementById("spells-note");
 const toolsBox = document.getElementById("tools-box");
+const sessionsBox = document.getElementById("sessions-box");
+const sessionsNote = document.getElementById("sessions-note");
 const control = document.getElementById("control");
 const controlTitle = document.getElementById("control-title");
 const controlCanvas = document.getElementById("control-canvas");
@@ -970,8 +972,108 @@ async function refreshTools() {
   }
 }
 
+// Sessions: the agent's own transcripts, with traces. This is the debugging
+// surface: open a session, flip it to debug, export it as a fixture.
+async function refreshSessions() {
+  try {
+    const payload = await (await fetch("sessions", { headers: apiHeaders() })).json();
+    const list = payload.sessions || [];
+    sessionsNote.textContent = `${list.length} sessions`;
+    sessionsBox.replaceChildren();
+    if (!list.length) {
+      sessionsBox.textContent = "no sessions yet";
+      return;
+    }
+    for (const session of list) {
+      const row = document.createElement("div");
+      row.className = "session-row";
+      const title = document.createElement("span");
+      title.className = "session-title";
+      title.textContent = session.title || session.id.slice(0, 8);
+      const meta = document.createElement("span");
+      meta.className = "session-meta";
+      const when = new Date((session.updated_at || session.started_at) * 1000).toLocaleString();
+      meta.textContent = `${session.mode} · ${session.turn_count} turns · ${when}`;
+      row.append(title, meta, nodeButton("open", () => openSession(session.id)));
+      sessionsBox.append(row);
+    }
+  } catch (error) {
+    sessionsBox.textContent = String(error);
+  }
+}
+
+async function openSession(id) {
+  const payload = await (await fetch("session?id=" + encodeURIComponent(id), { headers: apiHeaders() })).json();
+  if (payload.error) {
+    sessionsBox.textContent = payload.error;
+    return;
+  }
+  const session = payload.session;
+  sessionsBox.replaceChildren();
+
+  const bar = document.createElement("div");
+  bar.className = "session-bar";
+  bar.append(nodeButton("← sessions", () => refreshSessions()));
+  bar.append(nodeButton(session.mode === "debug" ? "debug: on" : "debug: off", async () => {
+    const next = session.mode === "debug" ? "default" : "debug";
+    await fetch("session/mode", {
+      method: "POST",
+      headers: apiHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ session_id: id, mode: next }),
+    });
+    openSession(id);
+  }));
+  bar.append(nodeButton("export fixture", async () => {
+    const fixture = await (await fetch("session/fixture?id=" + encodeURIComponent(id), { headers: apiHeaders() })).json();
+    const blob = new Blob([JSON.stringify(fixture, null, 2)], { type: "application/json" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `wasm-agent-session-${id.slice(0, 8)}.json`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  }));
+  sessionsBox.append(bar);
+
+  if (session.summary) {
+    const summary = document.createElement("div");
+    summary.className = "session-summary";
+    summary.textContent = "summary: " + session.summary;
+    sessionsBox.append(summary);
+  }
+
+  for (const turn of payload.turns || []) {
+    const row = document.createElement("div");
+    row.className = "turn turn-" + turn.role + (turn.ok ? "" : " bad");
+    const head = document.createElement("div");
+    head.className = "turn-head";
+    head.textContent = [
+      turn.seq, turn.role, turn.tool_name, turn.ms ? turn.ms + "ms" : "",
+      turn.tokens ? turn.tokens + " tok" : "",
+    ].filter(Boolean).join(" · ");
+    const body = document.createElement("div");
+    body.className = "turn-body";
+    body.textContent = (turn.content || "").slice(0, 1500);
+    row.append(head, body);
+    const trace = turn.trace || [];
+    if (trace.length) {
+      const line = document.createElement("div");
+      line.className = "turn-trace";
+      line.textContent = trace.map((span) => {
+        const parts = [span.kind + (span.name ? "(" + span.name + ")" : "")];
+        if (span.ms != null) parts.push(span.ms + "ms");
+        if (span.ok === false) parts.push("FAILED");
+        if (span.error) parts.push(span.error);
+        return parts.join(" ");
+      }).join("  →  ");
+      row.append(line);
+    }
+    sessionsBox.append(row);
+  }
+}
+
 function loadTopic(id) {
   if (id === "nodes-box") refreshNodes();
+  else if (id === "sessions-box") refreshSessions();
   else if (id === "spells-box") refreshSpells();
   else if (id === "tools-box") refreshTools();
 }
