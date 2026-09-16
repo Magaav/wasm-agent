@@ -43,16 +43,16 @@ end
 -- AGENTS.md is the only thing injected into context by default: instructions,
 -- read fresh every turn so editing the file takes effect immediately.
 function M.agents_md()
-  local candidates = {
-    os.getenv("WASM_AGENT_AGENTS_MD"),
-    "AGENTS.md",
-    (os.getenv("HOME") or ".") .. "/.wasm-agent/AGENTS.md",
-  }
+  -- Build the list by appending: an explicit first element of nil would make
+  -- `ipairs` stop immediately and silently skip everything else.
+  local candidates = {}
+  local configured = os.getenv("WASM_AGENT_AGENTS_MD")
+  if configured and configured ~= "" then candidates[#candidates + 1] = configured end
+  candidates[#candidates + 1] = "AGENTS.md"
+  candidates[#candidates + 1] = (os.getenv("HOME") or ".") .. "/.wasm-agent/AGENTS.md"
   for _, path in ipairs(candidates) do
-    if path and path ~= "" then
-      local text = host.read_file and host.read_file(path)
-      if text and text ~= "" then return text end
-    end
+    local text = host.read_file and host.read_file(path)
+    if text and text ~= "" then return text end
   end
   return nil
 end
