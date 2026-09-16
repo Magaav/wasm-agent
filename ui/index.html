@@ -27,6 +27,9 @@
       <div class="brand"><span class="dot"></span> wasm-agent</div>
       <div class="meta" id="meta">connecting…</div>
       <div class="topbar-actions">
+        <button id="engine-btn" class="topbar-btn" type="button" title="Engine (Ctrl+E)" aria-label="Engine">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="14" y="3" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="3" y="14" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="14" y="14" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+        </button>
         <button id="term-btn" class="topbar-btn" type="button" title="Shell (Ctrl+`)" aria-label="Shell">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7l5 5-5 5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 17h8" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
         </button>
@@ -61,6 +64,39 @@
         <input id="term-cmd" autocomplete="off" spellcheck="false"
                placeholder="shell on this machine — :spells, :run &lt;name&gt;, :clear" />
       </form>
+    </section>
+
+    <section id="engine" class="engine" hidden>
+      <header class="engine-bar">
+        <span class="engine-title">engine</span>
+        <span class="engine-sub" id="engine-sub"></span>
+        <button id="engine-close" class="icon-btn" type="button" title="Back to chat (Esc)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 6v12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+        </button>
+      </header>
+      <div class="engine-body">
+        <div class="engine-topic">
+          <button class="engine-head" type="button" data-target="nodes-box">
+            <span class="engine-caret">▸</span><span class="engine-name">nodes</span>
+            <span class="engine-note" id="nodes-binding"></span>
+          </button>
+          <div class="engine-content" id="nodes-box" hidden></div>
+        </div>
+        <div class="engine-topic">
+          <button class="engine-head" type="button" data-target="spells-box">
+            <span class="engine-caret">▸</span><span class="engine-name">spells</span>
+            <span class="engine-note" id="spells-note"></span>
+          </button>
+          <div class="engine-content" id="spells-box" hidden></div>
+        </div>
+        <div class="engine-topic">
+          <button class="engine-head" type="button" data-target="tools-box">
+            <span class="engine-caret">▸</span><span class="engine-name">tools</span>
+            <span class="engine-note">envelope the model sees</span>
+          </button>
+          <div class="engine-content" id="tools-box" hidden></div>
+        </div>
+      </div>
     </section>
 
     <section id="control" class="control" hidden>
@@ -124,8 +160,6 @@
           <label class="pop-head" for="model-select">model</label>
           <select id="model-select" class="wa-select"></select>
         </div>
-        <div class="pop-head">nodes <span id="nodes-binding" class="pop-sub"></span></div>
-        <div id="nodes-box" class="nodes-box"></div>
         <div class="pop-head">context</div>
         <div id="context-box" class="usage-box"></div>
         <div class="pop-head">limits</div>

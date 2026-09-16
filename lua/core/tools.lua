@@ -94,6 +94,46 @@ M.admin = {
   schema("nodes", "List this node and every peer known to the rendezvous.", {}),
 }
 
+-- Which capability tier each tool belongs to (DESIGN.md §8). Anything not
+-- listed here is a WASM plugin.
+M.tier_of = {
+  remember = "memory", recall = "memory",
+  spells = "capabilities",
+  bash = "environment", read = "environment", write = "environment",
+  edit = "environment", ls = "environment", grep = "environment",
+  shell = "shell",
+  search_messages = "ledger", conversation = "ledger", list_conversations = "ledger",
+  client = "client",
+  spell_save = "spells", spell_run = "spells", spell_list = "spells",
+  spell_get = "spells", spell_forget = "spells",
+  nodes = "nodes", remote = "nodes",
+}
+
+local TIER_ORDER = {
+  "memory", "capabilities", "environment", "shell", "ledger",
+  "client", "spells", "nodes", "plugins",
+}
+
+-- The envelope the model sees, grouped by tier.
+function M.tiers(role)
+  local groups = {}
+  for _, item in ipairs(M.all(role)) do
+    local name = item["function"].name
+    local tier = M.tier_of[name] or "plugins"
+    groups[tier] = groups[tier] or {}
+    table.insert(groups[tier], {
+      name = name,
+      description = item["function"].description or "",
+      parameters = item["function"].parameters or {},
+    })
+  end
+  local out = {}
+  for _, tier in ipairs(TIER_ORDER) do
+    if groups[tier] then out[#out + 1] = { tier = tier, tools = groups[tier] } end
+  end
+  return out
+end
+
 local function wasm_plugins()
   local ok, raw = pcall(host.plugins)
   if not ok or not raw then return {} end

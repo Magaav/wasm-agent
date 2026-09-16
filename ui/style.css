@@ -118,8 +118,39 @@ wa-message.assistant { align-self: flex-start; background: var(--assistant); }
 .tool-name { color: var(--muted); text-transform: uppercase; letter-spacing: .6px; font-size: 11px; margin-bottom: var(--space); }
 .tool-detail { color: #c9d1e0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-word; }
 
+/* engine: expandable topics (nodes, spells, tools) */
+body.engine .messages, body.engine .composer, body.engine .terminal, body.engine .control { display: none; }
+.engine { display: none; flex: 1; min-height: 0; flex-direction: column; }
+body.engine .engine { display: flex; }
+.engine-bar {
+  display: flex; align-items: center; gap: var(--gap); padding: var(--space) var(--pad);
+  border-bottom: 1px solid var(--line); background: rgba(18, 21, 28, .82);
+}
+.engine-title { font-size: 12.5px; color: var(--text); text-transform: uppercase; letter-spacing: .6px; }
+.engine-sub { flex: 1; font-size: 11px; color: var(--muted); }
+.engine-body { flex: 1; min-height: 0; overflow-y: auto; padding: var(--pad); display: flex; flex-direction: column; gap: var(--gap); }
+.engine-topic { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.engine-head {
+  display: flex; align-items: center; gap: var(--gap); width: 100%; cursor: pointer;
+  background: var(--panel-2); border: none; color: var(--text);
+  font: inherit; font-size: 13px; text-align: left; padding: var(--space) var(--pad);
+}
+.engine-head:hover { color: #fff; }
+.engine-caret { color: var(--muted); width: 12px; }
+.engine-name { font-weight: 500; }
+.engine-note { margin-left: auto; color: var(--muted); font-size: 11px; }
+.engine-content { padding: var(--pad); border-top: 1px solid var(--line); }
+.tier { margin-bottom: var(--pad); }
+.tier-name { color: var(--accent); font-size: 11px; text-transform: uppercase; letter-spacing: .6px; margin-bottom: var(--space); }
+.tool-row { display: flex; gap: var(--gap); align-items: baseline; padding: 2px 0; }
+.tool-name { color: var(--text); font-size: 12.5px; min-width: 130px; }
+.tool-desc { color: var(--muted); font-size: 11.5px; flex: 1; }
+.spell-row { display: flex; align-items: center; gap: var(--gap); padding: var(--space) 0; border-bottom: 1px solid rgba(35,41,54,.6); }
+.spell-name { font-weight: 500; }
+.spell-meta { color: var(--muted); font-size: 11px; flex: 1; }
+
 /* nodes (master:master / master:guest) */
-.nodes-box { display: flex; flex-direction: column; gap: var(--gap); padding: 0 var(--space) var(--space); }
+.nodes-box { display: flex; flex-direction: column; gap: var(--gap); }
 .node {
   display: flex; align-items: center; gap: var(--gap);
   border: 1px solid var(--line); border-radius: var(--radius-sm); padding: var(--space);

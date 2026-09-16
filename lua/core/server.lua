@@ -161,6 +161,26 @@ function wa_frame(max_width, session)
   }, user.role))
 end
 
+-- The tool surface (envelope) the current role sees, grouped by tier.
+function wa_tools(session)
+  local user = users.current(session)
+  local role = users.normalize(user.role)
+  return json.encode({
+    role = role,
+    tiers = toolslib.tiers(role),
+    client_actions = {
+      { name = "screenshot", args = {}, note = "save a full-res BMP on the client" },
+      { name = "frame", args = { max_width = "integer" }, note = "downscaled view for the control panel" },
+      { name = "move", args = { x = "integer", y = "integer" } },
+      { name = "click", args = { x = "integer", y = "integer", button = "left|right" } },
+      { name = "type", args = { text = "string" } },
+      { name = "key", args = { key = "enter|tab|esc|up|down|left|right|..." } },
+      { name = "shell", args = { command = "string", shell = "cmd|powershell", cwd = "string" } },
+      { name = "cdp", args = { target = "list|open|close|activate|navigate|evaluate|launch", script = "string", id = "string", url = "string", port = "integer", profile = "string" } },
+    },
+  })
+end
+
 function wa_users()
   local list = {}
   for _, user in ipairs(users.list()) do list[#list + 1] = users.public(user) end

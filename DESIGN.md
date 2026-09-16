@@ -118,7 +118,12 @@ The `client` and `shell` tools drive a real machine — the highest-risk tiers.
 
 ## 9. Modes and views
 
-A **mode** is a full-view switch (chat ⇄ shell ⇄ control).
+A **mode** is a full-view switch (chat ⇄ engine ⇄ shell ⇄ control).
+
+**Keep concerns apart.** The status balloon is only about the *model* (provider,
+context, limits, tokens — §6). Anything about the *machine or the fabric*
+(nodes, spells, tools/envelope, accounts) lives in the **engine** view, reached
+from the engine button in the topbar. Do not mix the two.
 
 - The switch lives in the **topbar**, beside the collapse control — never in the
   composer footer, which is for per-message actions (send, mic, attach).
@@ -135,3 +140,6 @@ A **mode** is a full-view switch (chat ⇄ shell ⇄ control).
 | `<wa-balloon>` | Anchored floating panel. Owns the close rule (§3). | `open` (attr/bool), `anchor` (id) | `open`, `close` |
 | `<wa-message>` | A chat message bubble. | `role` (`user`/`assistant`), `.body` | — |
 | `<wa-tool>` | A tool-activity chip. | `name`, `.detail`, status class | — |
+
+The engine view's topics (nodes, spells, tools) are expandable cards rendered in
+`app.js`; each loads its data on first expand (`GET /nodes`, `/spells`, `/tools`).

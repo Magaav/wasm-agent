@@ -32,6 +32,13 @@ const termClose = document.getElementById("term-close");
 const termTitle = document.getElementById("term-title");
 const nodesBox = document.getElementById("nodes-box");
 const nodesBinding = document.getElementById("nodes-binding");
+const engineBtn = document.getElementById("engine-btn");
+const engineView = document.getElementById("engine");
+const engineClose = document.getElementById("engine-close");
+const engineSub = document.getElementById("engine-sub");
+const spellsBox = document.getElementById("spells-box");
+const spellsNote = document.getElementById("spells-note");
+const toolsBox = document.getElementById("tools-box");
 const control = document.getElementById("control");
 const controlTitle = document.getElementById("control-title");
 const controlImg = document.getElementById("control-img");
@@ -489,7 +496,6 @@ statusBtn.addEventListener("click", () => {
     renderLimits();
     renderUsage();
     renderPopFoot();
-    refreshNodes();
   }
 });
 balloon.addEventListener("close", () => statusBtn.setAttribute("aria-expanded", "false"));
@@ -780,6 +786,119 @@ controlLive.addEventListener("change", () => {
   if (controlLive.checked) controlTimer = setInterval(fetchFrame, 1500);
 });
 
+// ---- engine: nodes / spells / tools --------------------------------------
+async function refreshSpells() {
+  try {
+    const payload = await (await fetch("spells", { headers: apiHeaders() })).json();
+    const spells = payload.spells || [];
+    spellsNote.textContent = spells.length + " saved";
+    spellsBox.replaceChildren();
+    if (!spells.length) {
+      spellsBox.textContent = "no spells saved yet";
+      return;
+    }
+    for (const spell of spells) {
+      const row = document.createElement("div");
+      row.className = "spell-row";
+      const name = document.createElement("span");
+      name.className = "spell-name";
+      name.textContent = spell.name;
+      const meta = document.createElement("span");
+      meta.className = "spell-meta";
+      const params = Object.keys(spell.params || {});
+      const detail = `v${spell.version} · ${spell.steps} steps · ${spell.post} settle`;
+      meta.textContent = detail + (params.length ? " · " + params.join(",") : "");
+      const run = nodeButton("run", async () => {
+        meta.textContent = "running…";
+        const result = await (await fetch("spell", {
+          method: "POST",
+          headers: apiHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({ name: spell.name }),
+        })).json();
+        meta.textContent = result.error ? "error: " + result.error : `ok · ${result.ms}ms · settled`;
+      });
+      row.append(name, meta, run);
+      spellsBox.append(row);
+    }
+  } catch (error) {
+    spellsBox.textContent = String(error);
+  }
+}
+
+async function refreshTools() {
+  try {
+    const payload = await (await fetch("tools", { headers: apiHeaders() })).json();
+    toolsBox.replaceChildren();
+    for (const group of payload.tiers || []) {
+      const block = document.createElement("div");
+      block.className = "tier";
+      const title = document.createElement("div");
+      title.className = "tier-name";
+      title.textContent = group.tier;
+      block.append(title);
+      for (const tool of group.tools) {
+        const row = document.createElement("div");
+        row.className = "tool-row";
+        const name = document.createElement("span");
+        name.className = "tool-name";
+        name.textContent = tool.name;
+        const desc = document.createElement("span");
+        desc.className = "tool-desc";
+        desc.textContent = tool.description || "";
+        row.append(name, desc);
+        block.append(row);
+      }
+      if (group.tier === "client") {
+        for (const action of payload.client_actions || []) {
+          const row = document.createElement("div");
+          row.className = "tool-row";
+          const name = document.createElement("span");
+          name.className = "tool-name";
+          name.textContent = "client." + action.name;
+          const args = Object.keys(action.args || {}).join(", ");
+          const desc = document.createElement("span");
+          desc.className = "tool-desc";
+          desc.textContent = (args ? "(" + args + ")" : "()") + (action.note ? "  " + action.note : "");
+          row.append(name, desc);
+          block.append(row);
+        }
+      }
+      toolsBox.append(block);
+    }
+  } catch (error) {
+    toolsBox.textContent = String(error);
+  }
+}
+
+function loadTopic(id) {
+  if (id === "nodes-box") refreshNodes();
+  else if (id === "spells-box") refreshSpells();
+  else if (id === "tools-box") refreshTools();
+}
+
+document.querySelectorAll(".engine-head").forEach((head) => {
+  head.addEventListener("click", () => {
+    const content = document.getElementById(head.dataset.target);
+    const opening = content.hidden;
+    content.hidden = !opening;
+    const caret = head.querySelector(".engine-caret");
+    if (caret) caret.textContent = opening ? "▾" : "▸";
+    if (opening) loadTopic(head.dataset.target);
+  });
+});
+
+function setEngine(open) {
+  document.body.classList.toggle("engine", open);
+  engineView.hidden = !open;
+  engineBtn.classList.toggle("active", open);
+  if (open) {
+    engineSub.textContent = `${me.role} · ${me.tools.length} tools`;
+  }
+}
+
+engineBtn.addEventListener("click", () => setEngine(!document.body.classList.contains("engine")));
+engineClose.addEventListener("click", () => setEngine(false));
+
 // ---- terminal: shell on this machine + spell replay ----------------------
 const termHistory = [];
 let termIndex = 0;
@@ -855,13 +974,17 @@ function setTerm(open) {
 termBtn.addEventListener("click", () => setTerm(!document.body.classList.contains("term")));
 termClose.addEventListener("click", () => setTerm(false));
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && document.body.classList.contains("term")) {
-    event.preventDefault();
-    setTerm(false);
-    input.focus();
-  } else if (event.ctrlKey && (event.key === "`" || event.code === "Backquote")) {
+  if (event.key === "Escape") {
+    if (document.body.classList.contains("engine")) { event.preventDefault(); setEngine(false); input.focus(); return; }
+    if (document.body.classList.contains("term")) { event.preventDefault(); setTerm(false); input.focus(); return; }
+    if (document.body.classList.contains("control")) { event.preventDefault(); closeControl(); return; }
+  }
+  if (event.ctrlKey && (event.key === "`" || event.code === "Backquote")) {
     event.preventDefault();
     setTerm(!document.body.classList.contains("term"));
+  } else if (event.ctrlKey && (event.key === "e" || event.key === "E")) {
+    event.preventDefault();
+    setEngine(!document.body.classList.contains("engine"));
   }
 });
 termForm.addEventListener("submit", (event) => {
