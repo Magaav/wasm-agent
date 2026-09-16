@@ -29,6 +29,14 @@ cargo build --release --offline     # Lua 5.4 is vendored; no network needed
 
 `rust/Cargo.lock` is committed for reproducible builds.
 
+## Working on this repo
+
+There are two working trees — a cloud instance and a local clone — and **both
+push to GitHub**, which is the source of truth. `git pull` before editing,
+push after, and keep `core.autocrlf=false` (these files are consumed by Linux
+and by `sh`/`lua`; a CRLF checkout breaks them). See `AGENTS.md` for the full
+conventions and `docs/` for the design documents.
+
 ## Use
 
 ```bash
