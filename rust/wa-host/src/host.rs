@@ -209,6 +209,38 @@ pub extern "C" fn client_status(l: *mut LuaState) -> c_int {
     1
 }
 
+/// host.node_identity() -> {node_id, public_key}
+pub extern "C" fn node_identity(l: *mut LuaState) -> c_int {
+    match crate::node::Identity::load() {
+        Ok(identity) => push_json(
+            l,
+            &json!({"node_id": identity.node_id, "public_key": identity.public_key}),
+        ),
+        Err(error) => push_json(l, &json!({"error": error})),
+    }
+    1
+}
+
+/// host.sign(text) -> {signature}
+pub extern "C" fn sign(l: *mut LuaState) -> c_int {
+    let text = arg_string(l, 1).unwrap_or_default();
+    match crate::node::Identity::load() {
+        Ok(identity) => push_json(l, &json!({"signature": identity.sign(&text)})),
+        Err(error) => push_json(l, &json!({"error": error})),
+    }
+    1
+}
+
+/// host.verify(public_key, text, signature) -> boolean
+pub extern "C" fn verify(l: *mut LuaState) -> c_int {
+    let public_key = arg_string(l, 1).unwrap_or_default();
+    let text = arg_string(l, 2).unwrap_or_default();
+    let signature = arg_string(l, 3).unwrap_or_default();
+    let ok = crate::node::verify(&public_key, &text, &signature);
+    unsafe { crate::lua::lua_pushboolean(l, ok as c_int) };
+    1
+}
+
 /// host.sleep(milliseconds) — used between deterministic spell steps.
 pub extern "C" fn sleep(l: *mut LuaState) -> c_int {
     let millis = arg_string(l, 1)

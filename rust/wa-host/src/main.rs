@@ -5,6 +5,8 @@
 mod client_bridge;
 mod host;
 mod lua;
+mod node;
+mod rendezvous;
 mod plugins;
 mod serve;
 
@@ -132,6 +134,9 @@ fn main() {
     lua.register("write_file", host::write_file);
     lua.register("exec", host::exec);
     lua.register("sleep", host::sleep);
+    lua.register("node_identity", host::node_identity);
+    lua.register("sign", host::sign);
+    lua.register("verify", host::verify);
     lua.register_with_upvalue("client", host::client, host as *mut c_void);
     lua.register_with_upvalue("client_status", host::client_status, host as *mut c_void);
     lua.register("http", host::http);
@@ -188,7 +193,48 @@ fn main() {
             .and_then(|value| value.parse().ok())
             .unwrap_or(8800);
         client_bridge::serve(client_port, bridge.clone());
+        if let Ok(rendezvous_url) = std::env::var("WASM_AGENT_RENDEZVOUS") {
+            if !rendezvous_url.is_empty() {
+                node::spawn_heartbeat(rendezvous_url);
+            }
+        }
         serve::run(&lua, port, PathBuf::from(ui));
+        return;
+    }
+
+    if command == "rendezvous" {
+        let port = flag(&lua_args, "--port").and_then(|value| value.parse().ok()).unwrap_or(8890);
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        let db = flag(&lua_args, "--db")
+            .unwrap_or_else(|| format!("{home}/.wasm-agent/rendezvous.db"));
+        if let Some(parent) = std::path::Path::new(&db).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        rendezvous::run(port, &db);
+        return;
+    }
+
+    if command == "node" {
+        match node::Identity::load() {
+            Ok(identity) => {
+                if lua_args.get(1).map(String::as_str) == Some("sign") {
+                    let message = lua_args.get(2).cloned().unwrap_or_default();
+                    println!("{}", identity.sign(&message));
+                } else {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "node_id": identity.node_id,
+                            "public_key": identity.public_key,
+                        })
+                    );
+                }
+            }
+            Err(error) => {
+                eprintln!("node identity: {error}");
+                std::process::exit(1);
+            }
+        }
         return;
     }
 
