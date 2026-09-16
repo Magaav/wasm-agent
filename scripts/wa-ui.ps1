@@ -9,7 +9,8 @@ param(
   [string]$HostAlias = $(if ($env:WASM_AGENT_HOST) { $env:WASM_AGENT_HOST } else { "openclaw.ohana" }),
   [int]$Port = 8799,
   [string]$RemoteUi = "/local/projects/wasm-agent/ui",
-  [string]$RemoteBin = "/local/projects/wasm-agent/target/windows-x64/x86_64-pc-windows-gnu/release"
+  [string]$RemoteBin = "/local/projects/wasm-agent/target/windows-x64/x86_64-pc-windows-gnu/release",
+  [int]$ClientPort = 8800
 )
 $ErrorActionPreference = "Stop"
 
@@ -30,7 +31,7 @@ if ($health -ne "200") {
 # Open the tunnel. Reuse an existing one if the port is already forwarded.
 $listening = (netstat -ano | Select-String "127.0.0.1:$Port\s+0.0.0.0:0\s+LISTENING") -ne $null
 if (-not $listening) {
-  Start-Process ssh -ArgumentList @("-N", "-o", "BatchMode=yes", "-L", "${Port}:127.0.0.1:${Port}", $HostAlias) -WindowStyle Hidden
+  Start-Process ssh -ArgumentList @("-N", "-o", "BatchMode=yes", "-L", "${Port}:127.0.0.1:${Port}", "-L", "$ClientPort`:127.0.0.1:$ClientPort", $HostAlias) -WindowStyle Hidden
   Start-Sleep -Seconds 1
 }
 
@@ -51,6 +52,7 @@ try {
 
 if ((Test-Path $localExe) -and (Test-Path $localDll)) {
   $env:WASM_AGENT_UI_URL = $url
+  $env:WASM_AGENT_CLIENT_PORT = "$ClientPort"
   Start-Process $localExe
   Write-Host "   ok  native window -> $url" -ForegroundColor Green
   Write-Host "   (click the avatar to expand, drag to move, collapse with the top-right arrow)" -ForegroundColor DarkGray

@@ -5,6 +5,9 @@
 //! the SSH tunnel, so the UI still hot-reloads while it runs.
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+#[cfg(target_os = "windows")]
+mod client;
+
 #[cfg(not(target_os = "windows"))]
 fn main() {
     eprintln!("wa-window is a Windows companion; run `wa ui` on Windows.");
@@ -304,6 +307,8 @@ mod companion {
         std::panic::set_hook(Box::new(|info| note(&format!("panic: {info}"))));
         let url = std::env::var("WASM_AGENT_UI_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
         note(&format!("start url={url}"));
+        // Background executor for client tools (screenshot/input/CDP).
+        crate::client::spawn();
         let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
         let window = WindowBuilder::new()
             .with_title("wasm-agent")

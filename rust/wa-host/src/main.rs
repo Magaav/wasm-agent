@@ -2,6 +2,7 @@
 //!
 //! The agent logic lives in Lua (`lua/`); this host only provides capabilities
 //! (sqlite, http, wasmtime, sha256, uuid, time, files). No Python anywhere.
+mod client_bridge;
 mod host;
 mod lua;
 mod plugins;
@@ -113,7 +114,12 @@ fn main() {
         )
         .expect("pragma");
     let plugin_registry = plugins::PluginRegistry::load(&plugins::plugin_dir());
-    let host = Box::into_raw(Box::new(Host { db: Mutex::new(connection), plugins: Mutex::new(plugin_registry) }));
+    let bridge = std::sync::Arc::new(client_bridge::Bridge::new());
+    let host = Box::into_raw(Box::new(Host {
+        db: Mutex::new(connection),
+        plugins: Mutex::new(plugin_registry),
+        client: bridge.clone(),
+    }));
 
     let lua = Lua::new();
     lua.push_table();
@@ -124,6 +130,7 @@ fn main() {
     lua.register("read_file", host::read_file);
     lua.register("write_file", host::write_file);
     lua.register("exec", host::exec);
+    lua.register_with_upvalue("client", host::client, host as *mut c_void);
     lua.register("http", host::http);
     lua.register("http_stream", host::http_stream);
     lua.register_with_upvalue("plugins", host::plugins, host as *mut c_void);
@@ -173,6 +180,11 @@ fn main() {
         let ui = flag(&lua_args, "--ui")
             .or_else(|| std::env::var("WASM_AGENT_UI").ok())
             .unwrap_or_else(|| "ui".to_string());
+        let client_port = flag(&lua_args, "--client-port")
+            .or_else(|| std::env::var("WASM_AGENT_CLIENT_PORT").ok())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(8800);
+        client_bridge::serve(client_port, bridge.clone());
         serve::run(&lua, port, PathBuf::from(ui));
         return;
     }

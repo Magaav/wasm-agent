@@ -13,6 +13,7 @@ use std::sync::Mutex;
 pub struct Host {
     pub db: Mutex<Connection>,
     pub plugins: Mutex<PluginRegistry>,
+    pub client: std::sync::Arc<crate::client_bridge::Bridge>,
 }
 
 fn host_of<'a>(l: *mut LuaState) -> &'a Host {
@@ -26,6 +27,15 @@ fn host_of<'a>(l: *mut LuaState) -> &'a Host {
 fn push_json(l: *mut LuaState, value: &Value) {
     let text = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
     unsafe { lua_pushlstring(l, text.as_ptr() as *const c_char, text.len()) };
+}
+
+/// An agent that returns error responses instead of raising, so provider
+/// 4xx bodies reach the caller (and the logs).
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into()
 }
 
 fn parse_headers(headers_json: &str) -> Vec<(String, String)> {
@@ -181,6 +191,17 @@ pub extern "C" fn exec(l: *mut LuaState) -> c_int {
     1
 }
 
+/// host.client(action, args_json) -> result from the client machine | {error}
+pub extern "C" fn client(l: *mut LuaState) -> c_int {
+    let host = host_of(l);
+    let action = arg_string(l, 1).unwrap_or_default();
+    let args: Value = serde_json::from_str(&arg_string(l, 2).unwrap_or_else(|| "{}".into()))
+        .unwrap_or_else(|_| json!({}));
+    let result = host.client.call(&action, args);
+    push_json(l, &result);
+    1
+}
+
 /// host.log(message)
 pub extern "C" fn log(l: *mut LuaState) -> c_int {
     if let Some(message) = arg_string(l, 1) {
@@ -238,14 +259,14 @@ pub extern "C" fn http(l: *mut LuaState) -> c_int {
     let outcome = (|| -> Result<Value, String> {
         let response = match method.as_str() {
             "GET" => {
-                let mut request = ureq::get(&url);
+                let mut request = agent().get(&url);
                 for (key, value) in &headers {
                     request = request.header(key, value);
                 }
                 request.call().map_err(|e| e.to_string())?
             }
             "POST" => {
-                let mut request = ureq::post(&url);
+                let mut request = agent().post(&url);
                 for (key, value) in &headers {
                     request = request.header(key, value);
                 }
@@ -285,7 +306,7 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
     if method != "POST" {
         return Err("method_not_supported".into());
     }
-    let mut request = ureq::post(url);
+    let mut request = agent().post(url);
     for (key, value) in headers {
         request = request.header(key, value);
     }

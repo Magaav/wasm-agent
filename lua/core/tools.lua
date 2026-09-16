@@ -4,9 +4,13 @@ local json = dofile("lua/vendor/json.lua")
 local M = {}
 
 local function schema(name, description, properties, required)
+  -- An empty Lua table encodes as `[]`, which providers reject as a schema, so
+  -- only emit `properties`/`required` when they actually have entries.
+  local parameters = { type = "object" }
+  if properties and next(properties) ~= nil then parameters.properties = properties end
+  if required and #required > 0 then parameters.required = required end
   return { type = "function", ["function"] = {
-    name = name, description = description,
-    parameters = { type = "object", properties = properties or {}, required = required } } }
+    name = name, description = description, parameters = parameters } }
 end
 
 -- Available to everyone.
@@ -48,6 +52,12 @@ M.admin = {
   schema("ls", "List a directory.", { path = { type = "string" } }),
   schema("grep", "Search files for a pattern and return matching lines.", {
     pattern = { type = "string" }, path = { type = "string" } }, { "pattern" }),
+  schema("client", "Control the wasm-agent client machine: screenshot, mouse, keyboard and a browser CDP session.", {
+    action = { type = "string", enum = { "screenshot", "click", "move", "type", "key", "cdp" } },
+    x = { type = "integer" }, y = { type = "integer" },
+    text = { type = "string" }, key = { type = "string" },
+    target = { type = "string", description = "CDP action: list | open | close | activate" },
+    url = { type = "string" }, port = { type = "integer" } }, { "action" }),
 }
 
 local function wasm_plugins()
@@ -152,6 +162,12 @@ function M.dispatch(memory, name, args, role)
     return run("ls -la -- " .. shell_quote(args.path or "."))
   elseif name == "grep" then
     return run("grep -rn -- " .. shell_quote(args.pattern or "") .. " " .. shell_quote(args.path or "."))
+  elseif name == "client" then
+    local ok, raw = pcall(host.client, args.action or "", json.encode(args))
+    if not ok then return { error = tostring(raw) } end
+    local decoded = json.decode(raw)
+    if type(decoded) ~= "table" then return { result = raw } end
+    return decoded
   end
 
   -- Fall back to a WASM plugin (admin only; guests never see their schemas).

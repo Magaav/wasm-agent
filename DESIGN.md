@@ -94,7 +94,24 @@ The UI must not foreground memory: no memory counters in the status balloon, the
 header, or the empty state. Surface memory only inside a turn (a `recall` tool
 chip) or when the user explicitly asks for it.
 
-## 8. Component registry
+## 8. Capability tiers
+
+Tools are grouped by the role that may call them (§ see `lua/core/tools.lua`):
+
+| Tier | Tools | Roles |
+| --- | --- | --- |
+| memory | `remember`, `recall` | everyone |
+| spells | `spells` | everyone |
+| environment (pi) | `bash`, `read`, `write`, `edit`, `ls`, `grep` | admin |
+| ledger | `search_messages`, `conversation`, `list_conversations` | admin |
+| client | `client` (screenshot, mouse, keyboard, CDP) | admin |
+| plugins | every WASM plugin | admin |
+
+Never expose an admin tier to a non-admin turn; filter schemas *and* re-check in
+`dispatch`, because the model can ask for a tool it was not offered.
+The `client` tool drives a real desktop — treat it as the highest-risk tier.
+
+## 9. Component registry
 
 | Element | Purpose | Key attributes / properties | Events |
 | --- | --- | --- | --- |
