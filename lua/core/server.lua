@@ -28,19 +28,37 @@ end
 
 function wa_model()
   local settings = provider.settings()
+  local providers = {}
+  for _, item in ipairs(provider.providers()) do
+    providers[#providers + 1] = {
+      id = item.id,
+      label = item.label,
+      base_url = item.base_url,
+      default_model = item.default_model,
+      configured = item.base_url ~= "" and item.api_key ~= "",
+      models = provider.list_models(item.id),
+    }
+  end
   return json.encode({
+    provider = settings.provider,
     model = settings.model,
     base_url = settings.base_url,
     configured = provider.configured(),
-    database = os.getenv("WASM_AGENT_DB") or "",
-    models = provider.list_models(),
+    providers = providers,
     usage = agentlib.usage(),
     context_limit = tonumber(os.getenv("WASM_AGENT_LLM_CONTEXT")) or 0,
     stats = memory.stats(),
+    database = os.getenv("WASM_AGENT_DB") or "",
   })
 end
 
--- Switch models at runtime; returns the refreshed settings payload.
+-- Switch provider/model at runtime; returns the refreshed settings payload.
+function wa_set_provider(id)
+  provider.set_provider(id or "")
+  if agent then agent.model = provider.settings().model end
+  return wa_model()
+end
+
 function wa_set_model(name)
   provider.set_model(name or "")
   if agent then agent.model = provider.settings().model end

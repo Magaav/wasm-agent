@@ -5,6 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>wasm-agent</title>
   <link rel="stylesheet" href="style.css" />
+  <script>
+    // Surface runtime errors in the window title (GUI builds have no console).
+    window.addEventListener("error", (event) => {
+      document.title = "wasm-agent · error: " + (event.message || event.error);
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      const reason = event.reason;
+      document.title = "wasm-agent · error: " + ((reason && reason.message) || reason);
+    });
+  </script>
 </head>
 <body class="expanded">
   <div id="orb" class="orb" title="wasm-agent">
@@ -36,13 +46,13 @@
       <div class="composer-row">
         <textarea id="input" rows="1" placeholder="Message wasm-agent…"></textarea>
         <button id="send" class="send" type="submit" title="Send" aria-label="Send">
-          <svg class="icon-send" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.4 20.4 21 12 3.4 3.6 3.4 10l12.6 2-12.6 2z"/></svg>
-          <svg class="icon-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
+          <svg class="icon-send" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 21 23 12 2 3v7l15 2-15 2z"/></svg>
+          <svg class="icon-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
         </button>
       </div>
       <div class="composer-footer">
         <div class="footer-left">
-          <button id="status-btn" class="chip" type="button" title="Model, tokens and limits">
+          <button id="status-btn" class="chip" type="button" title="Provider, model and usage" aria-haspopup="true" aria-expanded="false">
             <span class="chip-dot"></span>
             <span id="chip-model">connecting…</span>
             <span id="chip-usage" class="chip-usage"></span>
@@ -55,18 +65,27 @@
           </button>
           <input id="file" type="file" hidden multiple />
         </div>
-        <div class="footer-right" id="footer-hint"></div>
       </div>
 
-      <div id="model-pop" class="popover" hidden>
-        <div class="pop-head">model <span id="pop-base" class="pop-sub"></span></div>
-        <div id="model-list" class="model-list"></div>
+      <wa-balloon id="status-balloon" class="popover" anchor="status-btn">
+        <div class="pop-row">
+          <label class="pop-head" for="provider-select">provider</label>
+          <select id="provider-select" class="wa-select"></select>
+        </div>
+        <div class="pop-row">
+          <label class="pop-head" for="model-select">model</label>
+          <select id="model-select" class="wa-select"></select>
+        </div>
         <div class="pop-head">usage</div>
         <div id="usage-box" class="usage-box"></div>
-      </div>
+        <div class="pop-head">memory</div>
+        <div id="memory-box" class="usage-box"></div>
+        <div class="pop-foot" id="pop-foot"></div>
+      </wa-balloon>
     </form>
   </div>
 
+  <script src="components.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

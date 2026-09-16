@@ -19,7 +19,13 @@ local SYSTEM = table.concat({
 local MAX_TOOL_ROUNDS = 8
 
 -- Process-wide token accounting, surfaced to the UI footer.
-M.usage_total = { prompt = 0, completion = 0, total = 0, turns = 0 }
+M.usage_total = {
+  prompt = 0,
+  completion = 0,
+  total = 0,
+  turns = 0,
+  last = { prompt = 0, completion = 0, total = 0 },
+}
 
 function M.usage()
   return M.usage_total
@@ -43,14 +49,21 @@ function M:turn(text)
   end
   self.messages[#self.messages + 1] = { role = "user", content = text }
   local reply = ""
+  local turn = { prompt = 0, completion = 0, total = 0 }
   for _ = 1, MAX_TOOL_ROUNDS do
     self.emit({ type = "status", text = "model" })
     local result = provider.complete(self.messages, tools.all(), self.stream)
     if type(result.usage) == "table" then
       local usage = result.usage
-      M.usage_total.prompt = M.usage_total.prompt + (tonumber(usage.prompt_tokens) or 0)
-      M.usage_total.completion = M.usage_total.completion + (tonumber(usage.completion_tokens) or 0)
-      M.usage_total.total = M.usage_total.total + (tonumber(usage.total_tokens) or 0)
+      local prompt = tonumber(usage.prompt_tokens) or 0
+      local completion = tonumber(usage.completion_tokens) or 0
+      local total = tonumber(usage.total_tokens) or (prompt + completion)
+      M.usage_total.prompt = M.usage_total.prompt + prompt
+      M.usage_total.completion = M.usage_total.completion + completion
+      M.usage_total.total = M.usage_total.total + total
+      turn.prompt = turn.prompt + prompt
+      turn.completion = turn.completion + completion
+      turn.total = turn.total + total
     end
     if result.model and result.model ~= "" then self.model = result.model end
     local calls = result.tool_calls
@@ -81,6 +94,7 @@ function M:turn(text)
   if reply == "" then reply = "(tool loop limit reached)" end
   memory.record_run(host.uuid(), self.session_id, "completed", "completed", reply)
   M.usage_total.turns = M.usage_total.turns + 1
+  M.usage_total.last = turn
   self.emit({ type = "usage", total = M.usage_total, model = self.model })
   self.emit({ type = "reply", text = reply })
   return reply

@@ -86,6 +86,13 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
         let settings = lua.call_string("wa_model", &[]).unwrap_or_else(|_| "{}".into());
         return respond(stream, 200, "application/json", settings.as_bytes());
     }
+    if path == "/provider" && method == "POST" {
+        let id = String::from_utf8_lossy(&body).trim().to_string();
+        let payload = lua
+            .call_string("wa_set_provider", &[id.as_str()])
+            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
+        return respond(stream, 200, "application/json", payload.as_bytes());
+    }
     if path == "/model" && method == "POST" {
         let name = String::from_utf8_lossy(&body).trim().to_string();
         let payload = lua

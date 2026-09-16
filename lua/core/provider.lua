@@ -1,30 +1,71 @@
--- OpenAI-compatible chat provider, over host.http / host.http_stream.
+-- OpenAI-compatible providers, over host.http / host.http_stream.
+--
+-- A *provider* is an endpoint (base URL + key). A *model* belongs to a provider.
+-- Selection is persisted per provider under ~/.wasm-agent/.
 local json = dofile("lua/vendor/json.lua")
 local M = {}
 
 local function env(name) return os.getenv(name) end
+local function trim(value) return (value or ""):gsub("^%s+", ""):gsub("%s+$", "") end
 
-local function model_path()
-  return (os.getenv("HOME") or ".") .. "/.wasm-agent/model"
+local function state_path(name)
+  return (os.getenv("HOME") or ".") .. "/.wasm-agent/" .. name
 end
 
-local function persisted_model()
+local function read_state(name)
   if not (host and host.read_file) then return nil end
-  local text = host.read_file(model_path())
-  if not text or text == "" then return nil end
-  local name = text:gsub("^%s+", ""):gsub("%s+$", "")
-  if name == "" then return nil end
-  return name
+  local value = trim(host.read_file(state_path(name)))
+  if value == "" then return nil end
+  return value
+end
+
+local function write_state(name, value)
+  if host and host.write_file then host.write_file(state_path(name), value) end
+end
+
+-- Provider profiles. Add one here and it appears in the UI automatically.
+function M.providers()
+  return {
+    {
+      id = "opencode-go",
+      label = "opencode-go",
+      base_url = env("WASM_AGENT_LLM_BASE_URL") or env("WASM_AGENT_OPENAI_BASE_URL")
+        or "https://opencode.ai/zen/go/v1",
+      api_key = env("WASM_AGENT_LLM_API_KEY") or env("OPENCODE_GO_API_KEY")
+        or env("OPENAI_API_KEY") or "",
+      default_model = "deepseek-v4.1-flash",
+    },
+    {
+      id = "gpt",
+      label = "gpt",
+      base_url = env("OPENAI_BASE_URL") or "https://api.openai.com/v1",
+      api_key = env("OPENAI_API_KEY") or "",
+      default_model = "gpt-4.1",
+    },
+  }
+end
+
+function M.active()
+  local id = M.provider_override or read_state("provider") or env("WASM_AGENT_PROVIDER")
+  local list = M.providers()
+  for _, provider in ipairs(list) do
+    if provider.id == id then return provider end
+  end
+  return list[1]
 end
 
 function M.settings()
+  local provider = M.active()
+  local model = (M.overrides and M.overrides[provider.id]) or read_state("model." .. provider.id)
+  if not model and provider.id == "opencode-go" then model = env("WASM_AGENT_LLM_MODEL") end
+  model = model or provider.default_model
   return {
-    base_url = env("WASM_AGENT_LLM_BASE_URL") or env("WASM_AGENT_OPENAI_BASE_URL")
-      or "https://opencode.ai/zen/go/v1",
-    api_key = env("WASM_AGENT_LLM_API_KEY") or env("OPENCODE_GO_API_KEY")
-      or env("OPENAI_API_KEY") or "",
-    model = M.override or persisted_model() or env("WASM_AGENT_LLM_MODEL")
-      or env("WASM_AGENT_DIRECT_HEAD_MODEL") or env("WASM_AGENT_OPENAI_MODEL") or "",
+    provider = provider.id,
+    label = provider.label,
+    base_url = provider.base_url,
+    api_key = provider.api_key,
+    model = model,
+    default_model = provider.default_model,
   }
 end
 
@@ -33,10 +74,32 @@ function M.configured()
   return settings.base_url ~= "" and settings.api_key ~= "" and settings.model ~= ""
 end
 
-local function headers_for(settings)
+function M.set_provider(id)
+  id = trim(id)
+  for _, provider in ipairs(M.providers()) do
+    if provider.id == id then
+      M.provider_override = id
+      write_state("provider", id)
+      return true
+    end
+  end
+  return false
+end
+
+function M.set_model(name)
+  name = trim(name)
+  if name == "" then return false end
+  local provider = M.active()
+  M.overrides = M.overrides or {}
+  M.overrides[provider.id] = name
+  write_state("model." .. provider.id, name)
+  return true
+end
+
+local function headers_for(provider)
   return {
     ["Content-Type"] = "application/json",
-    ["Authorization"] = "Bearer " .. settings.api_key,
+    ["Authorization"] = "Bearer " .. provider.api_key,
     ["Accept"] = "application/json",
     -- The provider edge rejects a default urllib/ureq-style agent string.
     ["User-Agent"] = "wasm-agent/0.1 provider-proxy",
@@ -44,38 +107,39 @@ local function headers_for(settings)
   }
 end
 
--- Switch the active model. Kept in memory and persisted so it survives restarts.
-function M.set_model(name)
-  name = (name or ""):gsub("^%s+", ""):gsub("%s+$", "")
-  if name == "" then return false end
-  M.override = name
-  M._models = nil
-  if host and host.write_file then host.write_file(model_path(), name) end
-  return true
-end
-
--- Ask the provider for its model catalogue; fall back to the active model.
--- Cached for five minutes so the UI can poll it cheaply.
-function M.list_models()
+-- Model catalogue for a provider (defaults to the active one). Cached, then
+-- falls back to the provider's default model so the dropdown is never empty.
+function M.list_models(id)
+  local provider = nil
+  if id then
+    for _, candidate in ipairs(M.providers()) do
+      if candidate.id == id then provider = candidate end
+    end
+  end
+  provider = provider or M.active()
+  M._cache = M._cache or {}
   local now = (host and host.now and host.now()) or 0
-  if M._models and (now - (M._models_at or 0)) < 300 then return M._models end
-  local settings = M.settings()
+  local entry = M._cache[provider.id]
+  if entry and (now - entry.at) < 300 then return entry.models end
+
   local models = {}
-  pcall(function()
-    local url = settings.base_url:gsub("/+$", "") .. "/models"
-    local response = json.decode(host.http("GET", url, json.encode(headers_for(settings)), ""))
-    if response and tonumber(response.status) == 200 then
-      local ok, payload = pcall(json.decode, response.body)
-      if ok and type(payload) == "table" and type(payload.data) == "table" then
-        for _, item in ipairs(payload.data) do
-          if type(item) == "table" and item.id then models[#models + 1] = item.id end
+  if provider.api_key ~= "" then
+    pcall(function()
+      local url = provider.base_url:gsub("/+$", "") .. "/models"
+      local response = json.decode(host.http("GET", url, json.encode(headers_for(provider)), ""))
+      if response and tonumber(response.status) == 200 then
+        local ok, payload = pcall(json.decode, response.body)
+        if ok and type(payload) == "table" and type(payload.data) == "table" then
+          for _, item in ipairs(payload.data) do
+            if type(item) == "table" and item.id then models[#models + 1] = item.id end
+          end
         end
       end
-    end
-  end)
-  if #models == 0 and settings.model ~= "" then models[1] = settings.model end
-  M._models = models
-  M._models_at = now
+    end)
+  end
+  if #models == 0 then models[1] = provider.default_model end
+
+  M._cache[provider.id] = { at = now, models = models }
   return models
 end
 
@@ -83,13 +147,14 @@ end
 -- message (content + tool_calls + usage) so the tool loop can continue.
 function M.complete(messages, tools, stream)
   local settings = M.settings()
+  local provider = M.active()
   local body = { model = settings.model, messages = messages }
   if tools and #tools > 0 then
     body.tools = tools
     body.tool_choice = "auto"
   end
-  local url = settings.base_url:gsub("/+$", "") .. "/chat/completions"
-  local headers = headers_for(settings)
+  local url = provider.base_url:gsub("/+$", "") .. "/chat/completions"
+  local headers = headers_for(provider)
 
   if stream then
     body.stream = true

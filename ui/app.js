@@ -1,4 +1,4 @@
-// wasm-agent web UI: streaming chat, tool activity, hot reload, WASM renderer.
+// wasm-agent web UI. Components live in components.js (see DESIGN.md).
 const messages = document.getElementById("messages");
 const meta = document.getElementById("meta");
 const form = document.getElementById("composer");
@@ -7,10 +7,12 @@ const sendButton = document.getElementById("send");
 const statusBtn = document.getElementById("status-btn");
 const chipModel = document.getElementById("chip-model");
 const chipUsage = document.getElementById("chip-usage");
-const modelPop = document.getElementById("model-pop");
-const modelList = document.getElementById("model-list");
+const balloon = document.getElementById("status-balloon");
+const providerSelect = document.getElementById("provider-select");
+const modelSelect = document.getElementById("model-select");
 const usageBox = document.getElementById("usage-box");
-const popBase = document.getElementById("pop-base");
+const memoryBox = document.getElementById("memory-box");
+const popFoot = document.getElementById("pop-foot");
 const micButton = document.getElementById("mic");
 const attachButton = document.getElementById("attach");
 const fileInput = document.getElementById("file");
@@ -22,9 +24,9 @@ let busy = false;
 let statusLine = null;
 let streamBody = null;
 let streamText = "";
-let controller = null; // AbortController for the active turn
-let attachments = []; // { name, text }
-let settings = { model: "", models: [], usage: {}, configured: false, base_url: "" };
+let controller = null;
+let attachments = [];
+let settings = { provider: "", model: "", providers: [], usage: {}, stats: {}, configured: false, base_url: "" };
 let recognizing = false;
 let recognition = null;
 let voicePrefix = "";
@@ -35,7 +37,7 @@ async function loadRenderer() {
     const { instance } = await WebAssembly.instantiateStreaming(response, {});
     renderer = instance.exports;
   } catch (error) {
-    renderer = null; // fall back to escaped text
+    renderer = null;
   }
 }
 
@@ -44,7 +46,6 @@ function escapeHtml(text) {
     { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-// Render markdown-lite in WASM when available (safe HTML), else escaped text.
 function renderMarkdown(text) {
   if (renderer && renderer.memory) {
     try {
@@ -77,16 +78,11 @@ function atBottom() {
 function add(role, text, asHtml = false) {
   document.getElementById("empty")?.remove();
   const stick = atBottom();
-  const element = document.createElement("div");
-  element.className = "msg " + role;
-  const who = document.createElement("div");
-  who.className = "who";
-  who.textContent = role === "user" ? "you" : "wasm-agent";
-  const body = document.createElement("div");
-  if (asHtml) body.innerHTML = text; else body.textContent = text;
-  body.style.whiteSpace = "pre-wrap";
-  element.append(who, body);
+  const element = document.createElement("wa-message");
+  element.setAttribute("role", role);
   messages.append(element);
+  const body = element.body;
+  if (asHtml) body.innerHTML = text; else body.textContent = text;
   if (stick) messages.scrollTop = messages.scrollHeight;
   return body;
 }
@@ -111,16 +107,10 @@ function clearStatus() {
 function addTool(name, args) {
   document.getElementById("empty")?.remove();
   const stick = atBottom();
-  const chip = document.createElement("div");
-  chip.className = "tool";
-  const title = document.createElement("div");
-  title.className = "tool-name";
-  title.textContent = "tool · " + name;
-  const detail = document.createElement("div");
-  detail.className = "tool-detail";
-  detail.textContent = JSON.stringify(args || {});
-  chip.append(title, detail);
+  const chip = document.createElement("wa-tool");
+  chip.setAttribute("name", name);
   messages.append(chip);
+  chip.detail.textContent = JSON.stringify(args || {});
   if (stick) messages.scrollTop = messages.scrollHeight;
   return chip;
 }
@@ -147,11 +137,10 @@ function handleEvent(event) {
     addTool(event.name, event.arguments);
   } else if (event.type === "tool_result") {
     const chip = messages.lastElementChild;
-    if (chip && chip.classList.contains("tool")) {
+    if (chip && chip.detail) {
       const ok = !(event.result && event.result.error);
       chip.classList.add(ok ? "ok" : "err");
-      const detail = chip.querySelector(".tool-detail");
-      if (detail) detail.textContent = JSON.stringify(event.result || {}).slice(0, 400);
+      chip.detail.textContent = JSON.stringify(event.result || {}).slice(0, 400);
     }
   } else if (event.type === "delta") {
     clearStatus();
@@ -174,7 +163,7 @@ function handleEvent(event) {
     settings.usage = event.total || settings.usage;
     if (event.model) settings.model = event.model;
     updateChip();
-    if (!modelPop.hidden) renderUsage();
+    if (balloon.open) { renderUsage(); renderModels(); }
   } else if (event.type === "error") {
     clearStatus();
     add("assistant", "error: " + (event.error || "unknown"));
@@ -254,6 +243,10 @@ function formatTokens(value) {
   return String(n);
 }
 
+function activeProvider() {
+  return (settings.providers || []).find((provider) => provider.id === settings.provider) || null;
+}
+
 function updateChip() {
   chipModel.textContent = settings.configured ? (settings.model || "model") : "local mode";
   statusBtn.classList.toggle("local", !settings.configured);
@@ -261,77 +254,107 @@ function updateChip() {
   chipUsage.textContent = total ? formatTokens(total) + " tok" : "";
 }
 
-function renderModels() {
-  modelList.replaceChildren();
-  const models = settings.models && settings.models.length ? settings.models : [settings.model].filter(Boolean);
-  for (const name of models) {
-    const item = document.createElement("button");
-    item.type = "button";
-    item.className = "model-item" + (name === settings.model ? " active" : "");
-    const label = document.createElement("span");
-    label.textContent = name;
-    item.append(label);
-    if (name === settings.model) {
-      const check = document.createElement("span");
-      check.className = "check";
-      check.textContent = "✓";
-      item.append(check);
-    }
-    item.addEventListener("click", () => setModel(name));
-    modelList.append(item);
+function renderProviders() {
+  providerSelect.replaceChildren();
+  for (const provider of settings.providers || []) {
+    const option = document.createElement("option");
+    option.value = provider.id;
+    option.textContent = provider.configured ? provider.label : provider.label + " (no key)";
+    if (provider.id === settings.provider) option.selected = true;
+    providerSelect.append(option);
   }
 }
 
-function renderUsage() {
-  usageBox.replaceChildren();
-  const usage = settings.usage || {};
-  const rows = [
-    ["prompt tokens", usage.prompt || 0],
-    ["completion tokens", usage.completion || 0],
-    ["total tokens", usage.total || 0],
-    ["turns", usage.turns || 0],
-  ];
+function renderModels() {
+  modelSelect.replaceChildren();
+  const provider = activeProvider();
+  const models = (provider && provider.models) || [];
+  for (const name of models) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name;
+    if (name === settings.model) option.selected = true;
+    modelSelect.append(option);
+  }
+}
+
+function grid(rows) {
+  const fragment = document.createDocumentFragment();
   for (const [label, value] of rows) {
     const key = document.createElement("span");
     key.textContent = label;
     const val = document.createElement("b");
     val.textContent = String(value);
-    usageBox.append(key, val);
+    fragment.append(key, val);
   }
+  return fragment;
+}
+
+function renderUsage() {
+  usageBox.replaceChildren();
+  const usage = settings.usage || {};
+  const last = usage.last || {};
+  usageBox.append(grid([
+    ["last turn (in/out)", `${formatTokens(last.prompt)} / ${formatTokens(last.completion)}`],
+    ["last total", formatTokens(last.total)],
+    ["session in", formatTokens(usage.prompt)],
+    ["session out", formatTokens(usage.completion)],
+    ["session total", formatTokens(usage.total)],
+    ["turns", usage.turns || 0],
+  ]));
   if (settings.context_limit) {
-    const used = usage.total || 0;
+    const used = Number(last.prompt) || 0;
     const percent = Math.min(100, Math.round((used / settings.context_limit) * 100));
     const meter = document.createElement("div");
     meter.className = "meter";
     const fill = document.createElement("span");
     fill.style.width = percent + "%";
     meter.append(fill);
-    usageBox.append(meter);
-    const key = document.createElement("span");
-    key.textContent = "context window";
-    const val = document.createElement("b");
-    val.textContent = `${formatTokens(used)} / ${formatTokens(settings.context_limit)}`;
-    usageBox.append(key, val);
+    usageBox.append(meter, grid([
+      ["context window", `${formatTokens(used)} / ${formatTokens(settings.context_limit)}`],
+      ["context used", percent + "%"],
+    ]));
   }
-  popBase.textContent = settings.base_url || "";
 }
 
-async function setModel(name) {
-  try {
-    const response = await fetch("model", {
-      method: "POST",
-      headers: { "Content-Type": "text/plain; charset=utf-8" },
-      body: name,
-    });
-    const payload = await response.json();
-    if (!payload.error) {
-      settings = { ...settings, ...payload };
-      updateChip();
-      renderModels();
-      renderUsage();
-    }
-  } catch (error) { /* keep the old model */ }
+function renderMemory() {
+  memoryBox.replaceChildren();
+  const stats = settings.stats || {};
+  memoryBox.append(grid([
+    ["memories", stats.memories ?? 0],
+    ["messages", stats.messages ?? 0],
+    ["ledger runs", stats.runs ?? 0],
+    ["sessions", stats.sessions ?? 0],
+    ["conversations", stats.conversations ?? 0],
+  ]));
 }
+
+function renderPopFoot() {
+  const provider = activeProvider();
+  const base = (provider && provider.base_url) || settings.base_url || "";
+  popFoot.textContent = base + (settings.database ? "  ·  " + settings.database : "");
+}
+
+async function post(path, body) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+    body: body,
+  });
+  const payload = await response.json();
+  if (!payload.error) {
+    settings = { ...settings, ...payload };
+    updateChip();
+    renderProviders();
+    renderModels();
+    renderUsage();
+    renderMemory();
+    renderPopFoot();
+  }
+}
+
+function setProvider(id) { return post("provider", id); }
+function setModel(name) { return post("model", name); }
 
 function renderAttachments() {
   attachmentsEl.replaceChildren();
@@ -384,20 +407,21 @@ messages.addEventListener("click", (event) => {
   if (prompt) send(prompt);
 });
 
-// ---- model / usage popover ----------------------------------------------
-statusBtn.addEventListener("click", (event) => {
-  event.stopPropagation();
-  modelPop.hidden = !modelPop.hidden;
-  if (!modelPop.hidden) {
+// ---- status balloon (provider + model + usage) ---------------------------
+statusBtn.addEventListener("click", () => {
+  balloon.toggle();
+  statusBtn.setAttribute("aria-expanded", String(balloon.open));
+  if (balloon.open) {
+    renderProviders();
     renderModels();
     renderUsage();
+    renderMemory();
+    renderPopFoot();
   }
 });
-document.addEventListener("click", (event) => {
-  if (!modelPop.hidden && !modelPop.contains(event.target) && !statusBtn.contains(event.target)) {
-    modelPop.hidden = true;
-  }
-});
+balloon.addEventListener("close", () => statusBtn.setAttribute("aria-expanded", "false"));
+providerSelect.addEventListener("change", () => setProvider(providerSelect.value));
+modelSelect.addEventListener("change", () => setModel(modelSelect.value));
 
 // ---- voice input ---------------------------------------------------------
 function setupVoice() {
@@ -458,18 +482,23 @@ async function refreshMeta() {
     const payload = await response.json();
     settings = { ...settings, ...payload };
     updateChip();
-    if (!modelPop.hidden) {
+    if (balloon.open) {
+      renderProviders();
       renderModels();
       renderUsage();
+      renderMemory();
+      renderPopFoot();
     }
     const stats = payload.stats || {};
-    meta.textContent = `${payload.configured ? payload.model : "local mode"} · ${stats.memories ?? 0} memories · ${stats.messages ?? 0} messages`;
+    const provider = activeProvider();
+    const label = provider ? provider.label : "local";
+    meta.textContent = `${label} · ${payload.model} · ${stats.memories ?? 0} memories`;
   } catch (error) {
     meta.textContent = "offline";
   }
 }
 
-// Hot reload: reload the window whenever the UI files change on disk.
+// Hot reload.
 async function watch() {
   try {
     const response = await fetch("version");
@@ -503,7 +532,7 @@ let dragDown = null;
 function wireDrag(element) {
   if (!element || !native) return;
   element.addEventListener("pointerdown", (event) => {
-    if (event.target.closest("button, a, textarea, input")) return;
+    if (event.target.closest("button, a, textarea, input, select, wa-balloon")) return;
     dragDown = { x: event.clientX, y: event.clientY };
   });
   element.addEventListener("pointermove", (event) => {
