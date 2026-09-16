@@ -84,9 +84,10 @@ body.compact {
   border-radius: 999px; padding: 7px 13px; cursor: pointer; font-size: 13px;
 }
 .hints button:hover { border-color: var(--accent); }
-.composer { display: flex; gap: 10px; padding: 14px 18px 18px; border-top: 1px solid var(--line); background: rgba(18, 21, 28, .7); }
+.composer { display: flex; gap: 10px; align-items: flex-end; padding: 14px 18px 18px; border-top: 1px solid var(--line); background: rgba(18, 21, 28, .7); }
 .composer textarea {
-  flex: 1; resize: none; max-height: 180px; padding: 11px 13px; border-radius: 12px;
+  flex: 1; resize: none; overflow-y: auto; height: 44px; min-height: 44px; max-height: 180px;
+  padding: 10px 13px; border-radius: 12px; line-height: 22px;
   border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
   font: inherit; outline: none;
 }

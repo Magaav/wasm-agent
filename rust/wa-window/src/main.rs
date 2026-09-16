@@ -109,6 +109,9 @@ mod companion {
         } else {
             LogicalSize::new(COMPACT as f64, COMPACT as f64)
         };
+        // Fixed-size: a sizing frame would inset the client area and leave a
+        // visible border around the frameless translucent window.
+        window.set_resizable(false);
         let physical: PhysicalSize<u32> = logical.to_physical(window.scale_factor());
         window.set_inner_size(physical);
         let observed = window.outer_size();
@@ -126,13 +129,14 @@ mod companion {
     /// (`WS_EX_LAYERED` + `LWA_ALPHA`, which works even without per-pixel DWM
     /// transparency), and clipped to a circle when compact or a rounded rect
     /// when expanded so the frameless window has no square corners.
-    fn style_window(window: &Window, webview: &WebView, mode: &str) {
-        use windows::Win32::Foundation::{COLORREF, HWND, RECT};
-        use windows::Win32::Graphics::Gdi::{CreateEllipticRgn, CreateRoundRectRgn, SetWindowRgn};
+    /// Alpha, topmost z-order and the initial show. Called once after the
+    /// window is made visible.
+    fn apply_style(window: &Window) {
+        use windows::Win32::Foundation::{COLORREF, HWND};
         use windows::Win32::UI::WindowsAndMessaging::{
-            GetClientRect, GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW,
-            SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOMOVE,
-            SWP_NOSIZE, SWP_SHOWWINDOW, WS_EX_LAYERED,
+            GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
+            GWL_EXSTYLE, HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+            SWP_SHOWWINDOW, WS_EX_LAYERED,
         };
         let hwnd = HWND(window.hwnd() as _);
         unsafe {
@@ -148,10 +152,21 @@ mod companion {
                 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
+        }
+    }
+
+    /// Keep the WebView bounds and the window region in step with the client
+    /// area. Runs on every mode change and on every manual resize.
+    fn apply_layout(window: &Window, webview: &WebView, mode: &str) {
+        use windows::Win32::Foundation::{HWND, RECT};
+        use windows::Win32::Graphics::Gdi::{CreateEllipticRgn, CreateRoundRectRgn, SetWindowRgn};
+        use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+        let hwnd = HWND(window.hwnd() as _);
+        let scale = window.scale_factor();
+        unsafe {
             let mut rc = RECT::default();
             let _ = GetClientRect(hwnd, &mut rc);
             let (w, h) = (rc.right.max(1), rc.bottom.max(1));
-            let scale = window.scale_factor();
             // The WebView keeps the size it was created with until told
             // otherwise, so pin it to the client area on every relayout.
             let _ = webview.set_bounds(wry::Rect {
@@ -159,7 +174,9 @@ mod companion {
                 size: LogicalSize::new(w as f64 / scale, h as f64 / scale).into(),
             });
             let region = if mode == "expanded" {
-                CreateRoundRectRgn(0, 0, w + 1, h + 1, 36, 36)
+                // Match the panel's CSS `border-radius: 18px` in physical pixels.
+                let r = (36.0 * scale).round().max(8.0) as i32;
+                CreateRoundRectRgn(0, 0, w + 1, h + 1, r, r)
             } else {
                 // A centred circle of the smaller dimension, so the avatar stays
                 // round even if the client area is not exactly square.
@@ -169,6 +186,11 @@ mod companion {
             };
             SetWindowRgn(hwnd, Some(region), true);
         }
+    }
+
+    fn style_window(window: &Window, webview: &WebView, mode: &str) {
+        apply_style(window);
+        apply_layout(window, webview, mode);
     }
 
     fn handle(window: &Window, webview: &WebView, state: &mut State, body: &str) -> bool {
@@ -223,6 +245,10 @@ mod companion {
             .with_visible(false)
             .with_skip_taskbar(true)
             .with_focusable(false)
+            .with_resizable(false)
+            // No DWM drop shadow: it draws a soft border around the frameless
+            // translucent window that reads as stray edges.
+            .with_undecorated_shadow(false)
             .build(&event_loop)
             .context("create companion window")?;
         note("window created");
@@ -286,6 +312,10 @@ mod companion {
                     }
                 }
                 Event::UserEvent(UserEvent::Loaded) => note("page loaded"),
+                Event::WindowEvent { event: WindowEvent::Resized(_), .. } => {
+                    // Manual resize: re-pin the WebView and re-cut the region.
+                    apply_layout(&window, &webview, &state.mode);
+                }
                 Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
                     note("close requested");
                     window.set_visible(false);

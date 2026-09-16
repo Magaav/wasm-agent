@@ -210,10 +210,13 @@ input.addEventListener("keydown", (event) => {
     form.requestSubmit();
   }
 });
-input.addEventListener("input", () => {
+function autosize() {
   input.style.height = "auto";
   input.style.height = Math.min(input.scrollHeight, 180) + "px";
-});
+}
+input.addEventListener("input", autosize);
+// Re-measure once the native window finishes expanding/collapsing.
+window.addEventListener("resize", () => requestAnimationFrame(autosize));
 messages.addEventListener("click", (event) => {
   const prompt = event.target?.dataset?.prompt;
   if (prompt) send(prompt);
@@ -256,7 +259,12 @@ function applyMode(mode) {
 }
 applyMode(native ? "compact" : "expanded");
 
-orb?.addEventListener("click", () => { applyMode("expanded"); native?.expand(); });
+orb?.addEventListener("click", () => {
+  applyMode("expanded");
+  // Measure once the panel is visible (the compact window is too narrow).
+  requestAnimationFrame(autosize);
+  native?.expand();
+});
 collapse?.addEventListener("click", () => { applyMode("compact"); native?.compact(); });
 
 // Drag to move the frameless window (click still expands the orb).
