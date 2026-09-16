@@ -52,12 +52,17 @@ M.admin = {
   schema("ls", "List a directory.", { path = { type = "string" } }),
   schema("grep", "Search files for a pattern and return matching lines.", {
     pattern = { type = "string" }, path = { type = "string" } }, { "pattern" }),
-  schema("client", "Control the wasm-agent client machine: screenshot, mouse, keyboard and a browser CDP session.", {
+  schema("client", "Control the wasm-agent client machine: screenshot, mouse, keyboard and a Chrome DevTools (CDP) session. CDP uses a dedicated Chrome profile and launches Chrome if needed.", {
     action = { type = "string", enum = { "screenshot", "click", "move", "type", "key", "cdp" } },
     x = { type = "integer" }, y = { type = "integer" },
     text = { type = "string" }, key = { type = "string" },
-    target = { type = "string", description = "CDP action: list | open | close | activate" },
-    url = { type = "string" }, port = { type = "integer" } }, { "action" }),
+    target = { type = "string", description = "CDP: list | open | close | activate | navigate | evaluate | launch" },
+    script = { type = "string", description = "CDP evaluate: JavaScript expression" },
+    id = { type = "string", description = "CDP target id for close/activate" },
+    url = { type = "string" },
+    port = { type = "integer", description = "CDP port (default 9222)" },
+    profile = { type = "string", description = "Chrome user-data-dir (defaults to the wasm-agent account)" } },
+    { "action" }),
 }
 
 local function wasm_plugins()

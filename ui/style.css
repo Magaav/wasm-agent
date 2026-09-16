@@ -73,10 +73,13 @@ body.compact {
 .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px var(--accent); }
 .meta { color: var(--muted); font-size: 12.5px; text-align: right; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .collapse {
-  border: 1px solid var(--line); background: var(--panel-2); color: var(--muted);
-  border-radius: var(--radius-sm); width: 30px; height: 30px; cursor: pointer; line-height: 1;
+  flex: none; width: 40px; height: 40px; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+  border-radius: var(--radius);
 }
-.collapse:hover { color: var(--text); border-color: var(--accent); }
+.collapse svg { width: 24px; height: 24px; display: block; }
+.collapse:hover { border-color: var(--accent); background: #1d2330; }
 
 .messages { flex: 1; overflow-y: auto; padding: var(--pad); display: flex; flex-direction: column; gap: var(--gap); }
 .msg {
