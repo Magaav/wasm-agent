@@ -202,6 +202,16 @@ pub extern "C" fn client(l: *mut LuaState) -> c_int {
     1
 }
 
+/// host.sleep(milliseconds) — used between deterministic spell steps.
+pub extern "C" fn sleep(l: *mut LuaState) -> c_int {
+    let millis = arg_string(l, 1)
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
+        .min(10_000);
+    std::thread::sleep(std::time::Duration::from_millis(millis));
+    0
+}
+
 /// host.log(message)
 pub extern "C" fn log(l: *mut LuaState) -> c_int {
     if let Some(message) = arg_string(l, 1) {

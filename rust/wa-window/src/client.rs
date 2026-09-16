@@ -119,6 +119,7 @@ fn execute(action: &str, args: &Value) -> Value {
             json!({"ok": true, "chars": text.chars().count()})
         }
         "key" => json!({"ok": press_key(args["key"].as_str().unwrap_or_default())}),
+        "shell" => shell(args),
         "cdp" => cdp(args),
         other => json!({"error": format!("unknown_action:{other}")}),
     }
@@ -126,6 +127,50 @@ fn execute(action: &str, args: &Value) -> Value {
 
 fn point(args: &Value) -> (i32, i32) {
     (args["x"].as_i64().unwrap_or(0) as i32, args["y"].as_i64().unwrap_or(0) as i32)
+}
+
+// ---- shell ---------------------------------------------------------------
+fn shell(args: &Value) -> Value {
+    let command = args["command"].as_str().unwrap_or_default();
+    if command.is_empty() {
+        return json!({"error": "command_required"});
+    }
+    let kind = args["shell"].as_str().unwrap_or("cmd");
+    let mut process = if kind.eq_ignore_ascii_case("powershell") {
+        let mut powershell = std::process::Command::new("powershell");
+        powershell.arg("-NoProfile").arg("-NonInteractive").arg("-Command").arg(command);
+        powershell
+    } else {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.arg("/C").arg(command);
+        cmd
+    };
+    if let Some(dir) = args["cwd"].as_str() {
+        if !dir.is_empty() {
+            process.current_dir(dir);
+        }
+    }
+    match process.output() {
+        Ok(output) => {
+            let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            if stdout.len() > 20000 {
+                stdout.truncate(20000);
+                stdout.push_str("\n…(truncated)");
+            }
+            if stderr.len() > 8000 {
+                stderr.truncate(8000);
+                stderr.push_str("\n…(truncated)");
+            }
+            json!({
+                "ok": true,
+                "code": output.status.code().unwrap_or(-1),
+                "stdout": stdout,
+                "stderr": stderr
+            })
+        }
+        Err(error) => json!({"error": error.to_string()}),
+    }
 }
 
 // ---- mouse + keyboard ----------------------------------------------------

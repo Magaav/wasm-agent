@@ -113,6 +113,26 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", payload.as_bytes());
     }
+    if path == "/shell" && method == "POST" {
+        let command = String::from_utf8_lossy(&body).to_string();
+        let payload = lua
+            .call_string("wa_shell", &[command.as_str(), session.as_str()])
+            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
+        return respond(stream, 200, "application/json", payload.as_bytes());
+    }
+    if path == "/spells" {
+        let payload = lua
+            .call_string("wa_spells", &[session.as_str()])
+            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
+        return respond(stream, 200, "application/json", payload.as_bytes());
+    }
+    if path == "/spell" && method == "POST" {
+        let name = String::from_utf8_lossy(&body).trim().to_string();
+        let payload = lua
+            .call_string("wa_spell_run", &[name.as_str(), session.as_str()])
+            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
+        return respond(stream, 200, "application/json", payload.as_bytes());
+    }
     if path == "/provider" && method == "POST" {
         let id = String::from_utf8_lossy(&body).trim().to_string();
         let payload = lua

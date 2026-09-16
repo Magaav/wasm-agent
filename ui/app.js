@@ -23,6 +23,11 @@ const userAvatar = document.getElementById("user-avatar");
 const userName = document.getElementById("user-name");
 const userMenu = document.getElementById("user-menu");
 const contextMenu = document.getElementById("context-menu");
+const terminal = document.getElementById("terminal");
+const termBtn = document.getElementById("term-btn");
+const termOut = document.getElementById("term-out");
+const termForm = document.getElementById("term-form");
+const termCmd = document.getElementById("term-cmd");
 
 let renderer = null;
 let version = null;
@@ -665,6 +670,82 @@ function wireDrag(element) {
 }
 wireDrag(orb);
 wireDrag(dragbar);
+
+// ---- terminal: shell on this machine + spell replay ----------------------
+const termHistory = [];
+let termIndex = 0;
+
+function termWrite(text, kind = "") {
+  const line = document.createElement("div");
+  line.className = "term-line" + (kind ? " " + kind : "");
+  line.textContent = text;
+  termOut.append(line);
+  termOut.scrollTop = termOut.scrollHeight;
+}
+
+async function runShell(command) {
+  termWrite("> " + command, "cmd");
+  const trimmed = command.trim();
+  if (!trimmed) return;
+  if (trimmed === ":clear") { termOut.replaceChildren(); return; }
+  try {
+    if (trimmed === ":spells" || trimmed === ":spell") {
+      const payload = await (await fetch("spells", { headers: apiHeaders() })).json();
+      if (payload.error) { termWrite(payload.error, "err"); return; }
+      const spells = payload.spells || [];
+      if (!spells.length) { termWrite("(no spells saved yet)", "meta"); return; }
+      for (const spell of spells) {
+        termWrite(`  ${spell.name}  (${spell.steps} steps)  ${spell.description || ""}`, "meta");
+      }
+      return;
+    }
+    if (trimmed.startsWith(":run ")) {
+      const name = trimmed.slice(5).trim();
+      const payload = await (await fetch("spell", {
+        method: "POST", headers: apiHeaders({ "Content-Type": "text/plain" }), body: name,
+      })).json();
+      termWrite(JSON.stringify(payload), payload.error ? "err" : "meta");
+      return;
+    }
+    const payload = await (await fetch("shell", {
+      method: "POST", headers: apiHeaders({ "Content-Type": "text/plain" }), body: command,
+    })).json();
+    if (payload.error) { termWrite(payload.error, "err"); return; }
+    if (payload.stdout) termWrite(payload.stdout.replace(/\n$/, ""));
+    if (payload.stderr) termWrite(payload.stderr.replace(/\n$/, ""), "err");
+    if (payload.code) termWrite(`(exit ${payload.code})`, "meta");
+  } catch (error) {
+    termWrite(String(error), "err");
+  }
+}
+
+termBtn.addEventListener("click", () => {
+  const open = document.body.classList.toggle("term");
+  terminal.hidden = !open;
+  termBtn.classList.toggle("active", open);
+  if (open) termCmd.focus();
+});
+termForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const command = termCmd.value;
+  termCmd.value = "";
+  if (command.trim()) {
+    termHistory.push(command);
+    termIndex = termHistory.length;
+  }
+  runShell(command);
+});
+termCmd.addEventListener("keydown", (event) => {
+  if (event.key === "ArrowUp" && termHistory.length) {
+    event.preventDefault();
+    termIndex = Math.max(0, termIndex - 1);
+    termCmd.value = termHistory[termIndex] || "";
+  } else if (event.key === "ArrowDown") {
+    event.preventDefault();
+    termIndex = Math.min(termHistory.length, termIndex + 1);
+    termCmd.value = termHistory[termIndex] || "";
+  }
+});
 
 // ---- menus ---------------------------------------------------------------
 statusBtn.setAttribute("aria-expanded", "false");

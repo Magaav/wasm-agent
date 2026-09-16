@@ -66,6 +66,32 @@ function wa_logout(session)
   return json.encode({ ok = true, user = users.public(user) })
 end
 
+-- ---- UI shell + spells (master only) -------------------------------------
+local function require_master(session)
+  local user = users.current(session)
+  if not users.is_master(user.role) then return nil, user end
+  return user
+end
+
+function wa_shell(command, session)
+  local user = require_master(session)
+  if not user then return json.encode({ error = "forbidden" }) end
+  if not command or command == "" then return json.encode({ error = "command_required" }) end
+  return json.encode(toolslib.dispatch(memory, "shell", { command = command }, user.role))
+end
+
+function wa_spells(session)
+  local user = require_master(session)
+  if not user then return json.encode({ error = "forbidden" }) end
+  return json.encode(toolslib.dispatch(memory, "spell_list", {}, user.role))
+end
+
+function wa_spell_run(name, session)
+  local user = require_master(session)
+  if not user then return json.encode({ error = "forbidden" }) end
+  return json.encode(toolslib.dispatch(memory, "spell_run", { name = name }, user.role))
+end
+
 function wa_users()
   local list = {}
   for _, user in ipairs(users.list()) do list[#list + 1] = users.public(user) end

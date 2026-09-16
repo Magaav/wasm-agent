@@ -1,8 +1,9 @@
 -- Users and roles. A role decides which tools the agent may call.
 --
---   admin  full access: code, shell, files, client control, memory, plugins.
---   guest  on-demand memory only (remember/recall) plus future "spells".
+--   master  full access: code, shell, files, client control, memory, plugins.
+--   guest   on-demand memory only (remember/recall) plus spells.
 --
+-- `admin` is accepted as a legacy alias for `master`.
 -- Stored at ~/.wasm-agent/users.json (created on first run).
 local json = dofile("lua/vendor/json.lua")
 local M = {}
@@ -16,11 +17,20 @@ end
 
 local DEFAULT = {
   users = {
-    { id = "admin", name = "admin", role = "admin" },
+    { id = "master", name = "master", role = "master" },
     { id = "guest", name = "guest", role = "guest" },
   },
-  default_user = "admin",
+  default_user = "master",
 }
+
+function M.normalize(role)
+  if role == "admin" then return "master" end
+  return role or "guest"
+end
+
+function M.is_master(role)
+  return M.normalize(role) == "master"
+end
 
 function M.load()
   if cache then return cache end
@@ -42,6 +52,12 @@ function M.list() return M.load().users end
 function M.find(id)
   for _, user in ipairs(M.list()) do
     if user.id == id then return user end
+  end
+  -- `admin` maps onto the master account.
+  if id == "admin" then
+    for _, user in ipairs(M.list()) do
+      if M.normalize(user.role) == "master" then return user end
+    end
   end
   return nil
 end
@@ -65,16 +81,15 @@ end
 
 function M.current(session)
   local id = session and sessions[session] or nil
-  if id then
-    local user = M.find(id)
-    if user then return user end
-  end
-  return M.default_user()
+  local user = id and M.find(id) or nil
+  user = user or M.default_user()
+  user.role = M.normalize(user.role)
+  return user
 end
 
 function M.public(user)
   if not user then return nil end
-  return { id = user.id, name = user.name, role = user.role }
+  return { id = user.id, name = user.name, role = M.normalize(user.role) }
 end
 
 return M

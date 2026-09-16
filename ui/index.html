@@ -43,6 +43,15 @@
       </div>
     </main>
 
+    <section id="terminal" class="terminal" hidden>
+      <div id="term-out" class="term-out"></div>
+      <form id="term-form" class="term-in">
+        <span class="term-prompt">&gt;</span>
+        <input id="term-cmd" autocomplete="off" spellcheck="false"
+               placeholder="shell on this machine — :spells, :run &lt;name&gt;, :clear" />
+      </form>
+    </section>
+
     <form id="composer" class="composer">
       <div id="attachments" class="attachments"></div>
       <div class="composer-row">
@@ -62,6 +71,9 @@
             <span class="chip-dot"></span>
             <span id="chip-model">connecting…</span>
             <span id="chip-usage" class="chip-usage"></span>
+          </button>
+          <button id="term-btn" class="icon-btn" type="button" title="Shell" aria-label="Shell">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7l5 5-5 5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 17h8" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
           </button>
           <button id="mic" class="icon-btn" type="button" title="Talk with voice" aria-label="Talk with voice">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zm7 8a7 7 0 0 1-6 6.9V21h-2v-3.1A7 7 0 0 1 5 11h2a5 5 0 0 0 10 0h2z"/></svg>

@@ -1,7 +1,12 @@
 -- Tools exposed to the head model. Access is gated by the caller's role:
 -- admins get everything; guests get on-demand memory plus "spells".
 local json = dofile("lua/vendor/json.lua")
+local spellslib = dofile("lua/core/spells.lua")
 local M = {}
+
+local function is_master(role)
+  return role == "master" or role == "admin"
+end
 
 local function schema(name, description, properties, required)
   -- An empty Lua table encodes as `[]`, which providers reject as a schema, so
@@ -63,6 +68,18 @@ M.admin = {
     port = { type = "integer", description = "CDP port (default 9222)" },
     profile = { type = "string", description = "Chrome user-data-dir (defaults to the wasm-agent account)" } },
     { "action" }),
+  schema("shell", "Run a shell command on the wasm-agent client machine (the desktop host running the UI) and return stdout, stderr and the exit code.", {
+    command = { type = "string" },
+    shell = { type = "string", enum = { "cmd", "powershell" }, description = "Default cmd." },
+    cwd = { type = "string" } }, { "command" }),
+  schema("spell_save", "Crystallize a working sequence of client actions into a named, deterministic spell that replays without the model.", {
+    name = { type = "string" },
+    description = { type = "string" },
+    steps = { type = "array", items = { type = "object" }, description = "Each step: {kind=client|wait|assert, ...}." } }, { "name", "steps" }),
+  schema("spell_run", "Replay a saved spell deterministically (stops at the first failure).", {
+    name = { type = "string" } }, { "name" }),
+  schema("spell_list", "List saved spells.", {}),
+  schema("spell_forget", "Delete a saved spell.", { name = { type = "string" } }, { "name" }),
 }
 
 local function wasm_plugins()
@@ -82,7 +99,7 @@ function M.all(role)
   role = role or "admin"
   local list = {}
   for _, item in ipairs(M.shared) do list[#list + 1] = item end
-  if role == "admin" then
+  if is_master(role) then
     for _, item in ipairs(M.admin) do list[#list + 1] = item end
     for _, plugin in ipairs(wasm_plugins()) do
       list[#list + 1] = schema(plugin.name, plugin.description or "", plugin.parameters and plugin.parameters.properties, plugin.parameters and plugin.parameters.required)
@@ -119,7 +136,7 @@ end
 function M.dispatch(memory, name, args, role)
   args = args or {}
   role = role or "admin"
-  if role ~= "admin" and admin_names()[name] then return { error = "forbidden_for_role:" .. role } end
+  if not is_master(role) and admin_names()[name] then return { error = "forbidden_for_role:" .. role } end
 
   if name == "remember" then
     if not args.content or args.content == "" then return { error = "content_required" } end
@@ -128,8 +145,8 @@ function M.dispatch(memory, name, args, role)
     return memory.recall(args.query or "", args.limit or 10, args.scope)
   elseif name == "spells" then
     local spells = { "remember", "recall" }
-    if role == "admin" then
-      for _, extra in ipairs({ "bash", "read", "write", "edit", "ls", "grep", "client" }) do
+    if is_master(role) then
+      for _, extra in ipairs({ "bash", "read", "write", "edit", "ls", "grep", "client", "shell", "spell_run" }) do
         spells[#spells + 1] = extra
       end
     end
@@ -173,10 +190,25 @@ function M.dispatch(memory, name, args, role)
     local decoded = json.decode(raw)
     if type(decoded) ~= "table" then return { result = raw } end
     return decoded
+  elseif name == "shell" then
+    if not args.command or args.command == "" then return { error = "command_required" } end
+    local ok, raw = pcall(host.client, "shell", json.encode(args))
+    if not ok then return { error = tostring(raw) } end
+    local decoded = json.decode(raw)
+    if type(decoded) ~= "table" then return { result = raw } end
+    return decoded
+  elseif name == "spell_save" then
+    return spellslib.save(args.name, args.description, args.steps)
+  elseif name == "spell_run" then
+    return spellslib.run(args.name)
+  elseif name == "spell_list" then
+    return spellslib.list()
+  elseif name == "spell_forget" then
+    return spellslib.remove(args.name)
   end
 
   -- Fall back to a WASM plugin (admin only; guests never see their schemas).
-  if role ~= "admin" then return { error = "unknown_tool:" .. tostring(name) } end
+  if not is_master(role) then return { error = "unknown_tool:" .. tostring(name) } end
   local ok, result = pcall(host.invoke, name, json.encode(args))
   if not ok then return { error = tostring(result) } end
   local decoded = json.decode(result)

@@ -78,7 +78,7 @@ body.compact {
   border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
   border-radius: var(--radius);
 }
-.collapse svg { width: 24px; height: 24px; display: block; }
+.collapse svg { width: 18px; height: 18px; display: block; }
 .collapse:hover { border-color: var(--accent); background: #1d2330; }
 
 .messages { flex: 1; overflow-y: auto; padding: var(--pad); display: flex; flex-direction: column; gap: var(--gap); }
@@ -114,6 +114,30 @@ wa-message.assistant { align-self: flex-start; background: var(--assistant); }
 .tool.err { border-left-color: #f85149; }
 .tool-name { color: var(--muted); text-transform: uppercase; letter-spacing: .6px; font-size: 11px; margin-bottom: var(--space); }
 .tool-detail { color: #c9d1e0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-word; }
+
+/* terminal (client shell) */
+body.term .messages { display: none; }
+body.term .composer { display: none; }
+.terminal { display: none; flex: 1; min-height: 0; flex-direction: column; }
+body.term .terminal { display: flex; }
+.term-out {
+  flex: 1; min-height: 0; overflow-y: auto; padding: var(--pad);
+  font: var(--font-size)/1.5 var(--font); white-space: pre-wrap; word-break: break-word;
+  color: #cfd6e4;
+}
+.term-line { margin-bottom: var(--space); }
+.term-line.cmd { color: var(--text); }
+.term-line.err { color: #ff9a9e; }
+.term-line.meta { color: var(--muted); }
+.term-in {
+  display: flex; align-items: center; gap: var(--gap); padding: var(--pad);
+  border-top: 1px solid var(--line); background: rgba(18, 21, 28, .82);
+}
+.term-prompt { color: var(--accent); font: var(--font-size)/1 var(--font); }
+.term-in input {
+  flex: 1; border: none; outline: none; background: none; color: var(--text);
+  font: var(--font-size)/1.4 var(--font);
+}
 
 /* composer */
 .composer {
