@@ -72,13 +72,19 @@ M.admin = {
     command = { type = "string" },
     shell = { type = "string", enum = { "cmd", "powershell" }, description = "Default cmd." },
     cwd = { type = "string" } }, { "command" }),
-  schema("spell_save", "Crystallize a working sequence of client actions into a named, deterministic spell that replays without the model.", {
+  schema("spell_save", "Crystallize a working sequence of client actions into a named, parameterised, VERIFIED spell. Requires at least one post assertion: a spell must settle its effect, so it can never report success while doing nothing.", {
     name = { type = "string" },
     description = { type = "string" },
-    steps = { type = "array", items = { type = "object" }, description = "Each step: {kind=client|wait|assert, ...}." } }, { "name", "steps" }),
-  schema("spell_run", "Replay a saved spell deterministically (stops at the first failure).", {
-    name = { type = "string" } }, { "name" }),
-  schema("spell_list", "List saved spells.", {}),
+    target = { type = "object", description = "{node, app, profile} the spell was recorded against." },
+    params = { type = "object", description = "parameter -> {type: string|number|boolean, default}. Reference them as {{name}}." },
+    pre = { type = "array", items = { type = "object" }, description = "Assertions checked before the first step." },
+    steps = { type = "array", items = { type = "object" }, description = "Steps: {kind=client|wait|assert}. Retries allowed only with idempotent=true." },
+    post = { type = "array", items = { type = "object" }, description = "REQUIRED. Assertions checked after the steps (effect settlement)." } }, { "name", "steps", "post" }),
+  schema("spell_run", "Replay a saved spell; fails loudly at the first failing step or assertion.", {
+    name = { type = "string" },
+    params = { type = "object", description = "Values for the spell's declared parameters." } }, { "name" }),
+  schema("spell_list", "List saved spells with version and parameter names.", {}),
+  schema("spell_get", "Read one saved spell in full.", { name = { type = "string" } }, { "name" }),
   schema("spell_forget", "Delete a saved spell.", { name = { type = "string" } }, { "name" }),
 }
 
@@ -146,7 +152,7 @@ function M.dispatch(memory, name, args, role)
   elseif name == "spells" then
     local spells = { "remember", "recall" }
     if is_master(role) then
-      for _, extra in ipairs({ "bash", "read", "write", "edit", "ls", "grep", "client", "shell", "spell_run" }) do
+      for _, extra in ipairs({ "bash", "read", "write", "edit", "ls", "grep", "client", "shell", "spell_save", "spell_run", "spell_get" }) do
         spells[#spells + 1] = extra
       end
     end
@@ -198,11 +204,13 @@ function M.dispatch(memory, name, args, role)
     if type(decoded) ~= "table" then return { result = raw } end
     return decoded
   elseif name == "spell_save" then
-    return spellslib.save(args.name, args.description, args.steps)
+    return spellslib.save(args)
   elseif name == "spell_run" then
-    return spellslib.run(args.name)
+    return spellslib.run(args.name, args.params)
   elseif name == "spell_list" then
     return spellslib.list()
+  elseif name == "spell_get" then
+    return spellslib.get(args.name) or { error = "unknown_spell" }
   elseif name == "spell_forget" then
     return spellslib.remove(args.name)
   end

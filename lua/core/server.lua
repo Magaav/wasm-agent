@@ -86,10 +86,18 @@ function wa_spells(session)
   return json.encode(toolslib.dispatch(memory, "spell_list", {}, user.role))
 end
 
-function wa_spell_run(name, session)
+function wa_spell_run(payload, session)
   local user = require_master(session)
   if not user then return json.encode({ error = "forbidden" }) end
-  return json.encode(toolslib.dispatch(memory, "spell_run", { name = name }, user.role))
+  -- Body is either a bare spell name or {"name":..., "params":{...}}.
+  local name, params = payload, nil
+  if type(payload) == "string" and payload:sub(1, 1) == "{" then
+    local ok, decoded = pcall(json.decode, payload)
+    if ok and type(decoded) == "table" then
+      name, params = decoded.name, decoded.params
+    end
+  end
+  return json.encode(toolslib.dispatch(memory, "spell_run", { name = name, params = params }, user.role))
 end
 
 -- ---- nodes ---------------------------------------------------------------

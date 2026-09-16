@@ -804,7 +804,9 @@ async function runShell(command) {
       const spells = payload.spells || [];
       if (!spells.length) { termWrite("(no spells saved yet)", "meta"); return; }
       for (const spell of spells) {
-        termWrite(`  ${spell.name}  (${spell.steps} steps)  ${spell.description || ""}`, "meta");
+        const params = Object.keys(spell.params || {});
+        const settle = `${spell.post} settle`;
+        termWrite(`  ${spell.name} v${spell.version} · ${spell.steps} steps · ${settle}${params.length ? " · params: " + params.join(",") : ""}  ${spell.description || ""}`, "meta");
       }
       return;
     }
