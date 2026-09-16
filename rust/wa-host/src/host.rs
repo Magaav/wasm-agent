@@ -142,6 +142,14 @@ pub extern "C" fn log(l: *mut LuaState) -> c_int {
     0
 }
 
+/// host.stream(json) -> push one server-sent event to the connected UI.
+pub extern "C" fn stream(l: *mut LuaState) -> c_int {
+    if let Some(payload) = arg_string(l, 1) {
+        crate::serve::write_event(&payload);
+    }
+    0
+}
+
 /// host.plugins() -> JSON `[{name, description, parameters}, ...]`
 pub extern "C" fn plugins(l: *mut LuaState) -> c_int {
     let host = host_of(l);

@@ -18,20 +18,25 @@ local SYSTEM = table.concat({
 
 local MAX_TOOL_ROUNDS = 8
 
-function M.new(session_id)
+function M.new(session_id, on_event)
   return setmetatable({
     session_id = session_id or memory.start_session("cli", "interactive chat"),
     messages = { { role = "system", content = SYSTEM } },
+    emit = on_event or function() end,
   }, M)
 end
 
 function M:turn(text)
+  self.emit({ type = "status", text = "thinking" })
   if not provider.configured() then
-    return self:local_turn(text)
+    local reply = self:local_turn(text)
+    self.emit({ type = "reply", text = reply })
+    return reply
   end
   self.messages[#self.messages + 1] = { role = "user", content = text }
   local reply = ""
   for _ = 1, MAX_TOOL_ROUNDS do
+    self.emit({ type = "status", text = "model" })
     local result = provider.complete(self.messages, tools.all())
     local calls = result.tool_calls
     local assistant = { role = "assistant", content = result.content or "" }
@@ -48,8 +53,10 @@ function M:turn(text)
         local ok, decoded = pcall(json.decode, function_.arguments)
         if ok and type(decoded) == "table" then args = decoded end
       end
+      self.emit({ type = "tool", name = function_.name, arguments = args })
       local ok, output = pcall(tools.dispatch, memory, function_.name, args)
       if not ok then output = { error = tostring(output) } end
+      self.emit({ type = "tool_result", name = function_.name, result = output })
       self.messages[#self.messages + 1] = {
         role = "tool", tool_call_id = call.id or "", name = function_.name or "",
         content = json.encode(output),
@@ -58,6 +65,7 @@ function M:turn(text)
   end
   if reply == "" then reply = "(tool loop limit reached)" end
   memory.record_run(host.uuid(), self.session_id, "completed", "completed", reply)
+  self.emit({ type = "reply", text = reply })
   return reply
 end
 

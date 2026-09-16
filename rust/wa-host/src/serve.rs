@@ -8,6 +8,20 @@ use crate::lua::Lua;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::Mutex;
+
+/// The one open SSE client (the server is single-threaded, so one is enough).
+static CLIENT: Mutex<Option<TcpStream>> = Mutex::new(None);
+
+/// Push one event to the streaming client, if any. Called from Lua via host.stream.
+pub fn write_event(payload: &str) {
+    if let Ok(mut guard) = CLIENT.lock() {
+        if let Some(socket) = guard.as_mut() {
+            let _ = socket.write_all(format!("data: {payload}\n\n").as_bytes());
+            let _ = socket.flush();
+        }
+    }
+}
 
 pub fn run(lua: &Lua, port: u16, ui: PathBuf) {
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
@@ -74,6 +88,28 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
     }
     if path == "/chat" && method == "POST" {
         let text = String::from_utf8_lossy(&body).to_string();
+        let header_text = String::from_utf8_lossy(&data).to_ascii_lowercase();
+        if header_text.contains("text/event-stream") || path.contains("stream=1") {
+            // Server-sent events: the whole turn streams back on this response.
+            stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\
+                  Connection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+            )?;
+            stream.flush()?;
+            if let Ok(clone) = stream.try_clone() {
+                if let Ok(mut guard) = CLIENT.lock() {
+                    *guard = Some(clone);
+                }
+            }
+            if let Err(error) = lua.call_string("wa_reply_stream", &[text.as_str()]) {
+                write_event(&format!("{{\"type\":\"error\",\"error\":{}}}", json_escape(&error)));
+            }
+            write_event("{\"type\":\"done\"}");
+            if let Ok(mut guard) = CLIENT.lock() {
+                *guard = None;
+            }
+            return Ok(());
+        }
         let reply = lua
             .call_string("wa_reply", &[text.as_str()])
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
