@@ -33,33 +33,47 @@ signature is rejected (`bad_signature`); a `serve` instance with
 - **The rendezvous itself** must be publicly reachable by guests, so it needs one
   inbound port and a stable name.
 
-## Infrastructure we need (asks)
+## Deployment (live)
 
-1. **A static address.** Attach a **reserved public IP** to the Oracle instance
-   (if the instance uses an ephemeral IP, reserve one and reassign it) so a DNS
-   record stays valid.
-2. **A DNS name.** Create an `A` (and `AAAA` if there is IPv6) record:
-   `wa.colmeio.com → <reserved public IP>`. (`rendezvous.colmeio.com` is fine
-   too; pick one and I will wire it.)
-3. **One inbound port**, opened in **two** places on Oracle Cloud:
-   - the **VCN security list / NSG** ingress rule (console — I cannot do this
-     from the shell), and
-   - the instance firewall (I can do this: `iptables -I INPUT -p tcp --dport
-     <port> -j ACCEPT`, persisted).
-   Preferred: **TCP 443** (never blocked by client networks). Alternative:
-   **TCP 8890** (the current default) or **8443**.
-4. **TLS.** For HTTPS on 443 pick one:
-   - **Cloudflare (easiest if colmeio.com is on Cloudflare):** create the record
-     proxied (orange cloud) and terminate TLS at the edge, forwarding to the
-     instance on a port it can reach. No certificate on the box.
-   - **Let's Encrypt on the instance:** needs **TCP 80** reachable once for the
-     HTTP-01 challenge (or DNS-01 with a token). I can run certbot and add the
-     renewal timer.
-   - **Cloudflare Tunnel (`cloudflared`):** no inbound ports at all — the tunnel
-     dials out and Cloudflare publishes the hostname. Good fallback if opening
-     ports is awkward.
-5. **Keep it running.** I will add a systemd unit
-   (`wa-rendezvous.service`) so it survives reboots.
+| | |
+| --- | --- |
+| Public name | **https://rendezvous.colmeio.com** |
+| Address | `147.15.64.233` (reserved) |
+| Host | `openclaw.ohana` / `openclaw-instance` (Ubuntu 24.04, Oracle) |
+| Service | `wa-rendezvous.service` (systemd, **enabled**, restarts on failure) |
+| Binds | `127.0.0.1:8890` — never exposed directly |
+| TLS | Let's Encrypt via **Caddy** (`tls-alpn-01`), renewed automatically |
+| Certificate | `CN = rendezvous.colmeio.com`, Let's Encrypt, ~90 days |
+| State | `~/.wasm-agent/rendezvous.db` (SQLite, WAL) |
+
+Caddy already ran on 80/443 for the other colmeio.com sites, so the rendezvous
+is a **new site block** in `/etc/caddy/Caddyfile` proxying to localhost; nothing
+existing was replaced. `admin off` means `caddy reload` is unavailable, so the
+change was applied with a validated restart; every pre-existing site was checked
+before and after and is unchanged.
+
+### Verified
+
+- `GET /` — service banner with node counts and the endpoint list.
+- `GET /health` — `{"ok":true}` from the public internet (TLS 1.3, valid cert).
+- `POST /register` — the `openclaw` node registers and appears online.
+- `GET /nodes` / `GET /lookup?node_id=` — returns the node with its endpoint.
+- `POST /register` with a forged signature — **401 `bad_signature`**.
+- Unknown `node_id` — 404 `unknown_node`.
+- Survives reboot — unit is `enabled`.
+
+### Notes and limits
+
+- **Node identity is per machine** (`~/.wasm-agent/node.key`), so one host is one
+  node. Two processes on the same machine share a key and overwrite each other's
+  registration; real multi-node means one installation per machine.
+- Port 80 is **not** reachable from Let's Encrypt (the http-01 challenge timed
+  out), which is why issuance used **tls-alpn-01 on 443**. Renewal will keep
+  using it; no port-80 rule is required.
+- Pre-existing and unrelated: `fernanda.colmeio.com` has **no A record**, so
+  Caddy cannot renew it (it is only a redirect). Left untouched.
+- The relay (for nodes that are not directly reachable) is still phase 3; this
+  instance is the natural first relay.
 
 ## What I will do once the port is open
 

@@ -13,7 +13,7 @@ use std::net::{TcpListener, TcpStream};
 
 const ONLINE_WINDOW: i64 = 180; // seconds
 
-pub fn run(port: u16, db_path: &str) {
+pub fn run(bind: &str, port: u16, db_path: &str) {
     let connection = match Connection::open(db_path) {
         Ok(connection) => connection,
         Err(error) => {
@@ -36,14 +36,14 @@ pub fn run(port: u16, db_path: &str) {
         eprintln!("[rendezvous] schema: {error}");
         return;
     }
-    let listener = match TcpListener::bind(("0.0.0.0", port)) {
+    let listener = match TcpListener::bind((bind, port)) {
         Ok(listener) => listener,
         Err(error) => {
-            eprintln!("[rendezvous] bind 0.0.0.0:{port}: {error}");
+            eprintln!("[rendezvous] bind {bind}:{port}: {error}");
             return;
         }
     };
-    eprintln!("[rendezvous] listening on 0.0.0.0:{port} (db {db_path})");
+    eprintln!("[rendezvous] listening on {bind}:{port} (db {db_path})");
     for stream in listener.incoming() {
         if let Ok(mut stream) = stream {
             let _ = handle(&connection, &mut stream);
@@ -89,6 +89,36 @@ fn handle(connection: &Connection, stream: &mut TcpStream) -> std::io::Result<()
 
     if path == "/health" {
         return respond(stream, 200, "{\"ok\":true}");
+    }
+    if path == "/" {
+        let total: i64 = connection
+            .query_row("SELECT COUNT(*) FROM nodes", [], |row| row.get(0))
+            .unwrap_or(0);
+        let online: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE last_seen > ?1",
+                rusqlite::params![now() - ONLINE_WINDOW],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        return respond(
+            stream,
+            200,
+            &json!({
+                "service": "wasm-agent rendezvous",
+                "protocol": "nodes bind by ed25519 key, not address",
+                "nodes": total,
+                "online": online,
+                "endpoints": [
+                    "POST /register",
+                    "POST /heartbeat",
+                    "GET /lookup?node_id=",
+                    "GET /nodes",
+                    "GET /health"
+                ]
+            })
+            .to_string(),
+        );
     }
     if (path == "/register" || path == "/heartbeat") && method == "POST" {
         let node_id = payload["node_id"].as_str().unwrap_or_default();

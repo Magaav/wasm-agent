@@ -210,7 +210,8 @@ fn main() {
         if let Some(parent) = std::path::Path::new(&db).parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        rendezvous::run(port, &db);
+        let bind = flag(&lua_args, "--bind").unwrap_or_else(|| "127.0.0.1".into());
+        rendezvous::run(&bind, port, &db);
         return;
     }
 
