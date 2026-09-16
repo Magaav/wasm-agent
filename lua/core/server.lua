@@ -161,6 +161,28 @@ function wa_frame(max_width, session)
   }, user.role))
 end
 
+-- The exact envelope object sent to the model, at full depth.
+function wa_envelope(session)
+  local user = users.current(session)
+  local role = users.normalize(user.role)
+  local settings = provider.settings()
+  local tools = toolslib.all(role)
+  local names = {}
+  for _, tool in ipairs(tools) do names[#names + 1] = tool["function"].name end
+  return json.encode({
+    role = role,
+    request = {
+      model = settings.model,
+      provider = settings.provider,
+      base_url = settings.base_url,
+      tools = tools,
+    },
+    tool_count = #tools,
+    tool_names = names,
+    tiers = toolslib.tiers(role),
+  })
+end
+
 -- The tool surface (envelope) the current role sees, grouped by tier.
 function wa_tools(session)
   local user = users.current(session)

@@ -865,6 +865,18 @@ async function refreshTools() {
       }
       toolsBox.append(block);
     }
+    // The literal object sent to the provider, at full depth.
+    const envelope = await (await fetch("envelope", { headers: apiHeaders() })).json();
+    if (envelope.request) {
+      const details = document.createElement("details");
+      details.className = "envelope-raw";
+      const summary = document.createElement("summary");
+      summary.textContent = `raw envelope · ${envelope.tool_count} tools`;
+      const pre = document.createElement("pre");
+      pre.textContent = JSON.stringify(envelope.request, null, 2);
+      details.append(summary, pre);
+      toolsBox.append(details);
+    }
   } catch (error) {
     toolsBox.textContent = String(error);
   }

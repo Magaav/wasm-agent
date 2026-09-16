@@ -135,6 +135,23 @@ fn handle(connection: &Connection, stream: &mut TcpStream) -> std::io::Result<()
         let name = payload["name"].as_str().unwrap_or_default().to_string();
         let role = payload["role"].as_str().unwrap_or("guest").to_string();
         let endpoints = serde_json::to_string(&payload["endpoints"]).unwrap_or_else(|_| "[]".into());
+        // A node key is per machine; if the name changes, two processes are
+        // sharing one key. That is almost always a mistake worth surfacing.
+        if let Some(previous) = connection
+            .query_row(
+                "SELECT name FROM nodes WHERE node_id = ?1",
+                rusqlite::params![node_id],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+        {
+            if !name.is_empty() && previous != name {
+                eprintln!(
+                    "[rendezvous] {} re-registered as '{name}' (was '{previous}') — same key, two processes?",
+                    &node_id[..node_id.len().min(12)]
+                );
+            }
+        }
         let outcome = connection.execute(
             "INSERT INTO nodes (node_id, public_key, name, role, endpoints, last_seen, registered_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
@@ -147,6 +164,21 @@ fn handle(connection: &Connection, stream: &mut TcpStream) -> std::io::Result<()
             Ok(_) => respond(stream, 200, &json!({"ok": true, "node_id": node_id, "ts": now}).to_string()),
             Err(error) => respond(stream, 500, &json!({"error": error.to_string()}).to_string()),
         };
+    }
+    if path == "/forget" && method == "POST" {
+        let node_id = payload["node_id"].as_str().unwrap_or_default();
+        let ts = payload["ts"].as_i64().unwrap_or(0);
+        let signature = payload["signature"].as_str().unwrap_or_default();
+        let stored = public_key_of(connection, node_id);
+        let Some(public_key) = stored else {
+            return respond(stream, 404, "{\"error\":\"unknown_node\"}");
+        };
+        // Only the key holder may remove its own registration.
+        if !node::verify(&public_key, &format!("forget|{node_id}|{ts}"), signature) {
+            return respond(stream, 401, "{\"error\":\"bad_signature\"}");
+        }
+        let _ = connection.execute("DELETE FROM nodes WHERE node_id = ?1", rusqlite::params![node_id]);
+        return respond(stream, 200, &json!({"ok": true, "forgotten": node_id}).to_string());
     }
     if path == "/lookup" {
         let node_id = query
@@ -185,6 +217,16 @@ fn handle(connection: &Connection, stream: &mut TcpStream) -> std::io::Result<()
         return respond(stream, 200, &json!({"nodes": list}).to_string());
     }
     respond(stream, 404, "{\"error\":\"not_found\"}")
+}
+
+fn public_key_of(connection: &Connection, node_id: &str) -> Option<String> {
+    connection
+        .query_row(
+            "SELECT public_key FROM nodes WHERE node_id = ?1",
+            rusqlite::params![node_id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
 }
 
 fn lookup(connection: &Connection, node_id: &str) -> Option<Value> {
