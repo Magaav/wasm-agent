@@ -6,28 +6,36 @@
   <title>wasm-agent</title>
   <link rel="stylesheet" href="style.css" />
 </head>
-<body>
-  <header class="topbar">
-    <div class="brand"><span class="dot"></span> wasm-agent</div>
-    <div class="meta" id="meta">connecting…</div>
-  </header>
+<body class="expanded">
+  <div id="orb" class="orb" title="wasm-agent">
+    <span class="orb-ring"></span>
+    <span class="orb-core"></span>
+  </div>
 
-  <main id="messages" class="messages">
-    <div class="empty" id="empty">
-      <h1>wasm-agent</h1>
-      <p>Talk to your agent. It remembers what you tell it and can search your message ledger.</p>
-      <div class="hints">
-        <button data-prompt="remember that Laura prefers invoices on the 5th">remember a fact</button>
-        <button data-prompt="what do you know about Laura?">recall a fact</button>
-        <button data-prompt="use the echo tool to echo 'wasm plugins are alive'">use a WASM tool</button>
+  <div id="panel" class="panel">
+    <header class="topbar" id="dragbar">
+      <div class="brand"><span class="dot"></span> wasm-agent</div>
+      <div class="meta" id="meta">connecting…</div>
+      <button id="collapse" class="collapse" title="Collapse to avatar">▾</button>
+    </header>
+
+    <main id="messages" class="messages">
+      <div class="empty" id="empty">
+        <h1>wasm-agent</h1>
+        <p>Talk to your agent. It remembers what you tell it and can search your message ledger.</p>
+        <div class="hints">
+          <button data-prompt="remember that Laura prefers invoices on the 5th">remember a fact</button>
+          <button data-prompt="what do you know about Laura?">recall a fact</button>
+          <button data-prompt="use the echo tool to echo 'wasm plugins are alive'">use a WASM tool</button>
+        </div>
       </div>
-    </div>
-  </main>
+    </main>
 
-  <form id="composer" class="composer">
-    <textarea id="input" rows="1" placeholder="Message wasm-agent…  (Enter to send, Shift+Enter for a newline)"></textarea>
-    <button id="send" type="submit">Send</button>
-  </form>
+    <form id="composer" class="composer">
+      <textarea id="input" rows="1" placeholder="Message wasm-agent…  (Enter to send, Shift+Enter for a newline)"></textarea>
+      <button id="send" type="submit">Send</button>
+    </form>
+  </div>
 
   <script src="app.js"></script>
 </body>

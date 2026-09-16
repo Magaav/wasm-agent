@@ -242,6 +242,43 @@ async function watch() {
   setTimeout(watch, 1000);
 }
 
+// ---- native companion window (wa-window / WebView2) ----------------------
+// When hosted in the frameless always-on-top shell, the page starts as a round
+// avatar and expands into the translucent chat panel on click.
+const native = window.wasmAgent || null;
+const orb = document.getElementById("orb");
+const collapse = document.getElementById("collapse");
+const dragbar = document.getElementById("dragbar");
+
+function applyMode(mode) {
+  document.body.classList.toggle("compact", mode === "compact");
+  document.body.classList.toggle("expanded", mode === "expanded");
+}
+applyMode(native ? "compact" : "expanded");
+
+orb?.addEventListener("click", () => { applyMode("expanded"); native?.expand(); });
+collapse?.addEventListener("click", () => { applyMode("compact"); native?.compact(); });
+
+// Drag to move the frameless window (click still expands the orb).
+let dragDown = null;
+function wireDrag(element) {
+  if (!element || !native) return;
+  element.addEventListener("pointerdown", (event) => {
+    if (event.target.closest("button, a, textarea, input")) return;
+    dragDown = { x: event.clientX, y: event.clientY };
+  });
+  element.addEventListener("pointermove", (event) => {
+    if (!dragDown) return;
+    if (Math.hypot(event.clientX - dragDown.x, event.clientY - dragDown.y) > 4) {
+      dragDown = null;
+      native.drag();
+    }
+  });
+  element.addEventListener("pointerup", () => { dragDown = null; });
+}
+wireDrag(orb);
+wireDrag(dragbar);
+
 loadRenderer().then(refreshMeta);
 watch();
-input.focus();
+if (!native) input.focus();

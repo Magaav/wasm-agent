@@ -1,0 +1,13 @@
+# Cross-build the Windows WebView2 companion from Linux.
+#   docker build -t wa-window-build -f rust/wa-window/Dockerfile.windows rust/wa-window
+#   docker run --rm -v $PWD:/source -w /source wa-window-build \
+#     cargo build --manifest-path rust/wa-window/Cargo.toml \
+#       --target x86_64-pc-windows-gnu --release
+FROM rust:1.97-bookworm
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup target add x86_64-pc-windows-gnu
+ENV CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc
+ENV CARGO_TARGET_DIR=/source/target/windows-x64
+WORKDIR /source

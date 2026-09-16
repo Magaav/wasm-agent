@@ -1,11 +1,15 @@
-# Open the wasm-agent chat window.
+# Open the wasm-agent desktop window.
 #
-# Ensures `wa serve` is running on the host, opens an SSH tunnel, and launches an
-# app window (Edge --app, i.e. no browser chrome). Invoked by `wa ui`.
+# Ensures `wa serve` is running on the host, opens an SSH tunnel, and launches
+# the native WebView2 companion: frameless, translucent, always-on-top, and
+# collapsed to a round avatar that expands into the chat panel on click. Falls
+# back to an Edge --app window when the native shell is unavailable. Invoked by
+# `wa ui`.
 param(
   [string]$HostAlias = $(if ($env:WASM_AGENT_HOST) { $env:WASM_AGENT_HOST } else { "openclaw.ohana" }),
   [int]$Port = 8799,
-  [string]$RemoteUi = "/local/projects/wasm-agent/ui"
+  [string]$RemoteUi = "/local/projects/wasm-agent/ui",
+  [string]$RemoteBin = "/local/projects/wasm-agent/target/windows-x64/x86_64-pc-windows-gnu/release"
 )
 $ErrorActionPreference = "Stop"
 
@@ -23,10 +27,38 @@ if ($health -ne "200") {
   Write-Host "   * server already running" -ForegroundColor DarkGray
 }
 
-$tunnel = Start-Process ssh -ArgumentList @("-N", "-o", "BatchMode=yes", "-L", "${Port}:127.0.0.1:${Port}", $HostAlias) -PassThru -WindowStyle Hidden
-Start-Sleep -Seconds 1
+# Open the tunnel. Reuse an existing one if the port is already forwarded.
+$listening = (netstat -ano | Select-String "127.0.0.1:$Port\s+0.0.0.0:0\s+LISTENING") -ne $null
+if (-not $listening) {
+  Start-Process ssh -ArgumentList @("-N", "-o", "BatchMode=yes", "-L", "${Port}:127.0.0.1:${Port}", $HostAlias) -WindowStyle Hidden
+  Start-Sleep -Seconds 1
+}
 
 $url = "http://127.0.0.1:$Port/"
+$dir = Join-Path $env:LOCALAPPDATA "wasm-agent"
+$localExe = Join-Path $dir "wa-window.exe"
+$localDll = Join-Path $dir "WebView2Loader.dll"
+
+# Fetch the native companion (rebuilding it is `scripts/build-window.sh`).
+try {
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  Write-Host "   * fetching the window" -ForegroundColor DarkGray
+  & scp -q -o BatchMode=yes "${HostAlias}:${RemoteBin}/wa-window.exe" $localExe
+  & scp -q -o BatchMode=yes "${HostAlias}:${RemoteBin}/WebView2Loader.dll" $localDll
+} catch {
+  Remove-Item $localExe, $localDll -ErrorAction SilentlyContinue
+}
+
+if ((Test-Path $localExe) -and (Test-Path $localDll)) {
+  $env:WASM_AGENT_UI_URL = $url
+  Start-Process $localExe
+  Write-Host "   ok  native window -> $url" -ForegroundColor Green
+  Write-Host "   (click the avatar to expand, drag to move, collapse with the top-right arrow)" -ForegroundColor DarkGray
+  Write-Host ""
+  return
+}
+
+Write-Host "   ! native window unavailable; opening a browser" -ForegroundColor Yellow
 $edge = @(
   "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
   "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
@@ -39,5 +71,4 @@ if ($edge) {
 }
 
 Write-Host "   ok  $url" -ForegroundColor Green
-Write-Host "   (close the window when done; the tunnel exits with this terminal)" -ForegroundColor DarkGray
 Write-Host ""
