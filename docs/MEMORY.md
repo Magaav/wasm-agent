@@ -99,11 +99,23 @@ cursor per peer.
 Verified: node-b pushed 6 entries to openclaw (cursor 2→8, the host's session
 went 2→6 turns, traces included); a second tick pushed `0` (idempotent).
 
-Still open: **endpoint resolution**. A node currently advertises whatever
-`WASM_AGENT_ENDPOINT` says, and the host advertises the SSH alias
-`openclaw.ohana:8799` — a peer cannot resolve that. Peers need a real address
-(a public `host:port`, or the rendezvous serving as relay). This is the same
-missing piece as remote control of a NAT'd node: **the relay**.
+**Endpoint resolution is solved by the relay**: a node with no routable address
+advertises no endpoints, attaches to the relay by long-poll, and is reached
+through it. `nodeslib.request` tries a direct endpoint first and falls back to
+the relay, so nothing above it needs to know which path was taken.
+
+Verified with **separate databases** (the earlier test was invalid: two nodes on
+one machine share `~/.wasm-agent/memory.db`, so it proved nothing). With
+`--db /tmp/node-a.db` and `--db /tmp/node-b.db`: node-b's turn landed in the
+host's database via the relay, traces included.
+
+Two bugs this surfaced, both fixed:
+
+- a 200 carrying an error body ("rejected") was treated as success and the sync
+  cursor advanced anyway — **silent data loss**;
+- `apply_entry` built SQL parameters as a Lua array literal containing nils
+  (`parent_session_id`, `ended_at`, `session_id`), which is a *sparse* array and
+  made the JSON encoder throw, rejecting the whole batch.
 
 ## Retention
 

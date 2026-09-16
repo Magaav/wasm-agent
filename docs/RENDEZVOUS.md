@@ -21,7 +21,7 @@ a node whose address changed — that is all the rendezvous does.
 | `POST /register`, `POST /heartbeat` (signature-verified) | done |
 | `GET /lookup?node_id=`, `GET /nodes`, `GET /health` | done |
 | Outbound-only client heartbeat | done — set `WASM_AGENT_RENDEZVOUS` |
-| Relay (for masters behind NAT) | planned, phase 3 |
+| **Relay** (reach nodes behind NAT) | **done** — `GET /relay/poll`, `POST /relay/respond`, `POST /relay/send`, `GET /relay/status` |
 
 Verified locally: a valid announcement registers and looks up; a forged
 signature is rejected (`bad_signature`); a `serve` instance with
@@ -93,6 +93,35 @@ wa serve --port 8799
 
 The node registers, heartbeats every 60s, and any master can resolve it by
 `node_id`.
+
+## Relay
+
+A node that cannot accept inbound connections attaches by **long-polling** the
+relay (`GET /relay/poll`); it never exposes a port. A caller posts to
+`POST /relay/send {rid, to, method, path, headers, body}` and the relay hands the
+request to the attached node and returns its response. The node's own
+`/node/call`, `/node/chat` and `/sync/push` handlers do the work, so a node
+behaves identically whether it is reached directly or through the relay.
+
+Design points that matter:
+
+- **Idempotent by request id.** The caller generates one `rid` for the whole
+  operation; the relay queues that action **at most once**. A retry after a slow
+  fetch re-collects the same result instead of re-running the action — so a
+  click or a file write can never double-apply because the network was slow.
+- **Abandoned work is dropped.** When a caller gives up, the request is removed
+  from the queue, so a node never receives a stale, out-of-date instruction.
+- **Attach gating.** `POST /relay/send` returns `503 node_not_attached`
+  immediately when the target has not polled recently, instead of hanging.
+- **Authenticated end to end.** Every relay call carries `action|node_id|ts`
+  signed by the node key; only registered nodes with role `master` may send.
+- **Buffered streaming.** `/node/chat` is captured as an SSE body and replayed
+  by the caller, so a relayed turn looks the same in the UI as a direct one.
+
+Verified with a node that advertises **no endpoints at all** (NAT simulation):
+`bash`/`read` calls, a full chat turn (`relayed-chat-ok`) and a journal sync all
+succeeded through `https://rendezvous.colmeio.com`, with the queue draining to
+zero afterwards (`GET /relay/status`).
 
 ## Security notes
 

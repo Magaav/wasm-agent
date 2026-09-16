@@ -1,9 +1,10 @@
-//! Tiny local web UI: serves the chat window and forwards messages to Lua.
+//! Tiny local web UI plus the node's inbound surface.
 //!
 //! Deliberately single-threaded: the Lua state is not thread-safe, so requests
-//! are handled one at a time on the main thread. `ui/` files are read fresh on
-//! every request, and `/version` changes when they do, so the browser can hot
-//! reload while the UI is being edited.
+//! are handled one at a time on the main thread. Two things feed that loop:
+//! sockets, and — when attached to a relay — requests the relay hands us
+//! (`relay_client`). Both end up in `dispatch`, so a node behaves identically
+//! whether it is reached directly or through the relay.
 use crate::lua::Lua;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -13,14 +14,44 @@ use std::sync::Mutex;
 /// The one open SSE client (the server is single-threaded, so one is enough).
 static CLIENT: Mutex<Option<TcpStream>> = Mutex::new(None);
 
+/// When set, events are collected here instead of going to a socket: that is how
+/// a streaming turn is relayed to a peer that cannot hold a live connection.
+static EVENT_SINK: Mutex<Option<String>> = Mutex::new(None);
+
 /// Push one event to the streaming client, if any. Called from Lua via host.stream.
 pub fn write_event(payload: &str) {
+    if let Ok(mut sink) = EVENT_SINK.lock() {
+        if let Some(buffer) = sink.as_mut() {
+            buffer.push_str("data: ");
+            buffer.push_str(payload);
+            buffer.push_str("\n\n");
+            return;
+        }
+    }
     if let Ok(mut guard) = CLIENT.lock() {
         if let Some(socket) = guard.as_mut() {
             let _ = socket.write_all(format!("data: {payload}\n\n").as_bytes());
             let _ = socket.flush();
         }
     }
+}
+
+/// Run `f` collecting any events it emits, and return them as an SSE body.
+fn capture_events<F: FnOnce()>(f: F) -> String {
+    if let Ok(mut sink) = EVENT_SINK.lock() {
+        *sink = Some(String::new());
+    }
+    f();
+    match EVENT_SINK.lock() {
+        Ok(mut sink) => sink.take().unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+
+type Reply = (u16, &'static str, Vec<u8>);
+
+fn ok_json(body: String) -> Reply {
+    (200, "application/json", body.into_bytes())
 }
 
 pub fn run(lua: &Lua, port: u16, ui: PathBuf) {
@@ -32,11 +63,24 @@ pub fn run(lua: &Lua, port: u16, ui: PathBuf) {
         }
     };
     eprintln!("[serve] wasm-agent UI at http://127.0.0.1:{port}  (ui: {})", ui.display());
+
+    if let Ok(relay_url) = std::env::var("WASM_AGENT_RELAY") {
+        if !relay_url.is_empty() {
+            crate::relay_client::spawn(relay_url);
+        }
+    }
+
     // Non-blocking accept so the single-threaded server can also run scheduled
-    // work (replication ticks) without a second thread touching the Lua state.
+    // work (replication ticks, relayed requests) without a second thread
+    // touching the Lua state.
     let _ = listener.set_nonblocking(true);
     let mut next_sync = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
+        // Requests the relay handed to us (NAT'd peers, or peers relaying to us).
+        for job in crate::relay_client::take_jobs() {
+            let (status, body) = process_relay_job(lua, &ui, &job);
+            let _ = job.reply.send((status, body));
+        }
         match listener.accept() {
             Ok((mut stream, _)) => {
                 let _ = handle(lua, &ui, &mut stream);
@@ -48,10 +92,61 @@ pub fn run(lua: &Lua, port: u16, ui: PathBuf) {
                         eprintln!("[sync] tick failed: {error}");
                     }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(150));
+                std::thread::sleep(std::time::Duration::from_millis(120));
             }
-            Err(_) => std::thread::sleep(std::time::Duration::from_millis(150)),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(120)),
         }
+    }
+}
+
+/// Process a request that arrived over the relay. Streaming routes are captured
+/// rather than written to a socket, so the peer gets the events and can replay
+/// them locally.
+fn process_relay_job(lua: &Lua, ui: &std::path::Path, job: &crate::relay_client::RelayJob) -> (u16, String) {
+    let ui = ui.to_path_buf();
+    let job = crate::relay_client::RelayJob {
+        id: job.id.clone(),
+        method: job.method.clone(),
+        path: job.path.clone(),
+        headers: job.headers.clone(),
+        body: job.body.clone(),
+        reply: job.reply.clone(),
+    };
+    let (route, _query) = split_path(&job.path);
+    let session = header_of(&job.headers, "x-wa-session");
+
+    if route == "/node/chat" && job.method == "POST" {
+        let from = header_of(&job.headers, "x-wa-node");
+        let public_key = header_of(&job.headers, "x-wa-pub");
+        let ts = header_of(&job.headers, "x-wa-ts");
+        let signature = header_of(&job.headers, "x-wa-sig");
+        let text = job.body.clone();
+        let events = capture_events(|| {
+            if let Err(error) = lua.call_string(
+                "wa_node_chat",
+                &[from.as_str(), public_key.as_str(), ts.as_str(), signature.as_str(), text.as_str()],
+            ) {
+                write_event(&format!("{{\"type\":\"error\",\"error\":{}}}", json_escape(&error)));
+            }
+            write_event("{\"type\":\"done\"}");
+        });
+        return (200, events);
+    }
+    if route == "/chat" && job.method == "POST" {
+        let text = job.body.clone();
+        let node = header_of(&job.headers, "x-wa-node");
+        let events = capture_events(|| {
+            if let Err(error) = lua.call_string("wa_reply_stream", &[text.as_str(), session.as_str(), node.as_str()]) {
+                write_event(&format!("{{\"type\":\"error\",\"error\":{}}}", json_escape(&error)));
+            }
+            write_event("{\"type\":\"done\"}");
+        });
+        return (200, events);
+    }
+
+    match dispatch(lua, &ui, &job.method, &job.path, &job.headers, &job.body) {
+        Some((status, _content_type, body)) => (status, String::from_utf8_lossy(&body).to_string()),
+        None => (404, "{\"error\":\"not_found\"}".to_string()),
     }
 }
 
@@ -76,10 +171,17 @@ fn query_value(query: &str, key: &str) -> String {
         .unwrap_or_default()
 }
 
+fn split_path(path: &str) -> (String, String) {
+    match path.split_once('?') {
+        Some((route, query)) => (route.to_string(), query.to_string()),
+        None => (path.to_string(), String::new()),
+    }
+}
+
 fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::Result<()> {
     let mut data = Vec::new();
     let mut chunk = [0u8; 16384];
-    let (method, path, session, node_headers, body) = loop {
+    let (method, path, session, node_headers, body, accept_sse) = loop {
         let read = stream.read(&mut chunk)?;
         if read == 0 {
             return Ok(());
@@ -93,6 +195,7 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
             let path = request.next().unwrap_or("/").to_string();
             let mut length = 0usize;
             let mut session = String::new();
+            let mut accept_sse = false;
             let mut node_headers: Vec<(String, String)> = Vec::new();
             for line in lines {
                 let lower = line.to_ascii_lowercase();
@@ -100,6 +203,8 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
                     length = value.trim().parse().unwrap_or(0);
                 } else if let Some(value) = lower.strip_prefix("x-wa-session:") {
                     session = value.trim().to_string();
+                } else if lower.starts_with("accept:") && lower.contains("text/event-stream") {
+                    accept_sse = true;
                 } else if let Some((key, value)) = lower.split_once(':') {
                     if key.trim().starts_with("x-wa-") {
                         node_headers.push((key.trim().to_string(), value.trim().to_string()));
@@ -107,70 +212,38 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
                 }
             }
             if data.len() >= end + 4 + length {
-                break (method, path, session, node_headers, data[end + 4..end + 4 + length].to_vec());
+                break (method, path, session, node_headers, data[end + 4..end + 4 + length].to_vec(), accept_sse);
             }
         }
-        if data.len() > 2_000_000 {
+        if data.len() > 4_000_000 {
             return Ok(());
         }
     };
 
-    let (route, query) = match path.split_once('?') {
-        Some((route, query)) => (route.to_string(), query.to_string()),
-        None => (path.clone(), String::new()),
-    };
-    // Which node the request is for: query string (GET) or header (POST).
-    let node_param = query_value(&query, "node");
-    let node = if !node_param.is_empty() {
-        node_param.clone()
-    } else {
-        header_of(&node_headers, "x-wa-node")
-    };
-
-    if route == "/version" {
-        let version = ui_version(ui);
-        return respond(stream, 200, "application/json", format!("{{\"version\":\"{version}\"}}").as_bytes());
-    }
-    if route == "/health" {
-        return respond(stream, 200, "application/json", b"{\"ok\":true}");
-    }
-    if route == "/models" {
-        let settings = lua
-            .call_string("wa_model", &[node.as_str(), session.as_str()])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", settings.as_bytes());
-    }
-    if route == "/me" {
-        let payload = lua
-            .call_string("wa_me", &[session.as_str()])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/users" {
-        let payload = lua
-            .call_string("wa_users", &[])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/login" && method == "POST" {
-        let id = String::from_utf8_lossy(&body).trim().to_string();
-        let payload = lua
-            .call_string("wa_login", &[id.as_str(), session.as_str()])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/logout" && method == "POST" {
-        let payload = lua
-            .call_string("wa_logout", &[session.as_str()])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/shell" && method == "POST" {
-        let command = String::from_utf8_lossy(&body).to_string();
-        let payload = lua
-            .call_string("wa_shell", &[command.as_str(), session.as_str()])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
+    let (route, _query) = split_path(&path);
+    if route == "/chat" && method == "POST" {
+        let text = String::from_utf8_lossy(&body).to_string();
+        if accept_sse || route.contains("stream=1") {
+            stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\
+                  Connection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+            )?;
+            stream.flush()?;
+            if let Ok(clone) = stream.try_clone() {
+                if let Ok(mut guard) = CLIENT.lock() {
+                    *guard = Some(clone);
+                }
+            }
+            let node = header_of(&node_headers, "x-wa-node");
+            if let Err(error) = lua.call_string("wa_reply_stream", &[text.as_str(), session.as_str(), node.as_str()]) {
+                write_event(&format!("{{\"type\":\"error\",\"error\":{}}}", json_escape(&error)));
+            }
+            write_event("{\"type\":\"done\"}");
+            if let Ok(mut guard) = CLIENT.lock() {
+                *guard = None;
+            }
+            return Ok(());
+        }
     }
     if route == "/node/chat" && method == "POST" {
         let text = String::from_utf8_lossy(&body).to_string();
@@ -200,168 +273,89 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
         }
         return Ok(());
     }
-    if route == "/sync/head" {
-        let payload = lua
-            .call_string("wa_sync_head", &[])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/sync/push" && method == "POST" {
-        let batch = String::from_utf8_lossy(&body).to_string();
-        let from = header_of(&node_headers, "x-wa-node");
-        let public_key = header_of(&node_headers, "x-wa-pub");
-        let ts = header_of(&node_headers, "x-wa-ts");
-        let signature = header_of(&node_headers, "x-wa-sig");
-        let payload = lua
-            .call_string("wa_sync_apply", &[
-                batch.as_str(), from.as_str(), public_key.as_str(), ts.as_str(), signature.as_str(),
-            ])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/sync/tick" && method == "POST" {
-        let payload = lua
-            .call_string("wa_sync_tick", &[])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/sync" {
-        let payload = lua
-            .call_string("wa_sync_status", &[])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/node/call" && method == "POST" {
-        let payload_body = String::from_utf8_lossy(&body).to_string();
-        let payload = lua
-            .call_string("wa_node_call", &[payload_body.as_str()])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/envelope" {
-        let payload = lua
-            .call_string("wa_envelope", &[session.as_str()])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/sessions" {
-        let payload = lua
-            .call_string("wa_sessions", &[session.as_str()])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/session" {
-        let id = query_value(&query, "id");
-        let payload = lua
-            .call_string("wa_session", &[id.as_str(), session.as_str()])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/session/mode" && method == "POST" {
-        let body_text = String::from_utf8_lossy(&body).to_string();
-        let payload = lua
-            .call_string("wa_session_mode", &[body_text.as_str(), session.as_str()])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/session/fixture" {
-        let id = query_value(&query, "id");
-        let payload = lua
-            .call_string("wa_session_fixture", &[id.as_str(), session.as_str()])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/tools" {
-        let payload = lua
-            .call_string("wa_tools", &[session.as_str()])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/nodes" {
-        let payload = lua
-            .call_string("wa_nodes", &[session.as_str()])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/client" && method == "POST" {
-        let payload_body = String::from_utf8_lossy(&body).to_string();
-        let payload = lua
-            .call_string("wa_client", &[payload_body.as_str(), session.as_str()])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/frame" && method == "POST" {
-        let frame_request = String::from_utf8_lossy(&body).trim().to_string();
-        let payload = lua
-            .call_string("wa_frame", &[frame_request.as_str(), session.as_str()])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/spells" {
-        let payload = lua
-            .call_string("wa_spells", &[session.as_str()])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/spell" && method == "POST" {
-        let name = String::from_utf8_lossy(&body).trim().to_string();
-        let payload = lua
-            .call_string("wa_spell_run", &[name.as_str(), session.as_str()])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/provider" && method == "POST" {
-        let id = String::from_utf8_lossy(&body).trim().to_string();
-        let payload = lua
-            .call_string("wa_set_provider", &[id.as_str(), node.as_str(), session.as_str()])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/model" && method == "POST" {
-        let name = String::from_utf8_lossy(&body).trim().to_string();
-        let payload = lua
-            .call_string("wa_set_model", &[name.as_str(), node.as_str(), session.as_str()])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", payload.as_bytes());
-    }
-    if route == "/chat" && method == "POST" {
-        let text = String::from_utf8_lossy(&body).to_string();
-        let header_text = String::from_utf8_lossy(&data).to_ascii_lowercase();
-        if header_text.contains("text/event-stream") || route.contains("stream=1") {
-            // Server-sent events: the whole turn streams back on this response.
-            stream.write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\
-                  Connection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
-            )?;
-            stream.flush()?;
-            if let Ok(clone) = stream.try_clone() {
-                if let Ok(mut guard) = CLIENT.lock() {
-                    *guard = Some(clone);
-                }
-            }
-            if let Err(error) = lua.call_string("wa_reply_stream", &[text.as_str(), session.as_str(), node.as_str()]) {
-                write_event(&format!("{{\"type\":\"error\",\"error\":{}}}", json_escape(&error)));
-            }
-            write_event("{\"type\":\"done\"}");
-            if let Ok(mut guard) = CLIENT.lock() {
-                *guard = None;
-            }
-            return Ok(());
-        }
-        let reply = lua
-            .call_string("wa_reply", &[text.as_str(), session.as_str(), node.as_str()])
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
-        return respond(stream, 200, "application/json", reply.as_bytes());
-    }
 
-    let relative = if route == "/" || route.is_empty() { "index.html".to_string() } else { route.trim_start_matches('/').to_string() };
-    if relative.contains("..") {
-        return respond(stream, 400, "text/plain", b"bad path");
+    match dispatch(lua, ui, &method, &path, &node_headers, &String::from_utf8_lossy(&body)) {
+        Some((status, content_type, payload)) => respond(stream, status, content_type, &payload),
+        None => respond(stream, 404, "text/plain; charset=utf-8", b"not found"),
     }
-    match std::fs::read(ui.join(&relative)) {
-        Ok(bytes) => respond(stream, 200, content_type(&relative), &bytes),
-        Err(_) => respond(stream, 404, "text/plain; charset=utf-8", b"not found"),
-    }
+}
+
+/// Every request/response endpoint. Streaming routes return `None` and are
+/// handled by the caller (socket or relay capture).
+fn dispatch(
+    lua: &Lua,
+    ui: &std::path::Path,
+    method: &str,
+    path: &str,
+    node_headers: &[(String, String)],
+    body: &str,
+) -> Option<Reply> {
+    let (route, query) = split_path(path);
+    let session = header_of(node_headers, "x-wa-session");
+    let node_param = query_value(&query, "node");
+    let node = if !node_param.is_empty() {
+        node_param
+    } else {
+        header_of(node_headers, "x-wa-node")
+    };
+    let call = |name: &str, args: &[&str]| -> String {
+        lua.call_string(name, args)
+            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)))
+    };
+
+    let reply = match route.as_str() {
+        "/version" => (200, "application/json", format!("{{\"version\":\"{}\"}}", ui_version(ui)).into_bytes()),
+        "/health" => (200, "application/json", b"{\"ok\":true}".to_vec()),
+        "/models" => (200, "application/json", call("wa_model", &[node.as_str(), session.as_str()]).into_bytes()),
+        "/me" => (200, "application/json", call("wa_me", &[session.as_str()]).into_bytes()),
+        "/users" => (200, "application/json", call("wa_users", &[]).into_bytes()),
+        "/login" if method == "POST" => (200, "application/json", call("wa_login", &[body.trim(), session.as_str()]).into_bytes()),
+        "/logout" if method == "POST" => (200, "application/json", call("wa_logout", &[session.as_str()]).into_bytes()),
+        "/shell" if method == "POST" => (200, "application/json", call("wa_shell", &[body, session.as_str()]).into_bytes()),
+        "/sync/head" => (200, "application/json", call("wa_sync_head", &[]).into_bytes()),
+        "/sync/push" if method == "POST" => (200, "application/json", call("wa_sync_apply", &[
+            body,
+            &header_of(node_headers, "x-wa-node"),
+            &header_of(node_headers, "x-wa-pub"),
+            &header_of(node_headers, "x-wa-ts"),
+            &header_of(node_headers, "x-wa-sig"),
+        ]).into_bytes()),
+        "/sync/tick" if method == "POST" => (200, "application/json", call("wa_sync_tick", &[]).into_bytes()),
+        "/sync" => (200, "application/json", call("wa_sync_status", &[]).into_bytes()),
+        "/node/call" if method == "POST" => (200, "application/json", call("wa_node_call", &[body]).into_bytes()),
+        "/envelope" => (200, "application/json", call("wa_envelope", &[session.as_str()]).into_bytes()),
+        "/tools" => (200, "application/json", call("wa_tools", &[session.as_str()]).into_bytes()),
+        "/nodes" => (200, "application/json", call("wa_nodes", &[session.as_str()]).into_bytes()),
+        "/sessions" => (200, "application/json", call("wa_sessions", &[session.as_str()]).into_bytes()),
+        "/session" => (200, "application/json", call("wa_session", &[query_value(&query, "id").as_str(), session.as_str()]).into_bytes()),
+        "/session/mode" if method == "POST" => (200, "application/json", call("wa_session_mode", &[body, session.as_str()]).into_bytes()),
+        "/session/fixture" => (200, "application/json", call("wa_session_fixture", &[query_value(&query, "id").as_str(), session.as_str()]).into_bytes()),
+        "/client" if method == "POST" => (200, "application/json", call("wa_client", &[body, session.as_str()]).into_bytes()),
+        "/frame" if method == "POST" => (200, "application/json", call("wa_frame", &[body.trim(), session.as_str()]).into_bytes()),
+        "/spells" => (200, "application/json", call("wa_spells", &[session.as_str()]).into_bytes()),
+        "/spell" if method == "POST" => (200, "application/json", call("wa_spell_run", &[body.trim(), session.as_str()]).into_bytes()),
+        "/provider" if method == "POST" => (200, "application/json", call("wa_set_provider", &[body.trim(), node.as_str(), session.as_str()]).into_bytes()),
+        "/model" if method == "POST" => (200, "application/json", call("wa_set_model", &[body.trim(), node.as_str(), session.as_str()]).into_bytes()),
+        "/chat" if method == "POST" => (200, "application/json", call("wa_reply", &[body, session.as_str(), node.as_str()]).into_bytes()),
+        _ => {
+            if route == "/chat" || route == "/node/chat" {
+                return None; // streaming
+            }
+            let relative = if route == "/" || route.is_empty() {
+                "index.html".to_string()
+            } else {
+                route.trim_start_matches('/').to_string()
+            };
+            if relative.contains("..") {
+                return Some((400, "text/plain", b"bad path".to_vec()));
+            }
+            return match std::fs::read(ui.join(&relative)) {
+                Ok(bytes) => Some((200, content_type(&relative), bytes)),
+                Err(_) => Some((404, "text/plain; charset=utf-8", b"not found".to_vec())),
+            };
+        }
+    };
+    Some(reply)
 }
 
 fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) -> std::io::Result<()> {
@@ -369,6 +363,7 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
         200 => "OK",
         204 => "No Content",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
         _ => "OK",
     };

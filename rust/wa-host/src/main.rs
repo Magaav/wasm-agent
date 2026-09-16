@@ -6,6 +6,7 @@ mod client_bridge;
 mod host;
 mod lua;
 mod node;
+mod relay_client;
 mod rendezvous;
 mod plugins;
 mod serve;

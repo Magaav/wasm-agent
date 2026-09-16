@@ -352,37 +352,47 @@ end
 function wa_sync_tick()
   local configured = os.getenv("WASM_AGENT_SYNC_TO") or ""
   if configured == "" then return json.encode({ ok = true, peers = 0, pushed = 0 }) end
-  local identity = nodeslib.identity() or {}
-  local peers, pushed = 0, 0
+  local peers, pushed, failed, last_error = 0, 0, 0, nil
   for peer in configured:gmatch("[^,]+") do
     peer = peer:gsub("^%s+", ""):gsub("%s+$", "")
     if peer ~= "" then
       peers = peers + 1
-      local node = nodeslib.find(peer)
-      local endpoint = (node and nodeslib.endpoint(node)) or (peer:match("^https?://") and peer) or nil
       local cursor = memory.cursor(peer)
       local entries = memory.journal_since(cursor, 200)
-      if endpoint and #entries > 0 then
-        local ts = math.floor(host.now())
-        local _, signature = nodeslib.sign_action("sync", ts)
-        local headers = json.encode({
-          ["Content-Type"] = "application/json",
-          ["User-Agent"] = "wasm-agent/0.1 node",
-          ["X-WA-Node"] = identity.node_id or "",
-          ["X-WA-Pub"] = identity.public_key or "",
-          ["X-WA-Ts"] = tostring(ts),
-          ["X-WA-Sig"] = signature or "",
-        })
-        local response = json.decode(host.http("POST", endpoint:gsub("/+$", "") .. "/sync/push",
-          headers, json.encode({ entries = entries })))
-        if response and tonumber(response.status) == 200 then
-          memory.set_cursor(peer, entries[#entries].id)
-          pushed = pushed + #entries
+      if #entries > 0 then
+        -- A name/id routes through the fabric (direct, else relay); a URL is used directly.
+        local target = nodeslib.find(peer)
+        if not target and peer:match("^https?://") then
+          target = { node_id = peer, name = peer, endpoints = { peer } }
+        end
+        local headers = target and nodeslib.signed_headers("sync") or nil
+        if headers then
+          local response = nodeslib.request(target, "/sync/push",
+            json.encode({ entries = entries }), headers)
+          local applied = false
+          if response and tonumber(response.status) == 200 then
+            -- A 200 carrying an error body is a REJECTION: do not advance the
+            -- cursor, or the batch would be lost silently.
+            local ok, decoded = pcall(json.decode, response.body)
+            if ok and type(decoded) == "table" and decoded.error == nil then
+              applied = true
+            else
+              last_error = ok and decoded.error or "bad_response"
+            end
+          else
+            last_error = response and (response.error or response.status) or "no_response"
+          end
+          if applied then
+            memory.set_cursor(peer, entries[#entries].id)
+            pushed = pushed + #entries
+          else
+            failed = failed + 1
+          end
         end
       end
     end
   end
-  return json.encode({ ok = true, peers = peers, pushed = pushed })
+  return json.encode({ ok = failed == 0, peers = peers, pushed = pushed, failed = failed, error = last_error })
 end
 
 function wa_sync_status()

@@ -1,41 +1,77 @@
-//! Rendezvous: a tiny always-on registry that lets nodes find each other.
+//! Rendezvous **and relay**.
 //!
-//! It stores `node_id -> {public_key, name, role, endpoints, last_seen}` and
-//! verifies every announcement with the node's ed25519 key. It never carries
-//! traffic, so it can stay small; a node that is always on (e.g. an Oracle
-//! instance) is enough. Nodes dial **out** to it, so no node needs an inbound
-//! port.
+//! Two jobs for nodes that cannot accept inbound connections (NAT, no public
+//! address):
+//!
+//! * **Rendezvous** — a registry binding `node_id → {public_key, endpoints}`.
+//!   Nodes bind by ed25519 key, never by address.
+//! * **Relay** — store-and-forward for traffic addressed to a node that is
+//!   attached by long-poll. The attached node dials *out* only, so it works
+//!   behind any NAT; the relay hands it requests and returns its responses.
+//!
+//! Every call is signed by the node key: `action|node_id|ts`.
 use crate::node;
 use rusqlite::Connection;
 use serde_json::{json, Value};
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const ONLINE_WINDOW: i64 = 180; // seconds
+const POLL_WAIT: Duration = Duration::from_secs(25);
+const SEND_WAIT: Duration = Duration::from_secs(45);
+const MAX_BODY: usize = 4_000_000;
+
+#[derive(Default)]
+struct RelayState {
+    queue: HashMap<String, VecDeque<Value>>,
+    waiting: HashMap<String, mpsc::Sender<(u16, String)>>,
+    /// When each node last polled. A node that is not attached cannot be
+    /// reached, so say so immediately instead of queueing for a minute.
+    last_poll: HashMap<String, Instant>,
+    /// Request ids already queued, so a caller that retries after a timeout
+    /// waits on the same request instead of running the action twice.
+    issued: HashMap<String, Instant>,
+    /// Completed results kept briefly so a retry can still collect them.
+    results: HashMap<String, ((u16, String), Instant)>,
+    next_id: u64,
+}
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 pub fn run(bind: &str, port: u16, db_path: &str) {
-    let connection = match Connection::open(db_path) {
-        Ok(connection) => connection,
+    // Schema first, on a short-lived connection.
+    match Connection::open(db_path) {
+        Ok(connection) => {
+            if let Err(error) = connection.execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 CREATE TABLE IF NOT EXISTS nodes (
+                   node_id TEXT PRIMARY KEY,
+                   public_key TEXT NOT NULL,
+                   name TEXT,
+                   role TEXT,
+                   endpoints TEXT,
+                   last_seen INTEGER,
+                   registered_at INTEGER
+                 );",
+            ) {
+                eprintln!("[rendezvous] schema: {error}");
+                return;
+            }
+        }
         Err(error) => {
             eprintln!("[rendezvous] open {db_path}: {error}");
             return;
         }
-    };
-    if let Err(error) = connection.execute_batch(
-        "PRAGMA journal_mode=WAL;
-         CREATE TABLE IF NOT EXISTS nodes (
-           node_id TEXT PRIMARY KEY,
-           public_key TEXT NOT NULL,
-           name TEXT,
-           role TEXT,
-           endpoints TEXT,
-           last_seen INTEGER,
-           registered_at INTEGER
-         );",
-    ) {
-        eprintln!("[rendezvous] schema: {error}");
-        return;
     }
+
     let listener = match TcpListener::bind((bind, port)) {
         Ok(listener) => listener,
         Err(error) => {
@@ -44,17 +80,32 @@ pub fn run(bind: &str, port: u16, db_path: &str) {
         }
     };
     eprintln!("[rendezvous] listening on {bind}:{port} (db {db_path})");
+
+    let relay: Arc<Mutex<RelayState>> = Arc::new(Mutex::new(RelayState::default()));
+    // One thread per connection: long polls must not block the registry.
     for stream in listener.incoming() {
-        if let Ok(mut stream) = stream {
-            let _ = handle(&connection, &mut stream);
-        }
+        let Ok(mut stream) = stream else { continue };
+        let db = db_path.to_string();
+        let relay = relay.clone();
+        std::thread::spawn(move || {
+            if let Err(error) = handle(&db, &mut stream, &relay) {
+                eprintln!("[rendezvous] connection: {error}");
+            }
+        });
     }
 }
 
-fn handle(connection: &Connection, stream: &mut TcpStream) -> std::io::Result<()> {
+fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>) -> std::io::Result<()> {
+    let connection = match Connection::open(db_path) {
+        Ok(connection) => connection,
+        Err(error) => {
+            return respond(stream, 500, &json!({"error": error.to_string()}).to_string());
+        }
+    };
+
     let mut data = Vec::new();
-    let mut chunk = [0u8; 8192];
-    let (method, target, body) = loop {
+    let mut chunk = [0u8; 16384];
+    let (method, target, headers, body) = loop {
         let read = stream.read(&mut chunk)?;
         if read == 0 {
             return Ok(());
@@ -67,16 +118,20 @@ fn handle(connection: &Connection, stream: &mut TcpStream) -> std::io::Result<()
             let method = request.next().unwrap_or("").to_string();
             let target = request.next().unwrap_or("/").to_string();
             let mut length = 0usize;
+            let mut headers: Vec<(String, String)> = Vec::new();
             for line in lines {
-                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                let lower = line.to_ascii_lowercase();
+                if let Some(value) = lower.strip_prefix("content-length:") {
                     length = value.trim().parse().unwrap_or(0);
+                } else if let Some((key, value)) = lower.split_once(':') {
+                    headers.push((key.trim().to_string(), value.trim().to_string()));
                 }
             }
             if data.len() >= end + 4 + length {
-                break (method, target, data[end + 4..end + 4 + length].to_vec());
+                break (method, target, headers, data[end + 4..end + 4 + length].to_vec());
             }
         }
-        if data.len() > 1_000_000 {
+        if data.len() > MAX_BODY {
             return Ok(());
         }
     };
@@ -86,118 +141,365 @@ fn handle(connection: &Connection, stream: &mut TcpStream) -> std::io::Result<()
         None => (target.clone(), String::new()),
     };
     let payload: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default()
+    };
 
     if path == "/health" {
         return respond(stream, 200, "{\"ok\":true}");
     }
     if path == "/" {
-        let total: i64 = connection
-            .query_row("SELECT COUNT(*) FROM nodes", [], |row| row.get(0))
-            .unwrap_or(0);
-        let online: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM nodes WHERE last_seen > ?1",
-                rusqlite::params![now() - ONLINE_WINDOW],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        return respond(
-            stream,
-            200,
-            &json!({
-                "service": "wasm-agent rendezvous",
-                "protocol": "nodes bind by ed25519 key, not address",
-                "nodes": total,
-                "online": online,
-                "endpoints": [
-                    "POST /register",
-                    "POST /heartbeat",
-                    "GET /lookup?node_id=",
-                    "GET /nodes",
-                    "GET /health"
-                ]
-            })
-            .to_string(),
-        );
+        return respond(stream, 200, &banner(&connection, relay));
     }
+
+    // ---- registry --------------------------------------------------------
     if (path == "/register" || path == "/heartbeat") && method == "POST" {
-        let node_id = payload["node_id"].as_str().unwrap_or_default();
-        let public_key = payload["public_key"].as_str().unwrap_or_default();
-        let ts = payload["ts"].as_i64().unwrap_or(0);
-        let signature = payload["signature"].as_str().unwrap_or_default();
-        if node_id.is_empty() || public_key.is_empty() {
-            return respond(stream, 400, "{\"error\":\"node_id_and_public_key_required\"}");
-        }
-        if !node::verify(public_key, &node::announcement(node_id, ts as u64), signature) {
-            return respond(stream, 401, "{\"error\":\"bad_signature\"}");
-        }
-        let now = now();
-        let name = payload["name"].as_str().unwrap_or_default().to_string();
-        let role = payload["role"].as_str().unwrap_or("guest").to_string();
-        let endpoints = serde_json::to_string(&payload["endpoints"]).unwrap_or_else(|_| "[]".into());
-        // A node key is per machine; if the name changes, two processes are
-        // sharing one key. That is almost always a mistake worth surfacing.
-        if let Some(previous) = connection
-            .query_row(
-                "SELECT name FROM nodes WHERE node_id = ?1",
-                rusqlite::params![node_id],
-                |row| row.get::<_, String>(0),
-            )
-            .ok()
-        {
-            if !name.is_empty() && previous != name {
-                eprintln!(
-                    "[rendezvous] {} re-registered as '{name}' (was '{previous}') — same key, two processes?",
-                    &node_id[..node_id.len().min(12)]
-                );
-            }
-        }
-        let outcome = connection.execute(
-            "INSERT INTO nodes (node_id, public_key, name, role, endpoints, last_seen, registered_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
-             ON CONFLICT(node_id) DO UPDATE SET
-               public_key=excluded.public_key, name=excluded.name, role=excluded.role,
-               endpoints=excluded.endpoints, last_seen=excluded.last_seen",
-            rusqlite::params![node_id, public_key, name, role, endpoints, now],
-        );
-        return match outcome {
-            Ok(_) => respond(stream, 200, &json!({"ok": true, "node_id": node_id, "ts": now}).to_string()),
-            Err(error) => respond(stream, 500, &json!({"error": error.to_string()}).to_string()),
-        };
+        return register(&connection, stream, &payload, &path);
     }
     if path == "/forget" && method == "POST" {
-        let node_id = payload["node_id"].as_str().unwrap_or_default();
-        let ts = payload["ts"].as_i64().unwrap_or(0);
-        let signature = payload["signature"].as_str().unwrap_or_default();
-        let stored = public_key_of(connection, node_id);
-        let Some(public_key) = stored else {
-            return respond(stream, 404, "{\"error\":\"unknown_node\"}");
-        };
-        // Only the key holder may remove its own registration.
-        if !node::verify(&public_key, &format!("forget|{node_id}|{ts}"), signature) {
-            return respond(stream, 401, "{\"error\":\"bad_signature\"}");
-        }
-        let _ = connection.execute("DELETE FROM nodes WHERE node_id = ?1", rusqlite::params![node_id]);
-        return respond(stream, 200, &json!({"ok": true, "forgotten": node_id}).to_string());
+        return forget(&connection, stream, &payload);
     }
     if path == "/lookup" {
-        let node_id = query
-            .split('&')
-            .find_map(|pair| pair.strip_prefix("node_id="))
-            .unwrap_or("");
-        return match lookup(connection, node_id) {
+        let node_id = query_value(&query, "node_id");
+        return match lookup(&connection, &node_id) {
             Some(node) => respond(stream, 200, &node.to_string()),
             None => respond(stream, 404, "{\"error\":\"unknown_node\"}"),
         };
     }
     if path == "/nodes" {
-        let mut statement = match connection
-            .prepare("SELECT node_id, public_key, name, role, endpoints, last_seen FROM nodes ORDER BY last_seen DESC")
+        return respond(stream, 200, &list(&connection).to_string());
+    }
+
+    // ---- relay -----------------------------------------------------------
+    if path == "/relay/poll" {
+        let node_id = query_value(&query, "node_id");
+        if !verify(&connection, &node_id, "relay-poll", &header, stream) {
+            return Ok(());
+        }
+        let deadline = Instant::now() + POLL_WAIT;
+        loop {
+            let next = {
+                let mut state = relay.lock().unwrap();
+                state.last_poll.insert(node_id.clone(), Instant::now());
+                state.queue.get_mut(&node_id).and_then(|queue| queue.pop_front())
+            };
+            if let Some(request) = next {
+                return respond(stream, 200, &json!({"request": request}).to_string());
+            }
+            if Instant::now() >= deadline {
+                return respond(stream, 200, "{}");
+            }
+            std::thread::sleep(Duration::from_millis(120));
+        }
+    }
+    if path == "/relay/respond" && method == "POST" {
+        let node_id = payload["node_id"].as_str().unwrap_or_default().to_string();
+        if !verify(&connection, &node_id, "relay-respond", &header, stream) {
+            return Ok(());
+        }
+        let id = payload["id"].as_str().unwrap_or_default().to_string();
+        let status = payload["status"].as_u64().unwrap_or(200) as u16;
+        let body = payload["body"].as_str().unwrap_or_default().to_string();
         {
-            Ok(statement) => statement,
-            Err(error) => return respond(stream, 500, &json!({"error": error.to_string()}).to_string()),
+            let mut state = relay.lock().unwrap();
+            state.issued.remove(&id);
+            // Keep the result briefly even if nobody is waiting right now,
+            // so a caller that timed out can still collect it.
+            state.results.insert(id.clone(), ((status, body.clone()), Instant::now()));
+            if let Some(sender) = state.waiting.remove(&id) {
+                let _ = sender.send((status, body));
+            }
+        }
+        respond(stream, 200, "{\"ok\":true}")
+    } else if path == "/relay/send" && method == "POST" {
+        let from = header("x-wa-node");
+        if !verify(&connection, &from, "relay-send", &header, stream) {
+            return Ok(());
+        }
+        let caller = lookup(&connection, &from);
+        let is_master = caller
+            .as_ref()
+            .and_then(|node| node["role"].as_str())
+            .map(|role| role == "master" || role == "admin")
+            .unwrap_or(false);
+        if !is_master {
+            return respond(stream, 403, "{\"error\":\"forbidden_role\"}");
+        }
+        let to = payload["to"].as_str().unwrap_or_default().to_string();
+        if to.is_empty() {
+            return respond(stream, 400, "{\"error\":\"to_required\"}");
+        }
+        if lookup(&connection, &to).is_none() {
+            return respond(stream, 404, "{\"error\":\"unknown_node\"}");
+        }
+        // Idempotent by request id: a retry never re-runs the action.
+        let id = payload["rid"].as_str().filter(|value| !value.is_empty()).map(str::to_string);
+        let id = id.unwrap_or_else(|| {
+            let mut state = relay.lock().unwrap();
+            state.next_id += 1;
+            format!("r{}", state.next_id)
+        });
+        {
+            let mut state = relay.lock().unwrap();
+            let now = Instant::now();
+            state.results.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(120));
+            state.issued.retain(|_, at| at.elapsed() < Duration::from_secs(120));
+            if let Some(((status, body), _)) = state.results.remove(&id) {
+                return respond(
+                    stream,
+                    200,
+                    &json!({"ok": true, "status": status, "body": body, "replayed": true}).to_string(),
+                );
+            }
+        }
+        // Fail fast when the target is not attached to the relay.
+        let attached = {
+            let state = relay.lock().unwrap();
+            state
+                .last_poll
+                .get(&to)
+                .map(|at| at.elapsed() < Duration::from_secs(40))
+                .unwrap_or(false)
         };
-        let mut list: Vec<Value> = Vec::new();
+        if !attached {
+            return respond(
+                stream,
+                503,
+                &json!({"error": "node_not_attached", "to": to}).to_string(),
+            );
+        }
+        let (tx, rx) = mpsc::channel();
+        let request = json!({
+            "id": id,
+            "from": from,
+            "method": payload["method"].as_str().unwrap_or("POST"),
+            "path": payload["path"].as_str().unwrap_or("/"),
+            "headers": payload["headers"].clone(),
+            "body": payload["body"].as_str().unwrap_or(""),
+        });
+        {
+            let mut state = relay.lock().unwrap();
+            state.waiting.insert(id.clone(), tx);
+            // Only queue if this id has not already been issued.
+            if !state.issued.contains_key(&id) {
+                state.issued.insert(id.clone(), Instant::now());
+                state.queue.entry(to.clone()).or_default().push_back(request);
+            }
+        }
+        match rx.recv_timeout(SEND_WAIT) {
+            Ok((status, body)) => {
+                relay.lock().unwrap().waiting.remove(&id);
+                respond(stream, 200, &json!({"ok": true, "status": status, "body": body}).to_string())
+            }
+            Err(_) => {
+                // Abandoned: drop it from the queue so it is never delivered
+                // late (which would look like a stale, out-of-date request).
+                {
+                    let mut state = relay.lock().unwrap();
+                    state.waiting.remove(&id);
+                    state.issued.remove(&id);
+                    if let Some(entries) = state.queue.get_mut(&to) {
+                        entries.retain(|entry| entry["id"].as_str() != Some(id.as_str()));
+                    }
+                }
+                respond(
+                    stream,
+                    200,
+                    &json!({"error": "relay_timeout", "rid": id, "to": to}).to_string(),
+                )
+            }
+        }
+    } else if path == "/relay/status" {
+        let state = relay.lock().unwrap();
+        let queue: Vec<Value> = state
+            .queue
+            .iter()
+            .filter(|(_, entries)| !entries.is_empty())
+            .map(|(node, entries)| json!({"node_id": node, "queued": entries.len()}))
+            .collect();
+        let attached: Vec<Value> = state
+            .last_poll
+            .iter()
+            .filter(|(_, at)| at.elapsed() < Duration::from_secs(40))
+            .map(|(node, _)| json!(node))
+            .collect();
+        respond(
+            stream,
+            200,
+            &json!({"ok": true, "queued": queue, "waiting": state.waiting.len(), "attached": attached})
+                .to_string(),
+        )
+    } else {
+        respond(stream, 404, "{\"error\":\"not_found\"}")
+    }
+}
+
+fn banner(connection: &Connection, relay: &Arc<Mutex<RelayState>>) -> String {
+    let total: i64 = connection
+        .query_row("SELECT COUNT(*) FROM nodes", [], |row| row.get(0))
+        .unwrap_or(0);
+    let online: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM nodes WHERE last_seen > ?1",
+            rusqlite::params![now() - ONLINE_WINDOW],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let state = relay.lock().unwrap();
+    let queued: usize = state.queue.values().map(|entries| entries.len()).sum();
+    json!({
+        "service": "wasm-agent rendezvous + relay",
+        "protocol": "nodes bind by ed25519 key, not address",
+        "nodes": total,
+        "online": online,
+        "relay": { "queued": queued, "waiting": state.waiting.len() },
+        "endpoints": [
+            "POST /register", "POST /heartbeat", "POST /forget",
+            "GET /lookup?node_id=", "GET /nodes", "GET /health",
+            "GET /relay/poll?node_id=", "POST /relay/respond", "POST /relay/send",
+            "GET /relay/status"
+        ]
+    })
+    .to_string()
+}
+
+/// Verify a signed relay call: `action|node_id|ts`.
+fn verify(
+    connection: &Connection,
+    node_id: &str,
+    action: &str,
+    header: &dyn Fn(&str) -> String,
+    stream: &mut TcpStream,
+) -> bool {
+    if node_id.is_empty() {
+        let _ = respond(stream, 400, "{\"error\":\"node_id_required\"}");
+        return false;
+    }
+    let public_key = header("x-wa-pub");
+    let ts = header("x-wa-ts");
+    let signature = header("x-wa-sig");
+    let stored = public_key_of(connection, node_id);
+    let Some(stored) = stored else {
+        let _ = respond(stream, 401, "{\"error\":\"unknown_node\"}");
+        return false;
+    };
+    if stored != public_key {
+        let _ = respond(stream, 401, "{\"error\":\"bad_signature\"}");
+        return false;
+    }
+    let ts_value: i64 = ts.parse().unwrap_or(0);
+    if (now() - ts_value).abs() > 120 {
+        let _ = respond(stream, 401, "{\"error\":\"stale_request\"}");
+        return false;
+    }
+    if !node::verify(&stored, &format!("{action}|{node_id}|{ts_value}"), &signature) {
+        let _ = respond(stream, 401, "{\"error\":\"bad_signature\"}");
+        return false;
+    }
+    true
+}
+
+fn register(connection: &Connection, stream: &mut TcpStream, payload: &Value, path: &str) -> std::io::Result<()> {
+    let node_id = payload["node_id"].as_str().unwrap_or_default();
+    let public_key = payload["public_key"].as_str().unwrap_or_default();
+    let ts = payload["ts"].as_i64().unwrap_or(0);
+    let signature = payload["signature"].as_str().unwrap_or_default();
+    if node_id.is_empty() || public_key.is_empty() {
+        return respond(stream, 400, "{\"error\":\"node_id_and_public_key_required\"}");
+    }
+    if !node::verify(public_key, &node::announcement(node_id, ts as u64), signature) {
+        return respond(stream, 401, "{\"error\":\"bad_signature\"}");
+    }
+    let now = now();
+    let name = payload["name"].as_str().unwrap_or_default().to_string();
+    let role = payload["role"].as_str().unwrap_or("guest").to_string();
+    let endpoints = serde_json::to_string(&payload["endpoints"]).unwrap_or_else(|_| "[]".into());
+    // A node key is per machine; a changing name means two processes share it.
+    if let Ok(previous) = connection.query_row(
+        "SELECT name FROM nodes WHERE node_id = ?1",
+        rusqlite::params![node_id],
+        |row| row.get::<_, String>(0),
+    ) {
+        if !name.is_empty() && previous != name {
+            eprintln!(
+                "[rendezvous] {} re-registered as '{name}' (was '{previous}') — same key, two processes?",
+                &node_id[..node_id.len().min(12)]
+            );
+        }
+    }
+    let outcome = connection.execute(
+        "INSERT INTO nodes (node_id, public_key, name, role, endpoints, last_seen, registered_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+         ON CONFLICT(node_id) DO UPDATE SET
+           public_key=excluded.public_key, name=excluded.name, role=excluded.role,
+           endpoints=excluded.endpoints, last_seen=excluded.last_seen",
+        rusqlite::params![node_id, public_key, name, role, endpoints, now],
+    );
+    match outcome {
+        Ok(_) => respond(
+            stream,
+            200,
+            &json!({"ok": true, "node_id": node_id, "ts": now, "path": path}).to_string(),
+        ),
+        Err(error) => respond(stream, 500, &json!({"error": error.to_string()}).to_string()),
+    }
+}
+
+fn forget(connection: &Connection, stream: &mut TcpStream, payload: &Value) -> std::io::Result<()> {
+    let node_id = payload["node_id"].as_str().unwrap_or_default();
+    let ts = payload["ts"].as_i64().unwrap_or(0);
+    let signature = payload["signature"].as_str().unwrap_or_default();
+    let Some(public_key) = public_key_of(connection, node_id) else {
+        return respond(stream, 404, "{\"error\":\"unknown_node\"}");
+    };
+    // Only the key holder may remove its own registration.
+    if !node::verify(&public_key, &format!("forget|{node_id}|{ts}"), signature) {
+        return respond(stream, 401, "{\"error\":\"bad_signature\"}");
+    }
+    let _ = connection.execute("DELETE FROM nodes WHERE node_id = ?1", rusqlite::params![node_id]);
+    respond(stream, 200, &json!({"ok": true, "forgotten": node_id}).to_string())
+}
+
+fn public_key_of(connection: &Connection, node_id: &str) -> Option<String> {
+    connection
+        .query_row(
+            "SELECT public_key FROM nodes WHERE node_id = ?1",
+            rusqlite::params![node_id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+}
+
+fn lookup(connection: &Connection, node_id: &str) -> Option<Value> {
+    connection
+        .query_row(
+            "SELECT node_id, public_key, name, role, endpoints, last_seen FROM nodes WHERE node_id = ?1",
+            rusqlite::params![node_id],
+            |row| {
+                let last_seen: i64 = row.get(5)?;
+                Ok(json!({
+                    "node_id": row.get::<_, String>(0)?,
+                    "public_key": row.get::<_, String>(1)?,
+                    "name": row.get::<_, String>(2)?,
+                    "role": row.get::<_, String>(3)?,
+                    "endpoints": serde_json::from_str::<Value>(&row.get::<_, String>(4)?).unwrap_or(json!([])),
+                    "last_seen": last_seen,
+                    "online": now() - last_seen < ONLINE_WINDOW,
+                }))
+            },
+        )
+        .ok()
+}
+
+fn list(connection: &Connection) -> Value {
+    let mut list: Vec<Value> = Vec::new();
+    if let Ok(mut statement) = connection.prepare(
+        "SELECT node_id, public_key, name, role, endpoints, last_seen FROM nodes ORDER BY last_seen DESC",
+    ) {
         if let Ok(rows) = statement.query_map([], |row| {
             let last_seen: i64 = row.get(5)?;
             Ok(json!({
@@ -214,46 +516,17 @@ fn handle(connection: &Connection, stream: &mut TcpStream) -> std::io::Result<()
                 list.push(row);
             }
         }
-        return respond(stream, 200, &json!({"nodes": list}).to_string());
     }
-    respond(stream, 404, "{\"error\":\"not_found\"}")
+    json!({"nodes": list})
 }
 
-fn public_key_of(connection: &Connection, node_id: &str) -> Option<String> {
-    connection
-        .query_row(
-            "SELECT public_key FROM nodes WHERE node_id = ?1",
-            rusqlite::params![node_id],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-}
-
-fn lookup(connection: &Connection, node_id: &str) -> Option<Value> {
-    let mut statement = connection
-        .prepare("SELECT node_id, public_key, name, role, endpoints, last_seen FROM nodes WHERE node_id = ?1")
-        .ok()?;
-    statement
-        .query_row(rusqlite::params![node_id], |row| {
-            let last_seen: i64 = row.get(5)?;
-            Ok(json!({
-                "node_id": row.get::<_, String>(0)?,
-                "public_key": row.get::<_, String>(1)?,
-                "name": row.get::<_, String>(2)?,
-                "role": row.get::<_, String>(3)?,
-                "endpoints": serde_json::from_str::<Value>(&row.get::<_, String>(4)?).unwrap_or(json!([])),
-                "last_seen": last_seen,
-                "online": now() - last_seen < ONLINE_WINDOW,
-            }))
-        })
-        .ok()
-}
-
-fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or(0)
+fn query_value(query: &str, key: &str) -> String {
+    let prefix = format!("{key}=");
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix(prefix.as_str()))
+        .map(|value| value.to_string())
+        .unwrap_or_default()
 }
 
 fn respond(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Result<()> {

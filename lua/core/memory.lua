@@ -451,11 +451,14 @@ function M.apply_entry(entry)
   elseif entry.kind == "session" then
     local local_rows = query("SELECT updated_at FROM sessions WHERE id=?", {payload.id})
     if #local_rows == 0 or (payload.updated_at or 0) >= (local_rows[1].updated_at or 0) then
+      -- Every position needs a concrete value: a nil would leave a hole in the
+      -- params array and the JSON encoder rejects sparse arrays.
       exec("INSERT OR REPLACE INTO sessions(id,route_id,objective,parent_session_id,started_at," ..
            "ended_at,user_id,node_id,title,mode,summary,summarized_until,updated_at) " ..
            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-           {payload.id, payload.route_id or "", payload.objective or "", payload.parent_session_id,
-            payload.started_at or host.now(), payload.ended_at, payload.user_id or "master",
+           {payload.id, payload.route_id or "", payload.objective or "",
+            payload.parent_session_id or "", payload.started_at or host.now(),
+            payload.ended_at or 0, payload.user_id or "master",
             payload.node_id or "", payload.title or "", payload.mode or "default",
             payload.summary or "", payload.summarized_until or 0, payload.updated_at or host.now()})
     end
@@ -464,7 +467,7 @@ function M.apply_entry(entry)
          "updated_at,content_sha256) VALUES(?,?,?,?,?,?,?,?,?)",
          {payload.id, payload.scope or "global", payload.content or "",
           type(payload.tags) == "table" and json.encode(payload.tags) or (payload.tags or "[]"),
-          payload.source or "replica", payload.session_id, payload.created_at or host.now(),
+          payload.source or "replica", payload.session_id or "", payload.created_at or host.now(),
           payload.updated_at or host.now(), payload.content_sha256 or ""})
     exec("DELETE FROM memories_fts WHERE memory_id=?", {payload.id})
     exec("INSERT INTO memories_fts(content,tags,memory_id) VALUES(?,?,?)",
@@ -472,8 +475,9 @@ function M.apply_entry(entry)
   elseif entry.kind == "run" then
     exec("INSERT OR REPLACE INTO runs(id,session_id,turn_id,status,outcome,reply,started_at,ended_at) " ..
          "VALUES(?,?,?,?,?,?,?,?)",
-         {payload.id, payload.session_id, payload.turn_id or "", payload.status or "",
-          payload.outcome or "", payload.reply or "", payload.started_at or host.now(), payload.ended_at})
+         {payload.id, payload.session_id or "", payload.turn_id or "", payload.status or "",
+          payload.outcome or "", payload.reply or "", payload.started_at or host.now(),
+          payload.ended_at or 0})
   else
     return false
   end
