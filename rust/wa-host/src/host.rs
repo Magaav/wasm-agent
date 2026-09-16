@@ -140,6 +140,45 @@ pub extern "C" fn log(l: *mut LuaState) -> c_int {
     0
 }
 
+/// host.http(method, url, headers_json, body) -> {status, body} | {error}
+pub extern "C" fn http(l: *mut LuaState) -> c_int {
+    let method = arg_string(l, 1).unwrap_or_else(|| "POST".into()).to_uppercase();
+    let url = arg_string(l, 2).unwrap_or_default();
+    let headers_json = arg_string(l, 3).unwrap_or_else(|| "{}".into());
+    let body = arg_string(l, 4).unwrap_or_default();
+    let headers: Vec<(String, String)> = serde_json::from_str::<serde_json::Map<String, Value>>(&headers_json)
+        .map(|map| {
+            map.into_iter()
+                .map(|(key, value)| (key, value.as_str().unwrap_or_default().to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let outcome = (|| -> Result<Value, String> {
+        let response = match method.as_str() {
+            "GET" => {
+                let mut request = ureq::get(&url);
+                for (key, value) in &headers {
+                    request = request.header(key, value);
+                }
+                request.call().map_err(|e| e.to_string())?
+            }
+            "POST" => {
+                let mut request = ureq::post(&url);
+                for (key, value) in &headers {
+                    request = request.header(key, value);
+                }
+                request.send(body.as_bytes()).map_err(|e| e.to_string())?
+            }
+            other => return Err(format!("method_not_supported:{other}")),
+        };
+        let status = response.status().as_u16();
+        let text = response.into_body().read_to_string().map_err(|e| e.to_string())?;
+        Ok(json!({"status": status, "body": text}))
+    })();
+    push_json(l, &outcome.unwrap_or_else(|error| json!({"error": error})));
+    1
+}
+
 /// host.now() -> seconds since epoch
 pub extern "C" fn now(l: *mut LuaState) -> c_int {
     let seconds = std::time::SystemTime::now()

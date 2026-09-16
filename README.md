@@ -1,17 +1,64 @@
 # wasm-agent
 
-A portable, local-first agent foundation. This repository starts with the thing
-every useful agent needs first: **organized memory** — explicit facts the agent
-is told to remember, plus an append-only ledger of what actually happened.
+A portable agent with **organized memory**, written as a **Rust host + Lua core**.
+No Python.
 
-Plain **SQLite** (WAL), **standard library only**, one file per machine. No
-cloud, no service, no lock-in. The schema is designed so a change-log
-replication layer can be added later without a migration.
+The Rust host is a thin capabilities layer (SQLite, HTTP, hashing, time, files)
+and embeds the Lua agent, so `wa` is a single self-contained binary. The agent's
+decisions — prompts, tools, the turn loop, memory policy — live in Lua, which is
+the part designed to become a WASM component.
 
-## Install
+```
+lua/                 the agent: schema, memory, tools, provider, loop, chat
+  core/*.lua
+  vendor/json.lua
+rust/wa-host/        `wa` binary: host capabilities + embedded Lua 5.4
+  build.rs           compiles vendored Lua 5.4 into the binary
+  src/lua.rs         Lua C-API bindings
+  src/host.rs        host.sql_*, host.http, host.sha256, host.uuid, ...
+  src/main.rs        CLI, embedded Lua core, SQLite
+```
 
-One-liner (installs a `wa` command that talks to your wasm-agent host over SSH;
-no Python needed on the client):
+## Build
+
+```bash
+cd rust
+cargo build --release --offline     # Lua 5.4 is vendored; no network needed
+./target/release/wa --version
+```
+
+`rust/Cargo.lock` is committed for reproducible builds.
+
+## Use
+
+```bash
+wa                       # interactive chat (default)
+wa chat
+wa remember "Laura prefers invoices on the 5th" --tag laura
+wa recall "laura invoices"
+wa memories
+wa search "invoice"      # over the message ledger
+wa conversation <id>
+wa stats
+```
+
+Chat commands: `/remember`, `/recall`, `/memories`, `/search`, `/conversation`,
+`/stats`, `/help`, `/exit`. Without a configured model, `wa` still works in
+local mode (`/remember` and `/recall`).
+
+Model provider (OpenAI-compatible) is read from the environment or
+`~/.wasm-agent/env`:
+
+```
+WASM_AGENT_LLM_BASE_URL=...
+WASM_AGENT_LLM_API_KEY=...
+WASM_AGENT_LLM_MODEL=...
+```
+
+## Install (one line)
+
+The installer puts a `wa` command on your PATH that talks to your wasm-agent
+host over SSH — the host runs the Rust agent and holds the memory.
 
 ```powershell
 # Windows
@@ -23,84 +70,30 @@ powershell -c "irm https://raw.githubusercontent.com/Magaav/wasm-agent/main/scri
 curl -fsSL https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/install.sh | sh
 ```
 
-Or install the package itself:
+Override the host with `-HostAlias <name>` (PowerShell) or `WASM_AGENT_HOST`
+(shell). The default is `openclaw.ohana`.
 
-```bash
-python3 -m pip install -e .          # from a checkout
-PYTHONPATH=src python3 -m wasm_agent --help   # without installing
-```
+## Memory model
 
-Requires Python 3.10+ and SQLite with FTS5 (bundled with CPython).
+Two kinds of data, never mixed:
 
-## Chat
+- **Ledger** (append-only, source of truth): observations, conversations,
+  messages, sessions, runs. Written only by ingestion.
+- **Memories** (explicit, editable, soft-deletable): what "remember this" writes
+  and "recall" reads.
+- **Derived** (rebuildable, not yet implemented): summaries, embeddings. Never
+  the source of truth; always regenerable.
 
-```bash
-wa                    # interactive agent chat (default)
-wasm-agent chat       # same
-```
+The model reads the ledger and writes explicit memories; it never rewrites the
+ledger. See [`docs/DESIGN.md`](docs/DESIGN.md).
 
-The agent uses an OpenAI-compatible model (configured via
-`WASM_AGENT_LLM_BASE_URL` / `WASM_AGENT_LLM_API_KEY` / `WASM_AGENT_LLM_MODEL`,
-falling back to `OPENCODE_GO_API_KEY` / `OPENAI_API_KEY`) and the memory tools
-`remember`, `recall`, `search_messages`, `conversation`, `list_conversations`.
-Without a model it still runs: `/remember`, `/recall`, `/search` work locally.
+## Roadmap
 
-Chat commands: `/remember <text>`, `/recall <query>`, `/memories`, `/search
-<query>`, `/conversation <id>`, `/stats`, `/help`, `/exit`.
-
-## Use
-
-```bash
-wasm-agent init
-wasm-agent remember "Laura prefers invoices on the 5th" --tag laura --tag billing
-wasm-agent recall "laura invoices"
-wasm-agent memories
-wasm-agent search "invoice"          # search the message ledger
-wasm-agent conversation CONVERSATION_ID
-wasm-agent stats --json
-```
-
-Every command takes `--db PATH` (or `$WASM_AGENT_DB`, default
-`~/.wasm-agent/memory.db`) and `--json` for machine output.
-
-## The design rule
-
-Memory is **two kinds of data, never mixed**:
-
-| | Ledger | Memories |
-|---|---|---|
-| what | observations, messages, sessions, runs | explicit facts a user/agent asked to remember |
-| writes | ingestion helpers only | user/agent, editable, soft-deletable |
-| truth | append-only, immutable | editable, but always owned by the user |
-| search | FTS5 over message bodies | FTS5 over facts |
-
-Anything *model-derived* — summaries, embeddings, client profiles — is
-**rebuildable** and must live in separate tables that can be dropped and
-regenerated. The model never rewrites the ledger. That is what keeps memory
-organized instead of an accumulating pile of notes.
-
-## Library
-
-```python
-from wasm_agent import Memory
-
-with Memory() as memory:
-    memory.remember("Laura prefers invoices on the 5th", tags=["laura"])
-    memory.recall("laura")
-    memory.record_message(conversation_id="c1", message_id="m1", body="hello")
-    memory.search_messages("hello")
-```
-
-The same object exposes session/run history (`start_session`, `record_run`,
-`link_run`, `session`) so old agent sessions are queryable next to the world data
-they touched.
-
-## Status
-
-`0.1.0` — memory foundation. Ingestion from WhatsApp/browser events, replication
-across devices, and the agent loop itself come next. See
-[`docs/DESIGN.md`](docs/DESIGN.md).
+1. WASM tool/plugin components via `wasmtime` + WIT (`host.invoke`).
+2. Compile the Lua core to `wasm32-wasip2` so the brain itself is a component.
+3. Event ingestion: browser/WhatsApp events into the ledger.
+4. Cross-device replication with secure, server-mediated device binding.
 
 ## License
 
-MIT.
+MIT. Vendored Lua is MIT — see `rust/wa-host/vendor/lua`.

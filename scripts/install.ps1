@@ -2,17 +2,35 @@
 #
 #   powershell -c "irm https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/install.ps1 | iex"
 #
-# Installs a `wa` command that talks to a wasm-agent host over SSH (no Python
-# needed on Windows). Like pi, it installs into a directory that is already on
-# PATH, so `wa` works immediately in the current and new terminals.
-# Use -Local to pip-install the package on this machine instead.
+# Installs a `wa` command that talks to your wasm-agent host over SSH. `wa` is
+# put in a directory already on PATH, so it works immediately.
 param(
-  [string]$HostAlias = "openclaw.ohana",
-  [switch]$Local,
-  [string]$Source = "git+https://github.com/Magaav/wasm-agent.git",
+  [string]$HostAlias = $(if ($env:WASM_AGENT_HOST) { $env:WASM_AGENT_HOST } else { "openclaw.ohana" }),
   [string]$InstallDir = (Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "wasm-agent")
 )
 $ErrorActionPreference = "Stop"
+
+function Write-Logo {
+  Write-Host ""
+  Write-Host "   wasm-agent" -ForegroundColor Cyan
+  Write-Host "   a portable agent with organized memory" -ForegroundColor DarkGray
+  Write-Host ""
+}
+function Step([string]$Text) {
+  Write-Host "   " -NoNewline
+  Write-Host "* " -ForegroundColor Cyan -NoNewline
+  Write-Host $Text
+}
+function Ok([string]$Text) {
+  Write-Host "     " -NoNewline
+  Write-Host "ok " -ForegroundColor Green -NoNewline
+  Write-Host $Text -ForegroundColor DarkGray
+}
+function Warn([string]$Text) {
+  Write-Host "     " -NoNewline
+  Write-Host "!  " -ForegroundColor Yellow -NoNewline
+  Write-Host $Text -ForegroundColor DarkGray
+}
 
 function Add-UserPath([string]$Dir) {
   $current = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -20,75 +38,64 @@ function Add-UserPath([string]$Dir) {
     [Environment]::SetEnvironmentVariable("Path", ($current.TrimEnd(';') + ";" + $Dir), "User")
   }
 }
-
 function Test-WritableDir([string]$Dir) {
   try {
     $probe = Join-Path $Dir (".wa-write-{0}.tmp" -f $PID)
     Set-Content -Path $probe -Value "" -ErrorAction Stop
     Remove-Item -Path $probe -Force -ErrorAction Stop
     return $true
-  } catch {
-    return $false
-  }
+  } catch { return $false }
 }
 
-if ($Local) {
-  if (Get-Command py -ErrorAction SilentlyContinue) {
-    & py -3 -m pip install --user --upgrade $Source
-  } elseif (Get-Command python -ErrorAction SilentlyContinue) {
-    & python -m pip install --user --upgrade $Source
-  } else {
-    throw "Python 3.10+ is required for -Local. Install it from python.org, or run this installer without -Local."
-  }
-  Write-Host "wasm-agent installed locally. Run: wa"
-  return
-}
+Write-Logo
+Step "finding a directory on PATH"
 
-# Prefer a directory already on PATH (pi does this via the npm bin): `wa`
-# becomes available without touching PATH or reopening the terminal.
+# Prefer a directory already on PATH (the npm bin, like pi): `wa` works with no
+# PATH change and no terminal restart.
 $appData = [Environment]::GetFolderPath("ApplicationData")
 $localAppData = [Environment]::GetFolderPath("LocalApplicationData")
-$pathDirs = ($env:Path -split ';') | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') }
-$candidates = @((Join-Path $appData "npm"), (Join-Path $localAppData "Microsoft\WindowsApps"))
+$onPath = ($env:Path -split ';') | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') }
 $target = $null
-$managed = $false
-foreach ($dir in $candidates) {
-  if (($pathDirs -contains $dir.TrimEnd('\')) -and (Test-Path $dir) -and (Test-WritableDir $dir)) {
-    $target = $dir
-    break
-  }
+foreach ($dir in @((Join-Path $appData "npm"), (Join-Path $localAppData "Microsoft\WindowsApps"))) {
+  if (($onPath -contains $dir.TrimEnd('\')) -and (Test-Path $dir) -and (Test-WritableDir $dir)) { $target = $dir; break }
 }
 if (-not $target) {
   $target = $InstallDir
   New-Item -ItemType Directory -Force -Path $target | Out-Null
   Add-UserPath $target
-  $managed = $true
 }
+Ok $target
 
+Step "installing the wa command"
 $shim = Join-Path $target "wa.cmd"
-$body = "@echo off`r`nssh -t $HostAlias wasm-agent %*`r`n"
-Set-Content -Path $shim -Value $body -Encoding ASCII
+Set-Content -Path $shim -Value "@echo off`r`nssh -t $HostAlias wasm-agent %*`r`n" -Encoding ASCII
 if (($env:Path -split ';') -notcontains $target) { $env:Path = "$target;$env:Path" }
+$stale = Join-Path $InstallDir "wa.cmd"
+if ((Test-Path $stale) -and ($stale -ne $shim)) { Remove-Item $stale -Force -ErrorAction SilentlyContinue }
+Ok "wa -> ssh -t $HostAlias wasm-agent"
 
-# Remove a shim from the fallback directory if we installed somewhere on PATH.
-if (-not $managed) {
-  $stale = Join-Path $InstallDir "wa.cmd"
-  if (Test-Path $stale) { Remove-Item $stale -Force -ErrorAction SilentlyContinue }
-}
-
-Write-Host ""
-Write-Host "wasm-agent installed."
-Write-Host "  wa   ->  ssh -t $HostAlias wasm-agent   ($shim)"
-Write-Host ""
-if (Get-Command wa -ErrorAction SilentlyContinue) {
-  Write-Host "Run:  wa"
+Step "checking the connection to $HostAlias"
+if (Get-Command ssh -ErrorAction SilentlyContinue) {
+  try {
+    $version = (& ssh -o BatchMode=yes -o ConnectTimeout=8 $HostAlias "wasm-agent --version" 2>$null | Select-Object -First 1)
+    if ($LASTEXITCODE -eq 0 -and $version) { Ok "connected: $version" }
+    else { Warn "not reachable yet - check ~/.ssh/config, then run: wa" }
+  } catch { Warn "not reachable yet - check ~/.ssh/config, then run: wa" }
 } else {
-  Write-Host "Open a NEW terminal, then run:  wa"
-  Write-Host "(or, in this terminal:  `$env:Path += `";$target`")"
+  Warn "ssh not found; install OpenSSH, then run: wa"
 }
+
 Write-Host ""
-Write-Host "If SSH is not set up yet, add this to ~/.ssh/config:"
-Write-Host "  Host $HostAlias"
-Write-Host "      HostName <server-ip>"
-Write-Host "      User ubuntu"
-Write-Host "      IdentityFile <path-to-key>"
+Write-Host "   ready." -ForegroundColor Green
+Write-Host ""
+Write-Host "   start chatting:" -ForegroundColor DarkGray
+Write-Host "     wa" -ForegroundColor White
+Write-Host ""
+Write-Host "   then try:" -ForegroundColor DarkGray
+Write-Host "     remember that Laura prefers invoices on the 5th" -ForegroundColor DarkGray
+Write-Host "     what do you know about Laura?" -ForegroundColor DarkGray
+Write-Host "     /exit" -ForegroundColor DarkGray
+Write-Host ""
+if (-not (Get-Command wa -ErrorAction SilentlyContinue)) {
+  Write-Host "   (if 'wa' is not found, open a NEW terminal)" -ForegroundColor Yellow
+}

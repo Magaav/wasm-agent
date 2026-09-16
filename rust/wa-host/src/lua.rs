@@ -169,6 +169,11 @@ impl Lua {
         }
     }
 
+    /// Set the value on top of the stack into the table at `idx`.
+    pub fn set_field(&self, idx: c_int, key: &str) {
+        unsafe { lua_setfield(self.l, idx, cstr(key).as_ptr()) }
+    }
+
     /// Set the top value into the table at -2 at integer key `n`.
     pub fn raw_seti(&self, n: c_int) {
         unsafe { lua_rawseti(self.l, -2, n as LuaInteger) }

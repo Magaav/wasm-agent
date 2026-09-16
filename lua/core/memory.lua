@@ -36,7 +36,7 @@ function M.fts_query(text)
 end
 
 function M.setup()
-  local schema = host.read_file("lua/core/schema.sql")
+  local schema = (EMBEDDED and EMBEDDED["lua/core/schema.sql"]) or host.read_file("lua/core/schema.sql")
   if not schema then error("schema_missing") end
   exec(schema)
 end

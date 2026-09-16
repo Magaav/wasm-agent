@@ -15,18 +15,22 @@ local function line(item)
   return json.encode(item)
 end
 
-local function limit_of(value, fallback)
-  return tonumber(value) or fallback
-end
-
 local function each(rows)
   if #rows == 0 then print("(empty)") return end
   for _, row in ipairs(rows) do print(line(row)) end
 end
 
-local command = args[1] or "help"
+local function limit_of(value, fallback)
+  return tonumber(value) or fallback
+end
+
+local command = args[1]
+if command == nil or command == "chat" then
+  return dofile("lua/core/chat.lua").run()
+end
+
 if command == "init" then
-  print(json.encode({schema = "ok"}))
+  print(json.encode({ schema = "ok" }))
 elseif command == "remember" then
   print(memory.remember(args[2], "global", {}))
 elseif command == "recall" then
@@ -34,7 +38,7 @@ elseif command == "recall" then
 elseif command == "memories" then
   each(memory.memories(nil, limit_of(args[2], 50)))
 elseif command == "forget" then
-  print(json.encode({forgotten = memory.forget(args[2])}))
+  print(json.encode({ forgotten = memory.forget(args[2]) }))
 elseif command == "search" then
   each(memory.search_messages(args[2], args[3], limit_of(args[4], 20)))
 elseif command == "conversation" then
@@ -44,7 +48,7 @@ elseif command == "conversations" then
 elseif command == "stats" then
   print(json.encode(memory.stats()))
 elseif command == "help" then
-  print("wa: init | remember <text> | recall <query> | memories | forget <id>")
+  print("wa: chat | remember <text> | recall <query> | memories | forget <id>")
   print("    search <query> | conversation <id> | conversations | stats")
 else
   print("unknown command: " .. tostring(command))
