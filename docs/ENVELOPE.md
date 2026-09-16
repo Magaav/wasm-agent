@@ -19,7 +19,7 @@ that surface. The live version is rendered in the UI under **engine → tools**
 | --- | --- | --- |
 | `remember` | `content`, `scope?`, `tags?` | store a fact |
 | `recall` | `query`, `scope?`, `limit?` | search remembered facts |
-| `spells` | — | list what this account can do |
+| `capabilities` | — | list the tools this account may call |
 
 ### master only
 
@@ -68,7 +68,9 @@ UI terminal uses the same path
 already running. `evaluate` runs JS in the first page target and returns the
 value.
 
-**spells (macros)** — deterministic, verified automation (see `SPELLS.md`)
+**spells** — crystallized, deterministic macros (see `SPELLS.md`). Note the
+name is reserved for macros only; the tier that *lists* what you may do is
+`capabilities`, above.
 
 | Tool | Args | Does |
 | --- | --- | --- |

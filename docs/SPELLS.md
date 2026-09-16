@@ -5,6 +5,12 @@ preconditions and mandatory postconditions. The agent *crystallizes* a task into
 a spell once it has worked it out, and replays it later **without the model in
 the loop**.
 
+> **Naming.** "Spells" always means these crystallized macros. The tool that
+> lists what an account may call is **`capabilities`**, never `spells`. The two
+> used to share the name, which was a defect: it made the envelope read
+> `capabilities → spells` and `spells → spell_save`, two different things under
+> one word.
+
 This document is the contract. It exists because the old v8 orchestrator failed
 in ways we are not repeating.
 

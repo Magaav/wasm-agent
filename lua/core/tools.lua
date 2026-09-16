@@ -1,5 +1,6 @@
 -- Tools exposed to the head model. Access is gated by the caller's role:
--- admins get everything; guests get on-demand memory plus "spells".
+-- masters get everything; guests get on-demand memory plus a way to list
+-- what they may do. "spells" means crystallized macros only (spells.lua).
 local json = dofile("lua/vendor/json.lua")
 local spellslib = dofile("lua/core/spells.lua")
 local nodeslib = dofile("lua/core/nodes.lua")
@@ -29,7 +30,7 @@ M.shared = {
     query = { type = "string" },
     scope = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 50 } }, { "query" }),
-  schema("spells", "List the extra capabilities available to this account.", {}),
+  schema("capabilities", "List the tools available to this account (its capabilities).", {}),
 }
 
 -- Admin only: the ledger and the pi-style environment tools.
@@ -98,7 +99,7 @@ M.admin = {
 -- listed here is a WASM plugin.
 M.tier_of = {
   remember = "memory", recall = "memory",
-  spells = "capabilities",
+  capabilities = "capabilities",
   bash = "environment", read = "environment", write = "environment",
   edit = "environment", ls = "environment", grep = "environment",
   shell = "shell",
@@ -195,14 +196,14 @@ function M.dispatch(memory, name, args, role)
     return { ok = true, id = memory.remember(args.content, args.scope or "global", args.tags or {}) }
   elseif name == "recall" then
     return memory.recall(args.query or "", args.limit or 10, args.scope)
-  elseif name == "spells" then
-    local spells = { "remember", "recall" }
+  elseif name == "capabilities" then
+    local list = { "remember", "recall", "capabilities" }
     if is_master(role) then
-      for _, extra in ipairs({ "bash", "read", "write", "edit", "ls", "grep", "client", "shell", "spell_save", "spell_run", "spell_get" }) do
-        spells[#spells + 1] = extra
+      for _, extra in ipairs({ "bash", "read", "write", "edit", "ls", "grep", "shell", "client", "spell_save", "spell_run", "spell_get", "nodes", "remote" }) do
+        list[#list + 1] = extra
       end
     end
-    return { role = role, spells = spells, note = "ask an admin to unlock more" }
+    return { role = role, capabilities = list, note = "ask a master to unlock more" }
   elseif name == "search_messages" then
     return memory.search_messages(args.query or "", args.conversation_id, args.limit or 20)
   elseif name == "conversation" then
