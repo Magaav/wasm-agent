@@ -68,11 +68,27 @@ Ok $target
 
 Step "installing the wa command"
 $shim = Join-Path $target "wa.cmd"
-Set-Content -Path $shim -Value "@echo off`r`nssh -t $HostAlias wasm-agent %*`r`n" -Encoding ASCII
+$body = @"
+@echo off
+if /I "%~1"=="ui" (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wa-ui.ps1" %2 %3 %4 %5 %6 %7 %8 %9
+  exit /b
+)
+ssh -t $HostAlias wasm-agent %*
+"@
+Set-Content -Path $shim -Value $body -Encoding ASCII
 if (($env:Path -split ';') -notcontains $target) { $env:Path = "$target;$env:Path" }
 $stale = Join-Path $InstallDir "wa.cmd"
 if ((Test-Path $stale) -and ($stale -ne $shim)) { Remove-Item $stale -Force -ErrorAction SilentlyContinue }
-Ok "wa -> ssh -t $HostAlias wasm-agent"
+Ok "wa     -> ssh -t $HostAlias wasm-agent"
+
+$uiScript = Join-Path $target "wa-ui.ps1"
+try {
+  Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/wa-ui.ps1" -OutFile $uiScript -ErrorAction Stop
+  Ok "wa ui  -> desktop chat window"
+} catch {
+  Warn "could not fetch wa-ui.ps1; 'wa ui' will not work until it is present"
+}
 
 Step "checking the connection to $HostAlias"
 if (Get-Command ssh -ErrorAction SilentlyContinue) {
@@ -89,12 +105,12 @@ Write-Host ""
 Write-Host "   ready." -ForegroundColor Green
 Write-Host ""
 Write-Host "   start chatting:" -ForegroundColor DarkGray
-Write-Host "     wa" -ForegroundColor White
+Write-Host "     wa        chat in the terminal" -ForegroundColor White
+Write-Host "     wa ui     open the desktop chat window" -ForegroundColor White
 Write-Host ""
 Write-Host "   then try:" -ForegroundColor DarkGray
 Write-Host "     remember that Laura prefers invoices on the 5th" -ForegroundColor DarkGray
 Write-Host "     what do you know about Laura?" -ForegroundColor DarkGray
-Write-Host "     /exit" -ForegroundColor DarkGray
 Write-Host ""
 if (-not (Get-Command wa -ErrorAction SilentlyContinue)) {
   Write-Host "   (if 'wa' is not found, open a NEW terminal)" -ForegroundColor Yellow

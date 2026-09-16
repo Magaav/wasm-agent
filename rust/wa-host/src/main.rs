@@ -1,31 +1,59 @@
-//! `wa` host: a Rust binary with vendored Lua, SQLite and HTTP capabilities.
+//! `wa` host: a Rust binary with vendored Lua, SQLite, HTTP and WASM plugins.
 //!
 //! The agent logic lives in Lua (`lua/`); this host only provides capabilities
-//! (sqlite, sha256, uuid, time, files, http). No Python anywhere.
+//! (sqlite, http, wasmtime, sha256, uuid, time, files). No Python anywhere.
 mod host;
 mod lua;
 mod plugins;
+mod serve;
 
 use host::Host;
 use lua::Lua;
 use rusqlite::Connection;
 use std::ffi::{c_int, c_void};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
-fn db_path(args: &[String]) -> String {
+/// The Lua core is embedded so `wa` is a single self-contained binary that runs
+/// from any working directory. WA_SCRIPT overrides the entry point with a file.
+const EMBEDDED: &[(&str, &str)] = &[
+    ("lua/vendor/json.lua", include_str!("../../../lua/vendor/json.lua")),
+    ("lua/core/schema.sql", include_str!("../../../lua/core/schema.sql")),
+    ("lua/core/memory.lua", include_str!("../../../lua/core/memory.lua")),
+    ("lua/core/tools.lua", include_str!("../../../lua/core/tools.lua")),
+    ("lua/core/provider.lua", include_str!("../../../lua/core/provider.lua")),
+    ("lua/core/agent.lua", include_str!("../../../lua/core/agent.lua")),
+    ("lua/core/chat.lua", include_str!("../../../lua/core/chat.lua")),
+    ("lua/core/server.lua", include_str!("../../../lua/core/server.lua")),
+    ("lua/core/init.lua", include_str!("../../../lua/core/init.lua")),
+];
+
+fn embedded(name: &str) -> &'static str {
+    EMBEDDED
+        .iter()
+        .find(|(key, _)| *key == name)
+        .map(|(_, source)| *source)
+        .unwrap_or_else(|| panic!("missing embedded module: {name}"))
+}
+
+fn flag(args: &[String], name: &str) -> Option<String> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
-        if arg == "--db" {
-            if let Some(path) = iter.next() {
-                return path.clone();
-            }
+        if arg == name {
+            return iter.next().cloned();
         }
-        if let Some(path) = arg.strip_prefix("--db=") {
-            return path.to_string();
+        if let Some(value) = arg.strip_prefix(&format!("{name}=")) {
+            return Some(value.to_string());
         }
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    format!("{home}/.wasm-agent/memory.db")
+    None
+}
+
+fn db_path(args: &[String]) -> String {
+    flag(args, "--db").unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        format!("{home}/.wasm-agent/memory.db")
+    })
 }
 
 /// Load KEY=VALUE pairs from ~/.wasm-agent/env without overwriting real env.
@@ -56,6 +84,7 @@ fn main() {
         println!("wasm-agent {}", env!("CARGO_PKG_VERSION"));
         return;
     }
+
     // The host consumes --db; the Lua core gets the rest.
     let mut lua_args: Vec<String> = Vec::new();
     let mut iter = args.iter();
@@ -69,6 +98,7 @@ fn main() {
         }
         lua_args.push(arg.clone());
     }
+
     let db = db_path(&args);
     std::env::set_var("WASM_AGENT_DB", &db);
     if let Some(parent) = std::path::Path::new(&db).parent() {
@@ -105,18 +135,6 @@ fn main() {
     }
     lua.set_global("args");
 
-    // The Lua core is embedded so `wa` is a single self-contained binary that
-    // runs from any working directory. WA_SCRIPT overrides with a file on disk.
-    const EMBEDDED: &[(&str, &str)] = &[
-        ("lua/vendor/json.lua", include_str!("../../../lua/vendor/json.lua")),
-        ("lua/core/schema.sql", include_str!("../../../lua/core/schema.sql")),
-        ("lua/core/memory.lua", include_str!("../../../lua/core/memory.lua")),
-        ("lua/core/tools.lua", include_str!("../../../lua/core/tools.lua")),
-        ("lua/core/provider.lua", include_str!("../../../lua/core/provider.lua")),
-        ("lua/core/agent.lua", include_str!("../../../lua/core/agent.lua")),
-        ("lua/core/chat.lua", include_str!("../../../lua/core/chat.lua")),
-        ("lua/core/init.lua", include_str!("../../../lua/core/init.lua")),
-    ];
     lua.push_table();
     for (name, source) in EMBEDDED {
         lua.push_string(source);
@@ -137,7 +155,24 @@ fn main() {
             eprintln!("lua error: {error}");
             std::process::exit(1);
         }
-    } else if let Err(error) = lua.do_string(EMBEDDED[7].1, "lua/core/init.lua") {
+        return;
+    }
+
+    let command = lua_args.first().map(String::as_str).unwrap_or("");
+    if command == "serve" {
+        if let Err(error) = lua.do_string(embedded("lua/core/server.lua"), "lua/core/server.lua") {
+            eprintln!("lua error: {error}");
+            std::process::exit(1);
+        }
+        let port = flag(&lua_args, "--port").and_then(|value| value.parse().ok()).unwrap_or(8799);
+        let ui = flag(&lua_args, "--ui")
+            .or_else(|| std::env::var("WASM_AGENT_UI").ok())
+            .unwrap_or_else(|| "ui".to_string());
+        serve::run(&lua, port, PathBuf::from(ui));
+        return;
+    }
+
+    if let Err(error) = lua.do_string(embedded("lua/core/init.lua"), "lua/core/init.lua") {
         eprintln!("lua error: {error}");
         std::process::exit(1);
     }
