@@ -116,7 +116,19 @@ Never expose a master tier to a non-master turn; filter schemas *and* re-check i
 `dispatch`, because the model can ask for a tool it was not offered.
 The `client` and `shell` tools drive a real machine — the highest-risk tiers.
 
-## 9. Component registry
+## 9. Modes and views
+
+A **mode** is a full-view switch (chat ⇄ shell ⇄ control).
+
+- The switch lives in the **topbar**, beside the collapse control — never in the
+  composer footer, which is for per-message actions (send, mic, attach).
+- Every mode must be escapable **three ways**: the topbar toggle (which stays
+  visible in every mode), an explicit back control in the view's own header, and
+  `Escape`.
+- A view must never hide the control that opens it. Hiding the only way back is
+  a defect, not a style choice.
+
+## 10. Component registry
 
 | Element | Purpose | Key attributes / properties | Events |
 | --- | --- | --- | --- |

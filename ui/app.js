@@ -28,6 +28,8 @@ const termBtn = document.getElementById("term-btn");
 const termOut = document.getElementById("term-out");
 const termForm = document.getElementById("term-form");
 const termCmd = document.getElementById("term-cmd");
+const termClose = document.getElementById("term-close");
+const termTitle = document.getElementById("term-title");
 const nodesBox = document.getElementById("nodes-box");
 const nodesBinding = document.getElementById("nodes-binding");
 const control = document.getElementById("control");
@@ -826,11 +828,39 @@ async function runShell(command) {
   }
 }
 
-termBtn.addEventListener("click", () => {
-  const open = document.body.classList.toggle("term");
+let clientHost = "";
+async function ensureHost() {
+  if (clientHost) return;
+  try {
+    const payload = await (await fetch("shell", {
+      method: "POST", headers: apiHeaders({ "Content-Type": "text/plain" }), body: "hostname",
+    })).json();
+    clientHost = (payload.stdout || "").trim() || "client";
+    termTitle.textContent = "shell · " + clientHost;
+  } catch (error) { /* leave the default title */ }
+}
+
+function setTerm(open) {
+  document.body.classList.toggle("term", open);
   terminal.hidden = !open;
   termBtn.classList.toggle("active", open);
-  if (open) termCmd.focus();
+  if (open) {
+    ensureHost();
+    termCmd.focus();
+  }
+}
+
+termBtn.addEventListener("click", () => setTerm(!document.body.classList.contains("term")));
+termClose.addEventListener("click", () => setTerm(false));
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && document.body.classList.contains("term")) {
+    event.preventDefault();
+    setTerm(false);
+    input.focus();
+  } else if (event.ctrlKey && (event.key === "`" || event.code === "Backquote")) {
+    event.preventDefault();
+    setTerm(!document.body.classList.contains("term"));
+  }
 });
 termForm.addEventListener("submit", (event) => {
   event.preventDefault();

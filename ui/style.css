@@ -72,14 +72,17 @@ body.compact {
 .brand { font-weight: 600; letter-spacing: .2px; display: flex; align-items: center; gap: var(--gap); }
 .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px var(--accent); }
 .meta { color: var(--muted); font-size: 12.5px; text-align: right; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.collapse {
+.topbar-actions { display: flex; align-items: center; gap: var(--gap); }
+.topbar-btn, .collapse {
   flex: none; width: 40px; height: 40px; cursor: pointer;
   display: inline-flex; align-items: center; justify-content: center;
   border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
   border-radius: var(--radius);
 }
+.topbar-btn svg { width: 20px; height: 20px; display: block; }
 .collapse svg { width: 18px; height: 18px; display: block; }
-.collapse:hover { border-color: var(--accent); background: #1d2330; }
+.topbar-btn:hover, .collapse:hover { border-color: var(--accent); background: #1d2330; }
+.topbar-btn.active { color: #fff; background: var(--accent); border-color: var(--accent); }
 
 .messages { flex: 1; overflow-y: auto; padding: var(--pad); display: flex; flex-direction: column; gap: var(--gap); }
 .msg {
@@ -153,6 +156,12 @@ body.term .messages { display: none; }
 body.term .composer { display: none; }
 .terminal { display: none; flex: 1; min-height: 0; flex-direction: column; }
 body.term .terminal { display: flex; }
+.term-bar {
+  display: flex; align-items: center; gap: var(--gap);
+  padding: var(--space) var(--pad); border-bottom: 1px solid var(--line);
+  background: rgba(18, 21, 28, .82);
+}
+.term-title { flex: 1; font-size: 12.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
 .term-out {
   flex: 1; min-height: 0; overflow-y: auto; padding: var(--pad);
   font: var(--font-size)/1.5 var(--font); white-space: pre-wrap; word-break: break-word;
