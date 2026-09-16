@@ -18,6 +18,13 @@ local SYSTEM = table.concat({
 
 local MAX_TOOL_ROUNDS = 8
 
+-- Process-wide token accounting, surfaced to the UI footer.
+M.usage_total = { prompt = 0, completion = 0, total = 0, turns = 0 }
+
+function M.usage()
+  return M.usage_total
+end
+
 function M.new(session_id, on_event)
   return setmetatable({
     session_id = session_id or memory.start_session("cli", "interactive chat"),
@@ -39,6 +46,13 @@ function M:turn(text)
   for _ = 1, MAX_TOOL_ROUNDS do
     self.emit({ type = "status", text = "model" })
     local result = provider.complete(self.messages, tools.all(), self.stream)
+    if type(result.usage) == "table" then
+      local usage = result.usage
+      M.usage_total.prompt = M.usage_total.prompt + (tonumber(usage.prompt_tokens) or 0)
+      M.usage_total.completion = M.usage_total.completion + (tonumber(usage.completion_tokens) or 0)
+      M.usage_total.total = M.usage_total.total + (tonumber(usage.total_tokens) or 0)
+    end
+    if result.model and result.model ~= "" then self.model = result.model end
     local calls = result.tool_calls
     local assistant = { role = "assistant", content = result.content or "" }
     if #calls > 0 then assistant.tool_calls = calls end
@@ -66,6 +80,8 @@ function M:turn(text)
   end
   if reply == "" then reply = "(tool loop limit reached)" end
   memory.record_run(host.uuid(), self.session_id, "completed", "completed", reply)
+  M.usage_total.turns = M.usage_total.turns + 1
+  self.emit({ type = "usage", total = M.usage_total, model = self.model })
   self.emit({ type = "reply", text = reply })
   return reply
 end

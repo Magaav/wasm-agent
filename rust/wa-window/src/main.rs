@@ -101,6 +101,43 @@ mod companion {
 "#
     }
 
+    /// Work area (screen minus taskbar) of the monitor the window is nearest to.
+    fn monitor_work_area(window: &Window) -> Option<(i32, i32, i32, i32)> {
+        use windows::Win32::Foundation::{HWND, RECT};
+        use windows::Win32::Graphics::Gdi::{
+            GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        };
+        let hwnd = HWND(window.hwnd() as _);
+        unsafe {
+            let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                rcMonitor: RECT::default(),
+                rcWork: RECT::default(),
+                dwFlags: 0,
+            };
+            if GetMonitorInfoW(monitor, &mut info).as_bool() {
+                Some((info.rcWork.left, info.rcWork.top, info.rcWork.right, info.rcWork.bottom))
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Keep the whole window inside the work area so it can never be dragged or
+    /// grown off-screen.
+    fn clamp_to_work_area(window: &Window) {
+        let Some((left, top, right, bottom)) = monitor_work_area(window) else { return };
+        let size = window.outer_size();
+        let position = window.outer_position().unwrap_or_default();
+        let (w, h) = (size.width as i32, size.height as i32);
+        let (max_x, max_y) = ((right - w).max(left), (bottom - h).max(top));
+        let (x, y) = (position.x.clamp(left, max_x), position.y.clamp(top, max_y));
+        if x != position.x || y != position.y {
+            window.set_outer_position(PhysicalPosition::new(x, y));
+        }
+    }
+
     fn resize(window: &Window, mode: &str, width: u32, height: u32) {
         let old_size = window.outer_size();
         let old_position = window.outer_position().unwrap_or_default();
@@ -112,13 +149,27 @@ mod companion {
         // Fixed-size: a sizing frame would inset the client area and leave a
         // visible border around the frameless translucent window.
         window.set_resizable(false);
-        let physical: PhysicalSize<u32> = logical.to_physical(window.scale_factor());
+        let mut physical: PhysicalSize<u32> = logical.to_physical(window.scale_factor());
+        // Never grow past the monitor work area.
+        if let Some((left, top, right, bottom)) = monitor_work_area(window) {
+            physical.width = physical.width.min((right - left).max(1) as u32);
+            physical.height = physical.height.min((bottom - top).max(1) as u32);
+        }
         window.set_inner_size(physical);
         let observed = window.outer_size();
-        window.set_outer_position(PhysicalPosition::new(
+        let mut target = PhysicalPosition::new(
             old_position.x + old_size.width as i32 - observed.width as i32,
             old_position.y + old_size.height as i32 - observed.height as i32,
-        ));
+        );
+        // Clamp the computed target: reading the position back after
+        // `set_outer_position` can race, so never trust it here.
+        if let Some((left, top, right, bottom)) = monitor_work_area(window) {
+            let max_x = (right - observed.width as i32).max(left);
+            let max_y = (bottom - observed.height as i32).max(top);
+            target.x = target.x.clamp(left, max_x);
+            target.y = target.y.clamp(top, max_y);
+        }
+        window.set_outer_position(target);
         window.set_focusable(mode == "expanded");
         if mode == "expanded" {
             window.set_focus();
@@ -142,7 +193,7 @@ mod companion {
         unsafe {
             let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED.0 as isize);
-            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 238, LWA_ALPHA);
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 246, LWA_ALPHA);
             let _ = SetWindowPos(
                 hwnd,
                 Some(HWND_TOPMOST),
@@ -204,6 +255,7 @@ mod companion {
             }
             "drag" => {
                 let _ = window.drag_window();
+                clamp_to_work_area(window);
             }
             "topmost" => {
                 state.topmost = request.enabled.unwrap_or(true);
@@ -286,6 +338,7 @@ mod companion {
                 origin.y + size.height as i32 - compact.height as i32 - 56,
             ));
         }
+        clamp_to_work_area(&window);
         window.set_visible(true);
         resize(&window, "compact", PANEL_WIDTH, PANEL_HEIGHT);
         style_window(&window, &webview, "compact");

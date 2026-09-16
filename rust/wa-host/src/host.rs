@@ -144,6 +144,15 @@ pub extern "C" fn read_file(l: *mut LuaState) -> c_int {
     }
 }
 
+/// host.write_file(path, text) -> boolean
+pub extern "C" fn write_file(l: *mut LuaState) -> c_int {
+    let path = arg_string(l, 1).unwrap_or_default();
+    let text = arg_string(l, 2).unwrap_or_default();
+    let ok = std::fs::write(&path, text).is_ok();
+    unsafe { crate::lua::lua_pushboolean(l, ok as c_int) };
+    1
+}
+
 /// host.log(message)
 pub extern "C" fn log(l: *mut LuaState) -> c_int {
     if let Some(message) = arg_string(l, 1) {

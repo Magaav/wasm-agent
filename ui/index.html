@@ -32,8 +32,38 @@
     </main>
 
     <form id="composer" class="composer">
-      <textarea id="input" rows="1" placeholder="Message wasm-agent…"></textarea>
-      <button id="send" type="submit">Send</button>
+      <div id="attachments" class="attachments"></div>
+      <div class="composer-row">
+        <textarea id="input" rows="1" placeholder="Message wasm-agent…"></textarea>
+        <button id="send" class="send" type="submit" title="Send" aria-label="Send">
+          <svg class="icon-send" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.4 20.4 21 12 3.4 3.6 3.4 10l12.6 2-12.6 2z"/></svg>
+          <svg class="icon-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
+        </button>
+      </div>
+      <div class="composer-footer">
+        <div class="footer-left">
+          <button id="status-btn" class="chip" type="button" title="Model, tokens and limits">
+            <span class="chip-dot"></span>
+            <span id="chip-model">connecting…</span>
+            <span id="chip-usage" class="chip-usage"></span>
+          </button>
+          <button id="mic" class="icon-btn" type="button" title="Talk with voice" aria-label="Talk with voice">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zm7 8a7 7 0 0 1-6 6.9V21h-2v-3.1A7 7 0 0 1 5 11h2a5 5 0 0 0 10 0h2z"/></svg>
+          </button>
+          <button id="attach" class="icon-btn" type="button" title="Append a file" aria-label="Append a file">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.6 8.7 14.4a1.5 1.5 0 0 0 2.1 2.1l7.8-7.8a3.5 3.5 0 0 0-5-5l-8.1 8.1a5.5 5.5 0 0 0 7.8 7.8l6.7-6.7-1.4-1.4-6.7 6.7a3.5 3.5 0 0 1-5-5l8.1-8.1a1.5 1.5 0 0 1 2.1 2.1z"/></svg>
+          </button>
+          <input id="file" type="file" hidden multiple />
+        </div>
+        <div class="footer-right" id="footer-hint"></div>
+      </div>
+
+      <div id="model-pop" class="popover" hidden>
+        <div class="pop-head">model <span id="pop-base" class="pop-sub"></span></div>
+        <div id="model-list" class="model-list"></div>
+        <div class="pop-head">usage</div>
+        <div id="usage-box" class="usage-box"></div>
+      </div>
     </form>
   </div>
 

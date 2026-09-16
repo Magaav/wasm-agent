@@ -121,6 +121,7 @@ fn main() {
     lua.register("sha256", host::sha256);
     lua.register("uuid", host::uuid);
     lua.register("read_file", host::read_file);
+    lua.register("write_file", host::write_file);
     lua.register("http", host::http);
     lua.register("http_stream", host::http_stream);
     lua.register_with_upvalue("plugins", host::plugins, host as *mut c_void);

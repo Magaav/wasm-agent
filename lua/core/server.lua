@@ -33,6 +33,16 @@ function wa_model()
     base_url = settings.base_url,
     configured = provider.configured(),
     database = os.getenv("WASM_AGENT_DB") or "",
+    models = provider.list_models(),
+    usage = agentlib.usage(),
+    context_limit = tonumber(os.getenv("WASM_AGENT_LLM_CONTEXT")) or 0,
     stats = memory.stats(),
   })
+end
+
+-- Switch models at runtime; returns the refreshed settings payload.
+function wa_set_model(name)
+  provider.set_model(name or "")
+  if agent then agent.model = provider.settings().model end
+  return wa_model()
 end
