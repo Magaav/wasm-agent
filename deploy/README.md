@@ -78,6 +78,24 @@ The desktop shell (`rust/wa-window`) is cross-built on Linux
 SSH tunnel (`8799` UI, `8800` client bridge) and launches the window. It talks to
 `127.0.0.1` on the client, so the same launcher works against any node.
 
+## GitHub access
+
+Each machine holds its **own** deploy key on the repo (Settings → Deploy keys,
+write access), so a machine can be revoked independently — no shared private key
+in two places.
+
+| Machine | Key | SSH alias |
+| --- | --- | --- |
+| the always-on instance | `~/.ssh/id_ed25519_wasm_agent` | `github-wasm-agent` |
+| the local clone | `~/.ssh/id_ed25519_wasm_agent_local` | `github-wasm-agent` |
+
+Both use the same remote: `git@github-wasm-agent:Magaav/wasm-agent.git`. To check
+which key is being used:
+
+```bash
+ssh -v -T git@github-wasm-agent 2>&1 | grep -E "Offering|accepts key"
+```
+
 ## Notes
 
 - One node per machine: the key lives in `~/.wasm-agent/node.key`. Override with
