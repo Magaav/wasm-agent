@@ -10,13 +10,19 @@ const chipUsage = document.getElementById("chip-usage");
 const balloon = document.getElementById("status-balloon");
 const providerSelect = document.getElementById("provider-select");
 const modelSelect = document.getElementById("model-select");
+const contextBox = document.getElementById("context-box");
+const limitsBox = document.getElementById("limits-box");
 const usageBox = document.getElementById("usage-box");
-const memoryBox = document.getElementById("memory-box");
 const popFoot = document.getElementById("pop-foot");
 const micButton = document.getElementById("mic");
 const attachButton = document.getElementById("attach");
 const fileInput = document.getElementById("file");
 const attachmentsEl = document.getElementById("attachments");
+const userBtn = document.getElementById("user-btn");
+const userAvatar = document.getElementById("user-avatar");
+const userName = document.getElementById("user-name");
+const userMenu = document.getElementById("user-menu");
+const contextMenu = document.getElementById("context-menu");
 
 let renderer = null;
 let version = null;
@@ -27,6 +33,14 @@ let streamText = "";
 let controller = null;
 let attachments = [];
 let settings = { provider: "", model: "", providers: [], usage: {}, stats: {}, configured: false, base_url: "" };
+let session = localStorage.getItem("wa-session") || "";
+let me = { user: null, role: "guest", tools: [] };
+
+function apiHeaders(extra) {
+  const headers = Object.assign({}, extra || {});
+  if (session) headers["X-WA-Session"] = session;
+  return headers;
+}
 let recognizing = false;
 let recognition = null;
 let voicePrefix = "";
@@ -199,7 +213,7 @@ async function send(text) {
   try {
     const response = await fetch("chat", {
       method: "POST",
-      headers: { "Content-Type": "text/plain; charset=utf-8", "Accept": "text/event-stream" },
+      headers: apiHeaders({ "Content-Type": "text/plain; charset=utf-8", "Accept": "text/event-stream" }),
       body: outgoing,
       signal: controller.signal,
     });
@@ -290,6 +304,70 @@ function grid(rows) {
   return fragment;
 }
 
+function meter(percent) {
+  const wrap = document.createElement("div");
+  wrap.className = "meter";
+  const fill = document.createElement("span");
+  fill.style.width = Math.min(100, Math.max(0, percent)) + "%";
+  if (percent >= 90) fill.classList.add("hot");
+  wrap.append(fill);
+  return wrap;
+}
+
+function formatReset(iso) {
+  const then = new Date(iso).getTime();
+  if (!then) return "";
+  const minutes = Math.round((then - Date.now()) / 60000);
+  if (minutes <= 0) return "resetting";
+  if (minutes < 60) return `resets in ${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `resets in ${hours}h ${minutes % 60}m`;
+  return `resets in ${Math.round(hours / 24)}d`;
+}
+
+// Context: tokens sent last turn vs the configured context budget.
+function renderContext() {
+  contextBox.replaceChildren();
+  const usage = settings.usage || {};
+  const taken = Number((usage.last && usage.last.prompt) || 0);
+  const budget = Number(settings.context_limit) || 0;
+  contextBox.append(grid([
+    ["taken", formatTokens(taken)],
+    ["budget", budget ? formatTokens(budget) : "—"],
+  ]));
+  if (budget) {
+    const percent = Math.min(100, Math.round((taken / budget) * 100));
+    contextBox.append(meter(percent), grid([["used", percent + "%"]]));
+  }
+}
+
+// Rolling provider limits: 5h, 7d and 30d.
+function renderLimits() {
+  limitsBox.replaceChildren();
+  const limits = settings.limits || {};
+  const windows = [["5h", "rolling"], ["7d", "weekly"], ["30d", "monthly"]];
+  let shown = 0;
+  for (const [label, key] of windows) {
+    const entry = limits[key];
+    if (!entry) continue;
+    shown += 1;
+    const percent = Number(entry.percent) || 0;
+    limitsBox.append(grid([[label + " limit", percent + "%"]]));
+    limitsBox.append(meter(percent));
+    const note = document.createElement("span");
+    note.className = "usage-note";
+    note.textContent = formatReset(entry.resetsAt);
+    limitsBox.append(note);
+  }
+  if (!shown) {
+    const none = document.createElement("span");
+    none.className = "usage-note";
+    none.textContent = "limits unavailable";
+    limitsBox.append(none);
+  }
+}
+
+// Token accounting: last turn and session totals.
 function renderUsage() {
   usageBox.replaceChildren();
   const usage = settings.usage || {};
@@ -302,31 +380,6 @@ function renderUsage() {
     ["session total", formatTokens(usage.total)],
     ["turns", usage.turns || 0],
   ]));
-  if (settings.context_limit) {
-    const used = Number(last.prompt) || 0;
-    const percent = Math.min(100, Math.round((used / settings.context_limit) * 100));
-    const meter = document.createElement("div");
-    meter.className = "meter";
-    const fill = document.createElement("span");
-    fill.style.width = percent + "%";
-    meter.append(fill);
-    usageBox.append(meter, grid([
-      ["context window", `${formatTokens(used)} / ${formatTokens(settings.context_limit)}`],
-      ["context used", percent + "%"],
-    ]));
-  }
-}
-
-function renderMemory() {
-  memoryBox.replaceChildren();
-  const stats = settings.stats || {};
-  memoryBox.append(grid([
-    ["memories", stats.memories ?? 0],
-    ["messages", stats.messages ?? 0],
-    ["ledger runs", stats.runs ?? 0],
-    ["sessions", stats.sessions ?? 0],
-    ["conversations", stats.conversations ?? 0],
-  ]));
 }
 
 function renderPopFoot() {
@@ -338,7 +391,7 @@ function renderPopFoot() {
 async function post(path, body) {
   const response = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "text/plain; charset=utf-8" },
+    headers: apiHeaders({ "Content-Type": "text/plain; charset=utf-8" }),
     body: body,
   });
   const payload = await response.json();
@@ -347,8 +400,9 @@ async function post(path, body) {
     updateChip();
     renderProviders();
     renderModels();
+    renderContext();
+    renderLimits();
     renderUsage();
-    renderMemory();
     renderPopFoot();
   }
 }
@@ -414,8 +468,9 @@ statusBtn.addEventListener("click", () => {
   if (balloon.open) {
     renderProviders();
     renderModels();
+    renderContext();
+    renderLimits();
     renderUsage();
-    renderMemory();
     renderPopFoot();
   }
 });
@@ -476,23 +531,87 @@ fileInput.addEventListener("change", async () => {
   renderAttachments();
 });
 
+// ---- account -------------------------------------------------------------
+function initials(name) {
+  return (name || "?").trim().slice(0, 2);
+}
+
+function renderUser() {
+  const user = me.user || { name: "guest" };
+  userName.textContent = user.name || user.id || "guest";
+  userAvatar.textContent = initials(user.name || user.id);
+  userBtn.title = `Signed in as ${user.name || "guest"} (${me.role}) · ${me.tools.length} tools`;
+  userBtn.classList.toggle("local", me.role !== "admin");
+}
+
+async function refreshMe() {
+  try {
+    const response = await fetch("me", { headers: apiHeaders() });
+    const payload = await response.json();
+    if (!payload.error) {
+      me = payload;
+      renderUser();
+    }
+  } catch (error) { /* keep the current view */ }
+}
+
+async function login(id) {
+  const response = await fetch("login", {
+    method: "POST", headers: apiHeaders({ "Content-Type": "text/plain" }), body: id,
+  });
+  const payload = await response.json();
+  if (payload.session) {
+    session = payload.session;
+    localStorage.setItem("wa-session", session);
+  }
+  await refreshMe();
+  await refreshMeta();
+}
+
+async function logout() {
+  await fetch("logout", { method: "POST", headers: apiHeaders() });
+  session = "";
+  localStorage.removeItem("wa-session");
+  await refreshMe();
+  await refreshMeta();
+}
+
+async function openUserMenu() {
+  const user = me.user || {};
+  const items = [{ label: `${user.name || "guest"} · ${me.role}`, action: null }, { separator: true }];
+  try {
+    const payload = await (await fetch("users")).json();
+    for (const candidate of payload.users || []) {
+      if (candidate.id === (user.id || "")) continue;
+      items.push({ label: `Sign in as ${candidate.name}`, action: () => login(candidate.id) });
+    }
+  } catch (error) { /* no user list */ }
+  if (session) {
+    items.push({ separator: true }, { label: "Sign out", danger: true, action: () => logout() });
+  }
+  userMenu.items = items;
+  const rect = userBtn.getBoundingClientRect();
+  userMenu.openAt(rect.left, rect.top - 5);
+  userBtn.setAttribute("aria-expanded", "true");
+}
+
 async function refreshMeta() {
   try {
-    const response = await fetch("models");
+    const response = await fetch("models", { headers: apiHeaders() });
     const payload = await response.json();
     settings = { ...settings, ...payload };
     updateChip();
     if (balloon.open) {
       renderProviders();
       renderModels();
+      renderContext();
+      renderLimits();
       renderUsage();
-      renderMemory();
       renderPopFoot();
     }
-    const stats = payload.stats || {};
     const provider = activeProvider();
     const label = provider ? provider.label : "local";
-    meta.textContent = `${label} · ${payload.model} · ${stats.memories ?? 0} memories`;
+    meta.textContent = `${label} · ${payload.model}`;
   } catch (error) {
     meta.textContent = "offline";
   }
@@ -547,6 +666,23 @@ function wireDrag(element) {
 wireDrag(orb);
 wireDrag(dragbar);
 
-loadRenderer().then(() => { setupVoice(); refreshMeta(); });
+// ---- menus ---------------------------------------------------------------
+statusBtn.setAttribute("aria-expanded", "false");
+userBtn.addEventListener("click", openUserMenu);
+userMenu.addEventListener("close", () => userBtn.setAttribute("aria-expanded", "false"));
+
+document.addEventListener("contextmenu", (event) => {
+  if (!native) return; // keep the normal browser menu outside the shell
+  event.preventDefault();
+  contextMenu.items = [
+    { label: "Collapse to avatar", action: () => { applyMode("compact"); native.compact(); } },
+    { label: "Reload window", action: () => location.reload() },
+    { separator: true },
+    { label: "Close wasm-agent", danger: true, action: () => native.quit() },
+  ];
+  contextMenu.openAt(event.clientX, event.clientY);
+});
+
+loadRenderer().then(() => { setupVoice(); refreshMe(); refreshMeta(); });
 watch();
 if (!native) input.focus();

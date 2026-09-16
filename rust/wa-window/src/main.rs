@@ -23,7 +23,7 @@ mod companion {
         event_loop::{ControlFlow, EventLoopBuilder},
         window::{Window, WindowBuilder},
     };
-    use wry::{PageLoadEvent, WebContext, WebView, WebViewBuilder};
+    use wry::{PageLoadEvent, WebContext, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
     const COMPACT: u32 = 88;
     const PANEL_WIDTH: u32 = 430;
@@ -55,6 +55,23 @@ mod companion {
         mode: String,
         topmost: bool,
         next_topmost: Instant,
+    }
+
+    /// Give the window (taskbar, alt-tab) the embedded wasm-agent icon.
+    fn set_window_icon(window: &Window) {
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            LoadIconW, SendMessageW, ICON_BIG, ICON_SMALL, WM_SETICON,
+        };
+        let hwnd = HWND(window.hwnd() as _);
+        unsafe {
+            let Ok(module) = GetModuleHandleW(None) else { return };
+            let Ok(icon) = LoadIconW(Some(module.into()), PCWSTR(1 as *const u16)) else { return };
+            SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_BIG as usize)), Some(LPARAM(icon.0 as isize)));
+            SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_SMALL as usize)), Some(LPARAM(icon.0 as isize)));
+        }
     }
 
     fn data_dir() -> PathBuf {
@@ -295,7 +312,7 @@ mod companion {
             .with_transparent(false)
             .with_always_on_top(true)
             .with_visible(false)
-            .with_skip_taskbar(true)
+            .with_skip_taskbar(false)
             .with_focusable(false)
             .with_resizable(false)
             // No DWM drop shadow: it draws a soft border around the frameless
@@ -303,6 +320,7 @@ mod companion {
             .with_undecorated_shadow(false)
             .build(&event_loop)
             .context("create companion window")?;
+        set_window_icon(&window);
         note("window created");
         // Size the window before the WebView is created so its initial bounds
         // are correct (wry does not resize the controller on its own).
@@ -313,6 +331,8 @@ mod companion {
         let webview = WebViewBuilder::new_with_web_context(&mut web_context)
             .with_url(&url)
             .with_transparent(false)
+            // We draw our own right-click menu in the page.
+            .with_default_context_menus(false)
             .with_initialization_script(bridge_script())
             .with_ipc_handler(move |request| {
                 let _ = ipc_proxy.send_event(UserEvent::Ipc(request.body().clone()));

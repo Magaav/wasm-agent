@@ -74,15 +74,27 @@ Providers are chosen first, models second.
 
 ## 6. Status balloon contents
 
-The status balloon reports more than a token count. Minimum fields:
+The status balloon is about **the model and its budget**, not storage. Required
+sections, in order:
 
-- active provider and model, and the base URL;
-- context-window meter when a limit is known, plus last-turn prompt tokens;
-- token totals: last turn (prompt/completion/total) and session
-  (prompt/completion/total) and turn count;
-- memory: memories, messages, ledger runs, sessions.
+1. **provider** select, **model** select (§5);
+2. **context** — tokens sent on the last turn (`taken`) vs the context budget
+   (`WASM_AGENT_LLM_CONTEXT`), with a meter;
+3. **limits** — the provider's rolling windows: `5h` (`rolling`), `7d`
+   (`weekly`), `30d` (`monthly`), each a percent with a meter and a reset
+   estimate; "limits unavailable" when the provider exposes none;
+4. **tokens** — last turn (in/out/total), session (in/out/total), turn count.
 
-## 7. Component registry
+The base URL and database path belong in the balloon footer line.
+
+## 7. Memory is on demand
+
+Memory is a feature the agent uses when a task calls for it, not a dashboard.
+The UI must not foreground memory: no memory counters in the status balloon, the
+header, or the empty state. Surface memory only inside a turn (a `recall` tool
+chip) or when the user explicitly asks for it.
+
+## 8. Component registry
 
 | Element | Purpose | Key attributes / properties | Events |
 | --- | --- | --- | --- |

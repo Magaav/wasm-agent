@@ -143,6 +143,29 @@ function M.list_models(id)
   return models
 end
 
+-- Rolling usage limits from the provider (`rolling` = 5h, `weekly` = 7d,
+-- `monthly` = 30d), each `{status, percent, resetsAt}`. Cached briefly.
+function M.limits()
+  local provider = M.active()
+  if provider.api_key == "" then return {} end
+  local now = (host and host.now and host.now()) or 0
+  if M._limits and (now - (M._limits_at or 0)) < 30 then return M._limits end
+  local limits = {}
+  pcall(function()
+    local url = provider.base_url:gsub("/+$", "") .. "/usage"
+    local response = json.decode(host.http("GET", url, json.encode(headers_for(provider)), ""))
+    if response and tonumber(response.status) == 200 then
+      local ok, payload = pcall(json.decode, response.body)
+      if ok and type(payload) == "table" and type(payload.usage) == "table" then
+        limits = payload.usage
+      end
+    end
+  end)
+  M._limits = limits
+  M._limits_at = now
+  return limits
+end
+
 -- `stream` forwards content deltas to the UI and still returns the whole
 -- message (content + tool_calls + usage) so the tool loop can continue.
 function M.complete(messages, tools, stream)

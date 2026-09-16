@@ -21,6 +21,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/schema.sql", include_str!("../../../lua/core/schema.sql")),
     ("lua/core/memory.lua", include_str!("../../../lua/core/memory.lua")),
     ("lua/core/tools.lua", include_str!("../../../lua/core/tools.lua")),
+    ("lua/core/users.lua", include_str!("../../../lua/core/users.lua")),
     ("lua/core/provider.lua", include_str!("../../../lua/core/provider.lua")),
     ("lua/core/agent.lua", include_str!("../../../lua/core/agent.lua")),
     ("lua/core/chat.lua", include_str!("../../../lua/core/chat.lua")),
@@ -122,6 +123,7 @@ fn main() {
     lua.register("uuid", host::uuid);
     lua.register("read_file", host::read_file);
     lua.register("write_file", host::write_file);
+    lua.register("exec", host::exec);
     lua.register("http", host::http);
     lua.register("http_stream", host::http_stream);
     lua.register_with_upvalue("plugins", host::plugins, host as *mut c_void);

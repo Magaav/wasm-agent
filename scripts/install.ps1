@@ -90,6 +90,27 @@ try {
   Warn "could not fetch wa-ui.ps1; 'wa ui' will not work until it is present"
 }
 
+Step "creating the desktop icon"
+try {
+  $icon = Join-Path $target "wa.ico"
+  if (-not (Test-Path $icon)) {
+    Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/Magaav/wasm-agent/main/rust/wa-window/assets/wa.ico" -OutFile $icon -ErrorAction Stop
+  }
+  $desktop = [Environment]::GetFolderPath("Desktop")
+  $linkPath = Join-Path $desktop "wasm-agent.lnk"
+  $shell = New-Object -ComObject WScript.Shell
+  $shortcut = $shell.CreateShortcut($linkPath)
+  $shortcut.TargetPath = (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe")
+  $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$uiScript`""
+  $shortcut.WorkingDirectory = $target
+  $shortcut.IconLocation = "$icon,0"
+  $shortcut.Description = "wasm-agent"
+  $shortcut.Save()
+  Ok "desktop icon -> opens the wasm-agent avatar"
+} catch {
+  Warn "could not create the desktop icon"
+}
+
 Step "checking the connection to $HostAlias"
 if (Get-Command ssh -ErrorAction SilentlyContinue) {
   try {

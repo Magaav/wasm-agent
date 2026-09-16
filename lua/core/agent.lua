@@ -31,12 +31,14 @@ function M.usage()
   return M.usage_total
 end
 
-function M.new(session_id, on_event)
+function M.new(session_id, on_event, role, user)
   return setmetatable({
     session_id = session_id or memory.start_session("cli", "interactive chat"),
     messages = { { role = "system", content = SYSTEM } },
     emit = on_event or function() end,
     stream = on_event ~= nil,
+    role = role or "admin",
+    user = user,
   }, M)
 end
 
@@ -52,7 +54,7 @@ function M:turn(text)
   local turn = { prompt = 0, completion = 0, total = 0 }
   for _ = 1, MAX_TOOL_ROUNDS do
     self.emit({ type = "status", text = "model" })
-    local result = provider.complete(self.messages, tools.all(), self.stream)
+    local result = provider.complete(self.messages, tools.all(self.role), self.stream)
     if type(result.usage) == "table" then
       local usage = result.usage
       local prompt = tonumber(usage.prompt_tokens) or 0
@@ -82,7 +84,7 @@ function M:turn(text)
         if ok and type(decoded) == "table" then args = decoded end
       end
       self.emit({ type = "tool", name = function_.name, arguments = args })
-      local ok, output = pcall(tools.dispatch, memory, function_.name, args)
+      local ok, output = pcall(tools.dispatch, memory, function_.name, args, self.role)
       if not ok then output = { error = tostring(output) } end
       self.emit({ type = "tool_result", name = function_.name, result = output })
       self.messages[#self.messages + 1] = {

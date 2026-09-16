@@ -153,6 +153,34 @@ pub extern "C" fn write_file(l: *mut LuaState) -> c_int {
     1
 }
 
+/// host.exec(command, cwd?) -> {code, stdout, stderr} | {error}
+pub extern "C" fn exec(l: *mut LuaState) -> c_int {
+    let command = arg_string(l, 1).unwrap_or_default();
+    let cwd = arg_string(l, 2).unwrap_or_default();
+    let outcome = (|| -> Result<Value, String> {
+        let mut process = if cfg!(target_os = "windows") {
+            let mut command_line = std::process::Command::new("cmd");
+            command_line.arg("/C").arg(&command);
+            command_line
+        } else {
+            let mut shell = std::process::Command::new("sh");
+            shell.arg("-c").arg(&command);
+            shell
+        };
+        if !cwd.is_empty() {
+            process.current_dir(&cwd);
+        }
+        let output = process.output().map_err(|error| error.to_string())?;
+        Ok(json!({
+            "code": output.status.code().unwrap_or(-1),
+            "stdout": String::from_utf8_lossy(&output.stdout),
+            "stderr": String::from_utf8_lossy(&output.stderr),
+        }))
+    })();
+    push_json(l, &outcome.unwrap_or_else(|error| json!({"error": error})));
+    1
+}
+
 /// host.log(message)
 pub extern "C" fn log(l: *mut LuaState) -> c_int {
     if let Some(message) = arg_string(l, 1) {

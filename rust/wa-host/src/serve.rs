@@ -46,7 +46,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::Result<()> {
     let mut data = Vec::new();
     let mut chunk = [0u8; 16384];
-    let (method, path, body) = loop {
+    let (method, path, session, body) = loop {
         let read = stream.read(&mut chunk)?;
         if read == 0 {
             return Ok(());
@@ -58,16 +58,18 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
             let mut request = lines.next().unwrap_or("").split_whitespace();
             let method = request.next().unwrap_or("").to_string();
             let path = request.next().unwrap_or("/").to_string();
-            let length = lines
-                .filter_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("content-length:")
-                        .map(|value| value.trim().parse::<usize>().unwrap_or(0))
-                })
-                .next()
-                .unwrap_or(0);
+            let mut length = 0usize;
+            let mut session = String::new();
+            for line in lines {
+                let lower = line.to_ascii_lowercase();
+                if let Some(value) = lower.strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap_or(0);
+                } else if let Some(value) = lower.strip_prefix("x-wa-session:") {
+                    session = value.trim().to_string();
+                }
+            }
             if data.len() >= end + 4 + length {
-                break (method, path, data[end + 4..end + 4 + length].to_vec());
+                break (method, path, session, data[end + 4..end + 4 + length].to_vec());
             }
         }
         if data.len() > 2_000_000 {
@@ -85,6 +87,31 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
     if path == "/models" {
         let settings = lua.call_string("wa_model", &[]).unwrap_or_else(|_| "{}".into());
         return respond(stream, 200, "application/json", settings.as_bytes());
+    }
+    if path == "/me" {
+        let payload = lua
+            .call_string("wa_me", &[session.as_str()])
+            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
+        return respond(stream, 200, "application/json", payload.as_bytes());
+    }
+    if path == "/users" {
+        let payload = lua
+            .call_string("wa_users", &[])
+            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
+        return respond(stream, 200, "application/json", payload.as_bytes());
+    }
+    if path == "/login" && method == "POST" {
+        let id = String::from_utf8_lossy(&body).trim().to_string();
+        let payload = lua
+            .call_string("wa_login", &[id.as_str(), session.as_str()])
+            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
+        return respond(stream, 200, "application/json", payload.as_bytes());
+    }
+    if path == "/logout" && method == "POST" {
+        let payload = lua
+            .call_string("wa_logout", &[session.as_str()])
+            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
+        return respond(stream, 200, "application/json", payload.as_bytes());
     }
     if path == "/provider" && method == "POST" {
         let id = String::from_utf8_lossy(&body).trim().to_string();
@@ -115,7 +142,7 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
                     *guard = Some(clone);
                 }
             }
-            if let Err(error) = lua.call_string("wa_reply_stream", &[text.as_str()]) {
+            if let Err(error) = lua.call_string("wa_reply_stream", &[text.as_str(), session.as_str()]) {
                 write_event(&format!("{{\"type\":\"error\",\"error\":{}}}", json_escape(&error)));
             }
             write_event("{\"type\":\"done\"}");
@@ -125,7 +152,7 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
             return Ok(());
         }
         let reply = lua
-            .call_string("wa_reply", &[text.as_str()])
+            .call_string("wa_reply", &[text.as_str(), session.as_str()])
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", reply.as_bytes());
     }

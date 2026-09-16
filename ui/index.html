@@ -52,6 +52,10 @@
       </div>
       <div class="composer-footer">
         <div class="footer-left">
+          <button id="user-btn" class="chip user-chip" type="button" title="Account" aria-haspopup="true">
+            <span class="user-avatar" id="user-avatar">?</span>
+            <span id="user-name">…</span>
+          </button>
           <button id="status-btn" class="chip" type="button" title="Provider, model and usage" aria-haspopup="true" aria-expanded="false">
             <span class="chip-dot"></span>
             <span id="chip-model">connecting…</span>
@@ -76,14 +80,19 @@
           <label class="pop-head" for="model-select">model</label>
           <select id="model-select" class="wa-select"></select>
         </div>
-        <div class="pop-head">usage</div>
+        <div class="pop-head">context</div>
+        <div id="context-box" class="usage-box"></div>
+        <div class="pop-head">limits</div>
+        <div id="limits-box" class="usage-box"></div>
+        <div class="pop-head">tokens</div>
         <div id="usage-box" class="usage-box"></div>
-        <div class="pop-head">memory</div>
-        <div id="memory-box" class="usage-box"></div>
         <div class="pop-foot" id="pop-foot"></div>
       </wa-balloon>
     </form>
   </div>
+
+  <wa-menu id="user-menu"></wa-menu>
+  <wa-menu id="context-menu"></wa-menu>
 
   <script src="components.js"></script>
   <script src="app.js"></script>

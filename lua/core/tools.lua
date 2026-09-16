@@ -1,82 +1,161 @@
--- Tools exposed to the head model: built-in memory tools plus WASM plugins.
+-- Tools exposed to the head model. Access is gated by the caller's role:
+-- admins get everything; guests get on-demand memory plus "spells".
 local json = dofile("lua/vendor/json.lua")
 local M = {}
 
-M.builtin = {
-  { type = "function", ["function"] = {
-      name = "remember",
-      description = "Store a fact the user asked you to remember, so it can be recalled later.",
-      parameters = { type = "object", properties = {
-        content = { type = "string", description = "The fact to remember, in full." },
-        scope = { type = "string", description = "Optional scope, e.g. global or a conversation id." },
-        tags = { type = "array", items = { type = "string" } } },
-        required = { "content" } } } },
-  { type = "function", ["function"] = {
-      name = "recall",
-      description = "Search remembered facts (the memories store).",
-      parameters = { type = "object", properties = {
-        query = { type = "string" },
-        scope = { type = "string" },
-        limit = { type = "integer", minimum = 1, maximum = 50 } },
-        required = { "query" } } } },
-  { type = "function", ["function"] = {
-      name = "search_messages",
-      description = "Search the message ledger (WhatsApp/chat history) for literal text.",
-      parameters = { type = "object", properties = {
-        query = { type = "string" },
-        conversation_id = { type = "string" },
-        limit = { type = "integer", minimum = 1, maximum = 50 } },
-        required = { "query" } } } },
-  { type = "function", ["function"] = {
-      name = "conversation",
-      description = "Read the most recent messages of one conversation, oldest first.",
-      parameters = { type = "object", properties = {
-        conversation_id = { type = "string" },
-        limit = { type = "integer", minimum = 1, maximum = 200 } },
-        required = { "conversation_id" } } } },
-  { type = "function", ["function"] = {
-      name = "list_conversations",
-      description = "List conversations known to the ledger, most recently active first.",
-      parameters = { type = "object", properties = {
-        limit = { type = "integer", minimum = 1, maximum = 200 } } } } },
+local function schema(name, description, properties, required)
+  return { type = "function", ["function"] = {
+    name = name, description = description,
+    parameters = { type = "object", properties = properties or {}, required = required } } }
+end
+
+-- Available to everyone.
+M.shared = {
+  schema("remember", "Store a fact the user asked you to remember, so it can be recalled later.", {
+    content = { type = "string", description = "The fact to remember, in full." },
+    scope = { type = "string", description = "Optional scope, e.g. global or a conversation id." },
+    tags = { type = "array", items = { type = "string" } } }, { "content" }),
+  schema("recall", "Search remembered facts (the memories store).", {
+    query = { type = "string" },
+    scope = { type = "string" },
+    limit = { type = "integer", minimum = 1, maximum = 50 } }, { "query" }),
+  schema("spells", "List the extra capabilities available to this account.", {}),
+}
+
+-- Admin only: the ledger and the pi-style environment tools.
+M.admin = {
+  schema("search_messages", "Search the message ledger (WhatsApp/chat history) for literal text.", {
+    query = { type = "string" },
+    conversation_id = { type = "string" },
+    limit = { type = "integer", minimum = 1, maximum = 50 } }, { "query" }),
+  schema("conversation", "Read the most recent messages of one conversation, oldest first.", {
+    conversation_id = { type = "string" },
+    limit = { type = "integer", minimum = 1, maximum = 200 } }, { "conversation_id" }),
+  schema("list_conversations", "List conversations known to the ledger, most recently active first.", {
+    limit = { type = "integer", minimum = 1, maximum = 200 } }),
+  schema("bash", "Run a shell command and return stdout, stderr and the exit code.", {
+    command = { type = "string" }, cwd = { type = "string" } }, { "command" }),
+  schema("read", "Read a text file, optionally a line range.", {
+    path = { type = "string" },
+    offset = { type = "integer", minimum = 1 },
+    limit = { type = "integer", minimum = 1, maximum = 2000 } }, { "path" }),
+  schema("write", "Create or overwrite a text file with the given content.", {
+    path = { type = "string" }, content = { type = "string" } }, { "path", "content" }),
+  schema("edit", "Replace the first exact occurrence of old_text with new_text in a file.", {
+    path = { type = "string" },
+    old_text = { type = "string" },
+    new_text = { type = "string" } }, { "path", "old_text", "new_text" }),
+  schema("ls", "List a directory.", { path = { type = "string" } }),
+  schema("grep", "Search files for a pattern and return matching lines.", {
+    pattern = { type = "string" }, path = { type = "string" } }, { "pattern" }),
 }
 
 local function wasm_plugins()
   local ok, raw = pcall(host.plugins)
   if not ok or not raw then return {} end
-  local decoded = json.decode(raw)
-  return decoded or {}
+  return json.decode(raw) or {}
 end
 
--- Built-in schemas plus every WASM plugin's declared tool.
-function M.all()
+local function admin_names()
+  local names = {}
+  for _, item in ipairs(M.admin) do names[item["function"].name] = true end
+  return names
+end
+
+-- Tool schemas for a role.
+function M.all(role)
+  role = role or "admin"
   local list = {}
-  for _, schema in ipairs(M.builtin) do list[#list + 1] = schema end
-  for _, plugin in ipairs(wasm_plugins()) do
-    list[#list + 1] = { type = "function", ["function"] = {
-      name = plugin.name,
-      description = plugin.description or "",
-      parameters = plugin.parameters or { type = "object" } } }
+  for _, item in ipairs(M.shared) do list[#list + 1] = item end
+  if role == "admin" then
+    for _, item in ipairs(M.admin) do list[#list + 1] = item end
+    for _, plugin in ipairs(wasm_plugins()) do
+      list[#list + 1] = schema(plugin.name, plugin.description or "", plugin.parameters and plugin.parameters.properties, plugin.parameters and plugin.parameters.required)
+    end
   end
   return list
 end
 
-function M.dispatch(memory, name, args)
+local function shell_quote(value)
+  return "'" .. tostring(value or ""):gsub("'", "'\\''") .. "'"
+end
+
+local function run(command)
+  local ok, raw = pcall(host.exec, command, "")
+  if not ok then return { error = tostring(raw) } end
+  local decoded = json.decode(raw)
+  if type(decoded) ~= "table" then return { error = tostring(raw) } end
+  return decoded
+end
+
+local function read_lines(path, offset, limit)
+  local text = host.read_file and host.read_file(path)
+  if not text then return nil end
+  if not offset and not limit then return text end
+  local lines = {}
+  for line in (text .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  local from = offset or 1
+  local to = limit and (from + limit - 1) or #lines
+  local slice = {}
+  for index = from, math.min(to, #lines) do slice[#slice + 1] = string.format("%6d\t%s", index, lines[index]) end
+  return table.concat(slice, "\n")
+end
+
+function M.dispatch(memory, name, args, role)
   args = args or {}
+  role = role or "admin"
+  if role ~= "admin" and admin_names()[name] then return { error = "forbidden_for_role:" .. role } end
+
   if name == "remember" then
     if not args.content or args.content == "" then return { error = "content_required" } end
-    local id = memory.remember(args.content, args.scope or "global", args.tags or {})
-    return { ok = true, id = id }
+    return { ok = true, id = memory.remember(args.content, args.scope or "global", args.tags or {}) }
   elseif name == "recall" then
     return memory.recall(args.query or "", args.limit or 10, args.scope)
+  elseif name == "spells" then
+    local spells = { "remember", "recall" }
+    if role == "admin" then
+      for _, extra in ipairs({ "bash", "read", "write", "edit", "ls", "grep", "client" }) do
+        spells[#spells + 1] = extra
+      end
+    end
+    return { role = role, spells = spells, note = "ask an admin to unlock more" }
   elseif name == "search_messages" then
     return memory.search_messages(args.query or "", args.conversation_id, args.limit or 20)
   elseif name == "conversation" then
     return memory.conversation(args.conversation_id or "", args.limit or 50)
   elseif name == "list_conversations" then
     return memory.conversations(args.limit or 50)
+  elseif name == "bash" then
+    if not args.command or args.command == "" then return { error = "command_required" } end
+    local result = run(args.cwd and ("cd " .. shell_quote(args.cwd) .. " && " .. args.command) or args.command)
+    if result.stdout and #result.stdout > 8000 then result.stdout = result.stdout:sub(1, 8000) .. "\n…(truncated)" end
+    if result.stderr and #result.stderr > 4000 then result.stderr = result.stderr:sub(1, 4000) .. "\n…(truncated)" end
+    return result
+  elseif name == "read" then
+    local content = read_lines(args.path, args.offset, args.limit)
+    if not content then return { error = "not_found" } end
+    if #content > 20000 then content = content:sub(1, 20000) .. "\n…(truncated)" end
+    return { path = args.path, content = content }
+  elseif name == "write" then
+    if not args.path then return { error = "path_required" } end
+    local ok = host.write_file and host.write_file(args.path, args.content or "")
+    return { ok = ok and true or false, path = args.path }
+  elseif name == "edit" then
+    local text = host.read_file and host.read_file(args.path)
+    if not text then return { error = "not_found" } end
+    local from, to = text:find(args.old_text or "", 1, true)
+    if not from then return { error = "old_text_not_found" } end
+    local updated = text:sub(1, from - 1) .. (args.new_text or "") .. text:sub(to + 1)
+    host.write_file(args.path, updated)
+    return { ok = true, path = args.path }
+  elseif name == "ls" then
+    return run("ls -la -- " .. shell_quote(args.path or "."))
+  elseif name == "grep" then
+    return run("grep -rn -- " .. shell_quote(args.pattern or "") .. " " .. shell_quote(args.path or "."))
   end
-  -- Fall back to a WASM plugin. Unknown tools surface as a typed error.
+
+  -- Fall back to a WASM plugin (admin only; guests never see their schemas).
+  if role ~= "admin" then return { error = "unknown_tool:" .. tostring(name) } end
   local ok, result = pcall(host.invoke, name, json.encode(args))
   if not ok then return { error = tostring(result) } end
   local decoded = json.decode(result)
