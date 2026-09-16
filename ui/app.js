@@ -42,7 +42,10 @@ const spellsNote = document.getElementById("spells-note");
 const toolsBox = document.getElementById("tools-box");
 const control = document.getElementById("control");
 const controlTitle = document.getElementById("control-title");
-const controlImg = document.getElementById("control-img");
+const controlCanvas = document.getElementById("control-canvas");
+const controlCtx = controlCanvas.getContext("2d");
+const controlMax = document.getElementById("control-max");
+const controlHint = document.getElementById("control-hint");
 const controlLive = document.getElementById("control-live");
 const controlRefresh = document.getElementById("control-refresh");
 const controlClose = document.getElementById("control-close");
@@ -696,8 +699,13 @@ const dragbar = document.getElementById("dragbar");
 function applyMode(mode) {
   document.body.classList.toggle("compact", mode === "compact");
   document.body.classList.toggle("expanded", mode === "expanded");
+  try { localStorage.setItem("wa-mode", mode); } catch (error) { /* private mode */ }
 }
-applyMode(native ? "compact" : "expanded");
+// Keep the page and the window in step across hot reloads: restore the last mode
+// and ask the shell to size itself to match.
+const initialMode = native ? (localStorage.getItem("wa-mode") || "compact") : "expanded";
+applyMode(initialMode);
+if (native && initialMode === "expanded") requestAnimationFrame(() => native.expand());
 
 orb?.addEventListener("click", () => {
   applyMode("expanded");
@@ -727,7 +735,16 @@ wireDrag(dragbar);
 
 // ---- nodes + remote control ---------------------------------------------
 let controlTimer = null;
-let controlScale = 1;
+let controlPending = false;
+let controlCanvasSize = { w: 0, h: 0 };
+let controlScreen = { w: 0, h: 0 };
+
+function b64ToBytes(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
 
 async function clientAction(payload) {
   const response = await fetch("client", {
@@ -777,15 +794,46 @@ async function refreshNodes() {
   } catch (error) { /* leave the panel as-is */ }
 }
 
-async function fetchFrame() {
+async function drawTile(tile) {
+  try {
+    const blob = new Blob([b64ToBytes(tile.image)], { type: "image/bmp" });
+    const bitmap = await createImageBitmap(blob);
+    controlCtx.drawImage(bitmap, tile.x, tile.y, tile.w, tile.h);
+    bitmap.close();
+  } catch (error) { /* skip a bad tile */ }
+}
+
+async function fetchFrame(full) {
+  if (controlPending) return;
+  controlPending = true;
   try {
     const payload = await (await fetch("frame", {
-      method: "POST", headers: apiHeaders({ "Content-Type": "text/plain" }), body: "720",
+      method: "POST",
+      headers: apiHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ max_width: 800, full: !!full }),
     })).json();
-    if (payload.error || !payload.image) return;
-    controlScale = payload.scale || 1;
-    controlImg.src = "data:image/bmp;base64," + payload.image;
-  } catch (error) { /* ignore */ }
+    if (payload.error) {
+      controlHint.textContent = payload.error;
+      return;
+    }
+    controlScreen = { w: payload.screen_width, h: payload.screen_height };
+    if (payload.full || controlCanvasSize.w !== payload.width || controlCanvasSize.h !== payload.height) {
+      controlCanvas.width = payload.width;
+      controlCanvas.height = payload.height;
+      controlCanvasSize = { w: payload.width, h: payload.height };
+    }
+    controlHint.textContent = `${payload.width}×${payload.height} · ${payload.tiles.length} tile${payload.tiles.length === 1 ? "" : "s"}`;
+    for (const tile of payload.tiles) await drawTile(tile);
+  } catch (error) {
+    controlHint.textContent = String(error);
+  } finally {
+    controlPending = false;
+  }
+}
+
+function startLive() {
+  if (controlTimer) clearInterval(controlTimer);
+  controlTimer = setInterval(() => fetchFrame(false), 150);
 }
 
 function openControl(name) {
@@ -793,20 +841,22 @@ function openControl(name) {
   document.body.classList.add("control");
   control.hidden = false;
   controlTitle.textContent = "control · " + name;
-  fetchFrame();
+  controlCanvasSize = { w: 0, h: 0 };
+  fetchFrame(true).then(() => { if (controlLive.checked) startLive(); });
 }
 
 function closeControl() {
   document.body.classList.remove("control");
   control.hidden = true;
-  controlLive.checked = false;
+  control.classList.remove("maximized");
   if (controlTimer) { clearInterval(controlTimer); controlTimer = null; }
 }
 
-controlImg.addEventListener("click", (event) => {
-  const rect = controlImg.getBoundingClientRect();
-  const x = Math.round((event.clientX - rect.left) / controlScale);
-  const y = Math.round((event.clientY - rect.top) / controlScale);
+controlCanvas.addEventListener("click", (event) => {
+  const rect = controlCanvas.getBoundingClientRect();
+  if (!rect.width || !controlScreen.w) return;
+  const x = Math.round(((event.clientX - rect.left) / rect.width) * controlScreen.w);
+  const y = Math.round(((event.clientY - rect.top) / rect.height) * controlScreen.h);
   clientAction({ action: "click", x, y });
 });
 controlKeys.addEventListener("submit", (event) => {
@@ -816,11 +866,12 @@ controlKeys.addEventListener("submit", (event) => {
   controlText.value = "";
   clientAction({ action: "type", text });
 });
-controlRefresh.addEventListener("click", fetchFrame);
+controlMax.addEventListener("click", () => control.classList.toggle("maximized"));
+controlRefresh.addEventListener("click", () => fetchFrame(true));
 controlClose.addEventListener("click", closeControl);
 controlLive.addEventListener("change", () => {
-  if (controlTimer) { clearInterval(controlTimer); controlTimer = null; }
-  if (controlLive.checked) controlTimer = setInterval(fetchFrame, 1500);
+  if (controlLive.checked) startLive();
+  else if (controlTimer) { clearInterval(controlTimer); controlTimer = null; }
 });
 
 // ---- engine: nodes / spells / tools --------------------------------------

@@ -217,9 +217,9 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
         return respond(stream, 200, "application/json", payload.as_bytes());
     }
     if route == "/frame" && method == "POST" {
-        let width = String::from_utf8_lossy(&body).trim().to_string();
+        let frame_request = String::from_utf8_lossy(&body).trim().to_string();
         let payload = lua
-            .call_string("wa_frame", &[width.as_str(), session.as_str()])
+            .call_string("wa_frame", &[frame_request.as_str(), session.as_str()])
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", payload.as_bytes());
     }

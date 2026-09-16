@@ -319,15 +319,29 @@ fn screenshot() -> Value {
     json!({"ok": true, "path": path.to_string_lossy(), "width": width, "height": height})
 }
 
-/// A downscaled frame as a base64 BMP, for the remote-control view.
+struct CachedFrame {
+    width: i32,
+    height: i32,
+    pixels: Vec<u8>,
+}
+
+/// Last frame we sent, so we can send only what changed.
+static FRAME_CACHE: std::sync::Mutex<Option<CachedFrame>> = std::sync::Mutex::new(None);
+
+const TILE: i32 = 64;
+
+/// A live frame for the control view. Returns tiles: the first call is a full
+/// frame, later calls carry only the 64x64 tiles that changed, which is what
+/// makes it usable in real time instead of shipping whole screenshots.
 fn frame(args: &Value) -> Value {
     let Some((width, height, pixels)) = capture_screen() else {
         return json!({"error": "capture_failed"});
     };
-    let max_width = args["max_width"].as_i64().unwrap_or(720).clamp(160, 1920) as i32;
+    let max_width = args["max_width"].as_i64().unwrap_or(800).clamp(160, 1920) as i32;
     let scale = (max_width as f64 / width as f64).min(1.0);
     let out_w = ((width as f64 * scale).round() as i32).max(1);
     let out_h = ((height as f64 * scale).round() as i32).max(1);
+
     let mut out = vec![0u8; (out_w * out_h * 4) as usize];
     for y in 0..out_h {
         let sy = ((y as f64 / scale) as i32).min(height - 1);
@@ -338,6 +352,38 @@ fn frame(args: &Value) -> Value {
             out[dst..dst + 4].copy_from_slice(&pixels[src..src + 4]);
         }
     }
+
+    let mut tiles: Vec<Value> = Vec::new();
+    let mut guard = match FRAME_CACHE.lock() {
+        Ok(guard) => guard,
+        Err(_) => return json!({"error": "frame_lock"}),
+    };
+    let previous = guard.take();
+    let same_size = previous
+        .as_ref()
+        .map(|cached| cached.width == out_w && cached.height == out_h)
+        .unwrap_or(false);
+    let full = args["full"].as_bool().unwrap_or(false) || !same_size;
+
+    if full {
+        tiles.push(tile_json(0, 0, out_w, out_h, out_w, &out));
+    } else if let Some(cached) = previous.as_ref() {
+        let mut y = 0;
+        while y < out_h {
+            let mut x = 0;
+            while x < out_w {
+                let w = TILE.min(out_w - x);
+                let h = TILE.min(out_h - y);
+                if region_differs(&out, out_w, &cached.pixels, x, y, w, h) {
+                    tiles.push(tile_json(x, y, w, h, out_w, &out));
+                }
+                x += TILE;
+            }
+            y += TILE;
+        }
+    }
+    *guard = Some(CachedFrame { width: out_w, height: out_h, pixels: out });
+
     json!({
         "ok": true,
         "width": out_w,
@@ -345,8 +391,34 @@ fn frame(args: &Value) -> Value {
         "screen_width": width,
         "screen_height": height,
         "scale": scale,
-        "mime": "image/bmp",
-        "image": base64(&bmp_bytes(out_w, out_h, &out))
+        "full": full,
+        "tiles": tiles
+    })
+}
+
+fn region_differs(frame: &[u8], stride_px: i32, other: &[u8], x: i32, y: i32, w: i32, h: i32) -> bool {
+    for row in 0..h {
+        let start = (((y + row) * stride_px + x) * 4) as usize;
+        let end = start + (w * 4) as usize;
+        if frame.get(start..end) != other.get(start..end) {
+            return true;
+        }
+    }
+    false
+}
+
+fn tile_json(x: i32, y: i32, w: i32, h: i32, stride_px: i32, frame: &[u8]) -> Value {
+    let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+    for row in 0..h {
+        let start = (((y + row) * stride_px + x) * 4) as usize;
+        pixels.extend_from_slice(&frame[start..start + (w * 4) as usize]);
+    }
+    json!({
+        "x": x,
+        "y": y,
+        "w": w,
+        "h": h,
+        "image": base64(&bmp_bytes(w, h, &pixels))
     })
 }
 

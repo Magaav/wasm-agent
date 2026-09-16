@@ -218,12 +218,20 @@ function wa_client(payload, session)
 end
 
 -- One downscaled screen frame from the client, for the control view.
-function wa_frame(max_width, session)
+function wa_frame(request, session)
   local user = require_master(session)
   if not user then return json.encode({ error = "forbidden" }) end
-  return json.encode(toolslib.dispatch(memory, "client", {
-    action = "frame", max_width = tonumber(max_width) or 720,
-  }, user.role))
+  local args = { action = "frame", max_width = 800, full = false }
+  if type(request) == "string" and request:sub(1, 1) == "{" then
+    local ok, decoded = pcall(json.decode, request)
+    if ok and type(decoded) == "table" then
+      args.max_width = tonumber(decoded.max_width) or args.max_width
+      args.full = decoded.full and true or false
+    end
+  else
+    args.max_width = tonumber(request) or args.max_width
+  end
+  return json.encode(toolslib.dispatch(memory, "client", args, user.role))
 end
 
 -- The exact envelope object sent to the model, at full depth.
