@@ -23,8 +23,10 @@
 local json = dofile("lua/vendor/json.lua")
 local M = {}
 
+local state = dofile("lua/core/state.lua")
+
 local function path()
-  return (os.getenv("HOME") or ".") .. "/.wasm-agent/spells.json"
+  return state.path("spells.json")
 end
 
 local function trim(value)
@@ -32,7 +34,7 @@ local function trim(value)
 end
 
 local function load()
-  local text = host.read_file and host.read_file(path())
+  local text = state.read("spells.json")
   if text and text ~= "" then
     local ok, decoded = pcall(json.decode, text)
     if ok and type(decoded) == "table" and type(decoded.spells) == "table" then

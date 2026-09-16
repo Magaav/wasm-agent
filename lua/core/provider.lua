@@ -8,19 +8,19 @@ local M = {}
 local function env(name) return os.getenv(name) end
 local function trim(value) return (value or ""):gsub("^%s+", ""):gsub("%s+$", "") end
 
+local state = dofile("lua/core/state.lua")
+
 local function state_path(name)
-  return (os.getenv("HOME") or ".") .. "/.wasm-agent/" .. name
+  return state.path(name)
 end
 
 local function read_state(name)
   if not (host and host.read_file) then return nil end
-  local value = trim(host.read_file(state_path(name)))
-  if value == "" then return nil end
-  return value
+  return state.read(name)
 end
 
 local function write_state(name, value)
-  if host and host.write_file then host.write_file(state_path(name), value) end
+  state.write(name, value)
 end
 
 -- Provider profiles. Add one here and it appears in the UI automatically.

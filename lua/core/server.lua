@@ -24,7 +24,20 @@ local function agent_for(session)
   return agent
 end
 
-function wa_reply(text, session)
+-- Is this selector a remote peer?
+local function remote_target(node)
+  if not node or node == "" or node == "local" then return nil end
+  local target = nodeslib.find(node)
+  if target and not target.local_node then return target end
+  return nil
+end
+
+function wa_reply(text, session, node)
+  if remote_target(node) then
+    local result = nodeslib.remote_call(node, "chat", { text = text or "" })
+    if result and result.error then return json.encode({ error = tostring(result.error) }) end
+    return json.encode({ reply = result and result.reply or "" })
+  end
   local bot = agent_for(session)
   local ok, reply = pcall(bot.turn, bot, text or "")
   if not ok then return json.encode({ error = tostring(reply) }) end
@@ -32,7 +45,13 @@ function wa_reply(text, session)
 end
 
 -- Streaming turn: events are pushed to the SSE client as the agent runs.
-function wa_reply_stream(text, session)
+-- When a peer is selected, its stream is relayed here unchanged.
+function wa_reply_stream(text, session, node)
+  if remote_target(node) then
+    local result = nodeslib.remote_chat(node, text or "")
+    if result and result.error then emit({ type = "error", error = tostring(result.error) }) end
+    return ""
+  end
   local bot = agent_for(session)
   local ok, reply = pcall(bot.turn, bot, text or "")
   if not ok then emit({ type = "error", error = tostring(reply) }) end
@@ -124,23 +143,69 @@ function wa_nodes(session)
 end
 
 -- Accept a signed capability call from a peer (see nodes.lua for the caller).
+-- A peer must be a rendezvous-known master with a valid, fresh signature.
+local function verify_peer(from, public_key, ts, signature, action)
+  if not from or from == "" then return nil, "bad_request" end
+  local message = table.concat({ action, from, tostring(math.floor(tonumber(ts) or 0)) }, "|")
+  if not host.verify(public_key or "", message, signature or "") then return nil, "bad_signature" end
+  if math.abs(host.now() - (tonumber(ts) or 0)) > 120 then return nil, "stale_request" end
+  local caller = nodeslib.verify_caller(from, public_key)
+  if not caller then return nil, "unknown_caller" end
+  if users.normalize(caller.role) ~= "master" then return nil, "forbidden_role" end
+  return caller
+end
+
+-- A turn requested by a peer runs as master.
+local node_agent_instance
+local function node_agent()
+  if not node_agent_instance then
+    node_agent_instance = agentlib.new(nil, emit, "master", "node")
+  end
+  return node_agent_instance
+end
+
+-- Capabilities a peer may invoke, in addition to the normal tools.
+local function node_capability(capability, args)
+  args = args or {}
+  if capability == "status" then
+    return json.decode(wa_model("", ""))
+  elseif capability == "set_provider" then
+    provider.set_provider(args.id or "")
+    return json.decode(wa_model("", ""))
+  elseif capability == "set_model" then
+    provider.set_model(args.name or "")
+    return json.decode(wa_model("", ""))
+  elseif capability == "chat" then
+    local bot = node_agent()
+    local ok, reply = pcall(bot.turn, bot, args.text or "")
+    if not ok then return { error = tostring(reply) } end
+    return { reply = reply }
+  end
+  return toolslib.dispatch(memory, capability, args, "master")
+end
+
 function wa_node_call(payload)
   local ok, request = pcall(json.decode, payload)
   if not ok or type(request) ~= "table" then return json.encode({ error = "bad_request" }) end
-  local from = request.from_node_id or ""
   local capability = request.capability or ""
-  local ts = math.floor(tonumber(request.ts) or 0)
-  if from == "" or capability == "" then return json.encode({ error = "bad_request" }) end
-  local message = table.concat({ "call", from, tostring(ts), capability }, "|")
-  if not host.verify(request.public_key or "", message, request.signature or "") then
-    return json.encode({ error = "bad_signature" })
-  end
-  if math.abs(host.now() - ts) > 120 then return json.encode({ error = "stale_request" }) end
-  local caller = nodeslib.verify_caller(from, request.public_key)
-  if not caller then return json.encode({ error = "unknown_caller" }) end
-  if users.normalize(caller.role) ~= "master" then return json.encode({ error = "forbidden_role" }) end
+  if capability == "" then return json.encode({ error = "bad_request" }) end
   if capability == "remote" then return json.encode({ error = "remote_cannot_recurse" }) end
-  return json.encode(toolslib.dispatch(memory, capability, request.args or {}, "master"))
+  local _, problem = verify_peer(request.from_node_id, request.public_key, request.ts, request.signature, "call")
+  if problem then return json.encode({ error = problem }) end
+  return json.encode(node_capability(capability, request.args))
+end
+
+-- Streaming turn requested by a peer (/node/chat): events go to that stream.
+function wa_node_chat(from, public_key, ts, signature, text)
+  local _, problem = verify_peer(from, public_key, ts, signature, "chat")
+  if problem then
+    emit({ type = "error", error = problem })
+    return ""
+  end
+  local bot = node_agent()
+  local ok, reply = pcall(bot.turn, bot, text or "")
+  if not ok then emit({ type = "error", error = tostring(reply) }) end
+  return ""
 end
 
 -- Generic client action from the UI (control view: click/type/key).
@@ -210,7 +275,12 @@ function wa_users()
 end
 
 -- ---- model + provider ----------------------------------------------------
-function wa_model()
+function wa_model(node, session)
+  if remote_target(node) then
+    local result = nodeslib.remote_call(node, "status", {})
+    if result and not result.error then return json.encode(result) end
+    return json.encode({ error = (result and result.error) or "remote_error", node = node })
+  end
   local settings = provider.settings()
   local providers = {}
   for _, item in ipairs(provider.providers()) do
@@ -238,14 +308,24 @@ function wa_model()
 end
 
 -- Switch provider/model at runtime; returns the refreshed settings payload.
-function wa_set_provider(id)
+function wa_set_provider(id, node, session)
+  if remote_target(node) then
+    local result = nodeslib.remote_call(node, "set_provider", { id = id or "" })
+    if result and not result.error then return json.encode(result) end
+    return json.encode({ error = (result and result.error) or "remote_error" })
+  end
   provider.set_provider(id or "")
   if agent then agent.model = provider.settings().model end
-  return wa_model()
+  return wa_model("", session)
 end
 
-function wa_set_model(name)
+function wa_set_model(name, node, session)
+  if remote_target(node) then
+    local result = nodeslib.remote_call(node, "set_model", { name = name or "" })
+    if result and not result.error then return json.encode(result) end
+    return json.encode({ error = (result and result.error) or "remote_error" })
+  end
   provider.set_model(name or "")
   if agent then agent.model = provider.settings().model end
-  return wa_model()
+  return wa_model("", session)
 end

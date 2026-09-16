@@ -8,6 +8,7 @@ const statusBtn = document.getElementById("status-btn");
 const chipModel = document.getElementById("chip-model");
 const chipUsage = document.getElementById("chip-usage");
 const balloon = document.getElementById("status-balloon");
+const nodeSelect = document.getElementById("node-select");
 const providerSelect = document.getElementById("provider-select");
 const modelSelect = document.getElementById("model-select");
 const contextBox = document.getElementById("context-box");
@@ -59,11 +60,18 @@ let attachments = [];
 let settings = { provider: "", model: "", providers: [], usage: {}, stats: {}, configured: false, base_url: "" };
 let session = localStorage.getItem("wa-session") || "";
 let me = { user: null, role: "guest", tools: [] };
+let activeNode = localStorage.getItem("wa-node") || "";
+let nodeList = [];
 
 function apiHeaders(extra) {
   const headers = Object.assign({}, extra || {});
   if (session) headers["X-WA-Session"] = session;
+  if (activeNode) headers["X-WA-Node"] = activeNode;
   return headers;
+}
+
+function nodeQuery() {
+  return activeNode ? "?node=" + encodeURIComponent(activeNode) : "";
 }
 let recognizing = false;
 let recognition = null;
@@ -292,6 +300,22 @@ function updateChip() {
   chipUsage.textContent = total ? formatTokens(total) + " tok" : "";
 }
 
+function renderNodeSelect() {
+  const previous = nodeSelect.value;
+  nodeSelect.replaceChildren();
+  for (const node of nodeList) {
+    const option = document.createElement("option");
+    option.value = node.name;
+    option.textContent = `${node.name} · ${node.kind}${node.online ? "" : " (offline)"}`;
+    if (node.name === (activeNode || previous)) option.selected = true;
+    nodeSelect.append(option);
+  }
+  if (!activeNode && nodeList.length && !nodeSelect.value) {
+    const local = nodeList.find((node) => node.local_node && node.kind === "host") || nodeList[0];
+    if (local) nodeSelect.value = local.name;
+  }
+}
+
 function renderProviders() {
   providerSelect.replaceChildren();
   for (const provider of settings.providers || []) {
@@ -490,6 +514,7 @@ statusBtn.addEventListener("click", () => {
   balloon.toggle();
   statusBtn.setAttribute("aria-expanded", String(balloon.open));
   if (balloon.open) {
+    refreshNodes();
     renderProviders();
     renderModels();
     renderContext();
@@ -501,6 +526,15 @@ statusBtn.addEventListener("click", () => {
 balloon.addEventListener("close", () => statusBtn.setAttribute("aria-expanded", "false"));
 providerSelect.addEventListener("change", () => setProvider(providerSelect.value));
 modelSelect.addEventListener("change", () => setModel(modelSelect.value));
+nodeSelect.addEventListener("change", async () => {
+  const value = nodeSelect.value;
+  const local = nodeList.find((node) => node.name === value && node.local_node && node.kind === "host");
+  activeNode = local ? "" : value;
+  localStorage.setItem("wa-node", activeNode);
+  await refreshMeta();
+  renderProviders();
+  renderModels();
+});
 
 // ---- voice input ---------------------------------------------------------
 function setupVoice() {
@@ -621,7 +655,7 @@ async function openUserMenu() {
 
 async function refreshMeta() {
   try {
-    const response = await fetch("models", { headers: apiHeaders() });
+    const response = await fetch("models" + nodeQuery(), { headers: apiHeaders() });
     const payload = await response.json();
     settings = { ...settings, ...payload };
     updateChip();
@@ -635,7 +669,8 @@ async function refreshMeta() {
     }
     const provider = activeProvider();
     const label = provider ? provider.label : "local";
-    meta.textContent = `${label} · ${payload.model}`;
+    const where = activeNode || "local";
+    meta.textContent = `${where} · ${label} · ${payload.model}`;
   } catch (error) {
     meta.textContent = "offline";
   }
@@ -714,6 +749,8 @@ function nodeButton(label, handler) {
 async function refreshNodes() {
   try {
     const payload = await (await fetch("nodes", { headers: apiHeaders() })).json();
+    nodeList = payload.nodes || [];
+    renderNodeSelect();
     nodesBinding.textContent = payload.binding || "";
     nodesBox.replaceChildren();
     for (const node of payload.nodes || []) {

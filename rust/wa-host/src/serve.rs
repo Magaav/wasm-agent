@@ -43,10 +43,27 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|window| window == needle)
 }
 
+fn header_of(headers: &[(String, String)], name: &str) -> String {
+    headers
+        .iter()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default()
+}
+
+fn query_value(query: &str, key: &str) -> String {
+    let prefix = format!("{key}=");
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix(prefix.as_str()))
+        .map(|value| value.to_string())
+        .unwrap_or_default()
+}
+
 fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::Result<()> {
     let mut data = Vec::new();
     let mut chunk = [0u8; 16384];
-    let (method, path, session, body) = loop {
+    let (method, path, session, node_headers, body) = loop {
         let read = stream.read(&mut chunk)?;
         if read == 0 {
             return Ok(());
@@ -60,16 +77,21 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
             let path = request.next().unwrap_or("/").to_string();
             let mut length = 0usize;
             let mut session = String::new();
+            let mut node_headers: Vec<(String, String)> = Vec::new();
             for line in lines {
                 let lower = line.to_ascii_lowercase();
                 if let Some(value) = lower.strip_prefix("content-length:") {
                     length = value.trim().parse().unwrap_or(0);
                 } else if let Some(value) = lower.strip_prefix("x-wa-session:") {
                     session = value.trim().to_string();
+                } else if let Some((key, value)) = lower.split_once(':') {
+                    if key.trim().starts_with("x-wa-") {
+                        node_headers.push((key.trim().to_string(), value.trim().to_string()));
+                    }
                 }
             }
             if data.len() >= end + 4 + length {
-                break (method, path, session, data[end + 4..end + 4 + length].to_vec());
+                break (method, path, session, node_headers, data[end + 4..end + 4 + length].to_vec());
             }
         }
         if data.len() > 2_000_000 {
@@ -77,119 +99,161 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
         }
     };
 
-    if path == "/version" {
+    let (route, query) = match path.split_once('?') {
+        Some((route, query)) => (route.to_string(), query.to_string()),
+        None => (path.clone(), String::new()),
+    };
+    // Which node the request is for: query string (GET) or header (POST).
+    let node_param = query_value(&query, "node");
+    let node = if !node_param.is_empty() {
+        node_param.clone()
+    } else {
+        header_of(&node_headers, "x-wa-node")
+    };
+
+    if route == "/version" {
         let version = ui_version(ui);
         return respond(stream, 200, "application/json", format!("{{\"version\":\"{version}\"}}").as_bytes());
     }
-    if path == "/health" {
+    if route == "/health" {
         return respond(stream, 200, "application/json", b"{\"ok\":true}");
     }
-    if path == "/models" {
-        let settings = lua.call_string("wa_model", &[]).unwrap_or_else(|_| "{}".into());
+    if route == "/models" {
+        let settings = lua
+            .call_string("wa_model", &[node.as_str(), session.as_str()])
+            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", settings.as_bytes());
     }
-    if path == "/me" {
+    if route == "/me" {
         let payload = lua
             .call_string("wa_me", &[session.as_str()])
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", payload.as_bytes());
     }
-    if path == "/users" {
+    if route == "/users" {
         let payload = lua
             .call_string("wa_users", &[])
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", payload.as_bytes());
     }
-    if path == "/login" && method == "POST" {
+    if route == "/login" && method == "POST" {
         let id = String::from_utf8_lossy(&body).trim().to_string();
         let payload = lua
             .call_string("wa_login", &[id.as_str(), session.as_str()])
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", payload.as_bytes());
     }
-    if path == "/logout" && method == "POST" {
+    if route == "/logout" && method == "POST" {
         let payload = lua
             .call_string("wa_logout", &[session.as_str()])
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", payload.as_bytes());
     }
-    if path == "/shell" && method == "POST" {
+    if route == "/shell" && method == "POST" {
         let command = String::from_utf8_lossy(&body).to_string();
         let payload = lua
             .call_string("wa_shell", &[command.as_str(), session.as_str()])
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", payload.as_bytes());
     }
-    if path == "/node/call" && method == "POST" {
+    if route == "/node/chat" && method == "POST" {
+        let text = String::from_utf8_lossy(&body).to_string();
+        let from = header_of(&node_headers, "x-wa-node");
+        let public_key = header_of(&node_headers, "x-wa-pub");
+        let ts = header_of(&node_headers, "x-wa-ts");
+        let signature = header_of(&node_headers, "x-wa-sig");
+        stream.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\
+              Connection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+        )?;
+        stream.flush()?;
+        if let Ok(clone) = stream.try_clone() {
+            if let Ok(mut guard) = CLIENT.lock() {
+                *guard = Some(clone);
+            }
+        }
+        if let Err(error) = lua.call_string(
+            "wa_node_chat",
+            &[from.as_str(), public_key.as_str(), ts.as_str(), signature.as_str(), text.as_str()],
+        ) {
+            write_event(&format!("{{\"type\":\"error\",\"error\":{}}}", json_escape(&error)));
+        }
+        write_event("{\"type\":\"done\"}");
+        if let Ok(mut guard) = CLIENT.lock() {
+            *guard = None;
+        }
+        return Ok(());
+    }
+    if route == "/node/call" && method == "POST" {
         let payload_body = String::from_utf8_lossy(&body).to_string();
         let payload = lua
             .call_string("wa_node_call", &[payload_body.as_str()])
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", payload.as_bytes());
     }
-    if path == "/envelope" {
+    if route == "/envelope" {
         let payload = lua
             .call_string("wa_envelope", &[session.as_str()])
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", payload.as_bytes());
     }
-    if path == "/tools" {
+    if route == "/tools" {
         let payload = lua
             .call_string("wa_tools", &[session.as_str()])
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", payload.as_bytes());
     }
-    if path == "/nodes" {
+    if route == "/nodes" {
         let payload = lua
             .call_string("wa_nodes", &[session.as_str()])
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", payload.as_bytes());
     }
-    if path == "/client" && method == "POST" {
+    if route == "/client" && method == "POST" {
         let payload_body = String::from_utf8_lossy(&body).to_string();
         let payload = lua
             .call_string("wa_client", &[payload_body.as_str(), session.as_str()])
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", payload.as_bytes());
     }
-    if path == "/frame" && method == "POST" {
+    if route == "/frame" && method == "POST" {
         let width = String::from_utf8_lossy(&body).trim().to_string();
         let payload = lua
             .call_string("wa_frame", &[width.as_str(), session.as_str()])
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", payload.as_bytes());
     }
-    if path == "/spells" {
+    if route == "/spells" {
         let payload = lua
             .call_string("wa_spells", &[session.as_str()])
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", payload.as_bytes());
     }
-    if path == "/spell" && method == "POST" {
+    if route == "/spell" && method == "POST" {
         let name = String::from_utf8_lossy(&body).trim().to_string();
         let payload = lua
             .call_string("wa_spell_run", &[name.as_str(), session.as_str()])
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", payload.as_bytes());
     }
-    if path == "/provider" && method == "POST" {
+    if route == "/provider" && method == "POST" {
         let id = String::from_utf8_lossy(&body).trim().to_string();
         let payload = lua
-            .call_string("wa_set_provider", &[id.as_str()])
+            .call_string("wa_set_provider", &[id.as_str(), node.as_str(), session.as_str()])
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", payload.as_bytes());
     }
-    if path == "/model" && method == "POST" {
+    if route == "/model" && method == "POST" {
         let name = String::from_utf8_lossy(&body).trim().to_string();
         let payload = lua
-            .call_string("wa_set_model", &[name.as_str()])
+            .call_string("wa_set_model", &[name.as_str(), node.as_str(), session.as_str()])
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", payload.as_bytes());
     }
-    if path == "/chat" && method == "POST" {
+    if route == "/chat" && method == "POST" {
         let text = String::from_utf8_lossy(&body).to_string();
         let header_text = String::from_utf8_lossy(&data).to_ascii_lowercase();
-        if header_text.contains("text/event-stream") || path.contains("stream=1") {
+        if header_text.contains("text/event-stream") || route.contains("stream=1") {
             // Server-sent events: the whole turn streams back on this response.
             stream.write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\
@@ -201,7 +265,7 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
                     *guard = Some(clone);
                 }
             }
-            if let Err(error) = lua.call_string("wa_reply_stream", &[text.as_str(), session.as_str()]) {
+            if let Err(error) = lua.call_string("wa_reply_stream", &[text.as_str(), session.as_str(), node.as_str()]) {
                 write_event(&format!("{{\"type\":\"error\",\"error\":{}}}", json_escape(&error)));
             }
             write_event("{\"type\":\"done\"}");
@@ -211,12 +275,12 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
             return Ok(());
         }
         let reply = lua
-            .call_string("wa_reply", &[text.as_str(), session.as_str()])
+            .call_string("wa_reply", &[text.as_str(), session.as_str(), node.as_str()])
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", reply.as_bytes());
     }
 
-    let relative = if path == "/" || path.is_empty() { "index.html".to_string() } else { path.trim_start_matches('/').to_string() };
+    let relative = if route == "/" || route.is_empty() { "index.html".to_string() } else { route.trim_start_matches('/').to_string() };
     if relative.contains("..") {
         return respond(stream, 400, "text/plain", b"bad path");
     }

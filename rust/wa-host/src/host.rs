@@ -158,6 +158,9 @@ pub extern "C" fn read_file(l: *mut LuaState) -> c_int {
 pub extern "C" fn write_file(l: *mut LuaState) -> c_int {
     let path = arg_string(l, 1).unwrap_or_default();
     let text = arg_string(l, 2).unwrap_or_default();
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let ok = std::fs::write(&path, text).is_ok();
     unsafe { crate::lua::lua_pushboolean(l, ok as c_int) };
     1
@@ -347,6 +350,40 @@ pub extern "C" fn http_stream(l: *mut LuaState) -> c_int {
         Ok(value) => push_json(l, &value),
         Err(error) => push_json(l, &json!({"error": error})),
     }
+    1
+}
+
+/// host.relay(url, headers_json, body) -> {status}
+///
+/// POSTs to a peer and forwards every SSE `data:` line straight to our UI
+/// client, so a remote node's reply streams here unchanged.
+pub extern "C" fn relay(l: *mut LuaState) -> c_int {
+    let url = arg_string(l, 1).unwrap_or_default();
+    let headers_json = arg_string(l, 2).unwrap_or_else(|| "{}".into());
+    let body = arg_string(l, 3).unwrap_or_default();
+    let headers = parse_headers(&headers_json);
+    let outcome = (|| -> Result<Value, String> {
+        let mut request = agent().post(&url);
+        for (key, value) in &headers {
+            request = request.header(key, value);
+        }
+        let response = request.send(body.as_bytes()).map_err(|error| error.to_string())?;
+        let status = response.status().as_u16();
+        if status != 200 {
+            let text = response.into_body().read_to_string().unwrap_or_default();
+            return Ok(json!({"status": status, "body": text.chars().take(400).collect::<String>()}));
+        }
+        use std::io::BufRead;
+        let reader = std::io::BufReader::new(response.into_body().into_reader());
+        for line in reader.lines() {
+            let line = line.map_err(|error| error.to_string())?;
+            if let Some(data) = line.strip_prefix("data: ") {
+                crate::serve::write_event(data);
+            }
+        }
+        Ok(json!({"status": 200}))
+    })();
+    push_json(l, &outcome.unwrap_or_else(|error| json!({"error": error})));
     1
 }
 

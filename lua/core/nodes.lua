@@ -98,25 +98,32 @@ function M.verify_caller(node_id, public_key)
   return nil
 end
 
+-- Sign `action|node_id|ts` with this node's key.
+function M.sign_action(action, ts)
+  local identity = M.identity()
+  if not identity or not identity.node_id then return nil, nil, "no_identity" end
+  local message = table.concat({ action, identity.node_id, tostring(ts) }, "|")
+  local signed = json.decode(host.sign(message))
+  if not signed or not signed.signature then return identity, nil, "sign_failed" end
+  return identity, signed.signature
+end
+
 -- Call a capability on a peer: signed request to its /node/call endpoint.
 function M.remote_call(selector, capability, args)
   local node = M.find(selector)
   if not node then return { error = "unknown_node:" .. tostring(selector) } end
   local endpoint = M.endpoint(node)
   if not endpoint then return { error = "no_endpoint", node = node.name } end
-  local identity = M.identity()
-  if not identity or not identity.node_id then return { error = "no_identity" } end
   local ts = math.floor(host.now())
-  local message = table.concat({ "call", identity.node_id, tostring(ts), capability or "" }, "|")
-  local signed = json.decode(host.sign(message))
-  if not signed or not signed.signature then return { error = "sign_failed" } end
+  local identity, signature, problem = M.sign_action("call", ts)
+  if not identity then return { error = problem } end
   local body = json.encode({
     from_node_id = identity.node_id,
     public_key = identity.public_key,
     ts = ts,
     capability = capability,
     args = args or {},
-    signature = signed.signature,
+    signature = signature,
   })
   local headers = json.encode({
     ["Content-Type"] = "application/json",
@@ -137,6 +144,31 @@ function M.remote_call(selector, capability, args)
   if not ok or type(decoded) ~= "table" then return { result = response.body, node = node.name } end
   decoded.node = node.name
   return decoded
+end
+
+-- Stream a turn on a peer: the peer's SSE lines are relayed to our UI.
+function M.remote_chat(selector, text)
+  local node = M.find(selector)
+  if not node then return { error = "unknown_node:" .. tostring(selector) } end
+  if node.local_node then return { error = "not_remote" } end
+  local endpoint = M.endpoint(node)
+  if not endpoint then return { error = "no_endpoint", node = node.name } end
+  local ts = math.floor(host.now())
+  local identity, signature, problem = M.sign_action("chat", ts)
+  if not identity then return { error = problem } end
+  local headers = json.encode({
+    ["Content-Type"] = "text/plain; charset=utf-8",
+    ["Accept"] = "text/event-stream",
+    ["User-Agent"] = "wasm-agent/0.1 node",
+    ["X-WA-Node"] = identity.node_id,
+    ["X-WA-Pub"] = identity.public_key,
+    ["X-WA-Ts"] = tostring(ts),
+    ["X-WA-Sig"] = signature,
+  })
+  local result = json.decode(host.relay(endpoint:gsub("/+$", "") .. "/node/chat", headers, text or ""))
+  if not result then return { error = "relay_failed", node = node.name } end
+  if result.error then return { error = result.error, node = node.name } end
+  return { ok = true, node = node.name, status = result.status }
 end
 
 function M.endpoint(node)
