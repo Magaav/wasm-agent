@@ -16,6 +16,9 @@ venv/
 *.db-shm
 .wasm-agent/
 
+# Rust build output.
+rust/target/
+
 # Secrets: never version these.
 .env
 .env.*
