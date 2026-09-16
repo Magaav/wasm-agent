@@ -56,7 +56,7 @@ wasm-agent remember "Laura prefers invoices on the 5th" --tag laura --tag billin
 wasm-agent recall "laura invoices"
 wasm-agent memories
 wasm-agent search "invoice"          # search the message ledger
-wasm-agent conversation 15551234567@c.us
+wasm-agent conversation CONVERSATION_ID
 wasm-agent stats --json
 ```
 
