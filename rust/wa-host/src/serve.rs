@@ -144,7 +144,8 @@ fn process_relay_job(lua: &Lua, ui: &std::path::Path, job: &crate::relay_client:
         return (200, events);
     }
 
-    match dispatch(lua, &ui, &job.method, &job.path, &job.headers, &job.body) {
+    let session = header_of(&job.headers, "x-wa-session");
+    match dispatch(lua, &ui, &job.method, &job.path, &job.headers, &job.body, &session) {
         Some((status, _content_type, body)) => (status, String::from_utf8_lossy(&body).to_string()),
         None => (404, "{\"error\":\"not_found\"}".to_string()),
     }
@@ -274,7 +275,7 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
         return Ok(());
     }
 
-    match dispatch(lua, ui, &method, &path, &node_headers, &String::from_utf8_lossy(&body)) {
+    match dispatch(lua, ui, &method, &path, &node_headers, &String::from_utf8_lossy(&body), &session) {
         Some((status, content_type, payload)) => respond(stream, status, content_type, &payload),
         None => respond(stream, 404, "text/plain; charset=utf-8", b"not found"),
     }
@@ -289,9 +290,12 @@ fn dispatch(
     path: &str,
     node_headers: &[(String, String)],
     body: &str,
+    session: &str,
 ) -> Option<Reply> {
     let (route, query) = split_path(path);
-    let session = header_of(node_headers, "x-wa-session");
+    // `session` is passed in: the socket parser consumes x-wa-session before the
+    // x-wa-* collection, so reading it back out of node_headers yields nothing
+    // and every request silently falls back to the default (master) user.
     let node_param = query_value(&query, "node");
     let node = if !node_param.is_empty() {
         node_param
@@ -306,12 +310,12 @@ fn dispatch(
     let reply = match route.as_str() {
         "/version" => (200, "application/json", format!("{{\"version\":\"{}\"}}", ui_version(ui)).into_bytes()),
         "/health" => (200, "application/json", b"{\"ok\":true}".to_vec()),
-        "/models" => (200, "application/json", call("wa_model", &[node.as_str(), session.as_str()]).into_bytes()),
-        "/me" => (200, "application/json", call("wa_me", &[session.as_str()]).into_bytes()),
+        "/models" => (200, "application/json", call("wa_model", &[node.as_str(), session]).into_bytes()),
+        "/me" => (200, "application/json", call("wa_me", &[session]).into_bytes()),
         "/users" => (200, "application/json", call("wa_users", &[]).into_bytes()),
-        "/login" if method == "POST" => (200, "application/json", call("wa_login", &[body.trim(), session.as_str()]).into_bytes()),
-        "/logout" if method == "POST" => (200, "application/json", call("wa_logout", &[session.as_str()]).into_bytes()),
-        "/shell" if method == "POST" => (200, "application/json", call("wa_shell", &[body, session.as_str()]).into_bytes()),
+        "/login" if method == "POST" => (200, "application/json", call("wa_login", &[body.trim(), session]).into_bytes()),
+        "/logout" if method == "POST" => (200, "application/json", call("wa_logout", &[session]).into_bytes()),
+        "/shell" if method == "POST" => (200, "application/json", call("wa_shell", &[body, session]).into_bytes()),
         "/sync/head" => (200, "application/json", call("wa_sync_head", &[]).into_bytes()),
         "/sync/push" if method == "POST" => (200, "application/json", call("wa_sync_apply", &[
             body,
@@ -323,20 +327,20 @@ fn dispatch(
         "/sync/tick" if method == "POST" => (200, "application/json", call("wa_sync_tick", &[]).into_bytes()),
         "/sync" => (200, "application/json", call("wa_sync_status", &[]).into_bytes()),
         "/node/call" if method == "POST" => (200, "application/json", call("wa_node_call", &[body]).into_bytes()),
-        "/envelope" => (200, "application/json", call("wa_envelope", &[session.as_str()]).into_bytes()),
-        "/tools" => (200, "application/json", call("wa_tools", &[session.as_str()]).into_bytes()),
-        "/nodes" => (200, "application/json", call("wa_nodes", &[session.as_str()]).into_bytes()),
-        "/sessions" => (200, "application/json", call("wa_sessions", &[session.as_str()]).into_bytes()),
-        "/session" => (200, "application/json", call("wa_session", &[query_value(&query, "id").as_str(), session.as_str()]).into_bytes()),
-        "/session/mode" if method == "POST" => (200, "application/json", call("wa_session_mode", &[body, session.as_str()]).into_bytes()),
-        "/session/fixture" => (200, "application/json", call("wa_session_fixture", &[query_value(&query, "id").as_str(), session.as_str()]).into_bytes()),
-        "/client" if method == "POST" => (200, "application/json", call("wa_client", &[body, session.as_str()]).into_bytes()),
-        "/frame" if method == "POST" => (200, "application/json", call("wa_frame", &[body.trim(), session.as_str()]).into_bytes()),
-        "/spells" => (200, "application/json", call("wa_spells", &[session.as_str()]).into_bytes()),
-        "/spell" if method == "POST" => (200, "application/json", call("wa_spell_run", &[body.trim(), session.as_str()]).into_bytes()),
-        "/provider" if method == "POST" => (200, "application/json", call("wa_set_provider", &[body.trim(), node.as_str(), session.as_str()]).into_bytes()),
-        "/model" if method == "POST" => (200, "application/json", call("wa_set_model", &[body.trim(), node.as_str(), session.as_str()]).into_bytes()),
-        "/chat" if method == "POST" => (200, "application/json", call("wa_reply", &[body, session.as_str(), node.as_str()]).into_bytes()),
+        "/envelope" => (200, "application/json", call("wa_envelope", &[session]).into_bytes()),
+        "/tools" => (200, "application/json", call("wa_tools", &[session]).into_bytes()),
+        "/nodes" => (200, "application/json", call("wa_nodes", &[session]).into_bytes()),
+        "/sessions" => (200, "application/json", call("wa_sessions", &[session]).into_bytes()),
+        "/session" => (200, "application/json", call("wa_session", &[query_value(&query, "id").as_str(), session]).into_bytes()),
+        "/session/mode" if method == "POST" => (200, "application/json", call("wa_session_mode", &[body, session]).into_bytes()),
+        "/session/fixture" => (200, "application/json", call("wa_session_fixture", &[query_value(&query, "id").as_str(), session]).into_bytes()),
+        "/client" if method == "POST" => (200, "application/json", call("wa_client", &[body, session]).into_bytes()),
+        "/frame" if method == "POST" => (200, "application/json", call("wa_frame", &[body.trim(), session]).into_bytes()),
+        "/spells" => (200, "application/json", call("wa_spells", &[session]).into_bytes()),
+        "/spell" if method == "POST" => (200, "application/json", call("wa_spell_run", &[body.trim(), session]).into_bytes()),
+        "/provider" if method == "POST" => (200, "application/json", call("wa_set_provider", &[body.trim(), node.as_str(), session]).into_bytes()),
+        "/model" if method == "POST" => (200, "application/json", call("wa_set_model", &[body.trim(), node.as_str(), session]).into_bytes()),
+        "/chat" if method == "POST" => (200, "application/json", call("wa_reply", &[body, session, node.as_str()]).into_bytes()),
         _ => {
             if route == "/chat" || route == "/node/chat" {
                 return None; // streaming
