@@ -37,12 +37,21 @@ $shim = Join-Path $InstallDir "wa.cmd"
 $body = "@echo off`r`nssh -t $HostAlias wasm-agent %*`r`n"
 Set-Content -Path $shim -Value $body -Encoding ASCII
 Add-UserPath $InstallDir
+# Make `wa` usable in this session too (works when run as `irm | iex` in-process).
+if (($env:Path -split ';') -notcontains $InstallDir) { $env:Path = "$InstallDir;$env:Path" }
 
 Write-Host ""
 Write-Host "wasm-agent installed."
 Write-Host "  wa          -> ssh -t $HostAlias wasm-agent"
 Write-Host ""
-Write-Host "Open a NEW terminal, then run:  wa"
+if (Get-Command wa -ErrorAction SilentlyContinue) {
+  Write-Host "Run:  wa"
+} else {
+  Write-Host "Open a NEW terminal, then run:  wa"
+  Write-Host "or, in this terminal:"
+  Write-Host "  `$env:Path += `";$InstallDir`""
+  Write-Host "(a brand-new Windows Terminal window may be needed: close ALL windows, reopen)"
+}
 Write-Host "If you have not set up SSH yet, add this to ~/.ssh/config:"
 Write-Host "  Host $HostAlias"
 Write-Host "      HostName <server-ip>"
