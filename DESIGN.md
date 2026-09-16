@@ -98,18 +98,23 @@ chip) or when the user explicitly asks for it.
 
 Tools are grouped by the role that may call them (§ see `lua/core/tools.lua`):
 
+Roles are `master` (full) and `guest` (on demand memory); `admin` is a legacy
+alias for `master`. Binding between nodes is `master:master` or `master:guest`.
+
 | Tier | Tools | Roles |
 | --- | --- | --- |
 | memory | `remember`, `recall` | everyone |
-| spells | `spells` | everyone |
-| environment (pi) | `bash`, `read`, `write`, `edit`, `ls`, `grep` | admin |
-| ledger | `search_messages`, `conversation`, `list_conversations` | admin |
-| client | `client` (screenshot, mouse, keyboard, CDP) | admin |
-| plugins | every WASM plugin | admin |
+| spells | `spells` (list capabilities) | everyone |
+| environment (pi) | `bash`, `read`, `write`, `edit`, `ls`, `grep` | master |
+| shell | `shell` (shell on the client host, also the UI terminal) | master |
+| ledger | `search_messages`, `conversation`, `list_conversations` | master |
+| client | `client` (screenshot, frame, mouse, keyboard, CDP) | master |
+| spell macros | `spell_save`, `spell_run`, `spell_list`, `spell_forget` | master |
+| plugins | every WASM plugin | master |
 
-Never expose an admin tier to a non-admin turn; filter schemas *and* re-check in
+Never expose a master tier to a non-master turn; filter schemas *and* re-check in
 `dispatch`, because the model can ask for a tool it was not offered.
-The `client` tool drives a real desktop — treat it as the highest-risk tier.
+The `client` and `shell` tools drive a real machine — the highest-risk tiers.
 
 ## 9. Component registry
 

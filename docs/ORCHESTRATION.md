@@ -20,8 +20,10 @@ consensus over a WAN.
 | --- | --- | --- |
 | Host runtime | Rust host + embedded Lua, WASM plugins | the **host node** runtime |
 | Client bridge | `client_bridge.rs` + `wa-window` executor (screenshot/input/CDP) | the generic **remote tool** channel |
-| Roles | `users.json` → `admin` / `guest`, tool gating | the **node + user** trust model |
-| Tool tiers | memory / spells / pi / ledger / client / plugins | **capabilities** advertised per node |
+| Roles | `users.json` → `master` / `guest`, tool gating | the **node + user** trust model |
+| Tool tiers | memory / spells / pi / ledger / client / shell / plugins | **capabilities** advertised per node |
+| Nodes panel | master:master / master:guest binding + on-demand control | the node fabric |
+| Spells | crystallized, deterministic client macros | automation layer |
 | Ledger | SQLite (WAL, FTS5) | replicated event log |
 | Transport | SSH tunnel (Windows → host) | QUIC / WebTransport, SSH as fallback |
 
@@ -35,9 +37,12 @@ on it. **Orchestration is that pattern generalised to N nodes and many streams.*
 - **Node identity** — an ed25519 keypair; `node_id = base32(sha256(pubkey))[:26]`.
 - **Capability** — a named tool a node can execute (`bash`, `client.screenshot`,
   `camera.capture`, `ledger.search`, …), with a JSON schema and a risk tier.
-- **Role** — what a node is trusted with: `admin` (all tiers), `operator`
+- **Role** — what a node is trusted with: `master` (all tiers), `operator`
   (no destructive/code tiers), `guest` (memory + spells only). Same tiers as
-  `DESIGN.md §8`, now attached to nodes as well as users.
+  `DESIGN.md §8`, now attached to nodes as well as users. Binding is
+  `master:master` or `master:guest`.
+- **Spell** — a crystallized, deterministic macro (client/wait/assert steps) the
+  agent records after working a task out and can replay without the model.
 - **Invitation** — a short-lived, single-use token that admits a node with a
   chosen role and capability mask.
 - **Stream** — a named, ordered event channel (`events`, `ledger`, `telemetry`,
@@ -149,29 +154,48 @@ Requirement: "game-like" latency and Kafka-like multi-stream.
 Sequencing note: M1–M4 are pure refactors of what exists (the bridge, roles,
 SSE). M5 is the first genuinely new subsystem and should not block M1–M4.
 
-## 11. Open questions (the "doubts")
+## 11. Decisions from review
 
-1. **Node identity source** — do we derive node keys from the existing SSH keys,
-   or mint a fresh ed25519 per node? (SSH reuse is convenient; a dedicated key is
-   cleaner to rotate and works on mobile without SSH.)
-2. **Invite UX** — link? code the user types? QR for mobile? expiring how long?
-3. **Role granularity** — is a node `admin`/`guest` globally, or per capability
-   (e.g. a phone may `camera.capture` but never `bash`)? I'd propose per
-   capability, defaults by role.
-4. **Mobile runtime** — does a phone run Lua/WASM (`wasm32-wasip2`) itself, or is
-   it a thin native client that only executes capabilities we ship? This decides
-   whether we need the WASI port next.
-5. **How soon is WebTransport real?** It needs a QUIC stack. We are offline-capped
-   (`crates.io` blocked, 566 cached crates). Do you want to vendor a QUIC crate,
-   or should M5 wait until crate access is restored? Until then, SSE+POST over
-   the tunnel is the honest transport.
-6. **Kafka semantics depth** — do we need consumer groups, partitions and replay
-   from offset, or is "per-stream ordered + cursor resume" enough for v1?
-7. **Relay policy** — may any admin node relay for others (bandwidth), or do we
-   designate relay nodes? What's the abuse story?
-8. **Approval fatigue** — for high-risk capabilities, approve per call, per
-   session, or per node with a TTL? (I'd default: per node per session, revocable.)
-9. **Data gravity** — when a plan spans nodes, does the ledger move to the data,
-   or the data to the ledger? (Affects privacy + latency.)
-10. **Naming** — "node", "peer", or "spoke" in the UI? ("node" reads best for
-    infra users; "peer" for the p2p future.)
+1. **Identity & binding — bind by key, never by address.** Every node has an
+   ed25519 keypair; names and addresses are ephemeral. Guests always **dial out**
+   to the master, so NAT and rotating ISP IPv4 do not matter: the guest
+   re-announces on every reconnect and the master recognises `node_id → pubkey`,
+   binding them again after both restart. The only unsolved piece is *finding a
+   master whose address changes*, which a dynamic-DNS name plus a tiny
+   `wa rendezvous` endpoint solves (or any always-on friend can act as
+   rendezvous). No cloud is required as long as one node stays up.
+2. **Mobile node — thin shell + WASI runtime, installed once.** The phone runs a
+   small native shell exposing OS APIs (camera, mic, location, notifications,
+   screen) as capabilities, plus the WASM/Lua runtime fetched from the master and
+   hot-updated thereafter (so "install once from the CLI" holds). Wake-on-demand
+   uses push (FCM/APNs) to reconnect and run the requested capability, which
+   keeps battery cost low and makes the Jarvis flow (talk to it) possible.
+   This makes the `wasm32-wasip2` port the enabler for mobile.
+3. **Roles & binding — `master` and `guest`.** `admin` becomes `master`;
+   binding is `master:master` or `master:guest`. The master can list bound nodes,
+   talk to them, or control them on demand.
+4. **Granularity — support both.** A per-node role (master/guest) *and*
+   per-capability grants on top (a phone may `camera.capture` but never `bash`),
+   chosen in the UI.
+5. **Streams — keep it simple (da Vinci).** Per-stream ordering plus a resumable
+   cursor. No consumer groups or partition replays in v1; the framing leaves room
+   to add them later.
+6. **Relays, explained.** A *relay* forwards traffic between two nodes that
+   cannot reach each other directly. With an **open relay** (any master relays),
+   anyone who compromises a node can spend your bandwidth and — if traffic is not
+   end-to-end encrypted — read it. With **designated relays** (only nodes marked
+   `relay`, normally always-on servers) cost and abuse are predictable, at the
+   price of those nodes being a dependency. Decision: **designated relays +
+   end-to-end encryption** (a relay sees ciphertext), per-node quotas, and an
+   opt-in before relaying over metered mobile links.
+
+## 12. Remaining questions
+
+- **Is the master always on?** If not, we need a rendezvous host (and a decision
+  on who runs it, e.g. a domain with dynamic DNS).
+- **Push provider for mobile** — FCM, APNs, or self-hosted (ntfy/UnifiedPush)?
+- **Approval default** — per node per session (revocable), or per call for the
+  highest-risk capabilities (`client.*`, `shell`, `write`)?
+- **WebTransport timing** — needs a QUIC stack; this box is offline-capped, so
+  M5 waits unless we vendor a QUIC crate. Until then SSE+POST over the tunnel is
+  the honest transport.
