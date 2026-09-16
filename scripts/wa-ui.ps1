@@ -13,8 +13,9 @@ Write-Host ""
 Write-Host "   wasm-agent ui" -ForegroundColor Cyan
 Write-Host ""
 
-$running = (& ssh -o BatchMode=yes $HostAlias "pgrep -f 'wasm-agent serve' >/dev/null && echo yes || echo no" 2>$null) | Select-Object -First 1
-if ($running -ne "yes") {
+# Health-check the port (a pgrep here would match this very command).
+$health = (& ssh -o BatchMode=yes $HostAlias "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$Port/health" 2>$null) | Select-Object -First 1
+if ($health -ne "200") {
   Write-Host "   * starting the server on $HostAlias" -ForegroundColor DarkGray
   & ssh -o BatchMode=yes $HostAlias "setsid nohup wasm-agent serve --port $Port --ui $RemoteUi >/tmp/wa-ui.log 2>&1 </dev/null & sleep 1; echo started" | Out-Null
   Start-Sleep -Seconds 2
