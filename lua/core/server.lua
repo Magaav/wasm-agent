@@ -5,6 +5,7 @@ local provider = dofile("lua/core/provider.lua")
 local agentlib = dofile("lua/core/agent.lua")
 local users = dofile("lua/core/users.lua")
 local toolslib = dofile("lua/core/tools.lua")
+local nodeslib = dofile("lua/core/nodes.lua")
 
 memory.setup()
 local agent
@@ -105,23 +106,41 @@ function wa_nodes(session)
   local user = users.current(session)
   local role = users.normalize(user.role)
   local link = (host.client_status and json.decode(host.client_status())) or { connected = false }
-  local nodes = {
-    {
-      id = "host", name = "host", kind = "host", role = role, online = true,
-      capabilities = { "bash", "read", "write", "edit", "ls", "grep", "spells" },
-    },
-    {
-      id = "client", name = "client", kind = "client", role = role,
-      online = link.connected and true or false,
-      last_seen_secs = link.last_seen_secs,
-      capabilities = { "screenshot", "frame", "click", "move", "type", "key", "shell", "cdp" },
-    },
-  }
+  local list = nodeslib.list()
+  -- The local client (the desktop running the window) sits next to the host.
+  table.insert(list, math.min(2, #list + 1), {
+    id = "client", node_id = "client", name = "client", kind = "client", role = role,
+    online = link.connected and true or false,
+    last_seen_secs = link.last_seen_secs,
+    local_node = true,
+    capabilities = { "screenshot", "frame", "click", "move", "type", "key", "shell", "cdp" },
+  })
   return json.encode({
     role = role,
     binding = role == "master" and "master:master" or "master:guest",
-    nodes = nodes,
+    node_id = (nodeslib.identity() or {}).node_id,
+    nodes = list,
   })
+end
+
+-- Accept a signed capability call from a peer (see nodes.lua for the caller).
+function wa_node_call(payload)
+  local ok, request = pcall(json.decode, payload)
+  if not ok or type(request) ~= "table" then return json.encode({ error = "bad_request" }) end
+  local from = request.from_node_id or ""
+  local capability = request.capability or ""
+  local ts = math.floor(tonumber(request.ts) or 0)
+  if from == "" or capability == "" then return json.encode({ error = "bad_request" }) end
+  local message = table.concat({ "call", from, tostring(ts), capability }, "|")
+  if not host.verify(request.public_key or "", message, request.signature or "") then
+    return json.encode({ error = "bad_signature" })
+  end
+  if math.abs(host.now() - ts) > 120 then return json.encode({ error = "stale_request" }) end
+  local caller = nodeslib.verify_caller(from, request.public_key)
+  if not caller then return json.encode({ error = "unknown_caller" }) end
+  if users.normalize(caller.role) ~= "master" then return json.encode({ error = "forbidden_role" }) end
+  if capability == "remote" then return json.encode({ error = "remote_cannot_recurse" }) end
+  return json.encode(toolslib.dispatch(memory, capability, request.args or {}, "master"))
 end
 
 -- Generic client action from the UI (control view: click/type/key).

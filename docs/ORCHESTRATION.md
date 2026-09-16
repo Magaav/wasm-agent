@@ -142,7 +142,7 @@ Requirement: "game-like" latency and Kafka-like multi-stream.
 
 | # | Milestone | Ships |
 | --- | --- | --- |
-| M1 | Node registry + `hello` over the existing tunnel | `wa nodes` lists peers; capability routing for one remote node |
+| M1 | Node registry + capability routing | **done** — see §13 |
 | M2 | Generalise the client bridge into `remote call` | `client` becomes a built-in capability of the *client node* |
 | M3 | Invites + roles per node (UI approval balloon) | invite a guest node from the UI |
 | M4 | Event streams over SSH (SSE + POST) | `events`/`telemetry` fan-out, cursors |
@@ -189,7 +189,40 @@ SSE). M5 is the first genuinely new subsystem and should not block M1–M4.
    end-to-end encryption** (a relay sees ciphertext), per-node quotas, and an
    opt-in before relaying over metered mobile links.
 
-## 12. Remaining questions
+## 12. Implemented: M1 (node registry + capability routing)
+
+- **Registry** (`lua/core/nodes.lua`): this host, the local client, and every
+  peer the rendezvous knows (cached 15s). The rendezvous is the source of truth
+  for a peer's public key, so a caller is trusted only if its key matches.
+- **Discovery**: peers register themselves; nothing needs to be configured
+  per-peer. `wa nodes` prints the registry, and the UI nodes panel lists peers
+  alongside the local host and client.
+- **Routing**: the `remote` tool — `remote{node, capability, args}` — signs a
+  request and POSTs it to the peer's `/node/call`; `wa call <node> <capability>
+  [args-json]` does the same from the CLI. Calling the local node runs the
+  capability in-process.
+- **Auth**: the caller signs `call|from_node_id|ts|capability` with its ed25519
+  key. The callee verifies the signature, requires `ts` within 120s, and requires
+  the caller to be a rendezvous-known node with role `master`. `remote` cannot
+  recurse.
+
+Verified with two nodes (distinct keys, one machine):
+
+| Case | Result |
+| --- | --- |
+| A → B `bash{hostname}` | `{"code":0,"stdout":"openclaw-instance"}` on B |
+| A → B `read{/etc/hostname}` | file contents |
+| A → B `nodes{}` | B ran its own registry |
+| forged signature | `bad_signature` |
+| valid signature, unregistered node | `unknown_caller` |
+| stale timestamp | `stale_request` |
+| `remote` forwarded | `remote_cannot_recurse` |
+
+Next (**M2/M3**): make the desktop client its own node (it currently shares the
+host's process), and add the **relay** so a peer behind NAT can be reached — the
+last blocker for controlling a remote node.
+
+## 13. Remaining questions
 
 - **Is the master always on?** If not, we need a rendezvous host (and a decision
   on who runs it, e.g. a domain with dynamic DNS).

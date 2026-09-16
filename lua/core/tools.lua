@@ -2,6 +2,7 @@
 -- admins get everything; guests get on-demand memory plus "spells".
 local json = dofile("lua/vendor/json.lua")
 local spellslib = dofile("lua/core/spells.lua")
+local nodeslib = dofile("lua/core/nodes.lua")
 local M = {}
 
 local function is_master(role)
@@ -86,6 +87,11 @@ M.admin = {
   schema("spell_list", "List saved spells with version and parameter names.", {}),
   schema("spell_get", "Read one saved spell in full.", { name = { type = "string" } }, { "name" }),
   schema("spell_forget", "Delete a saved spell.", { name = { type = "string" } }, { "name" }),
+  schema("remote", "Run a capability on another wasm-agent node (peer). Nodes are discovered by ed25519 key through the rendezvous, so the name or node_id is enough.", {
+    node = { type = "string", description = "Peer name or node_id (use the nodes panel for the list)." },
+    capability = { type = "string", description = "Tool to run on that node, e.g. bash, read, client, shell." },
+    args = { type = "object", description = "Arguments for that tool." } }, { "node", "capability" }),
+  schema("nodes", "List this node and every peer known to the rendezvous.", {}),
 }
 
 local function wasm_plugins()
@@ -213,6 +219,24 @@ function M.dispatch(memory, name, args, role)
     return spellslib.get(args.name) or { error = "unknown_spell" }
   elseif name == "spell_forget" then
     return spellslib.remove(args.name)
+  elseif name == "nodes" then
+    local list = {}
+    for _, node in ipairs(nodeslib.list()) do
+      list[#list + 1] = {
+        name = node.name, role = node.role, online = node.online,
+        local_node = node.local_node, capabilities = node.capabilities,
+        endpoints = node.endpoints, node_id = node.node_id,
+      }
+    end
+    return { nodes = list }
+  elseif name == "remote" then
+    if args.capability == "remote" then return { error = "remote_cannot_recurse" } end
+    local node = nodeslib.find(args.node)
+    if not node then return { error = "unknown_node:" .. tostring(args.node) } end
+    if node.local_node then
+      return M.dispatch(memory, args.capability, args.args or {}, role)
+    end
+    return nodeslib.remote_call(args.node, args.capability, args.args or {})
   end
 
   -- Fall back to a WASM plugin (admin only; guests never see their schemas).

@@ -47,9 +47,21 @@ elseif command == "conversations" then
   each(memory.conversations(limit_of(args[2], 50)))
 elseif command == "stats" then
   print(json.encode(memory.stats()))
+elseif command == "nodes" then
+  local nodes = dofile("lua/core/nodes.lua")
+  print(json.encode({ node_id = (nodes.identity() or {}).node_id, nodes = nodes.list() }))
+elseif command == "call" then
+  local nodes = dofile("lua/core/nodes.lua")
+  local payload = {}
+  if args[4] and args[4] ~= "" then
+    local ok, decoded = pcall(json.decode, args[4])
+    if ok and type(decoded) == "table" then payload = decoded end
+  end
+  print(json.encode(nodes.remote_call(args[2], args[3], payload)))
 elseif command == "help" then
   print("wa: chat | remember <text> | recall <query> | memories | forget <id>")
   print("    search <query> | conversation <id> | conversations | stats")
+  print("    nodes | call <node> <capability> [args-json]")
 else
   print("unknown command: " .. tostring(command))
   os.exit(2)

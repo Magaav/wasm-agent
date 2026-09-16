@@ -120,6 +120,13 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
             .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
         return respond(stream, 200, "application/json", payload.as_bytes());
     }
+    if path == "/node/call" && method == "POST" {
+        let payload_body = String::from_utf8_lossy(&body).to_string();
+        let payload = lua
+            .call_string("wa_node_call", &[payload_body.as_str()])
+            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
+        return respond(stream, 200, "application/json", payload.as_bytes());
+    }
     if path == "/nodes" {
         let payload = lua
             .call_string("wa_nodes", &[session.as_str()])

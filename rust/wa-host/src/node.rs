@@ -27,6 +27,11 @@ fn home() -> String {
 }
 
 fn key_path() -> PathBuf {
+    if let Ok(path) = std::env::var("WASM_AGENT_NODE_KEY") {
+        if !path.is_empty() {
+            return PathBuf::from(path);
+        }
+    }
     PathBuf::from(home()).join(".wasm-agent").join("node.key")
 }
 
