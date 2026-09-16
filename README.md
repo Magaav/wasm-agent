@@ -73,6 +73,31 @@ curl -fsSL https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/inst
 Override the host with `-HostAlias <name>` (PowerShell) or `WASM_AGENT_HOST`
 (shell). The default is `openclaw.ohana`.
 
+## Plugins (WASM)
+
+Tools are WASM modules. Drop `*.wasm` into `~/.wasm-agent/plugins/`
+(`WASM_AGENT_PLUGINS` overrides the directory); the host loads each with
+`wasmtime` and exposes it to the agent exactly like a built-in tool.
+
+A plugin is a core module exporting:
+
+```
+memory                            the module's linear memory
+alloc(len: i32) -> i32            guest allocates len bytes for the arguments
+describe() -> i64                 packed ptr<<32 | len, JSON {name, description, parameters}
+call(ptr: i32, len: i32) -> i64   packed ptr<<32 | len, JSON result
+```
+
+Build the example plugin and install it:
+
+```bash
+bash scripts/build-plugins.sh        # builds rust/plugins/* and installs to ~/.wasm-agent/plugins
+```
+
+`rust/plugins/echo` is a ~56 KB example. The Lua core merges each plugin's
+declared schema into the model's tool list and routes unknown tool calls to
+`host.invoke`, so a plugin is just another capability.
+
 ## Memory model
 
 Two kinds of data, never mixed:
@@ -89,7 +114,8 @@ ledger. See [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## Roadmap
 
-1. WASM tool/plugin components via `wasmtime` + WIT (`host.invoke`).
+1. Upgrade the plugin ABI from core modules to the **component model + WIT**
+   (typed interfaces, capability imports) — the ABI is intentionally tiny today.
 2. Compile the Lua core to `wasm32-wasip2` so the brain itself is a component.
 3. Event ingestion: browser/WhatsApp events into the ledger.
 4. Cross-device replication with secure, server-mediated device binding.

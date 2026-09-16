@@ -4,6 +4,7 @@
 //! agent *decides* lives in Lua; everything it *needs from the platform* lives
 //! here, so the same Lua can later run as a WASM component with these imports.
 use crate::lua::{arg_string, lua_pushlstring, lua_touserdata, upvalue_index, LuaState};
+use crate::plugins::PluginRegistry;
 use rusqlite::{params_from_iter, Connection};
 use serde_json::{json, Value};
 use std::ffi::{c_char, c_int};
@@ -11,6 +12,7 @@ use std::sync::Mutex;
 
 pub struct Host {
     pub db: Mutex<Connection>,
+    pub plugins: Mutex<PluginRegistry>,
 }
 
 fn host_of<'a>(l: *mut LuaState) -> &'a Host {
@@ -138,6 +140,37 @@ pub extern "C" fn log(l: *mut LuaState) -> c_int {
         eprintln!("[lua] {message}");
     }
     0
+}
+
+/// host.plugins() -> JSON `[{name, description, parameters}, ...]`
+pub extern "C" fn plugins(l: *mut LuaState) -> c_int {
+    let host = host_of(l);
+    let list = host
+        .plugins
+        .lock()
+        .map(|registry| registry.describe_all())
+        .unwrap_or_else(|_| json!([]));
+    push_json(l, &list);
+    1
+}
+
+/// host.invoke(name, arguments_json) -> plugin JSON result | {error}
+pub extern "C" fn invoke(l: *mut LuaState) -> c_int {
+    let host = host_of(l);
+    let name = arg_string(l, 1).unwrap_or_default();
+    let arguments = arg_string(l, 2).unwrap_or_else(|| "{}".into());
+    let outcome = host
+        .plugins
+        .lock()
+        .map_err(|error| error.to_string())
+        .and_then(|mut registry| registry.invoke(&name, &arguments).map_err(|error| error.to_string()));
+    match outcome {
+        Ok(text) => unsafe {
+            lua_pushlstring(l, text.as_ptr() as *const c_char, text.len());
+        },
+        Err(error) => push_json(l, &json!({"error": error})),
+    }
+    1
 }
 
 /// host.http(method, url, headers_json, body) -> {status, body} | {error}

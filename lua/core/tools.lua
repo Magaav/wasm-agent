@@ -1,7 +1,8 @@
--- Memory tools exposed to the head model (OpenAI function-calling schema).
+-- Tools exposed to the head model: built-in memory tools plus WASM plugins.
+local json = dofile("lua/vendor/json.lua")
 local M = {}
 
-M.schemas = {
+M.builtin = {
   { type = "function", ["function"] = {
       name = "remember",
       description = "Store a fact the user asked you to remember, so it can be recalled later.",
@@ -40,6 +41,26 @@ M.schemas = {
         limit = { type = "integer", minimum = 1, maximum = 200 } } } } },
 }
 
+local function wasm_plugins()
+  local ok, raw = pcall(host.plugins)
+  if not ok or not raw then return {} end
+  local decoded = json.decode(raw)
+  return decoded or {}
+end
+
+-- Built-in schemas plus every WASM plugin's declared tool.
+function M.all()
+  local list = {}
+  for _, schema in ipairs(M.builtin) do list[#list + 1] = schema end
+  for _, plugin in ipairs(wasm_plugins()) do
+    list[#list + 1] = { type = "function", ["function"] = {
+      name = plugin.name,
+      description = plugin.description or "",
+      parameters = plugin.parameters or { type = "object" } } }
+  end
+  return list
+end
+
 function M.dispatch(memory, name, args)
   args = args or {}
   if name == "remember" then
@@ -55,7 +76,12 @@ function M.dispatch(memory, name, args)
   elseif name == "list_conversations" then
     return memory.conversations(args.limit or 50)
   end
-  return { error = "unknown_tool:" .. tostring(name) }
+  -- Fall back to a WASM plugin. Unknown tools surface as a typed error.
+  local ok, result = pcall(host.invoke, name, json.encode(args))
+  if not ok then return { error = tostring(result) } end
+  local decoded = json.decode(result)
+  if type(decoded) ~= "table" then return { result = result } end
+  return decoded
 end
 
 return M

@@ -16,8 +16,8 @@ venv/
 *.db-shm
 .wasm-agent/
 
-# Rust build output.
-rust/target/
+# Rust build output (host workspace and standalone plugin crates).
+target/
 
 # Secrets: never version these.
 .env

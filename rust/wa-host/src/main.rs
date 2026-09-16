@@ -4,6 +4,7 @@
 //! (sqlite, sha256, uuid, time, files, http). No Python anywhere.
 mod host;
 mod lua;
+mod plugins;
 
 use host::Host;
 use lua::Lua;
@@ -80,7 +81,8 @@ fn main() {
              PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
         )
         .expect("pragma");
-    let host = Box::into_raw(Box::new(Host { db: Mutex::new(connection) }));
+    let plugin_registry = plugins::PluginRegistry::load(&plugins::plugin_dir());
+    let host = Box::into_raw(Box::new(Host { db: Mutex::new(connection), plugins: Mutex::new(plugin_registry) }));
 
     let lua = Lua::new();
     lua.push_table();
@@ -90,6 +92,8 @@ fn main() {
     lua.register("uuid", host::uuid);
     lua.register("read_file", host::read_file);
     lua.register("http", host::http);
+    lua.register_with_upvalue("plugins", host::plugins, host as *mut c_void);
+    lua.register_with_upvalue("invoke", host::invoke, host as *mut c_void);
     lua.register("now", host::now);
     lua.register("log", host::log);
     lua.set_global("host");

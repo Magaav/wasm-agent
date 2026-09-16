@@ -32,7 +32,7 @@ function M:turn(text)
   self.messages[#self.messages + 1] = { role = "user", content = text }
   local reply = ""
   for _ = 1, MAX_TOOL_ROUNDS do
-    local result = provider.complete(self.messages, tools.schemas)
+    local result = provider.complete(self.messages, tools.all())
     local calls = result.tool_calls
     local assistant = { role = "assistant", content = result.content or "" }
     if #calls > 0 then assistant.tool_calls = calls end
