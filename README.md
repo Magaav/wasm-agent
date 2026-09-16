@@ -17,6 +17,9 @@ rust/wa-host/        `wa` binary: host capabilities + embedded Lua 5.4
   src/lua.rs         Lua C-API bindings
   src/host.rs        host.sql_*, host.http, host.sha256, host.uuid, ...
   src/main.rs        CLI, embedded Lua core, SQLite
+rust/wa-window/      Windows WebView2 desktop shell (cross-built)
+ui/                  the chat window (hot-reloaded by `wa serve`)
+deploy/              systemd units, env template, Caddy site, install script
 ```
 
 ## Build

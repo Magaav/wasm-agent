@@ -1,0 +1,13 @@
+# Append to /etc/caddy/Caddyfile, then restart Caddy.
+#
+# NOTE: the Caddyfile sets `admin off`, so `caddy reload` (and therefore
+# `systemctl reload caddy`) does NOT work. Apply changes with a validated
+# restart:  caddy validate --config /etc/caddy/Caddyfile && systemctl restart caddy
+rendezvous.colmeio.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8890 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+}

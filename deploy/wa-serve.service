@@ -1,0 +1,18 @@
+# This node: the chat UI, the client-tools bridge, the relay attachment and the
+# replication ticks.
+[Unit]
+Description=wasm-agent node (UI + client bridge + relay + sync)
+After=network-online.target wa-rendezvous.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/local/projects/wasm-agent
+EnvironmentFile=-/home/ubuntu/.wasm-agent/env
+ExecStart=/home/ubuntu/.local/bin/wa serve --port 8799 --client-port 8800 --ui /local/projects/wasm-agent/ui
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
