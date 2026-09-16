@@ -9,6 +9,8 @@ let renderer = null; // WASM renderer module
 let version = null; // UI version for hot reload
 let busy = false;
 let statusLine = null;
+let streamBody = null;
+let streamText = "";
 
 async function loadRenderer() {
   try {
@@ -122,9 +124,23 @@ function handleEvent(event) {
       const detail = chip.querySelector(".tool-detail");
       if (detail) detail.textContent = JSON.stringify(event.result || {}).slice(0, 400);
     }
+  } else if (event.type === "delta") {
+    // Token-by-token from the model: append to the live assistant bubble.
+    clearStatus();
+    if (!streamBody) streamBody = add("assistant", "");
+    streamText += event.text || "";
+    streamBody.textContent = streamText;
+    messages.scrollTop = messages.scrollHeight;
   } else if (event.type === "reply") {
     clearStatus();
-    typeOut(add("assistant", ""), event.text || "");
+    const finalText = event.text || streamText;
+    if (streamBody) {
+      streamBody.innerHTML = renderMarkdown(finalText);
+      streamBody = null;
+      streamText = "";
+    } else {
+      typeOut(add("assistant", ""), finalText);
+    }
   } else if (event.type === "error") {
     clearStatus();
     add("assistant", "error: " + (event.error || "unknown"));
@@ -137,6 +153,8 @@ async function send(text) {
   if (busy) return;
   busy = true;
   sendButton.disabled = true;
+  streamBody = null;
+  streamText = "";
   add("user", text);
   setStatus("wasm-agent is thinking…");
   try {

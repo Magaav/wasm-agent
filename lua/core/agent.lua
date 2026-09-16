@@ -23,6 +23,7 @@ function M.new(session_id, on_event)
     session_id = session_id or memory.start_session("cli", "interactive chat"),
     messages = { { role = "system", content = SYSTEM } },
     emit = on_event or function() end,
+    stream = on_event ~= nil,
   }, M)
 end
 
@@ -37,7 +38,7 @@ function M:turn(text)
   local reply = ""
   for _ = 1, MAX_TOOL_ROUNDS do
     self.emit({ type = "status", text = "model" })
-    local result = provider.complete(self.messages, tools.all())
+    local result = provider.complete(self.messages, tools.all(), self.stream)
     local calls = result.tool_calls
     local assistant = { role = "assistant", content = result.content or "" }
     if #calls > 0 then assistant.tool_calls = calls end

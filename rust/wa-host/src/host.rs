@@ -28,6 +28,16 @@ fn push_json(l: *mut LuaState, value: &Value) {
     unsafe { lua_pushlstring(l, text.as_ptr() as *const c_char, text.len()) };
 }
 
+fn parse_headers(headers_json: &str) -> Vec<(String, String)> {
+    serde_json::from_str::<serde_json::Map<String, Value>>(headers_json)
+        .map(|map| {
+            map.into_iter()
+                .map(|(key, value)| (key, value.as_str().unwrap_or_default().to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn params(values: &[Value]) -> Vec<Box<dyn rusqlite::ToSql>> {
     values
         .iter()
@@ -187,13 +197,7 @@ pub extern "C" fn http(l: *mut LuaState) -> c_int {
     let url = arg_string(l, 2).unwrap_or_default();
     let headers_json = arg_string(l, 3).unwrap_or_else(|| "{}".into());
     let body = arg_string(l, 4).unwrap_or_default();
-    let headers: Vec<(String, String)> = serde_json::from_str::<serde_json::Map<String, Value>>(&headers_json)
-        .map(|map| {
-            map.into_iter()
-                .map(|(key, value)| (key, value.as_str().unwrap_or_default().to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
+    let headers = parse_headers(&headers_json);
     let outcome = (|| -> Result<Value, String> {
         let response = match method.as_str() {
             "GET" => {
@@ -218,6 +222,89 @@ pub extern "C" fn http(l: *mut LuaState) -> c_int {
     })();
     push_json(l, &outcome.unwrap_or_else(|error| json!({"error": error})));
     1
+}
+
+/// host.http_stream(method, url, headers_json, body) -> aggregated completion.
+///
+/// Reads an OpenAI-compatible SSE stream, forwards each content delta to the UI
+/// (server-sent event `delta`), and returns `{status, content, tool_calls,
+/// usage}` so the caller can continue the tool loop.
+pub extern "C" fn http_stream(l: *mut LuaState) -> c_int {
+    let method = arg_string(l, 1).unwrap_or_else(|| "POST".into()).to_uppercase();
+    let url = arg_string(l, 2).unwrap_or_default();
+    let headers_json = arg_string(l, 3).unwrap_or_else(|| "{}".into());
+    let body = arg_string(l, 4).unwrap_or_default();
+    let headers = parse_headers(&headers_json);
+    let outcome = stream_completion(&method, &url, &headers, &body);
+    match outcome {
+        Ok(value) => push_json(l, &value),
+        Err(error) => push_json(l, &json!({"error": error})),
+    }
+    1
+}
+
+fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body: &str) -> Result<Value, String> {
+    use std::io::BufRead;
+    if method != "POST" {
+        return Err("method_not_supported".into());
+    }
+    let mut request = ureq::post(url);
+    for (key, value) in headers {
+        request = request.header(key, value);
+    }
+    let response = request.send(body.as_bytes()).map_err(|error| error.to_string())?;
+    let status = response.status().as_u16();
+    if status != 200 {
+        let text = response.into_body().read_to_string().unwrap_or_default();
+        return Ok(json!({"status": status, "content": "", "tool_calls": [], "body": text}));
+    }
+    let reader = std::io::BufReader::new(response.into_body().into_reader());
+    let mut content = String::new();
+    let mut tool_calls: Vec<Value> = Vec::new();
+    let mut usage: Option<Value> = None;
+    for line in reader.lines() {
+        let line = line.map_err(|error| error.to_string())?;
+        let Some(data) = line.trim().strip_prefix("data:") else { continue };
+        let data = data.trim();
+        if data.is_empty() {
+            continue;
+        }
+        if data == "[DONE]" {
+            break;
+        }
+        let chunk: Value = match serde_json::from_str(data) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if let Some(text) = chunk["choices"][0]["delta"]["content"].as_str() {
+            if !text.is_empty() {
+                content.push_str(text);
+                crate::serve::write_event(&json!({"type": "delta", "text": text}).to_string());
+            }
+        }
+        if let Some(calls) = chunk["choices"][0]["delta"]["tool_calls"].as_array() {
+            for call in calls {
+                let index = call["index"].as_u64().unwrap_or(0) as usize;
+                while tool_calls.len() <= index {
+                    tool_calls.push(json!({"id": "", "type": "function", "function": {"name": "", "arguments": ""}}));
+                }
+                if let Some(id) = call["id"].as_str() {
+                    tool_calls[index]["id"] = json!(id);
+                }
+                if let Some(name) = call["function"]["name"].as_str() {
+                    tool_calls[index]["function"]["name"] = json!(name);
+                }
+                if let Some(arguments) = call["function"]["arguments"].as_str() {
+                    let previous = tool_calls[index]["function"]["arguments"].as_str().unwrap_or("").to_string();
+                    tool_calls[index]["function"]["arguments"] = json!(format!("{previous}{arguments}"));
+                }
+            }
+        }
+        if chunk["usage"].is_object() {
+            usage = Some(chunk["usage"].clone());
+        }
+    }
+    Ok(json!({"status": status, "content": content, "tool_calls": tool_calls, "usage": usage}))
 }
 
 /// host.now() -> seconds since epoch

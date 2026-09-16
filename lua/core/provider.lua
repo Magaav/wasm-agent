@@ -1,4 +1,4 @@
--- OpenAI-compatible chat provider, over host.http.
+-- OpenAI-compatible chat provider, over host.http / host.http_stream.
 local json = dofile("lua/vendor/json.lua")
 local M = {}
 
@@ -18,15 +18,8 @@ function M.configured()
   return settings.base_url ~= "" and settings.api_key ~= "" and settings.model ~= ""
 end
 
-function M.complete(messages, tools)
-  local settings = M.settings()
-  local body = { model = settings.model, messages = messages }
-  if tools and #tools > 0 then
-    body.tools = tools
-    body.tool_choice = "auto"
-  end
-  local url = settings.base_url:gsub("/+$", "") .. "/chat/completions"
-  local headers = {
+local function headers_for(settings)
+  return {
     ["Content-Type"] = "application/json",
     ["Authorization"] = "Bearer " .. settings.api_key,
     ["Accept"] = "application/json",
@@ -34,6 +27,31 @@ function M.complete(messages, tools)
     ["User-Agent"] = "wasm-agent/0.1 provider-proxy",
     ["x-opencode-session"] = "wasm-agent",
   }
+end
+
+-- `stream` forwards content deltas to the UI and still returns the whole
+-- message (content + tool_calls) so the tool loop can continue.
+function M.complete(messages, tools, stream)
+  local settings = M.settings()
+  local body = { model = settings.model, messages = messages }
+  if tools and #tools > 0 then
+    body.tools = tools
+    body.tool_choice = "auto"
+  end
+  local url = settings.base_url:gsub("/+$", "") .. "/chat/completions"
+  local headers = headers_for(settings)
+
+  if stream then
+    body.stream = true
+    body.stream_options = { include_usage = true }
+    local result = json.decode(host.http_stream("POST", url, json.encode(headers), json.encode(body)))
+    if result.error then error("provider_error: " .. tostring(result.error)) end
+    if result.status ~= 200 then
+      error("provider_http_" .. tostring(result.status) .. ": " .. tostring(result.body):sub(1, 240))
+    end
+    return { content = result.content or "", tool_calls = result.tool_calls or {} }
+  end
+
   local response = json.decode(host.http("POST", url, json.encode(headers), json.encode(body)))
   if response.error then error("provider_error: " .. tostring(response.error)) end
   if response.status ~= 200 then
