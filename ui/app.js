@@ -308,7 +308,9 @@ function updateChip() {
 function renderNodeSelect() {
   const previous = nodeSelect.value;
   nodeSelect.replaceChildren();
-  for (const node of nodeList) {
+  // Only nodes that can host a chat: the local host and peers. The local
+  // `client` node is a control target, not a conversation target.
+  for (const node of nodeList.filter((item) => item.kind !== "client")) {
     const option = document.createElement("option");
     option.value = node.name;
     option.textContent = `${node.name} · ${node.kind}${node.online ? "" : " (offline)"}`;

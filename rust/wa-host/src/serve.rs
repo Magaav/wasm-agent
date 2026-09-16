@@ -32,9 +32,25 @@ pub fn run(lua: &Lua, port: u16, ui: PathBuf) {
         }
     };
     eprintln!("[serve] wasm-agent UI at http://127.0.0.1:{port}  (ui: {})", ui.display());
-    for stream in listener.incoming() {
-        if let Ok(mut stream) = stream {
-            let _ = handle(lua, &ui, &mut stream);
+    // Non-blocking accept so the single-threaded server can also run scheduled
+    // work (replication ticks) without a second thread touching the Lua state.
+    let _ = listener.set_nonblocking(true);
+    let mut next_sync = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                let _ = handle(lua, &ui, &mut stream);
+            }
+            Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= next_sync {
+                    next_sync = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                    if let Err(error) = lua.call_string("wa_sync_tick", &[]) {
+                        eprintln!("[sync] tick failed: {error}");
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(150)),
         }
     }
 }
@@ -183,6 +199,37 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
             *guard = None;
         }
         return Ok(());
+    }
+    if route == "/sync/head" {
+        let payload = lua
+            .call_string("wa_sync_head", &[])
+            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
+        return respond(stream, 200, "application/json", payload.as_bytes());
+    }
+    if route == "/sync/push" && method == "POST" {
+        let batch = String::from_utf8_lossy(&body).to_string();
+        let from = header_of(&node_headers, "x-wa-node");
+        let public_key = header_of(&node_headers, "x-wa-pub");
+        let ts = header_of(&node_headers, "x-wa-ts");
+        let signature = header_of(&node_headers, "x-wa-sig");
+        let payload = lua
+            .call_string("wa_sync_apply", &[
+                batch.as_str(), from.as_str(), public_key.as_str(), ts.as_str(), signature.as_str(),
+            ])
+            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
+        return respond(stream, 200, "application/json", payload.as_bytes());
+    }
+    if route == "/sync/tick" && method == "POST" {
+        let payload = lua
+            .call_string("wa_sync_tick", &[])
+            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
+        return respond(stream, 200, "application/json", payload.as_bytes());
+    }
+    if route == "/sync" {
+        let payload = lua
+            .call_string("wa_sync_status", &[])
+            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)));
+        return respond(stream, 200, "application/json", payload.as_bytes());
     }
     if route == "/node/call" && method == "POST" {
         let payload_body = String::from_utf8_lossy(&body).to_string();

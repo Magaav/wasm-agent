@@ -81,3 +81,24 @@ CREATE INDEX IF NOT EXISTS turns_time_idx ON turns(created_at);
 CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(
   content, session_id UNINDEXED, turn_id UNINDEXED,
   tokenize = 'unicode61 remove_diacritics 2');
+
+-- ------------------------------------------------------------- replication
+-- An append-only journal of local mutations. Peers pull/push "everything after
+-- cursor N", so sync is a diff, not a dump; applying an entry is idempotent and
+-- entries carry their origin so they are never echoed back.
+CREATE TABLE IF NOT EXISTS journal (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind       TEXT NOT NULL,
+  entity_id  TEXT NOT NULL,
+  op         TEXT NOT NULL DEFAULT 'upsert',
+  origin     TEXT NOT NULL DEFAULT '',
+  payload    TEXT NOT NULL,
+  created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS journal_time_idx ON journal(created_at);
+
+CREATE TABLE IF NOT EXISTS sync_cursors (
+  peer_id    TEXT PRIMARY KEY,
+  cursor     INTEGER NOT NULL DEFAULT 0,
+  updated_at REAL NOT NULL
+);

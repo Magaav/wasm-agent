@@ -322,6 +322,78 @@ function wa_users()
 end
 
 -- ---- model + provider ----------------------------------------------------
+-- ---- replication: diff sync between nodes --------------------------------
+function wa_sync_head()
+  return json.encode({
+    node_id = (nodeslib.identity() or {}).node_id or "",
+    head = memory.journal_head(),
+  })
+end
+
+-- Accept a batch from a peer: idempotent, and never echo an entry's own origin.
+function wa_sync_apply(payload, from, public_key, ts, signature)
+  local _, problem = verify_peer(from, public_key, ts, signature, "sync")
+  if problem then return json.encode({ error = problem }) end
+  local ok, request = pcall(json.decode, payload)
+  if not ok or type(request) ~= "table" or type(request.entries) ~= "table" then
+    return json.encode({ error = "bad_request" })
+  end
+  local self_id = (nodeslib.identity() or {}).node_id or ""
+  local applied = 0
+  for _, entry in ipairs(request.entries) do
+    if entry.origin ~= self_id and memory.apply_entry(entry) then
+      applied = applied + 1
+    end
+  end
+  return json.encode({ ok = true, applied = applied, head = memory.journal_head() })
+end
+
+-- Push everything after each peer's cursor. Called on a timer by the host.
+function wa_sync_tick()
+  local configured = os.getenv("WASM_AGENT_SYNC_TO") or ""
+  if configured == "" then return json.encode({ ok = true, peers = 0, pushed = 0 }) end
+  local identity = nodeslib.identity() or {}
+  local peers, pushed = 0, 0
+  for peer in configured:gmatch("[^,]+") do
+    peer = peer:gsub("^%s+", ""):gsub("%s+$", "")
+    if peer ~= "" then
+      peers = peers + 1
+      local node = nodeslib.find(peer)
+      local endpoint = (node and nodeslib.endpoint(node)) or (peer:match("^https?://") and peer) or nil
+      local cursor = memory.cursor(peer)
+      local entries = memory.journal_since(cursor, 200)
+      if endpoint and #entries > 0 then
+        local ts = math.floor(host.now())
+        local _, signature = nodeslib.sign_action("sync", ts)
+        local headers = json.encode({
+          ["Content-Type"] = "application/json",
+          ["User-Agent"] = "wasm-agent/0.1 node",
+          ["X-WA-Node"] = identity.node_id or "",
+          ["X-WA-Pub"] = identity.public_key or "",
+          ["X-WA-Ts"] = tostring(ts),
+          ["X-WA-Sig"] = signature or "",
+        })
+        local response = json.decode(host.http("POST", endpoint:gsub("/+$", "") .. "/sync/push",
+          headers, json.encode({ entries = entries })))
+        if response and tonumber(response.status) == 200 then
+          memory.set_cursor(peer, entries[#entries].id)
+          pushed = pushed + #entries
+        end
+      end
+    end
+  end
+  return json.encode({ ok = true, peers = peers, pushed = pushed })
+end
+
+function wa_sync_status()
+  return json.encode({
+    node_id = (nodeslib.identity() or {}).node_id or "",
+    head = memory.journal_head(),
+    pushing_to = os.getenv("WASM_AGENT_SYNC_TO") or "",
+    peers = memory.sync_peers(),
+  })
+end
+
 function wa_model(node, session)
   if remote_target(node) then
     local result = nodeslib.remote_call(node, "status", {})

@@ -88,6 +88,10 @@ function M.remember(content, scope, tags)
        {id, scope, content, json.encode(tags), "user", "", now, now, hash})
   exec("INSERT INTO memories_fts(content,tags,memory_id) VALUES(?,?,?)",
        {content, table.concat(tags, " "), id})
+  M.journal("memory", id, {
+    id = id, scope = scope, content = content, tags = tags, source = "user",
+    created_at = now, updated_at = now, content_sha256 = hash,
+  })
   return id
 end
 
@@ -236,6 +240,7 @@ function M.start_session(route_id, objective, opts)
        "VALUES(?,?,?,?,?,?,?,?,?)",
        {id, route_id or "", objective or "", now, opts.user_id or "master",
         opts.node_id or "", opts.title or objective or "", opts.mode or "default", now})
+  M.journal("session", id, M.session(id))
   return id
 end
 
@@ -269,20 +274,40 @@ end
 function M.set_session_mode(session_id, mode)
   mode = (mode == "debug") and "debug" or "default"
   exec("UPDATE sessions SET mode=?, updated_at=? WHERE id=?", {mode, host.now(), session_id})
+  M.journal("session", session_id, M.session(session_id))
   return mode
 end
 
 function M.set_session_summary(session_id, until_seq, summary)
   exec("UPDATE sessions SET summarized_until=?, summary=?, updated_at=? WHERE id=?",
        {until_seq, summary or "", host.now(), session_id})
+  M.journal("session", session_id, M.session(session_id))
 end
 
 function M.finish_session(session_id)
   exec("UPDATE sessions SET ended_at=?, updated_at=? WHERE id=? AND ended_at IS NULL",
        {host.now(), host.now(), session_id})
+  M.journal("session", session_id, M.session(session_id))
 end
 
 -- ------------------------------------------------------------------- turns
+
+local cached_origin = nil
+local function origin()
+  if cached_origin == nil then
+    local ok, raw = pcall(host.node_identity)
+    local identity = ok and raw and json.decode(raw) or nil
+    cached_origin = (identity and identity.node_id) or ""
+  end
+  return cached_origin
+end
+
+-- Append a mutation to the replication journal. Every write that should reach
+-- peers goes through here; applying a remote entry does NOT journal it again.
+function M.journal(kind, entity_id, payload)
+  exec("INSERT INTO journal(kind,entity_id,op,origin,payload,created_at) VALUES(?,?,?,?,?,?)",
+       {kind, entity_id, "upsert", origin(), json.encode(payload), host.now()})
+end
 
 function M.next_seq(session_id)
   local rows = query("SELECT COALESCE(MAX(seq),0)+1 AS seq FROM turns WHERE session_id=?", {session_id})
@@ -301,6 +326,14 @@ function M.append_turn(session_id, turn)
   exec("INSERT INTO turns_fts(content,session_id,turn_id) VALUES(?,?,?)",
        {turn.content or "", session_id, id})
   exec("UPDATE sessions SET updated_at=? WHERE id=?", {host.now(), session_id})
+  M.journal("turn", id, {
+    id = id, session_id = session_id, seq = seq, role = turn.role or "user",
+    content = turn.content or "", tool_calls = turn.tool_calls or {},
+    tool_call_id = turn.tool_call_id or "", tool_name = turn.tool_name or "",
+    tokens = turn.tokens or 0, ms = turn.ms or 0,
+    ok = turn.ok == false and 0 or 1, debug = turn.debug and 1 or 0,
+    trace = turn.trace or {}, created_at = host.now(),
+  })
   return seq
 end
 
@@ -360,6 +393,91 @@ function M.record_run(run_id, session_id, status, outcome, reply)
   exec("INSERT INTO runs(id,session_id,turn_id,status,outcome,reply,started_at) VALUES(?,?,?,?,?,?,?) " ..
        "ON CONFLICT(id) DO UPDATE SET status=excluded.status, outcome=excluded.outcome, reply=excluded.reply",
        {run_id, session_id, run_id, status or "", outcome or "", reply or "", host.now()})
+  M.journal("run", run_id, {
+    id = run_id, session_id = session_id, turn_id = run_id, status = status or "",
+    outcome = outcome or "", reply = reply or "", started_at = host.now(),
+  })
+end
+
+-- ---------------------------------------------------------------- replication
+
+function M.journal_head()
+  local rows = query("SELECT COALESCE(MAX(id),0) AS head FROM journal")
+  return rows[1] and rows[1].head or 0
+end
+
+function M.journal_since(cursor, limit)
+  local rows = query("SELECT * FROM journal WHERE id>? ORDER BY id ASC LIMIT ?",
+                     {cursor or 0, limit or 200})
+  for _, row in ipairs(rows) do row.payload = json.decode(row.payload) end
+  return rows
+end
+
+function M.cursor(peer_id)
+  local rows = query("SELECT cursor FROM sync_cursors WHERE peer_id=?", {peer_id})
+  return rows[1] and rows[1].cursor or 0
+end
+
+function M.set_cursor(peer_id, cursor)
+  exec("INSERT INTO sync_cursors(peer_id,cursor,updated_at) VALUES(?,?,?) " ..
+       "ON CONFLICT(peer_id) DO UPDATE SET cursor=excluded.cursor, updated_at=excluded.updated_at",
+       {peer_id, cursor, host.now()})
+end
+
+function M.sync_peers()
+  return query("SELECT peer_id, cursor, updated_at FROM sync_cursors ORDER BY updated_at DESC")
+end
+
+-- Idempotent: safe to apply the same entry twice. Never journals what it applies.
+function M.apply_entry(entry)
+  local payload = entry.payload
+  if type(payload) == "string" then
+    local ok, decoded = pcall(json.decode, payload)
+    if not ok then return false end
+    payload = decoded
+  end
+  if type(payload) ~= "table" then return false end
+
+  if entry.kind == "turn" then
+    exec("INSERT OR REPLACE INTO turns(id,session_id,seq,role,content,tool_calls,tool_call_id," ..
+         "tool_name,tokens,ms,ok,debug,trace,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+         {payload.id, payload.session_id, payload.seq, payload.role, payload.content or "",
+          json.encode(payload.tool_calls or {}), payload.tool_call_id or "", payload.tool_name or "",
+          payload.tokens or 0, payload.ms or 0, payload.ok or 1, payload.debug or 0,
+          json.encode(payload.trace or {}), payload.created_at or host.now()})
+    exec("DELETE FROM turns_fts WHERE turn_id=?", {payload.id})
+    exec("INSERT INTO turns_fts(content,session_id,turn_id) VALUES(?,?,?)",
+         {payload.content or "", payload.session_id, payload.id})
+  elseif entry.kind == "session" then
+    local local_rows = query("SELECT updated_at FROM sessions WHERE id=?", {payload.id})
+    if #local_rows == 0 or (payload.updated_at or 0) >= (local_rows[1].updated_at or 0) then
+      exec("INSERT OR REPLACE INTO sessions(id,route_id,objective,parent_session_id,started_at," ..
+           "ended_at,user_id,node_id,title,mode,summary,summarized_until,updated_at) " ..
+           "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+           {payload.id, payload.route_id or "", payload.objective or "", payload.parent_session_id,
+            payload.started_at or host.now(), payload.ended_at, payload.user_id or "master",
+            payload.node_id or "", payload.title or "", payload.mode or "default",
+            payload.summary or "", payload.summarized_until or 0, payload.updated_at or host.now()})
+    end
+  elseif entry.kind == "memory" then
+    exec("INSERT OR IGNORE INTO memories(id,scope,content,tags,source,session_id,created_at," ..
+         "updated_at,content_sha256) VALUES(?,?,?,?,?,?,?,?,?)",
+         {payload.id, payload.scope or "global", payload.content or "",
+          type(payload.tags) == "table" and json.encode(payload.tags) or (payload.tags or "[]"),
+          payload.source or "replica", payload.session_id, payload.created_at or host.now(),
+          payload.updated_at or host.now(), payload.content_sha256 or ""})
+    exec("DELETE FROM memories_fts WHERE memory_id=?", {payload.id})
+    exec("INSERT INTO memories_fts(content,tags,memory_id) VALUES(?,?,?)",
+         {payload.content or "", payload.tags or "", payload.id})
+  elseif entry.kind == "run" then
+    exec("INSERT OR REPLACE INTO runs(id,session_id,turn_id,status,outcome,reply,started_at,ended_at) " ..
+         "VALUES(?,?,?,?,?,?,?,?)",
+         {payload.id, payload.session_id, payload.turn_id or "", payload.status or "",
+          payload.outcome or "", payload.reply or "", payload.started_at or host.now(), payload.ended_at})
+  else
+    return false
+  end
+  return true
 end
 
 return M

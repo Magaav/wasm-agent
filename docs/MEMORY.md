@@ -79,13 +79,31 @@ Rendered in **engine → sessions** as `llm 2478ms → tool(remember) 1ms → ll
 so a slow or failing step is obvious. Failures keep `ok:false` and the error text
 on the turn, so `search_turns` can find "where does this keep failing".
 
-## Replication (planned, per node first)
+## Replication — diff sync (implemented)
 
-Start per node (a turn on `node-b` lives in node-b's SQLite). When we need a
-cluster, sync transcripts **by diff** like a message log: each node keeps a
-monotonic `(stream, seq)` cursor per peer and ships new turns; resumable by
-cursor, last-writer-wins per turn id. That gives backup-on-the-fly and a global
-`search_turns` without a central writer. `runs`/`memories` ride the same channel.
+Transcripts start per node (a turn on `node-b` lives in node-b's SQLite). Sync is
+a **diff, not a dump**: every local mutation appends to a `journal` (monotonic
+`id`, `kind`, `origin`, JSON `payload`), and each node keeps a `sync_cursors`
+cursor per peer.
+
+- `wa_sync_tick` ships `journal_since(cursor, 200)` to each peer in
+  `WASM_AGENT_SYNC_TO`, signed with the node key; on `200` the cursor advances.
+  The host runs it on a timer (non-blocking accept loop in `serve::run`).
+- `POST /sync/push` verifies the peer (`bad_signature`/`unknown_caller`/
+  `stale_request`) and applies entries **idempotently**; an entry is never
+  echoed back (its `origin` is checked).
+- Kinds: `turn`, `session` (last-writer-wins on `updated_at`), `memory`
+  (dedupe by the unique index), `run`. Traces replicate with the turn, so the
+  remote copy is as debuggable as the original.
+
+Verified: node-b pushed 6 entries to openclaw (cursor 2→8, the host's session
+went 2→6 turns, traces included); a second tick pushed `0` (idempotent).
+
+Still open: **endpoint resolution**. A node currently advertises whatever
+`WASM_AGENT_ENDPOINT` says, and the host advertises the SSH alias
+`openclaw.ohana:8799` — a peer cannot resolve that. Peers need a real address
+(a public `host:port`, or the rendezvous serving as relay). This is the same
+missing piece as remote control of a NAT'd node: **the relay**.
 
 ## Retention
 
