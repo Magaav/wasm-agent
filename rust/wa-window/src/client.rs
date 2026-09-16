@@ -120,6 +120,7 @@ fn execute(action: &str, args: &Value) -> Value {
         }
         "key" => json!({"ok": press_key(args["key"].as_str().unwrap_or_default())}),
         "shell" => shell(args),
+        "frame" => frame(args),
         "cdp" => cdp(args),
         other => json!({"error": format!("unknown_action:{other}")}),
     }
@@ -255,8 +256,9 @@ fn press_key(name: &str) -> bool {
     true
 }
 
-// ---- screenshot ----------------------------------------------------------
-fn screenshot() -> Value {
+// ---- screenshot / live frame --------------------------------------------
+/// Capture the primary screen into top-down BGRA pixels.
+fn capture_screen() -> Option<(i32, i32, Vec<u8>)> {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
@@ -268,7 +270,7 @@ fn screenshot() -> Value {
         let width = GetSystemMetrics(SM_CXSCREEN);
         let height = GetSystemMetrics(SM_CYSCREEN);
         if width <= 0 || height <= 0 {
-            return json!({"error": "no_display"});
+            return None;
         }
         let screen = GetDC(None);
         let memory = CreateCompatibleDC(Some(screen));
@@ -300,45 +302,79 @@ fn screenshot() -> Value {
         ReleaseDC(Some(HWND(std::ptr::null_mut())), screen);
 
         if lines == 0 {
-            return json!({"error": "capture_failed"});
+            return None;
         }
-
-        let path = std::env::temp_dir().join(format!("wa-screenshot-{}.bmp", std::process::id()));
-        if let Err(error) = write_bmp(&path, width, height, &pixels) {
-            return json!({"error": error});
-        }
-        json!({"ok": true, "path": path.to_string_lossy(), "width": width, "height": height})
+        Some((width, height, pixels))
     }
 }
 
-fn write_bmp(path: &std::path::Path, width: i32, height: i32, pixels: &[u8]) -> Result<(), String> {
-    use std::io::Write;
-    let size = (pixels.len()) as u32;
-    let mut file = std::fs::File::create(path).map_err(|error| error.to_string())?;
-    let mut header = Vec::with_capacity(54);
-    header.extend_from_slice(b"BM");
-    header.extend_from_slice(&(54 + size).to_le_bytes()); // file size
-    header.extend_from_slice(&0u16.to_le_bytes()); // reserved
-    header.extend_from_slice(&0u16.to_le_bytes()); // reserved
-    header.extend_from_slice(&54u32.to_le_bytes()); // pixel offset
-    header.extend_from_slice(&40u32.to_le_bytes()); // header size
-    header.extend_from_slice(&width.to_le_bytes());
-    header.extend_from_slice(&height.to_le_bytes()); // positive = bottom-up; pixels are top-down, flip
-    header.extend_from_slice(&1u16.to_le_bytes()); // planes
-    header.extend_from_slice(&32u16.to_le_bytes()); // bpp
-    header.extend_from_slice(&0u32.to_le_bytes()); // compression
-    header.extend_from_slice(&size.to_le_bytes());
-    header.extend_from_slice(&2835u32.to_le_bytes());
-    header.extend_from_slice(&2835u32.to_le_bytes());
-    header.extend_from_slice(&0u32.to_le_bytes());
-    header.extend_from_slice(&0u32.to_le_bytes());
-    file.write_all(&header).map_err(|error| error.to_string())?;
-    // GDI gives bottom-up rows; our buffer is top-down, so write rows in reverse.
+fn screenshot() -> Value {
+    let Some((width, height, pixels)) = capture_screen() else {
+        return json!({"error": "capture_failed"});
+    };
+    let path = std::env::temp_dir().join(format!("wa-screenshot-{}.bmp", std::process::id()));
+    if let Err(error) = std::fs::write(&path, bmp_bytes(width, height, &pixels)) {
+        return json!({"error": error.to_string()});
+    }
+    json!({"ok": true, "path": path.to_string_lossy(), "width": width, "height": height})
+}
+
+/// A downscaled frame as a base64 BMP, for the remote-control view.
+fn frame(args: &Value) -> Value {
+    let Some((width, height, pixels)) = capture_screen() else {
+        return json!({"error": "capture_failed"});
+    };
+    let max_width = args["max_width"].as_i64().unwrap_or(720).clamp(160, 1920) as i32;
+    let scale = (max_width as f64 / width as f64).min(1.0);
+    let out_w = ((width as f64 * scale).round() as i32).max(1);
+    let out_h = ((height as f64 * scale).round() as i32).max(1);
+    let mut out = vec![0u8; (out_w * out_h * 4) as usize];
+    for y in 0..out_h {
+        let sy = ((y as f64 / scale) as i32).min(height - 1);
+        for x in 0..out_w {
+            let sx = ((x as f64 / scale) as i32).min(width - 1);
+            let src = ((sy * width + sx) * 4) as usize;
+            let dst = ((y * out_w + x) * 4) as usize;
+            out[dst..dst + 4].copy_from_slice(&pixels[src..src + 4]);
+        }
+    }
+    json!({
+        "ok": true,
+        "width": out_w,
+        "height": out_h,
+        "screen_width": width,
+        "screen_height": height,
+        "scale": scale,
+        "mime": "image/bmp",
+        "image": base64(&bmp_bytes(out_w, out_h, &out))
+    })
+}
+
+fn bmp_bytes(width: i32, height: i32, pixels: &[u8]) -> Vec<u8> {
+    let size = pixels.len() as u32;
+    let mut out = Vec::with_capacity(54 + pixels.len());
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&(54 + size).to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&54u32.to_le_bytes());
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&width.to_le_bytes());
+    out.extend_from_slice(&height.to_le_bytes()); // positive = bottom-up
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&32u16.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&size.to_le_bytes());
+    out.extend_from_slice(&2835u32.to_le_bytes());
+    out.extend_from_slice(&2835u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    // Pixels are top-down; BMP rows are bottom-up, so write them in reverse.
     let stride = (width * 4) as usize;
     for row in (0..height as usize).rev() {
-        file.write_all(&pixels[row * stride..(row + 1) * stride]).map_err(|error| error.to_string())?;
+        out.extend_from_slice(&pixels[row * stride..(row + 1) * stride]);
     }
-    Ok(())
+    out
 }
 
 // ---- CDP (Chrome DevTools Protocol) --------------------------------------

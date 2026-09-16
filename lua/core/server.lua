@@ -92,6 +92,48 @@ function wa_spell_run(name, session)
   return json.encode(toolslib.dispatch(memory, "spell_run", { name = name }, user.role))
 end
 
+-- ---- nodes ---------------------------------------------------------------
+function wa_nodes(session)
+  local user = users.current(session)
+  local role = users.normalize(user.role)
+  local link = (host.client_status and json.decode(host.client_status())) or { connected = false }
+  local nodes = {
+    {
+      id = "host", name = "host", kind = "host", role = role, online = true,
+      capabilities = { "bash", "read", "write", "edit", "ls", "grep", "spells" },
+    },
+    {
+      id = "client", name = "client", kind = "client", role = role,
+      online = link.connected and true or false,
+      last_seen_secs = link.last_seen_secs,
+      capabilities = { "screenshot", "frame", "click", "move", "type", "key", "shell", "cdp" },
+    },
+  }
+  return json.encode({
+    role = role,
+    binding = role == "master" and "master:master" or "master:guest",
+    nodes = nodes,
+  })
+end
+
+-- Generic client action from the UI (control view: click/type/key).
+function wa_client(payload, session)
+  local user = require_master(session)
+  if not user then return json.encode({ error = "forbidden" }) end
+  local ok, args = pcall(json.decode, payload)
+  if not ok or type(args) ~= "table" then return json.encode({ error = "bad_args" }) end
+  return json.encode(toolslib.dispatch(memory, "client", args, user.role))
+end
+
+-- One downscaled screen frame from the client, for the control view.
+function wa_frame(max_width, session)
+  local user = require_master(session)
+  if not user then return json.encode({ error = "forbidden" }) end
+  return json.encode(toolslib.dispatch(memory, "client", {
+    action = "frame", max_width = tonumber(max_width) or 720,
+  }, user.role))
+end
+
 function wa_users()
   local list = {}
   for _, user in ipairs(users.list()) do list[#list + 1] = users.public(user) end

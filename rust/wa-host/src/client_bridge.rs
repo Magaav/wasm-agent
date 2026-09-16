@@ -22,6 +22,7 @@ struct Inner {
     queue: VecDeque<Value>,
     result: Option<(String, Value)>,
     next_id: u64,
+    last_poll: Option<Instant>,
 }
 
 pub struct Bridge {
@@ -32,7 +33,7 @@ pub struct Bridge {
 impl Bridge {
     pub fn new() -> Self {
         Bridge {
-            inner: Mutex::new(Inner { queue: VecDeque::new(), result: None, next_id: 0 }),
+            inner: Mutex::new(Inner { queue: VecDeque::new(), result: None, next_id: 0, last_poll: None }),
             signal: Condvar::new(),
         }
     }
@@ -70,6 +71,26 @@ impl Bridge {
 
     fn take_command(&self) -> Option<Value> {
         self.inner.lock().unwrap().queue.pop_front()
+    }
+
+    fn mark_poll(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.last_poll = Some(Instant::now());
+        }
+    }
+
+    /// Liveness of the bound client, for the nodes panel.
+    pub fn status(&self) -> Value {
+        let inner = self.inner.lock().unwrap();
+        let elapsed = inner
+            .last_poll
+            .map(|at| at.elapsed().as_secs())
+            .unwrap_or(u64::MAX);
+        json!({
+            "connected": elapsed < 30,
+            "last_seen_secs": if elapsed == u64::MAX { Value::Null } else { json!(elapsed) },
+            "queued": inner.queue.len()
+        })
     }
 
     fn deliver(&self, id: String, result: Value) {
@@ -123,12 +144,14 @@ fn handle(bridge: &Bridge, stream: &mut TcpStream) -> std::io::Result<()> {
                 break (method, path, data[end + 4..end + 4 + length].to_vec());
             }
         }
-        if data.len() > 1_000_000 {
+        // Frames come back as base64 images, so allow several MB.
+        if data.len() > 24_000_000 {
             return Ok(());
         }
     };
 
     if path == "/client/poll" {
+        bridge.mark_poll();
         let deadline = Instant::now() + POLL_WAIT;
         loop {
             if let Some(command) = bridge.take_command() {

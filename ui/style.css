@@ -115,6 +115,39 @@ wa-message.assistant { align-self: flex-start; background: var(--assistant); }
 .tool-name { color: var(--muted); text-transform: uppercase; letter-spacing: .6px; font-size: 11px; margin-bottom: var(--space); }
 .tool-detail { color: #c9d1e0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-word; }
 
+/* nodes (master:master / master:guest) */
+.nodes-box { display: flex; flex-direction: column; gap: var(--gap); padding: 0 var(--space) var(--space); }
+.node {
+  display: flex; align-items: center; gap: var(--gap);
+  border: 1px solid var(--line); border-radius: var(--radius-sm); padding: var(--space);
+}
+.node .node-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); flex: none; }
+.node.online .node-dot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+.node-name { font-weight: 500; }
+.node-kind, .node-caps { color: var(--muted); font-size: 11px; }
+.node-caps { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.node button {
+  border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+  border-radius: var(--radius-sm); padding: 2px var(--space); cursor: pointer; font-size: 11px;
+}
+.node button:hover { border-color: var(--accent); }
+
+/* remote control view */
+body.control .messages, body.control .composer, body.control .terminal { display: none; }
+.control { display: none; flex: 1; min-height: 0; flex-direction: column; }
+body.control .control { display: flex; }
+.control-bar {
+  display: flex; align-items: center; gap: var(--gap); padding: var(--space) var(--pad);
+  border-bottom: 1px solid var(--line); background: rgba(18, 21, 28, .82);
+}
+.control-title { flex: 1; font-size: 12.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
+.control-live { display: flex; align-items: center; gap: var(--space); font-size: 12px; color: var(--muted); }
+.control-view { flex: 1; min-height: 0; overflow: auto; background: #05070c; display: flex; align-items: flex-start; justify-content: center; }
+.control-view img { max-width: 100%; cursor: crosshair; display: block; }
+.control-keys { display: flex; gap: var(--gap); padding: var(--pad); border-top: 1px solid var(--line); background: rgba(18, 21, 28, .82); }
+.control-keys input { flex: 1; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel-2); color: var(--text); padding: var(--space) var(--pad); font: inherit; outline: none; }
+.control-keys input:focus { border-color: var(--accent); }
+
 /* terminal (client shell) */
 body.term .messages { display: none; }
 body.term .composer { display: none; }

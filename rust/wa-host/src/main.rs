@@ -133,6 +133,7 @@ fn main() {
     lua.register("exec", host::exec);
     lua.register("sleep", host::sleep);
     lua.register_with_upvalue("client", host::client, host as *mut c_void);
+    lua.register_with_upvalue("client_status", host::client_status, host as *mut c_void);
     lua.register("http", host::http);
     lua.register("http_stream", host::http_stream);
     lua.register_with_upvalue("plugins", host::plugins, host as *mut c_void);

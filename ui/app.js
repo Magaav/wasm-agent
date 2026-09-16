@@ -28,6 +28,16 @@ const termBtn = document.getElementById("term-btn");
 const termOut = document.getElementById("term-out");
 const termForm = document.getElementById("term-form");
 const termCmd = document.getElementById("term-cmd");
+const nodesBox = document.getElementById("nodes-box");
+const nodesBinding = document.getElementById("nodes-binding");
+const control = document.getElementById("control");
+const controlTitle = document.getElementById("control-title");
+const controlImg = document.getElementById("control-img");
+const controlLive = document.getElementById("control-live");
+const controlRefresh = document.getElementById("control-refresh");
+const controlClose = document.getElementById("control-close");
+const controlKeys = document.getElementById("control-keys");
+const controlText = document.getElementById("control-text");
 
 let renderer = null;
 let version = null;
@@ -477,6 +487,7 @@ statusBtn.addEventListener("click", () => {
     renderLimits();
     renderUsage();
     renderPopFoot();
+    refreshNodes();
   }
 });
 balloon.addEventListener("close", () => statusBtn.setAttribute("aria-expanded", "false"));
@@ -670,6 +681,102 @@ function wireDrag(element) {
 }
 wireDrag(orb);
 wireDrag(dragbar);
+
+// ---- nodes + remote control ---------------------------------------------
+let controlTimer = null;
+let controlScale = 1;
+
+async function clientAction(payload) {
+  const response = await fetch("client", {
+    method: "POST",
+    headers: apiHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  return response.json();
+}
+
+function nodeButton(label, handler) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  button.addEventListener("click", handler);
+  return button;
+}
+
+async function refreshNodes() {
+  try {
+    const payload = await (await fetch("nodes", { headers: apiHeaders() })).json();
+    nodesBinding.textContent = payload.binding || "";
+    nodesBox.replaceChildren();
+    for (const node of payload.nodes || []) {
+      const row = document.createElement("div");
+      row.className = "node" + (node.online ? " online" : "");
+      const dot = document.createElement("span");
+      dot.className = "node-dot";
+      const name = document.createElement("span");
+      name.className = "node-name";
+      name.textContent = node.name;
+      const kind = document.createElement("span");
+      kind.className = "node-kind";
+      kind.textContent = node.kind;
+      const caps = document.createElement("span");
+      caps.className = "node-caps";
+      caps.textContent = (node.capabilities || []).join(" ");
+      row.append(dot, name, kind, caps);
+      row.append(nodeButton("talk", () => { balloon.close(); input.focus(); }));
+      if (node.kind === "client") {
+        row.append(nodeButton("control", () => openControl(node.name)));
+      }
+      nodesBox.append(row);
+    }
+  } catch (error) { /* leave the panel as-is */ }
+}
+
+async function fetchFrame() {
+  try {
+    const payload = await (await fetch("frame", {
+      method: "POST", headers: apiHeaders({ "Content-Type": "text/plain" }), body: "720",
+    })).json();
+    if (payload.error || !payload.image) return;
+    controlScale = payload.scale || 1;
+    controlImg.src = "data:image/bmp;base64," + payload.image;
+  } catch (error) { /* ignore */ }
+}
+
+function openControl(name) {
+  balloon.close();
+  document.body.classList.add("control");
+  control.hidden = false;
+  controlTitle.textContent = "control · " + name;
+  fetchFrame();
+}
+
+function closeControl() {
+  document.body.classList.remove("control");
+  control.hidden = true;
+  controlLive.checked = false;
+  if (controlTimer) { clearInterval(controlTimer); controlTimer = null; }
+}
+
+controlImg.addEventListener("click", (event) => {
+  const rect = controlImg.getBoundingClientRect();
+  const x = Math.round((event.clientX - rect.left) / controlScale);
+  const y = Math.round((event.clientY - rect.top) / controlScale);
+  clientAction({ action: "click", x, y });
+});
+controlKeys.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const text = controlText.value;
+  if (!text) return;
+  controlText.value = "";
+  clientAction({ action: "type", text });
+});
+controlRefresh.addEventListener("click", fetchFrame);
+controlClose.addEventListener("click", closeControl);
+controlLive.addEventListener("change", () => {
+  if (controlTimer) { clearInterval(controlTimer); controlTimer = null; }
+  if (controlLive.checked) controlTimer = setInterval(fetchFrame, 1500);
+});
 
 // ---- terminal: shell on this machine + spell replay ----------------------
 const termHistory = [];

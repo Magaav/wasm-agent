@@ -202,6 +202,13 @@ pub extern "C" fn client(l: *mut LuaState) -> c_int {
     1
 }
 
+/// host.client_status() -> {connected, last_seen_secs, queued}
+pub extern "C" fn client_status(l: *mut LuaState) -> c_int {
+    let host = host_of(l);
+    push_json(l, &host.client.status());
+    1
+}
+
 /// host.sleep(milliseconds) — used between deterministic spell steps.
 pub extern "C" fn sleep(l: *mut LuaState) -> c_int {
     let millis = arg_string(l, 1)

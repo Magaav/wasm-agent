@@ -52,6 +52,28 @@
       </form>
     </section>
 
+    <section id="control" class="control" hidden>
+      <header class="control-bar">
+        <span class="control-title" id="control-title">control</span>
+        <label class="control-live"><input id="control-live" type="checkbox" /> live</label>
+        <button id="control-refresh" class="icon-btn" type="button" title="Refresh frame">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5V2L7 6l5 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z"/></svg>
+        </button>
+        <button id="control-close" class="icon-btn" type="button" title="Close control">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+        </button>
+      </header>
+      <div class="control-view" id="control-view">
+        <img id="control-img" alt="remote screen" />
+      </div>
+      <form id="control-keys" class="control-keys">
+        <input id="control-text" autocomplete="off" placeholder="type text, Enter sends it to the node" />
+        <button class="icon-btn" type="submit" title="Send text">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </form>
+    </section>
+
     <form id="composer" class="composer">
       <div id="attachments" class="attachments"></div>
       <div class="composer-row">
@@ -94,6 +116,8 @@
           <label class="pop-head" for="model-select">model</label>
           <select id="model-select" class="wa-select"></select>
         </div>
+        <div class="pop-head">nodes <span id="nodes-binding" class="pop-sub"></span></div>
+        <div id="nodes-box" class="nodes-box"></div>
         <div class="pop-head">context</div>
         <div id="context-box" class="usage-box"></div>
         <div class="pop-head">limits</div>
