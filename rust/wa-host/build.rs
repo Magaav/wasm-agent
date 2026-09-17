@@ -1,9 +1,17 @@
 // Compile the vendored Lua 5.4 C sources into a static library.
 fn main() {
     println!("cargo:rerun-if-changed=vendor/lua");
+    // Lua's configuration is selected by defines, and the platform matters:
+    // LUA_USE_LINUX pulls in LUA_USE_POSIX, which switches the error handling to
+    // _setjmp/_longjmp. mingw-w64 declares `_setjmp(jmp_buf, void *)` - two
+    // arguments - so on Windows that does not compile at all. Let Windows use
+    // the portable setjmp/longjmp path instead.
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let mut build = cc::Build::new();
     build.include("vendor/lua");
-    build.define("LUA_USE_LINUX", None);
+    if target_os == "linux" {
+        build.define("LUA_USE_LINUX", None);
+    }
     build.warnings(false);
     for entry in std::fs::read_dir("vendor/lua").expect("vendor/lua") {
         let path = entry.expect("entry").path();
@@ -18,6 +26,9 @@ fn main() {
         build.file(path);
     }
     build.compile("lua");
-    println!("cargo:rustc-link-lib=m");
-    println!("cargo:rustc-link-lib=dl");
+    // libm and libdl are Unix libraries; on Windows the C runtime provides both.
+    if target_os != "windows" {
+        println!("cargo:rustc-link-lib=m");
+        println!("cargo:rustc-link-lib=dl");
+    }
 }
