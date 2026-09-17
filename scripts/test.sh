@@ -120,6 +120,12 @@ memory.setup()
 local sid = memory.start_session("", "evidence", { user_id = "master", node_id = "", title = "evidence" })
 local big = string.rep("0123456789", 3000)
 memory.append_turn(sid, { role = "user", content = "read it" })
+-- A tool result whose call is not declared is dropped by the exchange repair,
+-- correctly: the assistant message that asked for it has to be here too.
+memory.append_turn(sid, { role = "assistant", content = "", tool_calls = {
+  { id = "c1", type = "function", ["function"] = { name = "read", arguments = "{}" } },
+  { id = "c2", type = "function", ["function"] = { name = "bash", arguments = "{}" } },
+} })
 memory.append_turn(sid, { role = "tool", tool_call_id = "c1", tool_name = "read", content = big })
 memory.append_turn(sid, { role = "tool", tool_call_id = "c2", tool_name = "bash",
   content = string.rep("noise ", 2000) .. "FATAL: the error is at the end" })
