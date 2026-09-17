@@ -122,10 +122,20 @@ function M:build_context()
   local rows = memory.session_turns(self.session_id, {
     after_seq = session.summarized_until or 0, limit = 500,
   })
+  -- A window that begins with a tool result is missing the tool call it answers
+  -- (it was summarised away, or the boundary was cut mid-exchange). Providers
+  -- reject an orphan tool result with a 400, so drop leading tool turns until
+  -- the window starts on a real message. Compaction avoids creating such a
+  -- boundary, but this keeps a rebuilt context valid regardless.
+  local started = false
   for _, turn in ipairs(rows) do
-    if turn.role == "user" then
+    if not started and turn.role == "tool" then
+      -- skip the orphan
+    elseif turn.role == "user" then
+      started = true
       messages[#messages + 1] = { role = "user", content = turn.content }
     elseif turn.role == "assistant" then
+      started = true
       local message = { role = "assistant", content = turn.content or "" }
       if type(turn.tool_calls) == "table" and #turn.tool_calls > 0 then
         message.tool_calls = turn.tool_calls
