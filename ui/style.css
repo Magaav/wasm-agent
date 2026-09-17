@@ -222,6 +222,14 @@ body.engine .engine { display: flex; }
 .session-row { display: flex; align-items: center; gap: var(--gap); padding: var(--space) 0; border-bottom: 1px solid rgba(35,41,54,.6); }
 .session-title { font-weight: 500; min-width: 110px; }
 .session-meta { color: var(--muted); font-size: 11px; flex: 1; }
+/* A thread that needs attention says so where the thread is listed. */
+.session-state {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .5px;
+  padding: 1px var(--space); border-radius: 999px; border: 1px solid #f85149;
+  color: #f85149; cursor: help;
+}
+.session-state.interrupted { border-color: #d29922; color: #d29922; }
+.session-state.failed { border-color: #f85149; color: #f85149; }
 .session-bar { display: flex; gap: var(--gap); margin-bottom: var(--pad); }
 .session-bar button { border: 1px solid var(--line); background: var(--panel-2); color: var(--text); border-radius: var(--radius-sm); padding: 2px var(--space); cursor: pointer; font-size: 11px; }
 .session-bar button:hover { border-color: var(--accent); }

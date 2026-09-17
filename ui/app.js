@@ -1262,7 +1262,18 @@ async function refreshSessions() {
       meta.className = "session-meta";
       const when = new Date((session.updated_at || session.started_at) * 1000).toLocaleString();
       meta.textContent = `${session.mode} · ${session.turn_count} turns · ${when}`;
-      row.append(title, meta, nodeButton("open", () => openSession(session.id)));
+      row.append(title, meta);
+      // Only when there is something to recover: a badge on every row would be
+      // noise, and "answered" is the case that needs no attention. The reason
+      // is the API's own words, so the UI cannot invent a different story.
+      if (session.state && session.state !== "answered" && session.state !== "empty") {
+        const badge = document.createElement("span");
+        badge.className = "session-state " + session.state;
+        badge.textContent = session.state;
+        badge.title = session.state_detail || session.state;
+        row.append(badge);
+      }
+      row.append(nodeButton("open", () => openSession(session.id)));
       sessionsBox.append(row);
     }
   } catch (error) {

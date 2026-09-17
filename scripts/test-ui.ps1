@@ -28,8 +28,9 @@ foreach ($name in @("index.html", "style.css", "app.js", "components.js", "rende
 # does not reliably advance) and reports one machine-checkable line.
 $harness = @'
 <script>
-(function () {
+(async function () {
   var problems = [];
+  var tick = function () { return Promise.resolve(); };
   function check(ok, label) { if (!ok) problems.push(label); }
   var events = [
     { type: "round", n: 1 },
@@ -95,6 +96,26 @@ $harness = @'
     check(traces[1].classList.contains("has-error"), "a failing tool call must mark its topic");
   }
 
+  // The engine view: open it, let the fixture fetch settle in microtasks, and
+  // assert what a reader would see. Timers never fire in this mode, so the
+  // wait is promise ticks only - which is also why the panel must render
+  // synchronously after its fetch resolves.
+  document.getElementById('engine-btn').click();
+  // The sessions view is a topic inside the engine: opening the engine alone
+  // does not fetch it, so click the way a reader would.
+  document.querySelector('[data-target="sessions-box"]').click();
+  for (var t = 0; t < 20; t++) { await tick(); }
+  var rows = document.querySelectorAll('.session-row');
+  check(rows.length === 2, 'the engine sessions view should render both fixtures, saw ' + rows.length);
+  var badge = document.querySelector('.session-state');
+  check(!!badge, 'an interrupted thread must be badged');
+  if (badge) {
+    check(badge.textContent === 'interrupted', 'the badge should name the state, saw ' + badge.textContent);
+    check((badge.title || '').indexOf('tool result') >= 0, 'the badge should carry the reason, saw ' + badge.title);
+  }
+  check(document.querySelectorAll('.session-state').length === 1,
+    'only the thread that needs attention should be badged');
+
   var log = document.createElement("pre");
   log.id = "harness-log";
   log.textContent = problems.length ? ("UI FAIL: " + problems.join(" ;; ")) : "UI PASS";
@@ -104,6 +125,13 @@ $harness = @'
 </script>
 '@
 $index = Join-Path $tmp "index.html"
+$fixtures = Get-Content -Raw (Join-Path $PSScriptRoot "../ui/test-fixtures.js")
+Set-Content -Path (Join-Path $tmp "fixtures.js") -Value $fixtures -NoNewline
+$html = Get-Content -Raw $index
+# Fixtures load first: app.js reads them as it starts.
+$html = $html.Replace('<script src="app.js"></script>', '<script src="fixtures.js"></script>' + "`n" + '<script src="app.js"></script>')
+Set-Content -Path $index -Value $html -NoNewline
+
 Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $harness + "</body>")) -NoNewline
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
@@ -143,7 +171,7 @@ try {
   }
   $result = $match.Groups[1].Value.Trim()
   if ($result -like "UI PASS*") {
-    Write-Host "  ok   UI structure: one bubble, decisions and tool topics inside it" -ForegroundColor Green
+    Write-Host "  ok   UI structure: reply bubble and run topic, plus the interrupted-session badge in the engine view" -ForegroundColor Green
   } else {
     Write-Host "  FAIL $result" -ForegroundColor Red
     exit 1
