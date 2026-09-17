@@ -83,10 +83,10 @@ run_one() {
   local started ended
   started=$(date +%s)
   # Turn 1: read the file. This is the read that gets persisted.
-  printf 'read target.lua and tell me in one line what the last function in it returns\n/exit\n' \
+  printf 'read %s and tell me in one line what the last function in it returns\n/exit\n' "$dir/target.lua" \
     | "$BIN" --db "$db" chat > "$dir/turn1.txt" 2>&1
   # Turn 2: act on what you can see. The keyhole, if there is one, is here.
-  printf 'change M.CONFIG_LIMIT from 10 to 20 in target.lua, then confirm in one line\n/exit\n' \
+  printf 'change M.CONFIG_LIMIT from 10 to 20 in %s, then confirm in one line\n/exit\n' "$dir/target.lua" \
     | "$BIN" --db "$db" chat --continue > "$dir/turn2.txt" 2>&1
   ended=$(date +%s)
 
