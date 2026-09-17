@@ -96,6 +96,9 @@ function M.new(session_id, on_event, role, user, node)
     node = node,
     debug = session and session.mode == "debug" or false,
     model = provider.settings().model,
+    -- Prompt tokens the provider reported for the last request in this session:
+    -- the real context size, as opposed to a sum of message bodies.
+    last_prompt_tokens = 0,
     emit = on_event or function() end,
     stream = on_event ~= nil,
   }, M)
@@ -160,7 +163,12 @@ function M:maybe_compact()
   local keep = tonumber(os.getenv("WASM_AGENT_COMPACT_KEEP")) or COMPACT_KEEP
   keep = math.min(keep, math.max(1000, math.floor(limit / 2)))
 
-  local before = self:context_tokens()
+  -- Trigger on what the provider actually charged us for, not on a sum of
+  -- message bodies: the request also carries the system prompt, AGENTS.md and
+  -- every tool schema (several thousand tokens), which an estimate of the
+  -- transcript alone misses entirely.
+  local measured = self.last_prompt_tokens or 0
+  local before = measured > 0 and measured or self:context_tokens()
   if before <= (limit - reserve) then return end
 
   local session = memory.session(self.session_id) or {}
@@ -204,7 +212,7 @@ function M:maybe_compact()
   local previous = session.summary or ""
   local merged = previous ~= "" and (previous .. "\n" .. result.content) or result.content
   memory.set_session_summary(self.session_id, cut.seq, merged)
-  local after = self:context_tokens()
+  local after = self:context_tokens()  -- honest post-compaction size of the transcript
   -- Record it in the transcript so a compaction (and the cache invalidation it
   -- causes) is visible in the session view instead of being invisible work.
   memory.append_turn(self.session_id, {
@@ -295,6 +303,8 @@ function M:turn(text)
       if self.debug and round == 1 then
         span.request = { model = self.model, messages = messages, tools = tool_list }
       end
+      -- The provider's own count for this request is the true context size.
+      self.last_prompt_tokens = prompt
       trace[#trace + 1] = span
     else
       trace[#trace + 1] = { kind = "llm", model = self.model, ok = true, round = round,
