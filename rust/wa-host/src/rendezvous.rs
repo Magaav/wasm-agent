@@ -245,7 +245,9 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
         });
         {
             let mut state = relay.lock().unwrap();
-            let now = Instant::now();
+            // Drop abandoned relay entries: a caller that stopped polling leaves
+            // results and issued ids behind, and they are only useful for a
+            // couple of minutes.
             state.results.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(120));
             state.issued.retain(|_, at| at.elapsed() < Duration::from_secs(120));
             if let Some(((status, body), _)) = state.results.remove(&id) {
