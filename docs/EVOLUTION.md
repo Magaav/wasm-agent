@@ -20,7 +20,7 @@ Step 1 and 2 through Orca:
 # one worktree per task, branched from origin/main
 orca worktree create --repo id:<wasm-agent-repo-id> --name <task> --no-parent --json
 # the agent in the first terminal of that worktree
-orca terminal create --worktree <worktree-id> --title wasm-agent --command "wa chat" --json
+orca terminal create --worktree <worktree-id> --title wasm-agent --command "<worktree>\scripts\dev-agent.cmd" --json
 orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json
 orca terminal send --terminal <handle> --text "<brief>" --enter --json
 orca terminal read --terminal <handle> --json      # watch it work
@@ -55,6 +55,12 @@ the files on disk, falling back to the embedded copy:
 ```powershell
 $env:WASM_AGENT_LUA_ROOT = "C:\Users\Victor\orca\workspaces\foundation\self-evolve"
 wa paths                     # runs the edited Lua
+```
+
+Or just use the launcher, which sets it for you:
+
+```powershell
+scripts\dev-agent.cmd        # `wa chat` with this checkout's Lua core
 ```
 
 That is what makes self-evolution possible at all on a machine with no toolchain:
