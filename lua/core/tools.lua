@@ -31,6 +31,9 @@ M.shared = {
     query = { type = "string", description = "What to look for, in the user's own words." },
     scope = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 50 } }, { "query" }),
+  schema("memories", "List what is stored, most recent first. Use it when the user asks what you remember or wants the store tidied up.", {
+    scope = { type = "string" },
+    limit = { type = "integer", minimum = 1, maximum = 200 } }),
   schema("capabilities", "List the tools available to this account (its capabilities).", {}),
   schema("sessions", "List your own past sessions (resumable threads), most recent first.", {
     limit = { type = "integer", minimum = 1, maximum = 100 } }),
@@ -56,6 +59,12 @@ M.admin = {
     limit = { type = "integer", minimum = 1, maximum = 200 } }, { "conversation_id" }),
   schema("list_conversations", "List conversations known to the ledger, most recently active first.", {
     limit = { type = "integer", minimum = 1, maximum = 200 } }),
+  -- Master only: deleting is destructive, and memory is shared across roles, so a
+  -- guest must not be able to erase the operator's stored facts. Without this
+  -- tool the agent could only ever accumulate - it said so itself, and left a
+  -- wrong date in the store because it had nothing to delete it with.
+  schema("forget", "Delete a stored memory by id (from `recall` or `memories`). Use it for something wrong, outdated or stored by mistake: an append-only store fills with junk and then misleads you later.", {
+    id = { type = "string" } }, { "id" }),
   -- The dialect is in the description because the model otherwise assumes POSIX
   -- and wastes its tool budget on commands this machine does not have.
   schema("bash", "Run a shell command on this machine and return stdout, stderr and the exit code. This machine runs " ..
@@ -118,7 +127,7 @@ M.admin = {
 -- Which capability tier each tool belongs to (DESIGN.md §8). Anything not
 -- listed here is a WASM plugin.
 M.tier_of = {
-  remember = "memory", recall = "memory",
+  remember = "memory", recall = "memory", memories = "memory", forget = "memory",
   capabilities = "capabilities",
   sessions = "sessions", session = "sessions", search_turns = "sessions",
   resume_session = "sessions", session_debug = "sessions", session_fixture = "sessions",
@@ -220,6 +229,11 @@ function M.dispatch(memory, name, args, role, ctx)
     return { ok = true, id = memory.remember(args.content, args.scope or "global", args.tags or {}) }
   elseif name == "recall" then
     return memory.recall(args.query or "", args.limit or 10, args.scope)
+  elseif name == "memories" then
+    return memory.memories(args.scope, args.limit or 50)
+  elseif name == "forget" then
+    if not args.id or args.id == "" then return { error = "id_required" } end
+    return { id = args.id, forgotten = memory.forget(args.id) and true or false }
   elseif name == "capabilities" then
     local list = { "remember", "recall", "capabilities" }
     if is_master(role) then

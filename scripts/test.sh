@@ -29,7 +29,7 @@ local seen = {}
 for _, tool in ipairs(guest) do seen[tool["function"].name] = true end
 for _, forbidden in ipairs({
   "bash", "write", "edit", "client", "shell", "remote",
-  "spell_save", "session_debug", "session_fixture",
+  "spell_save", "session_debug", "session_fixture", "forget",
 }) do
   assert(not seen[forbidden], "guest must not see " .. forbidden)
 end
@@ -213,6 +213,37 @@ print("platform ok")
 LUA
 WA_SCRIPT="$DB.platform.lua" "$BIN" --db "$DB" | grep "platform ok"
 rm -f "$DB.platform.lua"
+
+# Memory has to be curatable and findable, or it misleads later: the agent could
+# only accumulate (no delete tool), and a conversational question could never
+# match a note because every term was ANDed.
+cat > "$DB.memory.lua" <<'LUA'
+local memory = dofile("lua/core/memory.lua")
+local tools = dofile("lua/core/tools.lua")
+memory.setup()
+local id = memory.remember("The readiness probe runs on Tuesdays", "global", {})
+-- The precise query finds it.
+assert(#memory.recall("readiness probe") > 0, "an exact query must match")
+-- A conversational question shares no complete term set with the note; it must
+-- still find it, because returning nothing here made the agent report an empty
+-- store while the fact was present.
+local conversational = memory.recall("what did I ask you to remember about the probe?")
+assert(#conversational > 0, "a conversational question must still find the memory")
+-- The tool surface: listing and deleting, master only for the delete.
+local master = {}
+for _, tool in ipairs(tools.all("master")) do master[tool["function"].name] = true end
+assert(master.memories and master.forget, "master must be able to list and delete memories")
+local guest = {}
+for _, tool in ipairs(tools.all("guest")) do guest[tool["function"].name] = true end
+assert(not guest.forget, "a guest must not be able to erase stored facts")
+assert(tools.dispatch(memory, "forget", { id = id }, "guest").error, "dispatching forget as a guest must fail")
+local result = tools.dispatch(memory, "forget", { id = id }, "master")
+assert(result.forgotten, "the master must be able to forget a memory")
+assert(#memory.recall("readiness probe") == 0, "a forgotten memory must not be recalled")
+print("memory curation ok")
+LUA
+WA_SCRIPT="$DB.memory.lua" "$BIN" --db "$DB" | grep "memory curation ok"
+rm -f "$DB.memory.lua"
 
 # Build every plugin and assert one round trip through the WASM host.
 for crate in rust/plugins/*/; do

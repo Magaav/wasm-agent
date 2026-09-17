@@ -27,12 +27,23 @@ local function exec(sql, params)
 end
 
 -- Turn free text into a safe FTS5 AND-of-quoted-terms query.
-function M.fts_query(text)
-  local terms = {}
+-- Terms for an FTS5 MATCH expression, each quoted so that arbitrary user text
+-- cannot be read as FTS syntax, and deduplicated so a repeated word does not
+-- skew the ranking.
+local function fts_terms(text)
+  local terms, seen = {}, {}
   for term in tostring(text or ""):gmatch("[%w_]+") do
-    terms[#terms + 1] = '"' .. term .. '"'
+    local key = term:lower()
+    if not seen[key] then
+      seen[key] = true
+      terms[#terms + 1] = '"' .. term .. '"'
+    end
   end
-  return table.concat(terms, " AND ")
+  return terms
+end
+
+function M.fts_query(text)
+  return table.concat(fts_terms(text), " AND ")
 end
 
 local function has_column(table, column)
@@ -95,10 +106,7 @@ function M.remember(content, scope, tags)
   return id
 end
 
-function M.recall(text, limit, scope)
-  limit = limit or 10
-  local match = M.fts_query(text)
-  if match == "" then return {} end
+local function query_memories(match, limit, scope)
   local sql = "SELECT m.id,m.scope,m.content,m.tags,m.source,m.created_at,m.updated_at," ..
               "bm25(memories_fts) AS rank FROM memories_fts " ..
               "JOIN memories m ON m.id=memories_fts.memory_id " ..
@@ -112,6 +120,23 @@ function M.recall(text, limit, scope)
   params[#params + 1] = limit
   local rows = query(sql, params)
   for _, row in ipairs(rows) do row.tags = json.decode(row.tags) end
+  return rows
+end
+
+-- Recall is searched twice on purpose. All terms present is the precise case
+-- (a query naming a fact), so it is tried first. A conversational question -
+-- "what did I ask you to remember?" - shares no complete term set with the note
+-- it is about, so requiring every term returns nothing, and returning nothing
+-- here is what made the agent tell the user the memory store was empty while the
+-- fact was sitting in it. The second pass matches any term and lets bm25 rank.
+function M.recall(text, limit, scope)
+  limit = limit or 10
+  local terms = fts_terms(text)
+  if #terms == 0 then return {} end
+  local rows = query_memories(table.concat(terms, " AND "), limit, scope)
+  if #rows == 0 and #terms > 1 then
+    rows = query_memories(table.concat(terms, " OR "), limit, scope)
+  end
   return rows
 end
 
