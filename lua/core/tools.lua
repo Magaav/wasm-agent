@@ -2,6 +2,7 @@
 -- masters get everything; guests get on-demand memory plus a way to list
 -- what they may do. "spells" means crystallized macros only (spells.lua).
 local json = dofile("lua/vendor/json.lua")
+local platform = dofile("lua/core/platform.lua")
 local spellslib = dofile("lua/core/spells.lua")
 local nodeslib = dofile("lua/core/nodes.lua")
 local M = {}
@@ -55,7 +56,10 @@ M.admin = {
     limit = { type = "integer", minimum = 1, maximum = 200 } }, { "conversation_id" }),
   schema("list_conversations", "List conversations known to the ledger, most recently active first.", {
     limit = { type = "integer", minimum = 1, maximum = 200 } }),
-  schema("bash", "Run a shell command and return stdout, stderr and the exit code.", {
+  -- The dialect is in the description because the model otherwise assumes POSIX
+  -- and wastes its tool budget on commands this machine does not have.
+  schema("bash", "Run a shell command on this machine and return stdout, stderr and the exit code. This machine runs " ..
+    platform.shell() .. (platform.os() == "windows" and ": use dir, type, findstr, copy." or "."), {
     command = { type = "string" }, cwd = { type = "string" } }, { "command" }),
   schema("read", "Read a text file, optionally a line range.", {
     path = { type = "string" },
@@ -67,8 +71,8 @@ M.admin = {
     path = { type = "string" },
     old_text = { type = "string" },
     new_text = { type = "string" } }, { "path", "old_text", "new_text" }),
-  schema("ls", "List a directory.", { path = { type = "string" } }),
-  schema("grep", "Search files for a pattern and return matching lines.", {
+  schema("ls", "List a directory (portable: works the same on every platform).", { path = { type = "string" } }),
+  schema("grep", "Search files for a pattern and return matching lines. Uses a portable matcher, so it works the same on every platform.", {
     pattern = { type = "string" }, path = { type = "string" } }, { "pattern" }),
   schema("client", "Control the wasm-agent client machine: screenshot, mouse, keyboard and a Chrome DevTools (CDP) session. CDP uses a dedicated Chrome profile and launches Chrome if needed.", {
     action = { type = "string", enum = { "screenshot", "frame", "click", "move", "type", "key", "shell", "cdp" } },
@@ -256,6 +260,18 @@ function M.dispatch(memory, name, args, role, ctx)
   elseif name == "ls" then
     return run("ls -la -- " .. shell_quote(args.path or "."))
   elseif name == "grep" then
+    -- Native matcher: shelling out to `grep` fails on Windows, where the tool
+    -- shell is cmd /C.
+    local native = host.grep
+    if native then
+      local ok, result = pcall(native, args.pattern or "", args.path or ".",
+        json.encode({ ignore_case = true, limit = args.limit or 100 }))
+      if ok and result then return json.decode(result) end
+    end
+    if platform.os() == "windows" then
+      return run("findstr /s /n /i /c:" .. shell_quote(args.pattern or "") .. " " ..
+        shell_quote((args.path or ".") .. "\\*"))
+    end
     return run("grep -rn -- " .. shell_quote(args.pattern or "") .. " " .. shell_quote(args.path or "."))
   elseif name == "client" then
     local ok, raw = pcall(host.client, args.action or "", json.encode(args))

@@ -184,6 +184,29 @@ LUA
 WA_SCRIPT="$DB.sessions.lua" "$BIN" --db "$DB" | grep "sessions ok"
 rm -f "$DB.sessions.lua"
 
+# Host capabilities that keep the agent portable: it must be able to learn which
+# shell dialect it is in (it guessed POSIX on Windows and lost a whole tool
+# budget), and grep must not depend on a POSIX binary.
+cat > "$DB.platform.lua" <<'LUA'
+local platform = dofile("lua/core/platform.lua")
+local info = platform.info()
+assert(info.os and info.os ~= "unknown", "platform.os must be known")
+assert(info.shell and info.shell ~= "", "platform.shell must be known")
+local described = platform.describe()
+assert(described:find("shell") or described:find("cmd"), "describe() must mention the shell")
+local agentlib = dofile("lua/core/agent.lua")
+local prompt = agentlib.system_prompt("master", nil)
+assert(prompt:find("Running on:", 1, true), "the system prompt must state the environment")
+local result = host.grep("wasm-agent", "lua/core", '{"limit":5}')
+assert(result, "host.grep must return a result")
+local decoded = dofile("lua/vendor/json.lua").decode(result)
+assert(decoded.count > 0, "host.grep must find a pattern that is definitely present")
+assert(decoded.matches[1].file and decoded.matches[1].line, "matches carry file and line")
+print("platform ok")
+LUA
+WA_SCRIPT="$DB.platform.lua" "$BIN" --db "$DB" | grep "platform ok"
+rm -f "$DB.platform.lua"
+
 # Build every plugin and assert one round trip through the WASM host.
 for crate in rust/plugins/*/; do
   [ -f "$crate/Cargo.toml" ] || continue

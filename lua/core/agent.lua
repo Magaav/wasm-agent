@@ -36,7 +36,16 @@ local SYSTEM = table.concat({
   "Style: keep replies short, never invent facts, and say what you did not do.",
 }, "\n")
 
-local MAX_TOOL_ROUNDS = 8
+-- The environment line is built at load time so the model never guesses the
+-- dialect: on Windows it guessed POSIX and spent a whole tool budget on `pwd`,
+-- `ls` and `grep` failing with "not recognized as an internal or external
+-- command".
+local ENVIRONMENT = dofile("lua/core/platform.lua").describe()
+
+-- Tool rounds: a real coding task is read -> edit -> test -> read again, and
+-- eight rounds is not enough for one. Configurable, because a bulk edit wants
+-- more and a chat wants fewer.
+local MAX_TOOL_ROUNDS = tonumber(host.getenv("WASM_AGENT_MAX_TOOL_ROUNDS")) or 24
 local TOOL_TRUNCATE = 600          -- default mode: keep tool output small
 local COMPACT_RESERVE = 16384      -- tokens reserved for the reply (like pi)
 local COMPACT_KEEP = 20000         -- newest tokens left un-summarised (like pi)
@@ -96,7 +105,7 @@ function M.agents_md(role)
 end
 
 local function system_prompt(role, agents)
-  local parts = { SYSTEM }
+  local parts = { SYSTEM, "Running on: " .. ENVIRONMENT }
   if agents and agents ~= "" then
     parts[#parts + 1] = "Project instructions:\n" .. agents
   end
