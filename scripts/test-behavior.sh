@@ -168,27 +168,22 @@ local summaries = {}
 for _, turn in ipairs(memory.session_turns(sid, { limit = 500 })) do
   if turn.role == "summary" then
     for _, span in ipairs(turn.trace or {}) do
-      if span.kind == "compact" then summaries[#summaries + 1] = { split = span.split_turn, template = span.template, text = turn.content } end
+      if span.kind == "compact" then
+        summaries[#summaries + 1] = { template = span.template, split = span.split_turn, text = turn.content }
+      end
     end
   end
 end
+assert(#summaries == 2, "expected two compactions, got " .. #summaries)
+assert(summaries[1].template == "checkpoint", "the first span must use the checkpoint template, got " .. tostring(summaries[1].template))
+assert(summaries[2].template == "prefix", "a cut inside the turn must use the split-turn prefix template, got " .. tostring(summaries[2].template))
+-- Whether the summarisation model filled the template in is its own outcome, not
+-- ours: it has answered with prose instead. Report that, do not fail on it.
 for index, item in ipairs(summaries) do
-  print(string.format("       summary %d: split_turn=%s head=%q", index, tostring(item.split),
-    (item.text:gsub("\n.*", "")):sub(1, 60)))
-end
-assert(first and second, "both compactions should have run")
--- Assert which template was chosen, not that the model obeyed it: a model that
--- answers with prose instead ("I need to be honest with you: I can't produce a
--- meaningful r...") is a model outcome, and it must not read as broken
--- compaction. The choice is ours and deterministic; the filling-in is not.
-assert(summaries[1].template == "checkpoint", "the first span must use the checkpoint template")
-assert(summaries[2].template == "prefix", "a cut inside the turn must use the split-turn prefix template")
-for _, item in ipairs(summaries) do
   local heading = item.template == "prefix" and "## Original Request" or "## Next Steps"
-  if not item.text:find(heading, 1, true) then
-    print("       note: the model did not follow the template (expected " .. heading .. 
-      "): " .. (item.text:gsub("
-.*", "")):sub(1, 50))
+  local head = tostring(item.text or ""):match("^[^\n]*") or ""
+  if not tostring(item.text or ""):find(heading, 1, true) then
+    print("       note: summary " .. index .. " did not follow the template (expected " .. heading .. "): " .. head:sub(1, 50))
   end
 end
 print("compaction templates ok")
