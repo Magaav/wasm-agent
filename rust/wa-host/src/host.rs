@@ -46,8 +46,13 @@ pub extern "C" fn getenv(l: *mut LuaState) -> c_int {
             unsafe { lua_pushlstring(l, value.as_ptr() as *const c_char, value.len()) };
             1
         }
-        // Returning nothing yields nil, which is what os.getenv does for unset.
-        None => 0,
+        // Push an explicit nil. Returning *zero* values instead would expand to
+        // nothing when used as a function argument, so `tonumber(host.getenv(X))`
+        // would become `tonumber()` and fail with "bad argument #1".
+        None => {
+            unsafe { crate::lua::lua_pushnil(l) };
+            1
+        }
     }
 }
 
