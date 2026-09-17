@@ -45,14 +45,21 @@ Always name the path in full.
 
 ### Keep LF
 
-`core.autocrlf` **must be `false`** in this checkout. These files are consumed by
-a Linux host and by `sh`/`lua`; a CRLF checkout breaks scripts and the Lua core.
-Verify with:
+These files are consumed by a Linux host and by `sh`/`lua`, so they must stay
+LF. `core.autocrlf` **must be `false`** in every checkout, and the committed
+blobs must contain no CR:
 
 ```bash
-git config core.autocrlf        # must print false
-grep -c $'\r' lua/core/agent.lua  # must print 0
+git config core.autocrlf                    # must print false
+git grep --cached -I -l "$(printf '\r')"     # must print nothing
 ```
+
+The second command checks the **stored** blobs and skips binaries, which is the
+invariant that matters: a CRLF working copy on Windows is recoverable, a CRLF
+commit is not. Do **not** verify this with `grep -c $'\r' <file>` — in some
+shells the pattern arrives empty, so it silently returns the *line count*
+(`444` for `lua/core/agent.lua`) and looks exactly like a repo-wide CRLF
+disaster. `bash scripts/test.sh` asserts this, so trust the test.
 
 ## Layout
 

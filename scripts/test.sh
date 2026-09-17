@@ -72,4 +72,19 @@ LUA
 WASM_AGENT_PLUGINS="$PLUGINS" WA_SCRIPT="$DB.plugin.lua" "$BIN" --db "$DB" | grep -q "plugin ok"
 rm -f "$DB.plugin.lua"
 
+# Line endings are an invariant, not a preference: these files run on a Linux
+# host under sh and lua, where a CRLF script fails in confusing ways. Check the
+# *stored* blobs (recoverable if a Windows working copy drifts) and skip
+# binaries, which legitimately contain CR bytes. `-I` does that for us.
+if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+  crlf="$(git grep --cached -I -l "$(printf '\r')")"
+  if [ -n "$crlf" ]; then
+    echo "FAIL: CRLF stored in the index:" >&2
+    echo "$crlf" >&2
+    echo "Fix with: git add --renormalize .   (and set core.autocrlf=false)" >&2
+    exit 1
+  fi
+  echo "line endings ok"
+fi
+
 echo "smoke ok"
