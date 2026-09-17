@@ -86,11 +86,24 @@ also shows the session's cost, with cache reads priced separately.
 
 ## AGENTS.md — the only automatic injection
 
-Read fresh every turn (so editing takes effect immediately), from
-`$WASM_AGENT_AGENTS_MD`, then `./AGENTS.md`, then `~/.wasm-agent/AGENTS.md`. It
-is appended to the system prompt as "Project instructions". This is deliberate:
-project rules are the one thing that should always be present, and everything
-else is retrieved on demand.
+Read fresh every turn (so editing takes effect immediately) and appended to the
+system prompt as "Project instructions". This is deliberate: project rules are
+the one thing that should always be present, and everything else is retrieved
+on demand.
+
+It is **scoped by role**, because the operator instructions name internal paths
+and the deploy shape, and a guest can ask the model to repeat its own context:
+
+| role | env override | then |
+| --- | --- | --- |
+| `master` | `WASM_AGENT_AGENTS_MD` | `./AGENTS.md`, `~/.wasm-agent/AGENTS.md` |
+| `guest` | `WASM_AGENT_AGENTS_MD_GUEST` | `./AGENTS.guest.md`, `~/.wasm-agent/AGENTS.guest.md` |
+
+A guest deliberately does **not** fall back to `AGENTS.md`: falling back would
+hand the operator instructions to exactly the role they are hidden from. A node
+with no file for that role runs uninstructed, so each turn records the resolved
+path on its first llm span (`agents_md`), and a configured-but-unreadable path
+emits a visible warning rather than passing silently.
 
 ## Observability: the trace
 

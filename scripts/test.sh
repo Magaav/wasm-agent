@@ -37,6 +37,20 @@ assert(#guest > 0 and #guest < #master, "guest gating looks wrong")
 local session, user = users.login("guest")
 assert(user and user.role == "guest", "login must return the guest role")
 assert(users.current(session).id == "guest", "a valid session must resolve to its own user")
+
+-- Role-scoped instructions. A guest must be given its own file and must never
+-- fall back to the operator's: the operator file names internal paths and the
+-- deploy shape, and a guest can ask the model to repeat its context.
+local agent = dofile("lua/core/agent.lua")
+local operator, operator_path = agent.agents_md("master")
+local guest_md, guest_path = agent.agents_md("guest")
+assert(operator and operator_path:match("AGENTS%.md$"), "master must read AGENTS.md")
+assert(guest_md and guest_path:match("AGENTS%.guest%.md$"), "guest must read AGENTS.guest.md")
+assert(guest_md ~= operator, "guest must not receive the operator instructions")
+for _, leak in ipairs({ "openclaw", "git@github", "WORKSPACE", "cargo" }) do
+  assert(not guest_md:lower():find(leak:lower(), 1, true),
+    "guest instructions must not mention " .. leak)
+end
 print("gating ok")
 LUA
 WA_SCRIPT="$DB.gating.lua" "$BIN" --db "$DB" | grep -q "gating ok"

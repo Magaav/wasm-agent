@@ -50,19 +50,30 @@ local function estimate_tokens(text)
   return math.ceil(#tostring(text or "") / 4)
 end
 
--- AGENTS.md is the only thing injected into context by default: instructions,
--- read fresh every turn so editing the file takes effect immediately.
--- Returns `text, path` for the first readable AGENTS.md. The path matters: a
--- node without the file silently runs uninstructed, so we record which one (if
--- any) was used and warn when an explicitly configured path is unreadable.
-function M.agents_md()
+-- Instructions are the only thing injected into context by default, read
+-- fresh every turn so editing the file takes effect immediately.
+--
+-- They are scoped by role. The operator instructions name internal paths and
+-- the deploy shape, so a guest is given its own file and deliberately does NOT
+-- fall back to the operator's: a guest can ask the model to repeat its
+-- instructions, and "guest falls back to AGENTS.md" would hand them over.
+local function agents_env(role)
+  if (role or "master") == "guest" then return "WASM_AGENT_AGENTS_MD_GUEST" end
+  return "WASM_AGENT_AGENTS_MD"
+end
+
+-- Returns `text, path` for the first readable instruction file. The path
+-- matters: a node without the file silently runs uninstructed, so we record
+-- which one (if any) was used and warn when a configured path is unreadable.
+function M.agents_md(role)
   -- Build the list by appending: an explicit first element of nil would make
   -- `ipairs` stop immediately and silently skip everything else.
   local candidates = {}
-  local configured = os.getenv("WASM_AGENT_AGENTS_MD")
+  local configured = os.getenv(agents_env(role))
   if configured and configured ~= "" then candidates[#candidates + 1] = configured end
-  candidates[#candidates + 1] = "AGENTS.md"
-  candidates[#candidates + 1] = (os.getenv("HOME") or ".") .. "/.wasm-agent/AGENTS.md"
+  local name = (role or "master") == "guest" and "AGENTS.guest.md" or "AGENTS.md"
+  candidates[#candidates + 1] = name
+  candidates[#candidates + 1] = (os.getenv("HOME") or ".") .. "/.wasm-agent/" .. name
   for _, path in ipairs(candidates) do
     local text = host.read_file and host.read_file(path)
     if text and text ~= "" then return text, path end
@@ -73,7 +84,7 @@ end
 local function system_prompt(role, agents)
   local parts = { SYSTEM }
   if agents and agents ~= "" then
-    parts[#parts + 1] = "Project instructions (AGENTS.md):\n" .. agents
+    parts[#parts + 1] = "Project instructions:\n" .. agents
   end
   parts[#parts + 1] = "Your role is `" .. tostring(role or "master") .. "`."
   return table.concat(parts, "\n\n")
@@ -115,7 +126,7 @@ end
 -- the compaction summary, then every turn after the watermark.
 function M:build_context()
   local session = memory.session(self.session_id) or {}
-  local agents, agents_path = M.agents_md()
+  local agents, agents_path = M.agents_md(self.role)
   self.agents_source = agents_path
   local messages = { { role = "system", content = system_prompt(self.role, agents) } }
   if session.summary and session.summary ~= "" then
@@ -285,9 +296,10 @@ function M:turn(text)
   for round = 1, MAX_TOOL_ROUNDS do
     self.emit({ type = "status", text = "model" })
     local llm_started = host.now()
-    local configured_agents = os.getenv("WASM_AGENT_AGENTS_MD")
+    local agents_var = agents_env(self.role)
+    local configured_agents = os.getenv(agents_var)
     if round == 1 and configured_agents and configured_agents ~= "" and not self.agents_source then
-      self.emit({ type = "status", text = "AGENTS.md configured but unreadable: " .. configured_agents })
+      self.emit({ type = "status", text = agents_var .. " configured but unreadable: " .. configured_agents })
     end
     local ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream,
       { session_id = self.session_id })

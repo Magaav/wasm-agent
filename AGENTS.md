@@ -61,7 +61,9 @@ bash scripts/build-window.sh                  # -> target/windows-x64/.../wa-win
 - Read `DESIGN.md` before UI work (spacing scale, balloons, modes) and
   `docs/` before changing memory, sessions, sync or the node fabric.
 - Memory is **on demand**: never inject memory into context automatically;
-  `AGENTS.md` is the only automatic injection.
+  the instruction file is the only automatic injection, and it is **scoped by
+  role** — operators get `AGENTS.md`, guests get `AGENTS.guest.md` and never
+  fall back to the operator file (`docs/MEMORY.md`).
 - Failures must be **visible**: no silent success, no silent data loss. Surface
   the error and the step. `docs/MEMORY.md` explains the tracing model.
 - Verify before claiming: run the smoke test, and prefer a real two-node check
