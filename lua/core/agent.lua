@@ -518,6 +518,11 @@ function M:turn(text)
         .. "changed, commit it, and state plainly what is unfinished." }
       self.emit({ type = "status", text = "runaway guard reached - asking the model to wrap up" })
     end
+    -- One round is one decision. Announcing it lets the UI close the previous
+    -- decision's text and tool topic, so the transcript reads decision -> its
+    -- tools -> next decision, instead of every tool topic stacked behind one
+    -- growing block of text.
+    self.emit({ type = "round", n = round })
     self.emit({ type = "status", text = "model" })
     local llm_started = host.now()
     local agents_var = agents_env(self.role)

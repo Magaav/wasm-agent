@@ -335,6 +335,25 @@ function finishTrace() {
   trace = null;
 }
 
+// A round is one decision: what the model said, then the tools it chose. Closing
+// both here is what interleaves them - text, tools, text, tools - instead of
+// leaving one block of text with every tool topic stacked after it.
+function flushDecision(final = false) {
+  if (streamBody) {
+    const text = stripThinking(streamText);
+    if (text.trim()) {
+      streamBody.innerHTML = renderMarkdown(text);
+      streamBody.style.whiteSpace = "normal";
+    } else {
+      streamBody.parentElement?.remove();   // a decision with no prose
+    }
+    streamBody = null;
+    streamText = "";
+  }
+  finishTrace();
+  if (!final) pin();
+}
+
 function typeOut(body, text) {
   let index = 0;
   const step = Math.max(2, Math.ceil(text.length / 180));
@@ -351,7 +370,10 @@ function typeOut(body, text) {
 }
 
 function handleEvent(event) {
-  if (event.type === "status") {
+  if (event.type === "round") {
+    // A new decision begins: close the previous one (its text and its tool topic).
+    flushDecision();
+  } else if (event.type === "status") {
     setStatus("wasm-agent is " + (event.text || "working") + "…");
   } else if (event.type === "tool") {
     addTool(event.name, event.arguments);
@@ -375,8 +397,7 @@ function handleEvent(event) {
       typeOut(add("assistant", ""), finalText);
     }
     finishTrace();
-  } else if (event.type === "usage") {
-    settings.usage = event.total || settings.usage;
+  } else if (event.type === "usage") {    settings.usage = event.total || settings.usage;
     if (event.model) settings.model = event.model;
     updateChip();
     if (balloon.open) { renderUsage(); renderModels(); }
@@ -386,7 +407,7 @@ function handleEvent(event) {
     finishTrace();
   } else if (event.type === "done") {
     clearStatus();
-    finishTrace();
+    flushDecision(true);
   }
 }
 
