@@ -23,7 +23,7 @@ end
 
 -- Available to everyone.
 M.shared = {
-  schema("remember", "Store a fact the user asked you to remember, so it can be recalled later. Confirm in one short sentence; do not store your own reasoning.", {
+  schema("remember", "Store a fact the user asked you to remember, so it can be recalled later. Confirm in one short sentence; do not store your own reasoning. If a stored fact turns out to be wrong, call `forget` on it and then store the corrected version once - never append a correction entry, or the store accumulates contradictions that you will later have to guess between.", {
     content = { type = "string", description = "The fact to remember, in full." },
     scope = { type = "string", description = "Optional scope, e.g. global or a conversation id." },
     tags = { type = "array", items = { type = "string" } } }, { "content" }),
@@ -31,7 +31,7 @@ M.shared = {
     query = { type = "string", description = "What to look for, in the user's own words." },
     scope = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 50 } }, { "query" }),
-  schema("memories", "List what is stored, most recent first. Use it when the user asks what you remember or wants the store tidied up.", {
+  schema("memories", "List what is stored, most recent first, with each entry's id. Use it when the user asks what you remember or wants the store tidied: reading the ids is how you find what `forget` should remove.", {
     scope = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 200 } }),
   schema("capabilities", "List the tools available to this account (its capabilities).", {}),
