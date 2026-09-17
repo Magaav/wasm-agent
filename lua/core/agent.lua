@@ -477,6 +477,7 @@ function M:maybe_compact()
       kind = "compact", summarized_until = cut.seq, messages = cut_index,
       tokens_before = before, tokens_after = after, invalidates_cache = true,
       split_turn = split_turn, superseded = previous_summary ~= "",
+      template = split_turn and "prefix" or "checkpoint",
       summary_model = self:summary_model(),
       ms = math.floor((host.now() - started) * 1000),
     } },

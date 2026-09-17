@@ -168,7 +168,7 @@ local summaries = {}
 for _, turn in ipairs(memory.session_turns(sid, { limit = 500 })) do
   if turn.role == "summary" then
     for _, span in ipairs(turn.trace or {}) do
-      if span.kind == "compact" then summaries[#summaries + 1] = { split = span.split_turn, text = turn.content } end
+      if span.kind == "compact" then summaries[#summaries + 1] = { split = span.split_turn, template = span.template, text = turn.content } end
     end
   end
 end

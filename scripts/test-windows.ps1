@@ -213,11 +213,10 @@ print("seeded=" .. id)
 $shellProbe = @'
 local platform = dofile("lua/core/platform.lua")
 local shell = platform.shell()
-local raw = host.exec('echo "$0"; pwd; ls -a . | head -2', "")
+local raw = host.exec("echo $0; pwd; ls -a . | head -2", "")
 local decoded = dofile("lua/vendor/json.lua").decode(raw)
 print("shell=" .. shell .. " code=" .. tostring(decoded.code))
-print("out=" .. tostring(decoded.stdout):gsub("
-", " | "))
+print("out=" .. tostring(decoded.stdout):gsub("\n", " | "))
 assert(decoded.code == 0, "the tool shell must run POSIX commands")
 print(shell:find("bash", 1, true) and "posix shell on Windows" or "cmd shell on Windows")
 '@
