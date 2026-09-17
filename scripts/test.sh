@@ -124,6 +124,64 @@ LUA
 WA_SCRIPT="$DB.repair.lua" "$BIN" --db "$DB" | grep "repair ok"
 rm -f "$DB.repair.lua"
 
+# Secret redaction is a security boundary, so it gets a unit test with fake
+# secrets: a value that survives redaction must fail the build, not reach a log.
+cat > "$DB.redact.lua" <<'LUA'
+local redact = dofile("lua/core/redact.lua")
+local fake = "sk-FAKEtest1234567890abcdef"
+local cases = {
+  "OPENAI_API_KEY=" .. fake,
+  "ANTHROPIC_API_KEY: " .. fake,
+  "OPENROUTER_API_KEY='" .. fake .. "'",
+  '{"opencode-go":{"type":"api_key","key":"' .. fake .. '"}}',
+  "Authorization: Bearer " .. fake,
+  "curl -H 'Authorization: Bearer " .. fake .. "' https://example.invalid",
+  "WASM_AGENT_LLM_API_KEY=" .. fake .. " GITHUB_TOKEN=" .. fake,
+  "ghp_FAKEgithubtoken1234567890",
+  "nothing secret here",
+}
+for _, case in ipairs(cases) do
+  local out = redact.text(case)
+  assert(not out:find(fake, 1, true), "redaction leaked a secret: " .. out)
+end
+-- Masking must stay useful: which key, not what key.
+local masked = redact.text("OPENAI_API_KEY=" .. fake)
+assert(masked:find("sk-%.%.%.", 1) ~= nil, "expected a sk-...xxxx mask, got " .. masked)
+assert(masked:find(fake:sub(-4), 1, true) ~= nil, "the mask should keep the last four")
+-- Idempotent: redacting twice changes nothing.
+assert(redact.text(masked) == masked, "redaction must be stable")
+print("redact ok")
+LUA
+WA_SCRIPT="$DB.redact.lua" "$BIN" --db "$DB" | grep "redact ok"
+rm -f "$DB.redact.lua"
+
+# Session selection: a new thread is the default, --continue finds the latest,
+# --session must reject an unknown id instead of silently starting a new thread.
+cat > "$DB.sessions.lua" <<'LUA'
+local memory = dofile("lua/core/memory.lua")
+memory.setup()
+local first = memory.start_session("", "chat", { user_id = "master", node_id = "", title = "one" })
+local second = memory.start_session("", "chat", { user_id = "master", node_id = "", title = "two" })
+assert(memory.session(first) and memory.session(second), "sessions must be readable")
+local latest = memory.latest_session("master", "")
+assert(latest and latest.id == second, "latest_session must return the newest thread")
+assert(memory.session(second).id ~= first, "ids must differ")
+assert(memory.session("no-such-session") == nil, "an unknown session must resolve to nil")
+-- A finished session is still continuable: the process ends a session on exit,
+-- so filtering to open ones would mean --continue never finds anything.
+memory.finish_session(second)
+local after = memory.latest_session("master", "")
+assert(after and after.id == second, "a finished session must still be the latest")
+-- Memory is independent of conversational history.
+memory.remember("session test fact", "global", {})
+local sid = memory.start_session("", "chat", { user_id = "master", node_id = "", title = "three" })
+assert(#memory.session_turns(sid, {}) == 0, "a new session must start empty")
+assert(#memory.recall("session test fact", 5) > 0, "memory must not depend on the session")
+print("sessions ok")
+LUA
+WA_SCRIPT="$DB.sessions.lua" "$BIN" --db "$DB" | grep "sessions ok"
+rm -f "$DB.sessions.lua"
+
 # Build every plugin and assert one round trip through the WASM host.
 for crate in rust/plugins/*/; do
   [ -f "$crate/Cargo.toml" ] || continue

@@ -3,6 +3,9 @@
 -- A *provider* is an endpoint (base URL + key). A *model* belongs to a provider.
 -- Selection is persisted per provider under ~/.wasm-agent/.
 local json = dofile("lua/vendor/json.lua")
+-- Provider errors can quote the request back at us, key included; redact at the
+-- point the message is built so it is masked before it is logged or stored.
+local redact = dofile("lua/core/redact.lua")
 local M = {}
 
 local function env(name) return host.getenv(name) end
@@ -230,9 +233,9 @@ function M.complete_with(model, messages, tools, stream, opts)
     body.stream = true
     body.stream_options = { include_usage = true }
     local result = json.decode(host.http_stream("POST", url, json.encode(headers), json.encode(body)))
-    if result.error then error("provider_error: " .. tostring(result.error)) end
+    if result.error then error(redact.text("provider_error: " .. tostring(result.error))) end
     if result.status ~= 200 then
-      error("provider_http_" .. tostring(result.status) .. ": " .. tostring(result.body):sub(1, 240))
+      error(redact.text("provider_http_" .. tostring(result.status) .. ": " .. tostring(result.body):sub(1, 240)))
     end
     return {
       content = result.content or "",
@@ -243,9 +246,9 @@ function M.complete_with(model, messages, tools, stream, opts)
   end
 
   local response = json.decode(host.http("POST", url, json.encode(headers), json.encode(body)))
-  if response.error then error("provider_error: " .. tostring(response.error)) end
+  if response.error then error(redact.text("provider_error: " .. tostring(response.error))) end
   if response.status ~= 200 then
-    error("provider_http_" .. tostring(response.status) .. ": " .. tostring(response.body):sub(1, 240))
+    error(redact.text("provider_http_" .. tostring(response.status) .. ": " .. tostring(response.body):sub(1, 240)))
   end
   local payload = json.decode(response.body)
   local message = payload.choices[1].message

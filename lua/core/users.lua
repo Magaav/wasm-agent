@@ -12,7 +12,7 @@ local sessions = {}
 local cache = nil
 
 local function path()
-  return (host.getenv("HOME") or ".") .. "/.wasm-agent/users.json"
+  return dofile("lua/core/paths.lua").config() .. "/users.json"
 end
 
 local DEFAULT = {

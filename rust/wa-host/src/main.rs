@@ -23,6 +23,8 @@ use std::sync::Mutex;
 const EMBEDDED: &[(&str, &str)] = &[
     ("lua/vendor/json.lua", include_str!("../../../lua/vendor/json.lua")),
     ("lua/core/schema.sql", include_str!("../../../lua/core/schema.sql")),
+    ("lua/core/redact.lua", include_str!("../../../lua/core/redact.lua")),
+    ("lua/core/paths.lua", include_str!("../../../lua/core/paths.lua")),
     ("lua/core/memory.lua", include_str!("../../../lua/core/memory.lua")),
     ("lua/core/tools.lua", include_str!("../../../lua/core/tools.lua")),
     ("lua/core/users.lua", include_str!("../../../lua/core/users.lua")),
@@ -174,6 +176,7 @@ fn main() {
     lua.register_with_upvalue("sql_exec", host::sql_exec, host as *mut c_void);
     lua.register_with_upvalue("sql_query", host::sql_query, host as *mut c_void);
     lua.register("getenv", host::getenv);
+    lua.register("paths", host::paths);
     lua.register("sha256", host::sha256);
     lua.register("uuid", host::uuid);
     lua.register("read_file", host::read_file);

@@ -47,6 +47,13 @@ elseif command == "conversations" then
   each(memory.conversations(limit_of(args[2], 50)))
 elseif command == "stats" then
   print(json.encode(memory.stats()))
+elseif command == "sessions" then
+  local rows = memory.list_sessions(nil, limit_of(args[2], 20))
+  if #rows == 0 then print("(no sessions)") end
+  for _, row in ipairs(rows) do
+    print(string.format("%s  %-14s turns=%-3d %s", row.id, row.user_id or "",
+      tonumber(row.turn_count) or 0, row.title or ""))
+  end
 elseif command == "nodes" then
   local nodes = dofile("lua/core/nodes.lua")
   print(json.encode({ node_id = (nodes.identity() or {}).node_id, nodes = nodes.list() }))
@@ -59,9 +66,9 @@ elseif command == "call" then
   end
   print(json.encode(nodes.remote_call(args[2], args[3], payload)))
 elseif command == "help" then
-  print("wa: chat [--session <id>] [prompt]  |  remember <text> | recall <query> | memories")
-  print("    forget <id> | search <query> | conversation <id> | conversations | stats")
-  print("    nodes | call <node> <capability> [args-json]")
+  print("wa: chat [--continue|--session <id>] [prompt]  |  remember <text> | recall <query>")
+  print("    memories | forget <id> | search <query> | conversation <id> | conversations")
+  print("    sessions | stats | nodes | call <node> <capability> [args-json]")
 else
   print("unknown command: " .. tostring(command))
   os.exit(2)

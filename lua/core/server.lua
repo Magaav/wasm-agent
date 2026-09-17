@@ -6,6 +6,9 @@ local agentlib = dofile("lua/core/agent.lua")
 local users = dofile("lua/core/users.lua")
 local toolslib = dofile("lua/core/tools.lua")
 local nodeslib = dofile("lua/core/nodes.lua")
+-- Errors travel to a browser, a log and a test harness; mask secrets as they
+-- leave the server rather than trusting every future call site.
+local redact = dofile("lua/core/redact.lua")
 
 memory.setup()
 local agent
@@ -37,12 +40,12 @@ end
 function wa_reply(text, session, node)
   if remote_target(node) then
     local result = nodeslib.remote_call(node, "chat", { text = text or "" })
-    if result and result.error then return json.encode({ error = tostring(result.error) }) end
+    if result and result.error then return json.encode({ error = redact.text(tostring(result.error)) }) end
     return json.encode({ reply = result and result.reply or "" })
   end
   local bot = agent_for(session, node)
   local ok, reply = pcall(bot.turn, bot, text or "")
-  if not ok then return json.encode({ error = tostring(reply) }) end
+  if not ok then return json.encode({ error = redact.text(tostring(reply)) }) end
   return json.encode({ reply = reply })
 end
 
@@ -51,12 +54,12 @@ end
 function wa_reply_stream(text, session, node)
   if remote_target(node) then
     local result = nodeslib.remote_chat(node, text or "")
-    if result and result.error then emit({ type = "error", error = tostring(result.error) }) end
+    if result and result.error then emit({ type = "error", error = redact.text(tostring(result.error)) }) end
     return ""
   end
   local bot = agent_for(session, node)
   local ok, reply = pcall(bot.turn, bot, text or "")
-  if not ok then emit({ type = "error", error = tostring(reply) }) end
+  if not ok then emit({ type = "error", error = redact.text(tostring(reply)) }) end
   return ""
 end
 

@@ -9,7 +9,7 @@ local json = dofile("lua/vendor/json.lua")
 local M = {}
 
 local function base()
-  return (host.getenv("HOME") or ".") .. "/.wasm-agent"
+  return dofile("lua/core/paths.lua").config()
 end
 
 local function node_id()

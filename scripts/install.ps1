@@ -93,7 +93,9 @@ if ($haveExe) {
   $body = @"
 @echo off
 if /I "%~1"=="ui" (
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wa-ui.ps1" %2 %3 %4 %5 %6 %7 %8 %9
+  rem `start` detaches the launcher so `wa ui` returns to the prompt; the
+  rem server and window would otherwise hold this console open.
+  start "" powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0wa-ui.ps1" %2 %3 %4 %5 %6 %7 %8 %9
   exit /b
 )
 "$localExe" %*

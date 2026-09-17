@@ -260,6 +260,17 @@ function M.session(session_id)
   return rows[1]
 end
 
+-- The most recently used session for this (user, node) pair, open or finished.
+-- `wa chat --continue` resumes the thread the user was last in: a session ends
+-- when its process exits, so filtering to open ones would never find anything.
+function M.latest_session(user_id, node_id)
+  local rows = query(
+    "SELECT * FROM sessions WHERE user_id=? AND node_id=? " ..
+    "ORDER BY updated_at DESC, started_at DESC LIMIT 1",
+    { user_id or "master", node_id or "" })
+  return rows[1]
+end
+
 function M.list_sessions(user_id, limit)
   limit = limit or 30
   local sql = "SELECT s.*, (SELECT COUNT(*) FROM turns t WHERE t.session_id=s.id) AS turn_count " ..

@@ -3,10 +3,24 @@ local json = dofile("lua/vendor/json.lua")
 local memory = dofile("lua/core/memory.lua")
 local provider = dofile("lua/core/provider.lua")
 local agentlib = dofile("lua/core/agent.lua")
+-- Everything this REPL prints is captured by whatever launched it (a terminal,
+-- an orchestrator, a test), so it all goes out through the redactor.
+local redact = dofile("lua/core/redact.lua")
 
 local M = {}
 
-local HELP = [[commands:
+-- The CLI runs as one user on one node; sessions are keyed by both, so the same
+-- machine can keep separate threads per user.
+local USER, NODE = "master", ""
+
+local HELP = [[usage: wa chat [--continue | --session <id>] [prompt]
+
+sessions:
+  (default)            start a new session
+  --continue, -c       continue the most recent session
+  --session <id>       continue exactly that session (see: wa sessions)
+
+commands:
   /session             print the session id (resume with --session)
   /remember <text>     store a memory
   /recall <query>      search memories
@@ -47,11 +61,11 @@ local function printer(state)
       -- tostring would print "table: 0x..." and say nothing.
       local value = event.result
       local text = (type(value) == "table") and json.encode(value) or tostring(value or "")
-      text = text:gsub("%s+", " ")
+      text = redact.text(text):gsub("%s+", " ")
       io.write("    " .. text:sub(1, 120) .. (#text > 120 and "…" or "") .. "\n")
       io.flush()
     elseif kind == "error" then
-      io.write("\n  ! " .. tostring(event.error or "error") .. "\n")
+      io.write("\n  ! " .. redact.text(tostring(event.error or "error")) .. "\n")
       io.flush()
     end
   end
@@ -59,15 +73,19 @@ end
 
 function M.run(argv)
   argv = argv or {}
-  -- `--session <id>` resumes a thread; a bare word starts the first turn, so a
-  -- launcher can pass the prompt as arguments.
-  local session_id, prompt = nil, {}
+  -- Session selection. A new thread is the default; `--continue` resumes the
+  -- most recent one; `--session <id>` picks exactly that one. A bare word is the
+  -- first prompt, so a launcher can start the agent with work already queued.
+  local session_id, resume_last, prompt = nil, false, {}
   local index = 2
   while argv[index] do
     local arg = argv[index]
     if arg == "--session" then
       session_id = argv[index + 1]
       index = index + 2
+    elseif arg == "--continue" or arg == "-c" then
+      resume_last = true
+      index = index + 1
     elseif arg == "--help" or arg == "-h" then
       print(HELP)
       return 0
@@ -78,17 +96,41 @@ function M.run(argv)
   end
   prompt = table.concat(prompt, " ")
 
+  -- Which thread this process runs in. Conversational history is the transcript
+  -- of that thread; remembered facts live in memory and are deliberately
+  -- independent of it, so `--continue` never changes what `recall` finds.
+  local session
+  if session_id then
+    if session_id == "" then
+      print("  --session needs an id; list them with: wa sessions")
+      return 2
+    end
+    session = memory.session(session_id)
+    if not session then
+      print("  no such session: " .. session_id)
+      print("  list them with: wa sessions")
+      return 2
+    end
+  elseif resume_last then
+    session = memory.latest_session(USER, NODE)
+    if not session then print("  nothing to continue; starting a new session") end
+  end
+  if not session then
+    local id = memory.start_session(NODE, "chat", { user_id = USER, node_id = NODE, title = "chat" })
+    session = memory.session(id) or { id = id }
+  end
+
   local settings = provider.settings()
   local mode = provider.configured() and (settings.model .. " @ " .. settings.base_url)
     or "local mode (no model configured)"
   local state = { streamed = 0 }
-  local agent = agentlib.new(session_id, printer(state), nil, nil, nil)
+  local agent = agentlib.new(session.id, printer(state), "master", USER, NODE)
 
   print("")
   print("  wasm-agent 0.1.0")
   print("  model    " .. mode)
   print("  memory   " .. (host.getenv("WASM_AGENT_DB") or "~/.wasm-agent/memory.db"))
-  print("  session  " .. agent.session_id)
+  print("  session  " .. agent.session_id .. (resume_last and "  (continued)" or ""))
   print("  /help for commands, /exit to quit")
   print("")
 
@@ -96,7 +138,7 @@ function M.run(argv)
     state.streamed = 0
     local ok, reply = pcall(agent.turn, agent, line)
     if not ok then
-      print("\n  error: " .. tostring(reply))
+      print("\n  error: " .. redact.text(tostring(reply)))
     elseif state.streamed == 0 then
       -- Nothing streamed (an error before the first token, or a provider
       -- without streaming): print the reply so the turn is never silent.

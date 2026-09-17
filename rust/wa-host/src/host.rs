@@ -56,6 +56,36 @@ pub extern "C" fn getenv(l: *mut LuaState) -> c_int {
     }
 }
 
+/// host.paths() -> { home, config, data, cache, temp }
+///
+/// Platform-neutral directories, so the Lua core never has to know about
+/// `$HOME`, `/tmp`, or drive letters - and so the same Lua can later run under
+/// WASI, where these are exactly what the filesystem preopens provide.
+///
+/// A host function always returns a value: an absent string is `nil`, never
+/// "no values", because zero results expand to nothing when used as an argument
+/// (`tonumber(host.getenv(X))` became `tonumber()` and failed).
+pub extern "C" fn paths(l: *mut LuaState) -> c_int {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let base = format!("{home}/.wasm-agent");
+    let entries: [(&str, String); 5] = [
+        ("home", home),
+        ("config", base.clone()),
+        ("data", base.clone()),
+        ("cache", format!("{base}/cache")),
+        ("temp", std::env::temp_dir().to_string_lossy().to_string()),
+    ];
+    unsafe {
+        crate::lua::lua_createtable(l, 0, entries.len() as c_int);
+        for (key, value) in entries {
+            lua_pushlstring(l, value.as_ptr() as *const c_char, value.len());
+            let name = std::ffi::CString::new(key).unwrap();
+            crate::lua::lua_setfield(l, -2, name.as_ptr());
+        }
+    }
+    1
+}
+
 fn host_of<'a>(l: *mut LuaState) -> &'a Host {
     unsafe {
         let ptr = lua_touserdata(l, upvalue_index(1)) as *const Host;
@@ -326,9 +356,55 @@ pub extern "C" fn sleep(l: *mut LuaState) -> c_int {
 }
 
 /// host.log(message)
+/// Mask credentials in a string on the way out of the host.
+///
+/// A Rust-side twin of `lua/core/redact.lua`, for the paths that never touch
+/// Lua: host logging and process-level errors. Two implementations is one more
+/// than ideal, but the alternative is a capability call from inside `log`,
+/// which already runs with the Lua state locked.
+pub fn redact(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (index, word) in text.split(' ').enumerate() {
+        if index > 0 {
+            out.push(' ');
+        }
+        match word.split_once('=') {
+            Some((name, value)) if is_secret_name(name) => {
+                out.push_str(name);
+                out.push('=');
+                out.push_str(&mask(value));
+            }
+            _ => {
+                if word.starts_with("sk-") && word.len() > 12 {
+                    out.push_str(&mask(word));
+                } else {
+                    out.push_str(word);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn is_secret_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase().trim_matches('"').to_string();
+    ["API_KEY", "APIKEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL"]
+        .iter()
+        .any(|needle| upper.contains(needle))
+}
+
+/// `sk-...7f2a`: enough to tell which key, not enough to use it.
+fn mask(value: &str) -> String {
+    let trimmed = value.trim_matches(|c| c == '"' || c == '\'' || c == ',' || c == '}');
+    if trimmed.len() < 12 {
+        return "<redacted>".to_string();
+    }
+    format!("{}...{}", &trimmed[..3], &trimmed[trimmed.len() - 4..])
+}
+
 pub extern "C" fn log(l: *mut LuaState) -> c_int {
     if let Some(message) = arg_string(l, 1) {
-        eprintln!("[lua] {message}");
+        eprintln!("[lua] {}", redact(&message));
     }
     0
 }

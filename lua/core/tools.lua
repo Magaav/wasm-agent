@@ -22,12 +22,12 @@ end
 
 -- Available to everyone.
 M.shared = {
-  schema("remember", "Store a fact the user asked you to remember, so it can be recalled later.", {
+  schema("remember", "Store a fact the user asked you to remember, so it can be recalled later. Confirm in one short sentence; do not store your own reasoning.", {
     content = { type = "string", description = "The fact to remember, in full." },
     scope = { type = "string", description = "Optional scope, e.g. global or a conversation id." },
     tags = { type = "array", items = { type = "string" } } }, { "content" }),
-  schema("recall", "Search remembered facts (the memories store).", {
-    query = { type = "string" },
+  schema("recall", "Look up facts the user previously asked you to remember. Call this before answering any question about the user, their preferences, names, codewords, settings, accounts, or earlier decisions - and before saying you do not know. The store is small and lookup is cheap; guessing is not.", {
+    query = { type = "string", description = "What to look for, in the user's own words." },
     scope = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 50 } }, { "query" }),
   schema("capabilities", "List the tools available to this account (its capabilities).", {}),

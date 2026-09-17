@@ -8,18 +8,32 @@ local json = dofile("lua/vendor/json.lua")
 local tools = dofile("lua/core/tools.lua")
 local provider = dofile("lua/core/provider.lua")
 local memory = dofile("lua/core/memory.lua")
+-- Failure text is persisted in the trace and shown in the session view, so it is
+-- redacted before it is stored, not only when it is displayed.
+local redact = dofile("lua/core/redact.lua")
 
 local M = {}
 M.__index = M
 
 local SYSTEM = table.concat({
   "You are wasm-agent, a concise, local-first assistant with durable memory.",
-  "- Memory is on demand: call `recall`/`search_turns` when they would help; never assume.",
+  "",
+  "Memory (facts the user asked you to keep) is on demand, so you must ask for it:",
+  "- Before answering anything about the user - their names, preferences, codewords,",
+  "  settings, accounts, projects, or what was decided earlier - call `recall` first.",
+  "- Never answer a question about the user from your own guesswork, and never say the",
+  "  memory store is empty without having called `recall` in this turn. Checking is",
+  "  cheap; being wrong about the user is not.",
+  "- If `recall` returns nothing, say plainly that you have nothing stored about it.",
   "- When the user asks you to remember something, call `remember` and confirm briefly.",
-  "- When the user asks about past conversations, use `recall` (facts), `search_turns`",
-  "  (past sessions) or `search_messages`/`conversation` (the message ledger).",
-  "- Never invent facts. If memory has nothing, say so plainly.",
-  "- Keep replies short.",
+  "- For other questions, answer directly: do not call memory tools just to look busy.",
+  "- For past conversations use `search_turns` (past sessions) or",
+  "  `search_messages`/`conversation` (the message ledger).",
+  "",
+  "Language: reply in the language of the user's latest message, unless they ask for a",
+  "different one. Match their language even when your instructions are in English.",
+  "",
+  "Style: keep replies short, never invent facts, and say what you did not do.",
 }, "\n")
 
 local MAX_TOOL_ROUNDS = 8
@@ -73,7 +87,7 @@ function M.agents_md(role)
   if configured and configured ~= "" then candidates[#candidates + 1] = configured end
   local name = (role or "master") == "guest" and "AGENTS.guest.md" or "AGENTS.md"
   candidates[#candidates + 1] = name
-  candidates[#candidates + 1] = (host.getenv("HOME") or ".") .. "/.wasm-agent/" .. name
+  candidates[#candidates + 1] = dofile("lua/core/paths.lua").config() .. "/" .. name
   for _, path in ipairs(candidates) do
     local text = host.read_file and host.read_file(path)
     if text and text ~= "" then return text, path end
@@ -290,7 +304,7 @@ function M:maybe_compact()
   -- cache (pi does the same, to avoid paying a cache-write premium for nothing).
   local ok, result = pcall(provider.complete_with, self:summary_model(), prompt, nil, false, { cache = false })
   if not ok then
-    self.emit({ type = "status", text = "compaction failed: " .. tostring(result):sub(1, 120) })
+    self.emit({ type = "status", text = "compaction failed: " .. redact.text(tostring(result)):sub(1, 120) })
     return
   end
   local previous = session.summary or ""
@@ -354,7 +368,7 @@ function M:turn(text)
       { session_id = self.session_id })
     if not ok then
       trace[#trace + 1] = { kind = "llm", model = self.model, ok = false,
-        ms = math.floor((host.now() - llm_started) * 1000), error = tostring(result):sub(1, 400) }
+        ms = math.floor((host.now() - llm_started) * 1000), error = redact.text(tostring(result)):sub(1, 400) }
       memory.append_turn(self.session_id, {
         role = "assistant", content = "", ok = false, trace = trace, debug = self.debug,
         ms = math.floor((host.now() - turn_started) * 1000),
