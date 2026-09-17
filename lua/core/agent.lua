@@ -177,11 +177,15 @@ function M:maybe_compact()
   })
   if #rows < 4 then return end
 
-  -- Keep the newest `keep` tokens; summarise what is older.
+  -- Keep the newest `keep` tokens *of transcript*; summarise what is older.
+  -- `keep` is a whole-prompt budget, and the fixed overhead is always present,
+  -- so the transcript share is the remainder. Without this the two metrics are
+  -- in different units and the walk never finds anything to drop.
+  local keep_transcript = math.max(500, keep - (self.overhead_tokens or 0))
   local budget, cut_index = 0, 0
   for index = #rows, 1, -1 do
     budget = budget + estimate_tokens(rows[index].content)
-    if budget >= keep then
+    if budget >= keep_transcript then
       cut_index = index - 1
       break
     end
@@ -252,6 +256,11 @@ function M:turn(text)
   -- provider needs in order to serve the prefix from its KV/context cache.
   local prefix_fingerprint = host.sha256(
     tostring(messages[1] and messages[1].content or "") .. json.encode(tool_list))
+  -- The part of every request that is not transcript: system prompt (with
+  -- AGENTS.md) + tool schemas. Needed to compare like with like, because the
+  -- provider counts the whole prompt while the transcript is only its remainder.
+  self.overhead_tokens = estimate_tokens(messages[1] and messages[1].content or "")
+    + estimate_tokens(json.encode(tool_list))
 
   for round = 1, MAX_TOOL_ROUNDS do
     self.emit({ type = "status", text = "model" })
