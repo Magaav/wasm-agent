@@ -102,6 +102,54 @@ local PREFIX_SUMMARY_PROMPT = table.concat({
   "Be concise. Focus on what's needed to understand the kept suffix.",
 }, "\n")
 
+-- Context budgeting, per tool.
+--
+-- A tool result is stored whole and trimmed only when it is assembled into the
+-- context, because the transcript *is* the record: truncating at write time lost
+-- the evidence permanently. A 20 KB read became a 600-byte row, and every later
+-- turn worked from that keyhole - which is how "read, then edit" kept missing with
+-- old_text_not_found, and how a command's error (at the end of its output) was
+-- already gone by the time anyone looked.
+--
+-- Budgets differ by tool because the useful part does: an error lives at the *end*
+-- of a command's output, a file's opening usually identifies it, and an
+-- acknowledgement needs almost nothing. pi does the equivalent for bash - it keeps
+-- the tail and points at the full output - and this generalises it.
+local TOOL_CONTEXT_BUDGET = {
+  read = { chars = 8000, keep = "head" },
+  session = { chars = 8000, keep = "head" },
+  bash = { chars = 4000, keep = "both" },
+  shell = { chars = 4000, keep = "both" },
+  grep = { chars = 2500, keep = "head" },
+  recall = { chars = 2500, keep = "head" },
+  ls = { chars = 2000, keep = "head" },
+  memories = { chars = 2000, keep = "head" },
+  sessions = { chars = 1500, keep = "head" },
+  find = { chars = 2500, keep = "head" },
+  DEFAULT = { chars = 1500, keep = "head" },
+}
+local TOOL_STORE_CAP = 200000
+
+local function fit_tool_output(name, text)
+  local value = tostring(text or "")
+  local budget = TOOL_CONTEXT_BUDGET[name] or TOOL_CONTEXT_BUDGET.DEFAULT
+  if #value <= budget.chars then return value end
+  local head, tail, dropped = value:sub(1, budget.chars), "", #value - budget.chars
+  if budget.keep == "tail" then
+    head, tail = "", value:sub(-budget.chars)
+  elseif budget.keep == "both" then
+    local half = math.floor(budget.chars / 2)
+    head, tail = value:sub(1, half), value:sub(-half)
+    dropped = #value - #head - #tail
+  end
+  -- Say what was dropped and that the full text still exists: an unannounced loss
+  -- at the moment of use is the failure mode this whole change is about.
+  local marker = string.format("\n…(%s omitted: %d of %d characters; the full result is kept in the transcript)\n",
+    budget.keep == "tail" and "earlier output" or (budget.keep == "both" and "middle of this output" or "rest of this result"),
+    dropped, #value)
+  return head .. marker .. tail
+end
+
 local MAX_TOOL_ROUNDS = tonumber(host.getenv("WASM_AGENT_MAX_TOOL_ROUNDS")) or 200
 local TOOL_TRUNCATE = 600          -- default mode: keep tool output small
 local COMPACT_RESERVE = 16384      -- tokens reserved for the reply (like pi)
@@ -319,7 +367,7 @@ function M:build_context()
     elseif turn.role == "tool" then
       messages[#messages + 1] = {
         role = "tool", tool_call_id = turn.tool_call_id or "",
-        name = turn.tool_name or "", content = turn.content or "",
+        name = turn.tool_name or "", content = fit_tool_output(turn.tool_name, turn.content),
       }
     end
   end
@@ -691,8 +739,8 @@ function M:turn(text)
       local content = json.encode(output)
       memory.append_turn(self.session_id, {
         role = "tool", tool_call_id = call.id or "", tool_name = function_.name or "",
-        content = (self.debug or #content <= TOOL_TRUNCATE) and content
-          or (content:sub(1, TOOL_TRUNCATE) .. "…(truncated)"),
+        content = ((self.debug or #content <= TOOL_STORE_CAP) and content)
+          or (content:sub(1, TOOL_STORE_CAP) .. "…(stored truncated at " .. TOOL_STORE_CAP .. " characters)"),
         ok = ok_tool, debug = self.debug,
       })
       messages[#messages + 1] = {
