@@ -307,10 +307,17 @@ function updateChip() {
 
 function renderNodeSelect() {
   const previous = nodeSelect.value;
-  nodeSelect.replaceChildren();
   // Only nodes that can host a chat: the local host and peers. The local
   // `client` node is a control target, not a conversation target.
-  for (const node of nodeList.filter((item) => item.kind !== "client")) {
+  const options = nodeList.filter((item) => item.kind !== "client");
+  // Drop a stale selection (a node that is no longer a chat target) instead of
+  // silently sending it as X-WA-Node and keying sessions under a phantom name.
+  if (activeNode && !options.some((node) => node.name === activeNode)) {
+    activeNode = "";
+    try { localStorage.removeItem("wa-node"); } catch (error) { /* ignore */ }
+  }
+  nodeSelect.replaceChildren();
+  for (const node of options) {
     const option = document.createElement("option");
     option.value = node.name;
     option.textContent = `${node.name} · ${node.kind}${node.online ? "" : " (offline)"}`;
