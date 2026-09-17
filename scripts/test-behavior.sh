@@ -151,14 +151,21 @@ resumed="$(grep -c "(continued)" "$CONT" || true)"
 if [ "$after" = "$mid" ] && [ "$resumed" -ge 1 ]; then ok "--continue reuses the latest session (still $after sessions)"
 else bad "--continue should not create a session (was $mid, now $after, marker=$resumed)"; fi
 
-# The continued thread must actually carry the earlier turn.
-python3 - "$DB" <<'PY' && ok "the continued thread carries its earlier turns" || bad "continuation lost the transcript"
+# The continued thread must actually carry the earlier turn. Assert on content,
+# not on a turn count: "one" and "two" answered directly are two exchanges, and
+# a magic threshold makes the test depend on whether the model chose to use a
+# tool. That flakiness cost me two confident-but-wrong "regression" reports.
+PRE_SID="$(python3 -c "import sqlite3,sys;print(sqlite3.connect(sys.argv[1]).execute('select id from sessions order by updated_at desc limit 1').fetchone()[0])" "$DB")"
+python3 - "$DB" "$PRE_SID" <<'PY' && ok "the continued thread carries its earlier turns" || bad "continuation lost the transcript"
 import sqlite3, sys
 con = sqlite3.connect(sys.argv[1])
-sid, turns = con.execute("SELECT id, (SELECT COUNT(*) FROM turns t WHERE t.session_id=s.id) "
-                         "FROM sessions s ORDER BY updated_at DESC LIMIT 1").fetchone()
-print(f"       session {sid[:8]} has {turns} turns")
-sys.exit(0 if turns > 4 else 1)
+sid = sys.argv[2]
+texts = [row[0] or "" for row in con.execute(
+    "SELECT content FROM turns WHERE session_id=? ORDER BY seq", (sid,))]
+print(f"       session {sid[:8]} has {len(texts)} turns; earliest user text: "
+      f"{next((t for t in texts if t.strip()), '')[:40]!r}")
+# The earlier exchange must still be there alongside the new one.
+sys.exit(0 if any("one" == t.strip() for t in texts) and any("two" == t.strip() for t in texts) else 1)
 PY
 
 SID="$(python3 -c "import sqlite3,sys;print(sqlite3.connect(sys.argv[1]).execute('select id from sessions order by updated_at desc limit 1').fetchone()[0])" "$DB")"
