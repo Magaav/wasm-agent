@@ -211,7 +211,17 @@ fn main() {
         lua.set_field(-2, name);
     }
     lua.set_global("EMBEDDED");
-    let bootstrap = "function dofile(path) local source = EMBEDDED[path]; \
+    // `dofile` reads the embedded copy by default, so `wa` is one self-contained
+    // binary. With WASM_AGENT_LUA_ROOT set it prefers the files on disk instead,
+    // which is what lets an agent iterate on the Lua core without a rebuild (and
+    // therefore without a Rust toolchain, e.g. on a Windows node).
+    let bootstrap = "function dofile(path) \
+         local root = host.getenv('WASM_AGENT_LUA_ROOT'); \
+         if root and root ~= '' then \
+           local text = host.read_file(root .. '/' .. path); \
+           if text then return assert(load(text, '@' .. root .. '/' .. path))() end \
+         end; \
+         local source = EMBEDDED[path]; \
          if not source then error('embedded module missing: ' .. tostring(path)) end; \
          return assert(load(source, '@' .. path))() end";
     if let Err(error) = lua.do_string(bootstrap, "bootstrap") {
