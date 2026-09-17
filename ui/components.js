@@ -292,8 +292,71 @@ class WaTrace extends HTMLElement {
     }
     this.classList.toggle("has-error", this._errors > 0);
   }
+  get count() { return this._count; }
 }
 customElements.define("wa-trace", WaTrace);
+
+// <wa-run> — the whole turn's path, collapsed to one line at the top of the
+// reply. A finished reply should read as an answer; how it got there (which
+// decisions, which tools) is one click away instead of pushing the answer off
+// the screen.
+class WaRun extends HTMLElement {
+  static get observedAttributes() { return ["open"]; }
+
+  connectedCallback() { this._build(); }
+
+  _build() {
+    if (this._body) return;
+    this.classList.add("run");
+    this._header = document.createElement("button");
+    this._header.type = "button";
+    this._header.className = "trace-head";
+    this._glyph = document.createElement("span");
+    this._glyph.className = "trace-glyph";
+    this._glyph.textContent = "\u2699";
+    this._label = document.createElement("span");
+    this._label.className = "trace-label";
+    this._label.textContent = "run";
+    this._meta = document.createElement("span");
+    this._meta.className = "trace-meta";
+    this._chevron = document.createElement("span");
+    this._chevron.className = "trace-chevron";
+    this._chevron.textContent = "\u203a";
+    this._header.append(this._glyph, this._label, this._meta, this._chevron);
+    this._body = document.createElement("div");
+    this._body.className = "run-body";
+    this._body.hidden = true;
+    this._header.addEventListener("click", () => this.toggle());
+    this.append(this._header, this._body);
+  }
+
+  get body() { this._build(); return this._body; }
+  get open() { return this.hasAttribute("open"); }
+  set open(value) {
+    if (value) this.setAttribute("open", "");
+    else this.removeAttribute("open");
+  }
+
+  attributeChangedCallback() {
+    this._build();
+    this._body.hidden = !this.open;
+    this._header.setAttribute("aria-expanded", String(this.open));
+    this._chevron.textContent = this.open ? "\u2304" : "\u203a";
+  }
+
+  toggle() { this.open = !this.open; }
+
+  setSummary(decisions, calls, ms) {
+    this._build();
+    const seconds = ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms";
+    const parts = [];
+    if (decisions > 0) parts.push(decisions + (decisions === 1 ? " decision" : " decisions"));
+    parts.push(calls + (calls === 1 ? " tool call" : " tool calls"));
+    this._label.textContent = "run";
+    this._meta.textContent = parts.join(" · ") + " · " + seconds;
+  }
+}
+customElements.define("wa-run", WaRun);
 
 // <wa-tool> — a tool-activity chip. `name` sets the label; `.detail` is writable.
 class WaTool extends HTMLElement {

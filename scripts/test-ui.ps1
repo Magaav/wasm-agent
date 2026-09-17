@@ -55,15 +55,33 @@ $harness = @'
   var body = bubble ? bubble.querySelector(".body") : null;
   check(!!body && body.classList.contains("steps"), "the bubble body should be a steps container");
 
-  var children = body ? Array.prototype.slice.call(body.children) : [];
-  var shape = children.map(function (c) { return c.tagName === "WA-TRACE" ? "trace" : "text"; }).join(",");
-  check(shape === "text,trace,text,trace,text", "expected text,trace,text,trace,text inside the bubble, saw " + shape);
+  // Once the answer is ready the whole path collapses into one run topic, which
+  // sits above the answer so the reader lands on the answer.
+  var shape = body ? Array.prototype.map.call(body.children, function (c) {
+    return c.tagName === "WA-RUN" ? "run" : (c.tagName === "WA-TRACE" ? "trace" : "text");
+  }).join(",") : "";
+  check(shape === "run,text", "expected run,text in the bubble after the reply, saw " + shape);
+
+  var run = body ? body.querySelector("wa-run") : null;
+  check(!!run, "the collapsed run topic should exist");
+  check(!!run && !run.hasAttribute("open"), "the run topic should start collapsed");
+
+  var runBody = run ? run.querySelector(".run-body") : null;
+  var inner = runBody ? Array.prototype.map.call(runBody.children, function (c) {
+    return c.tagName === "WA-TRACE" ? "trace" : "text";
+  }).join(",") : "";
+  check(inner === "text,trace,text,trace", "expected text,trace,text,trace inside the run, saw " + inner);
+
+  var runMeta = run ? run.querySelector(".trace-meta") : null;
+  var runText = runMeta ? runMeta.textContent : "";
+  check(runText.indexOf("2 tool calls") >= 0, "the run topic should total its tool calls, saw: " + runText);
+  check(runText.indexOf("2 decisions") >= 0, "the run topic should count its decisions, saw: " + runText);
 
   // Tool topics belong to the reply, not to the transcript.
   check(messages.querySelectorAll(":scope > wa-trace").length === 0,
         "tool topics must not be children of the transcript container");
 
-  var traces = body ? body.querySelectorAll("wa-trace") : [];
+  var traces = runBody ? runBody.querySelectorAll("wa-trace") : [];
   check(traces.length === 2, "expected two tool topics, saw " + traces.length);
   if (traces.length) {
     var head = traces[0].querySelector(".trace-head");

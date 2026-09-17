@@ -99,6 +99,17 @@ wa-message.assistant { align-self: flex-start; background: var(--assistant); }
 .msg .body.steps { display: flex; flex-direction: column; gap: var(--gap); }
 .msg .body.steps .seg { white-space: pre-wrap; }
 .msg .body.steps wa-trace { width: 100%; max-width: none; }
+
+/* The run topic: the whole turn's path, collapsed above the answer. */
+.msg .body.steps wa-run { width: 100%; max-width: none; }
+.run { border: 1px solid var(--line); border-radius: var(--radius); background: rgba(15, 18, 25, .6); overflow: hidden; }
+.run-body {
+  display: flex; flex-direction: column; gap: var(--gap);
+  padding: var(--space) var(--space) var(--space) 0;
+  border-top: 1px solid rgba(35, 41, 54, .8);
+}
+.run-body .seg { padding-left: var(--space); color: var(--muted); }
+.run-body wa-trace { border: 0; border-left: 2px solid rgba(35, 41, 54, .8); border-radius: 0; background: none; }
 .msg .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .6px; }
 .msg .body { white-space: pre-wrap; }
 .msg code { background: #0a0c11; padding: 1px 5px; border-radius: var(--radius-sm); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }

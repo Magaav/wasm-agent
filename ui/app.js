@@ -173,8 +173,10 @@ jump.addEventListener("click", () => { setFollow(true); pin(true); });
 // One assistant bubble per turn. Decisions and their tool topics live *inside*
 // it as stacked segments: separate bubbles put a border between every decision,
 // which reads as a divider between unrelated messages instead of one reply that
-// thought, used tools, thought again, and answered.
+// thought, used tools, thought again, and answered. When the answer is ready the
+// whole path collapses into a single run topic at the top of the bubble.
 let turnBubble = null;
+let turnStartedAt = 0;
 
 function currentBubble() {
   if (!turnBubble) {
@@ -351,6 +353,29 @@ function finishTrace() {
   trace = null;
 }
 
+// The answer is the point; the route is reference. On reply, everything the turn
+// did before the answer moves into one collapsed run topic at the top of the
+// bubble, and the answer sits below it.
+function collapseRun() {
+  const bubble = turnBubble;
+  if (!bubble) return;
+  const body = bubble.body;
+  const answer = streamBody;
+  const moves = Array.prototype.filter.call(body.children, (c) => c !== answer);
+  const traces = moves.filter((c) => c.tagName === "WA-TRACE");
+  if (traces.length === 0) return;   // nothing ran: leave the plain answer alone
+  let calls = 0;
+  let decisions = 0;
+  for (const child of moves) {
+    if (child.tagName === "WA-TRACE") calls += child.count || 0;
+    else if (child.classList && child.classList.contains("seg")) decisions += 1;
+  }
+  const run = document.createElement("wa-run");
+  body.prepend(run);
+  for (const child of moves) run.body.append(child);
+  run.setSummary(decisions, calls, Date.now() - (turnStartedAt || Date.now()));
+}
+
 // A round is one decision: what the model said, then the tools it chose. Closing
 // both here interleaves them inside the same bubble - text, tools, text, tools -
 // and the bubble only closes when the turn really ends.
@@ -389,6 +414,7 @@ function typeOut(body, text) {
 function handleEvent(event) {
   if (event.type === "round") {
     // A new decision begins: close the previous one (its text and its tool topic).
+    if (!turnStartedAt) turnStartedAt = Date.now();
     flushDecision();
   } else if (event.type === "status") {
     setStatus("wasm-agent is " + (event.text || "working") + "…");
@@ -413,14 +439,18 @@ function handleEvent(event) {
     if (streamBody) {
       streamBody.innerHTML = renderMarkdown(finalText);
       streamBody.style.whiteSpace = "normal";
-      streamBody = null;
-      streamText = "";
-      finishTrace();
-      turnBubble = null;
     } else {
-      turnBubble = null;
-      typeOut(add("assistant", ""), finalText);
+      const segment = document.createElement("div");
+      segment.className = "seg";
+      segment.innerHTML = renderMarkdown(finalText);
+      currentBubble().body.append(segment);
+      streamBody = segment;
     }
+    finishTrace();
+    collapseRun();
+    streamBody = null;
+    streamText = "";
+    turnBubble = null;
   } else if (event.type === "usage") {    settings.usage = event.total || settings.usage;
     if (event.model) settings.model = event.model;
     updateChip();
@@ -456,6 +486,7 @@ async function send(text) {
   setFollow(true);
   pin(true);
   turnBubble = null;   // the reply gets its own bubble
+  turnStartedAt = Date.now();
   controller = new AbortController();
   streamBody = null;
   streamText = "";
