@@ -101,6 +101,24 @@ end
 assert(calls == 0, "an unanswered tool call must not be sent (found " .. calls .. ")")
 assert(orphans == 0, "an orphan tool result must not be sent (found " .. orphans .. ")")
 assert(bot.repaired and bot.repaired > 0, "the repair must be recorded, not silent")
+
+-- Positive control: a *complete* exchange must survive intact. Without this the
+-- assertions above would also pass if the builder simply dropped every call.
+local sid2 = memory.start_session("test", "repair", { user_id = "master", node_id = "", title = "repair" })
+local call2 = { id = "call_2", type = "function", ["function"] = { name = "bash", arguments = "{}" } }
+memory.append_turn(sid2, { role = "user", content = "do it" })
+memory.append_turn(sid2, { role = "assistant", content = "", tool_calls = { call2 } })
+memory.append_turn(sid2, { role = "tool", content = '{"stdout":"hi"}', tool_call_id = "call_2", tool_name = "bash" })
+memory.append_turn(sid2, { role = "assistant", content = "done" })
+local good = agentlib.new(sid2, function() end, "master", "master", "")
+local kept_calls, kept_results = 0, 0
+for _, m in ipairs(good:build_context()) do
+  if m.role == "assistant" and m.tool_calls then kept_calls = kept_calls + 1 end
+  if m.role == "tool" then kept_results = kept_results + 1 end
+end
+assert(kept_calls == 1, "a complete exchange must keep its call (found " .. kept_calls .. ")")
+assert(kept_results == 1, "a complete exchange must keep its result (found " .. kept_results .. ")")
+assert(not good.repaired, "a complete exchange must not be reported as repaired")
 print("repair ok")
 LUA
 WA_SCRIPT="$DB.repair.lua" "$BIN" --db "$DB" | grep -q "repair ok"
