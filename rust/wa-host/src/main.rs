@@ -38,6 +38,26 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/init.lua", include_str!("../../../lua/core/init.lua")),
 ];
 
+/// Source for one of the entry modules the host loads itself.
+///
+/// `dofile` prefers the on-disk copy when WASM_AGENT_LUA_ROOT is set, but these
+/// two are read straight from the binary - so editing `lua/core/init.lua` had no
+/// effect at all, which is exactly how a self-evolution run lost its budget: it
+/// added a command, ran it, saw "unknown command", and went looking through the
+/// Rust host for the reason. Dev mode has to cover every entry point or it is a
+/// trap.
+fn core_source(name: &str) -> String {
+    if let Ok(root) = std::env::var("WASM_AGENT_LUA_ROOT") {
+        let trimmed = root.trim_end_matches(['/', '\\']);
+        if !trimmed.is_empty() {
+            if let Ok(text) = std::fs::read_to_string(format!("{trimmed}/{name}")) {
+                return text;
+            }
+        }
+    }
+    embedded(name).to_string()
+}
+
 fn embedded(name: &str) -> &'static str {
     EMBEDDED
         .iter()
@@ -243,7 +263,7 @@ fn main() {
 
     let command = lua_args.first().map(String::as_str).unwrap_or("");
     if command == "serve" {
-        if let Err(error) = lua.do_string(embedded("lua/core/server.lua"), "lua/core/server.lua") {
+        if let Err(error) = lua.do_string(&core_source("lua/core/server.lua"), "lua/core/server.lua") {
             eprintln!("lua error: {error}");
             std::process::exit(1);
         }
@@ -302,7 +322,7 @@ fn main() {
         return;
     }
 
-    if let Err(error) = lua.do_string(embedded("lua/core/init.lua"), "lua/core/init.lua") {
+    if let Err(error) = lua.do_string(&core_source("lua/core/init.lua"), "lua/core/init.lua") {
         eprintln!("lua error: {error}");
         std::process::exit(1);
     }
