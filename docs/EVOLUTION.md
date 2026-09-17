@@ -129,6 +129,21 @@ fix. Behaviour that is genuinely model-dependent (eagerness to recall, language
 following, how long it explores) is what `scripts/test-behavior.sh` measures; run
 it after any model change instead of assuming.
 
+## Two traps that cost a run each
+
+**Dev mode makes the Lua live, but the installed binary does not follow.**
+Verifying with `WASM_AGENT_LUA_ROOT` proves the code on disk works; a user running
+plain `wa` still gets the older embedded copy until the binary is rebuilt and
+reinstalled. Say which one you verified with, or you will report success on code
+nobody is running.
+
+**Never stop the node by image name.** `Stop-Process -Name wa` kills the local UI
+server *and* any interactive agent session mid-turn - it ended one session after
+61 turns with a tool result as its last turn, no crash and no trace, because a
+binary refresh needed the file unlocked. Target the serve PID instead. An
+unfinished session is visible in `wa sessions` (a last turn that is not an
+assistant reply), which is how it was found.
+
 ## Briefs that work
 
 The agent follows `AGENTS.md`, so the useful briefs state the goal, the
