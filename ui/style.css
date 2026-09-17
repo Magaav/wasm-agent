@@ -439,3 +439,46 @@ wa-menu.menu {
 /* The node is down: the composer says so rather than failing silently later. */
 body.node-offline .composer textarea { border-color: #d29922; }
 body.node-offline .composer textarea::placeholder { color: #d29922; }
+
+/* --- transcript must never widen ------------------------------------------
+   During a run the bubble holds raw text (streaming deltas and the status line)
+   and only becomes markdown at the end. An unbreakable token - a long path, a
+   base64 chunk, a URL - pushed the transcript sideways, so a horizontal scrollbar
+   appeared mid-run and vanished with the answer. Wrapping is the fix; the hidden
+   overflow is the belt, because a scrollbar here should never exist. */
+.messages { overflow-x: hidden; }
+.msg { max-width: min(760px, 100%); }
+.msg .body, .seg, .status, .trace-meta, .tool-output { overflow-wrap: anywhere; }
+
+/* --- spacing inside a reply ----------------------------------------------
+   A decision and the tools it chose belong together; the gap that separates is
+   the one before the *next* decision. The old uniform gap made one decision read
+   as two unrelated blocks - and when a model calls a tool before writing anything,
+   the topic comes first, which made it look like "tools, then a decision". */
+.msg .body.steps { gap: var(--space); }
+.msg .body.steps .seg:not(:first-child) { margin-top: var(--space); }
+
+/* --- blocks the renderer can produce -------------------------------------- */
+.msg .body h1, .msg .body h2, .msg .body h3, .msg .body h4 {
+  margin: var(--space) 0 2px 0; line-height: 1.3;
+}
+.msg .body h1 { font-size: 15px; }
+.msg .body h2 { font-size: 14px; }
+.msg .body h3, .msg .body h4 { font-size: 13px; }
+.msg .body ul, .msg .body ol { margin: var(--space) 0; padding-left: 20px; }
+.msg .body li { margin: 1px 0; }
+.msg .body pre {
+  margin: var(--space) 0; padding: var(--space);
+  background: #0a0c11; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  overflow-x: auto;
+}
+.msg .body pre code { background: none; padding: 0; font-size: 12px; }
+/* A table scrolls inside its own box, not by widening the transcript. */
+.md-table { margin: var(--space) 0; overflow-x: auto; max-width: 100%; }
+.md-table table { border-collapse: collapse; font-size: 12.5px; width: 100%; }
+.md-table th, .md-table td {
+  border: 1px solid var(--line); padding: 2px var(--space); text-align: left;
+  vertical-align: top;
+}
+.md-table th { background: rgba(88, 166, 255, .08); font-weight: 600; }
+.md-table td { color: #c9d1e0; }
