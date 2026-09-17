@@ -91,3 +91,13 @@ echo
 echo "  A loss here is not a slow model: the information is absent from one arm's"
 echo "  context and present in the other's. That is the difference between costing"
 echo "  rounds and losing evidence."
+
+# Measured result, recorded here so nobody over-claims from this script:
+#   legacy recovered the line in 2 of 3 runs, not 0.
+# The recovery path is the one this fixture failed to close: the assistant's own
+# turn-1 reply is prose, prose is not budgeted, and it had already mentioned the
+# last line in passing. So head-only truncation is usually recoverable through the
+# model's own summary and mostly costs rounds. Demonstrating real loss needs a case
+# where the answer is not echoed in prose - a file that changes between turns, or
+# several truncated results that no summary carries. Until then the honest claim is
+# the cost, not the failures.
