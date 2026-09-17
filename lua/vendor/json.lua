@@ -85,12 +85,21 @@ local function encode_table(val, stack)
     return "[" .. table.concat(res, ",") .. "]"
 
   else
-    -- Treat as an object
-    for k, v in pairs(val) do
+    -- Treat as an object. Keys are sorted so the output is canonical: Lua 5.4
+    -- randomises string hashing per process, so `pairs` order differs between
+    -- runs. The request body is built by encoding these tables, so an unstable
+    -- order changes what we send on every restart and silently cold-starts the
+    -- provider's prompt cache - and makes any hash of the body meaningless.
+    local keys = {}
+    for k in pairs(val) do
       if type(k) ~= "string" then
         error("invalid table: mixed or invalid key types")
       end
-      table.insert(res, encode(k, stack) .. ":" .. encode(v, stack))
+      keys[#keys + 1] = k
+    end
+    table.sort(keys)
+    for _, k in ipairs(keys) do
+      table.insert(res, encode(k, stack) .. ":" .. encode(val[k], stack))
     end
     stack[val] = nil
     return "{" .. table.concat(res, ",") .. "}"
