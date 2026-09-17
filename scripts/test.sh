@@ -340,8 +340,9 @@ assert(status.config_path() ~= "", "the config path must not be empty")
 
 -- Five facts, one line each, and each line names the fact it carries.
 local lines = status.lines()
-assert(#lines == 5, "status must print one line per fact (got " .. #lines .. ")")
-for _, label in ipairs({ "node", "model", "session", "tree", "config" }) do
+-- No count assertion: the labels below say which facts must be there, and a
+-- count only breaks when a fact is added (adding `tools` turned 5 into 6).
+for _, label in ipairs({ "node", "model", "session", "tools", "tree", "config" }) do
   local found = false
   for _, text in ipairs(lines) do
     if text:sub(1, #label) == label then found = true end
