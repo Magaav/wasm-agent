@@ -324,6 +324,47 @@ function M:summary_model()
   return host.getenv("WASM_AGENT_LLM_SUMMARY_MODEL") or provider.settings().model
 end
 
+-- A stored user turn as a provider message.
+--
+-- With no images this is a plain string, which is what every existing turn is
+-- and what non-vision providers expect. With images it becomes the
+-- OpenAI-compatible parts array. A missing file is reported *inside* the text
+-- part rather than dropped: a turn that silently lost its picture would let the
+-- model answer confidently about something it never saw.
+local function user_message(turn)
+  local images = turn.images
+  if type(images) ~= "table" or #images == 0 then
+    return { role = "user", content = turn.content or "" }
+  end
+  local parts = {}
+  if turn.content and turn.content ~= "" then
+    parts[#parts + 1] = { type = "text", text = turn.content }
+  end
+  local lost = {}
+  for _, reference in ipairs(images) do
+    local image = memory.load_image(reference)
+    if image.missing then
+      lost[#lost + 1] = tostring(reference.name or reference.sha256 or "image")
+    else
+      parts[#parts + 1] = {
+        type = "image_url",
+        image_url = { url = "data:" .. image.mime .. ";base64," .. image.b64 },
+      }
+    end
+  end
+  if #lost > 0 then
+    parts[#parts + 1] = {
+      type = "text",
+      text = "[image unavailable: " .. table.concat(lost, ", ") .. "]",
+    }
+  end
+  -- An image-only turn still needs a non-empty content array.
+  if #parts == 0 then
+    parts[1] = { type = "text", text = "(image)" }
+  end
+  return { role = "user", content = parts }
+end
+
 -- Rebuild the provider messages from the transcript: system (+AGENTS.md),
 -- the compaction summary, then every turn after the watermark.
 function M:build_context()
@@ -363,7 +404,7 @@ function M:build_context()
       -- skip the orphan
     elseif turn.role == "user" then
       started = true
-      messages[#messages + 1] = { role = "user", content = turn.content }
+      messages[#messages + 1] = user_message(turn)
     elseif turn.role == "assistant" then
       started = true
       local message = { role = "assistant", content = turn.content or "" }
@@ -586,12 +627,14 @@ function M:note_interruption()
   return self.resume_notice
 end
 
-function M:turn(text)
+function M:turn(text, images)
   self:note_interruption()
   self.emit({ type = "status", text = "thinking" })
   self.debug = (memory.session(self.session_id) or {}).mode == "debug"
 
-  memory.append_turn(self.session_id, { role = "user", content = text, debug = self.debug })
+  memory.append_turn(self.session_id, {
+    role = "user", content = text, images = images or {}, debug = self.debug,
+  })
 
   if not provider.configured() then
     local reply = self:local_turn(text)

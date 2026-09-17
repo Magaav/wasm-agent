@@ -37,14 +37,38 @@ local function remote_target(node)
   return nil
 end
 
+-- A /chat body may be plain text (the historical shape, still used by the CLI,
+-- the ledger and peer relays) or a JSON object {"text":..., "images":[...]} when
+-- the UI has pictures to send. The distinction is made here rather than in the
+-- Rust HTTP layer so that the text path keeps working unchanged.
+--
+-- Returns text, images, or an error string when a named image cannot be stored.
+local function parse_turn_body(body)
+  local raw = body or ""
+  if raw:sub(1, 1) ~= "{" then return raw, {} end
+  local ok, decoded = pcall(json.decode, raw)
+  if not ok or type(decoded) ~= "table" or decoded.images == nil then
+    return raw, {}
+  end
+  local images = {}
+  for _, entry in ipairs(decoded.images or {}) do
+    local reference, problem = memory.store_image(entry)
+    if not reference then return nil, nil, problem end
+    images[#images + 1] = reference
+  end
+  return tostring(decoded.text or ""), images
+end
+
 function wa_reply(text, session, node)
+  local prompt, images, problem = parse_turn_body(text)
+  if problem then return json.encode({ error = redact.text(problem) }) end
   if remote_target(node) then
-    local result = nodeslib.remote_call(node, "chat", { text = text or "" })
+    local result = nodeslib.remote_call(node, "chat", { text = prompt or "" })
     if result and result.error then return json.encode({ error = redact.text(tostring(result.error)) }) end
     return json.encode({ reply = result and result.reply or "" })
   end
   local bot = agent_for(session, node)
-  local ok, reply = pcall(bot.turn, bot, text or "")
+  local ok, reply = pcall(bot.turn, bot, prompt or "", images)
   if not ok then return json.encode({ error = redact.text(tostring(reply)) }) end
   return json.encode({ reply = reply })
 end
@@ -52,13 +76,18 @@ end
 -- Streaming turn: events are pushed to the SSE client as the agent runs.
 -- When a peer is selected, its stream is relayed here unchanged.
 function wa_reply_stream(text, session, node)
+  local prompt, images, problem = parse_turn_body(text)
+  if problem then
+    emit({ type = "error", error = redact.text(problem) })
+    return ""
+  end
   if remote_target(node) then
-    local result = nodeslib.remote_chat(node, text or "")
+    local result = nodeslib.remote_chat(node, prompt or "")
     if result and result.error then emit({ type = "error", error = redact.text(tostring(result.error)) }) end
     return ""
   end
   local bot = agent_for(session, node)
-  local ok, reply = pcall(bot.turn, bot, text or "")
+  local ok, reply = pcall(bot.turn, bot, prompt or "", images)
   if not ok then emit({ type = "error", error = redact.text(tostring(reply)) }) end
   return ""
 end

@@ -489,9 +489,25 @@ function setBusy(value) {
 }
 
 function composedText(text) {
-  if (attachments.length === 0) return text;
-  const files = attachments.map((file) => `[file: ${file.name}]\n${file.text}`);
-  return files.join("\n\n") + (text ? "\n\n" + text : "");
+  const files = attachments.filter((file) => file.kind !== "image");
+  if (files.length === 0) return text;
+  const bodies = files.map((file) => `[file: ${file.name}]\n${file.text}`);
+  return bodies.join("\n\n") + (text ? "\n\n" + text : "");
+}
+
+// Images go out as a JSON body: {text, images:[{name, mime, data}]}.
+// The server accepts plain text too, so this only changes when pictures are
+// actually attached. `data` is a full data URL; the server strips the envelope.
+function composedBody(text) {
+  const images = attachments.filter((file) => file.kind === "image");
+  if (images.length === 0) return { contentType: "text/plain; charset=utf-8", body: composedText(text) };
+  return {
+    contentType: "application/json",
+    body: JSON.stringify({
+      text: composedText(text),
+      images: images.map((file) => ({ name: file.name, mime: file.mime, data: file.data })),
+    }),
+  };
 }
 
 // A lost connection is not a failed turn. When the node dies mid-stream the
@@ -540,15 +556,15 @@ async function send(text) {
   streamText = "";
   const names = attachments.map((file) => file.name).join(", ");
   add("user", text + (names ? `\n\nattached: ${names}` : ""));
-  const outgoing = composedText(text);
+  const outgoing = composedBody(text);
   attachments = [];
   renderAttachments();
   setStatus("wasm-agent is thinking…");
   try {
     const response = await fetch("chat", {
       method: "POST",
-      headers: apiHeaders({ "Content-Type": "text/plain; charset=utf-8", "Accept": "text/event-stream" }),
-      body: outgoing,
+      headers: apiHeaders({ "Content-Type": outgoing.contentType, "Accept": "text/event-stream" }),
+      body: outgoing.body,
       signal: controller.signal,
     });
     if (!response.body) {
@@ -784,7 +800,14 @@ function renderAttachments() {
   attachmentsEl.replaceChildren();
   attachments.forEach((file, index) => {
     const chip = document.createElement("span");
-    chip.className = "attachment";
+    chip.className = "attachment" + (file.kind === "image" ? " attachment-image" : "");
+    if (file.kind === "image") {
+      const thumb = document.createElement("img");
+      thumb.className = "attachment-thumb";
+      thumb.src = file.data;
+      thumb.alt = file.name;
+      chip.append(thumb);
+    }
     const name = document.createElement("b");
     name.textContent = file.name;
     const remove = document.createElement("button");
@@ -897,14 +920,43 @@ function setupVoice() {
 }
 
 // ---- file append ---------------------------------------------------------
+// Two kinds of attachment ride through here. Text files keep the original
+// behaviour: read as UTF-8, inlined into the prompt. Images are sent as
+// structured parts so the model can actually see them, and are handled by the
+// server (stored content-addressed, referenced from the turn).
+const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+function isImage(file) {
+  return IMAGE_TYPES.includes((file.type || "").toLowerCase());
+}
+
+function readAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("read_failed"));
+    reader.readAsDataURL(file);
+  });
+}
+
 attachButton.addEventListener("click", () => fileInput.click());
 fileInput.addEventListener("change", async () => {
   for (const file of fileInput.files) {
+    if (isImage(file)) {
+      try {
+        const dataUrl = await readAsDataURL(file);
+        attachments.push({ kind: "image", name: file.name, mime: file.type, data: dataUrl });
+      } catch (error) {
+        // A picture we could not read must not vanish silently.
+        setStatus(`could not read ${file.name}`);
+      }
+      continue;
+    }
     try {
       const text = await file.text();
-      attachments.push({ name: file.name, text: text.slice(0, 20000) });
+      attachments.push({ kind: "text", name: file.name, text: text.slice(0, 20000) });
     } catch (error) {
-      attachments.push({ name: file.name, text: "" });
+      attachments.push({ kind: "text", name: file.name, text: "" });
     }
   }
   fileInput.value = "";

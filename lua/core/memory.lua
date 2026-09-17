@@ -1,6 +1,7 @@
 -- Memory: explicit memories + append-only ledger, all in Lua over host.sqlite.
 -- The ledger is source of truth; *_fts is an index; the model never rewrites it.
 local json = dofile("lua/vendor/json.lua")
+local paths = dofile("lua/core/paths.lua")
 local M = {}
 
 local function decode(raw)
@@ -85,6 +86,12 @@ local function migrate()
   add_column("sessions", "interrupted_seq", "INTEGER NOT NULL DEFAULT 0")
   add_column("sessions", "interrupted_reason", "TEXT NOT NULL DEFAULT ''")
   add_column("sessions", "interrupted_count", "INTEGER NOT NULL DEFAULT 0")
+  -- Images attached to a user turn. A JSON array of
+  -- {mime, sha256, name, bytes}; the bytes live on disk as base64 under
+  -- attachments/ (content-addressed by sha256), never in `content`. Content is
+  -- FTS-indexed, so putting base64 there would poison every text search and
+  -- bloat the index by three orders of magnitude.
+  add_column("turns", "images", "TEXT NOT NULL DEFAULT '[]'")
 end
 
 function M.setup()
@@ -382,6 +389,125 @@ function M.journal(kind, entity_id, payload)
        {kind, entity_id, "upsert", origin(), json.encode(payload), host.now()})
 end
 
+-- -------------------------------------------------------------------- images
+-- Attached images live on disk, content-addressed by sha256, and are referenced
+-- from a turn by identity. Three reasons it is a file and not a column:
+--   1. `turns.content` is FTS-indexed; base64 there would poison every search.
+--   2. The same screenshot pasted twice is stored once.
+--   3. The path is stable, so replays and fixtures can resolve it.
+--
+-- The bytes are stored base64 *as text*, because the host's read_file/write_file
+-- are UTF-8 text only (rust/wa-host/src/host.rs). Encoding is therefore part of
+-- the on-disk format, not an implementation detail to change casually.
+
+local BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+function M.base64_decode(text)
+  if type(text) ~= "string" or text == "" then return "" end
+  text = text:gsub("%s", ""):gsub("=+$", "")
+  local out, buffer, bits = {}, 0, 0
+  for i = 1, #text do
+    local char = text:sub(i, i)
+    local value = BASE64_ALPHABET:find(char, 1, true)
+    if value then
+      buffer = buffer * 64 + (value - 1)
+      bits = bits + 6
+      if bits >= 8 then
+        bits = bits - 8
+        -- Take the top byte and *discard* the bits it used. Keeping them would
+        -- let `buffer` grow without bound: past ~13 symbols it exceeds the
+        -- exact-integer range, and every later byte is silently wrong (the
+        -- length stays correct, so only a byte comparison catches it).
+        out[#out + 1] = string.char(math.floor(buffer / (2 ^ bits)) % 256)
+        buffer = buffer % (2 ^ bits)
+      end
+    end
+  end
+  return table.concat(out)
+end
+
+function M.base64_encode(bytes)
+  if type(bytes) ~= "string" or bytes == "" then return "" end
+  local out = {}
+  local function symbol(index) return BASE64_ALPHABET:sub(index + 1, index + 1) end
+  for i = 1, #bytes, 3 do
+    local remaining = #bytes - i + 1
+    local a, b, c = bytes:byte(i), bytes:byte(i + 1), bytes:byte(i + 2)
+    -- Pad the group to three bytes of bits, then take four 6-bit symbols. The
+    -- final group's spare symbols become '='; taking them from a zeroed byte
+    -- would emit a real character and corrupt the output by length alone.
+    out[#out + 1] = symbol(math.floor(a / 4))
+    out[#out + 1] = symbol((a % 4) * 16 + math.floor((b or 0) / 16))
+    out[#out + 1] = remaining > 1 and symbol((b % 16) * 4 + math.floor((c or 0) / 64)) or "="
+    out[#out + 1] = remaining > 2 and symbol(c % 64) or "="
+  end
+  return table.concat(out)
+end
+
+-- Extensions we accept, mapped to the mime types the provider will echo back.
+-- The gateway itself accepts webp/png/jpeg/gif and rejects anything else, so the
+-- check happens here rather than being discovered as a 400 mid-turn.
+local IMAGE_TYPES = {
+  ["image/png"] = "png", ["image/jpeg"] = "jpg", ["image/webp"] = "webp",
+  ["image/gif"] = "gif",
+}
+
+function M.image_mime_supported(mime)
+  return IMAGE_TYPES[tostring(mime or ""):lower()] ~= nil
+end
+
+-- Store an image and return the reference recorded on the turn.
+-- A data URL or bare base64 is accepted; the sha256 is taken over the *decoded*
+-- bytes so that the same picture in two encodings has one identity.
+function M.store_image(entry)
+  local raw = tostring(entry.data or entry.b64 or "")
+  local mime = tostring(entry.mime or ""):lower()
+  -- Strip a data URL envelope if one was supplied.
+  local header, payload = raw:match("^data:([^;,]+);base64,(.*)$")
+  if header then
+    mime = header:lower()
+    raw = payload
+  end
+  if not M.image_mime_supported(mime) then
+    return nil, "unsupported_image_type: " .. (mime ~= "" and mime or "unknown")
+  end
+  local bytes = M.base64_decode(raw)
+  if bytes == "" then return nil, "empty_image" end
+  local digest = host.sha256(bytes)
+  local extension = IMAGE_TYPES[mime]
+  local directory = paths.data() .. "/attachments/" .. digest:sub(1, 2)
+  local path = directory .. "/" .. digest .. "." .. extension
+  -- Content-addressed: identical bytes already on disk are already correct.
+  if not (host.read_file and host.read_file(path)) then
+    local ok = host.write_file and host.write_file(path, M.base64_encode(bytes))
+    if not ok then return nil, "attachment_write_failed: " .. path end
+  end
+  return {
+    mime = mime,
+    sha256 = digest,
+    path = path,
+    name = tostring(entry.name or (digest:sub(1, 8) .. "." .. extension)),
+    bytes = #bytes,
+  }
+end
+
+-- Read an image back for a provider request: {mime, b64, path, missing}.
+function M.load_image(reference)
+  local mime = tostring(reference.mime or "image/png")
+  local path = tostring(reference.path or "")
+  if path == "" and reference.sha256 then
+    local extension = IMAGE_TYPES[mime] or "png"
+    path = paths.data() .. "/attachments/" .. reference.sha256:sub(1, 2)
+      .. "/" .. reference.sha256 .. "." .. extension
+  end
+  local text = host.read_file and host.read_file(path)
+  if not text or text == "" then
+    return { mime = mime, path = path, missing = true }
+  end
+  -- Stored already base64; hand it back as-is so a replay does not re-encode.
+  return { mime = mime, path = path, b64 = text }
+end
+
 function M.next_seq(session_id)
   local rows = query("SELECT COALESCE(MAX(seq),0)+1 AS seq FROM turns WHERE session_id=?", {session_id})
   return rows[1] and rows[1].seq or 1
@@ -390,9 +516,10 @@ end
 function M.append_turn(session_id, turn)
   local seq = turn.seq or M.next_seq(session_id)
   local id = turn.id or host.uuid()
-  exec("INSERT INTO turns(id,session_id,seq,role,content,tool_calls,tool_call_id,tool_name," ..
-       "tokens,ms,ok,debug,trace,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+  exec("INSERT INTO turns(id,session_id,seq,role,content,images,tool_calls,tool_call_id,tool_name," ..
+       "tokens,ms,ok,debug,trace,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
        {id, session_id, seq, turn.role or "user", turn.content or "",
+        json.encode(turn.images or {}),
         json.encode(turn.tool_calls or {}), turn.tool_call_id or "", turn.tool_name or "",
         turn.tokens or 0, turn.ms or 0, turn.ok == false and 0 or 1,
         turn.debug and 1 or 0, json.encode(turn.trace or {}), host.now()})
@@ -401,7 +528,7 @@ function M.append_turn(session_id, turn)
   exec("UPDATE sessions SET updated_at=? WHERE id=?", {host.now(), session_id})
   M.journal("turn", id, {
     id = id, session_id = session_id, seq = seq, role = turn.role or "user",
-    content = turn.content or "", tool_calls = turn.tool_calls or {},
+    content = turn.content or "", images = turn.images or {}, tool_calls = turn.tool_calls or {},
     tool_call_id = turn.tool_call_id or "", tool_name = turn.tool_name or "",
     tokens = turn.tokens or 0, ms = turn.ms or 0,
     ok = turn.ok == false and 0 or 1, debug = turn.debug and 1 or 0,
@@ -421,6 +548,7 @@ function M.session_turns(session_id, opts)
   for _, row in ipairs(rows) do
     row.tool_calls = json.decode(row.tool_calls)
     row.trace = json.decode(row.trace)
+    if row.images then row.images = decode(row.images) end
   end
   return rows
 end
