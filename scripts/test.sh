@@ -571,4 +571,16 @@ if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; th
   echo "line endings ok"
 fi
 
+# The image-attachment tests, plus the helper tests that came with them. They were
+# written, they passed when run by hand, and nothing ran them - which is how a test
+# quietly stops being true. Each file is self-contained and prints its own verdict,
+# so the gate is that verdict rather than a fixed string.
+for t in tests/*.lua; do
+  out=$(WA_SCRIPT="$t" "$BIN" --db "$DB.attach" 2>&1 || true)
+  if ! printf '%s' "$out" | grep -qE "ALL PASS|^true$|ok$"; then
+    echo "FAIL $t"; printf '%s\n' "$out" | tail -6; exit 1
+  fi
+  rm -f "$DB.attach"*
+done
+echo "attach tests ok"
 echo "smoke ok"
