@@ -129,9 +129,13 @@ memory.append_turn(sid, { role = "assistant", content = "", tool_calls = {
 memory.append_turn(sid, { role = "tool", tool_call_id = "c1", tool_name = "read", content = big })
 memory.append_turn(sid, { role = "tool", tool_call_id = "c2", tool_name = "bash",
   content = string.rep("noise ", 2000) .. "FATAL: the error is at the end" })
-local stored = memory.session_turns(sid, { limit = 10 })
-assert(#stored[2].content > 20000, "the transcript must keep the whole result, got " .. #stored[2].content)
-assert(stored[2].content == big, "and keep it verbatim")
+local stored_read
+for _, row in ipairs(memory.session_turns(sid, { limit = 10 })) do
+  if row.tool_name == "read" then stored_read = row end
+end
+assert(stored_read, "the read result must be in the transcript")
+assert(#stored_read.content > 20000, "the transcript must keep the whole result, got " .. #stored_read.content)
+assert(stored_read.content == big, "and keep it verbatim")
 local bot = agentlib.new(sid, function() end, "master", "master", "")
 local read_view, bash_view
 for _, message in ipairs(bot:build_context()) do
