@@ -163,6 +163,7 @@ local first = bot:maybe_compact()
 work(9, 18)
 bot.last_prompt_tokens = 99999
 local second = bot:maybe_compact()
+print("       compaction 1 ran: " .. tostring(first) .. ", compaction 2 ran: " .. tostring(second))
 local summaries = {}
 for _, turn in ipairs(memory.session_turns(sid, { limit = 500 })) do
   if turn.role == "summary" then
@@ -171,6 +172,10 @@ for _, turn in ipairs(memory.session_turns(sid, { limit = 500 })) do
     end
   end
 end
+for index, item in ipairs(summaries) do
+  print(string.format("       summary %d: split_turn=%s head=%q", index, tostring(item.split),
+    (item.text:gsub("\n.*", "")):sub(1, 60)))
+end
 assert(first and second, "both compactions should have run")
 assert(summaries[1].split == false and summaries[1].text:find("## Next Steps", 1, true),
   "the first summary must be the checkpoint template with a plan")
@@ -178,9 +183,13 @@ assert(summaries[2].split == true and summaries[2].text:find("## Original Reques
   "a cut inside the turn must use the split-turn prefix template")
 print("compaction templates ok")
 LUA
-if WASM_AGENT_LLM_CONTEXT=6000 WA_SCRIPT="$TMP/compact.lua" "$BIN" --db "$DB" 2>&1 | grep "compaction templates ok"; then
+compact_out="$(WASM_AGENT_LLM_CONTEXT=6000 WA_SCRIPT="$TMP/compact.lua" "$BIN" --db "$DB" 2>&1)"
+if grep -q "compaction templates ok" <<<"$compact_out"; then
   ok "checkpoint and split-turn summaries both carry the plan"
-else bad "compaction summaries did not use pi's templates"; fi
+else
+  bad "compaction summaries did not use pi's templates"
+  echo "$compact_out" | tail -6 | sed 's/^/       /'
+fi
 
 # --- 2. session continuation --------------------------------------------------
 echo
