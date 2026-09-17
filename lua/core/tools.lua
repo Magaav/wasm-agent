@@ -85,7 +85,12 @@ M.admin = {
   schema("ls", "List a directory (portable: works the same on every platform).", { path = { type = "string" } }),
   schema("grep", "Search files for a pattern and return matching lines. Uses a portable matcher, so it works the same on every platform.", {
     pattern = { type = "string" }, path = { type = "string" } }, { "pattern" }),
-  schema("client", "Control the wasm-agent client machine: screenshot, mouse, keyboard and a Chrome DevTools (CDP) session. CDP uses a dedicated Chrome profile and launches Chrome if needed.", {
+  -- Scoped deliberately. It used to read as "here is how you look at a web page",
+  -- and an agent verifying its own UI spent 28 calls driving Chrome through CDP:
+  -- fighting the debug endpoint, falling back to PowerShell one-liners mangled by
+  -- the shell, and briefly overwriting the installed app.js to instrument it.
+  -- None of that was needed - the UI is a page this node serves.
+  schema("client", "Act on the user's machine at their request: screenshot, mouse, keyboard, a shell on their machine, and a Chrome DevTools session for browsing tasks. This is not how to inspect the wasm-agent UI - that is a page this node serves, so fetch it or load it in a headless browser. `cdp` launches its own Chrome profile and is slow to become ready.", {
     action = { type = "string", enum = { "screenshot", "frame", "click", "move", "type", "key", "shell", "cdp" } },
     x = { type = "integer" }, y = { type = "integer" },
     text = { type = "string" }, key = { type = "string" },

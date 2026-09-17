@@ -77,3 +77,28 @@ break it silently.
 - Do not claim a UI change works because the code "looks right".
 - Do not claim it fails because your probe found nothing — check the probe first.
 - Do not report success on structure alone when the question was appearance.
+
+## Boundaries
+
+Two things this skill is not a licence for, both learned from an agent that spent 28
+tool calls on them:
+
+**Never drive the user's browser.** The `cdp` action of the `client` tool is for
+acting on the user's machine at the user's request - a browsing task. It is not the
+way to look at the wasm-agent UI: that is a page *this node serves*, so fetch it, or
+load it in a headless browser you launch yourself. Chrome's debug endpoint is slow to
+come up, so CDP fights you with connection errors that have nothing to do with your
+change, and you end up touching a browser session that is not yours.
+
+**Never write into the installed UI to instrument it.** `%LOCALAPPDATA%\wasm-agent\ui`
+(and the equivalent on the node) is what the user's window is running. Copy it
+somewhere, instrument the copy, and serve that - which is what `scripts/test-ui.ps1`
+does. An agent that overwrote the installed `app.js` left the user's window running
+its probe until it restored a backup, and the user reasonably concluded that
+reloading the app changed nothing.
+
+**And for anything beyond a trivial command, write a script file and run it.** A long
+one-liner handed to the shell loses its quoting and its backslashes: a PowerShell
+line of 118 characters died on a parse error, and a Windows path lost every
+backslash on the way through `bash -c`, which then looked like the filesystem was
+broken. Write `probe.ps1`, run it with `-File`, and pass paths with forward slashes.

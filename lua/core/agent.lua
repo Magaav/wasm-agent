@@ -189,6 +189,10 @@ local function guidelines_for(tool_list)
   add("Before changing this project's behaviour, read the relevant file under docs/ "
     .. "(or the section of AGENTS.md) in full, and follow its cross-references")
   add("When a task matches a skill in <available_skills>, load it with the skill tool before starting")
+  add("For anything beyond a trivial command, write a script file and run it: "
+    .. "a long one-liner passed through the shell loses its quoting and its backslashes")
+  add("Never overwrite the installed UI to instrument it - copy it somewhere first, "
+    .. "or the user's window starts running your probe")
   add("Be concise in your responses")
   add("Show file paths clearly when working with files")
   return list
