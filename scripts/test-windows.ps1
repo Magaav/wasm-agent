@@ -208,6 +208,22 @@ print("seeded=" .. id)
   }
 }
 
+# 9c. The shell the tools run in. The model speaks POSIX: with cmd these failed
+# with "is not recognized", which is what pi avoids by requiring bash.
+$shellProbe = @'
+local platform = dofile("lua/core/platform.lua")
+local shell = platform.shell()
+local raw = host.exec('echo "$0"; pwd; ls -a . | head -2', "")
+local decoded = dofile("lua/vendor/json.lua").decode(raw)
+print("shell=" .. shell .. " code=" .. tostring(decoded.code))
+print("out=" .. tostring(decoded.stdout):gsub("
+", " | "))
+assert(decoded.code == 0, "the tool shell must run POSIX commands")
+print(shell:find("bash", 1, true) and "posix shell on Windows" or "cmd shell on Windows")
+'@
+$probeOut = Lua $shellProbe
+if ($probeOut -match "posix shell on Windows") { Ok "tools run in bash on Windows (POSIX habits work)" }
+else { Bad "tools run in cmd on Windows: POSIX commands fail"; Note ($probeOut -replace "s+", " ") }
 # 10/11. local operation with the remote node and the rendezvous unreachable
 $env:WASM_AGENT_HOST = "unreachable.invalid"
 $env:WASM_AGENT_RENDEZVOUS = "http://127.0.0.1:1"

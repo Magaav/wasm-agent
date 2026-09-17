@@ -26,9 +26,18 @@ function M.cwd() return M.info().cwd or "." end
 -- One line for the system prompt, and a short form for tool descriptions.
 function M.describe()
   local info = M.info()
-  local hint = info.os == "windows"
-    and "shell commands run through cmd /C, so use dir, type, findstr and copy rather than ls, cat, grep and cp"
-    or "shell commands run through sh -c"
+  -- Say which shell, and only warn about the dialect when it actually is cmd:
+  -- with Git Bash present the POSIX habits the model already has are correct,
+  -- and a hint to use dir/type/findstr would push it the wrong way.
+  local shell = tostring(info.shell or "")
+  local hint
+  if shell:find("cmd", 1, true) then
+    hint = "shell commands run through cmd /C, so use dir, type, findstr and copy rather than ls, cat, grep and cp"
+  elseif shell:find("bash", 1, true) then
+    hint = "shell commands run through bash -c"
+  else
+    hint = "shell commands run through " .. shell
+  end
   return string.format("%s (%s); %s", info.os, info.arch, hint)
 end
 

@@ -86,6 +86,29 @@ print("tools ok")
 LUA
 WA_SCRIPT="$DB.tools.lua" "$BIN" --db "$DB" | grep "tools ok"
 rm -f "$DB.tools.lua"
+# The shell the tools run in. The model speaks POSIX, so a cmd shell on Windows
+# made `ls`, `pwd`, `tail` and `grep` fail with "is not recognized" - pi refuses
+# to start without bash for exactly this reason, and this asserts ours found one.
+cat > "$DB.shell.lua" <<'LUA'
+local platform = dofile("lua/core/platform.lua")
+local shell = platform.shell()
+assert(shell:find("bash", 1, true) or shell:find("sh ", 1, true),
+  "tools must run in a POSIX shell, got: " .. shell)
+local raw = host.exec('echo "$0"', "")
+local decoded = dofile("lua/vendor/json.lua").decode(raw)
+assert(decoded and decoded.code == 0, "echo must succeed in the tool shell")
+local name = tostring(decoded.stdout or ""):gsub("%s+$", "")
+assert(name:find("bash", 1, true) or name:find("sh", 1, true),
+  "$0 should name a POSIX shell, got: " .. name)
+-- The commands the model reaches for by habit, which cmd cannot run.
+for _, command in ipairs({ "pwd", "ls -a . | head -3", "echo hi | cat" }) do
+  local result = dofile("lua/vendor/json.lua").decode(host.exec(command, ""))
+  assert(result and result.code == 0, command .. " failed: " .. tostring(result and result.stderr))
+end
+print("posix shell ok")
+LUA
+WA_SCRIPT="$DB.shell.lua" "$BIN" --db "$DB" | grep "posix shell ok"
+rm -f "$DB.shell.lua"
 # Role gating: a guest must never see master tools, and a session must resolve
 # to its own user. A regression here silently runs guests as master, which is
 # exactly what happened when the session header stopped reaching dispatch.

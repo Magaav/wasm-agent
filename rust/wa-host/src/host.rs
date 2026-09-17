@@ -86,6 +86,65 @@ pub extern "C" fn paths(l: *mut LuaState) -> c_int {
     1
 }
 
+/// The shell `host.exec` runs commands with.
+///
+/// The model speaks POSIX: `ls`, `pwd`, `tail`, `grep`, single quotes, `$VAR`.
+/// pi resolves this by requiring bash on Windows - Git Bash, Cygwin, MSYS2, WSL -
+/// and refusing to start without it. We did the opposite, running `cmd /C`, so
+/// every one of those came back "is not recognized as an internal or external
+/// command" and the model, which cannot see the difference, tried variants of the
+/// same idea until its budget was gone. That was mistaken for the model being bad
+/// at tool calls; it was answering in the wrong language.
+fn executable_on_path(name: &str) -> Option<String> {
+    let path = std::env::var("PATH").ok()?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+fn shell_config() -> &'static (String, String) {
+    static SHELL: OnceLock<(String, String)> = OnceLock::new();
+    SHELL.get_or_init(|| {
+        // An explicit choice wins: pi has `shellPath` for the same reason.
+        if let Ok(explicit) = std::env::var("WASM_AGENT_SHELL") {
+            if !explicit.is_empty() {
+                return (explicit, "-c".to_string());
+            }
+        }
+        if cfg!(target_os = "windows") {
+            let mut candidates = vec![
+                r"C:\Program Files\Git\bin\bash.exe".to_string(),
+                r"C:\Program Files (x86)\Git\bin\bash.exe".to_string(),
+                r"C:\Program Files\Git\usr\bin\bash.exe".to_string(),
+            ];
+            for name in ["bash.exe", "sh.exe"] {
+                if let Some(found) = executable_on_path(name) {
+                    candidates.push(found);
+                }
+            }
+            for candidate in candidates {
+                if std::path::Path::new(&candidate).is_file() {
+                    return (candidate, "-c".to_string());
+                }
+            }
+            return ("cmd".to_string(), "/C".to_string());
+        }
+        for name in ["/bin/bash", "/usr/bin/bash"] {
+            if std::path::Path::new(name).is_file() {
+                return (name.to_string(), "-c".to_string());
+            }
+        }
+        if let Some(found) = executable_on_path("bash") {
+            return (found, "-c".to_string());
+        }
+        ("sh".to_string(), "-c".to_string())
+    })
+}
+
 /// host.platform() -> { os, arch, shell, pathSeparator, cwd }
 ///
 /// So the agent can be told which dialect it is running in. Its `bash` tool is
@@ -98,7 +157,7 @@ pub extern "C" fn platform(l: *mut LuaState) -> c_int {
         ("arch", std::env::consts::ARCH.to_string()),
         (
             "shell",
-            if cfg!(target_os = "windows") { "cmd /C".to_string() } else { "sh -c".to_string() },
+            format!("{} {}", shell_config().0, shell_config().1),
         ),
         ("pathSeparator", std::path::MAIN_SEPARATOR.to_string()),
         // pi puts the working directory at the end of its system prompt, and an
@@ -404,15 +463,9 @@ pub extern "C" fn exec(l: *mut LuaState) -> c_int {
     let command = arg_string(l, 1).unwrap_or_default();
     let cwd = arg_string(l, 2).unwrap_or_default();
     let outcome = (|| -> Result<Value, String> {
-        let mut process = if cfg!(target_os = "windows") {
-            let mut command_line = std::process::Command::new("cmd");
-            command_line.arg("/C").arg(&command);
-            command_line
-        } else {
-            let mut shell = std::process::Command::new("sh");
-            shell.arg("-c").arg(&command);
-            shell
-        };
+        let (program, flag) = shell_config();
+        let mut process = std::process::Command::new(program);
+        process.arg(flag).arg(&command);
         if !cwd.is_empty() {
             process.current_dir(&cwd);
         }
