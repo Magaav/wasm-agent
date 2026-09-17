@@ -151,7 +151,6 @@ local function fit_tool_output(name, text)
 end
 
 local MAX_TOOL_ROUNDS = tonumber(host.getenv("WASM_AGENT_MAX_TOOL_ROUNDS")) or 200
-local TOOL_TRUNCATE = 600          -- default mode: keep tool output small
 local COMPACT_RESERVE = 16384      -- tokens reserved for the reply (like pi)
 local COMPACT_KEEP = 20000         -- newest tokens left un-summarised (like pi)
 

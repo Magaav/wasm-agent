@@ -109,6 +109,39 @@ print("posix shell ok")
 LUA
 WA_SCRIPT="$DB.shell.lua" "$BIN" --db "$DB" | grep "posix shell ok"
 rm -f "$DB.shell.lua"
+# Tool results are stored whole and budgeted only for the context, per tool. The
+# old 600-character write-time cap made a 20 KB read a keyhole for every later
+# turn - the reason 'read then edit' kept missing - and dropped a command's error
+# with the tail of its output. pi keeps the tail and points at the full text.
+cat > "$DB.evidence.lua" <<'LUA'
+local memory = dofile("lua/core/memory.lua")
+local agentlib = dofile("lua/core/agent.lua")
+memory.setup()
+local sid = memory.start_session("", "evidence", { user_id = "master", node_id = "", title = "evidence" })
+local big = string.rep("0123456789", 3000)
+memory.append_turn(sid, { role = "user", content = "read it" })
+memory.append_turn(sid, { role = "tool", tool_call_id = "c1", tool_name = "read", content = big })
+memory.append_turn(sid, { role = "tool", tool_call_id = "c2", tool_name = "bash",
+  content = string.rep("noise ", 2000) .. "FATAL: the error is at the end" })
+local stored = memory.session_turns(sid, { limit = 10 })
+assert(#stored[2].content > 20000, "the transcript must keep the whole result, got " .. #stored[2].content)
+assert(stored[2].content == big, "and keep it verbatim")
+local bot = agentlib.new(sid, function() end, "master", "master", "")
+local read_view, bash_view
+for _, message in ipairs(bot:build_context()) do
+  if message.role == "tool" and message.name == "read" then read_view = message.content end
+  if message.role == "tool" and message.name == "bash" then bash_view = message.content end
+end
+assert(#read_view > 600, "the read budget must be far larger than the old 600, got " .. #read_view)
+assert(#read_view < #big, "and still be a budget, got " .. #read_view)
+assert(read_view:find("omitted", 1, true), "the loss must be announced, not silent")
+assert(read_view:find("kept in the transcript", 1, true), "the marker must say the full text exists")
+assert(read_view:sub(1, 20) == big:sub(1, 20), "read keeps the head, which identifies the file")
+assert(bash_view:find("FATAL", 1, true), "bash keeps the tail, because the error lives there")
+print("tool evidence ok")
+LUA
+WA_SCRIPT="$DB.evidence.lua" "$BIN" --db "$DB" | grep "tool evidence ok"
+rm -f "$DB.evidence.lua"
 # Role gating: a guest must never see master tools, and a session must resolve
 # to its own user. A regression here silently runs guests as master, which is
 # exactly what happened when the session header stopped reaching dispatch.
