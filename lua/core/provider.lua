@@ -166,15 +166,55 @@ function M.limits()
   return limits
 end
 
+-- Prompt-cache routing. Providers cache the *prefix* of a request (system +
+-- tools + history) and reuse it when the prefix is byte-identical. A routing key
+-- pins a conversation to the same cache shard so it is not scattered.
+local function clamp_cache_key(value)
+  local text = tostring(value or ""):gsub("[^%w_-]", "")
+  if text == "" then return nil end
+  return text:sub(1, 64)
+end
+
+-- `auto` (default) sends the key only to providers known to honour it;
+-- `on` forces it; `off` disables it. `opts.cache == false` marks a one-off
+-- request (summarisation): it gets no key, so it neither reads nor pollutes the
+-- conversation's cache - the same reason pi disables cache writes there.
+function M.cache_params(opts)
+  opts = opts or {}
+  if opts.cache == false then return {} end
+  local mode = os.getenv("WASM_AGENT_PROMPT_CACHE_KEY") or "auto"
+  if mode == "off" then return {} end
+  local session_id = opts.session_id
+  if not session_id or session_id == "" then return {} end
+  local settings = M.settings()
+  local is_openai = settings.base_url:find("api%.openai%.com") ~= nil
+  if mode ~= "on" and not is_openai then return {} end
+  local params = { prompt_cache_key = clamp_cache_key(host.sha256(session_id)) }
+  local retention = os.getenv("WASM_AGENT_PROMPT_CACHE_RETENTION")
+  if retention and retention ~= "" then params.prompt_cache_retention = retention end
+  return params
+end
+
+-- Per-model rates in USD per million tokens, from WASM_AGENT_MODEL_RATES:
+--   {"deepseek-v4.1-flash":{"input":0.28,"output":0.42,"cacheRead":0.028,"cacheWrite":0.28}}
+-- No rates are invented here: unset means we report tokens and no cost.
+function M.rates(model)
+  local raw = os.getenv("WASM_AGENT_MODEL_RATES")
+  if not raw or raw == "" then return nil end
+  local ok, table_ = pcall(json.decode, raw)
+  if not ok or type(table_) ~= "table" then return nil end
+  return table_[model or M.settings().model]
+end
+
 -- `stream` forwards content deltas to the UI and still returns the whole
 -- message (content + tool_calls + usage) so the tool loop can continue.
-function M.complete(messages, tools, stream)
-  return M.complete_with(M.settings().model, messages, tools, stream)
+function M.complete(messages, tools, stream, opts)
+  return M.complete_with(M.settings().model, messages, tools, stream, opts)
 end
 
 -- Same, with an explicit model: used by compaction (a cheaper summariser when
 -- WASM_AGENT_LLM_SUMMARY_MODEL is set, otherwise the main model).
-function M.complete_with(model, messages, tools, stream)
+function M.complete_with(model, messages, tools, stream, opts)
   local settings = M.settings()
   local provider = M.active()
   local body = { model = model or settings.model, messages = messages }
@@ -182,6 +222,7 @@ function M.complete_with(model, messages, tools, stream)
     body.tools = tools
     body.tool_choice = "auto"
   end
+  for key, value in pairs(M.cache_params(opts)) do body[key] = value end
   local url = provider.base_url:gsub("/+$", "") .. "/chat/completions"
   local headers = headers_for(provider)
 

@@ -23,13 +23,13 @@ local SYSTEM = table.concat({
 }, "\n")
 
 local MAX_TOOL_ROUNDS = 8
-local TOOL_TRUNCATE = 600      -- default mode: keep tool output small
-local CONTEXT_RESERVE = 2000   -- tokens left for the reply
-local COMPACT_AT = 0.7         -- compact when this fraction of the budget is used
+local TOOL_TRUNCATE = 600          -- default mode: keep tool output small
+local COMPACT_RESERVE = 16384      -- tokens reserved for the reply (like pi)
+local COMPACT_KEEP = 20000         -- newest tokens left un-summarised (like pi)
 
 M.usage_total = {
-  prompt = 0, completion = 0, total = 0, cached = 0, turns = 0,
-  last = { prompt = 0, completion = 0, total = 0, cached = 0 },
+  prompt = 0, completion = 0, total = 0, cached = 0, cost = 0, turns = 0,
+  last = { prompt = 0, completion = 0, total = 0, cached = 0, cost = 0 },
 }
 
 -- Providers report cache reuse differently; read whichever shape is present.
@@ -145,33 +145,58 @@ function M:context_tokens()
   return total
 end
 
--- Automatic compaction (like pi): when the context fills, summarise the older
--- half into sessions.summary and move the watermark. The transcript keeps
--- everything; only the context is windowed.
+-- Automatic compaction. Policy borrowed from pi: trigger only when the context
+-- is within `reserve` of the window, and summarise everything older than
+-- `keep` recent tokens - rare, large-chunk compaction rather than frequent small
+-- ones. Every compaction rewrites the transcript prefix, so it invalidates the
+-- provider's prefix cache from that point on; doing it rarely means paying that
+-- once instead of constantly. The transcript keeps everything regardless; only
+-- the context is windowed.
 function M:maybe_compact()
   local limit = tonumber(os.getenv("WASM_AGENT_LLM_CONTEXT")) or 0
   if limit <= 0 then return end
-  if self:context_tokens() < (limit - CONTEXT_RESERVE) * COMPACT_AT then return end
+  local reserve = tonumber(os.getenv("WASM_AGENT_COMPACT_RESERVE")) or COMPACT_RESERVE
+  reserve = math.min(reserve, math.max(1000, math.floor(limit / 4)))
+  local keep = tonumber(os.getenv("WASM_AGENT_COMPACT_KEEP")) or COMPACT_KEEP
+  keep = math.min(keep, math.max(1000, math.floor(limit / 2)))
+
+  local before = self:context_tokens()
+  if before <= (limit - reserve) then return end
 
   local session = memory.session(self.session_id) or {}
   local rows = memory.session_turns(self.session_id, {
-    after_seq = session.summarized_until or 0, limit = 500,
+    after_seq = session.summarized_until or 0, limit = 2000,
   })
-  if #rows < 6 then return end
-  local cut = rows[math.floor(#rows / 2)]
+  if #rows < 4 then return end
+
+  -- Keep the newest `keep` tokens; summarise what is older.
+  local budget, cut_index = 0, 0
+  for index = #rows, 1, -1 do
+    budget = budget + estimate_tokens(rows[index].content)
+    if budget >= keep then
+      cut_index = index - 1
+      break
+    end
+  end
+  -- Never cut at a tool result: it must stay with its tool call.
+  while cut_index >= 1 and rows[cut_index].role == "tool" do cut_index = cut_index - 1 end
+  if cut_index < 1 then return end
+  local cut = rows[cut_index]
 
   local transcript = {}
-  for _, turn in ipairs(rows) do
-    if turn.seq <= cut.seq then
-      transcript[#transcript + 1] = string.format("%s: %s", turn.role, (turn.content or ""):sub(1, 2000))
-    end
+  for index = 1, cut_index do
+    transcript[#transcript + 1] = string.format("%s: %s", rows[index].role,
+      (rows[index].content or ""):sub(1, 2000))
   end
   local prompt = {
     { role = "system", content = "Summarise the conversation below into durable notes: decisions, " ..
         "facts, names, ids, open threads and what failed. Be compact and factual. No preamble." },
     { role = "user", content = table.concat(transcript, "\n") },
   }
-  local ok, result = pcall(provider.complete_with, self:summary_model(), prompt, nil, false)
+  local started = host.now()
+  -- cache = false: a one-off prompt must not read or write the conversation's
+  -- cache (pi does the same, to avoid paying a cache-write premium for nothing).
+  local ok, result = pcall(provider.complete_with, self:summary_model(), prompt, nil, false, { cache = false })
   if not ok then
     self.emit({ type = "status", text = "compaction failed: " .. tostring(result):sub(1, 120) })
     return
@@ -179,7 +204,20 @@ function M:maybe_compact()
   local previous = session.summary or ""
   local merged = previous ~= "" and (previous .. "\n" .. result.content) or result.content
   memory.set_session_summary(self.session_id, cut.seq, merged)
-  self.emit({ type = "compact", through = cut.seq, summary_tokens = estimate_tokens(merged) })
+  local after = self:context_tokens()
+  -- Record it in the transcript so a compaction (and the cache invalidation it
+  -- causes) is visible in the session view instead of being invisible work.
+  memory.append_turn(self.session_id, {
+    role = "summary", content = merged, tokens = estimate_tokens(merged), debug = self.debug,
+    ms = math.floor((host.now() - started) * 1000),
+    trace = { {
+      kind = "compact", summarized_until = cut.seq, messages = cut_index,
+      tokens_before = before, tokens_after = after, invalidates_cache = true,
+      summary_model = self:summary_model(),
+      ms = math.floor((host.now() - started) * 1000),
+    } },
+  })
+  self.emit({ type = "compact", through = cut.seq, tokens_before = before, tokens_after = after })
 end
 
 function M:turn(text)
@@ -210,7 +248,8 @@ function M:turn(text)
   for round = 1, MAX_TOOL_ROUNDS do
     self.emit({ type = "status", text = "model" })
     local llm_started = host.now()
-    local ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream)
+    local ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream,
+      { session_id = self.session_id })
     if not ok then
       trace[#trace + 1] = { kind = "llm", model = self.model, ok = false,
         ms = math.floor((host.now() - llm_started) * 1000), error = tostring(result):sub(1, 400) }
@@ -230,6 +269,18 @@ function M:turn(text)
       turn.completion = turn.completion + completion
       turn.total = turn.total + total
       local cached = cached_tokens(usage)
+      -- Cost, only when rates are configured: cache reads are a fraction of
+      -- input, so a cheap cached turn shows up as cheap rather than as "few".
+      local rates = provider.rates(self.model)
+      local cost = 0
+      if rates then
+        local miss = math.max(0, prompt - cached)
+        cost = (miss * (rates.input or 0)
+          + cached * (rates.cacheRead or rates.input or 0)
+          + completion * (rates.output or 0)) / 1000000
+        turn.cost = (turn.cost or 0) + cost
+        M.usage_total.cost = (M.usage_total.cost or 0) + cost
+      end
       M.usage_total.prompt = M.usage_total.prompt + prompt
       M.usage_total.completion = M.usage_total.completion + completion
       M.usage_total.total = M.usage_total.total + total
@@ -238,7 +289,7 @@ function M:turn(text)
       local span = { kind = "llm", model = self.model, ok = true, round = round,
         ms = math.floor((host.now() - llm_started) * 1000), prefix = prefix_fingerprint,
         usage = usage,
-        tokens = { prompt = prompt, completion = completion, total = total, cached = cached } }
+        tokens = { prompt = prompt, completion = completion, total = total, cached = cached, cost = cost } }
       -- In debug mode keep the exact request so a failing turn can be replayed
       -- byte for byte (round 1 only: later rounds are derived from tool calls).
       if self.debug and round == 1 then

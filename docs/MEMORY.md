@@ -57,6 +57,33 @@ The transcript keeps **everything**; only the *context* is windowed. Nothing is
 silently forgotten — it moves from context into the summary, and remains readable
 via `session`/`search_turns`.
 
+## Prompt caching (KV reuse)
+
+We resend the whole conversation every turn; the provider keeps the KV cache for
+the identical **prefix** and only computes the new suffix. Measured on this
+provider: turn 2 of a session reported `cached_tokens: 3328` of `3560` prompt
+tokens — **93% of the input was reused**, and cache hits bill at roughly a tenth
+of misses.
+
+The prefix is stable by construction: `system (+AGENTS.md) → tools → transcript`,
+append-only, deterministic tier order. Each llm span records a `prefix`
+fingerprint so a cache-hostile change is visible rather than mysterious.
+
+What invalidates it: **compaction** (rewrites the middle), **editing AGENTS.md**
+(it is the first block), and **changing the tool set**. Hence:
+
+- compaction is rare and in large chunks (`reserve` 16384 / `keep` 20000, like pi)
+  rather than frequent and small — one invalidation instead of many;
+- the summarisation call itself is marked `cache = false`, so a one-off prompt
+  neither reads nor pollutes the conversation's cache;
+- `prompt_cache_key` (a hash of the session id) pins a conversation to one cache
+  shard; `WASM_AGENT_PROMPT_CACHE_KEY=auto|on|off` controls it, and
+  `WASM_AGENT_PROMPT_CACHE_RETENTION` asks for extended retention.
+
+Cached tokens are accumulated and shown in the status balloon; when
+`WASM_AGENT_MODEL_RATES` is set (USD per million tokens, per model) the balloon
+also shows the session's cost, with cache reads priced separately.
+
 ## AGENTS.md — the only automatic injection
 
 Read fresh every turn (so editing takes effect immediately), from

@@ -447,6 +447,10 @@ function renderUsage() {
     const percent = usage.prompt ? Math.round((usage.cached / usage.prompt) * 100) : 0;
     rows.push(["cached (session)", `${formatTokens(usage.cached)} · ${percent}% of input`]);
   }
+  // Only shown when model rates are configured (WASM_AGENT_MODEL_RATES).
+  if (Number(usage.cost) > 0) {
+    rows.push(["cost (session)", "$" + Number(usage.cost).toFixed(4)]);
+  }
   usageBox.append(grid(rows));
 }
 
