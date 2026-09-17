@@ -74,12 +74,18 @@ Step "installing the local node"
 $nodeDir = Join-Path $localAppData "wasm-agent"
 New-Item -ItemType Directory -Force -Path $nodeDir | Out-Null
 $localExe = Join-Path $nodeDir "wa.exe"
-$haveExe = $false
+# A usable binary that is already installed counts, before any fetch is tried. A
+# locked wa.exe (the running node holds it) made scp fail, the size check after it
+# never ran, and the installer silently fell back to the SSH shim - so `wa`
+# started talking to the cloud node instead of the local one, and said nothing.
+$haveExe = (Test-Path $localExe) -and ((Get-Item $localExe).Length -gt 5MB)
 if (Get-Command scp -ErrorAction SilentlyContinue) {
   try {
     & scp -q -o BatchMode=yes "${HostAlias}:$RemoteBin/wa.exe" $localExe 2>$null
     if ((Test-Path $localExe) -and ((Get-Item $localExe).Length -gt 5MB)) { $haveExe = $true }
-  } catch { }
+  } catch {
+    if ($haveExe) { Warn "could not refresh wa.exe (it is in use); keeping the installed one" }
+  }
 }
 if ($haveExe) {
   Ok "wa.exe  -> $localExe"
