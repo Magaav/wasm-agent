@@ -116,6 +116,11 @@ $harness = @'
   check(document.querySelectorAll('.session-state').length === 1,
     'only the thread that needs attention should be badged');
 
+  // A lost connection has to be classified: that is what turns a raw TypeError
+  // into something a reader can act on, and it is checkable without a network.
+  var classify = window.__classifyProbe ? window.__classifyProbe() : ["the classify probe is missing"];
+  for (var c = 0; c < classify.length; c++) { problems.push(classify[c]); }
+
   var log = document.createElement("pre");
   log.id = "harness-log";
   log.textContent = problems.length ? ("UI FAIL: " + problems.join(" ;; ")) : "UI PASS";
@@ -136,7 +141,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent;"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage;"
 
 $server = $null
 $edge = @(

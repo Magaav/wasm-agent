@@ -435,3 +435,7 @@ wa-menu.menu {
 .menu-item.muted { color: var(--muted); cursor: default; }
 .menu-item.muted:hover { background: none; }
 .menu-sep { height: 1px; background: var(--line); margin: var(--space) 0; }
+
+/* The node is down: the composer says so rather than failing silently later. */
+body.node-offline .composer textarea { border-color: #d29922; }
+body.node-offline .composer textarea::placeholder { color: #d29922; }

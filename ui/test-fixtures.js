@@ -45,3 +45,15 @@ window.fetch = function (input, init) {
   }
   return realFetch ? realFetch(input, init) : Promise.reject(new Error("no fixture for " + url));
 };
+
+// A connection loss must be recognisable: the UI classifies it so it can say
+// something actionable instead of printing "TypeError: network error".
+window.__classifyProbe = function () {
+  const results = [];
+  if (typeof window.isConnectionLoss !== "function") return ["isConnectionLoss is not exposed"];
+  if (!window.isConnectionLoss(new TypeError("network error"))) results.push("a TypeError must classify as a lost connection");
+  if (window.isConnectionLoss({ name: "AbortError" })) results.push("an abort must not classify as a lost connection");
+  if (!/wa ui/.test(window.connectionMessage())) results.push("the message must say how to start the node");
+  if (!/resume/.test(window.connectionMessage())) results.push("the message must say the turn is recoverable");
+  return results;
+};

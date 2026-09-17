@@ -479,6 +479,39 @@ function composedText(text) {
   return files.join("\n\n") + (text ? "\n\n" + text : "");
 }
 
+// A lost connection is not a failed turn. When the node dies mid-stream the
+// browser throws a TypeError, and printing it raw - "error: TypeError: network
+// error" - tells the reader nothing: not what broke, not what to do, and not
+// that the work is recoverable. It is: the turn is recorded as interrupted.
+function isConnectionLoss(error) {
+  return error instanceof TypeError;
+}
+
+function connectionMessage() {
+  return "lost the local node mid-turn (nothing is serving " + location.origin + ")." +
+    " Start it with `wa ui` - this turn is recorded as interrupted, and" +
+    " `wa resume --list` will offer to continue it.";
+}
+
+// The window should not sit there looking fine while its node is gone: after a
+// lost connection it polls health and says so, then clears itself when the node
+// answers again - no reload, no guessing.
+let nodeWatch = null;
+function nodeOffline(offline) {
+  document.body.classList.toggle("node-offline", offline);
+  if (offline) setStatus("the local node is not answering - start it with `wa ui`");
+  else clearStatus();
+}
+function watchNode() {
+  if (nodeWatch) return;
+  nodeOffline(true);
+  nodeWatch = setInterval(async () => {
+    try {
+      const response = await fetch("health", { headers: apiHeaders() });
+      if (response.ok) { clearInterval(nodeWatch); nodeWatch = null; nodeOffline(false); refreshMeta(); }
+    } catch (error) { /* still down */ }
+  }, 3000);
+}
 async function send(text) {
   setBusy(true);
   // Sending is an explicit request to see the answer: follow again, even if the
@@ -527,6 +560,7 @@ async function send(text) {
   } catch (error) {
     clearStatus();
     if (error.name === "AbortError") add("assistant", "stopped.");
+    else if (isConnectionLoss(error)) { add("assistant", connectionMessage()); watchNode(); }
     else add("assistant", "error: " + error);
   } finally {
     setBusy(false);
