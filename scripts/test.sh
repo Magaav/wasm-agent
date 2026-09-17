@@ -49,6 +49,22 @@ print('client fast-fail ok')
 LUA
 WA_SCRIPT="$DB.client.lua" "$BIN" --db "$DB" | grep "client fast-fail ok"
 rm -f "$DB.client.lua"
+# Context budget is per model (provider.budget), and it is NOT the same thing as
+# provider.limits, which fetches the account's rate limits for the UI. Confusing
+# the two silently disabled compaction once: the window came back nil, so
+# maybe_compact returned early and nothing ever compacted.
+cat > "$DB.budget.lua" <<'LUA'
+local provider = dofile("lua/core/provider.lua")
+local fallback = provider.budget("some-unknown-model")
+assert(fallback.context == 128000, "the env window is the fallback, got " .. tostring(fallback.context))
+local per_model = provider.budget("kimi-k2.6")
+assert(per_model.context == 262144, "a per-model window must win, got " .. tostring(per_model.context))
+assert(per_model.reserve == 32768, "a per-model reserve must win")
+assert(provider.limits and provider.limits ~= provider.budget, "limits and budget are different things")
+print("budget ok")
+LUA
+WASM_AGENT_MODEL_LIMITS='{"kimi-k2.6":{"context":262144,"reserve":32768}}' WA_SCRIPT="$DB.budget.lua" "$BIN" --db "$DB" | grep "budget ok"
+rm -f "$DB.budget.lua"
 # Role gating: a guest must never see master tools, and a session must resolve
 # to its own user. A regression here silently runs guests as master, which is
 # exactly what happened when the session header stopped reaching dispatch.

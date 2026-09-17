@@ -201,6 +201,30 @@ end
 -- Per-model rates in USD per million tokens, from WASM_AGENT_MODEL_RATES:
 --   {"deepseek-v4.1-flash":{"input":0.28,"output":0.42,"cacheRead":0.028,"cacheWrite":0.28}}
 -- No rates are invented here: unset means we report tokens and no cost.
+-- Context budget for a model: the window, and how much of it to reserve for
+-- the reply. Per model, because switching models must not silently keep the
+-- previous window - that shows up as provider failures instead of compaction.
+-- `M.limits` above is unrelated: those are the account's rate limits for the UI.
+-- WASM_AGENT_MODEL_LIMITS is JSON, e.g.
+--   {"kimi-k2.6":{"context":262144,"reserve":32768,"keep":20000}}
+function M.budget(model)
+  local budget = {
+    context = tonumber(host.getenv("WASM_AGENT_LLM_CONTEXT")) or 0,
+    reserve = tonumber(host.getenv("WASM_AGENT_COMPACT_RESERVE")),
+    keep = tonumber(host.getenv("WASM_AGENT_COMPACT_KEEP")),
+  }
+  local raw = host.getenv("WASM_AGENT_MODEL_LIMITS")
+  if raw and raw ~= "" and model and model ~= "" then
+    local ok, parsed = pcall(json.decode, raw)
+    local entry = ok and type(parsed) == "table" and parsed[model] or nil
+    if type(entry) == "table" then
+      budget.context = tonumber(entry.context) or budget.context
+      budget.reserve = tonumber(entry.reserve) or budget.reserve
+      budget.keep = tonumber(entry.keep) or budget.keep
+    end
+  end
+  return budget
+end
 function M.rates(model)
   local raw = host.getenv("WASM_AGENT_MODEL_RATES")
   if not raw or raw == "" then return nil end

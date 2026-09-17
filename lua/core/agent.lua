@@ -186,6 +186,9 @@ local function guidelines_for(tool_list)
   if have.bash and not (have.grep or have.ls) then
     add("Use bash for file operations like listing and searching")
   end
+  add("Before changing this project's behaviour, read the relevant file under docs/ "
+    .. "(or the section of AGENTS.md) in full, and follow its cross-references")
+  add("When a task matches a skill in <available_skills>, load it with the skill tool before starting")
   add("Be concise in your responses")
   add("Show file paths clearly when working with files")
   return list
@@ -373,11 +376,12 @@ end
 -- once instead of constantly. The transcript keeps everything regardless; only
 -- the context is windowed.
 function M:maybe_compact()
-  local limit = tonumber(host.getenv("WASM_AGENT_LLM_CONTEXT")) or 0
+  local limits = provider.budget(self.model)
+  local limit = limits.context or 0
   if limit <= 0 then return false end
-  local reserve = tonumber(host.getenv("WASM_AGENT_COMPACT_RESERVE")) or COMPACT_RESERVE
+  local reserve = limits.reserve or COMPACT_RESERVE
   reserve = math.min(reserve, math.max(1000, math.floor(limit / 4)))
-  local keep = tonumber(host.getenv("WASM_AGENT_COMPACT_KEEP")) or COMPACT_KEEP
+  local keep = limits.keep or COMPACT_KEEP
   keep = math.min(keep, math.max(1000, math.floor(limit / 2)))
 
   -- Trigger on what the provider actually charged us for, not on a sum of
