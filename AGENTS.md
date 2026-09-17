@@ -51,15 +51,19 @@ blobs must contain no CR:
 
 ```bash
 git config core.autocrlf                    # must print false
-git grep --cached -I -l "$(printf '\r')"     # must print nothing
+bash scripts/test.sh                        # enforces the rest; prints "line endings ok"
 ```
 
-The second command checks the **stored** blobs and skips binaries, which is the
-invariant that matters: a CRLF working copy on Windows is recoverable, a CRLF
-commit is not. Do **not** verify this with `grep -c $'\r' <file>` — in some
-shells the pattern arrives empty, so it silently returns the *line count*
-(`444` for `lua/core/agent.lua`) and looks exactly like a repo-wide CRLF
-disaster. `bash scripts/test.sh` asserts this, so trust the test.
+The check is in the smoke test rather than a one-liner here because it cannot be
+spelled portably: it needs a literal carriage return, and the POSIX form
+(`git grep --cached -I -l "$(printf '\r')"`) silently does nothing under
+`cmd /C` on Windows — an agent working there reported exactly that. The test
+itself reads the **stored** blobs and skips binaries, which is the invariant that
+matters: a CRLF working copy on Windows is recoverable, a CRLF commit is not.
+
+Do **not** verify this with `grep -c $'\r' <file>` — in some shells the pattern
+arrives empty, so it returns the *line count* (`444` for `lua/core/agent.lua`)
+and looks exactly like a repo-wide CRLF disaster.
 
 ## Layout
 
