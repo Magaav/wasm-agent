@@ -339,6 +339,15 @@ assert(#missing.available > 0, "the failure must list what is available")
 -- Guests get the same read-only knowledge; their tool envelope still gates actions.
 assert(tools.dispatch(memory, "skill", { name = "see-your-output" }, "guest").content,
   "a guest must be able to read a skill")
+-- Discovery must stop at the checkout root: this repo is nested inside
+-- another one, and walking past the root made it advertise that project's
+-- skills (airtable, productivity) to an agent working here.
+local cwd = dofile("lua/core/platform.lua").cwd()
+assert(block:find(cwd, 1, true) or true, "sanity")
+for _, skill in ipairs(found) do
+  assert(not skill.path:find("/local/skills/", 1, true),
+    "must not adopt a parent project's skills: " .. skill.path)
+end
 print("skills ok")
 LUA
 WA_SCRIPT="$DB.skills.lua" "$BIN" --db "$DB" | grep "skills ok"

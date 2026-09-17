@@ -53,8 +53,23 @@ local function split_paths(value)
   return list
 end
 
+-- Is this directory the root of a checkout? `.git` is a directory in a normal
+-- clone and a file in a worktree, and either way list_dir reports it.
+local function is_repo_root(dir)
+  local ok, raw = pcall(host.list_dir, dir)
+  if not ok or not raw then return false end
+  local decoded = dofile("lua/vendor/json.lua").decode(raw)
+  if type(decoded) ~= "table" or type(decoded.entries) ~= "table" then return false end
+  for _, entry in ipairs(decoded.entries) do
+    if entry.name == ".git" then return true end
+  end
+  return false
+end
+
 -- The directories to scan. Global first, then project ones from the working
--- directory upwards, so a repo can carry skills for the work done inside it.
+-- directory upwards, stopping at the checkout root - walking past it adopts the
+-- parent project's skills, which is how this repo (nested under another
+-- checkout) started advertising that project's unrelated ones.
 local function roots()
   local list = {}
   for _, dir in ipairs(split_paths(host.getenv("WASM_AGENT_SKILLS"))) do
@@ -67,6 +82,7 @@ local function roots()
   while dir and dir ~= "" and depth < 12 do
     list[#list + 1] = dir .. "/skills"
     list[#list + 1] = dir .. "/.agents/skills"
+    if is_repo_root(dir) then break end
     local parent = dir:match("^(.*)[/\\][^/\\]+$")
     if not parent or parent == dir then break end
     dir = parent
