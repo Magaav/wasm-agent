@@ -92,6 +92,13 @@ body.compact {
 wa-message { display: block; }
 wa-message.user { align-self: flex-end; background: var(--user); border-color: #2a3a63; }
 wa-message.assistant { align-self: flex-start; background: var(--assistant); }
+
+/* A reply is one bubble containing the turn's decisions and their tool topics,
+   stacked with the spacing scale - not one bubble per decision, which puts a
+   border between each step and reads as unrelated messages. */
+.msg .body.steps { display: flex; flex-direction: column; gap: var(--gap); }
+.msg .body.steps .seg { white-space: pre-wrap; }
+.msg .body.steps wa-trace { width: 100%; max-width: none; }
 .msg .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .6px; }
 .msg .body { white-space: pre-wrap; }
 .msg code { background: #0a0c11; padding: 1px 5px; border-radius: var(--radius-sm); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }

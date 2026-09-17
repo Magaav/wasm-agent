@@ -170,6 +170,23 @@ if (typeof ResizeObserver === "function") {
 }
 jump.addEventListener("click", () => { setFollow(true); pin(true); });
 
+// One assistant bubble per turn. Decisions and their tool topics live *inside*
+// it as stacked segments: separate bubbles put a border between every decision,
+// which reads as a divider between unrelated messages instead of one reply that
+// thought, used tools, thought again, and answered.
+let turnBubble = null;
+
+function currentBubble() {
+  if (!turnBubble) {
+    document.getElementById("empty")?.remove();
+    turnBubble = document.createElement("wa-message");
+    turnBubble.setAttribute("role", "assistant");
+    messages.append(turnBubble);   // connecting is what builds .body
+    turnBubble.body.classList.add("steps");
+  }
+  return turnBubble;
+}
+
 function add(role, text, asHtml = false) {
   document.getElementById("empty")?.remove();
   const element = document.createElement("wa-message");
@@ -310,9 +327,8 @@ let lastTool = "";
 
 function currentTrace() {
   if (!trace) {
-    document.getElementById("empty")?.remove();
     trace = document.createElement("wa-trace");
-    messages.append(trace);
+    currentBubble().body.append(trace);
   }
   return trace;
 }
@@ -336,8 +352,8 @@ function finishTrace() {
 }
 
 // A round is one decision: what the model said, then the tools it chose. Closing
-// both here is what interleaves them - text, tools, text, tools - instead of
-// leaving one block of text with every tool topic stacked after it.
+// both here interleaves them inside the same bubble - text, tools, text, tools -
+// and the bubble only closes when the turn really ends.
 function flushDecision(final = false) {
   if (streamBody) {
     const text = stripThinking(streamText);
@@ -345,13 +361,14 @@ function flushDecision(final = false) {
       streamBody.innerHTML = renderMarkdown(text);
       streamBody.style.whiteSpace = "normal";
     } else {
-      streamBody.parentElement?.remove();   // a decision with no prose
+      streamBody.remove();   // a decision with no prose leaves no empty block
     }
     streamBody = null;
     streamText = "";
   }
   finishTrace();
-  if (!final) pin();
+  if (final) turnBubble = null;
+  pin();
 }
 
 function typeOut(body, text) {
@@ -381,7 +398,12 @@ function handleEvent(event) {
     settleTool(event.result);
   } else if (event.type === "delta") {
     clearStatus();
-    if (!streamBody) streamBody = add("assistant", "");
+    // A new segment per decision, inside the same bubble.
+    if (!streamBody) {
+      streamBody = document.createElement("div");
+      streamBody.className = "seg";
+      currentBubble().body.append(streamBody);
+    }
     streamText += event.text || "";
     streamBody.textContent = stripThinking(streamText);
     pin();
@@ -393,10 +415,12 @@ function handleEvent(event) {
       streamBody.style.whiteSpace = "normal";
       streamBody = null;
       streamText = "";
+      finishTrace();
+      turnBubble = null;
     } else {
+      turnBubble = null;
       typeOut(add("assistant", ""), finalText);
     }
-    finishTrace();
   } else if (event.type === "usage") {    settings.usage = event.total || settings.usage;
     if (event.model) settings.model = event.model;
     updateChip();
@@ -405,6 +429,7 @@ function handleEvent(event) {
     clearStatus();
     add("assistant", "error: " + (event.error || "unknown"));
     finishTrace();
+    turnBubble = null;
   } else if (event.type === "done") {
     clearStatus();
     flushDecision(true);
@@ -430,6 +455,7 @@ async function send(text) {
   // reader had scrolled up to read something.
   setFollow(true);
   pin(true);
+  turnBubble = null;   // the reply gets its own bubble
   controller = new AbortController();
   streamBody = null;
   streamText = "";

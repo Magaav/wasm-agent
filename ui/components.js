@@ -134,7 +134,13 @@ customElements.define("wa-menu", WaMenu);
 
 // <wa-message> — a chat bubble. `role` is user|assistant; `.body` is writable.
 class WaMessage extends HTMLElement {
-  connectedCallback() {
+  connectedCallback() { this._build(); }
+
+  // Building is lazy so `element.body` works even before the element is in the
+  // document. Reaching for `.body` right after createElement is the obvious
+  // thing to do, and it used to throw ("Cannot read properties of undefined")
+  // until the element happened to be connected.
+  _build() {
     if (this._body) return;
     const role = this.getAttribute("role") === "user" ? "user" : "assistant";
     this.classList.add("msg", role);
@@ -146,7 +152,10 @@ class WaMessage extends HTMLElement {
     this.append(who, this._body);
   }
 
-  get body() { return this._body; }
+  get body() {
+    this._build();
+    return this._body;
+  }
 }
 customElements.define("wa-message", WaMessage);
 

@@ -107,6 +107,13 @@ bash scripts/build-window.sh                  # -> target/windows-x64/.../wa-win
   Read `docs/HOST.md` before adding a capability: a host function returns `nil`
   for missing values (never zero values), and paths come from `host.paths()`,
   never `$HOME` or a Linux-only path.
+- **UI changes need the UI test, not an opinion.** `scripts/test-ui.ps1` replays a
+  synthetic turn in a real headless browser and asserts the structure (one reply
+  bubble per turn, decisions and tool topics *inside* it, pi-style tool lines, a
+  failing tool opening its topic). Run it before claiming a UI change works: the
+  UI is not observable through `bash`, `grep` or `read`, so without it you are
+  guessing and cannot tell whether you built what was asked. It caught a crash on
+  the very first run of the change that introduced it.
 - Read `DESIGN.md` before UI work (spacing scale, balloons, modes) and
   `docs/` before changing memory, sessions, sync or the node fabric.
 - Memory is **on demand**: never inject memory into context automatically;
