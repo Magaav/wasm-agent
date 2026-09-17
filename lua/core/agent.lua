@@ -45,7 +45,9 @@ local ENVIRONMENT = dofile("lua/core/platform.lua").describe()
 -- Tool rounds: a real coding task is read -> edit -> test -> read again, and
 -- eight rounds is not enough for one. Configurable, because a bulk edit wants
 -- more and a chat wants fewer.
-local MAX_TOOL_ROUNDS = tonumber(host.getenv("WASM_AGENT_MAX_TOOL_ROUNDS")) or 32
+-- Runaway guard, not a task budget: the loop is bounded by context (see the note
+-- before the round loop). A long task compacts mid-turn and keeps going.
+local MAX_TOOL_ROUNDS = tonumber(host.getenv("WASM_AGENT_MAX_TOOL_ROUNDS")) or 200
 local TOOL_TRUNCATE = 600          -- default mode: keep tool output small
 local COMPACT_RESERVE = 16384      -- tokens reserved for the reply (like pi)
 local COMPACT_KEEP = 20000         -- newest tokens left un-summarised (like pi)
@@ -258,7 +260,7 @@ end
 -- the context is windowed.
 function M:maybe_compact()
   local limit = tonumber(host.getenv("WASM_AGENT_LLM_CONTEXT")) or 0
-  if limit <= 0 then return end
+  if limit <= 0 then return false end
   local reserve = tonumber(host.getenv("WASM_AGENT_COMPACT_RESERVE")) or COMPACT_RESERVE
   reserve = math.min(reserve, math.max(1000, math.floor(limit / 4)))
   local keep = tonumber(host.getenv("WASM_AGENT_COMPACT_KEEP")) or COMPACT_KEEP
@@ -270,13 +272,13 @@ function M:maybe_compact()
   -- transcript alone misses entirely.
   local measured = self.last_prompt_tokens or 0
   local before = measured > 0 and measured or self:context_tokens()
-  if before <= (limit - reserve) then return end
+  if before <= (limit - reserve) then return false end
 
   local session = memory.session(self.session_id) or {}
   local rows = memory.session_turns(self.session_id, {
     after_seq = session.summarized_until or 0, limit = 2000,
   })
-  if #rows < 4 then return end
+  if #rows < 4 then return false end
 
   -- Keep the newest `keep` tokens *of transcript*; summarise what is older.
   -- `keep` is a whole-prompt budget, and the fixed overhead is always present,
@@ -298,7 +300,7 @@ function M:maybe_compact()
   while cut_index >= 1 and rows[cut_index + 1] and rows[cut_index + 1].role == "tool" do
     cut_index = cut_index - 1
   end
-  if cut_index < 1 then return end
+  if cut_index < 1 then return false end
   local cut = rows[cut_index]
 
   local transcript = {}
@@ -317,7 +319,7 @@ function M:maybe_compact()
   local ok, result = pcall(provider.complete_with, self:summary_model(), prompt, nil, false, { cache = false })
   if not ok then
     self.emit({ type = "status", text = "compaction failed: " .. redact.text(tostring(result)):sub(1, 120) })
-    return
+    return false
   end
   local previous = session.summary or ""
   local merged = previous ~= "" and (previous .. "\n" .. result.content) or result.content
@@ -336,6 +338,7 @@ function M:maybe_compact()
     } },
   })
   self.emit({ type = "compact", through = cut.seq, tokens_before = before, tokens_after = after })
+  return true
 end
 
 function M:turn(text)
@@ -368,28 +371,26 @@ function M:turn(text)
   self.overhead_tokens = estimate_tokens(messages[1] and messages[1].content or "")
     + estimate_tokens(json.encode(tool_list))
 
-  -- Tool budget, in windows. A spent budget used to end the turn with "(tool
-  -- loop limit reached)", which is the worst possible outcome: the work exists in
-  -- the transcript, but nothing is verified, committed or reported.
+  -- The loop is bounded by *context*, not by a round budget - pi's model, and
+  -- the better one. A fixed round budget fails the worst way: it stops the turn
+  -- mid-task, so the work exists in the transcript but nothing is verified,
+  -- committed or reported. Telling the model "wrap up now" ahead of a cut-off
+  -- only half-fixes it, because the deadline is artificial in the first place.
   --
-  -- pi does not have this problem because its budget is effectively open-ended:
-  -- it works across as many rounds as the task needs, with compaction keeping the
-  -- context bounded. The same model that fails inside one fixed wasm-agent turn
-  -- does this work well there, so the limit is the loop, not the model. Each
-  -- extra window is a fresh budget for the model to continue from where it is.
-  local windows = (tonumber(host.getenv("WASM_AGENT_MAX_CONTINUATIONS")) or 3) + 1
-  for window = 1, windows do
-    local last_window = (window == windows)
+  -- Instead the turn keeps its rounds and, when the request approaches the
+  -- window, compacts mid-turn (pi calls this a split turn) and rebuilds the
+  -- context from the transcript. Each round checks; nothing is cut off.
+  -- WASM_AGENT_MAX_TOOL_ROUNDS therefore only guards against a runaway loop, not
+  -- against a long task: it should never fire in practice.
   for round = 1, MAX_TOOL_ROUNDS do
-    -- Two rounds before the *final* cut-off, tell the model to wrap up. Asking
-    -- this earlier would waste a continuation telling it to stop when it could
-    -- keep going.
-    if last_window and (MAX_TOOL_ROUNDS - round) == 2 then
+    -- Two rounds before the runaway guard, ask the model to wrap up. This is
+    -- not a task budget - it is the last resort of a loop that should have
+    -- finished long before.
+    if (MAX_TOOL_ROUNDS - round) == 2 then
       messages[#messages + 1] = { role = "user", content =
-        "Budget: two tool rounds left, and this is the last window. Stop exploring. Verify what "
-        .. "you have already changed, commit it on the current branch, and state plainly what is "
-        .. "unfinished." }
-      self.emit({ type = "status", text = "tool budget nearly spent - asking the model to wrap up" })
+        "You have used a very large number of tool rounds. Stop exploring, verify what you have "
+        .. "changed, commit it, and state plainly what is unfinished." }
+      self.emit({ type = "status", text = "runaway guard reached - asking the model to wrap up" })
     end
     self.emit({ type = "status", text = "model" })
     local llm_started = host.now()
@@ -502,20 +503,20 @@ function M:turn(text)
         role = "tool", tool_call_id = call.id or "", name = function_.name or "", content = content,
       }
     end
-  end
-  if reply ~= "" then break end
-  if last_window then break end
-  -- Out of rounds, task unfinished: continue rather than fail.
-  self.emit({ type = "status", text = string.format(
-    "tool budget spent (%d rounds); continuing in window %d of %d", MAX_TOOL_ROUNDS, window + 1, windows) })
-  messages[#messages + 1] = { role = "user", content =
-    "You ran out of tool rounds mid-task. Continue from exactly where you are: do not repeat "
-    .. "completed steps, do not re-read files you have already read, and keep working until the "
-    .. "task is done or you are genuinely blocked." }
+
+    -- Mid-turn compaction (pi's "split turn"): everything so far is already in
+    -- the transcript, so when the request approaches the window we summarise the
+    -- older part and rebuild the context, then keep going in the same turn. The
+    -- alternative - stopping the turn to protect the window - throws away the
+    -- agent's momentum and leaves the work uncommitted.
+    if self:maybe_compact() then
+      messages = self:build_context()
+      self.emit({ type = "status", text = "context compacted mid-turn - continuing" })
+    end
   end
 
   if reply == "" then
-    reply = "(tool budget exhausted across " .. windows .. " windows without a final answer)"
+    reply = "(runaway guard: " .. MAX_TOOL_ROUNDS .. " tool rounds without a final answer)"
   end
   if not self.debug then
     -- keep raw tool payloads out of the persisted assistant reply as well
