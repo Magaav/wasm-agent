@@ -236,7 +236,9 @@ function wa_frame(request, session)
   return json.encode(toolslib.dispatch(memory, "client", args, user.role))
 end
 
--- The exact envelope object sent to the model, at full depth.
+-- The exact envelope sent to the model, at full depth. Tiers are NOT included:
+-- they duplicate every schema (~9 KB) and `GET /tools` already serves the
+-- grouped view for the UI.
 function wa_envelope(session)
   local user = users.current(session)
   local role = users.normalize(user.role)
@@ -254,7 +256,6 @@ function wa_envelope(session)
     },
     tool_count = #tools,
     tool_names = names,
-    tiers = toolslib.tiers(role),
   })
 end
 

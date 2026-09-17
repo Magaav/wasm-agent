@@ -427,14 +427,20 @@ function renderUsage() {
   usageBox.replaceChildren();
   const usage = settings.usage || {};
   const last = usage.last || {};
-  usageBox.append(grid([
+  const rows = [
     ["last turn (in/out)", `${formatTokens(last.prompt)} / ${formatTokens(last.completion)}`],
     ["last total", formatTokens(last.total)],
     ["session in", formatTokens(usage.prompt)],
     ["session out", formatTokens(usage.completion)],
     ["session total", formatTokens(usage.total)],
     ["turns", usage.turns || 0],
-  ]));
+  ];
+  // Only shown when the provider actually reports cache reuse.
+  if (Number(usage.cached) > 0) {
+    const percent = usage.prompt ? Math.round((usage.cached / usage.prompt) * 100) : 0;
+    rows.push(["cached (session)", `${formatTokens(usage.cached)} · ${percent}% of input`]);
+  }
+  usageBox.append(grid(rows));
 }
 
 function renderPopFoot() {

@@ -28,9 +28,19 @@ local CONTEXT_RESERVE = 2000   -- tokens left for the reply
 local COMPACT_AT = 0.7         -- compact when this fraction of the budget is used
 
 M.usage_total = {
-  prompt = 0, completion = 0, total = 0, turns = 0,
-  last = { prompt = 0, completion = 0, total = 0 },
+  prompt = 0, completion = 0, total = 0, cached = 0, turns = 0,
+  last = { prompt = 0, completion = 0, total = 0, cached = 0 },
 }
+
+-- Providers report cache reuse differently; read whichever shape is present.
+local function cached_tokens(usage)
+  if type(usage) ~= "table" then return 0 end
+  local details = usage.prompt_tokens_details or usage.prompt_cache
+  if type(details) == "table" and tonumber(details.cached_tokens) then
+    return tonumber(details.cached_tokens)
+  end
+  return tonumber(usage.cached_tokens) or 0
+end
 
 function M.usage()
   return M.usage_total
@@ -188,13 +198,19 @@ function M:turn(text)
   local messages = self:build_context()
   local trace = {}
   local reply = ""
-  local turn = { prompt = 0, completion = 0, total = 0 }
+  local turn = { prompt = 0, completion = 0, total = 0, cached = 0 }
   local turn_started = host.now()
+  local tool_list = tools.all(self.role)
+  -- Fingerprint of the *stable* prefix (system + AGENTS.md + tool schemas).
+  -- Identical across turns unless instructions or tools change, which is what a
+  -- provider needs in order to serve the prefix from its KV/context cache.
+  local prefix_fingerprint = host.sha256(
+    tostring(messages[1] and messages[1].content or "") .. json.encode(tool_list))
 
   for round = 1, MAX_TOOL_ROUNDS do
     self.emit({ type = "status", text = "model" })
     local llm_started = host.now()
-    local ok, result = pcall(provider.complete_with, self.model, messages, tools.all(self.role), self.stream)
+    local ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream)
     if not ok then
       trace[#trace + 1] = { kind = "llm", model = self.model, ok = false,
         ms = math.floor((host.now() - llm_started) * 1000), error = tostring(result):sub(1, 400) }
@@ -213,15 +229,25 @@ function M:turn(text)
       turn.prompt = turn.prompt + prompt
       turn.completion = turn.completion + completion
       turn.total = turn.total + total
+      local cached = cached_tokens(usage)
       M.usage_total.prompt = M.usage_total.prompt + prompt
       M.usage_total.completion = M.usage_total.completion + completion
       M.usage_total.total = M.usage_total.total + total
-      trace[#trace + 1] = { kind = "llm", model = self.model, ok = true, round = round,
-        ms = math.floor((host.now() - llm_started) * 1000),
-        tokens = { prompt = prompt, completion = completion, total = total } }
+      M.usage_total.cached = M.usage_total.cached + cached
+      turn.cached = turn.cached + cached
+      local span = { kind = "llm", model = self.model, ok = true, round = round,
+        ms = math.floor((host.now() - llm_started) * 1000), prefix = prefix_fingerprint,
+        usage = usage,
+        tokens = { prompt = prompt, completion = completion, total = total, cached = cached } }
+      -- In debug mode keep the exact request so a failing turn can be replayed
+      -- byte for byte (round 1 only: later rounds are derived from tool calls).
+      if self.debug and round == 1 then
+        span.request = { model = self.model, messages = messages, tools = tool_list }
+      end
+      trace[#trace + 1] = span
     else
       trace[#trace + 1] = { kind = "llm", model = self.model, ok = true, round = round,
-        ms = math.floor((host.now() - llm_started) * 1000) }
+        ms = math.floor((host.now() - llm_started) * 1000), prefix = prefix_fingerprint }
     end
     if result.model and result.model ~= "" then self.model = result.model end
 
