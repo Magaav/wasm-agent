@@ -43,7 +43,11 @@ local function printer(state)
       io.write("\n  · " .. tostring(event.name or "?") .. "\n")
       io.flush()
     elseif kind == "tool_result" then
-      local text = tostring(event.result or ""):gsub("%s+", " ")
+      -- Tool results are usually tables (bash returns {code, stdout, stderr});
+      -- tostring would print "table: 0x..." and say nothing.
+      local value = event.result
+      local text = (type(value) == "table") and json.encode(value) or tostring(value or "")
+      text = text:gsub("%s+", " ")
       io.write("    " .. text:sub(1, 120) .. (#text > 120 and "…" or "") .. "\n")
       io.flush()
     elseif kind == "error" then

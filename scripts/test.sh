@@ -62,10 +62,13 @@ rm -f "$DB.gating.lua"
 cat > "$DB.syntax.lua" <<'LUA'
 local bad = 0
 for path, source in pairs(EMBEDDED) do
-  local chunk, err = load(source, "@" .. path)
-  if not chunk then
-    bad = bad + 1
-    print("  " .. path .. ": " .. tostring(err))
+  -- EMBEDDED also carries the SQL schema; only Lua can be compiled.
+  if path:sub(-4) == ".lua" then
+    local chunk, err = load(source, "@" .. path)
+    if not chunk then
+      bad = bad + 1
+      print("  " .. path .. ": " .. tostring(err))
+    end
   end
 end
 assert(bad == 0, bad .. " lua module(s) failed to compile")
