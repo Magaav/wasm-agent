@@ -51,6 +51,9 @@ elseif command == "conversations" then
   each(memory.conversations(limit_of(args[2], 50)))
 elseif command == "stats" then
   print(json.encode(memory.stats()))
+elseif command == "status" then
+  -- One health line per fact, from this checkout (the Lua core, not the host).
+  dofile("lua/core/status.lua").report()
 elseif command == "sessions" then
   local rows = memory.list_sessions(nil, limit_of(args[2], 20))
   if #rows == 0 then print("(no sessions)") end
@@ -72,7 +75,7 @@ elseif command == "call" then
 elseif command == "help" then
   print("wa: chat [--continue|--session <id>] [prompt]  |  remember <text> | recall <query>")
   print("    memories | forget <id> | search <query> | conversation <id> | conversations")
-  print("    sessions | stats | nodes | call <node> <capability> [args-json]")
+  print("    sessions | stats | status | nodes | call <node> <capability> [args-json]")
 else
   print("unknown command: " .. tostring(command))
   os.exit(2)
