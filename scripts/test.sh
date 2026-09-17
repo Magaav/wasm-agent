@@ -324,6 +324,12 @@ rm -f "$DB.sessions.lua"
 # here is the surface a user actually touches and the Lua test cannot see: the
 # CLI's own words, its exit codes, and that reading a report changes nothing.
 WA_SCRIPT=scripts/test-recovery.lua "$BIN" --db "$DB" | grep "recovery ok"
+
+# An empty assistant message is not an answer. A reasoning model that spends its
+# whole output budget thinking returns content "", a reasoning field, and
+# finish_reason=length; the loop used to record that as a finished turn. The same
+# file runs in the Windows suite, for the same reason the recovery one does.
+WA_SCRIPT=scripts/test-empty-reply.lua "$BIN" --db "$DB" | grep "empty reply ok"WA_SCRIPT=scripts/test-recovery.lua "$BIN" --db "$DB" | grep "recovery ok"
 cat > "$DB.seed.lua" <<'LUA'
 -- Seed a thread cut off the way a killed process leaves it: a question, a decision
 -- to run a tool, and no result. `question` seeds the other shape (nothing but an

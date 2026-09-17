@@ -161,6 +161,25 @@ print("tool turns=" .. withTools .. " names=" .. table.concat(list, ","))
 # the cloud smoke test runs too - two copies of it would drift, and the shape a
 # killed process leaves in the ledger is the thing being asserted either way.
 $root = Split-Path $PSScriptRoot -Parent
+  # Both suites exercise the Lua in the working tree, not the copy baked into the
+  # binary: without this a Lua-only change is never loaded, so a green suite is a
+  # statement about an older build. The embedded copy is what ships, and the
+  # installer's smoke check is what proves that one loads.
+  $env:WASM_AGENT_LUA_ROOT = $root
+
+  # An empty answer is a failed turn, not a finished one. A reasoning model that
+  # spends its whole output budget thinking returns content "", a reasoning field
+  # and finish_reason=length; the loop used to record that as a finished turn. The
+  # same shared file the smoke suite runs, because the rule is about the loop.
+  $emptyReply = Join-Path $root "scripts/test-empty-reply.lua"
+  if (Test-Path $emptyReply) {
+    $out = Lua (Get-Content -Raw -Path $emptyReply)
+    if ($out -match "empty reply ok") { Ok "empty reply: reasoning is not an answer" }
+    else { Bad "the empty reply test failed"; Note ($out -replace "\s+", " ") }
+  } else {
+    Bad "scripts/test-empty-reply.lua is missing"
+  }
+
 $recoveryFile = Join-Path $root "scripts/test-recovery.lua"
 if (Test-Path $recoveryFile) {
   $out = Lua (Get-Content -Raw -Path $recoveryFile)
@@ -222,7 +241,7 @@ print(shell:find("bash", 1, true) and "posix shell on Windows" or "cmd shell on 
 '@
 $probeOut = Lua $shellProbe
 if ($probeOut -match "posix shell on Windows") { Ok "tools run in bash on Windows (POSIX habits work)" }
-else { Bad "tools run in cmd on Windows: POSIX commands fail"; Note ($probeOut -replace "s+", " ") }
+else { Bad "tools run in cmd on Windows: POSIX commands fail"; Note ($probeOut -replace "\s+", " ") }
 # 10/11. local operation with the remote node and the rendezvous unreachable
 $env:WASM_AGENT_HOST = "unreachable.invalid"
 $env:WASM_AGENT_RENDEZVOUS = "http://127.0.0.1:1"

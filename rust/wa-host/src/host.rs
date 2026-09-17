@@ -682,8 +682,10 @@ pub extern "C" fn http(l: *mut LuaState) -> c_int {
 /// host.http_stream(method, url, headers_json, body) -> aggregated completion.
 ///
 /// Reads an OpenAI-compatible SSE stream, forwards each content delta to the UI
-/// (server-sent event `delta`), and returns `{status, content, tool_calls,
-/// usage}` so the caller can continue the tool loop.
+/// (server-sent event `delta`), and returns `{status, content, reasoning,
+/// finish_reason, tool_calls, usage}` so the caller can continue the tool loop.
+/// Reasoning is kept apart from content: it is the model's thinking, not its
+/// answer, and conflating the two is how an unanswered turn looks answered.
 pub extern "C" fn http_stream(l: *mut LuaState) -> c_int {
     let method = arg_string(l, 1).unwrap_or_else(|| "POST".into()).to_uppercase();
     let url = arg_string(l, 2).unwrap_or_default();
@@ -749,6 +751,12 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
     }
     let reader = std::io::BufReader::new(response.into_body().into_reader());
     let mut content = String::new();
+    // Reasoning models stream their thinking in a sibling field, and endpoints
+    // spell it differently. pi reads all three and takes the first non-empty one,
+    // which is also what we do - the field is not an answer, but a run that spends
+    // its whole budget here answers nothing, and that has to be visible.
+    let mut reasoning = String::new();
+    let mut finish_reason: Option<String> = None;
     let mut tool_calls: Vec<Value> = Vec::new();
     let mut usage: Option<Value> = None;
     for line in reader.lines() {
@@ -770,6 +778,22 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
                 content.push_str(text);
                 crate::serve::write_event(&json!({"type": "delta", "text": text}).to_string());
             }
+        }
+        for field in ["reasoning_content", "reasoning", "reasoning_text"] {
+            if let Some(text) = chunk["choices"][0]["delta"][field].as_str() {
+                if !text.is_empty() {
+                    reasoning.push_str(text);
+                    // A long reasoning phase used to look like a hung turn. The UI
+                    // can now say how much thinking has happened.
+                    crate::serve::write_event(
+                        &json!({"type": "reasoning", "chars": reasoning.chars().count()}).to_string(),
+                    );
+                }
+                break;
+            }
+        }
+        if let Some(reason) = chunk["choices"][0]["finish_reason"].as_str() {
+            finish_reason = Some(reason.to_string());
         }
         if let Some(calls) = chunk["choices"][0]["delta"]["tool_calls"].as_array() {
             for call in calls {
@@ -793,7 +817,8 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
             usage = Some(chunk["usage"].clone());
         }
     }
-    Ok(json!({"status": status, "content": content, "tool_calls": tool_calls, "usage": usage}))
+    Ok(json!({"status": status, "content": content, "reasoning": reasoning,
+        "finish_reason": finish_reason, "tool_calls": tool_calls, "usage": usage}))
 }
 
 /// host.now() -> seconds since epoch

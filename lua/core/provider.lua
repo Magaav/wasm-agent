@@ -245,6 +245,16 @@ function M.complete_with(model, messages, tools, stream, opts)
   local settings = M.settings()
   local provider = M.active()
   local body = { model = model or settings.model, messages = messages }
+  -- pi always sends an output cap, and its own comment says why: reasoning and the
+  -- answer share max_tokens, so an uncapped reasoning phase can consume the whole
+  -- response and leave no answer and no tool call. We send one only when asked,
+  -- because a provider that rejects the field would break every turn - but an
+  -- empty answer is caught either way, which is what empty_reply_reason is for.
+  local max_output = tonumber(host.getenv("WASM_AGENT_LLM_MAX_OUTPUT") or "")
+  if max_output and max_output > 0 then
+    local field = host.getenv("WASM_AGENT_LLM_MAX_OUTPUT_FIELD")
+    body[field and field ~= "" and field or "max_tokens"] = max_output
+  end
   if tools and #tools > 0 then
     body.tools = tools
     body.tool_choice = "auto"
@@ -263,6 +273,8 @@ function M.complete_with(model, messages, tools, stream, opts)
     end
     return {
       content = result.content or "",
+      reasoning = result.reasoning or "",
+      finish_reason = result.finish_reason,
       tool_calls = result.tool_calls or {},
       usage = result.usage,
       model = body.model,
@@ -278,10 +290,64 @@ function M.complete_with(model, messages, tools, stream, opts)
   local message = payload.choices[1].message
   return {
     content = message.content or "",
+    reasoning = M.reasoning_of(message),
+    finish_reason = payload.choices[1].finish_reason,
     tool_calls = message.tool_calls or {},
     usage = payload.usage,
     model = payload.model or body.model,
   }
+end
+
+-- The three spellings an OpenAI-compatible endpoint uses for a reasoning model's
+-- thinking. pi reads all three and takes the first non-empty one for the same
+-- reason: it is one piece of information under different names.
+local REASONING_FIELDS = { "reasoning_content", "reasoning", "reasoning_text" }
+
+function M.reasoning_of(message)
+  if type(message) ~= "table" then return "" end
+  for _, field in ipairs(REASONING_FIELDS) do
+    local value = message[field]
+    if type(value) == "string" and value ~= "" then return value end
+  end
+  return ""
+end
+
+-- What a reader would see. A reply that is only reasoning, or only whitespace, is
+-- not an answer - and some endpoints put the thinking inside content as a <think>
+-- block, so those are removed here the way the UI removes them.
+function M.visible_text(text)
+  local out = tostring(text or "")
+  local last = nil
+  local from = 1
+  while true do
+    local _, closing = string.find(out, "</think>", from, true)
+    if not closing then break end
+    last = closing
+    from = closing + 1
+  end
+  if last then out = out:sub(last + 1) end
+  local opening = string.find(out, "<think", 1, true)
+  if opening then out = out:sub(1, opening - 1) end
+  out = out:gsub("</?think[^>]*>", "")
+  return (out:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- Why an empty assistant message is not an answer, in words a reader can act on.
+function M.empty_reply_reason(result)
+  local reasoning = tostring(result and result.reasoning or "")
+  local finish = result and result.finish_reason
+  local where = (finish and finish ~= "") and ("finish_reason=" .. tostring(finish))
+    or "the provider sent no finish_reason"
+  if #reasoning > 0 then
+    return string.format(
+      "the model spent its output on reasoning (%d chars) and returned no answer (%s); " ..
+      "reasoning is not an answer, so either it ran out of budget before writing one or " ..
+      "this endpoint only streams thinking - WASM_AGENT_LLM_MAX_OUTPUT sets the cap we " ..
+      "send, and pi clamps its thinking budget for exactly this reason",
+      #reasoning, where)
+  end
+  return string.format(
+    "the provider returned an empty message with no tool call and no text (%s)", where)
 end
 
 return M

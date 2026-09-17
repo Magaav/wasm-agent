@@ -427,6 +427,12 @@ function handleEvent(event) {
   } else if (event.type === "status") {
     const note = event.text || "working";
     setStatus(note === "model" ? "thinking…" : "wasm-agent is " + note + "…");
+  } else if (event.type === "reasoning") {
+    // A reasoning model can think for a long time before it says anything, and a
+    // silent panel is indistinguishable from a hung one. The count also tells the
+    // reader where the output budget went when a turn ends with no answer.
+    const chars = Number(event.chars) || 0;
+    setStatus("thinking… " + chars + " chars of reasoning");
   } else if (event.type === "tool") {
     addTool(event.name, event.arguments);
   } else if (event.type === "tool_result") {

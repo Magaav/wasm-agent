@@ -717,9 +717,33 @@ function M:turn(text)
     messages[#messages + 1] = assistant
 
     if #calls == 0 then
+      reply = result.content or ""
+      -- An empty answer with no tool call is not an answer. A reasoning model that
+      -- runs out of output budget before it writes anything returns exactly this,
+      -- and this path used to record it as a finished turn: the model looked like
+      -- it had nothing to say instead of like it had failed. (pi sends max_tokens
+      -- and clamps its thinking budget for this reason; we send neither, so the
+      -- detection below is the part that must not be missing.)
+      if provider.visible_text(reply) == "" then
+        local reason = provider.empty_reply_reason(result)
+        local span = trace[#trace]
+        if type(span) == "table" and span.kind == "llm" then
+          span.ok = false
+          span.error = reason
+          span.finish_reason = result.finish_reason
+          span.reasoning_chars = #(result.reasoning or "")
+          -- The reasoning is the only evidence of what the model did with the
+          -- budget, so a bounded head of it is kept where a reader can find it.
+          span.reasoning_head = (result.reasoning or ""):sub(1, 2000)
+        end
+        memory.append_turn(self.session_id, {
+          role = "assistant", content = "", ok = false, trace = trace, debug = self.debug,
+          ms = math.floor((host.now() - turn_started) * 1000),
+        })
+        error(reason)
+      end
       -- The final assistant message is recorded once, after the loop, with the
       -- turn's trace. Recording it here as well would duplicate it in context.
-      reply = result.content or ""
       break
     end
     memory.append_turn(self.session_id, {
