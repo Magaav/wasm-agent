@@ -85,7 +85,7 @@ M.admin = {
     port = { type = "integer", description = "CDP port (default 9222)" },
     profile = { type = "string", description = "Chrome user-data-dir (defaults to the wasm-agent account)" } },
     { "action" }),
-  schema("shell", "Run a shell command on the wasm-agent client machine (the desktop host running the UI) and return stdout, stderr and the exit code.", {
+  schema("shell", "Run a shell command on the wasm-agent client machine (this is the machine running the desktop UI, which must be open). Prefer `bash` for commands on the node itself.", {
     command = { type = "string" },
     shell = { type = "string", enum = { "cmd", "powershell" }, description = "Default cmd." },
     cwd = { type = "string" } }, { "command" }),
@@ -258,6 +258,15 @@ function M.dispatch(memory, name, args, role, ctx)
     host.write_file(args.path, updated)
     return { ok = true, path = args.path }
   elseif name == "ls" then
+    -- Native listing: `ls -la` does not exist on Windows, and the description
+    -- promises portability.
+    if host.list_dir then
+      local ok, result = pcall(host.list_dir, args.path or ".")
+      if ok and result then return json.decode(result) end
+    end
+    if platform.os() == "windows" then
+      return run("dir /b " .. shell_quote(args.path or "."))
+    end
     return run("ls -la -- " .. shell_quote(args.path or "."))
   elseif name == "grep" then
     -- Native matcher: shelling out to `grep` fails on Windows, where the tool

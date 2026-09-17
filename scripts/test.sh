@@ -197,11 +197,18 @@ assert(described:find("shell") or described:find("cmd"), "describe() must mentio
 local agentlib = dofile("lua/core/agent.lua")
 local prompt = agentlib.system_prompt("master", nil)
 assert(prompt:find("Running on:", 1, true), "the system prompt must state the environment")
-local result = host.grep("wasm-agent", "lua/core", '{"limit":5}')
+local result = host.grep("wasm-agent", "lua/core", "{\"limit\":5}")
 assert(result, "host.grep must return a result")
 local decoded = dofile("lua/vendor/json.lua").decode(result)
 assert(decoded.count > 0, "host.grep must find a pattern that is definitely present")
 assert(decoded.matches[1].file and decoded.matches[1].line, "matches carry file and line")
+local listing = host.list_dir("lua/core")
+assert(listing, "host.list_dir must return a result")
+local entries = dofile("lua/vendor/json.lua").decode(listing)
+assert(entries.entries and #entries.entries > 0, "host.list_dir must list the Lua core")
+local names = {}
+for _, entry in ipairs(entries.entries) do names[entry.name] = entry.kind end
+assert(names["agent.lua"] == "file", "listing must include files with a kind")
 print("platform ok")
 LUA
 WA_SCRIPT="$DB.platform.lua" "$BIN" --db "$DB" | grep "platform ok"

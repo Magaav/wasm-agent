@@ -24,8 +24,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/vendor/json.lua", include_str!("../../../lua/vendor/json.lua")),
     ("lua/core/schema.sql", include_str!("../../../lua/core/schema.sql")),
     ("lua/core/redact.lua", include_str!("../../../lua/core/redact.lua")),
-    ("lua/core/platform.lua", include_str!("../../../lua/core/platform.lua")),
-    ("lua/core/paths.lua", include_str!("../../../lua/core/paths.lua")),
+    ("lua/core/platform.lua", include_str!("../../../lua/core/platform.lua")),    ("lua/core/paths.lua", include_str!("../../../lua/core/paths.lua")),
     ("lua/core/memory.lua", include_str!("../../../lua/core/memory.lua")),
     ("lua/core/tools.lua", include_str!("../../../lua/core/tools.lua")),
     ("lua/core/users.lua", include_str!("../../../lua/core/users.lua")),
@@ -180,6 +179,7 @@ fn main() {
     lua.register("paths", host::paths);
     lua.register("platform", host::platform);
     lua.register("grep", host::grep);
+    lua.register("list_dir", host::list_dir);
     lua.register("sha256", host::sha256);
     lua.register("uuid", host::uuid);
     lua.register("read_file", host::read_file);

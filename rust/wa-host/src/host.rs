@@ -170,6 +170,46 @@ pub extern "C" fn grep(l: *mut LuaState) -> c_int {
     1
 }
 
+/// host.list_dir(path) -> [{ name, kind, size, modified }]
+///
+/// The `ls` tool used to shell out to `ls -la`, which does not exist on Windows:
+/// its description claimed to be portable while the implementation was not, and
+/// a self-evolution run found that before I did.
+pub extern "C" fn list_dir(l: *mut LuaState) -> c_int {
+    let path = arg_string(l, 1).unwrap_or_else(|| ".".to_string());
+    let mut entries: Vec<Value> = Vec::new();
+    match std::fs::read_dir(&path) {
+        Ok(reader) => {
+            for entry in reader.flatten() {
+                let metadata = entry.metadata().ok();
+                let kind = match metadata.as_ref().map(|m| m.is_dir()) {
+                    Some(true) => "dir",
+                    Some(false) => "file",
+                    None => "other",
+                };
+                entries.push(json!({
+                    "name": entry.file_name().to_string_lossy(),
+                    "kind": kind,
+                    "size": metadata.as_ref().map(|m| m.len()).unwrap_or(0),
+                    "modified": metadata
+                        .as_ref()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                }));
+            }
+            entries.sort_by(|a, b| {
+                let (ad, bd) = (a["kind"] == "dir", b["kind"] == "dir");
+                bd.cmp(&ad).then_with(|| a["name"].as_str().cmp(&b["name"].as_str()))
+            });
+            push_json(l, &json!({ "path": path, "entries": entries }));
+        }
+        Err(error) => push_json(l, &json!({ "error": error.to_string(), "path": path })),
+    }
+    1
+}
+
 fn host_of<'a>(l: *mut LuaState) -> &'a Host {
     unsafe {
         let ptr = lua_touserdata(l, upvalue_index(1)) as *const Host;
