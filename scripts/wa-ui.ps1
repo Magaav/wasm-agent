@@ -75,11 +75,15 @@ if ($useLocal) {
     Write-Host "   * local server already running" -ForegroundColor DarkGray
   } else {
     Write-Host "   * starting the local server" -ForegroundColor DarkGray
-    Start-Process -FilePath $localWa `
+    $serverProcess = Start-Process -FilePath $localWa `
       -ArgumentList @("serve", "--port", "$Port", "--ui", $uiDir, "--client-port", "$ClientPort") `
-      -WindowStyle Hidden `
+      -WindowStyle Hidden -PassThru `
       -RedirectStandardOutput (Join-Path $dir "serve.log") `
-      -RedirectStandardError (Join-Path $dir "serve.err.log") | Out-Null
+      -RedirectStandardError (Join-Path $dir "serve.err.log")
+    # Record the pid so the server can be stopped precisely. Stopping by image
+    # name also kills interactive agent sessions, which run the same binary and
+    # have died that way twice.
+    if ($serverProcess) { Set-Content -Path (Join-Path $dir "serve.pid") -Value $serverProcess.Id -Encoding ASCII }
     for ($i = 0; $i -lt 40; $i++) {
       Start-Sleep -Milliseconds 250
       if (Test-Health $Port) { break }

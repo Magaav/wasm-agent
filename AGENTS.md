@@ -130,6 +130,36 @@ bash scripts/build-window.sh                  # -> target/windows-x64/.../wa-win
 - Verify before claiming: run the smoke test, and prefer a real two-node check
   over a single-process one.
 
+## Stopping the node
+
+Never stop it by image name. `Stop-Process -Name wa` - and even a filter on
+the path, because an agent session runs the same binary from the same place -
+kills the UI server *and* every interactive session with it, mid-turn, leaving
+no crash and no trace. That has now cost two runs. `wa ui` writes the server's
+pid to `%LOCALAPPDATA%wasm-agentserve.pid`; stop that pid, or ask the port:
+
+```powershell
+Stop-Process -Id (Get-Content "$env:LOCALAPPDATAwasm-agentserve.pid")
+```
+
+An interrupted session is not lost: `wa chat --continue` resumes the thread
+with its transcript intact.
+
+## Stopping the node
+
+Never stop it by image name. `Stop-Process -Name wa` — and even a filter on the
+path, because an agent session runs the same binary from the same place — kills
+the UI server *and* every interactive session with it, mid-turn, leaving no crash
+and no trace. That has now cost two runs, the second while this very rule was
+being written. `wa ui` records the server's pid; stop that, or ask the port:
+
+```powershell
+Stop-Process -Id (Get-Content "$env:LOCALAPPDATA\wasm-agent\serve.pid")
+```
+
+An interrupted session is not lost: `wa chat --continue` resumes the thread with
+its transcript intact.
+
 ## Commit provenance
 
 Author is useless here: every commit in this repository is `wasm-agent
