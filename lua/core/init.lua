@@ -26,7 +26,7 @@ end
 
 local command = args[1]
 if command == nil or command == "chat" then
-  return dofile("lua/core/chat.lua").run()
+  return dofile("lua/core/chat.lua").run(args)
 end
 
 if command == "init" then
@@ -59,8 +59,8 @@ elseif command == "call" then
   end
   print(json.encode(nodes.remote_call(args[2], args[3], payload)))
 elseif command == "help" then
-  print("wa: chat | remember <text> | recall <query> | memories | forget <id>")
-  print("    search <query> | conversation <id> | conversations | stats")
+  print("wa: chat [--session <id>] [prompt]  |  remember <text> | recall <query> | memories")
+  print("    forget <id> | search <query> | conversation <id> | conversations | stats")
   print("    nodes | call <node> <capability> [args-json]")
 else
   print("unknown command: " .. tostring(command))
