@@ -130,9 +130,17 @@ local TOOL_CONTEXT_BUDGET = {
 }
 local TOOL_STORE_CAP = 200000
 
+-- WASM_AGENT_TOOL_BUDGET=legacy reproduces the old view exactly (600 characters,
+-- head only) for every tool. It exists so a claim about the budget can be
+-- measured rather than argued: same task, same model, one variable.
+local function tool_budget(name)
+  if host.getenv("WASM_AGENT_TOOL_BUDGET") == "legacy" then return { chars = 600, keep = "head" } end
+  return TOOL_CONTEXT_BUDGET[name] or TOOL_CONTEXT_BUDGET.DEFAULT
+end
+
 local function fit_tool_output(name, text)
   local value = tostring(text or "")
-  local budget = TOOL_CONTEXT_BUDGET[name] or TOOL_CONTEXT_BUDGET.DEFAULT
+  local budget = tool_budget(name)
   if #value <= budget.chars then return value end
   local head, tail, dropped = value:sub(1, budget.chars), "", #value - budget.chars
   if budget.keep == "tail" then
