@@ -70,6 +70,22 @@ print("budget ok")
 LUA
 WASM_AGENT_MODEL_LIMITS='{"kimi-k2.6":{"context":262144,"reserve":32768}}' WA_SCRIPT="$DB.budget.lua" "$BIN" --db "$DB" | grep "budget ok"
 rm -f "$DB.budget.lua"
+# `wa status` must report whether the toolchains its tools need resolve - a
+# service has no login PATH, which is how a remote build failed with
+# "cargo: not found" while nothing else said a word.
+cat > "$DB.tools.lua" <<'LUA'
+local status = dofile("lua/core/status.lua")
+local line = status.tools()
+assert(line:find("git=", 1, true), "the tools line must report git: " .. line)
+assert(line:find("cargo=", 1, true), "the tools line must report cargo: " .. line)
+local lines = status.lines()
+local found = false
+for _, text in ipairs(lines) do if text:find("tools", 1, true) then found = true end end
+assert(found, "status must print the tools line")
+print("tools ok")
+LUA
+WA_SCRIPT="$DB.tools.lua" "$BIN" --db "$DB" | grep "tools ok"
+rm -f "$DB.tools.lua"
 # Role gating: a guest must never see master tools, and a session must resolve
 # to its own user. A regression here silently runs guests as master, which is
 # exactly what happened when the session header stopped reaching dispatch.

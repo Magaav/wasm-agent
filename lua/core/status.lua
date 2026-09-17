@@ -97,6 +97,42 @@ end
 
 function M.config_path() return paths.config() end
 
+local function result_has(list, value)
+  for _, item in ipairs(list) do
+    if item == value then return true end
+  end
+  return false
+end
+
+-- Do the toolchains this node's tools need actually resolve? A systemd service
+-- does not inherit a login shell's PATH, so `cargo` can be installed and still be
+-- unreachable - which is what stopped a remote build with "sh: 1: cargo: not
+-- found" after two attempted calls. Nothing else reported it, because nothing
+-- else had tried to use it.
+function M.tools()
+  local platform = dofile("lua/core/platform.lua")
+  local probe = platform.os() == "windows" and "where %s" or "command -v %s"
+  local wanted = { "git", "ssh", "cargo" }
+  local found, missing = {}, {}
+  for _, tool in ipairs(wanted) do
+    local result = exec(string.format(probe, tool))
+    if type(result) == "table" and result.code == 0 then
+      found[#found + 1] = tool
+    else
+      missing[#missing + 1] = tool
+    end
+  end
+  local text = {}
+  for _, tool in ipairs(wanted) do
+    text[#text + 1] = tool .. "=" .. (result_has(found, tool) and "yes" or "no")
+  end
+  local line = table.concat(text, " ")
+  if #missing > 0 then
+    line = line .. "  (not on PATH: " .. table.concat(missing, " ") .. " - see PATH in deploy/env.example)"
+  end
+  return line
+end
+
 -- Ordered: identity first, then what would break a turn, then the paths.
 function M.lines()
   local lines = {
@@ -106,6 +142,7 @@ function M.lines()
   }
   local interrupted = M.interrupted()
   if interrupted then lines[#lines + 1] = "interrupted " .. interrupted end
+  lines[#lines + 1] = "tools     " .. M.tools()
   lines[#lines + 1] = "tree      " .. M.working_tree()
   lines[#lines + 1] = "config    " .. M.config_path()
   return lines
