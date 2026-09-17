@@ -200,10 +200,21 @@ function clearStatus() {
 // Tool lines are rendered the way pi renders them in its CLI: bold lowercase
 // tool name plus the argument that matters, never a JSON blob.
 //   read src/app.js (lines 10-40)   bash $ ls -la   grep /pattern/   edit path
+// Long paths crowd the trace line and push the interesting part off the end, so
+// elide the middle and keep the last two segments (pi shows them relative to its
+// working directory; we do not have the node's cwd in the browser, and the
+// tail is what identifies the file either way).
+function shortPath(value) {
+  const text = String(value || "").replace(/\\/g, "/");
+  if (text.length <= 52) return text;
+  const parts = text.split("/").filter(Boolean);
+  return "…/" + parts.slice(-2).join("/");
+}
+
 function toolTitle(name, args) {
   const a = args || {};
   const esc = escapeHtml;
-  const path = esc(String(a.path || a.file_path || ""));
+  const path = esc(shortPath(a.path || a.file_path || ""));
   switch (name) {
     case "bash":
     case "shell": {
@@ -220,7 +231,7 @@ function toolTitle(name, args) {
     case "edit":
       return path;
     case "grep":
-      return `/${esc(String(a.pattern || ""))}/${a.path ? " in " + esc(String(a.path)) : ""}`;
+      return `/${esc(String(a.pattern || ""))}/${a.path ? " in " + esc(shortPath(a.path)) : ""}`;
     case "ls":
       return path || ".";
     case "recall":
