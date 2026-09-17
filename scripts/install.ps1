@@ -70,7 +70,7 @@ Ok $target
 Step "installing the local node"
 # wa.exe is the whole agent: Rust host, embedded Lua, SQLite and the tool
 # runtime. The host cross-builds it for Windows, so fetch that build rather than
-the remote shim: the node then runs here, with no SSH in the path.
+# the remote shim: the node then runs here, with no SSH in the path.
 $nodeDir = Join-Path $localAppData "wasm-agent"
 New-Item -ItemType Directory -Force -Path $nodeDir | Out-Null
 $localExe = Join-Path $nodeDir "wa.exe"
@@ -131,7 +131,10 @@ if (Test-Path $envFile) {
 } else {
   try {
     $lines = @(& ssh -o BatchMode=yes $HostAlias "cat ~/.wasm-agent/env")
-    if ($LASTEXITCODE -eq 0 -and $lines.Count -gt 0) {
+    # Test the *content*, not $LASTEXITCODE: when ssh resolves to Git's MSYS
+    # ssh.exe, PowerShell reads its exit code as -1 even on success, so an exit
+    # code check silently skips provisioning.
+    if (($lines -join "`n") -match 'WASM_AGENT_LLM') {
       # Rename this node: copying the host config would otherwise make two nodes
       # with the same name, which is confusing in the fabric view.
       $nodeName = $env:COMPUTERNAME.ToLower()
@@ -192,7 +195,8 @@ Step "checking the connection to $HostAlias"
 if (Get-Command ssh -ErrorAction SilentlyContinue) {
   try {
     $version = (& ssh -o BatchMode=yes -o ConnectTimeout=8 $HostAlias "wasm-agent --version" 2>$null | Select-Object -First 1)
-    if ($LASTEXITCODE -eq 0 -and $version) { Ok "host reachable: $version" }
+    # Match the version string rather than trusting $LASTEXITCODE (see above).
+    if ($version -match 'wasm-agent\s+\d') { Ok "host reachable: $version" }
     else { Warn "host not reachable - the local node still works offline" }
   } catch { Warn "host not reachable - the local node still works offline" }
 } else {
