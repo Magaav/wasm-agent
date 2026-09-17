@@ -77,7 +77,9 @@ rm -f "$DB.plugin.lua"
 # *stored* blobs (recoverable if a Windows working copy drifts) and skip
 # binaries, which legitimately contain CR bytes. `-I` does that for us.
 if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
-  crlf="$(git grep --cached -I -l "$(printf '\r')")"
+  # `git grep` exits 1 when it finds nothing, which is the good case here; with
+  # `set -e` that would abort the run exactly when the invariant holds.
+  crlf="$(git grep --cached -I -l "$(printf '\r')" || true)"
   if [ -n "$crlf" ]; then
     echo "FAIL: CRLF stored in the index:" >&2
     echo "$crlf" >&2
