@@ -368,16 +368,27 @@ function M:turn(text)
   self.overhead_tokens = estimate_tokens(messages[1] and messages[1].content or "")
     + estimate_tokens(json.encode(tool_list))
 
+  -- Tool budget, in windows. A spent budget used to end the turn with "(tool
+  -- loop limit reached)", which is the worst possible outcome: the work exists in
+  -- the transcript, but nothing is verified, committed or reported.
+  --
+  -- pi does not have this problem because its budget is effectively open-ended:
+  -- it works across as many rounds as the task needs, with compaction keeping the
+  -- context bounded. The same model that fails inside one fixed wasm-agent turn
+  -- does this work well there, so the limit is the loop, not the model. Each
+  -- extra window is a fresh budget for the model to continue from where it is.
+  local windows = (tonumber(host.getenv("WASM_AGENT_MAX_CONTINUATIONS")) or 3) + 1
+  for window = 1, windows do
+    local last_window = (window == windows)
   for round = 1, MAX_TOOL_ROUNDS do
-    -- Two rounds before the cut-off, tell the model to wrap up. Without this it
-    -- explores until the loop stops it mid-task, leaving useful edits
-    -- uncommitted and unverified - which is exactly what happened to the first
-    -- self-evolution run: 39 tool calls of real work, then "(tool loop limit
-    -- reached)" and nothing to review.
-    if (MAX_TOOL_ROUNDS - round) == 2 then
+    -- Two rounds before the *final* cut-off, tell the model to wrap up. Asking
+    -- this earlier would waste a continuation telling it to stop when it could
+    -- keep going.
+    if last_window and (MAX_TOOL_ROUNDS - round) == 2 then
       messages[#messages + 1] = { role = "user", content =
-        "Budget: two tool rounds left. Stop exploring. Verify what you have already "
-        .. "changed, commit it on the current branch, and state plainly what is unfinished." }
+        "Budget: two tool rounds left, and this is the last window. Stop exploring. Verify what "
+        .. "you have already changed, commit it on the current branch, and state plainly what is "
+        .. "unfinished." }
       self.emit({ type = "status", text = "tool budget nearly spent - asking the model to wrap up" })
     end
     self.emit({ type = "status", text = "model" })
@@ -492,8 +503,20 @@ function M:turn(text)
       }
     end
   end
+  if reply ~= "" then break end
+  if last_window then break end
+  -- Out of rounds, task unfinished: continue rather than fail.
+  self.emit({ type = "status", text = string.format(
+    "tool budget spent (%d rounds); continuing in window %d of %d", MAX_TOOL_ROUNDS, window + 1, windows) })
+  messages[#messages + 1] = { role = "user", content =
+    "You ran out of tool rounds mid-task. Continue from exactly where you are: do not repeat "
+    .. "completed steps, do not re-read files you have already read, and keep working until the "
+    .. "task is done or you are genuinely blocked." }
+  end
 
-  if reply == "" then reply = "(tool loop limit reached)" end
+  if reply == "" then
+    reply = "(tool budget exhausted across " .. windows .. " windows without a final answer)"
+  end
   if not self.debug then
     -- keep raw tool payloads out of the persisted assistant reply as well
     reply = reply:sub(1, 8000)
