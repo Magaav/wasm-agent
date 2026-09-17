@@ -56,6 +56,24 @@ LUA
 WA_SCRIPT="$DB.gating.lua" "$BIN" --db "$DB" | grep -q "gating ok"
 rm -f "$DB.gating.lua"
 
+# Every embedded Lua module must at least compile. Without this a typo in a
+# file the test does not exercise (the chat REPL, a spell helper) ships and only
+# fails at runtime in front of a user.
+cat > "$DB.syntax.lua" <<'LUA'
+local bad = 0
+for path, source in pairs(EMBEDDED) do
+  local chunk, err = load(source, "@" .. path)
+  if not chunk then
+    bad = bad + 1
+    print("  " .. path .. ": " .. tostring(err))
+  end
+end
+assert(bad == 0, bad .. " lua module(s) failed to compile")
+print("lua syntax ok")
+LUA
+WA_SCRIPT="$DB.syntax.lua" "$BIN" --db "$DB" | grep -q "lua syntax ok"
+rm -f "$DB.syntax.lua"
+
 # Build every plugin and assert one round trip through the WASM host.
 for crate in rust/plugins/*/; do
   [ -f "$crate/Cargo.toml" ] || continue

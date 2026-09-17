@@ -44,7 +44,7 @@ local function printer(state)
       io.flush()
     elseif kind == "tool_result" then
       local text = tostring(event.result or ""):gsub("%s+", " ")
-      io.write("    " .. text:sub(1, 120) .. (\#text > 120 and "…" or "") .. "\n")
+      io.write("    " .. text:sub(1, 120) .. (#text > 120 and "…" or "") .. "\n")
       io.flush()
     elseif kind == "error" then
       io.write("\n  ! " .. tostring(event.error or "error") .. "\n")
