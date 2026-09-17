@@ -69,11 +69,11 @@ function M.agents_md(role)
   -- Build the list by appending: an explicit first element of nil would make
   -- `ipairs` stop immediately and silently skip everything else.
   local candidates = {}
-  local configured = os.getenv(agents_env(role))
+  local configured = host.getenv(agents_env(role))
   if configured and configured ~= "" then candidates[#candidates + 1] = configured end
   local name = (role or "master") == "guest" and "AGENTS.guest.md" or "AGENTS.md"
   candidates[#candidates + 1] = name
-  candidates[#candidates + 1] = (os.getenv("HOME") or ".") .. "/.wasm-agent/" .. name
+  candidates[#candidates + 1] = (host.getenv("HOME") or ".") .. "/.wasm-agent/" .. name
   for _, path in ipairs(candidates) do
     local text = host.read_file and host.read_file(path)
     if text and text ~= "" then return text, path end
@@ -119,7 +119,7 @@ function M.new(session_id, on_event, role, user, node)
 end
 
 function M:summary_model()
-  return os.getenv("WASM_AGENT_LLM_SUMMARY_MODEL") or provider.settings().model
+  return host.getenv("WASM_AGENT_LLM_SUMMARY_MODEL") or provider.settings().model
 end
 
 -- Rebuild the provider messages from the transcript: system (+AGENTS.md),
@@ -231,11 +231,11 @@ end
 -- once instead of constantly. The transcript keeps everything regardless; only
 -- the context is windowed.
 function M:maybe_compact()
-  local limit = tonumber(os.getenv("WASM_AGENT_LLM_CONTEXT")) or 0
+  local limit = tonumber(host.getenv("WASM_AGENT_LLM_CONTEXT")) or 0
   if limit <= 0 then return end
-  local reserve = tonumber(os.getenv("WASM_AGENT_COMPACT_RESERVE")) or COMPACT_RESERVE
+  local reserve = tonumber(host.getenv("WASM_AGENT_COMPACT_RESERVE")) or COMPACT_RESERVE
   reserve = math.min(reserve, math.max(1000, math.floor(limit / 4)))
-  local keep = tonumber(os.getenv("WASM_AGENT_COMPACT_KEEP")) or COMPACT_KEEP
+  local keep = tonumber(host.getenv("WASM_AGENT_COMPACT_KEEP")) or COMPACT_KEEP
   keep = math.min(keep, math.max(1000, math.floor(limit / 2)))
 
   -- Trigger on what the provider actually charged us for, not on a sum of
@@ -346,7 +346,7 @@ function M:turn(text)
     self.emit({ type = "status", text = "model" })
     local llm_started = host.now()
     local agents_var = agents_env(self.role)
-    local configured_agents = os.getenv(agents_var)
+    local configured_agents = host.getenv(agents_var)
     if round == 1 and configured_agents and configured_agents ~= "" and not self.agents_source then
       self.emit({ type = "status", text = agents_var .. " configured but unreadable: " .. configured_agents })
     end

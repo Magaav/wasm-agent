@@ -5,7 +5,7 @@
 local json = dofile("lua/vendor/json.lua")
 local M = {}
 
-local function env(name) return os.getenv(name) end
+local function env(name) return host.getenv(name) end
 local function trim(value) return (value or ""):gsub("^%s+", ""):gsub("%s+$", "") end
 
 local state = dofile("lua/core/state.lua")
@@ -182,7 +182,7 @@ end
 function M.cache_params(opts)
   opts = opts or {}
   if opts.cache == false then return {} end
-  local mode = os.getenv("WASM_AGENT_PROMPT_CACHE_KEY") or "auto"
+  local mode = host.getenv("WASM_AGENT_PROMPT_CACHE_KEY") or "auto"
   if mode == "off" then return {} end
   local session_id = opts.session_id
   if not session_id or session_id == "" then return {} end
@@ -190,7 +190,7 @@ function M.cache_params(opts)
   local is_openai = settings.base_url:find("api%.openai%.com") ~= nil
   if mode ~= "on" and not is_openai then return {} end
   local params = { prompt_cache_key = clamp_cache_key(host.sha256(session_id)) }
-  local retention = os.getenv("WASM_AGENT_PROMPT_CACHE_RETENTION")
+  local retention = host.getenv("WASM_AGENT_PROMPT_CACHE_RETENTION")
   if retention and retention ~= "" then params.prompt_cache_retention = retention end
   return params
 end
@@ -199,7 +199,7 @@ end
 --   {"deepseek-v4.1-flash":{"input":0.28,"output":0.42,"cacheRead":0.028,"cacheWrite":0.28}}
 -- No rates are invented here: unset means we report tokens and no cost.
 function M.rates(model)
-  local raw = os.getenv("WASM_AGENT_MODEL_RATES")
+  local raw = host.getenv("WASM_AGENT_MODEL_RATES")
   if not raw or raw == "" then return nil end
   local ok, table_ = pcall(json.decode, raw)
   if not ok or type(table_) ~= "table" then return nil end

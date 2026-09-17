@@ -92,10 +92,13 @@ fn db_path(args: &[String]) -> String {
 }
 
 /// Load KEY=VALUE pairs from ~/.wasm-agent/env without overwriting real env.
-fn load_env_file() {
+/// Returns what it read so the Lua core can see the same values through
+/// `host.getenv` (see the note on ENV_OVERRIDES in host.rs).
+fn load_env_file() -> Vec<(String, String)> {
     let home = std::env::var("HOME").unwrap_or_default();
+    let mut loaded = Vec::new();
     let Ok(text) = std::fs::read_to_string(format!("{home}/.wasm-agent/env")) else {
-        return;
+        return loaded;
     };
     for line in text.lines() {
         let line = line.trim();
@@ -107,9 +110,11 @@ fn load_env_file() {
             let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
             if !key.is_empty() && std::env::var(key).is_err() {
                 std::env::set_var(key, value);
+                loaded.push((key.to_string(), value.to_string()));
             }
         }
     }
+    loaded
 }
 
 fn main() {
@@ -118,7 +123,7 @@ fn main() {
     // their paths from HOME, so one resolution here fixes them together.
     let home = resolve_home();
     std::env::set_var("HOME", &home);
-    load_env_file();
+    let from_file = load_env_file();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--version" || arg == "-v") {
         println!("wasm-agent {}", env!("CARGO_PKG_VERSION"));
@@ -141,6 +146,11 @@ fn main() {
 
     let db = db_path(&args);
     std::env::set_var("WASM_AGENT_DB", &db);
+    // Hand the Lua core the same view the host resolved, in one place.
+    let mut resolved: std::collections::HashMap<String, String> = from_file.into_iter().collect();
+    resolved.insert("HOME".to_string(), home.clone());
+    resolved.insert("WASM_AGENT_DB".to_string(), db.clone());
+    host::set_env_overrides(resolved);
     if let Some(parent) = std::path::Path::new(&db).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -163,6 +173,7 @@ fn main() {
     lua.push_table();
     lua.register_with_upvalue("sql_exec", host::sql_exec, host as *mut c_void);
     lua.register_with_upvalue("sql_query", host::sql_query, host as *mut c_void);
+    lua.register("getenv", host::getenv);
     lua.register("sha256", host::sha256);
     lua.register("uuid", host::uuid);
     lua.register("read_file", host::read_file);

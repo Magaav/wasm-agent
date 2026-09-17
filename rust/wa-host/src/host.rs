@@ -8,14 +8,47 @@ use crate::plugins::PluginRegistry;
 use ring::rand::{SecureRandom, SystemRandom};
 use rusqlite::{params_from_iter, Connection};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::ffi::{c_char, c_int};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 pub struct Host {
     pub db: Mutex<Connection>,
     pub plugins: Mutex<PluginRegistry>,
     pub client: std::sync::Arc<crate::client_bridge::Bridge>,
+}
+
+// Values the host resolved itself: the config file, the home directory, the
+// database path. Lua reads them through `host.getenv` rather than `os.getenv`
+// because on Windows Rust's `set_var` is invisible to the C runtime's
+// `getenv` - the UCRT caches the environment at startup, so `os.getenv` kept
+// returning what the process was launched with. The effect was silent: the
+// entire config file was ignored and the agent ran with "no model configured".
+static ENV_OVERRIDES: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+pub fn set_env_overrides(values: HashMap<String, String>) {
+    let _ = ENV_OVERRIDES.set(values);
+}
+
+/// host.getenv(name) -> string | nil
+///
+/// Env access as a capability, like the rest of `host.*`: it checks what the
+/// host resolved first and falls back to the real process environment.
+pub extern "C" fn getenv(l: *mut LuaState) -> c_int {
+    let name = arg_string(l, 1).unwrap_or_default();
+    let value = ENV_OVERRIDES
+        .get()
+        .and_then(|map| map.get(&name).cloned())
+        .or_else(|| std::env::var(&name).ok());
+    match value {
+        Some(value) => {
+            unsafe { lua_pushlstring(l, value.as_ptr() as *const c_char, value.len()) };
+            1
+        }
+        // Returning nothing yields nil, which is what os.getenv does for unset.
+        None => 0,
+    }
 }
 
 fn host_of<'a>(l: *mut LuaState) -> &'a Host {

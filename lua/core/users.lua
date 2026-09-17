@@ -12,7 +12,7 @@ local sessions = {}
 local cache = nil
 
 local function path()
-  return (os.getenv("HOME") or ".") .. "/.wasm-agent/users.json"
+  return (host.getenv("HOME") or ".") .. "/.wasm-agent/users.json"
 end
 
 local DEFAULT = {

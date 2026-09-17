@@ -10,7 +10,7 @@ local CACHE_TTL = 15
 local cache, cache_at = nil, 0
 
 function M.rendezvous_url()
-  return os.getenv("WASM_AGENT_RENDEZVOUS") or ""
+  return host.getenv("WASM_AGENT_RENDEZVOUS") or ""
 end
 
 function M.identity()
@@ -20,7 +20,7 @@ function M.identity()
 end
 
 function M.node_name()
-  return os.getenv("WASM_AGENT_NODE_NAME") or "host"
+  return host.getenv("WASM_AGENT_NODE_NAME") or "host"
 end
 
 local function fetch_peers()
@@ -110,7 +110,7 @@ end
 
 -- The relay that fronts nodes which cannot accept inbound connections.
 function M.relay_url()
-  return os.getenv("WASM_AGENT_RELAY") or ""
+  return host.getenv("WASM_AGENT_RELAY") or ""
 end
 
 function M.signed_headers(action)

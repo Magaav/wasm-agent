@@ -351,7 +351,7 @@ end
 
 -- Push everything after each peer's cursor. Called on a timer by the host.
 function wa_sync_tick()
-  local configured = os.getenv("WASM_AGENT_SYNC_TO") or ""
+  local configured = host.getenv("WASM_AGENT_SYNC_TO") or ""
   if configured == "" then return json.encode({ ok = true, peers = 0, pushed = 0 }) end
   local peers, pushed, failed, last_error = 0, 0, 0, nil
   for peer in configured:gmatch("[^,]+") do
@@ -400,7 +400,7 @@ function wa_sync_status()
   return json.encode({
     node_id = (nodeslib.identity() or {}).node_id or "",
     head = memory.journal_head(),
-    pushing_to = os.getenv("WASM_AGENT_SYNC_TO") or "",
+    pushing_to = host.getenv("WASM_AGENT_SYNC_TO") or "",
     peers = memory.sync_peers(),
   })
 end
@@ -431,9 +431,9 @@ function wa_model(node, session)
     providers = providers,
     usage = agentlib.usage(),
     limits = provider.limits(),
-    context_limit = tonumber(os.getenv("WASM_AGENT_LLM_CONTEXT")) or 0,
+    context_limit = tonumber(host.getenv("WASM_AGENT_LLM_CONTEXT")) or 0,
     stats = memory.stats(),
-    database = os.getenv("WASM_AGENT_DB") or "",
+    database = host.getenv("WASM_AGENT_DB") or "",
   })
 end
 
