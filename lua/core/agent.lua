@@ -164,6 +164,55 @@ function M:build_context()
       }
     end
   end
+
+  -- A tool call and its result are recorded as separate turns, so a turn that
+  -- dies between them leaves a half-written exchange. Providers reject both
+  -- halves - a call with no result, and a result with no call - with a 400 that
+  -- would otherwise fail *every* later turn in this session, permanently
+  -- bricking it. Repair the window instead: keep only exchanges that are
+  -- complete, and say so, because silently dropping messages is exactly the
+  -- kind of hidden data loss this project forbids.
+  local answered = {}
+  for _, message in ipairs(messages) do
+    if message.role == "tool" and message.tool_call_id ~= "" then
+      answered[message.tool_call_id] = true
+    end
+  end
+  local dropped_calls, dropped_results = 0, 0
+  for _, message in ipairs(messages) do
+    if message.role == "assistant" and message.tool_calls then
+      local complete = true
+      for _, call in ipairs(message.tool_calls) do
+        if not (call.id and answered[call.id]) then complete = false end
+      end
+      if not complete then
+        dropped_calls = dropped_calls + 1
+        message.tool_calls = nil
+      end
+    end
+  end
+  -- Re-check after dropping calls: a result whose call is gone is now an orphan.
+  local declared = {}
+  for _, message in ipairs(messages) do
+    if message.role == "assistant" and message.tool_calls then
+      for _, call in ipairs(message.tool_calls) do declared[call.id] = true end
+    end
+  end
+  for index = #messages, 1, -1 do
+    local message = messages[index]
+    if message.role == "tool" and not declared[message.tool_call_id] then
+      table.remove(messages, index)
+      dropped_results = dropped_results + 1
+    end
+  end
+  if dropped_calls > 0 or dropped_results > 0 then
+    self.repaired = (self.repaired or 0) + 1
+    self.emit({
+      type = "status",
+      text = string.format("repaired an incomplete tool exchange in the transcript (%d call(s), %d result(s) dropped)",
+        dropped_calls, dropped_results),
+    })
+  end
   return messages
 end
 

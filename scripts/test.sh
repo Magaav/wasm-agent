@@ -77,6 +77,35 @@ LUA
 WA_SCRIPT="$DB.syntax.lua" "$BIN" --db "$DB" | grep -q "lua syntax ok"
 rm -f "$DB.syntax.lua"
 
+# A turn killed between recording its tool call and its result would otherwise
+# make every later turn in that session fail with a provider 400 - a bricked
+# thread. Build such a transcript on purpose and assert the context is repaired.
+cat > "$DB.repair.lua" <<'LUA'
+local memory = dofile("lua/core/memory.lua")
+local agentlib = dofile("lua/core/agent.lua")
+memory.setup()
+local sid = memory.start_session("test", "repair", { user_id = "master", node_id = "", title = "repair" })
+local call = { id = "call_1", type = "function", ["function"] = { name = "bash", arguments = "{}" } }
+memory.append_turn(sid, { role = "user", content = "do it" })
+memory.append_turn(sid, { role = "assistant", content = "", tool_calls = { call } })
+-- no tool result follows: the turn died here
+memory.append_turn(sid, { role = "user", content = "are you there?" })
+
+local bot = agentlib.new(sid, function() end, "master", "master", "")
+local messages = bot:build_context()
+local calls, orphans = 0, 0
+for _, m in ipairs(messages) do
+  if m.role == "assistant" and m.tool_calls then calls = calls + 1 end
+  if m.role == "tool" then orphans = orphans + 1 end
+end
+assert(calls == 0, "an unanswered tool call must not be sent (found " .. calls .. ")")
+assert(orphans == 0, "an orphan tool result must not be sent (found " .. orphans .. ")")
+assert(bot.repaired and bot.repaired > 0, "the repair must be recorded, not silent")
+print("repair ok")
+LUA
+WA_SCRIPT="$DB.repair.lua" "$BIN" --db "$DB" | grep -q "repair ok"
+rm -f "$DB.repair.lua"
+
 # Build every plugin and assert one round trip through the WASM host.
 for crate in rust/plugins/*/; do
   [ -f "$crate/Cargo.toml" ] || continue
