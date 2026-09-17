@@ -13,8 +13,16 @@ end
 
 local probe_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 
--- Headline check: the real host sha256 must match coreutils' sha256 of the
--- decoded bytes. If these disagree, content addressing is unsound.
+-- The sha256 of the base64 *text* of the probe PNG. Computed externally with
+-- coreutils (`printf %s '<b64>' | sha256sum`), not by the code under test.
+--
+-- This is asserted against a fixed constant on purpose: host.sha256() reaches
+-- Lua through CStr::from_ptr, which truncates at the first NUL. Hashing the
+-- decoded PNG therefore hashed 8 bytes of 70 and produced a plausible-looking
+-- but wrong digest. Only an external reference catches that class of bug.
+local EXPECTED_SHA256 = "e427046b9065448356fbf74a566c314d2538a7245140c8d042054420675db8f6"
+
+-- Headline check: the real host sha256 must match an externally computed value.
 local ref, problem = memory.store_image({
   name = "probe.png", mime = "image/png", data = "data:image/png;base64," .. probe_b64,
 })
@@ -22,6 +30,8 @@ check(ref ~= nil, "store_image on the real host" .. (problem and (" (" .. proble
 check(ref.sha256 ~= nil and #ref.sha256 == 64, "sha256 is 64 hex chars")
 print("     sha256 = " .. tostring(ref.sha256))
 print("     path   = " .. tostring(ref.path))
+check(ref.sha256 == EXPECTED_SHA256, "sha256 matches the externally computed digest")
+check(ref.path:find(EXPECTED_SHA256, 1, true) ~= nil, "the path is keyed by that digest")
 check(ref.bytes == 70, "byte count is 70")
 
 -- The file must be readable back, byte-identical.

@@ -473,13 +473,22 @@ function M.store_image(entry)
   end
   local bytes = M.base64_decode(raw)
   if bytes == "" then return nil, "empty_image" end
-  local digest = host.sha256(bytes)
+  -- Hash the *base64 text*, never the decoded bytes.
+  --
+  -- host.sha256() reaches Lua through `CStr::from_ptr` (rust/wa-host/src/lua.rs),
+  -- which stops at the first NUL. A PNG has a NUL at byte 9 of 70, so hashing
+  -- the decoded binary hashed an 8-byte prefix: a silent, truncated content
+  -- address, where two different images sharing a head would collide. The
+  -- encoded form is ASCII by construction, so it hashes in full, and it is also
+  -- exactly what we write to disk - so identity and stored bytes agree.
+  local encoded_bytes = M.base64_encode(bytes)
+  local digest = host.sha256(encoded_bytes)
   local extension = IMAGE_TYPES[mime]
   local directory = paths.data() .. "/attachments/" .. digest:sub(1, 2)
   local path = directory .. "/" .. digest .. "." .. extension
   -- Content-addressed: identical bytes already on disk are already correct.
   if not (host.read_file and host.read_file(path)) then
-    local ok = host.write_file and host.write_file(path, M.base64_encode(bytes))
+    local ok = host.write_file and host.write_file(path, encoded_bytes)
     if not ok then return nil, "attachment_write_failed: " .. path end
   end
   return {
