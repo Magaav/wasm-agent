@@ -124,3 +124,27 @@ bash scripts/build-window.sh                  # -> target/windows-x64/.../wa-win
   the error and the step. `docs/MEMORY.md` explains the tracing model.
 - Verify before claiming: run the smoke test, and prefer a real two-node check
   over a single-process one.
+
+## Commit provenance
+
+Author is useless here: every commit in this repository is `wasm-agent
+<agent@wasm-agent.local>` (or `.dev` from the cloud), because both harnesses and
+both trees share one configured identity. When a commit had to be traced, the
+only signal was the timestamp — the operator, the pi session and the wasm-agent
+node were indistinguishable.
+
+So say who you are in the message. End every commit you make with a trailer:
+
+```
+Agent: wasm-agent node=desktop-mg9djtg session=7a2f57ff
+Agent: pi session=<the pi session id>
+```
+
+The session id is the useful part: it maps the commit back to a transcript, and
+the transcript holds the tool calls, the diffs and the reasoning. Without it a
+commit is an orphan.
+
+And never leave a tree dirty without saying so. An uncommitted working-tree edit
+is invisible, unattributable and lost the moment anyone pulls — which is exactly
+what happened to a UI change found sitting in the cloud tree: no author, no date,
+no trace, and no way to tell whether it was even wanted.
