@@ -7,8 +7,12 @@ export PATH="$HOME/.cargo/bin:$PATH"
 cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 BIN=rust/target/release/wa
 DB="$(mktemp -u /tmp/wa-smoke-XXXXXX.db)"
+# `wa status` reports *the current thread*, so it gets its own database: with the
+# shared one, every earlier session in this run sits in the same second and the
+# "latest session" assertion would be a coin flip.
+SDB="$(mktemp -u /tmp/wa-status-XXXXXX.db)"
 PLUGINS="$(mktemp -d)"
-trap 'rm -f "$DB" "$DB"-wal "$DB"-shm; rm -rf "$PLUGINS"' EXIT
+trap 'rm -f "$DB" "$DB"-wal "$DB"-shm "$SDB" "$SDB"-wal "$SDB"-shm; rm -rf "$PLUGINS"' EXIT
 
 "$BIN" --db "$DB" init >/dev/null
 ID="$("$BIN" --db "$DB" remember "smoke fact about the rust lua core")"
@@ -183,6 +187,66 @@ print("sessions ok")
 LUA
 WA_SCRIPT="$DB.sessions.lua" "$BIN" --db "$DB" | grep "sessions ok"
 rm -f "$DB.sessions.lua"
+
+# `wa status` is the command an operator runs when something is wrong, so every
+# fact it prints is asserted here - including the one that has to leave the
+# process (git). A health line that says "clean" because git was unreachable is
+# worse than no line at all.
+cat > "$DB.status.lua" <<'LUA'
+local json = dofile("lua/vendor/json.lua")
+local memory = dofile("lua/core/memory.lua")
+local provider = dofile("lua/core/provider.lua")
+local paths = dofile("lua/core/paths.lua")
+local status = dofile("lua/core/status.lua")
+memory.setup()
+
+-- Identity: the node id must be this node's real ed25519 id, not a placeholder.
+local identity = json.decode(host.node_identity())
+assert(status.node_id() == identity.node_id, "status must report this node's id")
+
+-- The model line states the model *and* whether it can be reached: without the
+-- second half a missing api key reads as a merely quiet model.
+local model = status.model()
+assert(model:find(provider.settings().model, 1, true) ~= nil,
+  "the model line must name the model: " .. model)
+local expected = provider.configured() and "configured=yes" or "configured=no"
+assert(model:find(expected, 1, true) ~= nil, "the model line must say " .. expected)
+
+-- The thread: exactly the session `wa chat --continue` would resume.
+local sid = memory.start_session("", "chat", { user_id = "master", node_id = "", title = "status" })
+assert(status.session_id() == sid, "status must report the current thread")
+assert(status.session():find(sid, 1, true) ~= nil, "the session line must carry the id")
+
+-- The working tree: git must be reachable from the checkout under test, and the
+-- answer must be a state, not an apology.
+local tree = status.working_tree()
+assert(tree == "clean" or tree:match("^%d+ changed$") ~= nil,
+  "status must read the working tree, got: " .. tree)
+
+-- paths.config() is the host's answer, not a path rebuilt from $HOME.
+assert(status.config_path() == paths.config(), "config must come from paths.config()")
+assert(status.config_path() ~= "", "the config path must not be empty")
+
+-- Five facts, one line each, and each line names the fact it carries.
+local lines = status.lines()
+assert(#lines == 5, "status must print one line per fact (got " .. #lines .. ")")
+for _, label in ipairs({ "node", "model", "session", "tree", "config" }) do
+  local found = false
+  for _, text in ipairs(lines) do
+    if text:sub(1, #label) == label then found = true end
+  end
+  assert(found, "status is missing its " .. label .. " line")
+end
+print("status ok")
+LUA
+WA_SCRIPT="$DB.status.lua" "$BIN" --db "$SDB" | grep "status ok"
+rm -f "$DB.status.lua"
+
+# And the command itself must be wired to that report, and listed in help: a
+# module nobody can reach is not a command.
+"$BIN" --db "$SDB" status | grep -q "^node "
+"$BIN" --db "$SDB" status | grep -q "^config "
+"$BIN" --db "$SDB" help | grep -q "status"
 
 # Host capabilities that keep the agent portable: it must be able to learn which
 # shell dialect it is in (it guessed POSIX on Windows and lost a whole tool
