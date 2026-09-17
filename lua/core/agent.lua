@@ -47,6 +47,61 @@ local ENVIRONMENT = dofile("lua/core/platform.lua").describe()
 -- more and a chat wants fewer.
 -- Runaway guard, not a task budget: the loop is bounded by context (see the note
 -- before the round loop). A long task compacts mid-turn and keeps going.
+-- pi's checkpoint summary, copied: the summary is the only place a run's plan
+-- lives. pi ships no todo tool on purpose ("No built-in to-dos. They confuse
+-- models."), so the goal, the work in progress, the blockers and the next steps
+-- have to survive compaction in a fixed shape or they are simply lost - and
+-- compaction now happens mid-turn.
+local CHECKPOINT_SUMMARY_PROMPT = table.concat({
+  "The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.",
+  "",
+  "Use this EXACT format:",
+  "",
+  "## Goal",
+  "[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]",
+  "",
+  "## Constraints & Preferences",
+  "- [Any constraints, preferences, or requirements mentioned by user]",
+  "- [Or '(none)' if none were mentioned]",
+  "",
+  "## Progress",
+  "### Done",
+  "- [x] [Completed tasks/changes]",
+  "",
+  "### In Progress",
+  "- [ ] [Current work]",
+  "",
+  "### Blocked",
+  "- [Issues preventing progress, if any]",
+  "",
+  "## Key Decisions",
+  "- **[Decision]**: [Brief rationale]",
+  "",
+  "## Next Steps",
+  "1. [Ordered list of what should happen next]",
+}, "\n")
+
+-- The split-turn case: the span being summarised is the early part of one turn
+-- too large to keep, so there are no complete turns to summarise. pi generates
+-- this as a second summary and merges it with the history summary; here the
+-- span is summarised in one pass with the prefix shape.
+local PREFIX_SUMMARY_PROMPT = table.concat({
+  "This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.",
+  "",
+  "Summarize the prefix to provide context for the retained suffix:",
+  "",
+  "## Original Request",
+  "[What did the user ask for in this turn?]",
+  "",
+  "## Early Progress",
+  "- [Key decisions and work done in the prefix]",
+  "",
+  "## Context for Suffix",
+  "- [Information needed to understand the retained recent work]",
+  "",
+  "Be concise. Focus on what's needed to understand the kept suffix.",
+}, "\n")
+
 local MAX_TOOL_ROUNDS = tonumber(host.getenv("WASM_AGENT_MAX_TOOL_ROUNDS")) or 200
 local TOOL_TRUNCATE = 600          -- default mode: keep tool output small
 local COMPACT_RESERVE = 16384      -- tokens reserved for the reply (like pi)
@@ -106,12 +161,65 @@ function M.agents_md(role)
   return nil, nil
 end
 
-local function system_prompt(role, agents)
+-- Guidelines, built the way pi builds them: a base set, entries that depend on
+-- which tools actually exist, and project-supplied ones from
+-- WASM_AGENT_GUIDELINES (one per line - pi's `promptGuidelines`). Deduplicated,
+-- because a repeated instruction is noise.
+local function guidelines_for(tool_list)
+  local have = {}
+  for _, tool in ipairs(tool_list or {}) do
+    local name = (tool["function"] or {}).name
+    if name then have[name] = true end
+  end
+  local list, seen = {}, {}
+  local function add(text)
+    text = tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if text ~= "" and not seen[text] then
+      seen[text] = true
+      list[#list + 1] = text
+    end
+  end
+  local extra = host.getenv("WASM_AGENT_GUIDELINES")
+  if extra and extra ~= "" then
+    for line in extra:gmatch("[^\n]+") do add(line) end
+  end
+  if have.bash and not (have.grep or have.ls) then
+    add("Use bash for file operations like listing and searching")
+  end
+  add("Be concise in your responses")
+  add("Show file paths clearly when working with files")
+  return list
+end
+
+local function system_prompt(role, agents, agents_path, tool_list)
   local parts = { SYSTEM, "Running on: " .. ENVIRONMENT }
+  if tool_list and #tool_list > 0 then
+    -- pi lists the tools in the prompt as well as in the schemas: a model that
+    -- under-uses a tool is more likely to reach for it when it is named here.
+    local lines = { "Available tools:" }
+    for _, tool in ipairs(tool_list) do
+      local function_ = tool["function"] or {}
+      local snippet = tostring(function_.description or ""):match("^[^.]*") or ""
+      lines[#lines + 1] = string.format("- %s: %s", tostring(function_.name or "?"), snippet:sub(1, 110))
+    end
+    parts[#parts + 1] = table.concat(lines, "\n")
+    parts[#parts + 1] = "In addition to the tools above, you may have access to other tools " ..
+      "depending on the project."
+  end
+  local guidelines = guidelines_for(tool_list)
+  if #guidelines > 0 then
+    local lines = { "Guidelines:" }
+    for _, line in ipairs(guidelines) do lines[#lines + 1] = "- " .. line end
+    parts[#parts + 1] = table.concat(lines, "\n")
+  end
   if agents and agents ~= "" then
-    parts[#parts + 1] = "Project instructions:\n" .. agents
+    -- With the path, so the agent knows which file these rules came from and can
+    -- go back and read or edit it. pi stamps it the same way.
+    parts[#parts + 1] = "Project-specific instructions and guidelines:\n<project_instructions path=\"" ..
+      tostring(agents_path or "AGENTS.md") .. "\">\n" .. agents .. "\n</project_instructions>"
   end
   parts[#parts + 1] = "Your role is `" .. tostring(role or "master") .. "`."
+  parts[#parts + 1] = "Current working directory: " .. dofile("lua/core/platform.lua").cwd()
   return table.concat(parts, "\n\n")
 end
 
@@ -156,7 +264,9 @@ function M:build_context()
   local session = memory.session(self.session_id) or {}
   local agents, agents_path = M.agents_md(self.role)
   self.agents_source = agents_path
-  local messages = { { role = "system", content = system_prompt(self.role, agents) } }
+  local tool_list = tools.all(self.role)
+  self.tool_list = tool_list
+  local messages = { { role = "system", content = system_prompt(self.role, agents, agents_path, tool_list) } }
   if session.summary and session.summary ~= "" then
     messages[#messages + 1] = {
       role = "system",
@@ -308,10 +418,24 @@ function M:maybe_compact()
     transcript[#transcript + 1] = string.format("%s: %s", rows[index].role,
       (rows[index].content or ""):sub(1, 2000))
   end
+  -- No user message in the span means the cut landed inside one oversized turn:
+  -- pi calls this a split turn and summarises the prefix differently, because
+  -- there is no completed turn to describe.
+  local split_turn = true
+  for index = 1, cut_index do
+    if rows[index].role == "user" then split_turn = false break end
+  end
+  -- The previous summary is fed back in and *superseded* rather than appended:
+  -- concatenating grew it without bound, and a checkpoint that keeps accreting
+  -- stops being a checkpoint.
+  local previous = session.summary or ""
+  local body = table.concat(transcript, "\n")
+  if previous ~= "" then
+    body = "Previous summary (supersede it; keep anything still true):\n" .. previous .. "\n\n" .. body
+  end
   local prompt = {
-    { role = "system", content = "Summarise the conversation below into durable notes: decisions, " ..
-        "facts, names, ids, open threads and what failed. Be compact and factual. No preamble." },
-    { role = "user", content = table.concat(transcript, "\n") },
+    { role = "system", content = split_turn and PREFIX_SUMMARY_PROMPT or CHECKPOINT_SUMMARY_PROMPT },
+    { role = "user", content = body },
   }
   local started = host.now()
   -- cache = false: a one-off prompt must not read or write the conversation's
@@ -321,8 +445,9 @@ function M:maybe_compact()
     self.emit({ type = "status", text = "compaction failed: " .. redact.text(tostring(result)):sub(1, 120) })
     return false
   end
-  local previous = session.summary or ""
-  local merged = previous ~= "" and (previous .. "\n" .. result.content) or result.content
+  local previous_summary = session.summary or ""
+  local merged = tostring(result.content or "")
+  if merged == "" then merged = previous_summary end
   memory.set_session_summary(self.session_id, cut.seq, merged)
   local after = self:context_tokens()  -- honest post-compaction size of the transcript
   -- Record it in the transcript so a compaction (and the cache invalidation it
@@ -333,6 +458,7 @@ function M:maybe_compact()
     trace = { {
       kind = "compact", summarized_until = cut.seq, messages = cut_index,
       tokens_before = before, tokens_after = after, invalidates_cache = true,
+      split_turn = split_turn, superseded = previous_summary ~= "",
       summary_model = self:summary_model(),
       ms = math.floor((host.now() - started) * 1000),
     } },
@@ -359,7 +485,7 @@ function M:turn(text)
   local reply = ""
   local turn = { prompt = 0, completion = 0, total = 0, cached = 0 }
   local turn_started = host.now()
-  local tool_list = tools.all(self.role)
+  local tool_list = self.tool_list or tools.all(self.role)
   -- Fingerprint of the *stable* prefix (system + AGENTS.md + tool schemas).
   -- Identical across turns unless instructions or tools change, which is what a
   -- provider needs in order to serve the prefix from its KV/context cache.

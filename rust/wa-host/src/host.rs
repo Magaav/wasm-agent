@@ -86,14 +86,14 @@ pub extern "C" fn paths(l: *mut LuaState) -> c_int {
     1
 }
 
-/// host.platform() -> { os, arch, shell, pathSeparator }
+/// host.platform() -> { os, arch, shell, pathSeparator, cwd }
 ///
 /// So the agent can be told which dialect it is running in. Its `bash` tool is
 /// `sh -c` on Linux and `cmd /C` on Windows, and without this the model guesses
 /// POSIX: it runs `pwd`, `ls` and `grep`, gets "not recognized as an internal or
 /// external command", and burns its tool budget on retries.
 pub extern "C" fn platform(l: *mut LuaState) -> c_int {
-    let entries: [(&str, String); 4] = [
+    let entries: [(&str, String); 5] = [
         ("os", std::env::consts::OS.to_string()),
         ("arch", std::env::consts::ARCH.to_string()),
         (
@@ -101,6 +101,14 @@ pub extern "C" fn platform(l: *mut LuaState) -> c_int {
             if cfg!(target_os = "windows") { "cmd /C".to_string() } else { "sh -c".to_string() },
         ),
         ("pathSeparator", std::path::MAIN_SEPARATOR.to_string()),
+        // pi puts the working directory at the end of its system prompt, and an
+        // agent in a worktree should never have to guess which checkout it is in.
+        (
+            "cwd",
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| ".".to_string()),
+        ),
     ];
     unsafe {
         crate::lua::lua_createtable(l, 0, entries.len() as c_int);

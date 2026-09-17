@@ -15,12 +15,13 @@ function M.info()
     cached = value
     return cached
   end
-  cached = { os = "unknown", arch = "unknown", shell = "sh -c", pathSeparator = "/" }
+  cached = { os = "unknown", arch = "unknown", shell = "sh -c", pathSeparator = "/", cwd = "." }
   return cached
 end
 
 function M.os() return M.info().os end
 function M.shell() return M.info().shell end
+function M.cwd() return M.info().cwd or "." end
 
 -- One line for the system prompt, and a short form for tool descriptions.
 function M.describe()
