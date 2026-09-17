@@ -283,7 +283,7 @@ fn main() {
                 node::spawn_heartbeat(rendezvous_url);
             }
         }
-        serve::run(&lua, port, PathBuf::from(ui));
+        serve::run(lua, port, PathBuf::from(ui));
         return;
     }
 

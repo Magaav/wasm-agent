@@ -82,6 +82,14 @@ pub fn cstr(s: &str) -> CString {
     CString::new(s).expect("no interior nul")
 }
 
+// SAFETY: the interpreter is used by exactly one thread. `serve` moves it into
+// the agent thread at startup and nothing else touches it afterwards; every path
+// that reaches Lua in process (the accept thread answers static requests and
+// forwards the rest) goes through that one thread. This is what keeps the
+// "single-threaded" invariant while letting the node answer its own UI during a
+// running turn.
+unsafe impl Send for Lua {}
+
 pub struct Lua {
     pub l: *mut LuaState,
 }

@@ -1,17 +1,28 @@
 //! Tiny local web UI plus the node's inbound surface.
 //!
-//! Deliberately single-threaded: the Lua state is not thread-safe, so requests
-//! are handled one at a time on the main thread. Two things feed that loop:
-//! sockets, and — when attached to a relay — requests the relay hands us
-//! (`relay_client`). Both end up in `dispatch`, so a node behaves identically
-//! whether it is reached directly or through the relay.
+//! Two threads, with one job each. The accept thread answers everything that needs
+//! no interpreter - `/health`, `/version`, and the UI files - and forwards the rest
+//! to the agent thread, which owns the Lua state and runs requests one at a time
+//! (the interpreter is not thread-safe, so that serialisation is required, not a
+//! choice).
+//!
+//! The split exists because a single thread made the node deaf to its own UI while
+//! a turn was running: `POST /chat` holds its connection for a whole turn, so the
+//! window's fetches queued behind a model call, Chromium gave up, and the user saw
+//! "TypeError: Failed to fetch" from a node that was local and alive. Reloading
+//! could not help either - the reload needed the same busy thread.
+//!
+//! Two things feed the agent thread: sockets, and - when attached to a relay -
+//! requests the relay hands us (`relay_client`). Both end up in `dispatch`, so a
+//! node behaves identically whether it is reached directly or through the relay.
 use crate::lua::Lua;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-/// The one open SSE client (the server is single-threaded, so one is enough).
+/// The one open SSE client. Only the agent thread touches it, but it is a static
+/// so that `host.stream` can reach it from inside Lua.
 static CLIENT: Mutex<Option<TcpStream>> = Mutex::new(None);
 
 /// When set, events are collected here instead of going to a socket: that is how
@@ -54,7 +65,7 @@ fn ok_json(body: String) -> Reply {
     (200, "application/json", body.into_bytes())
 }
 
-pub fn run(lua: &Lua, port: u16, ui: PathBuf) {
+pub fn run(lua: Lua, port: u16, ui: PathBuf) {
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(listener) => listener,
         Err(error) => {
@@ -70,31 +81,50 @@ pub fn run(lua: &Lua, port: u16, ui: PathBuf) {
         }
     }
 
-    // Non-blocking accept so the single-threaded server can also run scheduled
-    // work (replication ticks, relayed requests) without a second thread
-    // touching the Lua state.
-    let _ = listener.set_nonblocking(true);
-    let mut next_sync = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        // Requests the relay handed to us (NAT'd peers, or peers relaying to us).
-        for job in crate::relay_client::take_jobs() {
-            let (status, body) = process_relay_job(lua, &ui, &job);
-            let _ = job.reply.send((status, body));
-        }
-        match listener.accept() {
-            Ok((mut stream, _)) => {
-                let _ = handle(lua, &ui, &mut stream);
+    // The agent thread owns the interpreter for the life of the process. Requests
+    // are queued to it, so they still run one at a time - what changed is that a
+    // running turn no longer stops the node answering `/health`, `/version` and its
+    // own UI files, which is what made the window look broken and made reloading
+    // useless.
+    let (sender, receiver) = std::sync::mpsc::channel::<(TcpStream, Request)>();
+    let agent_ui = ui.clone();
+    std::thread::spawn(move || {
+        let mut next_sync = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            // Requests the relay handed to us (NAT'd peers, or peers relaying us).
+            for job in crate::relay_client::take_jobs() {
+                let (status, body) = process_relay_job(&lua, &agent_ui, &job);
+                let _ = job.reply.send((status, body));
             }
-            Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                if std::time::Instant::now() >= next_sync {
-                    next_sync = std::time::Instant::now() + std::time::Duration::from_secs(20);
-                    if let Err(error) = lua.call_string("wa_sync_tick", &[]) {
-                        eprintln!("[sync] tick failed: {error}");
-                    }
+            if std::time::Instant::now() >= next_sync {
+                next_sync = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                if let Err(error) = lua.call_string("wa_sync_tick", &[]) {
+                    eprintln!("[sync] tick failed: {error}");
                 }
-                std::thread::sleep(std::time::Duration::from_millis(120));
             }
-            Err(_) => std::thread::sleep(std::time::Duration::from_millis(120)),
+            match receiver.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok((mut stream, request)) => {
+                    let _ = handle(&lua, &agent_ui, &mut stream, &request);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+        }
+    });
+
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else { continue };
+        let request = match read_request(&mut stream) {
+            Ok(Some(request)) => request,
+            _ => continue,
+        };
+        if let Some((status, content_type, body)) = static_reply(&ui, &request) {
+            let _ = respond(&mut stream, status, content_type, &body);
+            continue;
+        }
+        if sender.send((stream, request)).is_err() {
+            eprintln!("[serve] agent thread is gone");
+            return;
         }
     }
 }
@@ -179,13 +209,25 @@ fn split_path(path: &str) -> (String, String) {
     }
 }
 
-fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::Result<()> {
+/// A parsed request, so the accept thread can decide whether answering it needs the
+/// interpreter before handing it over.
+struct Request {
+    method: String,
+    path: String,
+    session: String,
+    node_headers: Vec<(String, String)>,
+    body: Vec<u8>,
+    accept_sse: bool,
+}
+
+/// Read one request off the socket. `None` means the peer closed.
+fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
     let mut data = Vec::new();
     let mut chunk = [0u8; 16384];
-    let (method, path, session, node_headers, body, accept_sse) = loop {
+    loop {
         let read = stream.read(&mut chunk)?;
         if read == 0 {
-            return Ok(());
+            return Ok(None);
         }
         data.extend_from_slice(&chunk[..read]);
         if let Some(end) = find(&data, b"\r\n\r\n") {
@@ -213,15 +255,62 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream) -> std::io::R
                 }
             }
             if data.len() >= end + 4 + length {
-                break (method, path, session, node_headers, data[end + 4..end + 4 + length].to_vec(), accept_sse);
+                return Ok(Some(Request {
+                    method,
+                    path,
+                    session,
+                    node_headers,
+                    body: data[end + 4..end + 4 + length].to_vec(),
+                    accept_sse,
+                }));
             }
         }
         if data.len() > 4_000_000 {
-            return Ok(());
+            return Ok(None);
         }
-    };
+    }
+}
 
-    let (route, _query) = split_path(&path);
+/// Answered on the accept thread, without the interpreter: the two facts a node is
+/// asked for when it looks unwell, and the files the window needs to redraw itself.
+/// Anything else - including an unknown route - goes to the agent thread.
+fn static_reply(ui: &std::path::Path, request: &Request) -> Option<Reply> {
+    let (route, _query) = split_path(&request.path);
+    if route == "/health" {
+        return Some((200, "application/json", b"{\"ok\":true}".to_vec()));
+    }
+    if route == "/version" {
+        return Some((200, "application/json", version_body(ui).into_bytes()));
+    }
+    let relative = if route == "/" || route.is_empty() {
+        "index.html".to_string()
+    } else {
+        route.trim_start_matches('/').to_string()
+    };
+    if relative.contains("..") {
+        return Some((400, "text/plain", b"bad path".to_vec()));
+    }
+    // A route the UI does not have could still be an API route (they are all
+    // handled by `dispatch`), so absence is not a 404 here - it means "ask the
+    // agent thread". That keeps the route table in exactly one place.
+    match std::fs::read(ui.join(&relative)) {
+        Ok(bytes) => Some((200, content_type(&relative), bytes)),
+        Err(_) => None,
+    }
+}
+
+fn version_body(ui: &std::path::Path) -> String {
+    format!("{{\"version\":\"{}\"}}", ui_version(ui))
+}
+
+fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream, request: &Request) -> std::io::Result<()> {
+    let method = request.method.as_str();
+    let path = request.path.as_str();
+    let session = request.session.as_str();
+    let body = request.body.as_slice();
+    let node_headers = request.node_headers.as_slice();
+    let accept_sse = request.accept_sse;
+    let (route, _query) = split_path(path);
     if route == "/chat" && method == "POST" {
         let text = String::from_utf8_lossy(&body).to_string();
         if accept_sse || route.contains("stream=1") {
@@ -308,7 +397,7 @@ fn dispatch(
     };
 
     let reply = match route.as_str() {
-        "/version" => (200, "application/json", format!("{{\"version\":\"{}\"}}", ui_version(ui)).into_bytes()),
+        "/version" => (200, "application/json", version_body(ui).into_bytes()),
         "/health" => (200, "application/json", b"{\"ok\":true}".to_vec()),
         "/models" => (200, "application/json", call("wa_model", &[node.as_str(), session]).into_bytes()),
         "/me" => (200, "application/json", call("wa_me", &[session]).into_bytes()),
