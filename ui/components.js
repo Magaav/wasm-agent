@@ -222,12 +222,22 @@ class WaTrace extends HTMLElement {
   }
 
   toggle() {
+    // Remember the reader's choice: automatic collapsing must not fight it.
+    this._userToggled = true;
     this.open = !this.open;
     this.dispatchEvent(new CustomEvent("toggle", { bubbles: true }));
   }
 
+  // One click on a finished run should show the sequence, not another row of
+  // collapsed headers.
+  reveal() {
+    this._userToggled = false;
+    this.open = true;
+  }
+
   // addTool(name, title) -> the line element, so the caller can fill the outcome.
   addTool(name, title, detail) {
+    if (!this._userToggled) this.open = true;   // live: show the lines, not a count
     this._count += 1;
     const line = document.createElement("li");
     line.className = "tool-line pending";
@@ -274,6 +284,7 @@ class WaTrace extends HTMLElement {
   finish() {
     this._header.classList.remove("running");
     this._done = true;
+    if (!this._userToggled) this.open = false;   // the decision is over: fold it away
     this._elapsed = Date.now() - this._started;
     this._refresh();
   }

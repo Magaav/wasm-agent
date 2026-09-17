@@ -372,7 +372,10 @@ function collapseRun() {
   }
   const run = document.createElement("wa-run");
   body.prepend(run);
-  for (const child of moves) run.body.append(child);
+  for (const child of moves) {
+    run.body.append(child);
+    if (typeof child.reveal === "function") child.reveal();
+  }
   run.setSummary(decisions, calls, Date.now() - (turnStartedAt || Date.now()));
 }
 
@@ -417,7 +420,8 @@ function handleEvent(event) {
     if (!turnStartedAt) turnStartedAt = Date.now();
     flushDecision();
   } else if (event.type === "status") {
-    setStatus("wasm-agent is " + (event.text || "working") + "…");
+    const note = event.text || "working";
+    setStatus(note === "model" ? "thinking…" : "wasm-agent is " + note + "…");
   } else if (event.type === "tool") {
     addTool(event.name, event.arguments);
   } else if (event.type === "tool_result") {
