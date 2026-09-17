@@ -45,7 +45,7 @@ local ENVIRONMENT = dofile("lua/core/platform.lua").describe()
 -- Tool rounds: a real coding task is read -> edit -> test -> read again, and
 -- eight rounds is not enough for one. Configurable, because a bulk edit wants
 -- more and a chat wants fewer.
-local MAX_TOOL_ROUNDS = tonumber(host.getenv("WASM_AGENT_MAX_TOOL_ROUNDS")) or 24
+local MAX_TOOL_ROUNDS = tonumber(host.getenv("WASM_AGENT_MAX_TOOL_ROUNDS")) or 32
 local TOOL_TRUNCATE = 600          -- default mode: keep tool output small
 local COMPACT_RESERVE = 16384      -- tokens reserved for the reply (like pi)
 local COMPACT_KEEP = 20000         -- newest tokens left un-summarised (like pi)
@@ -369,6 +369,17 @@ function M:turn(text)
     + estimate_tokens(json.encode(tool_list))
 
   for round = 1, MAX_TOOL_ROUNDS do
+    -- Two rounds before the cut-off, tell the model to wrap up. Without this it
+    -- explores until the loop stops it mid-task, leaving useful edits
+    -- uncommitted and unverified - which is exactly what happened to the first
+    -- self-evolution run: 39 tool calls of real work, then "(tool loop limit
+    -- reached)" and nothing to review.
+    if (MAX_TOOL_ROUNDS - round) == 2 then
+      messages[#messages + 1] = { role = "user", content =
+        "Budget: two tool rounds left. Stop exploring. Verify what you have already "
+        .. "changed, commit it on the current branch, and state plainly what is unfinished." }
+      self.emit({ type = "status", text = "tool budget nearly spent - asking the model to wrap up" })
+    end
     self.emit({ type = "status", text = "model" })
     local llm_started = host.now()
     local agents_var = agents_env(self.role)
