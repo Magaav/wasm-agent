@@ -26,7 +26,11 @@ end
 
 local command = args[1]
 if command == nil or command == "chat" then
-  return dofile("lua/core/chat.lua").run(args)
+  -- Propagate the REPL's status: `wa chat --session <bogus>` exits non-zero so a
+  -- script can tell a rejected session from a successful one.
+  local code = dofile("lua/core/chat.lua").run(args)
+  if code and code ~= 0 then os.exit(code) end
+  return
 end
 
 if command == "init" then

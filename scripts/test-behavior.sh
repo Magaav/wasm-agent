@@ -59,8 +59,10 @@ selected, query, retrieved, answer = False, "", "", ""
 latency = 0
 for seq, role, content, tool_calls, tool_name, trace, ms in turns:
     latency += ms or 0
-    if role == "assistant" and tool_calls:
-        for call in json.loads(tool_calls or "[]"):
+    try: calls = json.loads(tool_calls or "[]")
+    except Exception: calls = []
+    if role == "assistant" and calls:
+        for call in calls:
             fn = call.get("function", {})
             if fn.get("name") == "recall":
                 selected = True
@@ -68,7 +70,9 @@ for seq, role, content, tool_calls, tool_name, trace, ms in turns:
                 except Exception: query = fn.get("arguments") or ""
     if role == "tool" and tool_name == "recall":
         retrieved = content or ""
-    if role == "assistant" and content and not tool_calls:
+    # `tool_calls` is stored as '[]' when empty, and a non-empty string is
+    # truthy in Python - so test the parsed list, not the raw column.
+    if role == "assistant" and content and not calls:
         answer = content
 for _, _, _, _, _, trace, _ in turns:
     for span in json.loads(trace or "[]"):
