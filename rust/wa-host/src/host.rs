@@ -5,9 +5,11 @@
 //! here, so the same Lua can later run as a WASM component with these imports.
 use crate::lua::{arg_string, lua_pushlstring, lua_touserdata, upvalue_index, LuaState};
 use crate::plugins::PluginRegistry;
+use ring::rand::{SecureRandom, SystemRandom};
 use rusqlite::{params_from_iter, Connection};
 use serde_json::{json, Value};
 use std::ffi::{c_char, c_int};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 pub struct Host {
@@ -132,10 +134,41 @@ pub extern "C" fn sha256(l: *mut LuaState) -> c_int {
 }
 
 /// host.uuid() -> random uuid v4 string
+/// A v4 UUID.
+///
+/// Uniqueness here is load-bearing: turns, memories, sessions and journal rows
+/// are all keyed by it. The previous implementation read
+/// /proc/sys/kernel/random/uuid and fell back to the *process id* everywhere
+/// else, which is one value per process - so off Linux the second write in any
+/// session died with `UNIQUE constraint failed: turns.id`.
+fn new_uuid() -> String {
+    let mut bytes = [0u8; 16];
+    let random = SystemRandom::new();
+    if random.fill(&mut bytes).is_err() {
+        // Should not happen, but never return a constant: mix in the clock and
+        // a counter so consecutive calls still differ.
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        bytes[..8].copy_from_slice(&now.as_nanos().to_le_bytes());
+        bytes[8..].copy_from_slice(&COUNTER.fetch_add(1, Ordering::Relaxed).to_le_bytes());
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
 pub extern "C" fn uuid(l: *mut LuaState) -> c_int {
-    let value = std::fs::read_to_string("/proc/sys/kernel/random/uuid")
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| format!("{:x}", std::process::id()));
+    let value = new_uuid();
     unsafe { lua_pushlstring(l, value.as_ptr() as *const c_char, value.len()) };
     1
 }

@@ -57,6 +57,33 @@ fn flag(args: &[String], name: &str) -> Option<String> {
     None
 }
 
+/// The user's home directory, which is where `~/.wasm-agent` lives.
+///
+/// Windows does not set `HOME`, and Git Bash sets it to a POSIX path
+/// (`/c/Users/...`) that Rust cannot open - which silently disabled the whole
+/// config file, leaving the agent in "no model configured" mode. Prefer an
+/// explicit override, then the native Windows variables, then HOME.
+fn resolve_home() -> String {
+    if let Ok(value) = std::env::var("WASM_AGENT_HOME") {
+        if !value.is_empty() {
+            return value;
+        }
+    }
+    if cfg!(windows) {
+        if let Ok(value) = std::env::var("USERPROFILE") {
+            if !value.is_empty() {
+                return value;
+            }
+        }
+        if let (Ok(drive), Ok(path)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+            if !drive.is_empty() && !path.is_empty() {
+                return format!("{drive}{path}");
+            }
+        }
+    }
+    std::env::var("HOME").unwrap_or_else(|_| ".".into())
+}
+
 fn db_path(args: &[String]) -> String {
     flag(args, "--db").unwrap_or_else(|| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -86,6 +113,11 @@ fn load_env_file() {
 }
 
 fn main() {
+    // Publish the resolved home through HOME before anything reads it: the Lua
+    // core, the node key, the plugin directory and the config file all derive
+    // their paths from HOME, so one resolution here fixes them together.
+    let home = resolve_home();
+    std::env::set_var("HOME", &home);
     load_env_file();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--version" || arg == "-v") {
