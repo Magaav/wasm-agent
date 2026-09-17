@@ -23,6 +23,7 @@ use std::sync::Mutex;
 const EMBEDDED: &[(&str, &str)] = &[
     ("lua/vendor/json.lua", include_str!("../../../lua/vendor/json.lua")),
     ("lua/core/schema.sql", include_str!("../../../lua/core/schema.sql")),
+    ("lua/core/skills.lua", include_str!("../../../lua/core/skills.lua")),
     ("lua/core/redact.lua", include_str!("../../../lua/core/redact.lua")),
     ("lua/core/platform.lua", include_str!("../../../lua/core/platform.lua")),    ("lua/core/paths.lua", include_str!("../../../lua/core/paths.lua")),
     ("lua/core/memory.lua", include_str!("../../../lua/core/memory.lua")),

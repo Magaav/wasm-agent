@@ -245,6 +245,41 @@ LUA
 WA_SCRIPT="$DB.memory.lua" "$BIN" --db "$DB" | grep "memory curation ok"
 rm -f "$DB.memory.lua"
 
+# Skills: on-demand instructions (the Agent Skills standard pi implements).
+# Only name and description are always in context; the body loads when a task
+# matches, which is the whole point - a technique needed occasionally must not
+# cost context every turn, and must not have to be explained twice.
+cat > "$DB.skills.lua" <<'LUA'
+local skills = dofile("lua/core/skills.lua")
+local tools = dofile("lua/core/tools.lua")
+local memory = dofile("lua/core/memory.lua")
+memory.setup()
+local found = skills.list(true)
+assert(#found > 0, "at least one skill must be discoverable")
+local names = {}
+for _, skill in ipairs(found) do
+  names[skill.name] = true
+  assert(skill.description ~= "", skill.name .. " must have a description")
+end
+assert(names["see-your-output"], "the repo's own skill must be found")
+local block = skills.prompt_block()
+assert(block and block:find("<available_skills>", 1, true),
+  "the system prompt must advertise the skills")
+assert(block:find("see-your-output", 1, true), "the advertised block must name the skill")
+local loaded = tools.dispatch(memory, "skill", { name = "see-your-output" }, "master")
+assert(loaded.content and #loaded.content > 200, "loading a skill must return its instructions")
+assert(loaded.path and loaded.path:find("SKILL.md", 1, true), "a loaded skill reports its file")
+local missing = tools.dispatch(memory, "skill", { name = "no-such-skill" }, "master")
+assert(missing.error == "unknown_skill", "an unknown skill must fail, not invent one")
+assert(#missing.available > 0, "the failure must list what is available")
+-- Guests get the same read-only knowledge; their tool envelope still gates actions.
+assert(tools.dispatch(memory, "skill", { name = "see-your-output" }, "guest").content,
+  "a guest must be able to read a skill")
+print("skills ok")
+LUA
+WA_SCRIPT="$DB.skills.lua" "$BIN" --db "$DB" | grep "skills ok"
+rm -f "$DB.skills.lua"
+
 # Build every plugin and assert one round trip through the WASM host.
 for crate in rust/plugins/*/; do
   [ -f "$crate/Cargo.toml" ] || continue

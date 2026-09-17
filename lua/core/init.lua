@@ -49,6 +49,13 @@ elseif command == "conversation" then
   each(memory.conversation(args[2], limit_of(args[3], 50)))
 elseif command == "conversations" then
   each(memory.conversations(limit_of(args[2], 50)))
+elseif command == "skills" then
+  local skills = dofile("lua/core/skills.lua").list(true)
+  if #skills == 0 then print("(no skills found)") end
+  for _, skill in ipairs(skills) do
+    print(string.format("%s  %s", skill.name, skill.path))
+    print("    " .. skill.description)
+  end
 elseif command == "stats" then
   print(json.encode(memory.stats()))
 elseif command == "sessions" then
@@ -72,7 +79,7 @@ elseif command == "call" then
 elseif command == "help" then
   print("wa: chat [--continue|--session <id>] [prompt]  |  remember <text> | recall <query>")
   print("    memories | forget <id> | search <query> | conversation <id> | conversations")
-  print("    sessions | stats | nodes | call <node> <capability> [args-json]")
+  print("    sessions | skills | stats | nodes | call <node> <capability> [args-json]")
 else
   print("unknown command: " .. tostring(command))
   os.exit(2)

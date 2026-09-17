@@ -107,6 +107,11 @@ bash scripts/build-window.sh                  # -> target/windows-x64/.../wa-win
   Read `docs/HOST.md` before adding a capability: a host function returns `nil`
   for missing values (never zero values), and paths come from `host.paths()`,
   never `$HOME` or a Linux-only path.
+- **Skills carry procedures, not context.** A technique the agent should not
+  have to be told twice belongs in `skills/<name>/SKILL.md` (the Agent Skills
+  standard, shared with pi and Orca). Only the description is always in
+  context; the body loads when a task matches. Write the *trigger* into the
+  description. See `docs/SKILLS.md`.
 - **UI changes need the UI test, not an opinion.** `scripts/test-ui.ps1` replays a
   synthetic turn in a real headless browser and asserts the structure (one reply
   bubble per turn, decisions and tool topics *inside* it, pi-style tool lines, a

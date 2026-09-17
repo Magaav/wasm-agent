@@ -212,6 +212,10 @@ local function system_prompt(role, agents, agents_path, tool_list)
     for _, line in ipairs(guidelines) do lines[#lines + 1] = "- " .. line end
     parts[#parts + 1] = table.concat(lines, "\n")
   end
+  -- Skills only cost context here as name + description; the body loads on
+  -- demand when a task matches (pi's progressive disclosure).
+  local skills = dofile("lua/core/skills.lua").prompt_block()
+  if skills then parts[#parts + 1] = skills end
   if agents and agents ~= "" then
     -- With the path, so the agent knows which file these rules came from and can
     -- go back and read or edit it. pi stamps it the same way.

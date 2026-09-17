@@ -34,6 +34,8 @@ M.shared = {
   schema("memories", "List what is stored, most recent first, with each entry's id. Use it when the user asks what you remember or wants the store tidied: reading the ids is how you find what `forget` should remove.", {
     scope = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 200 } }),
+  schema("skill", "Load a skill: the full instructions for a specialized task listed in your context. Read the one that matches before starting that kind of work.", {
+    name = { type = "string", description = "The skill's name, as listed in <available_skills>." } }, { "name" }),
   schema("capabilities", "List the tools available to this account (its capabilities).", {}),
   schema("sessions", "List your own past sessions (resumable threads), most recent first.", {
     limit = { type = "integer", minimum = 1, maximum = 100 } }),
@@ -128,6 +130,7 @@ M.admin = {
 -- listed here is a WASM plugin.
 M.tier_of = {
   remember = "memory", recall = "memory", memories = "memory", forget = "memory",
+  skill = "skills",
   capabilities = "capabilities",
   sessions = "sessions", session = "sessions", search_turns = "sessions",
   resume_session = "sessions", session_debug = "sessions", session_fixture = "sessions",
@@ -229,6 +232,21 @@ function M.dispatch(memory, name, args, role, ctx)
     return { ok = true, id = memory.remember(args.content, args.scope or "global", args.tags or {}) }
   elseif name == "recall" then
     return memory.recall(args.query or "", args.limit or 10, args.scope)
+  elseif name == "skill" then
+    local skills = dofile("lua/core/skills.lua")
+    local wanted = args.name or ""
+    if wanted == "" then
+      local names = {}
+      for _, entry in ipairs(skills.list()) do names[#names + 1] = entry.name end
+      return { error = "name_required", available = names }
+    end
+    local found = skills.find(wanted)
+    if not found then
+      local names = {}
+      for _, entry in ipairs(skills.list()) do names[#names + 1] = entry.name end
+      return { error = "unknown_skill", requested = wanted, available = names }
+    end
+    return { name = found.name, path = found.path, dir = found.dir, content = skills.content(found) }
   elseif name == "memories" then
     return memory.memories(args.scope, args.limit or 50)
   elseif name == "forget" then
