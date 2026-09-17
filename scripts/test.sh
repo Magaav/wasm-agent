@@ -144,9 +144,11 @@ for _, case in ipairs(cases) do
   local out = redact.text(case)
   assert(not out:find(fake, 1, true), "redaction leaked a secret: " .. out)
 end
--- Masking must stay useful: which key, not what key.
+-- Masking must stay useful: which key, not what key. Plain find, not a
+-- pattern: in Lua patterns '-' after a letter is a quantifier, so 'sk-%.%.%.'
+-- silently never matches.
 local masked = redact.text("OPENAI_API_KEY=" .. fake)
-assert(masked:find("sk-%.%.%.", 1) ~= nil, "expected a sk-...xxxx mask, got " .. masked)
+assert(masked:find("sk-...", 1, true) ~= nil, "expected a sk-...xxxx mask, got " .. masked)
 assert(masked:find(fake:sub(-4), 1, true) ~= nil, "the mask should keep the last four")
 -- Idempotent: redacting twice changes nothing.
 assert(redact.text(masked) == masked, "redaction must be stable")
