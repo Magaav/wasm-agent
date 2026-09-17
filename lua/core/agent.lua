@@ -113,6 +113,9 @@ local function system_prompt(role, agents)
   return table.concat(parts, "\n\n")
 end
 
+-- Exported so tests and diagnostics can assert what instructions a role runs with.
+M.system_prompt = system_prompt
+
 function M.new(session_id, on_event, role, user, node)
   role = role or "master"
   user = user or "master"
