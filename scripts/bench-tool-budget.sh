@@ -91,7 +91,7 @@ run_one() {
   ended=$(date +%s)
 
   local edited=0
-  grep -q 'M.CONFIG_LIMIT = 20' "$dir/target.lua" && edited=1
+  grep -q "M.CONFIG_LIMIT = 20" "$dir/target.lua" && edited=1
   local metrics calls failed
   metrics="$(measure "$db")"
   calls="$(echo "$metrics" | awk '{print $1}')"
