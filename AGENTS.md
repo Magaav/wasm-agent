@@ -3,19 +3,45 @@
 Instructions for any agent (or human) editing this repo. This file is injected
 into wasm-agent's own context at runtime, so keep it short and operational.
 
-## One repo, two trees, both push to GitHub
+## One repo, three trees, all pushing to GitHub
 
 | Tree | Path | Role |
 | --- | --- | --- |
 | Cloud (authoritative runtime) | `openclaw.ohana:/local/projects/wasm-agent` | builds, runs, hosts the rendezvous + relay |
-| Local clone | this checkout | editing, tests, review |
+| Windows clone | `orca/workspaces/wasm-agent/loggerhead/foundation` | editing, tests, review |
+| Orca worktree | `workspaces/foundation/<task>` (one per task) | one agent per task, its own branch |
 
-Both push to `github.com/Magaav/wasm-agent` (remote `origin`). **GitHub is the
-source of truth**; neither tree is "the" copy. Before editing: `git pull`.
-After editing: commit and push, then pull on the other side.
+All of them push to `github.com/Magaav/wasm-agent` (remote `origin`). **GitHub
+is the source of truth**; none of them is "the" copy. Before editing: `git
+pull`. After editing: commit and push, then pull on the other side.
 
-The local clone authenticates with the `github-wasm-agent` SSH host alias:
+Every tree authenticates with the `github-wasm-agent` SSH host alias:
 `git@github-wasm-agent:Magaav/wasm-agent.git`.
+
+### If you are an Orca-spawned agent in a worktree
+
+- Your worktree is a `git worktree` of this repo, branched off `origin/main`.
+  Treat that branch as your deliverable: **work on it, commit to it, push it.**
+  Do not rewrite `main`, and do not push to `main` — hand the branch off or open
+  a PR, and let the human merge.
+- The last commit on your branch is the human's review surface. Keep commits
+  small and make each message say *why*, not just *what*.
+- Working-directory rule still applies: `git config core.autocrlf` must be
+  `false`. Worktrees inherit it from the shared git dir, so verify, don't assume.
+
+### Never touch the old plugin
+
+`openclaw.ohana:/local` is a **different repository**
+(`github.com/Magaav/hermes-orchestrator`), and `/local/plugins/wasm-agent`
+inside it is the Python v8 predecessor of this project. It is a **reference,
+not a target**: read it if you must, but never edit, build, deploy or "fix" it.
+The same goes for `/local/docs/context/*` and `find-run.py` — those describe the
+old plugin's runs.
+
+This repo is *also* nested on that host, at `/local/projects/wasm-agent`. That
+nesting is why the two get confused: it is a separate git repo (the old one
+ignores `projects/`), so `git -C /local status` says nothing about this repo.
+Always name the path in full.
 
 ### Keep LF
 
@@ -48,6 +74,9 @@ DESIGN.md        UI contract — read before touching ui/
 cd rust && cargo build --release --offline   # offline; crates are vendored/cached
 bash scripts/test.sh                          # end-to-end smoke test
 ```
+
+The smoke test is the gate for the Lua core and the WASM plugin ABI; it needs
+`cargo` on `PATH`, so run it on the cloud tree if the local one lacks it.
 
 The Windows shell is cross-built from Linux (Docker + mingw):
 
