@@ -190,8 +190,13 @@ function M:maybe_compact()
       break
     end
   end
-  -- Never cut at a tool result: it must stay with its tool call.
+  -- The boundary must not split a tool call from its result, in either
+  -- direction: an orphan tool result (or a tool call whose results were
+  -- summarised away) makes the provider reject the whole request with a 400.
   while cut_index >= 1 and rows[cut_index].role == "tool" do cut_index = cut_index - 1 end
+  while cut_index >= 1 and rows[cut_index + 1] and rows[cut_index + 1].role == "tool" do
+    cut_index = cut_index - 1
+  end
   if cut_index < 1 then return end
   local cut = rows[cut_index]
 
