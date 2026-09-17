@@ -53,7 +53,7 @@ for _, leak in ipairs({ "openclaw", "git@github", "WORKSPACE", "cargo" }) do
 end
 print("gating ok")
 LUA
-WA_SCRIPT="$DB.gating.lua" "$BIN" --db "$DB" | grep -q "gating ok"
+WA_SCRIPT="$DB.gating.lua" "$BIN" --db "$DB" | grep "gating ok"
 rm -f "$DB.gating.lua"
 
 # Every embedded Lua module must at least compile. Without this a typo in a
@@ -74,7 +74,7 @@ end
 assert(bad == 0, bad .. " lua module(s) failed to compile")
 print("lua syntax ok")
 LUA
-WA_SCRIPT="$DB.syntax.lua" "$BIN" --db "$DB" | grep -q "lua syntax ok"
+WA_SCRIPT="$DB.syntax.lua" "$BIN" --db "$DB" | grep "lua syntax ok"
 rm -f "$DB.syntax.lua"
 
 # A turn killed between recording its tool call and its result would otherwise
@@ -121,7 +121,7 @@ assert(kept_results == 1, "a complete exchange must keep its result (found " .. 
 assert(not good.repaired, "a complete exchange must not be reported as repaired")
 print("repair ok")
 LUA
-WA_SCRIPT="$DB.repair.lua" "$BIN" --db "$DB" | grep -q "repair ok"
+WA_SCRIPT="$DB.repair.lua" "$BIN" --db "$DB" | grep "repair ok"
 rm -f "$DB.repair.lua"
 
 # Build every plugin and assert one round trip through the WASM host.
@@ -137,7 +137,7 @@ local raw = host.invoke("echo", '{"text":"hi"}')
 assert(raw and raw:find('"echo":"hi"'), "plugin round trip failed: " .. tostring(raw))
 print("plugin ok")
 LUA
-WASM_AGENT_PLUGINS="$PLUGINS" WA_SCRIPT="$DB.plugin.lua" "$BIN" --db "$DB" | grep -q "plugin ok"
+WASM_AGENT_PLUGINS="$PLUGINS" WA_SCRIPT="$DB.plugin.lua" "$BIN" --db "$DB" | grep "plugin ok"
 rm -f "$DB.plugin.lua"
 
 # Line endings are an invariant, not a preference: these files run on a Linux
