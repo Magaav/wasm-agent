@@ -6,7 +6,8 @@
 # put in a directory already on PATH, so it works immediately.
 param(
   [string]$HostAlias = $(if ($env:WASM_AGENT_HOST) { $env:WASM_AGENT_HOST } else { "openclaw.ohana" }),
-  [string]$InstallDir = (Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "wasm-agent")
+  [string]$InstallDir = (Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "wasm-agent"),
+  [string]$RemoteBin = "/local/projects/wasm-agent/target/windows-x64/x86_64-pc-windows-gnu/release"
 )
 $ErrorActionPreference = "Stop"
 
@@ -66,9 +67,45 @@ if (-not $target) {
 }
 Ok $target
 
+Step "installing the local node"
+# wa.exe is the whole agent: Rust host, embedded Lua, SQLite and the tool
+# runtime. The host cross-builds it for Windows, so fetch that build rather than
+the remote shim: the node then runs here, with no SSH in the path.
+$nodeDir = Join-Path $localAppData "wasm-agent"
+New-Item -ItemType Directory -Force -Path $nodeDir | Out-Null
+$localExe = Join-Path $nodeDir "wa.exe"
+$haveExe = $false
+if (Get-Command scp -ErrorAction SilentlyContinue) {
+  try {
+    & scp -q -o BatchMode=yes "${HostAlias}:$RemoteBin/wa.exe" $localExe 2>$null
+    if ((Test-Path $localExe) -and ((Get-Item $localExe).Length -gt 5MB)) { $haveExe = $true }
+  } catch { }
+}
+if ($haveExe) {
+  Ok "wa.exe  -> $localExe"
+} else {
+  Warn "could not fetch wa.exe from $HostAlias; 'wa' will use the host over SSH"
+}
+
 Step "installing the wa command"
 $shim = Join-Path $target "wa.cmd"
-$body = @"
+if ($haveExe) {
+  $body = @"
+@echo off
+if /I "%~1"=="ui" (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wa-ui.ps1" %2 %3 %4 %5 %6 %7 %8 %9
+  exit /b
+)
+"$localExe" %*
+"@
+  Set-Content -Path $shim -Value $body -Encoding ASCII
+  Ok "wa     -> local node"
+  # Keep the host path available for when the local binary is not what you want.
+  $remoteShim = Join-Path $target "wa-remote.cmd"
+  Set-Content -Path $remoteShim -Value "@echo off`nssh -t $HostAlias wasm-agent %*" -Encoding ASCII
+  Ok "wa-remote -> $HostAlias over SSH"
+} else {
+  $body = @"
 @echo off
 if /I "%~1"=="ui" (
   powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wa-ui.ps1" %2 %3 %4 %5 %6 %7 %8 %9
@@ -76,11 +113,51 @@ if /I "%~1"=="ui" (
 )
 ssh -t $HostAlias wasm-agent %*
 "@
-Set-Content -Path $shim -Value $body -Encoding ASCII
+  Set-Content -Path $shim -Value $body -Encoding ASCII
+  Ok "wa     -> ssh -t $HostAlias wasm-agent"
+}
 if (($env:Path -split ';') -notcontains $target) { $env:Path = "$target;$env:Path" }
 $stale = Join-Path $InstallDir "wa.cmd"
 if ((Test-Path $stale) -and ($stale -ne $shim)) { Remove-Item $stale -Force -ErrorAction SilentlyContinue }
-Ok "wa     -> ssh -t $HostAlias wasm-agent"
+
+Step "provisioning the local node"
+# Everything the node needs to think and remember: model config, instructions
+# and a memory database that is created on first use.
+$waHome = Join-Path $env:USERPROFILE ".wasm-agent"
+New-Item -ItemType Directory -Force -Path $waHome | Out-Null
+$envFile = Join-Path $waHome "env"
+if (Test-Path $envFile) {
+  Ok "kept the existing model config"
+} else {
+  try {
+    $lines = @(& ssh -o BatchMode=yes $HostAlias "cat ~/.wasm-agent/env")
+    if ($LASTEXITCODE -eq 0 -and $lines.Count -gt 0) {
+      # Rename this node: copying the host config would otherwise make two nodes
+      # with the same name, which is confusing in the fabric view.
+      $nodeName = $env:COMPUTERNAME.ToLower()
+      $lines = @($lines | ForEach-Object {
+        if ($_ -match '^WASM_AGENT_NODE_NAME=') { "WASM_AGENT_NODE_NAME=$nodeName" } else { $_ }
+      })
+      if (-not ($lines -match '^WASM_AGENT_NODE_NAME=')) { $lines += "WASM_AGENT_NODE_NAME=$nodeName" }
+      Set-Content -Path $envFile -Value $lines -Encoding ASCII
+      Ok "model config -> $envFile"
+    } else {
+      Warn "could not read the model config from $HostAlias"
+    }
+  } catch { Warn "could not read the model config from $HostAlias" }
+}
+foreach ($doc in @("AGENTS.md", "AGENTS.guest.md")) {
+  $dest = Join-Path $waHome $doc
+  if (-not (Test-Path $dest)) {
+    try {
+      Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/Magaav/wasm-agent/main/$doc" -OutFile $dest -ErrorAction Stop
+    } catch { Warn "could not fetch $doc (instructions will come from the working directory)" }
+  }
+}
+if ($haveExe) {
+  $version = (& $localExe --version 2>$null | Select-Object -First 1)
+  if ($version) { Ok "local node ready: $version" } else { Warn "wa.exe did not run; try: $localExe --version" }
+}
 
 $uiScript = Join-Path $target "wa-ui.ps1"
 try {
@@ -115,23 +192,26 @@ Step "checking the connection to $HostAlias"
 if (Get-Command ssh -ErrorAction SilentlyContinue) {
   try {
     $version = (& ssh -o BatchMode=yes -o ConnectTimeout=8 $HostAlias "wasm-agent --version" 2>$null | Select-Object -First 1)
-    if ($LASTEXITCODE -eq 0 -and $version) { Ok "connected: $version" }
-    else { Warn "not reachable yet - check ~/.ssh/config, then run: wa" }
-  } catch { Warn "not reachable yet - check ~/.ssh/config, then run: wa" }
+    if ($LASTEXITCODE -eq 0 -and $version) { Ok "host reachable: $version" }
+    else { Warn "host not reachable - the local node still works offline" }
+  } catch { Warn "host not reachable - the local node still works offline" }
 } else {
-  Warn "ssh not found; install OpenSSH, then run: wa"
+  Warn "ssh not found; the local node still works, only 'wa-remote' and 'wa ui' need it"
 }
 
 Write-Host ""
 Write-Host "   ready." -ForegroundColor Green
 Write-Host ""
 Write-Host "   start chatting:" -ForegroundColor DarkGray
-Write-Host "     wa        chat in the terminal" -ForegroundColor White
+Write-Host "     wa        chat with the local node (no SSH, no latency)" -ForegroundColor White
 Write-Host "     wa ui     open the desktop chat window" -ForegroundColor White
+Write-Host "     wa-remote run the same commands on $HostAlias" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "   then try:" -ForegroundColor DarkGray
 Write-Host "     remember that Laura prefers invoices on the 5th" -ForegroundColor DarkGray
 Write-Host "     what do you know about Laura?" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "   memory lives in $env:USERPROFILE\.wasm-agent\memory.db" -ForegroundColor DarkGray
 Write-Host ""
 if (-not (Get-Command wa -ErrorAction SilentlyContinue)) {
   Write-Host "   (if 'wa' is not found, open a NEW terminal)" -ForegroundColor Yellow
