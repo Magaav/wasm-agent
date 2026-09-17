@@ -102,6 +102,7 @@ elseif command == "help" then
   print("    memories | forget <id> | search <query> | conversation <id> | conversations")
   print("    sessions | skills | stats | status | nodes | call <node> <capability> [args-json]")
   print("    paths  where this node keeps its files, and the config file it would read")
+else
   print("unknown command: " .. tostring(command))
   os.exit(2)
 end

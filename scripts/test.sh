@@ -22,6 +22,17 @@ ID="$("$BIN" --db "$DB" remember "smoke fact about the rust lua core")"
 "$BIN" --db "$DB" memories | grep -q "(empty)"
 "$BIN" --db "$DB" stats | grep -q '"memories":0'
 
+# The CLI's own surface. Resolving a merge once dropped an `else` and made
+# `wa help` fall through to "unknown command" - valid Lua, so every Lua-level
+# test passed while the command was broken.
+HELP="$("$BIN" --db "$DB" help)"
+case "$HELP" in
+  *"unknown command"*) echo "FAIL: wa help falls through to the unknown-command branch" >&2; exit 1 ;;
+esac
+for entry in chat paths status skills sessions; do
+  echo "$HELP" | grep -q "$entry" || { echo "FAIL: wa help must list '$entry'" >&2; exit 1; }
+done
+echo "cli ok"
 # Role gating: a guest must never see master tools, and a session must resolve
 # to its own user. A regression here silently runs guests as master, which is
 # exactly what happened when the session header stopped reaching dispatch.
