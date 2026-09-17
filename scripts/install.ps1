@@ -160,25 +160,33 @@ foreach ($doc in @("AGENTS.md", "AGENTS.guest.md")) {
   }
 }
 # The local server serves ui/ from disk, so the window has no network dependency.
+# Prefer this checkout's copy when the installer runs from one: GitHub raw is
+# CDN-cached, and a stale UI is invisible until something looks wrong.
 $uiDir = Join-Path $nodeDir "ui"
 New-Item -ItemType Directory -Force -Path $uiDir | Out-Null
-$uiMissing = @()
-foreach ($name in @("index.html", "style.css", "app.js", "components.js", "render.wasm")) {
-  $dest = Join-Path $uiDir $name
-  if (-not (Test-Path $dest)) { $uiMissing += $name }
-}
-if ($uiMissing.Count -eq 0) {
-  Ok "ui files present"
-} else {
-  $fetched = 0
-  foreach ($name in $uiMissing) {
-    try {
-      Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/Magaav/wasm-agent/main/ui/$name" -OutFile (Join-Path $uiDir $name) -ErrorAction Stop
-      $fetched++
-    } catch { }
+$localUiDir = if ($PSScriptRoot) { Join-Path $PSScriptRoot "../ui" } else { $null }
+$uiNames = @("index.html", "style.css", "app.js", "components.js", "render.wasm")
+if ($localUiDir -and (Test-Path $localUiDir)) {
+  foreach ($name in $uiNames) {
+    $source = Join-Path $localUiDir $name
+    if (Test-Path $source) { Copy-Item $source (Join-Path $uiDir $name) -Force }
   }
-  if ($fetched -eq $uiMissing.Count) { Ok "ui files -> $uiDir" }
-  else { Warn "could not fetch $($uiMissing.Count - $fetched) ui file(s); 'wa ui' will retry on first run" }
+  Ok "ui files -> $uiDir (from this checkout)"
+} else {
+  $uiMissing = @($uiNames | Where-Object { -not (Test-Path (Join-Path $uiDir $_)) })
+  if ($uiMissing.Count -eq 0) {
+    Ok "ui files present"
+  } else {
+    $fetched = 0
+    foreach ($name in $uiMissing) {
+      try {
+        Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/Magaav/wasm-agent/main/ui/$name" -OutFile (Join-Path $uiDir $name) -ErrorAction Stop
+        $fetched++
+      } catch { }
+    }
+    if ($fetched -eq $uiMissing.Count) { Ok "ui files -> $uiDir" }
+    else { Warn "could not fetch $($uiMissing.Count - $fetched) ui file(s); 'wa ui' will retry on first run" }
+  }
 }
 if ($haveExe) {
   $version = (& $localExe --version 2>$null | Select-Object -First 1)

@@ -150,6 +150,142 @@ class WaMessage extends HTMLElement {
 }
 customElements.define("wa-message", WaMessage);
 
+// <wa-trace> — one decision's tool activity, collapsed into a topic.
+//
+// The transcript should read as decisions, not as a wall of tool payloads: the
+// header says what happened (how many calls, which tools, how long) and the body
+// holds the sequential tool lines, hidden until the reader opens it. Failures are
+// the exception - an error opens the topic, because a silent failure is worse
+// than a noisy transcript (DESIGN.md).
+class WaTrace extends HTMLElement {
+  static get observedAttributes() { return ["open"]; }
+
+  constructor() {
+    super();
+    this._lines = new Map();
+    this._pending = null;
+    this._count = 0;
+    this._errors = 0;
+    this._started = Date.now();
+  }
+
+  connectedCallback() {
+    if (this._built) return;
+    this._built = true;
+    this.classList.add("trace");
+
+    this._header = document.createElement("button");
+    this._header.type = "button";
+    this._header.className = "trace-head";
+    this._header.setAttribute("aria-expanded", "false");
+    this._glyph = document.createElement("span");
+    this._glyph.className = "trace-glyph";
+    this._glyph.textContent = "\u2699";
+    this._label = document.createElement("span");
+    this._label.className = "trace-label";
+    this._label.textContent = "working…";
+    this._meta = document.createElement("span");
+    this._meta.className = "trace-meta";
+    this._chevron = document.createElement("span");
+    this._chevron.className = "trace-chevron";
+    this._chevron.textContent = "\u203a";
+    this._header.append(this._glyph, this._label, this._meta, this._chevron);
+
+    this._body = document.createElement("ol");
+    this._body.className = "trace-body";
+    this._body.hidden = true;
+
+    this._header.addEventListener("click", () => this.toggle());
+    this.append(this._header, this._body);
+  }
+
+  get open() { return this.hasAttribute("open"); }
+  set open(value) {
+    if (value) this.setAttribute("open", "");
+    else this.removeAttribute("open");
+  }
+
+  attributeChangedCallback() {
+    if (!this._body) return;
+    this._body.hidden = !this.open;
+    this._header.setAttribute("aria-expanded", String(this.open));
+    this._chevron.textContent = this.open ? "\u2304" : "\u203a";
+  }
+
+  toggle() {
+    this.open = !this.open;
+    this.dispatchEvent(new CustomEvent("toggle", { bubbles: true }));
+  }
+
+  // addTool(name, title) -> the line element, so the caller can fill the outcome.
+  addTool(name, title, detail) {
+    this._count += 1;
+    const line = document.createElement("li");
+    line.className = "tool-line pending";
+    const head = document.createElement("div");
+    head.className = "tool-head";
+    const label = document.createElement("span");
+    label.className = "tool-title";
+    label.innerHTML = `<b>${name}</b> ${title}`;
+    const outcome = document.createElement("span");
+    outcome.className = "tool-outcome";
+    head.append(label, outcome);
+    line.append(head);
+    const output = document.createElement("div");
+    output.className = "tool-output";
+    output.hidden = true;
+    if (detail) output.textContent = detail;
+    line.append(output);
+    this._lines.set(name, line);
+    this._pending = { line, output, outcome };
+    this._body.append(line);
+    this._header.classList.add("running");
+    this._refresh();
+    return line;
+  }
+
+  // settle(outcome, detail, failed) finishes the most recent tool line.
+  settle(outcome, detail, failed) {
+    const target = this._pending;
+    if (!target) return;
+    target.outcome.textContent = outcome || "";
+    target.line.classList.remove("pending");
+    target.line.classList.add(failed ? "err" : "ok");
+    if (detail) target.output.textContent = detail;
+    if (failed) {
+      this._errors += 1;
+      // An error is never hidden inside a collapsed topic.
+      target.output.hidden = false;
+      this.open = true;
+    }
+    this._pending = null;
+    this._refresh();
+  }
+
+  finish() {
+    this._header.classList.remove("running");
+    this._done = true;
+    this._elapsed = Date.now() - this._started;
+    this._refresh();
+  }
+
+  _refresh() {
+    const names = [...this._lines.keys()];
+    if (this._done) {
+      const seconds = this._elapsed >= 1000 ? `${(this._elapsed / 1000).toFixed(1)}s` : `${this._elapsed}ms`;
+      this._label.textContent = `${this._count} tool ${this._count === 1 ? "call" : "calls"}`;
+      this._meta.textContent = `${names.join(", ")} · ${seconds}`;
+      this._glyph.textContent = this._errors ? "\u26a0" : "\u2699";
+    } else {
+      const last = names[names.length - 1] || "starting";
+      this._label.textContent = `deciding…`;
+      this._meta.textContent = `${this._count} call${this._count === 1 ? "" : "s"} · ${last}`;
+    }
+    this.classList.toggle("has-error", this._errors > 0);
+  }
+}
+customElements.define("wa-trace", WaTrace);
+
 // <wa-tool> — a tool-activity chip. `name` sets the label; `.detail` is writable.
 class WaTool extends HTMLElement {
   connectedCallback() {

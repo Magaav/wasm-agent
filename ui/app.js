@@ -1,5 +1,6 @@
 // wasm-agent web UI. Components live in components.js (see DESIGN.md).
 const messages = document.getElementById("messages");
+const jump = document.getElementById("jump");
 const meta = document.getElementById("meta");
 const form = document.getElementById("composer");
 const input = document.getElementById("input");
@@ -122,32 +123,73 @@ function stripThinking(text) {
   return out.replace(/^\s+/, "");
 }
 
-function atBottom() {
-  return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 80;
+function atBottom(slack = 40) {
+  return messages.scrollHeight - messages.scrollTop - messages.clientHeight < slack;
 }
+
+// Sticky scroll. "Follow the bottom" is the default, and it stops only when the
+// reader moves away - so reading scrollback is not interrupted by new output,
+// and returning to the bottom resumes following. `follow` is only changed by the
+// reader's own scrolling: our programmatic pins set `pinning` first so the scroll
+// event they cause cannot be mistaken for intent.
+let follow = true;
+let pinning = false;
+
+function pin(force = false) {
+  if (!follow && !force) return;
+  pinning = true;
+  messages.scrollTop = messages.scrollHeight;
+  // Release on the next frame: the scroll event fires asynchronously.
+  requestAnimationFrame(() => { pinning = false; });
+}
+
+function setFollow(value) {
+  follow = value;
+  jump.classList.toggle("show", !follow);
+}
+
+messages.addEventListener("scroll", () => {
+  if (pinning) return;
+  setFollow(atBottom());
+}, { passive: true });
+
+// The reader's intent, not just the scroll position: a wheel tick or a drag
+// upwards should release the follow even before the bottom is out of view.
+for (const event of ["wheel", "touchstart"]) {
+  messages.addEventListener(event, () => setFollow(atBottom(4)), { passive: true });
+}
+messages.addEventListener("keydown", (event) => {
+  if (["PageUp", "ArrowUp", "Home"].includes(event.key)) setFollow(false);
+  if (["PageDown", "ArrowDown", "End"].includes(event.key)) setFollow(atBottom());
+});
+
+// Content can grow without an append (markdown re-render, a topic opening,
+// images): re-pin whenever the scroll height changes, if we are following.
+if (typeof ResizeObserver === "function") {
+  new ResizeObserver(() => pin()).observe(messages);
+}
+jump.addEventListener("click", () => { setFollow(true); pin(true); });
 
 function add(role, text, asHtml = false) {
   document.getElementById("empty")?.remove();
-  const stick = atBottom();
   const element = document.createElement("wa-message");
   element.setAttribute("role", role);
   messages.append(element);
   const body = element.body;
   if (asHtml) body.innerHTML = text; else body.textContent = text;
-  if (stick) messages.scrollTop = messages.scrollHeight;
+  pin();
   return body;
 }
 
 function setStatus(text) {
   document.getElementById("empty")?.remove();
-  const stick = atBottom();
   if (!statusLine) {
     statusLine = document.createElement("div");
     statusLine.className = "status";
     messages.append(statusLine);
   }
   statusLine.innerHTML = `<span class="spinner"></span>${escapeHtml(text)}`;
-  if (stick) messages.scrollTop = messages.scrollHeight;
+  pin();
 }
 
 function clearStatus() {
@@ -155,15 +197,131 @@ function clearStatus() {
   statusLine = null;
 }
 
+// Tool lines are rendered the way pi renders them in its CLI: bold lowercase
+// tool name plus the argument that matters, never a JSON blob.
+//   read src/app.js (lines 10-40)   bash $ ls -la   grep /pattern/   edit path
+function toolTitle(name, args) {
+  const a = args || {};
+  const esc = escapeHtml;
+  const path = esc(String(a.path || a.file_path || ""));
+  switch (name) {
+    case "bash":
+    case "shell": {
+      const command = String(a.command || "").replace(/\s+/g, " ").slice(0, 160);
+      return `$ ${esc(command)}`;
+    }
+    case "read": {
+      const range = (a.offset || a.limit)
+        ? ` (lines ${a.offset || 1}-${a.limit ? (Number(a.offset || 1) + Number(a.limit) - 1) : ""})`
+        : "";
+      return `${path}${esc(range)}`;
+    }
+    case "write":
+    case "edit":
+      return path;
+    case "grep":
+      return `/${esc(String(a.pattern || ""))}/${a.path ? " in " + esc(String(a.path)) : ""}`;
+    case "ls":
+      return path || ".";
+    case "recall":
+      return esc(String(a.query || ""));
+    case "remember":
+      return esc(String(a.content || "").slice(0, 90));
+    case "forget":
+      return esc(String(a.id || ""));
+    case "memories":
+      return a.scope ? esc(String(a.scope)) : "all";
+    case "session":
+    case "session_debug":
+    case "session_fixture":
+      return esc(String(a.session_id || a.id || ""));
+    case "search_turns":
+    case "search_messages":
+      return esc(String(a.query || ""));
+    case "nodes":
+    case "spells":
+    case "capabilities":
+      return "";
+    default: {
+      const values = Object.entries(a)
+        .filter(([, v]) => v !== undefined && v !== null && v !== "")
+        .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`);
+      return esc(values.join(" ").slice(0, 140));
+    }
+  }
+}
+
+// What the call produced, in one short phrase (pi shows the payload only when a
+// tool line is expanded).
+function toolOutcome(name, result) {
+  const r = result || {};
+  if (r.error) return { text: String(r.error).slice(0, 80), failed: true };
+  switch (name) {
+    case "read": {
+      const lines = String(r.content || "").split("\n").length - 1;
+      return { text: `${lines} lines` };
+    }
+    case "bash":
+    case "shell":
+      return { text: `exit ${r.code === undefined ? "?" : r.code}`, failed: r.code !== 0 && r.code !== undefined };
+    case "grep":
+      return { text: `${r.count || 0} match${r.count === 1 ? "" : "es"}` };
+    case "ls":
+      return { text: `${(r.entries || []).length} entries` };
+    case "write":
+    case "edit":
+      return { text: "written" };
+    case "remember":
+      return { text: "stored" };
+    case "forget":
+      return { text: r.forgotten ? "removed" : "not found" };
+    case "memories":
+    case "recall":
+      return { text: `${Array.isArray(r) ? r.length : 0} memories` };
+    case "sessions":
+      return { text: `${(r.sessions || []).length} sessions` };
+    case "nodes":
+      return { text: `${(r.nodes || []).length} nodes` };
+    default:
+      return { text: "ok" };
+  }
+}
+
+function toolDetail(result) {
+  const text = typeof result === "string" ? result : JSON.stringify(result || {}, null, 1);
+  return text.length > 4000 ? text.slice(0, 4000) + "\n…(truncated)" : text;
+}
+
+// The trace topic for the turn currently running. Created on the first tool call
+// and finished when the reply arrives, so one decision is one topic.
+let trace = null;
+let lastTool = "";
+
+function currentTrace() {
+  if (!trace) {
+    document.getElementById("empty")?.remove();
+    trace = document.createElement("wa-trace");
+    messages.append(trace);
+  }
+  return trace;
+}
+
 function addTool(name, args) {
-  document.getElementById("empty")?.remove();
-  const stick = atBottom();
-  const chip = document.createElement("wa-tool");
-  chip.setAttribute("name", name);
-  messages.append(chip);
-  chip.detail.textContent = JSON.stringify(args || {});
-  if (stick) messages.scrollTop = messages.scrollHeight;
-  return chip;
+  currentTrace().addTool(name, toolTitle(name, args));
+  lastTool = name;
+  pin();
+}
+
+function settleTool(result) {
+  if (!trace) return;
+  const outcome = toolOutcome(lastTool, result);
+  trace.settle(outcome.text, toolDetail(result), outcome.failed);
+  pin();
+}
+
+function finishTrace() {
+  trace?.finish();
+  trace = null;
 }
 
 function typeOut(body, text) {
@@ -172,7 +330,7 @@ function typeOut(body, text) {
   const timer = setInterval(() => {
     index = Math.min(text.length, index + step);
     body.textContent = text.slice(0, index);
-    messages.scrollTop = messages.scrollHeight;
+    pin();
     if (index >= text.length) {
       clearInterval(timer);
       body.innerHTML = renderMarkdown(text);
@@ -187,18 +345,13 @@ function handleEvent(event) {
   } else if (event.type === "tool") {
     addTool(event.name, event.arguments);
   } else if (event.type === "tool_result") {
-    const chip = messages.lastElementChild;
-    if (chip && chip.detail) {
-      const ok = !(event.result && event.result.error);
-      chip.classList.add(ok ? "ok" : "err");
-      chip.detail.textContent = JSON.stringify(event.result || {}).slice(0, 400);
-    }
+    settleTool(event.result);
   } else if (event.type === "delta") {
     clearStatus();
     if (!streamBody) streamBody = add("assistant", "");
     streamText += event.text || "";
     streamBody.textContent = stripThinking(streamText);
-    messages.scrollTop = messages.scrollHeight;
+    pin();
   } else if (event.type === "reply") {
     clearStatus();
     const finalText = stripThinking(event.text || streamText);
@@ -210,6 +363,7 @@ function handleEvent(event) {
     } else {
       typeOut(add("assistant", ""), finalText);
     }
+    finishTrace();
   } else if (event.type === "usage") {
     settings.usage = event.total || settings.usage;
     if (event.model) settings.model = event.model;
@@ -218,8 +372,10 @@ function handleEvent(event) {
   } else if (event.type === "error") {
     clearStatus();
     add("assistant", "error: " + (event.error || "unknown"));
+    finishTrace();
   } else if (event.type === "done") {
     clearStatus();
+    finishTrace();
   }
 }
 
@@ -238,6 +394,10 @@ function composedText(text) {
 
 async function send(text) {
   setBusy(true);
+  // Sending is an explicit request to see the answer: follow again, even if the
+  // reader had scrolled up to read something.
+  setFollow(true);
+  pin(true);
   controller = new AbortController();
   streamBody = null;
   streamText = "";
