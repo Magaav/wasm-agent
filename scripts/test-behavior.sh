@@ -134,6 +134,54 @@ check_language "portuguese prompt"           "Responda em uma frase curta: de qu
 check_language "english asking portuguese"   "Answer in one short Portuguese sentence: de que cor é o céu?" "pt"
 check_language "portuguese asking english"   "Responda em uma frase curta em inglês: what colour is the sky?" "en"
 
+# --- 3b. compaction summaries carry the plan ----------------------------------
+# pi ships no todo tool ("they confuse models"), so the run's plan lives in the
+# compaction summary. With compaction now happening mid-turn, that is
+# load-bearing: a summary without Goal/Progress/Next Steps loses the task.
+# Two compactions in one turn must use the checkpoint template and, once the cut
+# has moved inside the turn, the split-turn prefix template.
+echo
+echo "compaction summaries"
+cat > "$TMP/compact.lua" <<'LUA'
+local memory = dofile("lua/core/memory.lua")
+local agentlib = dofile("lua/core/agent.lua")
+memory.setup()
+local sid = memory.start_session("", "probe", { user_id = "master", node_id = "", title = "probe" })
+local function work(from, to)
+  for i = from, to do
+    local call = { id = "c" .. i, type = "function", ["function"] = { name = "read", arguments = "{}" } }
+    memory.append_turn(sid, { role = "assistant", content = "", tool_calls = { call } })
+    memory.append_turn(sid, { role = "tool", tool_call_id = "c" .. i, tool_name = "read",
+      content = string.rep("tool output " .. i .. " ", 400) })
+  end
+end
+memory.append_turn(sid, { role = "user", content = "Do a long sequence of work, then report." })
+work(1, 8)
+local bot = agentlib.new(sid, function() end, "master", "master", "")
+bot.last_prompt_tokens = 99999
+local first = bot:maybe_compact()
+work(9, 18)
+bot.last_prompt_tokens = 99999
+local second = bot:maybe_compact()
+local summaries = {}
+for _, turn in ipairs(memory.session_turns(sid, { limit = 500 })) do
+  if turn.role == "summary" then
+    for _, span in ipairs(turn.trace or {}) do
+      if span.kind == "compact" then summaries[#summaries + 1] = { split = span.split_turn, text = turn.content } end
+    end
+  end
+end
+assert(first and second, "both compactions should have run")
+assert(summaries[1].split == false and summaries[1].text:find("## Next Steps", 1, true),
+  "the first summary must be the checkpoint template with a plan")
+assert(summaries[2].split == true and summaries[2].text:find("## Original Request", 1, true),
+  "a cut inside the turn must use the split-turn prefix template")
+print("compaction templates ok")
+LUA
+if WASM_AGENT_LLM_CONTEXT=6000 WA_SCRIPT="$TMP/compact.lua" "$BIN" --db "$DB" 2>&1 | grep "compaction templates ok"; then
+  ok "checkpoint and split-turn summaries both carry the plan"
+else bad "compaction summaries did not use pi's templates"; fi
+
 # --- 2. session continuation --------------------------------------------------
 echo
 echo "session continuation"
