@@ -104,6 +104,24 @@ Then restart Orca. Notes:
 - Nothing else in Orca is touched; `wa chat` is drivable through a plain terminal
   with or without this.
 
+## Comparing against pi
+
+Keep the model identical or the comparison measures the model, not the agent.
+pi reads its model from `~/.pi/agent/settings.json` (`defaultProvider` /
+`defaultModel`); wasm-agent reads `WASM_AGENT_LLM_MODEL` from its env file. Both
+use the same provider here, so aligning is a one-line change:
+
+```bash
+# pi:         opencode-go / kimi-k2.6
+grep WASM_AGENT_LLM_MODEL ~/.wasm-agent/env   # must name the same model
+```
+
+When they differ, the honest description of a result is "this model did X", not
+"wasm-agent did X". Behaviour that depends on the model — how eagerly it recalls
+memory, whether it follows the language of the prompt, how long it explores
+before giving up — is exactly what `scripts/test-behavior.sh` measures, so run it
+after changing the model rather than assuming it still holds.
+
 ## Briefs that work
 
 The agent follows `AGENTS.md`, so the useful briefs state the goal, the
