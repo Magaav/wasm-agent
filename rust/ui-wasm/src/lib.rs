@@ -93,12 +93,9 @@ fn is_table_separator(line: &str) -> bool {
         && cells.iter().all(|cell| {
             let cell = cell.trim();
             !cell.is_empty()
-                && cell.starts_with(':') == false && cell.ends_with(':') == false
-                || cell.chars().all(|c| c == '-' || c == ':' || c == ' ')
+                && cell.chars().all(|c| c == '-' || c == ':' || c == ' ')
+                && cell.chars().filter(|c| *c == '-').count() >= 1
         })
-        && cells
-            .iter()
-            .all(|cell| cell.chars().filter(|c| *c == '-').count() >= 1)
 }
 
 fn bullet_prefix(line: &str) -> Option<&str> {
@@ -180,7 +177,7 @@ fn render_markdown(input: &str) -> String {
             out.push_str("</tr></thead><tbody>");
             for row in &rows {
                 out.push_str("<tr>");
-                for cell in &row {
+                for cell in row {
                     out.push_str("<td>");
                     out.push_str(&render_inline(cell));
                     out.push_str("</td>");
