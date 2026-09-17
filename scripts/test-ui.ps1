@@ -133,6 +133,16 @@ $harness = @'
   check(!!md && !!md.querySelector("h2"), "a markdown heading must render as a heading");
   check(!!md && md.querySelectorAll("li").length === 2, "list items must render as list items");
 
+  // A reasoning model thinks before it speaks, and a panel that shows nothing
+  // during that time is indistinguishable from a hung one. The count is also the
+  // number that explains where the output budget went when a turn ends with no
+  // answer at all.
+  window.handleEvent({ type: "reasoning", chars: 4096 });
+  var reasoningStatus = document.querySelector(".status");
+  check(!!reasoningStatus && /4096/.test(reasoningStatus.textContent),
+    "reasoning must be visible while it happens, saw: " +
+    (reasoningStatus ? reasoningStatus.textContent : "no status line"));
+
   // A run must not widen the transcript. Mid-run the bubble holds raw text and
   // the status line is at its longest, and an unbreakable token there pushed a
   // horizontal scrollbar onto the transcript that vanished with the answer.
