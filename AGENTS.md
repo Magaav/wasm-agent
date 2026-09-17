@@ -79,8 +79,14 @@ DESIGN.md        UI contract — read before touching ui/
 
 ```bash
 cd rust && cargo build --release --offline   # offline; crates are vendored/cached
-bash scripts/test.sh                          # end-to-end smoke test
+bash scripts/test.sh                          # hermetic smoke test, no model needed
+bash scripts/test-behavior.sh                 # memory/language/session policy (needs a model)
 ```
+
+On a Windows node, `powershell -File scripts/test-windows.ps1` runs the local
+suite: binary, identity, UUID uniqueness, config, memory, sessions, tools, a real
+turn, the UI on localhost, and that an unreachable remote node changes nothing.
+Both extra suites are safe to re-run and never print a credential.
 
 The smoke test is the gate for the Lua core and the WASM plugin ABI; it needs
 `cargo` on `PATH`, so run it on the cloud tree if the local one lacks it.
@@ -94,6 +100,9 @@ bash scripts/build-window.sh                  # -> target/windows-x64/.../wa-win
 ## Conventions
 
 - **No Python.** Agent logic is Lua; platform capabilities are Rust `host.*`.
+  Read `docs/HOST.md` before adding a capability: a host function returns `nil`
+  for missing values (never zero values), and paths come from `host.paths()`,
+  never `$HOME` or a Linux-only path.
 - Read `DESIGN.md` before UI work (spacing scale, balloons, modes) and
   `docs/` before changing memory, sessions, sync or the node fabric.
 - Memory is **on demand**: never inject memory into context automatically;
