@@ -157,3 +157,39 @@ constraint, and how to prove it:
 
 Bad briefs are the ones that leave verification out, because then the agent
 either guesses or claims success it cannot show.
+
+## Running a candidate node beside the stable one
+
+A patched build can be tested without disturbing the installed node. A candidate
+is just a second agent with its own state, and the isolation boundary is
+`WASM_AGENT_HOME`:
+
+- `<home>/.wasm-agent/env` — its own environment file
+- its own `memory.db`
+- its own `node.key`
+- its own plugins
+
+Everything the node writes hangs off that directory, so the candidate never
+touches the stable node's data. It does still need its own network identity:
+
+- a distinct `--port`
+- a distinct `--client-port`
+- `WASM_AGENT_ENDPOINT` pointing at **its own** endpoint. Without it the registry
+  advertises the stable node's address, and direct calls to the candidate are
+  misrouted to the stable node.
+
+To test a patched branch:
+
+```bash
+git checkout <branch>
+cd rust && cargo build --release && cd ..
+cp rust/target/release/wa /tmp/wa-candidate
+git checkout main
+
+WASM_AGENT_HOME=/tmp/wa-candidate-home \
+WASM_AGENT_ENDPOINT=<candidate-endpoint> \
+/tmp/wa-candidate serve --port <port> --client-port <client-port>
+```
+
+Promotion is a human step: fast-forward `main`, rebuild, and reinstall the binary
+on each machine. The candidate promotes nothing by itself.

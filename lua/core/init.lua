@@ -71,6 +71,24 @@ elseif command == "sessions" then
 elseif command == "nodes" then
   local nodes = dofile("lua/core/nodes.lua")
   print(json.encode({ node_id = (nodes.identity() or {}).node_id, nodes = nodes.list() }))
+elseif command == "paths" then
+  -- What an operator runs first when the agent says "no model configured": where
+  -- this node keeps its files, and which file the host actually reads for the
+  -- settings. A wrong path here is worse than no path - it sends the user off to
+  -- edit a file that will never be loaded (which is what the Git Bash HOME bug
+  -- did, silently).
+  local paths = dofile("lua/core/paths.lua")
+  local all = paths.all()
+  local ok, live = pcall(function() return host.paths() end)
+  if not ok or type(live) ~= "table" then
+    print("note: this host has no host.paths(); the paths below are derived from the environment")
+  end
+  for _, field in ipairs({ "home", "config", "data", "cache", "temp" }) do
+    print(string.format("%-12s %s", field, tostring(all[field])))
+  end
+  local present = paths.config_file_present()
+  print(string.format("%-12s %s  (%s)", "config file", paths.config_file(),
+    present and "present, read at startup" or "missing, nothing to read"))
 elseif command == "call" then
   local nodes = dofile("lua/core/nodes.lua")
   local payload = {}
@@ -82,7 +100,8 @@ elseif command == "call" then
 elseif command == "help" then
   print("wa: chat [--continue|--session <id>] [prompt]  |  remember <text> | recall <query>")
   print("    memories | forget <id> | search <query> | conversation <id> | conversations")
-  print("    sessions | skills | stats | status | nodes | call <node> <capability> [args-json]")else
+  print("    sessions | skills | stats | status | nodes | call <node> <capability> [args-json]")
+  print("    paths  where this node keeps its files, and the config file it would read")
   print("unknown command: " .. tostring(command))
   os.exit(2)
 end
