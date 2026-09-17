@@ -52,6 +52,9 @@ end
 
 -- AGENTS.md is the only thing injected into context by default: instructions,
 -- read fresh every turn so editing the file takes effect immediately.
+-- Returns `text, path` for the first readable AGENTS.md. The path matters: a
+-- node without the file silently runs uninstructed, so we record which one (if
+-- any) was used and warn when an explicitly configured path is unreadable.
 function M.agents_md()
   -- Build the list by appending: an explicit first element of nil would make
   -- `ipairs` stop immediately and silently skip everything else.
@@ -62,9 +65,9 @@ function M.agents_md()
   candidates[#candidates + 1] = (os.getenv("HOME") or ".") .. "/.wasm-agent/AGENTS.md"
   for _, path in ipairs(candidates) do
     local text = host.read_file and host.read_file(path)
-    if text and text ~= "" then return text end
+    if text and text ~= "" then return text, path end
   end
-  return nil
+  return nil, nil
 end
 
 local function system_prompt(role, agents)
@@ -112,7 +115,9 @@ end
 -- the compaction summary, then every turn after the watermark.
 function M:build_context()
   local session = memory.session(self.session_id) or {}
-  local messages = { { role = "system", content = system_prompt(self.role, M.agents_md()) } }
+  local agents, agents_path = M.agents_md()
+  self.agents_source = agents_path
+  local messages = { { role = "system", content = system_prompt(self.role, agents) } }
   if session.summary and session.summary ~= "" then
     messages[#messages + 1] = {
       role = "system",
@@ -280,6 +285,10 @@ function M:turn(text)
   for round = 1, MAX_TOOL_ROUNDS do
     self.emit({ type = "status", text = "model" })
     local llm_started = host.now()
+    local configured_agents = os.getenv("WASM_AGENT_AGENTS_MD")
+    if round == 1 and configured_agents and configured_agents ~= "" and not self.agents_source then
+      self.emit({ type = "status", text = "AGENTS.md configured but unreadable: " .. configured_agents })
+    end
     local ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream,
       { session_id = self.session_id })
     if not ok then
@@ -324,8 +333,13 @@ function M:turn(text)
         tokens = { prompt = prompt, completion = completion, total = total, cached = cached, cost = cost } }
       -- In debug mode keep the exact request so a failing turn can be replayed
       -- byte for byte (round 1 only: later rounds are derived from tool calls).
-      if self.debug and round == 1 then
-        span.request = { model = self.model, messages = messages, tools = tool_list }
+      if round == 1 then
+        -- Which instructions, if any, this turn ran with. A node without the
+        -- file is visible here instead of being indistinguishable from one with it.
+        span.agents_md = self.agents_source
+        if self.debug then
+          span.request = { model = self.model, messages = messages, tools = tool_list }
+        end
       end
       -- The provider's own count for this request is the true context size.
       self.last_prompt_tokens = prompt
