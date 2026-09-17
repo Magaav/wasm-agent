@@ -103,6 +103,25 @@ Verify with `scripts/test-recovery.lua` (run by `scripts/test.sh` and by
 leaves a specific shape in the ledger and that shape is the contract — a test that
 kills a child asserts the timing of a signal instead.
 
+To see it for real rather than in a fixture, start a turn that asks for a slow tool
+call, kill the process while the tool is running, and read the thread back — the
+ledger keeps the decision with no result, and `wa resume` names the call:
+
+```sh
+wa --db /tmp/kill.db chat "Run exactly this bash command with bash, then repeat its output: ping -n 8 127.0.0.1" &
+sleep 7        # mid tool call, after the decision was written
+kill %1
+wa --db /tmp/kill.db resume
+#   waiting: 1 thread
+#   544e4e9c  turns=2  1 tool call(s) never reported: bash, 5s ago
+#             recover   wa resume --session 544e4e9c "continue where you stopped"
+```
+
+Caveat: the notice is a `system` message placed after the first one, verified against
+the provider this node uses. If an endpoint rejects a mid-conversation system
+message, it should become a `user` turn instead (the runaway guard already does that):
+recovery must not be the thing that breaks the request.
+
 ## Two recording modes
 
 | | `default` | `debug` |
