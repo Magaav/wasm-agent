@@ -146,6 +146,7 @@ function M.request(node, path, body, inner_headers)
     if response and tonumber(response.status) == 200 then return response end
   end
   local relay = M.relay_url()
+  local last_error = nil
   if relay ~= "" and node and node.node_id then
     -- One request id for the whole retry loop: the relay queues the action at
     -- most once, so a retry only re-fetches the result. Actions are never run
@@ -165,15 +166,30 @@ function M.request(node, path, body, inner_headers)
         if decoded and decoded.ok then
           return { status = decoded.status, body = decoded.body, rid = rid }
         end
+        -- relay_timeout is retryable too: the relay keeps the result for two
+        -- minutes and the id is stable, so a retry re-fetches it.
         if not (decoded and decoded.error == "relay_timeout") then
           return { error = (decoded and decoded.error) or "relay_error" }
         end
       elseif response and tonumber(response.status) == 503 then
-        return { error = "node_not_attached" }
+        -- Retired by the relay (it holds now), kept for an older rendezvous:
+        -- the node was not attached, which is a reason to wait, not to fail.
+        last_error = "node_not_attached"
+      elseif response and tonumber(response.status) == 504 then
+        -- The relay held the request and the node did not answer: either it
+        -- never attached (retry when it is back) or it is busy and the action
+        -- may still be running - which is exactly why the retry reuses the id.
+        local decoded = json.decode(response.body)
+        last_error = (decoded and decoded.error) or "node_no_answer"
+        if decoded and decoded.retry_after_ms then
+          host.sleep(tonumber(decoded.retry_after_ms) / 1000)
+        end
       end
-      if attempt < 4 then host.sleep(750) end
+      if attempt < 4 then host.sleep(750 * attempt) end
     end
-    return { error = "relay_timeout", rid = rid }
+    -- Say that it is retryable, and which reason it kept hitting: "could not
+    -- reach the node" and "the node is busy" call for different next steps.
+    return { error = last_error or "relay_timeout", rid = rid, retryable = true }
   end
   return { error = "no_route" }
 end

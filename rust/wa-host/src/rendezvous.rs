@@ -22,6 +22,10 @@ use std::time::{Duration, Instant};
 const ONLINE_WINDOW: i64 = 180; // seconds
 const POLL_WAIT: Duration = Duration::from_secs(25);
 const SEND_WAIT: Duration = Duration::from_secs(45);
+// How long to hold a request for a node that is not attached at all. The node
+// attaches by polling, so waiting is usually just waiting for the next poll -
+// and failing immediately turned a four-second pause into a failed build.
+const ATTACH_HOLD: Duration = Duration::from_secs(20);
 const MAX_BODY: usize = 4_000_000;
 
 #[derive(Default)]
@@ -258,8 +262,12 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
                 );
             }
         }
-        // Fail fast when the target is not attached to the relay.
-        let attached = {
+        // Hold rather than fail when the target is not attached. It attaches by
+        // polling, so for the caller the difference is "this waited four seconds"
+        // rather than "this failed" - and nothing is lost if it never attaches,
+        // because the answer is retryable and the id is idempotent: a repeat
+        // re-fetches the result instead of re-running the action.
+        let attached_at_start = {
             let state = relay.lock().unwrap();
             state
                 .last_poll
@@ -267,13 +275,6 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
                 .map(|at| at.elapsed() < Duration::from_secs(40))
                 .unwrap_or(false)
         };
-        if !attached {
-            return respond(
-                stream,
-                503,
-                &json!({"error": "node_not_attached", "to": to}).to_string(),
-            );
-        }
         let (tx, rx) = mpsc::channel();
         let request = json!({
             "id": id,
@@ -292,26 +293,43 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
                 state.queue.entry(to.clone()).or_default().push_back(request);
             }
         }
-        match rx.recv_timeout(SEND_WAIT) {
+        let hold = if attached_at_start { SEND_WAIT } else { ATTACH_HOLD };
+        match rx.recv_timeout(hold) {
             Ok((status, body)) => {
                 relay.lock().unwrap().waiting.remove(&id);
                 respond(stream, 200, &json!({"ok": true, "status": status, "body": body}).to_string())
             }
             Err(_) => {
-                // Abandoned: drop it from the queue so it is never delivered
-                // late (which would look like a stale, out-of-date request).
-                {
-                    let mut state = relay.lock().unwrap();
-                    state.waiting.remove(&id);
-                    state.issued.remove(&id);
-                    if let Some(entries) = state.queue.get_mut(&to) {
-                        entries.retain(|entry| entry["id"].as_str() != Some(id.as_str()));
-                    }
-                }
+                // Two different situations, and the caller needs to tell them
+                // apart: a node that never attached (retry when it is back) and a
+                // node that is attached but did not answer in time (it is busy -
+                // the action may still be running, so do not repeat it blindly).
+                let attached_now = {
+                    let state = relay.lock().unwrap();
+                    state
+                        .last_poll
+                        .get(&to)
+                        .map(|at| at.elapsed() < Duration::from_secs(40))
+                        .unwrap_or(false)
+                };
+                relay.lock().unwrap().waiting.remove(&id);
                 respond(
                     stream,
-                    200,
-                    &json!({"error": "relay_timeout", "rid": id, "to": to}).to_string(),
+                    504,
+                    &json!({
+                        "error": if attached_now { "node_no_answer" } else { "node_not_attached" },
+                        "rid": id,
+                        "to": to,
+                        "waited_ms": hold.as_millis() as u64,
+                        "retryable": true,
+                        "retry_after_ms": 750,
+                        "hint": if attached_now {
+                            "the node is attached but did not answer in time; it may still be working"
+                        } else {
+                            "the node is not attached right now; it re-attaches on its next poll"
+                        },
+                    })
+                    .to_string(),
                 )
             }
         }
