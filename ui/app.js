@@ -89,7 +89,12 @@ async function loadRenderer() {
     const { instance } = await WebAssembly.instantiateStreaming(response, {});
     renderer = instance.exports;
   } catch (error) {
+    // A silent fallback hides a broken asset: replies quietly lose tables,
+    // headings and lists and just look plain. Keep the reason where a reader -
+    // or the UI test - can see it.
     renderer = null;
+    window.__rendererError = String((error && error.message) || error);
+    console.warn("markdown renderer unavailable:", error);
   }
 }
 
@@ -1545,6 +1550,9 @@ document.addEventListener("contextmenu", (event) => {
   contextMenu.openAt(event.clientX, event.clientY);
 });
 
-loadRenderer().then(() => { setupVoice(); refreshMe(); refreshMeta(); });
+// Rendering is a round trip to fetch render.wasm. Anything that needs to know the
+// real renderer - rather than the escape-and-<br> fallback - can await this, which
+// is what the UI test does instead of guessing at ticks.
+window.rendererLoaded = loadRenderer().then(() => { setupVoice(); refreshMe(); refreshMeta(); });
 watch();
 if (!native) input.focus();

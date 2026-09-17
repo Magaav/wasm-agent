@@ -109,6 +109,54 @@ $harness = @'
     check(traces[1].classList.contains("has-error"), "a failing tool call must mark its topic");
   }
 
+  // Markdown: a model answering with a table must get a table. Pipes are not
+  // something a reader can reconstruct. The renderer arrives over the node's
+  // static path, so this is real I/O: wait for it before dispatching the reply,
+  // otherwise the reply is rendered by the escape-and-<br> fallback.
+  if (window.rendererLoaded) { await window.rendererLoaded; }
+  check(!!(window.rendererReady && window.rendererReady()),
+    "the WASM markdown renderer must be loaded for this case: " + (window.__rendererError || "no error recorded"));
+  window.handleEvent({
+    type: "reply",
+    text: "| tool | legacy | default |\n|---|--:|--:|\n| read | 4.0 | 3.0 |\n\n## Next\n\n- keep the payload\n- budget the context",
+  });
+  window.handleEvent({ type: "done" });
+  var all = messages.querySelectorAll("wa-message.assistant");
+  var md = all[all.length - 1];
+  var table = md ? md.querySelector(".md-table table") : null;
+  check(!!table, "a markdown table in a reply must render as a table, saw: " +
+    (md ? md.innerHTML.slice(0, 160) : "no bubble"));
+  check(!!table && table.querySelectorAll("th").length === 3,
+    "the table must have three header cells");
+  check(!!table && table.querySelectorAll("tbody td").length === 3,
+    "the table must have three body cells");
+  check(!!md && !!md.querySelector("h2"), "a markdown heading must render as a heading");
+  check(!!md && md.querySelectorAll("li").length === 2, "list items must render as list items");
+
+  // A run must not widen the transcript. Mid-run the bubble holds raw text and
+  // the status line is at its longest, and an unbreakable token there pushed a
+  // horizontal scrollbar onto the transcript that vanished with the answer.
+  window.handleEvent({ type: "status",
+    text: "recovering an interrupted thread: died after a tool result with no next decision" });
+  // The status line is at its longest here, and it is the one element that exists
+  // only during a run - which is why a scrollbar could come and go with it.
+  var statusLine = document.querySelector(".status");
+  check(!!statusLine, "a run must show its status line");
+  var statusOverflow = messages.scrollWidth - messages.clientWidth;
+  check(statusOverflow <= 1,
+    "the status line must not widen the transcript (overflow " + statusOverflow + "px)");
+  window.handleEvent({ type: "round", n: 1 });
+  window.handleEvent({ type: "delta", text: "Reading " + "a".repeat(300) +
+    "/C:/Users/Victor/orca/workspaces/wasm-agent/loggerhead/foundation/" + "b".repeat(160) + " now" });
+  var overflow = messages.scrollWidth - messages.clientWidth;
+  check(overflow <= 1,
+    "a streaming delta must not widen the transcript (overflow " + overflow + "px)");
+  var running = messages.querySelectorAll("wa-message.assistant");
+  var runningBody = running.length ? running[running.length - 1].querySelector(".body.steps") : null;
+  var runningText = runningBody ? runningBody.textContent : "";
+  check(runningText.indexOf("Reading") >= 0,
+    "a running decision must show its streaming text, saw: " + runningText.slice(0, 40));
+
   // The engine view: open it, let the fixture fetch settle in microtasks, and
   // assert what a reader would see. Timers never fire in this mode, so the
   // wait is promise ticks only - which is also why the panel must render
@@ -154,7 +202,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage;"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer;"
 
 $server = $null
 $edge = @(
