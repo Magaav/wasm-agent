@@ -42,7 +42,22 @@ end
 function M.session()
   local id = M.session_id()
   if not id then return "none yet  (nothing for --continue to resume)" end
-  return id
+  local state = memory.session_state(id)
+  if not state then return id end
+  return string.format("%s  %s", id, state.detail)
+end
+
+-- An interrupted thread is the one fact `wa status` is uniquely placed to report:
+-- it is what `--continue` would resume, and the transcript itself cannot say it -
+-- a question with no answer looks the same whether the process is still thinking
+-- or dead. The line is emitted only when there is something to recover, so
+-- silence here means the thread is settled, and `wa resume` is the next step.
+function M.interrupted()
+  local id = M.session_id()
+  if not id then return nil end
+  local state = memory.session_state(id)
+  if not state or state.state ~= "interrupted" then return nil end
+  return string.format("interrupted at seq %d  %s  ->  wa resume", state.seq, state.detail)
 end
 
 -- host.exec hands its result back as a JSON string, not a table: reading `.code`
@@ -84,13 +99,16 @@ function M.config_path() return paths.config() end
 
 -- Ordered: identity first, then what would break a turn, then the paths.
 function M.lines()
-  return {
+  local lines = {
     "node      " .. M.node_id(),
     "model     " .. M.model(),
     "session   " .. M.session(),
-    "tree      " .. M.working_tree(),
-    "config    " .. M.config_path(),
   }
+  local interrupted = M.interrupted()
+  if interrupted then lines[#lines + 1] = "interrupted " .. interrupted end
+  lines[#lines + 1] = "tree      " .. M.working_tree()
+  lines[#lines + 1] = "config    " .. M.config_path()
+  return lines
 end
 
 function M.report()

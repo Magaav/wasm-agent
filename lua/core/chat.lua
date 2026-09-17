@@ -131,6 +131,14 @@ function M.run(argv)
   print("  model    " .. mode)
   print("  memory   " .. (host.getenv("WASM_AGENT_DB") or "~/.wasm-agent/memory.db"))
   print("  session  " .. agent.session_id .. (resume_last and "  (continued)" or ""))
+  -- The banner is the last place a user can be told before they type: a thread
+  -- that was cut off mid-answer looks like one that is simply quiet, and the
+  -- recovery below (the model is told in its context) is invisible from here.
+  local state = memory.session_state(agent.session_id)
+  if state and state.state == "interrupted" then
+    print("  !        interrupted " .. state.detail)
+    print("           recovering: wa resume --session " .. agent.session_id)
+  end
   print("  /help for commands, /exit to quit")
   print("")
 

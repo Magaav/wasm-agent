@@ -156,6 +156,58 @@ print("tool turns=" .. withTools .. " names=" .. table.concat(list, ","))
   Note "model checks skipped (-SkipModel)"
 }
 
+# Session recovery: a thread cut off mid-answer must be visible, recorded, and
+# continuable. The contract is one shared file (scripts/test-recovery.lua) which
+# the cloud smoke test runs too - two copies of it would drift, and the shape a
+# killed process leaves in the ledger is the thing being asserted either way.
+$root = Split-Path $PSScriptRoot -Parent
+$recoveryFile = Join-Path $root "scripts/test-recovery.lua"
+if (Test-Path $recoveryFile) {
+  $out = Lua (Get-Content -Raw -Path $recoveryFile)
+  if ($out -match "recovery ok") { Ok "session recovery: derived state, durable record, recovery notice" }
+  else { Bad "the session recovery test failed"; Note ($out -replace "\s+", " ") }
+} else {
+  Bad "scripts/test-recovery.lua is missing"
+}
+
+if (-not $SkipModel) {
+  # The end-to-end: seed a thread cut off mid-answer, then continue it for real.
+  # A verified resume says so before the user types, tells the model what was
+  # lost, and settles the thread while keeping the record of the interruption.
+  $seedProbe = @'
+local memory = dofile("lua/core/memory.lua")
+memory.setup()
+local id = memory.start_session("", "chat", { user_id = "master", node_id = "", title = "recovery-seed" })
+memory.append_turn(id, { role = "user", content = "count the files in scripts/" })
+memory.append_turn(id, { role = "assistant", content = "Listing them now.", tool_calls = {
+  { id = "seed1", type = "function", ["function"] = { name = "bash", arguments = "{}" } } } })
+print("seeded=" .. id)
+'@
+  $seeded = Lua $seedProbe
+  $seededId = ([regex]::Match($seeded, "seeded=([0-9a-fA-F\-]{36})")).Groups[1].Value
+  if ($seededId) { Ok "seeded an interrupted thread ($($seededId.Substring(0, 8)))" }
+  else { Bad "could not seed an interrupted thread"; Note ($seeded -replace "\s+", " ") }
+
+  if ($seededId) {
+    # `wa resume` is the visible half: read-only, and it names the unfinished call.
+    $report = Wa @("--db", $db, "resume")
+    if ($report -match "1 tool call\(s\) never reported: bash") { Ok "wa resume names the unfinished work" }
+    else { Bad "wa resume did not describe the interruption"; Note ($report -replace "\s+", " ") }
+
+    $resumed = Wa @("--db", $db, "chat", "--session", $seededId, "Answer with the single word: ready")
+    if ($resumed -match "interrupted") { Ok "continuing an interrupted thread says so before the prompt" }
+    else { Bad "the banner did not report the interruption"; Note ($resumed -replace "\s+", " ") }
+
+    $stateProbe = "local m = dofile(`"lua/core/memory.lua`") m.setup() local s = m.session_state(`"$seededId`") " +
+      "print(`"state=`" .. s.state .. `" interruptions=`" .. s.interruptions .. `" at=`" .. s.recorded_seq)"
+    $state = Lua $stateProbe
+    if ($state -match "state=answered") { Ok "the resumed thread settled ($($state.Trim()))" }
+    else { Bad "the resumed thread did not settle: $($state -replace '\s+', ' ')" }
+    if ($state -match "interruptions=1") { Ok "the interruption is recorded and survives the recovery" }
+    else { Bad "the interruption was not recorded: $($state -replace '\s+', ' ')" }
+  }
+}
+
 # 10/11. local operation with the remote node and the rendezvous unreachable
 $env:WASM_AGENT_HOST = "unreachable.invalid"
 $env:WASM_AGENT_RENDEZVOUS = "http://127.0.0.1:1"

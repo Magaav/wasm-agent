@@ -59,6 +59,12 @@ local function add_column(table, column, declaration)
   end
 end
 
+-- Interruption classification. Declared here because `list_sessions` reports a
+-- session's state and is defined earlier in the file than the section those
+-- helpers belong to; an earlier function body cannot see a `local` declared
+-- below it, it would resolve to a global and be nil at call time.
+local decode_calls, classify, ago, detail_of
+
 -- Sessions become resumable threads: who, where, how verbose, and the
 -- compaction watermark.
 local function migrate()
@@ -70,6 +76,15 @@ local function migrate()
   add_column("sessions", "summarized_until", "INTEGER NOT NULL DEFAULT 0")
   add_column("sessions", "updated_at", "REAL NOT NULL DEFAULT 0")
   exec("UPDATE sessions SET updated_at=started_at WHERE updated_at=0")
+  -- Interruptions: a thread that was cut off mid-answer (see the section on
+  -- derived state below). A hard kill cannot write these - that is the point of
+  -- deriving the *current* state from the ledger - but the *history* has to be
+  -- written down somewhere, or resuming the thread would erase the only trace
+  -- that anything went wrong.
+  add_column("sessions", "interrupted_at", "REAL")
+  add_column("sessions", "interrupted_seq", "INTEGER NOT NULL DEFAULT 0")
+  add_column("sessions", "interrupted_reason", "TEXT NOT NULL DEFAULT ''")
+  add_column("sessions", "interrupted_count", "INTEGER NOT NULL DEFAULT 0")
 end
 
 function M.setup()
@@ -296,15 +311,37 @@ function M.latest_session(user_id, node_id)
   return rows[1]
 end
 
-function M.list_sessions(user_id, limit)
+-- `opts.states` adds each session's derived state (see "interruptions" below) to
+-- the row: the engine view lists threads, and a thread that died mid-answer must
+-- be distinguishable from a settled one without opening it.
+function M.list_sessions(user_id, limit, opts)
+  opts = opts or {}
   limit = limit or 30
-  local sql = "SELECT s.*, (SELECT COUNT(*) FROM turns t WHERE t.session_id=s.id) AS turn_count " ..
-              "FROM sessions s"
+  local sql = "SELECT s.*, (SELECT COUNT(*) FROM turns t WHERE t.session_id=s.id) AS turn_count"
+  if opts.states then
+    -- The last turn per session, in the same query: one row per thread, no N+1.
+    sql = sql .. ", l.role AS last_role, l.ok AS last_ok, l.tool_calls AS last_tool_calls, " ..
+                "l.created_at AS last_at, l.seq AS last_seq"
+  end
+  sql = sql .. " FROM sessions s"
+  if opts.states then
+    sql = sql .. " LEFT JOIN turns l ON l.session_id=s.id " ..
+                 "AND l.seq=(SELECT MAX(seq) FROM turns WHERE session_id=s.id)"
+  end
   local params = {}
   if user_id and user_id ~= "" then sql = sql .. " WHERE s.user_id=?"; params[#params + 1] = user_id end
   sql = sql .. " ORDER BY s.updated_at DESC LIMIT ?"
   params[#params + 1] = limit
-  return query(sql, params)
+  local rows = query(sql, params)
+  if opts.states then
+    for _, row in ipairs(rows) do
+      local last = row.last_seq and { role = row.last_role, ok = row.last_ok,
+        tool_calls = row.last_tool_calls, created_at = row.last_at } or nil
+      row.state = classify(last)
+      row.state_detail = detail_of(row.state, last, nil)
+    end
+  end
+  return rows
 end
 
 function M.set_session_mode(session_id, mode)
@@ -400,6 +437,192 @@ function M.search_turns(text, user_id, limit)
   sql = sql .. " ORDER BY rank LIMIT ?"
   params[#params + 1] = limit
   return query(sql, params)
+end
+
+-- ------------------------------------------------------------- interruptions
+-- A thread that was cut off mid-answer looks exactly like a thread whose answer
+-- is still coming: the transcript just ends. A killed process cannot write a flag
+-- saying it died - the exit path that would set one does not run - so the state is
+-- *derived* from the ledger instead, which is appended to as the turn proceeds.
+-- The last turn is therefore an exact record of how far the process got:
+--
+--   empty        nothing was said yet
+--   answered     last turn is a reply: the thread is settled
+--   failed       last turn is an assistant turn with ok=0, i.e. the model call
+--                errored. That is a landed outcome, not an interruption, and
+--                conflating the two would send a reader looking for lost work
+--                that was never started.
+--   interrupted  last turn is a question, a tool result, or a decision whose
+--                tools never reported - the process stopped mid-turn
+--
+-- Derivations are cheap and always current, but they forget: once the thread is
+-- resumed the tail is an answer again and nothing says the answer came after a
+-- crash. So the first time an interruption is *observed* it is also recorded on
+-- the session (`mark_interrupted`), which is the part that survives.
+
+function decode_calls(raw)
+  if type(raw) == "string" then
+    local ok, value = pcall(json.decode, raw)
+    raw = ok and value or {}
+  end
+  return (type(raw) == "table") and raw or {}
+end
+
+function classify(last)
+  if not last then return "empty" end
+  if last.role == "assistant" then
+    if last.ok == 0 or last.ok == false then return "failed" end
+    if #decode_calls(last.tool_calls) > 0 then return "interrupted" end
+    return "answered"
+  end
+  return "interrupted"
+end
+
+function ago(at)
+  if not at then return "at an unknown time" end
+  local seconds = math.floor(host.now() - at)
+  if seconds < 0 then seconds = 0 end
+  if seconds < 60 then return seconds .. "s ago" end
+  if seconds < 3600 then return math.floor(seconds / 60) .. "min ago" end
+  if seconds < 86400 then return math.floor(seconds / 3600) .. "h ago" end
+  return math.floor(seconds / 86400) .. "d ago"
+end
+
+-- `pending` is the names of the tool calls with no recorded result. When it is
+-- not known (the listing, where checking every call would be one query per
+-- session) all of the last turn's calls are named, and the wording says "tool
+-- call(s) never reported" rather than claiming they never ran.
+function detail_of(state, last, pending)
+  if state == "empty" then return "no turns yet" end
+  if state == "answered" then return "settled - the last turn is a reply" end
+  if state == "failed" then return "the last turn failed (the model call errored)" end
+  if not last then return "interrupted" end
+  if last.role == "user" then return "an unanswered question, " .. ago(last.created_at) end
+  if last.role == "summary" then return "died right after a compaction, " .. ago(last.created_at) end
+  if last.role == "assistant" then
+    local names = pending
+    if names == nil then
+      names = {}
+      for _, call in ipairs(decode_calls(last.tool_calls)) do
+        names[#names + 1] = ((call["function"] or {}).name or "?")
+      end
+    end
+    return string.format("%d tool call(s) never reported: %s, %s",
+      #names, #names > 0 and table.concat(names, ", ") or "unnamed", ago(last.created_at))
+  end
+  -- The tail is a tool result: something did report, so the interesting fact is
+  -- which calls of that same decision did not.
+  if pending and #pending > 0 then
+    return string.format("died after a tool result; %d call(s) of that batch never reported: %s, %s",
+      #pending, table.concat(pending, ", "), ago(last.created_at))
+  end
+  return "died after a tool result with no next decision, " .. ago(last.created_at)
+end
+
+-- Which calls of the tail's own decision never reported a result. Returns the
+-- pending names and how many calls the decision had (nil when there is no such
+-- decision), because "1 of 2 never reported" and "1 of 1 never reported" are
+-- different facts about the same tail.
+--
+-- The tail is not always the decision: a batched decision writes one turn per
+-- call, so a process killed between two calls leaves a *tool* turn on top with
+-- its sibling never run. That is the sharpest thing recovery can tell a reader -
+-- which of the batch is missing - and it is only visible by looking the decision
+-- up, not at the tail.
+function M.pending_calls(session_id)
+  local rows = query("SELECT tool_calls FROM turns WHERE session_id=? AND role='assistant' " ..
+                     "AND tool_calls <> '[]' ORDER BY seq DESC LIMIT 1", {session_id})
+  local decision = rows[1]
+  if not decision then return nil, nil end
+  local answered = {}
+  for _, row in ipairs(query("SELECT tool_call_id FROM turns WHERE session_id=? AND role='tool'",
+                             {session_id})) do
+    answered[row.tool_call_id] = true
+  end
+  local calls, pending = decode_calls(decision.tool_calls), {}
+  for _, call in ipairs(calls) do
+    if not answered[call.id or ""] then
+      pending[#pending + 1] = ((call["function"] or {}).name or "?")
+    end
+  end
+  return pending, #calls
+end
+
+-- Facts about one thread's last turn: the state, where it stopped, and what was
+-- left unfinished. Read-only - nothing here writes, so a report can never be the
+-- thing that "fixes" what it reports.
+function M.session_state(session_id)
+  local session = M.session(session_id)
+  if not session then return nil end
+  local rows = query("SELECT * FROM turns WHERE session_id=? ORDER BY seq DESC LIMIT 1", {session_id})
+  local last = rows[1]
+  local state = classify(last)
+  local pending = nil
+  if state == "interrupted" and last and (last.role == "assistant" or last.role == "tool") then
+    local total
+    pending, total = M.pending_calls(session_id)
+    -- A tool tail whose result matches none of the decision's calls: the ledger
+    -- says a result arrived but not which call it answered, so the batch's state
+    -- is unknown. Claiming "2 of 2 never reported" there would be a lie.
+    if last.role == "tool" and pending and total and #pending == total then pending = nil end
+  end
+  return {
+    session_id = session_id,
+    title = session.title or "",
+    state = state,
+    seq = last and tonumber(last.seq) or 0,
+    role = last and last.role or "",
+    at = last and last.created_at or nil,
+    pending = pending or {},
+    question = (state == "interrupted" and last and last.role == "user") and (last.content or "") or "",
+    detail = detail_of(state, last, pending),
+    recorded_at = session.interrupted_at,
+    recorded_seq = tonumber(session.interrupted_seq) or 0,
+    recorded_reason = session.interrupted_reason or "",
+    interruptions = tonumber(session.interrupted_count) or 0,
+  }
+end
+
+function M.turn_count(session_id)
+  local rows = query("SELECT COUNT(*) AS n FROM turns WHERE session_id=?", {session_id})
+  return tonumber(rows[1] and rows[1].n) or 0
+end
+
+-- Write an interruption down, once per interruption point. Re-running the
+-- detection for the same tail must not inflate the count: an agent that resumes
+-- a thread three times was interrupted once, not three times.
+function M.mark_interrupted(session_id, opts)
+  opts = opts or {}
+  local session = M.session(session_id)
+  if not session then return nil end
+  local state = M.session_state(session_id)
+  local seq = opts.seq or (state and state.seq) or 0
+  if (tonumber(session.interrupted_seq) or 0) == seq and (session.interrupted_at or 0) > 0 then
+    return nil
+  end
+  local reason = opts.reason or (state and state.detail) or "interrupted"
+  exec("UPDATE sessions SET interrupted_at=?, interrupted_seq=?, interrupted_reason=?, " ..
+       "interrupted_count=COALESCE(interrupted_count,0)+1 WHERE id=?",
+       {host.now(), seq, reason, session_id})
+  M.journal("session", session_id, M.session(session_id))
+  return reason
+end
+
+-- Threads currently waiting for something, most recent first. This is what a
+-- user (or the resumed agent) needs to see, and it is derived, so a hard kill
+-- shows up here without anyone having run a command that could notice it.
+function M.interrupted(user_id, limit)
+  local found = {}
+  for _, row in ipairs(M.list_sessions(user_id, limit or 40, { states = true })) do
+    if row.state == "interrupted" then
+      local state = M.session_state(row.id)
+      if state then
+        state.turns = tonumber(row.turn_count) or 0
+        found[#found + 1] = state
+      end
+    end
+  end
+  return found
 end
 
 -- Retention: default sessions keep 100% of traces for 7 days; debug sessions

@@ -283,9 +283,12 @@ function wa_tools(session)
 end
 
 -- ---- sessions (for the engine view) -------------------------------------
+-- The state of each thread travels with it: a session that was interrupted
+-- mid-answer must be distinguishable from a settled one in the list, or the view
+-- shows two identical rows for "answered" and "the process died here".
 function wa_sessions(session)
   local user = users.current(session)
-  return json.encode({ sessions = memory.list_sessions(user.id, 50) })
+  return json.encode({ sessions = memory.list_sessions(user.id, 50, { states = true }) })
 end
 
 function wa_session(session_id, session)
@@ -297,6 +300,7 @@ function wa_session(session_id, session)
   end
   return json.encode({
     session = record,
+    state = memory.session_state(session_id),
     turns = memory.session_turns(session_id, { limit = 500 }),
   })
 end
