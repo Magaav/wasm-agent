@@ -107,20 +107,27 @@ Then restart Orca. Notes:
 ## Comparing against pi
 
 Keep the model identical or the comparison measures the model, not the agent.
-pi reads its model from `~/.pi/agent/settings.json` (`defaultProvider` /
-`defaultModel`); wasm-agent reads `WASM_AGENT_LLM_MODEL` from its env file. Both
-use the same provider here, so aligning is a one-line change:
+
+Do **not** take the model from pi's `~/.pi/agent/settings.json`: `defaultModel` is
+only what new sessions start with, and a session can be running something else.
+I aligned on that file once, moved wasm-agent onto `kimi-k2.6`, and broke the very
+parity I was trying to create - pi's live session was on `deepseek-v4.1-flash`
+the whole time. The model in use is recorded per turn in pi's session log:
 
 ```bash
-# pi:         opencode-go / kimi-k2.6
-grep WASM_AGENT_LLM_MODEL ~/.wasm-agent/env   # must name the same model
+tail -400 ~/.pi/agent/sessions/<worktree>/<session>.jsonl \
+  | grep -o '"model":"[^"]*"' | sort | uniq -c      # what pi is really running
+grep WASM_AGENT_LLM_MODEL ~/.wasm-agent/env            # what wasm-agent is running
 ```
 
-When they differ, the honest description of a result is "this model did X", not
-"wasm-agent did X". Behaviour that depends on the model — how eagerly it recalls
-memory, whether it follows the language of the prompt, how long it explores
-before giving up — is exactly what `scripts/test-behavior.sh` measures, so run it
-after changing the model rather than assuming it still holds.
+Both currently run `deepseek-v4.1-flash`.
+
+This matters more than it looks: the same model that failed repeatedly as a
+wasm-agent turn does this work well in pi's harness, so a difference between the
+two is a difference in the **loop**, not in the model - and the loop is ours to
+fix. Behaviour that is genuinely model-dependent (eagerness to recall, language
+following, how long it explores) is what `scripts/test-behavior.sh` measures; run
+it after any model change instead of assuming.
 
 ## Briefs that work
 
