@@ -74,7 +74,8 @@ LUA
 
 run_one() {
   local arm="$1" mode="$2" index="$3"
-  local dir="$WORK/$arm-$index" db="$dir/bench.db"
+  local dir="$WORK/$arm-$index"
+  local db="$dir/bench.db"
   mkdir -p "$dir"
   gen_fixture "$dir/target.lua"
   export WASM_AGENT_TOOL_BUDGET="$mode"
