@@ -280,6 +280,16 @@ function M:build_context()
       content = "Summary of earlier turns in this session:\n" .. session.summary,
     }
   end
+  -- Recovery: if this thread was interrupted, the model has to be told, because
+  -- its transcript simply ends mid-exchange and it would otherwise assume its
+  -- last step either succeeded or never ran. Both assumptions are wrong: the step
+  -- may have run without its result being written, and it may have run twice.
+  -- Context-only by design - the transcript is what was said, and a synthetic
+  -- turn in it would be replayed to every later request as if the agent had said
+  -- it (and indexed by search_turns).
+  if self.resume_notice then
+    messages[#messages + 1] = { role = "system", content = self.resume_notice }
+  end
   local rows = memory.session_turns(self.session_id, {
     after_seq = session.summarized_until or 0, limit = 500,
   })
@@ -475,7 +485,49 @@ function M:maybe_compact()
   return true
 end
 
+-- Detect an interrupted thread and prepare the recovery notice.
+--
+-- The moment to look is the first turn of a process, *before* the new question is
+-- appended: at that point the transcript's tail is still the previous turn's, and
+-- a tail that is a question, a tool result or an unanswered decision can only
+-- mean the process that was working on it did not survive. (A process cannot be
+-- killed and keep running, so this is checked once and cached: there is nothing
+-- to re-check later in the same process.)
+--
+-- Two things happen, and they are deliberately different: the interruption is
+-- *recorded* durably, so it survives being recovered from, and the model is told
+-- in its context, so it re-establishes state instead of assuming the lost step
+-- either ran or did not.
+function M:note_interruption()
+  if self.resume_notice ~= nil then return self.resume_notice end
+  self.resume_notice = false
+  local state = memory.session_state(self.session_id)
+  if not state or state.state ~= "interrupted" then return false end
+  memory.mark_interrupted(self.session_id, { seq = state.seq, reason = state.detail })
+
+  local work
+  if state.question ~= "" then
+    local question = tostring(state.question):gsub("%s+", " ")
+    work = 'The question "' .. question:sub(1, 160) .. '" was never answered.'
+  elseif #state.pending > 0 then
+    work = "The last decision was to run " .. table.concat(state.pending, ", ")
+      .. ", and no result for it is recorded."
+  else
+    work = "The transcript ends after a tool result, so nothing is recorded about what came next."
+  end
+  self.resume_notice =
+    "Recovery notice: your previous turn in this session was interrupted - the process stopped "
+    .. "mid-answer. " .. state.detail .. ". " .. work .. " Nothing after that point is recorded, so "
+    .. "the unfinished step may have run without its result being saved, or may not have run at all, "
+    .. "and re-running it may repeat an effect. Re-establish the real state from the machine before "
+    .. "continuing (re-read the files you changed, check `git status` and the ledger), and say plainly "
+    .. "what had already been done."
+  self.emit({ type = "status", text = "recovering an interrupted thread: " .. state.detail })
+  return self.resume_notice
+end
+
 function M:turn(text)
+  self:note_interruption()
   self.emit({ type = "status", text = "thinking" })
   self.debug = (memory.session(self.session_id) or {}).mode == "debug"
 

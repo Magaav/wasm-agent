@@ -11,8 +11,13 @@ DB="$(mktemp -u /tmp/wa-smoke-XXXXXX.db)"
 # shared one, every earlier session in this run sits in the same second and the
 # "latest session" assertion would be a coin flip.
 SDB="$(mktemp -u /tmp/wa-status-XXXXXX.db)"
+# Session recovery works on its own threads: which session is "the current
+# thread" decides what `wa status` and `wa resume` report, so sharing the smoke
+# database would make the assertions below depend on what ran before them.
+RDB="$(mktemp -u /tmp/wa-resume-XXXXXX.db)"
+QDB="$(mktemp -u /tmp/wa-resume-q-XXXXXX.db)"
 PLUGINS="$(mktemp -d)"
-trap 'rm -f "$DB" "$DB"-wal "$DB"-shm "$SDB" "$SDB"-wal "$SDB"-shm; rm -rf "$PLUGINS"' EXIT
+trap 'rm -f "$DB" "$DB"-wal "$DB"-shm "$SDB" "$SDB"-wal "$SDB"-shm "$RDB" "$RDB"-wal "$RDB"-shm "$QDB" "$QDB"-wal "$QDB"-shm; rm -rf "$PLUGINS"' EXIT
 
 "$BIN" --db "$DB" init >/dev/null
 ID="$("$BIN" --db "$DB" remember "smoke fact about the rust lua core")"
@@ -29,7 +34,7 @@ HELP="$("$BIN" --db "$DB" help)"
 case "$HELP" in
   *"unknown command"*) echo "FAIL: wa help falls through to the unknown-command branch" >&2; exit 1 ;;
 esac
-for entry in chat paths status skills sessions; do
+for entry in chat paths status skills sessions resume; do
   echo "$HELP" | grep -q "$entry" || { echo "FAIL: wa help must list '$entry'" >&2; exit 1; }
 done
 echo "cli ok"
@@ -230,6 +235,53 @@ print("sessions ok")
 LUA
 WA_SCRIPT="$DB.sessions.lua" "$BIN" --db "$DB" | grep "sessions ok"
 rm -f "$DB.sessions.lua"
+
+# Session recovery. The contract - what an interrupted thread is, what is recorded
+# and what the agent is told - lives in scripts/test-recovery.lua, because the
+# Windows suite runs the same file and two copies would drift. What is asserted
+# here is the surface a user actually touches and the Lua test cannot see: the
+# CLI's own words, its exit codes, and that reading a report changes nothing.
+WA_SCRIPT=scripts/test-recovery.lua "$BIN" --db "$DB" | grep "recovery ok"
+cat > "$DB.seed.lua" <<'LUA'
+-- Seed a thread cut off the way a killed process leaves it: a question, a decision
+-- to run a tool, and no result. `question` seeds the other shape (nothing but an
+-- unanswered question) - WA_SCRIPT runs before dispatch, so the extra word is free.
+local memory = dofile("lua/core/memory.lua")
+memory.setup()
+local id = memory.start_session("", "chat", { user_id = "master", node_id = "", title = "seed" })
+memory.append_turn(id, { role = "user", content = "count the scripts in scripts/" })
+if args[1] ~= "question" then
+  memory.append_turn(id, { role = "assistant", content = "Listing them now.", tool_calls = {
+    { id = "seed1", type = "function", ["function"] = { name = "bash", arguments = '{"command":"ls scripts"}' } },
+  } })
+end
+print(id)
+LUA
+SID="$(WA_SCRIPT="$DB.seed.lua" "$BIN" --db "$RDB")"
+[ -n "$SID" ] || { echo "FAIL: the seed produced no session id" >&2; exit 1; }
+"$BIN" --db "$RDB" sessions | grep -q "interrupted"
+# The unfinished call is named: "interrupted" alone would send the reader into the
+# transcript to find out what is missing.
+"$BIN" --db "$RDB" sessions | grep -q "1 tool call(s) never reported: bash"
+"$BIN" --db "$RDB" resume | grep -q "waiting: 1 thread"
+"$BIN" --db "$RDB" resume | grep -q "wa resume --session"
+"$BIN" --db "$RDB" status | grep -q "interrupted at seq 2"
+"$BIN" --db "$RDB" resume --session "$SID" | grep -q "never reported"
+# An unknown session must be refused, not silently reported as fine.
+if "$BIN" --db "$RDB" resume --session no-such-session >/dev/null 2>&1; then
+  echo "FAIL: wa resume --session <unknown> must exit non-zero" >&2; exit 1
+fi
+# Reporting is read-only. A report that repairs what it prints cannot be used to
+# check whether anything is wrong, and the repair would destroy the evidence.
+"$BIN" --db "$RDB" resume | grep -q "waiting: 1 thread"
+# The other shape: asked and never answered.
+QSID="$(WA_SCRIPT="$DB.seed.lua" "$BIN" --db "$QDB" question)"
+[ -n "$QSID" ] || { echo "FAIL: the question seed produced no session id" >&2; exit 1; }
+"$BIN" --db "$QDB" resume | grep -q "unanswered question"
+"$BIN" --db "$QDB" resume | grep -q "count the scripts"
+"$BIN" --db "$QDB" status | grep -q "interrupted at seq 1"
+rm -f "$DB.seed.lua"
+echo "recovery cli ok"
 
 # `wa status` is the command an operator runs when something is wrong, so every
 # fact it prints is asserted here - including the one that has to leave the

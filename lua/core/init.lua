@@ -61,12 +61,103 @@ elseif command == "stats" then
 elseif command == "status" then
   -- One health line per fact, from this checkout (the Lua core, not the host).
   dofile("lua/core/status.lua").report()
+elseif command == "resume" then
+  -- Recovery, in two halves: see what was interrupted, then continue it.
+  --
+  -- Reporting is read-only on purpose. "Visible" and "recovered" are different
+  -- claims: a command that silently repairs what it prints cannot be used to
+  -- check whether anything is wrong, and a repair nobody asked for destroys the
+  -- evidence of the crash. `wa resume` prints; `wa resume <prompt>` continues the
+  -- thread, with the model told what was lost.
+  local target, prompt, list_only, index = nil, {}, false, 2
+  while args[index] do
+    local arg = args[index]
+    if arg == "--session" then
+      target = args[index + 1]
+      index = index + 2
+    elseif arg == "--list" then
+      list_only = true
+      index = index + 1
+    else
+      prompt[#prompt + 1] = arg
+      index = index + 1
+    end
+  end
+
+  local function report(state)
+    local short = string.sub(state.session_id or "", 1, 8)
+    print(string.format("  %s  turns=%d  %s", short, state.turns or 0, state.detail))
+    if state.question ~= "" then
+      print("            asked     " .. tostring(state.question):gsub("%s+", " "):sub(1, 120))
+    end
+    -- The recorded history is shown even when the thread is settled now: a reply
+    -- written after a crash is not the same thing as a reply, and the record is
+    -- the only place that difference survives.
+    if state.interruptions > 0 then
+      print(string.format("            history   interrupted %d time(s); newest at turn %d: %s",
+        state.interruptions, state.recorded_seq, state.recorded_reason))
+    end
+    if state.state == "interrupted" then
+      print(string.format("            recover   wa resume --session %s \"continue where you stopped\"", short))
+    end
+  end
+
+  local states, targeted = nil, false
+  if target and target ~= "" then
+    local state = memory.session_state(target)
+    if not state then
+      print("  no such session: " .. target)
+      print("  list them with: wa sessions")
+      os.exit(2)
+    end
+    state.turns = memory.turn_count(target)
+    states, targeted = { state }, true
+  else
+    states = memory.interrupted(nil, 40)
+  end
+
+  if #states == 0 then
+    local latest = memory.latest_session("master", "")
+    local settled = latest and memory.session_state(latest.id)
+    print("  none - nothing is waiting")
+    print("  newest thread: " .. (settled and settled.detail or "no sessions yet"))
+    if #prompt > 0 then
+      -- Do not swallow the prompt: say what is happening and run it in the
+      -- newest thread, which is what `--continue` would do anyway.
+      print("  running the prompt in the newest thread instead")
+      local code = dofile("lua/core/chat.lua").run({ "chat", "--continue", table.concat(prompt, " ") })
+      if code and code ~= 0 then os.exit(code) end
+    end
+    return
+  end
+
+  if #prompt > 0 and not list_only then
+    -- Continuing: the report's advice ("run wa resume --session ...") is about to
+    -- be carried out, and the banner below repeats the detail. One line of
+    -- orientation, then the handoff.
+    local first = states[1]
+    print(string.format("  resuming %s  turns=%d  %s",
+      string.sub(first.session_id, 1, 8), first.turns or 0, first.detail))
+  else
+    if not targeted then print("  waiting: " .. (#states == 1 and "1 thread" or (#states .. " threads"))) end
+    for _, state in ipairs(states) do report(state) end
+  end
+  if list_only or #prompt == 0 then return end
+
+  local id = target or states[1].session_id
+  local argv = { "chat", "--session", id }
+  for _, word in ipairs(prompt) do argv[#argv + 1] = word end
+  local code = dofile("lua/core/chat.lua").run(argv)
+  if code and code ~= 0 then os.exit(code) end
 elseif command == "sessions" then
-  local rows = memory.list_sessions(nil, limit_of(args[2], 20))
+  local rows = memory.list_sessions(nil, limit_of(args[2], 20), { states = true })
   if #rows == 0 then print("(no sessions)") end
   for _, row in ipairs(rows) do
-    print(string.format("%s  %-14s turns=%-3d %s", row.id, row.user_id or "",
-      tonumber(row.turn_count) or 0, row.title or ""))
+    print(string.format("%s  %-10s turns=%-3d %-12s %s", row.id, row.user_id or "",
+      tonumber(row.turn_count) or 0, row.state or "-", row.title or ""))
+    -- A thread that needs attention says why, on its own line: the state column
+    -- is a label, and a label alone would make the reader open every session.
+    if row.state == "interrupted" then print("      " .. row.state_detail) end
   end
 elseif command == "nodes" then
   local nodes = dofile("lua/core/nodes.lua")
@@ -101,6 +192,7 @@ elseif command == "help" then
   print("wa: chat [--continue|--session <id>] [prompt]  |  remember <text> | recall <query>")
   print("    memories | forget <id> | search <query> | conversation <id> | conversations")
   print("    sessions | skills | stats | status | nodes | call <node> <capability> [args-json]")
+  print("    resume [--list] [--session <id>] [prompt]   see and continue an interrupted thread")
   print("    paths  where this node keeps its files, and the config file it would read")
 else
   print("unknown command: " .. tostring(command))

@@ -34,6 +34,94 @@ context**: `agent.lua` rebuilds the provider messages from it every turn
 (system + AGENTS.md + summary + turns after the watermark). There is no separate
 in-memory message list, which is what makes restarts resumable.
 
+## Interrupted sessions (recovery)
+
+A session is interrupted when the process died mid-answer: the machine slept, the
+terminal closed, something killed it. The transcript then just *ends* — after a
+question, after a tool result, or after a decision whose tools never reported —
+which is indistinguishable from "the answer is still coming". Nothing in a row says
+which, and a killed process cannot write a flag saying so: the exit path that would
+set one does not run.
+
+So the **state is derived from the ledger**, which is appended to as the turn
+proceeds. The last turn is an exact record of how far the process got:
+
+| state | last turn | meaning |
+| --- | --- | --- |
+| `empty` | none | nothing said yet |
+| `answered` | assistant reply | the thread is settled |
+| `failed` | assistant with `ok=0` | the model call errored — a **landed** outcome, not an interruption |
+| `interrupted` | user, tool, or assistant with `tool_calls` | the process stopped mid-turn |
+
+`memory.session_state(id)` returns that, plus where it stopped and which calls of the
+last decision have no recorded result: "1 of 2 never reported" is a different fact
+from "nothing ran", and only the decision knows which — when the process dies between
+two calls of a batch, the tail is a tool turn whose *sibling* never ran.
+
+Derivation is always current but it forgets: resume the thread and the tail is an
+answer again. So the first time an interruption is **observed** it is also recorded on
+the session (`interrupted_at/seq/reason/count`), one row per interruption *point* and
+never per observation. That is what makes the history survive recovery.
+
+What is visible, and where:
+
+```
+wa sessions          a state column, and the reason on its own line for threads
+                     that need attention
+wa status            an `interrupted at seq N  ...  ->  wa resume` line for the
+                     current thread - absent when it is settled
+wa resume [--list]   the report: what stopped it, what is unfinished, the question
+                     that was never answered, how many times, and the command to
+                     continue
+wa resume [--session <id>] <prompt>
+                     continue that thread
+engine -> sessions   the state travels in the payload (`sessions`, `session?id=`)
+```
+
+Recovery is **not** a repair of the ledger. `build_context` already drops a
+half-written tool exchange (a provider 400s on a call with no result, and on a result
+with no call); that was there already. What was missing is that the **model** was
+never told: its transcript ends mid-exchange, so it assumes its last step either
+succeeded or never ran — and both are wrong, because the step may have run without
+its result being saved, and it may have run twice. So the first turn of a process in
+an interrupted thread:
+
+1. records the interruption (above), and
+2. injects a **context-only** recovery notice — `system`, placed after the cached
+   prefix, never written to the transcript — naming what was lost and telling the
+   agent to re-establish the real state from the machine before continuing.
+
+Context-only is deliberate: the transcript is what was said, and a synthetic turn in
+it would be replayed to every later request as if the agent had said it, and would be
+found by `search_turns`.
+
+Not to be confused with the `resume_session` **tool**, which folds a past session into
+the current one's context: that is a recall aid, this is crash recovery.
+
+Verify with `scripts/test-recovery.lua` (run by `scripts/test.sh` and by
+`scripts/test-windows.ps1`): it builds each shape by hand, because a killed process
+leaves a specific shape in the ledger and that shape is the contract — a test that
+kills a child asserts the timing of a signal instead.
+
+To see it for real rather than in a fixture, start a turn that asks for a slow tool
+call, kill the process while the tool is running, and read the thread back — the
+ledger keeps the decision with no result, and `wa resume` names the call:
+
+```sh
+wa --db /tmp/kill.db chat "Run exactly this bash command with bash, then repeat its output: ping -n 8 127.0.0.1" &
+sleep 7        # mid tool call, after the decision was written
+kill %1
+wa --db /tmp/kill.db resume
+#   waiting: 1 thread
+#   544e4e9c  turns=2  1 tool call(s) never reported: bash, 5s ago
+#             recover   wa resume --session 544e4e9c "continue where you stopped"
+```
+
+Caveat: the notice is a `system` message placed after the first one, verified against
+the provider this node uses. If an endpoint rejects a mid-conversation system
+message, it should become a `user` turn instead (the runaway guard already does that):
+recovery must not be the thing that breaks the request.
+
 ## Two recording modes
 
 | | `default` | `debug` |
