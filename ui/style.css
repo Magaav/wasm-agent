@@ -333,6 +333,13 @@ body.term .terminal { display: flex; }
 .attachment b { color: var(--text); font-weight: 500; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attachment button { border: none; background: none; color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1; padding: 0 var(--space); }
 .attachment button:hover { color: var(--text); }
+/* An image attachment previews itself, so the composer shows what will be sent. */
+.attachment-image { padding: var(--space) var(--space) var(--space) 0; }
+.attachment-thumb {
+  width: 45px; height: 45px; flex: none;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  object-fit: cover; background: var(--panel-2);
+}
 
 .composer-row { display: flex; gap: var(--gap); align-items: flex-end; }
 .composer textarea {

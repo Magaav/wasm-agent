@@ -144,3 +144,26 @@ from the engine button in the topbar. Do not mix the two.
 
 The engine view's topics (nodes, spells, tools) are expandable cards rendered in
 `app.js`; each loads its data on first expand (`GET /nodes`, `/spells`, `/tools`).
+
+## 11. Attachments
+
+Attachments ride through the composer's existing `.attachment` chip, extended
+rather than forked (§1): an image adds `.attachment-image` and an
+`.attachment-thumb` preview so you can see what you are about to send.
+
+Two kinds, and they travel differently:
+
+- **text** — read as UTF-8 and inlined into the prompt (`[file: name]`), as before.
+- **image** — sent as a *structured part*, not inlined. The request body becomes
+  `{"text": …, "images": [{name, mime, data}]}`; the plain-text body is kept for
+  every turn without images, so the CLI and peer relays are unaffected.
+
+Accepted image types are `png`, `jpeg`, `webp`, `gif` — the set the provider
+gateway itself accepts. Anything else is refused with a visible error rather
+than sent and rejected mid-turn.
+
+On the node, bytes are stored content-addressed by sha256 under
+`~/.wasm-agent/attachments/` and referenced from the turn; they are never stored
+in `turns.content`, which is FTS-indexed. `build_context` rebuilds the vision
+part on every replay, and a file that has gone missing is reported inside the
+text part — never silently dropped.
