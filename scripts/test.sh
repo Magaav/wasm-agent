@@ -33,6 +33,22 @@ for entry in chat paths status skills sessions; do
   echo "$HELP" | grep -q "$entry" || { echo "FAIL: wa help must list '$entry'" >&2; exit 1; }
 done
 echo "cli ok"
+# Actions that need the user's machine must fail immediately when nothing is
+# polling the client bridge, instead of blocking for the call timeout: an agent
+# spent rounds on a tool that looked half-working. There is never a client
+# attached in this suite, so the failure is deterministic here.
+cat > "$DB.client.lua" <<'LUA'
+local started = host.now()
+local raw = host.client('screenshot', '{}')
+local elapsed = host.now() - started
+local result = dofile('lua/vendor/json.lua').decode(raw)
+assert(result.error == 'client_not_connected', 'expected client_not_connected, got ' .. tostring(result.error))
+assert(result.hint and result.hint:find('wa ui', 1, true), 'the failure must say how to fix it')
+assert(elapsed < 2, 'must fail fast, took ' .. string.format('%.2f', elapsed) .. 's')
+print('client fast-fail ok')
+LUA
+WA_SCRIPT="$DB.client.lua" "$BIN" --db "$DB" | grep "client fast-fail ok"
+rm -f "$DB.client.lua"
 # Role gating: a guest must never see master tools, and a session must resolve
 # to its own user. A regression here silently runs guests as master, which is
 # exactly what happened when the session header stopped reaching dispatch.

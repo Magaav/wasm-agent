@@ -433,6 +433,19 @@ pub extern "C" fn client(l: *mut LuaState) -> c_int {
     let action = arg_string(l, 1).unwrap_or_default();
     let args: Value = serde_json::from_str(&arg_string(l, 2).unwrap_or_else(|| "{}".into()))
         .unwrap_or_else(|_| json!({}));
+    // Fast-fail when no desktop client is attached. Blocking until the call
+    // timeout only to return `client_timeout` wastes the caller's turn, and the
+    // tool then looks like it half-worked: an agent spent several rounds on it
+    // before giving up. The bridge knows whether anything is polling.
+    let status = host.client.status();
+    if !status.get("connected").and_then(Value::as_bool).unwrap_or(false) {
+        push_json(l, &json!({
+            "error": "client_not_connected",
+            "hint": "nothing is polling this node's client bridge, so actions on the user's machine cannot run. Start the desktop client with `wa ui`, or use `bash` for commands on the node itself.",
+            "status": status,
+        }));
+        return 1;
+    }
     let result = host.client.call(&action, args);
     push_json(l, &result);
     1
