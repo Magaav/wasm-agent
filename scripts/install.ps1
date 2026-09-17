@@ -157,6 +157,27 @@ foreach ($doc in @("AGENTS.md", "AGENTS.guest.md")) {
     } catch { Warn "could not fetch $doc (instructions will come from the working directory)" }
   }
 }
+# The local server serves ui/ from disk, so the window has no network dependency.
+$uiDir = Join-Path $nodeDir "ui"
+New-Item -ItemType Directory -Force -Path $uiDir | Out-Null
+$uiMissing = @()
+foreach ($name in @("index.html", "style.css", "app.js", "components.js", "render.wasm")) {
+  $dest = Join-Path $uiDir $name
+  if (-not (Test-Path $dest)) { $uiMissing += $name }
+}
+if ($uiMissing.Count -eq 0) {
+  Ok "ui files present"
+} else {
+  $fetched = 0
+  foreach ($name in $uiMissing) {
+    try {
+      Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/Magaav/wasm-agent/main/ui/$name" -OutFile (Join-Path $uiDir $name) -ErrorAction Stop
+      $fetched++
+    } catch { }
+  }
+  if ($fetched -eq $uiMissing.Count) { Ok "ui files -> $uiDir" }
+  else { Warn "could not fetch $($uiMissing.Count - $fetched) ui file(s); 'wa ui' will retry on first run" }
+}
 if ($haveExe) {
   $version = (& $localExe --version 2>$null | Select-Object -First 1)
   if ($version) { Ok "local node ready: $version" } else { Warn "wa.exe did not run; try: $localExe --version" }
@@ -208,8 +229,9 @@ Write-Host "   ready." -ForegroundColor Green
 Write-Host ""
 Write-Host "   start chatting:" -ForegroundColor DarkGray
 Write-Host "     wa        chat with the local node (no SSH, no latency)" -ForegroundColor White
-Write-Host "     wa ui     open the desktop chat window" -ForegroundColor White
+Write-Host "     wa ui     open the desktop window against the local node" -ForegroundColor White
 Write-Host "     wa-remote run the same commands on $HostAlias" -ForegroundColor DarkGray
+Write-Host "     wa ui --remote   point the window at $HostAlias instead" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "   then try:" -ForegroundColor DarkGray
 Write-Host "     remember that Laura prefers invoices on the 5th" -ForegroundColor DarkGray
