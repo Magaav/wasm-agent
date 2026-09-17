@@ -184,19 +184,29 @@ if ($haveExe) {
 }
 
 $uiScript = Join-Path $target "wa-ui.ps1"
-try {
-  Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/wa-ui.ps1" -OutFile $uiScript -ErrorAction Stop
-  Ok "wa ui  -> desktop chat window"
-} catch {
-  Warn "could not fetch wa-ui.ps1; 'wa ui' will not work until it is present"
+# Prefer the copy beside this script when running from a checkout: GitHub raw is
+# CDN-cached, so a one-liner install can serve a launcher minutes out of date.
+$localUi = if ($PSScriptRoot) { Join-Path $PSScriptRoot "wa-ui.ps1" } else { $null }
+if ($localUi -and (Test-Path $localUi)) {
+  Copy-Item $localUi $uiScript -Force
+  Ok "wa ui  -> desktop window (from this checkout)"
+} else {
+  try {
+    Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/wa-ui.ps1" -OutFile $uiScript -ErrorAction Stop
+    Ok "wa ui  -> desktop window"
+  } catch {
+    Warn "could not fetch wa-ui.ps1; 'wa ui' will not work until it is present"
+  }
 }
 
 Step "creating the desktop icon"
 try {
   $icon = Join-Path $target "wa.ico"
-  if (-not (Test-Path $icon)) {
-    Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/Magaav/wasm-agent/main/rust/wa-window/assets/wa.ico" -OutFile $icon -ErrorAction Stop
-  }
+if (-not (Test-Path $icon)) {
+  $localIcon = if ($PSScriptRoot) { Join-Path $PSScriptRoot "../rust/wa-window/assets/wa.ico" } else { $null }
+  if ($localIcon -and (Test-Path $localIcon)) { Copy-Item $localIcon $icon -Force }
+  else { Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/Magaav/wasm-agent/main/rust/wa-window/assets/wa.ico" -OutFile $icon -ErrorAction Stop }
+}
   $desktop = [Environment]::GetFolderPath("Desktop")
   $linkPath = Join-Path $desktop "wasm-agent.lnk"
   $shell = New-Object -ComObject WScript.Shell
