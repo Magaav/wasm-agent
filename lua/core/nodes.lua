@@ -152,7 +152,11 @@ function M.request(node, path, body, inner_headers)
     -- most once, so a retry only re-fetches the result. Actions are never run
     -- twice because a fetch was slow.
     local rid = host.uuid()
-    for attempt = 1, 4 do
+    -- Bounded overall: the relay holds ~20s per attempt, so an absent node would
+    -- otherwise keep the caller waiting for well over a minute before it hears
+    -- anything. Two attempts is enough to cover a node that is between polls.
+    local DEADLINE, started = 60, host.now()
+    for attempt = 1, 3 do
       local relay_headers = M.signed_headers("relay-send")
       if not relay_headers then return { error = "no_identity" } end
       local envelope = json.encode({
@@ -185,7 +189,8 @@ function M.request(node, path, body, inner_headers)
           host.sleep(tonumber(decoded.retry_after_ms) / 1000)
         end
       end
-      if attempt < 4 then host.sleep(750 * attempt) end
+      if (host.now() - started) > DEADLINE then break end
+      if attempt < 3 then host.sleep(750 * attempt) end
     end
     -- Say that it is retryable, and which reason it kept hitting: "could not
     -- reach the node" and "the node is busy" call for different next steps.
