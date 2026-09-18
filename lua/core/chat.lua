@@ -135,9 +135,10 @@ function M.run(argv)
   -- that was cut off mid-answer looks like one that is simply quiet, and the
   -- recovery below (the model is told in its context) is invisible from here.
   local state = memory.session_state(agent.session_id)
-  if state and state.state == "interrupted" then
-    print("  !        interrupted " .. state.detail)
-    print("           recovering: wa resume --session " .. agent.session_id)
+  if state and state.unfinished then
+    print("  !        unfinished " .. state.detail)
+    print("           resuming this thread will tell the model what was lost:")
+    print("           wa resume --session " .. agent.session_id)
   end
   print("  /help for commands, /exit to quit")
   print("")

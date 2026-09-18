@@ -4,6 +4,31 @@ local memory = dofile("lua/core/memory.lua")
 
 memory.setup()
 
+-- Claim: an unfinished tail belongs to a process that is gone.
+--
+-- Nothing in the ledger can say that - a live in-flight tool call is written
+-- exactly like one whose process was killed, because a tool result lands when it
+-- lands. That ambiguity is how `wa status` came to describe the very tool call it
+-- was running as a lost one. What the ledger *does* say is age: no tool call runs
+-- for 45 seconds, so a tail that old is not still running, it is stranded. The
+-- claim is made here, by the reader, which knows the process it is reading about
+-- is not the one it is running in.
+local STRANDED_AFTER = 45
+
+local function claim(state, by_id)
+  state.unfinished = state.state == "unfinished"
+  state.stranded = state.unfinished and ((host.now() - (tonumber(state.at) or 0)) > STRANDED_AFTER)
+  if not state.unfinished then return state end
+  if state.stranded then
+    state.state = "interrupted"
+    state.detail = "stranded: interrupted: " .. state.detail
+  elseif by_id then
+    state.state = "interrupted"
+    state.detail = "interrupted: " .. state.detail
+  end
+  return state
+end
+
 local function line(item)
   if item.content then
     local tags = ""
@@ -97,13 +122,17 @@ elseif command == "resume" then
       print(string.format("            history   interrupted %d time(s); newest at turn %d: %s",
         state.interruptions, state.recorded_seq, state.recorded_reason))
     end
-    if state.state == "interrupted" then
+    if state.state == "unfinished" or state.state == "interrupted" then
       print(string.format("            recover   wa resume --session %s \"continue where you stopped\"", short))
     end
   end
 
   local states, targeted = nil, false
   if target and target ~= "" then
+    -- Asking about one thread by id *is* the knowledge that its process is gone:
+    -- this command is a separate process reading a ledger nobody is writing right
+    -- now. An unfinished tail here is therefore claimed as interrupted, and the
+    -- detail says so instead of hedging.
     local state = memory.session_state(target)
     if not state then
       print("  no such session: " .. target)
@@ -111,9 +140,14 @@ elseif command == "resume" then
       os.exit(2)
     end
     state.turns = memory.turn_count(target)
-    states, targeted = { state }, true
+    -- By id: this command is a separate process reading a ledger nobody is writing
+    -- right now, so an unfinished tail here belongs to a process that is gone.
+    states, targeted = { claim(state, true) }, true
   else
-    states = memory.interrupted(nil, 40)
+    -- The listing cannot know that much: the tail may be an in-flight turn of the
+    -- very process editing it. Age is what it can see, so age is what it claims.
+    states = memory.interrupted(nil, 40, { stranded_after = STRANDED_AFTER })
+    for _, state in ipairs(states) do claim(state) end
   end
 
   if #states == 0 then
@@ -155,9 +189,15 @@ elseif command == "sessions" then
   for _, row in ipairs(rows) do
     print(string.format("%s  %-10s turns=%-3d %-12s %s", row.id, row.user_id or "",
       tonumber(row.turn_count) or 0, row.state or "-", row.title or ""))
-    -- A thread that needs attention says why, on its own line: the state column
-    -- is a label, and a label alone would make the reader open every session.
-    if row.state == "interrupted" then print("      " .. row.state_detail) end
+    -- A thread that needs attention says why, on its own line: the state column is
+    -- a label, and a label alone would make the reader open every session. An
+    -- `unfinished` tail is listed too, because a live turn looks the same as a
+    -- abandoned one from here - what the reader adds is age.
+    if row.state == "unfinished" or row.state == "interrupted" then
+      local state = memory.session_state(row.id)
+      if state then claim(state) end
+      print("      " .. (state and state.detail or row.state_detail))
+    end
   end
 elseif command == "nodes" then
   local nodes = dofile("lua/core/nodes.lua")

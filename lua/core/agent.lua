@@ -498,7 +498,14 @@ function M:note_interruption()
   if self.resume_notice ~= nil then return self.resume_notice end
   self.resume_notice = false
   local state = memory.session_state(self.session_id)
-  if not state or state.state ~= "interrupted" then return false end
+  -- Only an *unfinished* tail is claimed here. `failed` and `answered` are landed
+  -- outcomes the ledger states outright; `empty` has nothing to recover. And the
+  -- claim is justified in a way no other caller can match: this process has run no
+  -- tool of this thread yet (the check happens before the first turn is appended),
+  -- so a tail with no recorded result cannot be an in-flight turn of its own - it
+  -- belongs to a process that is gone.
+  if not state or not state.unfinished then return false end
+  state = memory.session_state(self.session_id, { claimed = true })
   memory.mark_interrupted(self.session_id, { seq = state.seq, reason = state.detail })
 
   local work

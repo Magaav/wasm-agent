@@ -51,25 +51,36 @@ proceeds. The last turn is an exact record of how far the process got:
 | `empty` | none | nothing said yet |
 | `answered` | assistant reply | the thread is settled |
 | `failed` | assistant with `ok=0` | the model call errored — a **landed** outcome, not an interruption |
-| `interrupted` | user, tool, or assistant with `tool_calls` | the process stopped mid-turn |
+| `unfinished` | user, tool, or assistant with `tool_calls` | nothing after it is recorded yet |
 
-`memory.session_state(id)` returns that, plus where it stopped and which calls of the
-last decision have no recorded result: "1 of 2 never reported" is a different fact
-from "nothing ran", and only the decision knows which — when the process dies between
-two calls of a batch, the tail is a tool turn whose *sibling* never ran.
+`unfinished` is not called "interrupted" because the ledger cannot tell a turn in
+flight from a turn whose process was killed: a tool result lands when it lands, so a
+live call is written exactly like an abandoned one. That ambiguity is not theoretical
+— `wa status` first described **its own running tool call** as a lost one. So the
+claim "interrupted" is made only where it is actually known, by the reader:
 
-Derivation is always current but it forgets: resume the thread and the tail is an
-answer again. So the first time an interruption is **observed** it is also recorded on
-the session (`interrupted_at/seq/reason/count`), one row per interruption *point* and
-never per observation. That is what makes the history survive recovery.
+- **age** — no tool call runs for 45s, so an unfinished tail that old is *stranded*,
+  and `wa status`, `wa sessions` and `wa resume` say so;
+- **by id** — `wa resume --session <id>` is a separate process reading a ledger
+  nobody is writing, so an unfinished tail there belongs to a process that is gone;
+- **the resume path** — the strongest evidence there is: a process that has run no
+  tool of this thread yet cannot be the owner of an unfinished tail, so it claims it
+  and tells the model.
+
+Deriving forgets, though: resume the thread and the tail is an answer again. So the
+first time an interruption is *claimed* it is recorded on the session
+(`interrupted_at/seq/reason/count`), one row per interruption **point**, and that is
+what survives recovery.
 
 What is visible, and where:
 
 ```
 wa sessions          a state column, and the reason on its own line for threads
                      that need attention
-wa status            an `interrupted at seq N  ...  ->  wa resume` line for the
-                     current thread - absent when it is settled
+wa status            an `unfinished at seq N` or `stranded at seq N` line for the
+                     current thread - absent when it is settled. It does not claim
+                     the process died: the process printing this line may be the one
+                     working on that turn
 wa resume [--list]   the report: what stopped it, what is unfinished, the question
                      that was never answered, how many times, and the command to
                      continue
@@ -84,7 +95,7 @@ with no call); that was there already. What was missing is that the **model** wa
 never told: its transcript ends mid-exchange, so it assumes its last step either
 succeeded or never ran — and both are wrong, because the step may have run without
 its result being saved, and it may have run twice. So the first turn of a process in
-an interrupted thread:
+a thread it can prove is not its own:
 
 1. records the interruption (above), and
 2. injects a **context-only** recovery notice — `system`, placed after the cached

@@ -95,11 +95,43 @@ $harness = @'
     check(traces[1].classList.contains("has-error"), "a failing tool call must mark its topic");
   }
 
-  var log = document.createElement("pre");
-  log.id = "harness-log";
-  log.textContent = problems.length ? ("UI FAIL: " + problems.join(" ;; ")) : "UI PASS";
-  log.style.cssText = "position:fixed;top:0;left:0;z-index:99;background:#000;color:#0f0;font:12px monospace;padding:6px";
-  document.body.appendChild(log);
+  // The context section is a summary row and a seeker, not a four-row table:
+  // "taken" and "budget" fold into one ratio, and the percentage rides with it.
+  // The log lives outside the harness IIFE so the late (async) part can write it.
+  window.__uiProblems = problems;
+  window.__uiLog = function () {
+    var node = document.getElementById("harness-log");
+    if (!node) { node = document.createElement("pre"); node.id = "harness-log"; document.body.appendChild(node); }
+    node.textContent = problems.length ? ("UI FAIL: " + problems.join(" ;; ")) : "UI PASS";
+    node.style.cssText = "position:fixed;top:0;left:0;z-index:99;background:#000;color:#0f0;font:12px monospace;padding:6px";
+  };
+  window.__uiLog();
+
+  // The context section is a summary row and a seeker, not a four-row table:
+  // "taken" and "budget" fold into one ratio, and the percentage rides with it.
+  // A reader asked for exactly this shape, so the shape is what gets asserted.
+  // The balloon renders it from settings fetched by refreshMeta, and that fetch is
+  // a real promise, so the assertions run late - which is why the window is kept
+  // open (--virtual-time-budget) and the log is written by a separate function.
+  setTimeout(function () {
+    document.getElementById("status-btn").click();
+    var contextBox = document.getElementById("context-box");
+    // Two lines: one string line and one seeker. The string line is a label + value
+    // pair (SPAN + B), so "one pair, one meter" is the check - a bare child count
+    // would call the pair itself two lines.
+    var cells = contextBox ? contextBox.querySelectorAll(":scope > span, :scope > b").length : 0;
+    var seekers = contextBox ? contextBox.querySelectorAll(":scope > .meter").length : 0;
+    check(cells === 2, "the context section must be one string line, saw " + cells + " cell(s)");
+    check(seekers === 1, "the context section must have one seeker, saw " + seekers);
+    check(!!(contextBox ? contextBox.querySelector(".meter") : null), "the seeker is the second line");
+    var contextText = contextBox ? contextBox.textContent : "";
+    check(contextText.indexOf("taken") < 0, "the context section must not spell out 'taken', saw: " + contextText);
+    check(contextText.indexOf("budget") < 0, "the context section must not spell out 'budget', saw: " + contextText);
+    check(contextText.indexOf("used") < 0, "the context section must not spell out 'used', saw: " + contextText);
+    check(contextText.indexOf(" / ") >= 0, "the ratio must be in the summary row, saw: " + contextText);
+    check(/\d+%/.test(contextText), "the percentage must ride in the summary row, saw: " + contextText);
+    window.__uiLog();
+  }, 1200);
 })();
 </script>
 '@
@@ -131,7 +163,17 @@ try {
   $previous = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
-    $dump = & $edge --headless=new --disable-gpu --dump-dom "http://127.0.0.1:$Port/" 2>$null | Out-String
+    $dump = & $edge --headless=new --disable-gpu --virtual-time-budget=3000 --dump-dom "http://127.0.0.1:$Port/" 2>$null | Out-String
+    # What the context section actually rendered, for the record: the shape is
+    # asserted above, but a count cannot show whether the numbers are the right
+    # ones, and an empty payload would pass a shape check happily.
+    $context = [regex]::Match($dump, '(?s)<div id="context-box".*?</div>')
+    if ($context.Success) {
+      $text = ($context.Value -replace '<[^>]+>', ' ' -replace '\s+', ' ').Trim()
+      Write-Host "  ok   context section renders: '$text'"
+    } else {
+      Write-Host "  !  the context box never rendered"
+    }
   } finally { $ErrorActionPreference = $previous }
   $match = [regex]::Match($dump, '<pre id="harness-log"[^>]*>([\s\S]*?)</pre>')
   if (-not $match.Success) {

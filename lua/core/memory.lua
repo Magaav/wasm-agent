@@ -340,8 +340,7 @@ function M.list_sessions(user_id, limit, opts)
       row.state = classify(last)
       row.state_detail = detail_of(row.state, last, nil)
     end
-  end
-  return rows
+  end  return rows
 end
 
 function M.set_session_mode(session_id, mode)
@@ -455,6 +454,15 @@ end
 --   interrupted  last turn is a question, a tool result, or a decision whose
 --                tools never reported - the process stopped mid-turn
 --
+-- What the ledger *cannot* say is whether the process is still working on that
+-- unfinished turn right now. A turn in flight looks identical to a turn whose
+-- process was killed, because the result only lands when it lands. So the derived
+-- state is named `unfinished`, which is what the ledger proves, and the claim
+-- "interrupted" is made only where it is actually known: by the reader, after the
+-- fact (where the process is demonstrably gone), and by the resume path holding
+-- the claim. This is how `wa status` caught itself describing a live turn - the
+-- tool call it was in the middle of - as a lost one.
+--
 -- Derivations are cheap and always current, but they forget: once the thread is
 -- resumed the tail is an answer again and nothing says the answer came after a
 -- crash. So the first time an interruption is *observed* it is also recorded on
@@ -472,10 +480,10 @@ function classify(last)
   if not last then return "empty" end
   if last.role == "assistant" then
     if last.ok == 0 or last.ok == false then return "failed" end
-    if #decode_calls(last.tool_calls) > 0 then return "interrupted" end
+    if #decode_calls(last.tool_calls) > 0 then return "unfinished" end
     return "answered"
   end
-  return "interrupted"
+  return "unfinished"
 end
 
 function ago(at)
@@ -492,13 +500,18 @@ end
 -- not known (the listing, where checking every call would be one query per
 -- session) all of the last turn's calls are named, and the wording says "tool
 -- call(s) never reported" rather than claiming they never ran.
+--
+-- The wording is deliberately conditional ("never reported", "stopped after",
+-- "not answered yet"): the ledger says what is missing, not that anyone died. The
+-- reader knows that by knowing the process is gone, and the resume path says so
+-- in its own words because it is the one holding the evidence.
 function detail_of(state, last, pending)
   if state == "empty" then return "no turns yet" end
   if state == "answered" then return "settled - the last turn is a reply" end
   if state == "failed" then return "the last turn failed (the model call errored)" end
-  if not last then return "interrupted" end
-  if last.role == "user" then return "an unanswered question, " .. ago(last.created_at) end
-  if last.role == "summary" then return "died right after a compaction, " .. ago(last.created_at) end
+  if not last then return "nothing is recorded after the last turn" end
+  if last.role == "user" then return "not answered yet, asked " .. ago(last.created_at) end
+  if last.role == "summary" then return "stopped after a compaction, " .. ago(last.created_at) end
   if last.role == "assistant" then
     local names = pending
     if names == nil then
@@ -513,10 +526,10 @@ function detail_of(state, last, pending)
   -- The tail is a tool result: something did report, so the interesting fact is
   -- which calls of that same decision did not.
   if pending and #pending > 0 then
-    return string.format("died after a tool result; %d call(s) of that batch never reported: %s, %s",
+    return string.format("stopped after a tool result; %d call(s) of that batch never reported: %s, %s",
       #pending, table.concat(pending, ", "), ago(last.created_at))
   end
-  return "died after a tool result with no next decision, " .. ago(last.created_at)
+  return "stopped after a tool result with no next decision, " .. ago(last.created_at)
 end
 
 -- Which calls of the tail's own decision never reported a result. Returns the
@@ -551,14 +564,22 @@ end
 -- Facts about one thread's last turn: the state, where it stopped, and what was
 -- left unfinished. Read-only - nothing here writes, so a report can never be the
 -- thing that "fixes" what it reports.
-function M.session_state(session_id)
+--
+-- `opts.claimed` is the reader's own claim that the process which owned this turn
+-- is gone. Only the reader knows that: a turn in flight in a *live* process has the
+-- same ledger shape as one whose process was killed, because a tool result lands
+-- when it lands. So `claim_interrupted` upgrades an unfinished tail to the
+-- interrupted state and says so in the detail; without it the state stays honest
+-- about what the ledger alone proves.
+function M.session_state(session_id, opts)
+  opts = opts or {}
   local session = M.session(session_id)
   if not session then return nil end
   local rows = query("SELECT * FROM turns WHERE session_id=? ORDER BY seq DESC LIMIT 1", {session_id})
   local last = rows[1]
   local state = classify(last)
   local pending = nil
-  if state == "interrupted" and last and (last.role == "assistant" or last.role == "tool") then
+  if state == "unfinished" and last and (last.role == "assistant" or last.role == "tool") then
     local total
     pending, total = M.pending_calls(session_id)
     -- A tool tail whose result matches none of the decision's calls: the ledger
@@ -566,16 +587,24 @@ function M.session_state(session_id)
     -- is unknown. Claiming "2 of 2 never reported" there would be a lie.
     if last.role == "tool" and pending and total and #pending == total then pending = nil end
   end
+  local claim = opts.claimed == true and state == "unfinished"
+  local detail
+  if claim then
+    detail = "interrupted: " .. detail_of("unfinished", last, pending)
+  else
+    detail = detail_of(state, last, pending)
+  end
   return {
     session_id = session_id,
     title = session.title or "",
-    state = state,
+    state = claim and "interrupted" or state,
+    unfinished = state == "unfinished",
     seq = last and tonumber(last.seq) or 0,
     role = last and last.role or "",
     at = last and last.created_at or nil,
     pending = pending or {},
-    question = (state == "interrupted" and last and last.role == "user") and (last.content or "") or "",
-    detail = detail_of(state, last, pending),
+    question = (state == "unfinished" and last and last.role == "user") and (last.content or "") or "",
+    detail = detail,
     recorded_at = session.interrupted_at,
     recorded_seq = tonumber(session.interrupted_seq) or 0,
     recorded_reason = session.interrupted_reason or "",
@@ -608,16 +637,29 @@ function M.mark_interrupted(session_id, opts)
   return reason
 end
 
--- Threads currently waiting for something, most recent first. This is what a
--- user (or the resumed agent) needs to see, and it is derived, so a hard kill
--- shows up here without anyone having run a command that could notice it.
-function M.interrupted(user_id, limit)
+-- Threads waiting for something, most recent first - derived, so a hard kill shows
+-- up here without anyone having run a command that could notice it.
+--
+-- Every unfinished tail is listed, because a reader cannot tell a live in-flight
+-- turn from a dead one either - which is the whole problem. What the reader *can*
+-- see, and the ledger cannot, is age: a tool call that has not reported after hours
+-- is not still running, it is *stranded*, and that is the state worth naming
+-- outright. `stranded` is that refinement; `claimed` upgrades an unfinished tail to
+-- `interrupted` for a caller that knows the owning process is gone.
+function M.interrupted(user_id, limit, opts)
+  opts = opts or {}
+  local stranded_after = opts.stranded_after or 45
+  local now = host.now()
   local found = {}
   for _, row in ipairs(M.list_sessions(user_id, limit or 40, { states = true })) do
-    if row.state == "interrupted" then
-      local state = M.session_state(row.id)
+    if row.state == "unfinished" or row.state == "interrupted" then
+      local state = M.session_state(row.id, { claimed = opts.claimed })
       if state then
         state.turns = tonumber(row.turn_count) or 0
+        state.stranded = (tonumber(state.at) or now) < now - stranded_after
+        if state.stranded then
+          state.detail = "stranded: " .. state.detail
+        end
         found[#found + 1] = state
       end
     end

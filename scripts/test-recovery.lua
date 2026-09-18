@@ -18,13 +18,13 @@ memory.setup()
 local function session(title)
   return memory.start_session("", "chat", { user_id = "master", node_id = "", title = title })
 end
-local function state(id) return memory.session_state(id) end
+local function state(id, opts) return memory.session_state(id, opts) end
 local function call(id, name)
   return { id = id, type = "function", ["function"] = { name = name, arguments = "{}" } }
 end
--- Is this thread among the ones waiting? Negative controls need to ask.
+-- Which threads does a reader see as waiting, and what does it claim about them?
 local function waiting(id)
-  for _, found in ipairs(memory.interrupted(nil, 100)) do
+  for _, found in ipairs(memory.interrupted(nil, 100, { stranded_after = 45 })) do
     if found.session_id == id then return found end
   end
 end
@@ -53,26 +53,31 @@ assert(waiting(failed) == nil, "a failed turn must not be listed as interrupted"
 assert((tonumber(memory.session(failed).interrupted_count) or 0) == 0,
   "a failed turn must not be recorded as an interruption")
 
--- interrupted (1): asked, never answered. The process died between the question
+-- unfinished (1): asked, never answered. The process died between the question
 -- and the model's reply.
 local asked = session("asked")
 memory.append_turn(asked, { role = "user", content = "make the test pass" })
 local asked_state = state(asked)
-assert(asked_state.state == "interrupted", "an unanswered question is an interruption")
+assert(asked_state.state == "unfinished",
+  "an unanswered question is unfinished, not proven interrupted: " .. asked_state.state)
 assert(asked_state.question == "make the test pass", "the question must be carried for the report")
-assert(asked_state.detail:find("unanswered", 1, true), "the detail must say what is missing")
+assert(asked_state.detail:find("not answered", 1, true), "the detail must say what is missing")
+-- The claim, made by a reader that knows the process is gone.
+local claimed = state(asked, { claimed = true })
+assert(claimed.state == "interrupted", "a claimed unfinished tail reads as interrupted")
+assert(claimed.detail:find("interrupted", 1, true), "the claim must be visible in the detail")
 assert(waiting(asked) and waiting(asked).session_id == asked, "the thread must be listed as waiting")
 
--- interrupted (2): a decision whose tools never reported.
+-- unfinished (2): a decision whose tools never reported.
 local mid = session("mid-tools")
 memory.append_turn(mid, { role = "user", content = "run two things" })
 memory.append_turn(mid, { role = "assistant", content = "", tool_calls = { call("c1", "bash"), call("c2", "read") } })
 local mid_state = state(mid)
-assert(mid_state.state == "interrupted", "a decision with no results is an interruption")
+assert(mid_state.state == "unfinished", "a decision with no results is unfinished")
 assert(#mid_state.pending == 2, "both calls must be reported unfinished, got " .. #mid_state.pending)
 assert(mid_state.detail:find("2 tool call(s)", 1, true), "the detail must count the calls: " .. mid_state.detail)
 
--- interrupted (3): the sharp case. Two calls, one result - the process died
+-- unfinished (3): the sharp case. Two calls, one result - the process died
 -- *between* the tool calls, so exactly one of them is unfinished. Reporting both
 -- (or neither) would misdescribe the work that is actually missing.
 local partial = session("partial-tools")
@@ -81,13 +86,13 @@ memory.append_turn(partial, { role = "assistant", content = "",
   tool_calls = { call("p1", "bash"), call("p2", "read") } })
 memory.append_turn(partial, { role = "tool", tool_call_id = "p1", tool_name = "bash", content = '{"code":0}' })
 local partial_state = state(partial)
-assert(partial_state.state == "interrupted", "a half-written exchange is an interruption")
+assert(partial_state.state == "unfinished", "a half-written exchange is unfinished")
 assert(#partial_state.pending == 1 and partial_state.pending[1] == "read",
   "only the call with no result may be reported unfinished")
 assert(partial_state.detail:find("batch", 1, true),
   "the detail must say which of the batch is missing: " .. partial_state.detail)
 
--- interrupted (4): died after the result. The exchange is complete but nothing
+-- unfinished (4): died after the result. The exchange is complete but nothing
 -- followed it, so there is no answer to read - different missing work from (2),
 -- and it must not be reported as a call that never ran.
 local after = session("after-tool")
@@ -95,29 +100,67 @@ memory.append_turn(after, { role = "user", content = "run it" })
 memory.append_turn(after, { role = "assistant", content = "", tool_calls = { call("a1", "bash") } })
 memory.append_turn(after, { role = "tool", tool_call_id = "a1", tool_name = "bash", content = '{"code":0}' })
 local after_state = state(after)
-assert(after_state.state == "interrupted", "a tool result with nothing after it is an interruption")
+assert(after_state.state == "unfinished", "a tool result with nothing after it is unfinished")
 assert(#after_state.pending == 0, "a call that reported is not unfinished")
 assert(after_state.detail:find("tool result", 1, true), "the detail must say where it stopped")
 
 print("state derivation ok")
 
+-- ------------------------------------------------- live turn vs lost turn
+-- The reason the state is called `unfinished` and not `interrupted`: from the
+-- ledger a turn in flight in a *live* process is identical to one whose process was
+-- killed, because a tool result lands when it lands. This is not hypothetical - a
+-- status run described the tool call it was itself running as a lost one, and
+-- called a healthy process a crashed thread. The classification must not make that
+-- claim on its own; the reader must add it.
+--
+-- Age is the one part of the claim the ledger does support: no tool call runs for
+-- 45 seconds, so a tail that old is stranded.
+local now_state = state(mid)
+assert(now_state.state == "unfinished",
+  "a fresh tail must never be reported as interrupted without a claim: " .. now_state.state)
+assert(now_state.detail:find("never reported", 1, true),
+  "the detail must describe what is missing, not assert a death: " .. now_state.detail)
+assert(not now_state.detail:find("died", 1, true), "the detail must not claim the process died")
+assert(not now_state.detail:find("interrupted", 1, true), "the detail must not claim an interruption")
+local fresh = waiting(mid)
+assert(fresh and not fresh.stranded, "a just-written tail is not stranded")
+assert(fresh.state == "unfinished", "the listing must not upgrade a fresh tail on its own")
+-- The same tail, but old: now the reader can say it is not still running.
+local stale = session("stale")
+memory.append_turn(stale, { role = "user", content = "run it" })
+memory.append_turn(stale, { role = "assistant", content = "", tool_calls = { call("s1", "bash") } })
+local conn = dofile("lua/core/memory.lua")
+-- Backdate the tail by writing the turn's timestamp directly: the only way to
+-- build an aged tail without waiting, and it is the *reader's* threshold - not the
+-- turn - that is under test.
+memory.exec("UPDATE turns SET created_at=? WHERE session_id=? AND seq=(SELECT MAX(seq) FROM turns WHERE session_id=?)",
+  { host.now() - 3600, stale, stale })
+local aged = state(stale)
+assert(aged.at and (host.now() - aged.at) > 45, "the tail must be old enough to be stranded")
+local reported = waiting(stale)
+assert(reported and reported.stranded, "an aged tail must be reported as stranded")
+assert(reported.detail:find("stranded", 1, true), "the report must say stranded: " .. reported.detail)
+
+print("live turn vs lost turn ok")
+
 -- ------------------------------------------------------- the durable record
--- Deriving is enough to *see* an interruption, but it forgets: once the thread is
+-- Deriving is enough to *see* an unfinished tail, but it forgets: once the thread is
 -- resumed the tail is an answer again. The record is what survives, and it must
 -- count interruption points, not observations.
 assert(memory.session(asked).interrupted_at == nil, "reading a state must not write anything")
-local recorded = memory.mark_interrupted(asked, { reason = asked_state.detail })
+local recorded = memory.mark_interrupted(asked, { reason = claimed.detail })
 assert(recorded ~= nil, "marking an interruption must report what it recorded")
-assert(memory.session(asked).interrupted_seq == asked_state.seq,
+assert(memory.session(asked).interrupted_seq == claimed.seq,
   "the record must point at the turn that stopped")
 assert((tonumber(memory.session(asked).interrupted_count) or 0) == 1, "the first mark counts once")
 assert(memory.mark_interrupted(asked) == nil, "the same interruption point must not be recorded twice")
 assert((tonumber(memory.session(asked).interrupted_count) or 0) == 1,
-  "re-observing the same tail must not inflate the count")
+  "re-claiming the same tail must not inflate the count")
 
 -- A second, later interruption is a second point: the agent was cut off twice.
 memory.append_turn(asked, { role = "tool", tool_call_id = "x", tool_name = "bash", content = "{}" })
-assert(state(asked).state == "interrupted", "still interrupted after the result")
+assert(state(asked).state == "unfinished", "still unfinished after the result")
 assert(memory.mark_interrupted(asked) ~= nil, "a new interruption point must record")
 assert((tonumber(memory.session(asked).interrupted_count) or 0) == 2, "two points, two marks")
 assert(memory.mark_interrupted("no-such-session") == nil, "an unknown session cannot be marked")
@@ -147,7 +190,7 @@ local events = {}
 local bot = agentlib.new(notice_session, function(event) events[#events + 1] = event end, "master", "master", "")
 local before_turns = memory.turn_count(notice_session)
 local notice = bot:note_interruption()
-assert(type(notice) == "string", "an interrupted thread must produce a notice")
+assert(type(notice) == "string", "an unfinished thread must produce a notice")
 assert(notice:find("Recovery notice", 1, true), "the notice must announce itself")
 assert(notice:find("bash", 1, true), "the notice must name the unfinished call")
 assert(notice:find("1 tool call(s)", 1, true), "the notice must describe where it stopped")
@@ -220,7 +263,7 @@ print("recovery notice ok")
 -- a per-row state lookup would be an N+1 on a list of 50.
 local listed = {}
 for _, row in ipairs(memory.list_sessions(nil, 200, { states = true })) do listed[row.id] = row end
-assert(listed[mid] and listed[mid].state == "interrupted", "the list must mark an interrupted thread")
+assert(listed[mid] and listed[mid].state == "unfinished", "the list must mark an unfinished thread")
 assert(listed[mid].state_detail and listed[mid].state_detail:find("read", 1, true) ~= nil,
   "the list must carry the reason, so a reader does not open every session")
 assert(listed[settled] and listed[settled].state == "answered", "the list must mark a settled thread")

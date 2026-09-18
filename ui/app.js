@@ -637,19 +637,22 @@ function formatReset(iso) {
 }
 
 // Context: tokens sent last turn vs the configured context budget.
+//
+// Two lines: one summary row and one seeker. The numbers are the same ones the
+// four-row form showed, folded into a single pair - the ratio carries "taken" and
+// "budget" together, and the percentage rides along with it instead of taking a
+// third row of its own.
 function renderContext() {
   contextBox.replaceChildren();
   const usage = settings.usage || {};
   const taken = Number((usage.last && usage.last.prompt) || 0);
   const budget = Number(settings.context_limit) || 0;
-  contextBox.append(grid([
-    ["taken", formatTokens(taken)],
-    ["budget", budget ? formatTokens(budget) : "—"],
-  ]));
-  if (budget) {
-    const percent = Math.min(100, Math.round((taken / budget) * 100));
-    contextBox.append(meter(percent), grid([["used", percent + "%"]]));
-  }
+  const percent = budget ? Math.min(100, Math.round((taken / budget) * 100)) : 0;
+  contextBox.append(grid([[
+    "context",
+    `${formatTokens(taken)} / ${budget ? formatTokens(budget) : "—"}${budget ? "  " + percent + "%" : ""}`,
+  ]]));
+  if (budget) contextBox.append(meter(percent));
 }
 
 // Rolling provider limits: 5h, 7d and 30d.

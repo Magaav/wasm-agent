@@ -47,17 +47,30 @@ function M.session()
   return string.format("%s  %s", id, state.detail)
 end
 
--- An interrupted thread is the one fact `wa status` is uniquely placed to report:
--- it is what `--continue` would resume, and the transcript itself cannot say it -
--- a question with no answer looks the same whether the process is still thinking
--- or dead. The line is emitted only when there is something to recover, so
--- silence here means the thread is settled, and `wa resume` is the next step.
+-- An unfinished thread is the one fact `wa status` is uniquely placed to report: it
+-- is what `--continue` would resume, and the transcript itself cannot say it - a
+-- question with no answer looks the same whether the process is still thinking or
+-- dead.
+--
+-- But `wa status` is run *by* a process that may itself be the one working on that
+-- turn - which is exactly how it first described its own running tool call as a lost
+-- one. So it does not claim a live turn died. It reports what the caller could not
+-- otherwise know: a turn left unfinished somewhere, and how long it has been left.
+-- The line appears only when there is something to look at, so silence means the
+-- thread is settled.
+local STRANDED_AFTER = 45
+
 function M.interrupted()
   local id = M.session_id()
   if not id then return nil end
   local state = memory.session_state(id)
-  if not state or state.state ~= "interrupted" then return nil end
-  return string.format("interrupted at seq %d  %s  ->  wa resume", state.seq, state.detail)
+  if not state or not state.unfinished then return nil end
+  local age = host.now() - (tonumber(state.at) or 0)
+  if age > STRANDED_AFTER then
+    return string.format("stranded at seq %d  %s  ->  wa resume", state.seq, state.detail)
+  end
+  return string.format("unfinished at seq %d  %s  (still running, or gone - it cannot say which)",
+    state.seq, state.detail)
 end
 
 -- host.exec hands its result back as a JSON string, not a table: reading `.code`
