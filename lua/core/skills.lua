@@ -27,18 +27,41 @@ end
 
 -- Frontmatter is a tiny subset of YAML: `key: value` lines between --- markers.
 -- A full parser would be a dependency; the standard only requires name and
--- description, and a value that spans lines is not a skill worth loading.
+-- description. Block scalars are not optional though: `description: >-` followed by an indented
+-- paragraph is the *normal* way these files are written - pi's own skills use it, and so do the
+-- user's - and reading it as the two characters ">-" told the model that every such skill is
+-- described as ">-". It was found by listing the skills in the engine, which is the one place a
+-- wrong description is visible rather than merely unhelpful.
 local function parse_frontmatter(text)
   local block = text:match("^%-%-%-\r?\n(.-)\r?\n%-%-%-")
   if not block then return nil end
   local fields = {}
+  local pending, block_lines = nil, nil
+  local function flush()
+    if pending and block_lines and #block_lines > 0 then
+      -- Folded and literal both become one line here: a description is shown in a list and put
+      -- in a prompt, and a multi-line one would only be reflowed anyway.
+      fields[pending] = table.concat(block_lines, " "):gsub("%s+$", "")
+    end
+    pending, block_lines = nil, nil
+  end
   for line in block:gmatch("[^\r\n]+") do
     local key, value = line:match("^%s*([%w_%-]+)%s*:%s*(.*)$")
     if key then
+      flush()
       value = value:gsub("^[\"']", ""):gsub("[\"']$", ""):gsub("%s+$", "")
-      fields[key] = value
+      if value == ">" or value == ">-" or value == "|" or value == "|-" or value == ">+" or value == "|+" then
+        pending, block_lines = key, {}
+      else
+        fields[key] = value
+      end
+    elseif pending then
+      -- A continuation line of the block scalar: everything up to the next key.
+      local text_line = line:gsub("^%s+", "")
+      if text_line ~= "" or #block_lines > 0 then block_lines[#block_lines + 1] = text_line end
     end
   end
+  flush()
   if not fields.name or fields.name == "" then return nil end
   if not fields.description or fields.description == "" then return nil end
   return fields
@@ -153,6 +176,49 @@ function M.content(skill)
   -- Cap it: a skill is instructions, not an archive.
   if #text > 12000 then text = text:sub(1, 12000) .. "\n…(truncated)" end
   return text
+end
+
+-- Where a skill came from. Three roots matter, and they mean different things: the repository's
+-- own `skills/` is what the agent ships with, the node's config is what this node was given, and
+-- `.agents/skills` is whatever the person running it has accumulated.
+local function source_of(skill)
+  local path = tostring(skill.path or "")
+  if path:find("/.agents/", 1, true) then return "user" end
+  if path:find(paths.config() .. "/skills", 1, true) then return "node" end
+  return "repo"
+end
+
+-- The engine's view: every skill this node can see, and what is true of each one.
+--
+-- Two different facts live in one row, which is why the topic exists. The *description* is always
+-- in the model's context (unless the skill opts out of that), so the agent knows the skill exists;
+-- the *body* is only read when a task matches, so "the agent can load this on demand" is a
+-- separate claim - and a skill whose file cannot be read is visible here and useless to the model.
+function M.report(role)
+  local out = {}
+  local loadable, described = 0, 0
+  for _, skill in ipairs(M.list(true)) do
+    local body = M.content(skill)
+    local can_load = body ~= nil and body ~= ""
+    if can_load then loadable = loadable + 1 end
+    if not skill.hidden then described = described + 1 end
+    out[#out + 1] = {
+      name = skill.name,
+      description = skill.description or "",
+      path = skill.path,
+      source = source_of(skill),
+      hidden = skill.hidden == true,
+      loadable = can_load,
+      body_chars = can_load and #body or 0,
+    }
+  end
+  return {
+    skills = out,
+    count = #out,
+    loadable = loadable,
+    described = described,
+    role = role or "",
+  }
 end
 
 local function xml_escape(value)

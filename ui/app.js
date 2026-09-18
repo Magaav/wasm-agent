@@ -54,6 +54,8 @@ const driftBody = document.getElementById("drift-body");
 const driftRefresh = document.getElementById("drift-refresh");
 const spellsBox = document.getElementById("spells-box");
 const spellsNote = document.getElementById("spells-note");
+const skillsBox = document.getElementById("skills-box");
+const skillsNote = document.getElementById("skills-note");
 const toolsBox = document.getElementById("tools-box");
 const sessionsBox = document.getElementById("sessions-box");
 const sessionsNote = document.getElementById("sessions-note");
@@ -1826,6 +1828,47 @@ controlLive.addEventListener("change", () => {
 });
 
 // ---- engine: nodes / spells / tools --------------------------------------
+// ---- skills: what this node can be told to do -----------------------------
+//
+// Two different facts about one row, which is why the topic exists. The *description* is always
+// in the model's context - that is how the agent knows a skill exists - while the *body* is only
+// read when a task matches it. So "the agent has this skill" and "the agent can load it on
+// demand" are separate claims, and a skill whose file cannot be read is listed here and useless
+// to the model. Nothing on this screen is in context; looking loads nothing.
+async function refreshSkills() {
+  try {
+    const payload = await (await apiFetch("skills", { headers: apiHeaders() })).json();
+    const skills = payload.skills || [];
+    skillsNote.textContent = payload.count + " · " + payload.loadable + " loadable on demand";
+    skillsBox.replaceChildren();
+    if (!skills.length) {
+      skillsBox.textContent = "no skills found";
+      return;
+    }
+    for (const skill of skills) {
+      const row = document.createElement("div");
+      row.className = "skill-row";
+      const name = document.createElement("span");
+      name.className = "skill-name";
+      name.textContent = skill.name;
+      const meta = document.createElement("span");
+      meta.className = "skill-meta";
+      const tags = [skill.source];
+      tags.push(skill.loadable ? skill.body_chars + " chars on demand" : "body unreadable");
+      tags.push(skill.hidden ? "hidden from the model" : "described in context");
+      meta.textContent = tags.join(" · ");
+      const description = document.createElement("div");
+      description.className = "skill-description";
+      description.textContent = skill.description || "(no description)";
+      row.append(name, meta, description);
+      skillsBox.append(row);
+    }
+  } catch (error) {
+    skillsNote.textContent = "unavailable";
+    skillsBox.textContent = String(error);
+  }
+}
+
 async function refreshSpells() {
   try {
     const payload = await (await apiFetch("spells", { headers: apiHeaders() })).json();
@@ -2034,6 +2077,7 @@ async function openSession(id) {
 function loadTopic(id) {
   if (id === "nodes-box") refreshNodes();
   else if (id === "sessions-box") refreshSessions();
+  else if (id === "skills-box") refreshSkills();
   else if (id === "spells-box") refreshSpells();
   else if (id === "tools-box") refreshTools();
 }

@@ -64,6 +64,17 @@ window.__fixtures = {
   },
   tools: { tools: [] },
   spells: { spells: [] },
+  // Two skills, one of them hidden from the model: the topic must show that difference, because
+  // "the agent has this skill" and "the agent is told about this skill" are not the same claim.
+  skills: {
+    count: 2, loadable: 2, described: 1, role: "master",
+    skills: [
+      { name: "handoff-gate", description: "How to hand work off so a reviewer can verify it.",
+        source: "repo", hidden: false, loadable: true, body_chars: 4200 },
+      { name: "quiet-internals", description: "Notes that are never advertised to the model.",
+        source: "user", hidden: true, loadable: true, body_chars: 900 },
+    ],
+  },
   env: {},
   usage: {},
 };

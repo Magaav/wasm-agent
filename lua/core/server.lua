@@ -7,6 +7,7 @@ local agentlib = dofile("lua/core/agent.lua")
 local users = dofile("lua/core/users.lua")
 local toolslib = dofile("lua/core/tools.lua")
 local nodeslib = dofile("lua/core/nodes.lua")
+local skillslib = dofile("lua/core/skills.lua")
 -- Errors travel to a browser, a log and a test harness; mask secrets as they
 -- leave the server rather than trusting every future call site.
 local redact = dofile("lua/core/redact.lua")
@@ -153,6 +154,14 @@ function wa_shell(command, session)
   if not user then return json.encode({ error = "forbidden" }) end
   if not command or command == "" then return json.encode({ error = "command_required" }) end
   return json.encode(toolslib.dispatch(memory, "shell", { command = command }, user.role))
+end
+
+-- Every skill this node can see, and what is true of each: where it came from, whether its
+-- description is in the model's context, and whether its body can actually be loaded on demand.
+-- Reading it changes nothing - nothing here is in context, and no skill is loaded by looking.
+function wa_skills(session)
+  local user = users.current(session)
+  return json.encode(skillslib.report(effective_role(user)))
 end
 
 function wa_spells(session)

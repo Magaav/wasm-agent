@@ -372,8 +372,7 @@ $harness = @'
   check(!!desktopLine && /desktop/.test(desktopLine.textContent),
     "the desktop must be named on the node's own row, saw: " + (desktopLine ? desktopLine.textContent : "nothing"));
   var clientRow = null;
-  var rows = document.querySelectorAll("#nodes-box .node");
-  for (var r = 0; r < rows.length; r += 1) {
+  var rows = document.querySelectorAll("#nodes-box .node");  for (var r = 0; r < rows.length; r += 1) {
     if (/\bclient\b/.test(rows[r].textContent)) clientRow = rows[r];
   }
   check(clientRow === null, "the client executor must not be a row of its own");
@@ -429,6 +428,29 @@ $harness = @'
   var nodesText = document.getElementById("nodes-box").textContent;
   check(/foundation/.test(nodesText) && /openclaw/.test(nodesText),
     "both nodes must be listed, saw: " + nodesText.slice(0, 120));
+
+  // The skills topic, before spells: a skill is what the agent *is* - instructions it can be
+  // given - while a spell is something it saved. It lists every skill this node can see and says,
+  // for each, whether the body can actually be loaded on demand, which is a different fact from
+  // the description being in context.
+  document.title = "stage: skills topic";
+  document.querySelector('[data-target="skills-box"]').click();
+  for (var sk = 0; sk < 40; sk++) { await tick(); }
+  var skillsBox = document.getElementById("skills-box");
+  var skillRows = skillsBox.querySelectorAll(".skill-row");
+  check(skillRows.length === 2, "the skills topic must list every skill, saw " + skillRows.length);
+  var skillsText = skillsBox.textContent;
+  check(skillsText.indexOf("handoff-gate") >= 0, "and must name them, saw: " + skillsText.slice(0, 80));
+  check(skillsText.indexOf("chars on demand") >= 0,
+    "and say whether each body can be loaded on demand, saw: " + skillsText.slice(0, 160));
+  check(skillsText.indexOf("hidden from the model") >= 0 && skillsText.indexOf("described in context") >= 0,
+    "and separate a skill the model is told about from one it is not");
+  var topicNames = Array.prototype.map.call(document.querySelectorAll(".engine-name"),
+    function (span) { return span.textContent; });
+  check(topicNames.indexOf("skills") >= 0 && topicNames.indexOf("skills") < topicNames.indexOf("spells"),
+    "the skills topic must come before spells, saw: " + topicNames.join(","));
+  check((document.getElementById("skills-note").textContent || "").length > 0,
+    "and the topic note must say how many there are");
 
   document.title = "stage: renaming";
   // Ticks, not await: the app's apiFetch arms a setTimeout for its own deadline, and this

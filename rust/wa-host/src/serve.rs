@@ -601,6 +601,7 @@ fn dispatch(
         }
         "/envelope" => (200, "application/json", call("wa_envelope", &[session]).into_bytes()),
         "/tools" => (200, "application/json", call("wa_tools", &[session]).into_bytes()),
+        "/skills" => (200, "application/json", call("wa_skills", &[session]).into_bytes()),
         "/nodes" => (200, "application/json", call("wa_nodes", &[session]).into_bytes()),
         "/node/name" if method == "POST" => (200, "application/json", call("wa_set_node_name", &[body, session]).into_bytes()),
         "/sessions" => (200, "application/json", call("wa_sessions", &[session]).into_bytes()),
