@@ -8,30 +8,56 @@ into wasm-agent's own context at runtime, so keep it short and operational.
 | Tree | Path | Role |
 | --- | --- | --- |
 | Cloud (authoritative runtime) | `openclaw.ohana:/local/projects/wasm-agent` | builds, runs, hosts the rendezvous + relay |
-| Windows clone | `orca/workspaces/wasm-agent/loggerhead/foundation` | editing, tests, review |
-| Orca worktree | `workspaces/foundation/<task>` (one per task) | one agent per task, its own branch |
+| Windows trunk | `orca/workspaces/wasm-agent/loggerhead/foundation` | `main`. Editing, review, merges. A node never works here |
+| The node | `orca/workspaces/wasm-agent/node/foundation` | a node's own worktree, on the branch that carries its name |
 
 All of them push to `github.com/Magaav/wasm-agent` (remote `origin`). **GitHub
 is the source of truth**; none of them is "the" copy. Before editing: `git
 pull`. After editing: commit and push, then pull on the other side.
-
 Every tree authenticates with the `github-wasm-agent` SSH host alias:
 `git@github-wasm-agent:Magaav/wasm-agent.git`.
 
-### If you are an Orca-spawned agent in a worktree
+### Which branch am I on? You never ask — you derive it
 
-- Your worktree is a `git worktree` of this repo, branched off `origin/main`.
-  Treat that branch as your deliverable: **work on it, commit to it, push it.**
+**You are a node, and a node is bound to a worktree.** The branch of that
+worktree *is* your name, and git already knows it:
+
+```sh
+git symbolic-ref --short HEAD     # -> the node's name
+```
+
+That is the whole rule. Do not ask which branch to work on, do not invent a
+task name, and do not create a worktree per task: work on the branch you are
+already standing on, in the tree you are already in. `main` is not one of
+those branches — it is where all nodes converge, so a node that finds itself
+on `main` is in the wrong tree, and `main` is never a node's name.
+
+The same derivation exists in the agent's own core:
+`nodes.node_name()` (`lua/core/nodes.lua`) prefers a name someone set, then
+the branch, and `nodes.rename_branch()` moves the branch *first* — locally,
+then GitHub, and only then writes the name, or it fails with a reason and
+changes nothing. `main`/`master` are refused there rather than renamed.
+
+Blank state, the short version: *my branch is my name; I derive it with git; I
+never commit to main.*
+
+### If you are an agent in a node's worktree
+
+- Your worktree is a `git worktree` of this repo, on the branch named after the
+  node. Treat that branch as your deliverable: **work on it, commit to it, push it.**
   Do not rewrite `main`, and do not push to `main` — hand the branch off or open
   a PR, and let the human merge.
 - The last commit on your branch is the human's review surface. Keep commits
   small and make each message say *why*, not just *what*.
 - Working-directory rule still applies: `git config core.autocrlf` must be
   `false`. Worktrees inherit it from the shared git dir, so verify, don't assume.
-- **The commit-msg hook enforces the branch rule.** A commit on `main` whose trailer is
-  `Agent: wasm-agent ...` is refused, and so is a commit with no trailer at all. If you
-  see that refusal, you are on the wrong branch — `git switch -c <task>`, rebase onto
-  `origin/main`, push — and it is the hook working, not a bug to work around.
+- **The commit-msg hook enforces the branch rule.** The refusal comes from
+  `.githooks/commit-msg` — a commit on `main` whose trailer is `Agent: wasm-agent ...`
+  is refused, and so is a commit with no trailer at all. (The `pre-commit` hook is a
+  different rule: it refuses **CRLF in the index**.) If you see the main refusal, you are
+  on the wrong branch — go back to the branch that carries your node's name
+  (`git symbolic-ref --short HEAD` is where you should be), rebase onto `origin/main`,
+  push — and it is the hook working, not a bug to work around.
   Enable it in a checkout (once per clone; worktrees share the shared git dir):
 
   ```sh

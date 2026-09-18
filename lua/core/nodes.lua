@@ -108,9 +108,10 @@ end
 
 -- What a human calls this node when four of them are in a list.
 --
--- Order: a name someone set, then the *worktree this node is running in*, then the
--- environment, then "host". The worktree comes before the environment deliberately: a list
--- of nodes should read as a list of checkouts, and WASM_AGENT_NODE_NAME is the older
+-- Order: a name someone set, then the *branch this node is standing on* (which is the node's
+-- name by construction - see AGENTS.md, "Which branch am I on?"), then the worktree directory,
+-- then the environment, then "host". The branch comes before the environment deliberately: a
+-- list of nodes should read as a list of checkouts, and WASM_AGENT_NODE_NAME is the older
 -- mechanism - a leftover value in a shell profile would otherwise make every node on the
 -- machine claim the same name, which is the confusion this exists to remove.
 function M.node_name()
