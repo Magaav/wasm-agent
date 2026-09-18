@@ -22,10 +22,11 @@
 --   repo's test.sh hardcoded. It is the real source, fetched once and cached, because it
 --   is 4.7MB and must not be fetched per turn.
 --
---   It is not complete. deepseek-v4.1-flash - the model actually in use here - is in pi's
---   local store and NOT in the public catalogue, because it is not released yet. A chain
---   that assumed the catalogue was total would have answered "unknown" for the very model
---   this bug was found on.
+--   It is not complete either. deepseek-v4.1-flash - the model actually in use here -
+--   is in pi's store; at the time of writing the catalogue did not list it, and it does
+--   now, so a chain that assumed the catalogue was total would have been wrong in the
+--   direction that matters least and still wrong. Ordering store-first is about cost, not
+--   about coverage: the store is a local file, the catalogue is 4.7MB over the network.
 --
 -- Resolution order, most specific first:
 --   1. `WASM_AGENT_MODEL_LIMITS` JSON, per model - the operator's explicit override.
