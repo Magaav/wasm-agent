@@ -4,6 +4,8 @@ const jump = document.getElementById("jump");
 const meta = document.getElementById("meta");
 const form = document.getElementById("composer");
 const input = document.getElementById("input");
+const undoBtn = document.getElementById("undo");
+const redoBtn = document.getElementById("redo");
 const panel = document.getElementById("panel");
 const sendButton = document.getElementById("send");
 const statusBtn = document.getElementById("status-btn");
@@ -817,6 +819,9 @@ function renderAttachments() {
     remove.textContent = "×";
     remove.title = "Remove";
     remove.addEventListener("click", () => {
+      // A removal by hand is worth undoing: it is the easiest way to lose a
+      // pasted screenshot, and the chip is small enough to hit by accident.
+      pushDraft();
       attachments.splice(index, 1);
       renderAttachments();
     });
@@ -824,6 +829,85 @@ function renderAttachments() {
     attachmentsEl.append(chip);
   });
 }
+
+// ---- composer undo/redo --------------------------------------------------
+// What this undoes is the *draft*: the text you have typed and the files you
+// have attached but not yet sent. It deliberately does not touch the
+// transcript or the ledger - see DESIGN.md §12 for why that boundary is where
+// it is. Nothing here can alter what the model has already seen.
+const DRAFT_LIMIT = 50;
+let draftUndo = [];
+let draftRedo = [];
+let draftNow = { text: "", attachments: [] };
+
+function snapshotDraft() {
+  return {
+    text: input.value,
+    // The attachment objects are treated as immutable once created (a chip is
+    // removed, never edited in place), so a shallow copy is a real snapshot and
+    // a deep clone would only copy base64 for nothing.
+    attachments: attachments.slice(),
+  };
+}
+
+function sameDraft(a, b) {
+  if (a.text !== b.text) return false;
+  if (a.attachments.length !== b.attachments.length) return false;
+  for (let i = 0; i < a.attachments.length; i += 1) {
+    if (a.attachments[i] !== b.attachments[i]) return false;
+  }
+  return true;
+}
+
+// Call *before* a change, so the stack holds the state to come back to.
+function pushDraft() {
+  const previous = draftNow;
+  if (sameDraft(previous, snapshotDraft())) return;
+  draftUndo.push(previous);
+  if (draftUndo.length > DRAFT_LIMIT) draftUndo.shift();
+  // A fresh edit invalidates the redo branch, as in any editor.
+  draftRedo = [];
+  draftNow = snapshotDraft();
+  syncUndoButtons();
+}
+
+function applyDraft(draft) {
+  input.value = draft.text;
+  attachments.length = 0;
+  attachments.push(...draft.attachments);
+  draftNow = { text: draft.text, attachments: draft.attachments.slice() };
+  renderAttachments();
+  autosize();
+  syncUndoButtons();
+}
+
+function undoDraft() {
+  if (draftUndo.length === 0) return false;
+  const current = snapshotDraft();
+  const previous = draftUndo.pop();
+  draftRedo.push(current);
+  applyDraft(previous);
+  setStatus("undone - press Enter to send, Ctrl+Y to redo");
+  return true;
+}
+
+function redoDraft() {
+  if (draftRedo.length === 0) return false;
+  const current = snapshotDraft();
+  const next = draftRedo.pop();
+  draftUndo.push(current);
+  applyDraft(next);
+  setStatus("redone");
+  return true;
+}
+
+function syncUndoButtons() {
+  if (undoBtn) undoBtn.disabled = draftUndo.length === 0;
+  if (redoBtn) redoBtn.disabled = draftRedo.length === 0;
+}
+
+if (undoBtn) undoBtn.addEventListener("click", () => undoDraft());
+if (redoBtn) redoBtn.addEventListener("click", () => redoDraft());
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -834,11 +918,35 @@ form.addEventListener("submit", (event) => {
   const text = input.value.trim();
   if (!text && attachments.length === 0) return;
   input.value = "";
+  attachments.length = 0;
+  // The draft has been sent, so there is nothing to undo *to*: keeping the
+  // stack would let Ctrl+Z resurrect a draft that is already in the transcript,
+  // and pressing Enter again would send it twice.
+  draftUndo = [];
+  draftRedo = [];
+  draftNow = snapshotDraft();
+  renderAttachments();
+  syncUndoButtons();
   autosize();
   send(text);
 });
 
 input.addEventListener("keydown", (event) => {
+  const accel = event.ctrlKey || event.metaKey;
+  // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, the three spellings people actually use.
+  // Only while the composer has focus, so we never shadow an undo a browser
+  // context (a dialog, a native field) is entitled to handle itself.
+  if (accel && event.key.toLowerCase() === "z") {
+    event.preventDefault();
+    if (event.shiftKey) redoDraft();
+    else undoDraft();
+    return;
+  }
+  if (accel && event.key.toLowerCase() === "y") {
+    event.preventDefault();
+    redoDraft();
+    return;
+  }
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     form.requestSubmit();
@@ -848,7 +956,16 @@ function autosize() {
   input.style.height = "auto";
   input.style.height = Math.min(input.scrollHeight, 180) + "px";
 }
-input.addEventListener("input", autosize);
+// Group typing into one undo step: without this, every keystroke is its own
+// entry and Ctrl+Z walks back one character at a time, which is not what the
+// gesture means. A pause, or any non-typing change, starts a new step.
+let typingTimer = null;
+input.addEventListener("input", () => {
+  autosize();
+  if (typingTimer === null) pushDraft();     // first keystroke of a burst
+  clearTimeout(typingTimer);
+  typingTimer = setTimeout(() => { typingTimer = null; }, 600);
+});
 window.addEventListener("resize", () => requestAnimationFrame(autosize));
 
 messages.addEventListener("click", (event) => {
@@ -948,6 +1065,10 @@ function readAsDataURL(file) {
 async function addFiles(files) {
   let added = 0;
   let refused = 0;
+  // One snapshot for the whole batch: undoing a three-file drop one file at a
+  // time would make Ctrl+Z feel broken. Captured before the first await, so a
+  // slow read still leaves the pre-drop state on the stack.
+  const before = snapshotDraft();
   for (const file of files) {
     if (isImage(file)) {
       try {
@@ -979,7 +1100,16 @@ async function addFiles(files) {
   } else if (added > 0) {
     setStatus(`${added} file(s) attached - press Enter to send`);
   }
+  // Only record a step if the batch actually changed something: a refused-only
+  // drop must not add an undo entry that appears to do nothing.
+  if (added > 0 && !sameDraft(before, snapshotDraft())) {
+    draftUndo.push(before);
+    if (draftUndo.length > DRAFT_LIMIT) draftUndo.shift();
+    draftRedo = [];
+    draftNow = snapshotDraft();
+  }
   renderAttachments();
+  syncUndoButtons();
   return { added, refused };
 }
 

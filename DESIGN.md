@@ -167,3 +167,34 @@ On the node, bytes are stored content-addressed by sha256 under
 in `turns.content`, which is FTS-indexed. `build_context` rebuilds the vision
 part on every replay, and a file that has gone missing is reported inside the
 text part — never silently dropped.
+
+## 12. Composer undo/redo
+
+Two `.icon-btn` controls in the composer footer, where §9 puts per-message
+actions, plus `Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+Y` while the textarea has focus.
+
+**What it undoes is the draft, and only the draft**: the text you have typed and
+the files you have pasted, dropped or attached but not yet sent. It does not
+touch the transcript and it does not touch the ledger.
+
+That boundary is deliberate, not a limitation to be "fixed" later. The turn
+ledger is append-only: a conversation is what the model was actually shown, and
+letting someone silently delete a turn would make the transcript a claim about
+history that history cannot support. Undoing a *sent* turn would also have to
+reach the provider, the FTS index and every peer that mirrored the turn. If that
+is ever wanted it is a separate feature with its own design, not a wider
+interpretation of this button.
+
+Consequences worth knowing:
+
+- Typing is grouped into steps: a burst of keystrokes is one undo, not one per
+  character. A pause starts a new step.
+- A batch of files dropped together is one step, so one `Ctrl+Z` removes the
+  whole drop.
+- Sending clears both stacks. An already-sent draft must not be resurrected into
+  the composer, where pressing Enter would send it twice.
+- A refused file (an unsupported image type) does not create a step: an undo
+  entry that visibly does nothing is worse than no entry.
+- The buttons are disabled when their stack is empty, and disabled buttons do
+  not take the hover accent — a control must not claim an undo that is not
+  available.

@@ -242,6 +242,93 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
   check(attachments.length === 1, "the attach button still attaches (same addFiles path)");
   check(fileInput.value === "", "the file input is cleared so the same file can be re-picked");
 
+  // ---- undo / redo -------------------------------------------------------
+  const redoButton = byId("redo");
+  const undoButton = byId("undo");
+  const form = byId("composer");
+
+  // Start from a known state: the drop/paste tests above have already pushed
+  // steps, so asserting "undo is disabled" before clearing them would be
+  // asserting something about the previous test, not about undo.
+  const resetHistory = () => vm.runInContext(
+    "draftUndo.length = 0; draftRedo.length = 0; draftNow = { text: input.value, attachments: attachments.slice() }; syncUndoButtons();",
+    sandbox,
+  );
+
+  attachments.length = 0;
+  input.value = "";
+  resetHistory();
+  check(undoButton.disabled === true, "undo starts disabled (nothing to undo yet)");
+  check(redoButton.disabled === true, "redo starts disabled");
+
+  // Undoing a drop.
+  fileInput.files = [png("undo-me.png")];
+  await fileInput.fire("change", {});
+  await settle();
+  check(attachments.length === 1, "a file is attached before undoing");
+  check(undoButton.disabled === false, "undo enables once there is a step");
+
+  await undoButton.fire("click", {});
+  check(attachments.length === 0, "undo removes the dropped file");
+  check(redoButton.disabled === false, "redo enables after an undo");
+  await redoButton.fire("click", {});
+  check(attachments.length === 1, "redo puts the dropped file back");
+  check(attachments[0].name === "undo-me.png", "redo restores the same file");
+
+  // Undoing typed text, and that a new edit kills the redo branch.
+  resetHistory();
+  input.value = "first";
+  await input.fire("input", {});
+  vm.runInContext("typingTimer = null;", sandbox);
+  input.value = "first second";
+  await input.fire("input", {});
+  vm.runInContext("typingTimer = null;", sandbox);
+  await undoButton.fire("click", {});
+  check(input.value === "first", "undo reverts one typing step, not one character: " + JSON.stringify(input.value));
+  input.value = "something else";
+  await input.fire("input", {});
+  vm.runInContext("typingTimer = null;", sandbox);
+  check(redoButton.disabled === true, "a fresh edit clears the redo branch");
+
+  // Ctrl+Z / Ctrl+Shift+Z on the textarea.
+  resetHistory();
+  input.value = "alpha";
+  await input.fire("input", {});
+  vm.runInContext("typingTimer = null;", sandbox);
+  input.value = "alpha beta";
+  await input.fire("input", {});
+  vm.runInContext("typingTimer = null;", sandbox);
+  let keyPrevented = false;
+  await input.fire("keydown", { key: "z", ctrlKey: true, shiftKey: false, preventDefault() { keyPrevented = true; } });
+  check(input.value === "alpha", "Ctrl+Z undoes (keyboard path)");
+  check(keyPrevented, "Ctrl+Z preventDefault is called (no browser undo fight)");
+  await input.fire("keydown", { key: "z", ctrlKey: true, shiftKey: true, preventDefault() {} });
+  check(input.value === "alpha beta", "Ctrl+Shift+Z redoes (keyboard path)");
+  // Ctrl+Y is the third spelling of *redo*. After that redo there is nothing
+  // left to redo, so the correct behaviour is a no-op - and asserting an undo
+  // here would have encoded a wrong expectation, not found a bug.
+  await input.fire("keydown", { key: "y", ctrlKey: true, shiftKey: false, preventDefault() {} });
+  check(input.value === "alpha beta", "Ctrl+Y is a no-op with an empty redo stack");
+  await input.fire("keydown", { key: "z", ctrlKey: true, shiftKey: false, preventDefault() {} });
+  check(input.value === "alpha", "Ctrl+Z undoes again after the redo");
+  await input.fire("keydown", { key: "y", ctrlKey: true, shiftKey: false, preventDefault() {} });
+  check(input.value === "alpha beta", "Ctrl+Y redoes once there is something to redo");
+
+  // Plain typing must NOT be intercepted, or Enter-to-send breaks.
+  let plainPrevented = false;
+  await input.fire("keydown", { key: "a", ctrlKey: false, shiftKey: false, preventDefault() { plainPrevented = true; } });
+  check(!plainPrevented, "an ordinary keypress is not preventDefault'd");
+
+  // Sending clears the stack: an undone draft must not be resendable.
+  resetHistory();
+  input.value = "send me";
+  await input.fire("input", {});
+  vm.runInContext("typingTimer = null;", sandbox);
+  await form.fire("submit", { preventDefault() {} });
+  check(input.value === "", "a send clears the input");
+  check(undoButton.disabled === true, "a send clears undo (an already-sent draft must not come back)");
+  check(redoButton.disabled === true, "a send clears redo");
+
   console.log("---");
   console.log(failures === 0 ? "ALL PASS" : failures + " FAILURE(S)");
   process.exit(failures === 0 ? 0 : 1);

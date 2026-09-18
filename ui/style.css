@@ -379,6 +379,11 @@ body.term .terminal { display: flex; }
 .icon-btn:hover { color: var(--text); border-color: var(--accent); }
 .icon-btn.active { color: white; background: var(--accent); border-color: var(--accent); }
 .icon-btn.listening { animation: pulse 1.2s ease-in-out infinite; }
+/* A disabled icon button must look disabled and must not react to the pointer,
+   or it claims an undo that does not exist yet. Reuses --line for the outline
+   and dims the glyph rather than inventing a second grey. */
+.icon-btn:disabled { opacity: .35; cursor: default; border-color: var(--line); color: var(--muted); }
+.icon-btn:disabled:hover { color: var(--muted); border-color: var(--line); }
 @keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(79,140,255,.55); } 50% { box-shadow: 0 0 0 5px rgba(79,140,255,0); } }
 
 .chip {
