@@ -101,13 +101,23 @@ impl Bridge {
 }
 
 /// Spawn the listener the native client polls. Non-blocking to the caller.
+///
+/// The bind is retried rather than given up on, because giving up is silent and permanent: a
+/// leftover node held 127.0.0.1:8800 once, this printed one line to a log nobody was reading, and
+/// the process then ran for hours with no bridge at all - so every control action timed out and the
+/// only symptom was an AbortError in a view. A port that is busy now is often free a second later,
+/// and waiting costs nothing. The same loop rebinds if the listener ever ends, so a node cannot be
+/// left without a bridge for the rest of its life.
+///
+/// What this does *not* do is pretend the first failure did not happen: it says so, every attempt.
 pub fn serve(port: u16, bridge: Arc<Bridge>) {
-    std::thread::spawn(move || {
+    std::thread::spawn(move || loop {
         let listener = match TcpListener::bind(("127.0.0.1", port)) {
             Ok(listener) => listener,
             Err(error) => {
-                eprintln!("[client] bind 127.0.0.1:{port} failed: {error}");
-                return;
+                eprintln!("[client] bind 127.0.0.1:{port} failed ({error}); retrying in 2s");
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                continue;
             }
         };
         eprintln!("[client] client-tools bridge on http://127.0.0.1:{port}");
@@ -116,6 +126,8 @@ pub fn serve(port: u16, bridge: Arc<Bridge>) {
                 let _ = handle(&bridge, &mut stream);
             }
         }
+        eprintln!("[client] listener on {port} ended; rebinding");
+        std::thread::sleep(std::time::Duration::from_secs(1));
     });
 }
 

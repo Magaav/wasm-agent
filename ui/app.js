@@ -1896,6 +1896,19 @@ function applyViewMode() {
   return true;
 }
 
+// A deep link can ask for a view directly: `?open=control:node` opens it in its own window, which
+// is what a shortcut, a script or a test wants - and it is the same call the control button makes,
+// so the two cannot drift.
+function openFromQuery() {
+  let wanted = "";
+  try { wanted = new URLSearchParams(location.search).get("open") || ""; } catch (error) { wanted = ""; }
+  if (!wanted) return false;
+  const parts = wanted.split(":");
+  const target = parts[1] && parts[1] !== "this-node" ? parts.slice(1).join(":") : "";
+  if (parts[0] === "control") openControl(target);
+  return true;
+}
+
 function openControl(name) {
   balloon.close();
   const view = controlViewName(name);
@@ -2558,7 +2571,11 @@ window.rendererLoaded = loadRenderer().then(() => {
   input.addEventListener("input", saveDraft);
   // A view window renders one component and stops: it is not a conversation, and restoring a
   // transcript into it would be showing the chat inside the thing the chat opened.
-  if (!applyViewMode()) refreshMe().then(restoreSession);
+  if (!applyViewMode()) {
+    refreshMe().then(restoreSession);
+    // After the session is on its way: a deep link that opens a view should not delay the chat.
+    setTimeout(openFromQuery, 400);
+  }
 });
 watch();
 watchTurn();
