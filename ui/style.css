@@ -323,7 +323,20 @@ body.term .terminal { display: flex; }
   padding: var(--pad); border-top: 1px solid var(--line);
   background: rgba(18, 21, 28, .82);
 }
-.attachments { display: flex; flex-wrap: wrap; gap: var(--gap); }
+/* A pile of pasted screenshots used to grow the composer without limit until the message
+   box was pushed off the bottom of the window. Cap the strip at three and a half cards -
+   the half card is the affordance that says there is more - and let it scroll instead.
+   3 x 57px card + 3 x 5px gap + half a card = 215px, on the 5px scale. */
+.attachments {
+  display: flex; flex-wrap: wrap; gap: var(--gap);
+  max-height: 215px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* Wrapped lines must not stretch to fill the cap, and scrolling the strip must not
+     scroll the transcript behind it. */
+  align-content: flex-start;
+  overscroll-behavior: contain;
+}
 .attachments:empty { display: none; }
 .attachment {
   display: inline-flex; align-items: center; gap: var(--gap);

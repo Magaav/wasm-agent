@@ -109,6 +109,34 @@ $harness = @'
     check(traces[1].classList.contains("has-error"), "a failing tool call must mark its topic");
   }
 
+  // A pile of pasted screenshots must not push the composer off the screen. The strip
+  // caps its height and scrolls; the message box stays visible under it, and the last
+  // chip is reachable without the layout growing.
+  window.__attachMany(24);
+  var strip = document.getElementById("attachments");
+  var composer = document.getElementById("composer");
+  check(strip.children.length === 24, "24 attachments must render 24 chips, saw " + strip.children.length);
+  check(strip.clientHeight <= 216, "the strip must cap its height at ~215px, saw " + strip.clientHeight + "px");
+  check(strip.scrollHeight > strip.clientHeight + 40,
+    "and the overflow must be scrollable, saw scrollHeight " + strip.scrollHeight + " vs " + strip.clientHeight);
+  check(Math.abs(strip.clientHeight - 215) <= 1,
+    "the cap must be 215px (3.5 cards), saw " + strip.clientHeight + "px");
+  strip.scrollTop = strip.scrollHeight;
+  var lastChip = strip.children[strip.children.length - 1];
+  // Geometric, not offsetTop: the strip is not a positioned ancestor, so offsetTop is
+  // measured against something else entirely and the first version of this passed/failed
+  // for the wrong reason.
+  check(lastChip.getBoundingClientRect().bottom <= strip.getBoundingClientRect().bottom + 1,
+    "scrolling to the end must reach the last chip");
+  check(strip.scrollTop > 0, "the strip must actually have scrolled, saw scrollTop " + strip.scrollTop);
+  var inputBox = document.getElementById("input").getBoundingClientRect();
+  check(inputBox.bottom <= window.innerHeight,
+    "the message box must stay on screen, its bottom is at " + Math.round(inputBox.bottom) + " of " + window.innerHeight);
+  check(composer.clientHeight < window.innerHeight,
+    "the composer must not outgrow the window, saw " + composer.clientHeight + "px");
+  window.__attachMany(0);
+  check(document.getElementById("attachments").children.length === 0, "clearing must empty the strip");
+
   // The context panel states what it knows in one line. The fixture has a budget
   // and no usage, so this is the "0 / budget" case, and the percentage must be
   // computed rather than printed as a placeholder.
@@ -227,7 +255,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext;"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
 
 $server = $null
 $edge = @(
