@@ -9,6 +9,11 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 BIN=rust/target/release/wa
+# The suite must exercise the Lua in the working tree. cargo rebuilds the binary when a
+# Lua file changes (they are include_str!-ed), so this is belt as well as braces - but it
+# is the difference between testing the tree and testing a build artefact, and it went
+# missing in a merge without anyone noticing.
+export WASM_AGENT_LUA_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DB="$(mktemp -u /tmp/wa-smoke-XXXXXX.db)"
 # `wa status` reports *the current thread*, so it gets its own database: with the
 # shared one, every earlier session in this run sits in the same second and the

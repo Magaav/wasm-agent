@@ -17,9 +17,13 @@ $ErrorActionPreference = "Continue"
 
 $pass = 0
 $fail = 0
+$script:skipped = 0
 function Ok($m)   { Write-Host "  " -NoNewline; Write-Host "ok  " -ForegroundColor Green -NoNewline; Write-Host $m; $script:pass++ }
 function Bad($m)  { Write-Host "  " -NoNewline; Write-Host "FAIL" -ForegroundColor Red -NoNewline; Write-Host " $m"; $script:fail++ }
 function Note($m) { Write-Host "       $m" -ForegroundColor DarkGray }
+# A skipped check is counted and named in the verdict: a run that did not test something
+# must not report the same sentence as a run that did.
+function Skip($m) { Write-Host "  " -NoNewline; Write-Host "skip" -ForegroundColor Yellow -NoNewline; Write-Host " $m"; $script:skipped++ }
 
 # Never let a secret reach the console, whatever a future check prints.
 function Redact([string]$text) {
@@ -153,7 +157,7 @@ print("tool turns=" .. withTools .. " names=" .. table.concat(list, ","))
   $continued = (Lua 'local m = dofile("lua/core/memory.lua") m.setup() print("sessions=" .. #m.list_sessions(nil, 100))')
   if ($continued -eq $after) { Ok "--continue reuses the latest session" } else { Bad "--continue created a session" }
 } else {
-  Note "model checks skipped (-SkipModel)"
+  Skip "model checks (-SkipModel)"
 }
 
 # Session recovery: a thread cut off mid-answer must be visible, recorded, and
@@ -187,7 +191,7 @@ $root = Split-Path $PSScriptRoot -Parent
   if (-not (Test-Path $jsTest)) {
     Bad "tests/composer-attachments.js is missing"
   } elseif (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    Note "node not found: composer-attachments.js skipped"
+    Skip "composer-attachments.js (node not found)"
   } else {
     $out = & node $jsTest 2>&1 | Out-String
     if ($out -match "ALL PASS") { Ok "composer attachments: the JS unit test" }
@@ -318,7 +322,8 @@ try {
 } catch { Bad "node discovery did not return JSON" }
 
 Write-Host ""
-if ($fail -eq 0) { Write-Host "   local suite ok ($pass checks)" -ForegroundColor Green } else { Write-Host "   local suite FAILED ($fail of $($pass + $fail))" -ForegroundColor Red }
+$skippedNote = if ($script:skipped -gt 0) { ", $($script:skipped) skipped" } else { "" }
+if ($fail -eq 0) { Write-Host "   local suite ok ($pass checks$skippedNote)" -ForegroundColor Green } else { Write-Host "   local suite FAILED ($fail of $($pass + $fail)$skippedNote)" -ForegroundColor Red }
 Write-Host ""
 if ($started -and $serverProcess) {
   Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue

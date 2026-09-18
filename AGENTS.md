@@ -40,6 +40,15 @@ Every tree authenticates with the `github-wasm-agent` SSH host alias:
   If you are not going to finish it, commit it as `wip(...)` and say what remains.
 - `scripts/worktrees.sh` prints every worktree with its drift, its uncommitted files
   and whether it merges. Run it before you start, so you know what you are landing on.
+- **Never move a tree you do not own.** If your shell's cwd is someone else's checkout -
+  a `main` checkout, another agent's worktree - do not switch its branch, commit in it,
+  or leave it on a branch of yours. A live run did exactly that: it committed its work
+  to its own branch and left the human's checkout sitting on it, so the human's next
+  `git add -A` would have landed on the agent's branch. Create your own worktree first
+  (`orca worktree create`), or ask.
+- **A skipped test is reported as skipped.** The suites count skips and say so in the
+  verdict; skipping is something you ask for, not something inferred from a missing tool.
+  A run that did not test something must not print the sentence a run that did prints.
 
 ### Never touch the old plugin
 
