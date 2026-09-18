@@ -365,7 +365,7 @@ local nodes = dofile("lua/core/nodes.lua")
 local dir = nodes.worktree()
 assert(type(dir) == "string" and dir ~= "", "the worktree directory must be derivable from the cwd")
 assert(nodes.node_name() ~= "", "the node must have a name")
-local rejected, why = nodes.set_name("no
+local rejected, why = nodes.set_name("no" .. string.char(10) .. "newlines")
 newlines")
 assert(rejected == nil and why == "node_name_invalid",
   "a control character must be refused, got " .. tostring(rejected) .. " / " .. tostring(why))
