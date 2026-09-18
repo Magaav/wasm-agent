@@ -180,6 +180,20 @@ $root = Split-Path $PSScriptRoot -Parent
     Bad "scripts/test-empty-reply.lua is missing"
   }
 
+  # The composer's attachment handling, unit-tested in plain JS. It shipped with the
+  # image work and nothing ran it - it needs node and nothing else, and node is here.
+  # Missing node is a note, not a pass: a skipped test must not look like a green one.
+  $jsTest = Join-Path $root "tests/composer-attachments.js"
+  if (-not (Test-Path $jsTest)) {
+    Bad "tests/composer-attachments.js is missing"
+  } elseif (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    Note "node not found: composer-attachments.js skipped"
+  } else {
+    $out = & node $jsTest 2>&1 | Out-String
+    if ($out -match "ALL PASS") { Ok "composer attachments: the JS unit test" }
+    else { Bad "the composer attachment test failed"; Note ($out -replace "s+", " ") }
+  }
+
 $recoveryFile = Join-Path $root "scripts/test-recovery.lua"
 if (Test-Path $recoveryFile) {
   $out = Lua (Get-Content -Raw -Path $recoveryFile)

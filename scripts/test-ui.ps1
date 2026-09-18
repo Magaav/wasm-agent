@@ -109,6 +109,21 @@ $harness = @'
     check(traces[1].classList.contains("has-error"), "a failing tool call must mark its topic");
   }
 
+  // The context panel states what it knows in one line. The fixture has a budget
+  // and no usage, so this is the "0 / budget" case, and the percentage must be
+  // computed rather than printed as a placeholder.
+  // The panel lives in a popover, so the harness draws it through the same
+  // function the popover calls rather than reaching for the DOM it would build.
+  // Metatada is fetched after the renderer loads (app.js chains them), so wait for
+  // that first and then let the fixture's microtasks settle. Asserting earlier only
+  // ever tests the no-budget branch, which is how this check first passed wrongly.
+  if (window.rendererLoaded) { await window.rendererLoaded; }
+  for (var c = 0; c < 20; c++) { await tick(); }
+  window.renderContext();
+  var contextText = document.getElementById("context-box").textContent;
+  check(/used/.test(contextText) && /128/.test(contextText) && /%/.test(contextText),
+    "the context panel must state used / budget / percent, saw: " + contextText);
+
   // Markdown: a model answering with a table must get a table. Pipes are not
   // something a reader can reconstruct. The renderer arrives over the node's
   // static path, so this is real I/O: wait for it before dispatching the reply,
@@ -212,7 +227,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer;"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext;"
 
 $server = $null
 $edge = @(

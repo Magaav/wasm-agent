@@ -701,20 +701,21 @@ function formatReset(iso) {
   return `resets in ${Math.round(hours / 24)}d`;
 }
 
-// Context: tokens sent last turn vs the configured context budget.
+// Context: one information line (used / budget · percent), then the seeker. A
+// budget of zero is a fact worth stating - "taken 12K, budget -" reads like a
+// missing value rather than a configured absence.
 function renderContext() {
   contextBox.replaceChildren();
   const usage = settings.usage || {};
   const taken = Number((usage.last && usage.last.prompt) || 0);
   const budget = Number(settings.context_limit) || 0;
-  contextBox.append(grid([
-    ["taken", formatTokens(taken)],
-    ["budget", budget ? formatTokens(budget) : "—"],
-  ]));
-  if (budget) {
-    const percent = Math.min(100, Math.round((taken / budget) * 100));
-    contextBox.append(meter(percent), grid([["used", percent + "%"]]));
+  if (!budget) {
+    contextBox.append(grid([["used", `${formatTokens(taken)} taken · no budget`]]));
+    return;
   }
+  const percent = Math.min(100, Math.round((taken / budget) * 100));
+  contextBox.append(grid([["used", `${formatTokens(taken)} / ${formatTokens(budget)} · ${percent}%`]]));
+  contextBox.append(meter(percent));
 }
 
 // Rolling provider limits: 5h, 7d and 30d.
