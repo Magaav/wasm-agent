@@ -33,6 +33,9 @@
         <button id="term-btn" class="topbar-btn" type="button" title="Shell (Ctrl+`)" aria-label="Shell">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7l5 5-5 5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 17h8" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
         </button>
+        <button id="diff-btn" class="topbar-btn" type="button" title="Drift (Ctrl+D)" aria-label="Drift">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="7" cy="18.5" r="1.9" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="7" cy="4" r="1.9" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M15 4v12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="15" cy="18.5" r="1.9" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="15" cy="4" r="1.9" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+        </button>
         <button id="collapse" class="collapse" title="Collapse to avatar" aria-label="Collapse to avatar">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9l7 7 7-7" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
@@ -105,6 +108,20 @@
           <div class="engine-content" id="tools-box" hidden></div>
         </div>
       </div>
+    </section>
+
+    <section id="drift" class="drift" hidden>
+      <header class="engine-bar">
+        <span class="engine-title">drift</span>
+        <span class="engine-sub" id="drift-sub"></span>
+        <button id="drift-refresh" class="icon-btn" type="button" title="Re-read (r)" aria-label="Re-read">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.4-5.7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><path d="M20 4v4h-4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button id="drift-close" class="icon-btn" type="button" title="Back to chat (Esc)" aria-label="Back to chat">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 6v12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+        </button>
+      </header>
+      <div class="engine-body" id="drift-body"></div>
     </section>
 
     <section id="control" class="control" hidden>

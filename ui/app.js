@@ -41,6 +41,12 @@ const engineBtn = document.getElementById("engine-btn");
 const engineView = document.getElementById("engine");
 const engineClose = document.getElementById("engine-close");
 const engineSub = document.getElementById("engine-sub");
+const driftBtn = document.getElementById("diff-btn");
+const driftView = document.getElementById("drift");
+const driftClose = document.getElementById("drift-close");
+const driftSub = document.getElementById("drift-sub");
+const driftBody = document.getElementById("drift-body");
+const driftRefresh = document.getElementById("drift-refresh");
 const spellsBox = document.getElementById("spells-box");
 const spellsNote = document.getElementById("spells-note");
 const toolsBox = document.getElementById("tools-box");
@@ -1822,6 +1828,153 @@ function setEngine(open) {
 engineBtn.addEventListener("click", () => setEngine(!document.body.classList.contains("engine")));
 engineClose.addEventListener("click", () => setEngine(false));
 
+// ---- drift: what this node has that a peer does not ----------------------
+// A diff of the replication journal, read from GET /sync. This is the one place
+// in the UI that shows a *diff* rather than a transcript, so it is worth being
+// explicit about what the rows mean: a node keeps an append-only journal of
+// entries, and a cursor per peer recording how far that peer has been sent. The
+// gap between a cursor and the head is therefore exactly the set of entries that
+// peer has not seen - the drift. The local node has a head and no cursor; a peer
+// has both.
+//
+// It is READ-ONLY, and that is a deliberate limit rather than an oversight:
+// showing drift must not cause it. Pushing from a button would make merely
+// looking at the panel a mutation of another node's ledger, which is the kind of
+// thing that should be its own decision with its own confirmation.
+
+function driftRow(label, value, kind = "") {
+  const row = document.createElement("div");
+  row.className = "drift-row" + (kind ? " " + kind : "");
+  const name = document.createElement("span");
+  name.className = "drift-key";
+  name.textContent = label;
+  const val = document.createElement("span");
+  val.className = "drift-val";
+  val.textContent = value;
+  row.append(name, val);
+  return row;
+}
+
+function driftTopic(title, note) {
+  const topic = document.createElement("div");
+  topic.className = "engine-topic";
+  const head = document.createElement("div");
+  head.className = "engine-head";
+  const name = document.createElement("span");
+  name.className = "engine-name";
+  name.textContent = title;
+  const detail = document.createElement("span");
+  detail.className = "engine-note";
+  detail.textContent = note;
+  head.append(name, detail);
+  topic.append(head);
+  return topic;
+}
+
+// The journal head and a peer's cursor are both counts of entries, so the gap is
+// a count too - and a negative gap would mean the peer is *ahead* of us, which is
+// real (we may have been offline while it advanced) and must not be clamped to
+// zero. Showing "0 behind" for a peer that is ahead would be a lie in the same
+// family as a silent failure.
+function renderDrift(status) {
+  driftBody.replaceChildren();
+  const head = Number(status.head || 0);
+  const peers = Array.isArray(status.peers) ? status.peers : [];
+
+  driftSub.textContent = status.node_id
+    ? `${String(status.node_id).slice(0, 12)}… · head ${head}`
+    : `head ${head}`;
+
+  const own = driftTopic("this node", `${head} journal entr${head === 1 ? "y" : "ies"}`);
+  const ownBody = document.createElement("div");
+  ownBody.className = "engine-content";
+  ownBody.append(driftRow("head", String(head)));
+  ownBody.append(driftRow("pushing to", status.pushing_to ? String(status.pushing_to) : "nobody (WASM_AGENT_SYNC_TO is unset)"));
+  own.append(ownBody);
+  driftBody.append(own);
+
+  const peersTopic = driftTopic(
+    "peers",
+    peers.length === 0 ? "no peer has been sent anything yet" : `${peers.length} peer${peers.length === 1 ? "" : "s"}`,
+  );
+  const peersBody = document.createElement("div");
+  peersBody.className = "engine-content";
+
+  if (peers.length === 0) {
+    // Say why rather than showing an empty box: "no peers" and "peers that are
+    // all level" are different states and must not look the same.
+    const note = document.createElement("div");
+    note.className = "drift-empty";
+    note.textContent = "No cursors recorded. Either nothing has been pushed yet, or this node is not configured to push.";
+    peersBody.append(note);
+  } else {
+    for (const peer of peers) {
+      const cursor = Number(peer.cursor || 0);
+      const behind = head - cursor;
+      const topic = driftTopic(
+        String(peer.peer_id || "unknown").slice(0, 20),
+        behind > 0 ? `${behind} behind` : behind < 0 ? `${-behind} ahead` : "level",
+      );
+      const body = document.createElement("div");
+      body.className = "engine-content";
+      // Every pushed entry gets its own + line, so the count is auditable rather
+      // than asserted: a row per entry, capped so a large gap cannot hang the
+      // render, and the cap is stated instead of silently truncating.
+      const shown = Math.min(behind, 50);
+      for (let i = 0; i < shown; i += 1) {
+        body.append(driftRow("+", `journal entry ${cursor + i + 1}`, "add"));
+      }
+      if (behind > shown) {
+        body.append(driftRow("…", `${behind - shown} more not listed`, "muted"));
+      }
+      if (behind < 0) {
+        body.append(driftRow("−", `we are ${-behind} behind this peer`, "del"));
+      }
+      if (behind === 0) {
+        body.append(driftRow("=", "nothing to send", "muted"));
+      }
+      body.append(driftRow("cursor", String(cursor), "muted"));
+      topic.append(body);
+      peersBody.append(topic);
+    }
+  }
+  peersTopic.append(peersBody);
+  driftBody.append(peersTopic);
+}
+
+async function loadDrift() {
+  driftSub.textContent = "reading…";
+  try {
+    const response = await fetch("sync", { headers: apiHeaders() });
+    if (!response.ok) throw new Error(`sync ${response.status}`);
+    const payload = await response.json();
+    if (payload && payload.error) throw new Error(payload.error);
+    renderDrift(payload || {});
+  } catch (error) {
+    // Never render a failed read as "no drift": an unreadable journal is not a
+    // clean one, and conflating them is how a sync problem hides for a week.
+    driftBody.replaceChildren();
+    driftSub.textContent = "unreadable";
+    const topic = driftTopic("this node", "could not read the journal");
+    const body = document.createElement("div");
+    body.className = "engine-content";
+    body.append(driftRow("error", String(error && error.message ? error.message : error), "del"));
+    topic.append(body);
+    driftBody.append(topic);
+  }
+}
+
+function setDrift(open) {
+  document.body.classList.toggle("drift", open);
+  driftView.hidden = !open;
+  driftBtn.classList.toggle("active", open);
+  if (open) loadDrift();
+}
+
+driftBtn.addEventListener("click", () => setDrift(!document.body.classList.contains("drift")));
+driftClose.addEventListener("click", () => setDrift(false));
+driftRefresh.addEventListener("click", () => loadDrift());
+
 // ---- terminal: shell on this machine + spell replay ----------------------
 const termHistory = [];
 let termIndex = 0;
@@ -1899,6 +2052,7 @@ termClose.addEventListener("click", () => setTerm(false));
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     if (document.body.classList.contains("engine")) { event.preventDefault(); setEngine(false); input.focus(); return; }
+    if (document.body.classList.contains("drift")) { event.preventDefault(); setDrift(false); input.focus(); return; }
     if (document.body.classList.contains("term")) { event.preventDefault(); setTerm(false); input.focus(); return; }
     if (document.body.classList.contains("control")) { event.preventDefault(); closeControl(); return; }
   }
@@ -1908,6 +2062,10 @@ document.addEventListener("keydown", (event) => {
   } else if (event.ctrlKey && (event.key === "e" || event.key === "E")) {
     event.preventDefault();
     setEngine(!document.body.classList.contains("engine"));
+  } else if (event.ctrlKey && (event.key === "d" || event.key === "D")) {
+    // Ctrl+D would otherwise be the browser's bookmark gesture.
+    event.preventDefault();
+    setDrift(!document.body.classList.contains("drift"));
   }
 });
 termForm.addEventListener("submit", (event) => {

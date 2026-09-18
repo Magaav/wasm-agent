@@ -189,6 +189,24 @@ wa-trace { display: block; align-self: flex-start; max-width: 760px; width: 100%
 body.engine .messages, body.engine .composer, body.engine .terminal, body.engine .control { display: none; }
 .engine { display: none; flex: 1; min-height: 0; flex-direction: column; }
 body.engine .engine { display: flex; }
+/* drift: the replication journal as a diff between this node and its peers.
+   Reuses the engine view's bar/topic/content idioms (§1) rather than inventing a
+   second visual language for what is structurally the same kind of screen. */
+body.drift .messages, body.drift .composer, body.drift .terminal, body.drift .control, body.drift .engine { display: none; }
+.drift { display: none; flex: 1; min-height: 0; flex-direction: column; }
+body.drift .drift { display: flex; }
+.drift-row {
+  display: flex; gap: var(--gap); padding: 2px 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+}
+.drift-key { color: var(--muted); min-width: 4.5em; flex: 0 0 auto; }
+.drift-val { color: var(--text); word-break: break-all; }
+/* The + and − rows are the diff itself, so they carry the two colours a diff
+   reader already knows. Not decorative: the pair is the whole point of the view. */
+.drift-row.add .drift-key, .drift-row.add .drift-val { color: #7ee787; }
+.drift-row.del .drift-key, .drift-row.del .drift-val { color: #ff7b72; }
+.drift-row.muted .drift-val, .drift-row.muted .drift-key { color: var(--muted); }
+.drift-empty { color: var(--muted); font-size: 12px; line-height: 1.5; }
 .engine-bar {
   display: flex; align-items: center; gap: var(--gap); padding: var(--space) var(--pad);
   border-bottom: 1px solid var(--line); background: rgba(18, 21, 28, .82);
