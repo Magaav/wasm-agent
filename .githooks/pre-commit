@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Refuse a commit that stores CRLF.
+#
+# The invariant is the *stored blob*: this repo is consumed by Linux, and a CRLF file that
+# only ever lived on a Windows checkout has broken the build and the tests before now.
+# `core.autocrlf=false` means git stores exactly the bytes on disk, so nothing catches this
+# except a check - and the check existed only in the smoke suite, which runs on the cloud,
+# which is after the push. A commit that has to travel to another machine to be found is a
+# commit that has already been shared.
+#
+# So the same invariant runs here, on the staged content, before the commit exists. It is
+# the same command the suite uses, deliberately: one rule, one implementation.
+set -uo pipefail
+
+offenders="$(git grep --cached -I -l "$(printf '\r')" 2>/dev/null || true)"
+if [ -z "$offenders" ]; then
+  exit 0
+fi
+
+cat >&2 <<MESSAGE
+pre-commit: refusing a commit with CRLF in the index.
+
+  $(printf '%s\n  ' $offenders)
+
+The stored blob is what matters, and it must be LF: these files are consumed by Linux, and
+core.autocrlf=false means git stores the bytes on disk as they are. Convert the files and
+stage them again:
+
+  # with node, on Windows (the usual culprit: a tool that wrote CRLF)
+  node -e "const fs=require('fs');for(const f of process.argv.slice(1)){fs.writeFileSync(f,fs.readFileSync(f,'utf8').replace(/\\r\\n/g,'\\n'))}" <files>
+
+  # or with git, if the attributes allow it
+  git add --renormalize <files>
+
+Then confirm, before committing:
+
+  git grep --cached -I -l "\$(printf '\\r')"     # must print nothing
+MESSAGE
+exit 1
