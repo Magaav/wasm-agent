@@ -1801,12 +1801,23 @@ let synced = false;
 let syncRunning = false;
 let syncAttempts = 0;
 
-function setConnecting() {
+function setConnecting(label) {
   // Say what is true and that it is being worked on. "connecting…" forever reads as broken, and
-  // "offline" with no retry reads as final.
-  const label = syncAttempts > 2 ? "node offline — retrying" : "connecting…";
-  chipModel.textContent = label;
-  meta.textContent = label;
+  // "offline" with no retry reads as final. A node that is alive and inside a turn is neither: it is
+  // busy, and it will answer when the turn ends.
+  const text = label || (syncAttempts > 2 ? "node offline — retrying" : "connecting…");
+  chipModel.textContent = text;
+  meta.textContent = text;
+}
+
+/// The node's own answer, which is served without the interpreter - so it works exactly when the Lua
+/// routes do not, which is while a turn is running. Null means the node really is not answering.
+async function nodeHealth() {
+  try {
+    return await (await apiFetch("health", { headers: apiHeaders() })).json();
+  } catch (error) {
+    return null;
+  }
 }
 
 async function sync(reason) {
@@ -1817,7 +1828,20 @@ async function sync(reason) {
   const metaOk = await refreshMeta();
   syncRunning = false;
   if (!meOk || !metaOk) {
-    setConnecting();
+    // Why it failed decides what to say. A reload during a turn used to show "connecting…" and then
+    // "node offline — retrying" on a node that was working perfectly, and the transcript stayed empty
+    // because the restore never ran. It cannot run while the turn holds the interpreter - that is
+    // physical on a single-worker node - but the message can be true, and the retry does the rest.
+    const health = await nodeHealth();
+    if (health && health.current) {
+      syncAttempts = 0;
+      setConnecting("the node is running a turn — this window returns when it finishes");
+    } else if (health) {
+      syncAttempts = 0;
+      setConnecting("connecting…");
+    } else {
+      setConnecting();
+    }
     return;
   }
   synced = true;
