@@ -33,6 +33,9 @@ for _ in $(seq 1 40); do
 done
 if [ "${code:-}" != "200" ]; then echo "  server did not come up (see $WORK/serve.log)" >&2; exit 1; fi
 
+# WEDGE_ONLY=1 skips the model half. The suite runs it that way: the wedge check needs
+# no model, no provider and no network, so it has no business behind one.
+if [ "${WEDGE_ONLY:-0}" != "1" ]; then
 # A turn with several rounds, so it runs for a while.
 (
   curl -sN -m 180 -X POST \
@@ -69,6 +72,8 @@ if [ "$fail" -gt 0 ]; then
   exit 1
 fi
 echo "  ok: the node served its UI throughout a running turn"
+fi
+
 kill "$SERVER" 2>/dev/null
 wait "$SERVER" 2>/dev/null
 

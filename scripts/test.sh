@@ -386,6 +386,13 @@ rm -f "$DB.seed.lua"
 # Its own database: it seeds a few hundred turns, and sharing them would put this
 # file's fixtures in front of the recovery assertions above.
 WA_SCRIPT=scripts/test-memory-window.lua "$BIN" --db "$DB.window" | grep "memory window ok"
+
+# A node that is healthy and wedged at the same time is not instrumented, it is quiet.
+# The accept thread answers /health without the interpreter, so a stuck Lua worker used
+# to report ok forever while every endpoint that needs Lua hung with zero bytes. This
+# stalls the worker on purpose and requires the node to say so. No model needed, which
+# is why it runs here and not in the concurrency test's model half.
+WEDGE_ONLY=1 WA_BIN="$BIN" bash scripts/test-serve-concurrency.sh 8893 | grep "a stalled worker is visible"
 rm -f "$DB.window"*
 echo "recovery cli ok"
 
