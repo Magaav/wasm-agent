@@ -137,6 +137,34 @@ $harness = @'
   window.__attachMany(0);
   check(document.getElementById("attachments").children.length === 0, "clearing must empty the strip");
 
+  // A UI update must not break a turn. Styling changes apply live; markup/JS changes wait
+  // for the running turn and then land on their own. The reload is a spy here because a
+  // real one would take the page with it.
+  var reloads = 0;
+  window.__setReload(() => { reloads += 1; });
+  // The page has already polled /version once (the fixture answers it), so start from
+  // whatever the app believes and move relative to it - not from an invented "v1".
+  var live = window.__uiVersion();
+  check(typeof live === "string" && live.length > 0, "the page must have a version by now, saw " + live);
+  check(window.__applyUiVersion(live) === "same", "an unchanged version must do nothing");
+  check(reloads === 0, "an unchanged version must not reload, saw " + reloads);
+  check(window.__applyUiVersion(live + "-next") === "reloading", "a change while idle must reload");
+  check(reloads === 1, "exactly one reload while idle, saw " + reloads);
+  window.__setBusy(true);
+  window.handleEvent({ type: "round", n: 1 });
+  window.handleEvent({ type: "delta", text: "a turn is running" });
+  check(window.__applyUiVersion(live + "-third") === "deferred",
+    "a change during a turn must be deferred, not applied under it");
+  check(reloads === 1, "a deferred change must not reload yet, saw " + reloads);
+  var updateNote = document.querySelector(".status");
+  check(!!updateNote && /update ready/.test(updateNote.textContent),
+    "and it must say so, saw: " + (updateNote ? updateNote.textContent : "no status"));
+  window.__setBusy(false);
+  check(reloads === 2, "the deferred reload must land when the turn ends, saw " + reloads);
+  window.handleEvent({ type: "reply", text: "done" });
+  window.handleEvent({ type: "done" });
+  window.__setBusy(false);
+
   // The context panel states what it knows in one line. The fixture has a budget
   // and no usage, so this is the "0 / budget" case, and the percentage must be
   // computed rather than printed as a placeholder.
@@ -255,7 +283,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
 
 $server = $null
 $edge = @(

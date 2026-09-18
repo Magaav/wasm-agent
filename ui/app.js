@@ -72,6 +72,20 @@ let me = { user: null, role: "guest", tools: [] };
 let activeNode = localStorage.getItem("wa-node") || "";
 let nodeList = [];
 
+// Every request needs a deadline, and the recovery loop is why: it polls /version every
+// second, and when the node was wedged one fetch that never resolved hung the loop
+// forever - so the page sat on "connecting…" long after the node had recovered. A hung
+// request must never be able to stop the retry. Requests that bring their own signal (the
+// chat stream) pass through untouched: a turn is legitimately long.
+let apiTimeout = 8000;
+function apiFetch(path, options = {}, timeout = apiTimeout) {
+  if (!timeout || options.signal) return fetch(path, options);
+  const control = new AbortController();
+  const timer = setTimeout(() => control.abort(), timeout);
+  return fetch(path, Object.assign({}, options, { signal: control.signal }))
+    .finally(() => clearTimeout(timer));
+}
+
 function apiHeaders(extra) {
   const headers = Object.assign({}, extra || {});
   if (session) headers["X-WA-Session"] = session;
@@ -88,7 +102,7 @@ let voicePrefix = "";
 
 async function loadRenderer() {
   try {
-    const response = await fetch("render.wasm");
+    const response = await apiFetch("render.wasm");
     const { instance } = await WebAssembly.instantiateStreaming(response, {});
     renderer = instance.exports;
   } catch (error) {
@@ -486,6 +500,12 @@ function handleEvent(event) {
 
 function setBusy(value) {
   busy = value;
+  // A reload that was deferred for a running turn lands the moment it ends, so an update
+  // never sits invisible behind a finished turn.
+  if (!value && pendingReload) {
+    pendingReload = false;
+    reload();
+  }
   sendButton.classList.toggle("busy", value);
   sendButton.title = value ? "Stop" : "Send";
   sendButton.setAttribute("aria-label", sendButton.title);
@@ -541,7 +561,7 @@ function watchNode() {
   nodeOffline(true);
   nodeWatch = setInterval(async () => {
     try {
-      const response = await fetch("health", { headers: apiHeaders() });
+      const response = await apiFetch("health", { headers: apiHeaders() });
       if (response.ok) { clearInterval(nodeWatch); nodeWatch = null; nodeOffline(false); refreshMeta(); }
     } catch (error) { /* still down */ }
   }, 3000);
@@ -782,7 +802,7 @@ function renderPopFoot() {
 }
 
 async function post(path, body) {
-  const response = await fetch(path, {
+  const response = await apiFetch(path, {
     method: "POST",
     headers: apiHeaders({ "Content-Type": "text/plain; charset=utf-8" }),
     body: body,
@@ -1244,7 +1264,7 @@ function renderUser() {
 
 async function refreshMe() {
   try {
-    const response = await fetch("me", { headers: apiHeaders() });
+    const response = await apiFetch("me", { headers: apiHeaders() });
     const payload = await response.json();
     if (!payload.error) {
       me = payload;
@@ -1254,7 +1274,7 @@ async function refreshMe() {
 }
 
 async function login(id) {
-  const response = await fetch("login", {
+  const response = await apiFetch("login", {
     method: "POST", headers: apiHeaders({ "Content-Type": "text/plain" }), body: id,
   });
   const payload = await response.json();
@@ -1267,7 +1287,7 @@ async function login(id) {
 }
 
 async function logout() {
-  await fetch("logout", { method: "POST", headers: apiHeaders() });
+  await apiFetch("logout", { method: "POST", headers: apiHeaders() });
   session = "";
   localStorage.removeItem("wa-session");
   await refreshMe();
@@ -1278,7 +1298,7 @@ async function openUserMenu() {
   const user = me.user || {};
   const items = [{ label: `${user.name || "guest"} · ${me.role}`, action: null }, { separator: true }];
   try {
-    const payload = await (await fetch("users")).json();
+    const payload = await (await apiFetch("users")).json();
     for (const candidate of payload.users || []) {
       if (candidate.id === (user.id || "")) continue;
       items.push({ label: `Sign in as ${candidate.name}`, action: () => login(candidate.id) });
@@ -1295,7 +1315,7 @@ async function openUserMenu() {
 
 async function refreshMeta() {
   try {
-    const response = await fetch("models" + nodeQuery(), { headers: apiHeaders() });
+    const response = await apiFetch("models" + nodeQuery(), { headers: apiHeaders() });
     const payload = await response.json();
     settings = { ...settings, ...payload };
     updateChip();
@@ -1316,15 +1336,70 @@ async function refreshMeta() {
   }
 }
 
-// Hot reload.
+// Hot reload, in two halves.
+//
+// A stylesheet can be replaced under a running turn with no state lost, so styling changes
+// - the common case - never need a reload at all. Markup and JS cannot: a reload mid-turn
+// throws away the page's copy of a reply that is still arriving. Those wait for the turn to
+// finish, and say so while they wait.
+let pendingReload = false;
+let reload = () => location.reload();
+
+function hotSwapStyles() {
+  for (const link of document.querySelectorAll('link[rel="stylesheet"]')) {
+    const url = new URL(link.href, location.href);
+    url.searchParams.set("v", String(Date.now()));
+    // Load the replacement first and only then drop the old one: rewriting the href of the
+    // live link leaves the page unstyled for as long as the new sheet takes to arrive.
+    const next = link.cloneNode();
+    next.href = url.toString();
+    next.addEventListener("load", () => link.remove(), { once: true });
+    link.after(next);
+  }
+}
+
+// Split out from the polling so the decision can be driven directly: the decision is the
+// part worth testing, not the fetch around it.
+function applyUiVersion(next) {
+  if (version === null) { version = next; return "init"; }
+  if (next === version) return "same";
+  version = next;
+  hotSwapStyles();
+  if (busy) {
+    pendingReload = true;
+    setStatus("update ready - reloading when this turn finishes");
+    return "deferred";
+  }
+  reload();
+  return "reloading";
+}
+
 async function watch() {
   try {
-    const response = await fetch("version");
+    const response = await apiFetch("version");
     const payload = await response.json();
-    if (version === null) version = payload.version;
-    else if (payload.version !== version) location.reload();
-  } catch (error) { /* keep polling */ }
+    applyUiVersion(payload.version);
+  } catch (error) { /* keep polling: the deadline is what keeps this loop alive */ }
   setTimeout(watch, 1000);
+}
+
+// The node owns the turn; the browser only watches it. If one was running when this page
+// loaded - a reload mid-turn, or a reconnection after the node was busy - the reply is
+// already in the ledger, so refresh the transcript once it is no longer in flight instead
+// of making the reader reload to see it.
+let sawTurnInFlight = false;
+async function watchTurn() {
+  try {
+    const response = await apiFetch("health");
+    const health = await response.json();
+    const current = health && health.current;
+    if (current) { sawTurnInFlight = true; }
+    else if (sawTurnInFlight) {
+      sawTurnInFlight = false;
+      if (session) openSession(session);
+    }
+  } catch (error) { /* the node is down; watchNode handles that */ }
+  setTimeout(watchTurn, 3000);
 }
 
 // ---- native companion window (wa-window / WebView2) ----------------------
@@ -1384,7 +1459,7 @@ function b64ToBytes(base64) {
 }
 
 async function clientAction(payload) {
-  const response = await fetch("client", {
+  const response = await apiFetch("client", {
     method: "POST",
     headers: apiHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
@@ -1402,7 +1477,7 @@ function nodeButton(label, handler) {
 
 async function refreshNodes() {
   try {
-    const payload = await (await fetch("nodes", { headers: apiHeaders() })).json();
+    const payload = await (await apiFetch("nodes", { headers: apiHeaders() })).json();
     nodeList = payload.nodes || [];
     renderNodeSelect();
     nodesBinding.textContent = payload.binding || "";
@@ -1444,7 +1519,7 @@ async function fetchFrame(full) {
   if (controlPending) return;
   controlPending = true;
   try {
-    const payload = await (await fetch("frame", {
+    const payload = await (await apiFetch("frame", {
       method: "POST",
       headers: apiHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ max_width: 800, full: !!full }),
@@ -1514,7 +1589,7 @@ controlLive.addEventListener("change", () => {
 // ---- engine: nodes / spells / tools --------------------------------------
 async function refreshSpells() {
   try {
-    const payload = await (await fetch("spells", { headers: apiHeaders() })).json();
+    const payload = await (await apiFetch("spells", { headers: apiHeaders() })).json();
     const spells = payload.spells || [];
     spellsNote.textContent = spells.length + " saved";
     spellsBox.replaceChildren();
@@ -1535,7 +1610,7 @@ async function refreshSpells() {
       meta.textContent = detail + (params.length ? " · " + params.join(",") : "");
       const run = nodeButton("run", async () => {
         meta.textContent = "running…";
-        const result = await (await fetch("spell", {
+        const result = await (await apiFetch("spell", {
           method: "POST",
           headers: apiHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({ name: spell.name }),
@@ -1552,7 +1627,7 @@ async function refreshSpells() {
 
 async function refreshTools() {
   try {
-    const payload = await (await fetch("tools", { headers: apiHeaders() })).json();
+    const payload = await (await apiFetch("tools", { headers: apiHeaders() })).json();
     toolsBox.replaceChildren();
     for (const group of payload.tiers || []) {
       const block = document.createElement("div");
@@ -1591,7 +1666,7 @@ async function refreshTools() {
       toolsBox.append(block);
     }
     // The literal object sent to the provider, at full depth.
-    const envelope = await (await fetch("envelope", { headers: apiHeaders() })).json();
+    const envelope = await (await apiFetch("envelope", { headers: apiHeaders() })).json();
     if (envelope.request) {
       const details = document.createElement("details");
       details.className = "envelope-raw";
@@ -1611,7 +1686,7 @@ async function refreshTools() {
 // surface: open a session, flip it to debug, export it as a fixture.
 async function refreshSessions() {
   try {
-    const payload = await (await fetch("sessions", { headers: apiHeaders() })).json();
+    const payload = await (await apiFetch("sessions", { headers: apiHeaders() })).json();
     const list = payload.sessions || [];
     sessionsNote.textContent = `${list.length} sessions`;
     sessionsBox.replaceChildren();
@@ -1649,7 +1724,7 @@ async function refreshSessions() {
 }
 
 async function openSession(id) {
-  const payload = await (await fetch("session?id=" + encodeURIComponent(id), { headers: apiHeaders() })).json();
+  const payload = await (await apiFetch("session?id=" + encodeURIComponent(id), { headers: apiHeaders() })).json();
   if (payload.error) {
     sessionsBox.textContent = payload.error;
     return;
@@ -1662,7 +1737,7 @@ async function openSession(id) {
   bar.append(nodeButton("← sessions", () => refreshSessions()));
   bar.append(nodeButton(session.mode === "debug" ? "debug: on" : "debug: off", async () => {
     const next = session.mode === "debug" ? "default" : "debug";
-    await fetch("session/mode", {
+    await apiFetch("session/mode", {
       method: "POST",
       headers: apiHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ session_id: id, mode: next }),
@@ -1670,7 +1745,7 @@ async function openSession(id) {
     openSession(id);
   }));
   bar.append(nodeButton("export fixture", async () => {
-    const fixture = await (await fetch("session/fixture?id=" + encodeURIComponent(id), { headers: apiHeaders() })).json();
+    const fixture = await (await apiFetch("session/fixture?id=" + encodeURIComponent(id), { headers: apiHeaders() })).json();
     const blob = new Blob([JSON.stringify(fixture, null, 2)], { type: "application/json" });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
@@ -1766,7 +1841,7 @@ async function runShell(command) {
   if (trimmed === ":clear") { termOut.replaceChildren(); return; }
   try {
     if (trimmed === ":spells" || trimmed === ":spell") {
-      const payload = await (await fetch("spells", { headers: apiHeaders() })).json();
+      const payload = await (await apiFetch("spells", { headers: apiHeaders() })).json();
       if (payload.error) { termWrite(payload.error, "err"); return; }
       const spells = payload.spells || [];
       if (!spells.length) { termWrite("(no spells saved yet)", "meta"); return; }
@@ -1779,13 +1854,13 @@ async function runShell(command) {
     }
     if (trimmed.startsWith(":run ")) {
       const name = trimmed.slice(5).trim();
-      const payload = await (await fetch("spell", {
+      const payload = await (await apiFetch("spell", {
         method: "POST", headers: apiHeaders({ "Content-Type": "text/plain" }), body: name,
       })).json();
       termWrite(JSON.stringify(payload), payload.error ? "err" : "meta");
       return;
     }
-    const payload = await (await fetch("shell", {
+    const payload = await (await apiFetch("shell", {
       method: "POST", headers: apiHeaders({ "Content-Type": "text/plain" }), body: command,
     })).json();
     if (payload.error) { termWrite(payload.error, "err"); return; }
@@ -1801,7 +1876,7 @@ let clientHost = "";
 async function ensureHost() {
   if (clientHost) return;
   try {
-    const payload = await (await fetch("shell", {
+    const payload = await (await apiFetch("shell", {
       method: "POST", headers: apiHeaders({ "Content-Type": "text/plain" }), body: "hostname",
     })).json();
     clientHost = (payload.stdout || "").trim() || "client";
@@ -1879,4 +1954,5 @@ document.addEventListener("contextmenu", (event) => {
 // is what the UI test does instead of guessing at ticks.
 window.rendererLoaded = loadRenderer().then(() => { setupVoice(); refreshMe(); refreshMeta(); });
 watch();
+watchTurn();
 if (!native) input.focus();
