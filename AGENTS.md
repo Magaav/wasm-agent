@@ -218,16 +218,21 @@ its transcript intact.
 
 ## Commit provenance
 
-Author is useless here: every commit in this repository is `wasm-agent
-<agent@wasm-agent.local>` (or `.dev` from the cloud), because both harnesses and
-both trees share one configured identity. When a commit had to be traced, the
-only signal was the timestamp — the operator, the pi session and the wasm-agent
-node were indistinguishable.
+The author *name* is the same for everything here - `wasm-agent` - because both
+harnesses and both trees share one configured identity. That is deliberate, and it is
+also why the name tells you nothing about who did the work.
+
+The author *email* is the operator's own address, verified on their GitHub account.
+GitHub attributes commits by email, so this is what puts the work on their
+contribution graph; the name stays shared, so the graph shows the project rather than
+pretending one person wrote every line. Commits made before this was set carry the old
+synthetic address (`agent@wasm-agent.local`) and are not attributed - rewriting them
+would mean rewriting `main`, which this file forbids.
 
 So say who you are in the message. End every commit you make with a trailer:
 
 ```
-Agent: wasm-agent node=desktop-mg9djtg session=7a2f57ff
+Agent: wasm-agent node=<this node's name> session=<the session id>
 Agent: pi session=<the pi session id>
 ```
 
