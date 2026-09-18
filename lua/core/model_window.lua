@@ -136,12 +136,18 @@ end
 -- model this bug was found on is here and nowhere else.
 local function from_pi_store(model)
   if not model or model == "" then return nil end
-  local override = host.getenv("WASM_AGENT_PI_MODELS_STORE") -- test: set to empty json
+  -- A test can point this somewhere else, and when it does that is the *only* store
+  -- consulted: appending the real one after it meant a test that set this to an empty
+  -- object still got pi's answers, so the hook could not do what it claimed.
+  local override = host.getenv("WASM_AGENT_PI_MODELS_STORE")
   local candidates = {}
-  if override and override ~= "" then candidates[#candidates + 1] = override end
-  local home = host.getenv("HOME") or ""
-  if home ~= "" then
-    candidates[#candidates + 1] = home .. "/.pi/agent/models-store.json"
+  if override and override ~= "" then
+    candidates[1] = override
+  else
+    local home = host.getenv("HOME") or ""
+    if home ~= "" then
+      candidates[1] = home .. "/.pi/agent/models-store.json"
+    end
   end
   for _, path in ipairs(candidates) do
     local text = read_file(path)
