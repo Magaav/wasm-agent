@@ -1512,7 +1512,17 @@ function updateNodeLabel(name, worktree) {
   const button = document.getElementById("node-name-btn");
   if (!button) return;
   button.textContent = settings.node_name || "…";
-  button.title = settings.node_worktree
+  button.title = nodeTitle();
+}
+
+// A guest node owns no worktree, so its title says what it is instead of leaving a blank where
+// a checkout would be. The role comes from the same payload as the name (GET /models), so the
+// two can never disagree.
+function nodeTitle() {
+  if (settings.node_role === "guest") {
+    return "guest node — no worktree of its own — click to rename";
+  }
+  return settings.node_worktree
     ? "running in " + settings.node_worktree + " — click to rename"
     : "click to rename";
 }
@@ -1529,9 +1539,7 @@ function nodeControl() {
   button.id = "node-name-btn";
   button.className = "menu-node-name";
   button.textContent = settings.node_name || "…";
-  button.title = settings.node_worktree
-    ? "running in " + settings.node_worktree + " — click to rename"
-    : "click to rename";
+  button.title = nodeTitle();
   button.addEventListener("click", () => editNodeName(button));
   row.append(label, button);
   return row;
