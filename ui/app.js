@@ -1711,6 +1711,8 @@ function openControl(name) {
 // is a desktop, not a message, so it does not belong inside the chat panel.
 function setControlMaximized(on) {
   controlView.classList.toggle("maximized", on);
+  // Also on the section, so descendant rules (the header staying reachable) can match.
+  control.classList.toggle("maximized", on);
   controlMax.setAttribute("aria-pressed", on ? "true" : "false");
   controlMax.title = on ? "Leave full screen (Esc)" : "Fill the screen";
   if (native && native.maximize) {

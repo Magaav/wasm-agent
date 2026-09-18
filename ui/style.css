@@ -303,6 +303,9 @@ body.control .control { display: flex; }
    the typing bar stays reachable above the desktop it is driving. */
 .control-view.maximized { position: fixed; inset: 0 0 46px 0; z-index: 60; background: #05070c; }
 .control-view.maximized canvas { max-width: 100vw; max-height: calc(100vh - 46px); }
+/* The class is on the section for exactly this: the bar must stay above the full-size view,
+   or the mode would hide the control that leaves it. The element is .control-bar. */
+.control.maximized .control-bar { position: relative; z-index: 62; background: var(--panel); }
 .control-view.maximized ~ .control-keys {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 61;
   background: var(--panel); border-top: 1px solid var(--line); padding: var(--space) var(--pad);
@@ -356,7 +359,10 @@ body.term .terminal { display: flex; }
 /* The node's name, inside the account balloon. It defaults to the worktree the node runs
    in, so a list of nodes reads as a list of checkouts. The row reuses .menu-item for its
    metrics, so it lines up with the rows above and below it instead of bringing its own. */
-.menu-node { display: flex; align-items: baseline; justify-content: space-between; gap: var(--gap); }
+/* Compound selector on purpose: the row carries .menu-item for its metrics, and
+   .menu-item { display: block } appears later in this file - equal specificity, so a bare
+   .menu-node would lose and the label would sit flush against the name. */
+.menu-item.menu-node { display: flex; align-items: baseline; gap: var(--gap); }
 .menu-node-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
 .menu-node-name {
   background: none; border: none; color: var(--text); cursor: pointer; padding: 0;
