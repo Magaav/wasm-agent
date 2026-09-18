@@ -240,11 +240,17 @@ fn main() {
     // binary. With WASM_AGENT_LUA_ROOT set it prefers the files on disk instead,
     // which is what lets an agent iterate on the Lua core without a rebuild (and
     // therefore without a Rust toolchain, e.g. on a Windows node).
+      // A set-but-unreadable root is an error, not a fallback. Falling back would run
+      // the copy baked into the binary while the operator believes they are testing
+      // the files on disk - which is how two tests in the image branch passed while
+      // loading code that did not contain the feature they were testing. The fallback
+      // stays for the shipping case, where no root is set at all.
     let bootstrap = "function dofile(path) \
          local root = host.getenv('WASM_AGENT_LUA_ROOT'); \
          if root and root ~= '' then \
            local text = host.read_file(root .. '/' .. path); \
-           if text then return assert(load(text, '@' .. root .. '/' .. path))() end \
+           if not text then error('lua_root_unreadable: ' .. root .. '/' .. path) end; \
+             return assert(load(text, '@' .. root .. '/' .. path))() \
          end; \
          local source = EMBEDDED[path]; \
          if not source then error('embedded module missing: ' .. tostring(path)) end; \
