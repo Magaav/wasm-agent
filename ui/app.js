@@ -1847,8 +1847,12 @@ async function refreshSkills() {
     try { payload = JSON.parse(text); } catch (error) { payload = null; }
     if (!payload) {
       skillsNote.textContent = "not served";
-      skillsBox.textContent = "this node does not serve /skills yet (HTTP " + response.status +
-        ") - it arrives at the node's next start";
+      // Say what is actually missing. The route and the Lua function are both compiled into the
+      // node binary - the UI is read from disk per request, which is why this file can be newer
+      // than the node - so a *restart* of the same binary would change nothing. It needs a node
+      // built from a tree that has them.
+      skillsBox.textContent = "this node was built before the /skills route existed (HTTP " +
+        response.status + ") - it needs a node built from the current tree, not a restart";
       return;
     }
     const skills = payload.skills || [];
