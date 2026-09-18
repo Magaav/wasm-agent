@@ -83,7 +83,12 @@ assert(provider.limits and provider.limits ~= provider.budget, "limits and budge
 -- not an error.
 local deep = provider.budget("deepseek-v4.1-flash")
 assert(deep.context == 1000000, "a known model keeps its own window, got " .. tostring(deep.context))
-assert(deep.source == "known-model", "and says where the number came from, got " .. tostring(deep.source))
+-- The source is now specific: pi's local store, the fetched catalogue, the shipped table
+-- or the operator's override. Asserting the property (a real window, and a named source)
+-- rather than one string keeps this true whichever source answers on the day.
+assert(deep.context > 900000, "a known model must get its own window, got " .. tostring(deep.context))
+assert(type(deep.source) == "string" and deep.source ~= "" and deep.source ~= "unknown",
+  "and must say where the number came from, got " .. tostring(deep.source))
 -- The trigger must scale with the window. pi's reserve is 16384, so a 1M window triggers
 -- near 983616 and a 262144 window near 245760 - not both at the same absolute point.
 assert(deep.context - deep.reserve > 900000, "a 1M window must not compact at 96k, trigger at " .. tostring(deep.context - deep.reserve))
@@ -353,6 +358,28 @@ WA_SCRIPT=scripts/test-recovery.lua "$BIN" --db "$DB" | grep "recovery ok"
 # finish_reason=length; the loop used to record that as a finished turn. The same
 # file runs in the Windows suite, for the same reason the recovery one does.
 WA_SCRIPT=scripts/test-empty-reply.lua "$BIN" --db "$DB" | grep "empty reply ok"
+
+# Every Lua core module must be reachable from the *shipped* binary. The embedded list in
+# rust/wa-host/src/main.rs is maintained by hand, so a new module is invisible to a deployed
+# node until someone remembers to add it - which is how a node crash-looped on
+# "embedded module missing: lua/core/model_window.lua". Every other check here sets
+# WASM_AGENT_LUA_ROOT and therefore reads the working tree; this one deliberately does not,
+# because that is the path the node actually runs.
+EMBEDDED_CHECK=$(mktemp -u /tmp/wa-embedded-XXXXXX.lua)
+{
+  echo 'local names = {}'
+  echo 'local pipe = io.popen("ls lua/core/*.lua 2>/dev/null")'
+  echo 'for line in pipe:lines() do names[#names + 1] = (line:gsub("^%./", "")) end'
+  echo 'pipe:close()'
+  echo 'assert(#names > 20, "expected to find the core modules, found " .. #names)'
+  echo 'for _, path in ipairs(names) do'
+  echo '  local chunk, err = loadfile(path)'
+  echo '  if not chunk then error(path .. " is not in the binary: " .. tostring(err)) end'
+  echo 'end'
+  echo 'print("embedded modules ok (" .. #names .. " files)")'
+} > "$EMBEDDED_CHECK"
+( unset WASM_AGENT_LUA_ROOT; WA_SCRIPT="$EMBEDDED_CHECK" "$BIN" --db "$DB" ) | grep "embedded modules ok"
+rm -f "$EMBEDDED_CHECK"
 WA_SCRIPT=scripts/test-recovery.lua "$BIN" --db "$DB" | grep "recovery ok"
 cat > "$DB.seed.lua" <<'LUA'
 -- Seed a thread cut off the way a killed process leaves it: a question, a decision

@@ -34,12 +34,17 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/state.lua", include_str!("../../../lua/core/state.lua")),
     ("lua/core/status.lua", include_str!("../../../lua/core/status.lua")),
     ("lua/core/provider.lua", include_str!("../../../lua/core/provider.lua")),
+    ("lua/core/model_window.lua", include_str!("../../../lua/core/model_window.lua")),
     ("lua/core/agent.lua", include_str!("../../../lua/core/agent.lua")),
     ("lua/core/chat.lua", include_str!("../../../lua/core/chat.lua")),
     ("lua/core/server.lua", include_str!("../../../lua/core/server.lua")),
     ("lua/core/init.lua", include_str!("../../../lua/core/init.lua")),
 ];
 
+// NOTE: this list is hand-maintained, and a module missing from it exists in the working
+// tree and not in the shipped binary - which crash-loops a deployed node with
+// "embedded module missing". scripts/test.sh now loads every lua/core/*.lua with
+// WASM_AGENT_LUA_ROOT unset, so the list cannot drift silently again.
 /// Source for one of the entry modules the host loads itself.
 ///
 /// `dofile` prefers the on-disk copy when WASM_AGENT_LUA_ROOT is set, but these
