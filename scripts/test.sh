@@ -25,7 +25,7 @@ SDB="$(mktemp -u /tmp/wa-status-XXXXXX.db)"
 RDB="$(mktemp -u /tmp/wa-resume-XXXXXX.db)"
 QDB="$(mktemp -u /tmp/wa-resume-q-XXXXXX.db)"
 PLUGINS="$(mktemp -d)"
-trap 'rm -f "$DB" "$DB"-wal "$DB"-shm "$SDB" "$SDB"-wal "$SDB"-shm "$RDB" "$RDB"-wal "$RDB"-shm "$QDB" "$QDB"-wal "$QDB"-shm "$DB.title" "$DB.title"-wal "$DB.title"-shm; rm -rf "$PLUGINS" "$DB.home"' EXIT
+trap 'rm -f "$DB" "$DB"-wal "$DB"-shm "$SDB" "$SDB"-wal "$SDB"-shm "$RDB" "$RDB"-wal "$RDB"-shm "$QDB" "$QDB"-wal "$QDB"-shm "$DB.title" "$DB.title"-wal "$DB.title"-shm "$DB.exec" "$DB.exec"-wal "$DB.exec"-shm; rm -rf "$PLUGINS" "$DB.home"' EXIT
 
 "$BIN" --db "$DB" init >/dev/null
 ID="$("$BIN" --db "$DB" remember "smoke fact about the rust lua core")"
@@ -484,6 +484,11 @@ WA_SCRIPT=scripts/test-memory-window.lua "$BIN" --db "$DB.window" | grep "memory
 # and it must not drift as the conversation moves - a name that follows the conversation is a name
 # you cannot search for.
 WA_SCRIPT=scripts/test-session-title.lua "$BIN" --db "$DB.title" | grep "session title ok"
+
+# A command must not be able to hold the interpreter forever: an agent curled the node's own port
+# from inside a turn, the request queued behind the turn that made it, and the worker waited on
+# itself. The deadline is set short here so the check takes seconds, not minutes.
+WASM_AGENT_EXEC_TIMEOUT_SECONDS=2 WA_SCRIPT=scripts/test-exec-timeout.lua "$BIN" --db "$DB.exec" | grep "exec timeout ok"
 
 # A guest is not a smaller master. A guest node owns no worktree - so it is not named after
 # one and a rename does not move a branch on its behalf - and a master's call on a guest is
