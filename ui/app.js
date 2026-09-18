@@ -85,6 +85,31 @@ let settings = { provider: "", model: "", providers: [], usage: {}, stats: {}, c
 let session = localStorage.getItem("wa-session") || "";
 let me = { user: null, role: "guest", tools: [] };
 let activeNode = localStorage.getItem("wa-node") || "";
+
+// Which conversation this window is in, and the draft it was writing.
+//
+// The node owns the session; the window only remembers its id, and it learns that from the
+// sessions list, because the chat route creates the session and never says which one it made. The
+// draft is the reader's own text - attachments are deliberately not kept, since a picture
+// silently reappearing in a composer is worse than one that does not come back.
+const SESSION_KEY = "wa-chat-session";
+const DRAFT_KEY = "wa-draft";
+let chatSession = "";
+try { chatSession = localStorage.getItem(SESSION_KEY) || ""; } catch (error) { chatSession = ""; }
+
+function rememberSession(id) {
+  if (!id || id === chatSession) return;
+  chatSession = id;
+  try { localStorage.setItem(SESSION_KEY, id); } catch (error) { /* private mode */ }
+}
+
+function saveDraft() {
+  try { localStorage.setItem(DRAFT_KEY, input.value || ""); } catch (error) { /* private mode */ }
+}
+
+function clearDraft() {
+  try { localStorage.removeItem(DRAFT_KEY); } catch (error) { /* nothing to clear */ }
+}
 let nodeList = [];
 
 // Every request needs a deadline, and the recovery loop is why: it polls /version every
@@ -518,6 +543,75 @@ function handleEvent(event) {
   }
 }
 
+function restoreDraft() {
+  let text = "";
+  try { text = localStorage.getItem(DRAFT_KEY) || ""; } catch (error) { text = ""; }
+  if (!text) return;
+  input.value = text;
+  autosize();
+  draftNow = snapshotDraft();
+}
+
+// ---- coming back after a respawn ---------------------------------------------------------
+//
+// A window is a view of a durable ledger, which is what makes patching it safe. This is the other
+// half of that promise: after a respawn it must come back to the conversation it was in and
+// repaint it, instead of starting blank and looking like the work is gone. It did start blank -
+// a patch reloaded the window and both the transcript and a half-written prompt disappeared.
+
+// Repaint a transcript by replaying the stored turns as the events the live view already
+// understands. Reusing handleEvent is the point: a repainted bubble is built by exactly the code
+// that built it the first time, so the two cannot drift apart.
+function repaintTurns(turns) {
+  messages.replaceChildren();
+  turnBubble = null;
+  streamBody = null;
+  streamText = "";
+  for (const turn of turns) {
+    if (turn.role === "user") {
+      add("user", turn.content || "");
+    } else if (turn.role === "assistant") {
+      if (turn.content) handleEvent({ type: "reply", text: turn.content });
+      const calls = turn.tool_calls || [];
+      if (calls.length) {
+        handleEvent({ type: "round", n: 1 });
+        for (const raw of calls) {
+          // A stored call keeps the provider's shape: name and arguments nested, and the arguments
+          // still the JSON string the model produced.
+          const fn = raw.function || raw;
+          let args = fn.arguments;
+          if (typeof args === "string") { try { args = JSON.parse(args); } catch (error) { args = {}; } }
+          handleEvent({ type: "tool", name: fn.name, arguments: args || {} });
+        }
+      }
+    } else if (turn.role === "tool") {
+      handleEvent({ type: "tool_result", name: turn.tool_name, result: { content: turn.content } });
+    }
+  }
+  pin(true);
+}
+
+// The newest session for this user is the one that just ran, which is how the window finds out
+// which conversation it is in: the chat route does not return the id it used. Once known the id is
+// remembered, so the next respawn comes back to exactly this thread.
+async function restoreSession() {
+  try {
+    const payload = await (await apiFetch("sessions", { headers: apiHeaders() })).json();
+    const sessions = payload.sessions || [];
+    if (!sessions.length) return;
+    const mine = sessions.filter((s) => !me.user || !s.user_id || s.user_id === me.user.id);
+    const wanted = sessions.find((s) => s.id === chatSession) || mine[0] || sessions[0];
+    rememberSession(wanted.id);
+    const full = await (await apiFetch("session?id=" + encodeURIComponent(wanted.id), { headers: apiHeaders() })).json();
+    if (full && Array.isArray(full.turns) && full.turns.length) repaintTurns(full.turns);
+    // If that thread was still running when the window went away, watch it: the answer lands in the
+    // ledger, and the repaint is what puts it on screen. Tokens that arrived before the reload are
+    // still lost - the node streams to whoever opened the stream - so this resumes the *result* of
+    // a run, not its partial text.
+    if (full && full.state && full.state !== "answered" && full.state !== "empty") watchTurn();
+  } catch (error) { /* an empty node, or an unreachable one: the welcome screen is right */ }
+}
+
 function setBusy(value) {
   busy = value;
   // A reload that was deferred for a running turn lands the moment it ends, so an update
@@ -587,6 +681,9 @@ function watchNode() {
   }, 3000);
 }
 async function send(text) {
+  // The draft is going out, so what was stored is stale: a respawn must not put the sent prompt
+  // back into the composer.
+  clearDraft();
   setBusy(true);
   // Sending is an explicit request to see the answer: follow again, even if the
   // reader had scrolled up to read something.
@@ -2404,7 +2501,17 @@ document.addEventListener("contextmenu", (event) => {
 // Rendering is a round trip to fetch render.wasm. Anything that needs to know the
 // real renderer - rather than the escape-and-<br> fallback - can await this, which
 // is what the UI test does instead of guessing at ticks.
-window.rendererLoaded = loadRenderer().then(() => { setupVoice(); refreshMe(); refreshMeta(); });
+window.rendererLoaded = loadRenderer().then(() => {
+  setupVoice();
+  refreshMe();
+  refreshMeta();
+  // The draft first, because it is instant and it is the reader's own text; the conversation after
+  // /me has answered, because the session list is filtered by user. The second input listener is the
+  // draft's - the first belongs to the undo stack, and they answer different questions.
+  restoreDraft();
+  input.addEventListener("input", saveDraft);
+  refreshMe().then(restoreSession);
+});
 watch();
 watchTurn();
 if (!native) input.focus();
