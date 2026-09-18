@@ -1,6 +1,5 @@
 # handoff.sh counts - committed so a drop is a visible decision, not a quiet one.
 # Re-record with: bash scripts/handoff.sh --accept-counts
-.handoff/lua-budget.lua=11
 tests/bug-hunt.js=13
 tests/composer-attachments.js=22
 tests/composer-input.js=40

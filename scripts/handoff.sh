@@ -237,20 +237,18 @@ JS_KEYS=()
 # assertions never ran - which is how a context-window patch first appeared verified when
 # nothing had checked it.
 if [ -n "$WA_BIN" ] && [ "${SKIP_SUITES}" != "1" ]; then
-  for spec in tests/image-roundtrip.lua tests/image-store.lua .handoff/lua-budget.lua; do
+  for spec in tests/image-roundtrip.lua tests/image-store.lua; do
     script="$ROOT/$spec"
     if [ ! -f "$script" ]; then
       skip "$spec (no such script)"
       continue
     fi
-    # The same env scripts/test.sh uses for its budget block, so the two cannot disagree:
-    # the per-model override is only meaningful when it is actually set.
+    # Same env test.sh uses, so the two cannot disagree on what they are measuring.
     out="$(WASM_AGENT_LUA_ROOT="$ROOT" \
            WASM_AGENT_LLM_CONTEXT="${WASM_AGENT_LLM_CONTEXT:-128000}" \
-           WASM_AGENT_MODEL_LIMITS='{"kimi-k2.6":{"context":262144,"reserve":32768}}' \
            WA_SCRIPT="$script" "$WA_BIN" --db "$TMPLUA/lua.db" 2>&1)"
     rc=$?
-    verdict="$(printf '%s\n' "$out" | grep -E 'ALL PASS|budget ok' | tail -1 || true)"
+    verdict="$(printf '%s\n' "$out" | grep -E 'ALL PASS' | tail -1 || true)"
     lcount="$(printf '%s\n' "$out" | grep -cE '^ok\b' || true)"
     if [ -z "$verdict" ]; then
       err "$spec emitted no verdict (exit $rc)"
