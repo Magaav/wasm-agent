@@ -480,12 +480,17 @@ $harness = @'
     "dragging the title bar must move the window by exactly the drag, saw " +
     startLeft + "," + startTop + " -> " + frame.offsetLeft + "," + frame.offsetTop);
   var widthBefore = frame.offsetWidth;
-  sendPointer("pointerdown", frame.offsetLeft + frame.offsetWidth - 2, frame.offsetTop + 40,
+  // The expectation is derived from where the pointer actually started, not from a number I chose:
+  // the press lands 2px inside the edge, so the delta is 62 and not 60. Writing 60 by hand made a
+  // correct component look broken.
+  var downX = frame.offsetLeft + frame.offsetWidth - 2;
+  var moveX = downX + 62;
+  sendPointer("pointerdown", downX, frame.offsetTop + 40,
     inPage.shadowRoot.querySelector(".grip.e"));
-  sendPointer("pointermove", frame.offsetLeft + frame.offsetWidth + 60, frame.offsetTop + 40);
-  sendPointer("pointerup", frame.offsetLeft + frame.offsetWidth + 60, frame.offsetTop + 40);
-  check(frame.offsetWidth === widthBefore + 60,
-    "the east edge must resize it by the drag, saw " + widthBefore + " -> " + frame.offsetWidth);
+  sendPointer("pointermove", moveX, frame.offsetTop + 40);
+  sendPointer("pointerup", moveX, frame.offsetTop + 40);
+  check(frame.offsetWidth === widthBefore + (moveX - downX),
+    "the east edge must resize it by exactly the pointer delta, saw " + widthBefore + " -> " + frame.offsetWidth);
   check(!!localStorage.getItem("wa-window-harness-view"), "and its geometry must be remembered");
   inPage.close();
   check(!inPage.open && inPage.hidden, "closing must hide it");
