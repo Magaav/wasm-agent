@@ -790,6 +790,20 @@ function watchNode() {
     } catch (error) { /* still down */ }
   }, 3000);
 }
+// A notice the page put up about this turn, so it can take it down again. A span that stays after the
+// thing it described has gone is not a record, it is litter - and it grows the transcript with every
+// false alarm.
+let streamNotice = null;
+
+function clearStreamNotice() {
+  if (streamNotice && streamNotice.isConnected) streamNotice.remove();
+  streamNotice = null;
+  // The restore's notice is the same claim in a different place: "this turn did not finish". Once the
+  // node says the thread is settled, the claim is stale and the span should go - the durable record is
+  // the engine's sessions topic, which is where a reader looks for it.
+  for (const notice of document.querySelectorAll(".unfinished-notice")) notice.remove();
+}
+
 async function send(text, options = {}) {
   // The draft is going out, so what was stored is stale: a respawn must not put the sent prompt
   // back into the composer.
@@ -834,11 +848,21 @@ async function send(text, options = {}) {
     // can say whether the worker is alive while a turn runs. Ask it, and act only on its answer.
     let lastEvent = Date.now();
     let asking = false;
+    // Whether this turn finished under its own steam. Without it the watchdog cannot tell a turn that
+    // ended from a turn that died: both leave `current: null`, so a turn that completed while the
+    // watchdog was asking /health got reported as "no longer running this turn ... recorded as
+    // unfinished" - about a turn whose answer was already on screen. The message said `(alive)`, which
+    // was the tell.
+    let turnFinished = false;
     const watchdog = setInterval(async () => {
+      if (turnFinished) { clearInterval(watchdog); return; }
       if (asking || Date.now() - lastEvent < 30000) return;
       asking = true;
       try {
         const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
+        // Asked and answered while the turn was ending: say nothing. The turn finished; there is
+        // nothing to report and nothing to continue.
+        if (turnFinished) { clearInterval(watchdog); asking = false; return; }
         const running = health && health.current;
         if (running && health.worker !== "stalled") {
           // Working, and quiet because the work is quiet. Keep waiting, and start counting again.
@@ -846,17 +870,17 @@ async function send(text, options = {}) {
           asking = false;
           return;
         }
-        // Not running any more: the turn is genuinely over, and the page should say so and stop
-        // pretending it is still listening.
+        // Not running any more, and the turn did not finish: the turn is genuinely over, and the page
+        // should say so and stop pretending it is still listening.
         clearInterval(watchdog);
-        add("assistant", "the node is no longer running this turn (" + (health.worker || "no worker") +
+        streamNotice = add("assistant", "the node is no longer running this turn (" + (health.worker || "no worker") +
           "). It is recorded as unfinished - the sessions topic offers to continue it.");
         watchNode();
         controller?.abort();
       } catch (error) {
         // Unreachable: the node is gone, which is a different message and the one that fits.
         clearInterval(watchdog);
-        add("assistant", connectionMessage());
+        streamNotice = add("assistant", connectionMessage());
         watchNode();
         controller?.abort();
       }
@@ -886,6 +910,13 @@ async function send(text, options = {}) {
           const line = part.split("\n").find((l) => l.startsWith("data: "));
           if (!line) continue;
           try { handleEvent(JSON.parse(line.slice(6))); lastEvent = Date.now(); } catch (error) { /* ignore */ }
+          // A turn that says it is done, or has answered, or has failed, is finished: whatever the
+          // watchdog asks next, this turn is not unfinished, and any notice it put up is stale.
+          const kind = (() => { try { return JSON.parse(line.slice(6)).type; } catch (error) { return ""; } })();
+          if (kind === "done" || kind === "reply" || kind === "error") {
+            turnFinished = true;
+            clearStreamNotice();
+          }
         }
       }
     }
@@ -1873,6 +1904,8 @@ async function reconcile() {
       if (busy) { setBusy(false); clearStatus(); }
       // Nothing to wait for any more, so the lock must not wait either: it is a message, not a trap.
       document.getElementById("update-lock")?.remove();
+      // And a notice about a turn that is over is litter: take it down.
+      clearStreamNotice();
     }
   } catch (error) { /* the node is away; watchNode says so in the chat */ }
   reconciling = false;
@@ -1885,9 +1918,9 @@ async function watch() {
     applyUiVersion(payload.version);
     // The node answered, so finish the first sync if it never finished. This loop always runs.
     if (!synced) sync("watch");
-    // While this window believes a turn is running, or is holding an update lock, ask the node what
-    // is true - every few seconds, not every second.
-    else if (busy || document.getElementById("update-lock")) {
+    // While this window believes a turn is running, is holding an update lock, or is showing a notice
+    // about a turn that did not finish, ask the node what is true - every few seconds, not every second.
+    else if (busy || document.getElementById("update-lock") || document.querySelector(".unfinished-notice")) {
       if (Date.now() - reconciledAt > 5000) { reconciledAt = Date.now(); reconcile(); }
     }
   } catch (error) { /* keep polling: the deadline is what keeps this loop alive */ }

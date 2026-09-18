@@ -435,6 +435,15 @@ $harness = @'
     "and say what happened, saw: " + (notice ? notice.textContent.slice(0, 90) : "nothing"));
   check(!!notice && !!notice.querySelector("button"), "and offer to continue it");
 
+  // A notice about a turn that is over must come down. It is a claim about right now, not a record - the
+  // record is the engine's sessions topic - and a span that outlives what it described bloats the
+  // transcript with every false alarm.
+  window.__setBusy(false);
+  await window.__reconcile();
+  for (var ur = 0; ur < 10; ur++) { await tick(); }
+  check(!document.querySelector(".unfinished-notice"),
+    "a notice about a finished turn must be removed once the node says the thread is settled");
+
   // A repainted turn that changed a file must show its diff topic. The live path always did; the repaint
   // dropped the changes summary and the turn id, so every reloaded transcript lost every diff topic.
   var diffTopic = document.querySelector("wa-diff");
@@ -443,7 +452,11 @@ $harness = @'
     "with the file count, saw: " + (diffTopic ? diffTopic.textContent.slice(0, 60) : "nothing"));
   check(!!diffTopic && /\+4/.test(diffTopic.textContent) && /3/.test(diffTopic.textContent),
     "and the GitHub-style totals, saw: " + (diffTopic ? diffTopic.textContent.slice(0, 60) : "nothing"));
-  check(!!diffTopic && !!diffTopic.turnId, "and the turn id the undo route is asked about");
+  // The turn id is what the undo route is asked about. After the merge this is the branch's version, which
+  // carries it in `dataset.turnId` - my check read a property my own version had, so it was asserting the
+  // implementation rather than the behaviour. The behaviour is what matters: the topic knows its turn.
+  check(!!diffTopic && !!(diffTopic.dataset.turnId || diffTopic.turnId),
+    "and the turn id the undo route is asked about, saw: " + (diffTopic ? JSON.stringify(diffTopic.dataset.turnId) : "no topic"));
 
   // Opening a topic while a turn runs must not look like a broken UI. The node's worker is inside the
   // turn, so a Lua read queues and the client's deadline abandons it - which showed as
@@ -747,7 +760,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
 
 $server = $null
 $edge = @(
