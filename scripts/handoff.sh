@@ -88,15 +88,21 @@ SESSION="$(printf '%s\n' "$COMMIT_MSG" | grep -oE 'session=[0-9a-fA-F-]+' | tail
 AGENT_LINE="$(printf '%s\n' "$COMMIT_MSG" | grep -E '^Agent:' | tail -1 || true)"
 
 SESSION_SOURCE="trailer"
+
+# Resolve the node binary once, unconditionally: both the session lookup below and the Lua
+# suites further down need it, and it must be defined even when the trailer already names
+# the session (otherwise `set -u` kills the run on a path that used to work).
+WA_BIN="${HANDOFF_WA:-}"
+if [ -z "$WA_BIN" ]; then
+  for c in "$ROOT/rust/target/release/wa" "$LOCALAPPDATA/wasm-agent/wa.exe" "$(command -v wa 2>/dev/null || true)"; do
+    [ -n "$c" ] && [ -x "$c" ] && { WA_BIN="$c"; break; }
+  done
+fi
+: "${WA_BIN:=}"
+
 if [ -z "$SESSION" ]; then
   # Ask the node for its sessions and take the newest; that is this run. Reported as
   # inferred, not as fact, because a guess presented as a pointer is worse than none.
-  WA_BIN="${HANDOFF_WA:-}"
-  if [ -z "$WA_BIN" ]; then
-    for c in "$ROOT/rust/target/release/wa" "$LOCALAPPDATA/wasm-agent/wa.exe" "$(command -v wa 2>/dev/null || true)"; do
-      [ -n "$c" ] && [ -x "$c" ] && { WA_BIN="$c"; break; }
-    done
-  fi
   if [ -n "$WA_BIN" ]; then
     SESSION="$("$WA_BIN" sessions 2>/dev/null | head -1 | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1 || true)"
     [ -n "$SESSION" ] && SESSION_SOURCE="inferred from $WA_BIN sessions (newest)"
@@ -168,6 +174,12 @@ fi
 declare -A SUITE_COUNT=()
 declare -A SUITE_STATE=()
 
+# Scratch space for suites that need a database. Removed on exit; in the system temp dir so
+# it can never land in the tree the gate is judging (which is what dirtied the first run).
+TMPLUA="$(mktemp -d 2>/dev/null || echo "${TEMP:-/tmp}/handoff-lua-$$")"
+mkdir -p "$TMPLUA"
+trap 'rm -f "$MARKER"; rm -rf "$TMPLUA"' EXIT
+
 run_suite() {
   local key="$1" label="$2"; shift 2
   local out rc start end dur verdict count
@@ -219,6 +231,51 @@ run_suite() {
 }
 
 JS_KEYS=()
+# The Lua half of the smoke test, runnable without cargo. `wa` loads the Lua core from
+# disk when WASM_AGENT_LUA_ROOT is set, so Lua assertions can run on a node with no Rust
+# toolchain. Without this the gate SKIPs test.sh and reports OK on a tree where the Lua
+# assertions never ran - which is how a context-window patch first appeared verified when
+# nothing had checked it.
+if [ -n "$WA_BIN" ] && [ "${SKIP_SUITES}" != "1" ]; then
+  for spec in tests/image-roundtrip.lua tests/image-store.lua .handoff/lua-budget.lua; do
+    script="$ROOT/$spec"
+    if [ ! -f "$script" ]; then
+      skip "$spec (no such script)"
+      continue
+    fi
+    # The same env scripts/test.sh uses for its budget block, so the two cannot disagree:
+    # the per-model override is only meaningful when it is actually set.
+    out="$(WASM_AGENT_LUA_ROOT="$ROOT" \
+           WASM_AGENT_LLM_CONTEXT="${WASM_AGENT_LLM_CONTEXT:-128000}" \
+           WASM_AGENT_MODEL_LIMITS='{"kimi-k2.6":{"context":262144,"reserve":32768}}' \
+           WA_SCRIPT="$script" "$WA_BIN" --db "$TMPLUA/lua.db" 2>&1)"
+    rc=$?
+    verdict="$(printf '%s\n' "$out" | grep -E 'ALL PASS|budget ok' | tail -1 || true)"
+    lcount="$(printf '%s\n' "$out" | grep -cE '^ok\b' || true)"
+    if [ -z "$verdict" ]; then
+      err "$spec emitted no verdict (exit $rc)"
+      note "      last output: $(printf '%s\n' "$out" | tail -1 | cut -c1-120)"
+      SUITE_STATE["$spec"]="error"
+    elif [ "$rc" -ne 0 ]; then
+      fail "$spec exited $rc after its verdict"
+      SUITE_STATE["$spec"]="failed"
+    else
+      # A suite that prints no per-check lines still asserted something: its verdict only
+      # prints at the end, after every assert passed. Count it as 1 so a dropped suite is
+      # visible in the baseline rather than silently zero.
+      [ "$lcount" -eq 0 ] && lcount=1
+      note "ok    $spec -> $verdict"
+      note "      $lcount check(s) - ok lines counted"
+      SUITE_COUNT["$spec"]="$lcount"
+      SUITE_STATE["$spec"]="passed"
+    fi
+  done
+elif [ "${SKIP_SUITES}" = "1" ]; then
+  skip "lua suites (skipped by request)"
+else
+  skip "lua suites (no wa binary found)"
+fi
+
 if find_tool bash && find_tool cargo; then
   run_suite smoke "scripts/test.sh" bash scripts/test.sh
   COMMANDS+=("bash scripts/test.sh")
