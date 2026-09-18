@@ -493,6 +493,20 @@ function wa_set_provider(id, node, session)
   return wa_model("", session)
 end
 
+-- Rename this node. The name is announced on the event stream as well as returned, because
+-- every open window shows it: a rename that only the caller can see is not a rename.
+function wa_set_node_name(body, session)
+  local decoded = {}
+  pcall(function() decoded = json.decode(body) end)
+  local wanted = (type(decoded) == "table" and decoded.name) or body
+  local name, problem = nodeslib.set_name(wanted)
+  if not name then return json.encode({ error = problem }) end
+  local identity = nodeslib.identity() or {}
+  emit({ type = "node", node_id = identity.node_id or "", name = name,
+         worktree = nodeslib.worktree() })
+  return wa_nodes(session)
+end
+
 function wa_set_model(name, node, session)
   if remote_target(node) then
     local result = nodeslib.remote_call(node, "set_model", { name = name or "" })

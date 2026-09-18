@@ -5,6 +5,8 @@ const meta = document.getElementById("meta");
 const form = document.getElementById("composer");
 const input = document.getElementById("input");
 const undoBtn = document.getElementById("undo");
+const nodeBtn = document.getElementById("node-btn");
+const chipNode = document.getElementById("chip-node");
 const redoBtn = document.getElementById("redo");
 const panel = document.getElementById("panel");
 const sendButton = document.getElementById("send");
@@ -447,6 +449,14 @@ function handleEvent(event) {
     // A new decision begins: close the previous one (its text and its tool topic).
     if (!turnStartedAt) turnStartedAt = Date.now();
     flushDecision();
+  } else if (event.type === "node") {
+    // Another window renamed this node, or this one did: either way the name is the node's,
+    // so take it from the event and let the list catch up.
+    if (event.name) {
+      chipNode.textContent = event.name;
+      if (event.worktree) chipNode.title = "worktree " + event.worktree;
+    }
+    refreshNodes();
   } else if (event.type === "status") {
     const note = event.text || "working";
     setStatus(note === "model" ? "thinking…" : "wasm-agent is " + note + "…");
@@ -956,6 +966,7 @@ function syncUndoButtons() {
   if (redoBtn) redoBtn.disabled = draftRedo.length === 0;
 }
 
+if (nodeBtn) nodeBtn.addEventListener("click", startNodeRename);
 if (undoBtn) undoBtn.addEventListener("click", () => undoDraft());
 if (redoBtn) redoBtn.addEventListener("click", () => redoDraft());
 
@@ -1481,6 +1492,54 @@ function nodeButton(label, handler) {
   return button;
 }
 
+// Rename this node from the footer, in place. The name is the node's, not this window's:
+// it goes to the node, every other window is told over the event stream, and the label here
+// is only redrawn from what the node reports.
+async function saveNodeName(name) {
+  const next = String(name || "").trim();
+  if (!next) return;
+  chipNode.textContent = next;   // the edit should feel immediate; the node is the truth
+  try {
+    const response = await apiFetch("node/name", {
+      method: "POST",
+      headers: apiHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ name: next }),
+    });
+    const payload = await response.json();
+    if (payload && payload.error) setStatus("could not rename the node: " + payload.error);
+  } catch (error) {
+    setStatus("could not rename the node: the node is not answering");
+  }
+  await refreshNodes();
+}
+
+function startNodeRename() {
+  if (document.querySelector(".node-rename")) return;
+  const current = chipNode.textContent;
+  const field = document.createElement("input");
+  field.className = "node-rename";
+  field.value = current === "…" ? "" : current;
+  field.setAttribute("aria-label", "Node name");
+  chipNode.replaceWith(field);
+  field.focus();
+  field.select();
+  let settled = false;
+  const finish = (save) => {
+    if (settled) return;
+    settled = true;
+    const next = field.value;
+    field.replaceWith(chipNode);
+    if (save) saveNodeName(next);
+  };
+  field.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); finish(true); }
+    else if (event.key === "Escape") { event.preventDefault(); finish(false); }
+  });
+  // Leaving the field is a decision either way: keep what is there rather than silently
+  // discarding an edit the reader believes they made.
+  field.addEventListener("blur", () => finish(true));
+}
+
 async function refreshNodes() {
   try {
     const payload = await (await apiFetch("nodes", { headers: apiHeaders() })).json();
@@ -1496,6 +1555,17 @@ async function refreshNodes() {
       const name = document.createElement("span");
       name.className = "node-name";
       name.textContent = node.name;
+      // Which of these is the window talking to? Without it a list of four nodes is four
+      // names and no way to tell which one this is.
+      if (node.local_node) {
+        chipNode.textContent = node.name;
+        chipNode.title = node.worktree ? "worktree " + node.worktree : node.name;
+        row.classList.add("node-local");
+        const badge = document.createElement("span");
+        badge.className = "node-this";
+        badge.textContent = "this node";
+        row.append(badge);
+      }
       const kind = document.createElement("span");
       kind.className = "node-kind";
       kind.textContent = node.kind;

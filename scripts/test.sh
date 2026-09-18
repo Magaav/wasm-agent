@@ -357,6 +357,26 @@ WA_SCRIPT=scripts/test-recovery.lua "$BIN" --db "$DB" | grep "recovery ok"
 # whole output budget thinking returns content "", a reasoning field, and
 # finish_reason=length; the loop used to record that as a finished turn. The same
 # file runs in the Windows suite, for the same reason the recovery one does.
+# The node's name: derived from the worktree it runs in, and validated when someone sets it.
+# This deliberately writes nothing - it only exercises the derivation and the refusals - so it
+# cannot disturb the name of the node running it.
+cat > "$DB.node-name.lua" <<'LUA'
+local nodes = dofile("lua/core/nodes.lua")
+local dir = nodes.worktree()
+assert(type(dir) == "string" and dir ~= "", "the worktree directory must be derivable from the cwd")
+assert(nodes.node_name() ~= "", "the node must have a name")
+local rejected, why = nodes.set_name("no
+newlines")
+assert(rejected == nil and why == "node_name_invalid",
+  "a control character must be refused, got " .. tostring(rejected) .. " / " .. tostring(why))
+local long, why2 = nodes.set_name(string.rep("x", 41))
+assert(long == nil and why2 == "node_name_too_long",
+  "a 41-character name must be refused, got " .. tostring(long) .. " / " .. tostring(why2))
+assert(nodes.set_name("") == nil, "an empty name must be refused")
+print("node name ok (" .. nodes.node_name() .. " in " .. dir .. ")")
+LUA
+WA_SCRIPT="$DB.node-name.lua" "$BIN" --db "$DB" | grep "node name ok"
+rm -f "$DB.node-name.lua"
 WA_SCRIPT=scripts/test-empty-reply.lua "$BIN" --db "$DB" | grep "empty reply ok"
 
 # Every Lua core module must be reachable from the *shipped* binary. The embedded list in

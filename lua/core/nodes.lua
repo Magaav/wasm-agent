@@ -4,6 +4,8 @@
 -- for a peer's public key, so a caller is only trusted when its key matches what
 -- the rendezvous has on file.
 local json = dofile("lua/vendor/json.lua")
+local paths = dofile("lua/core/paths.lua")
+local platform = dofile("lua/core/platform.lua")
 local M = {}
 
 local CACHE_TTL = 15
@@ -19,8 +21,56 @@ function M.identity()
   return json.decode(raw)
 end
 
+-- Where a name someone chose is kept: beside the identity, because a name belongs to the
+-- node rather than to the shell that started it. A restart must not forget it.
+function M.name_file()
+  return paths.config() .. "/node.name"
+end
+
+-- What a human calls this node when four of them are in a list.
+--
+-- Order: a name someone set, then the *worktree this node is running in*, then the
+-- environment, then "host". The worktree comes before the environment deliberately: a list
+-- of nodes should read as a list of checkouts, and WASM_AGENT_NODE_NAME is the older
+-- mechanism - a leftover value in a shell profile would otherwise make every node on the
+-- machine claim the same name, which is the confusion this exists to remove.
 function M.node_name()
-  return host.getenv("WASM_AGENT_NODE_NAME") or "host"
+  local stored = host.read_file(M.name_file())
+  if type(stored) == "string" then
+    local trimmed = stored:gsub("^%s+", ""):gsub("%s+$", "")
+    if trimmed ~= "" then return trimmed end
+  end
+  local dir = M.worktree()
+  if dir and dir ~= "" then return dir end
+  local configured = host.getenv("WASM_AGENT_NODE_NAME")
+  if configured and configured ~= "" then return configured end
+  return "host"
+end
+
+-- The directory name of the checkout this node was started in, or "" when it cannot be
+-- known. This is the default name, not a promise that the node is in a worktree.
+function M.worktree()
+  local cwd = platform.cwd()
+  if type(cwd) ~= "string" or cwd == "" then return "" end
+  local dir = cwd:gsub("/+$", ""):match("([^/\\]+)$")
+  return dir or ""
+end
+
+-- Rename this node. Returns the new name, or nil plus a reason.
+--
+-- The name is validated rather than trusted: it appears in lists and in log lines, so a
+-- newline or a control character in it would forge structure somewhere downstream.
+function M.set_name(name)
+  name = tostring(name or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if name == "" then return nil, "node_name_required" end
+  if #name > 40 then return nil, "node_name_too_long" end
+  -- A space literal, not %s: %s matches newlines, and a name with a newline in it forges
+  -- structure in every list and log line it reaches.
+  if not name:match("^[%w][%w %._%-]*$") then return nil, "node_name_invalid" end
+  local ok, wrote = pcall(host.write_file, M.name_file(), name .. "\n")
+  if not ok or wrote == false then return nil, "node_name_write_failed" end
+  M.invalidate()
+  return name
 end
 
 local function fetch_peers()
@@ -59,6 +109,7 @@ function M.list()
       role = "master",
       online = true,
       local_node = true,
+      worktree = M.worktree(),
       endpoints = {},
       capabilities = {
         "bash", "read", "write", "edit", "ls", "grep",

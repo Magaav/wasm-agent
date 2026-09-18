@@ -596,6 +596,7 @@ fn dispatch(
         "/envelope" => (200, "application/json", call("wa_envelope", &[session]).into_bytes()),
         "/tools" => (200, "application/json", call("wa_tools", &[session]).into_bytes()),
         "/nodes" => (200, "application/json", call("wa_nodes", &[session]).into_bytes()),
+        "/node/name" if method == "POST" => (200, "application/json", call("wa_set_node_name", &[body, session]).into_bytes()),
         "/sessions" => (200, "application/json", call("wa_sessions", &[session]).into_bytes()),
         "/session" => (200, "application/json", call("wa_session", &[query_value(&query, "id").as_str(), session]).into_bytes()),
         "/session/mode" if method == "POST" => (200, "application/json", call("wa_session_mode", &[body, session]).into_bytes()),

@@ -345,6 +345,16 @@ body.term .terminal { display: flex; }
    box was pushed off the bottom of the window. Cap the strip at two and a half cards - the
    half card is the affordance that says there is more - and let it scroll instead.
    2 x 57px card + 2 x 5px gap + half a card = 152.5px, rounded to 150px on the 5px scale. */
+/* The node this window is talking to. Its name defaults to the worktree the node runs in,
+   so a list of four nodes reads as four checkouts and "which one am I?" has an answer. */
+.node-chip #chip-node { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+.node-rename {
+  background: var(--panel-2); border: 1px solid var(--accent); border-radius: var(--radius-sm);
+  color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px; padding: 1px var(--space); min-width: 96px; outline: none;
+}
+.node-this { color: var(--accent); font-size: 10.5px; }
+
 .attachments {
   display: flex; flex-wrap: wrap; gap: var(--gap);
   max-height: 150px;

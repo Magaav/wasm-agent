@@ -290,6 +290,37 @@ $harness = @'
   check(document.querySelectorAll('.session-state').length === 1,
     'only the thread that needs attention should be badged');
 
+  // The node chip answers the question the engine could not: which of these is this window
+  // talking to? It names it, the engine marks exactly one row, and a rename leaves the
+  // window: it goes to the node, and the label is redrawn from the node's reply.
+  // The nodes topic is a topic inside the engine, like sessions: opening the engine alone
+  // does not fetch it, so click the way a reader would.
+  document.querySelector('[data-target="nodes-box"]').click();
+  for (var n = 0; n < 20; n++) { await tick(); }
+  var chipNode = document.getElementById("chip-node");
+  check(!!chipNode && chipNode.textContent === "foundation",
+    "the footer must name the node this window is talking to, saw: " + (chipNode ? chipNode.textContent : "no chip"));
+  check(document.querySelectorAll(".node-local").length === 1,
+    "exactly one node row may be marked as this one, saw " + document.querySelectorAll(".node-local").length);
+  var thisBadge = document.querySelector(".node-this");
+  check(!!thisBadge && /this node/.test(thisBadge.textContent), "the marked row must say so");
+  var nodesText = document.getElementById("nodes-box").textContent;
+  check(/foundation/.test(nodesText) && /openclaw/.test(nodesText),
+    "both nodes must be listed, saw: " + nodesText.slice(0, 120));
+
+  await window.__renameNode("renamed-by-the-test");
+  check(chipNode.textContent === "renamed-by-the-test",
+    "the chip must show what the node reported, saw: " + chipNode.textContent +
+    " | stub local name: " + window.__fixtures.nodes.nodes[0].name +
+    " | nodes fetches: " + (window.__calls || []).filter(function (c) { return c.url.indexOf("nodes") >= 0; }).length +
+    " | last 3 calls: " + JSON.stringify((window.__calls || []).slice(-3).map(function (c) { return c.method + " " + c.url; })));
+  var posted = (window.__calls || []).filter(function (call) {
+    return call.url.indexOf("node/name") >= 0 && call.method === "POST";
+  });
+  check(posted.length === 1, "the rename must be sent to the node, saw " + posted.length);
+  check(posted.length === 1 && JSON.parse(posted[0].body).name === "renamed-by-the-test",
+    "and it must carry the new name, saw: " + (posted[0] ? posted[0].body : "nothing"));
+
   // A lost connection has to be classified: that is what turns a raw TypeError
   // into something a reader can act on, and it is checkable without a network.
   var classify = window.__classifyProbe ? window.__classifyProbe() : ["the classify probe is missing"];
@@ -315,7 +346,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
 
 $server = $null
 $edge = @(
