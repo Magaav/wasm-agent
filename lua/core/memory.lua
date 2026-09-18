@@ -541,12 +541,13 @@ function M.append_turn(session_id, turn)
   local seq = turn.seq or M.next_seq(session_id)
   local id = turn.id or host.uuid()
   exec("INSERT INTO turns(id,session_id,seq,role,content,images,tool_calls,tool_call_id,tool_name," ..
-       "tokens,ms,ok,debug,trace,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+       "tokens,ms,ok,debug,trace,changes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
        {id, session_id, seq, turn.role or "user", turn.content or "",
         json.encode(turn.images or {}),
         json.encode(turn.tool_calls or {}), turn.tool_call_id or "", turn.tool_name or "",
         turn.tokens or 0, turn.ms or 0, turn.ok == false and 0 or 1,
-        turn.debug and 1 or 0, json.encode(turn.trace or {}), host.now()})
+        turn.debug and 1 or 0, json.encode(turn.trace or {}),
+        json.encode(turn.changes or {}), host.now()})
   exec("INSERT INTO turns_fts(content,session_id,turn_id) VALUES(?,?,?)",
        {turn.content or "", session_id, id})
   exec("UPDATE sessions SET updated_at=? WHERE id=?", {host.now(), session_id})
@@ -588,6 +589,11 @@ function M.session_turns(session_id, opts)
     row.tool_calls = json.decode(row.tool_calls)
     row.trace = json.decode(row.trace)
     if row.images then row.images = decode(row.images) end
+    -- An older row has `{}` rather than a summary, and `{}` decodes to an empty table
+    -- that is truthy in Lua - so turn it into nil here. Otherwise every turn written
+    -- before this column existed would claim a diff topic and render an empty one.
+    row.changes = decode(row.changes)
+    if type(row.changes) ~= "table" or row.changes.files == nil then row.changes = nil end
   end
   return rows
 end
