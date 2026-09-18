@@ -114,6 +114,13 @@ function M.setup()
   if not schema then error("schema_missing") end
   exec(schema)
   migrate()
+  -- Threads that predate naming are all called "chat", which tells the reader nothing and makes a
+  -- list of them unusable. Name them from their first user message, once: after this the name
+  -- belongs to the thread, and only a thread without one gets named again.
+  for _, row in ipairs(query("SELECT id FROM sessions WHERE title='' OR title='chat'")) do
+    local first = query("SELECT content FROM turns WHERE session_id=? AND role='user' ORDER BY seq ASC LIMIT 1", {row.id})
+    if first[1] then M.name_session(row.id, first[1].content or "") end
+  end
 end
 
 -- ---------------------------------------------------------------- memories
@@ -559,7 +566,43 @@ function M.append_turn(session_id, turn)
     ok = turn.ok == false and 0 or 1, debug = turn.debug and 1 or 0,
     trace = turn.trace or {}, created_at = host.now(),
   })
+  -- A thread is named after the first thing asked in it, the way a chat is named after its opening
+  -- message. Set once and never rewritten: a name that drifts as the conversation moves is worse
+  -- than no name, because the reader cannot use it to find the thread they remember.
+  if (turn.role or "user") == "user" then M.name_session(session_id, turn.content or "") end
   return seq
+end
+
+-- A name has to survive being read in a list and typed into a search box: one line, no markdown
+-- furniture, and short. The first line, not the first sentence: a name that ends mid-thought reads
+-- as a different name, and picking a sentence boundary needs punctuation rules nobody agrees on.
+local function title_from(text)
+  local first = tostring(text or ""):gsub("\r", ""):match("^[^\n]*") or ""
+  local line = first:gsub("```[%s%S]-```", " ")
+  line = line:gsub("[#*_`>|]+", " ")
+  line = line:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  -- Removing a backtick leaves a space where it was, and "chat ?" is not how anyone writes it.
+  line = line:gsub("%s+([%?%.,:;!%%%)%]}])", "%1"):gsub("%s+$", "")
+  if line == "" then return "" end
+  if #line > 60 then
+    local cut = line:sub(1, 60)
+    local space = cut:match("^.*()%s")
+    if space and space > 30 then cut = cut:sub(1, space - 1) end
+    line = cut .. "\u{2026}"
+  end
+  return line
+end
+
+-- Name a session from its first user message, unless it already has a name. "chat" is the
+-- placeholder every session starts with, so it does not count as one.
+function M.name_session(session_id, text)
+  local rows = query("SELECT title FROM sessions WHERE id=?", {session_id})
+  local current = tostring((rows[1] or {}).title or "")
+  if current ~= "" and current ~= "chat" then return current end
+  local title = title_from(text)
+  if title == "" then return nil end
+  exec("UPDATE sessions SET title=? WHERE id=?", {title, session_id})
+  return title
 end
 
 -- Turns are read as a *window*, and the window is the newest ones. The old shape -

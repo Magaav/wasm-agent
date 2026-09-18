@@ -2347,43 +2347,107 @@ async function refreshTools() {
 
 // Sessions: the agent's own transcripts, with traces. This is the debugging
 // surface: open a session, flip it to debug, export it as a fixture.
+// ---- sessions: the threads this node has had --------------------------------
+//
+// Ordered by last interaction - the route does that, and this view must not re-sort it, because
+// "most recently used" is the only order that makes a long list usable. Named after their opening
+// message, and searchable: keeping threads is only worth anything if you can find the one you mean,
+// and a list you have to read top to bottom is not a way to find anything.
+let sessionQuery = "";
+let sessionList = [];
+
+// "3m ago" rather than a locale timestamp: in a list of threads, how long ago is the question, and
+// the exact second is never the answer.
+function ago(seconds) {
+  const s = Math.max(0, Number(seconds) || 0);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  if (s < 86400 * 7) return Math.floor(s / 86400) + "d ago";
+  return new Date(Date.now() - s * 1000).toLocaleDateString();
+}
+
+function sessionMatches(session, query) {
+  if (!query) return true;
+  const haystack = [session.title, session.id, session.objective, session.state]
+    .filter(Boolean).join(" ").toLowerCase();
+  return query.toLowerCase().split(/\s+/).every((word) => haystack.includes(word));
+}
+
+function renderSessions() {
+  const shown = sessionList.filter((session) => sessionMatches(session, sessionQuery));
+  sessionsNote.textContent = sessionQuery
+    ? `${shown.length} of ${sessionList.length} sessions`
+    : `${sessionList.length} sessions · most recent first`;
+  // The search row is re-appended on every render, not replaced by it: a filter box that vanishes
+  // when you type in it is not a filter box.
+  sessionsBox.replaceChildren(sessionSearch());
+  if (!sessionList.length) {
+    const empty = document.createElement("div");
+    empty.textContent = "no sessions yet";
+    sessionsBox.append(empty);
+    return;
+  }
+  if (!shown.length) {
+    const empty = document.createElement("div");
+    empty.textContent = "nothing matches " + JSON.stringify(sessionQuery);
+    sessionsBox.append(empty);
+    return;
+  }
+  for (const session of shown) {
+    const row = document.createElement("div");
+    row.className = "session-row";
+    const title = document.createElement("span");
+    title.className = "session-title";
+    // The id is the fallback, not the name: a thread whose first message could not name it is still
+    // findable by the id it will be referred to by.
+    title.textContent = session.title || session.id.slice(0, 8);
+    title.title = session.id;
+    const meta = document.createElement("span");
+    meta.className = "session-meta";
+    const when = ago((Date.now() / 1000) - (session.updated_at || session.started_at || 0));
+    meta.textContent = `${session.turn_count} turns · ${when}`;
+    row.append(title, meta);
+    // Only when there is something to recover: a badge on every row would be noise, and "answered"
+    // is the case that needs no attention. The reason is the API's own words, so the UI cannot
+    // invent a different story.
+    if (session.state && session.state !== "answered" && session.state !== "empty") {
+      const badge = document.createElement("span");
+      badge.className = "session-state " + session.state;
+      badge.textContent = session.state;
+      badge.title = session.state_detail || session.state;
+      row.append(badge);
+    }
+    row.append(nodeButton("open", () => openSession(session.id)));
+    sessionsBox.append(row);
+  }
+}
+
 async function refreshSessions() {
   try {
     const payload = await (await apiFetch("sessions", { headers: apiHeaders() })).json();
-    const list = payload.sessions || [];
-    sessionsNote.textContent = `${list.length} sessions`;
-    sessionsBox.replaceChildren();
-    if (!list.length) {
-      sessionsBox.textContent = "no sessions yet";
-      return;
-    }
-    for (const session of list) {
-      const row = document.createElement("div");
-      row.className = "session-row";
-      const title = document.createElement("span");
-      title.className = "session-title";
-      title.textContent = session.title || session.id.slice(0, 8);
-      const meta = document.createElement("span");
-      meta.className = "session-meta";
-      const when = new Date((session.updated_at || session.started_at) * 1000).toLocaleString();
-      meta.textContent = `${session.mode} · ${session.turn_count} turns · ${when}`;
-      row.append(title, meta);
-      // Only when there is something to recover: a badge on every row would be
-      // noise, and "answered" is the case that needs no attention. The reason
-      // is the API's own words, so the UI cannot invent a different story.
-      if (session.state && session.state !== "answered" && session.state !== "empty") {
-        const badge = document.createElement("span");
-        badge.className = "session-state " + session.state;
-        badge.textContent = session.state;
-        badge.title = session.state_detail || session.state;
-        row.append(badge);
-      }
-      row.append(nodeButton("open", () => openSession(session.id)));
-      sessionsBox.append(row);
-    }
+    sessionList = payload.sessions || [];
+    renderSessions();
   } catch (error) {
+    sessionsNote.textContent = "unavailable";
     sessionsBox.textContent = String(error);
   }
+}
+
+// The search box is part of the topic rather than the markup because the topic is drawn from JS -
+// and because a filter that survives re-rendering has to own its own element.
+function sessionSearch() {
+  const row = document.createElement("div");
+  row.className = "session-search";
+  const input = document.createElement("input");
+  input.type = "search";
+  input.id = "session-search";
+  input.placeholder = "search threads";
+  input.autocomplete = "off";
+  input.value = sessionQuery;
+  input.addEventListener("input", () => { sessionQuery = input.value.trim(); renderSessions(); });
+  row.append(input);
+  return row;
 }
 
 async function openSession(id) {

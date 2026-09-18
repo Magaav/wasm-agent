@@ -287,6 +287,16 @@ body.drift .drift { display: flex; }
 .session-row { display: flex; align-items: center; gap: var(--gap); padding: var(--space) 0; border-bottom: 1px solid rgba(35,41,54,.6); }
 .session-title { font-weight: 500; min-width: 110px; }
 .session-meta { color: var(--muted); font-size: 11px; flex: 1; }
+/* The thread's name is what is being read, so it takes the room and truncates; the search row is the
+   topic's only control and belongs to it rather than to the panel. */
+.session-search { padding: 0 0 var(--space) 0; }
+.session-search input {
+  width: 100%; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); color: var(--text); font: inherit; font-size: 12px;
+  padding: var(--space) var(--pad); outline: none;
+}
+.session-search input:focus { border-color: var(--accent); }
+.session-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A thread that needs attention says so where the thread is listed. */
 .session-state {
   font-size: 10px; text-transform: uppercase; letter-spacing: .5px;

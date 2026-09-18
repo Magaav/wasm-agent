@@ -294,6 +294,31 @@ $harness = @'
   check(document.querySelectorAll('.session-state').length === 1,
     'only the thread that needs attention should be badged');
 
+  // The sessions topic is a way to *find* a thread, not just a list: named after its opening
+  // message, most recent first, and searchable. A list you have to read top to bottom is not a way
+  // to find anything.
+  var search = document.getElementById("session-search");
+  check(!!search, "the sessions topic must carry a search box");
+  var titles = Array.prototype.map.call(document.querySelectorAll(".session-title"),
+    function (node) { return node.textContent; });
+  check(titles.indexOf("unfinished thread") >= 0 && titles.indexOf("settled thread") >= 0,
+    "rows must show the thread's name, saw: " + titles.join("|"));
+  check(/ago|just now/.test(document.getElementById("sessions-box").textContent),
+    "and how long ago it was used rather than a locale timestamp, saw: " +
+    document.getElementById("sessions-box").textContent.slice(0, 90));
+  if (search) {
+    search.value = "settled";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    for (var sq = 0; sq < 5; sq++) { await tick(); }
+    check(document.querySelectorAll(".session-row").length === 1,
+      "searching must filter the list, saw " + document.querySelectorAll(".session-row").length);
+    check(!!document.getElementById("session-search"), "and the box must survive its own filtering");
+    search.value = "";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    for (var sr = 0; sr < 5; sr++) { await tick(); }
+    check(document.querySelectorAll(".session-row").length === 2, "and clearing it must restore them");
+  }
+
   // The node chip answers the question the engine could not: which of these is this window
   // talking to? It names it, the engine marks exactly one row, and a rename leaves the
   // window: it goes to the node, and the label is redrawn from the node's reply.
@@ -565,6 +590,18 @@ $edge = @(
   "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe"
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $edge) { Write-Host "  !  no Edge or Chrome found"; exit 1 }
+
+# A server left behind by an interrupted run serves an *old* temp copy of the UI, so the harness would
+# test the wrong page and report on it - which is worse than not running at all. It happened: a stale
+# server on this port meant the page had no harness and no fixtures, the dump was the unpatched
+# markup, and the run looked like a broken test rather than a stale one.
+$busy = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($busy) {
+  Write-Host "  !  port $Port is already in use by pid $($busy.OwningProcess)"
+  Write-Host "     that is probably a previous run's server, and it would serve an old copy of the UI"
+  Write-Host "     stop it and run again:  Stop-Process -Id $($busy.OwningProcess)"
+  exit 1
+}
 
 try {
   $server = Start-Process -FilePath $WaExe -ArgumentList @("serve", "--port", "$Port", "--client-port", "$ClientPort", "--ui", $tmp) -WindowStyle Hidden -PassThru
