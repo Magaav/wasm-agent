@@ -92,6 +92,13 @@ local function migrate()
   -- FTS-indexed, so putting base64 there would poison every text search and
   -- bloat the index by three orders of magnitude.
   add_column("turns", "images", "TEXT NOT NULL DEFAULT '[]'")
+  -- What the turn changed on disk: a JSON summary of {files:[{path,added,removed,...}],
+  -- added, removed}, so the diff topic can be rebuilt from the ledger alone. The *bodies*
+  -- (the previous text undo restores) are not here and must not be: this column is read
+  -- into every transcript view, and a file's contents do not belong in a transcript any
+  -- more than base64 images do. An older turn's `{}` means "nothing recorded", which
+  -- reads as no topic rather than an empty one.
+  add_column("turns", "changes", "TEXT NOT NULL DEFAULT '{}'")
   -- Rows written before the state was renamed kept the wording of the claim we used to
   -- make: "died after a tool result", "died right after a compaction". Nobody observed
   -- those deaths - a live run was reported as interrupted fourteen times in a row - so

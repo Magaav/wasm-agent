@@ -429,6 +429,7 @@ class WaWindow extends HTMLElement {
         :host([hidden]) { display: none; }
         .frame {
           position: absolute; pointer-events: auto; display: flex; flex-direction: column;
+          box-sizing: border-box;
           min-width: 320px; min-height: 220px; overflow: hidden;
           background: var(--panel, #10131a); color: var(--text, #e6e9f0);
           border: 1px solid var(--line, #232936); border-radius: var(--radius, 10px);
@@ -536,7 +537,7 @@ class WaWindow extends HTMLElement {
     if (event.target.closest("button")) return;
     const geometry = this._geometry();
     this._drag = { pointerId: event.pointerId, dx: event.clientX - geometry.x, dy: event.clientY - geometry.y };
-    event.target.setPointerCapture?.(event.pointerId);
+    this._capture(event);
     document.addEventListener("pointermove", this._onMove);
     document.addEventListener("pointerup", this._onUp);
   }
@@ -545,9 +546,16 @@ class WaWindow extends HTMLElement {
     if (event.button !== 0) return;
     event.preventDefault();
     this._resize = { pointerId: event.pointerId, edge, geometry: this._geometry(), x: event.clientX, y: event.clientY };
-    event.target.setPointerCapture?.(event.pointerId);
+    this._capture(event);
     document.addEventListener("pointermove", this._onMove);
     document.addEventListener("pointerup", this._onUp);
+  }
+
+  // Pointer capture keeps a drag alive when the pointer leaves the window. It throws on a
+  // synthetic event (a harness dispatching pointer events has no real pointer to capture), and a
+  // throw here would abort the drag before it started - so a failed capture is not a failed drag.
+  _capture(event) {
+    try { event.target.setPointerCapture?.(event.pointerId); } catch (error) { /* synthetic pointer */ }
   }
 
   _onMove(event) {

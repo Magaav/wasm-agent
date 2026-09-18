@@ -83,7 +83,7 @@ function M.summary(entry)
   for _, file in ipairs(entry.files) do
     files[#files + 1] = {
       path = file.path, added = file.added, removed = file.removed,
-      created = file.before == nil, deleted = file.after == nil,
+      created = file.before == "",
       recorded = file.recorded,
     }
   end
@@ -94,9 +94,10 @@ end
 --
 -- Undo is all-or-nothing by design: a half-restored edit is worse than none, so the
 -- guards all run before the first write. The check is "does the file still look like what
--- the turn left?", compared on the *edited region* rather than the whole file, because
--- the whole-file comparison fails the moment the reader (or a formatter) touches anything
--- else - and then a legitimate undo is refused for a reason that is not the reader's.
+-- the turn left?", compared on the whole text rather than a region, because the record
+-- already holds the whole text and a partial comparison would have to guess where the
+-- edit was. A file that moved on is *refused*, never merged: guessing at intent here is
+-- how newer work gets eaten.
 function M.undo(entry)
   if M.empty(entry) then return nil, "nothing_to_undo" end
   for _, file in ipairs(entry.files) do
@@ -106,22 +107,19 @@ function M.undo(entry)
   -- Guard first, write second: nothing has been touched when a refusal is returned.
   for _, file in ipairs(entry.files) do
     local now = host.read_file and host.read_file(file.path)
-    if file.after == nil then
-      -- The turn created this file. Undoing it means removing it, and only while it is
-      -- still there: a file someone else already deleted is not an error to report.
-      if now ~= nil then
-        local ok = host.remove_file and host.remove_file(file.path)
-        if not ok then return nil, "remove_failed:" .. file.path end
-      end
-    else
-      if now ~= nil and now ~= file.after then
-        -- The refusal says which file, so the reader knows what to reconcile. It does not
-        -- try to merge: guessing at intent here is how newer work gets eaten.
-        return nil, "changed_since_turn:" .. file.path
-      end
-      if not host_write or not host_write(file.path, file.before or "") then
-        return nil, "write_failed:" .. file.path
-      end
+    if now ~= nil and now ~= file.after then
+      -- The refusal says which file, so the reader knows what to reconcile.
+      return nil, "changed_since_turn:" .. file.path
+    end
+    if now == nil and file.after ~= nil then
+      -- The file is gone. Restoring is not a revert of this turn, it is recreating
+      -- something someone removed - refused, and named.
+      return nil, "missing_since_turn:" .. file.path
+    end
+  end
+  for _, file in ipairs(entry.files) do
+    if not host_write or not host_write(file.path, file.before or "") then
+      return nil, "write_failed:" .. file.path
     end
   end
   return true, "undone"
@@ -131,29 +129,19 @@ end
 -- that cannot run must say so rather than leave half the files forward and half back.
 function M.redo(entry)
   if M.empty(entry) then return nil, "nothing_to_redo" end
-  local host_write = host.write_file
   for _, file in ipairs(entry.files) do
     if not file.recorded then return nil, "too_large_to_redo:" .. file.path end
   end
+  local host_write = host.write_file
   for _, file in ipairs(entry.files) do
     local now = host.read_file and host.read_file(file.path)
-    if file.before == nil then
-      if now ~= nil then return nil, "exists_since_undo:" .. file.path end
-      if not host_write or not host_write(file.path, file.after or "") then
-        return nil, "write_failed:" .. file.path
-      end
-    else
-      if now ~= nil and now ~= file.before then
-        return nil, "changed_since_undo:" .. file.path
-      end
-      if file.after == nil then
-        local ok = host.remove_file and host.remove_file(file.path)
-        if not ok then return nil, "remove_failed:" .. file.path end
-      else
-        if not host_write or not host_write(file.path, file.after) then
-          return nil, "write_failed:" .. file.path
-        end
-      end
+    if now ~= nil and now ~= file.before then
+      return nil, "changed_since_undo:" .. file.path
+    end
+  end
+  for _, file in ipairs(entry.files) do
+    if not host_write or not host_write(file.path, file.after or "") then
+      return nil, "write_failed:" .. file.path
     end
   end
   return true, "redone"

@@ -452,6 +452,45 @@ $harness = @'
   check((document.getElementById("skills-note").textContent || "").length > 0,
     "and the topic note must say how many there are");
 
+  // <wa-window>: the in-page window used when there is no shell to spawn a real one - a browser,
+  // or this harness. It makes the same promises the native window does: drag by the title bar,
+  // resize from an edge, close, and come back where you left it.
+  var inPage = document.createElement("wa-window");
+  inPage.setAttribute("name", "harness-view");
+  // Seed the geometry first: a default placement gets clamped to the harness window, and a drag
+  // from a clamped edge is capped - which makes an exact assertion about the delta impossible. A
+  // window with room around it moves by exactly what the pointer moved.
+  localStorage.setItem("wa-window-harness-view", JSON.stringify({ x: 20, y: 20, w: 300, h: 240 }));
+  inPage.open = true;
+  document.body.append(inPage);
+  for (var ww = 0; ww < 5; ww++) { await tick(); }
+  var frame = inPage.shadowRoot.querySelector(".frame");
+  check(!!frame, "wa-window must render a frame");
+  check(!!frame && frame.offsetWidth > 0 && frame.offsetHeight > 0, "and it must have a size");
+  var startLeft = frame.offsetLeft;
+  var startTop = frame.offsetTop;
+  var sendPointer = function (type, x, y, target) {
+    var event = new PointerEvent(type, { bubbles: true, clientX: x, clientY: y, button: 0, pointerId: 1 });
+    (target || document).dispatchEvent(event);
+  };
+  sendPointer("pointerdown", startLeft + 20, startTop + 8, inPage.shadowRoot.querySelector(".bar"));
+  sendPointer("pointermove", startLeft + 80, startTop + 58);
+  sendPointer("pointerup", startLeft + 80, startTop + 58);
+  check(frame.offsetLeft === startLeft + 60 && frame.offsetTop === startTop + 50,
+    "dragging the title bar must move the window by exactly the drag, saw " +
+    startLeft + "," + startTop + " -> " + frame.offsetLeft + "," + frame.offsetTop);
+  var widthBefore = frame.offsetWidth;
+  sendPointer("pointerdown", frame.offsetLeft + frame.offsetWidth - 2, frame.offsetTop + 40,
+    inPage.shadowRoot.querySelector(".grip.e"));
+  sendPointer("pointermove", frame.offsetLeft + frame.offsetWidth + 60, frame.offsetTop + 40);
+  sendPointer("pointerup", frame.offsetLeft + frame.offsetWidth + 60, frame.offsetTop + 40);
+  check(frame.offsetWidth === widthBefore + 60,
+    "the east edge must resize it by the drag, saw " + widthBefore + " -> " + frame.offsetWidth);
+  check(!!localStorage.getItem("wa-window-harness-view"), "and its geometry must be remembered");
+  inPage.close();
+  check(!inPage.open && inPage.hidden, "closing must hide it");
+  inPage.remove();
+
   document.title = "stage: renaming";
   // Ticks, not await: the app's apiFetch arms a setTimeout for its own deadline, and this
   // harness runs with virtual time, so awaiting an app promise that goes through it never

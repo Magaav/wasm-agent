@@ -5,6 +5,7 @@ local json = dofile("lua/vendor/json.lua")
 local platform = dofile("lua/core/platform.lua")
 local spellslib = dofile("lua/core/spells.lua")
 local nodeslib = dofile("lua/core/nodes.lua")
+local changeset = dofile("lua/core/changeset.lua")
 local M = {}
 
 local function is_master(role)
@@ -284,7 +285,13 @@ function M.dispatch(memory, name, args, role, ctx)
     return { path = args.path, content = content }
   elseif name == "write" then
     if not args.path then return { error = "path_required" } end
+    local before = (host.read_file and host.read_file(args.path)) or ""
     local ok = host.write_file and host.write_file(args.path, args.content or "")
+    -- Record what changed while the previous text is still in hand: this is what the diff
+    -- topic shows and what its undo replays. A failed write records nothing.
+    if ok and ctx and ctx.changes then
+      changeset.record(ctx.changes, args.path, before, args.content or "")
+    end
     return { ok = ok and true or false, path = args.path }
   elseif name == "edit" then
     local text = host.read_file and host.read_file(args.path)
@@ -293,6 +300,7 @@ function M.dispatch(memory, name, args, role, ctx)
     if not from then return { error = "old_text_not_found" } end
     local updated = text:sub(1, from - 1) .. (args.new_text or "") .. text:sub(to + 1)
     host.write_file(args.path, updated)
+    if ctx and ctx.changes then changeset.record(ctx.changes, args.path, text, updated) end
     return { ok = true, path = args.path }
   elseif name == "ls" then
     -- Native listing: `ls -la` does not exist on Windows, and the description

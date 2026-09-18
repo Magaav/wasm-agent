@@ -6,6 +6,7 @@
 -- of llm calls and tool calls with timings, tokens and failures.
 local json = dofile("lua/vendor/json.lua")
 local tools = dofile("lua/core/tools.lua")
+local changeset = dofile("lua/core/changeset.lua")
 local provider = dofile("lua/core/provider.lua")
 local memory = dofile("lua/core/memory.lua")
 -- Failure text is persisted in the trace and shown in the session view, so it is
@@ -650,6 +651,10 @@ function M:turn(text, images)
   local reply = ""
   local turn = { prompt = 0, completion = 0, total = 0, cached = 0 }
   local turn_started = host.now()
+  -- What this turn changes on disk, recorded by write/edit as it goes. It lives on the
+  -- turn, so the diff topic belongs to the turn that caused it and undo can reach the
+  -- previous text long after the turn ended.
+  self.changes = changeset.new()
   local tool_list = self.tool_list or tools.all(self.role)
   -- Fingerprint of the *stable* prefix (system + AGENTS.md + tool schemas).
   -- Identical across turns unless instructions or tools change, which is what a
@@ -809,7 +814,8 @@ function M:turn(text, images)
       local tool_started = host.now()
       host.beat()
       local handled, output = pcall(tools.dispatch, memory, function_.name, args, self.role,
-        { session_id = self.session_id, user_id = self.user, node_id = self.node })
+        { session_id = self.session_id, user_id = self.user, node_id = self.node,
+          changes = self.changes })
       host.beat()
       if not handled then output = { error = tostring(output) } end
       local ok_tool = type(output) ~= "table" or output.error == nil
@@ -848,16 +854,23 @@ function M:turn(text, images)
     reply = reply:sub(1, 8000)
   end
   memory.record_run(host.uuid(), self.session_id, "completed", "completed", reply)
+  -- The turn's changed files ride with the turn, so the diff topic is rebuilt from the
+  -- ledger like everything else: a reload, a resume or another reader all see the same
+  -- changes, and undo has the previous text to restore.
+  local changes = changeset.summary(self.changes)
   memory.append_turn(self.session_id, {
     role = "assistant", content = reply, trace = trace, tokens = turn.total, debug = self.debug,
     ms = math.floor((host.now() - turn_started) * 1000),
+    changes = json.encode(changes or json.null),
   })
   M.usage_total.turns = M.usage_total.turns + 1
   M.usage_total.last = turn
   self.emit({ type = "usage", total = M.usage_total, model = self.model })
 
   self:maybe_compact()
-  self.emit({ type = "reply", text = reply })
+  -- The diff goes with the reply: the topic belongs to this bubble, and the reader should
+  -- not need a second request to learn what the turn touched.
+  self.emit({ type = "reply", text = reply, changes = changes })
   return reply
 end
 
