@@ -248,7 +248,7 @@ fi
 # The JS suites are visible to the gate directly, not only through test.sh, because on
 # this platform test.sh cannot run at all - and a gate that can only see the smoke suite
 # would report a clean handoff from a tree whose JS tests were never executed.
-if find_tool node; then
+if find_tool node && [ "${SKIP_SUITES}" != "1" ]; then
   for t in tests/*.js; do
     [ -e "$t" ] || continue
     JS_KEYS+=("$t")
@@ -256,7 +256,11 @@ if find_tool node; then
     COMMANDS+=("node $t")
   done
 else
-  skip "tests/*.js (node not on PATH)"
+  if [ "${SKIP_SUITES}" = "1" ]; then
+    skip "tests/*.js (skipped by request)"
+  else
+    skip "tests/*.js (node not on PATH)"
+  fi
 fi
 
 # ---- property 1: the count cannot silently drop ----------------------------
