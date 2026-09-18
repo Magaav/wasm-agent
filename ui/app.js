@@ -1829,18 +1829,35 @@ async function sync(reason) {
   synced = true;
   syncAttempts = 0;
   clearStatus();
-  // The node is answering: if it says nothing is running, then nothing is - whatever this window
-  // believed before it lost touch. A turn that ended while the page was away must not leave a stop
-  // button and a dead composer behind.
-  if (busy && me.role) {
-    try {
-      const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
-      if (health && !health.current) setBusy(false);
-    } catch (error) { /* the health line is best effort here */ }
-  }
   // The transcript is restored once, and only after the node has answered - then the reader's place
-  // is put back on top of it, because "fresh" should not mean "moved".
+  // is put back on top of it, because "fresh" should not mean "moved". Whether a turn is still
+  // running is reconciled by `watch`, which keeps asking; one check here would only cover the first
+  // reconnection.
   restoreSession().then(restorePlace);
+}
+
+// A window must never be more certain than the node.
+//
+// If the node says nothing is running, then nothing is - however sure the page was a moment ago. A
+// turn that died with the node left the composer disabled and a stop button showing, and the only way
+// out was a manual reload: that is the "locked" window, and it is not a state a reader should have to
+// escape. This is also what makes a reinstall feel seamless - the node goes away, comes back, and the
+// chat is usable again without anyone clicking anything.
+let reconciling = false;
+let reconciledAt = 0;
+
+async function reconcile() {
+  if (reconciling || !synced) return;
+  reconciling = true;
+  try {
+    const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
+    if (health && !health.current) {
+      if (busy) { setBusy(false); clearStatus(); }
+      // Nothing to wait for any more, so the lock must not wait either: it is a message, not a trap.
+      document.getElementById("update-lock")?.remove();
+    }
+  } catch (error) { /* the node is away; watchNode says so in the chat */ }
+  reconciling = false;
 }
 
 async function watch() {
@@ -1850,6 +1867,11 @@ async function watch() {
     applyUiVersion(payload.version);
     // The node answered, so finish the first sync if it never finished. This loop always runs.
     if (!synced) sync("watch");
+    // While this window believes a turn is running, or is holding an update lock, ask the node what
+    // is true - every few seconds, not every second.
+    else if (busy || document.getElementById("update-lock")) {
+      if (Date.now() - reconciledAt > 5000) { reconciledAt = Date.now(); reconcile(); }
+    }
   } catch (error) { /* keep polling: the deadline is what keeps this loop alive */ }
   setTimeout(watch, 1000);
 }
