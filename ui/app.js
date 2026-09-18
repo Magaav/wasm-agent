@@ -471,7 +471,8 @@ function collapseRun() {
   if (!bubble) return;
   const body = bubble.body;
   const answer = streamBody;
-  const moves = Array.prototype.filter.call(body.children, (c) => c !== answer);
+  const moves = Array.prototype.filter.call(body.children,
+    (c) => c !== answer && c.tagName !== "WA-DIFF");
   const traces = moves.filter((c) => c.tagName === "WA-TRACE");
   if (traces.length === 0) return;   // nothing ran: leave the plain answer alone
   let calls = 0;
@@ -572,13 +573,18 @@ function handleEvent(event) {
       streamBody = segment;
     }
     finishTrace();
-    // The run topic goes *above* the answer and the diff goes *below* it: the answer is
-    // what was asked for, the changed files are what the reader may act on. Both are
-    // appended before the bubble is released, or there is nothing left to append to.
-    const diff = renderDiff(currentBubble(), event.changes);
-    if (diff) diff.dataset.turnId = event.turn_id || "";
+    // The run topic goes *above* the answer; the diff goes *below* it. Order matters and was
+    // wrong here: the diff used to be appended *before* collapseRun(), which moves every child
+    // that is not the answer into the run topic - so the diff landed inside the run topic,
+    // where the reader had to open the turn's path to find out what it changed. The diff is
+    // created after the run is collapsed, and collapseRun() also refuses to swallow a WA-DIFF,
+    // so the two cannot get back into that order.
     collapseRun();
-    if (diff && diff.dataset.turnId) askUndoable(diff);
+    const diff = renderDiff(currentBubble(), event.changes);
+    if (diff) {
+      diff.dataset.turnId = event.turn_id || "";
+      if (diff.dataset.turnId) askUndoable(diff);
+    }
     streamBody = null;
     streamText = "";
     turnBubble = null;
@@ -696,48 +702,6 @@ async function restoreSession() {
     // a run, not its partial text.
     if (full && full.state && full.state !== "answered" && full.state !== "empty") watchTurn();
   } catch (error) { /* an empty node, or an unreachable one: the welcome screen is right */ }
-}
-
-// What the turn changed on disk, as one topic at the end of the bubble.
-//
-// It is a component (`<wa-diff>`) because the same summary is shown wherever a change is
-// summarised, and because the undo affordance must behave the same everywhere. This function was
-// *called* and never defined - which threw on every answer, not only the ones with changes, so the
-// live view silently lost the diff topic and a reload truncated the transcript at the first reply.
-// "My own input is missing" was this.
-function renderDiff(bubble, changes) {
-  const files = (changes && changes.files) || [];
-  if (!files.length) return null;
-  const diff = document.createElement("wa-diff");
-  diff.setSummary(changes);
-  bubble.body.append(diff);
-  return diff;
-}
-
-// Undo is the server's, not the page's: the page asks and reports the answer, and the component
-// renders a refusal on the topic rather than swallowing it. There is no undo endpoint on this node
-// yet, and saying so is the honest answer - the alternative is a control that looks live and does
-// nothing, which is what `<wa-diff>` was written to avoid. When the endpoint lands, this is the
-// only place that changes.
-function askUndoable(diff) {
-  diff.addEventListener("diff-act", async (event) => {
-    const detail = event.detail || {};
-    const done = typeof detail.done === "function" ? detail.done : () => {};
-    try {
-      const response = await apiFetch("undo", {
-        method: "POST",
-        headers: apiHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ act: detail.act, files: diff.files || [] }),
-      });
-      if (!response.ok) {
-        done({ ok: false, reason: "this node has no undo endpoint yet (HTTP " + response.status + ")" });
-        return;
-      }
-      done(await response.json());
-    } catch (error) {
-      done({ ok: false, reason: String(error) });
-    }
-  });
 }
 
 function setBusy(value) {

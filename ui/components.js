@@ -408,7 +408,22 @@ customElements.define("wa-tool", WaTool);
 // there is no disabled state to guess at: when the patch is applied the button offers undo,
 // when it is undone it offers redo, and it is disabled only when neither is possible -
 // which the label states in words rather than leaving the reader clicking a dead control.
+// <wa-diff> — what the turn changed on disk, collapsed *below* the answer.
+//
+// This is the same topic as <wa-run> on purpose, down to the markup: a `trace-head` button
+// holding glyph · label · meta · chevron, the same `attributeChangedCallback`, the same
+// chevron swap, `open` as the attribute rather than a private flag. A topic is a topic; a
+// second header style reads as a different kind of thing, which is what the first version of
+// this component was - `diff-head`/`diff-expand` were its own invention and looked it.
+//
+// The one addition is the control at the right edge: a single button that toggles between
+// undoing this change and redoing it. It is a *sibling* of the header button, never a child,
+// because a button inside a button is invalid and swallows its own clicks - so `trace-head`
+// keeps `flex: 1` and the toggle sits beside it, which is the only structural difference from
+// <wa-run> and is why the header is wrapped in a row.
 class WaDiff extends HTMLElement {
+  static get observedAttributes() { return ["open"]; }
+
   constructor() {
     super();
     this._state = "applied";      // "applied" | "undone" | "locked"
@@ -419,19 +434,17 @@ class WaDiff extends HTMLElement {
   connectedCallback() { this._build(); }
 
   _build() {
-    if (this._header) return;
+    if (this._body) return;
     this.classList.add("diff");
 
-    this._header = document.createElement("div");
-    this._header.className = "diff-head";
+    this._row = document.createElement("div");
+    this._row.className = "diff-row";
 
-    // The expander is the whole left of the header, so a click anywhere on it opens the
-    // topic; the toggle is a *sibling* rather than a child, because a button inside a
-    // button is invalid and swallows its own clicks.
-    this._expander = document.createElement("button");
-    this._expander.type = "button";
-    this._expander.className = "diff-expand";
-    this._expander.setAttribute("aria-expanded", "false");
+    // The header is the real topic header: one button, exactly as <wa-run> builds it.
+    this._header = document.createElement("button");
+    this._header.type = "button";
+    this._header.className = "trace-head";
+    this._header.setAttribute("aria-expanded", "false");
     this._glyph = document.createElement("span");
     this._glyph.className = "trace-glyph";
     this._glyph.textContent = "\u0394";
@@ -443,25 +456,23 @@ class WaDiff extends HTMLElement {
     this._chevron = document.createElement("span");
     this._chevron.className = "trace-chevron";
     this._chevron.textContent = "\u203a";
-    this._expander.append(this._glyph, this._label, this._meta, this._chevron);
+    this._header.append(this._glyph, this._label, this._meta, this._chevron);
 
     this._toggle = document.createElement("button");
     this._toggle.type = "button";
     this._toggle.className = "diff-toggle";
-    this._toggle.setAttribute("aria-label", "Undo this change");
-    this._toggle.title = "Undo this change";
     this._toggle.disabled = true;
 
-    this._header.append(this._expander, this._toggle);
+    this._row.append(this._header, this._toggle);
 
     this._body = document.createElement("ul");
     this._body.className = "diff-body";
     this._body.hidden = true;
 
-    this._expander.addEventListener("click", () => { this.open = !this.open; });
+    this._header.addEventListener("click", () => this.toggle());
     this._toggle.addEventListener("click", () => this._act());
 
-    this.append(this._header, this._body);
+    this.append(this._row, this._body);
     this._paintToggle();
   }
 
@@ -470,10 +481,17 @@ class WaDiff extends HTMLElement {
   set open(value) {
     if (value) this.setAttribute("open", "");
     else this.removeAttribute("open");
-    if (this._body) this._body.hidden = !this.open;
-    if (this._chevron) this._chevron.textContent = this.open ? "\u2304" : "\u203a";
-    if (this._expander) this._expander.setAttribute("aria-expanded", String(this.open));
   }
+
+  // Verbatim the <wa-run>/<wa-trace> behaviour, so the three topics open and close alike.
+  attributeChangedCallback() {
+    if (!this._body) return;
+    this._body.hidden = !this.open;
+    this._header.setAttribute("aria-expanded", String(this.open));
+    this._chevron.textContent = this.open ? "\u2304" : "\u203a";
+  }
+
+  toggle() { this.open = !this.open; }
 
   // The glyph is the whole contract: undo when the change is applied, redo when it is not.
   _paintToggle() {

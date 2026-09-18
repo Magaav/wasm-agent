@@ -45,7 +45,13 @@ $harness = @'
     { type: "tool_result", result: { code: 1, stderr: "MISSING" } },
     { type: "round", n: 3 },
     { type: "delta", text: "Final: it exists." },
-    { type: "reply", text: "Final: it exists." },
+    // A turn that changed files, so the diff topic is exercised: without `changes` the topic
+    // never renders and every assertion about it would pass vacuously.
+    { type: "reply", text: "Final: it exists.", turn_id: "turn-fixture-1", changes: {
+      added: 7, removed: 2, files: [
+        { path: "lua/core/paths.lua", added: 5, removed: 2, created: false, recorded: true },
+        { path: "scripts/probe.lua", added: 2, removed: 0, created: true, recorded: true }
+      ] } },
     { type: "done" }
   ];
   // LIVE CHECK: while a decision is running its tool lines must be visible, not
@@ -67,11 +73,65 @@ $harness = @'
   check(!!body && body.classList.contains("steps"), "the bubble body should be a steps container");
 
   // Once the answer is ready the whole path collapses into one run topic, which
-  // sits above the answer so the reader lands on the answer.
+  // sits above the answer so the reader lands on the answer - and the diff topic sits
+  // *below* it, as a sibling of the answer rather than inside the run.
   var shape = body ? Array.prototype.map.call(body.children, function (c) {
-    return c.tagName === "WA-RUN" ? "run" : (c.tagName === "WA-TRACE" ? "trace" : "text");
+    return c.tagName === "WA-RUN" ? "run" : (c.tagName === "WA-TRACE" ? "trace"
+      : (c.tagName === "WA-DIFF" ? "diff" : "text"));
   }).join(",") : "";
-  check(shape === "run,text", "expected run,text in the bubble after the reply, saw " + shape);
+  check(shape === "run,text,diff",
+    "expected run,text,diff in the bubble after the reply, saw " + shape);
+
+  // The diff must be a *sibling*, not a descendant of the run topic: it used to be appended
+  // before collapseRun(), which sweeps every non-answer child into the run - so the reader
+  // had to open the turn's path to find out which files changed.
+  var runTopic = body ? body.querySelector("wa-run") : null;
+  check(!!runTopic && !runTopic.querySelector("wa-diff"),
+    "the diff topic must not be inside the run topic");
+  var diffTopic = body ? body.querySelector(":scope > wa-diff") : null;
+  check(!!diffTopic, "the diff topic should be a direct child of the bubble body");
+
+  // ...and after the answer, not before it.
+  var kids = body ? Array.prototype.slice.call(body.children) : [];
+  var answerIndex = kids.findIndex(function (c) { return c.classList && c.classList.contains("seg"); });
+  var diffIndex = kids.findIndex(function (c) { return c.tagName === "WA-DIFF"; });
+  check(diffIndex > answerIndex && answerIndex >= 0,
+    "the diff topic must come after the answer (answer at " + answerIndex + ", diff at " + diffIndex + ")");
+
+  // The header is the real topic header - the same button, the same parts, in the same order
+  // as <wa-run> - so the diff reads as a topic rather than as its own kind of thing.
+  var diffHead = diffTopic ? diffTopic.querySelector(".trace-head") : null;
+  check(!!diffHead && diffHead.tagName === "BUTTON",
+    "the diff header should be the shared trace-head button, saw " + (diffHead && diffHead.tagName));
+  var headParts = diffHead ? Array.prototype.map.call(diffHead.children, function (c) {
+    return c.className;
+  }).join(",") : "";
+  check(headParts === "trace-glyph,trace-label,trace-meta,trace-chevron",
+    "the diff header should hold glyph,label,meta,chevron like the run topic, saw: " + headParts);
+
+  // Same collapse behaviour as the other topics: closed to start, chevron flipped when open.
+  check(diffTopic && !diffTopic.hasAttribute("open"), "the diff topic should start collapsed");
+  if (diffTopic) {
+    var closedChevron = diffTopic.querySelector(".trace-chevron").textContent;
+    diffTopic.toggle();
+    check(diffTopic.hasAttribute("open"), "clicking the diff header should open the topic");
+    check(diffTopic.querySelector(".trace-chevron").textContent !== closedChevron,
+      "the diff chevron should flip when the topic opens");
+    check(diffTopic.querySelector(".diff-body").hidden === false,
+      "the diff body should be visible when the topic is open");
+    var headText = diffHead.textContent;
+    check(headText.indexOf("2 files changed") >= 0,
+      "the diff topic should total its files, saw: " + headText);
+    check(headText.indexOf("+7") >= 0 && headText.indexOf("\u22122") >= 0,
+      "the diff topic should show +added and -removed, saw: " + headText);
+    // The toggle is the diff's own addition: one button, at the right edge, sibling of the
+    // header (a button inside a button is invalid and swallows its own clicks).
+    var toggle = diffTopic.querySelector(".diff-toggle");
+    check(!!toggle, "the diff topic should carry the undo/redo toggle");
+    check(!!toggle && toggle.parentElement === diffHead.parentElement,
+      "the toggle must be a sibling of the header, not inside it");
+    diffTopic.toggle();
+  }
 
   var run = body ? body.querySelector("wa-run") : null;
   check(!!run, "the collapsed run topic should exist");
