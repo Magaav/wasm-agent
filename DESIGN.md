@@ -117,6 +117,17 @@ Never expose a master tier to a non-master turn; filter schemas *and* re-check i
 `dispatch`, because the model can ask for a tool it was not offered.
 The `client` and `shell` tools drive a real machine — the highest-risk tiers.
 
+A **node** has a role as well, and it answers a different question from the role
+of a turn. A *guest node* exists so that a master can have something done on the
+machine it runs on: it owns no worktree and no branch, so it is never named
+after a directory and a rename never moves a branch on its behalf, and its own
+capabilities are read-only. When a master calls it (`/node/call`, signed), the
+work runs **as that master** — the session and every tool call are filed under
+the master's name, never the guest's. There is one answer to "who did this?"
+whether the edit happened here or on a guest. `verify_peer` refuses a caller
+whose node is not a master, so a guest cannot command another node, and
+`nodes.author_of` is the single gate that turns a caller into an author.
+
 ## 9. Modes and views
 
 A **mode** is a full-view switch (chat ⇄ engine ⇄ shell ⇄ control).

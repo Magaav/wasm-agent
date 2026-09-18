@@ -190,18 +190,27 @@ local function verify_peer(from, public_key, ts, signature, action)
   return caller
 end
 
--- A turn requested by a peer runs as master.
-local node_agent_instance
-local function node_agent()
-  if not node_agent_instance then
-    node_agent_instance = agentlib.new(nil, emit, "master", "node")
-  end
-  return node_agent_instance
+-- A turn requested by a peer runs as the caller, not as this node.
+--
+-- The master who asked is the author of the work; this node is only where it happens. A guest
+-- node therefore files a master's call under the master's name - which is what proxying a
+-- master's wish means - instead of inventing a user called "node" and taking the credit for
+-- work it did not originate. `verify_peer` has already refused a caller whose node is not a
+-- master, so this path cannot be used by one guest to command another.
+local function node_agent(caller)
+  local author = nodeslib.author_of(caller)
+  if not author then return nil, "forbidden_role" end
+  -- Deliberately not cached: `memory.ensure_session` reuses the open session for this
+  -- (author, node) pair, so a fresh agent per call still lands in the same thread.
+  return agentlib.new(nil, emit, "master", author, nodeslib.node_name())
 end
 
--- Capabilities a peer may invoke, in addition to the normal tools.
-local function node_capability(capability, args)
+-- Capabilities a peer may invoke, in addition to the normal tools. `caller` is the peer that
+-- asked: its master is the author of whatever this does.
+local function node_capability(capability, args, caller)
   args = args or {}
+  local author = nodeslib.author_of(caller)
+  if not author then return { error = "forbidden_role" } end
   if capability == "status" then
     return json.decode(wa_model("", ""))
   elseif capability == "set_provider" then
@@ -211,12 +220,19 @@ local function node_capability(capability, args)
     provider.set_model(args.name or "")
     return json.decode(wa_model("", ""))
   elseif capability == "chat" then
-    local bot = node_agent()
+    local bot, agent_problem = node_agent(caller)
+    if not bot then return { error = agent_problem } end
     local ok, reply = pcall(bot.turn, bot, args.text or "")
     if not ok then return { error = tostring(reply) } end
     return { reply = reply }
   end
-  return toolslib.dispatch(memory, capability, args, "master")
+  -- The caller's role, not a hard-coded one: `verify_peer` proved it is a master, and passing
+  -- the proof through means a future caller that is not a master cannot inherit these tools by
+  -- accident - it would have to be granted, not merely un-refused.
+  return toolslib.dispatch(memory, capability, args, users.normalize(caller.role), {
+    user_id = author,
+    node_id = nodeslib.node_name(),
+  })
 end
 
 function wa_node_call(payload)
@@ -225,19 +241,23 @@ function wa_node_call(payload)
   local capability = request.capability or ""
   if capability == "" then return json.encode({ error = "bad_request" }) end
   if capability == "remote" then return json.encode({ error = "remote_cannot_recurse" }) end
-  local _, problem = verify_peer(request.from_node_id, request.public_key, request.ts, request.signature, "call")
+  local caller, problem = verify_peer(request.from_node_id, request.public_key, request.ts, request.signature, "call")
   if problem then return json.encode({ error = problem }) end
-  return json.encode(node_capability(capability, request.args))
+  return json.encode(node_capability(capability, request.args, caller))
 end
 
 -- Streaming turn requested by a peer (/node/chat): events go to that stream.
 function wa_node_chat(from, public_key, ts, signature, text)
-  local _, problem = verify_peer(from, public_key, ts, signature, "chat")
+  local caller, problem = verify_peer(from, public_key, ts, signature, "chat")
   if problem then
     emit({ type = "error", error = problem })
     return ""
   end
-  local bot = node_agent()
+  local bot, agent_problem = node_agent(caller)
+  if not bot then
+    emit({ type = "error", error = agent_problem })
+    return ""
+  end
   local ok, reply = pcall(bot.turn, bot, text or "")
   if not ok then emit({ type = "error", error = tostring(reply) }) end
   return ""
@@ -477,7 +497,10 @@ function wa_model(node, session)
     -- startup, so the node control in the account balloon has a name before the engine's
     -- nodes topic has ever been opened.
     node_name = nodeslib.node_name(),
-    node_worktree = nodeslib.worktree(),
+    -- A guest reports no worktree: it has none of its own. The role travels with the name so
+    -- the window can say which kind of node it is talking to without asking twice.
+    node_worktree = nodeslib.is_master() and nodeslib.worktree() or "",
+    node_role = nodeslib.role(),
     -- Where the window came from, and whether the catalogue was reached at all. Without
     -- this, "why is my window wrong" needs a log; with it, the answer is one field.
     context_catalogue = windowlib.catalogue_status(),

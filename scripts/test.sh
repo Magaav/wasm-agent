@@ -25,7 +25,7 @@ SDB="$(mktemp -u /tmp/wa-status-XXXXXX.db)"
 RDB="$(mktemp -u /tmp/wa-resume-XXXXXX.db)"
 QDB="$(mktemp -u /tmp/wa-resume-q-XXXXXX.db)"
 PLUGINS="$(mktemp -d)"
-trap 'rm -f "$DB" "$DB"-wal "$DB"-shm "$SDB" "$SDB"-wal "$SDB"-shm "$RDB" "$RDB"-wal "$RDB"-shm "$QDB" "$QDB"-wal "$QDB"-shm; rm -rf "$PLUGINS"' EXIT
+trap 'rm -f "$DB" "$DB"-wal "$DB"-shm "$SDB" "$SDB"-wal "$SDB"-shm "$RDB" "$RDB"-wal "$RDB"-shm "$QDB" "$QDB"-wal "$QDB"-shm; rm -rf "$PLUGINS" "$DB.home"' EXIT
 
 "$BIN" --db "$DB" init >/dev/null
 ID="$("$BIN" --db "$DB" remember "smoke fact about the rust lua core")"
@@ -457,6 +457,12 @@ rm -f "$DB.seed.lua"
 # Its own database: it seeds a few hundred turns, and sharing them would put this
 # file's fixtures in front of the recovery assertions above.
 WA_SCRIPT=scripts/test-memory-window.lua "$BIN" --db "$DB.window" | grep "memory window ok"
+
+# A guest is not a smaller master. A guest node owns no worktree - so it is not named after
+# one and a rename does not move a branch on its behalf - and a master's call on a guest is
+# filed under the master, not the guest. Sandboxed home: the node's stored name and role must
+# be this test's, not the machine's, and the node's own last four lines write to them.
+WASM_AGENT_HOME="$DB.home" WA_SCRIPT=scripts/test-guest.lua "$BIN" --db "$DB.guest" | grep "guest ok"
 
 # A node that is healthy and wedged at the same time is not instrumented, it is quiet.
 # The accept thread answers /health without the interpreter, so a stuck Lua worker used

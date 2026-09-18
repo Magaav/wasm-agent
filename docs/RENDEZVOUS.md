@@ -94,6 +94,23 @@ wa serve --port 8799
 The node registers, heartbeats every 60s, and any master can resolve it by
 `node_id`.
 
+## Guest nodes
+
+A node is a **guest** when `WASM_AGENT_NODE_ROLE=guest`, or when `<config>/node.role`
+contains `guest` (the environment wins). Anything else is a master.
+
+```bash
+export WASM_AGENT_NODE_ROLE=guest   # no worktree of its own, read-only unprompted
+```
+
+A guest node owns no worktree and no branch: it is never named after a directory
+and `wa` will refuse to rename a branch on its behalf (`guest_has_no_branch`).
+It advertises read-only capabilities, and it edits files when a master asks — a
+signed `/node/call`, which runs as that master, with the session and tool calls
+filed under the master's name rather than the guest's. A caller whose node is not
+a master is refused before any of that (`forbidden_role`), so one guest cannot
+command another.
+
 ## Relay
 
 A node that cannot accept inbound connections attaches by **long-polling** the

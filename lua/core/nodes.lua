@@ -27,6 +27,54 @@ function M.name_file()
   return paths.config() .. "/node.name"
 end
 
+-- A node is either the master's own workspace or a guest that carries out a master's wishes on
+-- its own directory. The difference is not decoration: a guest has no worktree *identity*, so
+-- it is never named after one and a rename never moves a branch on its behalf. It still edits
+-- files on this machine when a master asks - that is what a guest is for - but the work belongs
+-- to the master who asked, not to the guest.
+function M.role_file()
+  return paths.config() .. "/node.role"
+end
+
+-- `guest` when either the environment or the role file says so, `master` otherwise. An
+-- unrecognised value is a master rather than a silent guest: a typo must not quietly demote a
+-- node that is in the middle of work.
+function M.role()
+  local from_env = tostring(host.getenv("WASM_AGENT_NODE_ROLE") or ""):lower():gsub("%s+", "")
+  if from_env ~= "" then return from_env == "guest" and "guest" or "master" end
+  local stored = host.read_file(M.role_file())
+  if type(stored) == "string" then
+    stored = stored:lower():gsub("%s+", "")
+    if stored ~= "" then return stored == "guest" and "guest" or "master" end
+  end
+  return "master"
+end
+
+function M.is_master()
+  return M.role() == "master"
+end
+
+-- The author of a call from a peer.
+--
+-- `verify_peer` in server.lua has already refused a caller whose node is not a master, so this
+-- returns the master's name and nothing else: a guest cannot command a peer, and a node
+-- executing a master's wish signs the result with the master's name. The default is the safe
+-- one - a caller record with no role at all is not a master.
+local function normalize_role(role)
+  if role == "admin" then return "master" end
+  return role or "guest"
+end
+
+function M.author_of(caller)
+  if type(caller) ~= "table" then return nil end
+  if normalize_role(caller.role) ~= "master" then return nil end
+  local name = tostring(caller.name or "")
+  if name ~= "" then return name end
+  local id = tostring(caller.node_id or "")
+  if id ~= "" then return id end
+  return nil
+end
+
 -- What a human calls this node when four of them are in a list.
 --
 -- Order: a name someone set, then the *worktree this node is running in*, then the
@@ -40,8 +88,13 @@ function M.node_name()
     local trimmed = stored:gsub("^%s+", ""):gsub("%s+$", "")
     if trimmed ~= "" then return trimmed end
   end
-  local dir = M.worktree()
-  if dir and dir ~= "" then return dir end
+  -- Only a master's node is named after its worktree. A guest has no worktree identity of its
+  -- own - it carries out a master's wishes on this machine - so the directory it happens to be
+  -- running in is not its name.
+  if M.is_master() then
+    local dir = M.worktree()
+    if dir and dir ~= "" then return dir end
+  end
   local configured = host.getenv("WASM_AGENT_NODE_NAME")
   if configured and configured ~= "" then return configured end
   return "host"
@@ -89,6 +142,9 @@ end
 --
 -- Returns true plus a note, or nil plus a reason.
 function M.rename_branch(from, to)
+  -- A guest owns no branch, so there is none to move. Refused rather than silently skipped:
+  -- a caller asking for a rename should hear that it did not happen.
+  if not M.is_master() then return nil, "guest_has_no_branch" end
   local current = M.branch()
   if current == "" then return nil, "not_a_git_checkout" end
   if current == "main" or current == "master" then return nil, "refusing_to_rename_main" end
@@ -126,7 +182,10 @@ function M.set_name(name)
   -- Third party first. A name the node's own branch disagrees with is the state this exists to
   -- prevent, so the branch moves (locally and on GitHub) before the node believes anything.
   local previous = M.node_name()
-  if previous ~= name then
+  -- A master's rename stays transactional - branch first (locally, then GitHub), name second.
+  -- A guest takes a name without touching a branch, because it has none to move.
+  local transactional = M.is_master()
+  if transactional and previous ~= name then
     local renamed, note = M.rename_branch(previous, name)
     if not renamed then return nil, note end
   end
@@ -134,7 +193,7 @@ function M.set_name(name)
   if not ok or wrote == false then
     -- The branch moved and the name could not be written: give the branch back, or the tree and
     -- the node would be left pointing at each other with different names.
-    if previous ~= name then M.rename_branch(name, previous) end
+    if transactional and previous ~= name then M.rename_branch(name, previous) end
     return nil, "node_name_write_failed"
   end
   M.invalidate()
@@ -174,15 +233,20 @@ function M.list()
       node_id = identity.node_id or "local",
       name = M.node_name(),
       kind = "host",
-      role = "master",
+      role = M.role(),
       online = true,
       local_node = true,
-      worktree = M.worktree(),
+      -- A guest has no worktree of its own. Reporting one would say it is a checkout that can be
+      -- handed off, and it is not.
+      worktree = M.is_master() and M.worktree() or "",
       endpoints = {},
-      capabilities = {
+      -- A guest's own capabilities are read-only. It edits files when a master asks, through
+      -- /node/call, which runs as that master - not on its own initiative. So the write tools
+      -- are absent here rather than merely discouraged.
+      capabilities = M.is_master() and {
         "bash", "read", "write", "edit", "ls", "grep",
         "shell", "client", "spell_save", "spell_run", "spell_get",
-      },
+      } or { "read", "ls", "grep", "spell_save", "spell_run", "spell_get" },
     },
   }
   for _, peer in ipairs(fetch_peers()) do
