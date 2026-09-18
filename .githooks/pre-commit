@@ -12,6 +12,28 @@
 # the same command the suite uses, deliberately: one rule, one implementation.
 set -uo pipefail
 
+# A commit on the integration branch must be a merge. AGENTS.md says agents branch and hand
+# off; the human integrates. Committing directly here is how work ends up "generated inside
+# main" - and it was, several times, by the reviewer rather than an agent. A merge is the rule
+# and an explicit override exists for the times it genuinely is main's own change.
+branch="$(git symbolic-ref --short HEAD 2>/dev/null || echo "")"
+case "$branch" in
+  main|master)
+    merge_head="$(git rev-parse --git-dir)/MERGE_HEAD"
+    if [ ! -f "$merge_head" ] && [ "${WASM_AGENT_ALLOW_MAIN:-0}" != "1" ]; then
+      cat >&2 <<MESSAGE
+pre-commit: refusing a direct commit on '$branch'.
+
+Work is made on the node's own branch and merged here; that is what keeps "which branch is
+this work on?" answerable. If this really is main's own change (a document, a version bump),
+re-run with WASM_AGENT_ALLOW_MAIN=1 - the override is deliberate, so it shows up in the
+command you ran rather than in the shape of the history.
+MESSAGE
+      exit 1
+    fi
+    ;;
+esac
+
 offenders="$(git grep --cached -I -l "$(printf '\r')" 2>/dev/null || true)"
 if [ -z "$offenders" ]; then
   exit 0

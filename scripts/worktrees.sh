@@ -47,9 +47,31 @@ git worktree list --porcelain \
       printf '%-18s %-20s %6s %7s %6s  %s\n' "$name" "$branch" "$ahead" "$behind" "$dirty" "$merge"
     done
 
+echo
+echo "branches — one row each; the remote is a column, not more branches"
+printf '  %-18s %-22s %-22s %s\n' BRANCH LOCAL REMOTE STATE
+git for-each-ref --sort=refname --format='%(refname:short)' refs/heads | while read -r branch; do
+  local_head="$(git log -1 --format='%h %ad' --date=short "$branch" 2>/dev/null || echo '-')"
+  remote_head="$(git log -1 --format='%h %ad' --date=short "origin/$branch" 2>/dev/null || echo '-')"
+  if [ "$remote_head" = "-" ]; then
+    state="local only"
+  elif [ "$(git rev-parse "$branch")" = "$(git rev-parse "origin/$branch" 2>/dev/null)" ]; then
+    state="in sync"
+  else
+    ahead="$(git rev-list --count "origin/$branch..$branch" 2>/dev/null || echo '?')"
+    behind="$(git rev-list --count "$branch..origin/$branch" 2>/dev/null || echo '?')"
+    state="$ahead ahead, $behind behind"
+  fi
+  printf '  %-18s %-22s %-22s %s\n' "$branch" "$local_head" "$remote_head" "$state"
+done
+
 cat <<'NOTES'
 
 Reading it:
+  two branches only: main, and one named after this node. A branch exists locally and on
+             the server at once; "main" and "origin/main" are one branch seen from two places,
+             which is why git branch -a shows four lines for two branches.
+
   ahead 0    already in main - the worktree can be reaped
   behind N   commits main has that the branch has never seen; drift is time, not skill
   dirty N    uncommitted work: the branch may say merged while the worktree says in
