@@ -92,6 +92,14 @@ local function migrate()
   -- FTS-indexed, so putting base64 there would poison every text search and
   -- bloat the index by three orders of magnitude.
   add_column("turns", "images", "TEXT NOT NULL DEFAULT '[]'")
+  -- Rows written before the state was renamed kept the wording of the claim we used to
+  -- make: "died after a tool result", "died right after a compaction". Nobody observed
+  -- those deaths - a live run was reported as interrupted fourteen times in a row - so
+  -- the stored detail is corrected rather than preserved. The facts (seq, time, count)
+  -- are in their own columns and are untouched. Idempotent: a second run matches nothing.
+  exec("UPDATE sessions SET interrupted_reason = replace(interrupted_reason, 'died after a tool result', 'stopped after a tool result') WHERE interrupted_reason LIKE '%died after a tool result%'")
+  exec("UPDATE sessions SET interrupted_reason = replace(interrupted_reason, 'died right after a compaction', 'stopped right after a compaction') WHERE interrupted_reason LIKE '%died right after a compaction%'")
+  exec("UPDATE sessions SET interrupted_reason = replace(interrupted_reason, 'died after a decision', 'stopped after a decision') WHERE interrupted_reason LIKE '%died after a decision%'")
 end
 
 function M.setup()
