@@ -190,9 +190,11 @@ run_suite() {
   # checks)") rather than printing a line per check. Prefer the suite's own number when it
   # gives one: it is the count the suite computed, so it is the count the reader can
   # recompute, and it does not depend on the gate's idea of what a check looks like.
+  count_from="ok lines counted"
   stated="$(printf '%s\n' "$verdict" | grep -oE '\(([0-9]+) checks?\)' | grep -oE '[0-9]+' | head -1 || true)"
   if [ -n "$stated" ]; then
     count="$stated"
+    count_from="stated by the suite"
   fi
 
   if [ -z "$verdict" ]; then
@@ -212,7 +214,7 @@ run_suite() {
   # number the reader could not recompute, which is worse than no number.
   if [ "$count" -gt 0 ]; then
     SUITE_COUNT["$key"]="$count"
-    note "      $count ok line(s) counted"
+    note "      $count check(s) - $count_from"
   fi
 }
 

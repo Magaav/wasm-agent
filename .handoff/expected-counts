@@ -1,0 +1,6 @@
+# handoff.sh counts - committed so a drop is a visible decision, not a quiet one.
+# Re-record with: bash scripts/handoff.sh --accept-counts
+tests/bug-hunt.js=13
+tests/composer-attachments.js=22
+tests/composer-input.js=40
+windows=25

@@ -36,3 +36,9 @@ service-account*.json
 id_rsa*
 id_ed25519*
 id_ecdsa*
+
+# handoff.sh runtime output. The report and the run marker are per-run and must not be
+# versioned; the baseline count is deliberately NOT ignored - property 1 needs a baseline
+# that was reviewed, and a number nobody committed cannot be reviewed.
+.handoff/last-report.txt
+.handoff/running
