@@ -61,19 +61,39 @@ pid_on_port() {
   fi
 }
 
-# --- 1. prove the new binary answers before touching anything ------------------------------------
-say "checking $NEW answers on a scratch port before it goes near the running node"
+# The scratch port must be one nothing else is using. 8800 is the client bridge of the node already
+# running, so a check on it answers whether or not the new binary works at all - which is exactly what
+# happened: a text file "answered", was installed, and only the rollback saved the node.
+free_port() {
+  local candidate=$((PORT + 3))
+  for _ in $(seq 1 20); do
+    if [ "$WINDOWS" = "1" ]; then
+      if ! powershell.exe -NoProfile -Command "Get-NetTCPConnection -State Listen -LocalPort $candidate -ErrorAction SilentlyContinue" 2>/dev/null | grep -q .; then
+        echo "$candidate"; return 0
+      fi
+    else
+      if ! (command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ":$candidate "); then
+        echo "$candidate"; return 0
+      fi
+    fi
+    candidate=$((candidate + 1))
+  done
+  echo "$((PORT + 3))"
+}
+SCRATCH_PORT="$(free_port)"
+SCRATCH_CLIENT=$((SCRATCH_PORT + 1))
+
+say "checking $NEW answers on scratch port $SCRATCH_PORT before it goes near the running node"
 SCRATCH_HOME="$(mktemp -d)"
 SCRATCH_DB="$SCRATCH_HOME/scratch.db"
-if [ "$WINDOWS" = "1" ]; then
-  WASM_AGENT_HOME="$SCRATCH_HOME" "$NEW" serve --port "$((PORT + 1))" --client-port "$((CLIENT_PORT + 1))" --db "$SCRATCH_DB" >"$SCRATCH_HOME/out.log" 2>&1 &
-else
-  WASM_AGENT_HOME="$SCRATCH_HOME" "$NEW" serve --port "$((PORT + 1))" --client-port "$((CLIENT_PORT + 1))" --db "$SCRATCH_DB" >"$SCRATCH_HOME/out.log" 2>&1 &
-fi
+WASM_AGENT_HOME="$SCRATCH_HOME" "$NEW" serve --port "$SCRATCH_PORT" --client-port "$SCRATCH_CLIENT" --db "$SCRATCH_DB" >"$SCRATCH_HOME/out.log" 2>&1 &
 SCRATCH_PID=$!
 ok=0
 for _ in $(seq 1 40); do
-  if curl -s -m 2 "http://127.0.0.1:$((PORT + 1))/health" >/dev/null 2>&1; then ok=1; break; fi
+  # Both: the process must still be alive, and its port must answer. The port alone can be answered by
+  # something else - a text file cannot stay alive as a process.
+  if ! kill -0 "$SCRATCH_PID" 2>/dev/null; then break; fi
+  if curl -s -m 2 "http://127.0.0.1:$SCRATCH_PORT/health" >/dev/null 2>&1; then ok=1; break; fi
   sleep 0.5
 done
 kill "$SCRATCH_PID" 2>/dev/null
