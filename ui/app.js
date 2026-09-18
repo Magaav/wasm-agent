@@ -395,24 +395,53 @@ function renderDiff(bubble, changes) {
   const topic = document.createElement("wa-diff");
   topic.setSummary(changes);
   bubble.body.append(topic);
-  // The toggle starts disabled: the server has not yet said whether this can be undone
-  // (the files may have moved on since the turn), and enabling it first would be a button
-  // that promises something the handler can then refuse.
-  topic.setUndoable(false, "checking…");
+  // The toggle starts disabled while the node is asked whether this change can still be undone.
+  // This is `setPending`, not `setUndoable(false, ...)`: false means "cannot be undone", which
+  // locks the topic and paints the reason as a failure - and a locked topic then *discards* the
+  // real answer, so it read "checking..." for good. "Still asking" is not a verdict.
+  topic.setPending("checking…");
   topic.addEventListener("diff-act", (event) => actOnDiff(topic, event.detail));
+  topic.addEventListener("diff-preview", (event) => previewDiff(topic, event.detail));
   return topic;
+}
+
+// Answer a topic's request for one file's changed lines. Same deadline reasoning as
+// askUndoable: the node's single worker serves this route too, so a request made during a
+// long turn queues - and a hover balloon that waits forever is worse than one that says why.
+async function previewDiff(topic, detail) {
+  const done = typeof detail.done === "function" ? detail.done : () => {};
+  if (!topic.turnId) return done({ error: "this topic has no turn to ask about" });
+  try {
+    const response = await apiFetch("diff", {
+      method: "POST", headers: apiHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ turn_id: topic.turnId, action: "preview", path: detail.path }),
+    }, 5000);
+    done(await response.json());
+  } catch (error) {
+    done({ error: "the node did not answer" });
+  }
 }
 
 // Ask whether this turn's change can still be undone, and let the topic show the answer.
 // A refusal here is not an error: a file that moved on is a normal thing to find, and the
 // topic says which file rather than leaving the reader with a dead button.
+//
+// This uses `apiFetch`, not `fetch`: raw fetch has no deadline, so a node that is inside a
+// long turn (its single worker serves /diff too, so the request queues) left the topic on
+// "checking…" for as long as the turn ran - which is forever if the turn never ends. The
+// deadline turns that into an answer the reader can act on.
 async function askUndoable(topic) {
-  if (!topic.dataset.turnId) return;
+  if (!topic.turnId) {
+    // No turn id means the question cannot be asked at all, and saying nothing is how a topic
+    // sits on "checking…" for good. Name the reason instead.
+    topic.setUndoable(false, "this topic has no turn to ask about");
+    return;
+  }
   try {
-    const response = await fetch("diff", {
+    const response = await apiFetch("diff", {
       method: "POST", headers: apiHeaders({ "content-type": "application/json" }),
-      body: JSON.stringify({ turn_id: topic.dataset.turnId, action: "check" }),
-    });
+      body: JSON.stringify({ turn_id: topic.turnId, action: "check" }),
+    }, 5000);
     const payload = await response.json();
     topic.setUndoable(payload.can_undo === true, payload.reason || "");
   } catch (error) {
@@ -425,10 +454,10 @@ async function askUndoable(topic) {
 async function actOnDiff(topic, detail) {
   const act = detail.act;
   try {
-    const response = await fetch("diff", {
+    const response = await apiFetch("diff", {
       method: "POST", headers: apiHeaders({ "content-type": "application/json" }),
-      body: JSON.stringify({ turn_id: topic.dataset.turnId, action: act }),
-    });
+      body: JSON.stringify({ turn_id: topic.turnId, action: act }),
+    }, 10000);
     const payload = await response.json();
     if (payload.error) return detail.done({ ok: false, reason: payload.error });
     detail.done({ ok: payload.ok === true, reason: payload.reason || "" });
@@ -582,8 +611,8 @@ function handleEvent(event) {
     collapseRun();
     const diff = renderDiff(currentBubble(), event.changes);
     if (diff) {
-      diff.dataset.turnId = event.turn_id || "";
-      if (diff.dataset.turnId) askUndoable(diff);
+      diff.turnId = event.turn_id || "";
+      if (diff.turnId) askUndoable(diff);
     }
     streamBody = null;
     streamText = "";
@@ -813,6 +842,11 @@ async function send(text, options = {}) {
   attachments.length = 0;
   renderAttachments();
   setStatus("wasm-agent is thinking…");
+  // Declared here, in the function body, because the  below calls clearInterval on it
+  // and that finally is not in the block it used to be declared in - which made every finished
+  // turn throw ReferenceError from the finally, after the answer had already been drawn. The
+  // turn looked fine and the console was the only place it showed.
+  let watchdog = null;
   try {
     const headers = { "Content-Type": outgoing.contentType, "Accept": "text/event-stream" };
     // Which thread this turn belongs to. The node creates a session when it is not told one, and
@@ -834,7 +868,11 @@ async function send(text, options = {}) {
     // can say whether the worker is alive while a turn runs. Ask it, and act only on its answer.
     let lastEvent = Date.now();
     let asking = false;
-    const watchdog = setInterval(async () => {
+    // `watchdog` is declared in the function body above, not here: the `finally` that clears it
+    // belongs to the outer try, and a declaration in this block was not visible there - so
+    // every finished turn threw ReferenceError from the finally, after the answer had already
+    // been drawn. The turn looked fine, and the console was the only place it showed.
+    watchdog = setInterval(async () => {
       if (asking || Date.now() - lastEvent < 30000) return;
       asking = true;
       try {
@@ -1694,6 +1732,10 @@ let pendingReload = false;
 // Every reload goes through here, so every reload can save where the reader was first.
 let reload = () => { rememberPlace(); location.reload(); };
 
+// Replacement for `clientAction`, set by the test harness so a click can be asserted without
+// a client bridge. Null in normal use, and the live path is the `if` below.
+let clientActionSpy = null;
+
 // ---- the update lock ------------------------------------------------------
 //
 // A UI update is invisible: the page keeps working while new files sit on disk, and then it reloads
@@ -1942,7 +1984,11 @@ wireDrag(dragbar);
 let controlTimer = null;
 let controlPending = false;
 let controlCanvasSize = { w: 0, h: 0 };
-let controlScreen = { w: 0, h: 0 };
+// The virtual desktop the frame covers, in *screen* coordinates: `origin` is its top-left
+// (negative when a monitor sits left of or above the primary one) and `w`/`h` its size.
+// A monitor to the left is why both halves are needed - with two monitors the picture is
+// wider than either one, and a click read off it has to be offset back to screen space.
+let controlScreen = { w: 0, h: 0, originX: 0, originY: 0, monitors: 1 };
 
 function b64ToBytes(base64) {
   const binary = atob(base64);
@@ -1952,6 +1998,7 @@ function b64ToBytes(base64) {
 }
 
 async function clientAction(payload) {
+  if (clientActionSpy) return clientActionSpy(payload);
   const response = await apiFetch("client", {
     method: "POST",
     headers: apiHeaders({ "Content-Type": "application/json" }),
@@ -2149,19 +2196,36 @@ async function fetchFrame(full) {
       controlHint.textContent = payload.error;
       return;
     }
-    controlScreen = { w: payload.screen_width, h: payload.screen_height };
-    if (payload.full || controlCanvasSize.w !== payload.width || controlCanvasSize.h !== payload.height) {
-      controlCanvas.width = payload.width;
-      controlCanvas.height = payload.height;
-      controlCanvasSize = { w: payload.width, h: payload.height };
-    }
-    controlHint.textContent = `${payload.width}×${payload.height} · ${payload.tiles.length} tile${payload.tiles.length === 1 ? "" : "s"}`;
-    for (const tile of payload.tiles) await drawTile(tile);
+    await applyFrame(payload);
   } catch (error) {
     controlHint.textContent = String(error);
   } finally {
     controlPending = false;
   }
+}
+
+// Take one frame from the client and put it on the canvas.
+//
+// Split out of fetchFrame so the translation can be tested without a network round trip -
+// the coordinate maths is the part that breaks on a two-monitor desk, and asserting it
+// through a fake response is sturdier than driving a real screenshot.
+async function applyFrame(payload) {
+  controlScreen = {
+    w: payload.screen_width, h: payload.screen_height,
+    originX: Number(payload.origin_x) || 0, originY: Number(payload.origin_y) || 0,
+    monitors: Number(payload.monitors) || 1,
+  };
+  if (payload.full || controlCanvasSize.w !== payload.width || controlCanvasSize.h !== payload.height) {
+    controlCanvas.width = payload.width;
+    controlCanvas.height = payload.height;
+    controlCanvasSize = { w: payload.width, h: payload.height };
+  }
+  // Say when the frame spans more than one monitor: a 3840-wide picture is either one
+  // wide screen or two, and nothing in the image itself tells the reader which.
+  const screens = controlScreen.monitors > 1
+    ? ` · ${controlScreen.monitors} monitors ${controlScreen.w}×${controlScreen.h}` : "";
+  controlHint.textContent = `${payload.width}×${payload.height}${screens} · ${payload.tiles.length} tile${payload.tiles.length === 1 ? "" : "s"}`;
+  for (const tile of payload.tiles) await drawTile(tile);
 }
 
 // The live view polls as fast as the node answers, and no faster.
@@ -2289,8 +2353,12 @@ function closeControl() {
 controlCanvas.addEventListener("click", (event) => {
   const rect = controlCanvas.getBoundingClientRect();
   if (!rect.width || !controlScreen.w) return;
-  const x = Math.round(((event.clientX - rect.left) / rect.width) * controlScreen.w);
-  const y = Math.round(((event.clientY - rect.top) / rect.height) * controlScreen.h);
+  // Canvas -> virtual desktop -> screen. The middle step is the one that was missing: the
+  // frame covers every monitor, so canvas (0,0) is the virtual desktop's top-left and not
+  // the primary monitor's, and the two differ by `origin` whenever a monitor hangs off the
+  // left or top. Without it a click landed one monitor-width to the left of where it looked.
+  const x = Math.round(((event.clientX - rect.left) / rect.width) * controlScreen.w) + controlScreen.originX;
+  const y = Math.round(((event.clientY - rect.top) / rect.height) * controlScreen.h) + controlScreen.originY;
   clientAction({ action: "click", x, y });
 });
 controlKeys.addEventListener("submit", (event) => {

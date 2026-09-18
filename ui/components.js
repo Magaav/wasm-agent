@@ -428,6 +428,7 @@ class WaDiff extends HTMLElement {
     super();
     this._state = "applied";      // "applied" | "undone" | "locked"
     this._files = [];
+    this._rows = [];
     this._reason = "";
   }
 
@@ -496,7 +497,7 @@ class WaDiff extends HTMLElement {
   // The glyph is the whole contract: undo when the change is applied, redo when it is not.
   _paintToggle() {
     if (!this._toggle) return;
-    const can = this._state !== "locked";
+    const can = this._state !== "locked" && this._state !== "pending";
     this._toggle.disabled = !can;
     this._toggle.dataset.act = this._state === "undone" ? "redo" : "undo";
     // Inline SVG rather than a font glyph: the two arrows are the only way the reader
@@ -509,10 +510,121 @@ class WaDiff extends HTMLElement {
     this._toggle.setAttribute("aria-label", can ? act : this._reason);
   }
 
+  // Hovering a file row shows what changed in it: the added lines green, the removed red.
+  //
+  // The component asks; the app answers. It does not fetch here for the same reason it does not
+  // fetch for undo: the routes belong to the app, and a component that reaches for a URL cannot
+  // be reused by a surface that reaches the node differently. `diff-preview` carries a `done`
+  // callback, exactly like `diff-act`.
+  _previewFor(file, row) {
+    if (!this._preview) {
+      this._preview = document.createElement("wa-balloon");
+      // Its own class rather than `.popover`: that one is the composer balloon's placement
+      // (anchored to the chip row). This is a fixed panel placed beside a file row, and it
+      // borrows only the panel look.
+      this._preview.className = "preview";
+      this._preview.hidden = true;
+      document.body.append(this._preview);
+    }
+    // Anchor the balloon to the row, not to the topic: the balloon's own close rule (DESIGN.md
+    // §3) needs the anchor to be the thing under the pointer, and re-anchoring per row is what
+    // makes that true as the pointer moves down the list.
+    const id = "diff-row-" + (this._rows.length) + "-" + (file.path || "").replace(/[^a-z0-9]/gi, "-");
+    row.id = id;
+    this._preview.setAttribute("anchor", id);
+    this._preview.replaceChildren();
+    this._preview.hidden = false;
+
+    const box = document.createElement("div");
+    box.className = "diff-preview";
+    const head = document.createElement("div");
+    head.className = "diff-preview-head";
+    head.textContent = file.path || "";
+    box.append(head);
+    const pending = document.createElement("div");
+    pending.className = "diff-preview-note";
+    pending.textContent = "loading…";
+    box.append(pending);
+    this._preview.append(box);
+
+    // Place it next to the row, clamped into the viewport by the balloon's own openAt-style
+    // placement. A balloon that opens off-screen is the same as one that never opened.
+    const rect = row.getBoundingClientRect();
+    this._placePreview(rect);
+
+    this.dispatchEvent(new CustomEvent("diff-preview", {
+      bubbles: true,
+      detail: {
+        path: file.path,
+        done: (result) => {
+          pending.remove();
+          if (!result || result.error) {
+            const note = document.createElement("div");
+            note.className = "diff-preview-note failed";
+            note.textContent = "no preview: " + ((result && result.error) || "the node did not answer");
+            box.append(note);
+            this._placePreview(rect);
+            return;
+          }
+          const lines = document.createElement("ol");
+          lines.className = "diff-preview-lines";
+          for (const line of result.lines || []) {
+            const item = document.createElement("li");
+            item.className = "diff-line " + (line.kind === "add" ? "add" : "del");
+            const sign = document.createElement("span");
+            sign.className = "sign";
+            sign.textContent = line.kind === "add" ? "+" : "\u2212";
+            item.append(sign, document.createTextNode(line.text || ""));
+            lines.append(item);
+          }
+          if (!(result.lines || []).length) {
+            const empty = document.createElement("div");
+            empty.className = "diff-preview-note";
+            empty.textContent = "no line text recorded for this file";
+            box.append(empty);
+          } else {
+            box.append(lines);
+          }
+          const foot = document.createElement("div");
+          foot.className = "diff-preview-stats";
+          foot.innerHTML = '<span class="plus">+' + (result.added || 0) + '</span> <span class="minus">\u2212'
+            + (result.removed || 0) + "</span>";
+          head.append(foot);
+          if (result.truncated) {
+            const more = document.createElement("div");
+            more.className = "diff-preview-note";
+            more.textContent = "…(more lines not shown)";
+            box.append(more);
+          }
+          this._placePreview(rect);
+        },
+      },
+    }));
+  }
+
+  // Keep the balloon beside its row and inside the window.
+  _placePreview(rect) {
+    if (!this._preview) return;
+    const box = this._preview.getBoundingClientRect();
+    const left = Math.max(5, Math.min(rect.left, window.innerWidth - box.width - 5));
+    const below = rect.bottom + 5;
+    const top = below + box.height > window.innerHeight - 5
+      ? Math.max(5, rect.top - box.height - 5) : below;
+    this._preview.style.position = "fixed";
+    this._preview.style.left = left + "px";
+    this._preview.style.top = top + "px";
+  }
+
+  _hidePreview() {
+    if (!this._preview) return;
+    this._preview.hidden = true;
+    this._preview.replaceChildren();
+  }
+
   // What the toggle does is ask, not assume: the server owns the files, so the click
   // sends the intent and this waits to be told what happened.
   _act() {
-    if (this._state === "locked") return;
+    if (this._state === "locked" || this._state === "pending") return;
     const act = this._state === "undone" ? "redo" : "undo";
     this._toggle.disabled = true;
     this.dispatchEvent(new CustomEvent("diff-act", {
@@ -539,6 +651,13 @@ class WaDiff extends HTMLElement {
     this._paintToggle();
   }
 
+  // The turn this topic is about, so the undo route can be asked about it. It is a property
+  // rather than a `dataset` write from outside for the same reason `files` is: the turn id is
+  // this component's own state, and the app naming it through `dataset.turnId` made it
+  // invisible to anything that looked for it on the element (the UI test did).
+  get turnId() { return this.dataset.turnId || ""; }
+  set turnId(value) { this.dataset.turnId = value || ""; }
+
   // The files this topic is about. `_files` is the component's own; the app needs to name them in
   // an undo request, and reaching into a private field from outside is how a component stops being
   // one.
@@ -556,9 +675,23 @@ class WaDiff extends HTMLElement {
     this._meta.classList.toggle("no-change", added === 0 && removed === 0);
 
     this._body.replaceChildren();
+    this._rows = [];
     for (const file of this._files) {
       const row = document.createElement("li");
       row.className = "diff-file";
+      // Hover to see the lines: a path and a count say *what* changed, not what the change
+      // was, and asking the reader to undo to find out is the opposite of a preview.
+      let hideTimer = null;
+      row.addEventListener("pointerenter", () => {
+        if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+        this._previewFor(file, row);
+      });
+      row.addEventListener("pointerleave", () => {
+        // A short grace period, because the pointer travelling from the row to the balloon
+        // crosses the gap between them and must not make it vanish on the way.
+        hideTimer = setTimeout(() => this._hidePreview(), 120);
+      });
+      this._rows.push(row);
       const name = document.createElement("span");
       name.className = "diff-path";
       name.textContent = file.path;
@@ -601,12 +734,28 @@ class WaDiff extends HTMLElement {
   // The server says whether this change can still be undone (the file may have moved on
   // since the turn). Until it says so the toggle stays disabled, so a click can never
   // promise something that will be refused.
+  //
+  // `pending` is why this is a state and not a disabled flag. The topic starts by asking the
+  // node, and the old code expressed "still asking" as `setUndoable(false, "checking…")` -
+  // which *locked* the topic and painted "checking…" as a failure. The real answer then hit
+  // `if (this._state === "locked") return;` and was discarded, so the topic said "checking…"
+  // for good. A pending state is resolved by the next answer; only a refusal locks.
+  setPending(text) {
+    this._build();
+    if (this._state === "locked") return;
+    this._state = "pending";
+    this._paintToggle();
+    this.setMessage(text || "", false);
+  }
+
   setUndoable(can, reason) {
     this._build();
     if (this._state === "locked") return;
     if (can) {
       this._state = this._state === "undone" ? "undone" : "applied";
       this._reason = "";
+      // The pending note ("checking…") is not a result and must not survive the answer.
+      this.setMessage("", false);
     } else {
       this._state = "locked";
       this._reason = reason || "cannot be undone";

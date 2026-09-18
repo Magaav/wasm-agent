@@ -437,6 +437,27 @@ function wa_diff(payload, session)
     local can, why = changeset.check(entry)
     return json.encode({ turn_id = turn.id, can_undo = can == true, reason = why or "" })
   end
+  if action == "preview" then
+    -- The changed lines of one file, for the hover balloon. Loading the text is the whole
+    -- cost of this action, so it is asked for per file rather than for the whole turn -
+    -- a topic with seven files should not pull seven files' text to open one balloon.
+    local wanted = request.path
+    if not wanted or wanted == "" then return json.encode({ error = "path_required" }) end
+    for _, file in ipairs(entry.files) do
+      if file.path == wanted then
+        local preview, why = changeset.preview_file(file)
+        if not preview then
+          return json.encode({ turn_id = turn.id, path = file.path, error = why or "no_preview" })
+        end
+        return json.encode({
+          turn_id = turn.id, path = file.path,
+          lines = preview.lines, truncated = preview.truncated,
+          added = preview.added, removed = preview.removed,
+        })
+      end
+    end
+    return json.encode({ error = "unknown_path" })
+  end
   if action == "undo" then
     local done, why = changeset.undo(entry)
     if not done then return json.encode({ turn_id = turn.id, ok = false, reason = why }) end

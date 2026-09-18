@@ -130,6 +130,52 @@ $harness = @'
     check(!!toggle, "the diff topic should carry the undo/redo toggle");
     check(!!toggle && toggle.parentElement === diffHead.parentElement,
       "the toggle must be a sibling of the header, not inside it");
+
+    // A path must be readable, not elided. The reader opens this topic to find out *which*
+    // file changed, so a long path cannot be shortened to "C:/Users/Victor/orca/workspa…",
+    // and the body must scroll sideways to reach the rest of it.
+    var pathCell = diffTopic.querySelector(".diff-path");
+    check(!!pathCell, "each file row must carry its path");
+    check(!!pathCell && getComputedStyle(pathCell).textOverflow !== "ellipsis",
+      "the path must not be elided, saw text-overflow: "
+      + (pathCell ? getComputedStyle(pathCell).textOverflow : "no cell"));
+    check(!!pathCell && getComputedStyle(pathCell).whiteSpace === "nowrap",
+      "the path must stay on one line so the row scrolls instead of wrapping");
+    var bodyCell = diffTopic.querySelector(".diff-body");
+    check(!!bodyCell && getComputedStyle(bodyCell).overflowX === "auto",
+      "the diff body must scroll horizontally, saw overflow-x: "
+      + (bodyCell ? getComputedStyle(bodyCell).overflowX : "no body"));
+
+    // The toggle must not be left saying "checking…": that is a pending note, not a verdict, and
+    // the topic used to *lock* on it and keep it for good - `setUndoable(false, …)` set
+    // `_state = "locked"`, and the real answer then hit `if (this._state === "locked") return;`
+    // and was thrown away. This harness cannot await the fetch (apiFetch schedules an abort timer
+    // and virtual time does not advance here), so the state machine is driven directly: a pending
+    // topic must accept the answer that follows it, and a locked one must not.
+    var probe = document.createElement("wa-diff");
+    probe.setSummary({ added: 1, removed: 1, files: [{ path: "x.txt", added: 1, removed: 1 }] });
+    document.body.append(probe);
+    probe.setPending("checking…");
+    check(probe.querySelector(".diff-note").textContent === "checking…",
+      "a pending topic should say it is checking");
+    check(probe.querySelector(".diff-toggle").disabled === true,
+      "and its toggle should be disabled while the answer is unknown");
+    // The answer arrives: the topic must take it, and the pending note must go.
+    probe.setUndoable(true, "");
+    var afterNote = probe.querySelector(".diff-note");
+    check(!afterNote || afterNote.textContent !== "checking…",
+      "the answer must replace the pending note, saw: " + (afterNote ? afterNote.textContent : "nothing"));
+    check(probe.querySelector(".diff-toggle").disabled === false,
+      "and an undoable change must enable the toggle");
+    // A refusal locks, and a later answer must not reopen it - that is what "locked" is for.
+    probe.setUndoable(false, "the file moved on");
+    var lockedNote = probe.querySelector(".diff-note");
+    check(/the file moved on/.test(lockedNote.textContent),
+      "a refusal must state its reason, saw: " + lockedNote.textContent);
+    probe.setUndoable(true, "");
+    check(probe.querySelector(".diff-toggle").disabled === true,
+      "a locked topic must not be unlocked by a later answer");
+    probe.remove();
     diffTopic.toggle();
   }
 
@@ -445,6 +491,54 @@ $harness = @'
     "and the GitHub-style totals, saw: " + (diffTopic ? diffTopic.textContent.slice(0, 60) : "nothing"));
   check(!!diffTopic && !!diffTopic.turnId, "and the turn id the undo route is asked about");
 
+  // A click in the control view must land where it looks on a two-monitor desk. The frame covers
+  // every monitor, so a canvas coordinate is a *virtual desktop* coordinate and has to be offset
+  // by the desktop's origin before it is a screen coordinate - and on a desk with the secondary
+  // monitor to the left that origin is negative. Without the offset the click landed one
+  // monitor-width to the left of the pointer.
+  var frame = { screen_width: 3840, screen_height: 1080, origin_x: -1920, origin_y: 0,
+                width: 760, height: 214, monitors: 2, tiles: 1, full: true };
+  var calls = [];
+  window.__clientAction(function (payload) { calls.push(payload); });
+  // The view must actually be open: an `hidden` control has no layout box, so the canvas has
+  // zero width, the click handler returns early, and the assertion would blame the maths for
+  // a view that was never on screen.
+  window.__openControl("client");
+  for (var oc = 0; oc < 3; oc++) { await tick(); }
+  var controlSection = document.getElementById("control");
+  check(!controlSection.hidden, "the control view must be open before its canvas can be clicked");
+  window.__injectFrame(frame);
+  for (var fc = 0; fc < 3; fc++) { await tick(); }
+  var canvas = document.getElementById("control-canvas");
+  var rect = canvas.getBoundingClientRect();
+  check(rect.width > 0, "the control canvas must have a layout box, saw width " + rect.width);
+  // The centre of the canvas must be the centre of the virtual desktop: origin + half its size.
+  var event = new MouseEvent("click", { bubbles: true,
+    clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 });
+  canvas.dispatchEvent(event);
+  await tick();
+  var click = calls.filter(function (c) { return c.action === "click"; })[0];
+  check(!!click, "clicking the control view must ask the client to click");
+  // The centre of a 3840x1080 desktop is (0, 540) once the -1920 origin is added: the click is
+  // read off the canvas as virtual-desktop (1920, 540) and must come back as screen (0, 540).
+  // Y is allowed one pixel either side: the canvas is scaled to 760px wide, so the midpoint
+  // rounds, and pinning it exactly would make the test assert the rounding rather than the
+  // translation. X is asserted exactly, because that is the half the offset changes.
+  check(!!click && click.x === 0 && Math.abs(click.y - 540) <= 1,
+    "a click must be translated from the virtual desktop to screen coordinates, saw: "
+    + JSON.stringify(click) + " for 3840x1080 at origin -1920");
+  // The offset is the whole fix: without it the same click would be x = 1920, one monitor-width
+  // away from where the pointer was, which is what a two-monitor reader saw.
+  check(!!click && click.x !== 1920,
+    "the click must not keep the virtual-desktop x when the desktop starts at -1920, saw: "
+    + (click ? click.x : "no click"));
+  // And the hint must say the picture spans both monitors, because a 3840-wide image alone
+  // cannot tell the reader whether it is one screen or two.
+  var hint = document.getElementById("control-hint");
+  check(!!hint && /2 monitors/.test(hint.textContent),
+    "the control hint must say it is showing 2 monitors, saw: "
+    + (hint ? hint.textContent : "no hint"));
+
   // Opening a topic while a turn runs must not look like a broken UI. The node's worker is inside the
   // turn, so a Lua read queues and the client's deadline abandons it - which showed as
   // "AbortError: signal is aborted without reason" on a node that was working perfectly.
@@ -747,7 +841,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); }; window.__clientAction = (fn) => { clientActionSpy = fn; }; window.__injectFrame = (frame) => applyFrame(frame);"
 
 $server = $null
 $edge = @(

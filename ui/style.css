@@ -140,9 +140,18 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
   margin: 0; padding: var(--space); list-style: none;
   border-top: 1px solid rgba(35, 41, 54, .8);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  /* A path can be longer than the topic is wide, and it must be *readable*, not elided:
+     the reader is looking at this list to find out which file changed. So the body scrolls
+     sideways. The rows are `width: max-content` with a minimum of 100%, which is what keeps
+     a short list from shrinking to its text and lets a long path keep its full width. */
+  overflow-x: auto;
+  overflow-y: hidden;
 }
-.diff-file { display: flex; align-items: center; gap: var(--gap); min-width: 0; }
-.diff-path { flex: 1; color: #c9d1e0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diff-file {
+  display: flex; align-items: center; gap: var(--gap);
+  min-width: 0; width: max-content; min-width: 100%;
+}
+.diff-path { flex: 1; color: #c9d1e0; white-space: nowrap; }
 .diff-stat { display: flex; gap: var(--space); flex: 0 0 auto; }
 .diff-stat .plus { color: var(--ok); }
 .diff-stat .minus { color: #f85149; }
@@ -153,6 +162,41 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
 }
 .diff-note { padding: 0 var(--space) var(--space); font-size: 11px; color: var(--muted); }
 .diff-note.failed { color: #f85149; }
+
+/* The line preview balloon: what changed, added green and removed red.
+   These classes are used *inside* a <wa-balloon>, which owns the panel and its close rule
+   (DESIGN.md §3) - this is the content, not a second balloon implementation. */
+wa-balloon.preview {
+  position: fixed; z-index: 70; max-width: 640px;
+  background: rgba(16, 19, 26, .99); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: var(--pad);
+  box-shadow: 0 18px 45px rgba(0, 0, 0, .6);
+}
+wa-balloon.preview[hidden] { display: none; }
+.diff-preview { font-family: var(--font); font-size: 12px; max-width: 620px; }
+.diff-preview-head {
+  color: var(--muted); font-size: 11px; margin-bottom: var(--space);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-family: var(--font);
+}
+.diff-preview-stats { margin-left: var(--space); }
+.diff-preview-stats .plus { color: var(--ok); }
+.diff-preview-stats .minus { color: #f85149; }
+.diff-preview-lines {
+  display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none;
+  max-height: 320px; overflow: auto;
+  background: #0a0c11; border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.diff-line {
+  display: block; white-space: pre; padding: 0 5px;
+  /* The tint is the row background, so the text keeps full contrast on top of it. */
+  border-left: 2px solid transparent;
+}
+.diff-line.add { background: rgba(63, 185, 80, .13); border-left-color: var(--ok); color: #b7f0c0; }
+.diff-line.del { background: rgba(248, 81, 73, .13); border-left-color: #f85149; color: #ffc4c0; }
+.diff-line .sign { color: var(--muted); margin-right: 5px; }
+.diff-preview-note { color: var(--muted); font-size: 11px; margin-top: var(--space); font-family: var(--font); }
+.diff-preview-note.failed { color: #f85149; }
 .msg .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .6px; }
 .msg .body { white-space: pre-wrap; }
 .msg code { background: #0a0c11; padding: 1px 5px; border-radius: var(--radius-sm); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }

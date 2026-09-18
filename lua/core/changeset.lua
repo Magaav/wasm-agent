@@ -64,26 +64,103 @@ end
 -- instead of offering a button that cannot work.
 local RECORD_CAP = 262144
 
+-- Split text into lines. A trailing newline does **not** create a final empty line: "one\ntwo\n"
+-- is two lines, not three. The old `(text .. "\n"):gmatch("(.-)\n")` appended a newline to text
+-- that already ended in one, so every file ending in a newline - which is most of them - was
+-- counted as having an extra, empty last line, and a created file reported one line more than it
+-- had.
 local function split_lines(text)
   local lines = {}
   if not text or text == "" then return lines end
-  for line in (text .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  local start = 1
+  while true do
+    local nl = text:find("\n", start, true)
+    if not nl then
+      -- No more newlines: the tail is a line only if it is not empty (a trailing newline
+      -- leaves an empty tail, and that is not a line).
+      local tail = text:sub(start)
+      if tail ~= "" then lines[#lines + 1] = tail end
+      break
+    end
+    -- A line before the newline. An empty line *between* newlines is a real empty line and is
+    -- kept; only the empty tail after the final newline is dropped.
+    lines[#lines + 1] = text:sub(start, nl - 1)
+    start = nl + 1
+  end
   return lines
 end
 
--- Lines added and removed between two texts. Deliberately a simple count rather than a
--- text diff: the number is what the header shows ("+12 -3"), and the exact interleaving
--- is the topic's business, not the counter's. Counting a shared prefix and suffix is
--- what makes a one-line edit read as +1 -1 instead of +2000 -2000 on a large file.
-local function line_delta(before, after)
+-- Which lines differ, as a list in file order. Classic LCS table, then walk it: equal lines
+-- are skipped, a line only in `after` is an add, a line only in `before` is a del. Bounded to
+-- a window around the first difference so two large files cannot allocate a table of N*M.
+local function diff_lines(before, after)
   local a, b = split_lines(before), split_lines(after)
+  -- Trim the shared prefix and suffix first: they are equal by definition, and trimming them
+  -- is what keeps the table small for the common case of a small edit in a big file.
   local head = 0
   while head < #a and head < #b and a[head + 1] == b[head + 1] do head = head + 1 end
   local tail = 0
   while tail < (#a - head) and tail < (#b - head)
     and a[#a - tail] == b[#b - tail] do tail = tail + 1 end
-  return (#b - head - tail), (#a - head - tail)
+
+  local mid_a, mid_b = {}, {}
+  for i = head + 1, #a - tail do mid_a[#mid_a + 1] = a[i] end
+  for i = head + 1, #b - tail do mid_b[#mid_b + 1] = b[i] end
+
+  local n, m = #mid_a, #mid_b
+  -- Beyond this the table is too big to be worth building; fall back to the block form
+  -- (all removals then all additions), which is what the counts are based on anyway.
+  if n * m > 250000 then
+    local lines = {}
+    for i = 1, n do lines[#lines + 1] = { kind = "del", text = mid_a[i] } end
+    for i = 1, m do lines[#lines + 1] = { kind = "add", text = mid_b[i] } end
+    return lines
+  end
+
+  local lcs = {}
+  for i = 0, n do
+    lcs[i] = {}
+    for j = 0, m do lcs[i][j] = 0 end
+  end
+  for i = n - 1, 0, -1 do
+    for j = m - 1, 0, -1 do
+      if mid_a[i + 1] == mid_b[j + 1] then lcs[i][j] = lcs[i + 1][j + 1] + 1
+      else lcs[i][j] = math.max(lcs[i + 1][j], lcs[i][j + 1]) end
+    end
+  end
+
+  local lines = {}
+  local i, j = 0, 0
+  while i < n and j < m do
+    if mid_a[i + 1] == mid_b[j + 1] then i, j = i + 1, j + 1
+    elseif lcs[i + 1][j] >= lcs[i][j + 1] then
+      lines[#lines + 1] = { kind = "del", text = mid_a[i + 1] }
+      i = i + 1
+    else
+      lines[#lines + 1] = { kind = "add", text = mid_b[j + 1] }
+      j = j + 1
+    end
+  end
+  while i < n do lines[#lines + 1] = { kind = "del", text = mid_a[i + 1] }; i = i + 1 end
+  while j < m do lines[#lines + 1] = { kind = "add", text = mid_b[j + 1] }; j = j + 1 end
+  return lines
 end
+
+-- The added and removed line counts, from the real diff. This is what `record` stores, so the
+-- header and the hover preview describe the same change with the same definition.
+function diff_counts(before, after)
+  local added, removed = 0, 0
+  for _, line in ipairs(diff_lines(before, after)) do
+    if line.kind == "add" then added = added + 1 else removed = removed + 1 end
+  end
+  return added, removed
+end
+
+-- Exposed so the splitting rule can be asserted against fixed expectations. It is the one
+-- thing a diff of lines rests on, and testing it only through `record` cannot catch a wrong
+-- count: both sides of that comparison go through this function and a consistent error
+-- cancels out.
+function M.split_lines(text) return split_lines(text) end
 
 function M.new()
   return { files = {}, added = 0, removed = 0 }
@@ -105,7 +182,7 @@ function M.record(entry, path, before, after)
     -- "cannot be undone" instead of offering a button whose blob is not there.
     if not before_id or not after_id then recorded = false end
   end
-  local added, removed = line_delta(before, after)
+  local added, removed = diff_counts(before, after)
   entry.files[#entry.files + 1] = {
     path = path, before = before_id, after = after_id,
     added = added, removed = removed, recorded = recorded,
@@ -139,6 +216,45 @@ function M.summary(entry)
     }
   end
   return { files = files, added = entry.added, removed = entry.removed }
+end
+
+-- The changed lines of one file, for a preview a reader can see.
+--
+-- The summary carries addresses rather than text (a transcript is no place for a file's
+-- contents), so a preview has to load the two blobs back.
+--
+-- This is a real line diff, not a prefix/suffix count. A count only trims a
+-- shared prefix and suffix, so changing a line near the top reports every later line as
+-- changed - fine for "+4 -3", wrong for a preview that paints those lines green and red.
+-- The reader would be told that untouched lines had changed, which is exactly the kind of
+-- claim this feature exists to make honestly. A plain longest-common-subsequence over lines
+-- is what says which lines actually differ.
+--
+-- Returns `{lines = {{kind="add"|"del", text=...}}, truncated = bool}` or nil and a reason:
+-- an unrecorded or too-large change has no text to show, and saying so is better than an
+-- empty balloon that looks like a broken one.
+local PREVIEW_MAX = 60
+
+function M.preview_file(file)
+  if not file or file.recorded == false then return nil, "not_recorded" end
+  local before, before_err = M.load(file.before)
+  if not before then return nil, before_err or "no_before_text" end
+  local after, after_err = M.load(file.after)
+  if not after then return nil, after_err or "no_after_text" end
+
+  local all = diff_lines(before, after)
+  local lines, truncated = {}, false
+  for _, line in ipairs(all) do
+    if #lines >= PREVIEW_MAX then truncated = true break end
+    lines[#lines + 1] = line
+  end
+  -- The counts come from the same walk as the lines, so the balloon and whatever it shows
+  -- cannot disagree with each other.
+  local added, removed = 0, 0
+  for _, line in ipairs(all) do
+    if line.kind == "add" then added = added + 1 else removed = removed + 1 end
+  end
+  return { lines = lines, truncated = truncated, added = added, removed = removed }
 end
 
 -- Put the files back, newest change first, and refuse rather than clobber.
