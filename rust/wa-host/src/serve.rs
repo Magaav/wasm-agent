@@ -35,6 +35,31 @@ static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::n
 /// Rate-limits the "the worker is stalled" line so a wedged node cannot fill a log.
 static STALL_LOGGED_MS: AtomicU64 = AtomicU64::new(0);
 
+/// What the worker is doing right now, as (label, started_ms). A stall is only
+/// diagnosable if it says *what* it is stuck on: a local turn, a relayed peer request, or
+/// housekeeping are three different bugs with one symptom.
+static IN_FLIGHT: Mutex<Option<(String, u64)>> = Mutex::new(None);
+/// Requests waiting for the worker. Housekeeping waits until this is zero.
+static QUEUED: AtomicUsize = AtomicUsize::new(0);
+/// When the last request was taken off the queue, so the tick can wait for a quiet moment.
+static LAST_SERVED_MS: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    STARTED.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+}
+
+fn begin_work(label: String) {
+    if let Ok(mut slot) = IN_FLIGHT.lock() {
+        *slot = Some((label, now_ms()));
+    }
+}
+
+fn end_work() {
+    if let Ok(mut slot) = IN_FLIGHT.lock() {
+        *slot = None;
+    }
+}
+
 pub fn beat() {
     let started = STARTED.get_or_init(std::time::Instant::now);
     BEAT_MS.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
@@ -75,12 +100,23 @@ fn health_body() -> Vec<u8> {
     let age_ms = beat_age_ms();
     let stalled = age_ms >= stall_seconds() * 1000;
     let state = if stalled { "stalled" } else if age_ms < 1000 { "alive" } else { "busy" };
+    let current = IN_FLIGHT.lock().ok().and_then(|slot| {
+        slot.as_ref().map(|(label, started)| {
+            serde_json::json!({ "label": label, "ms": now_ms().saturating_sub(*started) })
+        })
+    });
     // Built with serde_json rather than a hand-escaped format string: the escaping
     // is exactly the kind of thing that silently produces invalid JSON, and this is
     // the one endpoint that must never be the thing that lies.
-    serde_json::json!({ "ok": !stalled, "worker": state, "stalled_ms": age_ms })
-        .to_string()
-        .into_bytes()
+    serde_json::json!({
+        "ok": !stalled,
+        "worker": state,
+        "stalled_ms": age_ms,
+        "queue": QUEUED.load(Ordering::Relaxed),
+        "current": current,
+    })
+    .to_string()
+    .into_bytes()
 }
 
 /// The one open SSE client. Only the agent thread touches it, but it is a static
@@ -168,29 +204,48 @@ pub fn run(lua: Lua, port: u16, ui: PathBuf) {
         let mut stalled_once = false;
         loop {
             beat();
-            // Requests the relay handed to us (NAT'd peers, or peers relaying us).
-            for job in crate::relay_client::take_jobs() {
-                let (status, body) = process_relay_job(&lua, &agent_ui, &job);
-                let _ = job.reply.send((status, body));
-            }
-            if std::time::Instant::now() >= next_sync {
-                next_sync = std::time::Instant::now() + std::time::Duration::from_secs(20);
-                if let Err(error) = lua.call_string("wa_sync_tick", &[]) {
-                    eprintln!("[sync] tick failed: {error}");
-                }
-            }
-            match receiver.recv_timeout(std::time::Duration::from_millis(100)) {
+            // Local requests first. Peer-relayed work is real work, but it is not the
+            // human's request, and putting it in front of the queue is how a peer's
+            // slow call made the window say "connecting…".
+            let local = receiver.recv_timeout(std::time::Duration::from_millis(100));
+            match local {
                 Ok((mut stream, request)) => {
                     if test_stall && !stalled_once {
                         stalled_once = true;
                         eprintln!("[serve] test hook: stalling the worker on purpose");
                         std::thread::sleep(std::time::Duration::from_secs(3600));
                     }
+                    QUEUED.fetch_sub(1, Ordering::Relaxed);
+                    LAST_SERVED_MS.store(now_ms(), Ordering::Relaxed);
+                    begin_work(format!("{} {}", request.method, request.path));
                     let _ = handle(&lua, &agent_ui, &mut stream, &request);
+                    end_work();
                     beat();
+                    continue;
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+            // Requests the relay handed to us (NAT'd peers, or peers relaying us).
+            for job in crate::relay_client::take_jobs() {
+                begin_work(format!("relay {} {}", job.method, job.path));
+                let (status, body) = process_relay_job(&lua, &agent_ui, &job);
+                end_work();
+                beat();
+                let _ = job.reply.send((status, body));
+            }
+            // Housekeeping last, and only when nobody is waiting and the node has been
+            // quiet: the sync tick talks to a peer over the network, and with one
+            // interpreter that means the node stops answering while it does.
+            let quiet = now_ms().saturating_sub(LAST_SERVED_MS.load(Ordering::Relaxed)) >= 2000;
+            if std::time::Instant::now() >= next_sync && QUEUED.load(Ordering::Relaxed) == 0 && quiet {
+                next_sync = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                begin_work("sync tick".to_string());
+                if let Err(error) = lua.call_string("wa_sync_tick", &[]) {
+                    eprintln!("[sync] tick failed: {error}");
+                }
+                end_work();
+                beat();
             }
         }
     });
@@ -232,15 +287,18 @@ pub fn run(lua: Lua, port: u16, ui: PathBuf) {
             let _ = respond(&mut stream, 503, "application/json", body.as_bytes());
             continue;
         }
+        QUEUED.fetch_add(1, Ordering::Relaxed);
         match sender.try_send((stream, request)) {
             Ok(()) => {}
             Err(std::sync::mpsc::TrySendError::Full((mut stream, _request))) => {
+                QUEUED.fetch_sub(1, Ordering::Relaxed);
                 // A bounded queue: refusing loudly beats an unbounded backlog that
                 // every client waits in.
                 let body = b"{\"error\":\"node_busy\",\"hint\":\"the node is answering other requests; retry shortly\"}";
                 let _ = respond(&mut stream, 503, "application/json", body);
             }
             Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                QUEUED.fetch_sub(1, Ordering::Relaxed);
                 eprintln!("[serve] agent thread is gone");
                 return;
             }
