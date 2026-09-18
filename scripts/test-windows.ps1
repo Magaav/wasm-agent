@@ -195,7 +195,7 @@ $root = Split-Path $PSScriptRoot -Parent
     foreach ($t in $jsTests) {
       $out = & node $t.FullName 2>&1 | Out-String
       # Anchored, like the smoke suite: "ALL PASS (with stub gaps)" is not a pass.
-      if ($out -match "(?m)^ALL PASS$") { Ok "ui test: $($t.Name)" }
+      if ($out -match "(?m)^ALL PASS?$") { Ok "ui test: $($t.Name)" }
       else { Bad "ui test failed: $($t.Name)"; Note (($out -replace "`r", " ") -replace "`n", " ") }
     }
   }

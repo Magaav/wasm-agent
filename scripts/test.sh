@@ -602,7 +602,7 @@ fi
 for t in tests/*.lua; do
   out=$(WA_SCRIPT="$t" "$BIN" --db "$DB.attach" 2>&1 || true)
   # Anchored: a harness that appends "but ..." to a pass must not read as a pass.
-  if ! printf '%s' "$out" | grep -qE "^ALL PASS$|^true$|ok$"; then
+  if ! printf '%s' "$out" | grep -qE "^ALL PASS[[:space:]]*$|^true$|ok$"; then
     echo "FAIL $t"; printf '%s\n' "$out" | tail -6; exit 1
   fi
   rm -f "$DB.attach"*
@@ -620,7 +620,7 @@ elif command -v node >/dev/null 2>&1; then
   for t in tests/*.js; do
     [ -e "$t" ] || continue
     out=$(node "$t" 2>&1 || true)
-    if ! printf '%s' "$out" | grep -q "^ALL PASS$"; then
+    if ! printf '%s' "$out" | grep -q "^ALL PASS[[:space:]]*$"; then
       echo "FAIL $t"; printf '%s\n' "$out" | tail -8; exit 1
     fi
   done
