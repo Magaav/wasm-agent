@@ -348,6 +348,21 @@ $harness = @'
   // to continue. A transcript that just stops looks like the agent had nothing to say - which is
   // exactly how a killed turn was read. The first fixture session is unfinished, so restoring it
   // must produce the notice.
+  // The fixture is injected here rather than shipped in the defaults: the app restores its session at
+  // load, so a `session` route present from the start repaints the transcript before the first check
+  // runs - which is what happened, and it looked like a dozen unrelated failures.
+  window.__fixtures.session = {
+    session: { id: "aaaaaaaa-0000-0000-0000-000000000001", title: "unfinished thread" },
+    state: "unfinished",
+    state_detail: "1 tool call(s) with no recorded result: bash",
+    turns: [
+      { seq: 1, role: "user", content: "check the installer on the node", ok: 1, tool_calls: [] },
+      { seq: 2, role: "assistant", content: "Running it now.", ok: 1, tool_calls: [] },
+      { seq: 3, role: "assistant", content: "", ok: 1,
+        tool_calls: [{ id: "c1", type: "function", function: { name: "bash", arguments: "{\"command\":\"wa toolchain check\"}" } }] },
+      { seq: 4, role: "tool", content: "{\"code\":0,\"stdout\":\"git yes\"}", ok: 1, tool_name: "bash", tool_calls: [] },
+    ],
+  };
   await window.__restoreSession();
   for (var un = 0; un < 30; un++) { await tick(); }
   var notice = document.querySelector(".unfinished-notice");
