@@ -64,6 +64,54 @@ function M.worktree()
   return dir or ""
 end
 
+-- Run a command and read the result. host.exec hands it back as a JSON string, not a
+-- table, so the code has to be decoded rather than compared directly.
+local function run(command)
+  local ok, raw = pcall(host.exec, command, "")
+  if not ok then return nil end
+  local ok2, decoded = pcall(json.decode, raw)
+  if not ok2 or type(decoded) ~= "table" then return nil end
+  return decoded
+end
+
+-- The branch this node is on, or "" when it is not in a checkout at all.
+function M.branch()
+  local result = run("git rev-parse --abbrev-ref HEAD")
+  if not result then return "" end
+  local name = tostring(result.stdout or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  return name
+end
+
+-- One branch per node, plus main: that is the whole point of the node's own branch. So a node
+-- rename renames its branch - and only its own. A node sitting on main, or on a branch that is
+-- not the name it currently answers to, is refused rather than allowed to rename someone
+-- else's branch out from under them.
+--
+-- Returns true plus a note, or nil plus a reason.
+function M.rename_branch(from, to)
+  local current = M.branch()
+  if current == "" then return nil, "not_a_git_checkout" end
+  if current == "main" or current == "master" then return nil, "refusing_to_rename_main" end
+  if current ~= from then return nil, "node_is_on_branch_" .. current end
+  -- The name is validated before it gets here: word characters, spaces, dot, underscore, dash.
+  -- No quote can appear, so single-quoting it for the shell is enough.
+  local function sh(command) return run(command) end
+  local function failed(result) return not result or tonumber(result.code) ~= 0 end
+  if failed(sh("git branch -m '" .. to .. "'")) then return nil, "local_rename_failed" end
+  if failed(sh("git push -u origin '" .. to .. "'")) then
+    sh("git branch -m '" .. from .. "'")
+    return nil, "github_push_failed"
+  end
+  if failed(sh("git push origin --delete '" .. from .. "'")) then
+    -- Both names are on GitHub now. Put GitHub back to one rather than leaving the tree and the
+    -- remote disagreeing about which branch this node is.
+    sh("git push origin --delete '" .. to .. "'")
+    sh("git branch -m '" .. from .. "'")
+    return nil, "github_delete_failed"
+  end
+  return true, "branch_renamed"
+end
+
 -- Rename this node. Returns the new name, or nil plus a reason.
 --
 -- The name is validated rather than trusted: it appears in lists and in log lines, so a
@@ -75,8 +123,20 @@ function M.set_name(name)
   -- A space literal, not %s: %s matches newlines, and a name with a newline in it forges
   -- structure in every list and log line it reaches.
   if not name:match("^[%w][%w %._%-]*$") then return nil, "node_name_invalid" end
+  -- Third party first. A name the node's own branch disagrees with is the state this exists to
+  -- prevent, so the branch moves (locally and on GitHub) before the node believes anything.
+  local previous = M.node_name()
+  if previous ~= name then
+    local renamed, note = M.rename_branch(previous, name)
+    if not renamed then return nil, note end
+  end
   local ok, wrote = pcall(host.write_file, M.name_file(), name .. "\n")
-  if not ok or wrote == false then return nil, "node_name_write_failed" end
+  if not ok or wrote == false then
+    -- The branch moved and the name could not be written: give the branch back, or the tree and
+    -- the node would be left pointing at each other with different names.
+    if previous ~= name then M.rename_branch(name, previous) end
+    return nil, "node_name_write_failed"
+  end
   M.invalidate()
   return name
 end
