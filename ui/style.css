@@ -324,12 +324,12 @@ body.term .terminal { display: flex; }
   background: rgba(18, 21, 28, .82);
 }
 /* A pile of pasted screenshots used to grow the composer without limit until the message
-   box was pushed off the bottom of the window. Cap the strip at three and a half cards -
-   the half card is the affordance that says there is more - and let it scroll instead.
-   3 x 57px card + 3 x 5px gap + half a card = 215px, on the 5px scale. */
+   box was pushed off the bottom of the window. Cap the strip at two and a half cards - the
+   half card is the affordance that says there is more - and let it scroll instead.
+   2 x 57px card + 2 x 5px gap + half a card = 152.5px, rounded to 150px on the 5px scale. */
 .attachments {
   display: flex; flex-wrap: wrap; gap: var(--gap);
-  max-height: 215px;
+  max-height: 150px;
   overflow-y: auto;
   overflow-x: hidden;
   /* Wrapped lines must not stretch to fill the cap, and scrolling the strip must not

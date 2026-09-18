@@ -116,11 +116,11 @@ $harness = @'
   var strip = document.getElementById("attachments");
   var composer = document.getElementById("composer");
   check(strip.children.length === 24, "24 attachments must render 24 chips, saw " + strip.children.length);
-  check(strip.clientHeight <= 216, "the strip must cap its height at ~215px, saw " + strip.clientHeight + "px");
+  check(strip.clientHeight <= 151, "the strip must cap its height at ~150px, saw " + strip.clientHeight + "px");
   check(strip.scrollHeight > strip.clientHeight + 40,
     "and the overflow must be scrollable, saw scrollHeight " + strip.scrollHeight + " vs " + strip.clientHeight);
-  check(Math.abs(strip.clientHeight - 215) <= 1,
-    "the cap must be 215px (3.5 cards), saw " + strip.clientHeight + "px");
+  check(Math.abs(strip.clientHeight - 150) <= 1,
+    "the cap must be 150px (2.5 cards), saw " + strip.clientHeight + "px");
   strip.scrollTop = strip.scrollHeight;
   var lastChip = strip.children[strip.children.length - 1];
   // Geometric, not offsetTop: the strip is not a positioned ancestor, so offsetTop is
