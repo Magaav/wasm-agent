@@ -215,6 +215,7 @@ fn main() {
     lua.register_with_upvalue("client_status", host::client_status, host as *mut c_void);
     lua.register("http", host::http);
     lua.register("http_stream", host::http_stream);
+    lua.register("beat", host::beat);
     lua.register("relay", host::relay);
     lua.register_with_upvalue("plugins", host::plugins, host as *mut c_void);
     lua.register_with_upvalue("invoke", host::invoke, host as *mut c_void);

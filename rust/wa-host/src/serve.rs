@@ -19,7 +19,70 @@ use crate::lua::Lua;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+
+/// Milliseconds since the process started, written by anything that is making
+/// progress: every event the worker emits, and every turn or tool boundary the Lua loop
+/// reports through host.beat.
+///
+/// This is the only way to tell a slow turn from a wedged node. A wedged node answers
+/// /health perfectly (that reply needs no interpreter) and holds its listening socket,
+/// so from outside it looks idle rather than stuck. If this stops moving, the
+/// interpreter is not running anything, and that is a fact worth reporting.
+static BEAT_MS: AtomicU64 = AtomicU64::new(0);
+static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+/// Rate-limits the "the worker is stalled" line so a wedged node cannot fill a log.
+static STALL_LOGGED_MS: AtomicU64 = AtomicU64::new(0);
+
+fn beat() {
+    let started = STARTED.get_or_init(std::time::Instant::now);
+    BEAT_MS.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+}
+
+/// How long since the last sign of progress, in milliseconds. A process that has not
+/// beaten at all is "as old as the process", which is not a stall.
+fn beat_age_ms() -> u64 {
+    let started = match STARTED.get() {
+        Some(started) => started,
+        None => return 0,
+    };
+    let now = started.elapsed().as_millis() as u64;
+    now.saturating_sub(BEAT_MS.load(Ordering::Relaxed))
+}
+
+fn env_seconds(name: &str, fallback: u64) -> u64 {
+    std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(fallback)
+}
+
+/// How long a request may sit behind a worker that has shown no progress before it is
+/// told so instead of waiting. Long enough that a slow turn is not mistaken for a
+/// wedge; short enough that a client is not left holding an open socket for minutes.
+fn stall_seconds() -> u64 {
+    env_seconds("WASM_AGENT_WORKER_STALL_SECONDS", 120)
+}
+
+/// Past this, the node stops being a node: exit so the service manager restarts it. A
+/// stalled turn is already lost - the provider connection is not coming back - and a
+/// fresh process beats a wedged one that answers /health.
+fn stall_exit_seconds() -> u64 {
+    env_seconds("WASM_AGENT_WORKER_STALL_EXIT_SECONDS", 900)
+}
+
+/// The honest health body. `ok` is false when the interpreter has stopped reporting,
+/// which is the one thing this endpoint is uniquely placed to say.
+fn health_body() -> Vec<u8> {
+    let age_ms = beat_age_ms();
+    let stalled = age_ms >= stall_seconds() * 1000;
+    let state = if stalled { "stalled" } else if age_ms < 1000 { "alive" } else { "busy" };
+    format!(
+        "{{"ok":{},"worker":"{}","stalled_ms":{}}}",
+        if stalled { "false" } else { "true" },
+        state,
+        age_ms
+    )
+    .into_bytes()
+}
 
 /// The one open SSE client. Only the agent thread touches it, but it is a static
 /// so that `host.stream` can reach it from inside Lua.
@@ -30,7 +93,11 @@ static CLIENT: Mutex<Option<TcpStream>> = Mutex::new(None);
 static EVENT_SINK: Mutex<Option<String>> = Mutex::new(None);
 
 /// Push one event to the streaming client, if any. Called from Lua via host.stream.
+///
+/// Every event is also proof of life: a streaming turn emits deltas continuously, so a
+/// stalled provider read shows up here as silence long before anyone notices a hang.
 pub fn write_event(payload: &str) {
+    beat();
     if let Ok(mut sink) = EVENT_SINK.lock() {
         if let Some(buffer) = sink.as_mut() {
             buffer.push_str("data: ");
@@ -86,11 +153,22 @@ pub fn run(lua: Lua, port: u16, ui: PathBuf) {
     // running turn no longer stops the node answering `/health`, `/version` and its
     // own UI files, which is what made the window look broken and made reloading
     // useless.
-    let (sender, receiver) = std::sync::mpsc::channel::<(TcpStream, Request)>();
+    // Bounded on purpose: an unbounded queue turns a busy node into an unbounded
+    // number of open sockets, and the accept thread can then only fail it loudly.
+    let queue_depth: usize = std::env::var("WASM_AGENT_QUEUE_DEPTH")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(256);
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<(TcpStream, Request)>(queue_depth);
     let agent_ui = ui.clone();
     std::thread::spawn(move || {
         let mut next_sync = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // A deterministic wedge, for the regression test: the hook stalls the worker on
+        // its first request, which is exactly the shape that was found in the wild.
+        let test_stall = std::env::var("WASM_AGENT_TEST_STALL_WORKER").is_ok();
+        let mut stalled_once = false;
         loop {
+            beat();
             // Requests the relay handed to us (NAT'd peers, or peers relaying us).
             for job in crate::relay_client::take_jobs() {
                 let (status, body) = process_relay_job(&lua, &agent_ui, &job);
@@ -104,7 +182,13 @@ pub fn run(lua: Lua, port: u16, ui: PathBuf) {
             }
             match receiver.recv_timeout(std::time::Duration::from_millis(100)) {
                 Ok((mut stream, request)) => {
+                    if test_stall && !stalled_once {
+                        stalled_once = true;
+                        eprintln!("[serve] test hook: stalling the worker on purpose");
+                        std::thread::sleep(std::time::Duration::from_secs(3600));
+                    }
                     let _ = handle(&lua, &agent_ui, &mut stream, &request);
+                    beat();
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
@@ -122,9 +206,45 @@ pub fn run(lua: Lua, port: u16, ui: PathBuf) {
             let _ = respond(&mut stream, status, content_type, &body);
             continue;
         }
-        if sender.send((stream, request)).is_err() {
-            eprintln!("[serve] agent thread is gone");
-            return;
+        let age_ms = beat_age_ms();
+        if age_ms >= stall_seconds() * 1000 {
+            // The worker has not reported progress for longer than any healthy
+            // operation takes. Saying so is the whole point: the alternative was an
+            // open socket, no bytes, and a client that waits forever.
+            let now_ms = STARTED.get().map(|s| s.elapsed().as_millis() as u64).unwrap_or(0);
+            let last = STALL_LOGGED_MS.load(Ordering::Relaxed);
+            if now_ms.saturating_sub(last) > 30_000 {
+                STALL_LOGGED_MS.store(now_ms, Ordering::Relaxed);
+                eprintln!(
+                    "[serve] the agent thread has not reported progress for {}s - replying 503",
+                    age_ms / 1000
+                );
+            }
+            if stall_exit_seconds() > 0 && age_ms >= stall_exit_seconds() * 1000 {
+                eprintln!(
+                    "[serve] agent thread stalled for {}s: exiting so the service manager can restart the node",
+                    age_ms / 1000
+                );
+                std::process::exit(3);
+            }
+            let body = format!(
+                "{{\"error\":\"worker_stalled\",\"stalled_ms\":{age_ms},\"hint\":\"the interpreter has not reported progress; see the node log, and restart it if the turn is lost\"}}"
+            );
+            let _ = respond(&mut stream, 503, "application/json", body.as_bytes());
+            continue;
+        }
+        match sender.try_send((stream, request)) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                // A bounded queue: refusing loudly beats an unbounded backlog that
+                // every client waits in.
+                let body = b"{\"error\":\"node_busy\",\"hint\":\"the node is answering other requests; retry shortly\"}";
+                let _ = respond(&mut stream, 503, "application/json", body);
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                eprintln!("[serve] agent thread is gone");
+                return;
+            }
         }
     }
 }
@@ -277,7 +397,7 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
 fn static_reply(ui: &std::path::Path, request: &Request) -> Option<Reply> {
     let (route, _query) = split_path(&request.path);
     if route == "/health" {
-        return Some((200, "application/json", b"{\"ok\":true}".to_vec()));
+        return Some((200, "application/json", health_body()));
     }
     if route == "/version" {
         return Some((200, "application/json", version_body(ui).into_bytes()));
@@ -398,7 +518,7 @@ fn dispatch(
 
     let reply = match route.as_str() {
         "/version" => (200, "application/json", version_body(ui).into_bytes()),
-        "/health" => (200, "application/json", b"{\"ok\":true}".to_vec()),
+        "/health" => (200, "application/json", health_body()),
         "/models" => (200, "application/json", call("wa_model", &[node.as_str(), session]).into_bytes()),
         "/me" => (200, "application/json", call("wa_me", &[session]).into_bytes()),
         "/users" => (200, "application/json", call("wa_users", &[]).into_bytes()),

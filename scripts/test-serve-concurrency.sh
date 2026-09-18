@@ -19,7 +19,7 @@ BIN="${WA_BIN:-rust/target/release/wa}"
 PORT="${1:-8891}"
 CLIENT_PORT=$((PORT + 1))
 WORK="$(mktemp -d /tmp/wa-conc-XXXXXX)"
-trap 'kill "$SERVER" 2>/dev/null; rm -rf "$WORK"' EXIT
+trap 'kill "$SERVER" "$WEDGE" 2>/dev/null; rm -rf "$WORK"' EXIT
 
 if [ ! -x "$BIN" ]; then echo "no binary at $BIN" >&2; exit 1; fi
 
@@ -69,3 +69,52 @@ if [ "$fail" -gt 0 ]; then
   exit 1
 fi
 echo "  ok: the node served its UI throughout a running turn"
+kill "$SERVER" 2>/dev/null
+wait "$SERVER" 2>/dev/null
+
+# ---------------------------------------------------------------------------
+# The other half of the same design, and why /health cannot be trusted alone: the
+# accept thread answers /health WITHOUT the interpreter, so a node whose Lua worker is
+# stuck reports healthy forever while every endpoint that needs Lua hangs with zero
+# bytes. Not hypothetical - a run found a node wedged for nine hours, with the
+# write-ahead log's last write as the timestamp proving when it stopped.
+#
+# So: stall the worker on purpose, shrink the threshold to a second, and require the
+# node to say so instead of going quiet.
+WEDGE_PORT=$((PORT + 10))
+WEDGE_CLIENT=$((WEDGE_PORT + 1))
+WASM_AGENT_TEST_STALL_WORKER=1 \
+WASM_AGENT_WORKER_STALL_SECONDS=1 \
+WASM_AGENT_WORKER_STALL_EXIT_SECONDS=0 \
+  "$BIN" serve --port "$WEDGE_PORT" --client-port "$WEDGE_CLIENT" --ui "$ROOT/ui" > "$WORK/wedge.log" 2>&1 &
+WEDGE=$!
+
+for _ in $(seq 1 40); do
+  code="$(curl -s -o /dev/null -m 2 -w '%{http_code}' "http://127.0.0.1:$WEDGE_PORT/health" 2>/dev/null)"
+  [ "$code" = "200" ] && break
+  sleep 0.25
+done
+if [ "${code:-}" != "200" ]; then echo "  FAIL: the wedge-test server did not come up"; exit 1; fi
+
+# Stall it: any request that needs the interpreter trips the hook.
+curl -s -o /dev/null -m 3 "http://127.0.0.1:$WEDGE_PORT/sessions" 2>/dev/null
+sleep 2
+
+health="$(curl -s -m 3 "http://127.0.0.1:$WEDGE_PORT/health" 2>/dev/null)"
+code="$(curl -s -m 5 -o "$WORK/stalled.json" -w '%{http_code}' "http://127.0.0.1:$WEDGE_PORT/models" 2>/dev/null)"
+body="$(cat "$WORK/stalled.json" 2>/dev/null)"
+kill "$WEDGE" 2>/dev/null
+
+echo
+echo "  wedged node: /health -> $health"
+echo "  wedged node: /models -> $code $body"
+case "$health" in
+  *'"ok":false'*'"worker":"stalled"'*) echo "  ok: /health admits the worker is stalled" ;;
+  *) echo "  FAIL: /health kept claiming the node was fine"; exit 1 ;;
+esac
+case "$code:$body" in
+  503:*worker_stalled*) echo "  ok: a blocked request is refused with a reason, not left hanging" ;;
+  *) echo "  FAIL: expected 503 worker_stalled, got $code $body"; exit 1 ;;
+esac
+echo "  ok: a stalled worker is visible, and survivable"
+

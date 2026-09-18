@@ -687,6 +687,9 @@ function M:turn(text, images)
     -- decision's text and tool topic, so the transcript reads decision -> its
     -- tools -> next decision, instead of every tool topic stacked behind one
     -- growing block of text.
+    -- Proof of life for the node's own watchdog: the interpreter is working, so a
+    -- /health check can tell this from a wedged turn. Cheap (an atomic store).
+    host.beat()
     self.emit({ type = "round", n = round })
     self.emit({ type = "status", text = "model" })
     local llm_started = host.now()
@@ -804,8 +807,10 @@ function M:turn(text, images)
       end
       self.emit({ type = "tool", name = function_.name, arguments = args })
       local tool_started = host.now()
+      host.beat()
       local handled, output = pcall(tools.dispatch, memory, function_.name, args, self.role,
         { session_id = self.session_id, user_id = self.user, node_id = self.node })
+      host.beat()
       if not handled then output = { error = tostring(output) } end
       local ok_tool = type(output) ~= "table" or output.error == nil
       trace[#trace + 1] = { kind = "tool", name = function_.name, ok = ok_tool, round = round,

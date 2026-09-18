@@ -290,11 +290,31 @@ fn push_json(l: *mut LuaState, value: &Value) {
     unsafe { lua_pushlstring(l, text.as_ptr() as *const c_char, text.len()) };
 }
 
-/// An agent that returns error responses instead of raising, so provider
-/// 4xx bodies reach the caller (and the logs).
+/// An agent that returns error responses instead of raising, so provider 4xx bodies
+/// reach the caller (and the logs).
+///
+/// The timeouts matter more than they look, and their absence is what wedged a node for
+/// nine hours. With no read timeout, a provider that accepts the connection and then
+/// stops talking blocks the one thread that owns the interpreter - forever. Every
+/// endpoint that needs Lua hung with zero bytes while /health (answered on another
+/// thread, without Lua) kept reporting ok, and an external run had to work out from the
+/// WAL's last write what the node could have told it.
+///
+/// The read timeout is per read, not for the whole exchange, which is the point: a long
+/// stream that keeps producing is fine, and one that goes quiet is not.
 fn agent() -> ureq::Agent {
+    let connect = std::env::var("WASM_AGENT_HTTP_CONNECT_TIMEOUT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(10u64);
+    let read = std::env::var("WASM_AGENT_HTTP_READ_TIMEOUT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(180u64);
     ureq::Agent::config_builder()
         .http_status_as_error(false)
+        .timeout_connect(Some(std::time::Duration::from_secs(connect)))
+        .timeout_read(Some(std::time::Duration::from_secs(read)))
         .build()
         .into()
 }
@@ -677,6 +697,18 @@ pub extern "C" fn http(l: *mut LuaState) -> c_int {
     })();
     push_json(l, &outcome.unwrap_or_else(|error| json!({"error": error})));
     1
+}
+
+/// host.beat() -> nil. Proof of life from inside the Lua loop.
+///
+/// The accept thread answers /health without the interpreter, so without this a node
+/// whose turn loop is stuck cannot be distinguished from an idle one. The loop calls it
+/// at each turn and tool boundary; a long tool call or a stalled provider read is then
+/// visible as silence rather than as health.
+#[no_mangle]
+pub extern "C" fn beat(_l: *mut LuaState) -> c_int {
+    crate::serve::beat();
+    0
 }
 
 /// host.http_stream(method, url, headers_json, body) -> aggregated completion.
