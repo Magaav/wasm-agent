@@ -84,3 +84,41 @@ wa-sentinel request wake --session "$MY_SESSION" --prompt "the node restarted; c
 ```
 
 Both requests are durable, so the order you write them in is the order they will be performed.
+
+## Waking the model on an event
+
+A trigger is a rule in `<config>/sentinel/triggers.json`. The trigger decides **when**; the verbs decide
+what, and they are the same fixed list as everywhere else — so a trigger can never do anything an
+operator could not ask for directly.
+
+```json
+[
+  { "kind": "file", "path": "C:/Users/me/Downloads", "pattern": ".png",
+    "session": "<session id>",
+    "prompt": "a new file appeared in the download folder: {name}. Say what it is and whether it needs anything.",
+    "reason": "download watcher" },
+
+  { "kind": "health", "when": "down", "verb": "restart", "reason": "the node fell over" },
+
+  { "kind": "schedule", "every_seconds": 21600, "session": "<session id>",
+    "prompt": "summarise what happened in the ledger since the last check",
+    "reason": "six-hourly summary" }
+]
+```
+
+`{name}`, `{path}` and `{event}` are substituted into the prompt, so the model is told what happened
+rather than asked to guess. Every firing goes through the same wake budget as a manual request: an event
+storm must not be able to spend money quietly, which is the only thing here that costs anything.
+
+The first pass after startup only *records* state — a sentinel started while the node is down must not
+decide the node just fell over, and a directory full of old files must not fire once per file.
+
+Three kinds are implemented: `file` (a directory, optionally filtered by a substring), `health` (the node
+going down or coming up), and `schedule` (every N seconds). CDP, a webhook and the rendezvous events are
+the obvious next ones and take the same shape — a watcher that calls `fire()`.
+
+## Running it as a service
+
+`deploy/wa-sentinel.service` is the systemd unit, and the header of that file carries the Windows
+scheduled-task equivalent. It must not be a child of the node: a supervisor that dies with the thing it
+supervises is decoration.

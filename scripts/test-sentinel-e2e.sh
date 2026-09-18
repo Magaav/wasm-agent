@@ -65,9 +65,19 @@ SID="$(session_id)"
 ok "$([ -n "$SID" ] && echo 1 || echo 0)" "found a session to inject into" "$SID"
 
 # 2. the `request` command itself must stop nothing: it writes a file and returns. Checked immediately,
-# because the watcher legitimately performs it within its next poll (2s) - the first version of this
-# waited three seconds and then reported a failure that was the sentinel working correctly.
-PID_BEFORE="$(pid_on_port)"
+# because the watcher legitimately performs it within its next poll (2s). And the node must be *stable*
+# first: the previous test's restart can still be settling, and a pid that changes for that reason looks
+# exactly like a pid that changed because of this request.
+STABLE=""; STABLE_FOR=0
+for _ in $(seq 1 30); do
+  NOW="$(pid_on_port)"
+  if [ -n "$NOW" ] && [ "$NOW" = "$STABLE" ]; then STABLE_FOR=$((STABLE_FOR + 1)); else STABLE_FOR=0; fi
+  STABLE="$NOW"
+  [ "$STABLE_FOR" -ge 2 ] && break
+  sleep 2
+done
+PID_BEFORE="$STABLE"
+ok "$([ -n "$PID_BEFORE" ] && echo 1 || echo 0)" "the node is up and its pid is stable" "pid $PID_BEFORE"
 rm -f "$BOX"/*.json 2>/dev/null
 "$SENTINEL" request restart --reason "e2e: does asking stop anything" >/dev/null 2>&1
 WROTE="$(ls "$BOX"/*.json 2>/dev/null | wc -l)"
@@ -132,6 +142,33 @@ sleep 5
 TAIL="$(curl -s -m 20 "http://127.0.0.1:$PORT/session?id=$SID" | node -e 'let r="";process.stdin.on("data",c=>r+=c).on("end",()=>{try{const d=JSON.parse(r);const t=(d.turns||[]);const last=t[t.length-1]||{};console.log(String(last.role)+": "+String(last.content||"").replace(/\s+/g," ").slice(0,70))}catch(e){console.log("")}})')"
 ok "$(grep -q '^assistant' <<<"$TAIL" && echo 1 || echo 0)" "the agent came back and answered" "$TAIL"
 ok "$(grep -qi 'woken' <<<"$TAIL" && echo 1 || echo 0)" "with the reply the wake asked for" "$TAIL"
+
+# 7. a trigger: an event wakes the model with nobody asking for anything. The other half of the idea -
+# not "restart this for me" but "wake me when this happens". The rules file is read on every pass, so
+# writing it is enough; no restart needed.
+say "wiring a file trigger and dropping a file into the watched folder"
+# The watched directory must be a path this native process can actually read: a POSIX /tmp path here
+# watched nothing, and the only symptom was a trigger that never fired.
+WATCH="${TEMP:-/tmp}/sentinel-watch"
+WATCH="$(cygpath -m "$WATCH" 2>/dev/null || echo "$WATCH")"
+rm -rf "$WATCH" && mkdir -p "$WATCH"
+cat > "$CONFIG/sentinel/triggers.json" <<JSON
+[ { "kind": "file", "path": "$WATCH", "pattern": ".txt", "session": "$SID",
+    "prompt": "A sentinel trigger fired: the file {name} appeared in the watched folder. Reply with the single word: triggered",
+    "reason": "file trigger end to end test" } ]
+JSON
+sleep 5
+echo "hello from a trigger" > "$WATCH/first.txt"
+TRIGGERED=0
+for _ in $(seq 1 90); do
+  if grep -q 'trigger' "$LOG" 2>/dev/null && grep 'wake' "$LOG" | tail -1 | grep -q 'done=true'; then TRIGGERED=1; break; fi
+  sleep 2
+done
+ok "$TRIGGERED" "an event woke the model with no request at all" "$(grep 'trigger' "$LOG" 2>/dev/null | tail -1)"
+sleep 4
+TAIL2="$(curl -s -m 20 "http://127.0.0.1:$PORT/session?id=$SID" | node -e 'let r="";process.stdin.on("data",c=>r+=c).on("end",()=>{try{const d=JSON.parse(r);const t=(d.turns||[]);const last=t[t.length-1]||{};console.log(String(last.role)+": "+String(last.content||"").replace(/\s+/g," ").slice(0,80))}catch(e){console.log("")}})')"
+ok "$(grep -qi 'triggered' <<<"$TAIL2" && echo 1 || echo 0)" "and it answered what the trigger asked for" "$TAIL2"
+rm -f "$CONFIG/sentinel/triggers.json"
 
 if [ "$failed" -eq 0 ]; then
   echo "sentinel e2e ok ($checks checks)"

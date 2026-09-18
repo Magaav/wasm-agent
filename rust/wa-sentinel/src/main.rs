@@ -559,6 +559,153 @@ fn request(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------- triggers
+//
+// The other half of the idea: not only "restart this for me" but "wake me when this happens".
+//
+// A trigger is a rule in `<config>/sentinel/triggers.json`:
+//
+//   [
+//     { "kind": "file",     "path": "C:/Users/me/Downloads", "pattern": ".png",
+//       "session": "<id>", "prompt": "a new file appeared: {name}", "reason": "download watcher" },
+//     { "kind": "health",   "when": "down", "verb": "restart", "reason": "the node fell over" },
+//     { "kind": "schedule", "every_seconds": 21600, "session": "<id>",
+//       "prompt": "summarise what happened in the ledger since the last check", "reason": "6h summary" }
+//   ]
+//
+// The shapes are deliberately few and the verbs are the same fixed list as everywhere else: a trigger
+// decides *when*, never *what*. `{name}`, `{path}` and `{event}` are substituted into the prompt, so the
+// model is told what happened rather than asked to guess.
+//
+// Every firing goes through the same budget as a manual wake. An event storm must not be able to spend
+// money quietly - that is the one thing here that costs anything.
+#[derive(Default)]
+struct TriggerState {
+    seen: std::collections::HashSet<String>,
+    fired: std::collections::HashMap<String, Instant>,
+    node_was_up: bool,
+    primed: bool,
+}
+
+fn triggers_path() -> PathBuf {
+    sentinel_dir().join("triggers.json")
+}
+
+fn load_triggers() -> Vec<Value> {
+    let Ok(text) = std::fs::read_to_string(triggers_path()) else { return Vec::new() };
+    match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Array(list)) => list,
+        Ok(_) => {
+            audit("triggers-bad", &triggers_path().display().to_string(), "expected a JSON array");
+            Vec::new()
+        }
+        Err(error) => {
+            audit("triggers-bad", &triggers_path().display().to_string(), &error.to_string());
+            Vec::new()
+        }
+    }
+}
+
+/// Fire a trigger: the same verbs as a request, so a trigger cannot do anything an operator could not.
+fn fire(trigger: &Value, event: &str) {
+    let mut request = trigger.clone();
+    let object = request.as_object_mut().unwrap();
+    object.remove("kind");
+    object.remove("path");
+    object.remove("pattern");
+    object.remove("every_seconds");
+    object.remove("when");
+    object.insert("verb".into(), object.get("verb").cloned().unwrap_or(json!("wake")));
+    let name = Path::new(event).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let substitute = |value: &str| {
+        value.replace("{name}", &name).replace("{path}", event).replace("{event}", event)
+    };
+    for key in ["prompt", "reason"] {
+        if let Some(text) = object.get(key).and_then(Value::as_str) {
+            let replaced = substitute(text);
+            object.insert(key.into(), json!(replaced));
+        }
+    }
+    let reason = object.get("reason").and_then(Value::as_str).unwrap_or("a trigger fired").to_string();
+    audit("trigger", &format!("{event}"), &reason);
+    match perform(&request) {
+        Ok(detail) => say(&format!("trigger: {detail}")),
+        Err(error) => audit("trigger-error", event, &error.to_string()),
+    }
+}
+
+fn check_triggers(state: &mut TriggerState) {
+    let triggers = load_triggers();
+    if triggers.is_empty() {
+        return;
+    }
+    let up = node_is_up();
+    // The first pass only records the state: a sentinel started while the node is down must not decide
+    // that the node *just* went down, and a directory full of old files must not fire once per file.
+    let first = !state.primed;
+    state.primed = true;
+    for (index, trigger) in triggers.iter().enumerate() {
+        let kind = trigger.get("kind").and_then(Value::as_str).unwrap_or("");
+        match kind {
+            "file" => {
+                let path = trigger.get("path").and_then(Value::as_str).unwrap_or("");
+                if path.is_empty() {
+                    continue;
+                }
+                let pattern = trigger.get("pattern").and_then(Value::as_str).unwrap_or("");
+                let entries = match std::fs::read_dir(path) {
+                    Ok(entries) => entries,
+                    // Say it, loudly. A POSIX path handed to this Windows process watched nothing at all
+                    // and the only symptom was a trigger that never fired - which looks exactly like a
+                    // trigger that is working and simply has not matched yet.
+                    Err(error) => {
+                        audit("trigger-unreadable", path, &error.to_string());
+                        continue;
+                    }
+                };
+                for entry in entries.flatten() {
+                    let file = entry.path();
+                    if !file.is_file() {
+                        continue;
+                    }
+                    let name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    if !pattern.is_empty() && !name.contains(pattern) {
+                        continue;
+                    }
+                    let key = format!("{index}:{}", file.display());
+                    if state.seen.contains(&key) {
+                        continue;
+                    }
+                    state.seen.insert(key);
+                    if first {
+                        continue;
+                    }
+                    fire(trigger, &file.display().to_string());
+                }
+            }
+            "health" => {
+                let want = trigger.get("when").and_then(Value::as_str).unwrap_or("down");
+                let matched = (want == "down" && !up && state.node_was_up) || (want == "up" && up && !state.node_was_up);
+                if matched && !first {
+                    fire(trigger, &format!("node {want}"));
+                }
+            }
+            "schedule" => {
+                let every = trigger.get("every_seconds").and_then(Value::as_u64).unwrap_or(3600);
+                let due = state.fired.get(&index.to_string()).map(|at| at.elapsed().as_secs() >= every).unwrap_or(true);
+                if due && !first {
+                    state.fired.insert(index.to_string(), Instant::now());
+                    fire(trigger, "schedule");
+                } else if due {
+                    state.fired.insert(index.to_string(), Instant::now());
+                }
+            }
+            _ => {}
+        }
+    }
+    state.node_was_up = up;
+}
+
 // ---------------------------------------------------------------- the loop
 
 fn watch() -> Result<()> {
@@ -569,6 +716,10 @@ fn watch() -> Result<()> {
     say(&format!("stop it with: wa-sentinel stop   (or create {})", stop_path().display()));
     let mut down_since: Option<Instant> = None;
     let mut announced = false;
+    let mut triggers = TriggerState::default();
+    if !load_triggers().is_empty() {
+        say(&format!("triggers: {}", triggers_path().display()));
+    }
     loop {
         if stop_path().exists() {
             audit("watch", "stop file", "sentinel stopping on request");
@@ -579,6 +730,7 @@ fn watch() -> Result<()> {
         if let Err(error) = process_requests() {
             audit("box-error", "requests", &error.to_string());
         }
+        check_triggers(&mut triggers);
         // Watching the node, not restarting it: an auto-restart that nobody asked for would fight the
         // operator every time they stop a node on purpose. The outage is reported; restarting is a
         // request.

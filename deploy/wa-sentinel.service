@@ -1,0 +1,35 @@
+# The sentinel as a service.
+#
+# It has to survive the node, so it must not be a child of it: a supervisor that dies with the thing it
+# supervises is decoration. This is the same reasoning as the drop-box - the process that can restart
+# your agent must not be reachable from it.
+#
+#   sudo cp deploy/wa-sentinel.service /etc/systemd/system/
+#   sudo systemctl enable --now wa-sentinel
+#
+# On Windows the equivalent is a scheduled task that runs at logon, because the sentinel needs the user's
+# environment to find the node's config and the client bridge:
+#
+#   schtasks /Create /TN wasm-agent-sentinel /SC ONLOGON /RL LIMITED ^
+#     /TR "\"%LOCALAPPDATA%\wasm-agent\wa-sentinel.exe\" watch"
+#
+[Unit]
+Description=wasm-agent sentinel (restarts, upgrades, and wakes the node from outside)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The node's own service, so the sentinel starts first and can watch it come up.
+ExecStart=/usr/local/bin/wa-sentinel watch
+Restart=always
+RestartSec=5
+# Same home as the node: the drop-box, the log and the triggers all live beside its config.
+Environment=WASM_AGENT_HOME=/home/ubuntu
+# Waking the model costs money, so the budget is set where an operator can see it.
+Environment=WA_SENTINEL_WAKE_BUDGET=6
+StandardOutput=append:/home/ubuntu/.wasm-agent/sentinel/sentinel.out
+StandardError=append:/home/ubuntu/.wasm-agent/sentinel/sentinel.out
+
+[Install]
+WantedBy=multi-user.target
