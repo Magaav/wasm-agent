@@ -2,9 +2,9 @@
 # handoff.sh - the gate that makes "done" mean *proven* rather than *claimed*.
 #
 # A handoff today is a branch plus a report written by the party being judged. This
-# replaces the self-assessment with evidence: it rebases, proves the branch still merges,
-# runs the suites it can run, and prints a one-screen report of counts, failures, skips
-# and errors, with every command the reader could re-run.
+# replaces the self-assessment with evidence: it proves the branch still merges, runs the
+# suites it can run, and prints a one-screen report of counts, failures, skips and errors,
+# with every command the reader could re-run.
 #
 # Four properties it is built to hold (from the task, and from this agent's own synthesis):
 #
@@ -14,8 +14,10 @@
 #   3. The gate signs the handoff, not the agent. What the agent believes is input.
 #   4. Endings are recorded - to the extent a gate can see them. See the `running` marker.
 #
-# It is read-only apart from: the rebase, the report file, the run marker, and (only with
-# --accept-counts) the baseline file. It never merges and never pushes.
+# It does not write to the branch under test. The only files it touches are its own report,
+# its run marker, and (only with --accept-counts) the baseline. It never merges and never
+# pushes, and it rebases only when asked with --rebase: rewriting the tip of a branch under
+# review changes what is under review, which this gate is supposed to be measuring.
 #
 # Exit 0 only if: no stage failed, no suite errored, and no count dropped.
 
@@ -30,10 +32,12 @@ MARKER="$HANDOFF_DIR/running"
 COUNTS="$HANDOFF_DIR/expected-counts"
 ACCEPT_COUNTS=0
 SKIP_SUITES=""
+DO_REBASE=0
 for arg in "$@"; do
   case "$arg" in
     --accept-counts) ACCEPT_COUNTS=1 ;;
     --skip-suites)   SKIP_SUITES="1" ;;
+    --rebase)        DO_REBASE=1 ;;
     -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "handoff: unknown argument: $arg" >&2; exit 2 ;;
   esac
@@ -112,6 +116,18 @@ fi
 
 # ---- rebase ----------------------------------------------------------------
 # Drift is time, not skill. A branch that ran for hours meets whatever landed meanwhile.
+#
+# But a rebase is not a read: it rewrites the branch's history, and this gate's whole job is
+# to report on a branch somebody else is reviewing. Ran by default, it silently rewrote the
+# tip under a reviewer who was reading that tip - and it did: a `model-window` review found
+# the branch's tip replaced mid-review, and the diff grew 238 deletions (docs/ORCHESTRATION.md,
+# ui/style.css) that belonged to main, not to the branch. Nothing was lost, but "what did
+# this agent change" stopped being answerable from the tip alone, which is the one question
+# the branch exists to answer.
+#
+# So it is opt-in: `--rebase`. Default is to *report* how far behind the branch is and leave
+# the history alone. Mergeability is still checked unconditionally below, which is the
+# property the rebase was there to establish and does not need a rewrite to establish.
 REMOTE_MAIN=""
 did_rebase="no"
 REBASE_FILES=""
@@ -126,24 +142,29 @@ BEFORE_REBASE="$(git rev-parse HEAD)"
 # exact failure AGENTS.md names. So: refuse, and say which files.
 DIRTY="$(git status --porcelain | head -20)"
 if [ -n "$DIRTY" ]; then
-  fail "uncommitted work in the tree; refusing to rebase over it"
+  fail "uncommitted work in the tree"
   note "      $(printf '%s' "$DIRTY" | wc -l | tr -d ' ') uncommitted path(s) - commit or stash first"
+elif [ -z "$REMOTE_MAIN" ]; then
+  skip "no origin/main or main to compare against"
+elif [ "${DO_REBASE}" != "1" ]; then
+  behind="$(git rev-list --count "HEAD..$REMOTE_MAIN" 2>/dev/null || echo 0)"
+  ahead="$(git rev-list --count "$REMOTE_MAIN..HEAD" 2>/dev/null || echo 0)"
+  note "ok    history left alone ($ahead ahead, $behind behind $REMOTE_MAIN)"
+  note "      re-run with --rebase to bring it up to date; not done by default, because"
+  note "      rewriting the tip of a branch under review changes what is being reviewed"
+  REBASE_SKIPPED=1
 else
-  if [ -n "$REMOTE_MAIN" ]; then
-    if git rebase "$REMOTE_MAIN" >/dev/null 2>&1; then
-      did_rebase="yes"
-      note "ok    rebased onto $REMOTE_MAIN ($BEFORE_REBASE -> $(git rev-parse --short HEAD))"
-    else
-      # On conflict: name the files, restore the branch, and call the task unfinished.
-      REBASE_FILES="$(git diff --name-only --diff-filter=U 2>/dev/null || true)"
-      git rebase --abort >/dev/null 2>&1 || true
-      fail "rebase onto $REMOTE_MAIN conflicts; this branch is not finished work"
-      if [ -n "$REBASE_FILES" ]; then
-        while IFS= read -r f; do [ -n "$f" ] && note "      conflict: $f"; done <<< "$REBASE_FILES"
-      fi
-    fi
+  if git rebase "$REMOTE_MAIN" >/dev/null 2>&1; then
+    did_rebase="yes"
+    note "ok    rebased onto $REMOTE_MAIN ($BEFORE_REBASE -> $(git rev-parse --short HEAD))"
   else
-    skip "no origin/main or main to rebase onto"
+    # On conflict: name the files, restore the branch, and call the task unfinished.
+    REBASE_FILES="$(git diff --name-only --diff-filter=U 2>/dev/null || true)"
+    git rebase --abort >/dev/null 2>&1 || true
+    fail "rebase onto $REMOTE_MAIN conflicts; this branch is not finished work"
+    if [ -n "$REBASE_FILES" ]; then
+      while IFS= read -r f; do [ -n "$f" ] && note "      conflict: $f"; done <<< "$REBASE_FILES"
+    fi
   fi
 fi
 
@@ -383,7 +404,13 @@ fi
   echo "session      : ${SESSION:-unknown}"
   echo "session from : $SESSION_SOURCE"
   [ -n "$AGENT_LINE" ] && echo "trailer      : $AGENT_LINE"
-  echo "rebase       : $did_rebase"
+  if [ "$did_rebase" = "yes" ]; then
+    echo "rebase       : yes (history rewritten onto $REMOTE_MAIN)"
+  elif [ "${REBASE_SKIPPED:-0}" = "1" ]; then
+    echo "rebase       : not run (history left alone; pass --rebase to bring it up to date)"
+  else
+    echo "rebase       : $did_rebase"
+  fi
   echo "merge        : $MERGE_VERDICT"
   echo "counts       : ${#SUITE_COUNT[@]} suite(s) reported a count"
   echo "baseline     : $COUNTS"
