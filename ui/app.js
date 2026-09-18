@@ -766,6 +766,8 @@ function setBusy(value) {
     pendingReload = false;
     reload();
   }
+  // A turn ending is what frees the node for everything the engine asked for while it ran.
+  if (!value && document.body.classList.contains("engine")) reloadTopics();
   sendButton.classList.toggle("busy", value);
   sendButton.title = value ? "Stop" : "Send";
   sendButton.setAttribute("aria-label", sendButton.title);
@@ -2704,12 +2706,35 @@ async function openSessionById(id) {
   }
 }
 
+// Topics waiting for the node to be free. The engine's reads are Lua, so on a single-worker node they
+// queue behind a turn - and the client's deadline is shorter than a turn, so opening one while the node
+// was working showed "AbortError: signal is aborted without reason". That reads as the UI being broken
+// when the node is simply busy, which is the opposite of what a status line is for.
+const pendingTopics = new Set();
+
 function loadTopic(id) {
+  const box = document.getElementById(id);
+  if (busy) {
+    // Do not even ask: the worker is inside a turn, so the request would queue and then be abandoned by
+    // the deadline. Say what is true and come back to it when the turn ends.
+    pendingTopics.add(id);
+    if (box) box.textContent = "the node is busy with a turn — this loads when it finishes";
+    return;
+  }
+  pendingTopics.delete(id);
   if (id === "nodes-box") refreshNodes();
   else if (id === "sessions-box") refreshSessions();
   else if (id === "skills-box") refreshSkills();
   else if (id === "spells-box") refreshSpells();
   else if (id === "tools-box") refreshTools();
+}
+
+/// Everything the engine was asked for while the node was busy, plus whatever is open, once it is free.
+function reloadTopics() {
+  for (const id of Array.from(pendingTopics)) loadTopic(id);
+  for (const box of document.querySelectorAll(".engine-content")) {
+    if (!box.hidden && box.id && !pendingTopics.has(box.id)) loadTopic(box.id);
+  }
 }
 
 document.querySelectorAll(".engine-head").forEach((head) => {

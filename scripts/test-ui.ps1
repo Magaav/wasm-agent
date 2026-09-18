@@ -385,6 +385,22 @@ $harness = @'
     "and the GitHub-style totals, saw: " + (diffTopic ? diffTopic.textContent.slice(0, 60) : "nothing"));
   check(!!diffTopic && !!diffTopic.turnId, "and the turn id the undo route is asked about");
 
+  // Opening a topic while a turn runs must not look like a broken UI. The node's worker is inside the
+  // turn, so a Lua read queues and the client's deadline abandons it - which showed as
+  // "AbortError: signal is aborted without reason" on a node that was working perfectly.
+  window.__setBusy(true);
+  window.__loadTopic("sessions-box");
+  for (var tb = 0; tb < 5; tb++) { await tick(); }
+  var busyBox = document.getElementById("sessions-box");
+  check(/busy with a turn/.test(busyBox.textContent),
+    "a topic opened during a turn must say the node is busy, saw: " + busyBox.textContent.slice(0, 70));
+  check(!/AbortError/.test(busyBox.textContent), "and must not report an abort as if the UI were broken");
+  // And it must load by itself when the turn ends - nobody should have to reopen it.
+  window.__setBusy(false);
+  for (var tc = 0; tc < 40; tc++) { await tick(); }
+  check(!/busy with a turn/.test(busyBox.textContent),
+    "and it must load when the turn finishes, saw: " + busyBox.textContent.slice(0, 70));
+
   // The sessions topic is a way to *find* a thread, not just a list: named after its opening
   // message, most recent first, and searchable. A list you have to read top to bottom is not a way
   // to find anything.
@@ -671,7 +687,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
 
 $server = $null
 $edge = @(
