@@ -361,6 +361,10 @@ $harness = @'
       { seq: 3, role: "assistant", content: "", ok: 1,
         tool_calls: [{ id: "c1", type: "function", function: { name: "bash", arguments: "{\"command\":\"wa toolchain check\"}" } }] },
       { seq: 4, role: "tool", content: "{\"code\":0,\"stdout\":\"git yes\"}", ok: 1, tool_name: "bash", tool_calls: [] },
+      // A turn that changed a file. The repaint used to drop this, so a reloaded transcript showed no diff
+      // topics at all while a live one did - and a window that has been reloaded is a repaint.
+      { seq: 5, role: "assistant", content: "Changed it.", ok: 1, tool_calls: [],
+        changes: { files: [{ path: "C:/tmp/proof.txt", added: 4, removed: 3, created: false }], added: 4, removed: 3 } },
     ],
   };
   await window.__restoreSession();
@@ -370,6 +374,16 @@ $harness = @'
   check(!!notice && /stopped before it answered/.test(notice.textContent),
     "and say what happened, saw: " + (notice ? notice.textContent.slice(0, 90) : "nothing"));
   check(!!notice && !!notice.querySelector("button"), "and offer to continue it");
+
+  // A repainted turn that changed a file must show its diff topic. The live path always did; the repaint
+  // dropped the changes summary and the turn id, so every reloaded transcript lost every diff topic.
+  var diffTopic = document.querySelector("wa-diff");
+  check(!!diffTopic, "a repainted turn with changes must show its diff topic");
+  check(!!diffTopic && /1 file changed/.test(diffTopic.textContent),
+    "with the file count, saw: " + (diffTopic ? diffTopic.textContent.slice(0, 60) : "nothing"));
+  check(!!diffTopic && /\+4/.test(diffTopic.textContent) && /3/.test(diffTopic.textContent),
+    "and the GitHub-style totals, saw: " + (diffTopic ? diffTopic.textContent.slice(0, 60) : "nothing"));
+  check(!!diffTopic && !!diffTopic.turnId, "and the turn id the undo route is asked about");
 
   // The sessions topic is a way to *find* a thread, not just a list: named after its opening
   // message, most recent first, and searchable. A list you have to read top to bottom is not a way

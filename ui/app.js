@@ -575,7 +575,7 @@ function handleEvent(event) {
     // The run topic goes *above* the answer and the diff goes *below* it: the answer is
     // what was asked for, the changed files are what the reader may act on. Both are
     // appended before the bubble is released, or there is nothing left to append to.
-    const diff = renderDiff(currentBubble(), event.changes);
+    const diff = renderDiff(currentBubble(), event.changes, event.turn_id);
     if (diff) diff.dataset.turnId = event.turn_id || "";
     collapseRun();
     if (diff && diff.dataset.turnId) askUndoable(diff);
@@ -632,7 +632,11 @@ function repaintTurns(turns) {
       if (turn.role === "user") {
         add("user", turn.content || "");
       } else if (turn.role === "assistant") {
-        if (turn.content) handleEvent({ type: "reply", text: turn.content });
+        // The stored turn carries its changes summary and its id, and both are needed: the summary is
+        // the topic, and the id is what the undo route is asked about. Dropping them here is why a
+        // reloaded transcript showed no diff topics at all - the live path had them, the repaint did
+        // not, and a window that has been reloaded is a repaint.
+        if (turn.content) handleEvent({ type: "reply", text: turn.content, changes: turn.changes, turn_id: turn.id });
         const calls = turn.tool_calls || [];
         if (calls.length) {
           handleEvent({ type: "round", n: 1 });
@@ -717,11 +721,13 @@ async function restoreSession() {
 // *called* and never defined - which threw on every answer, not only the ones with changes, so the
 // live view silently lost the diff topic and a reload truncated the transcript at the first reply.
 // "My own input is missing" was this.
-function renderDiff(bubble, changes) {
+function renderDiff(bubble, changes, turnId) {
   const files = (changes && changes.files) || [];
   if (!files.length) return null;
   const diff = document.createElement("wa-diff");
   diff.setSummary(changes);
+  // The undo route is asked about a *turn*, so the topic has to know which one it is showing.
+  diff.turnId = turnId || "";
   bubble.body.append(diff);
   return diff;
 }
@@ -739,7 +745,7 @@ function askUndoable(diff) {
       const response = await apiFetch("undo", {
         method: "POST",
         headers: apiHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ act: detail.act, files: diff.files || [] }),
+        body: JSON.stringify({ act: detail.act, turn_id: diff.turnId || "", files: diff.files || [] }),
       });
       if (!response.ok) {
         done({ ok: false, reason: "this node has no undo endpoint yet (HTTP " + response.status + ")" });
