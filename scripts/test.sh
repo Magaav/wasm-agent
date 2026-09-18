@@ -365,21 +365,31 @@ WA_SCRIPT=scripts/test-empty-reply.lua "$BIN" --db "$DB" | grep "empty reply ok"
 # "embedded module missing: lua/core/model_window.lua". Every other check here sets
 # WASM_AGENT_LUA_ROOT and therefore reads the working tree; this one deliberately does not,
 # because that is the path the node actually runs.
-EMBEDDED_CHECK=$(mktemp -u /tmp/wa-embedded-XXXXXX.lua)
-{
-  echo 'local names = {}'
-  echo 'local pipe = io.popen("ls lua/core/*.lua 2>/dev/null")'
-  echo 'for line in pipe:lines() do names[#names + 1] = (line:gsub("^%./", "")) end'
-  echo 'pipe:close()'
-  echo 'assert(#names > 20, "expected to find the core modules, found " .. #names)'
-  echo 'for _, path in ipairs(names) do'
-  echo '  local chunk, err = loadfile(path)'
-  echo '  if not chunk then error(path .. " is not in the binary: " .. tostring(err)) end'
-  echo 'end'
-  echo 'print("embedded modules ok (" .. #names .. " files)")'
-} > "$EMBEDDED_CHECK"
-( unset WASM_AGENT_LUA_ROOT; WA_SCRIPT="$EMBEDDED_CHECK" "$BIN" --db "$DB" ) | grep "embedded modules ok"
-rm -f "$EMBEDDED_CHECK"
+cat > "$DB.embedded.lua" <<'LUA'
+local json = dofile("lua/vendor/json.lua")
+local listing = host.list_dir("lua/core")
+assert(type(listing) == "string", "host.list_dir must return a listing")
+local decoded = json.decode(listing)
+local names = {}
+for _, entry in ipairs(decoded.entries or {}) do
+  if entry.kind == "file" and entry.name:match("%.lua$") then names[#names + 1] = entry.name end
+end
+assert(#names >= 10, "expected the core modules in the listing, found " .. #names)
+for _, required in ipairs({ "agent.lua", "provider.lua", "model_window.lua", "memory.lua" }) do
+  local found = false
+  for _, name in ipairs(names) do if name == required then found = true end end
+  assert(found, required .. " is missing from lua/core")
+end
+local missing = {}
+for _, name in ipairs(names) do
+  local chunk = loadfile("lua/core/" .. name)
+  if not chunk then missing[#missing + 1] = name end
+end
+assert(#missing == 0, "on disk but not in the binary: " .. table.concat(missing, ", "))
+print("embedded modules ok (" .. #names .. " files)")
+LUA
+( unset WASM_AGENT_LUA_ROOT; WA_SCRIPT="$DB.embedded.lua" "$BIN" --db "$DB" ) | grep "embedded modules ok"
+rm -f "$DB.embedded.lua"
 WA_SCRIPT=scripts/test-recovery.lua "$BIN" --db "$DB" | grep "recovery ok"
 cat > "$DB.seed.lua" <<'LUA'
 -- Seed a thread cut off the way a killed process leaves it: a question, a decision
