@@ -592,13 +592,13 @@ fn dispatch(
         ]).into_bytes()),
         "/sync/tick" if method == "POST" => (200, "application/json", call("wa_sync_tick", &[]).into_bytes()),
         "/sync" => (200, "application/json", call("wa_sync_status", &[]).into_bytes()),
-        "/node/call" if method == "POST" => (200, "application/json", call("wa_node_call", &[
-            body,
-            header_of(node_headers, "x-wa-node"),
-            header_of(node_headers, "x-wa-pub"),
-            header_of(node_headers, "x-wa-ts"),
-            header_of(node_headers, "x-wa-sig"),
-        ]).into_bytes()),
+        "/node/call" if method == "POST" => {
+            let from = header_of(node_headers, "x-wa-node");
+            let public_key = header_of(node_headers, "x-wa-pub");
+            let ts = header_of(node_headers, "x-wa-ts");
+            let signature = header_of(node_headers, "x-wa-sig");
+            (200, "application/json", call("wa_node_call", &[body, &from, &public_key, &ts, &signature]).into_bytes())
+        }
         "/envelope" => (200, "application/json", call("wa_envelope", &[session]).into_bytes()),
         "/tools" => (200, "application/json", call("wa_tools", &[session]).into_bytes()),
         "/nodes" => (200, "application/json", call("wa_nodes", &[session]).into_bytes()),

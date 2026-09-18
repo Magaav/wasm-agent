@@ -57,15 +57,16 @@ ok() {
 }
 
 # Nothing is stopped by image name: another `wa` on this machine is somebody's session, and
-# killing it for sharing a name is how that session dies. The guest is found by *its own home*,
-# which nothing else on the machine was started with, and stopped by pid.
-kill_by_home() {
+# killing it for sharing a name is how that session dies. The guest is found by *its port*, which
+# is the one thing in its command line that is unique to this run - the home directory is an
+# environment variable, so it never appears there at all, which is how the first version of this
+# silently failed to stop anything.
+kill_guest() {
   local pids=""
   if command -v powershell.exe >/dev/null 2>&1; then
-    pids="$(powershell.exe -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"name like 'wa%'\" | Where-Object { \$_.CommandLine -like '*$GUEST_HOME*' } | ForEach-Object { \$_.ProcessId }" 2>/dev/null | tr -d '\r')"
+    pids="$(powershell.exe -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"name like 'wa%'\" | Where-Object { \$_.CommandLine -like '*--port $GUEST_PORT*' } | ForEach-Object { \$_.ProcessId }" 2>/dev/null | tr -d '\r')"
   elif command -v pgrep >/dev/null 2>&1; then
-    # The run's own home directory, which is unique to it, so this cannot catch another node.
-    pids="$(pgrep -f "$GUEST_HOME" 2>/dev/null || true)"
+    pids="$(pgrep -f -- "--port $GUEST_PORT" 2>/dev/null || true)"
   fi
   [ -z "$pids" ] && pids="$GUEST_PID"
   for pid in $pids; do
@@ -74,7 +75,7 @@ kill_by_home() {
 }
 
 cleanup() {
-  kill_by_home
+  kill_guest
   # A busy database means the process has not finished dying; wait rather than leave the run's
   # debris behind, but keep the directory when something failed, because the log is the only
   # evidence of why.
@@ -116,7 +117,7 @@ start_guest() {
 }
 
 stop_guest() {
-  kill_by_home
+  kill_guest
   sleep 1
   GUEST_PID=""
 }
