@@ -12,6 +12,16 @@ files describe the two-tree workflow. This document is the plumbing around that.
 3. give it the brief
 4. it edits, tests, commits, pushes the branch
 5. a human reviews the branch and merges
+Two rules make step 5 possible, and `scripts/worktrees.sh` exists to keep them
+visible:
+
+- **The agent rebases before it reports done.** A branch that conflicts is a task
+  handed to the reviewer, and every hour it waits it grows: a branch based on a base
+  49 commits old needed a rebase plus two hand-resolved conflicts in `agent.lua` and
+  `memory.lua`, and the same branch unrebased would have deleted ~2800 lines of main.
+- **Nothing is left uncommitted.** Uncommitted work makes the branch say "merged"
+  while the worktree says "in progress", and neither state can be reviewed. A branch
+  that stops half-way says so in a `wip(...)` commit.
 ```
 
 Step 1 and 2 through Orca:

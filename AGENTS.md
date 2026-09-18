@@ -28,6 +28,18 @@ Every tree authenticates with the `github-wasm-agent` SSH host alias:
   small and make each message say *why*, not just *what*.
 - Working-directory rule still applies: `git config core.autocrlf` must be
   `false`. Worktrees inherit it from the shared git dir, so verify, don't assume.
+- **Merging cleanly is part of done.** Before you report a task finished, rebase onto
+  `origin/main` and prove the branch still merges:
+  `git rebase origin/main && git merge-tree --write-tree origin/main HEAD`.
+  A branch that conflicts is not finished work — it is a task you have handed to
+  someone else, and the longer it waits the more of main it would delete. The drift is
+  time, not skill: a task that runs for hours against an old base will meet whatever
+  landed while it ran.
+- **Commit before you stop.** Uncommitted work is invisible work: the branch reads
+  merged while the worktree reads in progress, and neither state can be reviewed.
+  If you are not going to finish it, commit it as `wip(...)` and say what remains.
+- `scripts/worktrees.sh` prints every worktree with its drift, its uncommitted files
+  and whether it merges. Run it before you start, so you know what you are landing on.
 
 ### Never touch the old plugin
 
