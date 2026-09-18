@@ -261,6 +261,24 @@ Write-Host "     wa ui --remote   point the window at $HostAlias instead" -Foreg
 Write-Host ""
 Write-Host "   then try:" -ForegroundColor DarkGray
 Write-Host "     remember that Laura prefers invoices on the 5th" -ForegroundColor DarkGray
+# Can this node build itself? The toolchains are ordinary packages, so a node can install them
+# on its own machine rather than depending on whichever machine happened to have them. Reported
+# always; installed only when asked, because a fresh install is not the moment to start a large
+# download behind somebody's back.
+$waCmd = Get-Command wa -ErrorAction SilentlyContinue
+if ($waCmd) {
+  $toolchainLine = (& wa toolchain check 2>$null | Select-Object -Last 1)
+  Write-Host "   toolchains: $toolchainLine" -ForegroundColor DarkGray
+  if ($toolchainLine -notmatch "every one resolves") {
+    Write-Host "   this node cannot build itself yet. See: wa toolchain plan" -ForegroundColor Yellow
+    if ($env:WA_INSTALL_TOOLCHAIN -eq "1") {
+      & wa toolchain ensure --yes
+    } else {
+      Write-Host "   run: wa toolchain ensure --yes   (or set WA_INSTALL_TOOLCHAIN=1 and re-run)" -ForegroundColor Yellow
+    }
+  }
+}
+
 Write-Host "     what do you know about Laura?" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "   memory lives in $env:USERPROFILE\.wasm-agent\memory.db" -ForegroundColor DarkGray

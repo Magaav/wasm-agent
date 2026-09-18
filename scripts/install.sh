@@ -36,6 +36,26 @@ else
   warn "ssh not found; install OpenSSH, then run: wa"
 fi
 
+# Can this node build itself? The toolchains are ordinary packages, so a node can install them
+# on its own machine and stop depending on whichever machine happened to have them. Reported
+# always; installed only when asked, because a fresh install is not the moment to start a 1.5GB
+# download behind somebody's back.
+if command -v wa >/dev/null 2>&1; then
+  TOOLCHAIN_LINE="$(wa toolchain check 2>/dev/null | tail -1)"
+  ok "toolchains: ${TOOLCHAIN_LINE:-unknown}"
+  case "$TOOLCHAIN_LINE" in
+    *"every one resolves"*) ;;
+    *)
+      warn "this node cannot build itself yet. See: wa toolchain plan"
+      if [ "${WA_INSTALL_TOOLCHAIN:-0}" = "1" ]; then
+        wa toolchain ensure --yes
+      else
+        warn "run: wa toolchain ensure --yes   (or re-run this installer with WA_INSTALL_TOOLCHAIN=1)"
+      fi
+      ;;
+  esac
+fi
+
 printf "\n   ${green}ready.${reset}\n\n"
 printf "   ${grey}start chatting:${reset}\n     wa\n\n"
 case ":$PATH:" in

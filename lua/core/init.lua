@@ -61,6 +61,11 @@ elseif command == "stats" then
 elseif command == "status" then
   -- One health line per fact, from this checkout (the Lua core, not the host).
   dofile("lua/core/status.lua").report()
+elseif command == "toolchain" then
+  -- What this node needs in order to build *itself*, and how to get it on this machine. Asking is
+  -- read-only; only `ensure --yes` installs anything. The exit code is useful in scripts: non-zero
+  -- when a toolchain is missing.
+  os.exit(dofile("lua/core/toolchain.lua").cli(args) or 0)
 elseif command == "resume" then
   -- Recovery, in two halves: see what was left unfinished, then continue it.
   --

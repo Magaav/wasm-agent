@@ -33,6 +33,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/nodes.lua", include_str!("../../../lua/core/nodes.lua")),
     ("lua/core/state.lua", include_str!("../../../lua/core/state.lua")),
     ("lua/core/status.lua", include_str!("../../../lua/core/status.lua")),
+    ("lua/core/toolchain.lua", include_str!("../../../lua/core/toolchain.lua")),
     ("lua/core/provider.lua", include_str!("../../../lua/core/provider.lua")),
     ("lua/core/model_window.lua", include_str!("../../../lua/core/model_window.lua")),
     ("lua/core/agent.lua", include_str!("../../../lua/core/agent.lua")),
