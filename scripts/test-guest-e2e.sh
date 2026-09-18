@@ -57,13 +57,34 @@ ok() {
 }
 
 # Nothing is stopped by image name: another `wa` on this machine is somebody's session, and
-# killing it for sharing a name is how that session dies. Only the pid this script started.
-cleanup() {
-  if [ -n "$GUEST_PID" ] && kill -0 "$GUEST_PID" 2>/dev/null; then
-    kill "$GUEST_PID" 2>/dev/null
-    wait "$GUEST_PID" 2>/dev/null
+# killing it for sharing a name is how that session dies. The guest is found by *its own home*,
+# which nothing else on the machine was started with, and stopped by pid.
+kill_by_home() {
+  local pids=""
+  if command -v powershell.exe >/dev/null 2>&1; then
+    pids="$(powershell.exe -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"name like 'wa%'\" | Where-Object { \$_.CommandLine -like '*$GUEST_HOME*' } | ForEach-Object { \$_.ProcessId }" 2>/dev/null | tr -d '\r')"
+  elif command -v pgrep >/dev/null 2>&1; then
+    # The run's own home directory, which is unique to it, so this cannot catch another node.
+    pids="$(pgrep -f "$GUEST_HOME" 2>/dev/null || true)"
   fi
-  rm -rf "$GUEST_HOME"
+  [ -z "$pids" ] && pids="$GUEST_PID"
+  for pid in $pids; do
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null
+  done
+}
+
+cleanup() {
+  kill_by_home
+  # A busy database means the process has not finished dying; wait rather than leave the run's
+  # debris behind, but keep the directory when something failed, because the log is the only
+  # evidence of why.
+  for _ in $(seq 1 20); do
+    rm -rf "$GUEST_HOME" 2>/dev/null && break
+    sleep 0.5
+  done
+  if [ -d "$GUEST_HOME" ] && [ "$failed" -gt 0 ]; then
+    say "kept $GUEST_HOME (the guest's log is $GUEST_HOME/serve.log)"
+  fi
 }
 trap cleanup EXIT
 
@@ -95,10 +116,8 @@ start_guest() {
 }
 
 stop_guest() {
-  if [ -n "$GUEST_PID" ] && kill -0 "$GUEST_PID" 2>/dev/null; then
-    kill "$GUEST_PID" 2>/dev/null
-    wait "$GUEST_PID" 2>/dev/null
-  fi
+  kill_by_home
+  sleep 1
   GUEST_PID=""
 }
 
@@ -124,9 +143,13 @@ ok "$([ "$NAME" != "foundation" ] && echo 1 || echo 0)" "a guest is not named af
 
 ME="$(guest_json /me)"
 ok "$(grep -q '"role":"guest"' <<<"$ME" && echo 1 || echo 0)" "a local session on a guest node is a guest"
+# The guest tier is memory on demand plus spells (DESIGN.md 8). `read` is *not* in it: a guest
+# node reads files when a master asks it to, which is a different thing from being allowed to
+# read on its own initiative - and that difference is the point of the check.
+ok "$(grep -q '"remember"' <<<"$ME" && echo 1 || echo 0)" "the guest is offered memory"
 ok "$(grep -q '"write"' <<<"$ME" && echo 0 || echo 1)" "the guest is not offered write"
 ok "$(grep -q '"bash"' <<<"$ME" && echo 0 || echo 1)" "the guest is not offered a shell"
-ok "$(grep -q '"read"' <<<"$ME" && echo 1 || echo 0)" "the guest is offered read"
+ok "$(grep -q '"edit"' <<<"$ME" && echo 0 || echo 1)" "the guest is not offered edit"
 
 SHELL_REPLY="$(curl -s -m 5 -X POST "http://127.0.0.1:$GUEST_PORT/shell" -d 'echo pwned')"
 ok "$(grep -q 'forbidden' <<<"$SHELL_REPLY" && echo 1 || echo 0)" "a guest cannot run a shell locally" "$SHELL_REPLY"
@@ -146,16 +169,25 @@ ok "$(grep -q '"role":"guest"' <<<"$PEERS" && echo 1 || echo 0)" \
   "the rendezvous learned it is a guest" "$(grep -c '"role":"guest"' <<<"$PEERS") guest row(s)"
 
 # ------------------------------------------------- 3. a guest cannot command a master
+# The call goes to the master's own advertised endpoint rather than through the relay, so what is
+# being tested is the role check and not the transport: a relay timeout would otherwise look like
+# a refusal, and "it failed" is not the same answer as "it was refused".
 cat > "$GUEST_HOME/call-master.lua" <<'LUA'
 local nodes = dofile("lua/core/nodes.lua")
+local json = dofile("lua/vendor/json.lua")
 local identity = nodes.identity()
 local master = nil
 for _, node in ipairs(nodes.peers({ fresh = true })) do
-  if node.node_id ~= identity.node_id and node.role == "master" then master = node break end
+  if node.node_id ~= identity.node_id and node.role == "master" and nodes.endpoint(node) then
+    master = node break
+  end
 end
-if not master then print("RESULT:no-master-visible") return end
-local result = nodes.remote_call(master.node_id, "status", {})
-print("RESULT:" .. tostring(result and (result.error or result.detail) or "no-answer"))
+if not master then print("RESULT:no-master-with-endpoint") return end
+local body = json.encode({ from_node_id = identity.node_id, capability = "status", args = {} })
+local headers = nodes.signed_headers("call", body)
+local response = json.decode(host.http("POST", nodes.endpoint(master) .. "/node/call",
+  json.encode(headers), body))
+print("RESULT:" .. tostring(response and response.body or "no-response"):sub(1, 80))
 LUA
 CMD_OUT="$(guest_lua "$GUEST_HOME/call-master.lua" | grep -o 'RESULT:.*' | head -1)"
 ok "$(grep -q 'forbidden_role' <<<"$CMD_OUT" && echo 1 || echo 0)" "a guest cannot command a master" "$CMD_OUT"
@@ -172,14 +204,21 @@ for _, node in ipairs(nodes.peers({ fresh = true })) do
   if node.node_id ~= identity.node_id and node.role == "master" then master = node break end
 end
 if not master then print("FORGE:no-master-visible") return end
+-- A real signature by the guest's own key, sent as if it belonged to the master's node id. The
+-- cryptography does its job: what fails is the *claim*, because the rendezvous will not confirm
+-- that this key speaks for that node.
+local body = json.encode({ from_node_id = identity.node_id, capability = "read", args = { path = "README.md" } })
 local ts = math.floor(host.now())
-local signature = json.decode(host.sign(table.concat({ "call", master.node_id, tostring(ts) }, "|"))).signature
-local body = json.encode({
-  from_node_id = master.node_id, public_key = identity.public_key, ts = ts,
-  capability = "read", args = { path = "README.md" }, signature = signature,
-})
+local signed = json.decode(host.sign(table.concat({ "call", master.node_id, tostring(ts), host.sha256(body) }, "|")))
+local headers = {
+  ["Content-Type"] = "application/json",
+  ["X-WA-Node"] = master.node_id,
+  ["X-WA-Pub"] = identity.public_key,
+  ["X-WA-Ts"] = tostring(ts),
+  ["X-WA-Sig"] = signed.signature,
+}
 local response = json.decode(host.http("POST", "http://127.0.0.1:$GUEST_PORT/node/call",
-  json.encode({ ["Content-Type"] = "application/json" }), body))
+  json.encode(headers), body))
 print("FORGE:" .. tostring(response and response.body or "no-response"):sub(1, 80))
 LUA
 FORGE_OUT="$(guest_lua "$GUEST_HOME/forge.lua" | grep -o 'FORGE:.*' | head -1)"
@@ -195,17 +234,16 @@ local json = dofile("lua/vendor/json.lua")
 local identity = nodes.identity()
 local guest = nil
 for _, node in ipairs(nodes.peers({ fresh = true })) do
-  if node.node_id ~= identity.node_id and node.role == "guest" then guest = node break end
+  if node.node_id ~= identity.node_id and node.role == "guest" and nodes.endpoint(node) then
+    guest = node break
+  end
 end
-if not guest then print("REPLAY:no-guest-visible") return end
+if not guest then print("REPLAY:no-guest-with-endpoint") return end
 local endpoint = nodes.endpoint(guest)
-local ts = math.floor(host.now())
-local signature = json.decode(host.sign(table.concat({ "call", identity.node_id, tostring(ts) }, "|"))).signature
-local body = json.encode({
-  from_node_id = identity.node_id, public_key = identity.public_key, ts = ts,
-  capability = "read", args = { path = "README.md" }, signature = signature,
-})
-local headers = json.encode({ ["Content-Type"] = "application/json" })
+-- One body and one set of headers, sent twice: exactly what someone who captured a request would
+-- do. The signature is genuine, the timestamp is still fresh, and the second one must not run.
+local body = json.encode({ from_node_id = identity.node_id, capability = "read", args = { path = "README.md" } })
+local headers = json.encode(nodes.signed_headers("call", body))
 local first = json.decode(host.http("POST", endpoint .. "/node/call", headers, body))
 local second = json.decode(host.http("POST", endpoint .. "/node/call", headers, body))
 print("REPLAY:first=" .. tostring(first and first.body or "?"):sub(1, 30))
@@ -217,14 +255,20 @@ ok "$(grep -q 'replayed_request' <<<"$REPLAY_OUT" && echo 1 || echo 0)" "a repla
 # ------------------------------------------------- 6. the master's wish is the master's work
 cat > "$GUEST_HOME/wish.lua" <<'LUA'
 local nodes = dofile("lua/core/nodes.lua")
+local json = dofile("lua/vendor/json.lua")
 local identity = nodes.identity()
 local guest = nil
 for _, node in ipairs(nodes.peers({ fresh = true })) do
-  if node.node_id ~= identity.node_id and node.role == "guest" then guest = node break end
+  if node.node_id ~= identity.node_id and node.role == "guest" and nodes.endpoint(node) then
+    guest = node break
+  end
 end
-if not guest then print("WISH:no-guest-visible") return end
-local result = nodes.remote_call(guest.node_id, "read", { path = "README.md" })
-print("WISH:" .. tostring(result and (result.result or result.error) or "nothing"):sub(1, 60))
+if not guest then print("WISH:no-guest-with-endpoint") return end
+local body = json.encode({ from_node_id = identity.node_id, capability = "read", args = { path = "README.md" } })
+local headers = nodes.signed_headers("call", body)
+local response = json.decode(host.http("POST", nodes.endpoint(guest) .. "/node/call",
+  json.encode(headers), body))
+print("WISH:" .. tostring(response and response.body or "no-response"):sub(1, 70))
 LUA
 WISH_OUT="$(master_lua "$GUEST_HOME/wish.lua" | grep -o 'WISH:.*' | head -1)"
 ok "$(grep -qi 'wasm-agent' <<<"$WISH_OUT" && echo 1 || echo 0)" "a master's wish runs on the guest" "$WISH_OUT"
@@ -250,7 +294,7 @@ stop_guest
 GUEST_TRUST="WASM_AGENT_TRUSTED_MASTERS=nobody-at-all" start_guest || exit 1
 sleep 3
 ANCHOR_OUT="$(master_lua "$GUEST_HOME/wish.lua" | grep -o 'WISH:.*' | head -1)"
-ok "$(grep -qE 'forbidden_role|unknown_caller|no-guest-visible' <<<"$ANCHOR_OUT" && echo 1 || echo 0)" \
+ok "$(grep -qE 'forbidden_role|unknown_caller|no-guest-with-endpoint' <<<"$ANCHOR_OUT" && echo 1 || echo 0)" \
   "an enrolled-master list refuses a master it does not name" "$ANCHOR_OUT"
 stop_guest
 

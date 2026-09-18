@@ -94,9 +94,21 @@ assert(type(deep.source) == "string" and deep.source ~= "" and deep.source ~= "u
 assert(deep.context - deep.reserve > 900000, "a 1M window must not compact at 96k, trigger at " .. tostring(deep.context - deep.reserve))
 local small = windowlib.policy(20000)
 assert(small < 20000, "a small window must still reserve proportionally, got " .. tostring(small))
+-- The request path must not fetch the catalogue. This runs with a scratch home (no cache) and a
+-- catalogue URL that cannot be reached, so a fetch would wait for the connect timeout - which is
+-- what used to happen: the first /models after a fresh install blocked the interpreter for as
+-- long as a 4.7MB download takes, and everything behind it queued. Immediate is the assertion;
+-- `shipped` is where the number then comes from, said out loud instead of implied.
+local started = host.now()
+local unknown = windowlib.budget("a-model-nobody-publishes")
+local elapsed = host.now() - started
+assert(elapsed < 2, "budget must not fetch the catalogue on the request path: took " .. elapsed .. "s")
+assert(unknown.source == "shipped", "a cold cache must say the answer is the shipped table, got " .. tostring(unknown.source))
 print("budget ok")
 LUA
-WASM_AGENT_MODEL_LIMITS='{"kimi-k2.6":{"context":262144,"reserve":32768}}' WA_SCRIPT="$DB.budget.lua" "$BIN" --db "$DB" | grep "budget ok"
+WASM_AGENT_HOME="$DB.home" WASM_AGENT_MODELS_CATALOGUE='http://10.255.255.1/api.json' \
+  WASM_AGENT_MODEL_LIMITS='{"kimi-k2.6":{"context":262144,"reserve":32768}}' \
+  WA_SCRIPT="$DB.budget.lua" "$BIN" --db "$DB" | grep "budget ok"
 rm -f "$DB.budget.lua"
 # `wa status` must report whether the toolchains its tools need resolve - a
 # service has no login PATH, which is how a remote build failed with

@@ -199,10 +199,15 @@ end
 
 -- Accept a signed capability call from a peer (see nodes.lua for the caller).
 -- A peer must be a rendezvous-known master with a valid, fresh signature.
-local function verify_peer(from, public_key, ts, signature, action)
+local function verify_peer(from, public_key, ts, signature, action, body)
   if not from or from == "" then return nil, "bad_request" end
   local stamp = math.floor(tonumber(ts) or 0)
-  local message = table.concat({ action, from, tostring(stamp) }, "|")
+  -- The signed message includes the hash of the body, so a valid signature covers *what* was
+  -- asked for and not only that something was. The signature itself arrives in the headers; the
+  -- body is hashed exactly as received.
+  local parts = { action, from, tostring(stamp) }
+  if type(body) == "string" then parts[#parts + 1] = host.sha256(body) end
+  local message = table.concat(parts, "|")
   if not host.verify(public_key or "", message, signature or "") then return nil, "bad_signature" end
   if math.abs(host.now() - stamp) > 120 then return nil, "stale_request" end
   -- Fresh from the rendezvous, not from the local cache: a peer that has been removed there
@@ -266,20 +271,20 @@ local function node_capability(capability, args, caller)
   })
 end
 
-function wa_node_call(payload)
+function wa_node_call(payload, from, public_key, ts, signature)
   local ok, request = pcall(json.decode, payload)
   if not ok or type(request) ~= "table" then return json.encode({ error = "bad_request" }) end
   local capability = request.capability or ""
   if capability == "" then return json.encode({ error = "bad_request" }) end
   if capability == "remote" then return json.encode({ error = "remote_cannot_recurse" }) end
-  local caller, problem = verify_peer(request.from_node_id, request.public_key, request.ts, request.signature, "call")
+  local caller, problem = verify_peer(from, public_key, ts, signature, "call", payload)
   if problem then return json.encode({ error = problem }) end
   return json.encode(node_capability(capability, request.args, caller))
 end
 
 -- Streaming turn requested by a peer (/node/chat): events go to that stream.
 function wa_node_chat(from, public_key, ts, signature, text)
-  local caller, problem = verify_peer(from, public_key, ts, signature, "chat")
+  local caller, problem = verify_peer(from, public_key, ts, signature, "chat", text or "")
   if problem then
     emit({ type = "error", error = problem })
     return ""

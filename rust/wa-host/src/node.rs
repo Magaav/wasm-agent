@@ -96,7 +96,7 @@ fn announced_role(config: &str) -> String {
 /// worktree identity), then the environment, then "host". The worktree outranks the environment
 /// on purpose: a leftover `WASM_AGENT_NODE_NAME` in a shell profile would otherwise make every
 /// node on a machine claim the same name.
-fn announced_name(identity: &Identity, config: &str, role: &str) -> String {
+fn announced_name(config: &str, role: &str) -> String {
     if let Some(stored) = read_trimmed(&format!("{config}/node.name")) {
         return stored;
     }
@@ -169,7 +169,7 @@ pub fn spawn_heartbeat(url: String) {
         // master tools from a peer, and the announcement below is the only place that decides.
         let config = format!("{}/.wasm-agent", crate::resolve_home());
         let role = announced_role(&config);
-        let name = announced_name(&identity, &config, &role);
+        let name = announced_name(&config, &role);
         let mut registered = false;
         loop {
             let ts = std::time::SystemTime::now()

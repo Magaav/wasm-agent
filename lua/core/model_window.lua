@@ -73,9 +73,10 @@ local function read_file(path)
   return nil
 end
 
--- The catalogue cache. Read if fresh, refetched if stale, and never fatal: a node with no
--- network keeps whatever it had rather than losing the window it already knew.
-local function fetch_catalogue()
+-- The catalogue cache. Read from disk when it is there, and **fetched only when a caller asks
+-- for it**: see `allow_fetch` below. Never fatal - a node with no network keeps whatever it had.
+local function fetch_catalogue(opts)
+  local allow_fetch = type(opts) == "table" and opts.allow_fetch == true
   local now = host.now and host.now() or 0
   if catalogue and (now - catalogue_at) < CATALOGUE_TTL then return catalogue end
 
@@ -93,6 +94,15 @@ local function fetch_catalogue()
   local url = host.getenv("WASM_AGENT_MODELS_CATALOGUE")
   if url == nil or url == "" then url = "https://models.dev/api.json" end
   if url == "off" then return catalogue end
+
+  -- A request path must not download 4.7MB. `budget` runs inside /models, the account balloon
+  -- and compaction, so a cold cache used to turn the first request after a fresh install into
+  -- that download, on the one thread that owns the interpreter: the request blocked, everything
+  -- behind it queued, and the node looked wedged while /health kept answering. The fetch happens
+  -- where it is asked for instead - `refresh()`, and the UI's own refresh - and until one has
+  -- succeeded the window comes from the shipped table, whose answer says `shipped` rather than
+  -- pretending the catalogue was consulted.
+  if not allow_fetch then return catalogue end
 
   if not catalogue or (now - catalogue_at) >= CATALOGUE_TTL then
     pcall(function()
@@ -232,7 +242,7 @@ end
 -- tell "refreshed and empty" from "could not refresh".
 function M.refresh()
   catalogue, catalogue_at = nil, 0
-  local cat = fetch_catalogue()
+  local cat = fetch_catalogue({ allow_fetch = true })
   if type(cat) ~= "table" then return nil end
   local n = 0
   for _, provider in pairs(cat) do

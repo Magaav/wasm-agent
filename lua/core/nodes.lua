@@ -326,11 +326,20 @@ function M.verify_caller(node_id, public_key, opts)
   return nil
 end
 
--- Sign `action|node_id|ts` with this node's key.
-function M.sign_action(action, ts)
+-- Sign `action|node_id|ts`, plus the hash of the body when there is one.
+--
+-- The body has to be in the signature. Without it a signed call was a signed *verb*: anyone who
+-- could see the request could change what the verb applied to - `read` this file becomes `write`
+-- that file - and the signature still verified, because it never mentioned the arguments. The
+-- direct peer hop is plain HTTP, so anyone on the path could do it. It also made two different
+-- calls in the same second indistinguishable, which turned the replay guard into something that
+-- refuses honest calls.
+function M.sign_action(action, ts, body)
   local identity = M.identity()
   if not identity or not identity.node_id then return nil, nil, "no_identity" end
-  local message = table.concat({ action, identity.node_id, tostring(ts) }, "|")
+  local parts = { action, identity.node_id, tostring(ts) }
+  if type(body) == "string" then parts[#parts + 1] = host.sha256(body) end
+  local message = table.concat(parts, "|")
   local signed = json.decode(host.sign(message))
   if not signed or not signed.signature then return identity, nil, "sign_failed" end
   return identity, signed.signature
@@ -341,9 +350,9 @@ function M.relay_url()
   return host.getenv("WASM_AGENT_RELAY") or ""
 end
 
-function M.signed_headers(action)
+function M.signed_headers(action, body)
   local ts = math.floor(host.now())
-  local identity, signature, problem = M.sign_action(action, ts)
+  local identity, signature, problem = M.sign_action(action, ts, body)
   if not identity then return nil, problem end
   return {
     ["Content-Type"] = "application/json",
@@ -432,17 +441,18 @@ function M.remote_call(selector, capability, args)
   local node = M.find(selector)
   if not node then return { error = "unknown_node:" .. tostring(selector) } end
   local ts = math.floor(host.now())
-  local identity, signature, problem = M.sign_action("call", ts)
-  if not identity then return { error = problem } end
+  -- The body is built before it is signed, and the signature travels in the headers rather than
+  -- inside the body: what was signed is the body as it is sent, so the receiver can hash the
+  -- bytes it got. `from_node_id` and the public key stay in the body for readability - they are
+  -- covered by the hash like everything else.
   local body = json.encode({
-    from_node_id = identity.node_id,
-    public_key = identity.public_key,
-    ts = ts,
+    from_node_id = (M.identity() or {}).node_id,
     capability = capability,
     args = args or {},
-    signature = signature,
   })
-  local response = M.request(node, "/node/call", body)
+  local headers, problem = M.signed_headers("call", body)
+  if not headers then return { error = problem } end
+  local response = M.request(node, "/node/call", body, headers)
   if not response then return { error = "remote_unreachable", node = node.name } end
   if response.error then return { error = "remote_error", detail = tostring(response.error) } end
   if tonumber(response.status) ~= 200 then
@@ -464,7 +474,7 @@ function M.remote_chat(selector, text)
   local node = M.find(selector)
   if not node then return { error = "unknown_node:" .. tostring(selector) } end
   if node.local_node then return { error = "not_remote" } end
-  local headers, problem = M.signed_headers("chat")
+  local headers, problem = M.signed_headers("chat", text or "")
   if not headers then return { error = problem } end
   headers["Content-Type"] = "text/plain; charset=utf-8"
   headers["Accept"] = "text/event-stream"
