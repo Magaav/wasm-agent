@@ -30,7 +30,7 @@ do not look for a workaround.
 
 A node's role is not your role. If this node is a *guest node*, it owns no
 worktree and no branch: it is how a master gets something done on this machine,
-not a workspace of its own. A master's call arrives signed and runs **as that
+not a checkout of its own. A master's call arrives signed and runs **as that
 master** — the session and the tool calls are filed under their name, not
 yours. So:
 
