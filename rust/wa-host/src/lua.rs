@@ -201,6 +201,17 @@ impl Lua {
         unsafe { lua_pushboolean(self.l, if b { 1 } else { 0 }) }
     }
 
+    /// Read a Lua string as Rust text.
+    ///
+    /// Lua strings are byte strings, and this is where they become UTF-8 - so it has to *decode*
+    /// them. It used to widen each byte to a character (`.map(|b| b as char)`), which is Latin-1:
+    /// an em dash is three UTF-8 bytes, so it came out as three characters - `â` followed by two
+    /// invisible control codes, which is exactly what a chat bubble showed.
+    ///
+    /// This is the reader for a Lua call's *return value*, so every JSON response body went through
+    /// it and every non-ASCII character in one was mangled: the transcript you load is corrupted
+    /// while the live stream is not, because `arg_string` (used for arguments, including the SSE
+    /// line) was always correct. The data was never lost - only its trip out.
     pub fn to_string(&self, idx: c_int) -> Option<String> {
         unsafe {
             let mut len = 0usize;
@@ -208,13 +219,11 @@ impl Lua {
             if ptr.is_null() {
                 return None;
             }
-            Some(
-                std::slice::from_raw_parts(ptr as *const u8, len)
-                    .to_vec()
-                    .into_iter()
-                    .map(|b| b as char)
-                    .collect(),
-            )
+            let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
+            // Lossy rather than strict: a Lua string can legitimately hold arbitrary bytes (a
+            // screenshot's base64, a truncated file), and refusing the whole value over one bad
+            // byte would break a response rather than show it.
+            Some(String::from_utf8_lossy(bytes).into_owned())
         }
     }
 

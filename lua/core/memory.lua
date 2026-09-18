@@ -598,6 +598,25 @@ function M.session_turns(session_id, opts)
   return rows
 end
 
+-- One turn, by id, with its `changes` decoded the same way session_turns decodes it.
+--
+-- Undo works from a turn id rather than from a position: the reader clicks a topic in the
+-- transcript, and what identifies that topic has to survive a reload, a compaction and a
+-- second reader. A sequence number would not - the window moves - and the id is what the
+-- journal already replicates, so a peer's turn resolves here too.
+function M.turn(turn_id)
+  if not turn_id or turn_id == "" then return nil end
+  local rows = query("SELECT * FROM turns WHERE id=?", {turn_id})
+  local row = rows[1]
+  if not row then return nil end
+  row.tool_calls = json.decode(row.tool_calls)
+  row.trace = json.decode(row.trace)
+  if row.images then row.images = decode(row.images) end
+  row.changes = decode(row.changes)
+  if type(row.changes) ~= "table" or row.changes.files == nil then row.changes = nil end
+  return row
+end
+
 function M.search_turns(text, user_id, limit)
   limit = limit or 20
   local match = M.fts_query(text)

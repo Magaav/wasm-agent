@@ -1,6 +1,7 @@
 -- Server entry for `wa serve`: one agent per user behind the web UI.
 local json = dofile("lua/vendor/json.lua")
 local memory = dofile("lua/core/memory.lua")
+local changeset = dofile("lua/core/changeset.lua")
 local provider = dofile("lua/core/provider.lua")
 local windowlib = dofile("lua/core/model_window.lua")
 local agentlib = dofile("lua/core/agent.lua")
@@ -398,6 +399,55 @@ function wa_session(session_id, session)
     state = memory.session_state(session_id),
     turns = memory.session_turns(session_id, { limit = 500 }),
   })
+end
+
+-- A turn's file changes: "can this still be undone?" and "do it".
+--
+-- The check and the action are the same route on purpose. Asking whether a patch can be
+-- undone and then undoing it are two reads of the same facts, and splitting them into two
+-- endpoints is how a UI ends up offering a button that the handler then refuses - the
+-- reader clicks, nothing happens, and no one can say why. Here the answer and the effect
+-- come from one code path, so what the toggle shows is what the handler will do.
+--
+-- `changeset.undo`/`redo` already refuse in words ("changed_since_turn:<path>"), and that
+-- reason is passed through rather than translated: the reader needs to know *which file*
+-- moved on, and inventing a friendlier sentence here would drop the only useful part.
+function wa_diff(payload, session)
+  local user = require_master(session)
+  if not user then return json.encode({ error = "forbidden" }) end
+  local ok, request = pcall(json.decode, payload)
+  if not ok or type(request) ~= "table" then return json.encode({ error = "bad_request" }) end
+  local turn = memory.turn(request.turn_id or "")
+  if not turn then return json.encode({ error = "unknown_turn" }) end
+  if not turn.changes then return json.encode({ error = "no_changes" }) end
+
+  local entry = { files = {}, added = turn.changes.added or 0, removed = turn.changes.removed or 0 }
+  for _, file in ipairs(turn.changes.files or {}) do
+    entry.files[#entry.files + 1] = {
+      path = file.path, before = file.before, after = file.after,
+      added = file.added or 0, removed = file.removed or 0,
+      created = file.created == true, recorded = file.recorded ~= false,
+    }
+  end
+
+  local action = request.action or "check"
+  if action == "check" then
+    -- The check is the undo's own guard, run without writing: it loads both texts and
+    -- compares the file to what the turn left, which is exactly what undo does first.
+    local can, why = changeset.check(entry)
+    return json.encode({ turn_id = turn.id, can_undo = can == true, reason = why or "" })
+  end
+  if action == "undo" then
+    local done, why = changeset.undo(entry)
+    if not done then return json.encode({ turn_id = turn.id, ok = false, reason = why }) end
+    return json.encode({ turn_id = turn.id, ok = true })
+  end
+  if action == "redo" then
+    local done, why = changeset.redo(entry)
+    if not done then return json.encode({ turn_id = turn.id, ok = false, reason = why }) end
+    return json.encode({ turn_id = turn.id, ok = true })
+  end
+  return json.encode({ error = "unknown_action:" .. tostring(action) })
 end
 
 function wa_session_mode(payload, session)

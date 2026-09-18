@@ -389,6 +389,54 @@ function toolDetail(result) {
 let trace = null;
 let lastTool = "";
 
+function renderDiff(bubble, changes) {
+  const files = (changes && changes.files) || [];
+  if (files.length === 0) return null;
+  const topic = document.createElement("wa-diff");
+  topic.setSummary(changes);
+  bubble.body.append(topic);
+  // The toggle starts disabled: the server has not yet said whether this can be undone
+  // (the files may have moved on since the turn), and enabling it first would be a button
+  // that promises something the handler can then refuse.
+  topic.setUndoable(false, "checking…");
+  topic.addEventListener("diff-act", (event) => actOnDiff(topic, event.detail));
+  return topic;
+}
+
+// Ask whether this turn's change can still be undone, and let the topic show the answer.
+// A refusal here is not an error: a file that moved on is a normal thing to find, and the
+// topic says which file rather than leaving the reader with a dead button.
+async function askUndoable(topic) {
+  if (!topic.dataset.turnId) return;
+  try {
+    const response = await fetch("diff", {
+      method: "POST", headers: apiHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ turn_id: topic.dataset.turnId, action: "check" }),
+    });
+    const payload = await response.json();
+    topic.setUndoable(payload.can_undo === true, payload.reason || "");
+  } catch (error) {
+    topic.setUndoable(false, "the node did not answer");
+  }
+}
+
+// One click, one request, and the outcome is whatever the server says - including a
+// refusal, which is shown on the topic. Nothing here assumes the write happened.
+async function actOnDiff(topic, detail) {
+  const act = detail.act;
+  try {
+    const response = await fetch("diff", {
+      method: "POST", headers: apiHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ turn_id: topic.dataset.turnId, action: act }),
+    });
+    const payload = await response.json();
+    if (payload.error) return detail.done({ ok: false, reason: payload.error });
+    detail.done({ ok: payload.ok === true, reason: payload.reason || "" });
+  } catch (error) {
+    detail.done({ ok: false, reason: "the node did not answer" });
+  }
+}
+
 function currentTrace() {
   if (!trace) {
     trace = document.createElement("wa-trace");

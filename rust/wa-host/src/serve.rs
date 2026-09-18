@@ -608,6 +608,9 @@ fn dispatch(
         "/session" => (200, "application/json", call("wa_session", &[query_value(&query, "id").as_str(), session]).into_bytes()),
         "/session/mode" if method == "POST" => (200, "application/json", call("wa_session_mode", &[body, session]).into_bytes()),
         "/session/fixture" => (200, "application/json", call("wa_session_fixture", &[query_value(&query, "id").as_str(), session]).into_bytes()),
+        // A turn's changed files: "can it be undone?" and "do it", one route so the answer
+        // the toggle shows and the handler's behaviour cannot disagree.
+        "/diff" if method == "POST" => (200, "application/json", call("wa_diff", &[body.trim(), session]).into_bytes()),
         "/client" if method == "POST" => (200, "application/json", call("wa_client", &[body, session]).into_bytes()),
         "/frame" if method == "POST" => (200, "application/json", call("wa_frame", &[body.trim(), session]).into_bytes()),
         "/spells" => (200, "application/json", call("wa_spells", &[session]).into_bytes()),
