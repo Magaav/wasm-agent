@@ -807,7 +807,7 @@ function watchNode() {
     } catch (error) { /* still down */ }
   }, 3000);
 }
-async function send(text) {
+async function send(text, options = {}) {
   // The draft is going out, so what was stored is stale: a respawn must not put the sent prompt
   // back into the composer.
   clearDraft();
@@ -831,9 +831,17 @@ async function send(text) {
   renderAttachments();
   setStatus("wasm-agent is thinking…");
   try {
+    const headers = { "Content-Type": outgoing.contentType, "Accept": "text/event-stream" };
+    // Which thread this turn belongs to. The node creates a session when it is not told one, and
+    // never says which - so a window that is *in* a thread says so, and a continuation lands in the
+    // thread it is continuing rather than in whatever is newest. Only a master says it: the session
+    // header doubles as the account header in this API, and a guest naming a master's thread is not
+    // something the node checks for yet.
+    const target = options.session || (me.role === "master" ? chatSession : "");
+    if (target) headers["X-WA-Session"] = target;
     const response = await fetch("chat", {
       method: "POST",
-      headers: apiHeaders({ "Content-Type": outgoing.contentType, "Accept": "text/event-stream" }),
+      headers: apiHeaders(headers),
       body: outgoing.body,
       signal: controller.signal,
     });
@@ -2374,6 +2382,18 @@ function sessionMatches(session, query) {
   return query.toLowerCase().split(/\s+/).every((word) => haystack.includes(word));
 }
 
+// Continue a thread the node left unfinished.
+//
+// The node records what was lost and prints the command; it does not act on its own, because a
+// repair nobody asked for destroys the evidence of the crash. That leaves a person to notice a
+// badge and type a command, which is not recovery - this is the same thing as one click, sent to
+// the node so the turn runs where the session lives and the window can watch it.
+function resumeSession(id) {
+  if (!id) return;
+  rememberSession(id);
+  send("continue where you stopped", { session: id });
+}
+
 function renderSessions() {
   const shown = sessionList.filter((session) => sessionMatches(session, sessionQuery));
   sessionsNote.textContent = sessionQuery
@@ -2419,6 +2439,11 @@ function renderSessions() {
       row.append(badge);
     }
     row.append(nodeButton("open", () => openSession(session.id)));
+    // Only where there is something to recover, and named as what it does: the node's own words for
+    // this are "continue where you stopped".
+    if (session.state === "unfinished") {
+      row.append(nodeButton("continue", () => resumeSession(session.id)));
+    }
     sessionsBox.append(row);
   }
 }

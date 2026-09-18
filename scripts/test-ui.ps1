@@ -293,6 +293,12 @@ $harness = @'
   }
   check(document.querySelectorAll('.session-state').length === 1,
     'only the thread that needs attention should be badged');
+  // Detection is automatic; acting is one click. A node that resumes turns by itself would be
+  // spending money on its own judgement, and the resume path deliberately only reports.
+  var continuable = Array.prototype.filter.call(document.querySelectorAll(".session-row"),
+    function (row) { return row.textContent.indexOf("continue") >= 0; });
+  check(continuable.length === 1,
+    "only the unfinished thread should offer to continue, saw " + continuable.length);
 
   // The sessions topic is a way to *find* a thread, not just a list: named after its opening
   // message, most recent first, and searchable. A list you have to read top to bottom is not a way
