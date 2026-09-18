@@ -395,11 +395,21 @@ $harness = @'
   document.title = "stage: renamed";
   check(!!nodeButton && nodeButton.textContent === "renamed-by-the-test",
     "the control must show what the node reported, saw: " + (nodeButton ? nodeButton.textContent : "no control"));
+  // A name the node refuses must not stick: the branch could not be renamed, so the node kept
+  // its old name and the window has to say so rather than showing a name the node does not have.
+  window.__renameNode("refused");
+  for (var rf = 0; rf < 30; rf++) { await tick(); }
+  var refusedNote = document.querySelector(".status");
+  check(!/refused/.test(nodeButton.textContent),
+    "a refused rename must not stick in the control, saw: " + nodeButton.textContent);
+  check(!!refusedNote && /could not rename/.test(refusedNote.textContent),
+    "and it must say why, saw: " + (refusedNote ? refusedNote.textContent : "no status"));
+
   var posted = (window.__calls || []).filter(function (call) {
     return call.url.indexOf("node/name") >= 0 && call.method === "POST";
   });
-  check(posted.length === 1, "the rename must be sent to the node, saw " + posted.length);
-  check(posted.length === 1 && JSON.parse(posted[0].body).name === "renamed-by-the-test",
+  check(posted.length === 2, "both renames must be sent to the node, saw " + posted.length);
+  check(posted.length >= 1 && JSON.parse(posted[0].body).name === "renamed-by-the-test",
     "and it must carry the new name, saw: " + (posted[0] ? posted[0].body : "nothing"));
 
   // A lost connection has to be classified: that is what turns a raw TypeError

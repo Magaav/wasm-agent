@@ -101,6 +101,15 @@ window.fetch = function (input, init) {
   if (url.indexOf("node/name") >= 0 && (init && init.method) === "POST") {
     let wanted = "";
     try { wanted = String(JSON.parse((init && init.body) || "{}").name || ""); } catch (error) { /* keep "" */ }
+    // A name the node refuses: the branch on GitHub could not be renamed, so the node keeps
+    // what it had. The UI must not have moved on.
+    if (wanted === "refused") {
+      return Promise.resolve({
+        ok: true, status: 200,
+        json: () => Promise.resolve({ error: "github_push_failed" }),
+        text: () => Promise.resolve(JSON.stringify({ error: "github_push_failed" })),
+      });
+    }
     const local = window.__fixtures.nodes.nodes.find((entry) => entry.local_node);
     if (local && wanted) local.name = wanted;
     return Promise.resolve({
