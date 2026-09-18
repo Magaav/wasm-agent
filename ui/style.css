@@ -340,6 +340,10 @@ body.term .terminal { display: flex; }
   border: 1px solid var(--line); border-radius: var(--radius-sm);
   object-fit: cover; background: var(--panel-2);
 }
+/* Dragging files over the window must look like something will happen; the
+   outline uses the accent so it reads as "drop here", not as an error. */
+.panel.dropping { outline: 2px dashed var(--accent); outline-offset: -4px; }
+.panel.dropping .composer { border-color: var(--accent); }
 
 .composer-row { display: flex; gap: var(--gap); align-items: flex-end; }
 .composer textarea {

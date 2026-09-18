@@ -592,4 +592,21 @@ for t in tests/*.lua; do
   rm -f "$DB.attach"*
 done
 echo "attach tests ok"
+
+# The UI tests are JS and run outside the embedded interpreter, so they need node
+# and they need the repo root as cwd (they read ui/app.js from disk). Skipped with
+# a note rather than silently passed when node is absent: a test that does not run
+# must not look like a test that passed.
+if command -v node >/dev/null 2>&1; then
+  for t in tests/*.js; do
+    [ -e "$t" ] || continue
+    out=$(node "$t" 2>&1 || true)
+    if ! printf '%s' "$out" | grep -q "ALL PASS"; then
+      echo "FAIL $t"; printf '%s\n' "$out" | tail -8; exit 1
+    fi
+  done
+  echo "ui tests ok"
+else
+  echo "ui tests SKIPPED - node not on PATH"
+fi
 echo "smoke ok"

@@ -4,6 +4,7 @@ const jump = document.getElementById("jump");
 const meta = document.getElementById("meta");
 const form = document.getElementById("composer");
 const input = document.getElementById("input");
+const panel = document.getElementById("panel");
 const sendButton = document.getElementById("send");
 const statusBtn = document.getElementById("status-btn");
 const chipModel = document.getElementById("chip-model");
@@ -940,17 +941,29 @@ function readAsDataURL(file) {
   });
 }
 
-attachButton.addEventListener("click", () => fileInput.click());
-fileInput.addEventListener("change", async () => {
-  for (const file of fileInput.files) {
+// One path for every way a file can arrive - the attach button, a paste, a drop
+// - so the three cannot drift apart in what they accept or how they name it.
+// Returns what it took and what it refused, so a caller can report accurately
+// instead of announcing success over a rejection.
+async function addFiles(files) {
+  let added = 0;
+  let refused = 0;
+  for (const file of files) {
     if (isImage(file)) {
       try {
         const dataUrl = await readAsDataURL(file);
         attachments.push({ kind: "image", name: file.name, mime: file.type, data: dataUrl });
+        added += 1;
       } catch (error) {
         // A picture we could not read must not vanish silently.
         setStatus(`could not read ${file.name}`);
       }
+      continue;
+    }
+    if ((file.type || "").startsWith("image/")) {
+      // An image type we do not accept (bmp, tiff, svg). Sending it would fail
+      // at the provider; refusing it here says why.
+      refused += 1;
       continue;
     }
     try {
@@ -959,9 +972,87 @@ fileInput.addEventListener("change", async () => {
     } catch (error) {
       attachments.push({ kind: "text", name: file.name, text: "" });
     }
+    added += 1;
   }
-  fileInput.value = "";
+  if (refused > 0) {
+    setStatus(`${refused} image(s) skipped - only png, jpeg, webp and gif are accepted`);
+  } else if (added > 0) {
+    setStatus(`${added} file(s) attached - press Enter to send`);
+  }
   renderAttachments();
+  return { added, refused };
+}
+
+attachButton.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", async () => {
+  await addFiles(fileInput.files);
+  fileInput.value = "";
+});
+
+// ---- paste (Ctrl+V) ------------------------------------------------------
+// A screenshot pasted from the clipboard arrives as a blob with no filename, so
+// give it one: an unnamed chip would be unreadable, and the name is what the
+// turn shows the model.
+input.addEventListener("paste", async (event) => {
+  const data = event.clipboardData;
+  if (!data) return;
+  const files = [];
+  for (const item of data.items || []) {
+    if (item.kind !== "file") continue;
+    const file = item.getAsFile();
+    if (!file) continue;
+    files.push(file);
+  }
+  if (files.length === 0) return;   // ordinary text paste: let it through
+  event.preventDefault();
+  const stamped = files.map((file, index) => {
+    if (file.name && file.name !== "image.png") return file;
+    const extension = (file.type || "").split("/")[1] || "png";
+    const suffix = files.length > 1 ? `-${index + 1}` : "";
+    return new File([file], `pasted${suffix}.${extension}`, { type: file.type });
+  });
+  await addFiles(stamped);
+});
+
+// ---- drag and drop -------------------------------------------------------
+// The whole panel is a target, not just the 45px textarea: dropping onto a
+// window that looks like it accepts files and having nothing happen is worse
+// than having no drop target at all.
+let dragDepth = 0;
+
+function hasFiles(event) {
+  const types = event.dataTransfer?.types;
+  return types ? Array.from(types).includes("Files") : false;
+}
+
+panel.addEventListener("dragenter", (event) => {
+  if (!hasFiles(event)) return;
+  event.preventDefault();
+  dragDepth += 1;
+  panel.classList.add("dropping");
+});
+
+panel.addEventListener("dragover", (event) => {
+  if (!hasFiles(event)) return;
+  // Without preventDefault on dragover the browser refuses the drop entirely.
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+});
+
+panel.addEventListener("dragleave", (event) => {
+  if (!hasFiles(event)) return;
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) panel.classList.remove("dropping");
+});
+
+panel.addEventListener("drop", async (event) => {
+  if (!hasFiles(event)) return;
+  event.preventDefault();
+  dragDepth = 0;
+  panel.classList.remove("dropping");
+  const files = Array.from(event.dataTransfer.files || []);
+  if (files.length === 0) return;
+  await addFiles(files);
 });
 
 // ---- account -------------------------------------------------------------
