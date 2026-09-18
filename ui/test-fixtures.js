@@ -25,6 +25,19 @@ window.__fixtures = {
     ],
   },
   nodes: { nodes: [] },
+  // GET /sync: what wa_sync_status returns. Three peers on purpose, so the panel's three
+  // states are all exercised by one fixture: behind (two + rows), ahead (one - row) and
+  // level (the = row).
+  sync: {
+    node_id: "aaaaaaaa-1111-2222-3333-444444444444",
+    head: 42,
+    pushing_to: "openclaw.ohana",
+    peers: [
+      { peer_id: "bbbbbbbb-5555-6666-7777-888888888888", cursor: 40 },
+      { peer_id: "cccccccc-8888-9999-aaaa-bbbbbbbbbbbb", cursor: 45 },
+      { peer_id: "dddddddd-cccc-dddd-eeee-ffffffffffff", cursor: 42 },
+    ],
+  },
   tools: { tools: [] },
   spells: { spells: [] },
   env: {},

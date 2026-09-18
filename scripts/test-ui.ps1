@@ -238,6 +238,38 @@ $harness = @'
   check(runningText.indexOf("Reading") >= 0,
     "a running decision must show its streaming text, saw: " + runningText.slice(0, 40));
 
+  // The drift panel is a diff, not a transcript, and it is the one view that could
+  // plausibly be given a write: pushing from here would make *looking* at another node's
+  // ledger a mutation. So it is asserted twice - that it draws the drift it is given, and
+  // that it has nothing to push with.
+  document.getElementById("diff-btn").click();
+  for (var d = 0; d < 20; d++) { await tick(); }
+  var driftBody = document.getElementById("drift-body");
+  var driftText = driftBody ? driftBody.textContent : "";
+  check(driftBody && driftBody.children.length === 2,
+    "the drift panel must show this node and its peers, saw " + (driftBody ? driftBody.children.length : "no panel"));
+  check(/head/.test(driftText) && /42/.test(driftText), "it must state the local head, saw: " + driftText.slice(0, 120));
+  check(/openclaw\.ohana/.test(driftText), "it must name where it is pushing, saw: " + driftText.slice(0, 120));
+  check(/2 behind/.test(driftText), "a peer behind the head must say so");
+  check(/3 ahead/.test(driftText), "a peer ahead of the head must say so");
+  check(/level/.test(driftText), "a peer at the head must say level");
+  var plusRows = driftBody ? driftBody.querySelectorAll(".drift-row.add").length : 0;
+  check(plusRows === 2, "two pending entries must render two + rows, saw " + plusRows);
+  check(!!driftBody && driftBody.querySelectorAll(".drift-row.del").length === 1,
+    "the peer we are behind must render one - row");
+  check(!!driftBody && driftBody.querySelectorAll(".drift-row.muted").length >= 1,
+    "a level peer must render the muted = row");
+  check(/cursor/.test(driftText), "each peer must show its cursor, so the count is auditable");
+  var driftButtons = document.getElementById("drift").querySelectorAll("button");
+  check(driftButtons.length <= 2, "the panel must have no action beyond refresh and close, saw " + driftButtons.length);
+  var mutationWords = /push|send|upload|apply|sync now/i;
+  var mutates = false;
+  for (var b = 0; b < driftButtons.length; b += 1) {
+    if (mutationWords.test(driftButtons[b].textContent + " " + (driftButtons[b].title || ""))) mutates = true;
+  }
+  check(!mutates, "nothing in the drift panel may push: looking at drift must not change it");
+  document.getElementById("drift-close").click();
+
   // The engine view: open it, let the fixture fetch settle in microtasks, and
   // assert what a reader would see. Timers never fire in this mode, so the
   // wait is promise ticks only - which is also why the panel must render
