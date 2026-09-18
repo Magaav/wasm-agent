@@ -257,3 +257,20 @@ wa-sentinel request wake --session "$SESSION" --prompt "the node restarted; carr
 `request` writes a file and returns; the sentinel performs it. Your turn dies as `unfinished` when the
 node stops, which is expected — the request is already on disk. Write the `wake` request too if you want
 to be brought back. See `docs/SENTINEL.md`.
+
+## Keep your branch current with main
+
+A node works in its own worktree on its own branch, and that branch drifts: main moves, the node does
+not, and then the node cannot see the rules it is supposed to follow.
+
+That is not hypothetical. An agent read `docs/SENTINEL.md` and got `not_found`, correctly - the file was
+on main, and its branch was **21 commits behind**. It could not see the sentinel, its documentation, or
+the rule telling it to ask the sentinel instead of stopping the node. A node that cannot see main cannot
+see the rules, and it will keep making the mistake the rule exists to prevent.
+
+Before starting work:
+
+    git fetch origin && git merge origin/main
+
+And when your work is merged into main, main is merged back into your branch, so the next thing you read
+is the current thing.
