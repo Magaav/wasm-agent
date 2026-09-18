@@ -13,9 +13,9 @@ window.__fixtures = {
   sessions: {
     sessions: [
       {
-        id: "aaaaaaaa-0000-0000-0000-000000000001", title: "interrupted thread",
+        id: "aaaaaaaa-0000-0000-0000-000000000001", title: "unfinished thread",
         mode: "chat", turn_count: 61, updated_at: 1789000000,
-        state: "interrupted", state_detail: "died after a tool result with no next decision",
+        state: "unfinished", state_detail: "stopped after a tool result with no next decision",
       },
       {
         id: "bbbbbbbb-0000-0000-0000-000000000002", title: "settled thread",

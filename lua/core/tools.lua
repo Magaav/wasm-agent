@@ -39,7 +39,7 @@ M.shared = {
   schema("capabilities", "List the tools available to this account (its capabilities).", {}),
   schema("sessions", "List your own past sessions (resumable threads), most recent first.", {
     limit = { type = "integer", minimum = 1, maximum = 100 } }),
-  schema("session", "Read one of your past sessions: the transcript, oldest first.", {
+  schema("session", "Read one of your past sessions: the newest turns, oldest first.", {
     session_id = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 1000 } }, { "session_id" }),
   schema("search_turns", "Search your own past sessions for text (what did we decide about X?).", {
@@ -348,7 +348,17 @@ function M.dispatch(memory, name, args, role, ctx)
     local session = memory.session(args.session_id)
     if not session then return { error = "unknown_session" } end
     if session.user_id ~= user_id and not is_master(role) then return { error = "forbidden" } end
-    return { session = session, turns = memory.session_turns(args.session_id, { limit = args.limit or 200 }) }
+    local turns = memory.session_turns(args.session_id, { limit = args.limit or 200 })
+    -- Say when it is a window. A model that reads 200 of 260 turns without being told
+    -- will treat the oldest row it can see as the start of the thread, which is how
+    -- ancient history reads as current state.
+    local total = memory.turn_count(args.session_id)
+    local note
+    if total > #turns then
+      note = string.format("showing the newest %d of %d turns; the %d earlier ones are omitted",
+        #turns, total, total - #turns)
+    end
+    return { session = session, turns = turns, note = note }
   elseif name == "search_turns" then
     return { matches = memory.search_turns(args.query or "", is_master(role) and nil or user_id, args.limit or 20) }
   elseif name == "resume_session" then
@@ -357,6 +367,11 @@ function M.dispatch(memory, name, args, role, ctx)
     if target.user_id ~= user_id and not is_master(role) then return { error = "forbidden" } end
     local turns = memory.session_turns(args.session_id, { limit = args.limit or 30 })
     local lines = { "Resumed session " .. args.session_id .. " (" .. (target.title or "") .. "):" }
+    local total = memory.turn_count(args.session_id)
+    if total > #turns then
+      lines[#lines + 1] = string.format("(%d earlier turns omitted; showing the newest %d)",
+        total - #turns, #turns)
+    end
     if target.summary and target.summary ~= "" then lines[#lines + 1] = target.summary end
     for _, turn in ipairs(turns) do
       if turn.role == "user" or turn.role == "assistant" then

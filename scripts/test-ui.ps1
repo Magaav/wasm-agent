@@ -162,7 +162,7 @@ $harness = @'
   // the status line is at its longest, and an unbreakable token there pushed a
   // horizontal scrollbar onto the transcript that vanished with the answer.
   window.handleEvent({ type: "status",
-    text: "recovering an interrupted thread: died after a tool result with no next decision" });
+    text: "recovering an unfinished thread: stopped after a tool result with no next decision" });
   // The status line is at its longest here, and it is the one element that exists
   // only during a run - which is why a scrollbar could come and go with it.
   var statusLine = document.querySelector(".status");
@@ -194,9 +194,9 @@ $harness = @'
   var rows = document.querySelectorAll('.session-row');
   check(rows.length === 2, 'the engine sessions view should render both fixtures, saw ' + rows.length);
   var badge = document.querySelector('.session-state');
-  check(!!badge, 'an interrupted thread must be badged');
+  check(!!badge, 'an unfinished thread must be badged');
   if (badge) {
-    check(badge.textContent === 'interrupted', 'the badge should name the state, saw ' + badge.textContent);
+    check(badge.textContent === 'unfinished', 'the badge should name the state, saw ' + badge.textContent);
     check((badge.title || '').indexOf('tool result') >= 0, 'the badge should carry the reason, saw ' + badge.title);
   }
   check(document.querySelectorAll('.session-state').length === 1,
@@ -262,7 +262,7 @@ try {
   }
   $result = $match.Groups[1].Value.Trim()
   if ($result -like "UI PASS*") {
-    Write-Host "  ok   UI structure: reply bubble and run topic, plus the interrupted-session badge in the engine view" -ForegroundColor Green
+    Write-Host "  ok   UI structure: reply bubble and run topic, plus the unfinished-session badge in the engine view" -ForegroundColor Green
   } else {
     Write-Host "  FAIL $result" -ForegroundColor Red
     exit 1

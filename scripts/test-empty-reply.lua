@@ -95,10 +95,12 @@ has(tostring(err), "WASM_AGENT_LLM_MAX_OUTPUT", "the failure names the knob")
 
 -- And the durable record must show a failed turn carrying the reason, which is
 -- what anyone reading the ledger later will actually see.
-local state = memory.session_state(session_id)
+-- session_state returns a table, and comparing a table to a string is always false -
+-- which is how the first version of this assertion passed while checking nothing.
+local state = (memory.session_state(session_id) or {}).state
 checks = checks + 1
-if state == "answered" or state == nil then
-  error("a turn that produced nothing must not read as answered, got state=" .. tostring(state))
+if state ~= "failed" then
+  error("a turn that produced nothing must be recorded as failed, got state=" .. tostring(state))
 end
 local turns = memory.session_turns(session_id)
 local last = turns and turns[#turns] or nil

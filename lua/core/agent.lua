@@ -380,7 +380,7 @@ function M:build_context()
       content = "Summary of earlier turns in this session:\n" .. session.summary,
     }
   end
-  -- Recovery: if this thread was interrupted, the model has to be told, because
+  -- Recovery: if this thread has no recorded answer, the model has to be told, because
   -- its transcript simply ends mid-exchange and it would otherwise assume its
   -- last step either succeeded or never ran. Both assumptions are wrong: the step
   -- may have run without its result being written, and it may have run twice.
@@ -586,25 +586,27 @@ function M:maybe_compact()
   return true
 end
 
--- Detect an interrupted thread and prepare the recovery notice.
+-- Detect a thread with no recorded answer and prepare the recovery notice.
 --
 -- The moment to look is the first turn of a process, *before* the new question is
--- appended: at that point the transcript's tail is still the previous turn's, and
--- a tail that is a question, a tool result or an unanswered decision can only
--- mean the process that was working on it did not survive. (A process cannot be
--- killed and keep running, so this is checked once and cached: there is nothing
--- to re-check later in the same process.)
+-- appended: at that point the transcript's tail is still the previous turn's, and a
+-- tail that is a question, a tool result or a decision with no recorded result means
+-- no answer was ever written. It does *not* mean the other process is dead - it may
+-- still be working, which is the case that made "interrupted" a word this code should
+-- never have used - so the notice states both possibilities rather than picking one.
+-- (Checked once and cached: our own appends are the only thing that can change the
+-- tail while this process runs.)
 --
--- Two things happen, and they are deliberately different: the interruption is
--- *recorded* durably, so it survives being recovered from, and the model is told
--- in its context, so it re-establishes state instead of assuming the lost step
--- either ran or did not.
+-- Two things happen, and they are deliberately different: picking the thread up is
+-- *recorded* durably, so it survives being recovered from, and the model is told in
+-- its context, so it re-establishes state instead of assuming the lost step either
+-- ran or did not.
 function M:note_interruption()
   if self.resume_notice ~= nil then return self.resume_notice end
   self.resume_notice = false
   local state = memory.session_state(self.session_id)
-  if not state or state.state ~= "interrupted" then return false end
-  memory.mark_interrupted(self.session_id, { seq = state.seq, reason = state.detail })
+  if not state or state.state ~= "unfinished" then return false end
+  memory.mark_unfinished(self.session_id, { seq = state.seq, reason = state.detail })
 
   local work
   if state.question ~= "" then
@@ -617,13 +619,13 @@ function M:note_interruption()
     work = "The transcript ends after a tool result, so nothing is recorded about what came next."
   end
   self.resume_notice =
-    "Recovery notice: your previous turn in this session was interrupted - the process stopped "
-    .. "mid-answer. " .. state.detail .. ". " .. work .. " Nothing after that point is recorded, so "
-    .. "the unfinished step may have run without its result being saved, or may not have run at all, "
-    .. "and re-running it may repeat an effect. Re-establish the real state from the machine before "
-    .. "continuing (re-read the files you changed, check `git status` and the ledger), and say plainly "
-    .. "what had already been done."
-  self.emit({ type = "status", text = "recovering an interrupted thread: " .. state.detail })
+    "Recovery notice: this session has no recorded answer after its last turn. " .. state.detail
+    .. ". " .. work .. " The process that was working on it may still be running, or it may have "
+    .. "stopped - nothing after that point is recorded either way, so the unfinished step may have "
+    .. "run without its result being saved, or may not have run at all, and re-running it may repeat "
+    .. "an effect. Re-establish the real state from the machine before continuing (re-read the files "
+    .. "you changed, check `git status` and the ledger), and say plainly what had already been done."
+  self.emit({ type = "status", text = "recovering an unfinished thread: " .. state.detail })
   return self.resume_notice
 end
 

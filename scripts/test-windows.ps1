@@ -194,7 +194,27 @@ $root = Split-Path $PSScriptRoot -Parent
     else { Bad "the composer attachment test failed"; Note ($out -replace "s+", " ") }
   }
 
-$recoveryFile = Join-Path $root "scripts/test-recovery.lua"
+  # Reading a session is a window, and the window is the newest turns. The same shared
+  # file the smoke suite runs, because the rule is about memory, not about the platform.
+  $windowTest = Join-Path $root "scripts/test-memory-window.lua"
+  if (Test-Path $windowTest) {
+    # Its own database: it seeds a few hundred turns, and sharing them would put this
+    # file's fixtures in front of the recovery assertions below.
+    $windowDb = "$db.window"
+    $previous = $env:WA_SCRIPT
+    $env:WA_SCRIPT = $windowTest
+    try { $out = $null | & $WaExe --db $windowDb 2>&1 | Out-String }
+    finally {
+      if ($null -eq $previous) { Remove-Item Env:\WA_SCRIPT -ErrorAction SilentlyContinue }
+      else { $env:WA_SCRIPT = $previous }
+    }
+    if ($out -match "memory window ok") { Ok "memory window: the newest turns, and it says what it dropped" }
+    else { Bad "the memory window test failed"; Note ($out -replace "\s+", " ") }
+  } else {
+    Bad "scripts/test-memory-window.lua is missing"
+  }
+
+  $recoveryFile = Join-Path $root "scripts/test-recovery.lua"
 if (Test-Path $recoveryFile) {
   $out = Lua (Get-Content -Raw -Path $recoveryFile)
   if ($out -match "recovery ok") { Ok "session recovery: derived state, durable record, recovery notice" }
@@ -218,18 +238,18 @@ print("seeded=" .. id)
 '@
   $seeded = Lua $seedProbe
   $seededId = ([regex]::Match($seeded, "seeded=([0-9a-fA-F\-]{36})")).Groups[1].Value
-  if ($seededId) { Ok "seeded an interrupted thread ($($seededId.Substring(0, 8)))" }
-  else { Bad "could not seed an interrupted thread"; Note ($seeded -replace "\s+", " ") }
+  if ($seededId) { Ok "seeded an unfinished thread ($($seededId.Substring(0, 8)))" }
+  else { Bad "could not seed an unfinished thread"; Note ($seeded -replace "\s+", " ") }
 
   if ($seededId) {
     # `wa resume` is the visible half: read-only, and it names the unfinished call.
     $report = Wa @("--db", $db, "resume")
-    if ($report -match "1 tool call\(s\) never reported: bash") { Ok "wa resume names the unfinished work" }
-    else { Bad "wa resume did not describe the interruption"; Note ($report -replace "\s+", " ") }
+    if ($report -match "1 tool call\(s\) with no recorded result: bash") { Ok "wa resume names the unfinished work" }
+    else { Bad "wa resume did not describe the unfinished work"; Note ($report -replace "\s+", " ") }
 
     $resumed = Wa @("--db", $db, "chat", "--session", $seededId, "Answer with the single word: ready")
-    if ($resumed -match "interrupted") { Ok "continuing an interrupted thread says so before the prompt" }
-    else { Bad "the banner did not report the interruption"; Note ($resumed -replace "\s+", " ") }
+    if ($resumed -match "unfinished") { Ok "continuing an unfinished thread says so before the prompt" }
+    else { Bad "the banner did not report the unfinished thread"; Note ($resumed -replace "\s+", " ") }
 
     $stateProbe = "local m = dofile(`"lua/core/memory.lua`") m.setup() local s = m.session_state(`"$seededId`") " +
       "print(`"state=`" .. s.state .. `" interruptions=`" .. s.interruptions .. `" at=`" .. s.recorded_seq)"

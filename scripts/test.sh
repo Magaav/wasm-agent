@@ -318,7 +318,7 @@ LUA
 WA_SCRIPT="$DB.sessions.lua" "$BIN" --db "$DB" | grep "sessions ok"
 rm -f "$DB.sessions.lua"
 
-# Session recovery. The contract - what an interrupted thread is, what is recorded
+# Session recovery. The contract - what an unfinished thread is, what is recorded
 # and what the agent is told - lives in scripts/test-recovery.lua, because the
 # Windows suite runs the same file and two copies would drift. What is asserted
 # here is the surface a user actually touches and the Lua test cannot see: the
@@ -348,14 +348,14 @@ print(id)
 LUA
 SID="$(WA_SCRIPT="$DB.seed.lua" "$BIN" --db "$RDB")"
 [ -n "$SID" ] || { echo "FAIL: the seed produced no session id" >&2; exit 1; }
-"$BIN" --db "$RDB" sessions | grep -q "interrupted"
-# The unfinished call is named: "interrupted" alone would send the reader into the
+"$BIN" --db "$RDB" sessions | grep -q "unfinished"
+# The unfinished call is named: "unfinished" alone would send the reader into the
 # transcript to find out what is missing.
-"$BIN" --db "$RDB" sessions | grep -q "1 tool call(s) never reported: bash"
+"$BIN" --db "$RDB" sessions | grep -q "1 tool call(s) with no recorded result: bash"
 "$BIN" --db "$RDB" resume | grep -q "waiting: 1 thread"
 "$BIN" --db "$RDB" resume | grep -q "wa resume --session"
-"$BIN" --db "$RDB" status | grep -q "interrupted at seq 2"
-"$BIN" --db "$RDB" resume --session "$SID" | grep -q "never reported"
+"$BIN" --db "$RDB" status | grep -q "unfinished at seq 2"
+"$BIN" --db "$RDB" resume --session "$SID" | grep -q "no recorded result"
 # An unknown session must be refused, not silently reported as fine.
 if "$BIN" --db "$RDB" resume --session no-such-session >/dev/null 2>&1; then
   echo "FAIL: wa resume --session <unknown> must exit non-zero" >&2; exit 1
@@ -368,8 +368,17 @@ QSID="$(WA_SCRIPT="$DB.seed.lua" "$BIN" --db "$QDB" question)"
 [ -n "$QSID" ] || { echo "FAIL: the question seed produced no session id" >&2; exit 1; }
 "$BIN" --db "$QDB" resume | grep -q "unanswered question"
 "$BIN" --db "$QDB" resume | grep -q "count the scripts"
-"$BIN" --db "$QDB" status | grep -q "interrupted at seq 1"
+"$BIN" --db "$QDB" status | grep -q "unfinished at seq 1"
 rm -f "$DB.seed.lua"
+
+# Reading a session is a window, and the window is the newest turns. The old shape
+# returned the oldest 200 of a long thread while saying nothing, so a reader looking
+# for the end of a run got its opening moves. The tool that shows a session to the
+# model must also say what it dropped.
+# Its own database: it seeds a few hundred turns, and sharing them would put this
+# file's fixtures in front of the recovery assertions above.
+WA_SCRIPT=scripts/test-memory-window.lua "$BIN" --db "$DB.window" | grep "memory window ok"
+rm -f "$DB.window"*
 echo "recovery cli ok"
 
 # `wa status` is the command an operator runs when something is wrong, so every

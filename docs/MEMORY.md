@@ -34,14 +34,21 @@ context**: `agent.lua` rebuilds the provider messages from it every turn
 (system + AGENTS.md + summary + turns after the watermark). There is no separate
 in-memory message list, which is what makes restarts resumable.
 
-## Interrupted sessions (recovery)
+## Unfinished sessions (recovery)
 
-A session is interrupted when the process died mid-answer: the machine slept, the
-terminal closed, something killed it. The transcript then just *ends* — after a
-question, after a tool result, or after a decision whose tools never reported —
-which is indistinguishable from "the answer is still coming". Nothing in a row says
-which, and a killed process cannot write a flag saying so: the exit path that would
-set one does not run.
+A session is unfinished when its transcript just *ends* — after a question, after a
+tool result, or after a decision whose tools have no recorded result. That shape is
+indistinguishable from "the answer is still coming": a process that was killed cannot
+write a flag saying so (the exit path that would set one does not run), and a process
+that is *alive* cannot write one either, because it has not stopped. Nothing in a row
+tells the two apart.
+
+The state was once called `interrupted`, and the word was wrong in a way that cost
+credibility rather than data: a live 426-turn run was reported as interrupted on every
+poll while it was demonstrably writing turns, and `wa resume` would have written a
+durable "the process died" record for a thread that had not. A name that asserts an
+event we cannot observe is a claim the code should not make, so the derived state is
+`unfinished` and the notice says both possibilities out loud.
 
 So the **state is derived from the ledger**, which is appended to as the turn
 proceeds. The last turn is an exact record of how far the process got:
@@ -50,8 +57,8 @@ proceeds. The last turn is an exact record of how far the process got:
 | --- | --- | --- |
 | `empty` | none | nothing said yet |
 | `answered` | assistant reply | the thread is settled |
-| `failed` | assistant with `ok=0` | the model call errored — a **landed** outcome, not an interruption |
-| `interrupted` | user, tool, or assistant with `tool_calls` | the process stopped mid-turn |
+| `failed` | assistant with `ok=0` | the model call errored — a **landed** outcome, not an unfinished one |
+| `unfinished` | user, tool, or assistant with `tool_calls` | no answer is recorded after this turn; the process may have stopped or may still be working |
 
 `memory.session_state(id)` returns that, plus where it stopped and which calls of the
 last decision have no recorded result: "1 of 2 never reported" is a different fact
@@ -59,8 +66,9 @@ from "nothing ran", and only the decision knows which — when the process dies 
 two calls of a batch, the tail is a tool turn whose *sibling* never ran.
 
 Derivation is always current but it forgets: resume the thread and the tail is an
-answer again. So the first time an interruption is **observed** it is also recorded on
-the session (`interrupted_at/seq/reason/count`), one row per interruption *point* and
+answer again. So the first time an unfinished tail is **observed** it is also recorded
+on the session (`interrupted_at/seq/reason/count` — the columns keep their old names
+to avoid a migration), one row per *point* where a thread was picked up unfinished and
 never per observation. That is what makes the history survive recovery.
 
 What is visible, and where:
@@ -68,7 +76,7 @@ What is visible, and where:
 ```
 wa sessions          a state column, and the reason on its own line for threads
                      that need attention
-wa status            an `interrupted at seq N  ...  ->  wa resume` line for the
+wa status            an `unfinished at seq N  ...  ->  wa resume` line for the
                      current thread - absent when it is settled
 wa resume [--list]   the report: what stopped it, what is unfinished, the question
                      that was never answered, how many times, and the command to
@@ -84,7 +92,7 @@ with no call); that was there already. What was missing is that the **model** wa
 never told: its transcript ends mid-exchange, so it assumes its last step either
 succeeded or never ran — and both are wrong, because the step may have run without
 its result being saved, and it may have run twice. So the first turn of a process in
-an interrupted thread:
+an unfinished thread:
 
 1. records the interruption (above), and
 2. injects a **context-only** recovery notice — `system`, placed after the cached

@@ -546,13 +546,28 @@ function M.append_turn(session_id, turn)
   return seq
 end
 
+-- Turns are read as a *window*, and the window is the newest ones. The old shape -
+-- ORDER BY seq ASC LIMIT ? - returned the oldest 200 of a 367-turn thread and said
+-- nothing about it, so a reader looking for the end of a run got its opening moves,
+-- and a model asking about a long session's state got its ancient history as if it
+-- were current. Nobody wants the head of a window; they want the tail.
+--
+-- `limit` bounds the window and `after_seq` moves its start. To know whether rows
+-- were dropped, compare with M.turn_count(session_id) - the tool that shows a session
+-- to the model says so in words, because a silent truncation is a memory bug.
 function M.session_turns(session_id, opts)
   opts = opts or {}
-  local sql = "SELECT * FROM turns WHERE session_id=?"
-  local params = {session_id}
-  if opts.after_seq then sql = sql .. " AND seq>?"; params[#params + 1] = opts.after_seq end
-  sql = sql .. " ORDER BY seq ASC LIMIT ?"
-  params[#params + 1] = opts.limit or 200
+  local limit = opts.limit or 200
+  local sql, params
+  if opts.after_seq then
+    sql = "SELECT * FROM (SELECT * FROM turns WHERE session_id=? AND seq>? " ..
+      "ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC"
+    params = {session_id, opts.after_seq, limit}
+  else
+    sql = "SELECT * FROM (SELECT * FROM turns WHERE session_id=? " ..
+      "ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC"
+    params = {session_id, limit}
+  end
   local rows = query(sql, params)
   for _, row in ipairs(rows) do
     row.tool_calls = json.decode(row.tool_calls)
@@ -589,13 +604,22 @@ end
 --                errored. That is a landed outcome, not an interruption, and
 --                conflating the two would send a reader looking for lost work
 --                that was never started.
---   interrupted  last turn is a question, a tool result, or a decision whose
---                tools never reported - the process stopped mid-turn
+--   unfinished   last turn is a question, a tool result, or a decision whose tools
+--                have no recorded result. The process that was working on it may
+--                have stopped, or it may still be working - the ledger cannot tell
+--                those apart, so nothing here claims a death.
+--
+-- This state was called `interrupted`, and the word cost real credibility: a live
+-- 426-turn run was reported as interrupted on every poll while it was demonstrably
+-- writing turns. A name that asserts something we cannot observe is a claim the code
+-- should not make. The durable history (`mark_unfinished`) is the part that *is*
+-- observable: a thread was picked up again after being left unfinished.
 --
 -- Derivations are cheap and always current, but they forget: once the thread is
--- resumed the tail is an answer again and nothing says the answer came after a
--- crash. So the first time an interruption is *observed* it is also recorded on
--- the session (`mark_interrupted`), which is the part that survives.
+-- resumed the tail is an answer again and nothing says the answer came after a stop.
+-- So the first time an unfinished tail is *observed* it is also recorded on the
+-- session - the interrupted_* columns keep their old names to avoid a migration,
+-- and hold the count and reason of those observations.
 
 function decode_calls(raw)
   if type(raw) == "string" then
@@ -609,10 +633,10 @@ function classify(last)
   if not last then return "empty" end
   if last.role == "assistant" then
     if last.ok == 0 or last.ok == false then return "failed" end
-    if #decode_calls(last.tool_calls) > 0 then return "interrupted" end
+    if #decode_calls(last.tool_calls) > 0 then return "unfinished" end
     return "answered"
   end
-  return "interrupted"
+  return "unfinished"
 end
 
 function ago(at)
@@ -633,9 +657,9 @@ function detail_of(state, last, pending)
   if state == "empty" then return "no turns yet" end
   if state == "answered" then return "settled - the last turn is a reply" end
   if state == "failed" then return "the last turn failed (the model call errored)" end
-  if not last then return "interrupted" end
+  if not last then return "nothing is recorded after the last turn" end
   if last.role == "user" then return "an unanswered question, " .. ago(last.created_at) end
-  if last.role == "summary" then return "died right after a compaction, " .. ago(last.created_at) end
+  if last.role == "summary" then return "stopped after a compaction, " .. ago(last.created_at) end
   if last.role == "assistant" then
     local names = pending
     if names == nil then
@@ -644,16 +668,16 @@ function detail_of(state, last, pending)
         names[#names + 1] = ((call["function"] or {}).name or "?")
       end
     end
-    return string.format("%d tool call(s) never reported: %s, %s",
+    return string.format("%d tool call(s) with no recorded result: %s, %s",
       #names, #names > 0 and table.concat(names, ", ") or "unnamed", ago(last.created_at))
   end
   -- The tail is a tool result: something did report, so the interesting fact is
   -- which calls of that same decision did not.
   if pending and #pending > 0 then
-    return string.format("died after a tool result; %d call(s) of that batch never reported: %s, %s",
+    return string.format("stopped after a tool result; %d call(s) of that batch have no recorded result: %s, %s",
       #pending, table.concat(pending, ", "), ago(last.created_at))
   end
-  return "died after a tool result with no next decision, " .. ago(last.created_at)
+  return "stopped after a tool result with no next decision, " .. ago(last.created_at)
 end
 
 -- Which calls of the tail's own decision never reported a result. Returns the
@@ -695,7 +719,7 @@ function M.session_state(session_id)
   local last = rows[1]
   local state = classify(last)
   local pending = nil
-  if state == "interrupted" and last and (last.role == "assistant" or last.role == "tool") then
+  if state == "unfinished" and last and (last.role == "assistant" or last.role == "tool") then
     local total
     pending, total = M.pending_calls(session_id)
     -- A tool tail whose result matches none of the decision's calls: the ledger
@@ -711,7 +735,7 @@ function M.session_state(session_id)
     role = last and last.role or "",
     at = last and last.created_at or nil,
     pending = pending or {},
-    question = (state == "interrupted" and last and last.role == "user") and (last.content or "") or "",
+    question = (state == "unfinished" and last and last.role == "user") and (last.content or "") or "",
     detail = detail_of(state, last, pending),
     recorded_at = session.interrupted_at,
     recorded_seq = tonumber(session.interrupted_seq) or 0,
@@ -725,10 +749,10 @@ function M.turn_count(session_id)
   return tonumber(rows[1] and rows[1].n) or 0
 end
 
--- Write an interruption down, once per interruption point. Re-running the
--- detection for the same tail must not inflate the count: an agent that resumes
--- a thread three times was interrupted once, not three times.
-function M.mark_interrupted(session_id, opts)
+-- Write down that a thread was picked up while unfinished, once per point where
+-- that happened. Re-running the detection for the same tail must not inflate the
+-- count: an agent that resumes a thread three times picked it up once at that tail.
+function M.mark_unfinished(session_id, opts)
   opts = opts or {}
   local session = M.session(session_id)
   if not session then return nil end
@@ -737,7 +761,7 @@ function M.mark_interrupted(session_id, opts)
   if (tonumber(session.interrupted_seq) or 0) == seq and (session.interrupted_at or 0) > 0 then
     return nil
   end
-  local reason = opts.reason or (state and state.detail) or "interrupted"
+  local reason = opts.reason or (state and state.detail) or "unfinished"
   exec("UPDATE sessions SET interrupted_at=?, interrupted_seq=?, interrupted_reason=?, " ..
        "interrupted_count=COALESCE(interrupted_count,0)+1 WHERE id=?",
        {host.now(), seq, reason, session_id})
@@ -745,13 +769,13 @@ function M.mark_interrupted(session_id, opts)
   return reason
 end
 
--- Threads currently waiting for something, most recent first. This is what a
--- user (or the resumed agent) needs to see, and it is derived, so a hard kill
--- shows up here without anyone having run a command that could notice it.
-function M.interrupted(user_id, limit)
+-- Threads with no recorded answer, most recent first. This is what a user (or the
+-- resumed agent) needs to see, and it is derived, so a process that stops without a
+-- chance to say so shows up here without anyone running a command that could notice.
+function M.unfinished(user_id, limit)
   local found = {}
   for _, row in ipairs(M.list_sessions(user_id, limit or 40, { states = true })) do
-    if row.state == "interrupted" then
+    if row.state == "unfinished" then
       local state = M.session_state(row.id)
       if state then
         state.turns = tonumber(row.turn_count) or 0

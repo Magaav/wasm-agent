@@ -62,7 +62,7 @@ elseif command == "status" then
   -- One health line per fact, from this checkout (the Lua core, not the host).
   dofile("lua/core/status.lua").report()
 elseif command == "resume" then
-  -- Recovery, in two halves: see what was interrupted, then continue it.
+  -- Recovery, in two halves: see what was left unfinished, then continue it.
   --
   -- Reporting is read-only on purpose. "Visible" and "recovered" are different
   -- claims: a command that silently repairs what it prints cannot be used to
@@ -94,10 +94,10 @@ elseif command == "resume" then
     -- written after a crash is not the same thing as a reply, and the record is
     -- the only place that difference survives.
     if state.interruptions > 0 then
-      print(string.format("            history   interrupted %d time(s); newest at turn %d: %s",
+      print(string.format("            history   left unfinished %d time(s); newest at turn %d: %s",
         state.interruptions, state.recorded_seq, state.recorded_reason))
     end
-    if state.state == "interrupted" then
+    if state.state == "unfinished" then
       print(string.format("            recover   wa resume --session %s \"continue where you stopped\"", short))
     end
   end
@@ -113,7 +113,7 @@ elseif command == "resume" then
     state.turns = memory.turn_count(target)
     states, targeted = { state }, true
   else
-    states = memory.interrupted(nil, 40)
+    states = memory.unfinished(nil, 40)
   end
 
   if #states == 0 then
@@ -157,7 +157,7 @@ elseif command == "sessions" then
       tonumber(row.turn_count) or 0, row.state or "-", row.title or ""))
     -- A thread that needs attention says why, on its own line: the state column
     -- is a label, and a label alone would make the reader open every session.
-    if row.state == "interrupted" then print("      " .. row.state_detail) end
+    if row.state == "unfinished" then print("      " .. row.state_detail) end
   end
 elseif command == "nodes" then
   local nodes = dofile("lua/core/nodes.lua")
@@ -192,7 +192,7 @@ elseif command == "help" then
   print("wa: chat [--continue|--session <id>] [prompt]  |  remember <text> | recall <query>")
   print("    memories | forget <id> | search <query> | conversation <id> | conversations")
   print("    sessions | skills | stats | status | nodes | call <node> <capability> [args-json]")
-  print("    resume [--list] [--session <id>] [prompt]   see and continue an interrupted thread")
+  print("    resume [--list] [--session <id>] [prompt]   see and continue an unfinished thread")
   print("    paths  where this node keeps its files, and the config file it would read")
 else
   print("unknown command: " .. tostring(command))

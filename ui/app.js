@@ -513,14 +513,14 @@ function composedBody(text) {
 // A lost connection is not a failed turn. When the node dies mid-stream the
 // browser throws a TypeError, and printing it raw - "error: TypeError: network
 // error" - tells the reader nothing: not what broke, not what to do, and not
-// that the work is recoverable. It is: the turn is recorded as interrupted.
+// that the work is recoverable. It is: the turn is recorded as unfinished.
 function isConnectionLoss(error) {
   return error instanceof TypeError;
 }
 
 function connectionMessage() {
   return "lost the local node mid-turn (nothing is serving " + location.origin + ")." +
-    " Start it with `wa ui` - this turn is recorded as interrupted, and" +
+    " Start it with `wa ui` - this turn is recorded as unfinished, and" +
     " `wa resume --list` will offer to continue it.";
 }
 
