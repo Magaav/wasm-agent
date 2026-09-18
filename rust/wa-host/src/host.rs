@@ -311,10 +311,18 @@ fn agent() -> ureq::Agent {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(180u64);
+    // ureq 3 names these for the phase they bound: waiting for the response headers,
+    // and waiting for each read of the body. The second is what catches an SSE stream
+    // that has gone quiet without capping a long one that is still talking.
+    let respond = std::env::var("WASM_AGENT_HTTP_RESPONSE_TIMEOUT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(120u64);
     ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(std::time::Duration::from_secs(connect)))
-        .timeout_read(Some(std::time::Duration::from_secs(read)))
+        .timeout_recv_response(Some(std::time::Duration::from_secs(respond)))
+        .timeout_recv_body(Some(std::time::Duration::from_secs(read)))
         .build()
         .into()
 }

@@ -35,7 +35,7 @@ static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::n
 /// Rate-limits the "the worker is stalled" line so a wedged node cannot fill a log.
 static STALL_LOGGED_MS: AtomicU64 = AtomicU64::new(0);
 
-fn beat() {
+pub fn beat() {
     let started = STARTED.get_or_init(std::time::Instant::now);
     BEAT_MS.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
 }
@@ -75,13 +75,12 @@ fn health_body() -> Vec<u8> {
     let age_ms = beat_age_ms();
     let stalled = age_ms >= stall_seconds() * 1000;
     let state = if stalled { "stalled" } else if age_ms < 1000 { "alive" } else { "busy" };
-    format!(
-        "{{"ok":{},"worker":"{}","stalled_ms":{}}}",
-        if stalled { "false" } else { "true" },
-        state,
-        age_ms
-    )
-    .into_bytes()
+    // Built with serde_json rather than a hand-escaped format string: the escaping
+    // is exactly the kind of thing that silently produces invalid JSON, and this is
+    // the one endpoint that must never be the thing that lies.
+    serde_json::json!({ "ok": !stalled, "worker": state, "stalled_ms": age_ms })
+        .to_string()
+        .into_bytes()
 }
 
 /// The one open SSE client. Only the agent thread touches it, but it is a static
@@ -235,7 +234,7 @@ pub fn run(lua: Lua, port: u16, ui: PathBuf) {
         }
         match sender.try_send((stream, request)) {
             Ok(()) => {}
-            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+            Err(std::sync::mpsc::TrySendError::Full((mut stream, _request))) => {
                 // A bounded queue: refusing loudly beats an unbounded backlog that
                 // every client waits in.
                 let body = b"{\"error\":\"node_busy\",\"hint\":\"the node is answering other requests; retry shortly\"}";
