@@ -68,12 +68,27 @@ rm -f "$DB.client.lua"
 # maybe_compact returned early and nothing ever compacted.
 cat > "$DB.budget.lua" <<'LUA'
 local provider = dofile("lua/core/provider.lua")
+local windowlib = dofile("lua/core/model_window.lua")
 local fallback = provider.budget("some-unknown-model")
 assert(fallback.context == 128000, "the env window is the fallback, got " .. tostring(fallback.context))
+assert(fallback.source == "env-WASM_AGENT_LLM_CONTEXT", "an unknown model must say the env was used, got " .. tostring(fallback.source))
 local per_model = provider.budget("kimi-k2.6")
 assert(per_model.context == 262144, "a per-model window must win, got " .. tostring(per_model.context))
 assert(per_model.reserve == 32768, "a per-model reserve must win")
 assert(provider.limits and provider.limits ~= provider.budget, "limits and budget are different things")
+
+-- The window belongs to the model, not to the process. WASM_AGENT_LLM_CONTEXT is 128000
+-- here, and deepseek-v4.1-flash has a 1000000-token window; the model's own number must
+-- win, or compaction fires ~10x too early and nothing reports it because "compacted" is
+-- not an error.
+local deep = provider.budget("deepseek-v4.1-flash")
+assert(deep.context == 1000000, "a known model keeps its own window, got " .. tostring(deep.context))
+assert(deep.source == "known-model", "and says where the number came from, got " .. tostring(deep.source))
+-- The trigger must scale with the window. pi's reserve is 16384, so a 1M window triggers
+-- near 983616 and a 262144 window near 245760 - not both at the same absolute point.
+assert(deep.context - deep.reserve > 900000, "a 1M window must not compact at 96k, trigger at " .. tostring(deep.context - deep.reserve))
+local small = windowlib.policy(20000)
+assert(small < 20000, "a small window must still reserve proportionally, got " .. tostring(small))
 print("budget ok")
 LUA
 WASM_AGENT_MODEL_LIMITS='{"kimi-k2.6":{"context":262144,"reserve":32768}}' WA_SCRIPT="$DB.budget.lua" "$BIN" --db "$DB" | grep "budget ok"

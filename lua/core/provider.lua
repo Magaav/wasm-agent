@@ -6,6 +6,8 @@ local json = dofile("lua/vendor/json.lua")
 -- Provider errors can quote the request back at us, key included; redact at the
 -- point the message is built so it is masked before it is logged or stored.
 local redact = dofile("lua/core/redact.lua")
+-- Per-model context windows. The window belongs to the model, not to the process.
+local windowlib = dofile("lua/core/model_window.lua")
 local M = {}
 
 local function env(name) return host.getenv(name) end
@@ -205,20 +207,42 @@ end
 -- the reply. Per model, because switching models must not silently keep the
 -- previous window - that shows up as provider failures instead of compaction.
 -- `M.limits` above is unrelated: those are the account's rate limits for the UI.
--- WASM_AGENT_MODEL_LIMITS is JSON, e.g.
---   {"kimi-k2.6":{"context":262144,"reserve":32768,"keep":20000}}
+--
+-- The window is looked up by model (lua/core/model_window.lua) rather than read from one
+-- global, because the global cannot be right for more than one model: with a single
+-- WASM_AGENT_LLM_CONTEXT=128000 the agent compacted a 1000000-token model at ~96000
+-- tokens, ten times too early, and "compacted" is not an error so nothing said so.
+-- WASM_AGENT_MODEL_LIMITS still overrides everything, and the old global is kept as the
+-- last-resort fallback so no existing deployment changes behaviour by surprise.
 function M.budget(model)
+  local window = windowlib.for_model(model)
   local budget = {
-    context = tonumber(host.getenv("WASM_AGENT_LLM_CONTEXT")) or 0,
-    reserve = tonumber(host.getenv("WASM_AGENT_COMPACT_RESERVE")),
-    keep = tonumber(host.getenv("WASM_AGENT_COMPACT_KEEP")),
+    context = window.context,
+    source = window.source,
+    output = window.output,
   }
+  local reserve = tonumber(host.getenv("WASM_AGENT_COMPACT_RESERVE"))
+  local keep = tonumber(host.getenv("WASM_AGENT_COMPACT_KEEP"))
+  if reserve and keep then
+    budget.reserve, budget.keep = reserve, keep
+  else
+    local r, k = windowlib.policy(budget.context)
+    budget.reserve = reserve or r
+    budget.keep = keep or k
+  end
+  -- A per-model override may still narrow the window (a proxy, a cheaper tier).
   local raw = host.getenv("WASM_AGENT_MODEL_LIMITS")
   if raw and raw ~= "" and model and model ~= "" then
     local ok, parsed = pcall(json.decode, raw)
     local entry = ok and type(parsed) == "table" and parsed[model] or nil
     if type(entry) == "table" then
-      budget.context = tonumber(entry.context) or budget.context
+      if tonumber(entry.context) then
+        budget.context = tonumber(entry.context)
+        budget.source = "env-WASM_AGENT_MODEL_LIMITS"
+        local r, k = windowlib.policy(budget.context)
+        budget.reserve = tonumber(entry.reserve) or r
+        budget.keep = tonumber(entry.keep) or k
+      end
       budget.reserve = tonumber(entry.reserve) or budget.reserve
       budget.keep = tonumber(entry.keep) or budget.keep
     end

@@ -467,7 +467,11 @@ function wa_model(node, session)
     providers = providers,
     usage = agentlib.usage(),
     limits = provider.limits(),
-    context_limit = tonumber(host.getenv("WASM_AGENT_LLM_CONTEXT")) or 0,
+    -- The window for the model that is actually selected, from the same place compaction
+    -- reads it. It used to read WASM_AGENT_LLM_CONTEXT directly, so the balloon and
+    -- compaction could disagree - and the balloon showed a number no model had.
+    context_limit = provider.budget(settings.model).context,
+    context_source = provider.budget(settings.model).source,
     stats = memory.stats(),
     database = host.getenv("WASM_AGENT_DB") or "",
   })
