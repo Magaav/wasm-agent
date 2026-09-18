@@ -14,6 +14,7 @@ end
 -- ---- host stubs ----------------------------------------------------------
 local FILES = {}
 local paths = dofile("lua/core/paths.lua")
+local real_host = host   -- before the stub replaces it
 host = {
   sha256 = function(text)
     -- Deterministic 64-hex stand-in; real sha256 comes from the Rust host.
@@ -21,13 +22,20 @@ host = {
     for i = 1, #text do h = (h * 31 + text:byte(i)) % 4294967296 end
     return string.format("%064x", h)
   end,
-  read_file = function(path) return FILES[path] end,
+  -- The stub stands in for the *attachment* store, so a path it has seen comes
+  -- from memory and everything else - the Lua core, which dofile() reads - goes to
+  -- the real host. A stub that answers nil for both turns this test into a test of
+  -- the copy embedded in the binary.
+  read_file = function(path) if FILES[path] ~= nil then return FILES[path] end return real_host.read_file(path) end,
   write_file = function(path, text) FILES[path] = text; return true end,
   sql_exec = function() return '{"ok":true}' end,
   sql_query = function() return "[]" end,
   now = function() return 0 end,
   uuid = function() return "00000000-0000-4000-8000-000000000000" end,
-  getenv = function() return nil end,
+  -- Carried through from the real host on purpose: dofile() asks getenv for
+  -- WASM_AGENT_LUA_ROOT, so a stub that answers nil makes this test load the copy
+  -- embedded in the binary - which does not contain the feature under test.
+  getenv = function(name) return real_host.getenv(name) end,
 }
 
 local memory = dofile("lua/core/memory.lua")
