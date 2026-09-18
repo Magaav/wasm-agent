@@ -96,16 +96,20 @@ class WaMenu extends WaOverlay {
     this.classList.add("menu");
   }
 
-  openAt(x, y) {
+  // `above: true` puts the menu's bottom edge at `y` instead of its top. A menu opened from
+  // the footer has nowhere to go downward, and clamping it to the viewport bottom leaves it
+  // covering the control that opened it.
+  openAt(x, y, options = {}) {
     this.render();
     this.style.left = "0px";
     this.style.top = "0px";
     this.show();
     const rect = this.getBoundingClientRect();
     const maxX = window.innerWidth - rect.width - 5;
+    const top = options.above ? y - rect.height - (options.inset || 0) : y;
     const maxY = window.innerHeight - rect.height - 5;
     this.style.left = Math.max(5, Math.min(x, maxX)) + "px";
-    this.style.top = Math.max(5, Math.min(y, maxY)) + "px";
+    this.style.top = Math.max(5, Math.min(top, maxY)) + "px";
   }
 
   render() {

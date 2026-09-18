@@ -113,6 +113,7 @@ mod companion {
     setMode: (mode, width, height) => send('set_mode', { mode, panel_width: width || 0, panel_height: height || 0 }),
     compact: () => send('set_mode', { mode: 'compact' }),
     expand: () => send('set_mode', { mode: 'expanded' }),
+    maximize: () => send('set_mode', { mode: 'maximized' }),
     drag: () => send('drag'),
     topmost: (enabled) => send('topmost', { enabled: enabled !== false }),
     quit: () => send('quit')
@@ -161,6 +162,21 @@ mod companion {
     fn resize(window: &Window, mode: &str, width: u32, height: u32) {
         let old_size = window.outer_size();
         let old_position = window.outer_position().unwrap_or_default();
+        if mode == "maximized" {
+            // The whole work area, pinned to its corner: "fill the screen" is a rectangle, and
+            // the page cannot ask for more than the window it is in.
+            if let Some((left, top, right, bottom)) = monitor_work_area(window) {
+                window.set_resizable(false);
+                window.set_inner_size(PhysicalSize::new(
+                    (right - left).max(1) as u32,
+                    (bottom - top).max(1) as u32,
+                ));
+                window.set_outer_position(PhysicalPosition::new(left, top));
+                window.set_focusable(true);
+                window.set_focus();
+                return;
+            }
+        }
         let logical = if mode == "expanded" {
             LogicalSize::new(width.clamp(320, 900) as f64, height.clamp(420, 1200) as f64)
         } else {
@@ -190,8 +206,8 @@ mod companion {
             target.y = target.y.clamp(top, max_y);
         }
         window.set_outer_position(target);
-        window.set_focusable(mode == "expanded");
-        if mode == "expanded" {
+        window.set_focusable(mode != "compact");
+        if mode != "compact" {
             window.set_focus();
         }
     }
@@ -244,18 +260,21 @@ mod companion {
                 position: LogicalPosition::new(0.0, 0.0).into(),
                 size: LogicalSize::new(w as f64 / scale, h as f64 / scale).into(),
             });
-            let region = if mode == "expanded" {
+            let region = if mode == "maximized" {
+                // A full rectangle: rounding is for a floating panel, and this is not one.
+                None
+            } else if mode == "expanded" {
                 // Match the panel's CSS `border-radius: 18px` in physical pixels.
                 let r = (36.0 * scale).round().max(8.0) as i32;
-                CreateRoundRectRgn(0, 0, w + 1, h + 1, r, r)
+                Some(CreateRoundRectRgn(0, 0, w + 1, h + 1, r, r))
             } else {
                 // A centred circle of the smaller dimension, so the avatar stays
                 // round even if the client area is not exactly square.
                 let d = w.min(h);
                 let (cx, cy) = (w / 2, h / 2);
-                CreateEllipticRgn(cx - d / 2, cy - d / 2, cx + d / 2, cy + d / 2)
+                Some(CreateEllipticRgn(cx - d / 2, cy - d / 2, cx + d / 2, cy + d / 2))
             };
-            SetWindowRgn(hwnd, Some(region), true);
+            SetWindowRgn(hwnd, region, true);
         }
     }
 
@@ -268,7 +287,14 @@ mod companion {
         let request: IpcRequest = serde_json::from_str(body).unwrap_or_default();
         match request.operation.as_str() {
             "set_mode" => {
-                state.mode = if request.mode == "expanded" { "expanded" } else { "compact" }.into();
+                state.mode = match request.mode.as_str() {
+                    "expanded" => "expanded",
+                    // The control view asks for this: a remote desktop wants the screen, and the
+                    // panel is sized for conversations.
+                    "maximized" => "maximized",
+                    _ => "compact",
+                }
+                .into();
                 resize(window, &state.mode, request.panel_width.max(PANEL_WIDTH),
                        request.panel_height.max(PANEL_HEIGHT));
                 style_window(window, webview, &state.mode);

@@ -57,6 +57,8 @@ const sessionsNote = document.getElementById("sessions-note");
 const control = document.getElementById("control");
 const controlTitle = document.getElementById("control-title");
 const controlCanvas = document.getElementById("control-canvas");
+// The view is what goes full size; the section is what is hidden when the control closes.
+const controlView = document.getElementById("control-view");
 const controlCtx = controlCanvas.getContext("2d");
 const controlMax = document.getElementById("control-max");
 const controlHint = document.getElementById("control-hint");
@@ -1326,7 +1328,7 @@ async function openUserMenu() {
   // that appears only after a round trip feels broken when the round trip is slow.
   userMenu.items = items;
   const rect = userBtn.getBoundingClientRect();
-  userMenu.openAt(rect.left, rect.top - 5);
+  userMenu.openAt(rect.left, rect.top, { above: true, inset: 5 });
   userBtn.setAttribute("aria-expanded", "true");
   try {
     const payload = await (await apiFetch("users")).json();
@@ -1518,7 +1520,7 @@ function updateNodeLabel(name, worktree) {
 // The node's own row in the account balloon: its name, editable in place.
 function nodeControl() {
   const row = document.createElement("div");
-  row.className = "menu-node";
+  row.className = "menu-item muted menu-node";
   const label = document.createElement("span");
   label.className = "menu-node-label";
   label.textContent = "node";
@@ -1596,6 +1598,8 @@ async function refreshNodes() {
     renderNodeSelect();
     nodesBinding.textContent = payload.binding || "";
     nodesBox.replaceChildren();
+    let desktopNode = null;
+    let hostRow = null;
     for (const node of payload.nodes || []) {
       const row = document.createElement("div");
       row.className = "node" + (node.online ? " online" : "");
@@ -1606,14 +1610,19 @@ async function refreshNodes() {
       name.textContent = node.name;
       // Which of these is the window talking to? Without it a list of four nodes is four
       // names and no way to tell which one this is.
-      // Two rows are local, and they are different things: the node itself, and the desktop
-      // running this window (the client executor, which the UI already filters out of the node
-      // picker). Marking both "this node" made one node look like two.
+      // The client executor is not a second node: it is the desktop this node's window runs
+      // on, so its state belongs on this node's row rather than in a row of its own. The
+      // payload still carries it, because the picker and the capability tiers read it.
+      if (node.kind === "client") {
+        desktopNode = node;
+        row.remove();
+        continue;
+      }
       if (node.local_node) {
         row.classList.add("node-local");
         const badge = document.createElement("span");
         badge.className = "node-this";
-        badge.textContent = node.kind === "client" ? "this desktop" : "this node";
+        badge.textContent = "this node";
         row.append(badge);
       }
       if (node.kind === "host") updateNodeLabel(node.name, node.worktree);
@@ -1625,10 +1634,23 @@ async function refreshNodes() {
       caps.textContent = (node.capabilities || []).join(" ");
       row.append(dot, name, kind, caps);
       row.append(nodeButton("talk", () => { balloon.close(); input.focus(); }));
-      if (node.kind === "client") {
-        row.append(nodeButton("control", () => openControl(node.name)));
-      }
+      if (node.kind === "host") hostRow = row;
       nodesBox.append(row);
+    }
+    // One row for this machine: the node, with the desktop it runs a window on. The control
+    // button lives here because it opens *this* window's desktop, and it would have been lost
+    // with the row it used to sit on.
+    if (hostRow) {
+      if (desktopNode) {
+        const state = document.createElement("span");
+        state.className = "node-desktop" + (desktopNode.online ? " ready" : "");
+        state.textContent = desktopNode.online ? "desktop ready" : "desktop offline";
+        state.title = "the machine this window runs on, reachable through the client bridge";
+        hostRow.append(state);
+        if (desktopNode.online) {
+          hostRow.append(nodeButton("control", () => openControl(desktopNode.name)));
+        }
+      }
     }
   } catch (error) { /* leave the panel as-is */ }
 }
@@ -1684,7 +1706,23 @@ function openControl(name) {
   fetchFrame(true).then(() => { if (controlLive.checked) startLive(); });
 }
 
+// The control view at full size. "Fill the screen" has to be asked for in two places: the
+// page can cover the window, and only the shell can give the page the screen. A control view
+// is a desktop, not a message, so it does not belong inside the chat panel.
+function setControlMaximized(on) {
+  controlView.classList.toggle("maximized", on);
+  controlMax.setAttribute("aria-pressed", on ? "true" : "false");
+  controlMax.title = on ? "Leave full screen (Esc)" : "Fill the screen";
+  if (native && native.maximize) {
+    if (on) native.maximize();
+    else native.expand();
+  }
+}
+
 function closeControl() {
+  // Leaving the control leaves the full screen too, or the chat would open inside a window
+  // sized for a desktop.
+  if (controlView.classList.contains("maximized")) setControlMaximized(false);
   document.body.classList.remove("control");
   control.hidden = true;
   control.classList.remove("maximized");
@@ -1705,7 +1743,15 @@ controlKeys.addEventListener("submit", (event) => {
   controlText.value = "";
   clientAction({ action: "type", text });
 });
-controlMax.addEventListener("click", () => control.classList.toggle("maximized"));
+controlMax.addEventListener("click", () => setControlMaximized(!controlView.classList.contains("maximized")));
+// Escapable the way every other mode here is: the control that opened it, Escape, and closing
+// the view. A mode you can only leave one way is a mode you can get stuck in.
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || control.hidden) return;
+  event.preventDefault();
+  if (controlView.classList.contains("maximized")) setControlMaximized(false);
+  else closeControl();
+});
 controlRefresh.addEventListener("click", () => fetchFrame(true));
 controlClose.addEventListener("click", closeControl);
 controlLive.addEventListener("change", () => {

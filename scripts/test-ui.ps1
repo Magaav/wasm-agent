@@ -272,6 +272,7 @@ $harness = @'
   check(!mutates, "nothing in the drift panel may push: looking at drift must not change it");
   document.getElementById("drift-close").click();
 
+
   document.title = "stage: node block done";
   // The engine view: open it, let the fixture fetch settle in microtasks, and
   // assert what a reader would see. Timers never fire in this mode, so the
@@ -315,20 +316,71 @@ $harness = @'
   document.title = "stage: nodes topic";
   document.querySelector('[data-target="nodes-box"]').click();
   for (var n = 0; n < 20; n++) { await tick(); }
-  // Two local rows, and they are different things: the node, and the desktop this window
-  // runs on. One node must never look like two.
+  // One row for this machine: the node, with the desktop it runs a window on inside it. The
+  // client executor is not a node and must not be listed as one - that is what made a single
+  // node look like two.
   var localRows = document.querySelectorAll(".node-local");
-  check(localRows.length === 2, "the node and this desktop are both local, saw " + localRows.length);
-  var badges = document.querySelectorAll(".node-this");
-  check(badges.length === 2, "both local rows must be labelled, saw " + badges.length);
-  var badgeWords = Array.prototype.map.call(badges, function (b) { return b.textContent; }).join(" | ");
-  check(/this node/.test(badgeWords) && /this desktop/.test(badgeWords),
-    "one must say this node and the other this desktop, saw: " + badgeWords);
-  var hostBadges = 0;
-  for (var r = 0; r < localRows.length; r += 1) {
-    if (/this node/.test(localRows[r].textContent)) hostBadges += 1;
+  check(localRows.length === 1, "exactly one row is this machine, saw " + localRows.length);
+  var thisBadge = document.querySelector(".node-this");
+  check(!!thisBadge && /this node/.test(thisBadge.textContent), "and it must say this node");
+  var desktopLine = document.querySelector(".node-desktop");
+  check(!!desktopLine && /desktop/.test(desktopLine.textContent),
+    "the desktop must be named on the node's own row, saw: " + (desktopLine ? desktopLine.textContent : "nothing"));
+  var clientRow = null;
+  var rows = document.querySelectorAll("#nodes-box .node");
+  for (var r = 0; r < rows.length; r += 1) {
+    if (/\bclient\b/.test(rows[r].textContent)) clientRow = rows[r];
   }
-  check(hostBadges === 1, "exactly one row may claim to be this node, saw " + hostBadges);
+  check(clientRow === null, "the client executor must not be a row of its own");
+  var controlButtons = 0;
+  for (var c = 0; c < rows.length; c += 1) {
+    if (/control/.test(rows[c].textContent)) controlButtons += 1;
+  }
+  check(controlButtons === 1, "the control view must still be reachable, saw " + controlButtons + " control button(s)");
+  // Keep it: the engine re-renders when its topics change, and the nodes rows are gone by the
+  // time the control view is opened further down.
+  var controlButton = null;
+  for (var cb = 0; cb < rows.length; cb += 1) {
+    var rowButtons = rows[cb].querySelectorAll("button");
+    for (var rb = 0; rb < rowButtons.length; rb += 1) {
+      if (/control/i.test(rowButtons[rb].textContent)) controlButton = rowButtons[rb];
+    }
+  }
+
+  // Full screen is a mode, and a mode must be escapable more than one way: the control, Escape,
+  // and closing the view. Its size comes from the shell, so the page asks for it - a spy here,
+  // because a real one would resize the window this test runs in.
+  window.__maximizeCalls = [];
+  // The app captured its native bridge when it loaded, so the spy goes on that object rather
+  // than on a fresh window.wasmAgent.
+  if (window.__native) {
+    window.__native.maximize = function () { window.__maximizeCalls.push("maximize"); };
+    window.__native.expand = function () { window.__maximizeCalls.push("expand"); };
+  }
+  // Drive the view directly: how the row renders its button is already asserted above, and
+  // this block is about what the maximize control does.
+  check(!!controlButton, "the node row must offer the control view");
+  window.__openControl("client");
+  for (var m = 0; m < 10; m++) { await tick(); }
+  var controlBox = document.getElementById("control-view");
+  var controlSection = document.getElementById("control");
+  check(!!controlBox, "the control view must exist");
+  check(!!controlSection && controlSection.hidden === false, "the control view must open from the node row");
+  document.getElementById("control-max").click();
+  check(controlBox.classList.contains("maximized"), "the maximize control must enter full size");
+  // In this harness there is no native shell, so there is nothing to ask and nothing may be
+  // asked. The hand-off to the shell is verified in the real window, not faked here.
+  check(window.__native === null || window.__native === undefined,
+    "this harness runs without a native shell, so the shell call cannot be asserted here");
+  check(window.__maximizeCalls.join(",") === "",
+    "with no shell, nothing may be called, saw: " + window.__maximizeCalls.join(","));
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+  check(!controlBox.classList.contains("maximized"), "Escape must leave full size");
+  check(controlBox.hidden === false, "and must not close the view as well");
+  check(window.__maximizeCalls.join(",") === "",
+    "and leaving it must not call a shell that is not there, saw: " + window.__maximizeCalls.join(","));
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+  check(controlSection.hidden === true, "and a second Escape closes the view");
   var nodesText = document.getElementById("nodes-box").textContent;
   check(/foundation/.test(nodesText) && /openclaw/.test(nodesText),
     "both nodes must be listed, saw: " + nodesText.slice(0, 120));
@@ -382,7 +434,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
 
 $server = $null
 $edge = @(
