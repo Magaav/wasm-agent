@@ -449,11 +449,6 @@ function wa_model(node, session)
     return json.encode({ error = (result and result.error) or "remote_error", node = node })
   end
   local settings = provider.settings()
-  -- The window asks for this at startup, so the node's own name rides along with the
-  -- metadata it already fetches. Otherwise the name only appears once the engine's nodes
-  -- topic has been opened, which leaves a fresh window with nothing to show.
-  settings.node_name = nodeslib.node_name()
-  settings.node_worktree = nodeslib.worktree()
   local providers = {}
   for _, item in ipairs(provider.providers()) do
     providers[#providers + 1] = {
@@ -478,6 +473,11 @@ function wa_model(node, session)
     -- compaction could disagree - and the balloon showed a number no model had.
     context_limit = provider.budget(settings.model).context,
     context_source = provider.budget(settings.model).source,
+    -- Who this node is, from the same place /nodes reads it. The window fetches this at
+    -- startup, so the node control in the account balloon has a name before the engine's
+    -- nodes topic has ever been opened.
+    node_name = nodeslib.node_name(),
+    node_worktree = nodeslib.worktree(),
     -- Where the window came from, and whether the catalogue was reached at all. Without
     -- this, "why is my window wrong" needs a log; with it, the answer is one field.
     context_catalogue = windowlib.catalogue_status(),
