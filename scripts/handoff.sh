@@ -268,6 +268,7 @@ if [ -n "$WA_BIN" ] && [ "${SKIP_SUITES}" != "1" ]; then
       note "      $lcount check(s) - ok lines counted"
       SUITE_COUNT["$spec"]="$lcount"
       SUITE_STATE["$spec"]="passed"
+      COMMANDS+=("WASM_AGENT_LUA_ROOT=. WA_SCRIPT=$spec $WA_BIN --db /tmp/lua.db")
     fi
   done
 elif [ "${SKIP_SUITES}" = "1" ]; then
