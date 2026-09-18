@@ -1412,11 +1412,14 @@ async function refreshMe() {
   try {
     const response = await apiFetch("me", { headers: apiHeaders() });
     const payload = await response.json();
-    if (!payload.error) {
-      me = payload;
-      renderUser();
-    }
-  } catch (error) { /* keep the current view */ }
+    if (payload.error) return false;
+    me = payload;
+    renderUser();
+    return true;
+  } catch (error) {
+    // Report rather than swallow: the caller decides whether to retry.
+    return false;
+  }
 }
 
 async function pickPicture() {
@@ -1515,8 +1518,10 @@ async function refreshMeta() {
     const label = provider ? provider.label : "local";
     const where = activeNode || "local";
     meta.textContent = `${where} · ${label} · ${payload.model}`;
+    return true;
   } catch (error) {
     meta.textContent = "offline";
+    return false;
   }
 }
 
@@ -1558,11 +1563,54 @@ function applyUiVersion(next) {
   return "reloading";
 }
 
+// ---- staying in sync ------------------------------------------------------
+//
+// A window must never sit in a state that will not change by itself, and it did: when the node was
+// briefly away at load - a restart, a slow start - the first /me and /models failed, nothing
+// retried them, and the footer said "connecting…" for the life of the page while the node was fine.
+// The chat was empty for the same reason: the transcript is restored *after* the node answers, and
+// it never did.
+//
+// The version poll already runs every second and is the one loop that always runs, so recovery
+// belongs there: it was always the liveness signal, it just never said so. Nothing here keeps a
+// retry timer of its own - one recovery path, not two.
+let synced = false;
+let syncRunning = false;
+let syncAttempts = 0;
+
+function setConnecting() {
+  // Say what is true and that it is being worked on. "connecting…" forever reads as broken, and
+  // "offline" with no retry reads as final.
+  const label = syncAttempts > 2 ? "node offline — retrying" : "connecting…";
+  chipModel.textContent = label;
+  meta.textContent = label;
+}
+
+async function sync(reason) {
+  if (synced || syncRunning) return;
+  syncRunning = true;
+  syncAttempts += 1;
+  const meOk = await refreshMe();
+  const metaOk = await refreshMeta();
+  syncRunning = false;
+  if (!meOk || !metaOk) {
+    setConnecting();
+    return;
+  }
+  synced = true;
+  syncAttempts = 0;
+  clearStatus();
+  // The transcript is restored once, and only after the node has answered.
+  restoreSession();
+}
+
 async function watch() {
   try {
     const response = await apiFetch("version");
     const payload = await response.json();
     applyUiVersion(payload.version);
+    // The node answered, so finish the first sync if it never finished. This loop always runs.
+    if (!synced) sync("watch");
   } catch (error) { /* keep polling: the deadline is what keeps this loop alive */ }
   setTimeout(watch, 1000);
 }
@@ -1572,7 +1620,12 @@ async function watch() {
 // already in the ledger, so refresh the transcript once it is no longer in flight instead
 // of making the reader reload to see it.
 let sawTurnInFlight = false;
+let turnPolling = false;
 async function watchTurn() {
+  // One at a time: a poll that has not answered yet is not a reason to start another, and on a
+  // single-worker node that is the difference between asking and queueing.
+  if (turnPolling) { setTimeout(watchTurn, 3000); return; }
+  turnPolling = true;
   try {
     const response = await apiFetch("health");
     const health = await response.json();
@@ -1583,6 +1636,7 @@ async function watchTurn() {
       if (session) openSession(session);
     }
   } catch (error) { /* the node is down; watchNode handles that */ }
+  turnPolling = false;
   setTimeout(watchTurn, 3000);
 }
 
@@ -1855,9 +1909,33 @@ async function fetchFrame(full) {
   }
 }
 
+// The live view polls as fast as the node answers, and no faster.
+//
+// It used to poll every 150ms behind an 8-second client deadline: each request was abandoned while
+// the node still had it, the next one started immediately, and the abandoned ones piled up - 256 of
+// them, the queue's bound, at which point the chat's own /me and /models could not get through and
+// the window sat on "connecting…" with an empty transcript. A live view is a view *of* the machine;
+// it is not the reason the machine exists, and it has to yield to the conversation.
+let controlDelay = 150;
+
+function scheduleFrame() {
+  if (controlTimer) clearTimeout(controlTimer);
+  controlTimer = setTimeout(async () => {
+    controlTimer = null;
+    const started = Date.now();
+    await fetchFrame(false);
+    const took = Date.now() - started;
+    // Twice the round trip, floored at the old cadence and capped so a slow node still gets a frame
+    // eventually rather than never.
+    controlDelay = Math.min(Math.max(150, took * 2), 5000);
+    if (controlLive.checked) scheduleFrame();
+  }, controlDelay);
+}
+
 function startLive() {
-  if (controlTimer) clearInterval(controlTimer);
-  controlTimer = setInterval(() => fetchFrame(false), 150);
+  if (controlTimer) clearTimeout(controlTimer);
+  controlDelay = 150;
+  scheduleFrame();
 }
 
 // ---- views: a component in its own window -------------------------------------------------
@@ -1950,7 +2028,7 @@ function closeControl() {
   document.body.classList.remove("control");
   control.hidden = true;
   control.classList.remove("maximized");
-  if (controlTimer) { clearInterval(controlTimer); controlTimer = null; }
+  if (controlTimer) { clearTimeout(controlTimer); controlTimer = null; }
 }
 
 controlCanvas.addEventListener("click", (event) => {
@@ -1980,7 +2058,7 @@ controlRefresh.addEventListener("click", () => fetchFrame(true));
 controlClose.addEventListener("click", closeControl);
 controlLive.addEventListener("change", () => {
   if (controlLive.checked) startLive();
-  else if (controlTimer) { clearInterval(controlTimer); controlTimer = null; }
+  else if (controlTimer) { clearTimeout(controlTimer); controlTimer = null; }
 });
 
 // ---- engine: nodes / spells / tools --------------------------------------
@@ -2572,10 +2650,12 @@ window.rendererLoaded = loadRenderer().then(() => {
   // A view window renders one component and stops: it is not a conversation, and restoring a
   // transcript into it would be showing the chat inside the thing the chat opened.
   if (!applyViewMode()) {
-    refreshMe().then(restoreSession);
-    // After the session is on its way: a deep link that opens a view should not delay the chat.
+    // One entry point for "become live", and it retries itself until the node answers - so a node
+    // that is briefly away at load no longer leaves the page half-born.
+    sync("boot");
     setTimeout(openFromQuery, 400);
   }
+  window.addEventListener("online", () => sync("online"));
 });
 watch();
 watchTurn();
