@@ -2,6 +2,7 @@
 local json = dofile("lua/vendor/json.lua")
 local memory = dofile("lua/core/memory.lua")
 local provider = dofile("lua/core/provider.lua")
+local windowlib = dofile("lua/core/model_window.lua")
 local agentlib = dofile("lua/core/agent.lua")
 local users = dofile("lua/core/users.lua")
 local toolslib = dofile("lua/core/tools.lua")
@@ -472,6 +473,9 @@ function wa_model(node, session)
     -- compaction could disagree - and the balloon showed a number no model had.
     context_limit = provider.budget(settings.model).context,
     context_source = provider.budget(settings.model).source,
+    -- Where the window came from, and whether the catalogue was reached at all. Without
+    -- this, "why is my window wrong" needs a log; with it, the answer is one field.
+    context_catalogue = windowlib.catalogue_status(),
     stats = memory.stats(),
     database = host.getenv("WASM_AGENT_DB") or "",
   })
