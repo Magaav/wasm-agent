@@ -435,6 +435,58 @@ $harness = @'
     "and say what happened, saw: " + (notice ? notice.textContent.slice(0, 90) : "nothing"));
   check(!!notice && !!notice.querySelector("button"), "and offer to continue it");
 
+  // A session whose last turn *failed* is the same situation by another route, and it used to be
+  // invisible here - which is why an agent that hit a provider error looked like one that had simply
+  // gone quiet. Restoring it must say so, and then resume it by itself: nobody should have to notice a
+  // stuck session and fix it. This is the case the user reported, so it is the case tested.
+  //
+  // The app picks the session from the *sessions list*, not from the session fixture - the first
+  // attempt here set only the latter, so it restored the unfinished thread again, and the guard
+  // (correctly) refused to resume a session it had already resumed. The test was wrong, not the code.
+  // A fresh id is used because the guard is per session per page, and the fixtures are put back
+  // afterwards because the diff checks below re-restore the original one.
+  var savedSessions = window.__fixtures.sessions;
+  var savedSession = window.__fixtures.session;
+  window.__fixtures.sessions = {
+    sessions: [
+      {
+        id: "cccccccc-0000-0000-0000-000000000003", title: "failed thread",
+        mode: "chat", turn_count: 3, updated_at: Math.floor(Date.now() / 1000) - 60,
+        state: "failed", state_detail: "the last turn failed (the model call errored)",
+      },
+    ],
+  };
+  window.__fixtures.session = {
+    session: { id: "cccccccc-0000-0000-0000-000000000003", title: "failed thread" },
+    state: "failed",
+    state_detail: "the last turn failed (the model call errored)",
+    turns: [ { seq: 1, role: "user", content: "carry on with the cross-build", ok: 1, tool_calls: [] } ],
+  };
+  await window.__restoreSession();
+  for (var uf = 0; uf < 30; uf++) { await tick(); }
+  var failedNotice = Array.from(document.querySelectorAll(".unfinished-notice")).find(function (n) {
+    return /failed before it answered/.test(n.textContent);
+  });
+  check(!!failedNotice, "a session whose turn failed must say so in the chat, not just go quiet");
+  var resuming = Array.from(document.querySelectorAll(".unfinished-notice")).filter(function (n) {
+    return /resuming it now/.test(n.textContent);
+  });
+  check(resuming.length === 1, "and resume itself, saw " + resuming.length + " resume notice(s)");
+
+  // Once per session per page. A resume spends a turn, so a second restore of the same session must not
+  // spend another - and if the resumed turn fails too, the notice and its button are the way forward,
+  // not another automatic attempt.
+  await window.__restoreSession();
+  for (var ug = 0; ug < 30; ug++) { await tick(); }
+  var resumedAgain = Array.from(document.querySelectorAll(".unfinished-notice")).filter(function (n) {
+    return /resuming it now/.test(n.textContent);
+  });
+  check(resumedAgain.length === 0,
+    "and never resume the same session twice on one page, saw " + resumedAgain.length +
+    " resume notice(s) - a resume always posts one, so none means it did not resume again");
+  window.__fixtures.sessions = savedSessions;
+  window.__fixtures.session = savedSession;
+
   // A notice about a turn that is over must come down. It is a claim about right now, not a record - the
   // record is the engine's sessions topic - and a span that outlives what it described bloats the
   // transcript with every false alarm.
@@ -446,6 +498,12 @@ $harness = @'
 
   // A repainted turn that changed a file must show its diff topic. The live path always did; the repaint
   // dropped the changes summary and the turn id, so every reloaded transcript lost every diff topic.
+  //
+  // The repaint is done here rather than relying on the transcript the block above left behind: the
+  // unfinished fixture now auto-resumes, and the resume sends a turn, so what is on screen at this point
+  // is whatever that did. A check that says "a repainted turn" should repaint.
+  await window.__restoreSession();
+  for (var ud = 0; ud < 30; ud++) { await tick(); }
   var diffTopic = document.querySelector("wa-diff");
   check(!!diffTopic, "a repainted turn with changes must show its diff topic");
   check(!!diffTopic && /1 file changed/.test(diffTopic.textContent),

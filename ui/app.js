@@ -690,6 +690,11 @@ async function learnSession() {
   } catch (error) { /* unreachable: the next turn tries again */ }
 }
 
+// Sessions this page has already auto-resumed. A resume spends a turn, so it happens at most once per
+// session per page load: if the resumed turn fails too, the notice stays and offers the button, and
+// nothing loops.
+const autoResumed = new Set();
+
 async function restoreSession() {
   try {
     const payload = await (await apiFetch("sessions", { headers: apiHeaders() })).json();
@@ -703,14 +708,41 @@ async function restoreSession() {
     // A thread whose last turn was cut off must say so *in the chat*: the answer never arrived, and a
     // transcript that just stops looks like the agent had nothing to say. The engine's badge says it
     // too, but the reader is here, so the offer belongs here.
-    if (full && full.state === "unfinished") {
+    //
+    // 'failed' is the same situation by a different route - the model call errored instead of the turn
+    // being stopped - and it was invisible here, which is why a failed session looked like an agent
+    // that had simply gone quiet.
+    const resumable = full && (full.state === "failed" || full.state === "unfinished");
+    if (resumable) {
       const notice = document.createElement("div");
       notice.className = "unfinished-notice";
-      notice.textContent = "this turn was stopped before it answered - " +
+      notice.textContent = (full.state === "failed"
+        ? "the last turn failed before it answered - "
+        : "this turn was stopped before it answered - ") +
         (full.state_detail || "the node did not record a result") + ".";
       const again = nodeButton("continue", () => { notice.remove(); resumeSession(wanted.id); });
       notice.append(again);
       messages.append(notice);
+    }
+    // And then resume it by itself, because a stuck session is not something the reader should have to
+    // notice and fix. Bounded and visible: once per session per page, only when the node reports no turn
+    // running - a turn that IS running also reads as unfinished, and resuming it would queue a second
+    // turn behind the first - and it says in the chat that it is doing it, so a turn is never spent in
+    // silence.
+    if (resumable && !autoResumed.has(wanted.id)) {
+      let idle = false;
+      try {
+        const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
+        idle = !!health && !health.current;
+      } catch (error) { /* the node is away: nothing to resume, and watchNode says so */ }
+      if (idle) {
+        autoResumed.add(wanted.id);
+        const line = document.createElement("div");
+        line.className = "unfinished-notice";
+        line.textContent = "resuming it now - " + (full.state_detail || "the last turn did not finish") + ".";
+        messages.append(line);
+        resumeSession(wanted.id);
+      }
     }
     // If that thread was still running when the window went away, watch it: the answer lands in the
     // ledger, and the repaint is what puts it on screen. Tokens that arrived before the reload are
