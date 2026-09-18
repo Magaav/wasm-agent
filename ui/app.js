@@ -524,7 +524,12 @@ function handleEvent(event) {
       streamBody = segment;
     }
     finishTrace();
+    // The run topic goes *above* the answer and the diff goes *below* it: the answer is
+    // what was asked for, the changed files are what the reader may act on. Both are
+    // appended before the bubble is released, or there is nothing left to append to.
+    const diff = renderDiff(currentBubble(), event.changes);
     collapseRun();
+    if (diff) askUndoable(diff);
     streamBody = null;
     streamText = "";
     turnBubble = null;
@@ -567,33 +572,65 @@ function repaintTurns(turns) {
   turnBubble = null;
   streamBody = null;
   streamText = "";
+  let rendered = 0;
+  let failed = 0;
+  let firstFailure = "";
   for (const turn of turns) {
-    if (turn.role === "user") {
-      add("user", turn.content || "");
-    } else if (turn.role === "assistant") {
-      if (turn.content) handleEvent({ type: "reply", text: turn.content });
-      const calls = turn.tool_calls || [];
-      if (calls.length) {
-        handleEvent({ type: "round", n: 1 });
-        for (const raw of calls) {
-          // A stored call keeps the provider's shape: name and arguments nested, and the arguments
-          // still the JSON string the model produced.
-          const fn = raw.function || raw;
-          let args = fn.arguments;
-          if (typeof args === "string") { try { args = JSON.parse(args); } catch (error) { args = {}; } }
-          handleEvent({ type: "tool", name: fn.name, arguments: args || {} });
+    // Per turn, so one malformed row cannot swallow the rest of the transcript. A repaint that
+    // stops halfway is how "my own input is missing" becomes invisible: the rows before the throw
+    // are drawn, the rows after it are not, and nothing says so.
+    try {
+      if (turn.role === "user") {
+        add("user", turn.content || "");
+      } else if (turn.role === "assistant") {
+        if (turn.content) handleEvent({ type: "reply", text: turn.content });
+        const calls = turn.tool_calls || [];
+        if (calls.length) {
+          handleEvent({ type: "round", n: 1 });
+          for (const raw of calls) {
+            // A stored call keeps the provider's shape: name and arguments nested, and the arguments
+            // still the JSON string the model produced.
+            const fn = raw.function || raw;
+            let args = fn.arguments;
+            if (typeof args === "string") { try { args = JSON.parse(args); } catch (error) { args = {}; } }
+            handleEvent({ type: "tool", name: fn.name, arguments: args || {} });
+          }
         }
+      } else if (turn.role === "tool") {
+        handleEvent({ type: "tool_result", name: turn.tool_name, result: { content: turn.content } });
       }
-    } else if (turn.role === "tool") {
-      handleEvent({ type: "tool_result", name: turn.tool_name, result: { content: turn.content } });
+      rendered += 1;
+    } catch (error) {
+      failed += 1;
+      if (!firstFailure) {
+        firstFailure = `${turn.role} seq ${turn.seq}: ${error}`;
+        console.error("repaint failed", turn, error);
+      }
     }
   }
   pin(true);
+  if (failed) {
+    add("assistant", `repaint: ${rendered} of ${turns.length} turns drawn, ${failed} failed — first: ${firstFailure}`);
+  }
+  return { rendered, failed, firstFailure };
 }
 
 // The newest session for this user is the one that just ran, which is how the window finds out
 // which conversation it is in: the chat route does not return the id it used. Once known the id is
 // remembered, so the next respawn comes back to exactly this thread.
+// The newest session for this user is the one that just ran, which is how the window finds out
+// which conversation it is in the *first* time: the chat route does not return the id it used. Once
+// known the id is remembered, and everything below prefers it - guessing "newest" on every load is
+// how a window ends up showing somebody else's thread, which is exactly what happened: the newest
+// session was another agent's, so the reader's own conversation looked like it had lost their input.
+async function learnSession() {
+  try {
+    const payload = await (await apiFetch("sessions", { headers: apiHeaders() })).json();
+    const mine = (payload.sessions || []).filter((s) => !me.user || !s.user_id || s.user_id === me.user.id);
+    if (mine.length) rememberSession(mine[0].id);
+  } catch (error) { /* unreachable: the next turn tries again */ }
+}
+
 async function restoreSession() {
   try {
     const payload = await (await apiFetch("sessions", { headers: apiHeaders() })).json();
@@ -610,6 +647,48 @@ async function restoreSession() {
     // a run, not its partial text.
     if (full && full.state && full.state !== "answered" && full.state !== "empty") watchTurn();
   } catch (error) { /* an empty node, or an unreachable one: the welcome screen is right */ }
+}
+
+// What the turn changed on disk, as one topic at the end of the bubble.
+//
+// It is a component (`<wa-diff>`) because the same summary is shown wherever a change is
+// summarised, and because the undo affordance must behave the same everywhere. This function was
+// *called* and never defined - which threw on every answer, not only the ones with changes, so the
+// live view silently lost the diff topic and a reload truncated the transcript at the first reply.
+// "My own input is missing" was this.
+function renderDiff(bubble, changes) {
+  const files = (changes && changes.files) || [];
+  if (!files.length) return null;
+  const diff = document.createElement("wa-diff");
+  diff.setSummary(changes);
+  bubble.body.append(diff);
+  return diff;
+}
+
+// Undo is the server's, not the page's: the page asks and reports the answer, and the component
+// renders a refusal on the topic rather than swallowing it. There is no undo endpoint on this node
+// yet, and saying so is the honest answer - the alternative is a control that looks live and does
+// nothing, which is what `<wa-diff>` was written to avoid. When the endpoint lands, this is the
+// only place that changes.
+function askUndoable(diff) {
+  diff.addEventListener("diff-act", async (event) => {
+    const detail = event.detail || {};
+    const done = typeof detail.done === "function" ? detail.done : () => {};
+    try {
+      const response = await apiFetch("undo", {
+        method: "POST",
+        headers: apiHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ act: detail.act, files: diff.files || [] }),
+      });
+      if (!response.ok) {
+        done({ ok: false, reason: "this node has no undo endpoint yet (HTTP " + response.status + ")" });
+        return;
+      }
+      done(await response.json());
+    } catch (error) {
+      done({ ok: false, reason: String(error) });
+    }
+  });
 }
 
 function setBusy(value) {
@@ -740,6 +819,9 @@ async function send(text) {
     setBusy(false);
     controller = null;
     refreshMeta();
+    // Learn which thread this turn went into, but only until we know one: after that the window
+    // keeps the thread it is in, rather than following whatever happens to be newest.
+    if (!chatSession) learnSession();
     if (!native) input.focus();
   }
 }
@@ -1633,7 +1715,7 @@ async function watchTurn() {
     if (current) { sawTurnInFlight = true; }
     else if (sawTurnInFlight) {
       sawTurnInFlight = false;
-      if (session) openSession(session);
+      if (chatSession) openSession(chatSession);
     }
   } catch (error) { /* the node is down; watchNode handles that */ }
   turnPolling = false;
@@ -2257,6 +2339,13 @@ async function refreshSessions() {
 }
 
 async function openSession(id) {
+  // Opening a thread is also choosing it: from here on this window is *in* that conversation, so a
+  // later respawn comes back to it instead of guessing.
+  rememberSession(id);
+  return openSessionById(id);
+}
+
+async function openSessionById(id) {
   const payload = await (await apiFetch("session?id=" + encodeURIComponent(id), { headers: apiHeaders() })).json();
   if (payload.error) {
     sessionsBox.textContent = payload.error;

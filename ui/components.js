@@ -397,6 +397,209 @@ class WaTool extends HTMLElement {
 }
 customElements.define("wa-tool", WaTool);
 
+// <wa-diff> — what the turn changed on disk, collapsed to one line after the answer.
+//
+// The answer is what the reader wants; the change to their files is the thing they may need
+// to *act* on, so the topic sits at the end of the bubble rather than the top. The header
+// carries the totals GitHub-style (+N -M) and, at its right edge, the only control the
+// topic has: one button that toggles between undoing the change and redoing it.
+//
+// One button, not two, and the glyph always says what the *next* click does. That is why
+// there is no disabled state to guess at: when the patch is applied the button offers undo,
+// when it is undone it offers redo, and it is disabled only when neither is possible -
+// which the label states in words rather than leaving the reader clicking a dead control.
+class WaDiff extends HTMLElement {
+  constructor() {
+    super();
+    this._state = "applied";      // "applied" | "undone" | "locked"
+    this._files = [];
+    this._reason = "";
+  }
+
+  connectedCallback() { this._build(); }
+
+  _build() {
+    if (this._header) return;
+    this.classList.add("diff");
+
+    this._header = document.createElement("div");
+    this._header.className = "diff-head";
+
+    // The expander is the whole left of the header, so a click anywhere on it opens the
+    // topic; the toggle is a *sibling* rather than a child, because a button inside a
+    // button is invalid and swallows its own clicks.
+    this._expander = document.createElement("button");
+    this._expander.type = "button";
+    this._expander.className = "diff-expand";
+    this._expander.setAttribute("aria-expanded", "false");
+    this._glyph = document.createElement("span");
+    this._glyph.className = "trace-glyph";
+    this._glyph.textContent = "\u0394";
+    this._label = document.createElement("span");
+    this._label.className = "trace-label";
+    this._label.textContent = "changes";
+    this._meta = document.createElement("span");
+    this._meta.className = "trace-meta";
+    this._chevron = document.createElement("span");
+    this._chevron.className = "trace-chevron";
+    this._chevron.textContent = "\u203a";
+    this._expander.append(this._glyph, this._label, this._meta, this._chevron);
+
+    this._toggle = document.createElement("button");
+    this._toggle.type = "button";
+    this._toggle.className = "diff-toggle";
+    this._toggle.setAttribute("aria-label", "Undo this change");
+    this._toggle.title = "Undo this change";
+    this._toggle.disabled = true;
+
+    this._header.append(this._expander, this._toggle);
+
+    this._body = document.createElement("ul");
+    this._body.className = "diff-body";
+    this._body.hidden = true;
+
+    this._expander.addEventListener("click", () => { this.open = !this.open; });
+    this._toggle.addEventListener("click", () => this._act());
+
+    this.append(this._header, this._body);
+    this._paintToggle();
+  }
+
+  get body() { this._build(); return this._body; }
+  get open() { return this.hasAttribute("open"); }
+  set open(value) {
+    if (value) this.setAttribute("open", "");
+    else this.removeAttribute("open");
+    if (this._body) this._body.hidden = !this.open;
+    if (this._chevron) this._chevron.textContent = this.open ? "\u2304" : "\u203a";
+    if (this._expander) this._expander.setAttribute("aria-expanded", String(this.open));
+  }
+
+  // The glyph is the whole contract: undo when the change is applied, redo when it is not.
+  _paintToggle() {
+    if (!this._toggle) return;
+    const can = this._state !== "locked";
+    this._toggle.disabled = !can;
+    this._toggle.dataset.act = this._state === "undone" ? "redo" : "undo";
+    // Inline SVG rather than a font glyph: the two arrows are the only way the reader
+    // knows which direction the next click goes, and a missing font must not take that away.
+    this._toggle.innerHTML = this._state === "undone"
+      ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 7H9.5a5.5 5.5 0 0 0 0 11H16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 4l3.5 3L12 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+      : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7H14.5a5.5 5.5 0 0 1 0 11H8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 4 8.5 7 12 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    const act = this._state === "undone" ? "Redo this change" : "Undo this change";
+    this._toggle.title = can ? act : this._reason;
+    this._toggle.setAttribute("aria-label", can ? act : this._reason);
+  }
+
+  // What the toggle does is ask, not assume: the server owns the files, so the click
+  // sends the intent and this waits to be told what happened.
+  _act() {
+    if (this._state === "locked") return;
+    const act = this._state === "undone" ? "redo" : "undo";
+    this._toggle.disabled = true;
+    this.dispatchEvent(new CustomEvent("diff-act", {
+      bubbles: true, detail: { act, done: (result) => this._settle(act, result) },
+    }));
+  }
+
+  // The outcome is the server's answer, and it is rendered either way. A refusal is shown
+  // on the topic rather than swallowed: "undo did nothing and said nothing" is the failure
+  // this whole component exists to avoid.
+  _settle(act, result) {
+    if (result && result.ok) {
+      this._state = act === "undo" ? "undone" : "applied";
+      this._reason = "";
+      this.classList.toggle("undone", this._state === "undone");
+      this.setMessage(act === "undo" ? "undone - the files are back" : "redone - the change is applied");
+    } else {
+      // A refusal that cannot be retried (the file moved on) locks the control and says
+      // why; the change is still on disk and the reader needs to know that, not a spinner.
+      const why = (result && result.reason) || "failed";
+      this._state = "locked";
+      this.setMessage(act + " refused: " + why, true);
+    }
+    this._paintToggle();
+  }
+
+  // The files this topic is about. `_files` is the component's own; the app needs to name them in
+  // an undo request, and reaching into a private field from outside is how a component stops being
+  // one.
+  get files() { return this._files; }
+
+  // `summary` is the server's summary: {files:[{path,added,removed,created}], added, removed}.
+  setSummary(summary) {
+    this._build();
+    this._files = (summary && summary.files) || [];
+    const added = (summary && summary.added) || 0;
+    const removed = (summary && summary.removed) || 0;
+    const count = this._files.length;
+    this._label.textContent = count === 1 ? "1 file changed" : count + " files changed";
+    this._meta.textContent = "+" + added + " \u2212" + removed;
+    this._meta.classList.toggle("no-change", added === 0 && removed === 0);
+
+    this._body.replaceChildren();
+    for (const file of this._files) {
+      const row = document.createElement("li");
+      row.className = "diff-file";
+      const name = document.createElement("span");
+      name.className = "diff-path";
+      name.textContent = file.path;
+      const stat = document.createElement("span");
+      stat.className = "diff-stat";
+      const plus = document.createElement("span");
+      plus.className = "plus";
+      plus.textContent = "+" + (file.added || 0);
+      const minus = document.createElement("span");
+      minus.className = "minus";
+      minus.textContent = "\u2212" + (file.removed || 0);
+      stat.append(plus, minus);
+      row.append(name, stat);
+      // "created" is shown because undo cannot remove a file: the host has no remove_file,
+      // so a created file goes back to empty and the reader is told that up front.
+      if (file.created) {
+        const tag = document.createElement("span");
+        tag.className = "diff-tag";
+        tag.textContent = "new";
+        row.append(tag);
+      }
+      this._body.append(row);
+    }
+    this._paintToggle();
+  }
+
+  // A line of what happened, under the files. Also how a refusal reaches the reader.
+  setMessage(text, failed = false) {
+    this._build();
+    if (!this._message) {
+      this._message = document.createElement("div");
+      this._message.className = "diff-note";
+      this.append(this._message);
+    }
+    this._message.textContent = text || "";
+    this._message.classList.toggle("failed", !!failed);
+    this._message.hidden = !text;
+  }
+
+  // The server says whether this change can still be undone (the file may have moved on
+  // since the turn). Until it says so the toggle stays disabled, so a click can never
+  // promise something that will be refused.
+  setUndoable(can, reason) {
+    this._build();
+    if (this._state === "locked") return;
+    if (can) {
+      this._state = this._state === "undone" ? "undone" : "applied";
+      this._reason = "";
+    } else {
+      this._state = "locked";
+      this._reason = reason || "cannot be undone";
+      this.setMessage(this._reason, true);
+    }
+    this._paintToggle();
+  }
+}
+customElements.define("wa-diff", WaDiff);
+
+
 // <wa-window> - a floating panel that moves, resizes and closes like a real window.
 //
 // The shell can spawn an actual second OS window (`native.openView`), and this is what the page

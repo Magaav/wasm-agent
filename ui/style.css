@@ -110,6 +110,53 @@ wa-message.assistant { align-self: flex-start; background: var(--assistant); }
 }
 .run-body .seg { padding-left: var(--space); color: var(--muted); }
 .run-body wa-trace { border: 0; border-left: 2px solid rgba(35, 41, 54, .8); border-radius: 0; background: none; }
+
+/* The diff topic: what the turn changed on disk, collapsed *after* the answer.
+   It shares the trace-* header classes on purpose - a topic is a topic, and a second
+   header style would read as a different kind of thing. What is its own: the header is a
+   div (it holds two controls, and a button cannot contain one) and the right edge carries
+   the single undo/redo toggle. */
+.msg .body.steps wa-diff { width: 100%; max-width: none; }
+wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%; }
+.diff { border: 1px solid var(--line); border-radius: var(--radius); background: rgba(15, 18, 25, .6); overflow: hidden; }
+.diff.undone { border-color: rgba(210, 153, 34, .55); }
+.diff-head { display: flex; align-items: center; gap: 0; width: 100%; }
+.diff-expand {
+  display: flex; align-items: center; gap: var(--gap); flex: 1; min-width: 0;
+  text-align: left; padding: 4px var(--space); background: none; border: 0;
+  color: var(--muted); font: inherit; font-size: 12px; cursor: pointer;
+}
+.diff-expand:hover { background: rgba(88, 166, 255, .06); }
+.diff .trace-meta { flex: 0 0 auto; }
+.diff .trace-meta.no-change { opacity: .55; }
+.diff-toggle {
+  display: flex; align-items: center; justify-content: center;
+  width: 26px; height: 24px; margin: 0 4px 0 0; flex: 0 0 auto;
+  background: none; border: 0; border-radius: var(--radius-sm);
+  color: var(--muted); cursor: pointer;
+}
+.diff-toggle svg { width: 14px; height: 14px; display: block; }
+.diff-toggle:hover:not(:disabled) { background: rgba(88, 166, 255, .12); color: var(--text); }
+.diff-toggle:disabled { opacity: .35; cursor: default; }
+.diff-toggle[data-act="redo"] { color: var(--accent); }
+.diff-body {
+  display: flex; flex-direction: column; gap: 2px;
+  margin: 0; padding: var(--space); list-style: none;
+  border-top: 1px solid rgba(35, 41, 54, .8);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+}
+.diff-file { display: flex; align-items: center; gap: var(--gap); min-width: 0; }
+.diff-path { flex: 1; color: #c9d1e0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diff-stat { display: flex; gap: var(--space); flex: 0 0 auto; }
+.diff-stat .plus { color: var(--ok); }
+.diff-stat .minus { color: #f85149; }
+.diff-tag {
+  flex: 0 0 auto; font-size: 10px; color: var(--muted); text-transform: uppercase;
+  letter-spacing: .5px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: 0 4px;
+}
+.diff-note { padding: 0 var(--space) var(--space); font-size: 11px; color: var(--muted); }
+.diff-note.failed { color: #f85149; }
 .msg .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .6px; }
 .msg .body { white-space: pre-wrap; }
 .msg code { background: #0a0c11; padding: 1px 5px; border-radius: var(--radius-sm); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
