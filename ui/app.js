@@ -1837,7 +1837,20 @@ controlLive.addEventListener("change", () => {
 // to the model. Nothing on this screen is in context; looking loads nothing.
 async function refreshSkills() {
   try {
-    const payload = await (await apiFetch("skills", { headers: apiHeaders() })).json();
+    const response = await apiFetch("skills", { headers: apiHeaders() });
+    // A node that does not serve this route answers with a plain "not found", and calling
+    // `.json()` on that raises a SyntaxError - which reads like the UI is broken rather than the
+    // node being older than the UI. Say which it is: a missing route is a normal thing to meet
+    // when a window is newer than the node it is talking to.
+    const text = await response.text();
+    let payload = null;
+    try { payload = JSON.parse(text); } catch (error) { payload = null; }
+    if (!payload) {
+      skillsNote.textContent = "not served";
+      skillsBox.textContent = "this node does not serve /skills yet (HTTP " + response.status +
+        ") - it arrives at the node's next start";
+      return;
+    }
     const skills = payload.skills || [];
     skillsNote.textContent = payload.count + " · " + payload.loadable + " loadable on demand";
     skillsBox.replaceChildren();
