@@ -43,7 +43,7 @@ local function wanted()
       why = "build this node's host from source",
       probe = "cargo --version",
       install = {
-        windows = "winget install --id Rustlang.Rustup -e --accept-source-agreements",
+        windows = "winget install --id Rustlang.Rustup -e --accept-source-agreements --accept-package-agreements",
         linux = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
         darwin = "brew install rustup && rustup default stable",
       },
@@ -53,7 +53,13 @@ local function wanted()
       why = "link the native dependencies (sqlite, ring)",
       probe = here == "windows" and "cc --version" or "cc --version",
       install = {
-        windows = "winget install --id Microsoft.VisualStudio.2022.BuildTools -e --accept-source-agreements",
+        -- The *workload* is the whole point on Windows: Build Tools without VCTools installs no
+        -- compiler at all, so `cc` still fails and the node still cannot build - which is worse
+        -- than installing nothing, because it looks done. VCTools is what provides cl.exe, and
+        -- --includeRecommended brings the Windows SDK it needs to link against.
+        windows = "winget install --id Microsoft.VisualStudio.2022.BuildTools -e " ..
+          "--accept-source-agreements --accept-package-agreements " ..
+          '--override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"',
         linux = "sudo apt-get install -y build-essential",
         darwin = "xcode-select --install",
       },
