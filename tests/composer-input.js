@@ -243,12 +243,20 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
   check(fileInput.value === "", "the file input is cleared so the same file can be re-picked");
 
   // ---- undo / redo -------------------------------------------------------
-  const redoButton = byId("redo");
-  const undoButton = byId("undo");
+  //
+  // These drive the *keyboard*, which is the only control the draft has: the two footer
+  // buttons were removed when the diff topic took the one toggle in the transcript (they
+  // acted on the draft while sitting where a reader looks for "undo the last change").
+  // What used to be asserted as `button.disabled` is now asserted on the stacks, which is
+  // the same fact - "is there anything to undo" - read from the state rather than a widget.
   const form = byId("composer");
+  const press = (key, extra = {}) => input.fire("keydown",
+    Object.assign({ key, ctrlKey: true, shiftKey: false, preventDefault() {} }, extra));
+  const canUndo = () => vm.runInContext("draftUndo.length > 0", sandbox);
+  const canRedo = () => vm.runInContext("draftRedo.length > 0", sandbox);
 
   // Start from a known state: the drop/paste tests above have already pushed
-  // steps, so asserting "undo is disabled" before clearing them would be
+  // steps, so asserting "nothing to undo" before clearing them would be
   // asserting something about the previous test, not about undo.
   const resetHistory = () => vm.runInContext(
     "draftUndo.length = 0; draftRedo.length = 0; draftNow = { text: input.value, attachments: attachments.slice() }; syncUndoButtons();",
@@ -258,20 +266,20 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
   attachments.length = 0;
   input.value = "";
   resetHistory();
-  check(undoButton.disabled === true, "undo starts disabled (nothing to undo yet)");
-  check(redoButton.disabled === true, "redo starts disabled");
+  check(canUndo() === false, "there is nothing to undo to start with");
+  check(canRedo() === false, "and nothing to redo");
 
   // Undoing a drop.
   fileInput.files = [png("undo-me.png")];
   await fileInput.fire("change", {});
   await settle();
   check(attachments.length === 1, "a file is attached before undoing");
-  check(undoButton.disabled === false, "undo enables once there is a step");
+  check(canUndo() === true, "a step makes undo possible");
 
-  await undoButton.fire("click", {});
+  await press("z");
   check(attachments.length === 0, "undo removes the dropped file");
-  check(redoButton.disabled === false, "redo enables after an undo");
-  await redoButton.fire("click", {});
+  check(canRedo() === true, "redo becomes possible after an undo");
+  await press("z", { shiftKey: true });
   check(attachments.length === 1, "redo puts the dropped file back");
   check(attachments[0].name === "undo-me.png", "redo restores the same file");
 
@@ -283,12 +291,12 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
   input.value = "first second";
   await input.fire("input", {});
   vm.runInContext("typingTimer = null;", sandbox);
-  await undoButton.fire("click", {});
+  await press("z");
   check(input.value === "first", "undo reverts one typing step, not one character: " + JSON.stringify(input.value));
   input.value = "something else";
   await input.fire("input", {});
   vm.runInContext("typingTimer = null;", sandbox);
-  check(redoButton.disabled === true, "a fresh edit clears the redo branch");
+  check(canRedo() === false, "a fresh edit clears the redo branch");
 
   // Ctrl+Z / Ctrl+Shift+Z on the textarea.
   resetHistory();
@@ -326,8 +334,8 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
   vm.runInContext("typingTimer = null;", sandbox);
   await form.fire("submit", { preventDefault() {} });
   check(input.value === "", "a send clears the input");
-  check(undoButton.disabled === true, "a send clears undo (an already-sent draft must not come back)");
-  check(redoButton.disabled === true, "a send clears redo");
+  check(canUndo() === false, "a send clears undo (an already-sent draft must not come back)");
+  check(canRedo() === false, "a send clears redo");
 
   console.log("---");
   console.log(failures === 0 ? "ALL PASS" : failures + " FAILURE(S)");
