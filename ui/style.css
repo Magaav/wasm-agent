@@ -570,6 +570,25 @@ wa-balloon.popover {
    moved out of the panel by the page, so this only has to hide the panel and let the view fill the
    window the shell gave it. */
 body.view-only .panel { display: none; }
+
+/* The update lock: covers the panel, says why it is there, and offers both ways out. */
+#update-lock {
+  position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center;
+  background: rgba(8, 10, 14, .74);
+}
+#update-lock .lock-card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: calc(var(--pad) * 2); max-width: 330px; text-align: center;
+  box-shadow: 0 24px 60px rgba(0,0,0,.6);
+}
+#update-lock .lock-title { font-size: 13px; margin-bottom: var(--gap); }
+#update-lock .lock-reason { color: var(--muted); font-size: 12px; margin-bottom: var(--pad); }
+#update-lock .lock-actions { display: flex; gap: var(--gap); justify-content: center; }
+#update-lock button {
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  color: var(--text); font: inherit; font-size: 12px; padding: var(--space) var(--pad); cursor: pointer;
+}
+#update-lock button:hover { border-color: var(--accent); }
 body.view-only #control {
   position: fixed; inset: 0; width: auto; height: 100vh;
   border: none; border-radius: 0; box-shadow: none;

@@ -300,6 +300,50 @@ $harness = @'
   check(continuable.length === 1,
     "only the unfinished thread should offer to continue, saw " + continuable.length);
 
+  // The update lock. A reload is invisible until it happens, and it used to happen at a moment the
+  // reader did not choose, with no word about why - so it looked like the window flickering and
+  // losing their place. The reload is replaced with a spy here: a real one would take the harness
+  // with it.
+  var reloads = 0;
+  window.__setReload(function () { reloads += 1; });
+  window.__setBusy(true);
+  window.__applyUiVersion("version-after-a-patch");
+  for (var ul = 0; ul < 5; ul++) { await tick(); }
+  var lock = document.getElementById("update-lock");
+  check(!!lock, "a deferred update must show the lock");
+  check(!!lock && /UI updating/.test(lock.textContent), "and say what is happening");
+  check(!!lock && /kept/.test(lock.textContent), "and that the reader's place and draft are kept");
+  check(!!lock && !!lock.querySelector(".lock-now") && !!lock.querySelector(".lock-later"),
+    "with both ways out: reload now, or keep working");
+  check(reloads === 0, "and it must not reload while a turn is running");
+  if (lock) {
+    lock.querySelector(".lock-later").click();
+    for (var uc = 0; uc < 3; uc++) { await tick(); }
+    check(!document.getElementById("update-lock"), "dismissing it removes it");
+  }
+  window.__setBusy(false);
+  for (var ud = 0; ud < 3; ud++) { await tick(); }
+  check(reloads === 1, "and the reload lands the moment the turn finishes, saw " + reloads);
+
+  // Where the reader was has to survive that reload: the scroll offset and whether they were
+  // following the bottom. "Fresh" should not mean "moved".
+  window.__setReload(function () { reloads += 1; });
+  // The browser reports the scroll offset it actually accepted - a short transcript cannot scroll to
+  // 123 - so the check compares what was remembered with what was observed, not with a number I
+  // chose.
+  messages.scrollTop = 123;
+  var observedTop = messages.scrollTop;
+  window.__rememberPlace();
+  var place = null;
+  try { place = JSON.parse(sessionStorage.getItem("wa-place") || "null"); } catch (error) { place = null; }
+  check(!!place && place.top === observedTop,
+    "the place must be remembered, saw " + JSON.stringify(place) + " for a scroll of " + observedTop);
+  check(!!place && typeof place.following === "boolean", "including whether the reader was following");
+  messages.scrollTop = 0;
+  window.__restorePlace();
+  for (var up = 0; up < 3; up++) { await tick(); }
+  check(messages.scrollTop === observedTop, "and put back after a reload, saw " + messages.scrollTop);
+
   // The sessions topic is a way to *find* a thread, not just a list: named after its opening
   // message, most recent first, and searchable. A list you have to read top to bottom is not a way
   // to find anything.
@@ -586,7 +630,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
 
 $server = $null
 $edge = @(

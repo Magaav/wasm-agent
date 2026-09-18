@@ -1670,7 +1670,69 @@ async function refreshMeta() {
 // throws away the page's copy of a reply that is still arriving. Those wait for the turn to
 // finish, and say so while they wait.
 let pendingReload = false;
-let reload = () => location.reload();
+// Every reload goes through here, so every reload can save where the reader was first.
+let reload = () => { rememberPlace(); location.reload(); };
+
+// ---- the update lock ------------------------------------------------------
+//
+// A UI update is invisible: the page keeps working while new files sit on disk, and then it reloads
+// at a moment the reader did not choose. Saying so - and saying *why now* - is the difference
+// between "the window flickered and lost my place" and "the window told me it was updating".
+//
+// It is a lock rather than a toast because it covers the panel: a turn is still running behind it,
+// and the reader should not be typing into a page that is about to be replaced. It is escapable -
+// reload now, or dismiss and let the reload land when the turn finishes.
+function updateLock(reason) {
+  let lock = document.getElementById("update-lock");
+  if (!lock) {
+    lock = document.createElement("div");
+    lock.id = "update-lock";
+    lock.innerHTML = '<div class="lock-card"><div class="lock-title">UI updating</div>' +
+      '<div class="lock-reason"></div><div class="lock-actions">' +
+      '<button type="button" class="lock-now">reload now</button>' +
+      '<button type="button" class="lock-later">keep working</button></div></div>';
+    lock.querySelector(".lock-now").addEventListener("click", () => { rememberPlace(); location.reload(); });
+    lock.querySelector(".lock-later").addEventListener("click", () => lock.remove());
+    document.body.append(lock);
+  }
+  lock.querySelector(".lock-reason").textContent = reason;
+  return lock;
+}
+
+// Where the reader was: the scroll offset, whether they were following the bottom, and which engine
+// topics were open. A reload that lands at the bottom of a long thread is a different page from the
+// one that was there a moment ago, and "fresh" should not mean "moved".
+const PLACE_KEY = "wa-place";
+
+function rememberPlace() {
+  try {
+    const topics = [];
+    for (const box of document.querySelectorAll(".engine-content")) {
+      if (!box.hidden && box.id) topics.push(box.id);
+    }
+    sessionStorage.setItem(PLACE_KEY, JSON.stringify({
+      session: chatSession,
+      top: messages.scrollTop,
+      following: follow,
+      topics: topics,
+    }));
+  } catch (error) { /* private mode: the reload still happens */ }
+}
+
+function restorePlace() {
+  let place = null;
+  try { place = JSON.parse(sessionStorage.getItem(PLACE_KEY) || "null"); } catch (error) { place = null; }
+  if (!place) return;
+  try { sessionStorage.removeItem(PLACE_KEY); } catch (error) { /* nothing to remove */ }
+  for (const id of place.topics || []) {
+    const box = document.getElementById(id);
+    if (box && box.hidden) document.querySelector('[data-target="' + id + '"]')?.click();
+  }
+  // Following the bottom is a position too, and the default: only a reader who had scrolled away
+  // needs the offset put back.
+  if (place.following) { setFollow(true); pin(true); }
+  else if (typeof place.top === "number") { setFollow(false); messages.scrollTop = place.top; }
+}
 
 function hotSwapStyles() {
   for (const link of document.querySelectorAll('link[rel="stylesheet"]')) {
@@ -1695,8 +1757,10 @@ function applyUiVersion(next) {
   if (busy) {
     pendingReload = true;
     setStatus("update ready - reloading when this turn finishes");
+    updateLock("A turn is running, so the reload waits for it to finish. Your place and your draft are kept.");
     return "deferred";
   }
+  updateLock("Reloading now - your place and your draft are kept.");
   reload();
   return "reloading";
 }
@@ -1738,8 +1802,9 @@ async function sync(reason) {
   synced = true;
   syncAttempts = 0;
   clearStatus();
-  // The transcript is restored once, and only after the node has answered.
-  restoreSession();
+  // The transcript is restored once, and only after the node has answered - then the reader's place
+  // is put back on top of it, because "fresh" should not mean "moved".
+  restoreSession().then(restorePlace);
 }
 
 async function watch() {
@@ -2854,7 +2919,7 @@ document.addEventListener("contextmenu", (event) => {
   event.preventDefault();
   contextMenu.items = [
     { label: "Collapse to avatar", action: () => { applyMode("compact"); native.compact(); } },
-    { label: "Reload window", action: () => location.reload() },
+    { label: "Reload window", action: () => reload() },
     { separator: true },
     { label: "Close wasm-agent", danger: true, action: () => native.quit() },
   ];
