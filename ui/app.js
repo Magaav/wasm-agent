@@ -560,7 +560,10 @@ async function send(text) {
   const names = attachments.map((file) => file.name).join(", ");
   add("user", text + (names ? `\n\nattached: ${names}` : ""));
   const outgoing = composedBody(text);
-  attachments = [];
+  // Clear in place, like the submit handler does. Reassigning the binding here was
+  // enough to make a reader's captured reference stale - which is how a test can end
+  // up asserting against a dead array and passing.
+  attachments.length = 0;
   renderAttachments();
   setStatus("wasm-agent is thinking…");
   try {
@@ -839,6 +842,11 @@ const DRAFT_LIMIT = 50;
 let draftUndo = [];
 let draftRedo = [];
 let draftNow = { text: "", attachments: [] };
+// Every time the draft is *committed* - sent, or replaced wholesale by an undo - the
+// generation moves on. A file read that began in an earlier generation belongs to a
+// draft that no longer exists, and appending it to the composer is how a screenshot
+// attached just before Enter reappears in the empty box afterwards.
+let draftGeneration = 0;
 
 function snapshotDraft() {
   return {
@@ -860,11 +868,26 @@ function sameDraft(a, b) {
 }
 
 // Call *before* a change, so the stack holds the state to come back to.
+//
+// It pushes the state as it is *now*. Comparing against draftNow instead looked
+// equivalent and was not: draftNow still equalled the current state at the moment of
+// a change (the snapshot is taken before the mutation), so the check returned early
+// and the change was never recorded. Removing a chip then pushed nothing, and undo
+// jumped back past it to the state before the files were attached at all - losing the
+// draft rather than restoring the chip. Deduping against the stack top keeps repeated
+// calls from piling up identical entries.
 function pushDraft() {
   const previous = draftNow;
-  if (sameDraft(previous, snapshotDraft())) return;
-  draftUndo.push(previous);
-  if (draftUndo.length > DRAFT_LIMIT) draftUndo.shift();
+  // Dedupe against the *stack top*, not against the current state. Comparing with the
+  // current state looked equivalent and was not: at the moment of a change they are
+  // usually still equal (the snapshot is taken before the mutation), so the check
+  // returned early and the state to come back to was never recorded - removing a chip
+  // pushed nothing, and undo jumped back past the attachments to an empty composer.
+  const top = draftUndo[draftUndo.length - 1];
+  if (!(top && sameDraft(top, previous))) {
+    draftUndo.push(previous);
+    if (draftUndo.length > DRAFT_LIMIT) draftUndo.shift();
+  }
   // A fresh edit invalidates the redo branch, as in any editor.
   draftRedo = [];
   draftNow = snapshotDraft();
@@ -873,6 +896,7 @@ function pushDraft() {
 
 function applyDraft(draft) {
   input.value = draft.text;
+  draftGeneration += 1;
   attachments.length = 0;
   attachments.push(...draft.attachments);
   draftNow = { text: draft.text, attachments: draft.attachments.slice() };
@@ -919,6 +943,7 @@ form.addEventListener("submit", (event) => {
   if (!text && attachments.length === 0) return;
   input.value = "";
   attachments.length = 0;
+  draftGeneration += 1;
   // The draft has been sent, so there is nothing to undo *to*: keeping the
   // stack would let Ctrl+Z resurrect a draft that is already in the transcript,
   // and pressing Enter again would send it twice.
@@ -1062,6 +1087,22 @@ function readAsDataURL(file) {
 // - so the three cannot drift apart in what they accept or how they name it.
 // Returns what it took and what it refused, so a caller can report accurately
 // instead of announcing success over a rejection.
+// The draft moved on while this file was being read. Say so: a file the user attached
+// that quietly does not appear is worse than one that explains why it did not.
+function discard(file, before) {
+  setStatus(`the draft was sent while ${file.name} was reading - it was not attached`);
+  // Files earlier in the same batch may already have been attached, so the state to
+  // undo back to is the one from before the batch - but only if anything changed,
+  // or the stack collects an entry that does nothing.
+  if (!sameDraft(before, snapshotDraft())) {
+    draftUndo.push(before);
+    draftNow = snapshotDraft();
+    syncUndoButtons();
+  }
+  renderAttachments();
+  return { added: 0, refused: 0 };
+}
+
 async function addFiles(files) {
   let added = 0;
   let refused = 0;
@@ -1069,10 +1110,12 @@ async function addFiles(files) {
   // time would make Ctrl+Z feel broken. Captured before the first await, so a
   // slow read still leaves the pre-drop state on the stack.
   const before = snapshotDraft();
+  const generation = draftGeneration;
   for (const file of files) {
     if (isImage(file)) {
       try {
         const dataUrl = await readAsDataURL(file);
+        if (generation !== draftGeneration) return discard(file, before);
         attachments.push({ kind: "image", name: file.name, mime: file.type, data: dataUrl });
         added += 1;
       } catch (error) {
@@ -1089,6 +1132,7 @@ async function addFiles(files) {
     }
     try {
       const text = await file.text();
+      if (generation !== draftGeneration) return discard(file, before);
       attachments.push({ kind: "text", name: file.name, text: text.slice(0, 20000) });
     } catch (error) {
       attachments.push({ kind: "text", name: file.name, text: "" });

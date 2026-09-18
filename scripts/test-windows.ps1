@@ -184,19 +184,21 @@ $root = Split-Path $PSScriptRoot -Parent
     Bad "scripts/test-empty-reply.lua is missing"
   }
 
-  # The composer's attachment handling, unit-tested in plain JS. It shipped with the
-  # image work and nothing ran it - it needs node and nothing else, and node is here.
-  # Missing node is a note, not a pass: a skipped test must not look like a green one.
-  $jsTest = Join-Path $root "tests/composer-attachments.js"
-  if (-not (Test-Path $jsTest)) {
-    Bad "tests/composer-attachments.js is missing"
+  # Every JS test, not a named one: test.sh already globs tests/*.js, and a new file
+  # should be wired into both suites by existing rather than by someone remembering.
+  $jsTests = @(Get-ChildItem -Path (Join-Path $root "tests") -Filter *.js -ErrorAction SilentlyContinue)
+  if ($jsTests.Count -eq 0) {
+    Bad "no JS tests found in tests/"
   } elseif (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    Skip "composer-attachments.js (node not found)"
+    Skip "$($jsTests.Count) JS test(s) (node not found)"
   } else {
-    $out = & node $jsTest 2>&1 | Out-String
-    if ($out -match "ALL PASS") { Ok "composer attachments: the JS unit test" }
-    else { Bad "the composer attachment test failed"; Note ($out -replace "s+", " ") }
+    foreach ($t in $jsTests) {
+      $out = & node $t.FullName 2>&1 | Out-String
+      if ($out -match "ALL PASS") { Ok "ui test: $($t.Name)" }
+      else { Bad "ui test failed: $($t.Name)"; Note (($out -replace "`r", " ") -replace "`n", " ") }
+    }
   }
+
 
   # Reading a session is a window, and the window is the newest turns. The same shared
   # file the smoke suite runs, because the rule is about memory, not about the platform.
