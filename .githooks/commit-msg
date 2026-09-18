@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Refuse an agent's commit on the integration branch.
+#
+# AGENTS.md says agents hand off a branch and the human merges. That was advice, and one
+# run committed straight to main anyway: a good commit, on the wrong route, and it sat
+# there unreviewed because nobody was watching the branch it was not on. A rule that is
+# only prose fails exactly when prose is least likely to be read - mid-task, by an agent
+# that has already decided its work is done.
+#
+# This is enforcement, and it uses the one thing the trailer convention can prove: under a
+# shared synthetic git identity, `Agent:` is the only trace of the harness behind a
+# commit. An `Agent: wasm-agent ...` commit on main is therefore refused here, and so is a
+# commit with no trailer at all.
+#
+# It is a commit-msg hook, not pre-commit, because the message is what is being judged and
+# only commit-msg is handed it. (The first version was a pre-commit hook, could not see the
+# message, and rejected everything - caught by trying both cases before believing it.)
+#
+# Escape hatch for the human landing agent work: WASM_AGENT_ALLOW_MAIN=1.
+set -uo pipefail
+
+branch="$(git symbolic-ref --short HEAD 2>/dev/null || echo "")"
+case "$branch" in
+  main|master) ;;
+  *) exit 0 ;;
+esac
+
+message_file="${1:-}"
+message=""
+if [ -n "$message_file" ] && [ -f "$message_file" ]; then
+  message="$(cat "$message_file")"
+fi
+
+trailer="$(printf '%s\n' "$message" | grep -E '^Agent:' | tail -1 || true)"
+
+if [ -z "$trailer" ]; then
+  cat >&2 <<'MESSAGE'
+commit-msg: no `Agent:` trailer.
+
+Every commit here is authored by a shared synthetic identity, so the trailer is the only
+record of which harness and session produced it. Add one:
+
+    Agent: pi session=<id>
+    Agent: wasm-agent node=<name> role=<role>
+MESSAGE
+  exit 1
+fi
+
+if printf '%s' "$trailer" | grep -q '^Agent: *wasm-agent' && [ "${WASM_AGENT_ALLOW_MAIN:-0}" != "1" ]; then
+  cat >&2 <<MESSAGE
+commit-msg: refusing an agent commit on '$branch'.
+
+  $trailer
+
+Your branch is the deliverable: put this on one (git switch -c <task>), rebase it onto
+origin/main so it still merges, push it, and let the human merge. If you are the human
+landing work an agent produced, re-run with WASM_AGENT_ALLOW_MAIN=1 and a trailer that
+says so.
+MESSAGE
+  exit 1
+fi
+
+exit 0

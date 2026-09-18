@@ -12,6 +12,16 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+# The board is also where the one piece of *enforcement* reports itself: a rule in a
+# document is advice, and the commit-msg hook is the part that actually refuses an agent
+# commit on main. A clone without it silently has no enforcement at all.
+hooks="$(git config core.hooksPath || true)"
+if [ "$hooks" != ".githooks" ]; then
+  echo "WARNING: commit-msg enforcement is OFF in this clone."
+  echo "         Agents can commit to main here. Fix: git config core.hooksPath .githooks"
+  echo
+fi
+
 git fetch -q origin 2>/dev/null || true
 main=origin/main
 main_head=$(git log --oneline -1 "$main")

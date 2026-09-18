@@ -28,6 +28,15 @@ Every tree authenticates with the `github-wasm-agent` SSH host alias:
   small and make each message say *why*, not just *what*.
 - Working-directory rule still applies: `git config core.autocrlf` must be
   `false`. Worktrees inherit it from the shared git dir, so verify, don't assume.
+- **The commit-msg hook enforces the branch rule.** A commit on `main` whose trailer is
+  `Agent: wasm-agent ...` is refused, and so is a commit with no trailer at all. If you
+  see that refusal, you are on the wrong branch — `git switch -c <task>`, rebase onto
+  `origin/main`, push — and it is the hook working, not a bug to work around.
+  Enable it in a checkout (once per clone; worktrees share the shared git dir):
+
+  ```sh
+  git config core.hooksPath .githooks
+  ```
 - **Merging cleanly is part of done.** Before you report a task finished, rebase onto
   `origin/main` and prove the branch still merges:
   `git rebase origin/main && git merge-tree --write-tree origin/main HEAD`.
