@@ -113,6 +113,10 @@ const removeButton = (chip) => (chip && chip.children ? chip.children.find((c) =
 const png = (name) => new FileStub([Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0x00])], name, { type: "image/png" });
 const resetHistory = () => vm.runInContext(
   "draftUndo.length = 0; draftRedo.length = 0; draftNow = { text: input.value, attachments: attachments.slice() }; syncUndoButtons();", sandbox);
+// The draft's undo/redo are the keyboard's: the two footer buttons were removed when the
+// diff topic took the transcript's one toggle. The hypotheses below use undo to *produce a
+// restored list*, so they still undo - through the control that remains.
+const undoDraft = () => input.fire("keydown", { key: "z", ctrlKey: true, shiftKey: false, preventDefault() {} });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Poll for a condition rather than guessing a duration. Returns false and records a
@@ -140,7 +144,7 @@ const until = async (predicate, label, ms = 2000) => {
   const chipEl = documentStub.createElement("span");
   chipEl.append(documentStub.createElement("b"), documentStub.createElement("button"));
   stub(chipEl.children.length === 2 && chipEl.children[1].tagName === "BUTTON", "createElement + append model a chip");
-  stub(typeof byId("undo").addEventListener === "function", "the undo button is in the stub registry");
+  stub(typeof byId("attach").addEventListener === "function", "the stub registry returns elements that accept listeners");
 
   // HYPOTHESIS 1: a send clears the composer in the DOM, not only in the array.
   live().length = 0; input.value = ""; resetHistory();
@@ -166,7 +170,7 @@ const until = async (predicate, label, ms = 2000) => {
     await removeButton(chips()[0]).fire("click", {});
     check(live().length === 1, "clicking × removes one");
     check(live()[0] && live()[0].name === "two.png", "it removed the right one (the first)");
-    await byId("undo").fire("click", {});
+    await undoDraft();
     await until(() => live().length === 2, "undo to restore both attachments");
     check(live().length === 2, "undo restores both attachments");
     check(live()[0] && live()[0].name === "one.png", "undo restores the order");
@@ -192,7 +196,7 @@ const until = async (predicate, label, ms = 2000) => {
   fileInput.files = [png("late.png")];
   await fileInput.fire("change", {});
   await until(() => live().length === 1, "the late attachment to register");
-  await byId("undo").fire("click", {});
+  await undoDraft();
   check(live().length === 0, "undo after attach removes the attachment");
   check(input.value === "keep me", "undo keeps the text typed before the attach: " + JSON.stringify(input.value));
 
