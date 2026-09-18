@@ -14,7 +14,11 @@ const statusBtn = document.getElementById("status-btn");
 const chipModel = document.getElementById("chip-model");
 const chipUsage = document.getElementById("chip-usage");
 const balloon = document.getElementById("status-balloon");
-const nodeSelect = document.getElementById("node-select");
+// Built here rather than in the markup: it lives in the account balloon now, and that balloon is
+// drawn from JS. The id is stable, so everything that reads the selection keeps working.
+const nodeSelect = document.createElement("select");
+nodeSelect.id = "node-select";
+nodeSelect.className = "wa-select";
 const providerSelect = document.getElementById("provider-select");
 const modelSelect = document.getElementById("model-select");
 const contextBox = document.getElementById("context-box");
@@ -27,7 +31,6 @@ const fileInput = document.getElementById("file");
 const attachmentsEl = document.getElementById("attachments");
 const userBtn = document.getElementById("user-btn");
 const userAvatar = document.getElementById("user-avatar");
-const userName = document.getElementById("user-name");
 const userMenu = document.getElementById("user-menu");
 const contextMenu = document.getElementById("context-menu");
 const terminal = document.getElementById("terminal");
@@ -1270,12 +1273,40 @@ function initials(name) {
   return (name || "?").trim().slice(0, 2);
 }
 
+// The account picture, if one was chosen. It replaces the initials inside the same rounded icon,
+// so the pill keeps its shape either way. Kept in localStorage: it belongs to this window's
+// reader rather than to the node, and nothing here is worth a server round trip.
+const AVATAR_KEY = "wa-avatar";
+
+function accountPicture() {
+  try { return localStorage.getItem(AVATAR_KEY) || ""; } catch (error) { return ""; }
+}
+
+function renderAvatar(name) {
+  const picture = accountPicture();
+  userAvatar.replaceChildren();
+  if (picture) {
+    const image = document.createElement("img");
+    image.className = "user-avatar-img";
+    image.src = picture;
+    image.alt = "";
+    userAvatar.append(image);
+    userAvatar.classList.add("has-picture");
+    return;
+  }
+  userAvatar.classList.remove("has-picture");
+  userAvatar.textContent = initials(name);
+}
+
 function renderUser() {
   const user = me.user || { name: "guest" };
-  userName.textContent = user.name || user.id || "guest";
-  userAvatar.textContent = initials(user.name || user.id);
-  userBtn.title = `Signed in as ${user.name || "guest"} (${me.role}) · ${me.tools.length} tools`;
-  userBtn.classList.toggle("local", me.role !== "admin");
+  renderAvatar(user.name || user.id);
+  // The tooltip names the *node*, because that is what this window is at, and how much it may do
+  // there. The account name is the same for everyone on a local-first node, so it said nothing.
+  const tools = (me.tools || []).length;
+  userBtn.title = "Signed in as " + (settings.node_name || "this node") + " · " + tools + " tools";
+  userBtn.setAttribute("aria-label", userBtn.title);
+  userBtn.classList.toggle("local", me.role !== "master");
 }
 
 async function refreshMe() {
@@ -1289,56 +1320,79 @@ async function refreshMe() {
   } catch (error) { /* keep the current view */ }
 }
 
-async function login(id) {
-  const response = await apiFetch("login", {
-    method: "POST", headers: apiHeaders({ "Content-Type": "text/plain" }), body: id,
+async function pickPicture() {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "image/*";
+  input.addEventListener("change", async () => {
+    const file = (input.files || [])[0];
+    if (!file) return;
+    try {
+      localStorage.setItem(AVATAR_KEY, await squareThumbnail(file));
+      renderUser();
+    } catch (error) {
+      setStatus("could not read that picture: " + error);
+    }
   });
-  const payload = await response.json();
-  if (payload.session) {
-    session = payload.session;
-    localStorage.setItem("wa-session", session);
-  }
-  await refreshMe();
-  await refreshMeta();
+  input.click();
 }
 
-async function logout() {
-  await apiFetch("logout", { method: "POST", headers: apiHeaders() });
-  session = "";
-  localStorage.removeItem("wa-session");
-  await refreshMe();
-  await refreshMeta();
+function clearPicture() {
+  try { localStorage.removeItem(AVATAR_KEY); } catch (error) { /* nothing to remove */ }
+  renderUser();
 }
 
-async function openUserMenu() {
-  // `me` is empty until /me answers, and the balloon can be opened before that. Reading
-  // through it anyway threw on the first click after load.
-  const user = (me && me.user) || {};
+// Downscaled before it is stored: this lives in localStorage, the icon is 20px, and an unshrunk
+// photo would both fill the quota and be thrown away by the display. Square and centre-cropped,
+// so the round icon does not squash it.
+async function squareThumbnail(file, size = 200) {
+  const bitmap = await createImageBitmap(file);
+  const side = Math.min(bitmap.width, bitmap.height);
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const context = canvas.getContext("2d");
+  context.drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, size, size);
+  bitmap.close();
+  return canvas.toDataURL("image/jpeg", 0.85);
+}
+
+// Switch Node: which node this window talks to, and therefore where work happens. It belongs with
+// the other identity controls rather than in the provider balloon, which is about the model.
+function switchNodeControl() {
+  const row = document.createElement("div");
+  row.className = "menu-item muted menu-node";
+  const label = document.createElement("span");
+  label.className = "menu-node-label";
+  label.textContent = "switch node";
+  // Draw what is known, then ask. The node list used to be fetched only when the engine's nodes
+  // topic was opened, so this row would have been an empty box for anyone who had not been there
+  // - a control that does nothing until you have already done something else.
+  renderNodeSelect();
+  refreshNodes();
+  row.append(label, nodeSelect);
+  return row;
+}
+
+function openUserMenu() {
+  // Three things about this window's identity, and nothing else: who the node is, what it looks
+  // like, and which node it is. The binding line that used to open this balloon said
+  // "master · master" and told nobody anything.
   const items = [
-    { label: `${user.name || "guest"} · ${me.role}`, action: null },
-    { separator: true },
     // Who this window is talking to, and what that node calls itself.
     { element: nodeControl() },
-    { separator: true },
+    { label: "Change Picture", action: () => pickPicture() },
   ];
-  if (session) {
-    items.push({ separator: true }, { label: "Sign out", danger: true, action: () => logout() });
-  }
+  // Offered only when there is one to remove, so the balloon does not grow a row that does
+  // nothing - but offered, because a picture with no way back is a trap.
+  if (accountPicture()) items.push({ label: "Remove Picture", action: () => clearPicture() });
+  items.push({ element: switchNodeControl() });
   // Open with what is already known: the node control has nothing to wait for, and a balloon
   // that appears only after a round trip feels broken when the round trip is slow.
   userMenu.items = items;
   const rect = userBtn.getBoundingClientRect();
   userMenu.openAt(rect.left, rect.top, { above: true, inset: 5 });
   userBtn.setAttribute("aria-expanded", "true");
-  try {
-    const payload = await (await apiFetch("users")).json();
-    for (const candidate of payload.users || []) {
-      if (candidate.id === (user.id || "")) continue;
-      items.push({ label: `Sign in as ${candidate.name}`, action: () => login(candidate.id) });
-    }
-    // Same items array, so only redraw if this balloon is still the one on screen.
-    if (userMenu.items === items) userMenu.render();
-  } catch (error) { /* no user list: the balloon is already open and usable */ }
 }
 
 async function refreshMeta() {
@@ -1347,6 +1401,8 @@ async function refreshMeta() {
     const payload = await response.json();
     settings = { ...settings, ...payload };
     updateNodeLabel(settings.node_name, settings.node_worktree);
+    // The account tooltip names the node, so it follows the same payload.
+    renderUser();
     updateChip();
     if (balloon.open) {
       renderProviders();

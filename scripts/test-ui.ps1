@@ -311,6 +311,51 @@ $harness = @'
   check(document.getElementById("chip-node") === null,
     "the footer must no longer carry a node chip of its own");
 
+  // The account pill is the icon and nothing beside it - a name there was truncated to "ma…" and
+  // said nothing - and the tooltip carries what the icon cannot: which node, and how much this
+  // window may do there.
+  var pill = document.getElementById("user-btn");
+  var avatar = document.getElementById("user-avatar");
+  check(pill.textContent.trim() === (avatar.textContent || "").trim(),
+    "the account pill must carry the icon and no written name, saw: " + JSON.stringify(pill.textContent));
+  check(/^Signed in as .+ · \d+ tools$/.test(pill.title),
+    "the account tooltip must read 'Signed in as <node> · n tools', saw: " + JSON.stringify(pill.title));
+
+  // The balloon is three things: which node this is, what it looks like, and which node it talks
+  // to. Everything that was taken out of it must stay out, and the node selector must have
+  // arrived here rather than staying in the provider balloon.
+  var accountMenu = document.getElementById("user-menu");
+  var accountText = (accountMenu.textContent || "").toLowerCase();
+  check(accountText.indexOf("change picture") >= 0, "the account balloon must offer Change Picture");
+  check(accountText.indexOf("switch node") >= 0, "the account balloon must offer Switch Node");
+  check(accountText.indexOf("sign in as") < 0 && accountText.indexOf("sign out") < 0,
+    "and must not offer user sign-in any more, saw: " + JSON.stringify(accountText.slice(0, 80)));
+  check(!!accountMenu.querySelector("select#node-select"),
+    "the node selector must live in the account balloon now");
+  check(document.querySelector("#status-balloon select#node-select") === null,
+    "and must no longer be in the status balloon");
+
+  // The picture replaces the initials inside the same circle, and taking it away brings them back.
+  //
+  // Only the two states are driven here. The picker itself needs a file dialog, and the resize
+  // step needs async image decoding, which never completes under headless virtual time - the first
+  // version of this block awaited it and hung the whole harness. So the swap is asserted, and the
+  // downscale is checked by using the control rather than pretended to be covered here.
+  localStorage.removeItem("wa-avatar");
+  renderUser();
+  check(!!avatar.textContent.trim() && !avatar.querySelector("img"),
+    "with no picture the icon must show the initials, saw: " + JSON.stringify(avatar.textContent));
+  localStorage.setItem("wa-avatar", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==");
+  renderUser();
+  var picture = avatar.querySelector("img.user-avatar-img");
+  check(!!picture, "a chosen picture must replace the initials inside the icon");
+  check(pill.textContent.trim() === "",
+    "and the pill must still carry no written text, saw: " + JSON.stringify(pill.textContent));
+  check(avatar.classList.contains("has-picture"), "and the icon must know it is showing a picture");
+  localStorage.removeItem("wa-avatar");
+  renderUser();
+  check(!!avatar.textContent.trim() && !avatar.querySelector("img"), "and removing it must restore the initials");
+
   // The nodes topic is a topic inside the engine, like sessions: opening the engine alone
   // does not fetch it, so click the way a reader would.
   document.title = "stage: nodes topic";

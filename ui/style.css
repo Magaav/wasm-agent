@@ -369,6 +369,8 @@ body.term .terminal { display: flex; }
   font: inherit; font-size: 13px;
 }
 .menu-node-name:hover { color: var(--accent); }
+/* The switch-node row: the label says what it is, the select takes the rest of the width. */
+.menu-node .wa-select { flex: 1; min-width: 0; }
 /* The desktop this node's window is on: part of the node, not a node. */
 .node-desktop { color: var(--muted); font-size: 10.5px; margin-left: var(--space); }
 .node-desktop.ready { color: var(--accent); }
@@ -491,12 +493,17 @@ wa-balloon.popover {
 /* user chip */
 .user-chip { padding: var(--space); gap: var(--space); }
 .user-avatar {
-  width: 20px; height: 20px; border-radius: 50%; flex: none;
+  width: 20px; height: 20px; border-radius: 50%; flex: none; overflow: hidden;
   background: linear-gradient(140deg, #6fa8ff, #2f5fd0); color: #fff;
   display: inline-flex; align-items: center; justify-content: center;
   font-size: 10.5px; text-transform: uppercase;
 }
-.user-chip #user-name { max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A chosen picture fills the same circle the initials do, so the pill keeps one shape either way. */
+.user-avatar.has-picture { background: none; }
+.user-avatar-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+/* The account balloon carries the node selector, which needs room to show a name and its kind. */
+#user-menu.menu { min-width: 240px; }
 
 /* menus (wa-menu) */
 wa-menu.menu {

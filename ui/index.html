@@ -161,9 +161,10 @@
       </div>
       <div class="composer-footer">
         <div class="footer-left">
-          <button id="user-btn" class="chip user-chip" type="button" title="Account" aria-haspopup="true">
+          <!-- The pill is the icon and nothing beside it. A name there was truncated to "ma…",
+               which said nothing the tooltip does not say better. -->
+          <button id="user-btn" class="chip user-chip" type="button" title="Account" aria-haspopup="true" aria-label="Account">
             <span class="user-avatar" id="user-avatar">?</span>
-            <span id="user-name">…</span>
           </button>
           <button id="status-btn" class="chip" type="button" title="Provider, model and usage" aria-haspopup="true" aria-expanded="false">
             <span class="chip-dot"></span>
@@ -187,10 +188,6 @@
       </div>
 
       <wa-balloon id="status-balloon" class="popover" anchor="status-btn">
-        <div class="pop-row">
-          <label class="pop-head" for="node-select">node</label>
-          <select id="node-select" class="wa-select"></select>
-        </div>
         <div class="pop-row">
           <label class="pop-head" for="provider-select">provider</label>
           <select id="provider-select" class="wa-select"></select>
