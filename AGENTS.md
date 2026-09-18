@@ -239,3 +239,21 @@ And never leave a tree dirty without saying so. An uncommitted working-tree edit
 is invisible, unattributable and lost the moment anyone pulls — which is exactly
 what happened to a UI change found sitting in the cloud tree: no author, no date,
 no trace, and no way to tell whether it was even wanted.
+
+## Restarting the node you are running on
+
+You cannot do it. The stop kills your turn before your next command runs — the node goes down, the copy
+never happens, the start never happens, and nobody is left to bring it back. This is not a rule to
+remember; it is what happens.
+
+Ask instead, and the sentinel outside performs it:
+
+```bash
+wa-sentinel request restart --reason "why"
+wa-sentinel request upgrade --binary /path/to/wa --reason "why"
+wa-sentinel request wake --session "$SESSION" --prompt "the node restarted; carry on" --reason "why"
+```
+
+`request` writes a file and returns; the sentinel performs it. Your turn dies as `unfinished` when the
+node stops, which is expected — the request is already on disk. Write the `wake` request too if you want
+to be brought back. See `docs/SENTINEL.md`.
