@@ -85,7 +85,10 @@ class WaBalloon extends WaOverlay {}
 customElements.define("wa-balloon", WaBalloon);
 
 // <wa-menu> — an overlay positioned at a point, rendering `items`.
-// Item shape: { label, action, danger?, separator? }.
+// Item shape: { label, action, danger?, separator? } for an action, or { element } for a
+// control that belongs in the menu but is not a menu action - a field to edit, say. An
+// element item is appended as it is: the menu does not wrap it in a button, because a
+// click inside it must not be read as choosing the item.
 class WaMenu extends WaOverlay {
   constructor() {
     super();
@@ -108,6 +111,10 @@ class WaMenu extends WaOverlay {
   render() {
     this.replaceChildren();
     for (const item of this.items) {
+      if (item.element) {
+        this.append(item.element);
+        continue;
+      }
       if (item.separator) {
         const line = document.createElement("div");
         line.className = "menu-sep";

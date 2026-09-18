@@ -29,7 +29,9 @@ foreach ($name in @("index.html", "style.css", "app.js", "components.js", "rende
 $harness = @'
 <script>
 (async function () {
+  document.title = "stage: start";
   var problems = [];
+  try {
   var tick = function () { return Promise.resolve(); };
   function check(ok, label) { if (!ok) problems.push(label); }
   var events = [
@@ -270,6 +272,7 @@ $harness = @'
   check(!mutates, "nothing in the drift panel may push: looking at drift must not change it");
   document.getElementById("drift-close").click();
 
+  document.title = "stage: node block done";
   // The engine view: open it, let the fixture fetch settle in microtasks, and
   // assert what a reader would see. Timers never fire in this mode, so the
   // wait is promise ticks only - which is also why the panel must render
@@ -293,27 +296,53 @@ $harness = @'
   // The node chip answers the question the engine could not: which of these is this window
   // talking to? It names it, the engine marks exactly one row, and a rename leaves the
   // window: it goes to the node, and the label is redrawn from the node's reply.
+  // The node control lives in the account balloon now, not the footer: it is a setting about
+  // this node, and the footer is for the conversation. Open it the way a reader would.
+  document.title = "stage: opening the balloon";
+  document.getElementById("user-btn").click();
+  for (var u = 0; u < 20; u++) { await tick(); }
+  document.title = "stage: balloon open";
+  var nodeButton = document.getElementById("node-name-btn");
+  check(!!nodeButton, "the account balloon must carry the node control");
+  check(!!nodeButton && nodeButton.textContent.length > 0 && nodeButton.textContent !== "…",
+    "and it must name the node from the metadata the window already has, saw: " +
+    (nodeButton ? JSON.stringify(nodeButton.textContent) : "no control"));
+  check(document.getElementById("chip-node") === null,
+    "the footer must no longer carry a node chip of its own");
+
   // The nodes topic is a topic inside the engine, like sessions: opening the engine alone
   // does not fetch it, so click the way a reader would.
+  document.title = "stage: nodes topic";
   document.querySelector('[data-target="nodes-box"]').click();
   for (var n = 0; n < 20; n++) { await tick(); }
-  var chipNode = document.getElementById("chip-node");
-  check(!!chipNode && chipNode.textContent === "foundation",
-    "the footer must name the node this window is talking to, saw: " + (chipNode ? chipNode.textContent : "no chip"));
-  check(document.querySelectorAll(".node-local").length === 1,
-    "exactly one node row may be marked as this one, saw " + document.querySelectorAll(".node-local").length);
-  var thisBadge = document.querySelector(".node-this");
-  check(!!thisBadge && /this node/.test(thisBadge.textContent), "the marked row must say so");
+  // Two local rows, and they are different things: the node, and the desktop this window
+  // runs on. One node must never look like two.
+  var localRows = document.querySelectorAll(".node-local");
+  check(localRows.length === 2, "the node and this desktop are both local, saw " + localRows.length);
+  var badges = document.querySelectorAll(".node-this");
+  check(badges.length === 2, "both local rows must be labelled, saw " + badges.length);
+  var badgeWords = Array.prototype.map.call(badges, function (b) { return b.textContent; }).join(" | ");
+  check(/this node/.test(badgeWords) && /this desktop/.test(badgeWords),
+    "one must say this node and the other this desktop, saw: " + badgeWords);
+  var hostBadges = 0;
+  for (var r = 0; r < localRows.length; r += 1) {
+    if (/this node/.test(localRows[r].textContent)) hostBadges += 1;
+  }
+  check(hostBadges === 1, "exactly one row may claim to be this node, saw " + hostBadges);
   var nodesText = document.getElementById("nodes-box").textContent;
   check(/foundation/.test(nodesText) && /openclaw/.test(nodesText),
     "both nodes must be listed, saw: " + nodesText.slice(0, 120));
 
-  await window.__renameNode("renamed-by-the-test");
-  check(chipNode.textContent === "renamed-by-the-test",
-    "the chip must show what the node reported, saw: " + chipNode.textContent +
-    " | stub local name: " + window.__fixtures.nodes.nodes[0].name +
-    " | nodes fetches: " + (window.__calls || []).filter(function (c) { return c.url.indexOf("nodes") >= 0; }).length +
-    " | last 3 calls: " + JSON.stringify((window.__calls || []).slice(-3).map(function (c) { return c.method + " " + c.url; })));
+  document.title = "stage: renaming";
+  // Ticks, not await: the app's apiFetch arms a setTimeout for its own deadline, and this
+  // harness runs with virtual time, so awaiting an app promise that goes through it never
+  // settles. Driving the call and then draining microtasks is the pattern every other check
+  // here uses, and this one had broken it.
+  window.__renameNode("renamed-by-the-test");
+  for (var w = 0; w < 40; w++) { await tick(); }
+  document.title = "stage: renamed";
+  check(!!nodeButton && nodeButton.textContent === "renamed-by-the-test",
+    "the control must show what the node reported, saw: " + (nodeButton ? nodeButton.textContent : "no control"));
   var posted = (window.__calls || []).filter(function (call) {
     return call.url.indexOf("node/name") >= 0 && call.method === "POST";
   });
@@ -326,6 +355,13 @@ $harness = @'
   var classify = window.__classifyProbe ? window.__classifyProbe() : ["the classify probe is missing"];
   for (var c = 0; c < classify.length; c++) { problems.push(classify[c]); }
 
+  document.title = "stage: end";
+} catch (error) {
+    // A throw must still produce a log: a reporter that swallows its own failure is worse
+    // than none, and "the harness did not run" is a symptom with no cause.
+    problems.push("the harness threw: " + ((error && error.stack) || error));
+  }
+  document.title = "stage: logging";
   var log = document.createElement("pre");
   log.id = "harness-log";
   log.textContent = problems.length ? ("UI FAIL: " + problems.join(" ;; ")) : "UI PASS";

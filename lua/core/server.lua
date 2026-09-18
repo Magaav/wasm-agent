@@ -449,6 +449,11 @@ function wa_model(node, session)
     return json.encode({ error = (result and result.error) or "remote_error", node = node })
   end
   local settings = provider.settings()
+  -- The window asks for this at startup, so the node's own name rides along with the
+  -- metadata it already fetches. Otherwise the name only appears once the engine's nodes
+  -- topic has been opened, which leaves a fresh window with nothing to show.
+  settings.node_name = nodeslib.node_name()
+  settings.node_worktree = nodeslib.worktree()
   local providers = {}
   for _, item in ipairs(provider.providers()) do
     providers[#providers + 1] = {

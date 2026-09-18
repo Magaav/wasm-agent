@@ -8,6 +8,7 @@ window.__fixtures = {
   models: {
     model: "fixture-model", provider: "fixture", configured: true,
     context_limit: 128000, database: "/tmp/fixture.db",
+    node_name: "foundation", node_worktree: "foundation",
     base_url: "http://fixture.invalid", usage: {},
   },
   sessions: {
@@ -24,12 +25,20 @@ window.__fixtures = {
       },
     ],
   },
+  me: { user: { id: "master", name: "master" }, role: "master" },
+  users: { users: [] },
   nodes: {
     nodes: [
       {
         id: "aaaaaaaa-1111-2222-3333-444444444444", node_id: "aaaaaaaa-1111-2222-3333-444444444444",
         name: "foundation", kind: "host", role: "master", online: true, local_node: true,
         worktree: "foundation", endpoints: {},
+      },
+      // The desktop running this window: local, but not the node. Both are local and they
+      // must not both claim to be "this node".
+      {
+        id: "client", node_id: "client", name: "client", kind: "client", online: true,
+        local_node: true, capabilities: ["screenshot", "frame", "click", "move", "type", "key", "shell", "cdp"],
       },
       {
         id: "bbbbbbbb-5555-6666-7777-888888888888", node_id: "bbbbbbbb-5555-6666-7777-888888888888",
@@ -68,7 +77,17 @@ window.fetch = function (input, init) {
     method: (init && init.method) || "GET",
     body: (init && init.body) || "",
   });
-  const key = Object.keys(window.__fixtures).find((name) => url.includes(name));
+  // Match the path, not a substring of it: url.includes("me") matched "node/name", so a
+  // rename POST was answered with the account payload and the write never reached its
+  // handler. A stub that answers the wrong request is worse than one that answers none.
+  let path = url.split("?")[0];
+  const schemeAt = path.indexOf("://");
+  if (schemeAt >= 0) path = path.slice(schemeAt + 3);
+  const slashAt = path.indexOf("/");
+  // A relative fetch like "nodes" has no slash at all: keep it as the path.
+  path = slashAt >= 0 ? path.slice(slashAt + 1) : path;
+  if (path.endsWith("/")) path = path.slice(0, -1);
+  const key = Object.keys(window.__fixtures).find((name) => path === name);
   if (key) {
     const payload = window.__fixtures[key];
     return Promise.resolve({

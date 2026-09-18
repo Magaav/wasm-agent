@@ -5,8 +5,8 @@ const meta = document.getElementById("meta");
 const form = document.getElementById("composer");
 const input = document.getElementById("input");
 const undoBtn = document.getElementById("undo");
-const nodeBtn = document.getElementById("node-btn");
-const chipNode = document.getElementById("chip-node");
+// The node's name is not in the footer: it is a setting about this node, so it lives in the
+// account balloon, which is where "who am I, and what am I" is answered.
 const redoBtn = document.getElementById("redo");
 const panel = document.getElementById("panel");
 const sendButton = document.getElementById("send");
@@ -452,10 +452,7 @@ function handleEvent(event) {
   } else if (event.type === "node") {
     // Another window renamed this node, or this one did: either way the name is the node's,
     // so take it from the event and let the list catch up.
-    if (event.name) {
-      chipNode.textContent = event.name;
-      if (event.worktree) chipNode.title = "worktree " + event.worktree;
-    }
+    if (event.name) updateNodeLabel(event.name, event.worktree);
     refreshNodes();
   } else if (event.type === "status") {
     const note = event.text || "working";
@@ -826,6 +823,7 @@ async function post(path, body) {
   const payload = await response.json();
   if (!payload.error) {
     settings = { ...settings, ...payload };
+    updateNodeLabel(settings.node_name, settings.node_worktree);
     updateChip();
     renderProviders();
     renderModels();
@@ -966,7 +964,6 @@ function syncUndoButtons() {
   if (redoBtn) redoBtn.disabled = draftRedo.length === 0;
 }
 
-if (nodeBtn) nodeBtn.addEventListener("click", startNodeRename);
 if (undoBtn) undoBtn.addEventListener("click", () => undoDraft());
 if (redoBtn) redoBtn.addEventListener("click", () => redoDraft());
 
@@ -1312,22 +1309,34 @@ async function logout() {
 }
 
 async function openUserMenu() {
-  const user = me.user || {};
-  const items = [{ label: `${user.name || "guest"} · ${me.role}`, action: null }, { separator: true }];
+  // `me` is empty until /me answers, and the balloon can be opened before that. Reading
+  // through it anyway threw on the first click after load.
+  const user = (me && me.user) || {};
+  const items = [
+    { label: `${user.name || "guest"} · ${me.role}`, action: null },
+    { separator: true },
+    // Who this window is talking to, and what that node calls itself.
+    { element: nodeControl() },
+    { separator: true },
+  ];
+  if (session) {
+    items.push({ separator: true }, { label: "Sign out", danger: true, action: () => logout() });
+  }
+  // Open with what is already known: the node control has nothing to wait for, and a balloon
+  // that appears only after a round trip feels broken when the round trip is slow.
+  userMenu.items = items;
+  const rect = userBtn.getBoundingClientRect();
+  userMenu.openAt(rect.left, rect.top - 5);
+  userBtn.setAttribute("aria-expanded", "true");
   try {
     const payload = await (await apiFetch("users")).json();
     for (const candidate of payload.users || []) {
       if (candidate.id === (user.id || "")) continue;
       items.push({ label: `Sign in as ${candidate.name}`, action: () => login(candidate.id) });
     }
-  } catch (error) { /* no user list */ }
-  if (session) {
-    items.push({ separator: true }, { label: "Sign out", danger: true, action: () => logout() });
-  }
-  userMenu.items = items;
-  const rect = userBtn.getBoundingClientRect();
-  userMenu.openAt(rect.left, rect.top - 5);
-  userBtn.setAttribute("aria-expanded", "true");
+    // Same items array, so only redraw if this balloon is still the one on screen.
+    if (userMenu.items === items) userMenu.render();
+  } catch (error) { /* no user list: the balloon is already open and usable */ }
 }
 
 async function refreshMeta() {
@@ -1335,6 +1344,7 @@ async function refreshMeta() {
     const response = await apiFetch("models" + nodeQuery(), { headers: apiHeaders() });
     const payload = await response.json();
     settings = { ...settings, ...payload };
+    updateNodeLabel(settings.node_name, settings.node_worktree);
     updateChip();
     if (balloon.open) {
       renderProviders();
@@ -1492,13 +1502,79 @@ function nodeButton(label, handler) {
   return button;
 }
 
-// Rename this node from the footer, in place. The name is the node's, not this window's:
-// it goes to the node, every other window is told over the event stream, and the label here
-// is only redrawn from what the node reports.
+// The one place the label is drawn, so the balloon, the engine and the settings cannot
+// disagree about what this node is called.
+function updateNodeLabel(name, worktree) {
+  if (name) settings.node_name = name;
+  if (worktree !== undefined) settings.node_worktree = worktree;
+  const button = document.getElementById("node-name-btn");
+  if (!button) return;
+  button.textContent = settings.node_name || "…";
+  button.title = settings.node_worktree
+    ? "running in " + settings.node_worktree + " — click to rename"
+    : "click to rename";
+}
+
+// The node's own row in the account balloon: its name, editable in place.
+function nodeControl() {
+  const row = document.createElement("div");
+  row.className = "menu-node";
+  const label = document.createElement("span");
+  label.className = "menu-node-label";
+  label.textContent = "node";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.id = "node-name-btn";
+  button.className = "menu-node-name";
+  button.textContent = settings.node_name || "…";
+  button.title = settings.node_worktree
+    ? "running in " + settings.node_worktree + " — click to rename"
+    : "click to rename";
+  button.addEventListener("click", () => editNodeName(button));
+  row.append(label, button);
+  return row;
+}
+
+function editNodeName(button) {
+  if (!button || button.dataset.editing === "1") return;
+  button.dataset.editing = "1";
+  const current = button.textContent;
+  const field = document.createElement("input");
+  field.className = "node-rename";
+  field.value = current === "…" ? "" : current;
+  field.setAttribute("aria-label", "Node name");
+  button.replaceWith(field);
+  field.focus();
+  field.select();
+  let settled = false;
+  const finish = (save) => {
+    if (settled) return;
+    settled = true;
+    const next = field.value.trim();
+    field.replaceWith(button);
+    button.dataset.editing = "";
+    if (!save) return;
+    // A node with no name is worse than a node with a boring one: keep what it had and say why.
+    if (!next) {
+      setStatus("a node needs a name");
+      return;
+    }
+    if (next !== current) saveNodeName(next);
+  };
+  field.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); finish(true); }
+    else if (event.key === "Escape") { event.preventDefault(); finish(false); }
+  });
+  field.addEventListener("blur", () => finish(true));
+}
+
+// Rename this node. The name is the node's, not this window's: it goes to the node, every
+// other window is told over the event stream, and the label is redrawn from what the node
+// reports.
 async function saveNodeName(name) {
   const next = String(name || "").trim();
-  if (!next) return;
-  chipNode.textContent = next;   // the edit should feel immediate; the node is the truth
+  if (!next) { setStatus("a node needs a name"); return; }
+  updateNodeLabel(next);   // the edit should feel immediate; the node is the truth
   try {
     const response = await apiFetch("node/name", {
       method: "POST",
@@ -1511,33 +1587,6 @@ async function saveNodeName(name) {
     setStatus("could not rename the node: the node is not answering");
   }
   await refreshNodes();
-}
-
-function startNodeRename() {
-  if (document.querySelector(".node-rename")) return;
-  const current = chipNode.textContent;
-  const field = document.createElement("input");
-  field.className = "node-rename";
-  field.value = current === "…" ? "" : current;
-  field.setAttribute("aria-label", "Node name");
-  chipNode.replaceWith(field);
-  field.focus();
-  field.select();
-  let settled = false;
-  const finish = (save) => {
-    if (settled) return;
-    settled = true;
-    const next = field.value;
-    field.replaceWith(chipNode);
-    if (save) saveNodeName(next);
-  };
-  field.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") { event.preventDefault(); finish(true); }
-    else if (event.key === "Escape") { event.preventDefault(); finish(false); }
-  });
-  // Leaving the field is a decision either way: keep what is there rather than silently
-  // discarding an edit the reader believes they made.
-  field.addEventListener("blur", () => finish(true));
 }
 
 async function refreshNodes() {
@@ -1557,15 +1606,17 @@ async function refreshNodes() {
       name.textContent = node.name;
       // Which of these is the window talking to? Without it a list of four nodes is four
       // names and no way to tell which one this is.
+      // Two rows are local, and they are different things: the node itself, and the desktop
+      // running this window (the client executor, which the UI already filters out of the node
+      // picker). Marking both "this node" made one node look like two.
       if (node.local_node) {
-        chipNode.textContent = node.name;
-        chipNode.title = node.worktree ? "worktree " + node.worktree : node.name;
         row.classList.add("node-local");
         const badge = document.createElement("span");
         badge.className = "node-this";
-        badge.textContent = "this node";
+        badge.textContent = node.kind === "client" ? "this desktop" : "this node";
         row.append(badge);
       }
+      if (node.kind === "host") updateNodeLabel(node.name, node.worktree);
       const kind = document.createElement("span");
       kind.className = "node-kind";
       kind.textContent = node.kind;
