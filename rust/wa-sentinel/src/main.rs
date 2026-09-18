@@ -285,27 +285,89 @@ fn verb_wake(session: &str, prompt: &str, reason: &str) -> Result<String> {
         audit("wake-refused", session, &format!("{reason} (budget {budget}/hour used)"));
         bail!("wake budget reached ({used}/{budget} in the last hour) - refusing, and saying so");
     }
+    // Wait for the node to be listening. A wake is usually written *beside* a restart, and a node that
+    // has just been started takes seconds to bind - so a wake that fires immediately loses the race and
+    // does nothing. It happened on the first end-to-end run: the log said "the node did not accept the
+    // wake" seven seconds after the restart, which is a supervisor failing at the one job it has.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while !node_is_up() {
+        if Instant::now() >= deadline {
+            audit("wake-failed", session, &format!("{reason} (the node never came up)"));
+            bail!("the node is not answering after 120s - not waking it");
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
     let url = format!("http://127.0.0.1:{}/chat", node_port());
     let body = json!({ "text": prompt }).to_string();
-    let agent = health_agent();
-    let response = agent
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .header("X-WA-Session", session)
-        .send(body.as_bytes())
-        .context("the node did not accept the wake")?;
-    let status = response.status().as_u16();
-    let text = response.into_body().read_to_string().unwrap_or_default();
-    if status != 200 {
-        audit("wake-failed", session, &format!("{reason} (HTTP {status})"));
-        bail!("the node answered HTTP {status}: {}", text.chars().take(200).collect::<String>());
+    // The streaming route, and a per-read timeout rather than a whole-request one.
+    //
+    // A wake runs a whole turn, which takes minutes, so the non-streaming route cannot answer inside any
+    // sane timeout - the first version of this failed with "timeout: receive response" on a node that was
+    // working perfectly, because it was waiting for a reply that would arrive when the turn ended. With
+    // `Accept: text/event-stream` the node sends a delta as it goes, so silence for two minutes means
+    // trouble and a long turn means traffic. Same reasoning as the node's own timeouts, and the same
+    // shape as the UI's stream.
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_connect(Some(Duration::from_secs(3)))
+        .timeout_recv_response(Some(Duration::from_secs(120)))
+        .timeout_recv_body(Some(Duration::from_secs(120)))
+        .build()
+        .into();
+    let mut last = String::new();
+    for attempt in 1..=6 {
+        match agent
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .header("X-WA-Session", session)
+            .send(body.as_bytes())
+        {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                if status != 200 {
+                    let text = response.into_body().read_to_string().unwrap_or_default();
+                    audit("wake-failed", session, &format!("{reason} (HTTP {status})"));
+                    bail!("the node answered HTTP {status}: {}", text.chars().take(200).collect::<String>());
+                }
+                // Read to the end of the turn: `done` is the node saying it finished. Anything shorter is
+                // reported, so a wake that half-happened is never recorded as a success.
+                let reader = std::io::BufReader::new(response.into_body().into_reader());
+                let mut events = 0u32;
+                let mut saw_done = false;
+                let mut failure: Option<String> = None;
+                for line in std::io::BufRead::lines(reader) {
+                    let Ok(line) = line else { break };
+                    if !line.starts_with("data: ") {
+                        continue;
+                    }
+                    events += 1;
+                    let payload = &line[6..];
+                    if payload.contains("\"type\":\"done\"") {
+                        saw_done = true;
+                        break;
+                    }
+                    if let Ok(value) = serde_json::from_str::<Value>(payload) {
+                        if value.get("type").and_then(Value::as_str) == Some("error") {
+                            failure = value.get("error").and_then(Value::as_str).map(str::to_string);
+                        }
+                    }
+                }
+                if let Some(error) = failure {
+                    audit("wake-failed", session, &format!("{reason} (the turn failed: {error})"));
+                    bail!("the turn failed: {error}");
+                }
+                audit("wake", session, &format!("{reason} ({events} events, done={saw_done})"));
+                return Ok(format!("{events} events, done={saw_done}"));
+            }
+            Err(error) => {
+                last = error.to_string();
+                std::thread::sleep(Duration::from_millis(500 * attempt));
+            }
+        }
     }
-    let reply = serde_json::from_str::<Value>(&text)
-        .ok()
-        .and_then(|v| v.get("reply").and_then(Value::as_str).map(str::to_string))
-        .unwrap_or_default();
-    audit("wake", session, reason);
-    Ok(reply)
+    audit("wake-failed", session, &format!("{reason} ({last})"));
+    bail!("the node did not accept the wake after 6 attempts: {last}")
 }
 
 fn wakes_last_hour() -> u32 {
@@ -447,7 +509,10 @@ fn process_requests() -> Result<u32> {
         };
         let record = json!({
             "request": request,
-            "ok": outcome.is_ok(),
+            // Not `ok`: for a spawned wake the outcome is genuinely unknown at this point, and a
+            // supervisor that reports success before it knows is the thing it exists to prevent. The
+            // log carries what happened, when it happens.
+            "ok": if matches!(outcome.as_ref().map(|d| d.as_str()), Ok("spawned")) { Value::Null } else { json!(outcome.is_ok()) },
             "detail": detail,
             "at": now_epoch(),
         });
@@ -566,6 +631,26 @@ fn stop_self() -> Result<()> {
     Ok(())
 }
 
+fn restart_self() -> Result<()> {
+    let old = std::fs::read_to_string(pid_path()).ok().and_then(|t| t.trim().parse::<u32>().ok());
+    if let Some(pid) = old {
+        if pid_alive(pid) {
+            stop_self()?;
+            for _ in 0..20 {
+                if !pid_alive(pid) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            if pid_alive(pid) {
+                bail!("the watcher (pid {pid}) did not stop - not starting a second one");
+            }
+        }
+    }
+    let _ = std::fs::remove_file(stop_path());
+    start_self()
+}
+
 fn pid_alive(pid: u32) -> bool {
     if cfg!(windows) {
         let output = std::process::Command::new("tasklist")
@@ -616,7 +701,7 @@ const HELP: &str = r#"wa-sentinel - the process outside the node.
   request upgrade  --binary PATH [--reason TEXT]
   request wake     --session ID --prompt TEXT [--reason TEXT]
   request run      --script PATH [--reason TEXT]
-  once | watch | status | start | stop | help
+  once | watch | status | start | restart | stop | help
 
 A node cannot restart itself: the turn doing the restarting runs on the node it is
 stopping, so the stop is the last command it ever executes. It asks instead -
@@ -637,6 +722,10 @@ fn main() -> Result<()> {
         "once" => process_requests().map(|n| say(&format!("{n} request(s) handled"))),
         "status" => status(),
         "start" => start_self(),
+        // Replacing the binary does not change a running process: the watcher keeps executing the image
+        // it started with, so a fixed sentinel needs its own restart. Found by replacing this binary and
+        // watching the old behaviour come out of the log.
+        "restart" => restart_self(),
         "stop" => stop_self(),
         "help" | "--help" | "-h" => { print_help(); Ok(()) }
         other => {
