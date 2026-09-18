@@ -15,12 +15,12 @@ window.__fixtures = {
     sessions: [
       {
         id: "aaaaaaaa-0000-0000-0000-000000000001", title: "unfinished thread",
-        mode: "chat", turn_count: 61, updated_at: 1789000000,
+        mode: "chat", turn_count: 61, updated_at: Math.floor(Date.now() / 1000) - 3600,
         state: "unfinished", state_detail: "stopped after a tool result with no next decision",
       },
       {
         id: "bbbbbbbb-0000-0000-0000-000000000002", title: "settled thread",
-        mode: "chat", turn_count: 12, updated_at: 1789000000,
+        mode: "chat", turn_count: 12, updated_at: Math.floor(Date.now() / 1000) - 120,
         state: "answered", state_detail: "the last turn is a reply",
       },
     ],

@@ -1,0 +1,13 @@
+[package]
+name = "wa-sentinel"
+version = "0.1.0"
+edition = "2021"
+
+# Its own lock file: the sentinel is a supervisor, and a supervisor that shares a dependency graph with
+# the thing it supervises can be broken by that thing's build.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+serde_json = "1"
+ureq = { version = "3", features = ["json"] }

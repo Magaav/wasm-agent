@@ -43,7 +43,7 @@ local function wanted()
       why = "build this node's host from source",
       probe = "cargo --version",
       install = {
-        windows = "winget install --id Rustlang.Rustup -e --accept-source-agreements",
+        windows = "winget install --id Rustlang.Rustup -e --accept-source-agreements --accept-package-agreements",
         linux = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
         darwin = "brew install rustup && rustup default stable",
       },
@@ -51,9 +51,23 @@ local function wanted()
     {
       id = "cc",
       why = "link the native dependencies (sqlite, ring)",
-      probe = here == "windows" and "cc --version" or "cc --version",
+      -- On Windows the compiler is cl.exe and it is deliberately *not* on PATH: Visual Studio keeps
+      -- it behind its own environment, which is why `cc --version` reported "no" on a machine that
+      -- had just built the host successfully. vswhere is the tool Microsoft ships to answer this
+      -- question, and it is what the `cc` crate itself consults - so this asks the same thing the
+      -- build will. `-products *` is quoted because the shell would otherwise glob it.
+      probe = here == "windows"
+        and '"/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest ' ..
+            "-products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath"
+        or "cc --version",
       install = {
-        windows = "winget install --id Microsoft.VisualStudio.2022.BuildTools -e --accept-source-agreements",
+        -- The *workload* is the whole point on Windows: Build Tools without VCTools installs no
+        -- compiler at all, so `cc` still fails and the node still cannot build - which is worse
+        -- than installing nothing, because it looks done. VCTools is what provides cl.exe, and
+        -- --includeRecommended brings the Windows SDK it needs to link against.
+        windows = "winget install --id Microsoft.VisualStudio.2022.BuildTools -e " ..
+          "--accept-source-agreements --accept-package-agreements " ..
+          '--override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"',
         linux = "sudo apt-get install -y build-essential",
         darwin = "xcode-select --install",
       },

@@ -197,6 +197,32 @@ if ($localUiDir -and (Test-Path $localUiDir)) {
 if ($haveExe) {
   $version = (& $localExe --version 2>$null | Select-Object -First 1)
   if ($version) { Ok "local node ready: $version" } else { Warn "wa.exe did not run; try: $localExe --version" }
+
+# The sentinel: the process outside the node. A node cannot restart itself - the turn doing the
+# restarting runs on the node it is stopping - so this is what performs restarts and upgrades, and what
+# wakes the model on an event. Installed beside wa.exe and started now, because a supervisor that has
+# to be remembered is a supervisor that is not there when it is needed.
+$sentinelExe = Join-Path $nodeDir "wa-sentinel.exe"
+$sentinelLocal = Join-Path $root "rust\wa-sentinel\target\release\wa-sentinel.exe"
+$haveSentinel = $false
+if (Get-Command scp -ErrorAction SilentlyContinue) {
+  & scp -q -o BatchMode=yes "${HostAlias}:$RemoteBin/wa-sentinel.exe" $sentinelExe 2>$null
+  $haveSentinel = Test-Path $sentinelExe
+}
+if (-not $haveSentinel -and (Test-Path $sentinelLocal)) {
+  Copy-Item $sentinelLocal $sentinelExe -Force
+  $haveSentinel = $true
+}
+if ($haveSentinel) {
+  Ok "wa-sentinel.exe -> $sentinelExe"
+  try {
+    & $sentinelExe restart 2>$null | Out-Null
+    $status = & $sentinelExe status 2>$null | Select-String "sentinel:" | Select-Object -First 1
+    Ok "sentinel: $status"
+  } catch { Warn "could not start the sentinel; run: $sentinelExe start" }
+} else {
+  Warn "no wa-sentinel.exe found (build it with: cargo build --release --manifest-path rust/wa-sentinel/Cargo.toml)"
+}
 }
 
 $uiScript = Join-Path $target "wa-ui.ps1"

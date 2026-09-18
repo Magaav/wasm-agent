@@ -353,6 +353,138 @@ $harness = @'
   }
   check(document.querySelectorAll('.session-state').length === 1,
     'only the thread that needs attention should be badged');
+  // Detection is automatic; acting is one click. A node that resumes turns by itself would be
+  // spending money on its own judgement, and the resume path deliberately only reports.
+  var continuable = Array.prototype.filter.call(document.querySelectorAll(".session-row"),
+    function (row) { return row.textContent.indexOf("continue") >= 0; });
+  check(continuable.length === 1,
+    "only the unfinished thread should offer to continue, saw " + continuable.length);
+
+  // The update lock. A reload is invisible until it happens, and it used to happen at a moment the
+  // reader did not choose, with no word about why - so it looked like the window flickering and
+  // losing their place. The reload is replaced with a spy here: a real one would take the harness
+  // with it.
+  var reloads = 0;
+  window.__setReload(function () { reloads += 1; });
+  window.__setBusy(true);
+  window.__applyUiVersion("version-after-a-patch");
+  for (var ul = 0; ul < 5; ul++) { await tick(); }
+  var lock = document.getElementById("update-lock");
+  check(!!lock, "a deferred update must show the lock");
+  check(!!lock && /UI updating/.test(lock.textContent), "and say what is happening");
+  check(!!lock && /kept/.test(lock.textContent), "and that the reader's place and draft are kept");
+  check(!!lock && !!lock.querySelector(".lock-now") && !!lock.querySelector(".lock-later"),
+    "with both ways out: reload now, or keep working");
+  check(reloads === 0, "and it must not reload while a turn is running");
+  if (lock) {
+    lock.querySelector(".lock-later").click();
+    for (var uc = 0; uc < 3; uc++) { await tick(); }
+    check(!document.getElementById("update-lock"), "dismissing it removes it");
+  }
+  window.__setBusy(false);
+  for (var ud = 0; ud < 3; ud++) { await tick(); }
+  check(reloads === 1, "and the reload lands the moment the turn finishes, saw " + reloads);
+
+  // Where the reader was has to survive that reload: the scroll offset and whether they were
+  // following the bottom. "Fresh" should not mean "moved".
+  window.__setReload(function () { reloads += 1; });
+  // The browser reports the scroll offset it actually accepted - a short transcript cannot scroll to
+  // 123 - so the check compares what was remembered with what was observed, not with a number I
+  // chose.
+  messages.scrollTop = 123;
+  var observedTop = messages.scrollTop;
+  window.__rememberPlace();
+  var place = null;
+  try { place = JSON.parse(sessionStorage.getItem("wa-place") || "null"); } catch (error) { place = null; }
+  check(!!place && place.top === observedTop,
+    "the place must be remembered, saw " + JSON.stringify(place) + " for a scroll of " + observedTop);
+  check(!!place && typeof place.following === "boolean", "including whether the reader was following");
+  messages.scrollTop = 0;
+  window.__restorePlace();
+  for (var up = 0; up < 3; up++) { await tick(); }
+  check(messages.scrollTop === observedTop, "and put back after a reload, saw " + messages.scrollTop);
+
+  // A turn that was cut off must say so *in the chat*, where the answer would have been, and offer
+  // to continue. A transcript that just stops looks like the agent had nothing to say - which is
+  // exactly how a killed turn was read. The first fixture session is unfinished, so restoring it
+  // must produce the notice.
+  // The fixture is injected here rather than shipped in the defaults: the app restores its session at
+  // load, so a `session` route present from the start repaints the transcript before the first check
+  // runs - which is what happened, and it looked like a dozen unrelated failures.
+  window.__fixtures.session = {
+    session: { id: "aaaaaaaa-0000-0000-0000-000000000001", title: "unfinished thread" },
+    state: "unfinished",
+    state_detail: "1 tool call(s) with no recorded result: bash",
+    turns: [
+      { seq: 1, role: "user", content: "check the installer on the node", ok: 1, tool_calls: [] },
+      { seq: 2, role: "assistant", content: "Running it now.", ok: 1, tool_calls: [] },
+      { seq: 3, role: "assistant", content: "", ok: 1,
+        tool_calls: [{ id: "c1", type: "function", function: { name: "bash", arguments: "{\"command\":\"wa toolchain check\"}" } }] },
+      { seq: 4, role: "tool", content: "{\"code\":0,\"stdout\":\"git yes\"}", ok: 1, tool_name: "bash", tool_calls: [] },
+      // A turn that changed a file. The repaint used to drop this, so a reloaded transcript showed no diff
+      // topics at all while a live one did - and a window that has been reloaded is a repaint.
+      { seq: 5, id: "turn-with-changes", role: "assistant", content: "Changed it.", ok: 1, tool_calls: [],
+        changes: { files: [{ path: "C:/tmp/proof.txt", added: 4, removed: 3, created: false }], added: 4, removed: 3 } },
+    ],
+  };
+  await window.__restoreSession();
+  for (var un = 0; un < 30; un++) { await tick(); }
+  var notice = document.querySelector(".unfinished-notice");
+  check(!!notice, "a thread whose turn was cut off must say so in the chat");
+  check(!!notice && /stopped before it answered/.test(notice.textContent),
+    "and say what happened, saw: " + (notice ? notice.textContent.slice(0, 90) : "nothing"));
+  check(!!notice && !!notice.querySelector("button"), "and offer to continue it");
+
+  // A repainted turn that changed a file must show its diff topic. The live path always did; the repaint
+  // dropped the changes summary and the turn id, so every reloaded transcript lost every diff topic.
+  var diffTopic = document.querySelector("wa-diff");
+  check(!!diffTopic, "a repainted turn with changes must show its diff topic");
+  check(!!diffTopic && /1 file changed/.test(diffTopic.textContent),
+    "with the file count, saw: " + (diffTopic ? diffTopic.textContent.slice(0, 60) : "nothing"));
+  check(!!diffTopic && /\+4/.test(diffTopic.textContent) && /3/.test(diffTopic.textContent),
+    "and the GitHub-style totals, saw: " + (diffTopic ? diffTopic.textContent.slice(0, 60) : "nothing"));
+  check(!!diffTopic && !!diffTopic.turnId, "and the turn id the undo route is asked about");
+
+  // Opening a topic while a turn runs must not look like a broken UI. The node's worker is inside the
+  // turn, so a Lua read queues and the client's deadline abandons it - which showed as
+  // "AbortError: signal is aborted without reason" on a node that was working perfectly.
+  window.__setBusy(true);
+  window.__loadTopic("sessions-box");
+  for (var tb = 0; tb < 5; tb++) { await tick(); }
+  var busyBox = document.getElementById("sessions-box");
+  check(/busy with a turn/.test(busyBox.textContent),
+    "a topic opened during a turn must say the node is busy, saw: " + busyBox.textContent.slice(0, 70));
+  check(!/AbortError/.test(busyBox.textContent), "and must not report an abort as if the UI were broken");
+  // And it must load by itself when the turn ends - nobody should have to reopen it.
+  window.__setBusy(false);
+  for (var tc = 0; tc < 40; tc++) { await tick(); }
+  check(!/busy with a turn/.test(busyBox.textContent),
+    "and it must load when the turn finishes, saw: " + busyBox.textContent.slice(0, 70));
+
+  // The sessions topic is a way to *find* a thread, not just a list: named after its opening
+  // message, most recent first, and searchable. A list you have to read top to bottom is not a way
+  // to find anything.
+  var search = document.getElementById("session-search");
+  check(!!search, "the sessions topic must carry a search box");
+  var titles = Array.prototype.map.call(document.querySelectorAll(".session-title"),
+    function (node) { return node.textContent; });
+  check(titles.indexOf("unfinished thread") >= 0 && titles.indexOf("settled thread") >= 0,
+    "rows must show the thread's name, saw: " + titles.join("|"));
+  check(/ago|just now/.test(document.getElementById("sessions-box").textContent),
+    "and how long ago it was used rather than a locale timestamp, saw: " +
+    document.getElementById("sessions-box").textContent.slice(0, 90));
+  if (search) {
+    search.value = "settled";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    for (var sq = 0; sq < 5; sq++) { await tick(); }
+    check(document.querySelectorAll(".session-row").length === 1,
+      "searching must filter the list, saw " + document.querySelectorAll(".session-row").length);
+    check(!!document.getElementById("session-search"), "and the box must survive its own filtering");
+    search.value = "";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    for (var sr = 0; sr < 5; sr++) { await tick(); }
+    check(document.querySelectorAll(".session-row").length === 2, "and clearing it must restore them");
+  }
 
   // The node chip answers the question the engine could not: which of these is this window
   // talking to? It names it, the engine marks exactly one row, and a rename leaves the
@@ -615,7 +747,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
 
 $server = $null
 $edge = @(
@@ -625,6 +757,18 @@ $edge = @(
   "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe"
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $edge) { Write-Host "  !  no Edge or Chrome found"; exit 1 }
+
+# A server left behind by an interrupted run serves an *old* temp copy of the UI, so the harness would
+# test the wrong page and report on it - which is worse than not running at all. It happened: a stale
+# server on this port meant the page had no harness and no fixtures, the dump was the unpatched
+# markup, and the run looked like a broken test rather than a stale one.
+$busy = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($busy) {
+  Write-Host "  !  port $Port is already in use by pid $($busy.OwningProcess)"
+  Write-Host "     that is probably a previous run's server, and it would serve an old copy of the UI"
+  Write-Host "     stop it and run again:  Stop-Process -Id $($busy.OwningProcess)"
+  exit 1
+}
 
 try {
   $server = Start-Process -FilePath $WaExe -ArgumentList @("serve", "--port", "$Port", "--client-port", "$ClientPort", "--ui", $tmp) -WindowStyle Hidden -PassThru

@@ -487,23 +487,94 @@ pub extern "C" fn write_file(l: *mut LuaState) -> c_int {
 }
 
 /// host.exec(command, cwd?) -> {code, stdout, stderr} | {error}
+/// Run a command with a deadline, draining its pipes from their own threads.
+///
+/// Two deadlocks live here, and both look identical from outside - a worker that never beats again:
+///
+/// * a command that never finishes. It happened: an agent curled *this node's own* endpoint from
+///   inside a turn, the request queued behind the turn that made it, and the worker waited on itself
+///   until somebody killed the curl six minutes later. The node reported it honestly - `ok:false`,
+///   `worker:stalled`, the age of the silence - which is how it was found, but reporting a deadlock
+///   is not the same as not having one.
+/// * a child whose output pipe has filled while we wait for it to exit. Waiting on the child first is
+///   the obvious way to write this and it wedges the same way.
+///
+/// So: read both pipes on their own threads, poll for exit against a deadline, and kill what is still
+/// running when the deadline passes. The failure is returned as text a model can read and act on.
+fn run_bounded(program: &str, flag: &str, command: &str, cwd: &str) -> Result<Value, String> {
+    use std::io::Read;
+    let seconds = std::env::var("WASM_AGENT_EXEC_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(300u64);
+    let mut process = std::process::Command::new(program);
+    process.arg(flag).arg(command);
+    if !cwd.is_empty() {
+        process.current_dir(cwd);
+    }
+    process.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut child = process.spawn().map_err(|error| error.to_string())?;
+    let reader = |pipe: Option<std::process::ChildStdout>| {
+        pipe.map(|mut pipe| std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = pipe.read_to_end(&mut buffer);
+            buffer
+        }))
+    };
+    let out_reader = reader(child.stdout.take());
+    let err_reader = child.stderr.take().map(|mut pipe| std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = pipe.read_to_end(&mut buffer);
+        buffer
+    }));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    let mut killed = false;
+    let status = loop {
+        match child.try_wait().map_err(|error| error.to_string())? {
+            Some(status) => break status,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                killed = true;
+                break child.wait().map_err(|error| error.to_string())?;
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    };
+    // The kill stops the shell, not the whole tree on Windows: a grandchild can hold the pipe open
+    // for as long as it likes, and joining the readers here would put the stall straight back - the
+    // deadline would fire at 2s and the call would return at 30s, which is exactly what the first
+    // version of this did. The readers are left to end when the orphan does.
+    let (stdout, stderr) = if killed {
+        (Vec::new(), Vec::new())
+    } else {
+        (
+            out_reader.and_then(|handle| handle.join().ok()).unwrap_or_default(),
+            err_reader.and_then(|handle| handle.join().ok()).unwrap_or_default(),
+        )
+    };
+    if killed {
+        return Ok(json!({
+            "code": -1,
+            "stdout": String::from_utf8_lossy(&stdout),
+            "stderr": format!(
+                "the command did not finish within {seconds}s and was killed (WASM_AGENT_EXEC_TIMEOUT_SECONDS). \
+                 If it was waiting on this node - a call to its own HTTP port - that request is queued \
+                 behind this very turn and can never be served: ask the node from outside the turn instead."
+            ),
+        }));
+    }
+    Ok(json!({
+        "code": status.code().unwrap_or(-1),
+        "stdout": String::from_utf8_lossy(&stdout),
+        "stderr": String::from_utf8_lossy(&stderr),
+    }))
+}
+
 pub extern "C" fn exec(l: *mut LuaState) -> c_int {
     let command = arg_string(l, 1).unwrap_or_default();
     let cwd = arg_string(l, 2).unwrap_or_default();
-    let outcome = (|| -> Result<Value, String> {
-        let (program, flag) = shell_config();
-        let mut process = std::process::Command::new(program);
-        process.arg(flag).arg(&command);
-        if !cwd.is_empty() {
-            process.current_dir(&cwd);
-        }
-        let output = process.output().map_err(|error| error.to_string())?;
-        Ok(json!({
-            "code": output.status.code().unwrap_or(-1),
-            "stdout": String::from_utf8_lossy(&output.stdout),
-            "stderr": String::from_utf8_lossy(&output.stderr),
-        }))
-    })();
+    let (program, flag) = shell_config();
+    let outcome = run_bounded(program, flag, &command, &cwd);
     push_json(l, &outcome.unwrap_or_else(|error| json!({"error": error})));
     1
 }

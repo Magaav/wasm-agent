@@ -638,7 +638,11 @@ function repaintTurns(turns) {
       if (turn.role === "user") {
         add("user", turn.content || "");
       } else if (turn.role === "assistant") {
-        if (turn.content) handleEvent({ type: "reply", text: turn.content });
+        // The stored turn carries its changes summary and its id, and both are needed: the summary is
+        // the topic, and the id is what the undo route is asked about. Dropping them here is why a
+        // reloaded transcript showed no diff topics at all - the live path had them, the repaint did
+        // not, and a window that has been reloaded is a repaint.
+        if (turn.content) handleEvent({ type: "reply", text: turn.content, changes: turn.changes, turn_id: turn.id });
         const calls = turn.tool_calls || [];
         if (calls.length) {
           handleEvent({ type: "round", n: 1 });
@@ -696,6 +700,18 @@ async function restoreSession() {
     rememberSession(wanted.id);
     const full = await (await apiFetch("session?id=" + encodeURIComponent(wanted.id), { headers: apiHeaders() })).json();
     if (full && Array.isArray(full.turns) && full.turns.length) repaintTurns(full.turns);
+    // A thread whose last turn was cut off must say so *in the chat*: the answer never arrived, and a
+    // transcript that just stops looks like the agent had nothing to say. The engine's badge says it
+    // too, but the reader is here, so the offer belongs here.
+    if (full && full.state === "unfinished") {
+      const notice = document.createElement("div");
+      notice.className = "unfinished-notice";
+      notice.textContent = "this turn was stopped before it answered - " +
+        (full.state_detail || "the node did not record a result") + ".";
+      const again = nodeButton("continue", () => { notice.remove(); resumeSession(wanted.id); });
+      notice.append(again);
+      messages.append(notice);
+    }
     // If that thread was still running when the window went away, watch it: the answer lands in the
     // ledger, and the repaint is what puts it on screen. Tokens that arrived before the reload are
     // still lost - the node streams to whoever opened the stream - so this resumes the *result* of
@@ -712,6 +728,8 @@ function setBusy(value) {
     pendingReload = false;
     reload();
   }
+  // A turn ending is what frees the node for everything the engine asked for while it ran.
+  if (!value && document.body.classList.contains("engine")) reloadTopics();
   sendButton.classList.toggle("busy", value);
   sendButton.title = value ? "Stop" : "Send";
   sendButton.setAttribute("aria-label", sendButton.title);
@@ -772,7 +790,7 @@ function watchNode() {
     } catch (error) { /* still down */ }
   }, 3000);
 }
-async function send(text) {
+async function send(text, options = {}) {
   // The draft is going out, so what was stored is stale: a respawn must not put the sent prompt
   // back into the composer.
   clearDraft();
@@ -796,9 +814,57 @@ async function send(text) {
   renderAttachments();
   setStatus("wasm-agent is thinking…");
   try {
+    const headers = { "Content-Type": outgoing.contentType, "Accept": "text/event-stream" };
+    // Which thread this turn belongs to. The node creates a session when it is not told one, and
+    // never says which - so a window that is *in* a thread says so, and a continuation lands in the
+    // thread it is continuing rather than in whatever is newest. Only a master says it: the session
+    // header doubles as the account header in this API, and a guest naming a master's thread is not
+    // something the node checks for yet.
+    const target = options.session || (me.role === "master" ? chatSession : "");
+    if (target) headers["X-WA-Session"] = target;
+    // Silence is not evidence of death.
+    //
+    // A tool that takes minutes - a build, a test suite, an install - produces no events at all, and
+    // the node keeps beating throughout. A client that counts seconds therefore kills turns that are
+    // working: this one aborted a healthy turn mid-build, told the reader it was "recorded as
+    // unfinished" when it was not, and the turn then finished normally in the ledger. A false alarm
+    // that also lies about the record is worse than no alarm.
+    //
+    // The node is the authority, and its accept thread answers /health without the interpreter, so it
+    // can say whether the worker is alive while a turn runs. Ask it, and act only on its answer.
+    let lastEvent = Date.now();
+    let asking = false;
+    const watchdog = setInterval(async () => {
+      if (asking || Date.now() - lastEvent < 30000) return;
+      asking = true;
+      try {
+        const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
+        const running = health && health.current;
+        if (running && health.worker !== "stalled") {
+          // Working, and quiet because the work is quiet. Keep waiting, and start counting again.
+          lastEvent = Date.now();
+          asking = false;
+          return;
+        }
+        // Not running any more: the turn is genuinely over, and the page should say so and stop
+        // pretending it is still listening.
+        clearInterval(watchdog);
+        add("assistant", "the node is no longer running this turn (" + (health.worker || "no worker") +
+          "). It is recorded as unfinished - the sessions topic offers to continue it.");
+        watchNode();
+        controller?.abort();
+      } catch (error) {
+        // Unreachable: the node is gone, which is a different message and the one that fits.
+        clearInterval(watchdog);
+        add("assistant", connectionMessage());
+        watchNode();
+        controller?.abort();
+      }
+      asking = false;
+    }, 5000);
     const response = await fetch("chat", {
       method: "POST",
-      headers: apiHeaders({ "Content-Type": outgoing.contentType, "Accept": "text/event-stream" }),
+      headers: apiHeaders(headers),
       body: outgoing.body,
       signal: controller.signal,
     });
@@ -819,7 +885,7 @@ async function send(text) {
         for (const part of parts) {
           const line = part.split("\n").find((l) => l.startsWith("data: "));
           if (!line) continue;
-          try { handleEvent(JSON.parse(line.slice(6))); } catch (error) { /* ignore */ }
+          try { handleEvent(JSON.parse(line.slice(6))); lastEvent = Date.now(); } catch (error) { /* ignore */ }
         }
       }
     }
@@ -829,6 +895,7 @@ async function send(text) {
     else if (isConnectionLoss(error)) { add("assistant", connectionMessage()); watchNode(); }
     else add("assistant", "error: " + error);
   } finally {
+    clearInterval(watchdog);
     setBusy(false);
     controller = null;
     refreshMeta();
@@ -1624,7 +1691,69 @@ async function refreshMeta() {
 // throws away the page's copy of a reply that is still arriving. Those wait for the turn to
 // finish, and say so while they wait.
 let pendingReload = false;
-let reload = () => location.reload();
+// Every reload goes through here, so every reload can save where the reader was first.
+let reload = () => { rememberPlace(); location.reload(); };
+
+// ---- the update lock ------------------------------------------------------
+//
+// A UI update is invisible: the page keeps working while new files sit on disk, and then it reloads
+// at a moment the reader did not choose. Saying so - and saying *why now* - is the difference
+// between "the window flickered and lost my place" and "the window told me it was updating".
+//
+// It is a lock rather than a toast because it covers the panel: a turn is still running behind it,
+// and the reader should not be typing into a page that is about to be replaced. It is escapable -
+// reload now, or dismiss and let the reload land when the turn finishes.
+function updateLock(reason) {
+  let lock = document.getElementById("update-lock");
+  if (!lock) {
+    lock = document.createElement("div");
+    lock.id = "update-lock";
+    lock.innerHTML = '<div class="lock-card"><div class="lock-title">UI updating</div>' +
+      '<div class="lock-reason"></div><div class="lock-actions">' +
+      '<button type="button" class="lock-now">reload now</button>' +
+      '<button type="button" class="lock-later">keep working</button></div></div>';
+    lock.querySelector(".lock-now").addEventListener("click", () => { rememberPlace(); location.reload(); });
+    lock.querySelector(".lock-later").addEventListener("click", () => lock.remove());
+    document.body.append(lock);
+  }
+  lock.querySelector(".lock-reason").textContent = reason;
+  return lock;
+}
+
+// Where the reader was: the scroll offset, whether they were following the bottom, and which engine
+// topics were open. A reload that lands at the bottom of a long thread is a different page from the
+// one that was there a moment ago, and "fresh" should not mean "moved".
+const PLACE_KEY = "wa-place";
+
+function rememberPlace() {
+  try {
+    const topics = [];
+    for (const box of document.querySelectorAll(".engine-content")) {
+      if (!box.hidden && box.id) topics.push(box.id);
+    }
+    sessionStorage.setItem(PLACE_KEY, JSON.stringify({
+      session: chatSession,
+      top: messages.scrollTop,
+      following: follow,
+      topics: topics,
+    }));
+  } catch (error) { /* private mode: the reload still happens */ }
+}
+
+function restorePlace() {
+  let place = null;
+  try { place = JSON.parse(sessionStorage.getItem(PLACE_KEY) || "null"); } catch (error) { place = null; }
+  if (!place) return;
+  try { sessionStorage.removeItem(PLACE_KEY); } catch (error) { /* nothing to remove */ }
+  for (const id of place.topics || []) {
+    const box = document.getElementById(id);
+    if (box && box.hidden) document.querySelector('[data-target="' + id + '"]')?.click();
+  }
+  // Following the bottom is a position too, and the default: only a reader who had scrolled away
+  // needs the offset put back.
+  if (place.following) { setFollow(true); pin(true); }
+  else if (typeof place.top === "number") { setFollow(false); messages.scrollTop = place.top; }
+}
 
 function hotSwapStyles() {
   for (const link of document.querySelectorAll('link[rel="stylesheet"]')) {
@@ -1649,8 +1778,10 @@ function applyUiVersion(next) {
   if (busy) {
     pendingReload = true;
     setStatus("update ready - reloading when this turn finishes");
+    updateLock("A turn is running, so the reload waits for it to finish. Your place and your draft are kept.");
     return "deferred";
   }
+  updateLock("Reloading now - your place and your draft are kept.");
   reload();
   return "reloading";
 }
@@ -1692,8 +1823,35 @@ async function sync(reason) {
   synced = true;
   syncAttempts = 0;
   clearStatus();
-  // The transcript is restored once, and only after the node has answered.
-  restoreSession();
+  // The transcript is restored once, and only after the node has answered - then the reader's place
+  // is put back on top of it, because "fresh" should not mean "moved". Whether a turn is still
+  // running is reconciled by `watch`, which keeps asking; one check here would only cover the first
+  // reconnection.
+  restoreSession().then(restorePlace);
+}
+
+// A window must never be more certain than the node.
+//
+// If the node says nothing is running, then nothing is - however sure the page was a moment ago. A
+// turn that died with the node left the composer disabled and a stop button showing, and the only way
+// out was a manual reload: that is the "locked" window, and it is not a state a reader should have to
+// escape. This is also what makes a reinstall feel seamless - the node goes away, comes back, and the
+// chat is usable again without anyone clicking anything.
+let reconciling = false;
+let reconciledAt = 0;
+
+async function reconcile() {
+  if (reconciling || !synced) return;
+  reconciling = true;
+  try {
+    const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
+    if (health && !health.current) {
+      if (busy) { setBusy(false); clearStatus(); }
+      // Nothing to wait for any more, so the lock must not wait either: it is a message, not a trap.
+      document.getElementById("update-lock")?.remove();
+    }
+  } catch (error) { /* the node is away; watchNode says so in the chat */ }
+  reconciling = false;
 }
 
 async function watch() {
@@ -1703,6 +1861,11 @@ async function watch() {
     applyUiVersion(payload.version);
     // The node answered, so finish the first sync if it never finished. This loop always runs.
     if (!synced) sync("watch");
+    // While this window believes a turn is running, or is holding an update lock, ask the node what
+    // is true - every few seconds, not every second.
+    else if (busy || document.getElementById("update-lock")) {
+      if (Date.now() - reconciledAt > 5000) { reconciledAt = Date.now(); reconcile(); }
+    }
   } catch (error) { /* keep polling: the deadline is what keeps this loop alive */ }
   setTimeout(watch, 1000);
 }
@@ -2309,43 +2472,124 @@ async function refreshTools() {
 
 // Sessions: the agent's own transcripts, with traces. This is the debugging
 // surface: open a session, flip it to debug, export it as a fixture.
+// ---- sessions: the threads this node has had --------------------------------
+//
+// Ordered by last interaction - the route does that, and this view must not re-sort it, because
+// "most recently used" is the only order that makes a long list usable. Named after their opening
+// message, and searchable: keeping threads is only worth anything if you can find the one you mean,
+// and a list you have to read top to bottom is not a way to find anything.
+let sessionQuery = "";
+let sessionList = [];
+
+// "3m ago" rather than a locale timestamp: in a list of threads, how long ago is the question, and
+// the exact second is never the answer.
+function ago(seconds) {
+  const s = Math.max(0, Number(seconds) || 0);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  if (s < 86400 * 7) return Math.floor(s / 86400) + "d ago";
+  return new Date(Date.now() - s * 1000).toLocaleDateString();
+}
+
+function sessionMatches(session, query) {
+  if (!query) return true;
+  const haystack = [session.title, session.id, session.objective, session.state]
+    .filter(Boolean).join(" ").toLowerCase();
+  return query.toLowerCase().split(/\s+/).every((word) => haystack.includes(word));
+}
+
+// Continue a thread the node left unfinished.
+//
+// The node records what was lost and prints the command; it does not act on its own, because a
+// repair nobody asked for destroys the evidence of the crash. That leaves a person to notice a
+// badge and type a command, which is not recovery - this is the same thing as one click, sent to
+// the node so the turn runs where the session lives and the window can watch it.
+function resumeSession(id) {
+  if (!id) return;
+  rememberSession(id);
+  send("continue where you stopped", { session: id });
+}
+
+function renderSessions() {
+  const shown = sessionList.filter((session) => sessionMatches(session, sessionQuery));
+  sessionsNote.textContent = sessionQuery
+    ? `${shown.length} of ${sessionList.length} sessions`
+    : `${sessionList.length} sessions · most recent first`;
+  // The search row is re-appended on every render, not replaced by it: a filter box that vanishes
+  // when you type in it is not a filter box.
+  sessionsBox.replaceChildren(sessionSearch());
+  if (!sessionList.length) {
+    const empty = document.createElement("div");
+    empty.textContent = "no sessions yet";
+    sessionsBox.append(empty);
+    return;
+  }
+  if (!shown.length) {
+    const empty = document.createElement("div");
+    empty.textContent = "nothing matches " + JSON.stringify(sessionQuery);
+    sessionsBox.append(empty);
+    return;
+  }
+  for (const session of shown) {
+    const row = document.createElement("div");
+    row.className = "session-row";
+    const title = document.createElement("span");
+    title.className = "session-title";
+    // The id is the fallback, not the name: a thread whose first message could not name it is still
+    // findable by the id it will be referred to by.
+    title.textContent = session.title || session.id.slice(0, 8);
+    title.title = session.id;
+    const meta = document.createElement("span");
+    meta.className = "session-meta";
+    const when = ago((Date.now() / 1000) - (session.updated_at || session.started_at || 0));
+    meta.textContent = `${session.turn_count} turns · ${when}`;
+    row.append(title, meta);
+    // Only when there is something to recover: a badge on every row would be noise, and "answered"
+    // is the case that needs no attention. The reason is the API's own words, so the UI cannot
+    // invent a different story.
+    if (session.state && session.state !== "answered" && session.state !== "empty") {
+      const badge = document.createElement("span");
+      badge.className = "session-state " + session.state;
+      badge.textContent = session.state;
+      badge.title = session.state_detail || session.state;
+      row.append(badge);
+    }
+    row.append(nodeButton("open", () => openSession(session.id)));
+    // Only where there is something to recover, and named as what it does: the node's own words for
+    // this are "continue where you stopped".
+    if (session.state === "unfinished") {
+      row.append(nodeButton("continue", () => resumeSession(session.id)));
+    }
+    sessionsBox.append(row);
+  }
+}
+
 async function refreshSessions() {
   try {
     const payload = await (await apiFetch("sessions", { headers: apiHeaders() })).json();
-    const list = payload.sessions || [];
-    sessionsNote.textContent = `${list.length} sessions`;
-    sessionsBox.replaceChildren();
-    if (!list.length) {
-      sessionsBox.textContent = "no sessions yet";
-      return;
-    }
-    for (const session of list) {
-      const row = document.createElement("div");
-      row.className = "session-row";
-      const title = document.createElement("span");
-      title.className = "session-title";
-      title.textContent = session.title || session.id.slice(0, 8);
-      const meta = document.createElement("span");
-      meta.className = "session-meta";
-      const when = new Date((session.updated_at || session.started_at) * 1000).toLocaleString();
-      meta.textContent = `${session.mode} · ${session.turn_count} turns · ${when}`;
-      row.append(title, meta);
-      // Only when there is something to recover: a badge on every row would be
-      // noise, and "answered" is the case that needs no attention. The reason
-      // is the API's own words, so the UI cannot invent a different story.
-      if (session.state && session.state !== "answered" && session.state !== "empty") {
-        const badge = document.createElement("span");
-        badge.className = "session-state " + session.state;
-        badge.textContent = session.state;
-        badge.title = session.state_detail || session.state;
-        row.append(badge);
-      }
-      row.append(nodeButton("open", () => openSession(session.id)));
-      sessionsBox.append(row);
-    }
+    sessionList = payload.sessions || [];
+    renderSessions();
   } catch (error) {
+    sessionsNote.textContent = "unavailable";
     sessionsBox.textContent = String(error);
   }
+}
+
+// The search box is part of the topic rather than the markup because the topic is drawn from JS -
+// and because a filter that survives re-rendering has to own its own element.
+function sessionSearch() {
+  const row = document.createElement("div");
+  row.className = "session-search";
+  const input = document.createElement("input");
+  input.type = "search";
+  input.id = "session-search";
+  input.placeholder = "search threads";
+  input.autocomplete = "off";
+  input.value = sessionQuery;
+  input.addEventListener("input", () => { sessionQuery = input.value.trim(); renderSessions(); });
+  row.append(input);
+  return row;
 }
 
 async function openSession(id) {
@@ -2424,12 +2668,35 @@ async function openSessionById(id) {
   }
 }
 
+// Topics waiting for the node to be free. The engine's reads are Lua, so on a single-worker node they
+// queue behind a turn - and the client's deadline is shorter than a turn, so opening one while the node
+// was working showed "AbortError: signal is aborted without reason". That reads as the UI being broken
+// when the node is simply busy, which is the opposite of what a status line is for.
+const pendingTopics = new Set();
+
 function loadTopic(id) {
+  const box = document.getElementById(id);
+  if (busy) {
+    // Do not even ask: the worker is inside a turn, so the request would queue and then be abandoned by
+    // the deadline. Say what is true and come back to it when the turn ends.
+    pendingTopics.add(id);
+    if (box) box.textContent = "the node is busy with a turn — this loads when it finishes";
+    return;
+  }
+  pendingTopics.delete(id);
   if (id === "nodes-box") refreshNodes();
   else if (id === "sessions-box") refreshSessions();
   else if (id === "skills-box") refreshSkills();
   else if (id === "spells-box") refreshSpells();
   else if (id === "tools-box") refreshTools();
+}
+
+/// Everything the engine was asked for while the node was busy, plus whatever is open, once it is free.
+function reloadTopics() {
+  for (const id of Array.from(pendingTopics)) loadTopic(id);
+  for (const box of document.querySelectorAll(".engine-content")) {
+    if (!box.hidden && box.id && !pendingTopics.has(box.id)) loadTopic(box.id);
+  }
 }
 
 document.querySelectorAll(".engine-head").forEach((head) => {
@@ -2727,7 +2994,7 @@ document.addEventListener("contextmenu", (event) => {
   event.preventDefault();
   contextMenu.items = [
     { label: "Collapse to avatar", action: () => { applyMode("compact"); native.compact(); } },
-    { label: "Reload window", action: () => location.reload() },
+    { label: "Reload window", action: () => reload() },
     { separator: true },
     { label: "Close wasm-agent", danger: true, action: () => native.quit() },
   ];

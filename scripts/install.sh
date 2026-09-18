@@ -56,6 +56,28 @@ if command -v wa >/dev/null 2>&1; then
   esac
 fi
 
+# The sentinel: the process outside the node, for restarts, upgrades, and waking the model on an
+# event. A node cannot restart itself, so this is what does it - and a supervisor that has to be
+# remembered is a supervisor that is not there when it is needed.
+ROOT="${WASM_AGENT_REPO:-}"
+if [ -z "$ROOT" ] || [ ! -d "$ROOT/rust/wa-sentinel" ]; then
+  warn "sentinel not installed: this installer is a pipe, not a checkout (set WASM_AGENT_REPO=/path/to/wasm-agent)"
+fi
+if [ -n "$ROOT" ] && [ -d "$ROOT/rust/wa-sentinel" ]; then
+  step "building and starting the sentinel"
+  if command -v cargo >/dev/null 2>&1; then
+    (cd "$ROOT" && cargo build --release --manifest-path rust/wa-sentinel/Cargo.toml 2>&1 | tail -1) || true
+    for built in "$ROOT/rust/wa-sentinel/target/release/wa-sentinel" "$ROOT/rust/wa-sentinel/target/release/wa-sentinel.exe"; do
+      if [ -x "$built" ]; then
+        cp -f "$built" "$DIR/" && ok "$DIR/$(basename "$built")" && "$DIR/$(basename "$built")" restart >/dev/null 2>&1 || true
+        break
+      fi
+    done
+  else
+    warn "cargo not found, so the sentinel was not built - see: wa toolchain plan"
+  fi
+fi
+
 printf "\n   ${green}ready.${reset}\n\n"
 printf "   ${grey}start chatting:${reset}\n     wa\n\n"
 case ":$PATH:" in
