@@ -363,7 +363,7 @@ $harness = @'
       { seq: 4, role: "tool", content: "{\"code\":0,\"stdout\":\"git yes\"}", ok: 1, tool_name: "bash", tool_calls: [] },
       // A turn that changed a file. The repaint used to drop this, so a reloaded transcript showed no diff
       // topics at all while a live one did - and a window that has been reloaded is a repaint.
-      { seq: 5, role: "assistant", content: "Changed it.", ok: 1, tool_calls: [],
+      { seq: 5, id: "turn-with-changes", role: "assistant", content: "Changed it.", ok: 1, tool_calls: [],
         changes: { files: [{ path: "C:/tmp/proof.txt", added: 4, removed: 3, created: false }], added: 4, removed: 3 } },
     ],
   };
