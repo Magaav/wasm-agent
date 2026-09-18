@@ -70,6 +70,74 @@ impl Identity {
     }
 }
 
+/// What this node announces to the rendezvous: its name and its role.
+///
+/// Mirrors `nodes.node_name()` and `nodes.role()` in Lua, deliberately and line for line,
+/// because the rendezvous is what other nodes check. This used to read the environment alone,
+/// so a node configured as a guest by its `node.role` file registered as a **master** - and a
+/// peer believing that would run master tools for it. Which is to say: on a guest node, this
+/// function is the security boundary, not a label.
+///
+/// Role: the environment, then `<config>/node.role`, then master. Anything that is not `guest`
+/// is a master, so a typo cannot quietly demote a node that is in the middle of work.
+fn announced_role(config: &str) -> String {
+    let configured = std::env::var("WASM_AGENT_NODE_ROLE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| read_trimmed(&format!("{config}/node.role")));
+    match configured {
+        Some(value) if value.eq_ignore_ascii_case("guest") => "guest".to_string(),
+        _ => "master".to_string(),
+    }
+}
+
+/// Name: what someone set, then the worktree this node runs in (masters only - a guest has no
+/// worktree identity), then the environment, then "host". The worktree outranks the environment
+/// on purpose: a leftover `WASM_AGENT_NODE_NAME` in a shell profile would otherwise make every
+/// node on a machine claim the same name.
+fn announced_name(identity: &Identity, config: &str, role: &str) -> String {
+    if let Some(stored) = read_trimmed(&format!("{config}/node.name")) {
+        return stored;
+    }
+    if role == "master" {
+        if let Some(directory) = worktree_name() {
+            return directory;
+        }
+    }
+    if let Ok(value) = std::env::var("WASM_AGENT_NODE_NAME") {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return value;
+        }
+    }
+    "host".to_string()
+}
+
+fn read_trimmed(path: &str) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
+/// The directory name of the checkout this process was started in, or `None` when it cannot be
+/// known. A home directory is skipped: `ubuntu` as a node name is noise, and a directory that is
+/// not a checkout answers "which checkout am I?" with nothing. Mirrors `nodes.worktree()`.
+fn worktree_name() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let normal = |path: &str| path.replace('\\', "/").trim_end_matches('/').to_lowercase();
+    if normal(&cwd.to_string_lossy()) == normal(&crate::resolve_home()) {
+        return None;
+    }
+    let name = cwd.file_name()?.to_string_lossy().to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
 pub fn verify(public_key_hex: &str, message: &str, signature_hex: &str) -> bool {
     let (Some(public), Some(signature)) = (unhex(public_key_hex), unhex(signature_hex)) else {
         return false;
@@ -96,9 +164,12 @@ pub fn spawn_heartbeat(url: String) {
             }
         };
         let endpoint = std::env::var("WASM_AGENT_ENDPOINT").unwrap_or_default();
-        let name = std::env::var("WASM_AGENT_NODE_NAME")
-            .unwrap_or_else(|_| identity.node_id[..8].to_string());
-        let role = std::env::var("WASM_AGENT_NODE_ROLE").unwrap_or_else(|_| "master".into());
+        // Resolved exactly as the Lua core resolves them, because the rendezvous is what other
+        // nodes check. A node that is a guest locally and a master remotely is how a guest gets
+        // master tools from a peer, and the announcement below is the only place that decides.
+        let config = format!("{}/.wasm-agent", crate::resolve_home());
+        let role = announced_role(&config);
+        let name = announced_name(&identity, &config, &role);
         let mut registered = false;
         loop {
             let ts = std::time::SystemTime::now()

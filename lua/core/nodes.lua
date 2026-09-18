@@ -68,11 +68,42 @@ end
 function M.author_of(caller)
   if type(caller) ~= "table" then return nil end
   if normalize_role(caller.role) ~= "master" then return nil end
+  -- Who is allowed to be a master at all. The rendezvous records what each node says about
+  -- itself, which is fine while every node is honest and useless once one is not: the record is
+  -- evidence of identity, not of intent. With this set, the rendezvous stops being the only
+  -- authority and an enrolled list decides. Unset means "the rendezvous is the authority", which
+  -- is the default - said out loud here so the choice is visible.
+  local enrolled = tostring(host.getenv("WASM_AGENT_TRUSTED_MASTERS") or "")
+  if enrolled ~= "" then
+    local node_id = tostring(caller.node_id or "")
+    local name = tostring(caller.name or "")
+    for entry in enrolled:gmatch("[^,]+") do
+      entry = entry:gsub("^%s+", ""):gsub("%s+$", "")
+      if entry ~= "" and (entry == node_id or entry == name) then return name ~= "" and name or node_id end
+    end
+    return nil
+  end
   local name = tostring(caller.name or "")
   if name ~= "" then return name end
   local id = tostring(caller.node_id or "")
   if id ~= "" then return id end
   return nil
+end
+
+-- Requests already answered, so a signature captured on the wire cannot be replayed inside the
+-- window where it is still fresh. Keyed by the whole request (caller, action, timestamp and
+-- signature), so replaying it is the only way to collide with it - and a forgery cannot produce
+-- the same key without the same signature.
+local seen = {}
+
+function M.seen_before(id)
+  if seen[id] then return true end
+  local now = host.now()
+  for key, at in pairs(seen) do
+    if (now - at) > 300 then seen[key] = nil end
+  end
+  seen[id] = now
+  return false
 end
 
 -- What a human calls this node when four of them are in a list.
@@ -200,11 +231,15 @@ function M.set_name(name)
   return name
 end
 
-local function fetch_peers()
+local function fetch_peers(fresh)
   local url = M.rendezvous_url()
   if url == "" then return {} end
   local now = host.now()
-  if cache and (now - cache_at) < CACHE_TTL then return cache end
+  -- `fresh` skips the cache. A decision that changes state - may this caller run tools on this
+  -- node - must not be made from a list read fifteen seconds ago: a peer removed from the
+  -- rendezvous would stay welcome here for the rest of the window. A display can live with that;
+  -- a capability check cannot.
+  if not fresh and cache and (now - cache_at) < CACHE_TTL then return cache end
   local peers = {}
   pcall(function()
     local headers = json.encode({ ["Accept"] = "application/json", ["User-Agent"] = "wasm-agent/0.1 node" })
@@ -218,6 +253,10 @@ local function fetch_peers()
   end)
   cache, cache_at = peers, now
   return peers
+end
+
+function M.peers(opts)
+  return fetch_peers(type(opts) == "table" and opts.fresh)
 end
 
 function M.invalidate()
@@ -271,9 +310,15 @@ function M.find(selector)
 end
 
 -- Trust a caller only when the rendezvous agrees on its key.
-function M.verify_caller(node_id, public_key)
+--
+-- This is the whole of the remote-trust story, so it is worth being exact about what it proves:
+-- the caller holds the private key for a public key that the rendezvous, right now, associates
+-- with that node id. It does not prove the caller is well-intentioned - that is what the role
+-- check and `author_of`'s enrolment list are for - and it fails closed: no rendezvous, no answer.
+function M.verify_caller(node_id, public_key, opts)
   if not node_id or not public_key then return nil end
-  for _, node in ipairs(fetch_peers()) do
+  local peers = fetch_peers(type(opts) == "table" and opts.fresh)
+  for _, node in ipairs(peers) do
     if node.node_id == node_id and node.public_key == public_key then
       return node
     end

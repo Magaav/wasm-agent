@@ -20,12 +20,27 @@ end
 
 -- Rebuild the agent when the signed-in user, their role, or the target node
 -- changes. The session is a resumable thread keyed by (user, node).
+-- The role a *local* turn actually gets.
+--
+-- On a guest node every local session is a guest, whatever the session's user says: the node
+-- carries out a master's wish, it does not have a master's initiative of its own. Without this
+-- the default user on a guest node is `master` (users.lua's fallback), so anyone who could
+-- reach the port had a master agent with its tools - and, since those tools include a shell and
+-- file writes, this machine. The peer path deliberately does not come through here: a signed
+-- call from a verified master *is* a master's wish, which is the one way work originates on a
+-- guest.
+local function effective_role(user)
+  if not nodeslib.is_master() then return "guest" end
+  return user.role
+end
+
 local function agent_for(session, node)
   local user = users.current(session)
+  local role = effective_role(user)
   node = node or ""
-  if not agent or agent.user ~= user.id or agent.role ~= user.role or agent.node ~= node then
+  if not agent or agent.user ~= user.id or agent.role ~= role or agent.node ~= node then
     if agent then agent:close() end
-    agent = agentlib.new(nil, emit, user.role, user.id, node)
+    agent = agentlib.new(nil, emit, role, user.id, node)
   end
   return agent
 end
@@ -102,10 +117,13 @@ end
 
 function wa_me(session)
   local user = users.current(session)
+  -- What this caller may actually do here, which on a guest node is the guest tier even though
+  -- the session resolves to the master user.
+  local role = effective_role(user)
   return json.encode({
     user = users.public(user),
-    role = user.role,
-    tools = tool_names(user.role),
+    role = role,
+    tools = tool_names(role),
   })
 end
 
@@ -124,7 +142,9 @@ end
 -- ---- UI shell + spells (master only) -------------------------------------
 local function require_master(session)
   local user = users.current(session)
-  if not users.is_master(user.role) then return nil, user end
+  -- The effective role, not the session's: on a guest node this is `guest`, so these routes
+  -- refuse instead of handing a shell to whoever asked.
+  if not users.is_master(effective_role(user)) then return nil, user end
   return user
 end
 
@@ -181,12 +201,23 @@ end
 -- A peer must be a rendezvous-known master with a valid, fresh signature.
 local function verify_peer(from, public_key, ts, signature, action)
   if not from or from == "" then return nil, "bad_request" end
-  local message = table.concat({ action, from, tostring(math.floor(tonumber(ts) or 0)) }, "|")
+  local stamp = math.floor(tonumber(ts) or 0)
+  local message = table.concat({ action, from, tostring(stamp) }, "|")
   if not host.verify(public_key or "", message, signature or "") then return nil, "bad_signature" end
-  if math.abs(host.now() - (tonumber(ts) or 0)) > 120 then return nil, "stale_request" end
-  local caller = nodeslib.verify_caller(from, public_key)
+  if math.abs(host.now() - stamp) > 120 then return nil, "stale_request" end
+  -- Fresh from the rendezvous, not from the local cache: a peer that has been removed there
+  -- must stop being welcome here at once, and if the rendezvous cannot be reached the call is
+  -- refused rather than allowed on the strength of a list nobody currently vouches for. This is
+  -- the answer to "a guest can fake a master call": it would have to hold the master's private
+  -- key *and* still be enrolled for that node id.
+  local caller = nodeslib.verify_caller(from, public_key, { fresh = true })
   if not caller then return nil, "unknown_caller" end
   if users.normalize(caller.role) ~= "master" then return nil, "forbidden_role" end
+  -- Recorded only after every check has passed, so a forged request cannot burn the id of a
+  -- real one. Two minutes is the freshness window; the record is kept a little longer than
+  -- that so a request cannot be replayed at the edge of its own validity.
+  local id = table.concat({ from, action, tostring(stamp), tostring(signature) }, "|")
+  if nodeslib.seen_before(id) then return nil, "replayed_request" end
   return caller
 end
 

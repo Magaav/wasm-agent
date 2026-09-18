@@ -111,6 +111,26 @@ filed under the master's name rather than the guest's. A caller whose node is no
 a master is refused before any of that (`forbidden_role`), so one guest cannot
 command another.
 
+A call is believed only when the **rendezvous** confirms the caller, at the moment
+of the call: the signature must match the public key the rendezvous currently
+associates with that node id (`unknown_caller` otherwise), the call must be fresh
+and not a repeat of one already answered (`stale_request`, `replayed_request`),
+and if the rendezvous cannot be reached the call is refused rather than allowed
+on the strength of a cached list. That is the answer to "a guest can fake a master
+call": it would have to hold the master's private key *and* still be enrolled for
+that node id.
+
+The rendezvous records what each node says about itself, which is all it can know.
+With `WASM_AGENT_TRUSTED_MASTERS` set (comma-separated node ids or names) an
+enrolled list decides instead: a caller not named there is refused even though the
+rendezvous would vouch for its key.
+
+`scripts/test-guest-e2e.sh` starts a real guest beside the master and attacks it —
+a shell request, a forged master call, a replay, a rename that must not move a
+branch — and checks that a master's wish is filed under the master. It needs a
+reachable rendezvous and a running master node, so it is run on demand rather than
+as part of `test.sh`.
+
 ## Relay
 
 A node that cannot accept inbound connections attaches by **long-polling** the

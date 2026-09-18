@@ -92,7 +92,7 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 /// (`/c/Users/...`) that Rust cannot open - which silently disabled the whole
 /// config file, leaving the agent in "no model configured" mode. Prefer an
 /// explicit override, then the native Windows variables, then HOME.
-fn resolve_home() -> String {
+pub(crate) fn resolve_home() -> String {
     if let Ok(value) = std::env::var("WASM_AGENT_HOME") {
         if !value.is_empty() {
             return value;
