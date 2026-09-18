@@ -26,6 +26,9 @@ window.__fixtures = {
     ],
   },
   me: { user: { id: "master", name: "master" }, role: "master" },
+  // What the node says about right now. The window asks this before believing a turn is over, so a
+  // notice can be taken down when the thread is settled - and a turn that completed is not "unfinished".
+  health: { current: null, ok: true, queue: 0, stalled_ms: 0, worker: "alive" },
   users: { users: [] },
   nodes: {
     nodes: [
