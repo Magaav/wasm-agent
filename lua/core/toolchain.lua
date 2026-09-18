@@ -51,7 +51,15 @@ local function wanted()
     {
       id = "cc",
       why = "link the native dependencies (sqlite, ring)",
-      probe = here == "windows" and "cc --version" or "cc --version",
+      -- On Windows the compiler is cl.exe and it is deliberately *not* on PATH: Visual Studio keeps
+      -- it behind its own environment, which is why `cc --version` reported "no" on a machine that
+      -- had just built the host successfully. vswhere is the tool Microsoft ships to answer this
+      -- question, and it is what the `cc` crate itself consults - so this asks the same thing the
+      -- build will. `-products *` is quoted because the shell would otherwise glob it.
+      probe = here == "windows"
+        and '"/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest ' ..
+            "-products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath"
+        or "cc --version",
       install = {
         -- The *workload* is the whole point on Windows: Build Tools without VCTools installs no
         -- compiler at all, so `cc` still fails and the node still cannot build - which is worse
