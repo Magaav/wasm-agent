@@ -52,7 +52,15 @@ end
 function M.worktree()
   local cwd = platform.cwd()
   if type(cwd) ~= "string" or cwd == "" then return "" end
-  local dir = cwd:gsub("/+$", ""):match("([^/\\]+)$")
+  local normal = function(path)
+    return tostring(path):gsub("\\", "/"):gsub("/+$", ""):lower()
+  end
+  -- A node started from a home directory is not working in a project: "Victor" or
+  -- "ubuntu" as a node name is noise, and the machine name (or an explicit setting) says
+  -- more. The name answers "which checkout am I?", so a directory that is not a checkout
+  -- says nothing at all.
+  if normal(cwd) == normal(paths.home()) then return "" end
+  local dir = cwd:gsub("/+$", ""):match("([^/]+)$")
   return dir or ""
 end
 
