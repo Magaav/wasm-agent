@@ -213,9 +213,12 @@ const until = async (predicate, label, ms = 2000) => {
   if (stubProblems > 0) {
     console.log(stubProblems + " STUB problem(s): the harness could not test everything it claims");
   }
-  const verdict = failures === 0
-    ? (stubProblems === 0 ? "ALL PASS" : "ALL PASS (with stub gaps)")
-    : failures + " FAILURE(S)";
+  // "ALL PASS (with stub gaps)" was a green verdict the suites grep for, so a run that
+  // could not test everything reported as a run that tested everything. The word PASS
+  // appears here only when nothing was skipped and nothing was left untested.
+  const verdict = failures === 0 && stubProblems === 0
+    ? "ALL PASS"
+    : failures + " FAILURE(S), " + stubProblems + " STUB GAP(S)";
   console.log(verdict);
   process.exit(failures === 0 && stubProblems === 0 ? 0 : 1);
 })();
