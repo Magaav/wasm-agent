@@ -1,0 +1,60 @@
+handoff report
+==============
+verdict      : HANDOFF NOT OK
+branch       : handoff-gate
+commit       : fdd10127ce6b533824c5cb6485b4a5c79d638b63
+session      : unknown
+trailer      : Agent: wasm-agent worktree=handoff-gate role=master
+rebase       : no
+merge        : merges
+counts       : 3 suite(s) reported a count
+baseline     : .handoff/expected-counts
+
+results
+-------
+failures     : 1
+errors       : 0
+skips        : 1
+
+  FAIL  uncommitted work in the tree; refusing to rebase over it
+        1 uncommitted path(s) - commit or stash first
+  ok    merges with origin/main (tree f6b7293068a9)
+  SKIP  scripts/test.sh (cargo not on PATH)
+  ok    scripts/test-windows.ps1 ->    local suite ok (25 checks) (17s)
+  ok    tests/bug-hunt.js -> ALL PASS (0s)
+        13 ok line(s) counted
+  ok    tests/composer-attachments.js -> ALL PASS (0s)
+        22 ok line(s) counted
+  ok    tests/composer-input.js -> ALL PASS (0s)
+        40 ok line(s) counted
+  ok    baseline recorded for the first time
+
+suites
+------
+  smoke                        skipped
+  tests/composer-attachments.js passed (22 ok)
+  tests/composer-input.js      passed (40 ok)
+  tests/bug-hunt.js            passed (13 ok)
+  windows                      passed
+
+counts (this run vs baseline)
+-----------------------------
+  tests/composer-attachments.js 22 (baseline none)
+  tests/composer-input.js      40 (baseline none)
+  tests/bug-hunt.js            13 (baseline none)
+
+re-run these
+------------
+  git merge-tree --write-tree origin/main HEAD
+  powershell -NoProfile -File scripts/test-windows.ps1
+  node tests/bug-hunt.js
+  node tests/composer-attachments.js
+  node tests/composer-input.js
+
+endings
+-------
+  this run     : started 2026-09-18T10:40:33Z, exited 2026-09-18T10:40:51Z
+  previous run : left no unfinished marker
+  scope        : the gate detects an unfinished run after the fact; it does not
+                 instrument the harness, so a death *within* a turn is not visible
+                 here - only that the run as a whole did not reach its own end.
