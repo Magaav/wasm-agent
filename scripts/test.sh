@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Smoke test for the Rust+Lua wasm-agent: build, then exercise memory and a WASM plugin.
 set -euo pipefail
+# A skipped test must be visible in the verdict, not only in the middle of the log:
+# "smoke ok" over a run that skipped the UI tests claims more than it did.
+SKIPPED=0
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 
@@ -594,10 +597,13 @@ done
 echo "attach tests ok"
 
 # The UI tests are JS and run outside the embedded interpreter, so they need node
-# and they need the repo root as cwd (they read ui/app.js from disk). Skipped with
-# a note rather than silently passed when node is absent: a test that does not run
-# must not look like a test that passed.
-if command -v node >/dev/null 2>&1; then
+# and they need the repo root as cwd (they read ui/app.js from disk). A test that does
+# not run must not look like one that passed, so a skip is counted and asked for: if
+# node is missing the suite says so and the verdict counts it.
+if [ "${WASM_AGENT_SKIP_UI_TESTS:-}" = "1" ]; then
+  echo "ui tests skipped by request (WASM_AGENT_SKIP_UI_TESTS=1)"
+  SKIPPED=$((SKIPPED + 1))
+elif command -v node >/dev/null 2>&1; then
   for t in tests/*.js; do
     [ -e "$t" ] || continue
     out=$(node "$t" 2>&1 || true)
@@ -608,5 +614,10 @@ if command -v node >/dev/null 2>&1; then
   echo "ui tests ok"
 else
   echo "ui tests SKIPPED - node not on PATH"
+  SKIPPED=$((SKIPPED + 1))
 fi
-echo "smoke ok"
+if [ "$SKIPPED" -gt 0 ]; then
+  echo "smoke ok ($SKIPPED skipped)"
+else
+  echo "smoke ok"
+fi
