@@ -396,3 +396,192 @@ class WaTool extends HTMLElement {
   get detail() { return this._detail; }
 }
 customElements.define("wa-tool", WaTool);
+
+// <wa-window> - a floating panel that moves, resizes and closes like a real window.
+//
+// The shell can spawn an actual second OS window (`native.openView`), and this is what the page
+// uses when there is no shell to ask: a browser tab, or the harness. It is a component rather than
+// markup in app.js because every view that wants to be its own window should behave the same -
+// drag by its title bar, resize from any edge, close from its own button, and come back where you
+// left it.
+//
+// Geometry is remembered per `name`, so a view that is reopened is where the reader put it. The
+// handles are eight invisible strips (four edges, four corners) rather than the browser's single
+// bottom-right grip, because a window that can only be resized from one corner is not a window.
+class WaWindow extends HTMLElement {
+  static get observedAttributes() { return ["open", "name"]; }
+
+  constructor() {
+    super();
+    this._drag = null;
+    this._resize = null;
+    this._onMove = this._onMove.bind(this);
+    this._onUp = this._onUp.bind(this);
+  }
+
+  connectedCallback() {
+    if (this._built) return;
+    this._built = true;
+    const root = this.attachShadow({ mode: "open" });
+    root.innerHTML = `
+      <style>
+        :host { position: fixed; inset: 0; pointer-events: none; z-index: 70; display: block; }
+        :host([hidden]) { display: none; }
+        .frame {
+          position: absolute; pointer-events: auto; display: flex; flex-direction: column;
+          min-width: 320px; min-height: 220px; overflow: hidden;
+          background: var(--panel, #10131a); color: var(--text, #e6e9f0);
+          border: 1px solid var(--line, #232936); border-radius: var(--radius, 10px);
+          box-shadow: 0 24px 60px rgba(0,0,0,.6);
+        }
+        .bar {
+          display: flex; align-items: center; gap: var(--gap, 5px); padding: var(--space, 5px) var(--pad, 10px);
+          background: var(--panel-2, #161a23); border-bottom: 1px solid var(--line, #232936);
+          cursor: grab; user-select: none; flex: none;
+        }
+        .bar:active { cursor: grabbing; }
+        .title { font-size: 12px; color: var(--muted, #8b93a7); flex: 1; text-transform: lowercase; letter-spacing: .04em; }
+        button {
+          background: none; border: none; color: var(--muted, #8b93a7); cursor: pointer;
+          font: inherit; font-size: 14px; line-height: 1; padding: 0 var(--space, 5px);
+        }
+        button:hover { color: var(--text, #e6e9f0); }
+        .body { flex: 1; min-height: 0; overflow: auto; }
+        .grip { position: absolute; pointer-events: auto; }
+        .grip.n { top: 0; left: 8px; right: 8px; height: 4px; cursor: ns-resize; }
+        .grip.s { bottom: 0; left: 8px; right: 8px; height: 4px; cursor: ns-resize; }
+        .grip.w { left: 0; top: 8px; bottom: 8px; width: 4px; cursor: ew-resize; }
+        .grip.e { right: 0; top: 8px; bottom: 8px; width: 4px; cursor: ew-resize; }
+        .grip.nw { top: 0; left: 0; width: 8px; height: 8px; cursor: nwse-resize; }
+        .grip.ne { top: 0; right: 0; width: 8px; height: 8px; cursor: nesw-resize; }
+        .grip.sw { bottom: 0; left: 0; width: 8px; height: 8px; cursor: nesw-resize; }
+        .grip.se { bottom: 0; right: 0; width: 8px; height: 8px; cursor: nwse-resize; }
+      </style>
+      <div class="frame">
+        <div class="bar"><span class="title"></span><button class="close" title="Close">\u00d7</button></div>
+        <div class="body"><slot></slot></div>
+        <div class="grip n"></div><div class="grip s"></div><div class="grip w"></div><div class="grip e"></div>
+        <div class="grip nw"></div><div class="grip ne"></div><div class="grip sw"></div><div class="grip se"></div>
+      </div>`;
+    this._frame = root.querySelector(".frame");
+    this._title = root.querySelector(".title");
+    root.querySelector(".close").addEventListener("click", () => this.close());
+    root.querySelector(".bar").addEventListener("pointerdown", (event) => this._startDrag(event));
+    for (const grip of root.querySelectorAll(".grip")) {
+      grip.addEventListener("pointerdown", (event) => this._startResize(event, grip.className.replace("grip ", "")));
+    }
+    this._place();
+    this.hidden = !this.open;
+  }
+
+  disconnectedCallback() { this._onUp(); }
+
+  attributeChangedCallback(name) {
+    if (name === "open") this.hidden = !this.open;
+    if (name === "name" && this._built) this._place();
+  }
+
+  get open() { return this.hasAttribute("open"); }
+  set open(value) {
+    if (value) this.setAttribute("open", "");
+    else this.removeAttribute("open");
+  }
+
+  get viewName() { return this.getAttribute("name") || "window"; }
+
+  close() {
+    this.removeAttribute("open");
+    this.dispatchEvent(new CustomEvent("close", { bubbles: true }));
+  }
+
+  set title(value) { this._title.textContent = value || this.viewName; }
+
+  // Where this view was left, or a sensible first place: a little in from the top left, so it is
+  // visibly not the panel and does not sit under the pointer.
+  _place() {
+    const key = "wa-window-" + this.viewName;
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(key) || "null"); } catch (error) { saved = null; }
+    const geometry = saved || { x: 60, y: 60, w: 720, h: 520 };
+    this._apply(geometry);
+    this._title.textContent = this.viewName;
+  }
+
+  _geometry() {
+    return {
+      x: this._frame.offsetLeft, y: this._frame.offsetTop,
+      w: this._frame.offsetWidth, h: this._frame.offsetHeight,
+    };
+  }
+
+  _apply(geometry) {
+    const maxW = Math.max(320, window.innerWidth - 20);
+    const maxH = Math.max(220, window.innerHeight - 20);
+    const w = Math.min(Math.max(320, geometry.w), maxW);
+    const h = Math.min(Math.max(220, geometry.h), maxH);
+    const x = Math.min(Math.max(0, geometry.x), Math.max(0, window.innerWidth - w));
+    const y = Math.min(Math.max(0, geometry.y), Math.max(0, window.innerHeight - h));
+    Object.assign(this._frame.style, { left: x + "px", top: y + "px", width: w + "px", height: h + "px" });
+    return { x, y, w, h };
+  }
+
+  _remember() {
+    try { localStorage.setItem("wa-window-" + this.viewName, JSON.stringify(this._geometry())); }
+    catch (error) { /* private mode */ }
+  }
+
+  _startDrag(event) {
+    if (event.button !== 0) return;
+    // The title bar is the handle; a press on the close button is not a drag.
+    if (event.target.closest("button")) return;
+    const geometry = this._geometry();
+    this._drag = { pointerId: event.pointerId, dx: event.clientX - geometry.x, dy: event.clientY - geometry.y };
+    event.target.setPointerCapture?.(event.pointerId);
+    document.addEventListener("pointermove", this._onMove);
+    document.addEventListener("pointerup", this._onUp);
+  }
+
+  _startResize(event, edge) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    this._resize = { pointerId: event.pointerId, edge, geometry: this._geometry(), x: event.clientX, y: event.clientY };
+    event.target.setPointerCapture?.(event.pointerId);
+    document.addEventListener("pointermove", this._onMove);
+    document.addEventListener("pointerup", this._onUp);
+  }
+
+  _onMove(event) {
+    if (this._drag) {
+      this._apply({
+        x: event.clientX - this._drag.dx, y: event.clientY - this._drag.dy,
+        w: this._frame.offsetWidth, h: this._frame.offsetHeight,
+      });
+      return;
+    }
+    if (this._resize) {
+      const start = this._resize.geometry;
+      const dx = event.clientX - this._resize.x;
+      const dy = event.clientY - this._resize.y;
+      const edge = this._resize.edge;
+      let { x, y, w, h } = start;
+      if (edge.includes("e")) w = start.w + dx;
+      if (edge.includes("s")) h = start.h + dy;
+      if (edge.includes("w")) { w = start.w - dx; x = start.x + dx; }
+      if (edge.includes("n")) { h = start.h - dy; y = start.y + dy; }
+      // A window cannot be dragged past its own minimum: the far edge stays put, which is what a
+      // real window does, instead of flipping inside out.
+      if (w < 320) { w = 320; if (edge.includes("w")) x = start.x + start.w - 320; }
+      if (h < 220) { h = 220; if (edge.includes("n")) y = start.y + start.h - 220; }
+      this._apply({ x, y, w, h });
+    }
+  }
+
+  _onUp() {
+    if (this._drag || this._resize) this._remember();
+    this._drag = null;
+    this._resize = null;
+    document.removeEventListener("pointermove", this._onMove);
+    document.removeEventListener("pointerup", this._onUp);
+  }
+}
+customElements.define("wa-window", WaWindow);

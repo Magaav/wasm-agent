@@ -36,7 +36,10 @@ mod companion {
 
     #[derive(Debug)]
     enum UserEvent {
-        Ipc(String),
+        /// An IPC message, tagged with the window that sent it: operations act on the window that
+        /// asked, not on the main one. A second window whose "maximize" resized the chat would be
+        /// worse than no second window.
+        Ipc(usize, String),
         Loaded,
     }
 
@@ -52,12 +55,26 @@ mod companion {
         panel_height: u32,
         #[serde(default)]
         enabled: Option<bool>,
+        /// Which view to open (`open_view`), and where to load it from.
+        #[serde(default)]
+        view: String,
+        #[serde(default)]
+        url: String,
+    }
+
+    /// A view window: a real OS window, decorated and resizable, deliberately *not* always on top.
+    /// The chat is the thing that floats above; this is the screen being worked in.
+    struct View {
+        id: usize,
+        window: Window,
+        _webview: WebView,
     }
 
     struct State {
         mode: String,
         topmost: bool,
         next_topmost: Instant,
+        views: Vec<View>,
     }
 
     /// Give the window (taskbar, alt-tab) the embedded wasm-agent icon.
@@ -116,6 +133,10 @@ mod companion {
     maximize: () => send('set_mode', { mode: 'maximized' }),
     drag: () => send('drag'),
     topmost: (enabled) => send('topmost', { enabled: enabled !== false }),
+    // A view in its own window: the chat stays the chat, and this is a screen you work in. The URL
+    // is built by the page, because the page is what knows where it was loaded from.
+    openView: (view, url) => send('open_view', { view: String(view || 'view'), url: String(url || '') }),
+    closeView: () => send('close_view'),
     quit: () => send('quit')
   }});
 })();
@@ -283,10 +304,41 @@ mod companion {
         apply_layout(window, webview, mode);
     }
 
-    fn handle(window: &Window, webview: &WebView, state: &mut State, body: &str) -> bool {
+    fn handle(main: &Window, main_webview: &WebView, state: &mut State, sender: tao::window::WindowId,
+              body: &str, target: &tao::event_loop::EventLoopWindowTarget<UserEvent>) -> bool {
         let request: IpcRequest = serde_json::from_str(body).unwrap_or_default();
+        let from_main = sender == encode_id(main.id());
         match request.operation.as_str() {
-            "set_mode" => {
+            // A view in its own window. Decorated, resizable, movable and *not* always on top -
+            // the chat is the thing that floats above; a control view is a screen you work in. It
+            // is a normal window on purpose: the operating system already knows how to move,
+            // resize, maximise, snap and Alt-Tab it, and re-implementing that would only be worse.
+            "open_view" if from_main => {
+                let view = if request.view.is_empty() { "view".to_string() } else { request.view.clone() };
+                if state.views.iter().any(|open| open.window.title() == view) {
+                    note(&format!("view {view} is already open"));
+                    return false;
+                }
+                let url = if request.url.is_empty() {
+                    let separator = if DEFAULT_URL.contains('?') { '&' } else { '?' };
+                    format!("{DEFAULT_URL}{separator}view={view}")
+                } else {
+                    request.url.clone()
+                };
+                match open_view(target, &view, &url) {
+                    Ok((window, window_id, webview)) => {
+                        note(&format!("view {view} opened: {url}"));
+                        state.views.push(View { id: window_id, window, _webview: webview });
+                    }
+                    Err(error) => note(&format!("view {view} failed: {error:#}")),
+                }
+            }
+            "close_view" => {
+                let before = state.views.len();
+                state.views.retain(|view| view.id != sender);
+                note(&format!("view closed by its page ({} of {before} left)", state.views.len()));
+            }
+            "set_mode" if from_main => {
                 state.mode = match request.mode.as_str() {
                     "expanded" => "expanded",
                     // The control view asks for this: a remote desktop wants the screen, and the
@@ -295,26 +347,70 @@ mod companion {
                     _ => "compact",
                 }
                 .into();
-                resize(window, &state.mode, request.panel_width.max(PANEL_WIDTH),
+                resize(main, &state.mode, request.panel_width.max(PANEL_WIDTH),
                        request.panel_height.max(PANEL_HEIGHT));
-                style_window(window, webview, &state.mode);
+                style_window(main, main_webview, &state.mode);
             }
-            "drag" => {
-                let _ = window.drag_window();
-                clamp_to_work_area(window);
+            "drag" if from_main => {
+                let _ = main.drag_window();
+                clamp_to_work_area(main);
             }
-            "topmost" => {
+            "topmost" if from_main => {
                 state.topmost = request.enabled.unwrap_or(true);
-                window.set_always_on_top(state.topmost);
+                main.set_always_on_top(state.topmost);
             }
             "quit" => {
                 note("quit requested by page");
-                let _ = webview;
+                let _ = main_webview;
                 return true;
             }
             _ => {}
         }
         false
+    }
+
+    /// Open a view as its own window, with its own webview. Each gets its own WebView2 profile
+    /// directory: two controllers sharing one profile is a fight over a cache for no benefit.
+    fn open_view(target: &tao::event_loop::EventLoopWindowTarget<UserEvent>, title: &str, url: &str)
+        -> Result<(Window, usize, WebView)> {
+        let window = WindowBuilder::new()
+            .with_title(format!("wasm-agent {title}"))
+            .with_inner_size(PhysicalSize::new(900, 620))
+            .with_min_inner_size(PhysicalSize::new(360, 260))
+            .with_decorations(true)
+            .with_resizable(true)
+            .with_always_on_top(false)
+            .with_visible(true)
+            .with_skip_taskbar(false)
+            .with_focusable(true)
+            .build(target)
+            .context("create view window")?;
+        let profile = data_dir().join("views").join(title.replace([':', '/', '\\'], "-"));
+        let _ = std::fs::create_dir_all(&profile);
+        let mut context = WebContext::new(Some(profile));
+        let proxy = target.create_proxy();
+        let id = encode_id(window.id());
+        let webview = WebViewBuilder::new_with_web_context(&mut context)
+            .with_url(url)
+            .with_default_context_menus(true)
+            .with_initialization_script(bridge_script())
+            .with_ipc_handler(move |request| {
+                // Tagged with the sending window, so an operation acts on the window that asked.
+                let _ = proxy.send_event(UserEvent::Ipc(id, request.body().clone()));
+            })
+            .build(&window)
+            .context("create view webview")?;
+        Ok((window, id, webview))
+    }
+
+    /// `WindowId` is opaque; its debug form is stable enough to carry through an event and compare
+    /// back, which is all this needs - the alternative is a map keyed by the id type itself.
+    fn encode_id(id: tao::window::WindowId) -> usize {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        format!("{id:?}").hash(&mut hasher);
+        hasher.finish() as usize
     }
 
     /// Declare per-monitor DPI awareness before any window exists, so tao's
@@ -359,6 +455,9 @@ mod companion {
         let ipc_proxy = event_loop.create_proxy();
         let load_proxy = event_loop.create_proxy();
         let mut web_context = WebContext::new(Some(data_dir()));
+        // The main window's identity, so the loop can tell which window an event or an IPC came
+        // from - a view's "close" must close the view, not the chat.
+        let main_id = encode_id(window.id());
         let webview = WebViewBuilder::new_with_web_context(&mut web_context)
             .with_url(&url)
             .with_transparent(false)
@@ -366,7 +465,7 @@ mod companion {
             .with_default_context_menus(false)
             .with_initialization_script(bridge_script())
             .with_ipc_handler(move |request| {
-                let _ = ipc_proxy.send_event(UserEvent::Ipc(request.body().clone()));
+                let _ = ipc_proxy.send_event(UserEvent::Ipc(main_id, request.body().clone()));
             })
             .with_on_page_load_handler(move |event, _url| {
                 if matches!(event, PageLoadEvent::Finished) {
@@ -399,8 +498,9 @@ mod companion {
             mode: "compact".into(),
             topmost: true,
             next_topmost: Instant::now() + TOPMOST_INTERVAL,
+            views: Vec::new(),
         };
-        event_loop.run(move |event, _, control_flow| {
+        event_loop.run(move |event, target, control_flow| {
             *control_flow = ControlFlow::WaitUntil(state.next_topmost);
             match event {
                 Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
@@ -409,23 +509,36 @@ mod companion {
                     }
                     state.next_topmost = Instant::now() + TOPMOST_INTERVAL;
                 }
-                Event::UserEvent(UserEvent::Ipc(body)) => {
-                    if handle(&window, &webview, &mut state, &body) {
+                Event::UserEvent(UserEvent::Ipc(sender, body)) => {
+                    if handle(&window, &webview, &mut state, sender, &body, target) {
                         window.set_visible(false);
                         *control_flow = ControlFlow::Exit;
                     }
                 }
                 Event::UserEvent(UserEvent::Loaded) => note("page loaded"),
-                Event::WindowEvent { event: WindowEvent::Resized(_), .. } => {
-                    // Manual resize: re-pin the WebView and re-cut the region.
-                    apply_layout(&window, &webview, &state.mode);
+                Event::WindowEvent { window_id, event: WindowEvent::Resized(_) } => {
+                    // Manual resize: re-pin the WebView and re-cut the region. Only the main window
+                    // is hand-styled; a view is an ordinary window and the OS sizes it.
+                    if encode_id(window_id) == main_id {
+                        apply_layout(&window, &webview, &state.mode);
+                    }
                 }
-                Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
-                    note("close requested");
-                    window.set_visible(false);
-                    *control_flow = ControlFlow::Exit;
+                Event::WindowEvent { window_id, event: WindowEvent::CloseRequested } => {
+                    if encode_id(window_id) == main_id {
+                        // Closing the chat closes what the chat opened: a view is a thing the chat
+                        // asked for, and leaving it behind would be a window nobody can explain.
+                        note(&format!("close requested; closing {} view(s)", state.views.len()));
+                        state.views.clear();
+                        window.set_visible(false);
+                        *control_flow = ControlFlow::Exit;
+                    } else {
+                        state.views.retain(|view| view.id != encode_id(window_id));
+                        note("view closed");
+                    }
                 }
-                Event::WindowEvent { event: WindowEvent::Destroyed, .. } => note("window destroyed"),
+                Event::WindowEvent { window_id, event: WindowEvent::Destroyed } => {
+                    state.views.retain(|view| view.id != encode_id(window_id));
+                }
                 Event::LoopDestroyed => note("loop destroyed"),
                 _ => {}
             }

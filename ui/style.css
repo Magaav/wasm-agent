@@ -509,6 +509,16 @@ wa-balloon.popover {
 .user-avatar.has-picture { background: none; }
 .user-avatar-img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
+/* A view window is one component and nothing else: no panel, no composer, no chat. The section is
+   moved out of the panel by the page, so this only has to hide the panel and let the view fill the
+   window the shell gave it. */
+body.view-only .panel { display: none; }
+body.view-only #control {
+  position: fixed; inset: 0; width: auto; height: 100vh;
+  border: none; border-radius: 0; box-shadow: none;
+}
+body.view-only #control .control-view { flex: 1; }
+
 /* The account balloon carries the node selector, which needs room to show a name and its kind. */
 #user-menu.menu { min-width: 240px; }
 

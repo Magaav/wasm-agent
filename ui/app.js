@@ -1860,11 +1860,54 @@ function startLive() {
   controlTimer = setInterval(() => fetchFrame(false), 150);
 }
 
+// ---- views: a component in its own window -------------------------------------------------
+//
+// A view is something the chat asked for and then gets out of the way of: the control view is a
+// desktop you work in, not a panel inside a conversation. When there is a shell to ask, it gets a
+// real OS window - decorated, resizable, movable, and *not* always on top, so the chat floats
+// above the thing it opened. In a browser there is no shell, so the same component renders in an
+// in-page <wa-window> instead.
+function viewMode() {
+  try { return new URLSearchParams(location.search).get("view") || ""; } catch (error) { return ""; }
+}
+
+function viewUrl(view) {
+  return location.origin + location.pathname + "?view=" + encodeURIComponent(view);
+}
+
+function controlViewName(name) {
+  return "control:" + (name || "this-node");
+}
+
+// In a view window, render that one component and nothing else. The section is moved out of the
+// panel, because this window is not the chat: there is no conversation here to keep.
+function applyViewMode() {
+  const wanted = viewMode();
+  if (!wanted) return false;
+  document.body.classList.add("view-only");
+  const parts = wanted.split(":");
+  const kind = parts[0];
+  const target = parts[1] && parts[1] !== "this-node" ? parts.slice(1).join(":") : "";
+  if (kind === "control") {
+    if (target) activeNode = target;
+    document.body.append(control);
+    openControl(target);
+  }
+  return true;
+}
+
 function openControl(name) {
   balloon.close();
+  const view = controlViewName(name);
+  // Its own window when the shell can give it one - and never from inside a view, or opening the
+  // control would open another window, which would open another.
+  if (!viewMode() && native && typeof native.openView === "function") {
+    native.openView(view, viewUrl(view));
+    return;
+  }
   document.body.classList.add("control");
   control.hidden = false;
-  controlTitle.textContent = "control · " + name;
+  controlTitle.textContent = "control · " + (name || "this node");
   controlCanvasSize = { w: 0, h: 0 };
   fetchFrame(true).then(() => { if (controlLive.checked) startLive(); });
 }
@@ -1885,6 +1928,9 @@ function setControlMaximized(on) {
 }
 
 function closeControl() {
+  // In its own window, closing means closing the window - the shell owns it. In the page it means
+  // hiding the panel, because the panel is still the chat's.
+  if (viewMode() && native && typeof native.closeView === "function") { native.closeView(); return; }
   // Leaving the control leaves the full screen too, or the chat would open inside a window
   // sized for a desktop.
   if (controlView.classList.contains("maximized")) setControlMaximized(false);
@@ -2510,7 +2556,9 @@ window.rendererLoaded = loadRenderer().then(() => {
   // draft's - the first belongs to the undo stack, and they answer different questions.
   restoreDraft();
   input.addEventListener("input", saveDraft);
-  refreshMe().then(restoreSession);
+  // A view window renders one component and stops: it is not a conversation, and restoring a
+  // transcript into it would be showing the chat inside the thing the chat opened.
+  if (!applyViewMode()) refreshMe().then(restoreSession);
 });
 watch();
 watchTurn();
