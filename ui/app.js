@@ -851,20 +851,46 @@ async function send(text, options = {}) {
     // something the node checks for yet.
     const target = options.session || (me.role === "master" ? chatSession : "");
     if (target) headers["X-WA-Session"] = target;
-    // A stream that goes quiet is not a stream that is working. The node dying mid-turn leaves the
-    // request hanging - no error, no end - and the window sits with a stop button and a greyed
-    // composer for as long as the reader is willing to wait. That is the "stuck chat": the turn was
-    // over and the page did not know. Twenty seconds of silence from a node that beats every second
-    // means the turn is not running.
+    // Silence is not evidence of death.
+    //
+    // A tool that takes minutes - a build, a test suite, an install - produces no events at all, and
+    // the node keeps beating throughout. A client that counts seconds therefore kills turns that are
+    // working: this one aborted a healthy turn mid-build, told the reader it was "recorded as
+    // unfinished" when it was not, and the turn then finished normally in the ledger. A false alarm
+    // that also lies about the record is worse than no alarm.
+    //
+    // The node is the authority, and its accept thread answers /health without the interpreter, so it
+    // can say whether the worker is alive while a turn runs. Ask it, and act only on its answer.
     let lastEvent = Date.now();
-    const watchdog = setInterval(() => {
-      if (Date.now() - lastEvent > 20000) {
+    let asking = false;
+    const watchdog = setInterval(async () => {
+      if (asking || Date.now() - lastEvent < 30000) return;
+      asking = true;
+      try {
+        const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
+        const running = health && health.current;
+        if (running && health.worker !== "stalled") {
+          // Working, and quiet because the work is quiet. Keep waiting, and start counting again.
+          lastEvent = Date.now();
+          asking = false;
+          return;
+        }
+        // Not running any more: the turn is genuinely over, and the page should say so and stop
+        // pretending it is still listening.
         clearInterval(watchdog);
-        add("assistant", "the node went quiet mid-turn (nothing heard for 20s). This turn is recorded as unfinished - the sessions topic offers to continue it.");
+        add("assistant", "the node is no longer running this turn (" + (health.worker || "no worker") +
+          "). It is recorded as unfinished - the sessions topic offers to continue it.");
+        watchNode();
+        controller?.abort();
+      } catch (error) {
+        // Unreachable: the node is gone, which is a different message and the one that fits.
+        clearInterval(watchdog);
+        add("assistant", connectionMessage());
         watchNode();
         controller?.abort();
       }
-    }, 2000);
+      asking = false;
+    }, 5000);
     const response = await fetch("chat", {
       method: "POST",
       headers: apiHeaders(headers),
