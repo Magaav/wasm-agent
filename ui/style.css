@@ -571,6 +571,19 @@ wa-balloon.popover {
    window the shell gave it. */
 body.view-only .panel { display: none; }
 
+/* A turn that was cut off says so where the answer would have been, and offers to continue: a
+   transcript that just stops looks like the agent had nothing to say. */
+.unfinished-notice {
+  display: flex; align-items: center; gap: var(--gap); flex-wrap: wrap;
+  color: var(--warn); font-size: 12px; padding: var(--space) 0;
+  border-top: 1px solid var(--line); margin-top: var(--gap);
+}
+.unfinished-notice button {
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  color: var(--text); font: inherit; font-size: 11.5px; padding: 1px var(--pad); cursor: pointer;
+}
+.unfinished-notice button:hover { border-color: var(--accent); }
+
 /* The update lock: covers the panel, says why it is there, and offers both ways out. */
 #update-lock {
   position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center;

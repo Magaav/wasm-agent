@@ -63,6 +63,20 @@ window.__fixtures = {
     ],
   },
   tools: { tools: [] },
+  // One thread, with a turn that was cut off: the chat must say so where the answer would have been,
+  // and offer to continue. `session` is the key the stub matches after it strips the query.
+  session: {
+    session: { id: "aaaaaaaa-0000-0000-0000-000000000001", title: "unfinished thread" },
+    state: "unfinished",
+    state_detail: "1 tool call(s) with no recorded result: bash",
+    turns: [
+      { seq: 1, role: "user", content: "check the installer on the node", ok: 1, tool_calls: [] },
+      { seq: 2, role: "assistant", content: "Running it now.", ok: 1, tool_calls: [] },
+      { seq: 3, role: "assistant", content: "", ok: 1,
+        tool_calls: [{ id: "c1", type: "function", function: { name: "bash", arguments: '{"command":"wa toolchain check"}' } }] },
+      { seq: 4, role: "tool", content: '{"code":0,"stdout":"git yes"}', ok: 1, tool_name: "bash", tool_calls: [] },
+    ],
+  },
   spells: { spells: [] },
   // Two skills, one of them hidden from the model: the topic must show that difference, because
   // "the agent has this skill" and "the agent is told about this skill" are not the same claim.

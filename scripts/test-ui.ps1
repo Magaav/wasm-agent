@@ -344,6 +344,18 @@ $harness = @'
   for (var up = 0; up < 3; up++) { await tick(); }
   check(messages.scrollTop === observedTop, "and put back after a reload, saw " + messages.scrollTop);
 
+  // A turn that was cut off must say so *in the chat*, where the answer would have been, and offer
+  // to continue. A transcript that just stops looks like the agent had nothing to say - which is
+  // exactly how a killed turn was read. The first fixture session is unfinished, so restoring it
+  // must produce the notice.
+  await window.__restoreSession();
+  for (var un = 0; un < 30; un++) { await tick(); }
+  var notice = document.querySelector(".unfinished-notice");
+  check(!!notice, "a thread whose turn was cut off must say so in the chat");
+  check(!!notice && /stopped before it answered/.test(notice.textContent),
+    "and say what happened, saw: " + (notice ? notice.textContent.slice(0, 90) : "nothing"));
+  check(!!notice && !!notice.querySelector("button"), "and offer to continue it");
+
   // The sessions topic is a way to *find* a thread, not just a list: named after its opening
   // message, most recent first, and searchable. A list you have to read top to bottom is not a way
   // to find anything.
@@ -630,7 +642,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
 
 $server = $null
 $edge = @(

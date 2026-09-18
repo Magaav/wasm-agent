@@ -689,6 +689,18 @@ async function restoreSession() {
     rememberSession(wanted.id);
     const full = await (await apiFetch("session?id=" + encodeURIComponent(wanted.id), { headers: apiHeaders() })).json();
     if (full && Array.isArray(full.turns) && full.turns.length) repaintTurns(full.turns);
+    // A thread whose last turn was cut off must say so *in the chat*: the answer never arrived, and a
+    // transcript that just stops looks like the agent had nothing to say. The engine's badge says it
+    // too, but the reader is here, so the offer belongs here.
+    if (full && full.state === "unfinished") {
+      const notice = document.createElement("div");
+      notice.className = "unfinished-notice";
+      notice.textContent = "this turn was stopped before it answered - " +
+        (full.state_detail || "the node did not record a result") + ".";
+      const again = nodeButton("continue", () => { notice.remove(); resumeSession(wanted.id); });
+      notice.append(again);
+      messages.append(notice);
+    }
     // If that thread was still running when the window went away, watch it: the answer lands in the
     // ledger, and the repaint is what puts it on screen. Tokens that arrived before the reload are
     // still lost - the node streams to whoever opened the stream - so this resumes the *result* of
@@ -839,6 +851,20 @@ async function send(text, options = {}) {
     // something the node checks for yet.
     const target = options.session || (me.role === "master" ? chatSession : "");
     if (target) headers["X-WA-Session"] = target;
+    // A stream that goes quiet is not a stream that is working. The node dying mid-turn leaves the
+    // request hanging - no error, no end - and the window sits with a stop button and a greyed
+    // composer for as long as the reader is willing to wait. That is the "stuck chat": the turn was
+    // over and the page did not know. Twenty seconds of silence from a node that beats every second
+    // means the turn is not running.
+    let lastEvent = Date.now();
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastEvent > 20000) {
+        clearInterval(watchdog);
+        add("assistant", "the node went quiet mid-turn (nothing heard for 20s). This turn is recorded as unfinished - the sessions topic offers to continue it.");
+        watchNode();
+        controller?.abort();
+      }
+    }, 2000);
     const response = await fetch("chat", {
       method: "POST",
       headers: apiHeaders(headers),
@@ -862,7 +888,7 @@ async function send(text, options = {}) {
         for (const part of parts) {
           const line = part.split("\n").find((l) => l.startsWith("data: "));
           if (!line) continue;
-          try { handleEvent(JSON.parse(line.slice(6))); } catch (error) { /* ignore */ }
+          try { handleEvent(JSON.parse(line.slice(6))); lastEvent = Date.now(); } catch (error) { /* ignore */ }
         }
       }
     }
@@ -872,6 +898,7 @@ async function send(text, options = {}) {
     else if (isConnectionLoss(error)) { add("assistant", connectionMessage()); watchNode(); }
     else add("assistant", "error: " + error);
   } finally {
+    clearInterval(watchdog);
     setBusy(false);
     controller = null;
     refreshMeta();
@@ -1802,6 +1829,15 @@ async function sync(reason) {
   synced = true;
   syncAttempts = 0;
   clearStatus();
+  // The node is answering: if it says nothing is running, then nothing is - whatever this window
+  // believed before it lost touch. A turn that ended while the page was away must not leave a stop
+  // button and a dead composer behind.
+  if (busy && me.role) {
+    try {
+      const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
+      if (health && !health.current) setBusy(false);
+    } catch (error) { /* the health line is best effort here */ }
+  }
   // The transcript is restored once, and only after the node has answered - then the reader's place
   // is put back on top of it, because "fresh" should not mean "moved".
   restoreSession().then(restorePlace);
