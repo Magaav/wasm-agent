@@ -374,6 +374,13 @@ rm -f "$DB.sessions.lua"
 # here is the surface a user actually touches and the Lua test cannot see: the
 # CLI's own words, its exit codes, and that reading a report changes nothing.
 WA_SCRIPT=scripts/test-recovery.lua "$BIN" --db "$DB" | grep "recovery ok"
+# The turn's file changes: recorded by write/edit, carried by the ledger, and reversible.
+# Three files because they fail for three different reasons - the record's own logic, the
+# ledger round trip (which was broken: the column existed and the INSERT dropped it), and
+# the route the UI's toggle calls.
+WA_SCRIPT=scripts/test-changeset.lua "$BIN" --db "$DB" | grep "changeset ok"
+WA_SCRIPT=scripts/test-changes-roundtrip.lua "$BIN" --db "$DB" | grep "changes round trip ok"
+WA_SCRIPT=scripts/test-diff-route.lua "$BIN" --db "$DB" | grep "diff route ok"
 
 # An empty assistant message is not an answer. A reasoning model that spends its
 # whole output budget thinking returns content "", a reasoning field, and

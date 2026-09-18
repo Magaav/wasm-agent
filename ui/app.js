@@ -4,10 +4,10 @@ const jump = document.getElementById("jump");
 const meta = document.getElementById("meta");
 const form = document.getElementById("composer");
 const input = document.getElementById("input");
-const undoBtn = document.getElementById("undo");
-// The node's name is not in the footer: it is a setting about this node, so it lives in the
-// account balloon, which is where "who am I, and what am I" is answered.
-const redoBtn = document.getElementById("redo");
+// The draft's undo/redo are keyboard-only since the diff topic took the only toggle in the
+// transcript: the two footer buttons acted on the *draft* while looking like they acted on
+// the conversation, and the transcript is where the reader looks for "undo the last thing".
+// Ctrl+Z / Ctrl+Shift+Z still work, and they are the controls a text box is expected to have.
 const panel = document.getElementById("panel");
 const sendButton = document.getElementById("send");
 const statusBtn = document.getElementById("status-btn");
@@ -576,8 +576,9 @@ function handleEvent(event) {
     // what was asked for, the changed files are what the reader may act on. Both are
     // appended before the bubble is released, or there is nothing left to append to.
     const diff = renderDiff(currentBubble(), event.changes);
+    if (diff) diff.dataset.turnId = event.turn_id || "";
     collapseRun();
-    if (diff) askUndoable(diff);
+    if (diff && diff.dataset.turnId) askUndoable(diff);
     streamBody = null;
     streamText = "";
     turnBubble = null;
@@ -1193,13 +1194,10 @@ function redoDraft() {
   return true;
 }
 
-function syncUndoButtons() {
-  if (undoBtn) undoBtn.disabled = draftUndo.length === 0;
-  if (redoBtn) redoBtn.disabled = draftRedo.length === 0;
-}
-
-if (undoBtn) undoBtn.addEventListener("click", () => undoDraft());
-if (redoBtn) redoBtn.addEventListener("click", () => redoDraft());
+// There is no button to sync any more: the draft's undo/redo are the keyboard's, and a
+// status line already reports what each one did ("undone - press Enter to send"). Kept as a
+// named function because the callers describe an intent - "the stacks moved" - not a widget.
+function syncUndoButtons() {}
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();

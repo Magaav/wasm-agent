@@ -858,10 +858,15 @@ function M:turn(text, images)
   -- ledger like everything else: a reload, a resume or another reader all see the same
   -- changes, and undo has the previous text to restore.
   local changes = changeset.summary(self.changes)
+  -- The turn id is minted here rather than by append_turn, because the reply event has to
+  -- name the turn *before* the record exists: the UI's topic carries the id it will ask
+  -- about, and append_turn uses the same one so the topic and the ledger agree.
+  local turn_id = host.uuid()
   memory.append_turn(self.session_id, {
+    id = turn_id,
     role = "assistant", content = reply, trace = trace, tokens = turn.total, debug = self.debug,
     ms = math.floor((host.now() - turn_started) * 1000),
-    changes = json.encode(changes or json.null),
+    changes = changes,
   })
   M.usage_total.turns = M.usage_total.turns + 1
   M.usage_total.last = turn
@@ -870,7 +875,7 @@ function M:turn(text, images)
   self:maybe_compact()
   -- The diff goes with the reply: the topic belongs to this bubble, and the reader should
   -- not need a second request to learn what the turn touched.
-  self.emit({ type = "reply", text = reply, changes = changes })
+  self.emit({ type = "reply", text = reply, changes = changes, turn_id = turn_id })
   return reply
 end
 
