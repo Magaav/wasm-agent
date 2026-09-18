@@ -304,8 +304,9 @@ mod companion {
         apply_layout(window, webview, mode);
     }
 
-    fn handle(main: &Window, main_webview: &WebView, state: &mut State, sender: tao::window::WindowId,
-              body: &str, target: &tao::event_loop::EventLoopWindowTarget<UserEvent>) -> bool {
+    fn handle(main: &Window, main_webview: &WebView, state: &mut State, sender: usize,
+              body: &str, target: &tao::event_loop::EventLoopWindowTarget<UserEvent>,
+              proxy: &tao::event_loop::EventLoopProxy<UserEvent>) -> bool {
         let request: IpcRequest = serde_json::from_str(body).unwrap_or_default();
         let from_main = sender == encode_id(main.id());
         match request.operation.as_str() {
@@ -325,7 +326,7 @@ mod companion {
                 } else {
                     request.url.clone()
                 };
-                match open_view(target, &view, &url) {
+                match open_view(target, proxy, &view, &url) {
                     Ok((window, window_id, webview)) => {
                         note(&format!("view {view} opened: {url}"));
                         state.views.push(View { id: window_id, window, _webview: webview });
@@ -371,8 +372,9 @@ mod companion {
 
     /// Open a view as its own window, with its own webview. Each gets its own WebView2 profile
     /// directory: two controllers sharing one profile is a fight over a cache for no benefit.
-    fn open_view(target: &tao::event_loop::EventLoopWindowTarget<UserEvent>, title: &str, url: &str)
-        -> Result<(Window, usize, WebView)> {
+    fn open_view(target: &tao::event_loop::EventLoopWindowTarget<UserEvent>,
+                 proxy: &tao::event_loop::EventLoopProxy<UserEvent>,
+                 title: &str, url: &str) -> Result<(Window, usize, WebView)> {
         let window = WindowBuilder::new()
             .with_title(format!("wasm-agent {title}"))
             .with_inner_size(PhysicalSize::new(900, 620))
@@ -388,7 +390,7 @@ mod companion {
         let profile = data_dir().join("views").join(title.replace([':', '/', '\\'], "-"));
         let _ = std::fs::create_dir_all(&profile);
         let mut context = WebContext::new(Some(profile));
-        let proxy = target.create_proxy();
+        let proxy = proxy.clone();
         let id = encode_id(window.id());
         let webview = WebViewBuilder::new_with_web_context(&mut context)
             .with_url(url)
@@ -500,6 +502,7 @@ mod companion {
             next_topmost: Instant::now() + TOPMOST_INTERVAL,
             views: Vec::new(),
         };
+        let view_proxy = event_loop.create_proxy();
         event_loop.run(move |event, target, control_flow| {
             *control_flow = ControlFlow::WaitUntil(state.next_topmost);
             match event {
@@ -510,20 +513,20 @@ mod companion {
                     state.next_topmost = Instant::now() + TOPMOST_INTERVAL;
                 }
                 Event::UserEvent(UserEvent::Ipc(sender, body)) => {
-                    if handle(&window, &webview, &mut state, sender, &body, target) {
+                    if handle(&window, &webview, &mut state, sender, &body, target, &view_proxy) {
                         window.set_visible(false);
                         *control_flow = ControlFlow::Exit;
                     }
                 }
                 Event::UserEvent(UserEvent::Loaded) => note("page loaded"),
-                Event::WindowEvent { window_id, event: WindowEvent::Resized(_) } => {
+                Event::WindowEvent { window_id, event: WindowEvent::Resized(_), .. } => {
                     // Manual resize: re-pin the WebView and re-cut the region. Only the main window
                     // is hand-styled; a view is an ordinary window and the OS sizes it.
                     if encode_id(window_id) == main_id {
                         apply_layout(&window, &webview, &state.mode);
                     }
                 }
-                Event::WindowEvent { window_id, event: WindowEvent::CloseRequested } => {
+                Event::WindowEvent { window_id, event: WindowEvent::CloseRequested, .. } => {
                     if encode_id(window_id) == main_id {
                         // Closing the chat closes what the chat opened: a view is a thing the chat
                         // asked for, and leaving it behind would be a window nobody can explain.
@@ -536,7 +539,7 @@ mod companion {
                         note("view closed");
                     }
                 }
-                Event::WindowEvent { window_id, event: WindowEvent::Destroyed } => {
+                Event::WindowEvent { window_id, event: WindowEvent::Destroyed, .. } => {
                     state.views.retain(|view| view.id != encode_id(window_id));
                 }
                 Event::LoopDestroyed => note("loop destroyed"),
