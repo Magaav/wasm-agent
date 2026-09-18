@@ -316,6 +316,10 @@ fn verb_wake(session: &str, prompt: &str, reason: &str) -> Result<String> {
         .into();
     let mut last = String::new();
     for attempt in 1..=6 {
+        // Say it started before it runs, not only when it finishes. A wake takes minutes, and a reader
+        // inside that very turn looks for its own record - the agent did, and correctly reported "the
+        // wake is not recorded as performed" because the completion line had not been written yet.
+        audit("wake-start", session, reason);
         match agent
             .post(&url)
             .header("Content-Type", "application/json")
