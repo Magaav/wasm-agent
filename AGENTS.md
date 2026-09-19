@@ -44,7 +44,9 @@ never commit to main.*
 ### If you are an agent in a node's worktree
 
 - Your worktree is a `git worktree` of this repo, on the branch named after the
-  node. Treat that branch as your deliverable: **work on it, commit to it, push it.**
+  node. That branch is your **home**: keep it current with `main`, because a node that cannot see `main`
+  cannot see the rules. Each **change** goes on its own short-lived branch (`change/<name>`), born from
+  current `main`, merged and deleted - a branch that lives a day cannot fall 21 commits behind.
   Do not rewrite `main`, and do not push to `main` — hand the branch off or open
   a PR, and let the human merge.
 - The last commit on your branch is the human's review surface. Keep commits

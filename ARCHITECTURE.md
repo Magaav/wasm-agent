@@ -80,3 +80,48 @@ the master's name, never the guest's. There is one answer to "who did this?"
 whether the edit happened here or on a guest. `verify_peer` refuses a caller
 whose node is not a master, so a guest cannot command another node, and
 `nodes.author_of` is the single gate that turns a caller into an author.
+
+## 4. If it can be deterministic, make it so
+
+This is the first rule of this file, and it outranks the others: **anything the machine can check should
+not be prose.** A sentence costs context on every turn, is forgotten under pressure, and is argued about
+when two people read it differently. A mechanism costs nothing per turn, cannot be forgotten, and settles
+the argument by running.
+
+So before writing a rule, ask in this order:
+
+1. **Can the code make it impossible?** A path converted at the boundary, a route that refuses, a startup
+   warning, a write that is atomic. Best: no one has to know the rule.
+2. **Can a hook enforce it?** LF, a commit trailer, "main only takes merges". Checked at the moment of the
+   mistake, in the only place that can stop it.
+3. **Can a test catch it?** Then it is a fact, not a preference - and it must be provably able to fail, or it
+   is not a test.
+4. **Can a trigger do it on a schedule or an event?** Currency with `main`, a restart, a wake.
+5. **Only then: prose** - in `AGENTS.md` if it is needed on every turn, in `docs/` if it is needed on demand,
+   in a skill if it is a technique.
+
+The test for whether something belongs in prose: *would a mechanism have caught the failure that made me
+write this?* Tonight's three failures all answer yes - a context-budget policy stated in code and re-litigated
+three times, scratch files with no ignore rule, and a branch shape where the roadmap said one thing and
+`AGENTS.md` said the opposite. Every one was a sentence where a mechanism belonged.
+
+**And prefer a spell over a sequence.** A procedure that works - a build, a deploy, a recovery - should be
+crystallised into a spell, so it runs the same way every time, costs no model tokens to re-derive, and cannot
+be half-remembered. Spells are the deterministic form of a procedure; this section is the deterministic form
+of a rule.
+
+## 5. Branch shape
+
+Two rules that must not be confused, because they apply to different things:
+
+- **A node's branch is its home.** It is named after the worktree, it is where the node lives, and its job is
+  to stay current with `main` - a node that cannot see `main` cannot see the rules. It is not a delivery
+  vehicle, and it should not accumulate work.
+- **A change is a short-lived branch.** `change/<name>`, born from current `main`, one change, merged and
+  deleted. A branch that lives a day cannot fall 21 commits behind, and merging it is cheap because it is
+  small and recent.
+
+The failure this prevents: the roadmap described short-lived branches while `AGENTS.md` told every agent to
+treat its node branch as the deliverable - so the code followed one rule and the docs described another, and
+the node's branch accumulated six commits ahead of `main` that were mostly merge bookkeeping. When two rules
+describe the same branch, one of them is wrong.
