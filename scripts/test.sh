@@ -25,6 +25,22 @@ grep -q 'refused inside a running turn' "$GUARD_HOME/upgrade.log"
 rm -f "$GUARD_HOME/deploy.log" "$GUARD_HOME/upgrade.log" "$GUARD_HOME/install/deploy.log"
 rmdir "$GUARD_HOME/install" "$GUARD_HOME"
 echo "self-update turn guard ok"
+# The other half of the install gate: it must refuse to replace an install that is ahead of this tree. Its
+# own file, because it asserts five cases (ahead, ancestor, no record, no commit=, an unresolvable commit)
+# and both directions of the check - a gate that refuses everything is as wrong as one that refuses nothing.
+# It stops at or before the build, so it costs about a second.
+set +e
+bash scripts/test-deploy-downgrade.sh
+GATE_STATUS=$?
+set -e
+if [ "$GATE_STATUS" = "3" ]; then
+  # Exit 3 is "this tree cannot reach the check": a clean tree that is not behind origin/main is required,
+  # and the gate asks about the tree first. Counted, not hidden - a skipped check is not a passing check.
+  SKIPPED=$((SKIPPED + 1))
+elif [ "$GATE_STATUS" != "0" ]; then
+  echo "FAIL: the deploy downgrade gate did not pass (exit $GATE_STATUS)" >&2
+  exit 1
+fi
 # The suite must exercise the Lua in the working tree. cargo rebuilds the binary when a
 # Lua file changes (they are include_str!-ed), so this is belt as well as braces - but it
 # is the difference between testing the tree and testing a build artefact, and it went
