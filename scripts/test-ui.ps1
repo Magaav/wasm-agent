@@ -147,7 +147,35 @@ $harness = @'
       check(patchText.indexOf("@@") >= 0 && patchText.indexOf("+new line") >= 0,
         "and the balloon must show the patch, saw: " + patchText.slice(0, 70));
       check(!!patchBalloon && patchBalloon.hasAttribute("open"), "and be open");
+
+      // The window path: the same patch, in a real native window. Both containers are kept on purpose -
+      // the balloon is instant and closes on a press outside, the window is resizable, movable, snapable
+      // and survives the chat being collapsed - so the UI must be able to ask for either, and must say
+      // which one it chose. This is the half of the feature a page-only test can still prove.
+      window.__shellCalls.length = 0;
+      window.__setShell(window.__makeShell());
+      var shellCalls = window.__shellCalls;
+      var callsBefore = shellCalls.length;
+      var toWindow = patchBalloon ? patchBalloon.querySelector(".pop-head-action") : null;
+      check(!!toWindow, "the patch balloon must offer its window form");
+      if (toWindow) {
+        toWindow.click();
+        for (var uz = 0; uz < 20; uz++) { await tick(); }
+        var opened = shellCalls.slice(callsBefore).filter(function (c) { return c.call === "openView"; });
+        check(opened.length === 1, "clicking it must ask the shell for a window, saw " + opened.length);
+        var url = opened.length === 1 ? opened[0].url : "";
+        check(/[?&]view=patch/.test(url), "and the window must be the patch view, saw: " + url);
+        check(/[?&]path=/.test(url) && /[?&]turn=/.test(url),
+          "carrying the turn and the file it is about, saw: " + url);
+        check(!document.querySelector("wa-balloon.file-diff"),
+          "and the balloon must hand over to it rather than linger");
+        window.__setShell(null);
+      }
+
       // A balloon is a balloon: it owns the close rule, and the same control closes it again.
+      fileRow.click();
+      for (var uw = 0; uw < 20; uw++) { await tick(); }
+      check(!!document.querySelector("wa-balloon.file-diff"), "clicking the file again reopens the balloon");
       fileRow.click();
       for (var uy = 0; uy < 20; uy++) { await tick(); }
       check(!document.querySelector("wa-balloon.file-diff"),
@@ -841,7 +869,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
 
 $server = $null
 $edge = @(

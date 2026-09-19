@@ -454,6 +454,65 @@ document.addEventListener("diff-file", (event) => {
   openFileDiff(detail.path, detail.anchor, topic);
 });
 
+// A patch in its own window: the same content the balloon shows, given the room a window has.
+//
+// This is the second of the two ways a balloon can exist, and the reason both are kept. In the panel it
+// is anchored, instant, and closes on a press outside. In a window it is resizable, movable, snappable
+// and Alt-Tab-able, because the operating system already knows how to do all of that and re-implementing
+// it in a div would be worse. The panel is the default - it costs nothing and keeps the close rule - and
+// a window is for content that wants space, which is exactly what a long patch is.
+const PATCH_PROMOTE_LINES = 200;
+
+function patchViewName(path) {
+  const base = String(path || "").split(/[\\/]/).pop() || "patch";
+  return "patch:" + base;
+}
+
+function openPatchWindow(turnId, path) {
+  if (!turnId || !path) return false;
+  if (!native || typeof native.openView !== "function") return false;
+  // Never from inside a view: opening a window from a window is how you get two of them.
+  if (viewMode()) return false;
+  const url = location.origin + location.pathname +
+    "?view=" + encodeURIComponent(patchViewName(path)) +
+    "&turn=" + encodeURIComponent(turnId) + "&path=" + encodeURIComponent(path);
+  native.openView(patchViewName(path), url);
+  return true;
+}
+
+function renderPatchView(turnId, path) {
+  const section = document.createElement("section");
+  section.className = "patch-view";
+  const head = document.createElement("div");
+  head.className = "patch-head";
+  const title = document.createElement("span");
+  title.className = "patch-title";
+  title.textContent = path || "patch";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "patch-close";
+  close.textContent = "close";
+  close.addEventListener("click", () => {
+    if (native && typeof native.closeView === "function") native.closeView();
+  });
+  head.append(title, close);
+  const pre = document.createElement("pre");
+  pre.className = "diff-patch";
+  pre.textContent = "asking the node for this file…";
+  section.append(head, pre);
+  document.body.append(section);
+  fetch("diff", {
+    method: "POST", headers: apiHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify({ turn_id: turnId, action: "patch", path: path }),
+  })
+    .then((response) => response.json())
+    .then((payload) => {
+      if (payload.error) pre.textContent = "this file cannot be shown: " + payload.error;
+      else renderPatch(pre, payload);
+    })
+    .catch(() => { pre.textContent = "the node did not answer"; });
+}
+
 async function openFileDiff(path, anchor, topic) {
   const turnId = topic && topic.dataset.turnId;
   if (!turnId || !path) return;
@@ -462,7 +521,21 @@ async function openFileDiff(path, anchor, topic) {
   balloon.className = "file-diff";
   const head = document.createElement("div");
   head.className = "pop-head";
-  head.textContent = path;
+  const headLabel = document.createElement("span");
+  headLabel.className = "pop-head-label";
+  headLabel.textContent = path;
+  // Always offered, not only when the patch is long: which container suits a patch is the reader's
+  // judgement, and the two have different virtues - the balloon is instant and closes on a press
+  // outside, the window is resizable, movable and survives the chat being collapsed.
+  const toWindow = document.createElement("button");
+  toWindow.type = "button";
+  toWindow.className = "pop-head-action";
+  toWindow.textContent = "open in a window";
+  toWindow.title = "show this patch in its own window";
+  toWindow.addEventListener("click", () => {
+    if (openPatchWindow(turnId, path)) closeFileDiff();
+  });
+  head.append(headLabel, toWindow);
   const body = document.createElement("pre");
   body.className = "diff-patch";
   body.textContent = "asking the node for this file…";
@@ -483,6 +556,14 @@ async function openFileDiff(path, anchor, topic) {
       body.textContent = "this file cannot be shown: " + payload.error;
     } else {
       renderPatch(body, payload);
+      // Content that wants more room than the panel can give goes to a window rather than being
+      // scrolled inside a box the size of a chat bubble. The reader is told which happened: the
+      // balloon does not silently become a window, and a window does not silently become a balloon.
+      const lines = String(payload.patch || "").split("\n").length;
+      if (lines >= PATCH_PROMOTE_LINES && openPatchWindow(turnId, path)) {
+        closeFileDiff();
+        return;
+      }
     }
     // The patch decided the balloon's size, so where it goes is decided after it is filled.
     placeFileDiff(balloon, anchor);
@@ -2124,7 +2205,9 @@ async function watchTurn() {
 }
 
 // ---- native companion window (wa-window / WebView2) ----------------------
-const native = window.wasmAgent || null;
+// `let`, not `const`: the harness runs the page with no shell on purpose (to prove the page degrades), and
+// a test that wants to prove the *window* path has to be able to hand it one. Same seam as `reload`.
+let native = window.wasmAgent || null;
 const orb = document.getElementById("orb");
 const collapse = document.getElementById("collapse");
 const dragbar = document.getElementById("dragbar");
@@ -2453,6 +2536,12 @@ function applyViewMode() {
     if (target) activeNode = target;
     document.body.append(control);
     openControl(target);
+  }
+  if (kind === "patch") {
+    // A view window is a client of the node like any other, so it fetches its own patch. Nothing is
+    // passed through the main window: that is what makes it a view and not a screenshot of one.
+    const params = new URLSearchParams(location.search);
+    renderPatchView(params.get("turn") || "", params.get("path") || "");
   }
   return true;
 }

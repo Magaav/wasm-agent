@@ -3,6 +3,21 @@
 // This is what makes the data-driven half of the UI testable: without it every
 // panel renders its error path, and any assertion about it is an assertion about
 // failure. With it, opening a view and asserting its contents is deterministic.
+// A shell that records what the page asks it to do, for the checks that need one. Deliberately *not*
+// installed here: the page must be loaded without a shell first, because a page that assumes one is a page
+// that breaks in a browser, and that degradation is itself checked. The harness installs this with
+// `__setShell` only for the window path.
+window.__makeShell = () => ({
+  calls: [],
+  openView(view, url) { window.__shellCalls.push({ call: "openView", view: view, url: url }); },
+  closeView() { window.__shellCalls.push({ call: "closeView" }); },
+  setMode(mode, w, h) { window.__shellCalls.push({ call: "setMode", mode: mode, w: w, h: h }); },
+  expand() { window.__shellCalls.push({ call: "expand" }); },
+  compact() { window.__shellCalls.push({ call: "compact" }); },
+  maximize() { window.__shellCalls.push({ call: "maximize" }); },
+});
+window.__shellCalls = [];
+
 window.__fixtures = {
   version: { version: "test" },
   models: {
