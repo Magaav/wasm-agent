@@ -99,6 +99,7 @@ local function migrate()
   -- more than base64 images do. An older turn's `{}` means "nothing recorded", which
   -- reads as no topic rather than an empty one.
   add_column("turns", "changes", "TEXT NOT NULL DEFAULT '{}'")
+  add_column("turns", "reasoning", "TEXT NOT NULL DEFAULT ''")
   -- Rows written before the state was renamed kept the wording of the claim we used to
   -- make: "died after a tool result", "died right after a compaction". Nobody observed
   -- those deaths - a live run was reported as interrupted fourteen times in a row - so
@@ -114,6 +115,7 @@ function M.setup()
   if not schema then error("schema_missing") end
   exec(schema)
   migrate()
+  dofile("lua/core/telemetry.lua").setup()
   -- Threads that predate naming are all called "chat", which tells the reader nothing and makes a
   -- list of them unusable. Name them from their first user message, once: after this the name
   -- belongs to the thread, and only a thread without one gets named again.
@@ -548,13 +550,13 @@ function M.append_turn(session_id, turn)
   local seq = turn.seq or M.next_seq(session_id)
   local id = turn.id or host.uuid()
   exec("INSERT INTO turns(id,session_id,seq,role,content,images,tool_calls,tool_call_id,tool_name," ..
-       "tokens,ms,ok,debug,trace,changes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+       "tokens,ms,ok,debug,trace,changes,created_at,reasoning) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
        {id, session_id, seq, turn.role or "user", turn.content or "",
         json.encode(turn.images or {}),
         json.encode(turn.tool_calls or {}), turn.tool_call_id or "", turn.tool_name or "",
         turn.tokens or 0, turn.ms or 0, turn.ok == false and 0 or 1,
         turn.debug and 1 or 0, json.encode(turn.trace or {}),
-        json.encode(turn.changes or {}), host.now()})
+        json.encode(turn.changes or {}), host.now(), turn.reasoning or ""})
   exec("INSERT INTO turns_fts(content,session_id,turn_id) VALUES(?,?,?)",
        {turn.content or "", session_id, id})
   exec("UPDATE sessions SET updated_at=? WHERE id=?", {host.now(), session_id})
@@ -564,7 +566,8 @@ function M.append_turn(session_id, turn)
     tool_call_id = turn.tool_call_id or "", tool_name = turn.tool_name or "",
     tokens = turn.tokens or 0, ms = turn.ms or 0,
     ok = turn.ok == false and 0 or 1, debug = turn.debug and 1 or 0,
-    trace = turn.trace or {}, created_at = host.now(),
+    trace = turn.trace or {}, created_at = host.now(), reasoning=turn.reasoning or "",
+    changes=turn.changes or {},
   })
   -- A thread is named after the first thing asked in it, the way a chat is named after its opening
   -- message. Set once and never rewritten: a name that drifts as the conversation moves is worse
@@ -618,7 +621,13 @@ function M.session_turns(session_id, opts)
   opts = opts or {}
   local limit = opts.limit or 200
   local sql, params
-  if opts.after_seq then
+  if opts.all then
+    sql="SELECT * FROM turns WHERE session_id=? AND seq>? "..(opts.exclude_summaries and "AND role<>'summary' " or "").."ORDER BY seq ASC"
+    params={session_id,opts.after_seq or 0}
+  elseif opts.before_seq then
+    sql="SELECT * FROM (SELECT * FROM turns WHERE session_id=? AND seq<? ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC"
+    params={session_id,opts.before_seq,limit}
+  elseif opts.after_seq then
     sql = "SELECT * FROM (SELECT * FROM turns WHERE session_id=? AND seq>? " ..
       "ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC"
     params = {session_id, opts.after_seq, limit}
@@ -888,7 +897,7 @@ function M.session_fixture(session_id)
   return {
     schema = "wasm-agent.session_fixture.v1",
     session = session,
-    turns = M.session_turns(session_id, { limit = 10000 }),
+    turns = M.session_turns(session_id, { all = true }),
   }
 end
 
@@ -943,11 +952,12 @@ function M.apply_entry(entry)
 
   if entry.kind == "turn" then
     exec("INSERT OR REPLACE INTO turns(id,session_id,seq,role,content,tool_calls,tool_call_id," ..
-         "tool_name,tokens,ms,ok,debug,trace,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+         "tool_name,tokens,ms,ok,debug,trace,created_at,reasoning,images,changes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
          {payload.id, payload.session_id, payload.seq, payload.role, payload.content or "",
           json.encode(payload.tool_calls or {}), payload.tool_call_id or "", payload.tool_name or "",
           payload.tokens or 0, payload.ms or 0, payload.ok or 1, payload.debug or 0,
-          json.encode(payload.trace or {}), payload.created_at or host.now()})
+          json.encode(payload.trace or {}), payload.created_at or host.now(),payload.reasoning or "",
+          json.encode(payload.images or {}),json.encode(payload.changes or {})})
     exec("DELETE FROM turns_fts WHERE turn_id=?", {payload.id})
     exec("INSERT INTO turns_fts(content,session_id,turn_id) VALUES(?,?,?)",
          {payload.content or "", payload.session_id, payload.id})

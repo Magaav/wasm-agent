@@ -303,6 +303,8 @@ fn push_json(l: *mut LuaState, value: &Value) {
 /// The read timeout is per read, not for the whole exchange, which is the point: a long
 /// stream that keeps producing is fine, and one that goes quiet is not.
 fn agent() -> ureq::Agent {
+    static HTTP_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    HTTP_AGENT.get_or_init(|| {
     let connect = std::env::var("WASM_AGENT_HTTP_CONNECT_TIMEOUT")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -325,6 +327,7 @@ fn agent() -> ureq::Agent {
         .timeout_recv_body(Some(std::time::Duration::from_secs(read)))
         .build()
         .into()
+    }).clone()
 }
 
 fn parse_headers(headers_json: &str) -> Vec<(String, String)> {
@@ -914,6 +917,9 @@ pub extern "C" fn relay(l: *mut LuaState) -> c_int {
 
 fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body: &str) -> Result<Value, String> {
     use std::io::BufRead;
+    let started = std::time::Instant::now();
+    let mut ttft_ms: Option<u128> = None;
+    let mut request_id: Option<String> = None;
     if method != "POST" {
         return Err("method_not_supported".into());
     }
@@ -954,6 +960,13 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
             Ok(value) => value,
             Err(_) => continue,
         };
+        if let Some(id) = chunk["id"].as_str() { request_id = Some(id.to_string()); }
+        let delta = &chunk["choices"][0]["delta"];
+        if ttft_ms.is_none() && (["content", "reasoning_content", "reasoning", "reasoning_text"]
+            .iter().any(|field| delta[*field].as_str().is_some_and(|s| !s.is_empty()))
+            || delta["tool_calls"].as_array().is_some_and(|a| !a.is_empty())) {
+            ttft_ms = Some(started.elapsed().as_millis());
+        }
         if let Some(text) = chunk["choices"][0]["delta"]["content"].as_str() {
             if !text.is_empty() {
                 content.push_str(text);
@@ -999,10 +1012,33 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
         }
     }
     Ok(json!({"status": status, "content": content, "reasoning": reasoning,
+        "stream_complete": finish_reason.is_some(), "ttft_ms": ttft_ms, "request_id": request_id,
         "finish_reason": finish_reason, "tool_calls": tool_calls, "usage": usage}))
 }
 
 /// host.now() -> seconds since epoch
+pub extern "C" fn monotonic_ms(l: *mut LuaState) -> c_int {
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    let ms = START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64() * 1000.0;
+    unsafe { crate::lua::lua_pushnumber(l, ms) };
+    1
+}
+
+pub extern "C" fn runtime_info(l: *mut LuaState) -> c_int {
+    static IDENTITY: OnceLock<Value> = OnceLock::new();
+    let identity = IDENTITY.get_or_init(|| {
+        let digest = std::env::current_exe().ok().and_then(|path| std::fs::read(path).ok())
+            .map(|bytes| ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref()
+                .iter().map(|b| format!("{b:02x}")).collect::<String>());
+        json!({"version": env!("CARGO_PKG_VERSION"), "binary_sha256": digest,
+            "process_id": std::process::id(), "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH})
+    });
+    push_json(l, identity);
+    1
+}
+
+/// Wall clock is for correlating events, never calculating durations.
 pub extern "C" fn now(l: *mut LuaState) -> c_int {
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1026,6 +1062,59 @@ pub extern "C" fn exec_timeout(l: *mut LuaState) -> c_int {
         .unwrap_or(300u64);
     unsafe { crate::lua::lua_pushnumber(l, seconds as f64) };
     1
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    fn fixture(body: &str) -> Value {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = body.to_owned();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                let mut byte = [0u8]; socket.read_exact(&mut byte).unwrap(); headers.push(byte[0]);
+                assert!(headers.len() < 16384);
+            }
+            let size = String::from_utf8_lossy(&headers).lines()
+                .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:")
+                    .and_then(|n| n.trim().parse::<usize>().ok())).unwrap_or(0);
+            let mut request = vec![0; size]; socket.read_exact(&mut request).unwrap();
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            socket.write_all(response.as_bytes()).unwrap();
+        });
+        let result = stream_completion("POST", &format!("http://{address}/fixture"), &[], "{}").unwrap();
+        server.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn stream_records_usage_identity_and_first_delta_time() {
+        let result = fixture(concat!(
+            "data: {\"id\":\"fixture-id\",\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20}}\n\n",
+            "data: [DONE]\n\n"));
+        assert_eq!(result["stream_complete"], true);
+        assert_eq!(result["request_id"], "fixture-id");
+        assert_eq!(result["content"], "answer");
+        assert_eq!(result["reasoning"], "thinking");
+        assert_eq!(result["usage"]["prompt_tokens"], 100);
+        assert!(result["ttft_ms"].is_number());
+    }
+
+    #[test]
+    fn eof_without_finish_is_not_success() {
+        let result=fixture("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n");
+        assert_eq!(result["stream_complete"], false);
+        assert_eq!(result["content"], "partial");
+        assert!(result["usage"].is_null());
+    }
 }
 
 #[cfg(test)]

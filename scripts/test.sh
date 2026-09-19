@@ -14,6 +14,8 @@ BIN=rust/target/release/wa
 # is the difference between testing the tree and testing a build artefact, and it went
 # missing in a merge without anyone noticing.
 export WASM_AGENT_LUA_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# This is a fixture, not the operator's deployment configuration.
+export WASM_AGENT_LLM_CONTEXT=128000
 DB="$(mktemp -u /tmp/wa-smoke-XXXXXX.db)"
 # `wa status` reports *the current thread*, so it gets its own database: with the
 # shared one, every earlier session in this run sits in the same second and the
@@ -193,15 +195,14 @@ for _, message in ipairs(bot:build_context()) do
   if message.role == "tool" and message.name == "bash" then bash_view = message.content end
 end
 assert(#read_view > 600, "the read budget must be far larger than the old 600, got " .. #read_view)
-assert(#read_view < #big, "and still be a budget, got " .. #read_view)
-assert(read_view:find("omitted", 1, true), "the loss must be announced, not silent")
-assert(read_view:find("kept in the transcript", 1, true), "the marker must say the full text exists")
+assert(read_view == big, "rebuild must preserve the stored view; projection happens once at execution")
 assert(read_view:sub(1, 20) == big:sub(1, 20), "read keeps the head, which identifies the file")
 assert(bash_view:find("FATAL", 1, true), "bash keeps the tail, because the error lives there")
 print("tool evidence ok")
 LUA
 WA_SCRIPT="$DB.evidence.lua" "$BIN" --db "$DB" | grep "tool evidence ok"
 rm -f "$DB.evidence.lua"
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB.observability" | grep 'observability ok'
 # Role gating: a guest must never see master tools, and a session must resolve
 # to its own user. A regression here silently runs guests as master, which is
 # exactly what happened when the session header stopped reaching dispatch.

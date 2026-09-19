@@ -146,7 +146,7 @@ fn is_read_route(request: &Request) -> bool {
     matches!(
         route.as_str(),
         "/sessions" | "/session" | "/models" | "/me" | "/users" | "/nodes" | "/skills"
-            | "/memories" | "/status" | "/spells" | "/sync" | "/toolchain" | "/turns"
+            | "/memories" | "/status" | "/spells" | "/sync" | "/toolchain" | "/turns" | "/observability/events"
     )
 }
 
@@ -417,7 +417,11 @@ impl Heartbeat {
     pub fn start() -> Self {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = stop.clone();
+        let owner = worker_id();
         std::thread::spawn(move || {
+            // Thread-local state does not inherit across spawn. Without this a
+            // request on worker 1 beats worker 0, hiding a real stall and inventing another.
+            WORKER_ID.with(|cell| cell.set(owner));
             while !flag.load(Ordering::Relaxed) {
                 beat();
                 // Once a second, not once every few: `worker` reads "alive" only while the age is
@@ -476,7 +480,7 @@ fn health_body() -> Vec<u8> {
     let age_ms = worker_age_ms(0);
     let stalled = age_ms >= stall_seconds() * 1000;
     let state = if stalled { "stalled" } else if age_ms < 1000 { "alive" } else { "busy" };
-    let current = IN_FLIGHT.lock().ok().and_then(|slot| {
+    let mut current = IN_FLIGHT.lock().ok().and_then(|slot| {
         slot.as_ref().map(|(label, started)| {
             serde_json::json!({ "label": label, "ms": now_ms().saturating_sub(*started) })
         })
@@ -496,9 +500,15 @@ fn health_body() -> Vec<u8> {
                     .get()
                     .and_then(|slots| slots.get(index))
                     .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()));
+                let turn = busy.as_ref().is_some_and(|(label, _)| label.starts_with("POST /chat"));
+                if current.is_none() && turn {
+                    if let Some((label, started)) = &busy {
+                        current = Some(serde_json::json!({"label":label,"ms":now_ms().saturating_sub(*started),"worker_id":index}));
+                    }
+                }
                 workers.push(serde_json::json!({
                     "id": index,
-                    "role": if index == 0 { "turns" } else { "reads" },
+                    "role": if index == 0 || turn { "turns" } else { "reads" },
                     "session": WORKER_SESSION.get().and_then(|slots| slots.get(index)).and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone())),
                     "state": if age >= stall_seconds() * 1000 { "stalled" } else if age < 1000 { "alive" } else { "busy" },
                     "age_ms": age,
@@ -1153,7 +1163,8 @@ fn dispatch(
     let reply = match route.as_str() {
         "/version" => (200, "application/json", version_body(ui).into_bytes()),
         "/health" => (200, "application/json", health_body()),
-        "/models" => (200, "application/json", call("wa_model", &[node.as_str(), session]).into_bytes()),
+        "/models" => (200, "application/json", call("wa_model", &[node.as_str(), session, &query_value(&query,"session_id")]).into_bytes()),
+        "/observability/events" => (200,"application/json",call("wa_observability_events",&[&query_value(&query,"id"),&query_value(&query,"cursor"),&query_value(&query,"since"),session,node.as_str()]).into_bytes()),
         "/me" => (200, "application/json", call("wa_me", &[session]).into_bytes()),
         "/users" => (200, "application/json", call("wa_users", &[]).into_bytes()),
         "/login" if method == "POST" => (200, "application/json", call("wa_login", &[body.trim(), session]).into_bytes()),
@@ -1198,6 +1209,7 @@ fn dispatch(
         "/spell" if method == "POST" => (200, "application/json", call("wa_spell_run", &[body.trim(), session]).into_bytes()),
         "/provider" if method == "POST" => (200, "application/json", call("wa_set_provider", &[body.trim(), node.as_str(), session]).into_bytes()),
         "/model" if method == "POST" => (200, "application/json", call("wa_set_model", &[body.trim(), node.as_str(), session]).into_bytes()),
+        "/reasoning" if method == "POST" => (200,"application/json",call("wa_set_reasoning",&[body.trim(),node.as_str(),session]).into_bytes()),
         "/chat" if method == "POST" => (200, "application/json", call("wa_reply", &[body, session, node.as_str()]).into_bytes()),
         _ => {
             if route == "/chat" || route == "/node/chat" {

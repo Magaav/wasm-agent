@@ -880,3 +880,88 @@ class WaWindow extends HTMLElement {
   }
 }
 customElements.define("wa-window", WaWindow);
+
+// A diagnostic surface, not an agent-quality score. Every number has a scope;
+// estimates, unreported provider fields and incomplete traces stay distinguishable.
+class WaHarnessStatus extends HTMLElement {
+  set data(settings) {
+    const opened = new Set([...this.querySelectorAll('details[open]')].map(x => x.dataset.section));
+    this.replaceChildren();
+    const report = settings.observability || {};
+    const note = text => { const el=document.createElement('p'); el.className='usage-note'; el.textContent=text; this.append(el); };
+    const n = x => x == null ? 'unknown' : Number(x).toLocaleString();
+    const ms = x => x == null ? 'unknown' : (Number(x)/1000).toFixed(2)+'s';
+    const hash = x => x ? String(x).slice(0,16) : 'unknown';
+    const section = (title,rows) => {
+      const d=document.createElement('details'); d.dataset.section=title; d.open=opened.has(title);
+      const heading=document.createElement('summary'); heading.textContent=title; d.append(heading);
+      const dl=document.createElement('dl'); dl.className='harness-grid';
+      for (const [label,value] of rows) {
+        const dt=document.createElement('dt'),dd=document.createElement('dd');
+        dt.textContent=label; dd.textContent=String(value ?? 'unknown'); dl.append(dt,dd);
+      }
+      d.append(dl); this.append(d);
+    };
+    note(report.available ? `Observed session ${report.session_id}. Since ${new Date(report.since*1000).toLocaleString()}. Historical usage before instrumentation is not backfilled.`
+      : 'No durable observations for this session yet. Missing records do not mean zero usage.');
+    const request=report.last_request || {}, last=report.last || {}, effective=request.settings || {};
+    section('Configuration actually sent',[
+      ['last request', `${request.provider || '?'} / ${request.model || '?'}`],
+      ['reasoning sent',effective.reasoning?.selected || 'unknown'],
+      ['output cap sent',n(effective.output_limit)],
+      ['selected output ceiling',n(settings.output_limit)],
+      ['compatibility metadata',settings.reasoning?.source || 'unknown'],
+      ['finish / request id',`${last.finish_reason || '?'} / ${last.request_id || 'not reported'}`],
+      ['reported reasoning tokens',n(last.normalized?.reasoning)],
+      ['first content/tool delta',ms(last.ttft_ms)],
+    ]);
+    if (request.model && (request.model!==settings.model || request.provider!==settings.provider))
+      note('The last measured request used a different configuration from the current selection.');
+    const t=report.total || {}, c=report.compaction || {}, i=report.inference || {};
+    section('Latency, calls and failures',[
+      ['model calls / failed',`${n(t.calls)} / ${n(t.failed)}`],
+      ['inference / summaries',`${n(i.calls)} / ${n(c.calls)}`],
+      ['model latency p50 / p95',`${ms(report.request_p50_ms)} / ${ms(report.request_p95_ms)}`],
+      ['turn wall time p50 / p95',`${ms(report.turn_p50_ms)} / ${ms(report.turn_p95_ms)}`],
+      ['inference / summary time',`${ms(i.ms)} / ${ms(c.ms)}`],
+      ['tools / failed',`${n(report.tool_calls)} / ${n(report.tool_failures)}`],
+      ['tool time',ms(report.tool_ms)],
+      ['repeated tool arguments',`${n(report.repeated_tools)} (signal, not proof of waste)`],
+      ['recorded turns / incomplete',`${n(report.turns)} / ${n(report.incomplete_turns)}`],
+      ['starts without ends',`${n(report.pending)} (running or interrupted)`],
+    ]);
+    const ctx=report.context || {}, compact=report.last_compaction || {};
+    section('Context and compaction',[
+      ['capacity / source',`${n(settings.context_limit)} / ${settings.context_source || '?'}`],
+      ['compact at / keep recent',`${n(settings.compact_trigger)} / ${n(settings.compact_keep)} tokens`],
+      ['unsummarized rows',n(ctx.unsummarized_rows)],
+      ['summary watermark / bytes',`${n(ctx.summary_watermark)} / ${n(ctx.summary_bytes)}`],
+      ['last request estimate',`${n(request.context_tokens_estimate)} (${request.context?.estimate_source || 'bytes/4'})`],
+      ['last compaction before / after',`${n(compact.before)} / ${n(compact.after_estimate)} (estimate)`],
+      ['summary tokens billed',n((c.prompt || 0)+(c.output || 0))],
+      ['failed compactions',n(report.compaction_failures)],
+      ['system / schema estimates',`${n(request.system_tokens_estimate)} / ${n(request.schema_tokens_estimate)}`],
+    ]);
+    note('Summaries are lossy model interpretations; the original ledger remains the evidence. Full oversized tool results are stored on the originating node.');
+    const runtime=request.runtime || report.runtime || {};
+    section('Trace quality and runtime',[
+      ['missing usage / cache fields',`${n(t.missing_usage)} / ${n(t.missing_cache)} calls`],
+      ['unpriced calls / unknown reasoning',`${n(t.unpriced)} / ${n(t.reasoning_unknown)}`],
+      ['request bytes / messages / tools',`${n(request.request_bytes)} / ${n(request.messages)} / ${n(request.tools)}`],
+      ['request hash',hash(request.request_hash)],['system / schema hashes',`${hash(request.system_hash)} / ${hash(request.schema_hash)}`],
+      ['Lua source / mode',`${hash(runtime.source_hash)} / ${runtime.lua_mode || '?'}`],
+      ['binary / process',`${hash(runtime.native?.binary_sha256)} / ${n(runtime.native?.process_id)}`],
+      ['recent failures',(report.errors || []).map(e=>`${e.kind}: ${e.error || e.name || e.code || 'unspecified'}`).join('\n') || 'none recorded'],
+    ]);
+    note('Answer completion is not verified task success. No efficiency score is claimed without judging the actual work. Exports contain metadata and errors; review before sharing.');
+    const actions=document.createElement('div'); actions.className='harness-actions';
+    for (const [label,scope] of [['Export session','session'],['Export node · 48h','node']]) {
+      const button=document.createElement('button'); button.type='button'; button.textContent=label;
+      button.disabled=scope==='session' && !report.session_id;
+      button.addEventListener('click',()=>this.dispatchEvent(new CustomEvent('export',{detail:{scope},bubbles:true})));
+      actions.append(button);
+    }
+    this.append(actions);
+  }
+}
+customElements.define('wa-harness-status',WaHarnessStatus);

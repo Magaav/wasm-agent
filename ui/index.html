@@ -231,12 +231,18 @@
           <label class="pop-head" for="model-select">model</label>
           <select id="model-select" class="wa-select"></select>
         </div>
+        <div class="pop-row">
+          <label class="pop-head" for="reasoning-select">reasoning</label>
+          <select id="reasoning-select" class="wa-select"></select>
+        </div>
+        <div id="settings-error" class="usage-note" role="alert"></div>
         <div class="pop-head">context</div>
         <div id="context-box" class="usage-box"></div>
         <div class="pop-head">limits</div>
         <div id="limits-box" class="usage-box"></div>
         <div class="pop-head">tokens</div>
         <div id="usage-box" class="usage-box"></div>
+        <wa-harness-status id="harness-status"></wa-harness-status>
         <div class="pop-foot" id="pop-foot"></div>
       </wa-balloon>
     </form>
