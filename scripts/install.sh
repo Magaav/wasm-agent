@@ -59,23 +59,59 @@ fi
 # The sentinel: the process outside the node, for restarts, upgrades, and waking the model on an
 # event. A node cannot restart itself, so this is what does it - and a supervisor that has to be
 # remembered is a supervisor that is not there when it is needed.
+#
+# Piped from the network there is no checkout, so the binary is fetched from the host that runs the
+# node - the same place the rest of this installer's knowledge comes from. Only when *that* fails is
+# the absence reported, because "you have no supervisor" is a fact the operator must not have to
+# infer from a warning about a missing repository.
 ROOT="${WASM_AGENT_REPO:-}"
-if [ -z "$ROOT" ] || [ ! -d "$ROOT/rust/wa-sentinel" ]; then
-  warn "sentinel not installed: this installer is a pipe, not a checkout (set WASM_AGENT_REPO=/path/to/wasm-agent)"
+SENTINEL_GOT=0
+if command -v scp >/dev/null 2>&1; then
+  step "fetching the sentinel from ${HOST_ALIAS}"
+  if scp -q -o BatchMode=yes "${HOST_ALIAS}:~/.local/bin/wa-sentinel" "$DIR/wa-sentinel" 2>/dev/null \
+     || scp -q -o BatchMode=yes "${HOST_ALIAS}:~/.local/bin/wa-sentinel.exe" "$DIR/wa-sentinel" 2>/dev/null; then
+    chmod +x "$DIR/wa-sentinel" 2>/dev/null || true
+    [ -x "$DIR/wa-sentinel" ] && SENTINEL_GOT=1
+  fi
 fi
-if [ -n "$ROOT" ] && [ -d "$ROOT/rust/wa-sentinel" ]; then
-  step "building and starting the sentinel"
+if [ "$SENTINEL_GOT" = "0" ] && [ -n "$ROOT" ] && [ -d "$ROOT/rust/wa-sentinel" ]; then
+  step "building the sentinel from $ROOT"
   if command -v cargo >/dev/null 2>&1; then
     (cd "$ROOT" && cargo build --release --manifest-path rust/wa-sentinel/Cargo.toml 2>&1 | tail -1) || true
     for built in "$ROOT/rust/wa-sentinel/target/release/wa-sentinel" "$ROOT/rust/wa-sentinel/target/release/wa-sentinel.exe"; do
       if [ -x "$built" ]; then
-        cp -f "$built" "$DIR/" && ok "$DIR/$(basename "$built")" && "$DIR/$(basename "$built")" restart >/dev/null 2>&1 || true
+        cp -f "$built" "$DIR/" && SENTINEL_GOT=1
         break
       fi
     done
   else
-    warn "cargo not found, so the sentinel was not built - see: wa toolchain plan"
+    warn "cargo not found, so the sentinel could not be built - see: wa toolchain plan"
   fi
+fi
+if [ "$SENTINEL_GOT" = "1" ]; then
+  ok "$DIR/wa-sentinel"
+  "$DIR/wa-sentinel" restart >/dev/null 2>&1 || true
+else
+  warn "no sentinel: this node cannot restart or upgrade itself. Set WASM_AGENT_REPO to a checkout, or install wa-sentinel by hand."
+fi
+
+# `scripts/upgrade.sh` beside the binary, which is where the sentinel looks for it. A supervisor that
+# can restart but not upgrade is half a supervisor, and the failure is silent: the request is
+# accepted, the script is not found, and the node simply does not change.
+SCRIPTS_DIR="$DIR/scripts"
+mkdir -p "$SCRIPTS_DIR"
+UPGRADE_GOT=0
+if [ -n "$ROOT" ] && [ -f "$ROOT/scripts/upgrade.sh" ]; then
+  cp -f "$ROOT/scripts/upgrade.sh" "$SCRIPTS_DIR/upgrade.sh" && UPGRADE_GOT=1
+elif command -v curl >/dev/null 2>&1; then
+  curl -fsSL "https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/upgrade.sh" \
+    -o "$SCRIPTS_DIR/upgrade.sh" 2>/dev/null && UPGRADE_GOT=1
+fi
+if [ "$UPGRADE_GOT" = "1" ]; then
+  chmod +x "$SCRIPTS_DIR/upgrade.sh" 2>/dev/null || true
+  ok "$SCRIPTS_DIR/upgrade.sh"
+else
+  warn "scripts/upgrade.sh was not installed - the sentinel can restart but not upgrade until it is"
 fi
 
 printf "\n   ${green}ready.${reset}\n\n"
