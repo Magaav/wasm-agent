@@ -122,6 +122,11 @@ M.admin = {
   schema("spell_list", "List saved spells with version and parameter names.", {}),
   schema("spell_get", "Read one saved spell in full.", { name = { type = "string" } }, { "name" }),
   schema("spell_forget", "Delete a saved spell.", { name = { type = "string" } }, { "name" }),
+  schema("spell_export", "Write a spell out as a portable JSON plan for the sentinel to run outside this node. Use it for a spell containing a `sentinel` step (one that restarts or upgrades this node): such a plan cannot run here, because the turn doing the work dies with the node it changes and its postconditions could never be observed. Returns the file path; run it with: wa-sentinel request spell --file <path> --reason \"...\".", {
+    name = { type = "string" },
+    params = { type = "object", description = "Values for the spell's declared parameters." },
+    binary = { type = "string", description = "For an `upgrade` step: the wa binary to install. Defaults to the step's own value." },
+    path = { type = "string", description = "Where to write the plan. Defaults to <state>/spell-plans/<name>.json." } }, { "name" }),
   schema("remote", "Run a capability on another wasm-agent node (peer). Nodes are discovered by ed25519 key through the rendezvous, so the name or node_id is enough.", {
     node = { type = "string", description = "Peer name or node_id (use the nodes panel for the list)." },
     capability = { type = "string", description = "Tool to run on that node, e.g. bash, read, client, shell." },
@@ -148,7 +153,7 @@ M.tier_of = {
   search_messages = "ledger", conversation = "ledger", list_conversations = "ledger",
   client = "client",
   spell_save = "spells", spell_run = "spells", spell_list = "spells",
-  spell_get = "spells", spell_forget = "spells",
+  spell_get = "spells", spell_forget = "spells", spell_export = "spells",
   nodes = "nodes", remote = "nodes",
 }
 
@@ -360,6 +365,8 @@ function M.dispatch(memory, name, args, role, ctx)
     return spellslib.get(args.name) or { error = "unknown_spell" }
   elseif name == "spell_forget" then
     return spellslib.remove(args.name)
+  elseif name == "spell_export" then
+    return spellslib.export_to_file(args.name, args.params, args.binary, args.path)
   elseif name == "sessions" then
     return { sessions = memory.list_sessions(user_id, args.limit or 30) }
   elseif name == "session" then

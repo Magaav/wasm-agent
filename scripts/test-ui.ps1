@@ -897,6 +897,34 @@ $harness = @'
   var classify = window.__classifyProbe ? window.__classifyProbe() : ["the classify probe is missing"];
   for (var c = 0; c < classify.length; c++) { problems.push(classify[c]); }
 
+  // --- liveness: can a reader tell "working" from "stuck"? ---
+  // This is the observation that was missing: a running turn showed a spinner either way, so a long
+  // command and a wedged one were indistinguishable until one was killed. Both states must be
+  // reachable, because a display that can only ever say "working" is decoration.
+  (function () {
+    window.__stopLiveness();
+    window.__setLiveness({ working: true, stalled: 46, busy_ms: 25369, climbing_ms: 0, worker: "alive", queue: 0 });
+    var ok = document.getElementById("liveness");
+    check(!!ok, "liveness: no line rendered while working");
+    if (ok) {
+      check(!ok.classList.contains("stuck"), "liveness: a fresh beat must not read as stuck");
+      check(ok.textContent.indexOf("working") >= 0, "liveness: the working state must say so");
+      // The socket number is the node's own evidence, so it has to appear rather than a guess.
+      check(ok.textContent.indexOf("46 ms") >= 0, "liveness: the beat age must be shown, got: " + ok.textContent);
+      check(ok.textContent.indexOf("25") >= 0, "liveness: the elapsed time must be shown, got: " + ok.textContent);
+    }
+    window.__setLiveness({ working: false, stalled: 9000, busy_ms: 60000, climbing_ms: 9000, worker: "alive", queue: 0 });
+    var stuck = document.getElementById("liveness");
+    check(!!stuck, "liveness: the line vanished when it turned into a stall");
+    if (stuck) {
+      check(stuck.classList.contains("stuck"), "liveness: no beat for 9s must be flagged");
+      check(stuck.textContent.indexOf("stuck") >= 0, "liveness: the stuck state must say so, got: " + stuck.textContent);
+    }
+    // One element, not two: a status line that accumulates is litter in the transcript.
+    check(document.querySelectorAll("#liveness").length === 1, "liveness: more than one line in the transcript");
+    window.__stopLiveness();
+    check(!document.getElementById("liveness"), "liveness: the line outlived the turn it described");
+  })();
   document.title = "stage: end";
 } catch (error) {
     // A throw must still produce a log: a reporter that swallows its own failure is worse
@@ -924,7 +952,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
 
 $server = $null
 $edge = @(

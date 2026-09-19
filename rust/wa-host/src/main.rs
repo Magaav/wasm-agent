@@ -239,6 +239,7 @@ fn main() {
     lua.register("now", host::now);
     lua.register("monotonic_ms", host::monotonic_ms);
     lua.register("runtime_info", host::runtime_info);
+    lua.register("exec_timeout", host::exec_timeout);
     lua.register("log", host::log);
     lua.set_global("host");
 

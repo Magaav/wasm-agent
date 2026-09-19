@@ -86,10 +86,115 @@ local function split_lines(text)
   return lines
 end
 
--- Lines added and removed between two texts. Deliberately a simple count rather than a
--- text diff: the number is what the header shows ("+12 -3"), and the exact interleaving
--- is the topic's business, not the counter's. Counting a shared prefix and suffix is
--- what makes a one-line edit read as +1 -1 instead of +2000 -2000 on a large file.
+-- Exported for the tests, which check the splitting rule directly against fixed expectations. It
+-- cannot be verified through `record`, because both sides of that comparison go through this same
+-- function - so a consistently wrong count cancels out and every count assertion still passes. That
+-- is how a phantom trailing line survived a suite that looked like it covered this.
+function M.split_lines(text) return split_lines(text) end
+
+-- The changed lines, as an ordered list of {kind="add"|"del", text=...}.
+--
+-- This is what a diff topic shows, so it must agree with the counts the header prints - and the way
+-- to guarantee that is for both to come from *one* walk, which is why `preview_file` below counts
+-- what this returns rather than counting for itself. Two definitions of "changed" in one topic is
+-- how the header came to say +4 -3 for a one-line edit while the balloon painted untouched lines red.
+local function diff_lines(before, after)
+  local a, b = split_lines(before), split_lines(after)
+  -- Trim the shared prefix and suffix first: they are equal by definition, and trimming them keeps
+  -- the table small for the common case of a small edit in a big file.
+  local head = 0
+  while head < #a and head < #b and a[head + 1] == b[head + 1] do head = head + 1 end
+  local tail = 0
+  while tail < (#a - head) and tail < (#b - head)
+    and a[#a - tail] == b[#b - tail] do tail = tail + 1 end
+
+  local mid_a, mid_b = {}, {}
+  for i = head + 1, #a - tail do mid_a[#mid_a + 1] = a[i] end
+  for i = head + 1, #b - tail do mid_b[#mid_b + 1] = b[i] end
+
+  local n, m = #mid_a, #mid_b
+  -- Beyond this the table is too big to be worth building; fall back to the block form (all
+  -- removals then all additions), which is what the counts are based on anyway.
+  if n * m > 250000 then
+    local lines = {}
+    for i = 1, n do lines[#lines + 1] = { kind = "del", text = mid_a[i] } end
+    for i = 1, m do lines[#lines + 1] = { kind = "add", text = mid_b[i] } end
+    return lines
+  end
+
+  -- Longest common subsequence, then walk it back into a line list. n*m is bounded above, so the
+  -- table is safe to allocate.
+  local lcs = {}
+  for i = 0, n do
+    lcs[i] = {}
+    for j = 0, m do lcs[i][j] = 0 end
+  end
+  for i = n - 1, 0, -1 do
+    for j = m - 1, 0, -1 do
+      if mid_a[i + 1] == mid_b[j + 1] then
+        lcs[i][j] = lcs[i + 1][j + 1] + 1
+      else
+        lcs[i][j] = math.max(lcs[i + 1][j], lcs[i][j + 1])
+      end
+    end
+  end
+  local lines = {}
+  local i, j = 0, 0
+  while i < n and j < m do
+    if mid_a[i + 1] == mid_b[j + 1] then
+      i, j = i + 1, j + 1
+    elseif lcs[i + 1][j] >= lcs[i][j + 1] then
+      lines[#lines + 1] = { kind = "del", text = mid_a[i + 1] }
+      i = i + 1
+    else
+      lines[#lines + 1] = { kind = "add", text = mid_b[j + 1] }
+      j = j + 1
+    end
+  end
+  while i < n do
+    lines[#lines + 1] = { kind = "del", text = mid_a[i + 1] }
+    i = i + 1
+  end
+  while j < m do
+    lines[#lines + 1] = { kind = "add", text = mid_b[j + 1] }
+    j = j + 1
+  end
+  return lines
+end
+
+-- How many changed lines a preview will carry before it says so. A balloon is for glancing at, so a
+-- rewritten file shows the first of it with `truncated` set rather than a thousand rows.
+local PREVIEW_MAX = 400
+
+-- The lines a diff topic shows for one file, with the counts that go with them.
+--
+-- Restored: this was lost when `record` was rewritten (5ed8d4e) and nothing caught it, because the
+-- test that exercises it landed in the same session and the gate was not re-run afterwards. It is
+-- called out here because the way it went missing - a rewrite that quietly dropped a function a test
+-- depended on - is the reason `scripts/test.sh` runs every tests/*.lua rather than the ones somebody
+-- remembers.
+function M.preview_file(file)
+  if not file or file.recorded == false then return nil, "not_recorded" end
+  local before, before_err = M.load(file.before)
+  if not before then return nil, before_err or "no_before_text" end
+  local after, after_err = M.load(file.after)
+  if not after then return nil, after_err or "no_after_text" end
+
+  local all = diff_lines(before, after)
+  local lines, truncated = {}, false
+  for _, line in ipairs(all) do
+    if #lines >= PREVIEW_MAX then truncated = true break end
+    lines[#lines + 1] = line
+  end
+  -- Counted from the same walk that produced the lines above, so the balloon and the header cannot
+  -- disagree - which is the invariant this function exists to keep.
+  local added, removed = 0, 0
+  for _, line in ipairs(all) do
+    if line.kind == "add" then added = added + 1 else removed = removed + 1 end
+  end
+  return { lines = lines, truncated = truncated, added = added, removed = removed }
+end
+
 local function line_delta(before, after)
   local a, b = split_lines(before), split_lines(after)
   local head = 0

@@ -58,9 +58,28 @@ echo "deploy: $BRANCH@$COMMIT -> $INSTALL_DIR (port $PORT)"
 # 3. Build.
 echo "deploy: building"
 ( cd rust && cargo build --release --offline -p wa-host ) || fail "the build failed"
+# The sentinel is its own crate, outside the `rust/` workspace (which lists only `wa-host`), so it is
+# built with its own manifest. Asking the workspace for `-p wa-sentinel` fails - "package ID
+# specification did not match any packages" - and that is how it came to be installed by hand at all.
+( cd rust && cargo build --release --offline --manifest-path wa-sentinel/Cargo.toml ) || fail "the sentinel build failed"
 NEW="rust/target/release/wa.exe"
 [ -f "$NEW" ] || NEW="rust/target/release/wa"
 [ -x "$NEW" ] || fail "no built binary at $NEW"
+
+# The supervisor is part of what this installs, and leaving it out is how the node and the thing that
+# restarts it drifted apart: `deploy.sh` replaced `wa.exe` while `wa-sentinel.exe` stayed at whatever
+# version was last placed by hand, so a fixed stop/start path sat in the repo uninstalled and the
+# e2e test refused to run - "the installed sentinel is the one just built" is a check the test makes
+# and the gate did not. The sentinel is the only process that can replace the node; shipping the node
+# without shipping it is shipping half a node.
+NEW_SENTINEL="rust/wa-sentinel/target/release/wa-sentinel.exe"
+[ -f "$NEW_SENTINEL" ] || NEW_SENTINEL="rust/wa-sentinel/target/release/wa-sentinel"
+[ -x "$NEW_SENTINEL" ] || fail "no built sentinel at $NEW_SENTINEL"
+NEW_SENTINEL_LOWER="$(echo "$NEW_SENTINEL" | tr '[:upper:]' '[:lower:]')"
+case "$NEW_SENTINEL_LOWER" in
+  *.exe) SENTINEL_NAME="wa-sentinel.exe" ;;
+  *)     SENTINEL_NAME="wa-sentinel" ;;
+esac
 
 # 4. Prove it answers before it goes near the running node. A build that cannot start must not replace one
 #    that is serving.
@@ -102,8 +121,42 @@ fi
 # 7. Record what is installed, so "what is running" is answerable.
 HASH="$(sha256sum "$INSTALL_DIR/wa.exe" 2>/dev/null | awk '{print $1}')"
 [ -n "$HASH" ] || HASH="$(shasum -a 256 "$INSTALL_DIR/wa.exe" 2>/dev/null | awk '{print $1}')"
-printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nat=%s\nreason=%s\n' \
-  "$COMMIT" "$BRANCH" "$DIRTY" "$HASH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$REASON" \
+
+# The supervisor, installed *after* the node is confirmed answering - so a failed upgrade leaves a
+# sentinel that still matches the node it supervises, rather than one rebuilt ahead of a node that
+# rolled back. A running sentinel holds its own image open on Windows, so the copy is attempted and
+# its failure is reported rather than fatal: the swap is completed by the one-shot restart below.
+SENTINEL_HASH="(none)"
+if [ -f "$INSTALL_DIR/$SENTINEL_NAME" ]; then
+  cp -f "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null || true
+  if cmp -s "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME"; then
+    echo "deploy: sentinel $SENTINEL_NAME updated"
+  else
+    # The file is locked by the running supervisor. Stop it, replace it, start it again - the verb
+    # that exists for exactly this, and the reason it is not done by hand.
+    OLD_SENTINEL_PID="$(netstat -ano -p TCP 2>/dev/null | awk -v p=":$PORT" '$1=="TCP" && $2 ~ p"$" && $4=="LISTENING" { print $5; exit }' | tr -d '\r')"
+    if [ -f "$INSTALL_DIR/$SENTINEL_NAME" ]; then
+      "$INSTALL_DIR/$SENTINEL_NAME" stop >/dev/null 2>&1 || true
+      sleep 2
+      cp -f "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null || true
+      "$INSTALL_DIR/$SENTINEL_NAME" start >/dev/null 2>&1 || true
+    fi
+    if cmp -s "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME"; then
+      echo "deploy: sentinel $SENTINEL_NAME updated (restarted past the file lock)"
+    else
+      fail "could not install $SENTINEL_NAME - it is still the old build; the node and its supervisor would disagree"
+    fi
+  fi
+  SENTINEL_HASH="$(sha256sum "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null | awk '{print $1}')"
+  [ -n "$SENTINEL_HASH" ] || SENTINEL_HASH="$(shasum -a 256 "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null | awk '{print $1}')"
+else
+  cp -f "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null || fail "could not place $SENTINEL_NAME"
+  echo "deploy: sentinel $SENTINEL_NAME installed"
+  SENTINEL_HASH="$(sha256sum "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null | awk '{print $1}')"
+fi
+
+printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nat=%s\nreason=%s\n' \
+  "$COMMIT" "$BRANCH" "$DIRTY" "$HASH" "$SENTINEL_HASH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$REASON" \
   > "$INSTALL_DIR/installed.txt"
 
 echo "deploy: installed $COMMIT ($HASH)"

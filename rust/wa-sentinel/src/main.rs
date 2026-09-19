@@ -34,6 +34,17 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+// The `spell` verb: executing a declared plan while the node cannot execute it. A module rather
+// than more functions here, because it is a different kind of thing - the verbs in this file act on
+// the node, and this one carries out a sequence the *agent* wrote, under a whitelist.
+mod spell;
+
+// Stopping and starting a node through the Win32 API instead of through a spawned shell. The safety
+// rule it must preserve - act on a pid the OS gave us, never on an image name - lives in the caller,
+// and is what `SENTINEL.md` requires; see the module header for why the mechanism cannot weaken it.
+#[cfg(windows)]
+mod winproc;
+
 // ---------------------------------------------------------------- paths
 
 fn home() -> PathBuf {
@@ -60,7 +71,10 @@ fn config_dir() -> PathBuf {
 
 fn sentinel_dir() -> PathBuf {
     let dir = config_dir().join("sentinel");
-    for sub in ["requests", "done", "failed"] {
+    // `claimed` too: a request is renamed into it before it is performed, and a missing directory
+    // would make that rename fail - which, after the claim-before-work change, would mean no request
+    // was ever processed at all. It is created here with the others so it cannot be forgotten.
+    for sub in ["requests", "done", "failed", "claimed"] {
         let _ = std::fs::create_dir_all(dir.join(sub));
     }
     dir
@@ -123,7 +137,7 @@ fn now_epoch() -> u64 {
 
 /// Append one line per action, with its reason. Nothing here happens silently: an action whose reason
 /// is not written down is an action nobody can review.
-fn audit(verb: &str, detail: &str, reason: &str) {
+pub(crate) fn audit(verb: &str, detail: &str, reason: &str) {
     use std::io::Write;
     let line = format!("{}\t{}\t{}\t{}\n", now_epoch(), verb, detail.replace('\n', " "), reason.replace('\n', " "));
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log_path()) {
@@ -149,7 +163,7 @@ fn health_agent() -> ureq::Agent {
         .into()
 }
 
-fn health() -> Option<Value> {
+pub(crate) fn health() -> Option<Value> {
     let url = format!("http://127.0.0.1:{}/health", node_port());
     let response = health_agent().get(&url).call().ok()?;
     let text = response.into_body().read_to_string().ok()?;
@@ -160,7 +174,7 @@ fn node_is_up() -> bool {
     health().is_some()
 }
 
-fn node_is_idle() -> bool {
+pub(crate) fn node_is_idle() -> bool {
     match health() {
         Some(value) => value.get("current").map(|c| c.is_null()).unwrap_or(true),
         None => true,
@@ -206,7 +220,10 @@ fn stop_node(reason: &str) -> Result<()> {
     let pid = pid_on_port(node_port()).context("nothing is listening on the node's port")?;
     say(&format!("stopping node pid {pid} (by pid, never by image name)"));
     if cfg!(windows) {
-        std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).output()?;
+        // Win32 directly, rather than `taskkill`: a spawned helper costs ~138ms and, worse, is a
+        // second program that could be absent or shadowed. The pid was just read from the OS.
+        #[cfg(windows)]
+        winproc::kill_pid(pid).context("stop the node")?;
     } else {
         std::process::Command::new("kill").arg(pid.to_string()).output()?;
     }
@@ -226,19 +243,19 @@ fn start_node(binary: &Path, reason: &str) -> Result<()> {
     let cport = client_port().to_string();
     say(&format!("starting {} on port {port}", binary.display()));
     if cfg!(windows) {
-        // Start-Process gives a process that outlives this one: the sentinel must be able to start a
-        // node and then exit without taking the node with it.
-        let status = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile", "-Command",
-                &format!(
-                    "Start-Process -FilePath '{}' -ArgumentList @('serve','--port','{port}','--client-port','{cport}','--ui','{}') -WindowStyle Hidden",
-                    binary.display(), ui.display()
-                ),
-            ])
-            .status()?;
-        if !status.success() {
-            bail!("could not start the node (powershell exit {status})");
+        // CreateProcessW with DETACHED_PROCESS, rather than `powershell Start-Process`. Measured:
+        // the shell hop costs ~243ms of the ~310ms it takes to see the node healthy, while the
+        // node's own boot is ~49ms. This is the last place a shell was in the hot path.
+        #[cfg(windows)]
+        {
+            let args = vec![
+                "serve".to_string(),
+                "--port".to_string(), port.clone(),
+                "--client-port".to_string(), cport.clone(),
+                "--ui".to_string(), ui.display().to_string(),
+            ];
+            let child = winproc::start_detached(binary, &args).context("start the node")?;
+            say(&format!("started pid {child}"));
         }
     } else {
         std::process::Command::new(binary)
@@ -386,7 +403,7 @@ fn wakes_last_hour() -> u32 {
         .count() as u32
 }
 
-fn verb_restart(reason: &str) -> Result<String> {
+pub(crate) fn verb_restart(reason: &str) -> Result<String> {
     let binary = installed_binary();
     if !binary.exists() {
         bail!("nothing installed at {}", binary.display());
@@ -416,19 +433,81 @@ fn verb_restart(reason: &str) -> Result<String> {
 /// Upgrade by running the operator's script, which already proves the binary, waits for idle, swaps,
 /// verifies and rolls back. Reimplementing that here would be a second implementation of the same
 /// safety properties, and the second one is always the one that is wrong.
-fn verb_upgrade(binary: &str, reason: &str) -> Result<String> {
+/// The interpreter to run a shell script with, and the script path in the form that interpreter
+/// can open.
+///
+/// This is where the upgrade was actually broken, and it took three wrong theories to find:
+///
+///   * `Command::new("bash")` resolves through the *system* PATH. On this machine that is
+///     `C:\Windows\System32\bash.exe` - **WSL's** bash - because Git Bash's directories are not on
+///     the system PATH for a detached process. WSL sees a Linux filesystem, so the script's
+///     `/c/Users/...` path does not exist there and bash exits 127 with "No such file or
+///     directory" for a file that plainly exists. Every theory about the file (missing, unreadable,
+///     CRLF, a `C:/` vs `/c/` form) was wrong; the interpreter was.
+///   * A Git Bash *does* accept `/c/...` for the script, but not `C:/...` - hence the drive-form
+///     conversion below, which must match whichever interpreter is chosen.
+///
+/// So: find a Git Bash by its own install location (the one place that is certain), pass it the
+/// POSIX form of the script, and pass the *binary* in the Windows form the script's `[ -x ... ]`
+/// test can actually stat. `sh` on Unix, unchanged.
+fn shell_for(script: &Path) -> (String, String) {
+    if !cfg!(windows) {
+        return ("sh".into(), script.display().to_string());
+    }
+    for candidate in [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ] {
+        if Path::new(candidate).exists() {
+            return (candidate.to_string(), to_msys_path(script));
+        }
+    }
+    // No Git Bash found: fall back to whatever `bash` is, with the Windows path form, and let the
+    // error name the real problem rather than a missing file.
+    ("bash".into(), script.display().to_string())
+}
+
+/// The binary argument, in the form the script's own `[ -x "$NEW" ]` test understands. That test
+/// runs under the shell we just chose, so the same rule applies: a POSIX path for a MSYS bash.
+fn shell_for_binary(binary: &str) -> String {
+    if !cfg!(windows) {
+        return binary.to_string();
+    }
+    if binary.len() > 2 && binary.as_bytes()[1] == b':' && binary.as_bytes()[2] == b'/' {
+        return to_msys_path(Path::new(binary));
+    }
+    binary.to_string()
+}
+
+/// `C:/dir/file` -> `/c/dir/file`. Only the drive form needs it; anything else is passed through
+/// unchanged rather than mangled into something worse.
+fn to_msys_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    let bytes = text.as_bytes();
+    if bytes.len() > 2 && bytes[1] == b':' && bytes[2] == b'/' {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        return format!("/{drive}{}", &text[2..]);
+    }
+    text
+}
+
+pub(crate) fn verb_upgrade(binary: &str, reason: &str) -> Result<String> {
     if binary.is_empty() {
         bail!("upgrade needs --binary");
     }
-    let script = std::env::var("WA_UPGRADE_SCRIPT").unwrap_or_else(|_| {
-        if cfg!(windows) { "scripts/upgrade.sh".into() } else { "scripts/upgrade.sh".into() }
-    });
-    if !Path::new(&script).exists() {
-        bail!("no upgrade script at {script} (set WA_UPGRADE_SCRIPT)");
-    }
-    let status = std::process::Command::new(if cfg!(windows) { "bash" } else { "sh" })
-        .arg(&script)
-        .arg(binary)
+    let script = resolve_upgrade_script()?;
+    let (interpreter, script_arg) = shell_for(&script);
+    let status = std::process::Command::new(&interpreter)
+        // The path is passed to the interpreter as its first argument. Git Bash does not accept a
+        // `C:/...` path there, and WSL's bash cannot see `/c/...` at all, so both the interpreter
+        // *and* the path form have to agree (`shell_for`).
+        .arg(&script_arg)
+        .arg(shell_for_binary(binary))
+        // The script locates the repo from its own path (`dirname $0/..`), so the working
+        // directory does not matter to it. This used to pin cwd to the sentinel's own, which was
+        // the install directory - a directory with no `scripts/` in it, which is exactly why the
+        // relative default could never be found from a detached watcher.
         .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
         .status()
         .context("run the upgrade script")?;
@@ -438,6 +517,55 @@ fn verb_upgrade(binary: &str, reason: &str) -> Result<String> {
     } else {
         bail!("the upgrade script failed (exit {status}) - it rolls back, so the node should be running the previous binary")
     }
+}
+
+/// Where `scripts/upgrade.sh` is.
+///
+/// The default used to be the bare relative path `scripts/upgrade.sh`, checked against the
+/// sentinel's own working directory. The sentinel is *detached* - started by `Start-Process`, which
+/// does not inherit the launcher's environment or its cwd - so its cwd is the install directory
+/// (e.g. `%LOCALAPPDATA%\wasm-agent`), which contains no `scripts/`. The check therefore failed on
+/// every upgrade, the audit line was still written, and the operator saw an "upgrade" entry with no
+/// swap and no explanation. It happened twice before this was traced.
+///
+/// Resolution order, so an upgrade works from a detached watcher:
+///   1. `WA_UPGRADE_SCRIPT`, the explicit override.
+///   2. `scripts/upgrade.sh` beside the *installed binary* (the upgrade target's directory) - this
+///      is where an install that ships the script puts it.
+///   3. `scripts/upgrade.sh` under the current directory, for a watcher started from a checkout.
+fn resolve_upgrade_script() -> Result<PathBuf> {
+    if let Ok(explicit) = std::env::var("WA_UPGRADE_SCRIPT") {
+        if Path::new(&explicit).exists() {
+            return Ok(PathBuf::from(explicit));
+        }
+        bail!("WA_UPGRADE_SCRIPT points at {explicit}, which does not exist");
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(me) = std::env::current_exe() {
+        if let Some(dir) = me.parent() {
+            candidates.push(dir.join("scripts").join("upgrade.sh"));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("scripts").join("upgrade.sh"));
+        // One level up, because a watcher is often started from a subdirectory of the checkout.
+        if let Some(up) = cwd.parent() {
+            candidates.push(up.join("scripts").join("upgrade.sh"));
+        }
+    }
+    for candidate in &candidates {
+        if candidate.exists() {
+            return Ok(candidate.clone());
+        }
+    }
+    bail!(
+        "no upgrade script found (looked at {}; set WA_UPGRADE_SCRIPT to the full path)",
+        candidates
+            .iter()
+            .map(|c| c.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 fn verb_run(script: &str, reason: &str) -> Result<String> {
@@ -480,6 +608,16 @@ fn perform(request: &Value) -> Result<String> {
             Ok("spawned".into())
         }
         "run" => verb_run(request.get("script").and_then(Value::as_str).unwrap_or(""), reason),
+        // A plan the agent exported. Validated against a whitelist before a single step runs, and
+        // settled by this process's own /health check - the assertion the node cannot make about
+        // itself while it is the thing being replaced.
+        "spell" => {
+            let file = request.get("file").and_then(Value::as_str).unwrap_or("");
+            match spell::verb_spell(file, reason) {
+                Ok(outcome) => Ok(outcome),
+                Err(error) => Err(error),
+            }
+        }
         other => bail!("unknown verb {other:?}"),
     }
 }
@@ -497,12 +635,23 @@ fn process_requests() -> Result<u32> {
     // Oldest first: a queue that runs backwards is a queue nobody can reason about.
     entries.sort();
     for path in entries {
-        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        // Claim before working, not after. This used to read the request, do the work, and only then
+        // remove the file - so a second runner (the watcher and a stray `once`, which is exactly what
+        // happened) could pick up the same file while the first was still inside it, and run the
+        // upgrade twice. Two `upgrade` lines appeared in the log for one request, and only the
+        // request record showed it had been performed once. The rename is the claim: it is atomic, so
+        // whichever runner calls it first owns the file, and the other sees it gone.
+        let claim = sentinel_dir().join("claimed").join(path.file_name().unwrap_or_default());
+        if std::fs::rename(&path, &claim).is_err() {
+            // Someone else got it, or it vanished. Either way it is not this runner's to perform.
+            continue;
+        }
+        let text = std::fs::read_to_string(&claim).unwrap_or_default();
         let request: Value = match serde_json::from_str(&text) {
             Ok(value) => value,
             Err(error) => {
-                audit("bad-request", &path.display().to_string(), &error.to_string());
-                let _ = std::fs::rename(&path, sentinel_dir().join("failed").join(path.file_name().unwrap_or_default()));
+                audit("bad-request", &claim.display().to_string(), &error.to_string());
+                let _ = std::fs::rename(&claim, sentinel_dir().join("failed").join(claim.file_name().unwrap_or_default()));
                 continue;
             }
         };
@@ -520,9 +669,11 @@ fn process_requests() -> Result<u32> {
             "detail": detail,
             "at": now_epoch(),
         });
-        let target = sentinel_dir().join(folder).join(path.file_name().unwrap_or_default());
+        let target = sentinel_dir().join(folder).join(claim.file_name().unwrap_or_default());
         let _ = std::fs::write(&target, serde_json::to_string_pretty(&record).unwrap_or_default());
-        let _ = std::fs::remove_file(&path);
+        // The file is already out of `requests/` - it was renamed there as the claim. Only the
+        // transient copy in `claimed/` is removed here.
+        let _ = std::fs::remove_file(&claim);
         say(&format!("{}: {}", if outcome.is_ok() { "ok" } else { "failed" }, detail));
         handled += 1;
     }
@@ -857,6 +1008,7 @@ const HELP: &str = r#"wa-sentinel - the process outside the node.
   request upgrade  --binary PATH [--reason TEXT]
   request wake     --session ID --prompt TEXT [--reason TEXT]
   request run      --script PATH [--reason TEXT]
+  request spell    --file PATH [--reason TEXT]
   once | watch | status | start | restart | stop | help
 
 A node cannot restart itself: the turn doing the restarting runs on the node it is

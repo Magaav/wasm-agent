@@ -1202,6 +1202,10 @@ fn dispatch(
         "/client" if method == "POST" => (200, "application/json", call("wa_client", &[body, session]).into_bytes()),
         "/frame" if method == "POST" => (200, "application/json", call("wa_frame", &[body.trim(), session]).into_bytes()),
         "/spells" => (200, "application/json", call("wa_spells", &[session]).into_bytes()),
+        // Export a spell as a portable plan for the sentinel. A separate route from /spell because
+        // it writes nothing to the node's behaviour and reads nothing about a run - it produces a
+        // file for *another process*, and the two must not be confusable.
+        "/spell/export" if method == "POST" => (200, "application/json", call("wa_spell_export", &[body.trim(), session]).into_bytes()),
         "/spell" if method == "POST" => (200, "application/json", call("wa_spell_run", &[body.trim(), session]).into_bytes()),
         "/provider" if method == "POST" => (200, "application/json", call("wa_set_provider", &[body.trim(), node.as_str(), session]).into_bytes()),
         "/model" if method == "POST" => (200, "application/json", call("wa_set_model", &[body.trim(), node.as_str(), session]).into_bytes()),

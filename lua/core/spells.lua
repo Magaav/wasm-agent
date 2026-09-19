@@ -17,6 +17,16 @@
 --   { kind="client", action="cdp"|"click"|"type"|"key"|"shell"|"move", ..., idempotent=true? }
 --   { kind="wait",   ms=500 }
 --   { kind="assert", script="...", equals=|contains=|matches=|gt=|lt=|truthy= }
+--   { kind="sentinel", verb="wait-idle"|"upgrade"|"restart"|"wait-health", binary=?, ... }
+--
+-- The `sentinel` kind is the one step this process cannot perform itself, and it exists because some
+-- plans are about *this node*: an upgrade stops the worker, so a turn running on that worker cannot
+-- survive its own plan and its `post` assertions never run. Such a step therefore does not execute
+-- here - it declares what the sentinel should do, and `M.export` writes the plan for `wa-sentinel
+-- request spell --file ...`, which runs it outside the node and settles the effect from there.
+--
+-- A sentinel step inside a normal `M.run` is refused rather than skipped: silently ignoring it would
+-- report success for a plan whose point never happened.
 --
 -- Assertions also gate preconditions (`pre`) and postconditions (`post`).
 -- Strings support {{param}} substitution.
@@ -121,6 +131,13 @@ local function check_assertion(check)
 end
 
 -- ---- validation ----------------------------------------------------------
+-- The verbs a `sentinel` step may name. Mirrors ALLOWED_STEPS in rust/wa-sentinel/src/spell.rs,
+-- and that duplication is deliberate-but-checked: the sentinel refuses anything not in *its* list, so
+-- a verb added here alone fails loudly at the sentinel with the list printed, rather than silently
+-- doing nothing. A spell chooses which step, never how it runs - `run` is absent on purpose, because
+-- a plan that could reach it would be a shell.
+local SENTINEL_VERBS = { ["wait-idle"] = true, ["upgrade"] = true, ["restart"] = true, ["wait-health"] = true }
+
 function M.validate(spec)
   if type(spec) ~= "table" then return "spec_required" end
   if trim(spec.name) == "" then return "name_required" end
@@ -139,6 +156,14 @@ function M.validate(spec)
     if kind == "assert" and type(step.script) ~= "string" then
       return "step_" .. index .. "_script_required"
     end
+    if kind == "sentinel" then
+      if type(step.verb) ~= "string" or not SENTINEL_VERBS[step.verb] then
+        return "step_" .. index .. "_sentinel_verb_unknown"
+      end
+      if step.verb == "upgrade" and (type(step.binary) ~= "string" or step.binary == "") then
+        return "step_" .. index .. "_sentinel_upgrade_needs_binary"
+      end
+    end
     if (tonumber(step.retries) or 0) > 0 and kind ~= "assert" and step.idempotent ~= true then
       return "step_" .. index .. "_retries_require_idempotent"
     end
@@ -147,6 +172,72 @@ function M.validate(spec)
     if type(check.script) ~= "string" then return "post_" .. index .. "_script_required" end
   end
   return nil
+end
+
+-- True if this spell contains a step only the sentinel can perform.
+function M.needs_sentinel(spec)
+  for _, step in ipairs((spec and spec.steps) or {}) do
+    if (step.kind or "client") == "sentinel" then return true end
+  end
+  return false
+end
+
+-- The portable plan: the resolved, literal steps the sentinel executes, with no model and no node
+-- involved. This is the artifact `wa-sentinel request spell --file` consumes.
+--
+-- `post` travels as *declarations* rather than being resolved here, because the sentinel settles the
+-- effect with its own tools (it checks /health itself), not with CDP. The declaration is kept so the
+-- file states its own success condition, which is what makes it reviewable before it runs.
+--
+-- Returns the plan or nil and a reason. It refuses an empty result: exporting a plan with nothing to
+-- do would produce a file that always "succeeds".
+function M.export(name, params, binary)
+  local spell = M.get(name)
+  if not spell then return nil, "unknown_spell:" .. tostring(name) end
+  local problem = M.validate(spell)
+  if problem then return nil, "invalid_spell:" .. problem end
+  -- The `binary` argument fills the `binary` parameter. It is supplied at export time because the
+  -- build to install is a fact about *now*, not about the spell: the same plan is exported again for
+  -- the next build. Merging it here (rather than requiring the caller to pass it twice, once as a
+  -- param and once as an argument) is what lets `spell_export` be called with only a name and a path.
+  local effective = {}
+  for key, value in pairs(params or {}) do effective[key] = value end
+  if binary and binary ~= "" and effective.binary == nil then effective.binary = binary end
+  local resolved, param_error = resolve_params(spell.params, effective)
+  if not resolved then return nil, param_error end
+
+  local steps = {}
+  for _, raw in ipairs(spell.steps) do
+    local step = substitute(raw, resolved)
+    local kind = step.kind or "client"
+    if kind ~= "sentinel" then
+      -- Refused rather than dropped: a plan that quietly omitted the client steps would look
+      -- complete and do less than the spell says.
+      return nil, "step_kind_not_exportable:" .. kind .. ": a sentinel plan may only contain `sentinel` steps"
+    end
+    local entry = { kind = "sentinel", verb = step.verb }
+    -- The binary can be passed at export time, so the spell carries a placeholder and the caller
+    -- supplies the actual build to install.
+    if step.verb == "upgrade" then
+      local chosen = binary
+      if not chosen or chosen == "" then chosen = step.binary end
+      if not chosen or chosen == "" then return nil, "upgrade_step_needs_binary" end
+      entry.binary = chosen
+    end
+    steps[#steps + 1] = entry
+  end
+
+  return {
+    name = spell.name,
+    description = spell.description or "",
+    version = spell.version or 1,
+    exported_at = host.now(),
+    params = resolved,
+    steps = steps,
+    -- Kept verbatim, and non-empty by M.validate: a plan without a stated success condition is the
+    -- v8 failure mode in file form.
+    post = spell.post,
+  }
 end
 
 -- ---- store ---------------------------------------------------------------
@@ -223,12 +314,63 @@ function M.validate_run(name, params)
   return { ok = true, spell = name, version = spell.version, params = resolved, steps = #spell.steps }
 end
 
+-- Write the plan to disk and hand back the path, which is the whole artifact: one file, one
+-- command, no model. The directory is created rather than assumed, because a spell that cannot be
+-- exported is a step the agent cannot ask the sentinel to perform - and the failure has to be the
+-- export saying so, not the sentinel finding no file.
+function M.export_to_file(name, params, binary, path)
+  local plan, problem = M.export(name, params, binary)
+  if not plan then return { error = problem } end
+
+  local target = path
+  if not target or target == "" then
+    target = state.path("spell-plans") .. "/" .. trim(name) .. ".json"
+  end
+  -- `host.write_file` creates the parent directory itself, so a plan can be written to a path whose
+  -- directory does not exist yet. Nothing is created here first: the write is the thing that must
+  -- say whether it worked, and a spell that cannot be exported is a step the agent cannot ask the
+  -- sentinel to perform - so the failure has to be the export saying so, not the sentinel finding no
+  -- file later.
+  target = target:gsub("\\", "/")
+  if not host.write_file then return { error = "write_unavailable" } end
+  -- `host.write_file` creates the parent directory itself, so there is nothing to make first - and a
+  -- `host.mkdir` call here would be a call to a function that does not exist.
+  local wrote = host.write_file(target, json.encode(plan))
+  if wrote ~= true then return { error = "write_failed:" .. target } end
+
+  -- Read what was written back, by *path* rather than through `state.read` (which prefixes the state
+  -- directory and would look for the name inside it). A plan that cannot be re-read is not a plan,
+  -- and the sentinel would discover that at a worse moment - when the node is already expected to be
+  -- replaced.
+  local readback = host.read_file and host.read_file(target) or nil
+  if not readback or readback == "" then return { error = "export_unreadable:" .. target } end
+  local decoded_ok = pcall(json.decode, readback)
+  if not decoded_ok then return { error = "export_not_json:" .. target } end
+
+  return {
+    ok = true, spell = plan.name, version = plan.version,
+    path = target, steps = #plan.steps, post = #plan.post,
+    command = "wa-sentinel request spell --file " .. target .. ' --reason "..."',
+  }
+end
+
 -- ---- execution -----------------------------------------------------------
 function M.run(name, params)
   local spell = M.get(name)
   if not spell then return { error = "unknown_spell:" .. tostring(name) } end
   local problem = M.validate(spell)
   if problem then return { error = "invalid_spell:" .. problem } end
+  -- A sentinel step cannot run here, and skipping it would report success for a plan whose point
+  -- never happened. Say which one and how to run it instead.
+  if M.needs_sentinel(spell) then
+    return {
+      error = "needs_sentinel",
+      detail = "this spell has a step only the sentinel can perform (it restarts or replaces this node, "
+        .. "so a turn running on it cannot survive the plan or check its own postconditions). "
+        .. "Export it and ask the sentinel: spell_export, then wa-sentinel request spell --file <path>.",
+      spell = name,
+    }
+  end
   local resolved, param_error = resolve_params(spell.params, params)
   if not resolved then return { error = param_error } end
 
