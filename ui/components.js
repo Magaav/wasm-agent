@@ -294,8 +294,10 @@ class WaTrace extends HTMLElement {
     this.open = true;
   }
 
-  // addTool(name, title) -> the line element, so the caller can fill the outcome.
-  addTool(name, title, detail) {
+  // addTool(name, title, detail, bound) -> the line element, so the caller can fill the outcome.
+  // `bound` is the call's deadline in seconds, when it has one: the line can then say how long it has
+  // run *of* how long it may take, which is the question "bash" alone cannot answer.
+  addTool(name, title, detail, bound) {
     if (!this._userToggled) this.open = true;   // live: show the lines, not a count
     this._count += 1;
     const line = document.createElement("li");
@@ -315,12 +317,27 @@ class WaTrace extends HTMLElement {
     if (detail) output.textContent = detail;
     line.append(output);
     this._lines.set(name, line);
-    this._pending = { line, output, outcome };
+    this._pending = { line, output, outcome, started: Date.now(), bound: bound || null };
     this._body.append(line);
     this._header.classList.add("running");
     this._refresh();
+    this.setAge(0);
     return line;
   }
+
+  // setAge(seconds, bound) paints how long the pending call has been running, and against what limit.
+  // Called by the page's one shared ticker with no arguments (it reads the pending line's own clock),
+  // and by the UI test with an explicit age so the text can be checked without waiting a real second.
+  setAge(seconds, bound) {
+    const target = this._pending;
+    if (!target) return;
+    const elapsed = seconds === undefined ? (Date.now() - target.started) / 1000 : seconds;
+    const text = `${Math.max(0, Math.floor(elapsed))}s`;
+    const limit = bound === undefined ? target.bound : bound;
+    target.outcome.textContent = limit ? `${text} of ${Math.floor(limit)}s` : text;
+  }
+
+  get pending() { return !!this._pending; }
 
   // settle(outcome, detail, failed) finishes the most recent tool line.
   settle(outcome, detail, failed) {

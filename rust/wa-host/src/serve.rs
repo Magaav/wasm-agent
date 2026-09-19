@@ -538,6 +538,10 @@ fn health_body() -> Vec<u8> {
         "worker": state,
         "stalled_ms": age_ms,
         "queue": QUEUED.load(Ordering::Relaxed),
+        // The bound a `bash`/`shell` call is given, so a client can show an in-flight tool's age
+        // against its deadline (`bash · 42s of 300s`) without waiting for the tool event to carry it.
+        // Same number `host.exec_timeout()` reports, from the one place the host enforces it.
+        "exec_timeout_seconds": crate::host::exec_timeout_seconds(),
         "current": current,
         "workers_count": worker_count(),
         "workers": workers,

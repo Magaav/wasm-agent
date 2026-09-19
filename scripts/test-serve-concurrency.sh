@@ -117,6 +117,13 @@ case "$health" in
   *'"ok":false'*'"worker":"stalled"'*) echo "  ok: /health admits the worker is stalled" ;;
   *) echo "  FAIL: /health kept claiming the node was fine"; exit 1 ;;
 esac
+# The bound an in-flight `bash`/`shell` call is shown against. It must be the number the host
+# enforces, reported rather than guessed, so a window can say "42s of 300s" without waiting for the
+# tool event - and so a client never invents a different deadline from the one that kills the call.
+case "$health" in
+  *'"exec_timeout_seconds":300'*) echo "  ok: /health reports the exec deadline" ;;
+  *) echo "  FAIL: /health must report exec_timeout_seconds=300, got: $health"; exit 1 ;;
+esac
 case "$code:$body" in
   503:*worker_stalled*) echo "  ok: a blocked request is refused with a reason, not left hanging" ;;
   *) echo "  FAIL: expected 503 worker_stalled, got $code $body"; exit 1 ;;

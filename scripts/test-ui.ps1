@@ -1017,6 +1017,35 @@ $harness = @'
     check(payload.text === "hello", "commands: the message itself must survive, got " + payload.text);
     check(payload.images === undefined, "commands: no pictures must be sent when none were attached");
   })();
+  // ---- in-flight tool age -------------------------------------------------
+  //
+  // A long command and a wedged one used to look identical: both were a tool line that had not come
+  // back. The pending line now carries the call's age against its deadline, so a reader can tell
+  // "42s of 300s" from a call that has no bound at all. Timers do not advance under this harness's
+  // virtual time, so the ticker's own paint is driven directly; what is asserted is the text, and that
+  // one shared ticker runs while a call is in flight and stops when it settles.
+  (function () {
+    window.handleEvent({ type: "round", n: 1 });
+    window.handleEvent({ type: "delta", text: "Running the slow check." });
+    window.handleEvent({ type: "tool", name: "bash", arguments: { command: "sleep 300" }, timeout_ms: 300000 });
+    var line = document.querySelector("wa-trace .tool-line.pending");
+    check(!!line, "tool age: an in-flight call must have a pending line");
+    var outcome = line ? line.querySelector(".tool-outcome") : null;
+    check(!!outcome && outcome.textContent.indexOf("0s of 300s") >= 0,
+      "tool age: a fresh call must show its bound immediately, saw: " + (outcome ? outcome.textContent : "no outcome"));
+    window.__setToolAge(42);
+    check(!!outcome && outcome.textContent.indexOf("42s of 300s") >= 0,
+      "tool age: the age must be painted against the bound, saw: " + (outcome ? outcome.textContent : "no outcome"));
+    check(window.__toolTickerActive() === true,
+      "tool age: the shared ticker must run while a call is in flight");
+    window.handleEvent({ type: "tool_result", result: { code: 0, stdout: "done" } });
+    check(window.__toolTickerActive() === false,
+      "tool age: the ticker must stop when the call settles, or it counts for a line that is over");
+    check(!!outcome && outcome.textContent.indexOf("exit 0") >= 0,
+      "tool age: the settled line must show its outcome, not a frozen age, saw: " + (outcome ? outcome.textContent : "no outcome"));
+    window.handleEvent({ type: "reply", text: "Slow check done." });
+    window.handleEvent({ type: "done" });
+  })();
   document.title = "stage: end";
 } catch (error) {
     // A throw must still produce a log: a reporter that swallows its own failure is worse
@@ -1044,7 +1073,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text);"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker;"
 
 $server = $null
 $edge = @(
