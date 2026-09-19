@@ -260,6 +260,38 @@ if ($haveSentinel) {
 } else {
   Warn "no wa-sentinel.exe found (build it with: cargo build --release --manifest-path rust/wa-sentinel/Cargo.toml)"
 }
+
+# Skills the node must have to know how to update itself. A skill is how this is delivered rather
+# than a paragraph in AGENTS.md: only its `name` and `description` sit in the prompt, and the body
+# loads when the task matches - so the procedure costs nothing until it is needed, and can then be
+# as long as it has to be.
+#
+# `~/.wasm-agent/skills` is the node-scoped location it scans, which is the install directory this
+# installer already owns. Shipped here because a skill that is not installed is not knowledge: a
+# fresh node would rediscover, at cost, that it cannot restart itself.
+$skillsDir = Join-Path $nodeDir "skills"
+$selfUpdate = Join-Path $skillsDir "self-update\SKILL.md"
+New-Item -ItemType Directory -Force -Path (Join-Path $skillsDir "self-update") | Out-Null
+$haveSkill = $false
+if (Get-Command scp -ErrorAction SilentlyContinue) {
+  & scp -q -o BatchMode=yes "${HostAlias}:$RemoteBin/skills/self-update/SKILL.md" $selfUpdate 2>$null
+  $haveSkill = Test-Path $selfUpdate
+}
+if (-not $haveSkill) {
+  $skillLocal = Join-Path $root "skills\self-update\SKILL.md"
+  if (Test-Path $skillLocal) { Copy-Item $skillLocal $selfUpdate -Force; $haveSkill = $true }
+}
+if (-not $haveSkill) {
+  try {
+    Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/Magaav/wasm-agent/main/skills/self-update/SKILL.md" -OutFile $selfUpdate -ErrorAction Stop
+    $haveSkill = Test-Path $selfUpdate
+  } catch { }
+}
+if ($haveSkill) {
+  Ok "skills\self-update -> $selfUpdate"
+} else {
+  Warn "skills\self-update was not installed - this node will not know how to update itself"
+}
 }
 
 $uiScript = Join-Path $target "wa-ui.ps1"

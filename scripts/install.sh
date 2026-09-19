@@ -114,6 +114,25 @@ else
   warn "scripts/upgrade.sh was not installed - the sentinel can restart but not upgrade until it is"
 fi
 
+# The skills the node needs to know how to update itself. Delivered as a skill rather than a
+# paragraph in AGENTS.md: only `name` and `description` enter the prompt, and the body loads when the
+# task matches, so the procedure costs nothing per turn and can be as long as it needs to be.
+# `~/.wasm-agent/skills` is the node-scoped place it scans, which is this install directory.
+SKILLS_DIR="$DIR/skills/self-update"
+mkdir -p "$SKILLS_DIR"
+SKILL_GOT=0
+if [ -n "$ROOT" ] && [ -f "$ROOT/skills/self-update/SKILL.md" ]; then
+  cp -f "$ROOT/skills/self-update/SKILL.md" "$SKILLS_DIR/SKILL.md" && SKILL_GOT=1
+elif command -v curl >/dev/null 2>&1; then
+  curl -fsSL "https://raw.githubusercontent.com/Magaav/wasm-agent/main/skills/self-update/SKILL.md" \
+    -o "$SKILLS_DIR/SKILL.md" 2>/dev/null && SKILL_GOT=1
+fi
+if [ "$SKILL_GOT" = "1" ]; then
+  ok "$SKILLS_DIR/SKILL.md"
+else
+  warn "skills/self-update was not installed - this node will not know how to update itself"
+fi
+
 printf "\n   ${green}ready.${reset}\n\n"
 printf "   ${grey}start chatting:${reset}\n     wa\n\n"
 case ":$PATH:" in
