@@ -395,10 +395,10 @@ function renderDiff(bubble, changes) {
   const topic = document.createElement("wa-diff");
   topic.setSummary(changes);
   bubble.body.append(topic);
-  // The toggle starts disabled: the server has not yet said whether this can be undone
-  // (the files may have moved on since the turn), and enabling it first would be a button
-  // that promises something the handler can then refuse.
-  topic.setUndoable(false, "checking…");
+  // The toggle starts pending: the server has not yet said whether this can be undone (the files may have
+  // moved on since the turn), and enabling it first would be a button that promises something the handler
+  // can then refuse. It used to say "checking…" in the refusal style, which showed a question as an error.
+  topic.setPending();
   topic.addEventListener("diff-act", (event) => actOnDiff(topic, event.detail));
   return topic;
 }

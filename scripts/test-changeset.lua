@@ -93,4 +93,34 @@ ok(why3 == "not_recorded", "with a reason, not an empty patch", tostring(why3))
 local missing, why4 = changeset.patch(entry, root .. "/never-touched.txt")
 ok(missing == nil and why4 == "unknown_path", "an unknown path is refused by name", tostring(why4))
 
+-- 8. A turn recorded before repeats were merged. The entry is built by hand, exactly as the old recorder
+--    would have written it: one entry per write, and the second entry's `before` is text the turn itself
+--    wrote. Undo restores `before`, so without the merge this restores an intermediate state and reports
+--    success - the failure the merge exists to prevent, and worse than a refusal because nothing says so.
+local old = root .. "/old.txt"
+write(old, "one\ntwo\nthree\n")
+local legacy = { files = {
+  { path = old, before = changeset.store("one\n"), after = changeset.store("one\ntwo\n"),
+    added = 1, removed = 0, recorded = true, created = false },
+  { path = old, before = changeset.store("one\ntwo\n"), after = changeset.store("one\ntwo\nthree\n"),
+    added = 1, removed = 0, recorded = true, created = false },
+}, added = 2, removed = 0 }
+local normalized = changeset.normalize(legacy)
+ok(#normalized.files == 1, "an entry recorded per write must normalize to one file", #normalized.files)
+ok(normalized.files[1].writes == 2, "and say how many writes it was", normalized.files[1].writes)
+ok(normalized.added == 2, "with the turn's whole delta", normalized.added)
+ok(changeset.undo(normalized) == true, "and undo must succeed")
+ok(host.read_file(old) == "one\n", "restoring where the turn started, not the intermediate text",
+  string.format("%q", tostring(host.read_file(old))))
+-- And what the unmerged entry does instead: it refuses. The first entry's `after` is the intermediate
+-- text and the file no longer matches it, so the guard stops the whole thing - which is the right
+-- failure, and better than what I first assumed (a silent restore of the wrong text). But it does mean
+-- those turns cannot be undone at all, and that is why they are merged as they are read.
+write(old, "one\ntwo\nthree\n")
+local refused, why5 = changeset.undo(legacy)
+ok(refused == nil, "an unmerged entry cannot be undone at all")
+ok(why5 == "changed_since_turn:" .. old, "and says which file stopped it", tostring(why5))
+ok(host.read_file(old) == "one\ntwo\nthree\n", "leaving the file exactly as it was",
+  string.format("%q", tostring(host.read_file(old))))
+
 print("changeset ok (" .. checks .. " checks)")

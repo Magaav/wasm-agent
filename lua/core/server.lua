@@ -429,6 +429,10 @@ function wa_diff(payload, session)
       created = file.created == true, recorded = file.recorded ~= false,
     }
   end
+  -- Turns recorded before repeats were merged hold one entry per write, and the second one's `before` is
+  -- text the turn itself wrote. Undo uses `before`, so without this an old turn's undo would restore an
+  -- intermediate state and call it success. The ledger keeps its rows; the entry is merged as it is read.
+  entry = changeset.normalize(entry)
 
   local action = request.action or "check"
   if action == "check" then

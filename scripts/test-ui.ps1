@@ -135,6 +135,40 @@ $harness = @'
     // balloon, because the turn carries addresses and not bodies - so the click is what turns an
     // address back into something readable. It used to be a line that did nothing on hover, which
     // reads as a control and is not one.
+    // A path must be readable, not elided: this topic is opened to find out *which* file changed, and
+    // "C:/Users/Victor/orca/workspa…" is not an answer. Found on the node's branch, which was fixing the
+    // same topic at the same time - the fix is CSS, the check belongs here.
+    var pathCell = diffTopic.querySelector(".diff-path");
+    check(!!pathCell, "each file row must carry its path");
+    check(!!pathCell && getComputedStyle(pathCell).textOverflow !== "ellipsis",
+      "the path must not be elided, saw text-overflow: "
+      + (pathCell ? getComputedStyle(pathCell).textOverflow : "no cell"));
+    check(!!pathCell && getComputedStyle(pathCell).whiteSpace === "nowrap",
+      "the path must stay on one line so the row scrolls instead of wrapping");
+
+    // "I do not know yet" is not a verdict, and must not be a trap. The first version rendered pending
+    // through the refusal path, which sets `locked` - and the real answer then hit `if (locked) return`
+    // and was thrown away, so an undoable change stayed disabled for good. The node's branch found that
+    // while I was building the click preview, from the other side of the same code.
+    var probe = document.createElement("wa-diff");
+    probe.setSummary({ added: 1, removed: 1, files: [{ path: "x.txt", added: 1, removed: 1 }] });
+    document.body.append(probe);
+    probe.setPending();
+    check(probe.querySelector(".diff-toggle").disabled === true,
+      "a pending topic must not offer the action before the answer");
+    var pendingNote = probe.querySelector(".diff-note");
+    check(!pendingNote || pendingNote.textContent === "",
+      "and must not dress a question up as a failure, saw: " + (pendingNote ? pendingNote.textContent : "nothing"));
+    probe.setUndoable(true, "");
+    check(probe.querySelector(".diff-toggle").disabled === false,
+      "the answer that follows a pending state must be taken");
+    probe.setUndoable(false, "the file moved on");
+    check(probe.querySelector(".diff-toggle").disabled === true, "a refusal disables it");
+    probe.setUndoable(true, "");
+    check(probe.querySelector(".diff-toggle").disabled === true,
+      "and a refusal is not reopened by a later answer - that is what locked is for");
+    probe.remove();
+
     var fileRow = diffTopic.querySelector(".diff-file");
     check(!!fileRow && fileRow.tagName === "BUTTON",
       "a changed file must be a control, saw " + (fileRow && fileRow.tagName));

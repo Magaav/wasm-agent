@@ -140,9 +140,12 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
   margin: 0; padding: var(--space); list-style: none;
   border-top: 1px solid rgba(35, 41, 54, .8);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  /* The path is not shortened, so the row scrolls sideways instead of hiding where the file is. */
+  overflow-x: auto;
 }
-.diff-file { display: flex; align-items: center; gap: var(--gap); min-width: 0; }
-.diff-path { flex: 1; color: #c9d1e0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diff-file { display: flex; align-items: center; gap: var(--gap); min-width: max-content; }
+/* No ellipsis: this topic exists to say *which* file changed, and a truncated path does not say it. */
+.diff-path { flex: 1; color: #c9d1e0; white-space: nowrap; }
 .diff-stat { display: flex; gap: var(--space); flex: 0 0 auto; }
 .diff-stat .plus { color: var(--ok); }
 .diff-stat .minus { color: #f85149; }

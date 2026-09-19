@@ -414,4 +414,51 @@ function M.patch(entry, path)
   }
 end
 
+-- Merge repeated paths in an entry that was read back from the ledger.
+--
+-- Turns recorded before `record` merged them hold one entry per write, and the *second* entry's `before`
+-- is the text the turn itself had just written. Undo restores `before`, so undoing such a turn would put
+-- the file back to an intermediate state and report success - which is precisely the failure the merge
+-- exists to prevent, and it is worse than a refusal because nothing says anything went wrong.
+--
+-- Those rows are not rewritten. The ledger is append-only and history that edits itself is not history,
+-- so the merge happens when the entry is read: first `before`, newest `after`, the stricter `recorded`,
+-- and the delta measured from where the turn started rather than from the previous keystroke.
+function M.normalize(entry)
+  if not entry or type(entry.files) ~= "table" then return entry end
+  local merged, order = {}, {}
+  for _, file in ipairs(entry.files) do
+    local seen = merged[file.path]
+    if not seen then
+      merged[file.path] = {
+        path = file.path, before = file.before, after = file.after,
+        added = file.added or 0, removed = file.removed or 0,
+        recorded = file.recorded ~= false, created = file.created == true,
+        writes = 1,
+      }
+      order[#order + 1] = file.path
+    else
+      seen.after = file.after
+      seen.recorded = seen.recorded and (file.recorded ~= false)
+      seen.writes = seen.writes + 1
+      local origin = seen.before and M.load(seen.before)
+      local final = file.after and M.load(file.after)
+      if type(origin) == "string" and type(final) == "string" then
+        seen.added, seen.removed = line_delta(origin, final)
+      else
+        -- The blobs are gone: sum what the ledger holds rather than inventing a number.
+        seen.added = seen.added + (file.added or 0)
+        seen.removed = seen.removed + (file.removed or 0)
+      end
+    end
+  end
+  local files, added, removed = {}, 0, 0
+  for _, path in ipairs(order) do
+    local file = merged[path]
+    files[#files + 1] = file
+    added, removed = added + file.added, removed + file.removed
+  end
+  return { files = files, added = added, removed = removed }
+end
+
 return M

@@ -496,7 +496,10 @@ class WaDiff extends HTMLElement {
   // The glyph is the whole contract: undo when the change is applied, redo when it is not.
   _paintToggle() {
     if (!this._toggle) return;
-    const can = this._state !== "locked";
+    // "pending" is disabled too, but it is not locked: the difference is whether the reader is being
+    // told no, or only told to wait. A disabled control with no explanation and a disabled control that
+    // says why are different things.
+    const can = this._state !== "locked" && this._state !== "pending";
     this._toggle.disabled = !can;
     this._toggle.dataset.act = this._state === "undone" ? "redo" : "undo";
     // Inline SVG rather than a font glyph: the two arrows are the only way the reader
@@ -550,13 +553,38 @@ class WaDiff extends HTMLElement {
     this._files = (summary && summary.files) || [];
     const added = (summary && summary.added) || 0;
     const removed = (summary && summary.removed) || 0;
-    const count = this._files.length;
+    // One row per path, even when the ledger holds the file twice.
+    //
+    // Turns recorded before the recorder merged repeats hold one entry per write, and those turns are
+    // still in the ledger - the ledger is append-only and is never rewritten to make a view prettier. So
+    // the view merges them and says so ("\u00d72"), instead of showing the same file twice and leaving the
+    // reader to work out that it is one change. The counts are summed the same way, so the rows and the
+    // header agree with each other.
+    const byPath = new Map();
+    for (const file of this._files) {
+      const seen = byPath.get(file.path);
+      if (seen) {
+        seen.added += file.added || 0;
+        seen.removed += file.removed || 0;
+        seen.writes += 1;
+        seen.created = seen.created && file.created === true;
+      } else {
+        byPath.set(file.path, {
+          path: file.path, added: file.added || 0, removed: file.removed || 0,
+          created: file.created === true, writes: 1,
+        });
+      }
+    }
+    const rows = Array.from(byPath.values());
+    const totalAdded = rows.reduce((sum, file) => sum + file.added, 0);
+    const totalRemoved = rows.reduce((sum, file) => sum + file.removed, 0);
+    const count = rows.length;
     this._label.textContent = count === 1 ? "1 file changed" : count + " files changed";
-    this._meta.textContent = "+" + added + " \u2212" + removed;
-    this._meta.classList.toggle("no-change", added === 0 && removed === 0);
+    this._meta.textContent = "+" + totalAdded + " \u2212" + totalRemoved;
+    this._meta.classList.toggle("no-change", totalAdded === 0 && totalRemoved === 0);
 
     this._body.replaceChildren();
-    for (const file of this._files) {
+    for (const file of rows) {
       // A button, not a list item: clicking a changed file is how you find out what changed in it. The
       // diff itself is not in the transcript (the turn carries addresses, not bodies), so this click is
       // what asks the node to build it - which is why it is a real control and not a decoration.
@@ -583,6 +611,15 @@ class WaDiff extends HTMLElement {
         const tag = document.createElement("span");
         tag.className = "diff-tag";
         tag.textContent = "new";
+        row.append(tag);
+      }
+      // More than one write to the same file in one turn: one change, and the reader is told how it was
+      // recorded rather than being shown the same path twice.
+      if (file.writes > 1) {
+        const tag = document.createElement("span");
+        tag.className = "diff-tag";
+        tag.textContent = "\u00d7" + file.writes;
+        tag.title = "this file was written " + file.writes + " times in this turn";
         row.append(tag);
       }
       row.addEventListener("click", (event) => {
@@ -615,12 +652,27 @@ class WaDiff extends HTMLElement {
   // The server says whether this change can still be undone (the file may have moved on
   // since the turn). Until it says so the toggle stays disabled, so a click can never
   // promise something that will be refused.
+  // "I do not know yet" is its own state, not a refusal.
+  //
+  // The first version passed `can = false, reason = "checking…"` and the refusal path rendered it as a
+  // red failed note - a transient question displayed as an error, which is what it looked like. A state
+  // that is neither yes nor no deserves neither styling nor a sentence.
+  setPending() {
+    this._build();
+    if (this._state === "locked") return;
+    this._state = "pending";
+    this._reason = "";
+    this.setMessage("");
+    this._paintToggle();
+  }
+
   setUndoable(can, reason) {
     this._build();
     if (this._state === "locked") return;
     if (can) {
       this._state = this._state === "undone" ? "undone" : "applied";
       this._reason = "";
+      this.setMessage("");
     } else {
       this._state = "locked";
       this._reason = reason || "cannot be undone";
