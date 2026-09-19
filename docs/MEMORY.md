@@ -14,12 +14,17 @@ Two rules drive all of this:
 | Store | What it is | Tool |
 | --- | --- | --- |
 | `memories` (+FTS) | distilled facts | `remember`, `recall` |
-| `messages` / `conversations` (+FTS) | **the external inbox/ledger** (WhatsApp, mail) | `search_messages`, `conversation` |
-| `turns` (+FTS) | **the agent's own dialogue** — its transcript | `sessions`, `session`, `search_turns`, `resume_session` |
-| `runs` | effect/settlement record per turn | (internal) |
+| `ledger_messages` / `conversations` (+FTS) | **the external inbox/ledger** (WhatsApp, mail) | `search_messages`, `conversation` |
+| `messages` (+FTS) | **the agent's own dialogue** — its transcript | `sessions`, `session`, `search_turns`, `resume_session` |
+| `runs` | effect/settlement record per run | (internal) |
 
-`messages` is *not* "what we talked about" — it is other people's messages.
-`runs` is not the conversation — it is one row per completed turn.
+`ledger_messages` holds other people's messages; `messages` holds the agent's transcript.
+`runs` is not the conversation — it is one row per completed ask-and-answer.
+Older databases used `messages` for the external ledger and `turns` for the transcript.
+The shape migration renames both before applying the new schema. It also renames
+`harness_events.turn_id` and `runs.turn_id` to `run_id`, preserving their rows.
+Once migrated, an older binary is incompatible and must not be restarted against
+that database. Back up the database and install the matching binary in one upgrade.
 
 ## Sessions are resumable threads
 
@@ -28,7 +33,7 @@ thread from talking locally, and a guest's threads are their own. `ensure_sessio
 reuses the newest open session for that pair, so a restart continues the thread
 instead of starting a new one.
 
-`turns` holds `seq, role (user|assistant|tool|summary), content, tool_calls,
+`messages` holds `seq, role (user|assistant|tool|summary), content, tool_calls,
 tool_call_id, tool_name, tokens, ms, ok, debug, trace`. **The transcript is the
 context**: `agent.lua` rebuilds the provider messages from it every turn
 (system + AGENTS.md + summary + turns after the watermark). There is no separate

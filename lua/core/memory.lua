@@ -66,6 +66,89 @@ end
 -- below it, it would resolve to a global and be nil at call time.
 local decode_calls, classify, ago, detail_of
 
+-- ---------------------------------------------------------------- the naming migration
+--
+-- docs/MEMORY.md settles what these words mean, and three different things used to share
+-- two of them: `session_turns()` returned *messages*, `turn_id` identified a *run* in one place and a
+-- *message* in another, and the UI said "this turn" meaning the run. The names move once, here.
+--
+-- Two properties this has to have, both of them paid for elsewhere in this project:
+--
+--   * **It runs before the schema, not after.** `schema.sql` creates `messages`, so a rename that
+--     arrived afterwards would find the name taken, skip, and strand every old row in a table nothing
+--     reads any more - silent data loss, on the one database that matters. Renaming first means the
+--     rows move, and the schema then fills in whatever a fresh database is missing.
+--   * **It is identified by shape, not by the presence of another table.** The ledger is recognised
+--     by its own `conversation_id` column, so a database that has the ledger but never had a
+--     transcript still frees the name instead of colliding with it.
+--
+-- Every step is guarded by the old name *and* the absence of the new one, so a database already
+-- migrated is left exactly as it is and a fresh one is not touched at all. Re-running changes
+-- nothing, which is asserted by tests/naming-migration.lua against a database built the old way.
+local function table_exists(name)
+  return #query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", {name}) > 0
+end
+
+local function index_exists(name)
+  return #query("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", {name}) > 0
+end
+
+-- SQLite has no `ALTER INDEX ... RENAME`: an index follows its table's rename and keeps its own name,
+-- so a moved table would leave behind an index called after the old one. Dropped and recreated, which
+-- is what `schema.sql` does for a fresh database anyway.
+local function rename_index(from, to, definition)
+  if index_exists(from) and not index_exists(to) then
+    exec("DROP INDEX " .. from)
+    exec("CREATE INDEX " .. to .. " ON " .. definition)
+  end
+end
+
+local function migrate_shape()
+  -- 1. The external inbox/ledger frees the word first: it holds `messages`, and the transcript needs
+  --    it. Recognised by its own column, so this cannot fire on an already-migrated database, where
+  --    `messages` is the transcript and has no `conversation_id`.
+  if table_exists("messages") and not table_exists("ledger_messages")
+     and has_column("messages", "conversation_id") then
+    exec("ALTER TABLE messages RENAME TO ledger_messages")
+  end
+  if table_exists("messages_fts") and not table_exists("ledger_messages_fts")
+     and (has_column("messages_fts", "conversation_id") or table_exists("turns")) then
+    exec("ALTER TABLE messages_fts RENAME TO ledger_messages_fts")
+  end
+  rename_index("messages_conversation_idx", "ledger_messages_conversation_idx",
+               "ledger_messages(conversation_id, observed_at)")
+  rename_index("messages_time_idx", "ledger_messages_time_idx", "ledger_messages(observed_at)")
+
+  -- 2. The transcript is `messages`: one stored row per message (user turn, assistant turn, tool
+  --    result, summary).
+  if table_exists("turns") and not table_exists("messages") then
+    exec("ALTER TABLE turns RENAME TO messages")
+  end
+  -- Its full-text index is rebuilt rather than renamed. SQLite renames an fts5 table happily, but refuses
+  -- `ALTER TABLE ... RENAME COLUMN` on a virtual table ("cannot rename columns of virtual table") - and
+  -- the column here is `turn_id`, where the row it points at is a message. Measured against this node's
+  -- own SQLite, not assumed: the rebuild below is the path it accepted.
+  if table_exists("turns_fts") and not table_exists("messages_fts") then
+    exec([[CREATE VIRTUAL TABLE messages_fts USING fts5(
+  content, session_id UNINDEXED, message_id UNINDEXED,
+  tokenize = 'unicode61 remove_diacritics 2')]])
+    exec("INSERT INTO messages_fts(content,session_id,message_id) SELECT content,session_id,turn_id FROM turns_fts")
+    exec("DROP TABLE turns_fts")
+  end
+  rename_index("turns_session_idx", "messages_session_idx", "messages(session_id, seq)")
+  rename_index("turns_time_idx", "messages_time_idx", "messages(created_at)")
+
+  -- 3. `turn_id` held a *run* in `runs` and `harness_events` (both are given the run's own id), and a
+  --    *message* in the full-text index above - which is why this is three renames and not one.
+  if table_exists("runs") and has_column("runs", "turn_id") and not has_column("runs", "run_id") then
+    exec("ALTER TABLE runs RENAME COLUMN turn_id TO run_id")
+  end
+  if table_exists("harness_events") and has_column("harness_events", "turn_id")
+     and not has_column("harness_events", "run_id") then
+    exec("ALTER TABLE harness_events RENAME COLUMN turn_id TO run_id")
+  end
+end
+
 -- Sessions become resumable threads: who, where, how verbose, and the
 -- compaction watermark.
 local function migrate()
@@ -91,15 +174,15 @@ local function migrate()
   -- attachments/ (content-addressed by sha256), never in `content`. Content is
   -- FTS-indexed, so putting base64 there would poison every text search and
   -- bloat the index by three orders of magnitude.
-  add_column("turns", "images", "TEXT NOT NULL DEFAULT '[]'")
+  add_column("messages", "images", "TEXT NOT NULL DEFAULT '[]'")
   -- What the turn changed on disk: a JSON summary of {files:[{path,added,removed,...}],
   -- added, removed}, so the diff topic can be rebuilt from the ledger alone. The *bodies*
   -- (the previous text undo restores) are not here and must not be: this column is read
   -- into every transcript view, and a file's contents do not belong in a transcript any
   -- more than base64 images do. An older turn's `{}` means "nothing recorded", which
   -- reads as no topic rather than an empty one.
-  add_column("turns", "changes", "TEXT NOT NULL DEFAULT '{}'")
-  add_column("turns", "reasoning", "TEXT NOT NULL DEFAULT ''")
+  add_column("messages", "changes", "TEXT NOT NULL DEFAULT '{}'")
+  add_column("messages", "reasoning", "TEXT NOT NULL DEFAULT ''")
   -- Rows written before the state was renamed kept the wording of the claim we used to
   -- make: "died after a tool result", "died right after a compaction". Nobody observed
   -- those deaths - a live run was reported as interrupted fourteen times in a row - so
@@ -111,6 +194,10 @@ local function migrate()
 end
 
 function M.setup()
+  -- The shape migration runs *before* the schema. `schema.sql` creates `messages`, so a rename that
+  -- arrived after it would find the name taken, skip, and strand the old rows in a table nothing reads
+  -- any more. Renaming first moves the rows; the schema then fills in whatever a fresh database lacks.
+  migrate_shape()
   local schema = (EMBEDDED and EMBEDDED["lua/core/schema.sql"]) or host.read_file("lua/core/schema.sql")
   if not schema then error("schema_missing") end
   exec(schema)
@@ -120,7 +207,7 @@ function M.setup()
   -- list of them unusable. Name them from their first user message, once: after this the name
   -- belongs to the thread, and only a thread without one gets named again.
   for _, row in ipairs(query("SELECT id FROM sessions WHERE title='' OR title='chat'")) do
-    local first = query("SELECT content FROM turns WHERE session_id=? AND role='user' ORDER BY seq ASC LIMIT 1", {row.id})
+    local first = query("SELECT content FROM messages WHERE session_id=? AND role='user' ORDER BY seq ASC LIMIT 1", {row.id})
     if first[1] then M.name_session(row.id, first[1].content or "") end
   end
 end
@@ -227,27 +314,27 @@ function M.record_message(message)
   exec("INSERT INTO conversations(id,kind,title,created_at,updated_at) VALUES(?,?,?,?,?) " ..
        "ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at",
        {conversation_id, message.kind or "unknown", message.title or "", now, now})
-  local existing = query("SELECT body_sha256 FROM messages WHERE conversation_id=? AND message_id=?",
+  local existing = query("SELECT body_sha256 FROM ledger_messages WHERE conversation_id=? AND message_id=?",
                          {conversation_id, message_id})
   local hash = host.sha256(body)
   if #existing == 0 then
-    exec("INSERT INTO messages(conversation_id,message_id,sender_id,direction,sent_at,observed_at," ..
+    exec("INSERT INTO ledger_messages(conversation_id,message_id,sender_id,direction,sent_at,observed_at," ..
          "body,reply_to,media,source,body_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
          {conversation_id, message_id, message.sender_id or "", message.direction or "incoming",
           message.sent_at, now, body, message.reply_to, json.encode(message.media or {}),
           message.source or "observer", hash})
-    exec("INSERT INTO messages_fts(body,conversation_id,message_id) VALUES(?,?,?)",
+    exec("INSERT INTO ledger_messages_fts(body,conversation_id,message_id) VALUES(?,?,?)",
          {body, conversation_id, message_id})
   elseif existing[1].body_sha256 ~= hash then
-    exec("UPDATE messages SET body=?, body_sha256=?, sender_id=?, direction=?, " ..
+    exec("UPDATE ledger_messages SET body=?, body_sha256=?, sender_id=?, direction=?, " ..
          "sent_at=COALESCE(?,sent_at), observed_at=?, reply_to=COALESCE(?,reply_to), media=?, source=? " ..
          "WHERE conversation_id=? AND message_id=?",
          {body, hash, message.sender_id or "", message.direction or "incoming", message.sent_at, now,
           message.reply_to, json.encode(message.media or {}), message.source or "observer",
           conversation_id, message_id})
-    exec("DELETE FROM messages_fts WHERE conversation_id=? AND message_id=?",
+    exec("DELETE FROM ledger_messages_fts WHERE conversation_id=? AND message_id=?",
          {conversation_id, message_id})
-    exec("INSERT INTO messages_fts(body,conversation_id,message_id) VALUES(?,?,?)",
+    exec("INSERT INTO ledger_messages_fts(body,conversation_id,message_id) VALUES(?,?,?)",
          {body, conversation_id, message_id})
   end
 end
@@ -256,9 +343,9 @@ function M.search_messages(text, conversation_id, limit)
   limit = limit or 20
   local match = M.fts_query(text)
   if match == "" then return {} end
-  local sql = "SELECT msg.*, bm25(messages_fts) AS rank FROM messages_fts " ..
-              "JOIN messages msg ON msg.conversation_id=messages_fts.conversation_id " ..
-              "AND msg.message_id=messages_fts.message_id WHERE messages_fts MATCH ?"
+  local sql = "SELECT msg.*, bm25(ledger_messages_fts) AS rank FROM ledger_messages_fts " ..
+              "JOIN ledger_messages msg ON msg.conversation_id=ledger_messages_fts.conversation_id " ..
+              "AND msg.message_id=ledger_messages_fts.message_id WHERE ledger_messages_fts MATCH ?"
   local params = {match}
   if conversation_id then sql = sql .. " AND msg.conversation_id=?"; params[#params + 1] = conversation_id end
   sql = sql .. " ORDER BY rank LIMIT ?"
@@ -268,7 +355,7 @@ end
 
 function M.conversation(conversation_id, limit)
   limit = limit or 50
-  local rows = query("SELECT * FROM messages WHERE conversation_id=? " ..
+  local rows = query("SELECT * FROM ledger_messages WHERE conversation_id=? " ..
                      "ORDER BY COALESCE(sent_at,observed_at) DESC LIMIT ?", {conversation_id, limit})
   local out = {}
   for index = #rows, 1, -1 do out[#out + 1] = rows[index] end
@@ -277,7 +364,7 @@ end
 
 function M.conversations(limit)
   limit = limit or 50
-  return query("SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id=c.id) AS message_count " ..
+  return query("SELECT c.*, (SELECT COUNT(*) FROM ledger_messages m WHERE m.conversation_id=c.id) AS message_count " ..
                "FROM conversations c ORDER BY c.updated_at DESC LIMIT ?", {limit})
 end
 
@@ -289,10 +376,10 @@ function M.stats()
   return {
     memories = count("SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL"),
     conversations = count("SELECT COUNT(*) FROM conversations"),
-    messages = count("SELECT COUNT(*) FROM messages"),
+    messages = count("SELECT COUNT(*) FROM ledger_messages"),
     observations = count("SELECT COUNT(*) FROM observations"),
     sessions = count("SELECT COUNT(*) FROM sessions"),
-    turns = count("SELECT COUNT(*) FROM turns"),
+    turns = count("SELECT COUNT(*) FROM messages"),
     runs = count("SELECT COUNT(*) FROM runs"),
   }
 end
@@ -352,7 +439,7 @@ end
 function M.list_sessions(user_id, limit, opts)
   opts = opts or {}
   limit = limit or 30
-  local sql = "SELECT s.*, (SELECT COUNT(*) FROM turns t WHERE t.session_id=s.id) AS turn_count"
+  local sql = "SELECT s.*, (SELECT COUNT(*) FROM messages t WHERE t.session_id=s.id) AS turn_count"
   if opts.states then
     -- The last turn per session, in the same query: one row per thread, no N+1.
     sql = sql .. ", l.role AS last_role, l.ok AS last_ok, l.tool_calls AS last_tool_calls, " ..
@@ -360,8 +447,8 @@ function M.list_sessions(user_id, limit, opts)
   end
   sql = sql .. " FROM sessions s"
   if opts.states then
-    sql = sql .. " LEFT JOIN turns l ON l.session_id=s.id " ..
-                 "AND l.seq=(SELECT MAX(seq) FROM turns WHERE session_id=s.id)"
+    sql = sql .. " LEFT JOIN messages l ON l.session_id=s.id " ..
+                 "AND l.seq=(SELECT MAX(seq) FROM messages WHERE session_id=s.id)"
   end
   local params = {}
   if user_id and user_id ~= "" then sql = sql .. " WHERE s.user_id=?"; params[#params + 1] = user_id end
@@ -546,14 +633,14 @@ function M.load_image(reference)
 end
 
 function M.next_seq(session_id)
-  local rows = query("SELECT COALESCE(MAX(seq),0)+1 AS seq FROM turns WHERE session_id=?", {session_id})
+  local rows = query("SELECT COALESCE(MAX(seq),0)+1 AS seq FROM messages WHERE session_id=?", {session_id})
   return rows[1] and rows[1].seq or 1
 end
 
 function M.append_turn(session_id, turn)
   local seq = turn.seq or M.next_seq(session_id)
   local id = turn.id or host.uuid()
-  exec("INSERT INTO turns(id,session_id,seq,role,content,images,tool_calls,tool_call_id,tool_name," ..
+  exec("INSERT INTO messages(id,session_id,seq,role,content,images,tool_calls,tool_call_id,tool_name," ..
        "tokens,ms,ok,debug,trace,changes,created_at,reasoning) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
        {id, session_id, seq, turn.role or "user", turn.content or "",
         json.encode(turn.images or {}),
@@ -561,7 +648,7 @@ function M.append_turn(session_id, turn)
         turn.tokens or 0, turn.ms or 0, turn.ok == false and 0 or 1,
         turn.debug and 1 or 0, json.encode(turn.trace or {}),
         json.encode(turn.changes or {}), host.now(), turn.reasoning or ""})
-  exec("INSERT INTO turns_fts(content,session_id,turn_id) VALUES(?,?,?)",
+  exec("INSERT INTO messages_fts(content,session_id,message_id) VALUES(?,?,?)",
        {turn.content or "", session_id, id})
   exec("UPDATE sessions SET updated_at=? WHERE id=?", {host.now(), session_id})
   M.journal("turn", id, {
@@ -626,17 +713,17 @@ function M.session_turns(session_id, opts)
   local limit = opts.limit or 200
   local sql, params
   if opts.all then
-    sql="SELECT * FROM turns WHERE session_id=? AND seq>? "..(opts.exclude_summaries and "AND role<>'summary' " or "").."ORDER BY seq ASC"
+    sql="SELECT * FROM messages WHERE session_id=? AND seq>? "..(opts.exclude_summaries and "AND role<>'summary' " or "").."ORDER BY seq ASC"
     params={session_id,opts.after_seq or 0}
   elseif opts.before_seq then
-    sql="SELECT * FROM (SELECT * FROM turns WHERE session_id=? AND seq<? ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC"
+    sql="SELECT * FROM (SELECT * FROM messages WHERE session_id=? AND seq<? ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC"
     params={session_id,opts.before_seq,limit}
   elseif opts.after_seq then
-    sql = "SELECT * FROM (SELECT * FROM turns WHERE session_id=? AND seq>? " ..
+    sql = "SELECT * FROM (SELECT * FROM messages WHERE session_id=? AND seq>? " ..
       "ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC"
     params = {session_id, opts.after_seq, limit}
   else
-    sql = "SELECT * FROM (SELECT * FROM turns WHERE session_id=? " ..
+    sql = "SELECT * FROM (SELECT * FROM messages WHERE session_id=? " ..
       "ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC"
     params = {session_id, limit}
   end
@@ -662,7 +749,7 @@ end
 -- journal already replicates, so a peer's turn resolves here too.
 function M.turn(turn_id)
   if not turn_id or turn_id == "" then return nil end
-  local rows = query("SELECT * FROM turns WHERE id=?", {turn_id})
+  local rows = query("SELECT * FROM messages WHERE id=?", {turn_id})
   local row = rows[1]
   if not row then return nil end
   row.tool_calls = json.decode(row.tool_calls)
@@ -677,9 +764,9 @@ function M.search_turns(text, user_id, limit)
   limit = limit or 20
   local match = M.fts_query(text)
   if match == "" then return {} end
-  local sql = "SELECT t.*, s.user_id, s.title, bm25(turns_fts) AS rank FROM turns_fts " ..
-              "JOIN turns t ON t.id=turns_fts.turn_id JOIN sessions s ON s.id=t.session_id " ..
-              "WHERE turns_fts MATCH ?"
+  local sql = "SELECT t.*, s.user_id, s.title, bm25(messages_fts) AS rank FROM messages_fts " ..
+              "JOIN messages t ON t.id=messages_fts.message_id JOIN sessions s ON s.id=t.session_id " ..
+              "WHERE messages_fts MATCH ?"
   local params = {match}
   if user_id and user_id ~= "" then sql = sql .. " AND s.user_id=?"; params[#params + 1] = user_id end
   sql = sql .. " ORDER BY rank LIMIT ?"
@@ -787,12 +874,12 @@ end
 -- which of the batch is missing - and it is only visible by looking the decision
 -- up, not at the tail.
 function M.pending_calls(session_id)
-  local rows = query("SELECT tool_calls FROM turns WHERE session_id=? AND role='assistant' " ..
+  local rows = query("SELECT tool_calls FROM messages WHERE session_id=? AND role='assistant' " ..
                      "AND tool_calls <> '[]' ORDER BY seq DESC LIMIT 1", {session_id})
   local decision = rows[1]
   if not decision then return nil, nil end
   local answered = {}
-  for _, row in ipairs(query("SELECT tool_call_id FROM turns WHERE session_id=? AND role='tool'",
+  for _, row in ipairs(query("SELECT tool_call_id FROM messages WHERE session_id=? AND role='tool'",
                              {session_id})) do
     answered[row.tool_call_id] = true
   end
@@ -811,7 +898,7 @@ end
 function M.session_state(session_id)
   local session = M.session(session_id)
   if not session then return nil end
-  local rows = query("SELECT * FROM turns WHERE session_id=? ORDER BY seq DESC LIMIT 1", {session_id})
+  local rows = query("SELECT * FROM messages WHERE session_id=? ORDER BY seq DESC LIMIT 1", {session_id})
   local last = rows[1]
   local state = classify(last)
   local pending = nil
@@ -841,7 +928,7 @@ function M.session_state(session_id)
 end
 
 function M.turn_count(session_id)
-  local rows = query("SELECT COUNT(*) AS n FROM turns WHERE session_id=?", {session_id})
+  local rows = query("SELECT COUNT(*) AS n FROM messages WHERE session_id=?", {session_id})
   return tonumber(rows[1] and rows[1].n) or 0
 end
 
@@ -888,9 +975,9 @@ function M.prune(days)
   days = days or 7
   local cutoff = host.now() - (days * 86400)
   local result = exec(
-    "DELETE FROM turns WHERE created_at < ? AND session_id IN " ..
+    "DELETE FROM messages WHERE created_at < ? AND session_id IN " ..
     "(SELECT id FROM sessions WHERE mode <> 'debug')", {cutoff})
-  exec("DELETE FROM turns_fts WHERE turn_id NOT IN (SELECT id FROM turns)")
+  exec("DELETE FROM messages_fts WHERE message_id NOT IN (SELECT id FROM messages)")
   return result.changes or 0
 end
 
@@ -906,11 +993,13 @@ function M.session_fixture(session_id)
 end
 
 function M.record_run(run_id, session_id, status, outcome, reply)
-  exec("INSERT INTO runs(id,session_id,turn_id,status,outcome,reply,started_at) VALUES(?,?,?,?,?,?,?) " ..
+  exec("INSERT INTO runs(id,session_id,run_id,status,outcome,reply,started_at) VALUES(?,?,?,?,?,?,?) " ..
        "ON CONFLICT(id) DO UPDATE SET status=excluded.status, outcome=excluded.outcome, reply=excluded.reply",
        {run_id, session_id, run_id, status or "", outcome or "", reply or "", host.now()})
   M.journal("run", run_id, {
-    id = run_id, session_id = session_id, turn_id = run_id, status = status or "",
+    -- Old peers still read turn_id. Keep the alias in the wire payload until
+    -- every peer has migrated; the local table has only run_id.
+    id = run_id, session_id = session_id, run_id = run_id, turn_id = run_id, status = status or "",
     outcome = outcome or "", reply = reply or "", started_at = host.now(),
   })
 end
@@ -955,15 +1044,15 @@ function M.apply_entry(entry)
   if type(payload) ~= "table" then return false end
 
   if entry.kind == "turn" then
-    exec("INSERT OR REPLACE INTO turns(id,session_id,seq,role,content,tool_calls,tool_call_id," ..
+    exec("INSERT OR REPLACE INTO messages(id,session_id,seq,role,content,tool_calls,tool_call_id," ..
          "tool_name,tokens,ms,ok,debug,trace,created_at,reasoning,images,changes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
          {payload.id, payload.session_id, payload.seq, payload.role, payload.content or "",
           json.encode(payload.tool_calls or {}), payload.tool_call_id or "", payload.tool_name or "",
           payload.tokens or 0, payload.ms or 0, payload.ok or 1, payload.debug or 0,
           json.encode(payload.trace or {}), payload.created_at or host.now(),payload.reasoning or "",
           json.encode(payload.images or {}),json.encode(payload.changes or {})})
-    exec("DELETE FROM turns_fts WHERE turn_id=?", {payload.id})
-    exec("INSERT INTO turns_fts(content,session_id,turn_id) VALUES(?,?,?)",
+    exec("DELETE FROM messages_fts WHERE message_id=?", {payload.id})
+    exec("INSERT INTO messages_fts(content,session_id,message_id) VALUES(?,?,?)",
          {payload.content or "", payload.session_id, payload.id})
   elseif entry.kind == "session" then
     local local_rows = query("SELECT updated_at FROM sessions WHERE id=?", {payload.id})
@@ -990,9 +1079,9 @@ function M.apply_entry(entry)
     exec("INSERT INTO memories_fts(content,tags,memory_id) VALUES(?,?,?)",
          {payload.content or "", payload.tags or "", payload.id})
   elseif entry.kind == "run" then
-    exec("INSERT OR REPLACE INTO runs(id,session_id,turn_id,status,outcome,reply,started_at,ended_at) " ..
+    exec("INSERT OR REPLACE INTO runs(id,session_id,run_id,status,outcome,reply,started_at,ended_at) " ..
          "VALUES(?,?,?,?,?,?,?,?)",
-         {payload.id, payload.session_id or "", payload.turn_id or "", payload.status or "",
+         {payload.id, payload.session_id or "", payload.run_id or payload.turn_id or "", payload.status or "",
           payload.outcome or "", payload.reply or "", payload.started_at or host.now(),
           payload.ended_at or 0})
   else

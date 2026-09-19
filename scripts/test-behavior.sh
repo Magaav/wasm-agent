@@ -52,7 +52,7 @@ db, codename, wall_ms = sys.argv[1], sys.argv[2], int(sys.argv[3])
 con = sqlite3.connect(db)
 sid = con.execute("SELECT id FROM sessions ORDER BY updated_at DESC LIMIT 1").fetchone()[0]
 turns = list(con.execute(
-    "SELECT seq, role, content, tool_calls, tool_name, trace, ms FROM turns "
+    "SELECT seq, role, content, tool_calls, tool_name, trace, ms FROM messages "
     "WHERE session_id=? ORDER BY seq", (sid,)))
 
 selected, query, retrieved, answer = False, "", "", ""
@@ -223,7 +223,7 @@ import sqlite3, sys
 con = sqlite3.connect(sys.argv[1])
 sid = sys.argv[2]
 texts = [row[0] or "" for row in con.execute(
-    "SELECT content FROM turns WHERE session_id=? ORDER BY seq", (sid,))]
+    "SELECT content FROM messages WHERE session_id=? ORDER BY seq", (sid,))]
 print(f"       session {sid[:8]} has {len(texts)} turns; earliest user text: "
       f"{next((t for t in texts if t.strip()), '')[:40]!r}")
 # The earlier exchange must still be there alongside the new one.

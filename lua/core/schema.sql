@@ -29,16 +29,20 @@ CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY, kind TEXT NOT NULL DEFAULT 'unknown', title TEXT NOT NULL DEFAULT '',
   created_at REAL NOT NULL, updated_at REAL NOT NULL);
 
-CREATE TABLE IF NOT EXISTS messages (
+-- The external inbox/ledger (WhatsApp, mail). It is `ledger_messages`, not `messages`: the naming
+-- contract (ARCHITECTURE.md section 6) gives "message" to the agent's own transcript rows, which are the
+-- `messages` table further down. Two tables cannot share one name, and this is the ledger - the word
+-- docs/MEMORY.md already used for it, and the one its tools are named after (`search_messages`).
+CREATE TABLE IF NOT EXISTS ledger_messages (
   conversation_id TEXT NOT NULL, message_id TEXT NOT NULL,
   sender_id TEXT NOT NULL DEFAULT '', direction TEXT NOT NULL DEFAULT 'incoming',
   sent_at REAL, observed_at REAL NOT NULL, body TEXT NOT NULL DEFAULT '',
   reply_to TEXT, media TEXT NOT NULL DEFAULT '[]', source TEXT NOT NULL DEFAULT 'observer',
   body_sha256 TEXT NOT NULL,
   PRIMARY KEY (conversation_id, message_id));
-CREATE INDEX IF NOT EXISTS messages_conversation_idx ON messages(conversation_id, observed_at);
-CREATE INDEX IF NOT EXISTS messages_time_idx ON messages(observed_at);
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+CREATE INDEX IF NOT EXISTS ledger_messages_conversation_idx ON ledger_messages(conversation_id, observed_at);
+CREATE INDEX IF NOT EXISTS ledger_messages_time_idx ON ledger_messages(observed_at);
+CREATE VIRTUAL TABLE IF NOT EXISTS ledger_messages_fts USING fts5(
   body, conversation_id UNINDEXED, message_id UNINDEXED,
   tokenize = 'unicode61 remove_diacritics 2');
 
@@ -47,7 +51,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   parent_session_id TEXT, started_at REAL NOT NULL, ended_at REAL);
 
 CREATE TABLE IF NOT EXISTS runs (
-  id TEXT PRIMARY KEY, session_id TEXT NOT NULL, turn_id TEXT NOT NULL DEFAULT '',
+  id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT '', outcome TEXT NOT NULL DEFAULT '', reply TEXT NOT NULL DEFAULT '',
   started_at REAL NOT NULL, ended_at REAL);
 CREATE INDEX IF NOT EXISTS runs_session_idx ON runs(session_id, started_at);
@@ -57,10 +61,15 @@ CREATE TABLE IF NOT EXISTS run_links (
   PRIMARY KEY (run_id, entity_type, entity_id));
 
 -- ---------------------------------------------------------------- transcript
--- The agent's OWN dialogue. Deliberately separate from `messages`, which is the
--- external inbox/ledger. `runs` stays an effect/settlement record; `turns` is the
--- conversation, and `trace` on each assistant turn is the observability payload.
-CREATE TABLE IF NOT EXISTS turns (
+-- The agent's OWN dialogue: one row per stored message (a user turn, an assistant turn, a tool
+-- result, a summary). Deliberately separate from `ledger_messages`, which is the external inbox.
+-- `runs` stays an effect/settlement record; `messages` is the conversation, and `trace` on each
+-- assistant message is the observability payload.
+--
+-- It was called `turns`, which was the ambiguity docs/MEMORY.md settles: a *turn* is one
+-- speaker's contribution, a *run* is the ask-and-answer, and a *message* is one stored row - which
+-- is what this table holds.
+CREATE TABLE IF NOT EXISTS messages (
   id           TEXT PRIMARY KEY,
   session_id   TEXT NOT NULL,
   seq          INTEGER NOT NULL,
@@ -76,10 +85,10 @@ CREATE TABLE IF NOT EXISTS turns (
   trace        TEXT NOT NULL DEFAULT '[]',
   created_at   REAL NOT NULL
 );
-CREATE INDEX IF NOT EXISTS turns_session_idx ON turns(session_id, seq);
-CREATE INDEX IF NOT EXISTS turns_time_idx ON turns(created_at);
-CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(
-  content, session_id UNINDEXED, turn_id UNINDEXED,
+CREATE INDEX IF NOT EXISTS messages_session_idx ON messages(session_id, seq);
+CREATE INDEX IF NOT EXISTS messages_time_idx ON messages(created_at);
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+  content, session_id UNINDEXED, message_id UNINDEXED,
   tokenize = 'unicode61 remove_diacritics 2');
 
 -- ------------------------------------------------------------- replication

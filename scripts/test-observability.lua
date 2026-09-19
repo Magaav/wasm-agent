@@ -190,7 +190,7 @@ check(final.reasoning=='final thought','final reasoning persisted for continuati
 local events=telemetry.events(run,0,100).events
 local first_request; for _,event in ipairs(events) do if event.kind=='llm' and event.phase=='start' then first_request=event; break end end
 check(first_request.payload.request_hash==host.sha256(json.encode(sent[1])),'hash matches exact streaming request including stream options')
-check(memory.session_turns(run,{all=true})[1].id==first_request.turn_id,'request trace links to its actual user turn')
+check(memory.session_turns(run,{all=true})[1].id==first_request.run_id,'request trace links to its actual user turn')
 report=original_dofile('lua/core/telemetry.lua').snapshot(run)
 check(report.total.calls==2 and report.tool_failures==1 and report.turns==1,'real loop durable outcomes')
 check(report.total.prompt==2000 and report.total.input==400,'actual loop uses disjoint cache categories')
