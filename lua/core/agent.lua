@@ -501,7 +501,19 @@ function M:maybe_compact()
   -- transcript alone misses entirely.
   local measured = self.last_prompt_tokens or 0
   local before = measured > 0 and measured or self:context_tokens()
-  if before <= (limit - reserve) then return false end
+  -- A soft budget, because the model window is the wrong trigger on its own.
+  --
+  -- This model's window is 1,000,000 tokens, so "compact when the window is nearly full" means a session
+  -- re-sends 100,000+ tokens on every call for its whole life and never compacts - measured: a 1,470-call
+  -- session averaged 120,628 tokens of prompt per call, ~11x pi, for a third of the output per call. The
+  -- window says when a call would *fail*; a budget says when it has stopped being worth paying for.
+  --
+  -- The ledger keeps every byte either way: only what gets re-sent is budgeted (ARCHITECTURE.md,
+  -- "memory is on demand"). The budget never overrides the window - a small window still fires first, or a
+  -- call would be sent past its model.
+  local budget = tonumber(host.getenv and host.getenv("WASM_AGENT_CONTEXT_BUDGET") or "") or 64000
+  local trigger = math.min(limit - reserve, budget)
+  if before <= trigger then return false end
 
   local session = memory.session(self.session_id) or {}
   local rows = memory.session_turns(self.session_id, {
