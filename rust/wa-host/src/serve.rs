@@ -567,6 +567,16 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
         "[serve] one turn worker{} (reads: {warm} warm, up to {ceiling}, spawned on demand)",
         if warm == 0 { String::new() } else { format!(" + {warm} read worker(s)") }
     );
+    // A node whose ui directory has no index.html serves 404 for every UI route and looks healthy doing
+    // it - the failure that made a window show "not found" for an afternoon. It says so at startup instead,
+    // once, where whoever started it will see it.
+    if !ui.join("index.html").exists() {
+        eprintln!(
+            "[serve] WARNING: no index.html in {} - this node cannot serve its UI and will answer 404 for /
+[serve] (on Windows a POSIX path here is the usual cause: pass a Windows path)",
+            ui.display()
+        );
+    }
     eprintln!("[serve] wasm-agent UI at http://127.0.0.1:{port}  (ui: {})", ui.display());
 
     if let Ok(relay_url) = std::env::var("WASM_AGENT_RELAY") {
