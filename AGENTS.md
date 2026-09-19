@@ -159,10 +159,10 @@ bash scripts/build-window.sh                  # -> target/windows-x64/.../wa-win
 
 ## Conventions
 
-- **No Python.** Agent logic is Lua; platform capabilities are Rust `host.*`.
-  Read `docs/HOST.md` before adding a capability: a host function returns `nil`
-  for missing values (never zero values), and paths come from `host.paths()`,
-  never `$HOME` or a Linux-only path.
+- **The host is capabilities, not logic.** Agent logic is Lua; platform capabilities
+  are Rust `host.*`. Read `docs/HOST.md` before adding a capability: a host function
+  returns `nil` for missing values (never zero values), and paths come from
+  `host.paths()`, never `$HOME` or a Linux-only path.
 - **Skills carry procedures, not context.** A technique the agent should not
   have to be told twice belongs in `skills/<name>/SKILL.md` (the Agent Skills
   standard, shared with pi and Orca). Only the description is always in
@@ -188,21 +188,6 @@ bash scripts/build-window.sh                  # -> target/windows-x64/.../wa-win
 
 ## Stopping the node
 
-Never stop it by image name. `Stop-Process -Name wa` - and even a filter on
-the path, because an agent session runs the same binary from the same place -
-kills the UI server *and* every interactive session with it, mid-turn, leaving
-no crash and no trace. That has now cost two runs. `wa ui` writes the server's
-pid to `%LOCALAPPDATA%wasm-agentserve.pid`; stop that pid, or ask the port:
-
-```powershell
-Stop-Process -Id (Get-Content "$env:LOCALAPPDATAwasm-agentserve.pid")
-```
-
-An interrupted session is not lost: `wa chat --continue` resumes the thread
-with its transcript intact.
-
-## Stopping the node
-
 Never stop it by image name. `Stop-Process -Name wa` — and even a filter on the
 path, because an agent session runs the same binary from the same place — kills
 the UI server *and* every interactive session with it, mid-turn, leaving no crash
@@ -213,21 +198,26 @@ being written. `wa ui` records the server's pid; stop that, or ask the port:
 Stop-Process -Id (Get-Content "$env:LOCALAPPDATA\wasm-agent\serve.pid")
 ```
 
-An interrupted session is not lost: `wa chat --continue` resumes the thread with
-its transcript intact.
+An unfinished session is not lost: `wa chat --continue` resumes the thread with
+its transcript intact, and the window offers to continue it where it stopped.
 
 ## Commit provenance
 
-Author is useless here: every commit in this repository is `wasm-agent
-<agent@wasm-agent.local>` (or `.dev` from the cloud), because both harnesses and
-both trees share one configured identity. When a commit had to be traced, the
-only signal was the timestamp — the operator, the pi session and the wasm-agent
-node were indistinguishable.
+The author *name* is the same for everything here - `wasm-agent` - because both
+harnesses and both trees share one configured identity. That is deliberate, and it is
+also why the name tells you nothing about who did the work.
+
+The author *email* is the operator's own address, verified on their GitHub account.
+GitHub attributes commits by email, so this is what puts the work on their
+contribution graph; the name stays shared, so the graph shows the project rather than
+pretending one person wrote every line. Commits made before this was set carry the old
+synthetic address (`agent@wasm-agent.local`) and are not attributed - rewriting them
+would mean rewriting `main`, which this file forbids.
 
 So say who you are in the message. End every commit you make with a trailer:
 
 ```
-Agent: wasm-agent node=desktop-mg9djtg session=7a2f57ff
+Agent: wasm-agent node=<this node's name> session=<the session id>
 Agent: pi session=<the pi session id>
 ```
 

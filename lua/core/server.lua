@@ -441,6 +441,10 @@ function wa_diff(payload, session)
       created = file.created == true, recorded = file.recorded ~= false,
     }
   end
+  -- Turns recorded before repeats were merged hold one entry per write, and the second one's `before` is
+  -- text the turn itself wrote. Undo uses `before`, so without this an old turn's undo would restore an
+  -- intermediate state and call it success. The ledger keeps its rows; the entry is merged as it is read.
+  entry = changeset.normalize(entry)
 
   local action = request.action or "check"
   if action == "check" then
@@ -479,6 +483,15 @@ function wa_diff(payload, session)
     local done, why = changeset.redo(entry)
     if not done then return json.encode({ turn_id = turn.id, ok = false, reason = why }) end
     return json.encode({ turn_id = turn.id, ok = true })
+  end
+  if action == "patch" then
+    -- What one changed file actually did, built from its two blobs. The transcript only carries
+    -- addresses, so this is the request that turns an address back into something a reader can read -
+    -- and it is asked for when a file is clicked, not when the turn ends.
+    local file, why = changeset.patch(entry, request.path or "")
+    if not file then return json.encode({ error = why or "patch_failed" }) end
+    file.turn_id = turn.id
+    return json.encode(file)
   end
   return json.encode({ error = "unknown_action:" .. tostring(action) })
 end

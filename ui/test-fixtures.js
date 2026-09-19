@@ -3,6 +3,21 @@
 // This is what makes the data-driven half of the UI testable: without it every
 // panel renders its error path, and any assertion about it is an assertion about
 // failure. With it, opening a view and asserting its contents is deterministic.
+// A shell that records what the page asks it to do, for the checks that need one. Deliberately *not*
+// installed here: the page must be loaded without a shell first, because a page that assumes one is a page
+// that breaks in a browser, and that degradation is itself checked. The harness installs this with
+// `__setShell` only for the window path.
+window.__makeShell = () => ({
+  calls: [],
+  openView(view, url) { window.__shellCalls.push({ call: "openView", view: view, url: url }); },
+  closeView() { window.__shellCalls.push({ call: "closeView" }); },
+  setMode(mode, w, h) { window.__shellCalls.push({ call: "setMode", mode: mode, w: w, h: h }); },
+  expand() { window.__shellCalls.push({ call: "expand" }); },
+  compact() { window.__shellCalls.push({ call: "compact" }); },
+  maximize() { window.__shellCalls.push({ call: "maximize" }); },
+});
+window.__shellCalls = [];
+
 window.__fixtures = {
   version: { version: "test" },
   models: {
@@ -26,6 +41,15 @@ window.__fixtures = {
     ],
   },
   me: { user: { id: "master", name: "master" }, role: "master" },
+  // What the node says about right now. The window asks this before believing a turn is over, so a
+  // notice can be taken down when the thread is settled - and a turn that completed is not "unfinished".
+  health: { current: null, ok: true, queue: 0, stalled_ms: 0, worker: "alive" },
+  // The resume path posts a turn. It must be answered *here*: the fallback below used to forward an
+  // unstubbed route to the real node, and since the app now auto-resumes a failed session, a run of this
+  // harness queued 33 real turns on a live node before anyone noticed. A test that spends turns is not a
+  // test. The body is deliberately not a stream: `send` fails to read it, catches, and the checks that
+  // matter are about what the UI said, not what the model replied.
+  chat: { ok: true, reply: "(the harness does not run a model)" },
   users: { users: [] },
   nodes: {
     nodes: [
@@ -129,7 +153,35 @@ window.fetch = function (input, init) {
       text: () => Promise.resolve(JSON.stringify(window.__fixtures.nodes)),
     });
   }
-  return realFetch ? realFetch(input, init) : Promise.reject(new Error("no fixture for " + url));
+  // A diff request is answered by its action rather than by one fixed body: the topic asks whether the
+  // change can still be undone, and when a changed file is clicked it asks for that file's patch.
+  if (path === "diff" && (init && init.method) === "POST") {
+    let request = {};
+    try { request = JSON.parse((init && init.body) || "{}"); } catch (error) { /* keep {} */ }
+    if (request.action === "patch") {
+      return Promise.resolve({
+        ok: true, status: 200,
+        json: () => Promise.resolve({
+          path: request.path, truncated: false, added: 1, removed: 1, created: false,
+          patch: "--- before/" + request.path + "\n+++ after/" + request.path +
+                 "\n@@ -1,2 +1,2 @@\n same line\n-old line\n+new line",
+        }),
+        text: () => Promise.resolve("{}"),
+      });
+    }
+    return Promise.resolve({
+      ok: true, status: 200,
+      json: () => Promise.resolve({ can_undo: true, reason: "undoable" }),
+      text: () => Promise.resolve("{}"),
+    });
+  }
+  // Refused, not forwarded - with one exception. See the note on the `chat` fixture: reaching the real
+  // node by accident is how this harness queued real turns. API routes are where a turn is spent, so they
+  // must be stubbed. Static assets cost nothing and one of them is a real file the checks need (the wasm
+  // markdown renderer), so those may be fetched. A route that genuinely needs the live node asks by name.
+  const isStaticAsset = /\.(wasm|css|js|png|jpg|svg|woff2?|ico)$/.test(path);
+  if ((window.__fixtures.__allowReal || isStaticAsset) && realFetch) return realFetch(input, init);
+  return Promise.reject(new Error("no fixture for " + url + " - the harness does not reach the real node"));
 };
 
 // A connection loss must be recognisable: the UI classifies it so it can say

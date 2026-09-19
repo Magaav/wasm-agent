@@ -33,6 +33,41 @@ fi
 
 trailer="$(printf '%s\n' "$message" | grep -E '^Agent:' | tail -1 || true)"
 
+# A merge is a different thing. Its provenance is its *parents*: the second parent is the branch that
+# was merged, so the commit says where the work came from without anyone writing it down. What a trailer
+# would add is the integrator's session - which a hook cannot know, and inventing it would put a false
+# name in the record. So a merge is accepted when its subject names the branch it merged, which is the
+# convention this repository already uses: merge(pi): ..., merge(wasm_the_first): ...
+#
+# Note for whoever edits this: each worktree runs *its own* copy of this file, because core.hooksPath is
+# a relative path. A worktree that has not merged main runs the old hook. That is a real trap, and it is
+# why this file is edited in the checkout where merges happen.
+if [ -f "$(git rev-parse --git-dir)/MERGE_HEAD" ]; then
+  subject="$(printf '%s\n' "$message" | head -1)"
+  # Two forms, both of which name the branch: this repository's own 'merge(<branch>): ...', and git's
+  # default "Merge branch 'x'" / "Merge remote-tracking branch 'origin/x'". Accepting git's default is
+  # what makes `git merge --no-edit` work, so the rule costs nothing in the ordinary case and still
+  # refuses a subject that says nothing. Written without regex escapes: matching ')' with -F and the
+  # rest with a plain pattern avoids a layer of quoting that has already cost two round trips today.
+  if printf '%s' "$subject" | grep -qE '^merge' && printf '%s' "$subject" | grep -qF '):' ; then
+    exit 0
+  fi
+  if printf '%s' "$subject" | grep -qE '^Merge (remote-tracking )?branch ' ; then
+    exit 0
+  fi
+  cat >&2 <<MESSAGE
+commit-msg: a merge must name the branch it merged.
+
+  $subject
+
+The parents of a merge record where the work came from; the subject should say it in words, as
+'merge(<branch>): what it brings'. A merge with a vague subject leaves the reader to diff the parents
+to find out what happened - and a merge cannot carry an 'Agent:' trailer truthfully, because the hook
+has no way to know which harness and session is integrating.
+MESSAGE
+  exit 1
+fi
+
 if [ -z "$trailer" ]; then
   cat >&2 <<'MESSAGE'
 commit-msg: no `Agent:` trailer.

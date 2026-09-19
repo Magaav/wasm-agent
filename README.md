@@ -1,78 +1,64 @@
 # wasm-agent
 
-A portable agent with **organized memory**, written as a **Rust host + Lua core**.
-No Python.
+**A coding agent you can hold to account.** One binary, its own memory, a desktop
+window, and a way to prove what it did.
 
-The Rust host is a thin capabilities layer (SQLite, HTTP, hashing, time, files)
-and embeds the Lua agent, so `wa` is a single self-contained binary. The agent's
-decisions — prompts, tools, the turn loop, memory policy — live in Lua, which is
-the part designed to become a WASM component.
-
-```
-lua/                 the agent: schema, memory, tools, provider, loop, chat
-  core/*.lua
-  vendor/json.lua
-rust/wa-host/        `wa` binary: host capabilities + embedded Lua 5.4
-  build.rs           compiles vendored Lua 5.4 into the binary
-  src/lua.rs         Lua C-API bindings
-  src/host.rs        host.sql_*, host.http, host.sha256, host.uuid, ...
-  src/main.rs        CLI, embedded Lua core, SQLite
-rust/wa-window/      Windows WebView2 desktop shell (cross-built)
-ui/                  the chat window (hot-reloaded by `wa serve`)
-deploy/              systemd units, env template, Caddy site, install script
-```
-
-## Build
-
-```bash
-cd rust
-cargo build --release --offline     # Lua 5.4 is vendored; no network needed
-./target/release/wa --version
-```
-
-`rust/Cargo.lock` is committed for reproducible builds.
-
-## Working on this repo
-
-There are two working trees — a cloud instance and a local clone — and **both
-push to GitHub**, which is the source of truth. `git pull` before editing,
-push after, and keep `core.autocrlf=false` (these files are consumed by Linux
-and by `sh`/`lua`; a CRLF checkout breaks them). See `AGENTS.md` for the full
-conventions and `docs/` for the design documents.
-
-## Use
-
-```bash
-wa                       # interactive chat (default)
-wa chat
-wa remember "Laura prefers invoices on the 5th" --tag laura
-wa recall "laura invoices"
-wa memories
-wa search "invoice"      # over the message ledger
-wa conversation <id>
-wa stats
-```
-
-Chat commands: `/remember`, `/recall`, `/memories`, `/search`, `/conversation`,
-`/stats`, `/help`, `/exit`. Without a configured model, `wa` still works in
-local mode (`/remember` and `/recall`).
-
-Model provider (OpenAI-compatible) is read from the environment or
-`~/.wasm-agent/env`:
+Most agents are a loop around an API call: they talk, they edit your files, and when
+something goes wrong you have a transcript and no evidence. wasm-agent keeps the
+evidence. Every turn is a record you can read, every file change is a diff you can
+actually undo, every claim it makes was run before it was made, and the node it runs
+on reports its own health to anything that asks — including you.
 
 ```
-WASM_AGENT_LLM_BASE_URL=...
-WASM_AGENT_LLM_API_KEY=...
-WASM_AGENT_LLM_MODEL=...
+                    ┌──────────────────────────┐
+   your machine     │  wa-window (WebView2)    │   round avatar → chat → full screen
+                    │  the same UI in a panel  │
+                    └────────────┬─────────────┘
+                                 │  SSE, one turn at a time
+                    ┌────────────▼─────────────┐
+                    │  wa serve    (Rust host) │   /health /version /chat /diff /nodes …
+                    │  ───────────────────────  │
+                    │  Lua core: loop, tools,  │   the agent's decisions live here,
+                    │  memory, sessions, skills│   and this is the part that will be WASM
+                    └────────────┬─────────────┘
+                                 │
+              SQLite ledger (append-only) · content-addressed blobs · WASM plugins
+                                 │
+                    ┌────────────▼─────────────┐
+                    │  the fabric: other nodes │   ed25519 identity, rendezvous,
+                    │  masters and guests      │   relay, diff replication
+                    └──────────────────────────┘
 ```
 
-## Install (one line)
+## What it does for you
 
-The installer puts a `wa` command on your PATH that talks to your wasm-agent
-host over SSH — the host runs the Rust agent and holds the memory.
+- **Remembers on purpose.** An append-only ledger of everything that happened, and
+  explicit memories you can edit. The model reads history; it never rewrites it.
+- **Shows its work.** A live token stream, a trace per turn, tool results kept whole,
+  and a diff topic per turn showing `+N −M` per file.
+- **Undoes for real.** The changed files are stored as content-addressed blobs, so
+  *undo* puts the files back — and refuses when the file moved on since, naming the
+  file rather than clobbering your newer work.
+- **Says what is true about itself.** `/health` is answered without the interpreter,
+  so a node inside a ten-minute build still answers. A busy node is never reported as
+  a dead one.
+- **Can be more than one.** Every node has an ed25519 identity and a name that is its
+  worktree. Nodes find each other through a rendezvous, replicate by diff, and can
+  call each other; a *guest* node owns no worktree and is read-only until a trusted
+  master asks.
+- **Can be restarted by something that is not itself.** `wa-sentinel` is a separate
+  process with a fixed verb list, a drop-box, an audit log and a wake budget — because
+  an agent that can restart the node it is running on will eventually do it mid-turn.
+- **Can improve itself.** Self-evolution has been done and written down, with the
+  measurements: see [`docs/EVOLUTION.md`](docs/EVOLUTION.md).
+- **Is honest about failure.** A failing tool opens its own topic; a skipped test is
+  reported as skipped; a refusal says why. "Done" means proven — there is a handoff
+  gate in `scripts/handoff.sh` that fails when a claim outruns its evidence.
+
+## Quick start
 
 ```powershell
-# Windows
+# Windows — installs `wa` on your PATH
 powershell -c "irm https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/install.ps1 | iex"
 ```
 
@@ -81,55 +67,85 @@ powershell -c "irm https://raw.githubusercontent.com/Magaav/wasm-agent/main/scri
 curl -fsSL https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/install.sh | sh
 ```
 
-Override the host with `-HostAlias <name>` (PowerShell) or `WASM_AGENT_HOST`
-(shell). The default is `openclaw.ohana`.
-
-## Plugins (WASM)
-
-Tools are WASM modules. Drop `*.wasm` into `~/.wasm-agent/plugins/`
-(`WASM_AGENT_PLUGINS` overrides the directory); the host loads each with
-`wasmtime` and exposes it to the agent exactly like a built-in tool.
-
-A plugin is a core module exporting:
-
-```
-memory                            the module's linear memory
-alloc(len: i32) -> i32            guest allocates len bytes for the arguments
-describe() -> i64                 packed ptr<<32 | len, JSON {name, description, parameters}
-call(ptr: i32, len: i32) -> i64   packed ptr<<32 | len, JSON result
-```
-
-Build the example plugin and install it:
+Then:
 
 ```bash
-bash scripts/build-plugins.sh        # builds rust/plugins/* and installs to ~/.wasm-agent/plugins
+wa ui                      # the node + the desktop window (or your browser at :8799)
+wa chat                    # a turn in the terminal
+wa status                  # node, model, context budget, tools
 ```
 
-`rust/plugins/echo` is a ~56 KB example. The Lua core merges each plugin's
-declared schema into the model's tool list and routes unknown tool calls to
-`host.invoke`, so a plugin is just another capability.
+Bring your own model — any OpenAI-compatible endpoint:
 
-## Memory model
+```
+WASM_AGENT_LLM_BASE_URL=https://…
+WASM_AGENT_LLM_API_KEY=…
+WASM_AGENT_LLM_MODEL=…
+```
 
-Two kinds of data, never mixed:
+Without a model configured, `wa` still runs: memory, recall, sessions and the
+ledger all work locally.
 
-- **Ledger** (append-only, source of truth): observations, conversations,
-  messages, sessions, runs. Written only by ingestion.
-- **Memories** (explicit, editable, soft-deletable): what "remember this" writes
-  and "recall" reads.
-- **Derived** (rebuildable, not yet implemented): summaries, embeddings. Never
-  the source of truth; always regenerable.
+## How it is built
 
-The model reads the ledger and writes explicit memories; it never rewrites the
-ledger. See [`docs/DESIGN.md`](docs/DESIGN.md).
+Two halves, deliberately split by *what changes*:
 
-## Roadmap
+| | |
+|---|---|
+| **Rust host** (`rust/wa-host`) | one binary: HTTP + SSE, SQLite, files, hashing, process execution with deadlines, WASM plugins via `wasmtime`, the node fabric, and the embedded Lua 5.4 interpreter. Capabilities only — no agent logic. |
+| **Lua core** (`lua/core`) | the agent: the turn loop, prompt assembly, tools, memory policy, sessions, compaction, skills, spells, the node's role rules. This is the part intended to become a WASM component, so it is written to be portable and to ask the host for everything it needs. |
+| **UI** (`ui/`) | the chat and control surfaces: web components, a wasm markdown renderer, and a documented design contract in [`DESIGN.md`](DESIGN.md). |
+| **Shell** (`rust/wa-window`) | the Windows WebView2 companion: translucent, always-on-top, collapses to a round avatar. It loads the same UI the browser does. |
 
-1. Upgrade the plugin ABI from core modules to the **component model + WIT**
-   (typed interfaces, capability imports) — the ABI is intentionally tiny today.
-2. Compile the Lua core to `wasm32-wasip2` so the brain itself is a component.
-3. Event ingestion: browser/WhatsApp events into the ledger.
-4. Cross-device replication with secure, server-mediated device binding.
+```bash
+cd rust && cargo build --release --offline     # Lua 5.4 is vendored; no network needed
+```
+
+## The parts worth reading
+
+- [`DESIGN.md`](DESIGN.md) — the enforced UI contract (reuse before you create, the
+  balloon close rule, the 5px scale, where a mode switch lives, capability tiers).
+- [`AGENTS.md`](AGENTS.md) — how to work in this repo, including commit provenance and
+  the rule that an agent's branch must stay current with `main`.
+- [`docs/MEMORY.md`](docs/MEMORY.md) — the ledger, explicit memories, and why they are
+  never mixed.
+- [`docs/ORCHESTRATION.md`](docs/ORCHESTRATION.md) — what was learned running multiple
+  agents against each other, including the failures.
+- [`docs/SENTINEL.md`](docs/SENTINEL.md) — the process that owns restarts, and why.
+- [`docs/RENDEZVOUS.md`](docs/RENDEZVOUS.md) — how nodes find each other and what a
+  guest is allowed to be.
+- [`docs/EVOLUTION.md`](docs/EVOLUTION.md) — self-improvement, with the numbers.
+- [`ROADMAP.md`](ROADMAP.md) — where this goes: many agents in one window, and a UI
+  that orchestrates a fleet.
+
+## Honest limits
+
+This is a working system, not a finished one, and the interesting part of a README is
+what it admits:
+
+- **One turn at a time per node.** A single interpreter serves the agent, so a second
+  request queues behind the first. That is the current design, and lifting it is the
+  first item on the roadmap.
+- **The desktop shell is Windows-first.** The node runs anywhere Rust does; the
+  WebView2 shell is the part that is Windows-specific today.
+- **The window is a rectangle.** A balloon cannot paint outside it. Two containers are
+  supported — an in-page balloon (instant, closes on a press outside) and a real view
+  window (resizable, movable, survives the chat being collapsed) — and the UI picks.
+- **The plugin ABI is a tiny core-module ABI**, not the component model. Typed
+  interfaces and WIT are on the roadmap.
+- **The Lua core is not yet `wasm32-wasip2`.** That is the portability goal, and the
+  reason the split between host capabilities and agent logic is where it is.
+- **You supply the model.** Quality, cost and latency are your provider's.
+
+## Working on it
+
+```bash
+bash scripts/test.sh          # the gate: every suite, including the ones that must fail
+bash scripts/test-ui.ps1      # the UI harness (headless Edge, one line per run)
+bash scripts/handoff.sh       # "done" means proven, and this is what checks it
+```
+
+Contributions are welcome; `AGENTS.md` is the contract, and the gate is the referee.
 
 ## License
 

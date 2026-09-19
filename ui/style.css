@@ -140,17 +140,11 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
   margin: 0; padding: var(--space); list-style: none;
   border-top: 1px solid rgba(35, 41, 54, .8);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
-  /* A path can be longer than the topic is wide, and it must be *readable*, not elided:
-     the reader is looking at this list to find out which file changed. So the body scrolls
-     sideways. The rows are `width: max-content` with a minimum of 100%, which is what keeps
-     a short list from shrinking to its text and lets a long path keep its full width. */
+  /* The path is not shortened, so the row scrolls sideways instead of hiding where the file is. */
   overflow-x: auto;
-  overflow-y: hidden;
 }
-.diff-file {
-  display: flex; align-items: center; gap: var(--gap);
-  min-width: 0; width: max-content; min-width: 100%;
-}
+.diff-file { display: flex; align-items: center; gap: var(--gap); min-width: max-content; }
+/* No ellipsis: this topic exists to say *which* file changed, and a truncated path does not say it. */
 .diff-path { flex: 1; color: #c9d1e0; white-space: nowrap; }
 .diff-stat { display: flex; gap: var(--space); flex: 0 0 auto; }
 .diff-stat .plus { color: var(--ok); }
@@ -162,41 +156,6 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
 }
 .diff-note { padding: 0 var(--space) var(--space); font-size: 11px; color: var(--muted); }
 .diff-note.failed { color: #f85149; }
-
-/* The line preview balloon: what changed, added green and removed red.
-   These classes are used *inside* a <wa-balloon>, which owns the panel and its close rule
-   (DESIGN.md §3) - this is the content, not a second balloon implementation. */
-wa-balloon.preview {
-  position: fixed; z-index: 70; max-width: 640px;
-  background: rgba(16, 19, 26, .99); border: 1px solid var(--line);
-  border-radius: var(--radius); padding: var(--pad);
-  box-shadow: 0 18px 45px rgba(0, 0, 0, .6);
-}
-wa-balloon.preview[hidden] { display: none; }
-.diff-preview { font-family: var(--font); font-size: 12px; max-width: 620px; }
-.diff-preview-head {
-  color: var(--muted); font-size: 11px; margin-bottom: var(--space);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  font-family: var(--font);
-}
-.diff-preview-stats { margin-left: var(--space); }
-.diff-preview-stats .plus { color: var(--ok); }
-.diff-preview-stats .minus { color: #f85149; }
-.diff-preview-lines {
-  display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none;
-  max-height: 320px; overflow: auto;
-  background: #0a0c11; border: 1px solid var(--line); border-radius: var(--radius-sm);
-}
-.diff-line {
-  display: block; white-space: pre; padding: 0 5px;
-  /* The tint is the row background, so the text keeps full contrast on top of it. */
-  border-left: 2px solid transparent;
-}
-.diff-line.add { background: rgba(63, 185, 80, .13); border-left-color: var(--ok); color: #b7f0c0; }
-.diff-line.del { background: rgba(248, 81, 73, .13); border-left-color: #f85149; color: #ffc4c0; }
-.diff-line .sign { color: var(--muted); margin-right: 5px; }
-.diff-preview-note { color: var(--muted); font-size: 11px; margin-top: var(--space); font-family: var(--font); }
-.diff-preview-note.failed { color: #f85149; }
 .msg .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .6px; }
 .msg .body { white-space: pre-wrap; }
 .msg code { background: #0a0c11; padding: 1px 5px; border-radius: var(--radius-sm); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
@@ -720,3 +679,62 @@ body.node-offline .composer textarea::placeholder { color: #d29922; }
 }
 .md-table th { background: rgba(88, 166, 255, .08); font-weight: 600; }
 .md-table td { color: #c9d1e0; }
+
+/* The patch for one changed file: a balloon, so it owns the close rule (DESIGN.md §3), positioned
+   at the file it came from rather than in the footer. Its size is bounded by the viewport, and the
+   app asks the shell for a bigger window when that is not enough - the one thing CSS cannot do is
+   paint outside the window it is in. */
+wa-balloon.file-diff {
+  position: fixed; z-index: 70; display: block;
+  width: min(720px, calc(100vw - 10px));
+  max-height: calc(100vh - 10px);
+  overflow: hidden;
+  background: rgba(12, 15, 21, .99); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: 0 22px 60px rgba(0, 0, 0, .7);
+}
+wa-balloon.file-diff .pop-head {
+  padding: var(--pad); border-bottom: 1px solid var(--line);
+  color: #c9d1e0; word-break: break-all; text-transform: none; letter-spacing: 0;
+}
+.diff-patch {
+  margin: 0; padding: var(--pad); overflow: auto;
+  max-height: calc(100vh - 80px);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 11.5px; line-height: 1.5; white-space: pre; color: #aab4c6;
+}
+.patch-line { display: block; }
+.patch-file { color: var(--muted); }
+.patch-hunk { color: #7fb2ff; }
+.patch-add { color: #7ee08a; }
+.patch-del { color: #ff8a8a; }
+.patch-note { display: block; margin-top: var(--gap); color: #e0b25a; }
+/* A changed file is a control now: clicking it is how you see what changed in it. */
+.diff-file {
+  width: 100%; text-align: left; font: inherit; color: inherit;
+  background: none; border: 0; border-radius: var(--radius-sm); padding: 0 2px; cursor: pointer;
+}
+.diff-file:hover, .diff-file:focus-visible { background: var(--panel-2); }
+
+/* A patch in its own window (the second way a balloon can exist). The view-only body is the whole
+   window, so the section is a column: a header that stays put and a patch that scrolls. */
+body.view-only { margin: 0; background: var(--bg); }
+.patch-view { display: flex; flex-direction: column; height: 100vh; }
+.patch-head {
+  display: flex; align-items: center; gap: var(--gap);
+  padding: var(--pad); border-bottom: 1px solid var(--line); flex: none;
+}
+.patch-title { flex: 1; min-width: 0; color: #c9d1e0; word-break: break-all; font-size: 12.5px; }
+.patch-close {
+  flex: none; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); padding: var(--space) var(--gap); font: inherit; font-size: 12px; cursor: pointer;
+}
+.patch-close:hover { border-color: var(--accent); }
+.patch-view .diff-patch { flex: 1; max-height: none; }
+/* The balloon header's own two parts: what it is, and where it can go instead. */
+.pop-head-label { flex: 1; min-width: 0; word-break: break-all; }
+.pop-head-action {
+  flex: none; background: none; color: var(--muted); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); padding: 2px var(--space); font: inherit; font-size: 11px; cursor: pointer;
+}
+.pop-head-action:hover { color: var(--text); border-color: var(--accent); }
+wa-balloon.file-diff .pop-head { display: flex; align-items: center; gap: var(--gap); }

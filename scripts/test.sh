@@ -497,6 +497,11 @@ WA_SCRIPT=scripts/test-session-title.lua "$BIN" --db "$DB.title" | grep "session
 # itself. The deadline is set short here so the check takes seconds, not minutes.
 WASM_AGENT_EXEC_TIMEOUT_SECONDS=2 WA_SCRIPT=scripts/test-exec-timeout.lua "$BIN" --db "$DB.exec" | grep "exec timeout ok"
 
+# One file written twice in a turn is one change, and its patch is built from the blobs. Both halves
+# matter to undo: a second entry carrying the intermediate text would restore a state the turn itself
+# created. Sandboxed home, because the reversible text is stored as content-addressed blobs under it.
+WASM_AGENT_HOME="$DB.home" WA_SCRIPT=scripts/test-changeset.lua "$BIN" --db "$DB.changeset" | grep "changeset ok"
+
 # A guest is not a smaller master. A guest node owns no worktree - so it is not named after
 # one and a rename does not move a branch on its behalf - and a master's call on a guest is
 # filed under the master, not the guest. Sandboxed home: the node's stored name and role must

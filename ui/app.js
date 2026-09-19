@@ -395,53 +395,24 @@ function renderDiff(bubble, changes) {
   const topic = document.createElement("wa-diff");
   topic.setSummary(changes);
   bubble.body.append(topic);
-  // The toggle starts disabled while the node is asked whether this change can still be undone.
-  // This is `setPending`, not `setUndoable(false, ...)`: false means "cannot be undone", which
-  // locks the topic and paints the reason as a failure - and a locked topic then *discards* the
-  // real answer, so it read "checking..." for good. "Still asking" is not a verdict.
-  topic.setPending("checking…");
+  // The toggle starts pending: the server has not yet said whether this can be undone (the files may have
+  // moved on since the turn), and enabling it first would be a button that promises something the handler
+  // can then refuse. It used to say "checking…" in the refusal style, which showed a question as an error.
+  topic.setPending();
   topic.addEventListener("diff-act", (event) => actOnDiff(topic, event.detail));
-  topic.addEventListener("diff-preview", (event) => previewDiff(topic, event.detail));
   return topic;
-}
-
-// Answer a topic's request for one file's changed lines. Same deadline reasoning as
-// askUndoable: the node's single worker serves this route too, so a request made during a
-// long turn queues - and a hover balloon that waits forever is worse than one that says why.
-async function previewDiff(topic, detail) {
-  const done = typeof detail.done === "function" ? detail.done : () => {};
-  if (!topic.turnId) return done({ error: "this topic has no turn to ask about" });
-  try {
-    const response = await apiFetch("diff", {
-      method: "POST", headers: apiHeaders({ "content-type": "application/json" }),
-      body: JSON.stringify({ turn_id: topic.turnId, action: "preview", path: detail.path }),
-    }, 5000);
-    done(await response.json());
-  } catch (error) {
-    done({ error: "the node did not answer" });
-  }
 }
 
 // Ask whether this turn's change can still be undone, and let the topic show the answer.
 // A refusal here is not an error: a file that moved on is a normal thing to find, and the
 // topic says which file rather than leaving the reader with a dead button.
-//
-// This uses `apiFetch`, not `fetch`: raw fetch has no deadline, so a node that is inside a
-// long turn (its single worker serves /diff too, so the request queues) left the topic on
-// "checking…" for as long as the turn ran - which is forever if the turn never ends. The
-// deadline turns that into an answer the reader can act on.
 async function askUndoable(topic) {
-  if (!topic.turnId) {
-    // No turn id means the question cannot be asked at all, and saying nothing is how a topic
-    // sits on "checking…" for good. Name the reason instead.
-    topic.setUndoable(false, "this topic has no turn to ask about");
-    return;
-  }
+  if (!topic.dataset.turnId) return;
   try {
-    const response = await apiFetch("diff", {
+    const response = await fetch("diff", {
       method: "POST", headers: apiHeaders({ "content-type": "application/json" }),
-      body: JSON.stringify({ turn_id: topic.turnId, action: "check" }),
-    }, 5000);
+      body: JSON.stringify({ turn_id: topic.dataset.turnId, action: "check" }),
+    });
     const payload = await response.json();
     topic.setUndoable(payload.can_undo === true, payload.reason || "");
   } catch (error) {
@@ -454,15 +425,222 @@ async function askUndoable(topic) {
 async function actOnDiff(topic, detail) {
   const act = detail.act;
   try {
-    const response = await apiFetch("diff", {
+    const response = await fetch("diff", {
       method: "POST", headers: apiHeaders({ "content-type": "application/json" }),
-      body: JSON.stringify({ turn_id: topic.turnId, action: act }),
-    }, 10000);
+      body: JSON.stringify({ turn_id: topic.dataset.turnId, action: act }),
+    });
     const payload = await response.json();
     if (payload.error) return detail.done({ ok: false, reason: payload.error });
     detail.done({ ok: payload.ok === true, reason: payload.reason || "" });
   } catch (error) {
     detail.done({ ok: false, reason: "the node did not answer" });
+  }
+}
+
+// ---- what changed in one file (the balloon behind a click) -----------------
+//
+// The turn carries addresses, not bodies, so the patch is built by the node on demand - which is why
+// this is a click and not a hover. A hover that fetched would spend a request on every pointer movement,
+// and the hover that showed nothing (which is what it did) is a control that lies about being one.
+// A second click on the same row closes it again.
+let diffBalloon = null;
+let diffBalloonAnchor = null;
+let diffBalloonRoom = null;
+
+document.addEventListener("diff-file", (event) => {
+  const topic = event.target && event.target.closest ? event.target.closest("wa-diff") : null;
+  const detail = event.detail || {};
+  if (diffBalloon && diffBalloonAnchor === detail.anchor) { closeFileDiff(); return; }
+  openFileDiff(detail.path, detail.anchor, topic);
+});
+
+// A patch in its own window: the same content the balloon shows, given the room a window has.
+//
+// This is the second of the two ways a balloon can exist, and the reason both are kept. In the panel it
+// is anchored, instant, and closes on a press outside. In a window it is resizable, movable, snappable
+// and Alt-Tab-able, because the operating system already knows how to do all of that and re-implementing
+// it in a div would be worse. The panel is the default - it costs nothing and keeps the close rule - and
+// a window is for content that wants space, which is exactly what a long patch is.
+const PATCH_PROMOTE_LINES = 200;
+
+function patchViewName(path) {
+  const base = String(path || "").split(/[\\/]/).pop() || "patch";
+  return "patch:" + base;
+}
+
+function openPatchWindow(turnId, path) {
+  if (!turnId || !path) return false;
+  if (!native || typeof native.openView !== "function") return false;
+  // Never from inside a view: opening a window from a window is how you get two of them.
+  if (viewMode()) return false;
+  const url = location.origin + location.pathname +
+    "?view=" + encodeURIComponent(patchViewName(path)) +
+    "&turn=" + encodeURIComponent(turnId) + "&path=" + encodeURIComponent(path);
+  native.openView(patchViewName(path), url);
+  return true;
+}
+
+function renderPatchView(turnId, path) {
+  const section = document.createElement("section");
+  section.className = "patch-view";
+  const head = document.createElement("div");
+  head.className = "patch-head";
+  const title = document.createElement("span");
+  title.className = "patch-title";
+  title.textContent = path || "patch";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "patch-close";
+  close.textContent = "close";
+  close.addEventListener("click", () => {
+    if (native && typeof native.closeView === "function") native.closeView();
+  });
+  head.append(title, close);
+  const pre = document.createElement("pre");
+  pre.className = "diff-patch";
+  pre.textContent = "asking the node for this file…";
+  section.append(head, pre);
+  document.body.append(section);
+  fetch("diff", {
+    method: "POST", headers: apiHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify({ turn_id: turnId, action: "patch", path: path }),
+  })
+    .then((response) => response.json())
+    .then((payload) => {
+      if (payload.error) pre.textContent = "this file cannot be shown: " + payload.error;
+      else renderPatch(pre, payload);
+    })
+    .catch(() => { pre.textContent = "the node did not answer"; });
+}
+
+async function openFileDiff(path, anchor, topic) {
+  const turnId = topic && topic.dataset.turnId;
+  if (!turnId || !path) return;
+  closeFileDiff();
+  const balloon = document.createElement("wa-balloon");
+  balloon.className = "file-diff";
+  const head = document.createElement("div");
+  head.className = "pop-head";
+  const headLabel = document.createElement("span");
+  headLabel.className = "pop-head-label";
+  headLabel.textContent = path;
+  // Always offered, not only when the patch is long: which container suits a patch is the reader's
+  // judgement, and the two have different virtues - the balloon is instant and closes on a press
+  // outside, the window is resizable, movable and survives the chat being collapsed.
+  const toWindow = document.createElement("button");
+  toWindow.type = "button";
+  toWindow.className = "pop-head-action";
+  toWindow.textContent = "open in a window";
+  toWindow.title = "show this patch in its own window";
+  toWindow.addEventListener("click", () => {
+    if (openPatchWindow(turnId, path)) closeFileDiff();
+  });
+  head.append(headLabel, toWindow);
+  const body = document.createElement("pre");
+  body.className = "diff-patch";
+  body.textContent = "asking the node for this file…";
+  balloon.append(head, body);
+  document.body.append(balloon);
+  diffBalloon = balloon;
+  diffBalloonAnchor = anchor;
+  balloon.addEventListener("close", () => { closeFileDiff(); });
+  balloon.show();
+  placeFileDiff(balloon, anchor);
+  try {
+    const response = await fetch("diff", {
+      method: "POST", headers: apiHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ turn_id: turnId, action: "patch", path: path }),
+    });
+    const payload = await response.json();
+    if (payload.error) {
+      body.textContent = "this file cannot be shown: " + payload.error;
+    } else {
+      renderPatch(body, payload);
+      // Content that wants more room than the panel can give goes to a window rather than being
+      // scrolled inside a box the size of a chat bubble. The reader is told which happened: the
+      // balloon does not silently become a window, and a window does not silently become a balloon.
+      const lines = String(payload.patch || "").split("\n").length;
+      if (lines >= PATCH_PROMOTE_LINES && openPatchWindow(turnId, path)) {
+        closeFileDiff();
+        return;
+      }
+    }
+    // The patch decided the balloon's size, so where it goes is decided after it is filled.
+    placeFileDiff(balloon, anchor);
+  } catch (error) {
+    body.textContent = "the node did not answer";
+  }
+}
+
+// Make room rather than clip.
+//
+// The window is a clipped rectangle: a panel that needs more space than the window has cannot be drawn
+// outside it, whatever the CSS says. So when a balloon does not fit, the shell is asked for a bigger
+// window, and gives it back when the balloon closes. That is not the same as overflowing the window - a
+// DOM element cannot paint outside its own window - but it is the difference between a patch the reader
+// can read and one cut off at 88 pixels, which is what the compact window is.
+function roomForBalloon(balloon) {
+  const rect = balloon.getBoundingClientRect();
+  const needWidth = Math.ceil(rect.width) + 10;
+  const needHeight = Math.ceil(rect.height) + 10;
+  const cramped = window.innerWidth < needWidth || window.innerHeight < needHeight;
+  if (cramped && native && native.setMode && !diffBalloonRoom) {
+    diffBalloonRoom = { mode: document.body.classList.contains("compact") ? "compact" : "expanded" };
+    native.setMode("expanded", Math.min(900, Math.max(needWidth, 360)),
+                              Math.min(1200, Math.max(needHeight, 420)));
+  }
+}
+
+function placeFileDiff(balloon, anchor) {
+  balloon.style.left = "0px";
+  balloon.style.top = "0px";
+  roomForBalloon(balloon);
+  const rect = balloon.getBoundingClientRect();
+  const box = anchor && anchor.getBoundingClientRect ? anchor.getBoundingClientRect()
+    : { right: 120, top: 40 };
+  const margin = 5;
+  let left = (box.right || 120) + margin;
+  if (left + rect.width > window.innerWidth - margin) {
+    left = Math.max(margin, window.innerWidth - rect.width - margin);
+  }
+  let top = box.top || 40;
+  if (top + rect.height > window.innerHeight - margin) {
+    top = Math.max(margin, window.innerHeight - rect.height - margin);
+  }
+  balloon.style.left = Math.max(margin, left) + "px";
+  balloon.style.top = Math.max(margin, top) + "px";
+}
+
+function renderPatch(pre, payload) {
+  pre.replaceChildren();
+  for (const line of String(payload.patch || "").split("\n")) {
+    const row = document.createElement("span");
+    row.className = "patch-line";
+    if (line.startsWith("+++") || line.startsWith("---")) row.classList.add("patch-file");
+    else if (line.startsWith("@@")) row.classList.add("patch-hunk");
+    else if (line.startsWith("+")) row.classList.add("patch-add");
+    else if (line.startsWith("-")) row.classList.add("patch-del");
+    row.textContent = line === "" ? " " : line;
+    pre.append(row);
+  }
+  if (payload.truncated) {
+    const note = document.createElement("span");
+    note.className = "patch-note";
+    note.textContent = "this file is large, so only its first part is shown";
+    pre.append(note);
+  }
+}
+
+function closeFileDiff() {
+  if (!diffBalloon) return;
+  const balloon = diffBalloon;
+  diffBalloon = null;
+  diffBalloonAnchor = null;
+  if (balloon.isConnected) balloon.remove();
+  // The window was grown to make room; give it back the way the reader had it.
+  if (diffBalloonRoom && native && native.setMode) {
+    native.setMode(diffBalloonRoom.mode, window.innerWidth, window.innerHeight);
+    diffBalloonRoom = null;
   }
 }
 
@@ -611,8 +789,8 @@ function handleEvent(event) {
     collapseRun();
     const diff = renderDiff(currentBubble(), event.changes);
     if (diff) {
-      diff.turnId = event.turn_id || "";
-      if (diff.turnId) askUndoable(diff);
+      diff.dataset.turnId = event.turn_id || "";
+      if (diff.dataset.turnId) askUndoable(diff);
     }
     streamBody = null;
     streamText = "";
@@ -719,6 +897,11 @@ async function learnSession() {
   } catch (error) { /* unreachable: the next turn tries again */ }
 }
 
+// Sessions this page has already auto-resumed. A resume spends a turn, so it happens at most once per
+// session per page load: if the resumed turn fails too, the notice stays and offers the button, and
+// nothing loops.
+const autoResumed = new Set();
+
 async function restoreSession() {
   try {
     const payload = await (await apiFetch("sessions", { headers: apiHeaders() })).json();
@@ -732,14 +915,41 @@ async function restoreSession() {
     // A thread whose last turn was cut off must say so *in the chat*: the answer never arrived, and a
     // transcript that just stops looks like the agent had nothing to say. The engine's badge says it
     // too, but the reader is here, so the offer belongs here.
-    if (full && full.state === "unfinished") {
+    //
+    // 'failed' is the same situation by a different route - the model call errored instead of the turn
+    // being stopped - and it was invisible here, which is why a failed session looked like an agent
+    // that had simply gone quiet.
+    const resumable = full && (full.state === "failed" || full.state === "unfinished");
+    if (resumable) {
       const notice = document.createElement("div");
       notice.className = "unfinished-notice";
-      notice.textContent = "this turn was stopped before it answered - " +
+      notice.textContent = (full.state === "failed"
+        ? "the last turn failed before it answered - "
+        : "this turn was stopped before it answered - ") +
         (full.state_detail || "the node did not record a result") + ".";
       const again = nodeButton("continue", () => { notice.remove(); resumeSession(wanted.id); });
       notice.append(again);
       messages.append(notice);
+    }
+    // And then resume it by itself, because a stuck session is not something the reader should have to
+    // notice and fix. Bounded and visible: once per session per page, only when the node reports no turn
+    // running - a turn that IS running also reads as unfinished, and resuming it would queue a second
+    // turn behind the first - and it says in the chat that it is doing it, so a turn is never spent in
+    // silence.
+    if (resumable && !autoResumed.has(wanted.id)) {
+      let idle = false;
+      try {
+        const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
+        idle = !!health && !health.current;
+      } catch (error) { /* the node is away: nothing to resume, and watchNode says so */ }
+      if (idle) {
+        autoResumed.add(wanted.id);
+        const line = document.createElement("div");
+        line.className = "unfinished-notice";
+        line.textContent = "resuming it now - " + (full.state_detail || "the last turn did not finish") + ".";
+        messages.append(line);
+        resumeSession(wanted.id);
+      }
     }
     // If that thread was still running when the window went away, watch it: the answer lands in the
     // ledger, and the repaint is what puts it on screen. Tokens that arrived before the reload are
@@ -819,6 +1029,20 @@ function watchNode() {
     } catch (error) { /* still down */ }
   }, 3000);
 }
+// A notice the page put up about this turn, so it can take it down again. A span that stays after the
+// thing it described has gone is not a record, it is litter - and it grows the transcript with every
+// false alarm.
+let streamNotice = null;
+
+function clearStreamNotice() {
+  if (streamNotice && streamNotice.isConnected) streamNotice.remove();
+  streamNotice = null;
+  // The restore's notice is the same claim in a different place: "this turn did not finish". Once the
+  // node says the thread is settled, the claim is stale and the span should go - the durable record is
+  // the engine's sessions topic, which is where a reader looks for it.
+  for (const notice of document.querySelectorAll(".unfinished-notice")) notice.remove();
+}
+
 async function send(text, options = {}) {
   // The draft is going out, so what was stored is stale: a respawn must not put the sent prompt
   // back into the composer.
@@ -842,10 +1066,11 @@ async function send(text, options = {}) {
   attachments.length = 0;
   renderAttachments();
   setStatus("wasm-agent is thinking…");
-  // Declared here, in the function body, because the  below calls clearInterval on it
-  // and that finally is not in the block it used to be declared in - which made every finished
-  // turn throw ReferenceError from the finally, after the answer had already been drawn. The
-  // turn looked fine and the console was the only place it showed.
+  // Declared out here, not inside the `try` below: the `finally` clears it, and a `const` inside the try
+  // is not in scope there. It was inside, so every turn ended by throwing `watchdog is not defined` from
+  // the first line of the `finally` - which meant `clearInterval`, `setBusy(false)`, `controller = null`
+  // and the meta refresh never ran, and the window sat there looking like it was still working on a turn
+  // that had finished. The gate's bug hunt found it; the product would only have shown it as "stuck".
   let watchdog = null;
   try {
     const headers = { "Content-Type": outgoing.contentType, "Accept": "text/event-stream" };
@@ -868,15 +1093,21 @@ async function send(text, options = {}) {
     // can say whether the worker is alive while a turn runs. Ask it, and act only on its answer.
     let lastEvent = Date.now();
     let asking = false;
-    // `watchdog` is declared in the function body above, not here: the `finally` that clears it
-    // belongs to the outer try, and a declaration in this block was not visible there - so
-    // every finished turn threw ReferenceError from the finally, after the answer had already
-    // been drawn. The turn looked fine, and the console was the only place it showed.
-    watchdog = setInterval(async () => {
+    // Whether this turn finished under its own steam. Without it the watchdog cannot tell a turn that
+    // ended from a turn that died: both leave `current: null`, so a turn that completed while the
+    // watchdog was asking /health got reported as "no longer running this turn ... recorded as
+    // unfinished" - about a turn whose answer was already on screen. The message said `(alive)`, which
+    // was the tell.
+    let turnFinished = false;
+    const watchdogTick = async () => {
+      if (turnFinished) { clearInterval(watchdog); return; }
       if (asking || Date.now() - lastEvent < 30000) return;
       asking = true;
       try {
         const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
+        // Asked and answered while the turn was ending: say nothing. The turn finished; there is
+        // nothing to report and nothing to continue.
+        if (turnFinished) { clearInterval(watchdog); asking = false; return; }
         const running = health && health.current;
         if (running && health.worker !== "stalled") {
           // Working, and quiet because the work is quiet. Keep waiting, and start counting again.
@@ -884,22 +1115,25 @@ async function send(text, options = {}) {
           asking = false;
           return;
         }
-        // Not running any more: the turn is genuinely over, and the page should say so and stop
-        // pretending it is still listening.
+        // Not running any more, and the turn did not finish: the turn is genuinely over, and the page
+        // should say so and stop pretending it is still listening.
         clearInterval(watchdog);
-        add("assistant", "the node is no longer running this turn (" + (health.worker || "no worker") +
+        streamNotice = add("assistant", "the node is no longer running this turn (" + (health.worker || "no worker") +
           "). It is recorded as unfinished - the sessions topic offers to continue it.");
         watchNode();
         controller?.abort();
       } catch (error) {
         // Unreachable: the node is gone, which is a different message and the one that fits.
         clearInterval(watchdog);
-        add("assistant", connectionMessage());
+        streamNotice = add("assistant", connectionMessage());
         watchNode();
         controller?.abort();
       }
       asking = false;
-    }, 5000);
+    };
+    // Armed here, assigned to the outer `watchdog` so the `finally` can always clear it - including when
+    // the fetch below throws before a single event arrives.
+    watchdog = setInterval(watchdogTick, 5000);
     const response = await fetch("chat", {
       method: "POST",
       headers: apiHeaders(headers),
@@ -924,6 +1158,13 @@ async function send(text, options = {}) {
           const line = part.split("\n").find((l) => l.startsWith("data: "));
           if (!line) continue;
           try { handleEvent(JSON.parse(line.slice(6))); lastEvent = Date.now(); } catch (error) { /* ignore */ }
+          // A turn that says it is done, or has answered, or has failed, is finished: whatever the
+          // watchdog asks next, this turn is not unfinished, and any notice it put up is stale.
+          const kind = (() => { try { return JSON.parse(line.slice(6)).type; } catch (error) { return ""; } })();
+          if (kind === "done" || kind === "reply" || kind === "error") {
+            turnFinished = true;
+            clearStreamNotice();
+          }
         }
       }
     }
@@ -1732,10 +1973,6 @@ let pendingReload = false;
 // Every reload goes through here, so every reload can save where the reader was first.
 let reload = () => { rememberPlace(); location.reload(); };
 
-// Replacement for `clientAction`, set by the test harness so a click can be asserted without
-// a client bridge. Null in normal use, and the live path is the `if` below.
-let clientActionSpy = null;
-
 // ---- the update lock ------------------------------------------------------
 //
 // A UI update is invisible: the page keeps working while new files sit on disk, and then it reloads
@@ -1843,12 +2080,23 @@ let synced = false;
 let syncRunning = false;
 let syncAttempts = 0;
 
-function setConnecting() {
+function setConnecting(label) {
   // Say what is true and that it is being worked on. "connecting…" forever reads as broken, and
-  // "offline" with no retry reads as final.
-  const label = syncAttempts > 2 ? "node offline — retrying" : "connecting…";
-  chipModel.textContent = label;
-  meta.textContent = label;
+  // "offline" with no retry reads as final. A node that is alive and inside a turn is neither: it is
+  // busy, and it will answer when the turn ends.
+  const text = label || (syncAttempts > 2 ? "node offline — retrying" : "connecting…");
+  chipModel.textContent = text;
+  meta.textContent = text;
+}
+
+/// The node's own answer, which is served without the interpreter - so it works exactly when the Lua
+/// routes do not, which is while a turn is running. Null means the node really is not answering.
+async function nodeHealth() {
+  try {
+    return await (await apiFetch("health", { headers: apiHeaders() })).json();
+  } catch (error) {
+    return null;
+  }
 }
 
 async function sync(reason) {
@@ -1859,7 +2107,24 @@ async function sync(reason) {
   const metaOk = await refreshMeta();
   syncRunning = false;
   if (!meOk || !metaOk) {
-    setConnecting();
+    // Why it failed decides what to say. A reload during a turn used to show "connecting…" and then
+    // "node offline — retrying" on a node that was working perfectly, and the transcript stayed empty
+    // because the restore never ran. It cannot run while the turn holds the interpreter - that is
+    // physical on a single-worker node - but the message can be true, and the retry does the rest.
+    const health = await nodeHealth();
+    if (health && health.current) {
+      syncAttempts = 0;
+      setConnecting("the node is running a turn — this window returns when it finishes");
+    } else if (health) {
+      // The node answered, so it is not offline - it is busy, and the reads this window needs
+      // (`/me`, `/models`, the transcript) queue behind the turn because one interpreter serves
+      // them. Calling that "offline" was a lie the reader could not check: the node was local,
+      // alive, and running their command. Only a node that does not answer at all is offline.
+      syncAttempts = 0;
+      setConnecting("the node is busy — this window returns when it can answer");
+    } else {
+      setConnecting();
+    }
     return;
   }
   synced = true;
@@ -1891,6 +2156,8 @@ async function reconcile() {
       if (busy) { setBusy(false); clearStatus(); }
       // Nothing to wait for any more, so the lock must not wait either: it is a message, not a trap.
       document.getElementById("update-lock")?.remove();
+      // And a notice about a turn that is over is litter: take it down.
+      clearStreamNotice();
     }
   } catch (error) { /* the node is away; watchNode says so in the chat */ }
   reconciling = false;
@@ -1903,9 +2170,9 @@ async function watch() {
     applyUiVersion(payload.version);
     // The node answered, so finish the first sync if it never finished. This loop always runs.
     if (!synced) sync("watch");
-    // While this window believes a turn is running, or is holding an update lock, ask the node what
-    // is true - every few seconds, not every second.
-    else if (busy || document.getElementById("update-lock")) {
+    // While this window believes a turn is running, is holding an update lock, or is showing a notice
+    // about a turn that did not finish, ask the node what is true - every few seconds, not every second.
+    else if (busy || document.getElementById("update-lock") || document.querySelector(".unfinished-notice")) {
       if (Date.now() - reconciledAt > 5000) { reconciledAt = Date.now(); reconcile(); }
     }
   } catch (error) { /* keep polling: the deadline is what keeps this loop alive */ }
@@ -1938,7 +2205,9 @@ async function watchTurn() {
 }
 
 // ---- native companion window (wa-window / WebView2) ----------------------
-const native = window.wasmAgent || null;
+// `let`, not `const`: the harness runs the page with no shell on purpose (to prove the page degrades), and
+// a test that wants to prove the *window* path has to be able to hand it one. Same seam as `reload`.
+let native = window.wasmAgent || null;
 const orb = document.getElementById("orb");
 const collapse = document.getElementById("collapse");
 const dragbar = document.getElementById("dragbar");
@@ -1984,11 +2253,7 @@ wireDrag(dragbar);
 let controlTimer = null;
 let controlPending = false;
 let controlCanvasSize = { w: 0, h: 0 };
-// The virtual desktop the frame covers, in *screen* coordinates: `origin` is its top-left
-// (negative when a monitor sits left of or above the primary one) and `w`/`h` its size.
-// A monitor to the left is why both halves are needed - with two monitors the picture is
-// wider than either one, and a click read off it has to be offset back to screen space.
-let controlScreen = { w: 0, h: 0, originX: 0, originY: 0, monitors: 1 };
+let controlScreen = { w: 0, h: 0 };
 
 function b64ToBytes(base64) {
   const binary = atob(base64);
@@ -1998,7 +2263,6 @@ function b64ToBytes(base64) {
 }
 
 async function clientAction(payload) {
-  if (clientActionSpy) return clientActionSpy(payload);
   const response = await apiFetch("client", {
     method: "POST",
     headers: apiHeaders({ "Content-Type": "application/json" }),
@@ -2196,36 +2460,19 @@ async function fetchFrame(full) {
       controlHint.textContent = payload.error;
       return;
     }
-    await applyFrame(payload);
+    controlScreen = { w: payload.screen_width, h: payload.screen_height };
+    if (payload.full || controlCanvasSize.w !== payload.width || controlCanvasSize.h !== payload.height) {
+      controlCanvas.width = payload.width;
+      controlCanvas.height = payload.height;
+      controlCanvasSize = { w: payload.width, h: payload.height };
+    }
+    controlHint.textContent = `${payload.width}×${payload.height} · ${payload.tiles.length} tile${payload.tiles.length === 1 ? "" : "s"}`;
+    for (const tile of payload.tiles) await drawTile(tile);
   } catch (error) {
     controlHint.textContent = String(error);
   } finally {
     controlPending = false;
   }
-}
-
-// Take one frame from the client and put it on the canvas.
-//
-// Split out of fetchFrame so the translation can be tested without a network round trip -
-// the coordinate maths is the part that breaks on a two-monitor desk, and asserting it
-// through a fake response is sturdier than driving a real screenshot.
-async function applyFrame(payload) {
-  controlScreen = {
-    w: payload.screen_width, h: payload.screen_height,
-    originX: Number(payload.origin_x) || 0, originY: Number(payload.origin_y) || 0,
-    monitors: Number(payload.monitors) || 1,
-  };
-  if (payload.full || controlCanvasSize.w !== payload.width || controlCanvasSize.h !== payload.height) {
-    controlCanvas.width = payload.width;
-    controlCanvas.height = payload.height;
-    controlCanvasSize = { w: payload.width, h: payload.height };
-  }
-  // Say when the frame spans more than one monitor: a 3840-wide picture is either one
-  // wide screen or two, and nothing in the image itself tells the reader which.
-  const screens = controlScreen.monitors > 1
-    ? ` · ${controlScreen.monitors} monitors ${controlScreen.w}×${controlScreen.h}` : "";
-  controlHint.textContent = `${payload.width}×${payload.height}${screens} · ${payload.tiles.length} tile${payload.tiles.length === 1 ? "" : "s"}`;
-  for (const tile of payload.tiles) await drawTile(tile);
 }
 
 // The live view polls as fast as the node answers, and no faster.
@@ -2290,6 +2537,12 @@ function applyViewMode() {
     document.body.append(control);
     openControl(target);
   }
+  if (kind === "patch") {
+    // A view window is a client of the node like any other, so it fetches its own patch. Nothing is
+    // passed through the main window: that is what makes it a view and not a screenshot of one.
+    const params = new URLSearchParams(location.search);
+    renderPatchView(params.get("turn") || "", params.get("path") || "");
+  }
   return true;
 }
 
@@ -2353,12 +2606,8 @@ function closeControl() {
 controlCanvas.addEventListener("click", (event) => {
   const rect = controlCanvas.getBoundingClientRect();
   if (!rect.width || !controlScreen.w) return;
-  // Canvas -> virtual desktop -> screen. The middle step is the one that was missing: the
-  // frame covers every monitor, so canvas (0,0) is the virtual desktop's top-left and not
-  // the primary monitor's, and the two differ by `origin` whenever a monitor hangs off the
-  // left or top. Without it a click landed one monitor-width to the left of where it looked.
-  const x = Math.round(((event.clientX - rect.left) / rect.width) * controlScreen.w) + controlScreen.originX;
-  const y = Math.round(((event.clientY - rect.top) / rect.height) * controlScreen.h) + controlScreen.originY;
+  const x = Math.round(((event.clientX - rect.left) / rect.width) * controlScreen.w);
+  const y = Math.round(((event.clientY - rect.top) / rect.height) * controlScreen.h);
   clientAction({ action: "click", x, y });
 });
 controlKeys.addEventListener("submit", (event) => {

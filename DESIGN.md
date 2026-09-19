@@ -50,6 +50,27 @@ picker, future menus). All balloons use `<wa-balloon>`.
 Never implement close-on-`click` by target alone: a click that starts inside and
 ends outside is reported against a common ancestor and would wrongly close.
 
+**Two containers, one panel.** A floating panel has two possible homes, and the
+UI must be able to choose between them and say which it chose:
+
+- **In-page `<wa-balloon>` — the default.** Instant, anchored to its trigger,
+  and it owns the close rule above. Bounded by the viewport with its own
+  scrolling, so it is never cut off. When it needs more room than the window
+  has, the page may ask the shell for a bigger window (and give the size back
+  when the balloon closes) — the shell is the only thing that can change the
+  window, and a DOM element cannot paint outside it.
+- **A view window (`native.openView`) — for content that wants space.** A real
+  OS window: resizable, movable, snappable, Alt-Tab-able, and it survives the
+  chat being collapsed. It is a client of the node like any other surface, so it
+  fetches its own data rather than receiving it from the main window. It closes
+  the way a window closes (its own control, or the OS), which is a *different*
+  rule from the one above — do not pretend otherwise in the UI.
+
+Promotion is decided by the content and by the reader, never silently: a long
+patch opens a window and says so, and every panel that can be promoted also
+offers the other container as a control. Never move a panel under the reader's
+pointer without telling them.
+
 ## 4. Spacing
 
 One scale: **5px**.
