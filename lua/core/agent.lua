@@ -9,6 +9,8 @@ local tools = dofile("lua/core/tools.lua")
 local changeset = dofile("lua/core/changeset.lua")
 local provider = dofile("lua/core/provider.lua")
 local memory = dofile("lua/core/memory.lua")
+local telemetry = dofile("lua/core/telemetry.lua")
+local tool_output = dofile("lua/core/tool_output.lua")
 -- Failure text is persisted in the trace and shown in the session view, so it is
 -- redacted before it is stored, not only when it is displayed.
 local redact = dofile("lua/core/redact.lua")
@@ -103,61 +105,7 @@ local PREFIX_SUMMARY_PROMPT = table.concat({
   "Be concise. Focus on what's needed to understand the kept suffix.",
 }, "\n")
 
--- Context budgeting, per tool.
---
--- A tool result is stored whole and trimmed only when it is assembled into the
--- context, because the transcript *is* the record: truncating at write time lost
--- the evidence permanently. A 20 KB read became a 600-byte row, and every later
--- turn worked from that keyhole - which is how "read, then edit" kept missing with
--- old_text_not_found, and how a command's error (at the end of its output) was
--- already gone by the time anyone looked.
---
--- Budgets differ by tool because the useful part does: an error lives at the *end*
--- of a command's output, a file's opening usually identifies it, and an
--- acknowledgement needs almost nothing. pi does the equivalent for bash - it keeps
--- the tail and points at the full output - and this generalises it.
-local TOOL_CONTEXT_BUDGET = {
-  read = { chars = 8000, keep = "head" },
-  session = { chars = 8000, keep = "head" },
-  bash = { chars = 4000, keep = "both" },
-  shell = { chars = 4000, keep = "both" },
-  grep = { chars = 2500, keep = "head" },
-  recall = { chars = 2500, keep = "head" },
-  ls = { chars = 2000, keep = "head" },
-  memories = { chars = 2000, keep = "head" },
-  sessions = { chars = 1500, keep = "head" },
-  find = { chars = 2500, keep = "head" },
-  DEFAULT = { chars = 1500, keep = "head" },
-}
-local TOOL_STORE_CAP = 200000
-
--- WASM_AGENT_TOOL_BUDGET=legacy reproduces the old view exactly (600 characters,
--- head only) for every tool. It exists so a claim about the budget can be
--- measured rather than argued: same task, same model, one variable.
-local function tool_budget(name)
-  if host.getenv("WASM_AGENT_TOOL_BUDGET") == "legacy" then return { chars = 600, keep = "head" } end
-  return TOOL_CONTEXT_BUDGET[name] or TOOL_CONTEXT_BUDGET.DEFAULT
-end
-
-local function fit_tool_output(name, text)
-  local value = tostring(text or "")
-  local budget = tool_budget(name)
-  if #value <= budget.chars then return value end
-  local head, tail, dropped = value:sub(1, budget.chars), "", #value - budget.chars
-  if budget.keep == "tail" then
-    head, tail = "", value:sub(-budget.chars)
-  elseif budget.keep == "both" then
-    local half = math.floor(budget.chars / 2)
-    head, tail = value:sub(1, half), value:sub(-half)
-    dropped = #value - #head - #tail
-  end
-  -- Say what was dropped and that the full text still exists: an unannounced loss
-  -- at the moment of use is the failure mode this whole change is about.
-  local marker = string.format("\n…(%s omitted: %d of %d characters; the full result is kept in the transcript)\n",
-    budget.keep == "tail" and "earlier output" or (budget.keep == "both" and "middle of this output" or "rest of this result"),
-    dropped, #value)
-  return head .. marker .. tail
-end
+-- Tool views are projected once by tool_output.lua; full output is retrievable.
 
 local MAX_TOOL_ROUNDS = tonumber(host.getenv("WASM_AGENT_MAX_TOOL_ROUNDS")) or 200
 local COMPACT_RESERVE = 16384      -- tokens reserved for the reply (like pi)
@@ -392,7 +340,7 @@ function M:build_context()
     messages[#messages + 1] = { role = "system", content = self.resume_notice }
   end
   local rows = memory.session_turns(self.session_id, {
-    after_seq = session.summarized_until or 0, limit = 500,
+    after_seq = session.summarized_until or 0, all = true,exclude_summaries=true,
   })
   -- A window that begins with a tool result is missing the tool call it answers
   -- (it was summarised away, or the boundary was cut mid-exchange). Providers
@@ -400,6 +348,7 @@ function M:build_context()
   -- the window starts on a real message. Compaction avoids creating such a
   -- boundary, but this keeps a rebuilt context valid regardless.
   local started = false
+  local replay_reasoning = provider.reasoning(self.model).replay
   for _, turn in ipairs(rows) do
     if not started and turn.role == "tool" then
       -- skip the orphan
@@ -409,6 +358,7 @@ function M:build_context()
     elseif turn.role == "assistant" then
       started = true
       local message = { role = "assistant", content = turn.content or "" }
+      if replay_reasoning then message.reasoning_content=turn.reasoning or "" end
       if type(turn.tool_calls) == "table" and #turn.tool_calls > 0 then
         message.tool_calls = turn.tool_calls
       end
@@ -416,7 +366,7 @@ function M:build_context()
     elseif turn.role == "tool" then
       messages[#messages + 1] = {
         role = "tool", tool_call_id = turn.tool_call_id or "",
-        name = turn.tool_name or "", content = fit_tool_output(turn.tool_name, turn.content),
+        name = turn.tool_name or "", content = turn.content or "",
       }
     end
   end
@@ -437,14 +387,12 @@ function M:build_context()
   local dropped_calls, dropped_results = 0, 0
   for _, message in ipairs(messages) do
     if message.role == "assistant" and message.tool_calls then
-      local complete = true
+      local complete = {}
       for _, call in ipairs(message.tool_calls) do
-        if not (call.id and answered[call.id]) then complete = false end
+        if call.id and answered[call.id] then complete[#complete+1]=call
+        else dropped_calls=dropped_calls+1 end
       end
-      if not complete then
-        dropped_calls = dropped_calls + 1
-        message.tool_calls = nil
-      end
+      message.tool_calls = #complete>0 and complete or nil
     end
   end
   -- Re-check after dropping calls: a result whose call is gone is now an orphan.
@@ -472,11 +420,17 @@ function M:build_context()
   return messages
 end
 
-function M:context_tokens()
-  local rows = memory.session_turns(self.session_id, { limit = 5000 })
-  local total = 0
-  for _, turn in ipairs(rows) do total = total + estimate_tokens(turn.content) end
-  return total
+function M:context_tokens(messages)
+  messages=messages or self:build_context()
+  local prefix=host.sha256(json.encode(messages[1] or {})..json.encode(self.tool_list or {}))
+  -- Pi uses the last measured usage plus the messages appended after it. A
+  -- changed system prefix, compaction or restart falls back to an explicit estimate.
+  if self.measured_prefix==prefix and self.measured_messages and #messages>=self.measured_messages then
+    local tokens=self.measured_total or 0
+    for i=self.measured_messages+1,#messages do tokens=tokens+telemetry.estimate_messages({messages[i]}) end
+    return tokens,"provider-plus-tail-estimate"
+  end
+  return telemetry.estimate_messages(messages)+estimate_tokens(json.encode(self.tool_list or {})),"bytes/4-plus-image-estimate"
 end
 
 -- Automatic compaction. Policy borrowed from pi: trigger only when the context
@@ -486,7 +440,7 @@ end
 -- provider's prefix cache from that point on; doing it rarely means paying that
 -- once instead of constantly. The transcript keeps everything regardless; only
 -- the context is windowed.
-function M:maybe_compact()
+function M:maybe_compact(messages)
   local limits = provider.budget(self.model)
   local limit = limits.context or 0
   if limit <= 0 then return false end
@@ -499,25 +453,17 @@ function M:maybe_compact()
   -- message bodies: the request also carries the system prompt, AGENTS.md and
   -- every tool schema (several thousand tokens), which an estimate of the
   -- transcript alone misses entirely.
-  local measured = self.last_prompt_tokens or 0
-  local before = measured > 0 and measured or self:context_tokens()
-  -- A soft budget, because the model window is the wrong trigger on its own.
-  --
-  -- This model's window is 1,000,000 tokens, so "compact when the window is nearly full" means a session
-  -- re-sends 100,000+ tokens on every call for its whole life and never compacts - measured: a 1,470-call
-  -- session averaged 120,628 tokens of prompt per call, ~11x pi, for a third of the output per call. The
-  -- window says when a call would *fail*; a budget says when it has stopped being worth paying for.
-  --
-  -- The ledger keeps every byte either way: only what gets re-sent is budgeted (ARCHITECTURE.md,
-  -- "memory is on demand"). The budget never overrides the window - a small window still fires first, or a
-  -- call would be sent past its model.
-  local budget = tonumber(host.getenv and host.getenv("WASM_AGENT_CONTEXT_BUDGET") or "") or 64000
+  local before = self:context_tokens(messages)
+  -- Pi compacts at capacity. A smaller engineering budget is an explicit choice,
+  -- never inferred from uncached-input statistics masquerading as total input.
+  local budget = tonumber(host.getenv and host.getenv("WASM_AGENT_CONTEXT_BUDGET") or "") or (limit-reserve)
+  if budget<=0 then budget=limit-reserve end
   local trigger = math.min(limit - reserve, budget)
   if before <= trigger then return false end
 
   local session = memory.session(self.session_id) or {}
   local rows = memory.session_turns(self.session_id, {
-    after_seq = session.summarized_until or 0, limit = 2000,
+    after_seq = session.summarized_until or 0, all = true,exclude_summaries=true,
   })
   if #rows < 4 then return false end
 
@@ -528,7 +474,7 @@ function M:maybe_compact()
   local keep_transcript = math.max(500, keep - (self.overhead_tokens or 0))
   local budget, cut_index = 0, 0
   for index = #rows, 1, -1 do
-    budget = budget + estimate_tokens(rows[index].content)
+    budget = budget + estimate_tokens(json.encode({content=rows[index].content,tool_calls=rows[index].tool_calls,reasoning=rows[index].reasoning,images=rows[index].images}))
     if budget >= keep_transcript then
       cut_index = index - 1
       break
@@ -544,10 +490,59 @@ function M:maybe_compact()
   if cut_index < 1 then return false end
   local cut = rows[cut_index]
 
-  local transcript = {}
+  local transcript, read_files, modified_files = {}, {}, {}
+  local row_ends={}
+  local summary_capacity=provider.budget(self:summary_model()).context or 0
+  local summary_room=summary_capacity>0 and (summary_capacity-reserve-2048) or math.huge
+  local summary_estimate=estimate_tokens(session.summary or "")+estimate_tokens(CHECKPOINT_SUMMARY_PROMPT)+1024
+  local bounded_cut=0
   for index = 1, cut_index do
-    transcript[#transcript + 1] = string.format("%s: %s", rows[index].role,
-      (rows[index].content or ""):sub(1, 2000))
+    local row=rows[index]
+    local content=row.content or ""
+    if row.role=="tool" and #content>2000 then
+      local ref=tool_output.store(content)
+      content=tool_output.slice(content,1,2000).."\n[Tool output excerpt; full_result sha256="..ref.sha256.."; bytes="..#content.."]"
+    end
+    transcript[#transcript+1]=string.format("[%s seq=%d]: %s",row.role,row.seq,content)
+    if row.reasoning and row.reasoning~="" then transcript[#transcript+1]="[Assistant thinking]: "..row.reasoning end
+    if type(row.tool_calls)=="table" and #row.tool_calls>0 then
+      transcript[#transcript+1]="[Assistant tool calls]: "..json.encode(row.tool_calls)
+      for _, call in ipairs(row.tool_calls) do
+        local f=call["function"] or {}
+        local ok,args=pcall(json.decode,f.arguments or "{}")
+        if ok and type(args)=="table" and type(args.path)=="string" then
+          if f.name=="read" then read_files[args.path]=true
+          elseif f.name=="write" or f.name=="edit" then modified_files[args.path]=true end
+        end
+      end
+    end
+    if type(row.images)=="table" and #row.images>0 then transcript[#transcript+1]="[Image references]: "..json.encode(row.images) end
+    row_ends[index]=#transcript
+    for j=(row_ends[index-1] or 0)+1,#transcript do summary_estimate=summary_estimate+estimate_tokens(transcript[j])+1 end
+    if summary_estimate>summary_room then break end
+    bounded_cut=index
+  end
+  if bounded_cut<cut_index then
+    cut_index=bounded_cut
+    while cut_index>=1 and (rows[cut_index].role=='tool' or rows[cut_index+1].role=='tool') do cut_index=cut_index-1 end
+    if cut_index<1 then
+      telemetry.event(self.session_id,self.turn_id,'','compact','failed',{ok=false,error='summary_input_exceeds_capacity',before=before})
+      self.emit({type='status',text='compaction cannot fit the next complete exchange; transcript preserved'})
+      return false
+    end
+    for j=#transcript,row_ends[cut_index]+1,-1 do transcript[j]=nil end
+    cut=rows[cut_index]
+    -- Only operations inside the chosen prefix belong in this checkpoint.
+    read_files,modified_files={},{}
+    for index=1,cut_index do
+      for _,call in ipairs(rows[index].tool_calls or {}) do
+        local f=call['function'] or {}; local ok,args=pcall(json.decode,f.arguments or '{}')
+        if ok and type(args)=='table' and type(args.path)=='string' then
+          if f.name=='read' then read_files[args.path]=true
+          elseif f.name=='edit' or f.name=='write' then modified_files[args.path]=true end
+        end
+      end
+    end
   end
   -- No user message in the span means the cut landed inside one oversized turn:
   -- pi calls this a split turn and summarises the prefix differently, because
@@ -571,16 +566,25 @@ function M:maybe_compact()
   local started = host.now()
   -- cache = false: a one-off prompt must not read or write the conversation's
   -- cache (pi does the same, to avoid paying a cache-write premium for nothing).
-  local ok, result = pcall(provider.complete_with, self:summary_model(), prompt, nil, false, { cache = false })
-  if not ok then
-    self.emit({ type = "status", text = "compaction failed: " .. redact.text(tostring(result)):sub(1, 120) })
+  local ok, result = pcall(provider.complete_with, self:summary_model(), prompt, nil, false,
+    {cache=false,session_id=self.session_id,turn_id=self.turn_id,kind="summary",max_output=math.floor(reserve*.8)})
+  if not ok or provider.visible_text(type(result)=="table" and result.content or "")==""
+      or (type(result)=="table" and (result.finish_reason=="length" or #(result.tool_calls or {})>0)) then
+    local problem=type(result)=="table" and ("invalid summary: "..tostring(result.finish_reason or "empty/tool response")) or tostring(result)
+    telemetry.event(self.session_id,self.turn_id,"","compact","failed",{ok=false,error=redact.text(problem),before=before})
+    self.emit({ type = "status", text = "compaction failed: " .. redact.text(problem):sub(1, 120) })
     return false
   end
   local previous_summary = session.summary or ""
   local merged = tostring(result.content or "")
-  if merged == "" then merged = previous_summary end
+  local file_lines={}
+  for path in pairs(read_files) do if not modified_files[path] then file_lines[#file_lines+1]="read: "..path end end
+  for path in pairs(modified_files) do file_lines[#file_lines+1]="modified: "..path end
+  table.sort(file_lines)
+  if #file_lines>0 then merged=merged.."\n\n<file-operations>\n"..table.concat(file_lines,"\n").."\n</file-operations>" end
   memory.set_session_summary(self.session_id, cut.seq, merged)
-  local after = self:context_tokens()  -- honest post-compaction size of the transcript
+  self.last_prompt_tokens,self.measured_messages,self.measured_total,self.measured_prefix=0,nil,nil,nil
+  local after = self:context_tokens()
   -- Record it in the transcript so a compaction (and the cache invalidation it
   -- causes) is visible in the session view instead of being invisible work.
   memory.append_turn(self.session_id, {
@@ -592,9 +596,13 @@ function M:maybe_compact()
       split_turn = split_turn, superseded = previous_summary ~= "",
       template = split_turn and "prefix" or "checkpoint",
       summary_model = self:summary_model(),
+      usage=result.usage,normalized=result.observation and result.observation.normalized,
       ms = math.floor((host.now() - started) * 1000),
     } },
   })
+  telemetry.event(self.session_id,self.turn_id,"","compact","applied",{ok=true,
+    summarized_from=(session.summarized_until or 0)+1,summarized_until=cut.seq,
+    before=before,after_estimate=after,summary_bytes=#merged,invalidates_cache=true})
   self.emit({ type = "compact", through = cut.seq, tokens_before = before, tokens_after = after })
   return true
 end
@@ -643,24 +651,38 @@ function M:note_interruption()
 end
 
 function M:turn(text, images)
+  self.turn_id=host.uuid()
+  local span=telemetry.start({session_id=self.session_id,turn_id=self.turn_id},'turn_span',{})
+  provider.pin()
+  local ok,result=pcall(self.run_turn,self,text,images)
+  provider.unpin()
+  telemetry.finish(span,{ok=ok,error=not ok and tostring(result) or nil})
+  if not ok then error(result) end
+  return result
+end
+
+function M:run_turn(text, images)
+  self.model=provider.settings().model
   self:note_interruption()
   self.emit({ type = "status", text = "thinking" })
   self.debug = (memory.session(self.session_id) or {}).mode == "debug"
 
   memory.append_turn(self.session_id, {
-    role = "user", content = text, images = images or {}, debug = self.debug,
+    id=self.turn_id,role = "user", content = text, images = images or {}, debug = self.debug,
   })
 
   if not provider.configured() then
     local reply = self:local_turn(text)
     memory.append_turn(self.session_id, { role = "assistant", content = reply, debug = self.debug })
     self.emit({ type = "reply", text = reply })
+    telemetry.event(self.session_id,self.turn_id,"","turn","end",{outcome="local_fallback"})
     return reply
   end
 
   local messages = self:build_context()
   local trace = {}
   local reply = ""
+  local reply_reasoning, completed = "", false
   local turn = { prompt = 0, completion = 0, total = 0, cached = 0 }
   local turn_started = host.now()
   -- What this turn changes on disk, recorded by write/edit as it goes. It lives on the
@@ -691,6 +713,18 @@ function M:turn(text, images)
   -- WASM_AGENT_MAX_TOOL_ROUNDS therefore only guards against a runaway loop, not
   -- against a long task: it should never fire in practice.
   for round = 1, MAX_TOOL_ROUNDS do
+    while self:maybe_compact(messages) do
+      messages=self:build_context()
+      -- A long imported backlog may need several bounded summaries. Ordinary
+      -- compaction stops here; every additional pass must cover a new prefix.
+      if self:context_tokens(messages)<(provider.budget(self.model).context or 0) then break end
+    end
+    local context_tokens,context_source=self:context_tokens(messages)
+    local capacity=provider.budget(self.model).context or 0
+    if capacity>0 and context_tokens>=capacity then
+      telemetry.event(self.session_id,self.turn_id,"","turn","end",{outcome="context_overflow",context_estimate=context_tokens})
+      error("context_overflow: compaction could not make a valid next request; transcript preserved")
+    end
     -- Two rounds before the runaway guard, ask the model to wrap up. This is
     -- not a task budget - it is the last resort of a loop that should have
     -- finished long before.
@@ -716,7 +750,8 @@ function M:turn(text, images)
       self.emit({ type = "status", text = agents_var .. " configured but unreadable: " .. configured_agents })
     end
     local ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream,
-      { session_id = self.session_id })
+      {session_id=self.session_id,turn_id=self.turn_id,round=round,context_tokens=context_tokens,
+       context={estimate_source=context_source,summary_watermark=(memory.session(self.session_id) or {}).summarized_until or 0}})
     if not ok then
       trace[#trace + 1] = { kind = "llm", model = self.model, ok = false,
         ms = math.floor((host.now() - llm_started) * 1000), error = redact.text(tostring(result)):sub(1, 400) }
@@ -724,27 +759,24 @@ function M:turn(text, images)
         role = "assistant", content = "", ok = false, trace = trace, debug = self.debug,
         ms = math.floor((host.now() - turn_started) * 1000),
       })
+      telemetry.event(self.session_id,self.turn_id,"","turn","end",{outcome="provider_failed"})
       error(result)
     end
 
     if type(result.usage) == "table" then
       local usage = result.usage
-      local prompt = tonumber(usage.prompt_tokens) or 0
-      local completion = tonumber(usage.completion_tokens) or 0
-      local total = tonumber(usage.total_tokens) or (prompt + completion)
+      local normalized=result.observation and result.observation.normalized or telemetry.normalize(usage,provider.rates(self.model))
+      local prompt = normalized.prompt or 0
+      local completion = normalized.output or 0
+      local total = normalized.total or 0
       turn.prompt = turn.prompt + prompt
       turn.completion = turn.completion + completion
       turn.total = turn.total + total
-      local cached = cached_tokens(usage)
+      local cached = normalized.cacheRead or 0
       -- Cost, only when rates are configured: cache reads are a fraction of
       -- input, so a cheap cached turn shows up as cheap rather than as "few".
-      local rates = provider.rates(self.model)
-      local cost = 0
-      if rates then
-        local miss = math.max(0, prompt - cached)
-        cost = (miss * (rates.input or 0)
-          + cached * (rates.cacheRead or rates.input or 0)
-          + completion * (rates.output or 0)) / 1000000
+      local cost = normalized.cost
+      if normalized.cost_known then
         turn.cost = (turn.cost or 0) + cost
         M.usage_total.cost = (M.usage_total.cost or 0) + cost
       end
@@ -755,7 +787,7 @@ function M:turn(text, images)
       turn.cached = turn.cached + cached
       local span = { kind = "llm", model = self.model, ok = true, round = round,
         ms = math.floor((host.now() - llm_started) * 1000), prefix = prefix_fingerprint,
-        usage = usage,
+        usage = usage,normalized=normalized,
         tokens = { prompt = prompt, completion = completion, total = total, cached = cached, cost = cost } }
       -- In debug mode keep the exact request so a failing turn can be replayed
       -- byte for byte (round 1 only: later rounds are derived from tool calls).
@@ -764,11 +796,14 @@ function M:turn(text, images)
         -- file is visible here instead of being indistinguishable from one with it.
         span.agents_md = self.agents_source
         if self.debug then
-          span.request = { model = self.model, messages = messages, tools = tool_list }
+          span.request = json.decode(json.encode({ model = self.model, messages = messages, tools = tool_list }))
         end
       end
       -- The provider's own count for this request is the true context size.
       self.last_prompt_tokens = prompt
+      self.measured_prefix=host.sha256(json.encode(messages[1] or {})..json.encode(tool_list))
+      self.measured_messages=#messages+1
+      self.measured_total=prompt+completion
       trace[#trace + 1] = span
     else
       trace[#trace + 1] = { kind = "llm", model = self.model, ok = true, round = round,
@@ -778,11 +813,26 @@ function M:turn(text, images)
 
     local calls = result.tool_calls or {}
     local assistant = { role = "assistant", content = result.content or "" }
+    if provider.reasoning(self.model).replay then assistant.reasoning_content=result.reasoning or "" end
+    if result.finish_reason=="length" or result.stream_complete==false then
+      local reason=result.stream_complete==false and "incomplete_stream" or "output_limit"
+      local problem=reason=="output_limit" and provider.visible_text(result.content)=="" and provider.empty_reply_reason(result)
+        or "provider_"..reason..": partial response preserved; no partial tool calls executed"
+      local failed_span=trace[#trace]
+      if failed_span then
+        failed_span.ok=false; failed_span.error=problem; failed_span.finish_reason=result.finish_reason
+        failed_span.reasoning_bytes=#(result.reasoning or "")
+      end
+      memory.append_turn(self.session_id,{role="assistant",content=result.content or "",reasoning=result.reasoning or "",ok=false,trace=trace})
+      telemetry.event(self.session_id,self.turn_id,"","turn","end",{outcome=reason})
+      error(problem)
+    end
     if #calls > 0 then assistant.tool_calls = calls end
     messages[#messages + 1] = assistant
 
     if #calls == 0 then
       reply = result.content or ""
+      reply_reasoning = result.reasoning or ""
       -- An empty answer with no tool call is not an answer. A reasoning model that
       -- runs out of output budget before it writes anything returns exactly this,
       -- and this path used to record it as a finished turn: the model looked like
@@ -802,44 +852,59 @@ function M:turn(text, images)
           span.reasoning_head = (result.reasoning or ""):sub(1, 2000)
         end
         memory.append_turn(self.session_id, {
-          role = "assistant", content = "", ok = false, trace = trace, debug = self.debug,
+          role = "assistant", content = "", reasoning=reply_reasoning, ok = false, trace = trace, debug = self.debug,
           ms = math.floor((host.now() - turn_started) * 1000),
         })
+        telemetry.event(self.session_id,self.turn_id,"","turn","end",{outcome="empty_reply"})
         error(reason)
       end
       -- The final assistant message is recorded once, after the loop, with the
       -- turn's trace. Recording it here as well would duplicate it in context.
+      completed=true
       break
     end
-    memory.append_turn(self.session_id, {
-      role = "assistant", content = result.content or "", tool_calls = calls, debug = self.debug,
+      memory.append_turn(self.session_id, {
+      role = "assistant", content = result.content or "", tool_calls = calls, debug = self.debug,reasoning=result.reasoning or "",
     })
 
     for _, call in ipairs(calls) do
       local function_ = call["function"] or {}
-      local args = {}
+      local args,argument_error = {},nil
       if function_.arguments and function_.arguments ~= "" then
         local decoded_ok, decoded = pcall(json.decode, function_.arguments)
-        if decoded_ok and type(decoded) == "table" then args = decoded end
+        if decoded_ok and type(decoded) == "table" then args = decoded
+        else argument_error="invalid_tool_arguments_json" end
       end
       self.emit({ type = "tool", name = function_.name, arguments = args })
       local tool_started = host.now()
+      local tool_span=telemetry.start({session_id=self.session_id,turn_id=self.turn_id},"tool",
+        {name=function_.name,call_id=call.id,round=round,arguments_hash=host.sha256(function_.arguments or "")})
       host.beat()
-      local handled, output = pcall(tools.dispatch, memory, function_.name, args, self.role,
+      local handled, output = pcall(function() if argument_error then return {error=argument_error} end
+        return tools.dispatch(memory, function_.name, args, self.role,
         { session_id = self.session_id, user_id = self.user, node_id = self.node,
-          changes = self.changes })
+          changes = self.changes }) end)
       host.beat()
       if not handled then output = { error = tostring(output) } end
-      local ok_tool = type(output) ~= "table" or output.error == nil
+      local ok_tool = tool_output.outcome(function_.name,output)
+      local projected,content=pcall(tool_output.project,function_.name,output)
+      if not projected then
+        -- A failed artifact write must not discard the original output. Keep it
+        -- verbatim and record the storage failure explicitly.
+        content=json.encode(output)
+        ok_tool=false
+        self.emit({type="status",text="tool output storage failed; full result kept in transcript"})
+      end
+      telemetry.finish(tool_span,{name=function_.name,ok=ok_tool,code=type(output)=="table" and output.code or nil,
+        error=not projected and "tool_output_storage_failed" or type(output)=="table" and output.error or nil,
+        full_bytes=#json.encode(output),view_bytes=#content,storage_ok=projected})
       trace[#trace + 1] = { kind = "tool", name = function_.name, ok = ok_tool, round = round,
         ms = math.floor((host.now() - tool_started) * 1000) }
       self.emit({ type = "tool_result", name = function_.name, result = output })
 
-      local content = json.encode(output)
       memory.append_turn(self.session_id, {
         role = "tool", tool_call_id = call.id or "", tool_name = function_.name or "",
-        content = ((self.debug or #content <= TOOL_STORE_CAP) and content)
-          or (content:sub(1, TOOL_STORE_CAP) .. "…(stored truncated at " .. TOOL_STORE_CAP .. " characters)"),
+        content = content,
         ok = ok_tool, debug = self.debug,
       })
       messages[#messages + 1] = {
@@ -852,20 +917,11 @@ function M:turn(text, images)
     -- older part and rebuild the context, then keep going in the same turn. The
     -- alternative - stopping the turn to protect the window - throws away the
     -- agent's momentum and leaves the work uncommitted.
-    if self:maybe_compact() then
-      messages = self:build_context()
-      self.emit({ type = "status", text = "context compacted mid-turn - continuing" })
-    end
   end
 
   if reply == "" then
     reply = "(runaway guard: " .. MAX_TOOL_ROUNDS .. " tool rounds without a final answer)"
   end
-  if not self.debug then
-    -- keep raw tool payloads out of the persisted assistant reply as well
-    reply = reply:sub(1, 8000)
-  end
-  memory.record_run(host.uuid(), self.session_id, "completed", "completed", reply)
   -- The turn's changed files ride with the turn, so the diff topic is rebuilt from the
   -- ledger like everything else: a reload, a resume or another reader all see the same
   -- changes, and undo has the previous text to restore.
@@ -875,16 +931,17 @@ function M:turn(text, images)
   -- about, and append_turn uses the same one so the topic and the ledger agree.
   local turn_id = host.uuid()
   memory.append_turn(self.session_id, {
-    id = turn_id,
-    role = "assistant", content = reply, trace = trace, tokens = turn.total, debug = self.debug,
+    id = turn_id,ok=completed,
+    role = "assistant", content = reply, reasoning=reply_reasoning, trace = trace, tokens = turn.total, debug = self.debug,
     ms = math.floor((host.now() - turn_started) * 1000),
     changes = changes,
   })
+  memory.record_run(self.turn_id, self.session_id, completed and "completed" or "incomplete", completed and "answered" or "runaway_guard", reply)
+  telemetry.event(self.session_id,self.turn_id,"","turn","end",{outcome=completed and "answered" or "runaway_guard",assistant_turn_id=turn_id})
   M.usage_total.turns = M.usage_total.turns + 1
   M.usage_total.last = turn
   self.emit({ type = "usage", total = M.usage_total, model = self.model })
 
-  self:maybe_compact()
   -- The diff goes with the reply: the topic belongs to this bubble, and the reader should
   -- not need a second request to learn what the turn touched.
   self.emit({ type = "reply", text = reply, changes = changes, turn_id = turn_id })

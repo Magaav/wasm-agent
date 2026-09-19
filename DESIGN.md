@@ -93,16 +93,25 @@ Providers are chosen first, models second.
 
 ## 6. Status balloon contents
 
-The status balloon is about **the model and its budget**, not storage. Required
+The status balloon is about **the model and harness observability**, not memory storage. Required
 sections, in order:
 
-1. **provider** select, **model** select (§5);
-2. **context** — tokens sent on the last turn (`taken`) vs the context budget
-   (`WASM_AGENT_LLM_CONTEXT`), with a meter;
+1. **provider**, **model** (§5), and model-supported **reasoning** selects;
+2. **context** — last measured request input and selected model capacity. Never
+   substitute a whole turn's cumulative input for one request's context;
 3. **limits** — the provider's rolling windows: `5h` (`rolling`), `7d`
    (`weekly`), `30d` (`monthly`), each a percent with a meter and a reset
    estimate; "limits unavailable" when the provider exposes none;
-4. **tokens** — last turn (in/out/total), session (in/out/total), turn count.
+4. **tokens** — durable session input, disjoint uncached/cache-read/cache-write
+   categories, output including reasoning, and priced cost including summaries;
+5. **harness diagnostics**, implemented as `<wa-harness-status>`: settings actually
+   sent; model/tool/turn latency and failures; context coverage and compaction;
+   trace completeness, request/source/binary fingerprints, and paginated exports.
+
+Use progressive disclosure and preserve expanded sections across refreshes.
+Missing usage, cache details and prices are **unknown**, never free or zero.
+Selected settings and the last observed request can differ; show that distinction.
+Answered turns are not verified task success. No synthetic efficiency score.
 
 The base URL and database path belong in the balloon footer line.
 
@@ -111,8 +120,8 @@ The base URL and database path belong in the balloon footer line.
 
 A **mode** is a full-view switch (chat ⇄ engine ⇄ shell ⇄ control).
 
-**Keep concerns apart.** The status balloon is only about the *model* (provider,
-context, limits, tokens — §6). Anything about the *machine or the fabric*
+**Keep concerns apart.** The status balloon diagnoses the *model and harness* (§6).
+Management of the *machine or the fabric*
 (nodes, spells, tools/envelope, accounts) lives in the **engine** view, reached
 from the engine button in the topbar. Do not mix the two.
 

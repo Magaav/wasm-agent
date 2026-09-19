@@ -25,6 +25,8 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/schema.sql", include_str!("../../../lua/core/schema.sql")),
     ("lua/core/skills.lua", include_str!("../../../lua/core/skills.lua")),
     ("lua/core/redact.lua", include_str!("../../../lua/core/redact.lua")),
+    ("lua/core/telemetry.lua", include_str!("../../../lua/core/telemetry.lua")),
+    ("lua/core/tool_output.lua", include_str!("../../../lua/core/tool_output.lua")),
     ("lua/core/platform.lua", include_str!("../../../lua/core/platform.lua")),    ("lua/core/paths.lua", include_str!("../../../lua/core/paths.lua")),
     ("lua/core/memory.lua", include_str!("../../../lua/core/memory.lua")),
     ("lua/core/tools.lua", include_str!("../../../lua/core/tools.lua")),
@@ -235,6 +237,8 @@ fn main() {
     lua.register_with_upvalue("invoke", host::invoke, host as *mut c_void);
     lua.register("stream", host::stream);
     lua.register("now", host::now);
+    lua.register("monotonic_ms", host::monotonic_ms);
+    lua.register("runtime_info", host::runtime_info);
     lua.register("log", host::log);
     lua.set_global("host");
 
@@ -260,15 +264,17 @@ fn main() {
       // the files on disk - which is how two tests in the image branch passed while
       // loading code that did not contain the feature they were testing. The fallback
       // stays for the shipping case, where no root is set at all.
-    let bootstrap = "function dofile(path) \
+    let bootstrap = "LOADED_SOURCES = {}; function dofile(path) \
          local root = host.getenv('WASM_AGENT_LUA_ROOT'); \
          if root and root ~= '' then \
            local text = host.read_file(root .. '/' .. path); \
            if not text then error('lua_root_unreadable: ' .. root .. '/' .. path) end; \
+           LOADED_SOURCES[path] = host.sha256(text); \
              return assert(load(text, '@' .. root .. '/' .. path))() \
          end; \
          local source = EMBEDDED[path]; \
          if not source then error('embedded module missing: ' .. tostring(path)) end; \
+         LOADED_SOURCES[path] = host.sha256(source); \
          return assert(load(source, '@' .. path))() end";
     if let Err(error) = lua.do_string(bootstrap, "bootstrap") {
         eprintln!("lua error: {error}");

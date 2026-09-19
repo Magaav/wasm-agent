@@ -6,6 +6,7 @@ local platform = dofile("lua/core/platform.lua")
 local spellslib = dofile("lua/core/spells.lua")
 local nodeslib = dofile("lua/core/nodes.lua")
 local changeset = dofile("lua/core/changeset.lua")
+local tool_output = dofile("lua/core/tool_output.lua")
 local M = {}
 
 local function is_master(role)
@@ -40,8 +41,9 @@ M.shared = {
   schema("capabilities", "List the tools available to this account (its capabilities).", {}),
   schema("sessions", "List your own past sessions (resumable threads), most recent first.", {
     limit = { type = "integer", minimum = 1, maximum = 100 } }),
-  schema("session", "Read one of your past sessions: the newest turns, oldest first.", {
+  schema("session", "Read a session. Defaults to newest turns; pass next_before_seq back as before_seq to retrieve earlier evidence.", {
     session_id = { type = "string" },
+    before_seq = { type = "integer", minimum = 1 },
     limit = { type = "integer", minimum = 1, maximum = 1000 } }, { "session_id" }),
   schema("search_turns", "Search your own past sessions for text (what did we decide about X?).", {
     query = { type = "string" },
@@ -193,6 +195,9 @@ function M.all(role)
   local list = {}
   for _, item in ipairs(M.shared) do list[#list + 1] = item end
   if is_master(role) then
+    list[#list+1]=schema("tool_result","Retrieve an exact byte range of a full tool result saved after output truncation. Use the full_result.sha256 from the result, then follow next_offset until eof.",{
+      sha256={type="string"},offset={type="integer",minimum=1},limit={type="integer",minimum=1,maximum=51200}
+    },{"sha256"})
     for _, item in ipairs(M.admin) do list[#list + 1] = item end
     for _, plugin in ipairs(wasm_plugins()) do
       list[#list + 1] = schema(plugin.name, plugin.description or "", plugin.parameters and plugin.parameters.properties, plugin.parameters and plugin.parameters.required)
@@ -232,6 +237,10 @@ function M.dispatch(memory, name, args, role, ctx)
   ctx = ctx or {}
   local user_id = ctx.user_id or "master"
   if not is_master(role) and admin_names()[name] then return { error = "forbidden_for_role:" .. role } end
+  if name=="tool_result" then
+    if not is_master(role) then return {error="forbidden_for_role:"..role} end
+    return tool_output.read(args.sha256,args.offset,args.limit)
+  end
 
   if name == "remember" then
     if not args.content or args.content == "" then return { error = "content_required" } end
@@ -275,16 +284,14 @@ function M.dispatch(memory, name, args, role, ctx)
   elseif name == "bash" then
     if not args.command or args.command == "" then return { error = "command_required" } end
     local result = run(args.cwd and ("cd " .. shell_quote(args.cwd) .. " && " .. args.command) or args.command)
-    if result.stdout and #result.stdout > 8000 then result.stdout = result.stdout:sub(1, 8000) .. "\n…(truncated)" end
-    if result.stderr and #result.stderr > 4000 then result.stderr = result.stderr:sub(1, 4000) .. "\n…(truncated)" end
     return result
   elseif name == "read" then
     local content = read_lines(args.path, args.offset, args.limit)
     if not content then return { error = "not_found" } end
-    if #content > 20000 then content = content:sub(1, 20000) .. "\n…(truncated)" end
     return { path = args.path, content = content }
   elseif name == "write" then
     if not args.path then return { error = "path_required" } end
+    if type(args.content)~="string" then return {error="content_required"} end
     local before = (host.read_file and host.read_file(args.path)) or ""
     local ok = host.write_file and host.write_file(args.path, args.content or "")
     -- Record what changed while the previous text is still in hand: this is what the diff
@@ -292,14 +299,17 @@ function M.dispatch(memory, name, args, role, ctx)
     if ok and ctx and ctx.changes then
       changeset.record(ctx.changes, args.path, before, args.content or "")
     end
-    return { ok = ok and true or false, path = args.path }
+    return { ok = ok and true or false, path = args.path, error=not ok and "write_failed" or nil }
   elseif name == "edit" then
+    if type(args.old_text)~="string" or args.old_text=="" then return {error="old_text_required"} end
+    if type(args.new_text)~="string" then return {error="new_text_required"} end
     local text = host.read_file and host.read_file(args.path)
     if not text then return { error = "not_found" } end
     local from, to = text:find(args.old_text or "", 1, true)
     if not from then return { error = "old_text_not_found" } end
+    if text:find(args.old_text,to+1,true) then return {error="old_text_ambiguous"} end
     local updated = text:sub(1, from - 1) .. (args.new_text or "") .. text:sub(to + 1)
-    host.write_file(args.path, updated)
+    if not host.write_file(args.path, updated) then return {ok=false,error="write_failed",path=args.path} end
     if ctx and ctx.changes then changeset.record(ctx.changes, args.path, text, updated) end
     return { ok = true, path = args.path }
   elseif name == "ls" then
@@ -356,17 +366,18 @@ function M.dispatch(memory, name, args, role, ctx)
     local session = memory.session(args.session_id)
     if not session then return { error = "unknown_session" } end
     if session.user_id ~= user_id and not is_master(role) then return { error = "forbidden" } end
-    local turns = memory.session_turns(args.session_id, { limit = args.limit or 200 })
+    local turns = memory.session_turns(args.session_id, { limit = math.min(1000,math.max(1,tonumber(args.limit) or 200)),before_seq=tonumber(args.before_seq) })
     -- Say when it is a window. A model that reads 200 of 260 turns without being told
     -- will treat the oldest row it can see as the start of the thread, which is how
     -- ancient history reads as current state.
     local total = memory.turn_count(args.session_id)
     local note
     if total > #turns then
-      note = string.format("showing the newest %d of %d turns; the %d earlier ones are omitted",
+      note = string.format("showing %d of %d turns; %d are outside this page; use before_seq for earlier evidence",
         #turns, total, total - #turns)
+      if not args.before_seq then note=string.format("showing the newest %d of %d turns; use before_seq for earlier evidence",#turns,total) end
     end
-    return { session = session, turns = turns, note = note }
+    return { session = session, turns = turns, note = note,next_before_seq=turns[1] and turns[1].seq }
   elseif name == "search_turns" then
     return { matches = memory.search_turns(args.query or "", is_master(role) and nil or user_id, args.limit or 20) }
   elseif name == "resume_session" then

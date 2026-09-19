@@ -8,6 +8,7 @@ local json = dofile("lua/vendor/json.lua")
 local redact = dofile("lua/core/redact.lua")
 -- Per-model context windows. The window belongs to the model, not to the process.
 local windowlib = dofile("lua/core/model_window.lua")
+local telemetry = dofile("lua/core/telemetry.lua")
 local M = {}
 
 local function env(name) return host.getenv(name) end
@@ -51,6 +52,7 @@ function M.providers()
 end
 
 function M.active()
+  if M._pinned then return M._pinned.provider end
   local id = M.provider_override or read_state("provider") or env("WASM_AGENT_PROVIDER")
   local list = M.providers()
   for _, provider in ipairs(list) do
@@ -60,6 +62,7 @@ function M.active()
 end
 
 function M.settings()
+  if M._pinned then return M._pinned.settings end
   local provider = M.active()
   local model = (M.overrides and M.overrides[provider.id]) or read_state("model." .. provider.id)
   if not model and provider.id == "opencode-go" then model = env("WASM_AGENT_LLM_MODEL") end
@@ -247,6 +250,12 @@ function M.budget(model)
       budget.keep = tonumber(entry.keep) or budget.keep
     end
   end
+  if budget.context>0 then
+    budget.reserve=math.min(budget.reserve,math.max(1000,math.floor(budget.context/4)))
+    budget.keep=math.min(budget.keep,math.max(1000,math.floor(budget.context/2)))
+    local soft=tonumber(host.getenv('WASM_AGENT_CONTEXT_BUDGET'))
+    budget.trigger=math.max(0,math.min(budget.context-budget.reserve,soft and soft>0 and soft or math.huge))
+  end
   return budget
 end
 function M.rates(model)
@@ -255,6 +264,106 @@ function M.rates(model)
   local ok, table_ = pcall(json.decode, raw)
   if not ok or type(table_) ~= "table" then return nil end
   return table_[model or M.settings().model]
+end
+
+-- Follow Pi's per-model compatibility contract; an unknown model stays unknown.
+-- Only public model metadata is read from Pi's local store, never credentials.
+function M.capabilities(model)
+  local provider_id = M.active().id
+  local file = host.getenv("WASM_AGENT_PI_MODELS_STORE")
+    or (dofile("lua/core/paths.lua").home() .. "/.pi/agent/models-store.json")
+  local text = host.read_file(file)
+  if text then
+    local ok, store = pcall(json.decode, text)
+    local profile = ok and type(store)=="table" and store[provider_id]
+    if type(profile)=="table" then
+      for _, entry in pairs(profile.models or {}) do
+        if entry.id==model then
+          return {reasoning=entry.reasoning==true, compat=entry.compat or {},
+            levels=entry.thinkingLevelMap, max_output=entry.maxTokens,
+            source="pi-model-store"}
+        end
+      end
+    end
+  end
+  if provider_id=="opencode-go" and windowlib.WINDOWS[model] then
+    return {reasoning=true,compat={thinkingFormat="deepseek",maxTokensField="max_tokens",
+      requiresReasoningContentOnAssistantMessages=true},
+      levels={low="low",high="high",max="max"},max_output=windowlib.WINDOWS[model].output,
+      source="pi-compatible-deepseek"}
+  end
+  return {reasoning=false,compat={},source="unknown"}
+end
+
+local function reasoning_key(model)
+  return "reasoning." .. host.sha256(M.active().id .. ":" .. model)
+end
+
+function M.reasoning(model)
+  model = model or M.settings().model
+  if M._pinned and M._pinned.settings.model==model then return M._pinned.reasoning end
+  local cap = M.capabilities(model)
+  local levels = {}
+  if cap.reasoning then
+    if cap.levels then
+      for _, name in ipairs({"off","minimal","low","medium","high","xhigh","max"}) do
+        if type(cap.levels[name])=="string" then levels[#levels+1]=name end
+      end
+    elseif cap.compat.thinkingFormat=="deepseek" then levels={"low","high"}
+    elseif cap.compat.supportsReasoningEffort==true then levels={"low","medium","high"} end
+  end
+  local selected = read_state(reasoning_key(model)) or env("WASM_AGENT_REASONING")
+  local valid=false
+  for _, level in ipairs(levels) do if level==selected then valid=true end end
+  if not valid then
+    selected="provider"
+    for _, level in ipairs(levels) do if level=="high" then selected=level end end
+  end
+  return {supported=#levels>0,levels=levels,selected=selected,source=cap.source,
+    configured=read_state(reasoning_key(model)) or env("WASM_AGENT_REASONING"),
+    replay=cap.compat.requiresReasoningContentOnAssistantMessages==true}
+end
+
+function M.set_reasoning(level)
+  local model=M.settings().model
+  for _, allowed in ipairs(M.reasoning(model).levels) do
+    if level==allowed then write_state(reasoning_key(model),level); return true end
+  end
+  return nil,"unsupported_reasoning_level"
+end
+
+-- Selection changes apply at the next user turn, not halfway through a tool
+-- exchange on another worker. Credentials remain only in memory, never telemetry.
+function M.pin()
+  local profile,settings=M.active(),M.settings()
+  local reasoning=M.reasoning(settings.model)
+  M._pinned={provider=profile,settings=settings,reasoning=reasoning}
+end
+function M.unpin() M._pinned=nil end
+
+function M.request_options(model, messages, opts)
+  opts=opts or {}
+  local cap=M.capabilities(model)
+  local reasoning=M.reasoning(model)
+  local fields={}
+  if reasoning.supported then
+    local effort=(cap.levels or {})[reasoning.selected] or reasoning.selected
+    if cap.compat.thinkingFormat=="deepseek" then
+      fields.thinking={type="enabled"}
+      if cap.compat.supportsReasoningEffort~=false then fields.reasoning_effort=effort end
+    elseif cap.compat.supportsReasoningEffort==true then fields.reasoning_effort=effort end
+  end
+  local maximum=tonumber(opts.max_output or env("WASM_AGENT_LLM_MAX_OUTPUT")) or tonumber(cap.max_output)
+  local budget=M.budget(model)
+  if maximum and maximum>0 then
+    local estimate=opts.context_tokens or telemetry.estimate_messages(messages)
+    if budget.context>0 then maximum=math.min(maximum,math.max(1,budget.context-estimate-4096)) end
+    if budget.output>0 then maximum=math.min(maximum,budget.output) end
+    local field=env("WASM_AGENT_LLM_MAX_OUTPUT_FIELD") or cap.compat.maxTokensField or "max_tokens"
+    if field~="max_tokens" and field~="max_completion_tokens" then error("invalid_output_cap_field") end
+    fields[field]=math.floor(maximum)
+  end
+  return fields,{reasoning=reasoning,output_limit=maximum,compatibility_source=cap.source}
 end
 
 -- `stream` forwards content deltas to the UI and still returns the whole
@@ -266,31 +375,36 @@ end
 -- Same, with an explicit model: used by compaction (a cheaper summariser when
 -- WASM_AGENT_LLM_SUMMARY_MODEL is set, otherwise the main model).
 function M.complete_with(model, messages, tools, stream, opts)
+  opts=opts or {}
   local settings = M.settings()
   local provider = M.active()
   local body = { model = model or settings.model, messages = messages }
-  -- pi always sends an output cap, and its own comment says why: reasoning and the
-  -- answer share max_tokens, so an uncapped reasoning phase can consume the whole
-  -- response and leave no answer and no tool call. We send one only when asked,
-  -- because a provider that rejects the field would break every turn - but an
-  -- empty answer is caught either way, which is what empty_reply_reason is for.
-  local max_output = tonumber(host.getenv("WASM_AGENT_LLM_MAX_OUTPUT") or "")
-  if max_output and max_output > 0 then
-    local field = host.getenv("WASM_AGENT_LLM_MAX_OUTPUT_FIELD")
-    body[field and field ~= "" and field or "max_tokens"] = max_output
-  end
+  -- Pi's output cap and reasoning fields follow the model compatibility contract.
+  local fields, effective = M.request_options(body.model,messages,opts)
+  for key,value in pairs(fields) do body[key]=value end
   if tools and #tools > 0 then
     body.tools = tools
     body.tool_choice = "auto"
   end
   for key, value in pairs(M.cache_params(opts)) do body[key] = value end
+  if stream then body.stream=true; body.stream_options={include_usage=true} end
   local url = provider.base_url:gsub("/+$", "") .. "/chat/completions"
   local headers = headers_for(provider)
-
+  local serialized=json.encode(body)
+  local request_meta={model=body.model,provider=provider.id,round=opts.round,
+    settings=effective,request_hash=host.sha256(serialized),request_bytes=#serialized,
+    messages=#messages,tools=tools and #tools or 0,
+    system_hash=host.sha256(json.encode(messages[1] or {})),
+    schema_hash=host.sha256(json.encode(tools or {})),
+    system_tokens_estimate=math.ceil(#json.encode(messages[1] or {})/4),
+    schema_tokens_estimate=math.ceil(#json.encode(tools or {})/4),
+    context_tokens_estimate=opts.context_tokens or telemetry.estimate_messages(messages)+math.ceil(#json.encode(tools or {})/4),
+    estimation="text bytes/4 + 1200 per image estimate; provider usage is authoritative",
+    runtime=telemetry.runtime(),context=opts.context}
+  local span=telemetry.start(opts,opts.kind or "llm",request_meta)
+  local ok,result=pcall(function()
   if stream then
-    body.stream = true
-    body.stream_options = { include_usage = true }
-    local result = json.decode(host.http_stream("POST", url, json.encode(headers), json.encode(body)))
+    local result = json.decode(host.http_stream("POST", url, json.encode(headers), serialized))
     if result.error then error(redact.text("provider_error: " .. tostring(result.error))) end
     if result.status ~= 200 then
       error(redact.text("provider_http_" .. tostring(result.status) .. ": " .. tostring(result.body):sub(1, 240)))
@@ -302,10 +416,13 @@ function M.complete_with(model, messages, tools, stream, opts)
       tool_calls = result.tool_calls or {},
       usage = result.usage,
       model = body.model,
+      request_id = result.request_id,
+      ttft_ms=result.ttft_ms,
+      stream_complete=result.stream_complete,
     }
   end
 
-  local response = json.decode(host.http("POST", url, json.encode(headers), json.encode(body)))
+  local response = json.decode(host.http("POST", url, json.encode(headers), serialized))
   if response.error then error(redact.text("provider_error: " .. tostring(response.error))) end
   if response.status ~= 200 then
     error(redact.text("provider_http_" .. tostring(response.status) .. ": " .. tostring(response.body):sub(1, 240)))
@@ -319,7 +436,28 @@ function M.complete_with(model, messages, tools, stream, opts)
     tool_calls = message.tool_calls or {},
     usage = payload.usage,
     model = payload.model or body.model,
+    request_id = payload.id,
   }
+  end)
+  if not ok then
+    telemetry.finish(span,{ok=false,error=result,model=body.model,provider=provider.id,
+      normalized=telemetry.normalize(nil)})
+    error(result)
+  end
+  local visible=M.visible_text(result.content)
+  local has_tools=#(result.tool_calls or {})>0
+  local meaningful=has_tools or visible~=""
+  local complete=result.finish_reason~="length" and result.stream_complete~=false and meaningful
+  local observation=telemetry.finish(span,{ok=complete,model=result.model,
+    provider=provider.id,request_id=result.request_id,finish_reason=result.finish_reason,
+    usage=result.usage,normalized=telemetry.normalize(result.usage,M.rates(result.model)),
+    ttft_ms=result.ttft_ms,stream_complete=result.stream_complete,
+    reasoning_bytes=#(result.reasoning or ""),answer_bytes=#(result.content or ""),
+    error=not complete and (result.stream_complete==false and "incomplete_stream" or result.finish_reason=="length" and "output_limit_reached" or "empty_reply") or nil})
+  result.observation=observation
+  result.request_meta=request_meta
+  result.span_id=span.id
+  return result
 end
 
 -- The three spellings an OpenAI-compatible endpoint uses for a reasoning model's

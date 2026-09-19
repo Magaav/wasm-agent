@@ -324,8 +324,29 @@ $harness = @'
   for (var c = 0; c < 20; c++) { await tick(); }
   window.renderContext();
   var contextText = document.getElementById("context-box").textContent;
-  check(/used/.test(contextText) && /128/.test(contextText) && /%/.test(contextText),
-    "the context panel must state used / budget / percent, saw: " + contextText);
+  check(/last measured input/.test(contextText) && /128/.test(contextText),
+    "context must show measured last request and selected capacity, saw: " + contextText);
+  window.renderUsage(); window.renderModels();
+  var diagnostics=document.getElementById('harness-status');
+  check(diagnostics.querySelectorAll('details').length===4,'harness diagnostics have four progressively disclosed categories');
+  check(/different configuration/.test(diagnostics.textContent),'model drift must be disclosed');
+  check(/not verified task success/.test(diagnostics.textContent),'answered turns are not a quality score');
+  check(/unknown \/ unpriced/.test(document.getElementById('usage-box').textContent),'missing pricing must not become zero dollars');
+  check(/620/.test(diagnostics.textContent),'unsummarized coverage is visible');
+  var diagnosticDetails=diagnostics.querySelector('details'); diagnosticDetails.open=true;
+  window.renderUsage();
+  check(diagnostics.querySelector('details').open,'refresh preserves expanded diagnostic sections');
+  var reasoningPicker=document.getElementById('reasoning-select');
+  reasoningPicker.value='low'; reasoningPicker.dispatchEvent(new Event('change'));
+  for(var c=0;c<20;c++) await tick();
+  check(window.__calls.some(c=>c.url.indexOf('reasoning')>=0 && c.method==='POST' && c.body==='low'),'reasoning selection sends the selected level');
+  check(/unsupported_reasoning_level/.test(document.getElementById('settings-error').textContent),'refused settings must be visible');
+  diagnostics.querySelector('button').click();
+  for(var c=0;c<20;c++) await tick();
+  check(/Export failed/.test(document.getElementById('settings-error').textContent),'export failure must not claim a download');
+  var emptyDiagnostic=document.createElement('wa-harness-status');
+  emptyDiagnostic.data={observability:{available:false}};
+  check(/Missing records do not mean zero/.test(emptyDiagnostic.textContent),'empty telemetry is unknown, not zero efficiency');
 
   // Markdown: a model answering with a table must get a table. Pipes are not
   // something a reader can reconstruct. The renderer arrives over the node's

@@ -16,6 +16,12 @@
 --     real provider uses, so the wiring is what is under test and not a copy of it
 --
 -- Run from the repo root:  WA_SCRIPT=scripts/test-empty-reply.lua wa --db /tmp/x.db
+-- This suite stubs the transport and must not depend on an operator API key.
+local real_getenv=host.getenv
+host.getenv=function(key)
+  if key=='WASM_AGENT_LLM_API_KEY' then return 'test-only' end
+  return real_getenv(key)
+end
 local provider = dofile("lua/core/provider.lua")
 local json = dofile("lua/vendor/json.lua")
 
@@ -134,5 +140,6 @@ checks = checks + 1
 if step < 2 then error("the tool round must have happened, the provider ran " .. step .. " time(s)") end
 
 host.http_stream = real_stream
+host.getenv=real_getenv
 
 print(string.format("empty reply ok (%d checks)", checks))
