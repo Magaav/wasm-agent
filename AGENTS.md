@@ -128,6 +128,9 @@ bash scripts/build-window.sh                  # -> target/windows-x64/.../wa-win
   refuses a tree behind `origin/main`, proves the binary on a scratch port, installs
   via `upgrade.sh`, records `installed.txt`, and verifies the pid answering is its own.
   Never copy a binary over a running one by hand, and do not re-implement it.
+  From *inside* a running turn, do not launch this gate: it cannot wait for
+  itself to become idle. Build and test, then request the external sentinel to
+  upgrade; `skills/self-update/SKILL.md` gives the one-request continuation path.
 - **Never hand a POSIX path to a native Windows process.** `/c/...` is unusable as an
   argument: the node starts, cannot read `index.html`, and answers 404 for `/` while
   looking healthy. Convert it (`cygpath -w`).
