@@ -20,3 +20,13 @@ and it teaches a node to distrust rules it cannot check.
   `http://127.0.0.1:9333/json/list` and `Runtime.evaluate` for `location.href`, `document.title` and
   `performance.getEntriesByType("navigation")[0].responseStatus`. One query found in seconds what three
   hypotheses - a cache, a profile lock, the WebView2 runtime - did not.
+
+## Status
+
+This file is **not injected yet**. `agent.agents_md` was extended to append it on Windows and that change
+broke the gating test (`master must read AGENTS.md`), so it was reverted rather than left in a red gate. The
+mechanism is the small remaining piece: resolve the base role file as before, then append
+`AGENTS.<platform>.md` from the same directories when `host.platform()` matches, and assert both halves in
+`scripts/test.sh` - the global file naming no platform mechanism, and the platform file arriving on the
+platform it is for. Until then the Windows rules live in `AGENTS.md` as well, and `DESIGN.md` 1a is the
+direction.

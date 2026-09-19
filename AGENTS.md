@@ -167,14 +167,17 @@ bash scripts/build-window.sh                  # -> target/windows-x64/.../wa-win
   refuses a tree behind `origin/main`, proves the binary on a scratch port, installs
   via `upgrade.sh`, records `installed.txt`, and verifies the pid answering is its own.
   Never copy a binary over a running one by hand, and do not re-implement it.
+- **Never hand a POSIX path to a native Windows process.** `/c/...` is unusable as an
+  argument: the node starts, cannot read `index.html`, and answers 404 for `/` while
+  looking healthy. Convert it (`cygpath -w`).
+- **Never restart or replace the window.** It is a client: it reconnects and reloads on
+  its own. A window that looks alive but does nothing is a *page* problem, and the node
+  can say so: `/health`'s `ui_page_age_ms` (a number = the page is polling) and
+  `ui_error` (what the page reported). A page that neither polls nor reports is not
+  running at all - ask it directly with
+  `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333`.
 - **More than one worker is normal.** Read workers spawn on demand and retire when
   idle; turns route by session. `/health`'s `workers[]` says who is busy with what.
-- **Put an instruction where it is true.** This file is injected into every turn, so
-  every line costs context on every turn. Role-specific rules go in `AGENTS.guest.md`;
-  platform-specific rules go in `AGENTS.<platform>.md` (injected only on that
-  platform); and **anything a mechanism can enforce belongs in code, not here** - a
-  rule the machine can check is cheaper than a rule the model must remember. Add prose
-  only for what neither a role, a platform, nor the code can carry.
 - **Skills carry procedures, not context.** A technique the agent should not
   have to be told twice belongs in `skills/<name>/SKILL.md` (the Agent Skills
   standard, shared with pi and Orca). Only the description is always in
