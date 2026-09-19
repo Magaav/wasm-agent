@@ -101,6 +101,13 @@ struct Pool {
 static POOL: OnceLock<Pool> = OnceLock::new();
 static WORKER_BEATS: OnceLock<Vec<AtomicU64>> = OnceLock::new();
 static WORKER_BUSY: OnceLock<Vec<Mutex<Option<(String, u64)>>>> = OnceLock::new();
+/// Which session each worker is currently running, if any.
+///
+/// This is what makes concurrent *turns* safe. A turn is routed by session: the same session always goes to
+/// the worker already running it, so its turns stay ordered and "one writer per session" holds by routing
+/// rather than by a lock. A session nobody is running goes to an idle worker - which is the whole point, two
+/// conversations at once - and only a session with nowhere to go waits.
+static WORKER_SESSION: OnceLock<Vec<Mutex<Option<String>>>> = OnceLock::new();
 
 fn env_usize(name: &str, fallback: usize) -> usize {
     std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(fallback)
@@ -209,7 +216,7 @@ fn worker_busy_label(index: usize) -> Option<String> {
 ///
 /// The interpreter is built *before* the lock is taken in spirit but inside it in practice, which is why
 /// the caller must not be a hot path: this happens once per growth, not once per request.
-fn spawn_read_worker(slots: &mut Vec<Option<std::sync::mpsc::SyncSender<(TcpStream, Request)>>>) -> Option<usize> {
+fn spawn_worker(slots: &mut Vec<Option<std::sync::mpsc::SyncSender<(TcpStream, Request)>>>) -> Option<usize> {
     let pool = POOL.get()?;
     let index = slots.iter().position(|slot| slot.is_none()).unwrap_or(slots.len());
     if index >= max_workers() + 1 {
@@ -247,9 +254,66 @@ fn turn_worker_is_idle() -> bool {
     }
 }
 
+/// A turn: the one route that is routed by session rather than pinned to worker 0.
+fn is_turn_route(request: &Request) -> bool {
+    request.method == "POST" && split_path(&request.path).0 == "/chat"
+}
+
+/// The worker already running this session, if any. That worker is where the next turn for it belongs, so
+/// the session keeps one writer and its turns keep their order.
+fn worker_running_session(session: &str) -> Option<usize> {
+    if session.is_empty() {
+        return None;
+    }
+    let slots = WORKER_SESSION.get()?;
+    for (index, slot) in slots.iter().enumerate() {
+        let held = slot.lock().ok().and_then(|guard| guard.clone());
+        if held.as_deref() == Some(session) {
+            return Some(index);
+        }
+    }
+    None
+}
+
+/// The first worker doing nothing at all, for a session nobody is running.
+///
+/// Takes the slots lock itself, so it must be called *before* the caller takes it: `std::sync::Mutex` is not
+/// reentrant, and the first version of this called it while already holding that lock.
+fn idle_worker() -> Option<usize> {
+    let beats = WORKER_BEATS.get()?;
+    let slots = POOL.get()?.slots.lock().ok()?;
+    for (index, slot) in slots.iter().enumerate() {
+        if slot.is_none() || worker_busy_label(index).is_some() {
+            continue;
+        }
+        let beaten = beats.get(index).map(|b| b.load(Ordering::Relaxed) != u64::MAX).unwrap_or(false);
+        if beaten && worker_age_ms(index) < 1000 {
+            return Some(index);
+        }
+    }
+    None
+}
+
 /// Which worker a request goes to, growing the pool if that is what it takes.
 fn choose_worker(request: &Request) -> usize {
     let Some(pool) = POOL.get() else { return 0 };
+    // A turn first, because it is the one route with a rule of its own: routed by session, so two different
+    // conversations run at once and one conversation never does.
+    if is_turn_route(request) {
+        if let Some(index) = worker_running_session(&request.session) {
+            return index;
+        }
+        if let Some(index) = idle_worker() {
+            return index;
+        }
+        if let Ok(mut slots) = pool.slots.lock() {
+            if let Some(index) = spawn_worker(&mut slots) {
+                return index;
+            }
+        }
+        // Nowhere to go: the turn waits behind worker 0, which is what a node with one interpreter always did.
+        return 0;
+    }
     let read = is_read_route(request);
     // Nothing to gain while the turn worker is idle - for a read as much as for a write. This is the rule
     // that keeps an idle node at exactly one interpreter, and it is also why a read does not spawn a worker
@@ -272,7 +336,7 @@ fn choose_worker(request: &Request) -> usize {
     }
     // A read, the turn worker is busy, and there is no read worker: this is the moment the pool earns its
     // keep. Everything else waits, which is what a node with one interpreter has always done.
-    if let Some(index) = spawn_read_worker(&mut slots) {
+    if let Some(index) = spawn_worker(&mut slots) {
         return index;
     }
     0
@@ -435,6 +499,7 @@ fn health_body() -> Vec<u8> {
                 workers.push(serde_json::json!({
                     "id": index,
                     "role": if index == 0 { "turns" } else { "reads" },
+                    "session": WORKER_SESSION.get().and_then(|slots| slots.get(index)).and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone())),
                     "state": if age >= stall_seconds() * 1000 { "stalled" } else if age < 1000 { "alive" } else { "busy" },
                     "age_ms": age,
                     "busy_ms": busy.as_ref().map(|(_, started)| now_ms().saturating_sub(*started)),
@@ -534,6 +599,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     // inside the first millisecond of the process, so 0 would be ambiguous between "never" and "at time 0".
     let _ = WORKER_BEATS.set((0..=ceiling).map(|_| AtomicU64::new(u64::MAX)).collect());
     let _ = WORKER_BUSY.set((0..=ceiling).map(|_| Mutex::new(None)).collect());
+    let _ = WORKER_SESSION.set((0..=ceiling).map(|_| Mutex::new(None)).collect());
     let _ = POOL.set(Pool {
         slots: Mutex::new(Vec::new()),
         factory,
@@ -560,7 +626,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     // so the default is to have none until that happens.
     for _ in 0..warm {
         if let Ok(mut slots) = pool.slots.lock() {
-            spawn_read_worker(&mut slots);
+            spawn_worker(&mut slots);
         }
     }
     eprintln!(
@@ -735,7 +801,23 @@ fn worker_loop(
                 QUEUED.fetch_sub(1, Ordering::Relaxed);
                 LAST_SERVED_MS.store(now_ms(), Ordering::Relaxed);
                 begin_work(format!("{} {}", request.method, request.path));
+                // Which session this worker holds, so a second turn in the same session finds it and queues
+                // behind it instead of starting a second writer on the same conversation.
+                if let Some(slots) = WORKER_SESSION.get() {
+                    if let Some(slot) = slots.get(index) {
+                        if let Ok(mut guard) = slot.lock() {
+                            *guard = if request.session.is_empty() { None } else { Some(request.session.clone()) };
+                        }
+                    }
+                }
                 let _ = handle(&lua, &agent_ui, &mut stream, &request);
+                if let Some(slots) = WORKER_SESSION.get() {
+                    if let Some(slot) = slots.get(index) {
+                        if let Ok(mut guard) = slot.lock() {
+                            *guard = None;
+                        }
+                    }
+                }
                 end_work();
                 beat();
                 idle_since = std::time::Instant::now();
