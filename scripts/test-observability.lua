@@ -27,6 +27,13 @@ check(not telemetry.normalize({prompt_tokens=1,completion_tokens=1}).cache_known
 check(not telemetry.normalize(raw).cost_known,'unpriced tokens are not free')
 check(telemetry.estimate_messages({{role='user',content={{type='image_url',image_url={url=string.rep('b',1000000)}}}}})<1300,'image estimate is not base64 length')
 check(telemetry.normalize({prompt_tokens=1,completion_tokens=1,prompt_cache_hit_tokens=3}).issue=='cache_exceeds_input','inconsistent provider accounting visible')
+local shape=telemetry.prompt_shape({
+  {role='system',content='rules'},
+  {role='assistant',content='',reasoning_content='thinking',tool_calls={{id='call',type='function',['function']={name='read',arguments='{"path":"first"}'}}}},
+  {role='tool',tool_call_id='call',content='file body'},
+},{{type='function',['function']={name='read'}}})
+check(shape.reasoning_source_bytes==8 and shape.tool_arguments_source_bytes==16 and shape.tool_calls==1 and shape.tool_results==1,'request shape separates assistant subsets and tool results')
+check(shape.system_bytes==#json.encode({role='system',content='rules'}) and shape.tool_result_bytes==#json.encode({role='tool',tool_call_id='call',content='file body'}),'role sizes are exact serialized JSON bytes')
 local sid=session('durability')
 local span=telemetry.start({session_id=sid,turn_id='turn'},'llm',{model='fixture'})
 telemetry.finish(span,{ok=true,usage=raw,normalized=normalized})
@@ -56,6 +63,25 @@ check(reconstructed==unicode,'unicode artifact retrieval is lossless')
 check(not output.outcome('bash',{code=7}) and not output.outcome('write',{ok=false}),'failed effects are failed tools')
 check(output.outcome('grep',{code=1}),'no-match is a valid search')
 check(tools.dispatch(memory,'tool_result',{sha256=projected.full_result.sha256},'guest').error~=nil,'artifact retrieval role gate')
+local read_original=host.read_file
+host.read_file=function(path)
+  if path=='first' then return 'alpha\nbeta\ngamma' end
+  if path=='second' then return 'one\ntwo' end
+  return read_original(path)
+end
+local requests={{path='first',offset=2,limit=1},{path='second'},{path='missing'}}
+local batched=tools.dispatch(memory,'read_many',{requests=requests},'master')
+check(#batched.results==3 and batched.failed==1 and batched.ok==false,'batched reads preserve order and partial failures')
+check(batched.results[1].content==tools.dispatch(memory,'read',requests[1],'master').content
+  and batched.results[2].content==tools.dispatch(memory,'read',requests[2],'master').content,
+  'batched ranges equal individual reads exactly')
+check(batched.results[3].error=='not_found' and tools.dispatch(memory,'read_many',{requests=requests},'guest').error~=nil,
+  'batched missing files and role denial remain visible')
+host.read_file=read_original
+local large_batch={ok=true,results={{path='first',content=text},{path='second',content=text}}}
+local large_view=json.decode(output.project('read_many',large_batch))
+check(large_view.omitted and host.read_file(large_view.full_result.path)==json.encode(large_batch),
+  'oversized batched view retains its complete original')
 local write=host.write_file
 host.write_file=function() return false end
 local read=host.read_file; host.read_file=function() return 'old text' end
@@ -97,6 +123,9 @@ local arguments=json.encode({path='fixture.txt',content=string.rep('exact argume
 memory.append_turn(backlog,{role='user',content=instruction})
 memory.append_turn(backlog,{role='assistant',content='',tool_calls={{id='write-fixture',type='function',['function']={name='write',arguments=arguments}}}})
 memory.append_turn(backlog,{role='tool',tool_call_id='write-fixture',tool_name='write',content='{"ok":true}'})
+local reads=json.encode({requests={{path='source-one.lua'},{path='source-two.lua'}}})
+memory.append_turn(backlog,{role='assistant',content='',tool_calls={{id='read-many-fixture',type='function',['function']={name='read_many',arguments=reads}}}})
+memory.append_turn(backlog,{role='tool',tool_call_id='read-many-fixture',tool_name='read_many',content='{"ok":true}'})
 for i=1,120 do memory.append_turn(backlog,{role=i%2==1 and 'user' or 'assistant',content=string.rep('past work ',200)}) end
 provider.complete_with=function(_,messages)
   check(messages[2].content:find(instruction,1,true)~=nil,'compaction preserves full user instructions')
@@ -106,6 +135,8 @@ provider.complete_with=function(_,messages)
 end
 local backlog_bot=agentlib.new(backlog,function() end,'master','master','')
 check(backlog_bot:maybe_compact(),'oversized backlog compacted in a bounded prefix')
+check(memory.session(backlog).summary:find('read: source-one.lua',1,true) and memory.session(backlog).summary:find('read: source-two.lua',1,true),
+  'compaction records every batched read path')
 check(#memory.session_turns(backlog,{all=true,after_seq=memory.session(backlog).summarized_until})>20,'uncovered backlog is not falsely marked summarized')
 provider.budget=budget
 

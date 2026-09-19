@@ -931,6 +931,7 @@ class WaHarnessStatus extends HTMLElement {
       ['starts without ends',`${n(report.pending)} (running or interrupted)`],
     ]);
     const ctx=report.context || {}, compact=report.last_compaction || {};
+    const shape=request.prompt_shape || {};
     section('Context and compaction',[
       ['capacity / source',`${n(settings.context_limit)} / ${settings.context_source || '?'}`],
       ['compact at / keep recent',`${n(settings.compact_trigger)} / ${n(settings.compact_keep)} tokens`],
@@ -941,7 +942,13 @@ class WaHarnessStatus extends HTMLElement {
       ['summary tokens billed',n((c.prompt || 0)+(c.output || 0))],
       ['failed compactions',n(report.compaction_failures)],
       ['system / schema estimates',`${n(request.system_tokens_estimate)} / ${n(request.schema_tokens_estimate)}`],
+      ['request system / schema bytes',`${n(shape.system_bytes)} / ${n(shape.schema_bytes)}`],
+      ['request user / assistant bytes',`${n(shape.user_bytes)} / ${n(shape.assistant_bytes)}`],
+      ['request tool-result bytes',n(shape.tool_result_bytes)],
+      ['assistant reasoning / tool-argument source bytes',`${n(shape.reasoning_source_bytes)} / ${n(shape.tool_arguments_source_bytes)}`],
+      ['tool calls / results in request',`${n(shape.tool_calls)} / ${n(shape.tool_results)}`],
     ]);
+    note('Request composition is measured in JSON bytes, not tokens. Reasoning and argument source bytes are subsets of assistant bytes; provider token usage remains authoritative.');
     note('Summaries are lossy model interpretations; the original ledger remains the evidence. Full oversized tool results are stored on the originating node.');
     const runtime=request.runtime || report.runtime || {};
     section('Trace quality and runtime',[

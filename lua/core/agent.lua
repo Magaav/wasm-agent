@@ -202,6 +202,10 @@ local function guidelines_for(tool_list)
   if have.bash and not (have.grep or have.ls) then
     add("Use bash for file operations like listing and searching")
   end
+  if have.read_many then
+    add("When several known file reads are independent, request them together with read_many; "
+      .. "keep dependent reads and edits in order")
+  end
   add("Before changing this project's behaviour, read the relevant file under docs/ "
     .. "(or the section of AGENTS.md) in full, and follow its cross-references")
   add("When a task matches a skill in <available_skills>, load it with the skill tool before starting")
@@ -533,9 +537,15 @@ function M:maybe_compact(messages)
       for _, call in ipairs(row.tool_calls) do
         local f=call["function"] or {}
         local ok,args=pcall(json.decode,f.arguments or "{}")
-        if ok and type(args)=="table" and type(args.path)=="string" then
-          if f.name=="read" then read_files[args.path]=true
-          elseif f.name=="write" or f.name=="edit" then modified_files[args.path]=true end
+        if ok and type(args)=="table" then
+          if f.name=="read_many" and type(args.requests)=="table" then
+            for _, request in ipairs(args.requests) do
+              if type(request)=="table" and type(request.path)=="string" then read_files[request.path]=true end
+            end
+          elseif type(args.path)=="string" then
+            if f.name=="read" then read_files[args.path]=true
+            elseif f.name=="write" or f.name=="edit" then modified_files[args.path]=true end
+          end
         end
       end
     end
@@ -560,9 +570,15 @@ function M:maybe_compact(messages)
     for index=1,cut_index do
       for _,call in ipairs(rows[index].tool_calls or {}) do
         local f=call['function'] or {}; local ok,args=pcall(json.decode,f.arguments or '{}')
-        if ok and type(args)=='table' and type(args.path)=='string' then
-          if f.name=='read' then read_files[args.path]=true
-          elseif f.name=='edit' or f.name=='write' then modified_files[args.path]=true end
+        if ok and type(args)=='table' then
+          if f.name=='read_many' and type(args.requests)=='table' then
+            for _,request in ipairs(args.requests) do
+              if type(request)=='table' and type(request.path)=='string' then read_files[request.path]=true end
+            end
+          elseif type(args.path)=='string' then
+            if f.name=='read' then read_files[args.path]=true
+            elseif f.name=='edit' or f.name=='write' then modified_files[args.path]=true end
+          end
         end
       end
     end

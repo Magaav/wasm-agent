@@ -333,6 +333,8 @@ $harness = @'
   check(/not verified task success/.test(diagnostics.textContent),'answered turns are not a quality score');
   check(/unknown \/ unpriced/.test(document.getElementById('usage-box').textContent),'missing pricing must not become zero dollars');
   check(/620/.test(diagnostics.textContent),'unsummarized coverage is visible');
+  check(/request tool-result bytes/.test(diagnostics.textContent) && /JSON bytes, not tokens/.test(diagnostics.textContent),
+    'prompt composition distinguishes exact bytes from token usage');
   var diagnosticDetails=diagnostics.querySelector('details'); diagnosticDetails.open=true;
   window.renderUsage();
   check(diagnostics.querySelector('details').open,'refresh preserves expanded diagnostic sections');
