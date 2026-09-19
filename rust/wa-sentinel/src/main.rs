@@ -416,19 +416,81 @@ fn verb_restart(reason: &str) -> Result<String> {
 /// Upgrade by running the operator's script, which already proves the binary, waits for idle, swaps,
 /// verifies and rolls back. Reimplementing that here would be a second implementation of the same
 /// safety properties, and the second one is always the one that is wrong.
+/// The interpreter to run a shell script with, and the script path in the form that interpreter
+/// can open.
+///
+/// This is where the upgrade was actually broken, and it took three wrong theories to find:
+///
+///   * `Command::new("bash")` resolves through the *system* PATH. On this machine that is
+///     `C:\Windows\System32\bash.exe` - **WSL's** bash - because Git Bash's directories are not on
+///     the system PATH for a detached process. WSL sees a Linux filesystem, so the script's
+///     `/c/Users/...` path does not exist there and bash exits 127 with "No such file or
+///     directory" for a file that plainly exists. Every theory about the file (missing, unreadable,
+///     CRLF, a `C:/` vs `/c/` form) was wrong; the interpreter was.
+///   * A Git Bash *does* accept `/c/...` for the script, but not `C:/...` - hence the drive-form
+///     conversion below, which must match whichever interpreter is chosen.
+///
+/// So: find a Git Bash by its own install location (the one place that is certain), pass it the
+/// POSIX form of the script, and pass the *binary* in the Windows form the script's `[ -x ... ]`
+/// test can actually stat. `sh` on Unix, unchanged.
+fn shell_for(script: &Path) -> (String, String) {
+    if !cfg!(windows) {
+        return ("sh".into(), script.display().to_string());
+    }
+    for candidate in [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ] {
+        if Path::new(candidate).exists() {
+            return (candidate.to_string(), to_msys_path(script));
+        }
+    }
+    // No Git Bash found: fall back to whatever `bash` is, with the Windows path form, and let the
+    // error name the real problem rather than a missing file.
+    ("bash".into(), script.display().to_string())
+}
+
+/// The binary argument, in the form the script's own `[ -x "$NEW" ]` test understands. That test
+/// runs under the shell we just chose, so the same rule applies: a POSIX path for a MSYS bash.
+fn shell_for_binary(binary: &str) -> String {
+    if !cfg!(windows) {
+        return binary.to_string();
+    }
+    if binary.len() > 2 && binary.as_bytes()[1] == b':' && binary.as_bytes()[2] == b'/' {
+        return to_msys_path(Path::new(binary));
+    }
+    binary.to_string()
+}
+
+/// `C:/dir/file` -> `/c/dir/file`. Only the drive form needs it; anything else is passed through
+/// unchanged rather than mangled into something worse.
+fn to_msys_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    let bytes = text.as_bytes();
+    if bytes.len() > 2 && bytes[1] == b':' && bytes[2] == b'/' {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        return format!("/{drive}{}", &text[2..]);
+    }
+    text
+}
+
 fn verb_upgrade(binary: &str, reason: &str) -> Result<String> {
     if binary.is_empty() {
         bail!("upgrade needs --binary");
     }
-    let script = std::env::var("WA_UPGRADE_SCRIPT").unwrap_or_else(|_| {
-        if cfg!(windows) { "scripts/upgrade.sh".into() } else { "scripts/upgrade.sh".into() }
-    });
-    if !Path::new(&script).exists() {
-        bail!("no upgrade script at {script} (set WA_UPGRADE_SCRIPT)");
-    }
-    let status = std::process::Command::new(if cfg!(windows) { "bash" } else { "sh" })
-        .arg(&script)
-        .arg(binary)
+    let script = resolve_upgrade_script()?;
+    let (interpreter, script_arg) = shell_for(&script);
+    let status = std::process::Command::new(&interpreter)
+        // The path is passed to the interpreter as its first argument. Git Bash does not accept a
+        // `C:/...` path there, and WSL's bash cannot see `/c/...` at all, so both the interpreter
+        // *and* the path form have to agree (`shell_for`).
+        .arg(&script_arg)
+        .arg(shell_for_binary(binary))
+        // The script locates the repo from its own path (`dirname $0/..`), so the working
+        // directory does not matter to it. This used to pin cwd to the sentinel's own, which was
+        // the install directory - a directory with no `scripts/` in it, which is exactly why the
+        // relative default could never be found from a detached watcher.
         .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
         .status()
         .context("run the upgrade script")?;
@@ -438,6 +500,55 @@ fn verb_upgrade(binary: &str, reason: &str) -> Result<String> {
     } else {
         bail!("the upgrade script failed (exit {status}) - it rolls back, so the node should be running the previous binary")
     }
+}
+
+/// Where `scripts/upgrade.sh` is.
+///
+/// The default used to be the bare relative path `scripts/upgrade.sh`, checked against the
+/// sentinel's own working directory. The sentinel is *detached* - started by `Start-Process`, which
+/// does not inherit the launcher's environment or its cwd - so its cwd is the install directory
+/// (e.g. `%LOCALAPPDATA%\wasm-agent`), which contains no `scripts/`. The check therefore failed on
+/// every upgrade, the audit line was still written, and the operator saw an "upgrade" entry with no
+/// swap and no explanation. It happened twice before this was traced.
+///
+/// Resolution order, so an upgrade works from a detached watcher:
+///   1. `WA_UPGRADE_SCRIPT`, the explicit override.
+///   2. `scripts/upgrade.sh` beside the *installed binary* (the upgrade target's directory) - this
+///      is where an install that ships the script puts it.
+///   3. `scripts/upgrade.sh` under the current directory, for a watcher started from a checkout.
+fn resolve_upgrade_script() -> Result<PathBuf> {
+    if let Ok(explicit) = std::env::var("WA_UPGRADE_SCRIPT") {
+        if Path::new(&explicit).exists() {
+            return Ok(PathBuf::from(explicit));
+        }
+        bail!("WA_UPGRADE_SCRIPT points at {explicit}, which does not exist");
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(me) = std::env::current_exe() {
+        if let Some(dir) = me.parent() {
+            candidates.push(dir.join("scripts").join("upgrade.sh"));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("scripts").join("upgrade.sh"));
+        // One level up, because a watcher is often started from a subdirectory of the checkout.
+        if let Some(up) = cwd.parent() {
+            candidates.push(up.join("scripts").join("upgrade.sh"));
+        }
+    }
+    for candidate in &candidates {
+        if candidate.exists() {
+            return Ok(candidate.clone());
+        }
+    }
+    bail!(
+        "no upgrade script found (looked at {}; set WA_UPGRADE_SCRIPT to the full path)",
+        candidates
+            .iter()
+            .map(|c| c.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 fn verb_run(script: &str, reason: &str) -> Result<String> {
