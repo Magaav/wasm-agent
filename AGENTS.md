@@ -87,53 +87,12 @@ never commit to main.*
 
 ### Never touch the old plugin
 
-`openclaw.ohana:/local` is a **different repository**
-(`github.com/Magaav/hermes-orchestrator`), and `/local/plugins/wasm-agent`
-inside it is the Python v8 predecessor of this project. It is a **reference,
-not a target**: read it if you must, but never edit, build, deploy or "fix" it.
-The same goes for `/local/docs/context/*` and `find-run.py` — those describe the
-old plugin's runs.
-
-This repo is *also* nested on that host, at `/local/projects/wasm-agent`. That
-nesting is why the two get confused: it is a separate git repo (the old one
-ignores `projects/`), so `git -C /local status` says nothing about this repo.
-Always name the path in full.
+The v8 plugin is the reference, not the target. Read it; do not modify it.
 
 ### Keep LF
 
-These files are consumed by a Linux host and by `sh`/`lua`, so they must stay
-LF. `core.autocrlf` **must be `false`** in every checkout, and the committed
-blobs must contain no CR:
-
-```bash
-git config core.autocrlf                    # must print false
-bash scripts/test.sh                        # enforces the rest; prints "line endings ok"
-```
-
-The check is in the smoke test rather than a one-liner here because it cannot be
-spelled portably: it needs a literal carriage return, and the POSIX form
-(`git grep --cached -I -l "$(printf '\r')"`) silently does nothing under
-`cmd /C` on Windows — an agent working there reported exactly that. The test
-itself reads the **stored** blobs and skips binaries, which is the invariant that
-matters: a CRLF working copy on Windows is recoverable, a CRLF commit is not.
-
-Do **not** verify this with `grep -c $'\r' <file>` — in some shells the pattern
-arrives empty, so it returns the *line count* (`444` for `lua/core/agent.lua`)
-and looks exactly like a repo-wide CRLF disaster.
-
-## Layout
-
-```
-lua/core/        the agent: schema, memory, tools, provider, turn loop, server
-lua/vendor/      json.lua
-rust/wa-host/    the `wa` binary: host capabilities + embedded Lua 5.4
-rust/wa-window/  the Windows WebView2 desktop shell (cross-built, see below)
-rust/plugins/    example WASM plugin
-ui/              the chat window (plain files, hot-reloaded)
-scripts/         install, build, test
-docs/            design documents
-DESIGN.md        UI contract — read before touching ui/
-```
+These files are consumed by Linux and by `sh`/`lua`; `core.autocrlf=false` stores bytes as they are.
+The `pre-commit` hook enforces it - that hook is the contract, this line is the pointer.
 
 ## Build and verify
 
@@ -247,21 +206,8 @@ no trace, and no way to tell whether it was even wanted.
 
 ## Restarting the node you are running on
 
-You cannot do it. The stop kills your turn before your next command runs — the node goes down, the copy
-never happens, the start never happens, and nobody is left to bring it back. This is not a rule to
-remember; it is what happens.
-
-Ask instead, and the sentinel outside performs it:
-
-```bash
-wa-sentinel request restart --reason "why"
-wa-sentinel request upgrade --binary /path/to/wa --reason "why"
-wa-sentinel request wake --session "$SESSION" --prompt "the node restarted; carry on" --reason "why"
-```
-
-`request` writes a file and returns; the sentinel performs it. Your turn dies as `unfinished` when the
-node stops, which is expected — the request is already on disk. Write the `wake` request too if you want
-to be brought back. See `docs/SENTINEL.md`.
+You cannot: the stop is the last command your turn executes. Ask the sentinel - the procedure, and the
+reasons, are in `skills/self-update/SKILL.md`.
 
 ## Keep your branch current with main
 
