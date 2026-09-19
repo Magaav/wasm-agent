@@ -65,7 +65,10 @@ fn config_dir() -> PathBuf {
 
 fn sentinel_dir() -> PathBuf {
     let dir = config_dir().join("sentinel");
-    for sub in ["requests", "done", "failed"] {
+    // `claimed` too: a request is renamed into it before it is performed, and a missing directory
+    // would make that rename fail - which, after the claim-before-work change, would mean no request
+    // was ever processed at all. It is created here with the others so it cannot be forgotten.
+    for sub in ["requests", "done", "failed", "claimed"] {
         let _ = std::fs::create_dir_all(dir.join(sub));
     }
     dir
@@ -623,12 +626,23 @@ fn process_requests() -> Result<u32> {
     // Oldest first: a queue that runs backwards is a queue nobody can reason about.
     entries.sort();
     for path in entries {
-        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        // Claim before working, not after. This used to read the request, do the work, and only then
+        // remove the file - so a second runner (the watcher and a stray `once`, which is exactly what
+        // happened) could pick up the same file while the first was still inside it, and run the
+        // upgrade twice. Two `upgrade` lines appeared in the log for one request, and only the
+        // request record showed it had been performed once. The rename is the claim: it is atomic, so
+        // whichever runner calls it first owns the file, and the other sees it gone.
+        let claim = sentinel_dir().join("claimed").join(path.file_name().unwrap_or_default());
+        if std::fs::rename(&path, &claim).is_err() {
+            // Someone else got it, or it vanished. Either way it is not this runner's to perform.
+            continue;
+        }
+        let text = std::fs::read_to_string(&claim).unwrap_or_default();
         let request: Value = match serde_json::from_str(&text) {
             Ok(value) => value,
             Err(error) => {
-                audit("bad-request", &path.display().to_string(), &error.to_string());
-                let _ = std::fs::rename(&path, sentinel_dir().join("failed").join(path.file_name().unwrap_or_default()));
+                audit("bad-request", &claim.display().to_string(), &error.to_string());
+                let _ = std::fs::rename(&claim, sentinel_dir().join("failed").join(claim.file_name().unwrap_or_default()));
                 continue;
             }
         };
@@ -646,9 +660,11 @@ fn process_requests() -> Result<u32> {
             "detail": detail,
             "at": now_epoch(),
         });
-        let target = sentinel_dir().join(folder).join(path.file_name().unwrap_or_default());
+        let target = sentinel_dir().join(folder).join(claim.file_name().unwrap_or_default());
         let _ = std::fs::write(&target, serde_json::to_string_pretty(&record).unwrap_or_default());
-        let _ = std::fs::remove_file(&path);
+        // The file is already out of `requests/` - it was renamed there as the claim. Only the
+        // transient copy in `claimed/` is removed here.
+        let _ = std::fs::remove_file(&claim);
         say(&format!("{}: {}", if outcome.is_ok() { "ok" } else { "failed" }, detail));
         handled += 1;
     }
