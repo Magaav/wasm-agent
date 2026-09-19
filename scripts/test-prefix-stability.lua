@@ -43,14 +43,14 @@ ok(second:find("CHANGED", 1, true) == nil, "and the changed text must not have l
 local guest = agent.agents_md("guest")
 ok(guest ~= nil and guest ~= first, "the guest instructions are still their own file")
 
--- The budget is on by default, and 0 disables it.
+-- The window decides by default, which is pi's policy. A budget is opt-in, and it can only make compaction
+-- happen earlier - never later, or a call would be sent past its model.
 local limit = 1000000
 local reserve = window.policy(limit)
-local default_budget = 64000
-ok(math.min(limit - reserve, default_budget) == default_budget,
-  "by default the budget is the trigger, not the window")
-ok(default_budget < limit - reserve, "so a 1,000,000-token window no longer means 723k calls")
 local off_trigger = (0 > 0) and math.min(limit - reserve, 0) or (limit - reserve)
-ok(off_trigger == limit - reserve, "0 disables the guard and restores the window trigger")
+ok(off_trigger == limit - reserve, "with no budget configured the window is the trigger")
+local opt_in = 64000
+ok(math.min(limit - reserve, opt_in) == opt_in, "a configured budget fires earlier than the window")
+ok(math.min(limit - reserve, opt_in) <= limit - reserve, "and can never fire later than it")
 
 print("prefix stability ok (" .. checks .. " checks)")

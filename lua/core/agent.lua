@@ -468,11 +468,17 @@ function M:maybe_compact(messages)
   local before = self:context_tokens(messages)
   -- Pi compacts at capacity. A smaller engineering budget is an explicit choice,
   -- never inferred from uncached-input statistics masquerading as total input.
-  -- The budget is a guard, not the parity fix: pi runs huge contexts happily because its prefix is stable
-  -- and cached. This is what makes *our* provider survive until that is true here - it caps what gets
-  -- re-sent, which is what took time-to-first-token to 27s and let a 723k stream be dropped. Set it to 0 to
-  -- disable. The default is on, because a guard that has to be remembered is not a guard.
-  local budget = tonumber(host.getenv and host.getenv("WASM_AGENT_CONTEXT_BUDGET") or "") or 64000
+  -- No budget by default: the window decides, which is pi's policy and the one the prefix fix depends on.
+  --
+  -- A 64k budget was added here and it was self-defeating. Compaction rewrites the transcript prefix, and the
+  -- prefix is exactly what the provider's cache keys on - so compacting far more often than pi does bought a
+  -- smaller prompt and paid for it with a cold cache, which is the slowness the budget was meant to prevent.
+  -- The 723k stream that dropped had `cached_tokens: 0` and 26.7s to first token: a cold-cache symptom, not a
+  -- size limit. With the prefix stable that prompt is mostly cached and answers in one to two seconds.
+  --
+  -- WASM_AGENT_CONTEXT_BUDGET stays as an escape hatch for a provider that genuinely cannot take a large
+  -- prompt. It is not the default, because pi parity is the default and a guard nobody needs is a cost.
+  local budget = tonumber(host.getenv and host.getenv("WASM_AGENT_CONTEXT_BUDGET") or "") or 0
   if budget <= 0 then budget = limit - reserve end
   if budget<=0 then budget=limit-reserve end
   local trigger = math.min(limit - reserve, budget)
