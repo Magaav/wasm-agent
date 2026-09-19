@@ -153,6 +153,7 @@ fi
 # --- 2. wait for the node to be idle, so no turn is interrupted ----------------------------------
 say "waiting for the running node to finish what it is doing"
 waited=0
+FINE_TICKS=0
 while :; do
   state="$(health)"
   case "$state" in
@@ -168,9 +169,15 @@ while :; do
   # minute - that is noise in the log and in the node's queue. But the *last* moment, when the turn has
   # just ended, is exactly when a fixed 5s tick costs 5s of outage for nothing: the swap cannot start
   # until the poll notices. So once the node has been seen busy for a while, poll finely.
+  #
+  # The counter is whole seconds and the sleep is derived from it, so the number in the log is the
+  # number that elapsed. It used to sleep 0.5s and increment by 1, which advanced twice as fast as the
+  # clock: `IDLE_TIMEOUT=900` gave up after ~450 real seconds while saying 900, so the message named a
+  # deadline that had not passed. Two ticks, one second, counted once - no compensating arithmetic.
   if [ "$waited" -ge 10 ]; then
     sleep 0.5
-    waited=$((waited + 1))
+    FINE_TICKS=$((FINE_TICKS + 1))
+    if [ $((FINE_TICKS % 2)) -eq 0 ]; then waited=$((waited + 1)); fi
   else
     sleep 5
     waited=$((waited + 5))
