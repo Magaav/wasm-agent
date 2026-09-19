@@ -205,7 +205,8 @@ fn main() {
     // bridge - so a second interpreter adds no new way for the ledger to be written by two writers at
     // once. Written as a closure rather than a function so the boot sequence stays in one place: a second
     // copy of it is how the pool would drift from the single-interpreter path.
-    let boot_state = |host: *mut c_void| -> Lua {
+    let boot_args = lua_args.clone();
+    let boot_state = move |host: *mut c_void| -> Lua {
     let lua = Lua::new();
     lua.push_table();
     lua.register_with_upvalue("sql_exec", host::sql_exec, host as *mut c_void);
@@ -238,7 +239,7 @@ fn main() {
     lua.set_global("host");
 
     lua.push_table();
-    for (index, arg) in lua_args.iter().enumerate() {
+    for (index, arg) in boot_args.iter().enumerate() {
         lua.push_string(arg);
         lua.raw_seti((index + 1) as c_int);
     }
@@ -306,25 +307,20 @@ fn main() {
                 node::spawn_heartbeat(rendezvous_url);
             }
         }
-        // Worker 0 owns every route that changes something - turns, writes, sync, node calls - and the
-        // extra workers serve reads, so the window's own reads stop queueing behind a turn. Conservative
-        // on purpose: all turns stay on one interpreter, so "one writer per session" and per-session order
-        // hold by construction. Concurrent turns are the next step, not this one.
-        let workers: usize = std::env::var("WASM_AGENT_WORKERS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(1)
-            .clamp(1, 8);
-        let mut states = vec![lua];
-        for _ in 1..workers {
-            let extra = boot_state(host as *mut c_void);
-            if let Err(error) = extra.do_string(&core_source("lua/core/server.lua"), "lua/core/server.lua") {
+        // The pool builds its own interpreters on demand, so what it needs is a way to make one rather
+        // than a pile of them up front. The host pointer travels as a usize because it is a leaked raw
+        // pointer for the life of the process; a newtype with an unsafe Send would be the same claim with
+        // more ceremony.
+        let host_address = host as usize;
+        let factory = move || -> Lua {
+            let state = boot_state(host_address as *mut c_void);
+            if let Err(error) = state.do_string(&core_source("lua/core/server.lua"), "lua/core/server.lua") {
                 eprintln!("lua error: {error}");
                 std::process::exit(1);
             }
-            states.push(extra);
-        }
-        serve::run(states, port, PathBuf::from(ui));
+            state
+        };
+        serve::run(lua, Box::new(factory), port, PathBuf::from(ui));
         return;
     }
 

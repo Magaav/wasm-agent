@@ -44,25 +44,58 @@ static QUEUED: AtomicUsize = AtomicUsize::new(0);
 /// When the last request was taken off the queue, so the tick can wait for a quiet moment.
 static LAST_SERVED_MS: AtomicU64 = AtomicU64::new(0);
 
-/// Which read worker the next read goes to. Round-robin rather than "the idle one": reads are short, and a
-/// counter has no lock and no stale idea about who is free.
-static READ_ROTATE: AtomicUsize = AtomicUsize::new(0);
+/// How many interpreters a node runs, and how it decides.
+///
+/// Worker 0 is the turn worker and always exists: it owns every route that changes something - turns,
+/// writes, sync, node calls - so "one writer per session" and per-session order hold by construction
+/// rather than by locking.
+///
+/// The read workers are **hot-swappable**. There is no fixed pool to configure: a read worker is spawned at
+/// the moment a read would otherwise wait behind a busy worker 0, and it retires itself once it has been
+/// idle long enough. An idle node therefore runs exactly one interpreter and costs exactly what it did
+/// before any of this existed; a node under load grows to meet the load and shrinks back. That also settles
+/// the question a fixed pool raises and cannot answer - how many is right - by not answering it in advance.
+///
+/// `WASM_AGENT_WORKERS` is how many read workers to keep *warm* (default 0: spawn on demand),
+/// `WASM_AGENT_WORKERS_MAX` is the ceiling (default 4), and `WASM_AGENT_WORKERS_IDLE_SECONDS` is how long an
+/// idle read worker waits before retiring (default 60).
+///
+/// The read-route list is a **routing hint, not a source of truth**: a path that is not in it goes to
+/// worker 0, which is why a missing entry is a performance question and never a correctness one.
+struct Pool {
+    /// One slot per possible worker, index 0 first. `None` means that worker is not running. Slots rather
+    /// than a list, because a worker retires itself and a list would renumber everyone under it.
+    slots: Mutex<Vec<Option<std::sync::mpsc::SyncSender<(TcpStream, Request)>>>>,
+    /// Builds a fresh interpreter. It lives here as a boxed closure because the boot sequence belongs to
+    /// main.rs - a second copy of it in the pool is how the two would drift.
+    factory: Box<dyn Fn() -> Lua + Send + Sync>,
+    ui: PathBuf,
+    queue_depth: usize,
+    /// Counters, so growing and shrinking is observable rather than something you infer from latency.
+    spawned: AtomicUsize,
+    retired: AtomicUsize,
+    next: AtomicUsize,
+}
 
-/// How many interpreters this node runs, and which one owns what.
-///
-/// One is the default and behaves exactly as before. With more, **worker 0 keeps every route that changes
-/// something** - turns, writes, sync, node calls - and the extra workers serve reads. That split is the
-/// whole point: the window's own reads (`/sessions`, `/session`, `/models`, `/nodes`) used to queue behind
-/// a turn, so a node in the middle of a build looked like a node that had gone away, an undo check sat
-/// pending for minutes, and the desktop client's polls piled up into the queue.
-///
-/// It is deliberately conservative: every turn stays on worker 0, so "one writer per session" and
-/// per-session order hold by construction rather than by locking. Concurrent *turns* are the next step,
-/// not this one. And the read-route list below is a **routing hint, not a source of truth**: a path that is
-/// not in it simply goes to worker 0, which is exactly today's behaviour.
-static WORKER_COUNT: AtomicUsize = AtomicUsize::new(1);
+static POOL: OnceLock<Pool> = OnceLock::new();
 static WORKER_BEATS: OnceLock<Vec<AtomicU64>> = OnceLock::new();
 static WORKER_BUSY: OnceLock<Vec<Mutex<Option<(String, u64)>>>> = OnceLock::new();
+
+fn env_usize(name: &str, fallback: usize) -> usize {
+    std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(fallback)
+}
+
+fn warm_read_workers() -> usize {
+    env_usize("WASM_AGENT_WORKERS", 0)
+}
+
+fn max_workers() -> usize {
+    env_usize("WASM_AGENT_WORKERS_MAX", 4).clamp(1, 16)
+}
+
+fn read_idle_seconds() -> u64 {
+    env_usize("WASM_AGENT_WORKERS_IDLE_SECONDS", 60) as u64
+}
 
 thread_local! {
     /// Which worker this thread is. `beat()` is called from inside Lua and had no way to say *which*
@@ -98,13 +131,130 @@ fn worker_age_ms(index: usize) -> u64 {
     };
     let now = started.elapsed().as_millis() as u64;
     match WORKER_BEATS.get().and_then(|beats| beats.get(index)) {
-        Some(slot) => now.saturating_sub(slot.load(Ordering::Relaxed)),
+        Some(slot) => {
+            let beat = slot.load(Ordering::Relaxed);
+            // Never beaten: the worker has just been created, which is not the same as having gone quiet. A
+            // worker that was spawned a moment ago must not be refused as if it had been silent for a
+            // minute - which is exactly what happened the first time the pool grew, because "no beat" read
+            // as "as old as the process". Each worker beats at the top of its own loop, so this lasts
+            // microseconds and the detector keeps its teeth for a worker that *stops* reporting.
+            if beat == u64::MAX {
+                0
+            } else {
+                now.saturating_sub(beat)
+            }
+        }
         None => now.saturating_sub(BEAT_MS.load(Ordering::Relaxed)),
     }
 }
 
+fn live_worker_ids() -> Vec<usize> {
+    match POOL.get().and_then(|pool| pool.slots.lock().ok().map(|slots| {
+        slots
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.is_some())
+            .map(|(index, _)| index)
+            .collect::<Vec<usize>>()
+    })) {
+        Some(ids) if !ids.is_empty() => ids,
+        _ => vec![0],
+    }
+}
+
 fn worker_count() -> usize {
-    WORKER_COUNT.load(Ordering::Relaxed).max(1)
+    match POOL.get() {
+        Some(pool) => pool
+            .slots
+            .lock()
+            .map(|slots| slots.iter().filter(|slot| slot.is_some()).count())
+            .unwrap_or(1)
+            .max(1),
+        None => 1,
+    }
+}
+
+/// The label a worker is currently busy with, if any. This is how the dispatcher asks "is the turn worker
+/// idle?" without holding the interpreter or guessing from a timestamp.
+fn worker_busy_label(index: usize) -> Option<String> {
+    WORKER_BUSY
+        .get()
+        .and_then(|slots| slots.get(index))
+        .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()))
+        .map(|(label, _)| label)
+}
+
+/// Start one more read worker, and return its index. Called while holding the slots lock.
+///
+/// The interpreter is built *before* the lock is taken in spirit but inside it in practice, which is why
+/// the caller must not be a hot path: this happens once per growth, not once per request.
+fn spawn_read_worker(slots: &mut Vec<Option<std::sync::mpsc::SyncSender<(TcpStream, Request)>>>) -> Option<usize> {
+    let pool = POOL.get()?;
+    let index = slots.iter().position(|slot| slot.is_none()).unwrap_or(slots.len());
+    if index >= max_workers() + 1 {
+        return None;
+    }
+    let state = (pool.factory)();
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<(TcpStream, Request)>(pool.queue_depth);
+    if index == slots.len() {
+        slots.push(Some(sender));
+    } else {
+        slots[index] = Some(sender);
+    }
+    let worker_ui = pool.ui.clone();
+    pool.spawned.fetch_add(1, Ordering::Relaxed);
+    std::thread::spawn(move || {
+        WORKER_ID.with(|cell| cell.set(index));
+        worker_loop(state, index, receiver, worker_ui);
+    });
+    Some(index)
+}
+
+/// Is the turn worker free to take a request right now?
+///
+/// Idle means *both*: nothing in its hands, and it has reported progress recently. A worker that is not
+/// beating is not idle, whatever its label says - which is the case that matters, because a wedged turn
+/// worker must not be handed more work, and a read must not be told the node is fine when it is not.
+fn turn_worker_is_idle() -> bool {
+    if worker_busy_label(0).is_some() {
+        return false;
+    }
+    match WORKER_BEATS.get().and_then(|beats| beats.get(0)) {
+        // Never beaten: the process has just started, which is not the same as busy.
+        Some(slot) if slot.load(Ordering::Relaxed) == u64::MAX => true,
+        _ => worker_age_ms(0) < 1000,
+    }
+}
+
+/// Which worker a request goes to, growing the pool if that is what it takes.
+fn choose_worker(request: &Request) -> usize {
+    let Some(pool) = POOL.get() else { return 0 };
+    let read = is_read_route(request);
+    // Nothing to gain while the turn worker is idle - for a read as much as for a write. This is the rule
+    // that keeps an idle node at exactly one interpreter, and it is also why a read does not spawn a worker
+    // that would then sit there doing nothing: the pool appears only when a request would otherwise wait.
+    if turn_worker_is_idle() {
+        return 0;
+    }
+    let Ok(mut slots) = pool.slots.lock() else { return 0 };
+    // Only reads may go to a read worker. A write goes to worker 0 even when read workers exist, because
+    // that is the whole reason one writer per session holds without a lock - and the first version of this
+    // returned a read worker for a write, which the test caught by getting a 200 where it expected the
+    // stalled worker's 503.
+    if !read {
+        return 0;
+    }
+    let live: Vec<usize> = (1..slots.len()).filter(|index| slots[*index].is_some()).collect();
+    if !live.is_empty() {
+        let start = pool.next.fetch_add(1, Ordering::Relaxed);
+        return live[start % live.len()];
+    }
+    // A read, the turn worker is busy, and there is no read worker: this is the moment the pool earns its
+    // keep. Everything else waits, which is what a node with one interpreter has always done.
+    if let Some(index) = spawn_read_worker(&mut slots) {
+        return index;
+    }
+    0
 }
 
 fn now_ms() -> u64 {
@@ -234,7 +384,11 @@ fn stall_exit_seconds() -> u64 {
 /// The honest health body. `ok` is false when the interpreter has stopped reporting,
 /// which is the one thing this endpoint is uniquely placed to say.
 fn health_body() -> Vec<u8> {
-    let age_ms = beat_age_ms();
+    // The aggregate answers one question: *can this node do work?* Work happens on worker 0 - turns and
+    // every route that changes something - so the aggregate is worker 0's age, and a wedged turn worker is
+    // still reported as the node being stalled even while a read worker answers reads. Which lane is wedged
+    // is a per-worker question, answered by the array below.
+    let age_ms = worker_age_ms(0);
     let stalled = age_ms >= stall_seconds() * 1000;
     let state = if stalled { "stalled" } else if age_ms < 1000 { "alive" } else { "busy" };
     let current = IN_FLIGHT.lock().ok().and_then(|slot| {
@@ -246,19 +400,27 @@ fn health_body() -> Vec<u8> {
     // aggregate fields above are kept exactly as they were: the window and the sentinel read them, and a
     // new field must not move an old one.
     let mut workers = Vec::new();
-    for index in 0..worker_count() {
-        let age = worker_age_ms(index);
-        let busy = WORKER_BUSY
-            .get()
-            .and_then(|slots| slots.get(index))
-            .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()));
-        workers.push(serde_json::json!({
-            "id": index,
-            "state": if age >= stall_seconds() * 1000 { "stalled" } else if age < 1000 { "alive" } else { "busy" },
-            "age_ms": age,
-            "busy_ms": busy.as_ref().map(|(_, started)| now_ms().saturating_sub(*started)),
-            "label": busy.as_ref().map(|(label, _)| label.clone()),
-        }));
+    if let Some(pool) = POOL.get() {
+        if let Ok(slots) = pool.slots.lock() {
+            for (index, slot) in slots.iter().enumerate() {
+                if slot.is_none() {
+                    continue;
+                }
+                let age = worker_age_ms(index);
+                let busy = WORKER_BUSY
+                    .get()
+                    .and_then(|slots| slots.get(index))
+                    .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()));
+                workers.push(serde_json::json!({
+                    "id": index,
+                    "role": if index == 0 { "turns" } else { "reads" },
+                    "state": if age >= stall_seconds() * 1000 { "stalled" } else if age < 1000 { "alive" } else { "busy" },
+                    "age_ms": age,
+                    "busy_ms": busy.as_ref().map(|(_, started)| now_ms().saturating_sub(*started)),
+                    "label": busy.as_ref().map(|(label, _)| label.clone()),
+                }));
+            }
+        }
     }
     // Built with serde_json rather than a hand-escaped format string: the escaping
     // is exactly the kind of thing that silently produces invalid JSON, and this is
@@ -271,6 +433,8 @@ fn health_body() -> Vec<u8> {
         "current": current,
         "workers_count": worker_count(),
         "workers": workers,
+        "workers_spawned": POOL.get().map(|pool| pool.spawned.load(Ordering::Relaxed)).unwrap_or(0),
+        "workers_retired": POOL.get().map(|pool| pool.retired.load(Ordering::Relaxed)).unwrap_or(0),
     })
     .to_string()
     .into_bytes()
@@ -324,7 +488,7 @@ fn ok_json(body: String) -> Reply {
     (200, "application/json", body.into_bytes())
 }
 
-pub fn run(states: Vec<Lua>, port: u16, ui: PathBuf) {
+pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, ui: PathBuf) {
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(listener) => listener,
         Err(error) => {
@@ -332,13 +496,48 @@ pub fn run(states: Vec<Lua>, port: u16, ui: PathBuf) {
             return;
         }
     };
-    let workers = states.len().max(1);
-    WORKER_COUNT.store(workers, Ordering::Relaxed);
-    let _ = WORKER_BEATS.set((0..workers).map(|_| AtomicU64::new(0)).collect());
-    let _ = WORKER_BUSY.set((0..workers).map(|_| Mutex::new(None)).collect());
-    if workers > 1 {
-        eprintln!("[serve] {workers} interpreters: worker 0 owns turns and writes, {} serve reads", workers - 1);
+    let ceiling = max_workers();
+    let warm = warm_read_workers().min(ceiling);
+    let queue_depth = env_usize("WASM_AGENT_QUEUE_DEPTH", 256);
+    // Sized to the ceiling once, so a worker's liveness slot never has to be created later: the arrays are
+    // indexed by worker id, and a slot whose sender is None is simply not running.
+    // u64::MAX, not 0, for "never beaten": a worker beats at the top of its own loop, which can happen
+    // inside the first millisecond of the process, so 0 would be ambiguous between "never" and "at time 0".
+    let _ = WORKER_BEATS.set((0..=ceiling).map(|_| AtomicU64::new(u64::MAX)).collect());
+    let _ = WORKER_BUSY.set((0..=ceiling).map(|_| Mutex::new(None)).collect());
+    let _ = POOL.set(Pool {
+        slots: Mutex::new(Vec::new()),
+        factory,
+        ui: ui.clone(),
+        queue_depth,
+        spawned: AtomicUsize::new(0),
+        retired: AtomicUsize::new(0),
+        next: AtomicUsize::new(0),
+    });
+    let pool = POOL.get().expect("pool");
+
+    // Worker 0, always: the turn worker. It is the state main.rs already booted, so a node that never
+    // grows a read worker boots exactly one interpreter, as it always did.
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<(TcpStream, Request)>(queue_depth);
+    if let Ok(mut slots) = pool.slots.lock() {
+        slots.push(Some(sender));
     }
+    let worker_ui = ui.clone();
+    std::thread::spawn(move || {
+        WORKER_ID.with(|cell| cell.set(0));
+        worker_loop(first, 0, receiver, worker_ui);
+    });
+    // Read workers only if asked for: the point of the pool is to appear when a read would otherwise wait,
+    // so the default is to have none until that happens.
+    for _ in 0..warm {
+        if let Ok(mut slots) = pool.slots.lock() {
+            spawn_read_worker(&mut slots);
+        }
+    }
+    eprintln!(
+        "[serve] one turn worker{} (reads: {warm} warm, up to {ceiling}, spawned on demand)",
+        if warm == 0 { String::new() } else { format!(" + {warm} read worker(s)") }
+    );
     eprintln!("[serve] wasm-agent UI at http://127.0.0.1:{port}  (ui: {})", ui.display());
 
     if let Ok(relay_url) = std::env::var("WASM_AGENT_RELAY") {
@@ -347,32 +546,13 @@ pub fn run(states: Vec<Lua>, port: u16, ui: PathBuf) {
         }
     }
 
-    // Each worker owns an interpreter for the life of the process and reads its own queue, so requests
-    // still run one at a time *per interpreter* - what changed is that a running turn no longer stops the
-    // node answering anything at all. `/health`, `/version` and the UI files were already answered on the
-    // accept thread; the reads that need Lua (sessions, models, nodes) now have a second interpreter to
-    // run on.
+    // Each worker owns an interpreter and reads its own queue, so requests still run one at a time *per
+    // interpreter* - what changed is that a running turn no longer stops the node answering anything at all.
+    // `/health`, `/version` and the UI files were already answered on the accept thread; the reads that need
+    // Lua (sessions, models, nodes) now have an interpreter of their own, created when they need one.
     //
     // Bounded on purpose: an unbounded queue turns a busy node into an unbounded number of open sockets,
     // and the accept thread can then only fail it loudly.
-    let queue_depth: usize = std::env::var("WASM_AGENT_QUEUE_DEPTH")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(256);
-    let mut senders = Vec::with_capacity(workers);
-    let mut receivers = Vec::with_capacity(workers);
-    for _ in 0..workers {
-        let (sender, receiver) = std::sync::mpsc::sync_channel::<(TcpStream, Request)>(queue_depth);
-        senders.push(sender);
-        receivers.push(receiver);
-    }
-    for (index, (state, receiver)) in states.into_iter().zip(receivers).enumerate() {
-        let worker_ui = ui.clone();
-        std::thread::spawn(move || {
-            WORKER_ID.with(|cell| cell.set(index));
-            worker_loop(state, index, receiver, worker_ui);
-        });
-    }
 
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
@@ -384,14 +564,10 @@ pub fn run(states: Vec<Lua>, port: u16, ui: PathBuf) {
             let _ = respond(&mut stream, status, content_type, &body);
             continue;
         }
-        // A read goes to a read worker even when they are all busy: queueing a status request behind a
-        // turn is the thing this exists to prevent. Anything that is not a known read - a turn, a write, a
-        // node call - goes to worker 0, which is what keeps one writer per session true by construction.
-        let target = if workers > 1 && is_read_route(&request) {
-            1 + (READ_ROTATE.fetch_add(1, Ordering::Relaxed) % (workers - 1))
-        } else {
-            0
-        };
+        // Which interpreter this request needs - and if that is a read arriving while the turn worker is
+        // busy, this is the call that grows the pool. Anything that changes something goes to worker 0,
+        // which is what keeps one writer per session true by construction.
+        let target = choose_worker(&request);
         let age_ms = worker_age_ms(target);
         if age_ms >= stall_seconds() * 1000 {
             // The worker this request needs has not reported progress for longer than any healthy
@@ -406,9 +582,11 @@ pub fn run(states: Vec<Lua>, port: u16, ui: PathBuf) {
                     age_ms / 1000
                 );
             }
-            // Exit only when *every* worker is stalled: a wedged lane must not take the healthy ones with
-            // it, and with the default of one worker this is exactly the old behaviour.
-            let all_stalled = (0..workers).all(|index| worker_age_ms(index) >= stall_exit_seconds() * 1000);
+            // Exit only when *every* worker that is running is stalled: a wedged lane must not take the
+            // healthy ones with it, and with a single interpreter this is exactly the old behaviour.
+            let all_stalled = live_worker_ids()
+                .iter()
+                .all(|index| worker_age_ms(*index) >= stall_exit_seconds() * 1000);
             if stall_exit_seconds() > 0 && all_stalled {
                 eprintln!(
                     "[serve] every worker has been stalled for {}s: exiting so the service manager can restart the node",
@@ -423,18 +601,59 @@ pub fn run(states: Vec<Lua>, port: u16, ui: PathBuf) {
             continue;
         }
         QUEUED.fetch_add(1, Ordering::Relaxed);
-        match senders[target].try_send((stream, request)) {
-            Ok(()) => {}
-            Err(std::sync::mpsc::TrySendError::Full((mut stream, _request))) => {
-                QUEUED.fetch_sub(1, Ordering::Relaxed);
-                // A bounded queue: refusing loudly beats an unbounded backlog that every client waits in.
-                let body = b"{\"error\":\"node_busy\",\"hint\":\"the node is answering other requests; retry shortly\"}";
-                let _ = respond(&mut stream, 503, "application/json", body);
-            }
-            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                QUEUED.fetch_sub(1, Ordering::Relaxed);
-                eprintln!("[serve] worker {target} is gone");
-                return;
+        // A worker can retire between being chosen and being sent to, so the send is attempted against the
+        // slot's current sender and falls back to worker 0. `try_send` hands the request back on failure,
+        // which is what makes the retry possible rather than a lost request.
+        let mut attempt = 0;
+        let mut target = target;
+        let mut pending = Some((stream, request));
+        loop {
+            let sender = POOL
+                .get()
+                .and_then(|pool| pool.slots.lock().ok().and_then(|slots| slots.get(target).cloned().flatten()));
+            let (mut stream, request) = match pending.take() {
+                Some(pair) => pair,
+                None => break,
+            };
+            let sender = match sender {
+                Some(sender) => sender,
+                None => {
+                    // The worker is gone (retired). Worker 0 always exists, so it is the honest fallback.
+                    if target != 0 && attempt < 2 {
+                        attempt += 1;
+                        target = 0;
+                        pending = Some((stream, request));
+                        continue;
+                    }
+                    QUEUED.fetch_sub(1, Ordering::Relaxed);
+                    let body = b"{\"error\":\"node_busy\",\"hint\":\"the node is answering other requests; retry shortly\"}";
+                    let _ = respond(&mut stream, 503, "application/json", body);
+                    break;
+                }
+            };
+            match sender.try_send((stream, request)) {
+                Ok(()) => break,
+                Err(std::sync::mpsc::TrySendError::Full((mut stream, _request))) => {
+                    QUEUED.fetch_sub(1, Ordering::Relaxed);
+                    // A bounded queue: refusing loudly beats an unbounded backlog that every client waits in.
+                    let body = b"{\"error\":\"node_busy\",\"hint\":\"the node is answering other requests; retry shortly\"}";
+                    let _ = respond(&mut stream, 503, "application/json", body);
+                    break;
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(pair)) => {
+                    // Retired while this request was on its way. Try worker 0 once, then refuse.
+                    if target != 0 && attempt < 2 {
+                        attempt += 1;
+                        target = 0;
+                        pending = Some(pair);
+                        continue;
+                    }
+                    QUEUED.fetch_sub(1, Ordering::Relaxed);
+                    let (mut stream, _request) = pair;
+                    let body = b"{\"error\":\"node_busy\",\"hint\":\"the node is answering other requests; retry shortly\"}";
+                    let _ = respond(&mut stream, 503, "application/json", body);
+                    break;
+                }
             }
         }
     }
@@ -455,6 +674,7 @@ fn worker_loop(
     // stall all of them and the test would be measuring itself.
     let test_stall = index == 0 && std::env::var("WASM_AGENT_TEST_STALL_WORKER").is_ok();
     let mut stalled_once = false;
+    let mut idle_since = std::time::Instant::now();
     loop {
         beat();
         // Local requests first. Peer-relayed work is real work, but it is not the human's request, and
@@ -473,12 +693,29 @@ fn worker_loop(
                 let _ = handle(&lua, &agent_ui, &mut stream, &request);
                 end_work();
                 beat();
+                idle_since = std::time::Instant::now();
                 continue;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
         }
         if index != 0 {
+            // A read worker retires itself once it has been idle long enough and the pool is above the warm
+            // minimum. Two things make that safe: it clears its own slot *before* returning, so the
+            // dispatcher stops choosing it, and a request already on its way to a retired worker is not
+            // lost - `try_send` reports Disconnected and the accept thread retries on worker 0.
+            if idle_since.elapsed().as_secs() >= read_idle_seconds() && worker_count() > warm_read_workers() + 1 {
+                if let Some(pool) = POOL.get() {
+                    if let Ok(mut slots) = pool.slots.lock() {
+                        if slots.get(index).is_some() {
+                            slots[index] = None;
+                            pool.retired.fetch_add(1, Ordering::Relaxed);
+                            eprintln!("[serve] read worker {index} retired after {}s idle", idle_since.elapsed().as_secs());
+                        }
+                    }
+                }
+                return;
+            }
             continue;
         }
         // Requests the relay handed to us (NAT'd peers, or peers relaying us).
