@@ -1,4 +1,8 @@
-# wasm-agent design contract
+# wasm-agent UI design contract
+
+This file is **UI direction only**: components, tokens, spacing, balloons, what a view may do.
+How the system is put together - instruction scope, capability tiers, where a concern belongs - is in
+[`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 Rules for the web UI (`ui/`) and any future surface (desktop shell, mobile, docs).
 These are **enforced**, not suggestions: when a change conflicts with a rule here,
@@ -9,38 +13,6 @@ change the change — or amend this file first with a reason.
 Prefer a component, token, or pattern that already exists in this project over a
 new one.
 
-## 1a. Scope an instruction to where it is true
-
-The agent's instructions are assembled per turn from files, and every line of them is
-paid for on every turn. So an instruction lives where it is true, and nowhere else:
-
-| Scope | Where it lives | Injected |
-|---|---|---|
-| every turn, every node | `AGENTS.md` | always |
-| one role | `AGENTS.guest.md` | guests only |
-| one platform | `AGENTS.<platform>.md` (`AGENTS.windows.md`) | only on that platform |
-| a technique, on demand | `skills/<name>/SKILL.md` | only when the model asks |
-| a fact about a subsystem | `docs/*.md` | only when read |
-
-**And prefer a mechanism to a sentence.** If the machine can enforce it - a path that
-gets converted, a route that refuses, a startup warning, a test - then it belongs in
-code, because code costs no context and cannot be forgotten. Prose is for what neither a
-role, a platform, a skill, nor the code can carry.
-
-The test for a rule is not "is it important" but "is it true here, and is it cheap". A
-rule about Windows in the global file is neither: it spends tokens on Linux turns and
-it teaches a node to distrust rules it cannot check.
-
-1. Search `ui/components.js` and `ui/style.css` first.
-2. If something is close but not a fit, **extend the existing component** (add a
-   property, a slot, a variant) instead of forking it.
-3. Only add a brand-new component when nothing existing can carry the behaviour.
-   When you do, you must:
-   - implement it as a custom element in `ui/components.js`;
-   - style it with the shared tokens in `:root`;
-   - document it in the "Component registry" below in the same change.
-
-Duplicated markup that should have been a component is a defect.
 
 ## 2. Web components are the default pattern
 
@@ -53,6 +25,7 @@ calls scattered through `app.js`.
 - Expose state through **attributes** and **properties**, and talk to the app
   through **`CustomEvent`s**, never by reaching into the app's globals.
 - `app.js` composes components; it does not build their internals.
+
 
 ## 3. Balloons (popovers)
 
@@ -93,6 +66,7 @@ patch opens a window and says so, and every panel that can be promoted also
 offers the other container as a control. Never move a panel under the reader's
 pointer without telling them.
 
+
 ## 4. Spacing
 
 One scale: **5px**.
@@ -105,6 +79,7 @@ One scale: **5px**.
 - Radii: `5px`, `10px`, `15px`.
 - Use the tokens `--space`, `--pad`, `--gap`, `--radius*` rather than literals.
 
+
 ## 5. Model selection shape
 
 Providers are chosen first, models second.
@@ -114,6 +89,7 @@ Providers are chosen first, models second.
 - A **model** select, populated from the selected provider's catalogue.
 - Defaults: provider `opencode-go`, model `deepseek-v4.1-flash`.
 - A provider is shown even when it has no key, but is marked unconfigured.
+
 
 ## 6. Status balloon contents
 
@@ -130,46 +106,6 @@ sections, in order:
 
 The base URL and database path belong in the balloon footer line.
 
-## 7. Memory is on demand
-
-Memory is a feature the agent uses when a task calls for it, not a dashboard.
-The UI must not foreground memory: no memory counters in the status balloon, the
-header, or the empty state. Surface memory only inside a turn (a `recall` tool
-chip) or when the user explicitly asks for it.
-
-## 8. Capability tiers
-
-Tools are grouped by the role that may call them (§ see `lua/core/tools.lua`):
-
-Roles are `master` (full) and `guest` (on demand memory); `admin` is a legacy
-alias for `master`. Binding between nodes is `master:master` or `master:guest`.
-
-| Tier | Tools | Roles |
-| --- | --- | --- |
-| memory | `remember`, `recall` | everyone |
-| capabilities | `capabilities` (list what this role may call) | everyone |
-| environment (pi) | `bash`, `read`, `write`, `edit`, `ls`, `grep` | master |
-| shell | `shell` (shell on the client host, also the UI terminal) | master |
-| ledger | `search_messages`, `conversation`, `list_conversations` | master |
-| client | `client` (screenshot, frame, mouse, keyboard, shell, CDP) | master |
-| nodes | `nodes`, `remote` | master |
-| spells | `spell_save`, `spell_run`, `spell_list`, `spell_get`, `spell_forget` (crystallized macros) | master |
-| plugins | every WASM plugin | master |
-
-Never expose a master tier to a non-master turn; filter schemas *and* re-check in
-`dispatch`, because the model can ask for a tool it was not offered.
-The `client` and `shell` tools drive a real machine — the highest-risk tiers.
-
-A **node** has a role as well, and it answers a different question from the role
-of a turn. A *guest node* exists so that a master can have something done on the
-machine it runs on: it owns no worktree and no branch, so it is never named
-after a directory and a rename never moves a branch on its behalf, and its own
-capabilities are read-only. When a master calls it (`/node/call`, signed), the
-work runs **as that master** — the session and every tool call are filed under
-the master's name, never the guest's. There is one answer to "who did this?"
-whether the edit happened here or on a guest. `verify_peer` refuses a caller
-whose node is not a master, so a guest cannot command another node, and
-`nodes.author_of` is the single gate that turns a caller into an author.
 
 ## 9. Modes and views
 
@@ -188,6 +124,7 @@ from the engine button in the topbar. Do not mix the two.
 - A view must never hide the control that opens it. Hiding the only way back is
   a defect, not a style choice.
 
+
 ## 10. Component registry
 
 | Element | Purpose | Key attributes / properties | Events |
@@ -198,6 +135,7 @@ from the engine button in the topbar. Do not mix the two.
 
 The engine view's topics (nodes, spells, tools) are expandable cards rendered in
 `app.js`; each loads its data on first expand (`GET /nodes`, `/spells`, `/tools`).
+
 
 ## 11. Attachments
 
@@ -221,6 +159,7 @@ On the node, bytes are stored content-addressed by sha256 under
 in `turns.content`, which is FTS-indexed. `build_context` rebuilds the vision
 part on every replay, and a file that has gone missing is reported inside the
 text part — never silently dropped.
+
 
 ## 12. Composer undo/redo
 
