@@ -42,3 +42,7 @@ id_ecdsa*
 # that was reviewed, and a number nobody committed cannot be reviewed.
 .handoff/last-report.txt
 .handoff/running
+
+# Scratch files: the probe scripts a run writes for itself. The convention is the mechanism - nothing here
+# needs a rule in AGENTS.md, it needs a .gitignore line. The files stay on disk and stay usable.
+tmp-*
