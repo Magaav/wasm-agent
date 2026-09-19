@@ -185,6 +185,27 @@ else
   SENTINEL_HASH="$(sha256sum < "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null | awk '{print $1}')"
 fi
 
+# Replacing an executable file does not replace the already-running process.
+# Even when the copy succeeds on Windows, a watcher can keep executing the old
+# image indefinitely. Respect an intentionally stopped watcher; restart only
+# one that was already watching, then prove its pid changed.
+SENTINEL_WATCH_PID="$("$INSTALL_DIR/$SENTINEL_NAME" status 2>/dev/null \
+  | awk '$1=="sentinel:" && $2=="watching" {gsub(/[^0-9]/,"",$4); print $4; exit}')"
+if [ -n "$SENTINEL_WATCH_PID" ]; then
+  echo "deploy: restarting the watching sentinel to load the installed image"
+  "$INSTALL_DIR/$SENTINEL_NAME" restart || fail "node installed, but the sentinel could not restart"
+  SENTINEL_NEW_PID=""
+  for _ in $(seq 1 50); do
+    SENTINEL_NEW_PID="$("$INSTALL_DIR/$SENTINEL_NAME" status 2>/dev/null \
+      | awk '$1=="sentinel:" && $2=="watching" {gsub(/[^0-9]/,"",$4); print $4; exit}')"
+    [ -n "$SENTINEL_NEW_PID" ] && [ "$SENTINEL_NEW_PID" != "$SENTINEL_WATCH_PID" ] && break
+    sleep 0.1
+  done
+  [ -n "$SENTINEL_NEW_PID" ] && [ "$SENTINEL_NEW_PID" != "$SENTINEL_WATCH_PID" ] \
+    || fail "node installed, but the sentinel did not start as a new watcher"
+  echo "deploy: sentinel pid $SENTINEL_WATCH_PID -> $SENTINEL_NEW_PID"
+fi
+
 cmp -s "$UPGRADE" "$INSTALL_DIR/scripts/upgrade.sh" || fail "the node is installed but the sentinel's upgrade.sh differs from this release"
 UPGRADE_HASH="$(sha256sum < "$INSTALL_DIR/scripts/upgrade.sh" 2>/dev/null | awk '{print $1}')"
 [ -n "$UPGRADE_HASH" ] || fail "the node is installed but upgrade.sh could not be hashed"
