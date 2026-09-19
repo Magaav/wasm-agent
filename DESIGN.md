@@ -138,9 +138,19 @@ from the engine button in the topbar. Do not mix the two.
 
 | Element | Purpose | Key attributes / properties | Events |
 | --- | --- | --- | --- |
-| `<wa-balloon>` | Anchored floating panel. Owns the close rule (§3). | `open` (attr/bool), `anchor` (id) | `open`, `close` |
+| `<wa-overlay>` | Base for anything that floats. Owns the §3 close rule. | `open` (attr/bool), `anchor` (id) | `open`, `close` |
+| `<wa-balloon>` | Anchored floating panel. | `open` (attr/bool), `anchor` (id) | `open`, `close` |
+| `<wa-menu>` | A list of choices at a point or above its anchor. | `.items` (`{label, action, danger?, separator?, element?}`), `.selected`, `.openAt(x, y, {above, inset})`, `.move(±1)`, `.activate()` | `open`, `close` |
 | `<wa-message>` | A chat message bubble. | `role` (`user`/`assistant`), `.body` | — |
 | `<wa-tool>` | A tool-activity chip. | `name`, `.detail`, status class | — |
+| `<wa-trace>` | A decision's tool trace inside a reply bubble. | `.body` | — |
+| `<wa-run>` | The collapsible topic a run's tool lines live in. | — | — |
+| `<wa-diff>` | The file changes a turn made, below its answer. | — | — |
+| `<wa-window>` | A promoted panel in its own OS window (§3). | — | — |
+| `<wa-harness-status>` | §6's harness diagnostics. | — | `export` |
+
+Keyboard selection belongs to `<wa-menu>`, not to its caller: the highlight and the click target
+must be the same item, or Enter chooses something other than what the list shows.
 
 The engine view's topics (nodes, spells, tools) are expandable cards rendered in
 `app.js`; each loads its data on first expand (`GET /nodes`, `/spells`, `/tools`).
@@ -172,8 +182,10 @@ text part — never silently dropped.
 
 ## 12. Composer undo/redo
 
-Two `.icon-btn` controls in the composer footer, where §9 puts per-message
-actions, plus `Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+Y` while the textarea has focus.
+`Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+Y` while the textarea has focus, and no
+buttons: the gesture is the keyboard's, and a status line already reports what each one did
+("undone - press Enter to send"). A control that claimed an undo the composer could not perform
+was worse than none.
 
 **What it undoes is the draft, and only the draft**: the text you have typed and
 the files you have pasted, dropped or attached but not yet sent. It does not
@@ -185,7 +197,7 @@ letting someone silently delete a turn would make the transcript a claim about
 history that history cannot support. Undoing a *sent* turn would also have to
 reach the provider, the FTS index and every peer that mirrored the turn. If that
 is ever wanted it is a separate feature with its own design, not a wider
-interpretation of this button.
+interpretation of this gesture.
 
 Consequences worth knowing:
 
@@ -197,6 +209,24 @@ Consequences worth knowing:
   the composer, where pressing Enter would send it twice.
 - A refused file (an unsupported image type) does not create a step: an undo
   entry that visibly does nothing is worse than no entry.
-- The buttons are disabled when their stack is empty, and disabled buttons do
-  not take the hover accent — a control must not claim an undo that is not
-  available.
+- There is no button to disable, and nothing claims an undo it cannot perform:
+  the stacks are reported by the status line when a gesture moves them.
+
+## 13. Composer commands
+
+A command is a word typed into the composer rather than one more control in the footer, which §9
+keeps for per-message actions. `/` opens the list of what can be run, typing filters it, `↑`/`↓`
+choose, `Enter` runs the chosen one, and `Escape` closes it (§3 owns the close rule). The panel is
+`<wa-menu>` (§10), anchored above the field so it does not cover what is being typed.
+
+The first match is chosen before any arrow key is pressed, so the list shows what `Enter` is about
+to do instead of waiting to be told.
+
+What a command may do is bounded by §12: the turn ledger is append-only, so nothing here deletes a
+transcript. `/new` starts a **thread** — this window's transcript is cleared and the next turn
+names the new thread — and the thread it leaves behind is untouched and still listed in the engine
+view. The empty transcript says so, because an empty transcript with no explanation reads as lost
+work rather than as a new start.
+
+A message that merely begins with `/` is not trapped: a newline ends the command line, and a
+command that matches nothing closes the list and leaves the text alone.

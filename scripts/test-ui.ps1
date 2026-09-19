@@ -925,6 +925,66 @@ $harness = @'
     window.__stopLiveness();
     check(!document.getElementById("liveness"), "liveness: the line outlived the turn it described");
   })();
+  // ---- `/` commands -------------------------------------------------------
+  //
+  // Driven through the events a keyboard actually produces, because what matters is what a reader
+  // gets, not what a function returns. The list, the choice and the effect are all asserted, and the
+  // last one is the point: a menu that clears the transcript while the turn still goes to the old
+  // thread would look exactly like a new session and be a lie.
+  (function () {
+    document.title = "stage: commands";
+    var input = window.__commandInput();
+    var menu = window.__commandMenu();
+    function type(value) { window.__typeCommand(value); }
+
+    type("/");
+    check(menu.open, "commands: `/` must open the list");
+    var items = Array.prototype.slice.call(menu.querySelectorAll(".menu-item"));
+    check(items.length === 1, "commands: `/` must offer the commands, got " + items.length);
+    check(items[0] && items[0].textContent.indexOf("/new") >= 0,
+      "commands: the list must offer /new, got: " + (items[0] && items[0].textContent));
+
+    // The first match is chosen before any arrow key is pressed, so Enter does what the list shows.
+    var chosen = menu.querySelectorAll(".menu-item.selected");
+    check(chosen.length === 1, "commands: exactly one row is chosen by default, got " + chosen.length);
+    check(chosen[0] === items[0], "commands: the default choice must be the first match");
+
+    type("/n");
+    check(menu.open, "commands: a partly typed command must keep the list open");
+    type("/zzz");
+    check(!menu.open, "commands: nothing matching must close the list");
+    type("/new\nand then a message");
+    check(!menu.open, "commands: a newline ends the command line, so a message is not trapped");
+
+    // The arrows must not *lose* the selection: a menu that forgets it sends Enter nowhere.
+    type("/");
+    var beforeArrow = menu.querySelector(".menu-item.selected");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    check(menu.querySelector(".menu-item.selected") === beforeArrow,
+      "commands: the arrows must not lose the selection");
+
+    // Enter runs it.
+    var messages = document.getElementById("messages");
+    var was = window.__chatThread();
+    check(messages.children.length > 0, "commands: there must be a transcript for /new to clear");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    check(!menu.open, "commands: running a command must close the list");
+    check(messages.children.length === 1 && messages.firstElementChild.classList.contains("thread-notice"),
+      "commands: /new must leave an empty transcript and say so, got " + messages.children.length + " children");
+    var now = window.__chatThread();
+    check(!!now && now !== was, "commands: /new must move the window to a different thread");
+    check(input.value === "", "commands: the command text must not be left in the composer");
+
+    // And the turn must name that thread, or the transcript is new and the ledger is not.
+    var body = window.__composed("hello");
+    check(body.contentType === "application/json",
+      "commands: a named thread must be sent as a structured body, got " + body.contentType);
+    var payload = JSON.parse(body.body);
+    check(payload.thread === now, "commands: the turn must name the new thread, got " + payload.thread);
+    check(payload.text === "hello", "commands: the message itself must survive, got " + payload.text);
+    check(payload.images === undefined, "commands: no pictures must be sent when none were attached");
+  })();
   document.title = "stage: end";
 } catch (error) {
     // A throw must still produce a log: a reporter that swallows its own failure is worse
@@ -952,7 +1012,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); };"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text);"
 
 $server = $null
 $edge = @(
