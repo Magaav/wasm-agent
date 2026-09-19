@@ -598,11 +598,41 @@ $harness = @'
   // A notice about a turn that is over must come down. It is a claim about right now, not a record - the
   // record is the engine's sessions topic - and a span that outlives what it described bloats the
   // transcript with every false alarm.
+  // The ledger says this thread is settled, so the notice is not litter - it is simply not true any more.
+  // The fixture must say so: it was unfinished, and the check passed only because the notice was never
+  // re-derived. A test whose premise does not match its fixture is not testing what it claims.
+  window.__fixtures.session.state = "answered";
+  window.__fixtures.session.state_detail = "the last turn is a reply";
   window.__setBusy(false);
   await window.__reconcile();
   for (var ur = 0; ur < 10; ur++) { await tick(); }
   check(!document.querySelector(".unfinished-notice"),
     "a notice about a finished turn must be removed once the node says the thread is settled");
+
+  // The bug a reader hit: the turn had finished, the answer was in the ledger, and the window still said
+  // "deciding..." until Ctrl+R. A tool is settled only by its own event, so a result that arrived while the
+  // stream was gone leaves the topic open forever. When the node says the turn is over, the transcript is
+  // repainted from the ledger - which is exactly what a reload does, and why a reload fixed it.
+  // The fixture is new content, so it can only appear if the repaint ran: an assertion on content that was
+  // already on screen would pass without the fix.
+  var savedSessionsForRepaint = window.__fixtures.sessions;
+  var savedSessionForRepaint = window.__fixtures.session;
+  window.__fixtures.sessions = { sessions: [ { id: "dddddddd-0000-0000-0000-000000000004", title: "repaint proof", mode: "chat", turn_count: 2, updated_at: Math.floor(Date.now()/1000), state: "answered", state_detail: "the last turn is a reply" } ] };
+  window.__fixtures.session = {
+    session: { id: "dddddddd-0000-0000-0000-000000000004", title: "repaint proof" },
+    state: "answered", state_detail: "the last turn is a reply",
+    turns: [ { seq: 1, role: "user", content: "REPAINT-PROOF-QUESTION", ok: 1, tool_calls: [] },
+             { seq: 2, role: "assistant", content: "REPAINT-PROOF-ANSWER", ok: 1, tool_calls: [] } ],
+  };
+  window.__setBusy(true);
+  await window.__reconcile();
+  for (var ux = 0; ux < 40; ux++) { await tick(); }
+  check(messages.textContent.indexOf("REPAINT-PROOF-ANSWER") >= 0,
+    "when the node says the turn is over, a stale transcript must be repainted from the ledger");
+  // Put them back: a block that leaves its fixtures installed makes every later check test the wrong data -
+  // which is what happened the first time this block was written.
+  window.__fixtures.sessions = savedSessionsForRepaint;
+  window.__fixtures.session = savedSessionForRepaint;
 
   // A repainted turn that changed a file must show its diff topic. The live path always did; the repaint
   // dropped the changes summary and the turn id, so every reloaded transcript lost every diff topic.
