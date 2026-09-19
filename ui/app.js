@@ -437,6 +437,132 @@ async function actOnDiff(topic, detail) {
   }
 }
 
+// ---- what changed in one file (the balloon behind a click) -----------------
+//
+// The turn carries addresses, not bodies, so the patch is built by the node on demand - which is why
+// this is a click and not a hover. A hover that fetched would spend a request on every pointer movement,
+// and the hover that showed nothing (which is what it did) is a control that lies about being one.
+// A second click on the same row closes it again.
+let diffBalloon = null;
+let diffBalloonAnchor = null;
+let diffBalloonRoom = null;
+
+document.addEventListener("diff-file", (event) => {
+  const topic = event.target && event.target.closest ? event.target.closest("wa-diff") : null;
+  const detail = event.detail || {};
+  if (diffBalloon && diffBalloonAnchor === detail.anchor) { closeFileDiff(); return; }
+  openFileDiff(detail.path, detail.anchor, topic);
+});
+
+async function openFileDiff(path, anchor, topic) {
+  const turnId = topic && topic.dataset.turnId;
+  if (!turnId || !path) return;
+  closeFileDiff();
+  const balloon = document.createElement("wa-balloon");
+  balloon.className = "file-diff";
+  const head = document.createElement("div");
+  head.className = "pop-head";
+  head.textContent = path;
+  const body = document.createElement("pre");
+  body.className = "diff-patch";
+  body.textContent = "asking the node for this file…";
+  balloon.append(head, body);
+  document.body.append(balloon);
+  diffBalloon = balloon;
+  diffBalloonAnchor = anchor;
+  balloon.addEventListener("close", () => { closeFileDiff(); });
+  balloon.show();
+  placeFileDiff(balloon, anchor);
+  try {
+    const response = await fetch("diff", {
+      method: "POST", headers: apiHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ turn_id: turnId, action: "patch", path: path }),
+    });
+    const payload = await response.json();
+    if (payload.error) {
+      body.textContent = "this file cannot be shown: " + payload.error;
+    } else {
+      renderPatch(body, payload);
+    }
+    // The patch decided the balloon's size, so where it goes is decided after it is filled.
+    placeFileDiff(balloon, anchor);
+  } catch (error) {
+    body.textContent = "the node did not answer";
+  }
+}
+
+// Make room rather than clip.
+//
+// The window is a clipped rectangle: a panel that needs more space than the window has cannot be drawn
+// outside it, whatever the CSS says. So when a balloon does not fit, the shell is asked for a bigger
+// window, and gives it back when the balloon closes. That is not the same as overflowing the window - a
+// DOM element cannot paint outside its own window - but it is the difference between a patch the reader
+// can read and one cut off at 88 pixels, which is what the compact window is.
+function roomForBalloon(balloon) {
+  const rect = balloon.getBoundingClientRect();
+  const needWidth = Math.ceil(rect.width) + 10;
+  const needHeight = Math.ceil(rect.height) + 10;
+  const cramped = window.innerWidth < needWidth || window.innerHeight < needHeight;
+  if (cramped && native && native.setMode && !diffBalloonRoom) {
+    diffBalloonRoom = { mode: document.body.classList.contains("compact") ? "compact" : "expanded" };
+    native.setMode("expanded", Math.min(900, Math.max(needWidth, 360)),
+                              Math.min(1200, Math.max(needHeight, 420)));
+  }
+}
+
+function placeFileDiff(balloon, anchor) {
+  balloon.style.left = "0px";
+  balloon.style.top = "0px";
+  roomForBalloon(balloon);
+  const rect = balloon.getBoundingClientRect();
+  const box = anchor && anchor.getBoundingClientRect ? anchor.getBoundingClientRect()
+    : { right: 120, top: 40 };
+  const margin = 5;
+  let left = (box.right || 120) + margin;
+  if (left + rect.width > window.innerWidth - margin) {
+    left = Math.max(margin, window.innerWidth - rect.width - margin);
+  }
+  let top = box.top || 40;
+  if (top + rect.height > window.innerHeight - margin) {
+    top = Math.max(margin, window.innerHeight - rect.height - margin);
+  }
+  balloon.style.left = Math.max(margin, left) + "px";
+  balloon.style.top = Math.max(margin, top) + "px";
+}
+
+function renderPatch(pre, payload) {
+  pre.replaceChildren();
+  for (const line of String(payload.patch || "").split("\n")) {
+    const row = document.createElement("span");
+    row.className = "patch-line";
+    if (line.startsWith("+++") || line.startsWith("---")) row.classList.add("patch-file");
+    else if (line.startsWith("@@")) row.classList.add("patch-hunk");
+    else if (line.startsWith("+")) row.classList.add("patch-add");
+    else if (line.startsWith("-")) row.classList.add("patch-del");
+    row.textContent = line === "" ? " " : line;
+    pre.append(row);
+  }
+  if (payload.truncated) {
+    const note = document.createElement("span");
+    note.className = "patch-note";
+    note.textContent = "this file is large, so only its first part is shown";
+    pre.append(note);
+  }
+}
+
+function closeFileDiff() {
+  if (!diffBalloon) return;
+  const balloon = diffBalloon;
+  diffBalloon = null;
+  diffBalloonAnchor = null;
+  if (balloon.isConnected) balloon.remove();
+  // The window was grown to make room; give it back the way the reader had it.
+  if (diffBalloonRoom && native && native.setMode) {
+    native.setMode(diffBalloonRoom.mode, window.innerWidth, window.innerHeight);
+    diffBalloonRoom = null;
+  }
+}
+
 function currentTrace() {
   if (!trace) {
     trace = document.createElement("wa-trace");
@@ -859,6 +985,12 @@ async function send(text, options = {}) {
   attachments.length = 0;
   renderAttachments();
   setStatus("wasm-agent is thinking…");
+  // Declared out here, not inside the `try` below: the `finally` clears it, and a `const` inside the try
+  // is not in scope there. It was inside, so every turn ended by throwing `watchdog is not defined` from
+  // the first line of the `finally` - which meant `clearInterval`, `setBusy(false)`, `controller = null`
+  // and the meta refresh never ran, and the window sat there looking like it was still working on a turn
+  // that had finished. The gate's bug hunt found it; the product would only have shown it as "stuck".
+  let watchdog = null;
   try {
     const headers = { "Content-Type": outgoing.contentType, "Accept": "text/event-stream" };
     // Which thread this turn belongs to. The node creates a session when it is not told one, and
@@ -886,7 +1018,7 @@ async function send(text, options = {}) {
     // unfinished" - about a turn whose answer was already on screen. The message said `(alive)`, which
     // was the tell.
     let turnFinished = false;
-    const watchdog = setInterval(async () => {
+    const watchdogTick = async () => {
       if (turnFinished) { clearInterval(watchdog); return; }
       if (asking || Date.now() - lastEvent < 30000) return;
       asking = true;
@@ -917,7 +1049,10 @@ async function send(text, options = {}) {
         controller?.abort();
       }
       asking = false;
-    }, 5000);
+    };
+    // Armed here, assigned to the outer `watchdog` so the `finally` can always clear it - including when
+    // the fetch below throws before a single event arrives.
+    watchdog = setInterval(watchdogTick, 5000);
     const response = await fetch("chat", {
       method: "POST",
       headers: apiHeaders(headers),
@@ -1900,8 +2035,12 @@ async function sync(reason) {
       syncAttempts = 0;
       setConnecting("the node is running a turn — this window returns when it finishes");
     } else if (health) {
+      // The node answered, so it is not offline - it is busy, and the reads this window needs
+      // (`/me`, `/models`, the transcript) queue behind the turn because one interpreter serves
+      // them. Calling that "offline" was a lie the reader could not check: the node was local,
+      // alive, and running their command. Only a node that does not answer at all is offline.
       syncAttempts = 0;
-      setConnecting("connecting…");
+      setConnecting("the node is busy — this window returns when it can answer");
     } else {
       setConnecting();
     }

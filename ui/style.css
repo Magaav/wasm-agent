@@ -676,3 +676,38 @@ body.node-offline .composer textarea::placeholder { color: #d29922; }
 }
 .md-table th { background: rgba(88, 166, 255, .08); font-weight: 600; }
 .md-table td { color: #c9d1e0; }
+
+/* The patch for one changed file: a balloon, so it owns the close rule (DESIGN.md §3), positioned
+   at the file it came from rather than in the footer. Its size is bounded by the viewport, and the
+   app asks the shell for a bigger window when that is not enough - the one thing CSS cannot do is
+   paint outside the window it is in. */
+wa-balloon.file-diff {
+  position: fixed; z-index: 70; display: block;
+  width: min(720px, calc(100vw - 10px));
+  max-height: calc(100vh - 10px);
+  overflow: hidden;
+  background: rgba(12, 15, 21, .99); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: 0 22px 60px rgba(0, 0, 0, .7);
+}
+wa-balloon.file-diff .pop-head {
+  padding: var(--pad); border-bottom: 1px solid var(--line);
+  color: #c9d1e0; word-break: break-all; text-transform: none; letter-spacing: 0;
+}
+.diff-patch {
+  margin: 0; padding: var(--pad); overflow: auto;
+  max-height: calc(100vh - 80px);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 11.5px; line-height: 1.5; white-space: pre; color: #aab4c6;
+}
+.patch-line { display: block; }
+.patch-file { color: var(--muted); }
+.patch-hunk { color: #7fb2ff; }
+.patch-add { color: #7ee08a; }
+.patch-del { color: #ff8a8a; }
+.patch-note { display: block; margin-top: var(--gap); color: #e0b25a; }
+/* A changed file is a control now: clicking it is how you see what changed in it. */
+.diff-file {
+  width: 100%; text-align: left; font: inherit; color: inherit;
+  background: none; border: 0; border-radius: var(--radius-sm); padding: 0 2px; cursor: pointer;
+}
+.diff-file:hover, .diff-file:focus-visible { background: var(--panel-2); }

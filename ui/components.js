@@ -557,8 +557,13 @@ class WaDiff extends HTMLElement {
 
     this._body.replaceChildren();
     for (const file of this._files) {
-      const row = document.createElement("li");
+      // A button, not a list item: clicking a changed file is how you find out what changed in it. The
+      // diff itself is not in the transcript (the turn carries addresses, not bodies), so this click is
+      // what asks the node to build it - which is why it is a real control and not a decoration.
+      const row = document.createElement("button");
+      row.type = "button";
       row.className = "diff-file";
+      row.title = "what changed in " + file.path;
       const name = document.createElement("span");
       name.className = "diff-path";
       name.textContent = file.path;
@@ -580,7 +585,16 @@ class WaDiff extends HTMLElement {
         tag.textContent = "new";
         row.append(tag);
       }
-      this._body.append(row);
+      row.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this.dispatchEvent(new CustomEvent("diff-file", {
+          bubbles: true,
+          detail: { path: file.path, anchor: row, file },
+        }));
+      });
+      const item = document.createElement("li");
+      item.append(row);
+      this._body.append(item);
     }
     this._paintToggle();
   }

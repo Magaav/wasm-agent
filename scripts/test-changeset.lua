@@ -1,88 +1,96 @@
--- The turn's file changes, and the way back: record, undo, redo, and the refusals.
+-- One file written twice in a turn is one change, and its patch is built from the blobs.
 --
--- This runs in the smoke suite because the failure it guards is the expensive one: an
--- undo that silently reverts *someone else's* newer edit, or one that half-applies and
--- leaves the tree in a state nobody chose. Both look like success from the outside, so
--- only an assertion can tell them apart from a working undo.
+-- Both halves of this were wrong in the same way: the topic listed the file twice, and the second line
+-- described the second edit rather than the turn. That is not a cosmetic problem - undo restores
+-- `before`, so a second entry carrying the intermediate text would put the file back to a state the turn
+-- itself had created, and the reader would be told their file was restored while looking at the turn's
+-- own output.
+--
+-- Run from the repo root:
+--   WA_SCRIPT=scripts/test-changeset.lua wa --db /tmp/changeset.db
 local changeset = dofile("lua/core/changeset.lua")
 
-local dir = host.paths().tmp or "."
-local function path_of(name) return dir .. "/wa-changeset-" .. name end
+local checks = 0
+local function ok(condition, label, detail)
+  checks = checks + 1
+  if not condition then error(label .. (detail and (" - " .. tostring(detail)) or "")) end
+end
 
--- A tiny stand-in for the host's file calls, so the test is about the record's logic and
--- not about the filesystem. `files` is the whole world.
-local files = {}
-local real_read, real_write = host.read_file, host.write_file
-function host.read_file(p) return files[p] end
-function host.write_file(p, text) files[p] = text; return true end
+local function write(path, text)
+  ok(host.write_file(path, text), "the test can write " .. path)
+end
 
-local ok, err = pcall(function()
-  -- A plain edit: one line replaced. The header numbers must be the *change*, not the
-  -- file: a shared prefix and suffix are what make this +1 -1 on a long file.
-  files[path_of("a.txt")] = "one\ntwo\nthree\n"
-  local entry = changeset.new()
-  changeset.record(entry, path_of("a.txt"), "one\ntwo\nthree\n", "one\nTWO\nthree\n")
-  assert(entry.added == 1 and entry.removed == 1,
-    "a one-line edit must count +1 -1, got +" .. entry.added .. " -" .. entry.removed)
+local root = (os.getenv("WASM_AGENT_TEST_DIR") or "/tmp") .. "/wa-changeset-" .. tostring(host.now())
+local one = root .. "/one.txt"
+local two = root .. "/two.txt"
 
-  local summary = changeset.summary(entry)
-  assert(summary and summary.added == 1 and summary.removed == 1, "the summary must carry the counts")
-  assert(#summary.files == 1 and summary.files[1].path == path_of("a.txt"), "the file must be named")
+-- 1. The same path, twice, in one turn.
+local entry = changeset.new()
+write(one, "alpha\n")
+changeset.record(entry, one, "alpha\n", "alpha\nbeta\n")
+changeset.record(entry, one, "alpha\nbeta\n", "alpha\nbeta\ngamma\n")
+ok(#entry.files == 1, "one file written twice must be one change, not two lines", #entry.files)
+local file = entry.files[1]
+ok(file.created == false, "a file that existed when the turn started is not 'created' by a later write")
+ok(file.added == 2, "and the counts describe the whole turn, not the last edit", file.added)
+ok(file.removed == 0, "with nothing removed", file.removed)
+ok(entry.added == 2 and entry.removed == 0, "and the totals are the sum, counted once",
+  entry.added .. "/" .. entry.removed)
 
-  -- Undo puts the file back, redo puts the change back. Both are the real thing: the
-  -- assertion is on the *file*, not on a flag.
-  files[path_of("a.txt")] = "one\nTWO\nthree\n"          -- as the turn left it
-  local done, why = changeset.undo(entry)
-  assert(done == true, "undo must succeed, got " .. tostring(why))
-  assert(files[path_of("a.txt")] == "one\ntwo\nthree\n",
-    "undo must restore the previous text, got " .. tostring(files[path_of("a.txt")]))
+-- 2. The consequence that matters: undo goes back to where the turn started, not to the
+--    intermediate text the turn itself wrote.
+write(one, "alpha\nbeta\ngamma\n")
+local undone, why = changeset.undo(entry)
+ok(undone == true, "undo must succeed on an untouched change", tostring(why))
+ok(host.read_file(one) == "alpha\n", "and restore the turn's starting text",
+  string.format("%q", tostring(host.read_file(one))))
 
-  local again, why2 = changeset.redo(entry)
-  assert(again == true, "redo must succeed, got " .. tostring(why2))
-  assert(files[path_of("a.txt")] == "one\nTWO\nthree\n", "redo must reapply the change")
+-- 3. A create, written twice, is still a create - and redo lands on the last text.
+local made = root .. "/made.txt"
+local entry2 = changeset.new()
+changeset.record(entry2, made, "", "one\n")
+changeset.record(entry2, made, "one\n", "one\ntwo\n")
+ok(#entry2.files == 1, "a created file written twice is still one line", #entry2.files)
+ok(entry2.files[1].created == true, "and is still reported as created")
+ok(entry2.files[1].added == 2, "with the turn's whole delta", entry2.files[1].added)
+write(made, "one\ntwo\n")
+ok(changeset.undo(entry2) == true, "undo of a create restores the empty text")
+ok(host.read_file(made) == "", "which is what 'created' means here: the host has no remove_file",
+  string.format("%q", tostring(host.read_file(made))))
+ok(changeset.redo(entry2) == true, "redo applies the change again")
+ok(host.read_file(made) == "one\ntwo\n", "landing on the last text the turn wrote, not the first",
+  string.format("%q", tostring(host.read_file(made))))
 
-  -- The guard that matters most: a file that moved on since the turn is REFUSED, and
-  -- nothing is written. This is the case where a naive undo eats newer work.
-  files[path_of("a.txt")] = "one\nSOMEONE ELSE\nthree\n"
-  local refused, reason = changeset.undo(entry)
-  assert(refused == nil and reason == "changed_since_turn:" .. path_of("a.txt"),
-    "an edited-since file must be refused, got " .. tostring(refused) .. " / " .. tostring(reason))
-  assert(files[path_of("a.txt")] == "one\nSOMEONE ELSE\nthree\n",
-    "a refused undo must not touch the file")
+-- 4. A second file is a second line, and the totals count both.
+write(two, "x\ny\n")
+changeset.record(entry, two, "x\ny\n", "x\n")
+ok(#entry.files == 2, "a different path is its own line", #entry.files)
+ok(entry.added == 2 and entry.removed == 1, "and the header counts every file once",
+  entry.added .. "/" .. entry.removed)
 
-  -- All-or-nothing: two files, the second one changed. Nothing may be written at all.
-  files[path_of("b1.txt")] = "b"
-  files[path_of("b2.txt")] = "b"
-  local pair = changeset.new()
-  changeset.record(pair, path_of("b1.txt"), "b", "B")
-  changeset.record(pair, path_of("b2.txt"), "b", "B")
-  files[path_of("b1.txt")] = "B"          -- as the turn left it
-  files[path_of("b2.txt")] = "MOVED ON"   -- someone else got here first
-  local pair_ok, pair_why = changeset.undo(pair)
-  assert(pair_ok == nil and pair_why == "changed_since_turn:" .. path_of("b2.txt"),
-    "the second file must refuse, got " .. tostring(pair_why))
-  assert(files[path_of("b1.txt")] == "B",
-    "an all-or-nothing undo must not have written the first file, got " .. tostring(files[path_of("b1.txt")]))
+-- 5. The patch: a unified diff built from the two blobs, with counts a parser can trust.
+local patched = changeset.patch(entry, one)
+ok(patched ~= nil, "a recorded file must be patchable")
+ok(patched.patch:find("--- before/", 1, true) == 1, "the patch names the before side",
+  patched.patch:sub(1, 40))
+ok(patched.patch:find("+++ after/", 1, true) ~= nil, "and the after side")
+ok(patched.patch:find("@@ -1,1 +1,3 @@", 1, true) ~= nil,
+  "with a hunk header whose counts are real", patched.patch:sub(1, 120))
+ok(patched.patch:find("\n+beta", 1, true) ~= nil, "and the added lines marked as added")
+ok(patched.truncated == false, "and not truncated for a small file")
 
-  -- A new file is a content change from empty, and undoing it restores empty rather than
-  -- deleting it: the host has no remove_file, so the record says "created" and the text
-  -- goes back to "".
-  files[path_of("c.txt")] = nil
-  local create = changeset.new()
-  changeset.record(create, path_of("c.txt"), "", "new file\n")
-  files[path_of("c.txt")] = "new file\n"
-  assert(changeset.undo(create) == true, "undoing a created file must succeed")
-  assert(files[path_of("c.txt")] == "", "the created file goes back to empty, not away")
-  assert(changeset.summary(create).files[1].created == true, "the summary must mark it created")
+-- 6. A file whose text was too large to record cannot be patched, and says which.
+local big = root .. "/big.txt"
+local entry3 = changeset.new()
+local huge = string.rep("line\n", 90000)
+changeset.record(entry3, big, "", huge)
+ok(entry3.files[1].recorded == false, "text past the cap is recorded as unrecordable")
+local none, why3 = changeset.patch(entry3, big)
+ok(none == nil, "and cannot be patched")
+ok(why3 == "not_recorded", "with a reason, not an empty patch", tostring(why3))
 
-  -- Nothing to undo is a refusal with a reason, not a crash.
-  assert(changeset.undo(changeset.new()) == nil, "an empty entry cannot be undone")
-  local _, none = changeset.undo(changeset.new())
-  assert(none == "nothing_to_undo", "the reason must say nothing_to_undo, got " .. tostring(none))
+-- 7. Asking for a file this turn did not change is refused by name.
+local missing, why4 = changeset.patch(entry, root .. "/never-touched.txt")
+ok(missing == nil and why4 == "unknown_path", "an unknown path is refused by name", tostring(why4))
 
-  print("changeset ok")
-end)
-
-host.read_file, host.write_file = real_read, real_write
-for _, name in ipairs({ "a.txt", "b1.txt", "b2.txt", "c.txt" }) do files[path_of(name)] = nil end
-if not ok then error(err) end
+print("changeset ok (" .. checks .. " checks)")

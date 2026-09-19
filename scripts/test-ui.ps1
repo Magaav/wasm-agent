@@ -130,6 +130,29 @@ $harness = @'
     check(!!toggle, "the diff topic should carry the undo/redo toggle");
     check(!!toggle && toggle.parentElement === diffHead.parentElement,
       "the toggle must be a sibling of the header, not inside it");
+
+    // A changed file is a control. Clicking it asks the node for that file's patch and shows it in a
+    // balloon, because the turn carries addresses and not bodies - so the click is what turns an
+    // address back into something readable. It used to be a line that did nothing on hover, which
+    // reads as a control and is not one.
+    var fileRow = diffTopic.querySelector(".diff-file");
+    check(!!fileRow && fileRow.tagName === "BUTTON",
+      "a changed file must be a control, saw " + (fileRow && fileRow.tagName));
+    if (fileRow) {
+      fileRow.click();
+      for (var ux = 0; ux < 40; ux++) { await tick(); }
+      var patchBalloon = document.querySelector("wa-balloon.file-diff");
+      check(!!patchBalloon, "clicking a changed file must open its patch in a balloon");
+      var patchText = patchBalloon ? patchBalloon.textContent : "";
+      check(patchText.indexOf("@@") >= 0 && patchText.indexOf("+new line") >= 0,
+        "and the balloon must show the patch, saw: " + patchText.slice(0, 70));
+      check(!!patchBalloon && patchBalloon.hasAttribute("open"), "and be open");
+      // A balloon is a balloon: it owns the close rule, and the same control closes it again.
+      fileRow.click();
+      for (var uy = 0; uy < 20; uy++) { await tick(); }
+      check(!document.querySelector("wa-balloon.file-diff"),
+        "clicking the same changed file again must close the balloon");
+    }
     diffTopic.toggle();
   }
 

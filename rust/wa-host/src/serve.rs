@@ -65,9 +65,52 @@ pub fn beat() {
     BEAT_MS.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
 }
 
+/// Proof of life for the duration of a host call that is known to be in progress and
+/// known to be bounded.
+///
+/// The stall detector exists to catch a worker that has stopped making progress: an
+/// unbounded Lua loop, a provider that accepted the connection and went quiet. A long
+/// `exec` is not that - it has a deadline and is killed when the deadline passes - but it
+/// beat nothing while it ran, so a node *working correctly* reported `ok:false`,
+/// `worker:stalled`, and every reader believed it. The window was the worst of them: its
+/// own reads queue behind the turn, so `/me` and `/models` timed out and it told the user
+/// the node was offline, while the node was running their command. Past the exit threshold
+/// the node then killed itself in the middle of that command.
+///
+/// So: while waiting on something with a deadline, say so. The detector keeps its teeth
+/// for the case it was built for - a worker stuck with no deadline in sight still stops
+/// beating, and still exits.
+pub struct Heartbeat {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Heartbeat {
+    pub fn start() -> Self {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        std::thread::spawn(move || {
+            while !flag.load(Ordering::Relaxed) {
+                beat();
+                // Once a second, not once every few: `worker` reads "alive" only while the age is
+                // under a second, and a five-second tick made a running command look merely "busy"
+                // - which the first version of this test caught by measuring a 4.5s age.
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        });
+        beat();
+        Self { stop }
+    }
+}
+
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
 /// How long since the last sign of progress, in milliseconds. A process that has not
 /// beaten at all is "as old as the process", which is not a stall.
-fn beat_age_ms() -> u64 {
+pub(crate) fn beat_age_ms() -> u64 {
     let started = match STARTED.get() {
         Some(started) => started,
         None => return 0,

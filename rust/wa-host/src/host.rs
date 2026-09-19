@@ -475,13 +475,74 @@ pub extern "C" fn read_file(l: *mut LuaState) -> c_int {
 }
 
 /// host.write_file(path, text) -> boolean
+/// Write a file so that a reader never sees a half-written one.
+///
+/// `fs::write` truncates and then streams. A crash, a kill, or a full disk between those two leaves the
+/// file shorter than it was - and this is the write path behind `write`, `edit`, the undo of a recorded
+/// change, and the content-addressed blob store, so the file it truncates may be the only copy of the
+/// text an undo needs. The v8 implementation had `atomic_write` (temp, fsync, rename) for exactly this
+/// reason; the new one wrote directly, which was a regression rather than a difference of taste.
+///
+/// Rename within one directory is atomic on both platforms. The temp name carries the pid and a counter
+/// so two writers cannot collide, the bytes are fsynced before the rename so a power loss cannot leave
+/// the new name pointing at empty content, and the temp file is removed on every failure path so a
+/// failed write leaves no litter beside the user's file.
+fn write_atomic(path: &str, text: &str) -> bool {
+    use std::io::Write;
+    let target = std::path::Path::new(path);
+    if let Some(parent) = target.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let directory = match target.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let name = target
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = format!(
+        ".{name}.wa-tmp-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let temporary = directory.join(unique);
+    let written = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+        return false;
+    }
+    // A rename replaces the target but not its permissions, so carry them over. v8 did this too; on a
+    // script the difference between 0755 and 0644 is whether it still runs.
+    #[cfg(unix)]
+    if let Ok(metadata) = std::fs::metadata(target) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(metadata.permissions().mode()));
+    }
+    match std::fs::rename(&temporary, target) {
+        Ok(()) => true,
+        Err(_) => {
+            // A rename can fail where a direct write would not: a target another process holds open on
+            // Windows, a read-only file, a target that is not a plain file. Falling back keeps the
+            // promise this function always made - a boolean, and the bytes where they were asked for -
+            // rather than failing a write that used to succeed.
+            let ok = std::fs::write(target, text).is_ok();
+            let _ = std::fs::remove_file(&temporary);
+            ok
+        }
+    }
+}
+
 pub extern "C" fn write_file(l: *mut LuaState) -> c_int {
     let path = arg_string(l, 1).unwrap_or_default();
     let text = arg_string(l, 2).unwrap_or_default();
-    if let Some(parent) = std::path::Path::new(&path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let ok = std::fs::write(&path, text).is_ok();
+    let ok = write_atomic(&path, &text);
     unsafe { crate::lua::lua_pushboolean(l, ok as c_int) };
     1
 }
@@ -503,6 +564,10 @@ pub extern "C" fn write_file(l: *mut LuaState) -> c_int {
 /// running when the deadline passes. The failure is returned as text a model can read and act on.
 fn run_bounded(program: &str, flag: &str, command: &str, cwd: &str) -> Result<Value, String> {
     use std::io::Read;
+    // A command is bounded by `seconds` below, so waiting on it is progress, not a stall. Without this
+    // a node running a long command reported `ok:false` and `worker:stalled` for its whole duration,
+    // and past WASM_AGENT_WORKER_STALL_EXIT_SECONDS it killed itself mid-command.
+    let _heartbeat = crate::serve::Heartbeat::start();
     let seconds = std::env::var("WASM_AGENT_EXEC_TIMEOUT_SECONDS")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -752,6 +817,8 @@ pub extern "C" fn http(l: *mut LuaState) -> c_int {
     let headers_json = arg_string(l, 3).unwrap_or_else(|| "{}".into());
     let body = arg_string(l, 4).unwrap_or_default();
     let headers = parse_headers(&headers_json);
+    // Every request here carries a connect/response/read timeout, so it is bounded work.
+    let _heartbeat = crate::serve::Heartbeat::start();
     let outcome = (|| -> Result<Value, String> {
         let response = match method.as_str() {
             "GET" => {
@@ -850,6 +917,9 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
     if method != "POST" {
         return Err("method_not_supported".into());
     }
+    // Same reasoning as `run_bounded`: a provider read is bounded by the connect/response/read
+    // timeouts on the agent, so a turn waiting on a slow model is not a stalled node.
+    let _heartbeat = crate::serve::Heartbeat::start();
     let mut request = agent().post(url);
     for (key, value) in headers {
         request = request.header(key, value);
@@ -940,4 +1010,47 @@ pub extern "C" fn now(l: *mut LuaState) -> c_int {
         .unwrap_or(0.0);
     unsafe { crate::lua::lua_pushnumber(l, seconds) };
     1
+}
+
+#[cfg(test)]
+mod heartbeat_tests {
+    use super::*;
+
+    /// A bounded host call must not look like a wedged worker.
+    ///
+    /// This is the bug the user reported as "the node is offline": `ok` is `!stalled`, and `stalled`
+    /// means no beat for WASM_AGENT_WORKER_STALL_SECONDS. A long `exec` beat nothing while it ran, so a
+    /// node running a command reported `ok:false` - and the window, whose reads queue behind the turn,
+    /// told the reader it was offline. The stall threshold is dropped to 2s here so the test is about
+    /// the mechanism rather than about waiting 120 of them.
+    #[test]
+    fn a_running_command_keeps_beating() {
+        std::env::set_var("WASM_AGENT_WORKER_STALL_SECONDS", "2");
+        std::env::set_var("WASM_AGENT_EXEC_TIMEOUT_SECONDS", "60");
+        // Establish a baseline the way a working node would: one beat, then the command. Without this
+        // the test passed even with the heartbeat removed, because `beat_age_ms` returns 0 when
+        // nothing has ever beaten - the sampler measured nothing and agreed with everything.
+        crate::serve::beat();
+        // The claim is about the whole duration of the call, so it is sampled throughout.
+        let sampler = std::thread::spawn(|| {
+            let mut worst = 0u64;
+            for _ in 0..14 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                worst = worst.max(crate::serve::beat_age_ms());
+            }
+            worst
+        });
+        let started = std::time::Instant::now();
+        let result = run_bounded("bash", "-c", "sleep 6", "");
+        let elapsed = started.elapsed();
+        let worst = sampler.join().unwrap();
+        assert!(result.is_ok(), "the command should run: {result:?}");
+        assert!(elapsed.as_secs() >= 5, "it should have waited for the command, took {elapsed:?}");
+        // Without the heartbeat the age would climb past 2s within the first seconds and stay there.
+        assert!(
+            worst < 2000,
+            "the beat age reached {worst}ms while a bounded command was running; \
+             the node would have reported ok:false and the window would have called it offline"
+        );
+    }
 }

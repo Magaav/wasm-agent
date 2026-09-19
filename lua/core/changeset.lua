@@ -64,10 +64,25 @@ end
 -- instead of offering a button that cannot work.
 local RECORD_CAP = 262144
 
+-- Lines of a text, where a trailing newline ends the last line rather than starting an empty
+-- one. The previous version appended a newline before splitting, so "a\nb\n" was three lines
+-- - the third empty - and the phantom cancelled out only while *both* sides had it. For a create
+-- the before side is empty and has no phantom, so every created file reported one added line too
+-- many: a file written with two lines claimed +3. The counts are what the topic's header shows,
+-- so the bug was visible in the product, not just in the test.
 local function split_lines(text)
   local lines = {}
   if not text or text == "" then return lines end
-  for line in (text .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  local start = 1
+  while true do
+    local at = text:find("\n", start, true)
+    if not at then
+      if start <= #text then lines[#lines + 1] = text:sub(start) end
+      break
+    end
+    lines[#lines + 1] = text:sub(start, at - 1)
+    start = at + 1
+  end
   return lines
 end
 
@@ -93,7 +108,18 @@ end
 -- exist (a create). Both are in hand at the call site, which is the point - and both go to
 -- the content-addressed store rather than into the entry, so the entry stays small enough
 -- to carry in a transcript.
+--
+-- The same path recorded twice in one turn is *one* change, not two lines in the topic. A turn
+-- that writes a file, then edits it again, has done one thing to that file, and the reader means
+-- the whole of it. So the entry keeps the first `before` - the turn's starting point, which is
+-- what undo has to restore - and takes the newest `after`. v8 arrived at the same rule from the
+-- other side: it kept `first_preimage` so that a later reread could not replace the session's
+-- baseline with a partial window.
 function M.record(entry, path, before, after)
+  local existing
+  for _, file in ipairs(entry.files) do
+    if file.path == path then existing = file break end
+  end
   local recorded = true
   if type(before) == "string" and #before > RECORD_CAP then recorded = false end
   if type(after) == "string" and #after > RECORD_CAP then recorded = false end
@@ -105,16 +131,42 @@ function M.record(entry, path, before, after)
     -- "cannot be undone" instead of offering a button whose blob is not there.
     if not before_id or not after_id then recorded = false end
   end
-  local added, removed = line_delta(before, after)
-  entry.files[#entry.files + 1] = {
-    path = path, before = before_id, after = after_id,
-    added = added, removed = removed, recorded = recorded,
-    -- A create is "no text before", recorded rather than re-derived: loading the blob to
-    -- ask would be a second source of truth for the same fact, and they could disagree.
-    created = (before or "") == "",
-  }
-  entry.added = entry.added + added
-  entry.removed = entry.removed + removed
+  if existing then
+    -- The delta is measured from where the turn started, not from the previous edit, so the
+    -- counts describe the turn rather than the last keystroke. The original text is loaded back
+    -- from the store for that; if it is not there the current call's `before` is the honest
+    -- fallback, because a wrong count is worse than a narrower one.
+    local origin = before
+    if existing.before then
+      local text = M.load(existing.before)
+      if type(text) == "string" then origin = text end
+    end
+    local added, removed = line_delta(origin, after)
+    existing.after = after_id
+    existing.added = added
+    existing.removed = removed
+    -- Stricter wins: a change that could not be recorded once cannot be undone later just
+    -- because a smaller edit followed it.
+    existing.recorded = existing.recorded and recorded
+    -- `created` is left as first seen: a file that existed when the turn started was not
+    -- created by the turn's second write to it.
+  else
+    local added, removed = line_delta(before, after)
+    entry.files[#entry.files + 1] = {
+      path = path, before = before_id, after = after_id,
+      added = added, removed = removed, recorded = recorded,
+      -- A create is "no text before", recorded rather than re-derived: loading the blob to
+      -- ask would be a second source of truth for the same fact, and they could disagree.
+      created = (before or "") == "",
+    }
+  end
+  -- Totals are summed from the files rather than accumulated as we go: with one path recorded
+  -- twice, an accumulator would add the first edit's counts twice and the header would lie.
+  entry.added, entry.removed = 0, 0
+  for _, file in ipairs(entry.files) do
+    entry.added = entry.added + (file.added or 0)
+    entry.removed = entry.removed + (file.removed or 0)
+  end
   return entry
 end
 
@@ -228,6 +280,138 @@ function M.redo(entry)
     end
   end
   return true, "redone"
+end
+
+-- A unified diff of one recorded file, built when it is asked for.
+--
+-- The transcript carries addresses, not contents, so the patch cannot be stored with the turn - and it
+-- should not be: a diff topic that carried every file's body twice would be the largest thing in the
+-- transcript. It is built here from the two blobs instead, which is the whole reason the blobs are
+-- content-addressed and reachable from the ledger alone.
+--
+-- The algorithm is a plain LCS over lines rather than Myers. The job is to show a reader what changed in
+-- one file, and the sizes a change topic covers are small; past DIFF_CAP lines on either side it says so
+-- instead of building a table large enough to be the problem it was meant to describe.
+local DIFF_CAP = 1200
+local CONTEXT = 3
+
+local function common_table(a, b)
+  local dp = {}
+  for i = #a + 1, 0, -1 do
+    dp[i] = {}
+    for j = #b + 1, 0, -1 do
+      if i > #a or j > #b then
+        dp[i][j] = 0
+      elseif a[i] == b[j] then
+        dp[i][j] = 1 + dp[i + 1][j + 1]
+      else
+        dp[i][j] = math.max(dp[i + 1][j], dp[i][j + 1])
+      end
+    end
+  end
+  return dp
+end
+
+-- A list of { kind = " "|"-"|"+", text = line }.
+local function edit_script(a, b)
+  local dp = common_table(a, b)
+  local ops, i, j = {}, 1, 1
+  while i <= #a or j <= #b do
+    if i <= #a and j <= #b and a[i] == b[j] then
+      ops[#ops + 1] = { kind = " ", text = a[i] }
+      i, j = i + 1, j + 1
+    elseif j <= #b and (i > #a or dp[i][j + 1] >= dp[i + 1][j]) then
+      ops[#ops + 1] = { kind = "+", text = b[j] }
+      j = j + 1
+    else
+      ops[#ops + 1] = { kind = "-", text = a[i] }
+      i = i + 1
+    end
+  end
+  return ops
+end
+
+-- Group an edit script into hunks with CONTEXT unchanged lines around each change, the way a
+-- unified diff does, so a one-line edit in a large file does not print the whole file.
+local function hunks(ops)
+  local changed = {}
+  for index, op in ipairs(ops) do
+    if op.kind ~= " " then changed[#changed + 1] = index end
+  end
+  local groups = {}
+  for _, index in ipairs(changed) do
+    local last = groups[#groups]
+    if last and index - last[#last] <= CONTEXT * 2 + 1 then
+      last[#last + 1] = index
+    else
+      groups[#groups + 1] = { index }
+    end
+  end
+  local out = {}
+  for _, group in ipairs(groups) do
+    local from = math.max(1, group[1] - CONTEXT)
+    local to = math.min(#ops, group[#group] + CONTEXT)
+    out[#out + 1] = { from = from, to = to }
+  end
+  return out
+end
+
+local function render_patch(path, a, b, ops)
+  local lines = { "--- before/" .. path, "+++ after/" .. path }
+  for _, hunk in ipairs(hunks(ops)) do
+    -- The hunk header counts lines on each side, which is what makes the patch readable by
+    -- anything that parses unified diffs - and what makes a wrong count visible rather than silent.
+    local start_a, count_a, start_b, count_b = 0, 0, 0, 0
+    local seen_a, seen_b = 0, 0
+    for index = 1, hunk.from - 1 do
+      if ops[index].kind ~= "+" then seen_a = seen_a + 1 end
+      if ops[index].kind ~= "-" then seen_b = seen_b + 1 end
+    end
+    start_a, start_b = seen_a + 1, seen_b + 1
+    for index = hunk.from, hunk.to do
+      local op = ops[index]
+      if op.kind ~= "+" then count_a = count_a + 1 end
+      if op.kind ~= "-" then count_b = count_b + 1 end
+    end
+    lines[#lines + 1] = string.format("@@ -%d,%d +%d,%d @@", start_a, count_a, start_b, count_b)
+    for index = hunk.from, hunk.to do
+      lines[#lines + 1] = ops[index].kind .. ops[index].text
+    end
+  end
+  return table.concat(lines, "\n")
+end
+
+-- { path, patch, truncated, added, removed, created } or nil and a reason a reader can act on.
+function M.patch(entry, path)
+  if type(path) ~= "string" or path == "" then return nil, "path_required" end
+  local file
+  for _, candidate in ipairs((entry and entry.files) or {}) do
+    if candidate.path == path then file = candidate break end
+  end
+  if not file then return nil, "unknown_path" end
+  if file.recorded == false then return nil, "not_recorded" end
+  local before, why_before = M.load(file.before)
+  if before == nil then return nil, "previous_text_missing" end
+  local after, why_after = M.load(file.after)
+  if after == nil then return nil, "recorded_text_missing" end
+  local a, b = split_lines(before), split_lines(after)
+  local truncated = false
+  if #a > DIFF_CAP or #b > DIFF_CAP then
+    -- Honest rather than enormous: the reader gets the counts and the first DIFF_CAP lines of each
+    -- side, and is told the rest is not shown.
+    truncated = true
+    a, b = { unpack(a, 1, math.min(#a, DIFF_CAP)) }, { unpack(b, 1, math.min(#b, DIFF_CAP)) }
+  end
+  local ops = edit_script(a, b)
+  return {
+    path = path,
+    patch = render_patch(path, a, b, ops),
+    truncated = truncated,
+    added = file.added or 0,
+    removed = file.removed or 0,
+    created = file.created == true,
+    recorded = file.recorded ~= false,
+  }
 end
 
 return M

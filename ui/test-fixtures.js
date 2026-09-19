@@ -138,6 +138,28 @@ window.fetch = function (input, init) {
       text: () => Promise.resolve(JSON.stringify(window.__fixtures.nodes)),
     });
   }
+  // A diff request is answered by its action rather than by one fixed body: the topic asks whether the
+  // change can still be undone, and when a changed file is clicked it asks for that file's patch.
+  if (path === "diff" && (init && init.method) === "POST") {
+    let request = {};
+    try { request = JSON.parse((init && init.body) || "{}"); } catch (error) { /* keep {} */ }
+    if (request.action === "patch") {
+      return Promise.resolve({
+        ok: true, status: 200,
+        json: () => Promise.resolve({
+          path: request.path, truncated: false, added: 1, removed: 1, created: false,
+          patch: "--- before/" + request.path + "\n+++ after/" + request.path +
+                 "\n@@ -1,2 +1,2 @@\n same line\n-old line\n+new line",
+        }),
+        text: () => Promise.resolve("{}"),
+      });
+    }
+    return Promise.resolve({
+      ok: true, status: 200,
+      json: () => Promise.resolve({ can_undo: true, reason: "undoable" }),
+      text: () => Promise.resolve("{}"),
+    });
+  }
   // Refused, not forwarded - with one exception. See the note on the `chat` fixture: reaching the real
   // node by accident is how this harness queued real turns. API routes are where a turn is spent, so they
   // must be stubbed. Static assets cost nothing and one of them is a real file the checks need (the wasm

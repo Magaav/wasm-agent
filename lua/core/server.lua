@@ -447,6 +447,15 @@ function wa_diff(payload, session)
     if not done then return json.encode({ turn_id = turn.id, ok = false, reason = why }) end
     return json.encode({ turn_id = turn.id, ok = true })
   end
+  if action == "patch" then
+    -- What one changed file actually did, built from its two blobs. The transcript only carries
+    -- addresses, so this is the request that turns an address back into something a reader can read -
+    -- and it is asked for when a file is clicked, not when the turn ends.
+    local file, why = changeset.patch(entry, request.path or "")
+    if not file then return json.encode({ error = why or "patch_failed" }) end
+    file.turn_id = turn.id
+    return json.encode(file)
+  end
   return json.encode({ error = "unknown_action:" .. tostring(action) })
 end
 
