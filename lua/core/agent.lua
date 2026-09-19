@@ -139,7 +139,26 @@ end
 -- Returns `text, path` for the first readable instruction file. The path
 -- matters: a node without the file silently runs uninstructed, so we record
 -- which one (if any) was used and warn when a configured path is unreadable.
+-- Instructions are read once per node process, not once per turn.
+--
+-- They sit at the *front* of every request, so the provider's prompt cache only helps if that prefix is
+-- byte-identical from call to call. Re-reading the files every turn means an edit to AGENTS.md - or to the
+-- platform file - re-prices and re-slows every call for the rest of the session. That is not theoretical: the
+-- night this was written, two edits to AGENTS.md left `cached_tokens` at zero and time-to-first-token at 27
+-- seconds on a 723k prompt, and the provider dropped the stream.
+--
+-- The trade is explicit and it is the right way round: an instruction change takes effect on the next
+-- restart, not on the next turn. Instructions are part of the harness's identity for the life of the process,
+-- which is also how a system prompt behaves everywhere else.
+local instructions_cache = {}
+
 function M.agents_md(role)
+  -- The key is the role alone. The platform cannot change inside one process, and `tostring` on the
+  -- platform *table* yields an address rather than a name - which made the key change every call, so the
+  -- cache never hit and this fix silently did nothing until the test caught it.
+  local key = role or "master"
+  local hit = instructions_cache[key]
+  if hit then return hit[1], hit[2] end
   -- Build the list by appending: an explicit first element of nil would make
   -- `ipairs` stop immediately and silently skip everything else.
   local candidates = {}
@@ -150,7 +169,10 @@ function M.agents_md(role)
   candidates[#candidates + 1] = dofile("lua/core/paths.lua").config() .. "/" .. name
   for _, path in ipairs(candidates) do
     local text = host.read_file and host.read_file(path)
-    if text and text ~= "" then return text, path end
+    if text and text ~= "" then
+      instructions_cache[key] = { text, path }
+      return text, path
+    end
   end
   return nil, nil
 end
@@ -446,7 +468,12 @@ function M:maybe_compact(messages)
   local before = self:context_tokens(messages)
   -- Pi compacts at capacity. A smaller engineering budget is an explicit choice,
   -- never inferred from uncached-input statistics masquerading as total input.
-  local budget = tonumber(host.getenv and host.getenv("WASM_AGENT_CONTEXT_BUDGET") or "") or (limit-reserve)
+  -- The budget is a guard, not the parity fix: pi runs huge contexts happily because its prefix is stable
+  -- and cached. This is what makes *our* provider survive until that is true here - it caps what gets
+  -- re-sent, which is what took time-to-first-token to 27s and let a 723k stream be dropped. Set it to 0 to
+  -- disable. The default is on, because a guard that has to be remembered is not a guard.
+  local budget = tonumber(host.getenv and host.getenv("WASM_AGENT_CONTEXT_BUDGET") or "") or 64000
+  if budget <= 0 then budget = limit - reserve end
   if budget<=0 then budget=limit-reserve end
   local trigger = math.min(limit - reserve, budget)
   if before <= trigger then return false end
