@@ -57,7 +57,11 @@ echo "deploy: $BRANCH@$COMMIT -> $INSTALL_DIR (port $PORT)"
 
 # 3. Build.
 echo "deploy: building"
-( cd rust && cargo build --release --offline -p wa-host -p wa-sentinel ) || fail "the build failed"
+( cd rust && cargo build --release --offline -p wa-host ) || fail "the build failed"
+# The sentinel is its own crate, outside the `rust/` workspace (which lists only `wa-host`), so it is
+# built with its own manifest. Asking the workspace for `-p wa-sentinel` fails - "package ID
+# specification did not match any packages" - and that is how it came to be installed by hand at all.
+( cd rust && cargo build --release --offline --manifest-path wa-sentinel/Cargo.toml ) || fail "the sentinel build failed"
 NEW="rust/target/release/wa.exe"
 [ -f "$NEW" ] || NEW="rust/target/release/wa"
 [ -x "$NEW" ] || fail "no built binary at $NEW"
