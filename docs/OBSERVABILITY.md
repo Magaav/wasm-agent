@@ -60,6 +60,10 @@ They help identify growth without copying prompt text into the event ledger.
 `read_many` can request up to eight independent file ranges in one decision;
 each result uses the same read path and reports its own failure. Large combined
 results keep the full JSON in an output artifact for exact retrieval.
+The 50 KiB tool-result limit applies to the entire model-facing JSON view,
+including nested session pages, not just a top-level `content` or `stdout`
+field. A large session page retains its newest complete turns and a cursor for
+earlier turns; its exact original remains available through `tool_result`.
 
 ## What to bring back in a day or two
 

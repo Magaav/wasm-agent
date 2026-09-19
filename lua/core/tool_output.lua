@@ -47,9 +47,61 @@ function M.truncate(text, tail)
   return selected,true
 end
 
+local function output_note()
+  return "The model view is bounded to 2000 lines / 50 KiB in total. Full original JSON is stored at full_result.path; use tool_result with its sha256 and byte offset to retrieve any part."
+end
+
+local function preview_view(name, output, encoded, ref)
+  local view={tool=name,code=output.code,ok=output.ok,error=output.error,
+    full_result=ref,omitted=true,note=output_note()}
+  local capacity=M.MAX_BYTES-1024
+  repeat
+    local from=(name=="bash" or name=="shell") and math.max(1,#encoded-capacity+1) or 1
+    view.preview=M.slice(encoded,from,capacity)
+    if #json.encode(view)<=M.MAX_BYTES then return json.encode(view) end
+    capacity=math.floor(capacity*.75)
+  until capacity<1
+  error("tool_output_envelope_exceeds_budget")
+end
+
+local function session_view(output, ref)
+  if type(output.turns)~="table" then return nil end
+  local session={}
+  for key,value in pairs(output.session or {}) do session[key]=value end
+  if type(session.summary)=="string" and #session.summary>8192 then
+    session.summary=M.slice(session.summary,1,8192)
+    session.summary_omitted=true
+  end
+  local view={session=session,turns={},note=output.note,full_result=ref,omitted=true,
+    view_omitted_turns=#output.turns,view_note="Newest returned turns shown; use next_before_seq for earlier turns or tool_result for the exact original.",
+    next_before_seq=output.next_before_seq}
+  for index=#output.turns,1,-1 do
+    table.insert(view.turns,1,output.turns[index])
+    view.view_omitted_turns=index-1
+    view.next_before_seq=view.turns[1].seq
+    if #json.encode(view)>M.MAX_BYTES then
+      table.remove(view.turns,1)
+      view.view_omitted_turns=index
+      view.next_before_seq=view.turns[1] and view.turns[1].seq or output.next_before_seq
+      break
+    end
+  end
+  if #view.turns==0 and #output.turns>0 then
+    local latest=output.turns[#output.turns]
+    view.latest_turn={seq=latest.seq,role=latest.role,
+      preview=M.slice(json.encode(latest),1,8192)}
+  end
+  local encoded=json.encode(view)
+  if #encoded<=M.MAX_BYTES then return encoded end
+  return nil
+end
+
 function M.project(name, output)
   local encoded = json.encode(output)
-  if type(output) ~= "table" then return encoded end
+  if type(output) ~= "table" then
+    if #encoded<=M.MAX_BYTES then return encoded end
+    return preview_view(name,{},encoded,M.store(encoded))
+  end
   local view = {}
   for key,value in pairs(output) do view[key]=value end
   local changed=false
@@ -59,16 +111,28 @@ function M.project(name, output)
       view[key]=clipped; changed=changed or truncated
     end
   end
-  if #encoded>M.MAX_BYTES*3 and not changed then
-    view={preview=M.slice(encoded,1,M.MAX_BYTES),code=output.code,ok=output.ok,error=output.error}
-    changed=true
-  end
+  if not changed and #encoded<=M.MAX_BYTES then return encoded end
+  local ref=M.store(encoded)
+  view.full_result=ref
+  view.omitted=true
+  view.note=output_note()
+  if #json.encode(view)<=M.MAX_BYTES then return json.encode(view) end
+  -- Preserve head-for-read / tail-for-shell after adding the artifact envelope.
   if changed then
-    view.full_result=M.store(encoded)
-    view.omitted=true
-    view.note="Output view is bounded to 2000 lines / 50 KiB per text field. Full original JSON is stored at full_result.path; use tool_result with its sha256 and byte offset to retrieve any part."
+    for _,key in ipairs({"stdout","stderr","content"}) do
+      if type(view[key])=="string" and #view[key]>M.MAX_BYTES-2048 then
+        local size=M.MAX_BYTES-2048
+        local from=(name=="bash" or name=="shell") and math.max(1,#view[key]-size+1) or 1
+        view[key]=M.slice(view[key],from,size)
+      end
+    end
+    if #json.encode(view)<=M.MAX_BYTES then return json.encode(view) end
   end
-  return json.encode(view)
+  if name=="session" then
+    local bounded=session_view(output,ref)
+    if bounded then return bounded end
+  end
+  return preview_view(name,output,encoded,ref)
 end
 
 function M.outcome(name, output)

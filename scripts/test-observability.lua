@@ -50,6 +50,7 @@ check(#page.events==2 and page.has_more and telemetry.events(sid,page.next_curso
 local text=string.rep('line data\n',9000)..'FATAL AT END'
 local projected=json.decode(output.project('bash',{code=7,stdout=text}))
 check(projected.omitted and projected.stdout:find('FATAL AT END',1,true),'bash preserves tail in bounded view')
+check(#json.encode(projected)<=output.MAX_BYTES,'shell view including its artifact envelope fits the total byte budget')
 local chunks,cursor={},1
 repeat
   local page=output.read(projected.full_result.sha256,cursor,12000)
@@ -82,6 +83,21 @@ local large_batch={ok=true,results={{path='first',content=text},{path='second',c
 local large_view=json.decode(output.project('read_many',large_batch))
 check(large_view.omitted and host.read_file(large_view.full_result.path)==json.encode(large_batch),
   'oversized batched view retains its complete original')
+check(#json.encode(large_view)<=output.MAX_BYTES,'nested result cannot bypass the total view budget')
+local scalar_view=json.decode(output.project('plugin',string.rep('x',90000)))
+check(scalar_view.omitted and #json.encode(scalar_view)<=output.MAX_BYTES
+  and json.decode(host.read_file(scalar_view.full_result.path))==string.rep('x',90000),
+  'large scalar plugin output is bounded and exactly retrievable')
+local history_page={session={id='older-session',title='previous work',summary='checkpoint'},turns={}}
+for i=1,30 do history_page.turns[i]={seq=i,role='tool',content=string.rep('evidence '..i..' ',250)} end
+history_page.next_before_seq=1
+local history_view=json.decode(output.project('session',history_page))
+check(#json.encode(history_view)<=output.MAX_BYTES and history_view.omitted and history_view.view_omitted_turns>0,
+  'large session pages keep only a bounded model view')
+check(history_view.turns[#history_view.turns].seq==30 and history_view.next_before_seq==history_view.turns[1].seq,
+  'session view retains newest turns and a truthful pagination cursor')
+check(host.read_file(history_view.full_result.path)==json.encode(history_page),
+  'full session page is exactly retrievable from the artifact')
 local write=host.write_file
 host.write_file=function() return false end
 local read=host.read_file; host.read_file=function() return 'old text' end
