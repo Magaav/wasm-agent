@@ -110,6 +110,19 @@ local original_dofile=dofile
 dofile=function(path) if path=='lua/core/provider.lua' then return provider end return original_dofile(path) end
 local agentlib=dofile('lua/core/agent.lua')
 dofile=original_dofile
+local legacy=session('legacy-bounded-context')
+local legacy_original=json.encode(history_page)
+check(#legacy_original>output.MAX_BYTES,'legacy fixture really exceeds the view budget')
+memory.append_turn(legacy,{role='user',content='inspect prior work'})
+memory.append_turn(legacy,{role='assistant',content='',tool_calls={{id='old-session-call',type='function',
+  ['function']={name='session',arguments='{"session_id":"older-session","limit":30}'}}}})
+memory.append_turn(legacy,{role='tool',tool_call_id='old-session-call',tool_name='session',content=legacy_original})
+local legacy_context=agentlib.new(legacy,function() end,'master','master',''):build_context()
+local legacy_view=json.decode(legacy_context[#legacy_context].content)
+check(#legacy_context[#legacy_context].content<=output.MAX_BYTES and legacy_view.omitted
+  and legacy_view.turns[#legacy_view.turns].seq==30,'rebuild bounds pre-existing nested output')
+check(memory.session_turns(legacy,{all=true})[3].content==legacy_original
+  and host.read_file(legacy_view.full_result.path)==legacy_original,'legacy ledger remains byte-for-byte intact')
 local history=session('coverage')
 for i=1,620 do memory.append_turn(history,{role=i%2==1 and 'user' or 'assistant',content='ROW_'..i}) end
 local bot=agentlib.new(history,function() end,'master','master','')

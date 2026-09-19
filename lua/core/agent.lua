@@ -393,7 +393,7 @@ function M:build_context()
     elseif turn.role == "tool" then
       messages[#messages + 1] = {
         role = "tool", tool_call_id = turn.tool_call_id or "",
-        name = turn.tool_name or "", content = turn.content or "",
+        name = turn.tool_name or "", content = tool_output.context_view(turn.tool_name,turn.content),
       }
     end
   end

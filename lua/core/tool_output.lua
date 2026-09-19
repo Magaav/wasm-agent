@@ -3,6 +3,7 @@
 local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
 local M = {MAX_BYTES=50*1024, MAX_LINES=2000}
+local legacy_views,legacy_count={},0
 
 function M.slice(text, from, count)
   text = tostring(text or "")
@@ -133,6 +134,36 @@ function M.project(name, output)
     if bounded then return bounded end
   end
   return preview_view(name,output,encoded,ref)
+end
+
+-- Older transcripts may contain a pre-budget nested result. Rebuild only its
+-- model-facing view; never rewrite the ledger row. Cache the projection so a
+-- long run does not reparse and rehash the same stored evidence every round.
+function M.context_view(name, content)
+  content=tostring(content or "")
+  if #content<=M.MAX_BYTES then return content end
+  local key=host.sha256(tostring(name or "").."\0"..content)
+  if legacy_views[key] then return legacy_views[key] end
+  local ok,decoded=pcall(json.decode,content)
+  local view
+  if ok then
+    if type(decoded)=="table" and type(decoded.full_result)=="table" then
+      local ref=decoded.full_result
+      local id=ref.sha256
+      local valid=type(id)=="string" and #id==64 and not id:find("[^0-9a-fA-F]")
+      local original=valid and host.read_file(paths.data().."/tool-results/"..id:lower()..".txt") or nil
+      if original and host.sha256(original)==id:lower() then
+        local read_ok,full=pcall(json.decode,original)
+        if read_ok then decoded=full end
+      end
+    end
+    view=M.project(name,decoded)
+  else
+    view=preview_view(name,{},content,M.store(content))
+  end
+  if legacy_count>=32 then legacy_views,legacy_count={},0 end
+  legacy_views[key]=view; legacy_count=legacy_count+1
+  return view
 end
 
 function M.outcome(name, output)

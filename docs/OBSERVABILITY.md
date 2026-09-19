@@ -64,6 +64,9 @@ The 50 KiB tool-result limit applies to the entire model-facing JSON view,
 including nested session pages, not just a top-level `content` or `stdout`
 field. A large session page retains its newest complete turns and a cursor for
 earlier turns; its exact original remains available through `tool_result`.
+Older oversized rows are projected when rebuilding a prompt, without changing
+their stored transcript bytes. This also bounds a resumed session that predates
+the output rule.
 
 ## What to bring back in a day or two
 
