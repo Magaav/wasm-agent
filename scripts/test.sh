@@ -229,26 +229,6 @@ local agent = dofile("lua/core/agent.lua")
 local operator, operator_path = agent.agents_md("master")
 local guest_md, guest_path = agent.agents_md("guest")
 assert(operator and operator_path:match("AGENTS%.md$"), "master must read AGENTS.md")
--- The global file is injected into every turn, so it must not carry a rule that is only true on one
--- platform: that spends tokens on every other platform's turns and teaches a node to distrust rules it
--- cannot check. The platform rules live in AGENTS.<platform>.md, and this is the check that keeps them
--- from creeping back.
-for _, word in ipairs({ "cygpath", "WebView2", "POSIX", "wa-window" }) do
-  assert(not operator:find(word, 1, true),
-    "AGENTS.md must not name the platform-specific mechanism " .. word)
-end
--- And on Windows the platform file must actually arrive, or the rules are simply lost.
-local windows_md = host.read_file and host.read_file("AGENTS.windows.md")
-assert(windows_md and windows_md ~= "", "AGENTS.windows.md must exist")
-local plat = host.platform and host.platform()
-local is_windows = type(plat) == "table" and tostring(plat.name or plat.os or ""):lower():find("win") ~= nil
-if is_windows then
-  local with_platform = agent.agents_md("master")
-  assert(with_platform and with_platform:find("Windows-only rules", 1, true),
-    "on Windows the platform rules must be appended to the role instructions")
-  assert(not operator:find("Windows-only rules", 1, true),
-    "and the base file must not already contain them")
-end
 assert(guest_md and guest_path:match("AGENTS%.guest%.md$"), "guest must read AGENTS.guest.md")
 assert(guest_md ~= operator, "guest must not receive the operator instructions")
 for _, leak in ipairs({ "openclaw", "git@github", "WORKSPACE", "cargo" }) do

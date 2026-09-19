@@ -201,20 +201,6 @@ end
 -- Returns `text, path` for the first readable instruction file. The path
 -- matters: a node without the file silently runs uninstructed, so we record
 -- which one (if any) was used and warn when a configured path is unreadable.
--- The platform's short name, for instructions that are only true on one of them.
-local function platform_name()
-  local ok, value = pcall(host.platform)
-  if not ok or value == nil then return "" end
-  local name = value
-  if type(value) == "table" then name = value.name or value.os or value.id or value.platform end
-  if type(name) ~= "string" then return "" end
-  name = name:lower()
-  if name:find("win") then return "windows" end
-  if name:find("darwin") or name:find("mac") then return "macos" end
-  if name:find("linux") then return "linux" end
-  return name
-end
-
 function M.agents_md(role)
   -- Build the list by appending: an explicit first element of nil would make
   -- `ipairs` stop immediately and silently skip everything else.
@@ -224,33 +210,11 @@ function M.agents_md(role)
   local name = (role or "master") == "guest" and "AGENTS.guest.md" or "AGENTS.md"
   candidates[#candidates + 1] = name
   candidates[#candidates + 1] = dofile("lua/core/paths.lua").config() .. "/" .. name
-  local base, base_path
   for _, path in ipairs(candidates) do
     local text = host.read_file and host.read_file(path)
-    if text and text ~= "" then base, base_path = text, path break end
+    if text and text ~= "" then return text, path end
   end
-  if not base then return nil, nil end
-  -- Platform-scoped rules ride with the role-scoped ones, and only on the platform they are true for.
-  --
-  -- This file is injected into every turn, so a rule that is only true on Windows costs context on every
-  -- Linux turn - and a node that reads rules about a platform it is not on learns to distrust the rest. The
-  -- scoping is done here rather than by asking an operator to remember which file to edit.
-  local platform = platform_name()
-  if platform ~= "" then
-    local extra = "AGENTS." .. platform .. ".md"
-    local dir = base_path:match("^(.*)[/\\][^/\\]*$")
-    local extra_paths = {}
-    if dir then extra_paths[#extra_paths + 1] = dir .. "/" .. extra end
-    extra_paths[#extra_paths + 1] = extra
-    extra_paths[#extra_paths + 1] = dofile("lua/core/paths.lua").config() .. "/" .. extra
-    for _, path in ipairs(extra_paths) do
-      local text = host.read_file and host.read_file(path)
-      if text and text ~= "" then
-        return base .. "\n\n" .. text, base_path .. " + " .. path
-      end
-    end
-  end
-  return base, base_path
+  return nil, nil
 end
 
 -- Guidelines, built the way pi builds them: a base set, entries that depend on
