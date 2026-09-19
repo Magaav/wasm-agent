@@ -106,13 +106,13 @@ curl -s -o /dev/null -m 3 "http://127.0.0.1:$WEDGE_PORT/sessions" 2>/dev/null
 sleep 2
 
 health="$(curl -s -m 3 "http://127.0.0.1:$WEDGE_PORT/health" 2>/dev/null)"
-code="$(curl -s -m 5 -o "$WORK/stalled.json" -w '%{http_code}' "http://127.0.0.1:$WEDGE_PORT/models" 2>/dev/null)"
+code="$(curl -s -m 5 -o "$WORK/stalled.json" -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{}' "http://127.0.0.1:$WEDGE_PORT/diff" 2>/dev/null)"
 body="$(cat "$WORK/stalled.json" 2>/dev/null)"
 kill "$WEDGE" 2>/dev/null
 
 echo
 echo "  wedged node: /health -> $health"
-echo "  wedged node: /models -> $code $body"
+echo "  wedged node: a write that needs worker 0 -> $code $body"
 case "$health" in
   *'"ok":false'*'"worker":"stalled"'*) echo "  ok: /health admits the worker is stalled" ;;
   *) echo "  FAIL: /health kept claiming the node was fine"; exit 1 ;;
@@ -124,18 +124,18 @@ esac
 echo "  ok: a stalled worker is visible, and survivable"
 
 # ---------------------------------------------------------------------------
-# The pool: a node with read workers must answer a read while a turn is in flight.
+# The pool, hot-swappable: a read must not wait for a turn, and the interpreter that made that possible
+# must not stay behind once the load is gone.
 #
-# The split is conservative on purpose - worker 0 owns every route that changes something, the extras serve
-# reads - and the point is that a read never queues behind a turn. Measured the same way the wedge is: stall
-# worker 0 with the test hook, then require /sessions to answer, and require a route that genuinely needs
-# worker 0 to be refused rather than left hanging.
+# No warm read workers are asked for (the default), so the worker that answers the read below does not exist
+# until the read needs it. That is the whole design: an idle node runs one interpreter, and a node under load
+# grows to meet the load and shrinks back.
 POOL_PORT=$((PORT + 20))
 POOL_CLIENT=$((POOL_PORT + 1))
-WASM_AGENT_WORKERS=2 \
 WASM_AGENT_TEST_STALL_WORKER=1 \
 WASM_AGENT_WORKER_STALL_SECONDS=1 \
 WASM_AGENT_WORKER_STALL_EXIT_SECONDS=0 \
+WASM_AGENT_WORKERS_IDLE_SECONDS=2 \
   "$BIN" serve --port "$POOL_PORT" --client-port "$POOL_CLIENT" --ui "$ROOT/ui" > "$WORK/pool.log" 2>&1 &
 POOL=$!
 
@@ -151,18 +151,24 @@ if [ "${code:-}" != "200" ]; then echo "  FAIL: the pool server did not come up 
 curl -s -o /dev/null -m 3 -X POST -H 'content-type: application/json' -d '{}' "http://127.0.0.1:$POOL_PORT/diff" 2>/dev/null
 sleep 2
 
-pool_health="$(curl -s -m 3 "http://127.0.0.1:$POOL_PORT/health" 2>/dev/null)"
+before_health="$(curl -s -m 3 "http://127.0.0.1:$POOL_PORT/health" 2>/dev/null)"
 read_code="$(curl -s -m 5 -o "$WORK/pool-read.json" -w '%{http_code}' "http://127.0.0.1:$POOL_PORT/sessions" 2>/dev/null)"
 write_code="$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{}' "http://127.0.0.1:$POOL_PORT/diff" 2>/dev/null)"
+grown_health="$(curl -s -m 3 "http://127.0.0.1:$POOL_PORT/health" 2>/dev/null)"
+# Now leave it alone: the worker that answered that read has nothing to do, and must go away again.
+sleep 6
+shrunk_health="$(curl -s -m 3 "http://127.0.0.1:$POOL_PORT/health" 2>/dev/null)"
 kill "$POOL" 2>/dev/null
 
 echo
-echo "  pool: /health -> $pool_health"
+echo "  pool: before any read -> $before_health"
 echo "  pool: read /sessions while worker 0 is stalled -> $read_code"
 echo "  pool: write /diff, which needs worker 0 -> $write_code"
-case "$pool_health" in
-  *'"workers_count":2'*) echo "  ok: /health names both interpreters" ;;
-  *) echo "  FAIL: /health did not report the pool"; exit 1 ;;
+echo "  pool: after the read -> $grown_health"
+echo "  pool: after 6s idle -> $shrunk_health"
+case "$before_health" in
+  *'"workers_count":1'*) echo "  ok: an idle node runs one interpreter, as it always did" ;;
+  *) echo "  FAIL: the pool existed before it was needed"; exit 1 ;;
 esac
 case "$read_code" in
   200) echo "  ok: a read is answered while a turn holds worker 0" ;;
@@ -172,5 +178,18 @@ case "$write_code" in
   503) echo "  ok: a request that needs the stalled worker is refused, not left hanging" ;;
   *) echo "  FAIL: expected 503 for the stalled worker, got ${write_code:-none}"; exit 1 ;;
 esac
-echo "  ok: a read does not wait for a turn"
+case "$grown_health" in
+  *'"workers_count":2'*'"workers_spawned":1'*|*'"workers_spawned":1'*'"workers_count":2'*)
+    echo "  ok: the read worker was created on demand, and /health says so" ;;
+  *) echo "  FAIL: expected a second interpreter, spawned once, got: $grown_health"; exit 1 ;;
+esac
+case "$shrunk_health" in
+  *'"workers_count":1'*) echo "  ok: the idle read worker retired itself" ;;
+  *) echo "  FAIL: the pool did not shrink back, got: $shrunk_health"; exit 1 ;;
+esac
+case "$shrunk_health" in
+  *'"workers_retired":1'*) echo "  ok: and the retirement is visible, not silent" ;;
+  *) echo "  FAIL: the retirement was not reported, got: $shrunk_health"; exit 1 ;;
+esac
+echo "  ok: the pool grows on demand and shrinks when the load is gone"
 
