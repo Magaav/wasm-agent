@@ -44,6 +44,19 @@ static QUEUED: AtomicUsize = AtomicUsize::new(0);
 /// When the last request was taken off the queue, so the tick can wait for a quiet moment.
 static LAST_SERVED_MS: AtomicU64 = AtomicU64::new(0);
 
+/// When a UI page last asked this node for anything.
+///
+/// The page polls `/version` once a second for as long as it is alive - it is the one loop that always runs,
+/// because it is also the reload path. So the age of this timestamp answers a question nothing else could:
+/// **is the window still rendering?**
+///
+/// That question is the difference between "the window is fine" and the failure that cost an afternoon: a
+/// shell whose event loop had panicked kept answering IPC (`delivered=true`) while its page was gone, so
+/// every command was accepted and nothing happened. `/health` looked healthy throughout, because a node
+/// cannot see a window's event loop - but it can see that nobody is asking it for the version any more.
+/// A reader that has a connected window *and* a stale page age has a zombie, not a window.
+static UI_SEEN_MS: AtomicU64 = AtomicU64::new(0);
+
 /// How many interpreters a node runs, and how it decides.
 ///
 /// Worker 0 is the turn worker and always exists: it owns every route that changes something - turns,
@@ -435,6 +448,12 @@ fn health_body() -> Vec<u8> {
         "workers": workers,
         "workers_spawned": POOL.get().map(|pool| pool.spawned.load(Ordering::Relaxed)).unwrap_or(0),
         "workers_retired": POOL.get().map(|pool| pool.retired.load(Ordering::Relaxed)).unwrap_or(0),
+        // Milliseconds since a UI page last polled. `null` means no page has ever asked - a node that has
+        // never been opened, which is not the same as one whose window has died.
+        "ui_page_age_ms": match UI_SEEN_MS.load(Ordering::Relaxed) {
+            0 => serde_json::Value::Null,
+            seen => serde_json::json!(now_ms().saturating_sub(seen)),
+        },
     })
     .to_string()
     .into_bytes()
@@ -560,6 +579,12 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
             Ok(Some(request)) => request,
             _ => continue,
         };
+        // The page's own heartbeat, recorded where every request passes - including the ones the accept
+        // thread answers itself, because `/version` is one of those and it is exactly the request that says
+        // the page is alive.
+        if split_path(&request.path).0 == "/version" {
+            UI_SEEN_MS.store(now_ms(), Ordering::Relaxed);
+        }
         if let Some((status, content_type, body)) = static_reply(&ui, &request) {
             let _ = respond(&mut stream, status, content_type, &body);
             continue;
