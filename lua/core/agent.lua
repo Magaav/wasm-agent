@@ -810,7 +810,16 @@ function M:turn(text, images)
         local decoded_ok, decoded = pcall(json.decode, function_.arguments)
         if decoded_ok and type(decoded) == "table" then args = decoded end
       end
-      self.emit({ type = "tool", name = function_.name, arguments = args })
+      -- The deadline travels with the call, not with the UI. `bash`/`shell` are bounded (300s
+      -- by default, WASM_AGENT_EXEC_TIMEOUT_SECONDS to change it), and a turn can spend all of it
+      -- inside one command - which used to appear only as a trace line that had not come back, and
+      -- was then killed five minutes later. It reads as the agent being stuck rather than as a
+      -- deadline that was always there, so the number is reported by the side that enforces it.
+      local emitted = { type = "tool", name = function_.name, arguments = args }
+      if function_.name == "bash" or function_.name == "shell" then
+        if host.exec_timeout then emitted.timeout_ms = math.floor(host.exec_timeout() * 1000) end
+      end
+      self.emit(emitted)
       local tool_started = host.now()
       host.beat()
       local handled, output = pcall(tools.dispatch, memory, function_.name, args, self.role,

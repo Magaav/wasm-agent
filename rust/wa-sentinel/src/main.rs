@@ -39,6 +39,12 @@ use std::time::{Duration, Instant};
 // the node, and this one carries out a sequence the *agent* wrote, under a whitelist.
 mod spell;
 
+// Stopping and starting a node through the Win32 API instead of through a spawned shell. The safety
+// rule it must preserve - act on a pid the OS gave us, never on an image name - lives in the caller,
+// and is what `SENTINEL.md` requires; see the module header for why the mechanism cannot weaken it.
+#[cfg(windows)]
+mod winproc;
+
 // ---------------------------------------------------------------- paths
 
 fn home() -> PathBuf {
@@ -214,7 +220,10 @@ fn stop_node(reason: &str) -> Result<()> {
     let pid = pid_on_port(node_port()).context("nothing is listening on the node's port")?;
     say(&format!("stopping node pid {pid} (by pid, never by image name)"));
     if cfg!(windows) {
-        std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).output()?;
+        // Win32 directly, rather than `taskkill`: a spawned helper costs ~138ms and, worse, is a
+        // second program that could be absent or shadowed. The pid was just read from the OS.
+        #[cfg(windows)]
+        winproc::kill_pid(pid).context("stop the node")?;
     } else {
         std::process::Command::new("kill").arg(pid.to_string()).output()?;
     }
@@ -234,19 +243,19 @@ fn start_node(binary: &Path, reason: &str) -> Result<()> {
     let cport = client_port().to_string();
     say(&format!("starting {} on port {port}", binary.display()));
     if cfg!(windows) {
-        // Start-Process gives a process that outlives this one: the sentinel must be able to start a
-        // node and then exit without taking the node with it.
-        let status = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile", "-Command",
-                &format!(
-                    "Start-Process -FilePath '{}' -ArgumentList @('serve','--port','{port}','--client-port','{cport}','--ui','{}') -WindowStyle Hidden",
-                    binary.display(), ui.display()
-                ),
-            ])
-            .status()?;
-        if !status.success() {
-            bail!("could not start the node (powershell exit {status})");
+        // CreateProcessW with DETACHED_PROCESS, rather than `powershell Start-Process`. Measured:
+        // the shell hop costs ~243ms of the ~310ms it takes to see the node healthy, while the
+        // node's own boot is ~49ms. This is the last place a shell was in the hot path.
+        #[cfg(windows)]
+        {
+            let args = vec![
+                "serve".to_string(),
+                "--port".to_string(), port.clone(),
+                "--client-port".to_string(), cport.clone(),
+                "--ui".to_string(), ui.display().to_string(),
+            ];
+            let child = winproc::start_detached(binary, &args).context("start the node")?;
+            say(&format!("started pid {child}"));
         }
     } else {
         std::process::Command::new(binary)

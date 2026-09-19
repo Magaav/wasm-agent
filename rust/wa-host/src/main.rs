@@ -234,6 +234,7 @@ fn main() {
     lua.register_with_upvalue("invoke", host::invoke, host as *mut c_void);
     lua.register("stream", host::stream);
     lua.register("now", host::now);
+    lua.register("exec_timeout", host::exec_timeout);
     lua.register("log", host::log);
     lua.set_global("host");
 

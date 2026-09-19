@@ -1012,6 +1012,22 @@ pub extern "C" fn now(l: *mut LuaState) -> c_int {
     1
 }
 
+/// `host.exec_timeout()` -> the deadline a `bash`/`shell` call is given, in seconds.
+///
+/// Reported rather than duplicated. A turn can spend 300 seconds inside one command and, until this
+/// existed, nothing said so: the trace showed a line that had not come back yet, and the only signal
+/// was the call being killed five minutes later - which reads as the agent being stuck rather than
+/// as a deadline that was always there. The number lives here because this is where it is enforced;
+/// anything showing it to a person reads it from here.
+pub extern "C" fn exec_timeout(l: *mut LuaState) -> c_int {
+    let seconds = std::env::var("WASM_AGENT_EXEC_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(300u64);
+    unsafe { crate::lua::lua_pushnumber(l, seconds as f64) };
+    1
+}
+
 #[cfg(test)]
 mod heartbeat_tests {
     use super::*;

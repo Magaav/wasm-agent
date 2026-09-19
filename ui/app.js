@@ -972,6 +972,86 @@ function setBusy(value) {
   sendButton.classList.toggle("busy", value);
   sendButton.title = value ? "Stop" : "Send";
   sendButton.setAttribute("aria-label", sendButton.title);
+  if (value) startLiveness(); else stopLiveness();
+}
+
+// Whether this turn is *working* or *stuck*, which looked identical from outside.
+//
+// A turn can legitimately spend minutes inside one command, and until this existed the only signals
+// were a spinner and a tool line that had not come back - so a long call and a wedged one were
+// indistinguishable, and the difference arrived 300 seconds later when the call was killed. The user
+// had no way to tell "still working" from "never coming back", which is exactly when they should be
+// told to stop it.
+//
+// The node already knows, and has done all along: `stalled_ms` (also `workers[].age_ms`) is the age
+// of the last heartbeat. `host.exec` beats while a command runs, so a *fresh* number proves progress
+// and a number that keeps climbing proves a stall. That is the node's own evidence, reported rather
+// than guessed - no client-side timeout, no heuristic about how long things should take.
+let liveness = null;
+
+function startLiveness() {
+  if (liveness) return;
+  let lastStalled = null;
+  let climbingSince = 0;
+  liveness = setInterval(async () => {
+    // Only while a turn is busy. The accept thread answers /health without the interpreter, so this
+    // costs nothing the turn needs and cannot itself be the thing that wedges.
+    if (!busy) return;
+    let health = null;
+    try { health = await (await apiFetch("health", { headers: apiHeaders() })).json(); }
+    catch (error) { return; }   // the offline path owns that case and says its piece
+    if (!health || !health.current) { setLiveness(null); return; }
+
+    const stalled = health.stalled_ms;
+    if (typeof stalled !== "number") { setLiveness(null); return; }
+    // "Climbing" is the honest signal for a stall: a single large number could be a long step between
+    // beats, but a number that grows across two polls means nothing has beaten since the last one.
+    if (lastStalled !== null && stalled > lastStalled + 500) {
+      if (!climbingSince) climbingSince = Date.now();
+    } else {
+      climbingSince = 0;
+    }
+    lastStalled = stalled;
+    const working = stalled < 5000 || !climbingSince;
+    const busyFor = health.current && health.current.ms ? health.current.ms : Date.now() - (turnStartedAt || Date.now());
+    setLiveness({
+      working,
+      stalled,
+      busy_ms: busyFor,
+      climbing_ms: climbingSince ? Date.now() - climbingSince : 0,
+      worker: health.worker || "alive",
+      queue: health.queue || 0,
+    });
+  }, 1000);
+}
+
+function stopLiveness() {
+  if (liveness) { clearInterval(liveness); liveness = null; }
+  setLiveness(null);
+}
+
+function setLiveness(info) {
+  let node = document.getElementById("liveness");
+  if (!info) { if (node) node.remove(); return; }
+  if (!node) {
+    node = document.createElement("div");
+    node.id = "liveness";
+    node.className = "liveness";
+    // Inside the message list, so it lives with the turn it describes and disappears with it - a
+    // status bar elsewhere would keep reporting a turn that has already been answered.
+    messages.append(node);
+  }
+  const seconds = (ms) => (ms / 1000).toFixed(0);
+  if (info.working) {
+    node.classList.remove("stuck");
+    node.textContent = "working — node beat " + info.stalled + " ms ago · this turn "
+      + seconds(info.busy_ms) + "s" + (info.queue ? " · " + info.queue + " queued" : "");
+  } else {
+    node.classList.add("stuck");
+    node.textContent = "possibly stuck — no node beat for " + seconds(info.climbing_ms) + "s"
+      + " (worker: " + info.worker + ") · send to stop";
+  }
+  pin();
 }
 
 function composedText(text) {
