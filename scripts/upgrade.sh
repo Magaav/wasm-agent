@@ -206,7 +206,13 @@ start_node() {
     local work win_binary
     work="$(cygpath -w "$ROOT" 2>/dev/null || echo "$ROOT")"
     win_binary="$(cygpath -w "$binary" 2>/dev/null || echo "$binary")"
-    powershell.exe -NoProfile -Command "Start-Process -FilePath '$win_binary' -ArgumentList @('serve','--port','$PORT','--client-port','$CLIENT_PORT','--ui','$UI_DIR') -WorkingDirectory '$work' -WindowStyle Hidden" 2>/dev/null
+    # A POSIX path handed to a native Windows process is silently unusable: the node starts, cannot read
+    # index.html, falls through to the API routes, and answers 404 for / - so the window shows "not found",
+    # runs no JavaScript, and looks like a dead shell. That cost an afternoon and three wrong diagnoses.
+    # Converted here, at the boundary, because this is where a shell path becomes a Windows argument.
+    ui_argument="$UI_DIR"
+    if command -v cygpath >/dev/null 2>&1; then ui_argument="$(cygpath -w "$UI_DIR")"; fi
+    powershell.exe -NoProfile -Command "Start-Process -FilePath '$win_binary' -ArgumentList @('serve','--port','$PORT','--client-port','$CLIENT_PORT','--ui','$ui_argument') -WorkingDirectory '$work' -WindowStyle Hidden" 2>/dev/null
   else
     (cd "$ROOT" && nohup "$binary" serve --port "$PORT" --client-port "$CLIENT_PORT" --ui "$UI_DIR" >>"$HOME_DIR/node.log" 2>&1 &)
   fi

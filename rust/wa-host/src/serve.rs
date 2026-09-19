@@ -44,6 +44,27 @@ static QUEUED: AtomicUsize = AtomicUsize::new(0);
 /// When the last request was taken off the queue, so the tick can wait for a quiet moment.
 static LAST_SERVED_MS: AtomicU64 = AtomicU64::new(0);
 
+/// When a UI page last asked this node for anything.
+///
+/// The page polls `/version` once a second for as long as it is alive - it is the one loop that always runs,
+/// because it is also the reload path. So the age of this timestamp answers a question nothing else could:
+/// **is the window still rendering?**
+///
+/// That question is the difference between "the window is fine" and the failure that cost an afternoon: a
+/// shell whose event loop had panicked kept answering IPC (`delivered=true`) while its page was gone, so
+/// every command was accepted and nothing happened. `/health` looked healthy throughout, because a node
+/// cannot see a window's event loop - but it can see that nobody is asking it for the version any more.
+/// A reader that has a connected window *and* a stale page age has a zombie, not a window.
+static UI_SEEN_MS: AtomicU64 = AtomicU64::new(0);
+
+/// The last thing the UI page said about its own failure, and when.
+///
+/// A page that cannot run cannot tell anyone it cannot run - which is how a window sat looking alive with a
+/// dead page behind it while every command was accepted and ignored. So the page reports its own errors here
+/// (the inline reporter in index.html runs before anything else), and this is what makes that visible: a node
+/// that can say "the UI reported this at 12:04" is a node whose window can be diagnosed without a log dive.
+static UI_ERROR: Mutex<Option<(String, u64)>> = Mutex::new(None);
+
 /// How many interpreters a node runs, and how it decides.
 ///
 /// Worker 0 is the turn worker and always exists: it owns every route that changes something - turns,
@@ -435,6 +456,14 @@ fn health_body() -> Vec<u8> {
         "workers": workers,
         "workers_spawned": POOL.get().map(|pool| pool.spawned.load(Ordering::Relaxed)).unwrap_or(0),
         "workers_retired": POOL.get().map(|pool| pool.retired.load(Ordering::Relaxed)).unwrap_or(0),
+        // Milliseconds since a UI page last polled. `null` means no page has ever asked - a node that has
+        // never been opened, which is not the same as one whose window has died.
+        "ui_error": UI_ERROR.lock().ok().and_then(|slot| slot.as_ref().map(|(text, _)| text.clone())),
+        "ui_error_age_ms": UI_ERROR.lock().ok().and_then(|slot| slot.as_ref().map(|(_, at)| now_ms().saturating_sub(*at))),
+        "ui_page_age_ms": match UI_SEEN_MS.load(Ordering::Relaxed) {
+            0 => serde_json::Value::Null,
+            seen => serde_json::json!(now_ms().saturating_sub(seen)),
+        },
     })
     .to_string()
     .into_bytes()
@@ -538,6 +567,16 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
         "[serve] one turn worker{} (reads: {warm} warm, up to {ceiling}, spawned on demand)",
         if warm == 0 { String::new() } else { format!(" + {warm} read worker(s)") }
     );
+    // A node whose ui directory has no index.html serves 404 for every UI route and looks healthy doing
+    // it - the failure that made a window show "not found" for an afternoon. It says so at startup instead,
+    // once, where whoever started it will see it.
+    if !ui.join("index.html").exists() {
+        eprintln!(
+            "[serve] WARNING: no index.html in {} - this node cannot serve its UI and will answer 404 for /
+[serve] (on Windows a POSIX path here is the usual cause: pass a Windows path)",
+            ui.display()
+        );
+    }
     eprintln!("[serve] wasm-agent UI at http://127.0.0.1:{port}  (ui: {})", ui.display());
 
     if let Ok(relay_url) = std::env::var("WASM_AGENT_RELAY") {
@@ -560,6 +599,12 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
             Ok(Some(request)) => request,
             _ => continue,
         };
+        // The page's own heartbeat, recorded where every request passes - including the ones the accept
+        // thread answers itself, because `/version` is one of those and it is exactly the request that says
+        // the page is alive.
+        if split_path(&request.path).0 == "/version" {
+            UI_SEEN_MS.store(now_ms(), Ordering::Relaxed);
+        }
         if let Some((status, content_type, body)) = static_reply(&ui, &request) {
             let _ = respond(&mut stream, status, content_type, &body);
             continue;
@@ -895,6 +940,19 @@ fn static_reply(ui: &std::path::Path, request: &Request) -> Option<Reply> {
     }
     if route == "/version" {
         return Some((200, "application/json", version_body(ui).into_bytes()));
+    }
+    if route == "/log" {
+        // Best effort by design: the page is already in trouble when it calls this, and a reporter that can
+        // fail loudly is worse than one that quietly records. The node log gets it too, so it is visible
+        // while it is happening and not only afterwards.
+        let text = String::from_utf8_lossy(&request.body).chars().take(2000).collect::<String>();
+        if !text.trim().is_empty() {
+            eprintln!("[ui] page reported: {text}");
+            if let Ok(mut slot) = UI_ERROR.lock() {
+                *slot = Some((text, now_ms()));
+            }
+        }
+        return Some((200, "application/json", b"{\"ok\":true}".to_vec()));
     }
     let relative = if route == "/" || route.is_empty() {
         "index.html".to_string()
