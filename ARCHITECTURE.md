@@ -126,30 +126,42 @@ treat its node branch as the deliverable - so the code followed one rule and the
 the node's branch accumulated six commits ahead of `main` that were mostly merge bookkeeping. When two rules
 describe the same branch, one of them is wrong.
 
-## 6. Naming: run, turn, call, message
+## 6. Naming: run, turn, step, message
 
 Three different things shared two words, and it cost a real question: `session_turns()` returns *messages*,
-`turn_id` identifies a *run*, and the UI says "this turn 99s" meaning the run. Settled here, once:
+`turn_id` identifies a *run*, and the UI says "this turn 99s" meaning the run. Settled here, once, and chosen
+to match what the words already mean everywhere else rather than what was convenient:
 
 | Word | Means | Was called |
 |---|---|---|
-| **run** | one user request through to its final answer | `turn_id`, `turn_span`, "turn" in the UI and `/health` |
-| **turn** | one decision cycle: **one call plus the tool calls it requested** | `turn`, and "decision" in the UI |
-| **call** | one provider request and response | `llm` span |
+| **run** | user asks → final answer | `turn_id`, `turn_span`, "turn" in the UI and `/health` |
+| **turn** | one speaker's contribution within the run (the user's ask; the assistant's answer) | `turn_id` |
+| **step** | one model call plus the tool calls it caused — the decision cycle | the `turn` span, "decision" in the UI |
+| **model call** | one provider request and response | `llm` span |
 | **tool call** | one tool execution | `tool` span |
-| **message** | one transcript row (user, assistant, tool, summary) | the `turns` table, `session_turns()` |
+| **message** | one stored transcript row (user, assistant, tool, summary) | the `turns` table, `session_turns()` |
 
-A turn is **not** a call. It contains exactly one call, and the tools that call asked for run *between* that
-call and the next one — which is why a run of 178 calls had 151 tool executions: some turns ask for two
-things, and the last turn usually asks for nothing.
+A run has one user turn, one assistant turn, many steps, and each step has exactly one model call and zero or
+more tool calls. A step is **not** a model call: it contains one, and the tools that call asked for run between
+it and the next step — which is why a ledger of 178 model calls held 151 tool executions.
+
+Two choices worth recording, because both were the other way round in the first draft of this section:
+
+- **"turn" keeps its meaning from every other harness and from conversation itself** — a speaker's
+  contribution. Using it for the decision cycle would have renamed everything and kept the same ambiguity,
+  with "turn" meaning a third thing.
+- **"call" is never used alone.** There are model calls and tool calls, and one word covering both is the bug
+  this section exists to end.
 
 The renames, mechanical and in this order:
 
-- schema: `harness_events.turn_id` → `run_id`; the `turns` table → `messages`
-- code: `session_turns()` → `session_messages()`; span kinds `llm` → `call`, `turn` → `turn`, `turn_span` →
-  `run`; `memory.session_state`'s "the last turn failed" → "the last run failed"
-- UI: "14 decisions · 19 tool calls" → "14 turns · 19 tool calls"
-- docs and skills: every use of "turn" meaning a run, and every use meaning a message
+- schema: `harness_events.turn_id` → `run_id`; span kinds `llm` → `model_call`, `turn` → `step`, `turn_span` →
+  `run`; the `turns` table → `messages`
+- code: `session_turns()` → `session_messages()`; `memory.session_state`'s "the last turn failed" → "the last
+  run failed"
+- UI: "14 decisions · 19 tool calls" → "14 steps · 19 tool calls"
+- docs and skills: every use of "turn" that means a run, every use that means a message, and every use of
+  "decision" that means a step
 
 This is a mechanism, not a style preference: a reader debugging a session should not have to know which file
-they are in to know what "turn" means.
+they are in to know what a word means.
