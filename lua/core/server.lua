@@ -185,6 +185,18 @@ function wa_spell_run(payload, session)
   return json.encode(toolslib.dispatch(memory, "spell_run", { name = name, params = params }, user.role))
 end
 
+-- Export a spell as a portable plan for the sentinel, which is the only process that can run a plan
+-- about this node: the turn asking for the export dies with the node it changes.
+function wa_spell_export(payload, session)
+  local user = require_master(session)
+  if not user then return json.encode({ error = "forbidden" }) end
+  local ok, request = pcall(json.decode, payload)
+  if not ok or type(request) ~= "table" then return json.encode({ error = "bad_request" }) end
+  return json.encode(toolslib.dispatch(memory, "spell_export", {
+    name = request.name, params = request.params, binary = request.binary, path = request.path,
+  }, user.role))
+end
+
 -- ---- nodes ---------------------------------------------------------------
 function wa_nodes(session)
   local user = users.current(session)

@@ -22,6 +22,7 @@ shell. The thing that can restart your agent must not be something your agent ca
 ```
 wa-sentinel request restart  --reason "why"
 wa-sentinel request upgrade  --binary /path/to/wa --reason "why"
+wa-sentinel request spell    --file /path/to/plan.json --reason "why"
 wa-sentinel request wake     --session <id> --prompt "..." --reason "why"
 wa-sentinel request run      --script /path/to/script.sh --reason "why"
 ```
@@ -122,3 +123,43 @@ the obvious next ones and take the same shape — a watcher that calls `fire()`.
 `deploy/wa-sentinel.service` is the systemd unit, and the header of that file carries the Windows
 scheduled-task equivalent. It must not be a child of the node: a supervisor that dies with the thing it
 supervises is decoration.
+
+## Self-update — the `spell` verb
+
+A plan the agent wrote, executed here because the node cannot execute it. `spells.lua` exports a
+spell as portable JSON (`spell_export`, or `POST /spell/export`), and this verb runs it while the
+node is being replaced — the one moment the node is the least able to act.
+
+```
+spell_export(name: "self-update", binary: "...")     # -> a path
+wa-sentinel request spell --file <path> --reason "..."
+```
+
+A plan is **untrusted input**: the agent writes it, and this process is the thing that can restart
+the node. So a step names a verb from a fixed list — `wait-idle | upgrade | restart | wait-health` —
+and everything else is refused before a single step runs:
+
+* an unknown verb, or **`run`** (the operator's script escape hatch);
+* a `kind` other than `sentinel` (a client action belongs to the node; dropping it silently would
+  make the plan do less than it says);
+* an empty `steps`, an empty `post`, a missing `binary` on `upgrade`, a `binary` on a verb that
+  takes none, or a `binary` path that does not exist.
+
+`post` is required here for the same reason it is required in `spells.lua`: a plan that cannot state
+its success condition cannot be settled, and "reported success while doing nothing" is the failure
+mode both exist to prevent. The sentinel settles it with its own `/health` check — the assertion an
+in-turn agent cannot make about itself.
+
+A refused plan is refused **whole**: nothing runs, so a half-executed plan is impossible.
+
+### What the agent cannot do
+
+An agent inside a turn cannot restart the node it is running on, and cannot run a spell about that
+node (`spell_run` returns `needs_sentinel`). It cannot read the result either: `/client`, `/spell`,
+`/health`'s busy state and everything else that needs the interpreter queues behind the turn
+holding the worker, so a call the agent makes to its own node waits on itself. The route out is
+always the same: **write a request and let this process do it.**
+
+`run` is disabled unless `WA_SENTINEL_SCRIPTS` names the directories it may execute from — and note
+that `spell` deliberately does not go through `run`, so enabling `run` does not widen what a plan
+can do.

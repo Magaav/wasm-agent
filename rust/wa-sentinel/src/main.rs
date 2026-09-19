@@ -34,6 +34,11 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+// The `spell` verb: executing a declared plan while the node cannot execute it. A module rather
+// than more functions here, because it is a different kind of thing - the verbs in this file act on
+// the node, and this one carries out a sequence the *agent* wrote, under a whitelist.
+mod spell;
+
 // ---------------------------------------------------------------- paths
 
 fn home() -> PathBuf {
@@ -123,7 +128,7 @@ fn now_epoch() -> u64 {
 
 /// Append one line per action, with its reason. Nothing here happens silently: an action whose reason
 /// is not written down is an action nobody can review.
-fn audit(verb: &str, detail: &str, reason: &str) {
+pub(crate) fn audit(verb: &str, detail: &str, reason: &str) {
     use std::io::Write;
     let line = format!("{}\t{}\t{}\t{}\n", now_epoch(), verb, detail.replace('\n', " "), reason.replace('\n', " "));
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log_path()) {
@@ -149,7 +154,7 @@ fn health_agent() -> ureq::Agent {
         .into()
 }
 
-fn health() -> Option<Value> {
+pub(crate) fn health() -> Option<Value> {
     let url = format!("http://127.0.0.1:{}/health", node_port());
     let response = health_agent().get(&url).call().ok()?;
     let text = response.into_body().read_to_string().ok()?;
@@ -160,7 +165,7 @@ fn node_is_up() -> bool {
     health().is_some()
 }
 
-fn node_is_idle() -> bool {
+pub(crate) fn node_is_idle() -> bool {
     match health() {
         Some(value) => value.get("current").map(|c| c.is_null()).unwrap_or(true),
         None => true,
@@ -386,7 +391,7 @@ fn wakes_last_hour() -> u32 {
         .count() as u32
 }
 
-fn verb_restart(reason: &str) -> Result<String> {
+pub(crate) fn verb_restart(reason: &str) -> Result<String> {
     let binary = installed_binary();
     if !binary.exists() {
         bail!("nothing installed at {}", binary.display());
@@ -475,7 +480,7 @@ fn to_msys_path(path: &Path) -> String {
     text
 }
 
-fn verb_upgrade(binary: &str, reason: &str) -> Result<String> {
+pub(crate) fn verb_upgrade(binary: &str, reason: &str) -> Result<String> {
     if binary.is_empty() {
         bail!("upgrade needs --binary");
     }
@@ -591,6 +596,16 @@ fn perform(request: &Value) -> Result<String> {
             Ok("spawned".into())
         }
         "run" => verb_run(request.get("script").and_then(Value::as_str).unwrap_or(""), reason),
+        // A plan the agent exported. Validated against a whitelist before a single step runs, and
+        // settled by this process's own /health check - the assertion the node cannot make about
+        // itself while it is the thing being replaced.
+        "spell" => {
+            let file = request.get("file").and_then(Value::as_str).unwrap_or("");
+            match spell::verb_spell(file, reason) {
+                Ok(outcome) => Ok(outcome),
+                Err(error) => Err(error),
+            }
+        }
         other => bail!("unknown verb {other:?}"),
     }
 }
@@ -968,6 +983,7 @@ const HELP: &str = r#"wa-sentinel - the process outside the node.
   request upgrade  --binary PATH [--reason TEXT]
   request wake     --session ID --prompt TEXT [--reason TEXT]
   request run      --script PATH [--reason TEXT]
+  request spell    --file PATH [--reason TEXT]
   once | watch | status | start | restart | stop | help
 
 A node cannot restart itself: the turn doing the restarting runs on the node it is

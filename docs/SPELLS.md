@@ -88,3 +88,64 @@ Spells are arbitrary automation on a real machine, so `spell_save` / `spell_run`
 are **master-only** tiers (`DESIGN.md §8`). A guest node can never save or run a
 spell. Spells are stored locally at `~/.wasm-agent/spells.json`; nothing is
 uploaded.
+
+## Self-update — plans the sentinel must run
+
+Some plans are *about the node itself*, and those cannot run on it. A spell is
+executed by the node's Lua worker, which is one thread a turn occupies: a plan that
+replaces the binary stops the worker, so the turn running it dies with the thing it
+changed, and its `post` assertions — the effect settlement that makes a spell a spell —
+never run. A plan that restarts its own host cannot satisfy its own contract.
+
+The `sentinel` step kind exists for that:
+
+```json
+{
+  "name": "self-update",
+  "params": { "binary": { "type": "string" } },
+  "steps": [
+    { "kind": "sentinel", "verb": "wait-idle" },
+    { "kind": "sentinel", "verb": "upgrade", "binary": "{{binary}}" }
+  ],
+  "post": [ { "script": "/health ok:true" } ]
+}
+```
+
+`spell_run` on such a spell **refuses** with `needs_sentinel` — it does not skip the
+steps, because skipping them would report success for a plan whose point never
+happened. Instead:
+
+```bash
+# 1. from a turn, export the plan (resolved, portable JSON — no model, no node)
+spell_export(name: "self-update", binary: "rust/target/release/wa")
+
+# 2. ask the process that outlives the node to run it
+wa-sentinel request spell --file <path from the export> --reason "picking up the build"
+```
+
+The sentinel executes the plan **outside** the node and settles it with its own
+`/health` check — the assertion an in-turn agent cannot make about itself. The turn
+that asked dies as `unfinished`; that is expected, and the request is already on disk.
+
+### Why a JSON plan and not a WASM module
+
+The plugin ABI is a *core module with no imports*: a guest gets `memory`, `alloc`,
+`describe`, `call` and nothing else — no filesystem, no clock, nothing to ask with.
+Such a module can compute a plan and hand it back; it cannot execute one step of it.
+Packaging spells as modules would therefore **remove** capability, not add it, and put
+a compiler on the upgrade path. A plan is a sequence, and a sequence is data.
+
+### The whitelist
+
+A plan file is written *by the agent*, so it is untrusted input to the sentinel. A
+`sentinel` step therefore names a verb from a fixed list — `wait-idle`, `upgrade`,
+`restart`, `wait-health` — and the sentinel refuses anything else before running a
+single step. `run` (the operator's script escape hatch) is **not** in the list: a plan
+that could reach it would be a shell, and `SENTINEL.md` requires that the thing which
+can restart your agent must not be something your agent can talk into anything.
+
+**A spell chooses which step, never how it runs.**
+
+The list is enforced twice, deliberately: once at `spell_save` (so a bad spell is
+refused where it is written) and once in `rust/wa-sentinel/src/spell.rs` (so a plan
+edited on disk is still refused). `tests/spell-sentinel.lua` asserts they agree.
