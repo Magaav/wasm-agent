@@ -9,6 +9,28 @@ change the change — or amend this file first with a reason.
 Prefer a component, token, or pattern that already exists in this project over a
 new one.
 
+## 1a. Scope an instruction to where it is true
+
+The agent's instructions are assembled per turn from files, and every line of them is
+paid for on every turn. So an instruction lives where it is true, and nowhere else:
+
+| Scope | Where it lives | Injected |
+|---|---|---|
+| every turn, every node | `AGENTS.md` | always |
+| one role | `AGENTS.guest.md` | guests only |
+| one platform | `AGENTS.<platform>.md` (`AGENTS.windows.md`) | only on that platform |
+| a technique, on demand | `skills/<name>/SKILL.md` | only when the model asks |
+| a fact about a subsystem | `docs/*.md` | only when read |
+
+**And prefer a mechanism to a sentence.** If the machine can enforce it - a path that
+gets converted, a route that refuses, a startup warning, a test - then it belongs in
+code, because code costs no context and cannot be forgotten. Prose is for what neither a
+role, a platform, a skill, nor the code can carry.
+
+The test for a rule is not "is it important" but "is it true here, and is it cheap". A
+rule about Windows in the global file is neither: it spends tokens on Linux turns and
+it teaches a node to distrust rules it cannot check.
+
 1. Search `ui/components.js` and `ui/style.css` first.
 2. If something is close but not a fit, **extend the existing component** (add a
    property, a slot, a variant) instead of forking it.
