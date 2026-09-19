@@ -179,7 +179,6 @@ function M.snapshot(session_id)
       if p.outcome ~= "answered" then report.incomplete_turns=report.incomplete_turns+1 end
     elseif row.phase == "start" then
       active[row.span_id] = p
-      if row.kind == "llm" then report.last_request = p end
       if row.kind=="tool" then
         local key=tostring(p.name)..":"..tostring(p.arguments_hash)
         if tool_keys[key] then report.repeated_tools=report.repeated_tools+1 end

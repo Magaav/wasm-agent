@@ -185,8 +185,8 @@ end
 
 -- `auto` (default) sends the key only to providers known to honour it;
 -- `on` forces it; `off` disables it. `opts.cache == false` marks a one-off
--- request (summarisation): it gets no key, so it neither reads nor pollutes the
--- conversation's cache - the same reason pi disables cache writes there.
+-- request (summarisation): it gets no conversation routing key. This does NOT
+-- disable a provider's automatic prefix caching.
 function M.cache_params(opts)
   opts = opts or {}
   if opts.cache == false then return {} end

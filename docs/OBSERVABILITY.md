@@ -89,3 +89,26 @@ stubbed HTTP and a scratch DB/home; it spends no model calls. The smoke suite
 includes it. Rust tests exercise actual local SSE transport. `scripts/test-ui.ps1`
 checks the status balloon in a real headless browser. The concurrency suite uses
 a delayed localhost provider for its routing checks, not a live model.
+`scripts/test-observability-restart.ps1` verifies durable HTTP accounting and
+reasoning settings across a real process replacement, plus the binary/UI
+recovery backups in a scratch installation. It retains its temporary evidence
+directory and never touches the live installation.
+
+## Deployment and recovery
+
+Deploy through `scripts/deploy.sh` from the clean reviewed delivery branch.
+`WA_RUNTIME_WORKTREE` preserves the existing node working directory without
+switching, merging or editing that checkout. The installed `runtime-worktree.txt`
+also applies to later `serve` launches. Binary and the five UI assets are upgraded
+together; `.pre-upgrade` copies remain available for recovery. The server PID is
+recorded from the actual launched process and checked against the listener.
+
+Before a migration, `scripts/backup-db.lua` can create a consistent SQLite
+snapshot with `WA_BACKUP_PATH` pointing to a new absolute file and `--db` to the
+source. It does not initialize or migrate the source schema. Keep that backup
+private: it contains the transcript. Restoring it would discard newer work, so
+recovery must explicitly account for any runs since deployment.
+
+The preserved node checkout is not automatically advanced to this delivery
+branch. Merge the reviewed changes before rebuilding from that checkout;
+otherwise a later deployment from old sources can revert these improvements.

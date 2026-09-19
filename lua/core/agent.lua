@@ -116,16 +116,6 @@ M.usage_total = {
   last = { prompt = 0, completion = 0, total = 0, cached = 0, cost = 0 },
 }
 
--- Providers report cache reuse differently; read whichever shape is present.
-local function cached_tokens(usage)
-  if type(usage) ~= "table" then return 0 end
-  local details = usage.prompt_tokens_details or usage.prompt_cache
-  if type(details) == "table" and tonumber(details.cached_tokens) then
-    return tonumber(details.cached_tokens)
-  end
-  return tonumber(usage.cached_tokens) or 0
-end
-
 function M.usage()
   return M.usage_total
 end
@@ -836,9 +826,8 @@ function M:run_turn(text, images)
       -- An empty answer with no tool call is not an answer. A reasoning model that
       -- runs out of output budget before it writes anything returns exactly this,
       -- and this path used to record it as a finished turn: the model looked like
-      -- it had nothing to say instead of like it had failed. (pi sends max_tokens
-      -- and clamps its thinking budget for this reason; we send neither, so the
-      -- detection below is the part that must not be missing.)
+      -- it had nothing to say instead of like it had failed. Explicit output
+      -- limits do not eliminate this failure; detect it even with Pi-style caps.
       if provider.visible_text(reply) == "" then
         local reason = provider.empty_reply_reason(result)
         local span = trace[#trace]

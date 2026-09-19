@@ -85,14 +85,16 @@ esac
 #    that is serving.
 SCRATCH=$((PORT + 40))
 SCRATCH_HOME="$(mktemp -d)"
-"$NEW" serve --port "$SCRATCH" --client-port "$((SCRATCH + 1))" --ui "$ROOT/ui" >"$SCRATCH_HOME/out.log" 2>&1 &
+WASM_AGENT_HOME="$SCRATCH_HOME" "$NEW" serve --port "$SCRATCH" --client-port "$((SCRATCH + 1))" --ui "$ROOT/ui" >"$SCRATCH_HOME/out.log" 2>&1 &
 SCRATCH_PID=$!
 ANSWERED=0
 for _ in $(seq 1 100); do
-  if curl -s -o /dev/null -m 2 "http://127.0.0.1:$SCRATCH/health" 2>/dev/null; then ANSWERED=1; break; fi
+  if ! kill -0 "$SCRATCH_PID" 2>/dev/null; then break; fi
+  if curl -fsS -o /dev/null -m 2 "http://127.0.0.1:$SCRATCH/health" 2>/dev/null && curl -fsS -o /dev/null -m 2 "http://127.0.0.1:$SCRATCH/" 2>/dev/null; then ANSWERED=1; break; fi
   sleep 0.1
 done
 kill "$SCRATCH_PID" 2>/dev/null
+wait "$SCRATCH_PID" 2>/dev/null
 rm -rf "$SCRATCH_HOME"
 [ "$ANSWERED" = "1" ] || fail "the new binary did not answer /health on the scratch port; not installing it"
 echo "deploy: the new binary answers on a scratch port"
@@ -101,6 +103,16 @@ echo "deploy: the new binary answers on a scratch port"
 UPGRADE="$ROOT/scripts/upgrade.sh"
 [ -f "$UPGRADE" ] || fail "no scripts/upgrade.sh to perform the install"
 echo "deploy: installing through upgrade.sh"
+# Persist only the explicitly selected runtime location; never move its git branch.
+if [ -n "${WA_RUNTIME_WORKTREE:-}" ]; then
+  [ -d "$WA_RUNTIME_WORKTREE" ] || fail "runtime worktree does not exist"
+  RUNTIME_PATH="$(cd "$WA_RUNTIME_WORKTREE" && pwd)"
+  command -v cygpath >/dev/null 2>&1 && RUNTIME_PATH="$(cygpath -w "$RUNTIME_PATH")"
+  if [ -f "$INSTALL_DIR/runtime-worktree.txt" ]; then
+    cp -f "$INSTALL_DIR/runtime-worktree.txt" "$INSTALL_DIR/runtime-worktree.txt.pre-upgrade" || fail "cannot back up runtime location"
+  fi
+  printf '%s\n' "$RUNTIME_PATH" > "$INSTALL_DIR/runtime-worktree.txt" || fail "cannot record runtime location"
+fi
 WA_INSTALL_DIR="$INSTALL_DIR" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
   bash "$UPGRADE" "$(cd "$(dirname "$NEW")" && pwd)/$(basename "$NEW")" 2>&1 | sed "s/^/  upgrade: /"
 UPGRADE_STATUS=${PIPESTATUS[0]}
@@ -111,7 +123,7 @@ UPGRADE_STATUS=${PIPESTATUS[0]}
 #    work it did not do.
 LISTENER="$(netstat -ano -p TCP 2>/dev/null | awk -v p=":$PORT" '$1=="TCP" && $2 ~ p"$" && $4=="LISTENING" { print $5; exit }' | tr -d '\r')"
 RECORDED="$(tr -d '[:space:]' < "$INSTALL_DIR/serve.pid" 2>/dev/null)"
-if [ -n "$RECORDED" ] && [ -n "$LISTENER" ] && [ "$RECORDED" != "$LISTENER" ]; then
+if [ -z "$RECORDED" ] || [ -z "$LISTENER" ] || [ "$RECORDED" != "$LISTENER" ]; then
   fail "the node answering on $PORT is pid $LISTENER, not the pid $RECORDED the install recorded - two nodes, one port"
 fi
 if grep -q "bind 127.0.0.1:$PORT failed" "$INSTALL_DIR/node.log" 2>/dev/null; then

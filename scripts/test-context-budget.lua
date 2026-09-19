@@ -1,13 +1,11 @@
--- The compaction trigger must fire on a budget, not only when the model window is nearly full.
---
--- The bug this exists for: compaction was correct and never ran. The trigger was "context > window - reserve",
--- and this model's window is 1,000,000 tokens, so a session averaging 120,628 tokens of prompt per call never
--- reached it and never compacted - eleven times pi's per-call cost, for a third of the output per call.
---
--- Run with a small budget so the budget is what fires:
+-- An explicit soft context budget can trigger compaction earlier. There is no
+-- default soft cap: raw prompt tokens cannot be compared with Pi's uncached
+-- input as evidence of waste, nor can unequal tasks establish a harness effect.
+-- Run with a small override so the actual provider policy is exercised:
 --   WASM_AGENT_CONTEXT_BUDGET=2000 WA_SCRIPT=scripts/test-context-budget.lua wa --db /tmp/x.db
 local window = dofile("lua/core/model_window.lua")
 local agent = dofile("lua/core/agent.lua")
+local provider = dofile("lua/core/provider.lua")
 
 local checks = 0
 local function ok(condition, label, detail)
@@ -19,13 +17,16 @@ local budget = tonumber(host.getenv("WASM_AGENT_CONTEXT_BUDGET") or "")
 ok(budget == 2000, "the test must run with WASM_AGENT_CONTEXT_BUDGET=2000", tostring(budget))
 ok(type(agent) == "table", "the agent module loads (the change must not break it)")
 
--- The case that cost the money: a huge window, so the budget is the only thing that can fire.
+-- A large window makes this explicit override the earlier trigger.
 local limit = 1000000
 local reserve, keep = window.policy(limit)
 ok(reserve > 0 and keep > 0, "the window still yields reserve and keep", reserve .. "/" .. keep)
 ok(math.min(limit - reserve, budget) == budget,
   "with a 1,000,000-token window the budget is the trigger", tostring(limit - reserve))
 ok(budget < limit - reserve, "and it is strictly earlier than the window would be", tostring(limit - reserve))
+local actual = provider.budget("deepseek-v4.1-flash")
+ok(actual.trigger == math.min(actual.context - actual.reserve, budget),
+  "the actual provider policy honors the explicit soft cap", tostring(actual.trigger))
 
 -- The property that matters: the budget may make compaction happen *earlier*, never later. A call must never
 -- be sent past its model. (The first version of this asserted the window always wins, which is false for a

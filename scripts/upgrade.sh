@@ -41,6 +41,14 @@ else
 fi
 INSTALLED="$INSTALL_DIR/$EXE"
 UI_DIR="${WA_UI_DIR:-$INSTALL_DIR/ui}"
+RUNTIME_ROOT="${WA_RUNTIME_WORKTREE:-$ROOT}"
+if [ -z "${WA_RUNTIME_WORKTREE:-}" ] && [ -f "$INSTALL_DIR/runtime-worktree.txt" ]; then
+  RUNTIME_ROOT="$(tr -d '\r\n' < "$INSTALL_DIR/runtime-worktree.txt")"
+fi
+[ -d "$RUNTIME_ROOT" ] || { say "runtime worktree does not exist: $RUNTIME_ROOT"; exit 2; }
+RUNTIME_ROOT="$(cd "$RUNTIME_ROOT" && pwd)"
+SOURCE_UI="${WA_SOURCE_UI_DIR:-$ROOT/ui}"
+UI_FILES="index.html app.js components.js style.css render.wasm"
 
 NEW="${1:-}"
 if [ -z "$NEW" ]; then
@@ -157,7 +165,10 @@ FINE_TICKS=0
 while :; do
   state="$(health)"
   case "$state" in
-    *'"current":null'*) break ;;
+    *'"current":null'*)
+      # Older nodes report current=null while secondary workers are busy.
+      # Inspect every worker too, before trusting that it is safe to stop.
+      if ! printf '%s' "$state" | grep -q '"label":"POST /chat' && printf '%s' "$state" | grep -q '"queue":0'; then break; fi ;;
     "") say "the node is not answering - nothing to wait for"; break ;;
   esac
   if [ "$waited" -ge "$IDLE_TIMEOUT" ]; then
@@ -188,7 +199,13 @@ done
 OLD_PID="$(pid_on_port)"
 [ -n "$OLD_PID" ] && say "stopping the node (pid $OLD_PID, by pid - never by image name)"
 BACKUP="$INSTALLED.pre-upgrade"
-cp -f "$INSTALLED" "$BACKUP" 2>/dev/null || true
+cp -f "$INSTALLED" "$BACKUP" 2>/dev/null && cmp -s "$INSTALLED" "$BACKUP" || { say "cannot verify recovery binary; not stopping the node"; exit 1; }
+if [ -d "$SOURCE_UI" ] && [ "$SOURCE_UI" != "$UI_DIR" ]; then
+  for asset in $UI_FILES; do
+    [ -f "$SOURCE_UI/$asset" ] || { say "missing release UI asset: $asset"; exit 1; }
+    [ ! -f "$UI_DIR/$asset" ] || cp -f "$UI_DIR/$asset" "$UI_DIR/$asset.pre-upgrade" || exit 1
+  done
+fi
 if [ -n "$OLD_PID" ]; then
   if [ "$WINDOWS" = "1" ]; then
     powershell.exe -NoProfile -Command "Stop-Process -Id $OLD_PID -Force" 2>/dev/null
@@ -202,6 +219,7 @@ if [ -n "$OLD_PID" ]; then
     port_busy "$PORT" || break
     sleep 0.05
   done
+  if port_busy "$PORT"; then say "port $PORT is still occupied; refusing to overwrite or kill another listener"; exit 1; fi
 fi
 
 start_node() {
@@ -211,7 +229,7 @@ start_node() {
     # the node then stays down while the script reports that the binary "did not come up" - which is
     # true and misleading in equal measure. Convert, or fail loudly here.
     local work win_binary
-    work="$(cygpath -w "$ROOT" 2>/dev/null || echo "$ROOT")"
+    work="$(cygpath -w "$RUNTIME_ROOT" 2>/dev/null || echo "$RUNTIME_ROOT")"
     win_binary="$(cygpath -w "$binary" 2>/dev/null || echo "$binary")"
     # A POSIX path handed to a native Windows process is silently unusable: the node starts, cannot read
     # index.html, falls through to the API routes, and answers 404 for / - so the window shows "not found",
@@ -219,9 +237,11 @@ start_node() {
     # Converted here, at the boundary, because this is where a shell path becomes a Windows argument.
     ui_argument="$UI_DIR"
     if command -v cygpath >/dev/null 2>&1; then ui_argument="$(cygpath -w "$UI_DIR")"; fi
-    powershell.exe -NoProfile -Command "Start-Process -FilePath '$win_binary' -ArgumentList @('serve','--port','$PORT','--client-port','$CLIENT_PORT','--ui','$ui_argument') -WorkingDirectory '$work' -WindowStyle Hidden" 2>/dev/null
+    local win_pid
+    win_pid="$(cygpath -w "$INSTALL_DIR/serve.pid")"
+    powershell.exe -NoProfile -Command "\$deployChild = Start-Process -FilePath '$win_binary' -ArgumentList @('serve','--port','$PORT','--client-port','$CLIENT_PORT','--ui','$ui_argument') -WorkingDirectory '$work' -WindowStyle Hidden -PassThru; [IO.File]::WriteAllText('$win_pid', [string]\$deployChild.Id)" 2>/dev/null
   else
-    (cd "$ROOT" && nohup "$binary" serve --port "$PORT" --client-port "$CLIENT_PORT" --ui "$UI_DIR" >>"$HOME_DIR/node.log" 2>&1 &)
+    (cd "$RUNTIME_ROOT" && { nohup "$binary" serve --port "$PORT" --client-port "$CLIENT_PORT" --ui "$UI_DIR" >>"$HOME_DIR/node.log" 2>&1 & echo $! > "$INSTALL_DIR/serve.pid"; })
   fi
 }
 
@@ -238,22 +258,42 @@ wait_health() {
 # Copy rather than move: the caller's build tree keeps its binary, and a failed swap has something to
 # roll back to. If they are already the same file - a hard link, which is how an installed binary and
 # its build output often relate - there is nothing to copy and `cp` says so as an error.
+SWAP_OK=1
 if [ "$NEW" -ef "$INSTALLED" ]; then
   say "the new binary is already the installed one ($INSTALLED) - nothing to swap, restarting it"
 else
-  cp -f "$NEW" "$INSTALLED"
+  cp -f "$NEW" "$INSTALLED" || SWAP_OK=0
   say "installed $(basename "$NEW") over $INSTALLED"
 fi
+UI_OK=$SWAP_OK
+if [ -d "$SOURCE_UI" ] && [ "$SOURCE_UI" != "$UI_DIR" ]; then
+  mkdir -p "$UI_DIR"
+  for asset in $UI_FILES; do cp -f "$SOURCE_UI/$asset" "$UI_DIR/$asset" || UI_OK=0; done
+fi
 start_node "$INSTALLED"
-if wait_health; then
+if [ "$UI_OK" = "1" ] && wait_health; then
   say "upgraded: $(health)"
-  rm -f "$BACKUP" 2>/dev/null
+  # Keep this one binary/UI backup for recovery after the deployment verdict.
   exit 0
 fi
 
 say "the new binary did not come up - putting the previous one back"
+FAILED_PID="$(pid_on_port)"
+EXPECTED_PID="$(tr -d '[:space:]' < "$INSTALL_DIR/serve.pid" 2>/dev/null)"
+if [ -n "$FAILED_PID" ] && [ "$FAILED_PID" = "$EXPECTED_PID" ]; then
+  if [ "$WINDOWS" = "1" ]; then powershell.exe -NoProfile -Command "Stop-Process -Id $FAILED_PID -Force" 2>/dev/null
+  else kill "$FAILED_PID" 2>/dev/null; fi
+fi
+for _ in $(seq 1 100); do
+  port_busy "$PORT" || break
+  sleep 0.05
+done
+if port_busy "$PORT"; then say "port $PORT is still occupied; recovery requires checking the listener"; exit 1; fi
 if [ -f "$BACKUP" ]; then
   cp -f "$BACKUP" "$INSTALLED"
+  for asset in $UI_FILES; do
+    [ ! -f "$UI_DIR/$asset.pre-upgrade" ] || cp -f "$UI_DIR/$asset.pre-upgrade" "$UI_DIR/$asset"
+  done
   start_node "$INSTALLED"
   if wait_health; then
     say "rolled back: $(health)"

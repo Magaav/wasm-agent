@@ -265,19 +265,15 @@ case "$affinity_health" in
     echo "  ok: the same session did not open a second worker" ;;
   *) echo "  FAIL: the same session opened another worker - two writers on one conversation"; exit 1 ;;
 esac
-# The third check cannot sample /health for session B: a trivial turn finishes in about a second, so the
-# sample races it and the first version of this failed on a turn that had already succeeded. The claim that
-# matters is deterministic instead: the reply arrived while worker 0 was *still* wedged, which is only
-# possible if the turn ran somewhere else.
+# Require an actual mock answer, not merely a routed request or a nonempty error.
+# Worker 0 remains wedged throughout; the turn must finish on another worker.
 b_bytes="$(wc -c < "$WORK/turn-b.txt" | tr -d " ")"
 if grep -q '"reply":"ok"' "$WORK/turn-b.txt" && printf "%s" "$concurrent_health" | grep -q "\"id\":0[^}]*\"state\":\"stalled\""; then
   echo "  ok: a second conversation was answered while worker 0 was still wedged ($b_bytes bytes of reply)"
 else
-  # KNOWN GAP, reported as a gap. Routing is proven by the two checks above: a turn for a new session got its
-  # own worker, and the same session did not open a second one. What is not yet explained is that this third
-  # turn produced no reply at all - it was routed (one spawn, and worker 1 was idle by then) and then failed
-  # somewhere in the turn itself. That is the next thing to look at, and it is not a routing question.
   echo "  FAIL: a second concurrent conversation did not return the mock answer ($b_bytes bytes)"
+  head -c 500 "$WORK/turn-b.txt"; echo
+  tail -8 "$WORK/turns.log"
   exit 1
 fi
 echo "  ok: turns are routed by session - concurrent across sessions, ordered within one"

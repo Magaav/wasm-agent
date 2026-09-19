@@ -138,3 +138,4 @@ host.http_stream=function() return json.encode({status=200,content='partial',str
 local interrupted=agentlib.new(session('interrupted-stream'),function() end,'master','master','')
 check(not pcall(interrupted.turn,interrupted,'test interruption'),'incomplete stream cannot become a completed turn')
 print('observability ok: '..cases..' assertions; zero model calls')
+print('observability_fixture_session='..run)

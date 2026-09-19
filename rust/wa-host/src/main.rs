@@ -158,6 +158,18 @@ fn main() {
     std::env::set_var("HOME", &home);
     let from_file = load_env_file();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // A detached launcher must not change the node's worktree/branch identity.
+    // The deployment gate writes this explicit location; CLI one-shot commands
+    // still use their caller's cwd, and scratch binaries have no such marker.
+    if args.first().is_some_and(|arg| arg == "serve") {
+        if let Some(marker) = std::env::current_exe().ok().and_then(|p| p.parent().map(|dir| dir.join("runtime-worktree.txt"))) {
+            if let Ok(path) = std::fs::read_to_string(marker) {
+                if let Err(error) = std::env::set_current_dir(path.trim()) {
+                    eprintln!("runtime_worktree_unavailable: {error}"); std::process::exit(2);
+                }
+            }
+        }
+    }
     if args.iter().any(|arg| arg == "--version" || arg == "-v") {
         println!("wasm-agent {}", env!("CARGO_PKG_VERSION"));
         return;
