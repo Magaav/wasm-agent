@@ -457,6 +457,20 @@ for _, name in ipairs(names) do
   if not chunk then missing[#missing + 1] = name end
 end
 assert(#missing == 0, "on disk but not in the binary: " .. table.concat(missing, ", "))
+-- Presence is not freshness. loadfile succeeding proves the module is IN the binary, not that it is the
+-- module on disk - and the binary runs the embedded copy. A Lua edit that did not trigger a rebuild leaves
+-- the old core inside, so a deploy ships a fix that is not in the artifact. Compare the text and name what
+-- is stale; the fix is to rebuild, which deploy.sh does.
+local stale = {}
+for _, name in ipairs(names) do
+  local path = "lua/core/" .. name
+  local embedded = EMBEDDED and EMBEDDED[path]
+  local on_disk = host.read_file and host.read_file(path)
+  if type(embedded) == "string" and type(on_disk) == "string" and embedded ~= on_disk then
+    stale[#stale + 1] = name
+  end
+end
+assert(#stale == 0, "the embedded core is stale - rebuild before trusting this binary: " .. table.concat(stale, ", "))
 print("embedded modules ok (" .. #names .. " files)")
 LUA
 ( unset WASM_AGENT_LUA_ROOT; WA_SCRIPT="$DB.embedded.lua" "$BIN" --db "$DB" ) | grep "embedded modules ok"
