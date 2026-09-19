@@ -43,6 +43,5 @@ id_ecdsa*
 .handoff/last-report.txt
 .handoff/running
 
-# Scratch files: the probe scripts a run writes for itself. The convention is the mechanism - nothing here
-# needs a rule in AGENTS.md, it needs a .gitignore line. The files stay on disk and stay usable.
+# Scratch files: the probe scripts a run writes for itself. The convention is the mechanism.
 tmp-*
