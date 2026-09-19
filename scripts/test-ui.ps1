@@ -19,6 +19,7 @@ if (-not (Test-Path (Join-Path $ui "index.html"))) { Write-Host "  !  no ui/ in 
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("wa-ui-test-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+$db = Join-Path $tmp "ui-test.db"
 foreach ($name in @("index.html", "style.css", "app.js", "components.js", "render.wasm")) {
   $from = Join-Path $ui $name
   if (Test-Path $from) { Copy-Item $from (Join-Path $tmp $name) }
@@ -1097,7 +1098,7 @@ if ($busy) {
 }
 
 try {
-  $server = Start-Process -FilePath $WaExe -ArgumentList @("serve", "--port", "$Port", "--client-port", "$ClientPort", "--ui", $tmp) -WindowStyle Hidden -PassThru
+  $server = Start-Process -FilePath $WaExe -ArgumentList @("serve", "--db", $db, "--port", "$Port", "--client-port", "$ClientPort", "--ui", $tmp) -WindowStyle Hidden -PassThru
   for ($i = 0; $i -lt 40; $i++) {
     Start-Sleep -Milliseconds 250
     try { if ((Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 "http://127.0.0.1:$Port/health").StatusCode -eq 200) { break } } catch { }
@@ -1127,5 +1128,10 @@ try {
   }
 } finally {
   if ($server) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
-  Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+  $resolvedTmp = [IO.Path]::GetFullPath($tmp)
+  $resolvedTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+  if ($resolvedTmp.StartsWith($resolvedTemp, [StringComparison]::OrdinalIgnoreCase) -and
+      [IO.Path]::GetFileName($resolvedTmp) -match '^wa-ui-test-[0-9a-f]{8}$') {
+    Remove-Item -LiteralPath $resolvedTmp -Recurse -Force -ErrorAction SilentlyContinue
+  }
 }

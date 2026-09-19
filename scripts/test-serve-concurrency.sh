@@ -19,11 +19,20 @@ BIN="${WA_BIN:-rust/target/release/wa}"
 PORT="${1:-8891}"
 CLIENT_PORT=$((PORT + 1))
 WORK="$(mktemp -d /tmp/wa-conc-XXXXXX)"
-trap 'kill "${SERVER:-}" "${WEDGE:-}" "${POOL:-}" "${TURNS:-}" "${MOCK_PID:-}" 2>/dev/null; rm -rf "$WORK"' EXIT
+cleanup() {
+  kill "${SERVER:-}" "${WEDGE:-}" "${POOL:-}" "${TURNS:-}" "${MOCK_PID:-}" 2>/dev/null
+  # The only recursive removal is the exact directory mktemp created here.
+  case "$WORK" in /tmp/wa-conc-??????) [ -d "$WORK" ] && rm -rf -- "$WORK" ;; esac
+}
+trap cleanup EXIT
+
+# Every fixture needs its own database. Omitting --db here used the operator's
+# live memory.db: a smoke run migrated its schema before the compatible binary
+# was deployed, then the still-running node failed on the renamed column.
 
 if [ ! -x "$BIN" ]; then echo "no binary at $BIN" >&2; exit 1; fi
 
-"$BIN" serve --port "$PORT" --client-port "$CLIENT_PORT" --ui "$ROOT/ui" > "$WORK/serve.log" 2>&1 &
+"$BIN" --db "$WORK/serve.db" serve --port "$PORT" --client-port "$CLIENT_PORT" --ui "$ROOT/ui" > "$WORK/serve.log" 2>&1 &
 SERVER=$!
 
 for _ in $(seq 1 40); do
@@ -91,7 +100,7 @@ WEDGE_CLIENT=$((WEDGE_PORT + 1))
 WASM_AGENT_TEST_STALL_WORKER=1 \
 WASM_AGENT_WORKER_STALL_SECONDS=1 \
 WASM_AGENT_WORKER_STALL_EXIT_SECONDS=0 \
-  "$BIN" serve --port "$WEDGE_PORT" --client-port "$WEDGE_CLIENT" --ui "$ROOT/ui" > "$WORK/wedge.log" 2>&1 &
+  "$BIN" --db "$WORK/wedge.db" serve --port "$WEDGE_PORT" --client-port "$WEDGE_CLIENT" --ui "$ROOT/ui" > "$WORK/wedge.log" 2>&1 &
 WEDGE=$!
 
 for _ in $(seq 1 40); do
@@ -143,7 +152,7 @@ WASM_AGENT_TEST_STALL_WORKER=1 \
 WASM_AGENT_WORKER_STALL_SECONDS=1 \
 WASM_AGENT_WORKER_STALL_EXIT_SECONDS=0 \
 WASM_AGENT_WORKERS_IDLE_SECONDS=2 \
-  "$BIN" serve --port "$POOL_PORT" --client-port "$POOL_CLIENT" --ui "$ROOT/ui" > "$WORK/pool.log" 2>&1 &
+  "$BIN" --db "$WORK/pool.db" serve --port "$POOL_PORT" --client-port "$POOL_CLIENT" --ui "$ROOT/ui" > "$WORK/pool.log" 2>&1 &
 POOL=$!
 
 for _ in $(seq 1 40); do
@@ -223,7 +232,7 @@ WASM_AGENT_LLM_API_KEY=test-only \
 WASM_AGENT_TEST_STALL_WORKER=1 \
 WASM_AGENT_WORKER_STALL_SECONDS=1 \
 WASM_AGENT_WORKER_STALL_EXIT_SECONDS=0 \
-  "$BIN" serve --port "$TURN_PORT" --client-port "$TURN_CLIENT" --ui "$ROOT/ui" > "$WORK/turns.log" 2>&1 &
+  "$BIN" --db "$WORK/turns.db" serve --port "$TURN_PORT" --client-port "$TURN_CLIENT" --ui "$ROOT/ui" > "$WORK/turns.log" 2>&1 &
 TURNS=$!
 for _ in $(seq 1 40); do
   code="$(curl -s -o /dev/null -m 2 -w '%{http_code}' "http://127.0.0.1:$TURN_PORT/health" 2>/dev/null)"
