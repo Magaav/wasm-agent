@@ -1067,16 +1067,27 @@ function composedText(text) {
 // Images go out as a JSON body: {text, images:[{name, mime, data}]}.
 // The server accepts plain text too, so this only changes when pictures are
 // actually attached. `data` is a full data URL; the server strips the envelope.
-function composedBody(text) {
+function composedBody(text, options = {}) {
   const images = attachments.filter((file) => file.kind === "image");
-  if (images.length === 0) return { contentType: "text/plain; charset=utf-8", body: composedText(text) };
-  return {
-    contentType: "application/json",
-    body: JSON.stringify({
-      text: composedText(text),
-      images: images.map((file) => ({ name: file.name, mime: file.mime, data: file.data })),
-    }),
-  };
+  // The thread this turn belongs to, named in the body.
+  //
+  // It used to be sent as `X-WA-Session`, which is the *account* header: a thread id in that field
+  // resolved to no user at all and fell back to master, so the window's choice was never read and
+  // every window shared one ever-growing thread. The node parses this body itself, which is why
+  // naming a thread needed no HTTP route and no Rust change.
+  //
+  // Deliberately not gated on the role the page believes it has: that value arrives from `/me` and
+  // is `guest` until it does, so a guard here would silently send the first turn after `/new` to the
+  // thread the reader just left. Who may address a thread is decided once, by the node, which knows
+  // the caller - and refuses a thread that is not theirs with `forbidden_thread`.
+  const thread = options.session || chatSession;
+  if (images.length === 0 && !thread) {
+    return { contentType: "text/plain; charset=utf-8", body: composedText(text) };
+  }
+  const payload = { text: composedText(text) };
+  if (images.length) payload.images = images.map((file) => ({ name: file.name, mime: file.mime, data: file.data }));
+  if (thread) payload.thread = thread;
+  return { contentType: "application/json", body: JSON.stringify(payload) };
 }
 
 // A lost connection is not a failed turn. When the node dies mid-stream the
@@ -1142,7 +1153,7 @@ async function send(text, options = {}) {
   streamText = "";
   const names = attachments.map((file) => file.name).join(", ");
   add("user", text + (names ? `\n\nattached: ${names}` : ""));
-  const outgoing = composedBody(text);
+  const outgoing = composedBody(text, options);
   // Clear in place, like the submit handler does. Reassigning the binding here was
   // enough to make a reader's captured reference stale - which is how a test can end
   // up asserting against a dead array and passing.
@@ -1157,13 +1168,9 @@ async function send(text, options = {}) {
   let watchdog = null;
   try {
     const headers = { "Content-Type": outgoing.contentType, "Accept": "text/event-stream" };
-    // Which thread this turn belongs to. The node creates a session when it is not told one, and
-    // never says which - so a window that is *in* a thread says so, and a continuation lands in the
-    // thread it is continuing rather than in whatever is newest. Only a master says it: the session
-    // header doubles as the account header in this API, and a guest naming a master's thread is not
-    // something the node checks for yet.
-    const target = options.session || (me.role === "master" ? chatSession : "");
-    if (target) headers["X-WA-Session"] = target;
+    // Which thread this turn belongs to travels in the body (`composedBody`), not here: the header
+    // this used to set is the *account* one, and a thread id in it resolved to no user and fell back
+    // to master - so the window's choice was never read. `apiHeaders` supplies the account below.
     // Silence is not evidence of death.
     //
     // A tool that takes minutes - a build, a test suite, an install - produces no events at all, and
@@ -1617,6 +1624,7 @@ form.addEventListener("submit", (event) => {
   }
   const text = input.value.trim();
   if (!text && attachments.length === 0) return;
+  commandMenu.close();
   input.value = "";
   attachments.length = 0;
   draftGeneration += 1;
@@ -1634,6 +1642,16 @@ form.addEventListener("submit", (event) => {
 
 input.addEventListener("keydown", (event) => {
   const accel = event.ctrlKey || event.metaKey;
+  // While the command list is up it owns the arrows, Enter and Tab: a menu that offered choices
+  // and then sent the half-typed command on Enter would be worse than no menu. Escape is left to
+  // the overlay itself (§3), which is where the close rule lives.
+  if (commandMenu.open && !accel) {
+    if (event.key === "ArrowDown") { event.preventDefault(); commandMenu.move(1); return; }
+    if (event.key === "ArrowUp") { event.preventDefault(); commandMenu.move(-1); return; }
+    if (event.key === "Enter" || event.key === "Tab") {
+      if (commandMenu.activate()) { event.preventDefault(); return; }
+    }
+  }
   // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, the three spellings people actually use.
   // Only while the composer has focus, so we never shadow an undo a browser
   // context (a dialog, a native field) is entitled to handle itself.
@@ -1667,6 +1685,85 @@ input.addEventListener("input", () => {
   clearTimeout(typingTimer);
   typingTimer = setTimeout(() => { typingTimer = null; }, 600);
 });
+
+// ---- `/` commands ---------------------------------------------------------
+//
+// The composer is where the reader is already typing, so a command is a word typed into it
+// rather than one more control in the footer - §9 keeps the footer for per-message actions
+// (send, mic, attach). The panel is `<wa-menu>`, which already owns the §3 close rule and now
+// owns keyboard selection too, so what a click would choose and what Enter chooses are the same
+// item by construction.
+const commandMenu = document.getElementById("command-menu");
+
+// Only commands that can keep their promise. `/new` starts a thread; nothing here deletes a
+// transcript, because the ledger is append-only (§12) and a command that silently removed
+// history would make the record a claim it cannot support.
+const COMMANDS = [
+  {
+    name: "/new",
+    hint: "start a new session — this window's transcript is cleared, the old thread is not touched",
+    run: newThread,
+  },
+];
+
+// A thread is named by whoever starts it. The id is made here rather than asked for, so the name
+// the window holds is the name the node stores, with no round trip in which the node could answer
+// "started" and hand back something else.
+function newId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (typeof crypto !== "undefined" && crypto.getRandomValues) crypto.getRandomValues(bytes);
+  else for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// Start a thread with nothing in it.
+//
+// Nothing is deleted. The thread being left behind is still in the ledger and still listed in the
+// engine view, which is why the notice says so: an empty transcript with no explanation reads as
+// "the work is gone", and it is not.
+function newThread() {
+  rememberSession(newId());
+  repaintTurns([]);
+  clearStatus();
+  const notice = document.createElement("div");
+  notice.className = "thread-notice";
+  notice.textContent = "new session — nothing from the previous thread carries over here. " +
+    "That thread is unchanged and still listed in the engine view.";
+  messages.append(notice);
+  pin();
+}
+
+// `/` opens the list; anything else typed after it filters. A newline ends the command line and
+// closes it, so a message that merely starts with a slash is not trapped.
+function commandMatches(value) {
+  if (value[0] !== "/" || value.includes("\n")) return [];
+  const typed = value.slice(1).trim().toLowerCase();
+  return COMMANDS.filter((command) => command.name.slice(1).startsWith(typed));
+}
+
+function syncCommands() {
+  const matches = commandMatches(input.value);
+  if (!matches.length) { commandMenu.close(); return; }
+  const rect = input.getBoundingClientRect();
+  commandMenu.items = matches.map((command) => ({
+    label: `${command.name}  —  ${command.hint}`,
+    action: () => {
+      // The draft as it stands (with the command typed in it) is what Ctrl+Z comes back to, so
+      // the command is pushed *before* the text is taken away.
+      pushDraft();
+      input.value = "";
+      draftNow = snapshotDraft();
+      autosize();
+      command.run();
+    },
+  }));
+  commandMenu.openAt(rect.left, rect.top, { above: true, inset: 5 });
+  // The first match is chosen before any arrow key is pressed, so the list shows what Enter is
+  // about to do instead of waiting to be told.
+  commandMenu.move(1);
+}
+input.addEventListener("input", syncCommands);
 window.addEventListener("resize", () => requestAnimationFrame(autosize));
 
 messages.addEventListener("click", (event) => {

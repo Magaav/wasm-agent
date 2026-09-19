@@ -53,6 +53,21 @@ cost and token totals. Missing usage, inconsistent counts or missing prices must
 remain visible. A high cache-hit percentage alone is not efficiency: unnecessary
 cached context can still waste money, time and attention.
 
+Each request start also records JSON byte counts by message role, plus the
+source bytes of assistant reasoning and tool arguments. These are diagnostic
+subsets, not token allocations: JSON escaping and provider tokenization differ.
+They help identify growth without copying prompt text into the event ledger.
+`read_many` can request up to eight independent file ranges in one decision;
+each result uses the same read path and reports its own failure. Large combined
+results keep the full JSON in an output artifact for exact retrieval.
+The 50 KiB tool-result limit applies to the entire model-facing JSON view,
+including nested session pages, not just a top-level `content` or `stdout`
+field. A large session page retains its newest complete turns and a cursor for
+earlier turns; its exact original remains available through `tool_result`.
+Older oversized rows are projected when rebuilding a prompt, without changing
+their stored transcript bytes. This also bounds a resumed session that predates
+the output rule.
+
 ## What to bring back in a day or two
 
 In the status balloon, **Export session** exports the observed thread;

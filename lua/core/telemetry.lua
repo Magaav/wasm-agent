@@ -48,6 +48,41 @@ function M.estimate_messages(messages)
   return total
 end
 
+-- Exact JSON byte sizes by message role, plus source-byte subsets that help
+-- locate growth. These are not token counts and cannot be added to provider
+-- usage. Prompt content itself never enters the diagnostic ledger.
+function M.prompt_shape(messages, tools)
+  local shape = {system_bytes=0,user_bytes=0,assistant_bytes=0,tool_result_bytes=0,
+    other_bytes=0,schema_bytes=#json.encode(tools or {}),reasoning_source_bytes=0,
+    tool_arguments_source_bytes=0,messages=0,tool_results=0,tool_calls=0,images=0}
+  for _, message in ipairs(messages or {}) do
+    shape.messages=shape.messages+1
+    local encoded=#json.encode(message)
+    if message.role=="system" then shape.system_bytes=shape.system_bytes+encoded
+    elseif message.role=="user" then shape.user_bytes=shape.user_bytes+encoded
+    elseif message.role=="assistant" then
+      shape.assistant_bytes=shape.assistant_bytes+encoded
+      shape.reasoning_source_bytes=shape.reasoning_source_bytes+#tostring(message.reasoning_content or "")
+      for _, call in ipairs(message.tool_calls or {}) do
+        shape.tool_calls=shape.tool_calls+1
+        shape.tool_arguments_source_bytes=shape.tool_arguments_source_bytes
+          +#tostring((call["function"] or {}).arguments or "")
+      end
+    elseif message.role=="tool" then
+      shape.tool_result_bytes=shape.tool_result_bytes+encoded
+      shape.tool_results=shape.tool_results+1
+    else shape.other_bytes=shape.other_bytes+encoded end
+    if type(message.content)=="table" then
+      for _, part in ipairs(message.content) do
+        if part.type=="image_url" or part.type=="image" then shape.images=shape.images+1 end
+      end
+    end
+  end
+  shape.total_message_bytes=shape.system_bytes+shape.user_bytes+shape.assistant_bytes
+    +shape.tool_result_bytes+shape.other_bytes
+  return shape
+end
+
 local function number(value)
   local n = tonumber(value)
   if n and n >= 0 and n < math.huge then return n end

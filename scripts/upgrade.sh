@@ -22,6 +22,10 @@ set -uo pipefail
 say() { printf '  %s\n' "$*"; }
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ "${WASM_AGENT_IN_TURN:-}" = "1" ]; then
+  echo "upgrade: refused inside a running turn; request the external sentinel instead" >&2
+  exit 2
+fi
 PORT="${WA_PORT:-8799}"
 CLIENT_PORT="${WA_CLIENT_PORT:-8800}"
 IDLE_TIMEOUT="${WA_IDLE_TIMEOUT:-900}"
@@ -58,6 +62,56 @@ if [ -z "$NEW" ]; then
 fi
 [ -n "$NEW" ] && [ -x "$NEW" ] || { say "no new binary to install (build one, or pass a path)"; exit 2; }
 [ -x "$INSTALLED" ] || { say "nothing installed at $INSTALLED - this upgrades a running node, it does not create one"; exit 2; }
+
+# The sentinel runs the copy beside the installed binary, so ROOT is the install
+# directory in that path. The candidate binary still points back to its source
+# checkout: use that checkout for UI assets and for a downgrade guard.
+SOURCE_ROOT="$(git -C "$(dirname "$NEW")" rev-parse --show-toplevel 2>/dev/null || true)"
+SOURCE_COMMIT=""
+if [ -n "$SOURCE_ROOT" ]; then
+  SOURCE_COMMIT="$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)"
+  if [ -z "${WA_SOURCE_UI_DIR:-}" ] && [ -d "$SOURCE_ROOT/ui" ]; then SOURCE_UI="$SOURCE_ROOT/ui"; fi
+fi
+PREVIOUS_COMMIT="$(sed -n 's/^commit=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)"
+if [ -n "$PREVIOUS_COMMIT" ] && [ "$PREVIOUS_COMMIT" != unknown ] \
+    && [ -z "$SOURCE_COMMIT" ] && [ "${WA_ALLOW_UNVERIFIED_UPGRADE:-}" != 1 ]; then
+  say "candidate has no source checkout to compare with installed commit $PREVIOUS_COMMIT; set WA_ALLOW_UNVERIFIED_UPGRADE=1 only for an intentional operator override"
+  exit 2
+fi
+if [ -n "$SOURCE_COMMIT" ] && [ -n "$PREVIOUS_COMMIT" ] && [ "$PREVIOUS_COMMIT" != unknown ] \
+    && git -C "$SOURCE_ROOT" cat-file -e "$PREVIOUS_COMMIT^{commit}" 2>/dev/null \
+    && ! git -C "$SOURCE_ROOT" merge-base --is-ancestor "$PREVIOUS_COMMIT" "$SOURCE_COMMIT"; then
+  say "refusing a candidate from $SOURCE_COMMIT: it does not contain installed commit $PREVIOUS_COMMIT"
+  exit 2
+fi
+
+file_hash() { [ -f "$1" ] && sha256sum < "$1" 2>/dev/null | awk '{print $1}' || true; }
+record_install() {
+  local hash sentinel_hash upgrade_hash commit branch source_hint reason via stamp record
+  hash="$(file_hash "$INSTALLED")"
+  sentinel_hash="$(file_hash "$INSTALL_DIR/wa-sentinel.exe")"
+  [ -n "$sentinel_hash" ] || sentinel_hash="$(file_hash "$INSTALL_DIR/wa-sentinel")"
+  [ -n "$sentinel_hash" ] || sentinel_hash=missing
+  upgrade_hash="$(file_hash "$INSTALL_DIR/scripts/upgrade.sh")"
+  [ -n "$upgrade_hash" ] || upgrade_hash=missing
+  [ -n "$hash" ] || return 1
+  commit=unknown; branch=unknown
+  # A sentinel upgrade knows the exact installed bytes, but cannot prove that a
+  # separately built binary corresponds to the checkout's current HEAD.
+  source_hint="${SOURCE_COMMIT:-unknown}"
+  if [ "$NEW" -ef "$INSTALLED" ] && [ "$(sed -n 's/^sha256=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)" = "$hash" ]; then
+    commit="${PREVIOUS_COMMIT:-unknown}"
+    branch="$(sed -n 's/^branch=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)"
+    branch="${branch:-unknown}"
+  fi
+  reason="$(printf '%s' "${WA_UPGRADE_REASON:-upgrade requested}" | tr '\r\n' '  ')"
+  via="$(printf '%s' "${WA_UPGRADE_VIA:-upgrade.sh}" | tr '\r\n' '  ')"
+  stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  record="$INSTALL_DIR/.installed.txt.$$"
+  printf 'commit=%s\nbranch=%s\ndirty=unknown\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\nsource_commit_hint=%s\nsource_provenance=unverified-binary\nvia=%s\nat=%s\nreason=%s\n' \
+    "$commit" "$branch" "$hash" "$sentinel_hash" "$upgrade_hash" "$source_hint" "$via" "$stamp" "$reason" > "$record" \
+    && mv -f "$record" "$INSTALL_DIR/installed.txt"
+}
 
 health() { curl -s -m 5 "http://127.0.0.1:$PORT/health" 2>/dev/null || true; }
 
@@ -272,9 +326,27 @@ if [ -d "$SOURCE_UI" ] && [ "$SOURCE_UI" != "$UI_DIR" ]; then
 fi
 start_node "$INSTALLED"
 if [ "$UI_OK" = "1" ] && wait_health; then
-  say "upgraded: $(health)"
-  # Keep this one binary/UI backup for recovery after the deployment verdict.
-  exit 0
+  LISTENER="$(pid_on_port)"
+  RECORDED="$(tr -d '[:space:]' < "$INSTALL_DIR/serve.pid" 2>/dev/null)"
+  if [ -n "$LISTENER" ] && [ "$LISTENER" = "$RECORDED" ]; then
+    # Record the new binary before shipping companion files. If a companion
+    # copy fails, installed.txt must still name the binary actually serving.
+    record_install || { say "node upgraded, but installed.txt could not be recorded"; exit 3; }
+    mkdir -p "$INSTALL_DIR/scripts"
+    if ! cmp -s "$0" "$INSTALL_DIR/scripts/upgrade.sh"; then
+      cp -f "$0" "$INSTALL_DIR/scripts/upgrade.sh" || { say "node upgraded, but could not ship upgrade.sh"; exit 3; }
+    fi
+    if [ -n "$SOURCE_ROOT" ] && [ -f "$SOURCE_ROOT/skills/self-update/SKILL.md" ]; then
+      mkdir -p "$HOME_DIR/skills/self-update"
+      cp -f "$SOURCE_ROOT/skills/self-update/SKILL.md" "$HOME_DIR/skills/self-update/SKILL.md" \
+        || { say "node upgraded, but could not ship self-update skill"; exit 3; }
+    fi
+    record_install || { say "node upgraded, but final installed.txt could not be recorded"; exit 3; }
+    say "upgraded and recorded: $(health)"
+    # Keep this one binary/UI backup for recovery after the deployment verdict.
+    exit 0
+  fi
+  say "health answered, but listener pid $LISTENER differs from recorded pid $RECORDED"
 fi
 
 say "the new binary did not come up - putting the previous one back"

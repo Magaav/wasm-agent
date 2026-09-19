@@ -21,7 +21,7 @@
 //! your agent can talk into anything):
 //!
 //!   request restart  [--reason TEXT]
-//!   request upgrade  --binary PATH [--reason TEXT]
+//!   request upgrade  --binary PATH [--session ID --prompt TEXT] [--reason TEXT]
 //!   request wake     --session ID --prompt TEXT [--reason TEXT]
 //!   request run      --script PATH [--reason TEXT]     (a script the operator installed)
 //!   once | watch | status | start | stop | help
@@ -498,24 +498,36 @@ pub(crate) fn verb_upgrade(binary: &str, reason: &str) -> Result<String> {
     }
     let script = resolve_upgrade_script()?;
     let (interpreter, script_arg) = shell_for(&script);
-    let status = std::process::Command::new(&interpreter)
+    let output = std::process::Command::new(&interpreter)
         // The path is passed to the interpreter as its first argument. Git Bash does not accept a
         // `C:/...` path there, and WSL's bash cannot see `/c/...` at all, so both the interpreter
         // *and* the path form have to agree (`shell_for`).
         .arg(&script_arg)
         .arg(shell_for_binary(binary))
+        .env("WA_UPGRADE_VIA", "sentinel")
+        .env("WA_UPGRADE_REASON", reason)
         // The script locates the repo from its own path (`dirname $0/..`), so the working
         // directory does not matter to it. This used to pin cwd to the sentinel's own, which was
         // the install directory - a directory with no `scripts/` in it, which is exactly why the
         // relative default could never be found from a detached watcher.
         .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .status()
+        .output()
         .context("run the upgrade script")?;
-    audit("upgrade", binary, reason);
-    if status.success() {
-        Ok("upgraded".into())
+    let log = sentinel_dir().join("upgrade.log");
+    let mut record = format!("{}\t{}\t{}\n", now_epoch(), binary, reason);
+    record.push_str(&String::from_utf8_lossy(&output.stdout));
+    record.push_str(&String::from_utf8_lossy(&output.stderr));
+    record.push('\n');
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+        let _ = file.write_all(record.as_bytes());
+    }
+    if output.status.success() {
+        audit("upgrade", binary, reason);
+        Ok(format!("upgraded; install record refreshed; transcript at {}", log.display()))
     } else {
-        bail!("the upgrade script failed (exit {status}) - it rolls back, so the node should be running the previous binary")
+        audit("upgrade-failed", binary, reason);
+        bail!("the upgrade script failed (exit {}); inspect {} and the live node before assuming rollback", output.status, log.display())
     }
 }
 
@@ -593,7 +605,24 @@ fn perform(request: &Value) -> Result<String> {
     let reason = request.get("reason").and_then(Value::as_str).unwrap_or("(no reason given)");
     match verb {
         "restart" => verb_restart(reason),
-        "upgrade" => verb_upgrade(request.get("binary").and_then(Value::as_str).unwrap_or(""), reason),
+        "upgrade" => {
+            let session = request.get("session").and_then(Value::as_str).unwrap_or("");
+            let prompt = request.get("prompt").and_then(Value::as_str).unwrap_or("");
+            if session.is_empty() != prompt.is_empty() {
+                bail!("upgrade continuation requires both --session and --prompt");
+            }
+            let detail = verb_upgrade(request.get("binary").and_then(Value::as_str).unwrap_or(""), reason)?;
+            if session.is_empty() {
+                Ok(detail)
+            } else {
+                let (session, prompt, reason) = (session.to_string(), prompt.to_string(), reason.to_string());
+                std::thread::spawn(move || match verb_wake(&session, &prompt, &reason) {
+                    Ok(_) => {}
+                    Err(error) => audit("wake-error", &session, &error.to_string()),
+                });
+                Ok(format!("{detail}; continuation wake spawned"))
+            }
+        },
         "wake" => {
             let session = request.get("session").and_then(Value::as_str).unwrap_or("");
             let prompt = request.get("prompt").and_then(Value::as_str).unwrap_or("");
@@ -1005,7 +1034,7 @@ fn print_help() {
 const HELP: &str = r#"wa-sentinel - the process outside the node.
 
   request restart  [--reason TEXT]
-  request upgrade  --binary PATH [--reason TEXT]
+  request upgrade  --binary PATH [--session ID --prompt TEXT] [--reason TEXT]
   request wake     --session ID --prompt TEXT [--reason TEXT]
   request run      --script PATH [--reason TEXT]
   request spell    --file PATH [--reason TEXT]
@@ -1046,4 +1075,20 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod self_update_tests {
+    use super::*;
+
+    #[test]
+    fn continuation_requires_both_fields_before_any_upgrade() {
+        for request in [
+            json!({"verb":"upgrade","binary":"not-a-binary","session":"thread"}),
+            json!({"verb":"upgrade","binary":"not-a-binary","prompt":"continue"}),
+        ] {
+            let error = perform(&request).unwrap_err().to_string();
+            assert!(error.contains("requires both --session and --prompt"), "{error}");
+        }
+    }
 }

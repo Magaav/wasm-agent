@@ -396,6 +396,7 @@ function M.complete_with(model, messages, tools, stream, opts)
     messages=#messages,tools=tools and #tools or 0,
     system_hash=host.sha256(json.encode(messages[1] or {})),
     schema_hash=host.sha256(json.encode(tools or {})),
+    prompt_shape=telemetry.prompt_shape(messages,tools),
     system_tokens_estimate=math.ceil(#json.encode(messages[1] or {})/4),
     schema_tokens_estimate=math.ceil(#json.encode(tools or {})/4),
     context_tokens_estimate=opts.context_tokens or telemetry.estimate_messages(messages)+math.ceil(#json.encode(tools or {})/4),

@@ -202,6 +202,10 @@ local function guidelines_for(tool_list)
   if have.bash and not (have.grep or have.ls) then
     add("Use bash for file operations like listing and searching")
   end
+  if have.read_many then
+    add("When several known file reads are independent, request them together with read_many; "
+      .. "keep dependent reads and edits in order")
+  end
   add("Before changing this project's behaviour, read the relevant file under docs/ "
     .. "(or the section of AGENTS.md) in full, and follow its cross-references")
   add("When a task matches a skill in <available_skills>, load it with the skill tool before starting")
@@ -253,14 +257,25 @@ end
 -- Exported so tests and diagnostics can assert what instructions a role runs with.
 M.system_prompt = system_prompt
 
-function M.new(session_id, on_event, role, user, node)
+function M.new(session_id, on_event, role, user, node, opts)
   role = role or "master"
   user = user or "master"
   node = node or ""
+  opts = opts or {}
   local session
   if session_id then
     session_id = session_id
     session = memory.session(session_id)
+    -- A named thread that does not exist yet is a request to *start* one, not an
+    -- error - that is what "new session" means from a client that has no id to
+    -- offer. It is started under the name the caller asked for, so the caller's
+    -- next turn addresses the same thread without being told its id back.
+    if not session and opts.start_if_missing then
+      memory.start_session(node, "chat", {
+        id = session_id, user_id = user, node_id = node, title = "chat",
+      })
+      session = memory.session(session_id)
+    end
   end
   if not session then
     session_id = memory.ensure_session(user, node, "chat")
@@ -378,7 +393,7 @@ function M:build_context()
     elseif turn.role == "tool" then
       messages[#messages + 1] = {
         role = "tool", tool_call_id = turn.tool_call_id or "",
-        name = turn.tool_name or "", content = turn.content or "",
+        name = turn.tool_name or "", content = tool_output.context_view(turn.tool_name,turn.content),
       }
     end
   end
@@ -533,9 +548,15 @@ function M:maybe_compact(messages)
       for _, call in ipairs(row.tool_calls) do
         local f=call["function"] or {}
         local ok,args=pcall(json.decode,f.arguments or "{}")
-        if ok and type(args)=="table" and type(args.path)=="string" then
-          if f.name=="read" then read_files[args.path]=true
-          elseif f.name=="write" or f.name=="edit" then modified_files[args.path]=true end
+        if ok and type(args)=="table" then
+          if f.name=="read_many" and type(args.requests)=="table" then
+            for _, request in ipairs(args.requests) do
+              if type(request)=="table" and type(request.path)=="string" then read_files[request.path]=true end
+            end
+          elseif type(args.path)=="string" then
+            if f.name=="read" then read_files[args.path]=true
+            elseif f.name=="write" or f.name=="edit" then modified_files[args.path]=true end
+          end
         end
       end
     end
@@ -560,9 +581,15 @@ function M:maybe_compact(messages)
     for index=1,cut_index do
       for _,call in ipairs(rows[index].tool_calls or {}) do
         local f=call['function'] or {}; local ok,args=pcall(json.decode,f.arguments or '{}')
-        if ok and type(args)=='table' and type(args.path)=='string' then
-          if f.name=='read' then read_files[args.path]=true
-          elseif f.name=='edit' or f.name=='write' then modified_files[args.path]=true end
+        if ok and type(args)=='table' then
+          if f.name=='read_many' and type(args.requests)=='table' then
+            for _,request in ipairs(args.requests) do
+              if type(request)=='table' and type(request.path)=='string' then read_files[request.path]=true end
+            end
+          elseif type(args.path)=='string' then
+            if f.name=='read' then read_files[args.path]=true
+            elseif f.name=='edit' or f.name=='write' then modified_files[args.path]=true end
+          end
         end
       end
     end

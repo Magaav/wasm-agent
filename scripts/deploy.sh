@@ -47,6 +47,10 @@ fail() {
   exit 1
 }
 
+if [ "${WASM_AGENT_IN_TURN:-}" = "1" ]; then
+  fail "cannot deploy from a running turn: it cannot become idle while this command waits. Build, then request an upgrade through wa-sentinel; see skills/self-update/SKILL.md"
+fi
+
 # 1. Clean. A build from a half-edited tree is not reproducible, and the file being edited is often the one
 #    that matters.
 DIRTY="$(git status --porcelain | wc -l | tr -d ' ')"
@@ -122,9 +126,13 @@ if [ -n "${WA_RUNTIME_WORKTREE:-}" ]; then
   printf '%s\n' "$RUNTIME_PATH" > "$INSTALL_DIR/runtime-worktree.txt" || fail "cannot record runtime location"
 fi
 WA_INSTALL_DIR="$INSTALL_DIR" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
+  WA_UPGRADE_REASON="$REASON" WA_UPGRADE_VIA=deploy.sh \
   bash "$UPGRADE" "$(cd "$(dirname "$NEW")" && pwd)/$(basename "$NEW")" 2>&1 | sed "s/^/  upgrade: /"
 UPGRADE_STATUS=${PIPESTATUS[0]}
-[ "$UPGRADE_STATUS" = "0" ] || fail "upgrade.sh failed (exit $UPGRADE_STATUS); it rolls back, so the node should be running the previous binary"
+if [ "$UPGRADE_STATUS" = "3" ]; then
+  fail "the node upgraded, but its script or install record failed (exit 3); inspect the live pid and installed.txt"
+fi
+[ "$UPGRADE_STATUS" = "0" ] || fail "upgrade.sh failed (exit $UPGRADE_STATUS); inspect its rollback output before assuming which binary is live"
 
 # 6. Verify that the node answering is *this* install: the listener's pid must be the pid the install
 #    recorded. Without this, a second node on the port answers /health and the deploy reports success for
@@ -177,9 +185,37 @@ else
   SENTINEL_HASH="$(sha256sum < "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null | awk '{print $1}')"
 fi
 
-printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nat=%s\nreason=%s\n' \
-  "$COMMIT" "$BRANCH" "$DIRTY" "$HASH" "$SENTINEL_HASH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$REASON" \
-  > "$INSTALL_DIR/installed.txt"
+# Replacing an executable file does not replace the already-running process.
+# Even when the copy succeeds on Windows, a watcher can keep executing the old
+# image indefinitely. Respect an intentionally stopped watcher; restart only
+# one that was already watching, then prove its pid changed.
+SENTINEL_WATCH_PID="$("$INSTALL_DIR/$SENTINEL_NAME" status 2>/dev/null \
+  | awk '$1=="sentinel:" && $2=="watching" {gsub(/[^0-9]/,"",$4); print $4; exit}')"
+if [ -n "$SENTINEL_WATCH_PID" ]; then
+  echo "deploy: restarting the watching sentinel to load the installed image"
+  "$INSTALL_DIR/$SENTINEL_NAME" restart || fail "node installed, but the sentinel could not restart"
+  SENTINEL_NEW_PID=""
+  for _ in $(seq 1 50); do
+    SENTINEL_NEW_PID="$("$INSTALL_DIR/$SENTINEL_NAME" status 2>/dev/null \
+      | awk '$1=="sentinel:" && $2=="watching" {gsub(/[^0-9]/,"",$4); print $4; exit}')"
+    [ -n "$SENTINEL_NEW_PID" ] && [ "$SENTINEL_NEW_PID" != "$SENTINEL_WATCH_PID" ] && break
+    sleep 0.1
+  done
+  [ -n "$SENTINEL_NEW_PID" ] && [ "$SENTINEL_NEW_PID" != "$SENTINEL_WATCH_PID" ] \
+    || fail "node installed, but the sentinel did not start as a new watcher"
+  echo "deploy: sentinel pid $SENTINEL_WATCH_PID -> $SENTINEL_NEW_PID"
+fi
+
+cmp -s "$UPGRADE" "$INSTALL_DIR/scripts/upgrade.sh" || fail "the node is installed but the sentinel's upgrade.sh differs from this release"
+UPGRADE_HASH="$(sha256sum < "$INSTALL_DIR/scripts/upgrade.sh" 2>/dev/null | awk '{print $1}')"
+[ -n "$UPGRADE_HASH" ] || fail "the node is installed but upgrade.sh could not be hashed"
+
+RECORD_TMP="$INSTALL_DIR/.installed.txt.deploy.$$"
+REASON_LINE="$(printf '%s' "$REASON" | tr '\r\n' '  ')"
+printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\nsource_provenance=clean-built-by-deploy\nvia=deploy.sh\nat=%s\nreason=%s\n' \
+  "$COMMIT" "$BRANCH" "$DIRTY" "$HASH" "$SENTINEL_HASH" "$UPGRADE_HASH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$REASON_LINE" \
+  > "$RECORD_TMP" && mv -f "$RECORD_TMP" "$INSTALL_DIR/installed.txt" \
+  || fail "node installed, but installed.txt could not be committed atomically"
 
 echo "deploy: installed $COMMIT ($HASH)"
 echo "deploy: recorded in $INSTALL_DIR/installed.txt"

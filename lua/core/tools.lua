@@ -79,6 +79,11 @@ M.admin = {
     path = { type = "string" },
     offset = { type = "integer", minimum = 1 },
     limit = { type = "integer", minimum = 1, maximum = 2000 } }, { "path" }),
+  schema("read_many", "Read several independent files or line ranges in one decision. Results match individual read calls in request order; each item reports its own error.", {
+    requests = { type = "array", minItems = 1, maxItems = 8, items = { type = "object",
+      properties = { path = { type = "string" }, offset = { type = "integer", minimum = 1 },
+        limit = { type = "integer", minimum = 1, maximum = 2000 } }, required = { "path" } } }
+  }, { "requests" }),
   schema("write", "Create or overwrite a text file with the given content.", {
     path = { type = "string" }, content = { type = "string" } }, { "path", "content" }),
   schema("edit", "Replace the first exact occurrence of old_text with new_text in a file.", {
@@ -275,7 +280,7 @@ function M.dispatch(memory, name, args, role, ctx)
   elseif name == "capabilities" then
     local list = { "remember", "recall", "capabilities" }
     if is_master(role) then
-      for _, extra in ipairs({ "bash", "read", "write", "edit", "ls", "grep", "shell", "client", "spell_save", "spell_run", "spell_get", "nodes", "remote" }) do
+      for _, extra in ipairs({ "bash", "read", "read_many", "write", "edit", "ls", "grep", "shell", "client", "spell_save", "spell_run", "spell_get", "nodes", "remote" }) do
         list[#list + 1] = extra
       end
     end
@@ -294,6 +299,22 @@ function M.dispatch(memory, name, args, role, ctx)
     local content = read_lines(args.path, args.offset, args.limit)
     if not content then return { error = "not_found" } end
     return { path = args.path, content = content }
+  elseif name == "read_many" then
+    if type(args.requests) ~= "table" or #args.requests < 1 or #args.requests > 8 then
+      return { error = "requests_required_1_to_8" }
+    end
+    local results, failed = {}, 0
+    for index, request in ipairs(args.requests) do
+      if type(request) ~= "table" or type(request.path) ~= "string" or request.path == "" then
+        results[index] = { error = "path_required" }
+      else
+        local content = read_lines(request.path, request.offset, request.limit)
+        results[index] = content and { path = request.path, content = content }
+          or { path = request.path, error = "not_found" }
+      end
+      if results[index].error then failed = failed + 1 end
+    end
+    return { ok = failed == 0, results = results, failed = failed }
   elseif name == "write" then
     if not args.path then return { error = "path_required" } end
     if type(args.content)~="string" then return {error="content_required"} end

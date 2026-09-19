@@ -9,6 +9,22 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 BIN=rust/target/release/wa
+# A turn cannot deploy the process serving that same turn. The marker crosses
+# the Rust host's shell boundary; both entry points must refuse before waiting
+# for idle or touching an installed binary.
+GUARD_HOME="$(mktemp -d)"
+mkdir -p "$GUARD_HOME/install"
+if WASM_AGENT_IN_TURN=1 WA_INSTALL_DIR="$GUARD_HOME/install" bash scripts/deploy.sh --reason guard >"$GUARD_HOME/deploy.log" 2>&1; then
+  echo "FAIL: deploy.sh accepted a running-turn invocation" >&2; exit 1
+fi
+grep -q 'cannot deploy from a running turn' "$GUARD_HOME/deploy.log"
+if WASM_AGENT_IN_TURN=1 bash scripts/upgrade.sh "$BIN" >"$GUARD_HOME/upgrade.log" 2>&1; then
+  echo "FAIL: upgrade.sh accepted a running-turn invocation" >&2; exit 1
+fi
+grep -q 'refused inside a running turn' "$GUARD_HOME/upgrade.log"
+rm -f "$GUARD_HOME/deploy.log" "$GUARD_HOME/upgrade.log" "$GUARD_HOME/install/deploy.log"
+rmdir "$GUARD_HOME/install" "$GUARD_HOME"
+echo "self-update turn guard ok"
 # The suite must exercise the Lua in the working tree. cargo rebuilds the binary when a
 # Lua file changes (they are include_str!-ed), so this is belt as well as braces - but it
 # is the difference between testing the tree and testing a build artefact, and it went
@@ -203,6 +219,12 @@ LUA
 WA_SCRIPT="$DB.evidence.lua" "$BIN" --db "$DB" | grep "tool evidence ok"
 rm -f "$DB.evidence.lua"
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB.observability" | grep 'observability ok'
+# Which conversation a turn lands in. The name a client sends is the only thing that
+# lets a window start a thread or return to one: before this, `agent_for` always passed
+# nil, so every turn from every window landed in the newest open session and that one
+# thread grew without end. The *refusal* is asserted here too - the name is obeyed now,
+# so a guest naming a master's thread must be refused rather than quietly served it.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-thread-selection.lua" "$BIN" --db "$DB.thread" | grep 'thread selection ok'
 # Role gating: a guest must never see master tools, and a session must resolve
 # to its own user. A regression here silently runs guests as master, which is
 # exactly what happened when the session header stopped reaching dispatch.

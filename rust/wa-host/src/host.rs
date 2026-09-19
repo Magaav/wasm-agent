@@ -577,6 +577,9 @@ fn run_bounded(program: &str, flag: &str, command: &str, cwd: &str) -> Result<Va
         .unwrap_or(300u64);
     let mut process = std::process::Command::new(program);
     process.arg(flag).arg(command);
+    if crate::serve::in_turn() {
+        process.env("WASM_AGENT_IN_TURN", "1");
+    }
     if !cwd.is_empty() {
         process.current_dir(cwd);
     }
@@ -1279,5 +1282,15 @@ mod heartbeat_tests {
             "the beat age reached {worst}ms while a bounded command was running; \
              the node would have reported ok:false and the window would have called it offline"
         );
+    }
+
+    #[test]
+    fn shell_child_inherits_only_the_turn_boolean() {
+        crate::serve::test_mark_turn(true);
+        let (program, flag) = shell_config();
+        let result = run_bounded(program, flag, "env | grep '^WASM_AGENT_IN_TURN='", "");
+        crate::serve::test_mark_turn(false);
+        let output = result.expect("shell child should run");
+        assert_eq!(output["stdout"], "WASM_AGENT_IN_TURN=1\n");
     }
 }
