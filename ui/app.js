@@ -2376,11 +2376,21 @@ async function reconcile() {
   try {
     const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
     if (health && !health.current) {
+      // What the live DOM still believes is worth checking *before* clearing it: if the page thought a turn was
+      // running, then whatever it is still showing - a tool topic waiting for a result that already arrived,
+      // a segment that never got its reply - is stale.
+      const wasLive = busy || document.getElementById("update-lock") || document.querySelector(".unfinished-notice");
       if (busy) { setBusy(false); clearStatus(); }
       // Nothing to wait for any more, so the lock must not wait either: it is a message, not a trap.
       document.getElementById("update-lock")?.remove();
       // And a notice about a turn that is over is litter: take it down.
       clearStreamNotice();
+      // The node says the turn is over, so the ledger is the authority - repaint from it. This is exactly what
+      // a reload does, and it is why a reload fixed it: a tool whose result arrived while the stream was gone
+      // stays open in the live DOM forever, because the only thing that settles a tool is its own event.
+      // Measured: the turn had finished, the answer was in the ledger, and the window still said "deciding…"
+      // until Ctrl+R. A window must never be more certain than the node.
+      if (wasLive) restoreSession();
     }
   } catch (error) { /* the node is away; watchNode says so in the chat */ }
   reconciling = false;
