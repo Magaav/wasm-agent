@@ -163,6 +163,21 @@ bash scripts/build-window.sh                  # -> target/windows-x64/.../wa-win
   are Rust `host.*`. Read `docs/HOST.md` before adding a capability: a host function
   returns `nil` for missing values (never zero values), and paths come from
   `host.paths()`, never `$HOME` or a Linux-only path.
+- **Install through `scripts/deploy.sh`.** It is the one gate: refuses a dirty tree,
+  refuses a tree behind `origin/main`, proves the binary on a scratch port, installs
+  via `upgrade.sh`, records `installed.txt`, and verifies the pid answering is its own.
+  Never copy a binary over a running one by hand, and do not re-implement it.
+- **Never hand a POSIX path to a native Windows process.** `/c/...` is unusable as an
+  argument: the node starts, cannot read `index.html`, and answers 404 for `/` while
+  looking healthy. Convert it (`cygpath -w`).
+- **Never restart or replace the window.** It is a client: it reconnects and reloads on
+  its own. A window that looks alive but does nothing is a *page* problem, and the node
+  can say so: `/health`'s `ui_page_age_ms` (a number = the page is polling) and
+  `ui_error` (what the page reported). A page that neither polls nor reports is not
+  running at all - ask it directly with
+  `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333`.
+- **More than one worker is normal.** Read workers spawn on demand and retire when
+  idle; turns route by session. `/health`'s `workers[]` says who is busy with what.
 - **Skills carry procedures, not context.** A technique the agent should not
   have to be told twice belongs in `skills/<name>/SKILL.md` (the Agent Skills
   standard, shared with pi and Orca). Only the description is always in
