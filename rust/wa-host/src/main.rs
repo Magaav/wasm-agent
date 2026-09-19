@@ -200,6 +200,12 @@ fn main() {
         client: bridge.clone(),
     }));
 
+    // One initialized interpreter. A node can run more than one (WASM_AGENT_WORKERS), and they all share
+    // this same `host` pointer - one SQLite connection behind a Mutex, one plugin registry, one client
+    // bridge - so a second interpreter adds no new way for the ledger to be written by two writers at
+    // once. Written as a closure rather than a function so the boot sequence stays in one place: a second
+    // copy of it is how the pool would drift from the single-interpreter path.
+    let boot_state = |host: *mut c_void| -> Lua {
     let lua = Lua::new();
     lua.push_table();
     lua.register_with_upvalue("sql_exec", host::sql_exec, host as *mut c_void);
@@ -267,6 +273,9 @@ fn main() {
         eprintln!("lua error: {error}");
         std::process::exit(1);
     }
+        lua
+    };
+    let lua = boot_state(host as *mut c_void);
 
     if let Ok(script) = std::env::var("WA_SCRIPT") {
         let source = std::fs::read_to_string(&script).unwrap_or_else(|e| panic!("read {script}: {e}"));
@@ -297,7 +306,25 @@ fn main() {
                 node::spawn_heartbeat(rendezvous_url);
             }
         }
-        serve::run(lua, port, PathBuf::from(ui));
+        // Worker 0 owns every route that changes something - turns, writes, sync, node calls - and the
+        // extra workers serve reads, so the window's own reads stop queueing behind a turn. Conservative
+        // on purpose: all turns stay on one interpreter, so "one writer per session" and per-session order
+        // hold by construction. Concurrent turns are the next step, not this one.
+        let workers: usize = std::env::var("WASM_AGENT_WORKERS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1)
+            .clamp(1, 8);
+        let mut states = vec![lua];
+        for _ in 1..workers {
+            let extra = boot_state(host as *mut c_void);
+            if let Err(error) = extra.do_string(&core_source("lua/core/server.lua"), "lua/core/server.lua") {
+                eprintln!("lua error: {error}");
+                std::process::exit(1);
+            }
+            states.push(extra);
+        }
+        serve::run(states, port, PathBuf::from(ui));
         return;
     }
 

@@ -123,3 +123,54 @@ case "$code:$body" in
 esac
 echo "  ok: a stalled worker is visible, and survivable"
 
+# ---------------------------------------------------------------------------
+# The pool: a node with read workers must answer a read while a turn is in flight.
+#
+# The split is conservative on purpose - worker 0 owns every route that changes something, the extras serve
+# reads - and the point is that a read never queues behind a turn. Measured the same way the wedge is: stall
+# worker 0 with the test hook, then require /sessions to answer, and require a route that genuinely needs
+# worker 0 to be refused rather than left hanging.
+POOL_PORT=$((PORT + 20))
+POOL_CLIENT=$((POOL_PORT + 1))
+WASM_AGENT_WORKERS=2 \
+WASM_AGENT_TEST_STALL_WORKER=1 \
+WASM_AGENT_WORKER_STALL_SECONDS=1 \
+WASM_AGENT_WORKER_STALL_EXIT_SECONDS=0 \
+  "$BIN" serve --port "$POOL_PORT" --client-port "$POOL_CLIENT" --ui "$ROOT/ui" > "$WORK/pool.log" 2>&1 &
+POOL=$!
+
+for _ in $(seq 1 40); do
+  code="$(curl -s -o /dev/null -m 2 -w '%{http_code}' "http://127.0.0.1:$POOL_PORT/health" 2>/dev/null)"
+  [ "$code" = "200" ] && break
+  sleep 0.25
+done
+if [ "${code:-}" != "200" ]; then echo "  FAIL: the pool server did not come up (see $WORK/pool.log)"; exit 1; fi
+
+# Trip the hook on worker 0 with a request that is not a read. /diff is a write route, and an unknown turn
+# makes it do nothing - which is all this needs, because the hook stalls before the route runs.
+curl -s -o /dev/null -m 3 -X POST -H 'content-type: application/json' -d '{}' "http://127.0.0.1:$POOL_PORT/diff" 2>/dev/null
+sleep 2
+
+pool_health="$(curl -s -m 3 "http://127.0.0.1:$POOL_PORT/health" 2>/dev/null)"
+read_code="$(curl -s -m 5 -o "$WORK/pool-read.json" -w '%{http_code}' "http://127.0.0.1:$POOL_PORT/sessions" 2>/dev/null)"
+write_code="$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{}' "http://127.0.0.1:$POOL_PORT/diff" 2>/dev/null)"
+kill "$POOL" 2>/dev/null
+
+echo
+echo "  pool: /health -> $pool_health"
+echo "  pool: read /sessions while worker 0 is stalled -> $read_code"
+echo "  pool: write /diff, which needs worker 0 -> $write_code"
+case "$pool_health" in
+  *'"workers_count":2'*) echo "  ok: /health names both interpreters" ;;
+  *) echo "  FAIL: /health did not report the pool"; exit 1 ;;
+esac
+case "$read_code" in
+  200) echo "  ok: a read is answered while a turn holds worker 0" ;;
+  *) echo "  FAIL: the read queued behind the turn (got ${read_code:-none})"; exit 1 ;;
+esac
+case "$write_code" in
+  503) echo "  ok: a request that needs the stalled worker is refused, not left hanging" ;;
+  *) echo "  FAIL: expected 503 for the stalled worker, got ${write_code:-none}"; exit 1 ;;
+esac
+echo "  ok: a read does not wait for a turn"
+
