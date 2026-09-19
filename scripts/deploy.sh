@@ -133,8 +133,8 @@ INSTALLED_NODE="$INSTALL_DIR/$(basename "$NEW")"
 cmp -s "$NEW" "$INSTALLED_NODE" || fail "installed binary differs from the proved build"
 
 # 7. Record what is installed, so "what is running" is answerable.
-HASH="$(sha256sum "$INSTALL_DIR/wa.exe" 2>/dev/null | awk '{print $1}')"
-[ -n "$HASH" ] || HASH="$(shasum -a 256 "$INSTALL_DIR/wa.exe" 2>/dev/null | awk '{print $1}')"
+HASH="$(sha256sum < "$INSTALLED_NODE" 2>/dev/null | awk '{print $1}')"
+[ -n "$HASH" ] || HASH="$(shasum -a 256 < "$INSTALLED_NODE" 2>/dev/null | awk '{print $1}')"
 
 # The supervisor, installed *after* the node is confirmed answering - so a failed upgrade leaves a
 # sentinel that still matches the node it supervises, rather than one rebuilt ahead of a node that
@@ -161,12 +161,12 @@ if [ -f "$INSTALL_DIR/$SENTINEL_NAME" ]; then
       fail "could not install $SENTINEL_NAME - it is still the old build; the node and its supervisor would disagree"
     fi
   fi
-  SENTINEL_HASH="$(sha256sum "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null | awk '{print $1}')"
-  [ -n "$SENTINEL_HASH" ] || SENTINEL_HASH="$(shasum -a 256 "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null | awk '{print $1}')"
+  SENTINEL_HASH="$(sha256sum < "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null | awk '{print $1}')"
+  [ -n "$SENTINEL_HASH" ] || SENTINEL_HASH="$(shasum -a 256 < "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null | awk '{print $1}')"
 else
   cp -f "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null || fail "could not place $SENTINEL_NAME"
   echo "deploy: sentinel $SENTINEL_NAME installed"
-  SENTINEL_HASH="$(sha256sum "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null | awk '{print $1}')"
+  SENTINEL_HASH="$(sha256sum < "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null | awk '{print $1}')"
 fi
 
 printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nat=%s\nreason=%s\n' \

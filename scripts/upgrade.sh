@@ -113,9 +113,9 @@ SCRATCH_DB="$SCRATCH_HOME/scratch.db"
 PROOF_CACHE="$INSTALL_DIR/.upgrade-proof"
 NEW_HASH=""
 if command -v sha256sum >/dev/null 2>&1; then
-  NEW_HASH="$(sha256sum "$NEW" 2>/dev/null | awk '{print $1}')"
+  NEW_HASH="$(sha256sum < "$NEW" 2>/dev/null | awk '{print $1}')"
 elif command -v shasum >/dev/null 2>&1; then
-  NEW_HASH="$(shasum -a 256 "$NEW" 2>/dev/null | awk '{print $1}')"
+  NEW_HASH="$(shasum -a 256 < "$NEW" 2>/dev/null | awk '{print $1}')"
 fi
 PROVED_ALREADY=0
 if [ -n "$NEW_HASH" ] && [ -f "$PROOF_CACHE" ]; then

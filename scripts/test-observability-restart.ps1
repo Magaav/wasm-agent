@@ -35,6 +35,7 @@ try {
   Check ($session -and $session.Count -eq 1) 'fixture session missing'
   $env:WA_SCRIPT=$null
   $env:WASM_AGENT_LUA_ROOT=$null # Prove the embedded release, not source overrides.
+  $initialHash=(Get-FileHash $WaExe).Hash
   Copy-Item -LiteralPath $WaExe -Destination (Join-Path $install 'wa.exe')
   Copy-Item -LiteralPath (Join-Path $root 'ui') -Destination (Join-Path $install 'ui') -Recurse
   # A historical failure must not override ownership of the new listener.
@@ -76,9 +77,12 @@ try {
     Check ((Get-FileHash (Join-Path $install "ui/$asset")).Hash -eq (Get-FileHash (Join-Path $root "ui/$asset")).Hash) "installed UI differs: $asset"
     Check (Test-Path (Join-Path $install "ui/$asset.pre-upgrade")) "UI recovery backup missing: $asset"
   }
-  Check ((Get-FileHash (Join-Path $install 'wa.exe.pre-upgrade')).Hash -eq (Get-FileHash $WaExe).Hash) 'recovery binary differs'
+  Check ((Get-FileHash (Join-Path $install 'wa.exe.pre-upgrade')).Hash -eq $initialHash) 'recovery binary differs from the pre-deployment install'
   if ($FullDeploy) {
     Check (Test-Path (Join-Path $install 'installed.txt')) 'deployment record missing'
+    $record=Get-Content (Join-Path $install 'installed.txt')
+    $recordedHash=($record | Where-Object { $_ -like 'sha256=*' }) -replace '^sha256=',''
+    Check ($recordedHash -eq (Get-FileHash (Join-Path $install 'wa.exe')).Hash) 'recorded hash is not the installed binary hash'
     Check ((Get-Content (Join-Path $install 'runtime-worktree.txt')) -eq $root) 'runtime worktree marker differs'
   }
   Write-Host 'observability restart + scratch upgrade ok; zero external model calls'
