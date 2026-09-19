@@ -125,3 +125,31 @@ The failure this prevents: the roadmap described short-lived branches while `AGE
 treat its node branch as the deliverable - so the code followed one rule and the docs described another, and
 the node's branch accumulated six commits ahead of `main` that were mostly merge bookkeeping. When two rules
 describe the same branch, one of them is wrong.
+
+## 6. Naming: run, turn, call, message
+
+Three different things shared two words, and it cost a real question: `session_turns()` returns *messages*,
+`turn_id` identifies a *run*, and the UI says "this turn 99s" meaning the run. Settled here, once:
+
+| Word | Means | Was called |
+|---|---|---|
+| **run** | one user request through to its final answer | `turn_id`, `turn_span`, "turn" in the UI and `/health` |
+| **turn** | one decision cycle: **one call plus the tool calls it requested** | `turn`, and "decision" in the UI |
+| **call** | one provider request and response | `llm` span |
+| **tool call** | one tool execution | `tool` span |
+| **message** | one transcript row (user, assistant, tool, summary) | the `turns` table, `session_turns()` |
+
+A turn is **not** a call. It contains exactly one call, and the tools that call asked for run *between* that
+call and the next one — which is why a run of 178 calls had 151 tool executions: some turns ask for two
+things, and the last turn usually asks for nothing.
+
+The renames, mechanical and in this order:
+
+- schema: `harness_events.turn_id` → `run_id`; the `turns` table → `messages`
+- code: `session_turns()` → `session_messages()`; span kinds `llm` → `call`, `turn` → `turn`, `turn_span` →
+  `run`; `memory.session_state`'s "the last turn failed" → "the last run failed"
+- UI: "14 decisions · 19 tool calls" → "14 turns · 19 tool calls"
+- docs and skills: every use of "turn" meaning a run, and every use meaning a message
+
+This is a mechanism, not a style preference: a reader debugging a session should not have to know which file
+they are in to know what "turn" means.

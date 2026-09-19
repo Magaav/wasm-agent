@@ -37,7 +37,15 @@ INSTALL_DIR="${WA_INSTALL_DIR:-$HOME/AppData/Local/wasm-agent}"
 PORT="${WA_PORT:-8799}"
 CLIENT_PORT="${WA_CLIENT_PORT:-8800}"
 
-fail() { echo "deploy: $*" >&2; exit 1; }
+# A refusal is evidence: the gate saying no, with a reason, at a moment. Printing to stderr is not enough -
+# after the fact, "did it refuse anything?" has to be answerable. Every refusal is appended to
+# <install>/deploy.log with the time, what it was about, and why.
+fail() {
+  echo "deploy: $*" >&2
+  printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${COMMIT:-unknown}" "${BRANCH:-unknown}" "$*" \
+    >> "$INSTALL_DIR/deploy.log" 2>/dev/null
+  exit 1
+}
 
 # 1. Clean. A build from a half-edited tree is not reproducible, and the file being edited is often the one
 #    that matters.
