@@ -503,6 +503,19 @@ WASM_AGENT_EXEC_TIMEOUT_SECONDS=2 WA_SCRIPT=scripts/test-exec-timeout.lua "$BIN"
 # created. Sandboxed home, because the reversible text is stored as content-addressed blobs under it.
 WASM_AGENT_HOME="$DB.home" WA_SCRIPT=scripts/test-changeset.lua "$BIN" --db "$DB.changeset" | grep "changeset ok"
 
+# Instructions must be read once per node process, not once per turn: they sit at the front of every request,
+# so an edit mid-session re-prices and re-slows every call after it (measured: cached_tokens 0, 27s
+# time-to-first-token, and a dropped stream). The test points the node at a scratch instruction file and edits
+# it between two reads - the only way the claim can fail. It was vacuous twice before that: first it compared
+# two reads without changing anything, then the cache key was a table address and never hit. The lua root is
+# already exported at the top of this script, so this does not set it again (doing so with the wrong variable
+# is how the first attempt failed inside the gate).
+SCRATCH_AGENTS_MD="$DB.agents.md"
+printf 'ORIGINAL INSTRUCTIONS\n' > "$SCRATCH_AGENTS_MD"
+WASM_AGENT_AGENTS_MD="$SCRATCH_AGENTS_MD" \
+  WA_SCRIPT=scripts/test-prefix-stability.lua "$BIN" --db "$DB.prefix" | grep "prefix stability ok"
+rm -f "$SCRATCH_AGENTS_MD"
+
 # A guest is not a smaller master. A guest node owns no worktree - so it is not named after
 # one and a rename does not move a branch on its behalf - and a master's call on a guest is
 # filed under the master, not the guest. Sandboxed home: the node's stored name and role must
