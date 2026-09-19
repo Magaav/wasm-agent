@@ -80,6 +80,15 @@ tell *which* key failed without being able to use it.
 
 ## Adding a capability
 
+`host.monotonic_ms()` measures elapsed time within a process. Use `host.now()` only
+for cross-process event timestamps. `host.runtime_info()` returns version, OS,
+architecture, PID and the SHA-256 of the executable (computed once per process).
+The Lua loader records hashes in `LOADED_SOURCES` before evaluating each module.
+HTTP clients reuse their connection pool. Stream results include provider request
+ID, first-content/reasoning/tool-delta latency and `stream_complete`; EOF without
+a finish reason is an incomplete response, never an executable partial tool call.
+Heartbeat helper threads retain their owning worker ID.
+
 1. Implement `pub extern "C" fn name(l: *mut LuaState) -> c_int` in
    `rust/wa-host/src/host.rs`; return `1` with a value, push `nil` for absent.
 2. Register it in `main.rs` (`lua.register("name", host::name)`).

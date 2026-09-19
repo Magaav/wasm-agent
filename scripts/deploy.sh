@@ -58,22 +58,43 @@ echo "deploy: $BRANCH@$COMMIT -> $INSTALL_DIR (port $PORT)"
 # 3. Build.
 echo "deploy: building"
 ( cd rust && cargo build --release --offline -p wa-host ) || fail "the build failed"
+# The sentinel is its own crate, outside the `rust/` workspace (which lists only `wa-host`), so it is
+# built with its own manifest. Asking the workspace for `-p wa-sentinel` fails - "package ID
+# specification did not match any packages" - and that is how it came to be installed by hand at all.
+( cd rust && cargo build --release --offline --manifest-path wa-sentinel/Cargo.toml ) || fail "the sentinel build failed"
 NEW="rust/target/release/wa.exe"
 [ -f "$NEW" ] || NEW="rust/target/release/wa"
 [ -x "$NEW" ] || fail "no built binary at $NEW"
+
+# The supervisor is part of what this installs, and leaving it out is how the node and the thing that
+# restarts it drifted apart: `deploy.sh` replaced `wa.exe` while `wa-sentinel.exe` stayed at whatever
+# version was last placed by hand, so a fixed stop/start path sat in the repo uninstalled and the
+# e2e test refused to run - "the installed sentinel is the one just built" is a check the test makes
+# and the gate did not. The sentinel is the only process that can replace the node; shipping the node
+# without shipping it is shipping half a node.
+NEW_SENTINEL="rust/wa-sentinel/target/release/wa-sentinel.exe"
+[ -f "$NEW_SENTINEL" ] || NEW_SENTINEL="rust/wa-sentinel/target/release/wa-sentinel"
+[ -x "$NEW_SENTINEL" ] || fail "no built sentinel at $NEW_SENTINEL"
+NEW_SENTINEL_LOWER="$(echo "$NEW_SENTINEL" | tr '[:upper:]' '[:lower:]')"
+case "$NEW_SENTINEL_LOWER" in
+  *.exe) SENTINEL_NAME="wa-sentinel.exe" ;;
+  *)     SENTINEL_NAME="wa-sentinel" ;;
+esac
 
 # 4. Prove it answers before it goes near the running node. A build that cannot start must not replace one
 #    that is serving.
 SCRATCH=$((PORT + 40))
 SCRATCH_HOME="$(mktemp -d)"
-"$NEW" serve --port "$SCRATCH" --client-port "$((SCRATCH + 1))" --ui "$ROOT/ui" >"$SCRATCH_HOME/out.log" 2>&1 &
+WASM_AGENT_HOME="$SCRATCH_HOME" "$NEW" serve --port "$SCRATCH" --client-port "$((SCRATCH + 1))" --ui "$ROOT/ui" >"$SCRATCH_HOME/out.log" 2>&1 &
 SCRATCH_PID=$!
 ANSWERED=0
 for _ in $(seq 1 100); do
-  if curl -s -o /dev/null -m 2 "http://127.0.0.1:$SCRATCH/health" 2>/dev/null; then ANSWERED=1; break; fi
+  if ! kill -0 "$SCRATCH_PID" 2>/dev/null; then break; fi
+  if curl -fsS -o /dev/null -m 2 "http://127.0.0.1:$SCRATCH/health" 2>/dev/null && curl -fsS -o /dev/null -m 2 "http://127.0.0.1:$SCRATCH/" 2>/dev/null; then ANSWERED=1; break; fi
   sleep 0.1
 done
 kill "$SCRATCH_PID" 2>/dev/null
+wait "$SCRATCH_PID" 2>/dev/null
 rm -rf "$SCRATCH_HOME"
 [ "$ANSWERED" = "1" ] || fail "the new binary did not answer /health on the scratch port; not installing it"
 echo "deploy: the new binary answers on a scratch port"
@@ -82,6 +103,16 @@ echo "deploy: the new binary answers on a scratch port"
 UPGRADE="$ROOT/scripts/upgrade.sh"
 [ -f "$UPGRADE" ] || fail "no scripts/upgrade.sh to perform the install"
 echo "deploy: installing through upgrade.sh"
+# Persist only the explicitly selected runtime location; never move its git branch.
+if [ -n "${WA_RUNTIME_WORKTREE:-}" ]; then
+  [ -d "$WA_RUNTIME_WORKTREE" ] || fail "runtime worktree does not exist"
+  RUNTIME_PATH="$(cd "$WA_RUNTIME_WORKTREE" && pwd)"
+  command -v cygpath >/dev/null 2>&1 && RUNTIME_PATH="$(cygpath -w "$RUNTIME_PATH")"
+  if [ -f "$INSTALL_DIR/runtime-worktree.txt" ]; then
+    cp -f "$INSTALL_DIR/runtime-worktree.txt" "$INSTALL_DIR/runtime-worktree.txt.pre-upgrade" || fail "cannot back up runtime location"
+  fi
+  printf '%s\n' "$RUNTIME_PATH" > "$INSTALL_DIR/runtime-worktree.txt" || fail "cannot record runtime location"
+fi
 WA_INSTALL_DIR="$INSTALL_DIR" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
   bash "$UPGRADE" "$(cd "$(dirname "$NEW")" && pwd)/$(basename "$NEW")" 2>&1 | sed "s/^/  upgrade: /"
 UPGRADE_STATUS=${PIPESTATUS[0]}
@@ -92,18 +123,54 @@ UPGRADE_STATUS=${PIPESTATUS[0]}
 #    work it did not do.
 LISTENER="$(netstat -ano -p TCP 2>/dev/null | awk -v p=":$PORT" '$1=="TCP" && $2 ~ p"$" && $4=="LISTENING" { print $5; exit }' | tr -d '\r')"
 RECORDED="$(tr -d '[:space:]' < "$INSTALL_DIR/serve.pid" 2>/dev/null)"
-if [ -n "$RECORDED" ] && [ -n "$LISTENER" ] && [ "$RECORDED" != "$LISTENER" ]; then
+if [ -z "$RECORDED" ] || [ -z "$LISTENER" ] || [ "$RECORDED" != "$LISTENER" ]; then
   fail "the node answering on $PORT is pid $LISTENER, not the pid $RECORDED the install recorded - two nodes, one port"
 fi
-if grep -q "bind 127.0.0.1:$PORT failed" "$INSTALL_DIR/node.log" 2>/dev/null; then
-  fail "the installed node failed to bind $PORT (see $INSTALL_DIR/node.log)"
-fi
+# An accumulated node.log can contain a bind error from a previous deployment.
+# The recorded child owning this listener is the current startup verdict; a
+# historical string is not evidence about that process. Also verify its artifact.
+INSTALLED_NODE="$INSTALL_DIR/$(basename "$NEW")"
+cmp -s "$NEW" "$INSTALLED_NODE" || fail "installed binary differs from the proved build"
 
 # 7. Record what is installed, so "what is running" is answerable.
-HASH="$(sha256sum "$INSTALL_DIR/wa.exe" 2>/dev/null | awk '{print $1}')"
-[ -n "$HASH" ] || HASH="$(shasum -a 256 "$INSTALL_DIR/wa.exe" 2>/dev/null | awk '{print $1}')"
-printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nat=%s\nreason=%s\n' \
-  "$COMMIT" "$BRANCH" "$DIRTY" "$HASH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$REASON" \
+HASH="$(sha256sum < "$INSTALLED_NODE" 2>/dev/null | awk '{print $1}')"
+[ -n "$HASH" ] || HASH="$(shasum -a 256 < "$INSTALLED_NODE" 2>/dev/null | awk '{print $1}')"
+
+# The supervisor, installed *after* the node is confirmed answering - so a failed upgrade leaves a
+# sentinel that still matches the node it supervises, rather than one rebuilt ahead of a node that
+# rolled back. A running sentinel holds its own image open on Windows, so the copy is attempted and
+# its failure is reported rather than fatal: the swap is completed by the one-shot restart below.
+SENTINEL_HASH="(none)"
+if [ -f "$INSTALL_DIR/$SENTINEL_NAME" ]; then
+  cp -f "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null || true
+  if cmp -s "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME"; then
+    echo "deploy: sentinel $SENTINEL_NAME updated"
+  else
+    # The file is locked by the running supervisor. Stop it, replace it, start it again - the verb
+    # that exists for exactly this, and the reason it is not done by hand.
+    OLD_SENTINEL_PID="$(netstat -ano -p TCP 2>/dev/null | awk -v p=":$PORT" '$1=="TCP" && $2 ~ p"$" && $4=="LISTENING" { print $5; exit }' | tr -d '\r')"
+    if [ -f "$INSTALL_DIR/$SENTINEL_NAME" ]; then
+      "$INSTALL_DIR/$SENTINEL_NAME" stop >/dev/null 2>&1 || true
+      sleep 2
+      cp -f "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null || true
+      "$INSTALL_DIR/$SENTINEL_NAME" start >/dev/null 2>&1 || true
+    fi
+    if cmp -s "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME"; then
+      echo "deploy: sentinel $SENTINEL_NAME updated (restarted past the file lock)"
+    else
+      fail "could not install $SENTINEL_NAME - it is still the old build; the node and its supervisor would disagree"
+    fi
+  fi
+  SENTINEL_HASH="$(sha256sum < "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null | awk '{print $1}')"
+  [ -n "$SENTINEL_HASH" ] || SENTINEL_HASH="$(shasum -a 256 < "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null | awk '{print $1}')"
+else
+  cp -f "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null || fail "could not place $SENTINEL_NAME"
+  echo "deploy: sentinel $SENTINEL_NAME installed"
+  SENTINEL_HASH="$(sha256sum < "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null | awk '{print $1}')"
+fi
+
+printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nat=%s\nreason=%s\n' \
+  "$COMMIT" "$BRANCH" "$DIRTY" "$HASH" "$SENTINEL_HASH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$REASON" \
   > "$INSTALL_DIR/installed.txt"
 
 echo "deploy: installed $COMMIT ($HASH)"

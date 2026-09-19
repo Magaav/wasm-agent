@@ -215,6 +215,43 @@ if (-not $haveSentinel -and (Test-Path $sentinelLocal)) {
 }
 if ($haveSentinel) {
   Ok "wa-sentinel.exe -> $sentinelExe"
+
+  # `scripts/upgrade.sh` beside the binary, because the sentinel resolves it there (and in the repo).
+  # Without it a fresh node has a supervisor that can restart but cannot *upgrade*: the verb runs, the
+  # script is not found, and the request fails with nothing to show for it. That is not hypothetical -
+  # it is what the first node built from this repo did, because the file had been placed by hand and
+  # the installer did not ship it.
+  #
+  # Fetched from the cloud host like the binary, with the checkout as the fallback, so a machine
+  # bootstrapped by this script alone still ends up able to upgrade itself.
+  $scriptsDir = Join-Path $nodeDir "scripts"
+  $upgradeSh = Join-Path $scriptsDir "upgrade.sh"
+  New-Item -ItemType Directory -Force -Path $scriptsDir | Out-Null
+  $haveUpgrade = $false
+  if (Get-Command scp -ErrorAction SilentlyContinue) {
+    & scp -q -o BatchMode=yes "${HostAlias}:$RemoteBin/scripts/upgrade.sh" $upgradeSh 2>$null
+    $haveUpgrade = Test-Path $upgradeSh
+  }
+  if (-not $haveUpgrade) {
+    $upgradeLocal = Join-Path $root "scripts\upgrade.sh"
+    if (Test-Path $upgradeLocal) { Copy-Item $upgradeLocal $upgradeSh -Force; $haveUpgrade = $true }
+  }
+  # Last resort: the raw file from the repository, which is already public and is where the rest of
+  # this installer comes from.
+  if (-not $haveUpgrade) {
+    try {
+      Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/upgrade.sh" -OutFile $upgradeSh -ErrorAction Stop
+      $haveUpgrade = Test-Path $upgradeSh
+    } catch { }
+  }
+  if ($haveUpgrade) {
+    Ok "scripts\upgrade.sh -> $upgradeSh"
+  } else {
+    # Said plainly, because the failure it causes is silent otherwise: `request upgrade` would be
+    # accepted and then do nothing that the operator can see.
+    Warn "scripts\upgrade.sh was not installed - the sentinel can restart but not upgrade until it is"
+  }
+
   try {
     & $sentinelExe restart 2>$null | Out-Null
     $status = & $sentinelExe status 2>$null | Select-String "sentinel:" | Select-Object -First 1
@@ -222,6 +259,38 @@ if ($haveSentinel) {
   } catch { Warn "could not start the sentinel; run: $sentinelExe start" }
 } else {
   Warn "no wa-sentinel.exe found (build it with: cargo build --release --manifest-path rust/wa-sentinel/Cargo.toml)"
+}
+
+# Skills the node must have to know how to update itself. A skill is how this is delivered rather
+# than a paragraph in AGENTS.md: only its `name` and `description` sit in the prompt, and the body
+# loads when the task matches - so the procedure costs nothing until it is needed, and can then be
+# as long as it has to be.
+#
+# `~/.wasm-agent/skills` is the node-scoped location it scans, which is the install directory this
+# installer already owns. Shipped here because a skill that is not installed is not knowledge: a
+# fresh node would rediscover, at cost, that it cannot restart itself.
+$skillsDir = Join-Path $nodeDir "skills"
+$selfUpdate = Join-Path $skillsDir "self-update\SKILL.md"
+New-Item -ItemType Directory -Force -Path (Join-Path $skillsDir "self-update") | Out-Null
+$haveSkill = $false
+if (Get-Command scp -ErrorAction SilentlyContinue) {
+  & scp -q -o BatchMode=yes "${HostAlias}:$RemoteBin/skills/self-update/SKILL.md" $selfUpdate 2>$null
+  $haveSkill = Test-Path $selfUpdate
+}
+if (-not $haveSkill) {
+  $skillLocal = Join-Path $root "skills\self-update\SKILL.md"
+  if (Test-Path $skillLocal) { Copy-Item $skillLocal $selfUpdate -Force; $haveSkill = $true }
+}
+if (-not $haveSkill) {
+  try {
+    Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/Magaav/wasm-agent/main/skills/self-update/SKILL.md" -OutFile $selfUpdate -ErrorAction Stop
+    $haveSkill = Test-Path $selfUpdate
+  } catch { }
+}
+if ($haveSkill) {
+  Ok "skills\self-update -> $selfUpdate"
+} else {
+  Warn "skills\self-update was not installed - this node will not know how to update itself"
 }
 }
 

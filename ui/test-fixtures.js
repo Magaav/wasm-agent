@@ -25,7 +25,18 @@ window.__fixtures = {
     context_limit: 128000, database: "/tmp/fixture.db",
     node_name: "foundation", node_worktree: "foundation",
     base_url: "http://fixture.invalid", usage: {},
+    reasoning:{supported:true,levels:['low','high'],selected:'high',source:'fixture'},
+    observability:{available:true,scope:'session',session_id:'fixture-session',since:1,
+      total:{calls:3,failed:1,prompt:12000,input:2000,cacheRead:10000,cacheWrite:0,output:400,
+        reasoning:200,reasoning_unknown:0,missing_usage:0,missing_cache:0,unpriced:3,cost_known:false,cache_known:true},
+      inference:{calls:2,ms:2000},compaction:{calls:1,prompt:3000,output:200,ms:1000},
+      last:{normalized:{prompt:6000,reasoning:100},finish_reason:'stop'},
+      last_request:{model:'previous-model',provider:'fixture',settings:{reasoning:{selected:'low'},output_limit:16000}},
+      context:{unsummarized_rows:620,summary_watermark:10},pending:1,tool_calls:2,tool_failures:1,
+      turns:1,incomplete_turns:0,compaction_failures:1,errors:[]},
   },
+  reasoning:{error:'unsupported_reasoning_level'},
+  'observability/events':{error:'fixture_export_failure'},
   sessions: {
     sessions: [
       {

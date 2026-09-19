@@ -21,6 +21,9 @@ nodeSelect.id = "node-select";
 nodeSelect.className = "wa-select";
 const providerSelect = document.getElementById("provider-select");
 const modelSelect = document.getElementById("model-select");
+const reasoningSelect = document.getElementById("reasoning-select");
+const harnessStatus = document.getElementById("harness-status");
+const settingsError = document.getElementById("settings-error");
 const contextBox = document.getElementById("context-box");
 const limitsBox = document.getElementById("limits-box");
 const usageBox = document.getElementById("usage-box");
@@ -972,6 +975,86 @@ function setBusy(value) {
   sendButton.classList.toggle("busy", value);
   sendButton.title = value ? "Stop" : "Send";
   sendButton.setAttribute("aria-label", sendButton.title);
+  if (value) startLiveness(); else stopLiveness();
+}
+
+// Whether this turn is *working* or *stuck*, which looked identical from outside.
+//
+// A turn can legitimately spend minutes inside one command, and until this existed the only signals
+// were a spinner and a tool line that had not come back - so a long call and a wedged one were
+// indistinguishable, and the difference arrived 300 seconds later when the call was killed. The user
+// had no way to tell "still working" from "never coming back", which is exactly when they should be
+// told to stop it.
+//
+// The node already knows, and has done all along: `stalled_ms` (also `workers[].age_ms`) is the age
+// of the last heartbeat. `host.exec` beats while a command runs, so a *fresh* number proves progress
+// and a number that keeps climbing proves a stall. That is the node's own evidence, reported rather
+// than guessed - no client-side timeout, no heuristic about how long things should take.
+let liveness = null;
+
+function startLiveness() {
+  if (liveness) return;
+  let lastStalled = null;
+  let climbingSince = 0;
+  liveness = setInterval(async () => {
+    // Only while a turn is busy. The accept thread answers /health without the interpreter, so this
+    // costs nothing the turn needs and cannot itself be the thing that wedges.
+    if (!busy) return;
+    let health = null;
+    try { health = await (await apiFetch("health", { headers: apiHeaders() })).json(); }
+    catch (error) { return; }   // the offline path owns that case and says its piece
+    if (!health || !health.current) { setLiveness(null); return; }
+
+    const stalled = health.stalled_ms;
+    if (typeof stalled !== "number") { setLiveness(null); return; }
+    // "Climbing" is the honest signal for a stall: a single large number could be a long step between
+    // beats, but a number that grows across two polls means nothing has beaten since the last one.
+    if (lastStalled !== null && stalled > lastStalled + 500) {
+      if (!climbingSince) climbingSince = Date.now();
+    } else {
+      climbingSince = 0;
+    }
+    lastStalled = stalled;
+    const working = stalled < 5000 || !climbingSince;
+    const busyFor = health.current && health.current.ms ? health.current.ms : Date.now() - (turnStartedAt || Date.now());
+    setLiveness({
+      working,
+      stalled,
+      busy_ms: busyFor,
+      climbing_ms: climbingSince ? Date.now() - climbingSince : 0,
+      worker: health.worker || "alive",
+      queue: health.queue || 0,
+    });
+  }, 1000);
+}
+
+function stopLiveness() {
+  if (liveness) { clearInterval(liveness); liveness = null; }
+  setLiveness(null);
+}
+
+function setLiveness(info) {
+  let node = document.getElementById("liveness");
+  if (!info) { if (node) node.remove(); return; }
+  if (!node) {
+    node = document.createElement("div");
+    node.id = "liveness";
+    node.className = "liveness";
+    // Inside the message list, so it lives with the turn it describes and disappears with it - a
+    // status bar elsewhere would keep reporting a turn that has already been answered.
+    messages.append(node);
+  }
+  const seconds = (ms) => (ms / 1000).toFixed(0);
+  if (info.working) {
+    node.classList.remove("stuck");
+    node.textContent = "working — node beat " + info.stalled + " ms ago · this turn "
+      + seconds(info.busy_ms) + "s" + (info.queue ? " · " + info.queue + " queued" : "");
+  } else {
+    node.classList.add("stuck");
+    node.textContent = "possibly stuck — no node beat for " + seconds(info.climbing_ms) + "s"
+      + " (worker: " + info.worker + ") · send to stop";
+  }
+  pin();
 }
 
 function composedText(text) {
@@ -1199,7 +1282,7 @@ function activeProvider() {
 function updateChip() {
   chipModel.textContent = settings.configured ? (settings.model || "model") : "local mode";
   statusBtn.classList.toggle("local", !settings.configured);
-  const total = (settings.usage && settings.usage.total) || 0;
+  const total = settings.observability?.available ? settings.observability.total?.total : 0;
   chipUsage.textContent = total ? formatTokens(total) + " tok" : "";
 }
 
@@ -1240,6 +1323,14 @@ function renderProviders() {
 }
 
 function renderModels() {
+  reasoningSelect.replaceChildren();
+  const reasoning=settings.reasoning || {};
+  for (const level of reasoning.supported ? reasoning.levels : ['provider']) {
+    const option=document.createElement('option'); option.value=level;
+    option.textContent=level==='provider' ? 'provider default / unknown' : level;
+    option.selected=level===reasoning.selected; reasoningSelect.append(option);
+  }
+  reasoningSelect.disabled=!reasoning.supported || me.role!=='master';
   modelSelect.replaceChildren();
   const provider = activeProvider();
   const models = (provider && provider.models) || [];
@@ -1290,6 +1381,16 @@ function formatReset(iso) {
 // missing value rather than a configured absence.
 function renderContext() {
   contextBox.replaceChildren();
+  if ('observability' in settings) {
+    const request=settings.observability?.last_request || {}, last=settings.observability?.last;
+    const taken=last?.normalized?.prompt;
+    const capacity=Number(settings.context_limit);
+    const mismatch=request.model && request.model!==settings.model;
+    contextBox.append(grid([['last measured input',taken==null ? 'unknown' : formatTokens(taken)],
+      ['selected capacity',capacity ? formatTokens(capacity) : 'unknown']]));
+    if (taken!=null && capacity>0 && !mismatch) contextBox.append(meter(taken/capacity*100));
+    return;
+  }
   const usage = settings.usage || {};
   const taken = Number((usage.last && usage.last.prompt) || 0);
   const budget = Number(settings.context_limit) || 0;
@@ -1331,27 +1432,25 @@ function renderLimits() {
 // Token accounting: last turn and session totals.
 function renderUsage() {
   usageBox.replaceChildren();
-  const usage = settings.usage || {};
-  const last = usage.last || {};
-  const rows = [
-    ["last turn (in/out)", `${formatTokens(last.prompt)} / ${formatTokens(last.completion)}`],
-    ["last total", formatTokens(last.total)],
-    ["session in", formatTokens(usage.prompt)],
-    ["session out", formatTokens(usage.completion)],
-    ["session total", formatTokens(usage.total)],
-    ["turns", usage.turns || 0],
-  ];
-  // Only shown when the provider actually reports cache reuse.
-  if (Number(usage.cached) > 0) {
-    const percent = usage.prompt ? Math.round((usage.cached / usage.prompt) * 100) : 0;
-    rows.push(["cached (session)", `${formatTokens(usage.cached)} · ${percent}% of input`]);
+  harnessStatus.data=settings;
+  const observed=settings.observability;
+  if (!observed?.available) {
+    usageBox.append(grid([['durable usage','not yet observed']]));
+    return;
   }
-  // Only shown when model rates are configured (WASM_AGENT_MODEL_RATES).
-  if (Number(usage.cost) > 0) {
-    rows.push(["cost (session)", "$" + Number(usage.cost).toFixed(4)]);
-  }
-  usageBox.append(grid(rows));
+  const t=observed.total || {};
+  const known=x=>x==null ? 'unknown' : formatTokens(x);
+  usageBox.append(grid([
+    ['session input (all)',known(t.prompt)+(t.missing_usage ? ' · partial' : '')],
+    ['uncached / cache read',t.cache_known ? `${known(t.input)} / ${known(t.cacheRead)}` : 'unknown / partial'],
+    ['cache write',t.cache_known ? known(t.cacheWrite) : 'unknown / partial'],
+    ['output (includes reasoning)',known(t.output)+(t.missing_usage ? ' · partial' : '')],
+    ['reasoning subset',known(t.reasoning)+(t.reasoning_unknown ? ' · partial/unknown' : '')],
+    ['cache reuse',t.cache_known && t.prompt ? (100*t.cacheRead/t.prompt).toFixed(1)+'%' : 'unknown'],
+    ['cost (incl. summaries)',t.cost_known ? '$'+Number(t.cost).toFixed(6) : 'unknown / unpriced calls'],
+  ]));
 }
+
 
 function renderPopFoot() {
   const provider = activeProvider();
@@ -1366,6 +1465,7 @@ async function post(path, body) {
     body: body,
   });
   const payload = await response.json();
+  settingsError.textContent=payload.error || '';
   if (!payload.error) {
     settings = { ...settings, ...payload };
     updateNodeLabel(settings.node_name, settings.node_worktree);
@@ -1580,6 +1680,7 @@ statusBtn.addEventListener("click", () => {
   statusBtn.setAttribute("aria-expanded", String(balloon.open));
   if (balloon.open) {
     refreshNodes();
+    refreshMeta();
     renderProviders();
     renderModels();
     renderContext();
@@ -1591,6 +1692,29 @@ statusBtn.addEventListener("click", () => {
 balloon.addEventListener("close", () => statusBtn.setAttribute("aria-expanded", "false"));
 providerSelect.addEventListener("change", () => setProvider(providerSelect.value));
 modelSelect.addEventListener("change", () => setModel(modelSelect.value));
+reasoningSelect.addEventListener('change',()=>post('reasoning',reasoningSelect.value).catch(error=>{settingsError.textContent=String(error);}));
+harnessStatus.addEventListener('export',async event=>{
+  settingsError.textContent='Exporting recorded events…';
+  try {
+    const id=event.detail.scope==='node' ? '*' : settings.observability.session_id;
+    const since=Math.floor(Date.now()/1000)-172800, events=[];
+    let cursor=0, page;
+    do {
+      const query=new URLSearchParams({id,cursor:String(cursor),since:String(since)});
+      page=await (await apiFetch('observability/events?'+query,{headers:apiHeaders()})).json();
+      if (page.error) throw new Error(page.error);
+      events.push(...page.events);
+      if (page.has_more && page.next_cursor<=cursor) throw new Error('export cursor did not advance');
+      cursor=page.next_cursor;
+    } while (page.has_more);
+    const data={schema_version:1,exported_at:new Date().toISOString(),scope:event.detail.scope,
+      since:event.detail.scope==='node' ? since : null,node:page.node_name,runtime:page.runtime,events};
+    const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));
+    const a=document.createElement('a'); a.href=url; a.download='wasm-harness-'+event.detail.scope+'-'+Date.now()+'.json';
+    a.click(); setTimeout(()=>URL.revokeObjectURL(url),1000);
+    settingsError.textContent=`Exported ${events.length} events. No task-quality judgment included.`;
+  } catch(error) { settingsError.textContent='Export failed: '+String(error); }
+});
 nodeSelect.addEventListener("change", async () => {
   const value = nodeSelect.value;
   const local = nodeList.find((node) => node.name === value && node.local_node && node.kind === "host");
@@ -1937,7 +2061,9 @@ function openUserMenu() {
 
 async function refreshMeta() {
   try {
-    const response = await apiFetch("models" + nodeQuery(), { headers: apiHeaders() });
+    const query=new URLSearchParams({session_id:chatSession});
+    if (activeNode) query.set('node',activeNode);
+    const response = await apiFetch("models?"+query, { headers: apiHeaders() });
     const payload = await response.json();
     settings = { ...settings, ...payload };
     updateNodeLabel(settings.node_name, settings.node_worktree);

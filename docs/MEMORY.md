@@ -134,7 +134,7 @@ recovery must not be the thing that breaks the request.
 
 | | `default` | `debug` |
 | --- | --- | --- |
-| tool payloads | truncated (600 chars) | verbatim |
+| tool payloads | stable bounded view + retrievable original JSON artifact | same, plus debug request capture |
 | retention | **100% for 7 days**, then pruned | **kept forever** |
 | purpose | everyday use, small DB | reproduce a failure, build a fixture |
 
@@ -144,14 +144,29 @@ fixture → fix → re-run the fixture as a regression test.
 
 ## Compaction (automatic, like pi)
 
-When the transcript approaches the context budget (`WASM_AGENT_LLM_CONTEXT` minus
-a reserve, at 70%), the older half is summarised into `sessions.summary` and
+When the assembled request approaches the selected model's capacity minus its
+reserve (Pi's defaults: 16,384 reserved, 20,000 recent tokens kept), an older prefix is summarised into `sessions.summary` and
 `summarized_until` moves forward. The summary is produced by
 `WASM_AGENT_LLM_SUMMARY_MODEL` if set, otherwise by the main model.
 
-The transcript keeps **everything**; only the *context* is windowed. Nothing is
-silently forgotten — it moves from context into the summary, and remains readable
-via `session`/`search_turns`.
+An explicit positive `WASM_AGENT_CONTEXT_BUDGET` can trigger earlier; there is no
+default 64K cap. Every unsummarized ledger row participates, without a 500-row gap.
+Context estimates use the last measured request plus trailing messages when valid,
+otherwise text bytes/4 and Pi's 1,200-token image estimate. Neither is a tokenizer.
+
+The summarizer receives full user/assistant text, reasoning and tool arguments;
+large tool results get explicit 2,000-byte excerpts with artifact references.
+Oversized backlogs are summarized in bounded prefixes. Empty, output-limited or
+tool-calling summaries cannot advance the watermark. Summary usage is billed in
+the durable telemetry totals, including unsuccessful attempts.
+
+Summaries are **lossy interpretations**, not lossless compression. The retained
+original transcript is the evidence, accessible via `session`/`search_turns`;
+`session` supports `before_seq` pagination. Default transcript retention remains
+seven days; debug transcripts persist. Oversized tool output is kept as hashed
+JSON under `data/tool-results/` and retrieved with `tool_result`. Views are created
+once (2,000 lines / 50 KiB per text field), saved, and replayed unchanged. Artifacts
+are node-local, not automatically replicated or pruned. Back them up with the DB.
 
 ## Prompt caching (KV reuse)
 
@@ -170,8 +185,8 @@ What invalidates it: **compaction** (rewrites the middle), **editing AGENTS.md**
 
 - compaction is rare and in large chunks (`reserve` 16384 / `keep` 20000, like pi)
   rather than frequent and small — one invalidation instead of many;
-- the summarisation call itself is marked `cache = false`, so a one-off prompt
-  neither reads nor pollutes the conversation's cache;
+- the summarisation call itself is marked `cache = false`, which omits the
+  conversation routing key; it does **not** disable a provider's automatic cache;
 - `prompt_cache_key` (a hash of the session id) pins a conversation to one cache
   shard; `WASM_AGENT_PROMPT_CACHE_KEY=auto|on|off` controls it, and
   `WASM_AGENT_PROMPT_CACHE_RETENTION` asks for extended retention.

@@ -19,7 +19,7 @@ BIN="${WA_BIN:-rust/target/release/wa}"
 PORT="${1:-8891}"
 CLIENT_PORT=$((PORT + 1))
 WORK="$(mktemp -d /tmp/wa-conc-XXXXXX)"
-trap 'kill "$SERVER" "$WEDGE" 2>/dev/null; rm -rf "$WORK"' EXIT
+trap 'kill "${SERVER:-}" "${WEDGE:-}" "${POOL:-}" "${TURNS:-}" "${MOCK_PID:-}" 2>/dev/null; rm -rf "$WORK"' EXIT
 
 if [ ! -x "$BIN" ]; then echo "no binary at $BIN" >&2; exit 1; fi
 
@@ -204,6 +204,15 @@ echo "  ok: the pool grows on demand and shrinks when the load is gone"
 # two writers on one conversation.
 TURN_PORT=$((PORT + 30))
 TURN_CLIENT=$((TURN_PORT + 1))
+MOCK_PORT=$((PORT + 40))
+node scripts/mock-provider.cjs "$MOCK_PORT" > "$WORK/mock.log" 2>&1 &
+MOCK_PID=$!
+sleep 1
+if ! kill -0 "$MOCK_PID" 2>/dev/null || ! curl -fsS -m 2 "http://127.0.0.1:$MOCK_PORT/" >/dev/null; then
+  echo "  FAIL: local mock provider did not start"; exit 1
+fi
+WASM_AGENT_LLM_BASE_URL="http://127.0.0.1:$MOCK_PORT" \
+WASM_AGENT_LLM_API_KEY=test-only \
 WASM_AGENT_TEST_STALL_WORKER=1 \
 WASM_AGENT_WORKER_STALL_SECONDS=1 \
 WASM_AGENT_WORKER_STALL_EXIT_SECONDS=0 \
@@ -233,8 +242,10 @@ affinity_health="$(curl -s -m 3 "http://127.0.0.1:$TURN_PORT/health" 2>/dev/null
 # A different session: a second conversation, which is the point.
 curl -s -N -m 20 -X POST -H 'content-type: text/plain' -H 'x-wa-session: turn-session-b' \
   --data 'reply with the single word: ok' "http://127.0.0.1:$TURN_PORT/chat" > "$WORK/turn-b.txt" 2>&1 &
+TURN_B=$!
 sleep 4
 concurrent_health="$(curl -s -m 3 "http://127.0.0.1:$TURN_PORT/health" 2>/dev/null)"
+wait "$TURN_B"
 kill "$TURNS" 2>/dev/null
 
 echo
@@ -246,23 +257,23 @@ case "$turns_health" in
     echo "  ok: a turn for a new session got its own worker, while worker 0 was wedged" ;;
   *) echo "  FAIL: the turn did not get a worker of its own"; exit 1 ;;
 esac
+if printf '%s' "$turns_health" | grep -q '"current":null'; then
+  echo '  FAIL: health must not advertise idle while a secondary worker runs a turn'; exit 1
+fi
 case "$affinity_health" in
   *'"workers_count":2'*)
     echo "  ok: the same session did not open a second worker" ;;
   *) echo "  FAIL: the same session opened another worker - two writers on one conversation"; exit 1 ;;
 esac
-# The third check cannot sample /health for session B: a trivial turn finishes in about a second, so the
-# sample races it and the first version of this failed on a turn that had already succeeded. The claim that
-# matters is deterministic instead: the reply arrived while worker 0 was *still* wedged, which is only
-# possible if the turn ran somewhere else.
+# Require an actual mock answer, not merely a routed request or a nonempty error.
+# Worker 0 remains wedged throughout; the turn must finish on another worker.
 b_bytes="$(wc -c < "$WORK/turn-b.txt" | tr -d " ")"
-if [ "$b_bytes" -gt 0 ] && printf "%s" "$concurrent_health" | grep -q "\"id\":0[^}]*\"state\":\"stalled\""; then
+if grep -q '"reply":"ok"' "$WORK/turn-b.txt" && printf "%s" "$concurrent_health" | grep -q "\"id\":0[^}]*\"state\":\"stalled\""; then
   echo "  ok: a second conversation was answered while worker 0 was still wedged ($b_bytes bytes of reply)"
 else
-  # KNOWN GAP, reported as a gap. Routing is proven by the two checks above: a turn for a new session got its
-  # own worker, and the same session did not open a second one. What is not yet explained is that this third
-  # turn produced no reply at all - it was routed (one spawn, and worker 1 was idle by then) and then failed
-  # somewhere in the turn itself. That is the next thing to look at, and it is not a routing question.
-  echo "  skipped: a second concurrent conversation produced no reply ($b_bytes bytes) - known gap, see above"
+  echo "  FAIL: a second concurrent conversation did not return the mock answer ($b_bytes bytes)"
+  head -c 500 "$WORK/turn-b.txt"; echo
+  tail -8 "$WORK/turns.log"
+  exit 1
 fi
 echo "  ok: turns are routed by session - concurrent across sessions, ordered within one"

@@ -552,6 +552,17 @@ wa-balloon.popover {
 .meter span { display: block; height: 100%; background: var(--accent); width: 0; }
 .meter span.hot { background: #f2555a; }
 .pop-foot { color: #5f6a80; font-size: 11px; padding: var(--space); word-break: break-all; }
+wa-balloon#status-balloon { max-height: min(650px, 70vh); }
+wa-harness-status { display: block; font-size: 12px; }
+wa-harness-status details { border-top: 1px solid var(--line); padding: var(--space) 0; }
+wa-harness-status summary { cursor: pointer; padding: var(--space); color: var(--text); }
+.harness-grid { display: grid; grid-template-columns: minmax(110px, 1fr) minmax(0, 1fr); gap: var(--space) var(--pad); margin: var(--space); }
+.harness-grid dt { color: var(--muted); }
+.harness-grid dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+wa-harness-status .usage-note { color: var(--muted); margin: var(--gap) var(--space); }
+.harness-actions { display: flex; flex-wrap: wrap; gap: var(--gap); padding: var(--space); }
+.harness-actions button { font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: var(--space) var(--gap); cursor: pointer; }
+.harness-actions button:disabled { opacity: .5; cursor: default; }
 
 /* user chip */
 .user-chip { padding: var(--space); gap: var(--space); }
@@ -582,6 +593,17 @@ body.view-only .panel { display: none; }
   color: var(--text); font: inherit; font-size: 11.5px; padding: 1px var(--pad); cursor: pointer;
 }
 .unfinished-notice button:hover { border-color: var(--accent); }
+
+/* Working, or stuck? A running turn showed only a spinner and an unfinished tool line, so a
+   command that was legitimately long and one that would never return looked the same - and the
+   difference arrived 300 seconds later, when the second was killed. This reports the node's own
+   heartbeat, so the distinction is evidence rather than a guess about how long things should take.
+   Muted while it is beating; warned only once the beat stops climbing. */
+.liveness {
+  color: var(--muted); font-size: 11.5px; padding: var(--space) 0;
+  font-variant-numeric: tabular-nums;   /* the counters tick; the line must not jitter */
+}
+.liveness.stuck { color: var(--warn); }
 
 /* The update lock: a banner, not a cover. It says what is happening and offers both ways out, and the
    page stays usable underneath it - a lock that traps the reader is worse than the flicker it was

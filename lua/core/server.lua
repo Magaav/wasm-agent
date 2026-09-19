@@ -12,6 +12,7 @@ local skillslib = dofile("lua/core/skills.lua")
 -- Errors travel to a browser, a log and a test harness; mask secrets as they
 -- leave the server rather than trusting every future call site.
 local redact = dofile("lua/core/redact.lua")
+local telemetry = dofile("lua/core/telemetry.lua")
 
 memory.setup()
 local agent
@@ -183,6 +184,18 @@ function wa_spell_run(payload, session)
     end
   end
   return json.encode(toolslib.dispatch(memory, "spell_run", { name = name, params = params }, user.role))
+end
+
+-- Export a spell as a portable plan for the sentinel, which is the only process that can run a plan
+-- about this node: the turn asking for the export dies with the node it changes.
+function wa_spell_export(payload, session)
+  local user = require_master(session)
+  if not user then return json.encode({ error = "forbidden" }) end
+  local ok, request = pcall(json.decode, payload)
+  if not ok or type(request) ~= "table" then return json.encode({ error = "bad_request" }) end
+  return json.encode(toolslib.dispatch(memory, "spell_export", {
+    name = request.name, params = request.params, binary = request.binary, path = request.path,
+  }, user.role))
 end
 
 -- ---- nodes ---------------------------------------------------------------
@@ -441,6 +454,27 @@ function wa_diff(payload, session)
     local can, why = changeset.check(entry)
     return json.encode({ turn_id = turn.id, can_undo = can == true, reason = why or "" })
   end
+  if action == "preview" then
+    -- The changed lines of one file, for the hover balloon. Loading the text is the whole
+    -- cost of this action, so it is asked for per file rather than for the whole turn -
+    -- a topic with seven files should not pull seven files' text to open one balloon.
+    local wanted = request.path
+    if not wanted or wanted == "" then return json.encode({ error = "path_required" }) end
+    for _, file in ipairs(entry.files) do
+      if file.path == wanted then
+        local preview, why = changeset.preview_file(file)
+        if not preview then
+          return json.encode({ turn_id = turn.id, path = file.path, error = why or "no_preview" })
+        end
+        return json.encode({
+          turn_id = turn.id, path = file.path,
+          lines = preview.lines, truncated = preview.truncated,
+          added = preview.added, removed = preview.removed,
+        })
+      end
+    end
+    return json.encode({ error = "unknown_path" })
+  end
   if action == "undo" then
     local done, why = changeset.undo(entry)
     if not done then return json.encode({ turn_id = turn.id, ok = false, reason = why }) end
@@ -570,13 +604,18 @@ function wa_sync_status()
   })
 end
 
-function wa_model(node, session)
+function wa_model(node, session, chat_session)
   if remote_target(node) then
     local result = nodeslib.remote_call(node, "status", {})
     if result and not result.error then return json.encode(result) end
     return json.encode({ error = (result and result.error) or "remote_error", node = node })
   end
   local settings = provider.settings()
+  local user=users.current(session)
+  local record=chat_session and chat_session~="" and memory.session(chat_session) or memory.latest_session(user.id,node or "")
+  local observation={available=false,scope="unavailable on this node"}
+  if require_master(session) and record then observation=telemetry.snapshot(record.id) end
+  local budget=provider.budget(settings.model)
   local providers = {}
   for _, item in ipairs(provider.providers()) do
     providers[#providers + 1] = {
@@ -595,6 +634,12 @@ function wa_model(node, session)
     configured = provider.configured(),
     providers = providers,
     usage = agentlib.usage(),
+    observability=observation,
+    reasoning=provider.reasoning(settings.model),
+    output_limit=tonumber(host.getenv("WASM_AGENT_LLM_MAX_OUTPUT")) or provider.capabilities(settings.model).max_output,
+    compact_reserve=budget.reserve,
+    compact_keep=budget.keep,
+    compact_trigger=budget.trigger,
     limits = provider.limits(),
     -- The window for the model that is actually selected, from the same place compaction
     -- reads it. It used to read WASM_AGENT_LLM_CONTEXT directly, so the balloon and
@@ -619,6 +664,7 @@ end
 
 -- Switch provider/model at runtime; returns the refreshed settings payload.
 function wa_set_provider(id, node, session)
+  if not require_master(session) then return json.encode({error="forbidden"}) end
   if remote_target(node) then
     local result = nodeslib.remote_call(node, "set_provider", { id = id or "" })
     if result and not result.error then return json.encode(result) end
@@ -644,6 +690,7 @@ function wa_set_node_name(body, session)
 end
 
 function wa_set_model(name, node, session)
+  if not require_master(session) then return json.encode({error="forbidden"}) end
   if remote_target(node) then
     local result = nodeslib.remote_call(node, "set_model", { name = name or "" })
     if result and not result.error then return json.encode(result) end
@@ -652,4 +699,24 @@ function wa_set_model(name, node, session)
   provider.set_model(name or "")
   if agent then agent.model = provider.settings().model end
   return wa_model("", session)
+end
+
+function wa_set_reasoning(level,node,session)
+  if not require_master(session) then return json.encode({error="forbidden"}) end
+  if remote_target(node) then return json.encode({error="reasoning_selection_requires_local_node"}) end
+  local ok,problem=provider.set_reasoning(level)
+  if not ok then return json.encode({error=problem}) end
+  return wa_model("",session)
+end
+
+-- Master-only, paginated diagnostic export. No prompts, API keys or tool arguments.
+-- '*' selects this node's last 48 hours, including abandoned/failed sessions.
+function wa_observability_events(id,cursor,since,session,node)
+  if not require_master(session) then return json.encode({error="forbidden"}) end
+  if remote_target(node) then return json.encode({error="export_requires_local_node"}) end
+  if id~="*" and not memory.session(id or "") then return json.encode({error="unknown_session"}) end
+  local result=telemetry.events(id,cursor,500,tonumber(since) or host.now()-172800)
+  result.runtime=telemetry.runtime()
+  result.node_name=nodeslib.node_name()
+  return json.encode(result)
 end

@@ -257,26 +257,69 @@ fn press_key(name: &str) -> bool {
 }
 
 // ---- screenshot / live frame --------------------------------------------
-/// Capture the primary screen into top-down BGRA pixels.
-fn capture_screen() -> Option<(i32, i32, Vec<u8>)> {
+/// Capture the whole virtual desktop into top-down BGRA pixels.
+///
+/// This used to capture `SM_CXSCREEN`/`SM_CYSCREEN` from `GetDC(None)` at origin (0,0) -
+/// that is the *primary monitor only*. On a machine with two monitors the control view
+/// therefore showed one screen and the other simply did not exist. The virtual screen
+/// metrics are the union of every monitor: `SM_XVIRTUALSCREEN`/`SM_YVIRTUALSCREEN` are the
+/// top-left corner (negative when a monitor sits left of or above the primary one) and the
+/// `SM_C*VIRTUALSCREEN` pair is the size. `BitBlt` takes that corner as the source origin.
+///
+/// The origin is returned with the pixels because it is not recoverable from them: a click
+/// at canvas (10, 10) is virtual-screen (origin.x + 10, origin.y + 10), and on a two-monitor
+/// desk with the secondary on the left that origin is negative. Callers must add it.
+fn capture_screen() -> Option<(i32, i32, Vec<u8>, i32, i32)> {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
         ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, SRCCOPY,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    };
 
     unsafe {
-        let width = GetSystemMetrics(SM_CXSCREEN);
-        let height = GetSystemMetrics(SM_CYSCREEN);
+        let origin_x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let origin_y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        let width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        let height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        // A driver that does not answer the virtual metrics (or a session with no desktop)
+        // gives 0 here; falling back to the primary monitor is better than a capture_failed
+        // that says nothing about why, and it keeps the single-monitor case exactly as it was.
+        let (origin_x, origin_y, width, height) = if width <= 0 || height <= 0 {
+            (
+                0,
+                0,
+                GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN),
+                GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CYSCREEN),
+            )
+        } else {
+            (origin_x, origin_y, width, height)
+        };
         if width <= 0 || height <= 0 {
+            return None;
+        }
+        // The virtual desktop can be enormous (two 4K monitors side by side is 7680x2160).
+        // Refuse before allocating rather than failing inside GDI with a half-filled bitmap.
+        if width as i64 * height as i64 > 64_000_000 {
             return None;
         }
         let screen = GetDC(None);
         let memory = CreateCompatibleDC(Some(screen));
         let bitmap = CreateCompatibleBitmap(screen, width, height);
         let previous = SelectObject(memory, bitmap.into());
-        let _ = BitBlt(memory, 0, 0, width, height, Some(screen), 0, 0, SRCCOPY);
+        let _ = BitBlt(
+            memory,
+            0,
+            0,
+            width,
+            height,
+            Some(screen),
+            origin_x,
+            origin_y,
+            SRCCOPY,
+        );
 
         let mut info = BITMAPINFO::default();
         info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
@@ -304,19 +347,31 @@ fn capture_screen() -> Option<(i32, i32, Vec<u8>)> {
         if lines == 0 {
             return None;
         }
-        Some((width, height, pixels))
+        Some((width, height, pixels, origin_x, origin_y))
     }
 }
 
+/// How many monitors are attached. Used to tell the reader that the frame covers all of
+/// them, which is otherwise unknowable from a picture of a wide desktop.
+fn monitor_count() -> i32 {
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CMONITORS};
+    unsafe { GetSystemMetrics(SM_CMONITORS) }
+}
+
 fn screenshot() -> Value {
-    let Some((width, height, pixels)) = capture_screen() else {
+    let Some((width, height, pixels, origin_x, origin_y)) = capture_screen() else {
         return json!({"error": "capture_failed"});
     };
     let path = std::env::temp_dir().join(format!("wa-screenshot-{}.bmp", std::process::id()));
     if let Err(error) = std::fs::write(&path, bmp_bytes(width, height, &pixels)) {
         return json!({"error": error.to_string()});
     }
-    json!({"ok": true, "path": path.to_string_lossy(), "width": width, "height": height})
+    // The origin travels with the screenshot for the same reason it does with a frame:
+    // a coordinate the caller reads off the image is only usable with it.
+    json!({
+        "ok": true, "path": path.to_string_lossy(), "width": width, "height": height,
+        "origin_x": origin_x, "origin_y": origin_y, "monitors": monitor_count()
+    })
 }
 
 struct CachedFrame {
@@ -334,7 +389,7 @@ const TILE: i32 = 64;
 /// frame, later calls carry only the 64x64 tiles that changed, which is what
 /// makes it usable in real time instead of shipping whole screenshots.
 fn frame(args: &Value) -> Value {
-    let Some((width, height, pixels)) = capture_screen() else {
+    let Some((width, height, pixels, origin_x, origin_y)) = capture_screen() else {
         return json!({"error": "capture_failed"});
     };
     let max_width = args["max_width"].as_i64().unwrap_or(800).clamp(160, 1920) as i32;
@@ -390,6 +445,13 @@ fn frame(args: &Value) -> Value {
         "height": out_h,
         "screen_width": width,
         "screen_height": height,
+        // The virtual desktop's top-left in screen coordinates. A click at canvas (x, y)
+        // is screen (origin_x + x, origin_y + y) - without this the control view clicks in
+        // the wrong place as soon as the desktop has a monitor above or left of the primary.
+        "origin_x": origin_x,
+        "origin_y": origin_y,
+        // The count, so the reader can be told the frame is all of them and not just one.
+        "monitors": monitor_count(),
         "scale": scale,
         "full": full,
         "tiles": tiles
