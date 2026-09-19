@@ -13,17 +13,20 @@ const source = fs.readFileSync("ui/app.js", "utf8");
 
 // The test is worthless if the functions drifted, so assert the same bodies.
 check(/function composedText\(text\)/.test(source), "app.js still defines composedText");
-check(/function composedBody\(text\)/.test(source), "app.js still defines composedBody");
+check(/function composedBody\(text, options = \{\}\)/.test(source), "app.js still defines composedBody");
 check(/readAsDataURL/.test(source), "app.js reads images as data URLs");
 check(/attachment-thumb/.test(source), "app.js renders a thumbnail");
 check(/IMAGE_TYPES\s*=\s*\["image\/png"/.test(source), "app.js declares the accepted image types");
 
-// Pull the two functions out of app.js and evaluate them with stubs.
+// Pull the two functions out of app.js and evaluate them with stubs. `chatSession` is part of the
+// sandbox because composedBody reads it: the thread a turn belongs to is named in the body, and a
+// body that lost it would send the turn to whatever thread was newest instead.
 const attachmentsRef = { current: [] };
 const sandbox = new Function("attachments", `
+  let chatSession = "";
   ${source.match(/function composedText\(text\)\s*\{[\s\S]*?\n\}/)[0]}
-  ${source.match(/function composedBody\(text\)\s*\{[\s\S]*?\n\}/)[0]}
-  return { composedText, composedBody };
+  ${source.match(/function composedBody\(text, options = \{\}\)\s*\{[\s\S]*?\n\}/)[0]}
+  return { composedText, composedBody, setThread: (id) => { chatSession = id; } };
 `);
 const API = sandbox(attachmentsRef.current);
 
@@ -71,6 +74,26 @@ body = API.composedBody("");
 const solo = JSON.parse(body.body);
 check(solo.text === "", "an image-only turn sends an empty text field");
 check(solo.images.length === 1, "an image-only turn still sends the image");
+
+// ---- the thread a turn belongs to ---------------------------------------
+// Named in the body, and only when there is one: the plain-text path is what the CLI, the ledger
+// and peer relays use, so a window that is in no thread must still produce exactly that.
+attachmentsRef.current.length = 0;
+API.setThread("4ef4e372-8d84-4eff-b3e3-7f48f2a3c939");
+body = API.composedBody("hello");
+check(body.contentType === "application/json", "a named thread makes the body structured");
+const threaded = JSON.parse(body.body);
+check(threaded.thread === "4ef4e372-8d84-4eff-b3e3-7f48f2a3c939", "the body names the thread");
+check(threaded.text === "hello", "and the message is still the message");
+check(threaded.images === undefined, "with no pictures when none were attached");
+
+body = API.composedBody("hello", { session: "turn-specific" });
+check(JSON.parse(body.body).thread === "turn-specific", "an explicit session wins over the stored one");
+
+API.setThread("");
+body = API.composedBody("just words");
+check(body.contentType.startsWith("text/plain"), "no thread and no attachments keeps the plain-text body");
+check(body.body === "just words", "and the plain body is still the raw text");
 
 console.log("---");
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILURE(S)");

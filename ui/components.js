@@ -93,6 +93,8 @@ class WaMenu extends WaOverlay {
   constructor() {
     super();
     this.items = [];
+    this.selected = -1;
+    this._buttons = [];
     this.classList.add("menu");
   }
 
@@ -112,17 +114,62 @@ class WaMenu extends WaOverlay {
     this.style.top = Math.max(5, Math.min(top, maxY)) + "px";
   }
 
+  // The items a keyboard can land on: an item with no action is a heading, and a separator is
+  // not a choice. Moving onto one would make Enter do nothing while the highlight said it would.
+  _actionable() {
+    const indexes = [];
+    this.items.forEach((item, index) => {
+      if (typeof item.action === "function") indexes.push(index);
+    });
+    return indexes;
+  }
+
+  // Keyboard selection lives here, not in the caller, because the highlight and the click
+  // target must be the same thing: a menu whose arrow keys move something other than the item
+  // a click would choose is a menu that lies about what Enter is about to do.
+  move(delta) {
+    const indexes = this._actionable();
+    if (!indexes.length) return;
+    const at = indexes.indexOf(this.selected);
+    const next = at === -1
+      ? (delta > 0 ? 0 : indexes.length - 1)
+      : (at + delta + indexes.length) % indexes.length;
+    this.selected = indexes[next];
+    this._paint();
+  }
+
+  // Returns whether it chose anything, so a caller can decide what an Enter with no choice
+  // means instead of guessing that it was handled.
+  activate() {
+    const item = this.items[this.selected];
+    if (!item || typeof item.action !== "function") return false;
+    this.close();
+    item.action();
+    return true;
+  }
+
+  _paint() {
+    this.items.forEach((item, index) => {
+      const button = this._buttons[index];
+      if (button) button.classList.toggle("selected", index === this.selected);
+    });
+  }
+
   render() {
     this.replaceChildren();
+    this.selected = -1;
+    this._buttons = [];
     for (const item of this.items) {
       if (item.element) {
         this.append(item.element);
+        this._buttons.push(null);
         continue;
       }
       if (item.separator) {
         const line = document.createElement("div");
         line.className = "menu-sep";
         this.append(line);
+        this._buttons.push(null);
         continue;
       }
       const button = document.createElement("button");
@@ -137,6 +184,7 @@ class WaMenu extends WaOverlay {
       } else {
         button.disabled = true;
       }
+      this._buttons.push(button);
       this.append(button);
     }
   }

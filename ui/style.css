@@ -594,6 +594,15 @@ body.view-only .panel { display: none; }
 }
 .unfinished-notice button:hover { border-color: var(--accent); }
 
+/* A window is always inside some thread and the chat never said which, so starting a new one is the
+   moment that has to say so - an empty transcript with no explanation reads as "the work is gone".
+   Neutral rather than a warning: nothing went wrong. */
+.thread-notice {
+  display: flex; align-items: center; gap: var(--gap); flex-wrap: wrap;
+  color: var(--muted); font-size: 12px; padding: var(--space) 0;
+  border-top: 1px solid var(--line); margin-top: var(--gap);
+}
+
 /* Working, or stuck? A running turn showed only a spinner and an unfinished tool line, so a
    command that was legitimately long and one that would never return looked the same - and the
    difference arrived 300 seconds later, when the second was killed. This reports the node's own
@@ -653,6 +662,12 @@ wa-menu.menu {
 .menu-item.danger:hover { background: rgba(242, 85, 90, .16); }
 .menu-item.muted { color: var(--muted); cursor: default; }
 .menu-item.muted:hover { background: none; }
+/* Keyboard selection. Which row Enter will choose has to be visible at a glance, and it must not
+   read as the hover state - the pointer can be somewhere else entirely - so it is tinted and
+   outlined rather than merely darker. */
+.menu-item.selected { background: rgba(79, 140, 255, .18); box-shadow: inset 0 0 0 1px var(--accent); }
+.menu-item.selected.danger { background: rgba(242, 85, 90, .18); box-shadow: inset 0 0 0 1px #f2555a; }
+.menu-item.selected.muted { background: none; box-shadow: none; }
 .menu-sep { height: 1px; background: var(--line); margin: var(--space) 0; }
 
 /* The node is down: the composer says so rather than failing silently later. */
