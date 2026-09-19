@@ -1,6 +1,6 @@
 # Local regression only: stubbed model calls, durable HTTP reads, and a scratch
 # installation upgrade. Never uses the installed node, its DB, or its ports.
-param([int]$Port=8993, [string]$WaExe="", [string]$Bash="C:/Program Files/Git/bin/bash.exe")
+param([int]$Port=8993, [string]$WaExe="", [string]$Bash="C:/Program Files/Git/bin/bash.exe", [switch]$FullDeploy)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 if (-not $WaExe) { $WaExe=Join-Path $root 'rust/target/release/wa.exe' }
@@ -19,7 +19,7 @@ function Wait-Node {
   throw 'scratch node did not answer'
 }
 try {
-  foreach ($p in @($Port,($Port+1),($Port+3),($Port+4))) {
+  foreach ($p in @($Port,($Port+1),($Port+3),($Port+4),($Port+40),($Port+41))) {
     Check (-not (Get-NetTCPConnection -State Listen -LocalPort $p -ErrorAction SilentlyContinue)) "test port $p is already in use"
   }
   New-Item -ItemType Directory -Path $install | Out-Null
@@ -37,6 +37,8 @@ try {
   $env:WASM_AGENT_LUA_ROOT=$null # Prove the embedded release, not source overrides.
   Copy-Item -LiteralPath $WaExe -Destination (Join-Path $install 'wa.exe')
   Copy-Item -LiteralPath (Join-Path $root 'ui') -Destination (Join-Path $install 'ui') -Recurse
+  # A historical failure must not override ownership of the new listener.
+  [IO.File]::WriteAllText((Join-Path $install 'node.log'),"[serve] bind 127.0.0.1:$Port failed: historical fixture`n")
   $child=Start-Process -FilePath (Join-Path $install 'wa.exe') -ArgumentList @('serve','--port',$Port,'--client-port',($Port+1),'--ui',(Join-Path $install 'ui')) -WorkingDirectory $root -WindowStyle Hidden -PassThru
   $owned+=$child.Id
   Wait-Node
@@ -50,7 +52,11 @@ try {
   $env:WA_CLIENT_PORT=[string]($Port+1)
   $env:WA_RUNTIME_WORKTREE=$root
   Push-Location $root
-  try { & $Bash scripts/upgrade.sh $WaExe; Check ($LASTEXITCODE -eq 0) 'scratch upgrade failed' } finally { Pop-Location }
+  try {
+    if ($FullDeploy) { & $Bash scripts/deploy.sh --reason 'isolated deployment regression; no external model calls' }
+    else { & $Bash scripts/upgrade.sh $WaExe }
+    Check ($LASTEXITCODE -eq 0) 'scratch upgrade failed'
+  } finally { Pop-Location }
   $newPid=[int](Get-Content -LiteralPath (Join-Path $install 'serve.pid'))
   $owned+=$newPid
   Check ($newPid -ne $child.Id) 'upgrade did not replace process'
@@ -71,6 +77,10 @@ try {
     Check (Test-Path (Join-Path $install "ui/$asset.pre-upgrade")) "UI recovery backup missing: $asset"
   }
   Check ((Get-FileHash (Join-Path $install 'wa.exe.pre-upgrade')).Hash -eq (Get-FileHash $WaExe).Hash) 'recovery binary differs'
+  if ($FullDeploy) {
+    Check (Test-Path (Join-Path $install 'installed.txt')) 'deployment record missing'
+    Check ((Get-Content (Join-Path $install 'runtime-worktree.txt')) -eq $root) 'runtime worktree marker differs'
+  }
   Write-Host 'observability restart + scratch upgrade ok; zero external model calls'
 } finally {
   # The script owns only processes it launched or upgrade.sh recorded in its

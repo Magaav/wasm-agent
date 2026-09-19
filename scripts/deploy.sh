@@ -126,9 +126,11 @@ RECORDED="$(tr -d '[:space:]' < "$INSTALL_DIR/serve.pid" 2>/dev/null)"
 if [ -z "$RECORDED" ] || [ -z "$LISTENER" ] || [ "$RECORDED" != "$LISTENER" ]; then
   fail "the node answering on $PORT is pid $LISTENER, not the pid $RECORDED the install recorded - two nodes, one port"
 fi
-if grep -q "bind 127.0.0.1:$PORT failed" "$INSTALL_DIR/node.log" 2>/dev/null; then
-  fail "the installed node failed to bind $PORT (see $INSTALL_DIR/node.log)"
-fi
+# An accumulated node.log can contain a bind error from a previous deployment.
+# The recorded child owning this listener is the current startup verdict; a
+# historical string is not evidence about that process. Also verify its artifact.
+INSTALLED_NODE="$INSTALL_DIR/$(basename "$NEW")"
+cmp -s "$NEW" "$INSTALLED_NODE" || fail "installed binary differs from the proved build"
 
 # 7. Record what is installed, so "what is running" is answerable.
 HASH="$(sha256sum "$INSTALL_DIR/wa.exe" 2>/dev/null | awk '{print $1}')"
