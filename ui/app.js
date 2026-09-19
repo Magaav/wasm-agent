@@ -391,6 +391,13 @@ function toolDetail(result) {
 // and finished when the reply arrives, so one decision is one topic.
 let trace = null;
 let lastTool = "";
+// The deadline a `bash`/`shell` call is given, from /health. The tool event usually carries its own
+// `timeout_ms`; this is the fallback for a window that joined mid-turn or an older node, so the bound
+// is still shown rather than guessed at.
+let execTimeoutSeconds = 300;
+// One ticker for the page, not one per tool. Only the newest pending line is in flight (turns are
+// ordered within a session), and a timer per call would outlive the line it was counting for.
+let toolTicker = null;
 
 function renderDiff(bubble, changes) {
   const files = (changes && changes.files) || [];
@@ -655,20 +662,36 @@ function currentTrace() {
   return trace;
 }
 
-function addTool(name, args) {
-  currentTrace().addTool(name, toolTitle(name, args));
+function addTool(name, args, options) {
+  const boundMs = options && options.timeoutMs;
+  currentTrace().addTool(name, toolTitle(name, args), null, boundMs ? Math.round(boundMs / 1000) : null);
   lastTool = name;
+  startToolTicker();
   pin();
+}
+
+function startToolTicker() {
+  if (toolTicker) return;
+  toolTicker = setInterval(() => {
+    if (!trace || !trace.pending) { stopToolTicker(); return; }
+    trace.setAge();
+  }, 1000);
+}
+
+function stopToolTicker() {
+  if (toolTicker) { clearInterval(toolTicker); toolTicker = null; }
 }
 
 function settleTool(result) {
   if (!trace) return;
+  stopToolTicker();
   const outcome = toolOutcome(lastTool, result);
   trace.settle(outcome.text, toolDetail(result), outcome.failed);
   pin();
 }
 
 function finishTrace() {
+  stopToolTicker();
   trace?.finish();
   trace = null;
 }
@@ -755,7 +778,11 @@ function handleEvent(event) {
     const chars = Number(event.chars) || 0;
     setStatus("thinking… " + chars + " chars of reasoning");
   } else if (event.type === "tool") {
-    addTool(event.name, event.arguments);
+    // The bound travels with the tool event when the host enforces one (bash/shell); /health is the
+    // fallback so an in-flight line still says "of 300s" instead of only "42s".
+    const boundMs = event.timeout_ms != null ? event.timeout_ms
+      : (event.name === "bash" || event.name === "shell" ? execTimeoutSeconds * 1000 : null);
+    addTool(event.name, event.arguments, { timeoutMs: boundMs });
   } else if (event.type === "tool_result") {
     settleTool(event.result);
   } else if (event.type === "delta") {
@@ -1005,6 +1032,7 @@ function startLiveness() {
     catch (error) { return; }   // the offline path owns that case and says its piece
     if (!health || !health.current) { setLiveness(null); return; }
 
+    if (typeof health.exec_timeout_seconds === "number") execTimeoutSeconds = health.exec_timeout_seconds;
     const stalled = health.stalled_ms;
     if (typeof stalled !== "number") { setLiveness(null); return; }
     // "Climbing" is the honest signal for a stall: a single large number could be a long step between

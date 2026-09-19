@@ -550,6 +550,16 @@ pub extern "C" fn write_file(l: *mut LuaState) -> c_int {
     1
 }
 
+/// The deadline a `bash`/`shell` call is given, in seconds. Read here because this is where it is
+/// enforced; `host.exec_timeout()` and `serve::health_body` both report this same number, so a
+/// client can show the bound without duplicating the parse or drifting from what the host does.
+pub(crate) fn exec_timeout_seconds() -> u64 {
+    std::env::var("WASM_AGENT_EXEC_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(300u64)
+}
+
 /// host.exec(command, cwd?) -> {code, stdout, stderr} | {error}
 /// Run a command with a deadline, draining its pipes from their own threads.
 ///
@@ -571,10 +581,7 @@ fn run_bounded(program: &str, flag: &str, command: &str, cwd: &str) -> Result<Va
     // a node running a long command reported `ok:false` and `worker:stalled` for its whole duration,
     // and past WASM_AGENT_WORKER_STALL_EXIT_SECONDS it killed itself mid-command.
     let _heartbeat = crate::serve::Heartbeat::start();
-    let seconds = std::env::var("WASM_AGENT_EXEC_TIMEOUT_SECONDS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(300u64);
+    let seconds = exec_timeout_seconds();
     let mut process = std::process::Command::new(program);
     process.arg(flag).arg(command);
     if crate::serve::in_turn() {
@@ -1111,10 +1118,7 @@ pub extern "C" fn now(l: *mut LuaState) -> c_int {
 /// as a deadline that was always there. The number lives here because this is where it is enforced;
 /// anything showing it to a person reads it from here.
 pub extern "C" fn exec_timeout(l: *mut LuaState) -> c_int {
-    let seconds = std::env::var("WASM_AGENT_EXEC_TIMEOUT_SECONDS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(300u64);
+    let seconds = exec_timeout_seconds();
     unsafe { crate::lua::lua_pushnumber(l, seconds as f64) };
     1
 }
