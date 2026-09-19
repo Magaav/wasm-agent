@@ -419,6 +419,19 @@ function M.complete_with(model, messages, tools, stream, opts)
       request_id = result.request_id,
       ttft_ms=result.ttft_ms,
       stream_complete=result.stream_complete,
+      -- Stream-termination telemetry, so an incomplete stream can say *how* it ended rather than only that it
+      -- did. Computed in the stream reader and forwarded here; without this they are thrown away, which is the
+      -- failure mode this project keeps repeating - an instrument placed where nothing reads it.
+      termination = result.termination,
+      saw_done_sentinel = result.saw_done_sentinel,
+      saw_finish_reason = result.saw_finish_reason,
+      saw_usage = result.saw_usage,
+      malformed_events = result.malformed_events,
+      chunks = result.chunks,
+      last_delta_kind = result.last_delta_kind,
+      max_gap_ms = result.max_gap_ms,
+      last_delta_to_end_ms = result.last_delta_to_end_ms,
+      ended_silent = result.ended_silent,
     }
   end
 

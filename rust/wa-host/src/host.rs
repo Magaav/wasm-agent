@@ -946,6 +946,24 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
     let mut finish_reason: Option<String> = None;
     let mut tool_calls: Vec<Value> = Vec::new();
     let mut usage: Option<Value> = None;
+    // Stream-termination telemetry.
+    //
+    // `stream_complete: false` reduced every ending to "no finish_reason", which cannot distinguish a
+    // provider that cut the stream from a reader that failed to parse the end - and those have different
+    // fixes. These fields answer the question the failure raises: did it end with `[DONE]` or at EOF, did a
+    // finish reason and a usage chunk arrive, how many events were unparseable, how many chunks arrived, and
+    // was the stream still flowing or already silent at the end.
+    //
+    // Payload-free by design: counts, kinds and timings, never content. A read error still propagates as an
+    // error (and carries its own text to the caller); this covers the endings that produce no error at all,
+    // which is exactly the case that was invisible.
+    let mut saw_done = false;
+    let mut saw_finish_reason = false;
+    let mut malformed_events = 0u64;
+    let mut chunks = 0u64;
+    let mut last_delta_kind = "";
+    let mut last_delta_ms: Option<u64> = None;
+    let mut max_gap_ms = 0u64;
     for line in reader.lines() {
         let line = line.map_err(|error| error.to_string())?;
         let Some(data) = line.trim().strip_prefix("data:") else { continue };
@@ -954,12 +972,28 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
             continue;
         }
         if data == "[DONE]" {
+            saw_done = true;
             break;
         }
         let chunk: Value = match serde_json::from_str(data) {
             Ok(value) => value,
-            Err(_) => continue,
+            // Counted rather than skipped in silence: an unparseable event is a reader-side fact, and a
+            // stream that ends "without a finish reason" because we dropped the chunk carrying it looks
+            // exactly like a provider that cut the stream.
+            Err(_) => { malformed_events += 1; continue },
         };
+        chunks += 1;
+        // When a delta arrives, and what kind it was: this is what says whether the stream was flowing or
+        // already silent when it ended. A gap is only meaningful between deltas; the gap *after* the last one
+        // is measured at the end, below.
+        let mut mark_delta = |kind: &'static str, now_ms: u64| {
+            if let Some(previous) = last_delta_ms {
+                max_gap_ms = max_gap_ms.max(now_ms.saturating_sub(previous));
+            }
+            last_delta_ms = Some(now_ms);
+            last_delta_kind = kind;
+        };
+        let elapsed_ms = started.elapsed().as_millis() as u64;
         if let Some(id) = chunk["id"].as_str() { request_id = Some(id.to_string()); }
         let delta = &chunk["choices"][0]["delta"];
         if ttft_ms.is_none() && (["content", "reasoning_content", "reasoning", "reasoning_text"]
@@ -970,6 +1004,7 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
         if let Some(text) = chunk["choices"][0]["delta"]["content"].as_str() {
             if !text.is_empty() {
                 content.push_str(text);
+                mark_delta("answer", elapsed_ms);
                 crate::serve::write_event(&json!({"type": "delta", "text": text}).to_string());
             }
         }
@@ -977,6 +1012,7 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
             if let Some(text) = chunk["choices"][0]["delta"][field].as_str() {
                 if !text.is_empty() {
                     reasoning.push_str(text);
+                    mark_delta("reasoning", elapsed_ms);
                     // A long reasoning phase used to look like a hung turn. The UI
                     // can now say how much thinking has happened.
                     crate::serve::write_event(
@@ -988,8 +1024,12 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
         }
         if let Some(reason) = chunk["choices"][0]["finish_reason"].as_str() {
             finish_reason = Some(reason.to_string());
+            saw_finish_reason = true;
         }
         if let Some(calls) = chunk["choices"][0]["delta"]["tool_calls"].as_array() {
+            if !calls.is_empty() {
+                mark_delta("tool_calls", elapsed_ms);
+            }
             for call in calls {
                 let index = call["index"].as_u64().unwrap_or(0) as usize;
                 while tool_calls.len() <= index {
@@ -1013,7 +1053,19 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
     }
     Ok(json!({"status": status, "content": content, "reasoning": reasoning,
         "stream_complete": finish_reason.is_some(), "ttft_ms": ttft_ms, "request_id": request_id,
-        "finish_reason": finish_reason, "tool_calls": tool_calls, "usage": usage}))
+        "finish_reason": finish_reason, "tool_calls": tool_calls, "usage": usage,
+        // Termination telemetry: how it ended, what arrived, and whether it was still talking.
+        "termination": if saw_done { "done" } else { "eof" },
+        "saw_done_sentinel": saw_done,
+        "saw_finish_reason": saw_finish_reason,
+        "saw_usage": usage.is_some(),
+        "malformed_events": malformed_events,
+        "chunks": chunks,
+        "last_delta_kind": last_delta_kind,
+        "max_gap_ms": max_gap_ms,
+        "last_delta_to_end_ms": last_delta_ms.map(|ms| started.elapsed().as_millis() as u64 - ms),
+        "ended_silent": last_delta_ms.map(|ms| started.elapsed().as_millis() as u64 - ms >= 10_000).unwrap_or(false),
+    }))
 }
 
 /// host.now() -> seconds since epoch
@@ -1106,6 +1158,76 @@ mod stream_tests {
         assert_eq!(result["reasoning"], "thinking");
         assert_eq!(result["usage"]["prompt_tokens"], 100);
         assert!(result["ttft_ms"].is_number());
+    }
+
+    #[test]
+    fn termination_telemetry_distinguishes_done_from_eof() {
+        // The question the failure raises is which ending happened. [DONE] and EOF look identical from
+        // stream_complete alone, and they have different fixes.
+        let done = fixture(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"a\"},\"finish_reason\":\"stop\"}]}
+
+",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10}}
+
+",
+            "data: [DONE]
+
+"));
+        assert_eq!(done["termination"], "done");
+        assert_eq!(done["saw_done_sentinel"], true);
+        assert_eq!(done["saw_finish_reason"], true);
+        assert_eq!(done["saw_usage"], true);
+        assert_eq!(done["last_delta_kind"], "answer");
+        assert!(done["last_delta_to_end_ms"].is_number());
+
+        let eof = fixture("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}
+
+");
+        assert_eq!(eof["termination"], "eof");
+        assert_eq!(eof["saw_done_sentinel"], false);
+        assert_eq!(eof["saw_finish_reason"], false);
+        assert_eq!(eof["saw_usage"], false);
+        assert_eq!(eof["ended_silent"], false);
+    }
+
+    #[test]
+    fn a_finish_reason_only_in_a_choices_empty_chunk_is_recorded_as_missing() {
+        // The discriminator between our parser and the response boundary. Providers commonly end with a
+        // usage-only chunk whose choices array is empty; if the finish reason rides there, a COMPLETE stream
+        // ends with saw_finish_reason false - which is indistinguishable from a cut unless these two flags
+        // are recorded separately. This test pins that behaviour so the distinction cannot be lost again.
+        let result = fixture(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}
+
+",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10},\"finish_reason\":\"stop\"}
+
+",
+            "data: [DONE]
+
+"));
+        assert_eq!(result["saw_finish_reason"], false);
+        assert_eq!(result["saw_usage"], true);
+        assert_eq!(result["termination"], "done");
+        assert_eq!(result["stream_complete"], false);
+    }
+
+    #[test]
+    fn an_unparseable_event_is_counted_not_skipped_in_silence() {
+        let result = fixture(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}
+
+",
+            "data: {not json at all
+
+",
+            "data: [DONE]
+
+"));
+        assert_eq!(result["malformed_events"], 1);
+        assert_eq!(result["chunks"], 1);
+        assert_eq!(result["content"], "a");
     }
 
     #[test]
