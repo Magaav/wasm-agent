@@ -57,6 +57,14 @@ static LAST_SERVED_MS: AtomicU64 = AtomicU64::new(0);
 /// A reader that has a connected window *and* a stale page age has a zombie, not a window.
 static UI_SEEN_MS: AtomicU64 = AtomicU64::new(0);
 
+/// The last thing the UI page said about its own failure, and when.
+///
+/// A page that cannot run cannot tell anyone it cannot run - which is how a window sat looking alive with a
+/// dead page behind it while every command was accepted and ignored. So the page reports its own errors here
+/// (the inline reporter in index.html runs before anything else), and this is what makes that visible: a node
+/// that can say "the UI reported this at 12:04" is a node whose window can be diagnosed without a log dive.
+static UI_ERROR: Mutex<Option<(String, u64)>> = Mutex::new(None);
+
 /// How many interpreters a node runs, and how it decides.
 ///
 /// Worker 0 is the turn worker and always exists: it owns every route that changes something - turns,
@@ -450,6 +458,8 @@ fn health_body() -> Vec<u8> {
         "workers_retired": POOL.get().map(|pool| pool.retired.load(Ordering::Relaxed)).unwrap_or(0),
         // Milliseconds since a UI page last polled. `null` means no page has ever asked - a node that has
         // never been opened, which is not the same as one whose window has died.
+        "ui_error": UI_ERROR.lock().ok().and_then(|slot| slot.as_ref().map(|(text, _)| text.clone())),
+        "ui_error_age_ms": UI_ERROR.lock().ok().and_then(|slot| slot.as_ref().map(|(_, at)| now_ms().saturating_sub(*at))),
         "ui_page_age_ms": match UI_SEEN_MS.load(Ordering::Relaxed) {
             0 => serde_json::Value::Null,
             seen => serde_json::json!(now_ms().saturating_sub(seen)),
@@ -920,6 +930,19 @@ fn static_reply(ui: &std::path::Path, request: &Request) -> Option<Reply> {
     }
     if route == "/version" {
         return Some((200, "application/json", version_body(ui).into_bytes()));
+    }
+    if route == "/log" {
+        // Best effort by design: the page is already in trouble when it calls this, and a reporter that can
+        // fail loudly is worse than one that quietly records. The node log gets it too, so it is visible
+        // while it is happening and not only afterwards.
+        let text = String::from_utf8_lossy(&request.body).chars().take(2000).collect::<String>();
+        if !text.trim().is_empty() {
+            eprintln!("[ui] page reported: {text}");
+            if let Ok(mut slot) = UI_ERROR.lock() {
+                *slot = Some((text, now_ms()));
+            }
+        }
+        return Some((200, "application/json", b"{\"ok\":true}".to_vec()));
     }
     let relative = if route == "/" || route.is_empty() {
         "index.html".to_string()
