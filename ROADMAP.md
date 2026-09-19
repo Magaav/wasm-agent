@@ -43,6 +43,34 @@ Two mechanisms, and we want both:
 report wall-clock for N=1, 8, 16, 32 turns, and `/health` reporting per-lane state
 instead of one `current`.
 
+**Implementation notes, from reading the node's core (so the next pass starts from facts):**
+
+- One `Lua` state is built in `rust/wa-host/src/main.rs` (around the host registration
+  block); the `Host` — one SQLite `Connection` behind a `Mutex`, plus the plugin
+  registry and the client bridge — is created once and shared **by pointer** with
+  `register_with_upvalue`. So N states can share it and every DB access stays
+  serialized by that `Mutex`. `PRAGMA journal_mode=WAL` and `busy_timeout=5000` are
+  already set, so a future design with one connection per worker is also safe.
+- The refactor is: factor that registration + `EMBEDDED` + the `dofile` bootstrap into
+  a `boot_state(host) -> Lua` closure, build N of them, load `lua/core/server.lua`
+  into each, and change `serve::run(lua, port, ui)` to take the vector.
+- `beat()` is a global with no idea which worker called it, so per-worker beats need a
+  `thread_local` worker id set when each worker thread starts; `health_body` then
+  reports per-worker `state`/`ms` and the *newest* beat drives `ok`.
+- The self-exit must become "every worker is stalled", not "the worker is stalled":
+  one wedged lane should not kill healthy ones. With the default of one worker the
+  behaviour is unchanged, which is why the pool ships **opt-in** (`WASM_AGENT_WORKERS`,
+  default 1) and is measured before it becomes the default.
+- Safety rules the pool must not break: **one writer per session** (requests carrying
+  the same `X-WA-Session` must not run concurrently), and per-session order. The cheap
+  first cut — worker 0 owns turns and writes, extra workers serve reads — gets the
+  responsiveness win with no ordering risk at all; affinity for concurrent turns is
+  the second step.
+- The test that judges it already has a shape: `scripts/test-serve-concurrency.sh`
+  (it caught the single-threaded node answering nothing while a turn ran). With a
+  pool, a read must be answered *while* a turn is in flight, and `/health` must name
+  the worker that is busy.
+
 ## 🔜 Orchestration context
 
 An orchestrator that does not know the fleet is a window with panes in it. The UI needs
