@@ -163,3 +163,43 @@ always the same: **write a request and let this process do it.**
 `run` is disabled unless `WA_SENTINEL_SCRIPTS` names the directories it may execute from — and note
 that `spell` deliberately does not go through `run`, so enabling `run` does not widen what a plan
 can do.
+
+### How fast it is
+
+Measured on this machine, not estimated. The numbers matter because "seamless" is a claim about
+seconds, so it should be a claim about *measured* seconds:
+
+| what | cost |
+| --- | --- |
+| cold start (spawn → `/health` ok) | ~55 ms |
+| kill → process gone | ~150 ms |
+| `/health` round trip | ~0.6 ms |
+| **whole cached upgrade command** | **~750 ms** |
+| **node unreachable during it** | **~235 ms** |
+
+The whole `upgrade.sh` run is ~750ms once the binary is known-good, and the *outage* — the window in
+which the node answers nothing — is about a quarter of a second. That is what the window's version
+poll (once a second, reconnecting by itself) turns into an unbroken transcript rather than a dead
+page.
+
+Four things were removed to get there, each found by timing the phase rather than guessing:
+
+1. **A fixed `sleep 2` after the kill.** The process is gone in ~150 ms, so ~1.8 s per upgrade was
+   spent asleep for nothing. It now polls the port until it is free, which also cannot be too short
+   on a loaded machine.
+2. **Polling with PowerShell.** `Get-NetTCPConnection` costs ~600 ms to start; `netstat -ano` costs
+   ~40 ms for the same answer. Every port question — the free-port scan, the port-free wait — now
+   goes through `netstat`, except the two that genuinely need Windows APIs (stop and start).
+3. **A fixed 5 s idle tick.** Fine while a long turn runs, ruinous at the moment it ends, because the
+   swap cannot begin until a poll notices. It polls at 5 s while the node is known-busy, then at
+   0.5 s.
+4. **Re-proving the same binary every time.** A build that answered once answers forever — the same
+   bytes cannot un-start. The verdict is cached by SHA-256 in `<install>/.upgrade-proof` (last 20
+   hashes), which removes the ~20 s worst-case scratch-port proof from every upgrade after the
+   first. Only *positive* verdicts are cached: a build that failed to answer is retried, because the
+   failure may have been a busy machine rather than the binary.
+
+What is left is two `powershell.exe` calls — one to stop by pid, one to start — because there is no
+shell equivalent, and each carries a fixed ~600 ms of process start. That is the floor for this
+approach, and it is why the outage is ~235 ms rather than ~55 ms: the start is fast, the *way we
+start* is not.
