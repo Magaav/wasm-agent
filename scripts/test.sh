@@ -203,6 +203,12 @@ LUA
 WA_SCRIPT="$DB.evidence.lua" "$BIN" --db "$DB" | grep "tool evidence ok"
 rm -f "$DB.evidence.lua"
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB.observability" | grep 'observability ok'
+# Which conversation a turn lands in. The name a client sends is the only thing that
+# lets a window start a thread or return to one: before this, `agent_for` always passed
+# nil, so every turn from every window landed in the newest open session and that one
+# thread grew without end. The *refusal* is asserted here too - the name is obeyed now,
+# so a guest naming a master's thread must be refused rather than quietly served it.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-thread-selection.lua" "$BIN" --db "$DB.thread" | grep 'thread selection ok'
 # Role gating: a guest must never see master tools, and a session must resolve
 # to its own user. A regression here silently runs guests as master, which is
 # exactly what happened when the session header stopped reaching dispatch.
