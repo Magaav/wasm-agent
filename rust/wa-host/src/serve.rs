@@ -109,6 +109,17 @@ static WORKER_BUSY: OnceLock<Vec<Mutex<Option<(String, u64)>>>> = OnceLock::new(
 /// conversations at once - and only a session with nowhere to go waits.
 static WORKER_SESSION: OnceLock<Vec<Mutex<Option<String>>>> = OnceLock::new();
 
+/// A deploy launched by a tool in a live turn cannot wait for that same turn
+/// to go idle. This is a boolean, not the x-wa-session credential.
+pub(crate) fn in_turn() -> bool {
+    IN_TURN.with(|flag| flag.get())
+}
+
+#[cfg(test)]
+pub(crate) fn test_mark_turn(value: bool) {
+    IN_TURN.with(|flag| flag.set(value));
+}
+
 fn env_usize(name: &str, fallback: usize) -> usize {
     std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(fallback)
 }
@@ -129,6 +140,7 @@ thread_local! {
     /// Which worker this thread is. `beat()` is called from inside Lua and had no way to say *which*
     /// interpreter had made progress, so per-worker liveness was impossible until this existed.
     static WORKER_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static IN_TURN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn worker_id() -> usize {
@@ -820,7 +832,9 @@ fn worker_loop(
                         }
                     }
                 }
+                IN_TURN.with(|flag| flag.set(is_turn_route(&request)));
                 let _ = handle(&lua, &agent_ui, &mut stream, &request);
+                IN_TURN.with(|flag| flag.set(false));
                 if let Some(slots) = WORKER_SESSION.get() {
                     if let Some(slot) = slots.get(index) {
                         if let Ok(mut guard) = slot.lock() {

@@ -9,6 +9,38 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 BIN=rust/target/release/wa
+# A turn cannot deploy the process serving that same turn. The marker crosses
+# the Rust host's shell boundary; both entry points must refuse before waiting
+# for idle or touching an installed binary.
+GUARD_HOME="$(mktemp -d)"
+mkdir -p "$GUARD_HOME/install"
+if WASM_AGENT_IN_TURN=1 WA_INSTALL_DIR="$GUARD_HOME/install" bash scripts/deploy.sh --reason guard >"$GUARD_HOME/deploy.log" 2>&1; then
+  echo "FAIL: deploy.sh accepted a running-turn invocation" >&2; exit 1
+fi
+grep -q 'cannot deploy from a running turn' "$GUARD_HOME/deploy.log"
+if WASM_AGENT_IN_TURN=1 bash scripts/upgrade.sh "$BIN" >"$GUARD_HOME/upgrade.log" 2>&1; then
+  echo "FAIL: upgrade.sh accepted a running-turn invocation" >&2; exit 1
+fi
+grep -q 'refused inside a running turn' "$GUARD_HOME/upgrade.log"
+rm -f "$GUARD_HOME/deploy.log" "$GUARD_HOME/upgrade.log" "$GUARD_HOME/install/deploy.log"
+rmdir "$GUARD_HOME/install" "$GUARD_HOME"
+echo "self-update turn guard ok"
+# The other half of the install gate: it must refuse to replace an install that is ahead of this tree. Its
+# own file, because it asserts five cases (ahead, ancestor, no record, no commit=, an unresolvable commit)
+# and both directions of the check - a gate that refuses everything is as wrong as one that refuses nothing.
+# It stops at or before the build, so it costs about a second.
+set +e
+bash scripts/test-deploy-downgrade.sh
+GATE_STATUS=$?
+set -e
+if [ "$GATE_STATUS" = "3" ]; then
+  # Exit 3 is "this tree cannot reach the check": a clean tree that is not behind origin/main is required,
+  # and the gate asks about the tree first. Counted, not hidden - a skipped check is not a passing check.
+  SKIPPED=$((SKIPPED + 1))
+elif [ "$GATE_STATUS" != "0" ]; then
+  echo "FAIL: the deploy downgrade gate did not pass (exit $GATE_STATUS)" >&2
+  exit 1
+fi
 # The suite must exercise the Lua in the working tree. cargo rebuilds the binary when a
 # Lua file changes (they are include_str!-ed), so this is belt as well as braces - but it
 # is the difference between testing the tree and testing a build artefact, and it went
@@ -203,6 +235,12 @@ LUA
 WA_SCRIPT="$DB.evidence.lua" "$BIN" --db "$DB" | grep "tool evidence ok"
 rm -f "$DB.evidence.lua"
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB.observability" | grep 'observability ok'
+# Which conversation a turn lands in. The name a client sends is the only thing that
+# lets a window start a thread or return to one: before this, `agent_for` always passed
+# nil, so every turn from every window landed in the newest open session and that one
+# thread grew without end. The *refusal* is asserted here too - the name is obeyed now,
+# so a guest naming a master's thread must be refused rather than quietly served it.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-thread-selection.lua" "$BIN" --db "$DB.thread" | grep 'thread selection ok'
 # Role gating: a guest must never see master tools, and a session must resolve
 # to its own user. A regression here silently runs guests as master, which is
 # exactly what happened when the session header stopped reaching dispatch.
@@ -435,6 +473,20 @@ for _, name in ipairs(names) do
   if not chunk then missing[#missing + 1] = name end
 end
 assert(#missing == 0, "on disk but not in the binary: " .. table.concat(missing, ", "))
+-- Presence is not freshness. loadfile succeeding proves the module is IN the binary, not that it is the
+-- module on disk - and the binary runs the embedded copy. A Lua edit that did not trigger a rebuild leaves
+-- the old core inside, so a deploy ships a fix that is not in the artifact. Compare the text and name what
+-- is stale; the fix is to rebuild, which deploy.sh does.
+local stale = {}
+for _, name in ipairs(names) do
+  local path = "lua/core/" .. name
+  local embedded = EMBEDDED and EMBEDDED[path]
+  local on_disk = host.read_file and host.read_file(path)
+  if type(embedded) == "string" and type(on_disk) == "string" and embedded ~= on_disk then
+    stale[#stale + 1] = name
+  end
+end
+assert(#stale == 0, "the embedded core is stale - rebuild before trusting this binary: " .. table.concat(stale, ", "))
 print("embedded modules ok (" .. #names .. " files)")
 LUA
 ( unset WASM_AGENT_LUA_ROOT; WA_SCRIPT="$DB.embedded.lua" "$BIN" --db "$DB" ) | grep "embedded modules ok"
@@ -502,6 +554,19 @@ WASM_AGENT_EXEC_TIMEOUT_SECONDS=2 WA_SCRIPT=scripts/test-exec-timeout.lua "$BIN"
 # matter to undo: a second entry carrying the intermediate text would restore a state the turn itself
 # created. Sandboxed home, because the reversible text is stored as content-addressed blobs under it.
 WASM_AGENT_HOME="$DB.home" WA_SCRIPT=scripts/test-changeset.lua "$BIN" --db "$DB.changeset" | grep "changeset ok"
+
+# Instructions must be read once per node process, not once per turn: they sit at the front of every request,
+# so an edit mid-session re-prices and re-slows every call after it (measured: cached_tokens 0, 27s
+# time-to-first-token, and a dropped stream). The test points the node at a scratch instruction file and edits
+# it between two reads - the only way the claim can fail. It was vacuous twice before that: first it compared
+# two reads without changing anything, then the cache key was a table address and never hit. The lua root is
+# already exported at the top of this script, so this does not set it again (doing so with the wrong variable
+# is how the first attempt failed inside the gate).
+SCRATCH_AGENTS_MD="$DB.agents.md"
+printf 'ORIGINAL INSTRUCTIONS\n' > "$SCRATCH_AGENTS_MD"
+WASM_AGENT_AGENTS_MD="$SCRATCH_AGENTS_MD" \
+  WA_SCRIPT=scripts/test-prefix-stability.lua "$BIN" --db "$DB.prefix" | grep "prefix stability ok"
+rm -f "$SCRATCH_AGENTS_MD"
 
 # A guest is not a smaller master. A guest node owns no worktree - so it is not named after
 # one and a rename does not move a branch on its behalf - and a master's call on a guest is

@@ -23,23 +23,37 @@ that, and every one of them was learned by failing at them:
 
 So the shape is always the same: **you write a request; something outside the node performs it.**
 
-## The one command you want
+## From a running turn
+
+Build and test the candidate, then write one durable request. Use an absolute
+binary path. If the current session id is known, include it and a continuation
+prompt; the sentinel wakes that session only after a successful upgrade:
 
 ```
-spell_export(name: "self-update", binary: "rust/target/release/wa")
-# -> returns a path; then, from a shell (not from your turn):
-wa-sentinel request spell --file <path> --reason "..."
+wa-sentinel request upgrade --binary "<absolute path to wa.exe>" \
+  --session "<current session id>" --prompt "The upgrade finished; verify it and continue." \
+  --reason "why"
 ```
 
-Or, if you only need the binary replaced and the spell does not exist yet:
+Omit `--session` and `--prompt` together if no continuation is wanted. The
+request command only queues work; the record in `sentinel/done` or `failed` and
+`installed.txt` report what actually happened. A separate wake request could
+race the upgrade. The exact installed binary hash is recorded; when the
+sentinel receives an independently built binary, its source commit is only a
+hint, not verified provenance.
 
-```
-wa-sentinel request upgrade --binary "<absolute path to the new wa.exe>" --reason "why"
-```
+`deploy.sh` and `upgrade.sh` refuse immediately when launched by a tool inside
+a running turn. Detaching either command does not make it safe: the child
+inherits the turn marker and would otherwise wait for its parent to go idle.
 
-Both are performed by the sentinel after your turn ends, and both settle their own effect by checking
-`/health` from outside. The turn that asked dies as `unfinished` — **that is expected**, and the
-request is already on disk before you die.
+For a declared spell, `spell_export` and `request spell` remain available when
+the plan needs more than a binary upgrade. The outside-the-turn boundary still
+applies.
+
+The sentinel checks `/health` from outside after the turn ends. The request is
+on disk before the process changes. A candidate whose checkout does not
+contain the installed commit is refused, avoiding a silent downgrade; bring
+that checkout forward and rebuild first.
 
 ## Why a spell and not just `bash`
 
@@ -58,9 +72,8 @@ plan whose point never happened.
 
 ## The rules that keep it from breaking
 
-1. **Never queue an upgrade while `health.current` is non-null.** `upgrade.sh` refuses to swap under a
-   running turn, so the request sits in the queue - which is safe, but it means the upgrade will not
-   happen until the node is genuinely idle. Do not interpret "queued" as "done".
+1. **Queueing while this turn runs is expected.** The sentinel waits for idle
+   before swapping. Do not interpret "queued" as "done".
 2. **Check the idle state from *outside* the turn** (the sentinel log, a file, a wake from before).
    Asking your own node is the deadlock above.
 3. **Failure is silent only if you let it be.** Read `sentinel.log` and the request record in
@@ -97,7 +110,7 @@ hand and read `sentinel.log`; do not hand-edit the database or the binary while 
 bash scripts/deploy.sh --reason "what changed and why"
 ```
 
-It refuses a dirty tree, refuses a tree behind `origin/main`, proves the binary on a scratch port before it
+Run this from outside the node's turn. It refuses a dirty tree, refuses a tree behind `origin/main`, proves the binary on a scratch port before it
 goes near the running node, installs through `scripts/upgrade.sh`, records commit/branch/hash/time/reason in
 `installed.txt`, and refuses if the pid answering is not the pid the install recorded. The refusals are paid
 for: a node behind main served a diff route that answered `unknown_action:patch`; a gate that stopped one of
@@ -124,7 +137,7 @@ hypotheses (a cache, a profile lock, the runtime) had not.
 
 ## The zero-downtime path, for Lua-only changes
 
-A change to `lua/core/*` needs no process restart: the core is read from disk when `WASM_AGENT_LUA_ROOT`
-points at this tree, and the read workers are hot-swappable (spawned on demand, retired when idle). Deploy the
-files and the next worker spawns with them - no outage to measure, and no turn to lose. Prefer it when it
-applies; Rust changes still need the binary path.
+Only development nodes explicitly started with `WASM_AGENT_LUA_ROOT` read Lua
+from disk. Production normally uses Lua embedded in `wa.exe`; changing
+`lua/core/*` there requires building and upgrading the binary. Do not claim a
+disk edit is live just because a worker retired and respawned.

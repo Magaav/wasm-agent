@@ -37,16 +37,44 @@ local function effective_role(user)
   return user.role
 end
 
-local function agent_for(session, node)
+-- The conversation a turn belongs to, when the client names one.
+--
+-- Without a name the node reuses the newest open session for (user, node) - so a
+-- window can neither *start* a thread nor return to one: every turn from every
+-- window lands in whatever was written to last, and that one thread grows without
+-- end. The name is the client's only way to say "this one", and it is checked here
+-- because this is the only place that knows who is asking. A thread belongs to its
+-- author: a caller who is not a master must not address someone else's thread, and
+-- must be refused rather than quietly served it.
+local function agent_for(session, node, thread)
   local user = users.current(session)
   local role = effective_role(user)
   node = node or ""
-  if not agent or agent.user ~= user.id or agent.role ~= role or agent.node ~= node then
+  local want = thread or ""
+  if want ~= "" then
+    local existing = memory.session(want)
+    if existing and existing.user_id ~= user.id and not users.is_master(role) then
+      return nil, "forbidden_thread"
+    end
+  end
+  -- The *requested* name is part of the cache key, not the resolved session id: an
+  -- unnamed turn resolves to a real session, and comparing that against "" would
+  -- rebuild the agent on every turn.
+  if not agent or agent.user ~= user.id or agent.role ~= role or agent.node ~= node
+     or agent.thread ~= want then
     if agent then agent:close() end
-    agent = agentlib.new(nil, emit, role, user.id, node)
+    agent = agentlib.new(want ~= "" and want or nil, emit, role, user.id, node,
+                         { start_if_missing = want ~= "" })
+    agent.thread = want
   end
   return agent
 end
+
+-- Exported so a test can ask which thread a turn would land in without a model:
+-- building the agent touches the ledger and never the provider. It is a global like
+-- every other handler in this file, and reachable only by name - the HTTP routes are
+-- matched in Rust, so nothing on the wire can reach it.
+wa_agent_for = agent_for
 
 -- Is this selector a remote peer?
 local function remote_target(node)
@@ -66,7 +94,12 @@ local function parse_turn_body(body)
   local raw = body or ""
   if raw:sub(1, 1) ~= "{" then return raw, {} end
   local ok, decoded = pcall(json.decode, raw)
-  if not ok or type(decoded) ~= "table" or decoded.images == nil then
+  -- A body is structured when it carries something a plain string cannot: pictures,
+  -- or the name of the conversation it belongs to. A body that is *only* text stays
+  -- text even when it happens to parse as JSON, so a message someone typed as
+  -- {"text":"hi"} still arrives verbatim rather than being silently reinterpreted.
+  if not ok or type(decoded) ~= "table"
+     or (decoded.images == nil and type(decoded.thread) ~= "string") then
     return raw, {}
   end
   local images = {}
@@ -75,18 +108,27 @@ local function parse_turn_body(body)
     if not reference then return nil, nil, problem end
     images[#images + 1] = reference
   end
-  return tostring(decoded.text or ""), images
+  local thread = decoded.thread
+  if thread == "" then thread = nil end
+  return tostring(decoded.text or ""), images, nil, thread
 end
 
+-- Exported for the same reason as `wa_agent_for`: what a body *means* is the one thing
+-- a caller cannot see, and getting it wrong shows the model a different message than
+-- the one that was typed. Text stays text; only pictures and a thread name make a body
+-- structured.
+wa_parse_turn_body = parse_turn_body
+
 function wa_reply(text, session, node)
-  local prompt, images, problem = parse_turn_body(text)
+  local prompt, images, problem, thread = parse_turn_body(text)
   if problem then return json.encode({ error = redact.text(problem) }) end
   if remote_target(node) then
     local result = nodeslib.remote_call(node, "chat", { text = prompt or "" })
     if result and result.error then return json.encode({ error = redact.text(tostring(result.error)) }) end
     return json.encode({ reply = result and result.reply or "" })
   end
-  local bot = agent_for(session, node)
+  local bot, refusal = agent_for(session, node, thread)
+  if not bot then return json.encode({ error = refusal }) end
   local ok, reply = pcall(bot.turn, bot, prompt or "", images)
   if not ok then return json.encode({ error = redact.text(tostring(reply)) }) end
   return json.encode({ reply = reply })
@@ -95,7 +137,7 @@ end
 -- Streaming turn: events are pushed to the SSE client as the agent runs.
 -- When a peer is selected, its stream is relayed here unchanged.
 function wa_reply_stream(text, session, node)
-  local prompt, images, problem = parse_turn_body(text)
+  local prompt, images, problem, thread = parse_turn_body(text)
   if problem then
     emit({ type = "error", error = redact.text(problem) })
     return ""
@@ -105,7 +147,11 @@ function wa_reply_stream(text, session, node)
     if result and result.error then emit({ type = "error", error = redact.text(tostring(result.error)) }) end
     return ""
   end
-  local bot = agent_for(session, node)
+  local bot, refusal = agent_for(session, node, thread)
+  if not bot then
+    emit({ type = "error", error = refusal })
+    return ""
+  end
   local ok, reply = pcall(bot.turn, bot, prompt or "", images)
   if not ok then emit({ type = "error", error = redact.text(tostring(reply)) }) end
   return ""

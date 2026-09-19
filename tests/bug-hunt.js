@@ -52,7 +52,10 @@ class El {
   async fire(type, event = {}) { for (const fn of this.listeners[type] || []) await fn(event); }
 }
 const reg = new Map();
-const byId = (id) => { if (!reg.has(id)) reg.set(id, new El("div", id)); return reg.get(id); };
+const byId = (id) => {
+  if (!reg.has(id)) reg.set(id, MENU_IDS.has(id) ? new WaMenuStub(id) : new El("div", id));
+  return reg.get(id);
+};
 
 // wa-message is a custom element from components.js that builds .body when it is
 // appended. The stub models just that much, because app.js writes into .body and a
@@ -63,6 +66,26 @@ class WaMessageStub extends El {
     this.body = new El("div");
   }
 }
+
+// wa-menu is the other custom element app.js talks to, and the stub was missing it: every id came
+// back as a bare div, so `commandMenu.close()` on submit was a TypeError here while the real page -
+// which declares `<wa-menu id="command-menu">` - was fine. The stub models the overlay contract
+// (open/show/close, and the keyboard entry points), because app.js is entitled to call them and a
+// harness that cannot run the code it is testing proves nothing about it.
+class WaMenuStub extends El {
+  constructor(id) {
+    super("wa-menu", id);
+    this.open = false;
+    this.items = [];
+  }
+  show() { this.open = true; }
+  close() { this.open = false; }
+  toggle() { if (this.open) this.close(); else this.show(); }
+  openAt() { this.open = true; }
+  move() {}
+  activate() { return false; }
+}
+const MENU_IDS = new Set(["user-menu", "context-menu", "command-menu"]);
 const documentStub = {
   getElementById: byId,
   createElement: (t) => (String(t).toLowerCase() === "wa-message" ? new WaMessageStub() : new El(t)),

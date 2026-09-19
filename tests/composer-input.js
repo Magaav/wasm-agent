@@ -58,8 +58,24 @@ class El {
 }
 
 const registry = new Map();
+// `wa-menu` is a custom element app.js opens and closes; a bare div has no `close`, so the stub
+// models the overlay contract for the ids index.html declares as menus.
+class WaMenuStub extends El {
+  constructor(id) {
+    super("wa-menu", id);
+    this.open = false;
+    this.items = [];
+  }
+  show() { this.open = true; }
+  close() { this.open = false; }
+  toggle() { if (this.open) this.close(); else this.show(); }
+  openAt() { this.open = true; }
+  move() {}
+  activate() { return false; }
+}
+const MENU_IDS = new Set(["user-menu", "context-menu", "command-menu"]);
 const byId = (id) => {
-  if (!registry.has(id)) registry.set(id, new El("div", id));
+  if (!registry.has(id)) registry.set(id, MENU_IDS.has(id) ? new WaMenuStub(id) : new El("div", id));
   return registry.get(id);
 };
 

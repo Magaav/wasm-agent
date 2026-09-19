@@ -22,6 +22,7 @@ shell. The thing that can restart your agent must not be something your agent ca
 ```
 wa-sentinel request restart  --reason "why"
 wa-sentinel request upgrade  --binary /path/to/wa --reason "why"
+wa-sentinel request upgrade  --binary /path/to/wa --session <id> --prompt "continue after upgrade" --reason "why"
 wa-sentinel request spell    --file /path/to/plan.json --reason "why"
 wa-sentinel request wake     --session <id> --prompt "..." --reason "why"
 wa-sentinel request run      --script /path/to/script.sh --reason "why"
@@ -29,6 +30,11 @@ wa-sentinel request run      --script /path/to/script.sh --reason "why"
 
 `request` **writes a file** and returns. `watch` (or `once`) performs it. That split is the whole
 point: the writer may die immediately afterwards, and the request still lands.
+An upgrade with both `--session` and `--prompt` wakes that session only after a
+successful upgrade, avoiding a race between separately queued upgrade and wake
+requests. `installed.txt` records the exact hash even for sentinel upgrades;
+their source commit remains explicitly unverified unless built by the clean
+deployment gate. The detailed upgrade transcript is in `sentinel/upgrade.log`.
 
 The box is `<config>/sentinel/requests/*.json` — `~/.wasm-agent/sentinel/requests` by default. A file
 survives the death of whoever wrote it, needs no socket, and works **when the node is down**, which is
