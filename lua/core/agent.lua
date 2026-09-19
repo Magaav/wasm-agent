@@ -257,14 +257,25 @@ end
 -- Exported so tests and diagnostics can assert what instructions a role runs with.
 M.system_prompt = system_prompt
 
-function M.new(session_id, on_event, role, user, node)
+function M.new(session_id, on_event, role, user, node, opts)
   role = role or "master"
   user = user or "master"
   node = node or ""
+  opts = opts or {}
   local session
   if session_id then
     session_id = session_id
     session = memory.session(session_id)
+    -- A named thread that does not exist yet is a request to *start* one, not an
+    -- error - that is what "new session" means from a client that has no id to
+    -- offer. It is started under the name the caller asked for, so the caller's
+    -- next turn addresses the same thread without being told its id back.
+    if not session and opts.start_if_missing then
+      memory.start_session(node, "chat", {
+        id = session_id, user_id = user, node_id = node, title = "chat",
+      })
+      session = memory.session(session_id)
+    end
   end
   if not session then
     session_id = memory.ensure_session(user, node, "chat")

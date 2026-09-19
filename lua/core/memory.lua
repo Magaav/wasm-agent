@@ -303,9 +303,13 @@ end
 -- verbatim, kept forever) so a failing task can be reproduced and turned into a
 -- fixture.
 
+-- `opts.id` starts the session under a name the caller already chose. A client that
+-- wants a *new* thread says so by naming one it knows is unused; letting it pick the
+-- name means the id it is holding and the id the node stored are the same thing, with
+-- no round trip in which the node could answer "started" and hand back something else.
 function M.start_session(route_id, objective, opts)
   opts = opts or {}
-  local id = host.uuid()
+  local id = opts.id or host.uuid()
   local now = host.now()
   exec("INSERT INTO sessions(id,route_id,objective,started_at,user_id,node_id,title,mode,updated_at) " ..
        "VALUES(?,?,?,?,?,?,?,?,?)",
