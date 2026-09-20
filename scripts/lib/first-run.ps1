@@ -87,6 +87,21 @@ function Save-WaSetup {
       -not (Test-Path -LiteralPath $Workspace -PathType Container)) { throw 'existing_native_workspace_required' }
   $workspacePath = (Get-Item -LiteralPath $Workspace).FullName
   $existing = Read-WaConfiguration $Config
+  if ((Test-Path -LiteralPath (Join-Path $Config 'env')) -and -not $existing['WASM_AGENT_ONBOARDING_MODE']) {
+    throw 'unmanaged_configuration: use a clean WASM_AGENT_HOME; setup will not adopt an operator configuration'
+  }
+  $launchers = Join-Path $Config 'launchers'
+  if (Test-Path -LiteralPath $launchers) {
+    foreach ($record in @(Get-ChildItem -LiteralPath $launchers -Filter '*.pid' -File -Recurse)) {
+      $serverPid = 0
+      if (-not [int]::TryParse([IO.File]::ReadAllText($record.FullName).Trim(), [ref]$serverPid) -or $serverPid -le 0) {
+        throw 'invalid_server_pid_record: cannot prove setup is safe while a server may be running'
+      }
+      if (Get-Process -Id $serverPid -ErrorAction SilentlyContinue) {
+        throw 'server_still_running: finish the task and stop the recorded server before changing setup'
+      }
+    }
+  }
   $updates = [ordered]@{
     WASM_AGENT_ONBOARDING_MODE = $Mode
     WASM_AGENT_DISPLAY_NAME = $Name.Trim()
@@ -183,7 +198,7 @@ function Test-WaWebView {
   return $false
 }
 
-function Start-WaLocalUi([string]$Install, [string]$Config, [int]$Port, [switch]$Browser) {
+function Start-WaLocalUi([string]$Install, [string]$Config, [int]$Port, [switch]$Browser, [switch]$NoOpen) {
   $settings = Read-WaConfiguration $Config
   if ($settings['WASM_AGENT_ONBOARDING_MODE'] -ne 'personal') {
     throw 'personal_setup_required: guest networking is disabled pending verified enrollment'
@@ -191,10 +206,12 @@ function Start-WaLocalUi([string]$Install, [string]$Config, [int]$Port, [switch]
   if (-not (Test-Path -LiteralPath $settings['WASM_AGENT_WORKSPACE'] -PathType Container)) {
     throw 'configured_workspace_unavailable'
   }
-  foreach ($name in @('WASM_AGENT_LUA_ROOT', 'WA_SCRIPT', 'WASM_AGENT_RENDEZVOUS', 'WASM_AGENT_SYNC_TO')) {
-    if ([Environment]::GetEnvironmentVariable($name, 'Process')) { throw "unsafe_launch_override: $name" }
+  foreach ($entry in @(Get-ChildItem Env: | Where-Object {
+    ($_.Name -like 'WASM_AGENT_*' -and $_.Name -ne 'WASM_AGENT_HOME') -or $_.Name -eq 'WA_SCRIPT'
+  })) {
+    if ($entry.Value) { throw "unsafe_launch_override: $($entry.Name)" }
   }
-  if (-not $Browser -and -not (Test-WaWebView)) {
+  if (-not $NoOpen -and -not $Browser -and -not (Test-WaWebView)) {
     throw 'webview2_runtime_missing: install Microsoft WebView2 Runtime or use wa ui -Browser'
   }
   # Reconnect only to the recorded process from THIS installation, not any process
@@ -238,6 +255,7 @@ function Start-WaLocalUi([string]$Install, [string]$Config, [int]$Port, [switch]
     if (-not $ready) { throw "server_start_unverified: inspect $runtime/serve-$Port.err.log; PID $($process.Id)" }
   }
   $url = "http://127.0.0.1:$Port/"
+  if ($NoOpen) { Write-Output "Local server verified at $url; no window requested."; return }
   if ($Browser) { Start-Process $url }
   else {
     $env:WASM_AGENT_UI_URL = $url

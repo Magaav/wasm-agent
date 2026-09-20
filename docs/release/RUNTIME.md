@@ -55,8 +55,11 @@ existing instructions and unrelated configuration. Conflicting provider selectio
 previously saved through the UI are reported, not silently overridden.
 
 Setup does not enroll either mode remotely; it clears rendezvous/sync settings.
-Do not use it to reconfigure an already connected operator deployment. Process
-environment can override configuration; setup refuses conflicts it detects.
+It refuses pre-existing configuration not created by this setup flow, and refuses
+changes while a recorded server is still running. Do not use it to reconfigure an
+operator deployment; select a separate `WASM_AGENT_HOME` instead. Process
+environment can override configuration; setup refuses conflicts it detects,
+and the UI launcher refuses runtime overrides other than `WASM_AGENT_HOME`.
 
 ## Guest / assisted mode
 
@@ -78,7 +81,8 @@ prerequisites, including Bash for POSIX shell commands.
 The launcher verifies the actual server PID owns its port. If another process
 owns it, it refuses rather than connecting to someone else's agent. Use
 `wa ui -Port 18799` to choose another unused port; the client bridge uses the next
-port. It does not stop or replace existing windows. Launcher logs and PID records
+port. `wa ui -NoOpen` starts/verifies the server without opening a window, useful
+for diagnostics. It does not stop or replace existing windows. Launcher logs and PID records
 live under the configuration directory, not inside the immutable package.
 
 If a launch fails, inspect the reported log and PID. Never stop all processes

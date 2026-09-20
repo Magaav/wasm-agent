@@ -8,6 +8,7 @@ Set-StrictMode -Version Latest
 $work = Join-Path ([IO.Path]::GetTempPath()) ('wa-package-runtime-' + [guid]::NewGuid())
 $environment = @{}
 $mock = $null
+$server = $null
 $checks = 0
 $global:LASTEXITCODE = 0
 function Check([bool]$Value, [string]$Label) {
@@ -61,7 +62,7 @@ try {
     if (-not (Test-Path -LiteralPath $portFile)) { throw 'mock_provider_failed_to_start' }
     $url = 'http://127.0.0.1:' + [IO.File]::ReadAllText($portFile) + '/v1'
     $config = Get-WaConfigDirectory
-    Write-WaPrivateText (Join-Path $config 'env') "WASM_AGENT_LLM_API_KEY=fixture-key`n"
+    Write-WaPrivateText (Join-Path $config 'env') "WASM_AGENT_ONBOARDING_MODE=personal`nWASM_AGENT_LLM_API_KEY=fixture-key`n"
     $command = Join-Path $installed 'bin/wa.cmd'
     & $command setup -NonInteractive -Mode personal -Name 'Fixture Agent' -Workspace $workspace -BaseUrl $url -Model fixture -ValidateProvider
     Check ($LASTEXITCODE -eq 0) 'packaged setup validates mock provider'
@@ -75,6 +76,25 @@ try {
     & $command doctor
     Check ($LASTEXITCODE -eq 0) 'packaged doctor runs without changing package inventory'
     Test-WaReleasePackage $installed | Out-Null
+    # Reserve/check a pair, then let the packaged launcher bind it. Its PID check
+    # still catches a process that wins the small release/bind race.
+    $one = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 0)
+    $one.Start(); $port = $one.LocalEndpoint.Port
+    $two = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, ($port + 1))
+    try { $two.Start() } finally { $one.Stop(); $two.Stop() }
+    & $command ui -NoOpen -Port $port
+    Check ($LASTEXITCODE -eq 0) 'packaged UI launcher starts and verifies its own server without opening a window'
+    $owner = @(Get-NetTCPConnection -LocalPort $port -State Listen)[0].OwningProcess
+    $server = Get-Process -Id $owner
+    Check ($server.Path -eq (Join-Path $installed 'wa.exe')) 'scratch listener belongs to installed candidate'
+    $page = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/" -TimeoutSec 5
+    Check ($page.StatusCode -eq 200 -and $page.Content.Contains('app.js')) 'packaged UI assets served from installation with spaces'
+    & $command ui -NoOpen -Port $port
+    Check ($LASTEXITCODE -eq 0 -and @(Get-NetTCPConnection -LocalPort $port -State Listen)[0].OwningProcess -eq $owner) 'second launch reuses only its recorded server'
+    Test-WaReleasePackage $installed | Out-Null
+    $checks++; Write-Output 'PASS running server writes no mutable files into package'
+    Stop-Process -Id $server.Id -ErrorAction Stop
+    $server.WaitForExit(); $server = $null
     $values = Read-WaConfiguration $config
     $values['WASM_AGENT_LLM_API_KEY'] = 'wrong-fixture-key'
     $failure = ''
@@ -86,6 +106,7 @@ try {
   Write-Output "packaged runtime: $checks passed (synthetic provider)."
   Write-Output 'NOT TESTED: unfamiliar clean Windows VM, real model quality, customer enrollment, or public release safety.'
 } finally {
+  if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -ErrorAction SilentlyContinue }
   if ($mock -and -not $mock.HasExited) { Stop-Process -Id $mock.Id -ErrorAction SilentlyContinue }
   foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'WASM_AGENT_*' -or $_.Name -like 'WA_*' })) {
     [Environment]::SetEnvironmentVariable($entry.Name, $null, 'Process')
