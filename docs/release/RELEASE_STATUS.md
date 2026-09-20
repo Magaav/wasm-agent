@@ -1,11 +1,38 @@
 # Release status
 
 **Windows developer candidate: built and verified as described below.**
-**Public/customer release: NO-GO.** The managed onboarding follow-up adds pinned
-operator consent, model-free guest execution, registry-controlled promotion,
-revocation and a background PowerShell bootstrap. Its public descriptor remains
-disabled pending package publication and managed-service deployment. Legacy guest
-setup remains offline. No live installation was upgraded or customer enrolled.
+**Live assisted alpha: GO for disposable/approved pilots; general customer release:
+NO-GO.** The managed onboarding flow is publicly reachable and one disposable
+Windows journey passed end to end. It provides pinned operator consent, model-free
+guest execution, registry-controlled promotion, revocation and a background
+PowerShell bootstrap. Ordinary `wa setup guest` remains offline.
+
+## Live assisted-alpha evidence (alpha.10)
+
+- Source: `e666bfa` (branch `change/independent-onboarding`; not merged to `main`).
+- Public ZIP: `https://rendezvous.colmeio.com/releases/wasm-agent-0.1.0-alpha.10-windows-x64.zip`.
+- SHA-256: `e9c43edff98d7d9fd67a4ebd0a64baaf1cc6d31ba7ca4e7af871360a256aa018`.
+- Public descriptor and script: `/releases/windows-service.json` and
+  `/releases/install.ps1` on `rendezvous.colmeio.com`.
+- Live service: protocol 1, two pinned existing operator identities, systemd units
+  using the deployment-gate-certified ARM binary. Installed record names source
+  `e666bfa` and SHA-256 `01ca90df9b055c8319466e7db9ae443b9166e120360c1f1c1d6bf4f0f2dbec26`.
+- Exact alpha.10 package: PASS 20 extracted personal-runtime checks and PASS 50
+  isolated managed-network/bootstrap checks, both zero-skip where applicable.
+- Public one-liner test: downloaded the hosted script, descriptor and ZIP into a
+  fresh local install/home; background install completed; node name became
+  `live-e2e-customer`; registration and relay attachment were verified; no model
+  key was configured.
+- Live operator effect: cloud operator `2b941f…` sent a signed write through the
+  public relay; exact bytes `live-one-liner-proof-1789913200` appeared on the
+  disposable Windows home. `wa disconnect` then revoked access; the same operator's
+  next write returned `unknown_caller`, bytes stayed unchanged, and only the
+  fixture's recorded PID was stopped before its directory was removed.
+
+Still unverified: unfamiliar user on a clean VM, publisher/code signing, issued
+single-use invitations, real operator-model task quality, diff/undo/recovery in
+this assisted journey, and the broader conversation-isolation gate. These block a
+general customer-ready claim.
 
 ## Managed onboarding follow-up
 
