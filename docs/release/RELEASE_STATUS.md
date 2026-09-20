@@ -9,11 +9,44 @@ setup remains offline. No live installation was upgraded or customer enrolled.
 
 ## Managed onboarding follow-up
 
-See [ONBOARDING.md](../ONBOARDING.md). Native isolated integration covers two
-operators and two customers: real file effects, unrelated callers, target binding,
-self-promotion refusal, administrator grants, relay result ownership, local
-revocation and expiry. Full follow-up artifact evidence is recorded after the
-candidate/bootstrap checks below; alpha.2 predates this protocol.
+See [ONBOARDING.md](../ONBOARDING.md). Follow-up candidate:
+
+- Version: `0.1.0-alpha.4`; source `3d088b7b26dc08330706bcb8440464e354f98223`.
+- ZIP: `dist/wasm-agent-0.1.0-alpha.4-windows-x64.zip` (local, ignored, unpublished).
+- SHA-256: `a567455a6fa2afd39a29c4382a2ce9cd72f8be4bbd428b4cc8ceae9b63217e54`.
+- Inventory: **19 assets plus manifest**. The packaged guide documents managed
+  connection, consent expiry, local audit, promotion and revocation.
+
+Verification on the development Windows machine:
+
+| Check | Result / boundary |
+| --- | --- |
+| Locked/offline package build | PASS; all three binaries built from clean source. Optional window icon still omitted without `windres`. |
+| `test-managed-network.cjs <packaged-wa.exe> <alpha.4.zip>` | **PASS: 49 checks, zero skips.** Isolated registry, two administrators, two customer nodes, plus a freshly bootstrapped customer installation. |
+| Paste-once UX | Typed name and CONNECT through redirected console input while installation runs in a background job; verified registration **and outbound relay attachment**, then a real signed file effect with no model. |
+| Negative controls | Self-promotion, wrong target, unrelated admin/customer, role-body tampering, replay across recipient/registry restart, relay-route bypass/result theft, foreign Origin/Host, revoked/expired access and bad package checksum refused. |
+| Owner control | Packaged disconnect/reconnect, operator promotion/demotion, local audit attribution, cancellation without enrollment; completed background install reported if retained. |
+| Isolation from operator shell | Service command shim ignores inherited identity/key/provider/script overrides. Customer config contains no provider key. Persistent user PATH mutation deliberately not performed by this isolated test. |
+| Existing first-run/integrity suites | PASS: 27 setup checks and 17 synthetic integrity/mutation checks. |
+| Extracted alpha.4 personal runtime | PASS: 20 checks, synthetic local provider, actual native write, memory/session persistence, package integrity and launcher ownership. |
+| Browser UI with packaged binary | PASS: structure, interrupted tools, real mid-run reload using repository fixtures. |
+| Full smoke | Initial serial run FAILED in the concurrency sub-suite after the wedge line; standalone sub-suite rerun passed. Final full rerun recorded below. |
+| Live deployment, public download, clean VM, real operator-model/customer journey | NOT RUN. |
+
+The packaged check command was:
+
+```powershell
+node scripts/test-managed-network.cjs `
+  dist/wasm-agent-0.1.0-alpha.4-windows-x64/wa.exe `
+  dist/wasm-agent-0.1.0-alpha.4-windows-x64.zip
+```
+
+Logs: `pi-astra-package-alpha4.log`, `pi-astra-bootstrap-alpha4-packaged.log`,
+`pi-astra-first-run-alpha4.log`, `pi-astra-tools-alpha4.log`,
+`pi-astra-runtime-alpha4.log`, `pi-astra-ui-alpha4.log`,
+`pi-astra-smoke-alpha4.log` and `pi-astra-concurrency-alpha4.log` in the session
+scratch directory. These checks use neither real provider credentials nor live
+rendezvous enrollment. Alpha.2 below predates this protocol.
 
 The current public service has not been upgraded to managed protocol 1. The
 bootstrap refuses it. GitHub CLI on the cloud host is not authenticated; no public
@@ -63,7 +96,7 @@ The shell built with a warning that its optional embedded icon was omitted becau
 - Browser test now waits for the asynchronous renderer/reload verdict and isolates
   both its browser profile and node home, not only its database.
 
-## Verification
+## Previous verification (alpha.2)
 
 Checks were run on the development Windows machine with isolated directories and
 ports. This is not a fresh Windows VM or an unfamiliar-user study.
@@ -111,14 +144,18 @@ Retained local scratch logs: `pi-astra-package-alpha2.log`,
 
 ## Remaining release blockers
 
-1. HTTP authority/origin handling and cross-worker conversation/stream ownership.
-   Baseline review findings were not fixed by this packaging work.
-2. Genuine customer enrollment: verified operator identity, consent, scoped grants,
-   customer isolation and effective revocation. An offline guest profile is not
-   an invitation implementation. Do not onboard customers by editing around it.
+1. Legacy/operator HTTP authority/origin handling and cross-worker conversation/
+   stream ownership. Managed guests now reject foreign Host/Origin and unapproved
+   peer calls, but this does not certify the unrestricted operator UI or its workers.
+2. Approve/deploy the managed registry and hardened operator environment; review the
+   protocol independently before actual customers. The tested grant is explicit
+   **full-user-account** control, not a task/workspace sandbox or a finished issued-
+   invitation/customer-consent UI. Do not enable the descriptor against legacy nodes.
 3. Clean Windows environment, runtime prerequisite verification, a real model-backed
    user journey, diff/undo/recovery acceptance and unfamiliar-user success.
-4. Review the intermittent concurrency-test failure and preserve full failure output.
+4. Investigate the intermittent concurrency-test failure (also observed on the
+   alpha.4 serial smoke run). The parent smoke script now retains the full sub-suite
+   output instead of hiding later failures behind an earlier successful grep.
 5. Publisher authenticity, public distribution and external update integration.
    The fresh installer intentionally refuses existing installations.
 
