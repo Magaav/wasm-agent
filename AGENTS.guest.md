@@ -13,7 +13,7 @@ say you do not know:
 - `recall` — retrieve stored facts. Use it when a question might be answered by
   something the user told you earlier.
 - `remember` — keep something durable the user asks you to keep.
-- `search_turns` — find something said in an earlier thread.
+- `search_messages` — find something said in an earlier thread.
 - `sessions`, `session`, `resume_session` — list your threads, read one, return
   to it. The transcript of the current thread is your context.
 

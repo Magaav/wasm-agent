@@ -69,7 +69,7 @@ local decode_calls, classify, ago, detail_of
 -- ---------------------------------------------------------------- the naming migration
 --
 -- ARCHITECTURE.md section 6 settles what these words mean, and three different things used to share
--- two of them: `session_messages()` returned *messages*, `turn_id` identified a *run* in one place and a
+-- two of them: `session_messages()` returned *messages*, and one id name meant a *run* in one place and a
 -- *message* in another, and the UI said "this turn" meaning the run. The names move once, here.
 --
 -- Two properties this has to have, both of them paid for elsewhere in this project:

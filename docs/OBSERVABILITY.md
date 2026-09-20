@@ -8,7 +8,7 @@ Use wasm-agent and Pi normally, then review the next day or two of actual work.
 `harness_events` is an append-only, node-local SQLite ledger. Request, summary,
 tool and whole-turn spans persist a start before the operation and an end after
 it. An unmatched start means running or interrupted—not zero cost. Request
-events link to the actual user row through `turn_id`; final outcome events link
+events link to the actual user row through `run_id`; final outcome events link
 to the assistant row. Failed requests with no provider usage remain unmeasured.
 
 Each model end stores the raw usage, normalized usage, provider/model, request ID,
@@ -57,13 +57,13 @@ Each request start also records JSON byte counts by message role, plus the
 source bytes of assistant reasoning and tool arguments. These are diagnostic
 subsets, not token allocations: JSON escaping and provider tokenization differ.
 They help identify growth without copying prompt text into the event ledger.
-`read_many` can request up to eight independent file ranges in one decision;
+`read_many` can request up to eight independent file ranges in one step;
 each result uses the same read path and reports its own failure. Large combined
 results keep the full JSON in an output artifact for exact retrieval.
 The 50 KiB tool-result limit applies to the entire model-facing JSON view,
 including nested session pages, not just a top-level `content` or `stdout`
-field. A large session page retains its newest complete turns and a cursor for
-earlier turns; its exact original remains available through `tool_result`.
+field. A large session page retains its newest complete messages and a cursor for
+earlier messages; its exact original remains available through `tool_result`.
 Older oversized rows are projected when rebuilding a prompt, without changing
 their stored transcript bytes. This also bounds a resumed session that predates
 the output rule.

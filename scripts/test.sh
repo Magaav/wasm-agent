@@ -782,6 +782,11 @@ if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; th
   echo "line endings ok"
 fi
 
+# No old name survives (ARCHITECTURE.md section 6). A rename that leaves both names in the tree is worse
+# than not doing it, so it is a check rather than a convention - and it greps for the old *names*, not for
+# the word "turn", which section 6 keeps for one speaker's contribution.
+bash scripts/check-naming.sh
+
 # The image-attachment tests, plus the helper tests that came with them. They were
 # written, they passed when run by hand, and nothing ran them - which is how a test
 # quietly stops being true. Each file is self-contained and prints its own verdict,

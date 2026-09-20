@@ -590,7 +590,7 @@ fn run_bounded(program: &str, flag: &str, command: &str, cwd: &str) -> Result<Va
         // would silently disarm the in-run refusal until those scripts were replaced too. The marker
         // says "this shell is inside a run" (ARCHITECTURE.md section 6); the rename needs a release
         // that sets and checks both names.
-        process.env("WASM_AGENT_IN_TURN", "1");
+        process.env("WASM_AGENT_IN_TURN", "1");   // naming-check: allow (read by the deploy scripts)
     }
     if !cwd.is_empty() {
         process.current_dir(cwd);

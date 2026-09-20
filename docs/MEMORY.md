@@ -14,8 +14,8 @@ Two rules drive all of this:
 | Store | What it is | Tool |
 | --- | --- | --- |
 | `memories` (+FTS) | distilled facts | `remember`, `recall` |
-| `messages` / `conversations` (+FTS) | **the external inbox/ledger** (WhatsApp, mail) | `search_messages`, `conversation` |
-| `turns` (+FTS) | **the agent's own dialogue** — its transcript | `sessions`, `session`, `search_turns`, `resume_session` |
+| `ledger_messages` / `conversations` (+FTS) | **the external inbox/ledger** (WhatsApp, mail) | `search_ledger`, `conversation` |
+| `messages` (+FTS) | **the agent's own dialogue** — its transcript | `sessions`, `session`, `search_messages`, `resume_session` |
 | `runs` | effect/settlement record per turn | (internal) |
 
 `messages` is *not* "what we talked about" — it is other people's messages.
@@ -28,16 +28,16 @@ thread from talking locally, and a guest's threads are their own. `ensure_sessio
 reuses the newest open session for that pair, so a restart continues the thread
 instead of starting a new one.
 
-`turns` holds `seq, role (user|assistant|tool|summary), content, tool_calls,
+`messages` holds `seq, role (user|assistant|tool|summary), content, tool_calls,
 tool_call_id, tool_name, tokens, ms, ok, debug, trace`. **The transcript is the
 context**: `agent.lua` rebuilds the provider messages from it every turn
-(system + AGENTS.md + summary + turns after the watermark). There is no separate
+(system + AGENTS.md + summary + messages after the watermark). There is no separate
 in-memory message list, which is what makes restarts resumable.
 
 ## Unfinished sessions (recovery)
 
 A session is unfinished when its transcript just *ends* — after a question, after a
-tool result, or after a decision whose tools have no recorded result. That shape is
+tool result, or after a step whose tools have no recorded result. That shape is
 indistinguishable from "the answer is still coming": a process that was killed cannot
 write a flag saying so (the exit path that would set one does not run), and a process
 that is *alive* cannot write one either, because it has not stopped. Nothing in a row
@@ -45,7 +45,7 @@ tells the two apart.
 
 The state was once called `interrupted`, and the word was wrong in a way that cost
 credibility rather than data: a live 426-turn run was reported as interrupted on every
-poll while it was demonstrably writing turns, and `wa resume` would have written a
+poll while it was demonstrably writing messages, and `wa resume` would have written a
 durable "the process died" record for a thread that had not. A name that asserts an
 event we cannot observe is a claim the code should not make, so the derived state is
 `unfinished` and the notice says both possibilities out loud.
@@ -61,8 +61,8 @@ proceeds. The last turn is an exact record of how far the process got:
 | `unfinished` | user, tool, or assistant with `tool_calls` | no answer is recorded after this turn; the process may have stopped or may still be working |
 
 `memory.session_state(id)` returns that, plus where it stopped and which calls of the
-last decision have no recorded result: "1 of 2 never reported" is a different fact
-from "nothing ran", and only the decision knows which — when the process dies between
+last step have no recorded result: "1 of 2 never reported" is a different fact
+from "nothing ran", and only the step knows which — when the process dies between
 two calls of a batch, the tail is a tool turn whose *sibling* never ran.
 
 Derivation is always current but it forgets: resume the thread and the tail is an
@@ -101,7 +101,7 @@ an unfinished thread:
 
 Context-only is deliberate: the transcript is what was said, and a synthetic turn in
 it would be replayed to every later request as if the agent had said it, and would be
-found by `search_turns`.
+found by `search_messages`.
 
 Not to be confused with the `resume_session` **tool**, which folds a past session into
 the current one's context: that is a recall aid, this is crash recovery.
@@ -113,15 +113,15 @@ kills a child asserts the timing of a signal instead.
 
 To see it for real rather than in a fixture, start a turn that asks for a slow tool
 call, kill the process while the tool is running, and read the thread back — the
-ledger keeps the decision with no result, and `wa resume` names the call:
+ledger keeps the step with no result, and `wa resume` names the call:
 
 ```sh
 wa --db /tmp/kill.db chat "Run exactly this bash command with bash, then repeat its output: ping -n 8 127.0.0.1" &
-sleep 7        # mid tool call, after the decision was written
+sleep 7        # mid tool call, after the step was written
 kill %1
 wa --db /tmp/kill.db resume
 #   waiting: 1 thread
-#   544e4e9c  turns=2  1 tool call(s) never reported: bash, 5s ago
+#   544e4e9c  messages=2  1 tool call(s) never reported: bash, 5s ago
 #             recover   wa resume --session 544e4e9c "continue where you stopped"
 ```
 
@@ -161,7 +161,7 @@ tool-calling summaries cannot advance the watermark. Summary usage is billed in
 the durable telemetry totals, including unsuccessful attempts.
 
 Summaries are **lossy interpretations**, not lossless compression. The retained
-original transcript is the evidence, accessible via `session`/`search_turns`;
+original transcript is the evidence, accessible via `session`/`search_messages`;
 `session` supports `before_seq` pagination. Default transcript retention remains
 seven days; debug transcripts persist. Oversized tool output is kept as hashed
 JSON under `data/tool-results/` and retrieved with `tool_result`. Views are created
@@ -228,7 +228,7 @@ Each assistant turn carries `trace`: an ordered list of spans.
 
 Rendered in **engine → sessions** as `llm 2478ms → tool(remember) 1ms → llm 1384ms`,
 so a slow or failing step is obvious. Failures keep `ok:false` and the error text
-on the turn, so `search_turns` can find "where does this keep failing".
+on the message, so `search_messages` can find "where does this keep failing".
 
 ## Replication — diff sync (implemented)
 
@@ -248,7 +248,7 @@ cursor per peer.
   remote copy is as debuggable as the original.
 
 Verified: node-b pushed 6 entries to openclaw (cursor 2→8, the host's session
-went 2→6 turns, traces included); a second tick pushed `0` (idempotent).
+went 2→6 messages, traces included); a second tick pushed `0` (idempotent).
 
 **Endpoint resolution is solved by the relay**: a node with no routable address
 advertises no endpoints, attaches to the relay by long-poll, and is reached
@@ -270,7 +270,7 @@ Two bugs this surfaced, both fixed:
 
 ## Retention
 
-`memory.prune(7)` deletes non-debug turns older than 7 days and vacuums their FTS
-rows. Debug sessions are never pruned. Summaries outlive their turns (they are
+`memory.prune(7)` deletes non-debug messages older than 7 days and vacuums their FTS
+rows. Debug sessions are never pruned. Summaries outlive their messages (they are
 the compressed value), so a years-old session still contributes its conclusions
 without carrying the raw trace.
