@@ -93,6 +93,18 @@ local function index_exists(name)
   return #query("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", {name}) > 0
 end
 
+-- `meta` is a key/value table for facts about the database itself. The one it holds today is the
+-- journal's vocabulary boundary: which word an entry was written with, and since when. It is written
+-- once, by the migration, and read by anyone who has to interpret a durable log.
+local function meta_get(key)
+  local rows = query("SELECT value FROM meta WHERE key=?", {key})
+  return rows[1] and rows[1].value or nil
+end
+
+local function meta_set(key, value)
+  exec("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", {key, tostring(value)})
+end
+
 -- SQLite has no `ALTER INDEX ... RENAME`: an index follows its table's rename and keeps its own name,
 -- so a moved table would leave behind an index called after the old one. Dropped and recreated, which
 -- is what `schema.sql` does for a fresh database anyway.
@@ -209,6 +221,23 @@ function M.setup()
   local schema = (EMBEDDED and EMBEDDED["lua/core/schema.sql"]) or host.read_file("lua/core/schema.sql")
   if not schema then error("schema_missing") end
   exec(schema)
+
+  -- The journal's vocabulary changed with the rename, and the old log is kept exactly as it was.
+  -- Rewriting it would erase which word each entry was written with, and the log is the record of what
+  -- happened - so entries written before this moment say `turn`, entries after say `message`, and a
+  -- reader accepts both. The boundary is *recorded* rather than inferred, so a later reader splits the
+  -- log by era instead of guessing from the commit graph. Nothing is pruned: the journal is read only
+  -- by the sync loop and never enters a prompt, so its old words cannot mislead an agent, while the
+  -- entries themselves are the evidence this project exists to keep.
+  --
+  -- Recorded here rather than in `migrate_shape()`, which deliberately runs *before* the schema: `meta`
+  -- does not exist yet at that point, and creating it in two places is how the two definitions drift.
+  if not meta_get("journal_kind") then
+    meta_set("journal_kind", "message")
+    meta_set("journal_kind_legacy", "turn")
+    meta_set("journal_kind_changed_at", host.now())
+  end
+
   migrate()
   dofile("lua/core/telemetry.lua").setup()
   -- Threads that predate naming are all called "chat", which tells the reader nothing and makes a
@@ -1049,7 +1078,10 @@ function M.apply_entry(entry)
   end
   if type(payload) ~= "table" then return false end
 
-  if entry.kind == "message" then
+  -- `turn` is the name this kind carried before the rename. The journal is durable and is never
+  -- rewritten, so an entry written then still has to replay now: the old name is the matcher for an
+  -- era, not a second vocabulary. The boundary the migration records is in `meta`.
+  if entry.kind == "message" or entry.kind == "turn" then -- naming-check: allow (a pre-rename journal entry)
     exec("INSERT OR REPLACE INTO messages(id,session_id,seq,role,content,tool_calls,tool_call_id," ..
          "tool_name,tokens,ms,ok,debug,trace,created_at,reasoning,images,changes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
          {payload.id, payload.session_id, payload.seq, payload.role, payload.content or "",
