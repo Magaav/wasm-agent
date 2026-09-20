@@ -142,10 +142,10 @@ installed: reconnect after logout when wanted.
 An authorized operator can run `wa network role <node-id> master` (or `guest`).
 Promotion does not automatically authorize that node to control other customers.
 
-The public descriptor, `releases/windows-service.json`, is intentionally disabled:
-there is **not yet a working public download command**. Do not point it at the legacy
-open registry. [Managed onboarding](docs/ONBOARDING.md) documents the service,
-publication and verification gates.
+The public descriptor is served by the managed rendezvous only after its package,
+operator pins and service protocol pass the live gate. The one-liner fails closed
+while that descriptor is unavailable. [Managed onboarding](docs/ONBOARDING.md)
+documents the service, publication and verification gates.
 
 ## Architecture
 
