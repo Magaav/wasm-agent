@@ -24,6 +24,7 @@ do
   local operator_home = host.getenv("USERPROFILE") or host.getenv("HOME") or ""
   local production_db = norm(operator_home .. "/.wasm-agent/memory.db")
   if root and root ~= "" and norm(host.getenv("WASM_AGENT_DB")) == production_db
+     and not host.getenv("WASM_AGENT_HOME")
      and host.getenv("WASM_AGENT_ALLOW_DEV_HOME") ~= "1" then
     print("wa: refusing on-disk Lua (" .. root .. ") against the operator's ledger.")
     print("    " .. tostring(host.getenv("WASM_AGENT_DB")))
