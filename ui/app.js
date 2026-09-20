@@ -1013,7 +1013,7 @@ async function restoreSessionOnce() {
       } else if (!health) {
         notice.textContent = "no result is recorded for the last message; the node is unavailable, so its outcome is unknown.";
       } else if (activeRun(health)) {
-        notice.textContent = "no result is recorded yet. The node is running a message; this page will check again when it becomes idle.";
+        notice.textContent = "no result is recorded yet. A run is in progress on the node; this page will check again when it becomes idle.";
         sawTurnInFlight = true;
       } else {
         notice.textContent = "this message has no recorded answer - " +

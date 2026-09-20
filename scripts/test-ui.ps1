@@ -47,7 +47,7 @@ $harness = @'
       "a real reload during a turn must restore the transcript on boot");
     check(performance.now() - loadedAt < 3000,
       "the running-turn transcript should restore promptly, not wait for the turn to finish");
-    check(!!restored.querySelector(".unfinished-notice") && /running a turn/.test(restored.textContent),
+    check(!!restored.querySelector(".unfinished-notice") && /A run is in progress/.test(restored.textContent),
       "a reload during a turn must say the ledger is pending and the node is active");
     check(!restored.querySelector("wa-trace .pending") && !window.__toolTickerActive(),
       "a repainted tool must not invent a new 300-second execution clock");
@@ -570,7 +570,7 @@ $harness = @'
     session: { id: "aaaaaaaa-0000-0000-0000-000000000001", title: "unfinished thread" },
     // Match the real /session route: state is an object, unlike the flattened /sessions rows.
     state: { state: "unfinished", detail: "1 tool call(s) with no recorded result: bash" },
-    turns: [
+    messages: [
       { seq: 1, role: "user", content: "check the installer on the node", created_at: fixtureNow - 120, ok: 1, tool_calls: [] },
       { seq: 2, role: "assistant", content: "Running it now.", ok: 1, tool_calls: [] },
       { seq: 3, role: "assistant", content: "", ok: 1,
@@ -578,7 +578,7 @@ $harness = @'
       { seq: 4, role: "tool", content: "{\"code\":0,\"stdout\":\"git yes\"}", ok: 1, tool_name: "bash", tool_calls: [] },
       // A turn that changed a file. The repaint used to drop this, so a reloaded transcript showed no diff
       // topics at all while a live one did - and a window that has been reloaded is a repaint.
-      { seq: 5, id: "turn-with-changes", role: "assistant", content: "Changed it.", created_at: fixtureNow - 114, ok: 1, tool_calls: [],
+      { seq: 5, id: "message-with-changes", role: "assistant", content: "Changed it.", created_at: fixtureNow - 114, ok: 1, tool_calls: [],
         changes: { files: [{ path: "C:/tmp/proof.txt", added: 4, removed: 3, created: false }], added: 4, removed: 3 } },
       // A previous interruption was later continued. Its missing result is still in the ledger,
       // but it must not leave a live-looking row that triggers a repaint every five seconds.
@@ -653,7 +653,7 @@ $harness = @'
   window.__fixtures.session = {
     session: { id: "cccccccc-0000-0000-0000-000000000003", title: "failed thread" },
     state: { state: "failed", detail: "the last run failed (the model call errored)" },
-    turns: [ { seq: 1, role: "user", content: "carry on with the cross-build", ok: 1, tool_calls: [] } ],
+    messages: [ { seq: 1, role: "user", content: "carry on with the cross-build", ok: 1, tool_calls: [] } ],
   };
   var sendsBeforeFailure = window.__calls.filter(function (call) { return call.url === "chat" && call.method === "POST"; }).length;
   await window.__restoreSession();
@@ -700,7 +700,7 @@ $harness = @'
   window.__fixtures.session = {
     session: { id: "dddddddd-0000-0000-0000-000000000004", title: "repaint proof" },
     state: { state: "answered", detail: "the last turn is a reply" },
-    turns: [ { seq: 1, role: "user", content: "REPAINT-PROOF-QUESTION", ok: 1, tool_calls: [] },
+    messages: [ { seq: 1, role: "user", content: "REPAINT-PROOF-QUESTION", ok: 1, tool_calls: [] },
              { seq: 2, role: "assistant", content: "REPAINT-PROOF-ANSWER", ok: 1, tool_calls: [] } ],
   };
   window.__setBusy(true);
@@ -739,13 +739,13 @@ $harness = @'
   window.__loadTopic("sessions-box");
   for (var tb = 0; tb < 5; tb++) { await tick(); }
   var busyBox = document.getElementById("sessions-box");
-  check(/busy with a turn/.test(busyBox.textContent),
+  check(/busy with a run/.test(busyBox.textContent),
     "a topic opened during a turn must say the node is busy, saw: " + busyBox.textContent.slice(0, 70));
   check(!/AbortError/.test(busyBox.textContent), "and must not report an abort as if the UI were broken");
   // And it must load by itself when the turn ends - nobody should have to reopen it.
   window.__setBusy(false);
   for (var tc = 0; tc < 40; tc++) { await tick(); }
-  check(!/busy with a turn/.test(busyBox.textContent),
+  check(!/busy with a run/.test(busyBox.textContent),
     "and it must load when the turn finishes, saw: " + busyBox.textContent.slice(0, 70));
 
   // The sessions topic is a way to *find* a thread, not just a list: named after its opening

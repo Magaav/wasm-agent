@@ -129,7 +129,7 @@ if (sessionStorage.getItem("wa-ui-reload-stage") === "active") {
   window.__fixtures.session = {
     session: { id, title: "running reload proof" },
     state: { state: "unfinished", detail: "1 tool call(s) with no recorded result: bash" },
-    turns: [
+    messages: [
       { seq: 1, role: "user", content: "EARLIER-INTERRUPTED-QUESTION", tool_calls: [] },
       { seq: 2, role: "assistant", content: "", tool_calls: [
         { id: "earlier-lost", type: "function", function: { name: "bash", arguments: "{\"command\":\"earlier check\"}" } },
