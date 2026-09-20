@@ -11,7 +11,7 @@ local FILES = {}
 
 -- ---- minimal in-memory sqlite stand-in -----------------------------------
 -- Only the statements memory.lua actually issues on the paths under test.
-local TURNS = {}
+local MESSAGES = {}
 local real_host = host   -- before the stub replaces it
 host = {
   sha256 = function(text)
@@ -46,7 +46,7 @@ memory.append_turn = function(session_id, turn)
   return #appended
 end
 
--- ---- parse_turn_body behaviour, replicated through server.lua ------------
+-- ---- parse_run_body behaviour, replicated through server.lua ------------
 -- server.lua needs many globals; drive the logic the same way it does.
 local probe_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 

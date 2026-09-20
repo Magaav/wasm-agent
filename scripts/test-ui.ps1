@@ -559,7 +559,7 @@ $harness = @'
     sessions: [
       {
         id: "cccccccc-0000-0000-0000-000000000003", title: "failed thread",
-        mode: "chat", turn_count: 3, updated_at: Math.floor(Date.now() / 1000) - 60,
+        mode: "chat", message_count: 3, updated_at: Math.floor(Date.now() / 1000) - 60,
         state: "failed", state_detail: "the last run failed (the model call errored)",
       },
     ],
@@ -602,7 +602,7 @@ $harness = @'
   // The fixture must say so: it was unfinished, and the check passed only because the notice was never
   // re-derived. A test whose premise does not match its fixture is not testing what it claims.
   window.__fixtures.session.state = "answered";
-  window.__fixtures.session.state_detail = "the last turn is a reply";
+  window.__fixtures.session.state_detail = "the last message is a reply";
   window.__setBusy(false);
   await window.__reconcile();
   for (var ur = 0; ur < 10; ur++) { await tick(); }
@@ -617,10 +617,10 @@ $harness = @'
   // already on screen would pass without the fix.
   var savedSessionsForRepaint = window.__fixtures.sessions;
   var savedSessionForRepaint = window.__fixtures.session;
-  window.__fixtures.sessions = { sessions: [ { id: "dddddddd-0000-0000-0000-000000000004", title: "repaint proof", mode: "chat", turn_count: 2, updated_at: Math.floor(Date.now()/1000), state: "answered", state_detail: "the last turn is a reply" } ] };
+  window.__fixtures.sessions = { sessions: [ { id: "dddddddd-0000-0000-0000-000000000004", title: "repaint proof", mode: "chat", message_count: 2, updated_at: Math.floor(Date.now()/1000), state: "answered", state_detail: "the last message is a reply" } ] };
   window.__fixtures.session = {
     session: { id: "dddddddd-0000-0000-0000-000000000004", title: "repaint proof" },
-    state: "answered", state_detail: "the last turn is a reply",
+    state: "answered", state_detail: "the last message is a reply",
     turns: [ { seq: 1, role: "user", content: "REPAINT-PROOF-QUESTION", ok: 1, tool_calls: [] },
              { seq: 2, role: "assistant", content: "REPAINT-PROOF-ANSWER", ok: 1, tool_calls: [] } ],
   };

@@ -40,7 +40,7 @@ if [ "${WEDGE_ONLY:-0}" != "1" ]; then
 (
   curl -sN -m 180 -X POST \
     --data "Find the caching parameters in lua/core/provider.lua, the retry loop in lua/core/nodes.lua, the tool budget in lua/core/agent.lua and the session states in lua/core/memory.lua. Then summarise each in one line." \
-    "http://127.0.0.1:$PORT/chat" > "$WORK/turn.txt" 2>&1
+    "http://127.0.0.1:$PORT/chat" > "$WORK/run.txt" 2>&1
 ) &
 TURN=$!
 
@@ -62,10 +62,10 @@ while kill -0 "$TURN" 2>/dev/null; do
 done
 wait "$TURN" 2>/dev/null
 
-turn_bytes="$(wc -c < "$WORK/turn.txt" | tr -d ' ')"
+run_bytes="$(wc -c < "$WORK/run.txt" | tr -d ' ')"
 echo
 echo "  probes while the turn streamed: $probes   answered: $ok   blocked: $fail"
-echo "  turn streamed $turn_bytes bytes"
+echo "  run streamed $run_bytes bytes"
 if [ "$probes" -eq 0 ]; then echo "  the turn finished before a single probe: test inconclusive"; exit 1; fi
 if [ "$fail" -gt 0 ]; then
   echo "  FAIL: the node stopped answering its own UI while a turn was running"
