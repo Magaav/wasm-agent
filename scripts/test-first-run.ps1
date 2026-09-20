@@ -60,6 +60,15 @@ try {
   $env:WASM_AGENT_LLM_MODEL = 'other-model'
   Refuse { Save-WaSetup -Config $config -Mode personal -Name 'Test' -Workspace $workspace -BaseUrl 'https://provider.invalid/v1' -Model fixture } 'process_environment_overrides_config'
   Remove-Item Env:WASM_AGENT_LLM_MODEL
+  $unmanaged = Join-Path $work 'unmanaged'
+  New-Item -ItemType Directory -Path $unmanaged | Out-Null
+  [IO.File]::WriteAllText((Join-Path $unmanaged 'env'), 'WASM_AGENT_LLM_API_KEY=fixture-only')
+  Refuse { Save-WaSetup -Config $unmanaged -Mode guest -Name 'Guest' -Workspace $workspace } 'unmanaged_configuration'
+  $launchers = Join-Path $config 'launchers/test'
+  New-Item -ItemType Directory -Force -Path $launchers | Out-Null
+  [IO.File]::WriteAllText((Join-Path $launchers 'serve.pid'), [string]$PID)
+  Refuse { Save-WaSetup -Config $config -Mode guest -Name 'Guest' -Workspace $workspace } 'server_still_running'
+  Remove-Item -LiteralPath (Join-Path $config 'launchers') -Recurse -Force
   Save-WaSetup -Config $config -Mode guest -Name 'Guest' -Workspace $workspace
   $guest = Read-WaConfiguration $config
   Check ($guest.WASM_AGENT_NODE_ROLE -eq 'guest' -and $guest.WASM_AGENT_RENDEZVOUS -eq '') 'guest staged offline, never implicitly authorized'

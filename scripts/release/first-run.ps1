@@ -10,6 +10,7 @@ param(
   [switch]$NonInteractive,
   [switch]$ValidateProvider,
   [switch]$Browser,
+  [switch]$NoOpen,
   [ValidateRange(1024, 65534)][int]$Port = 8799
 )
 $ErrorActionPreference = 'Stop'
@@ -95,7 +96,7 @@ try {
     'ui' {
       . (Join-Path $PSScriptRoot 'lib/release-package.ps1')
       Test-WaReleasePackage $install | Out-Null
-      Start-WaLocalUi -Install $install -Config $config -Port $Port -Browser:$Browser
+      Start-WaLocalUi -Install $install -Config $config -Port $Port -Browser:$Browser -NoOpen:$NoOpen
     }
   }
 } catch {
