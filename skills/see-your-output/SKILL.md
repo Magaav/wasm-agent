@@ -18,16 +18,16 @@ to patch the UI without interrupting the person using it.
 
 The UI is a **view of a durable ledger**, not the thing that owns the work. That is the
 whole reason a patch can be safe: the transcript lives in the node's database, the
-turn runs in the node's interpreter, and the window is a renderer that can be
+run executes in the node's interpreter, and the window is a renderer that can be
 replaced at any moment. So:
 
 - **Patch by deploying files.** The node reads `ui/` per request. Copy the changed
   files into the directory the window is served from (`app.js`, `style.css`,
   `index.html` — whatever changed) and the running window picks them up. CSS is
-  swapped in place; JS is deferred until the turn in flight finishes, and then
+  swapped in place; JS is deferred until the run in flight finishes, and then
   reloads itself. Both halves already work: do not invent a mechanism.
 - **Never restart the node to patch the UI.** A restart kills the interpreter and
-  therefore kills whatever turn the person is having. That is not a side effect to
+  therefore kills whatever run the person is having. That is not a side effect to
   accept; it is the failure this section exists to prevent. It has happened: a node
   was restarted to install a *binary* while somebody was mid-conversation, and their
   run died with the process.
@@ -41,10 +41,10 @@ Two consequences worth stating, because both come up:
 
 - **Anything the window holds that the ledger does not is a bug waiting to be a lost
   run.** After a reload the transcript comes back from the ledger, but tokens still
-  arriving for a turn that started before the reload do not: the node streams to the
+  arriving for a run that started before the reload do not: the node streams to the
   request that opened it. "Repaint and resume" means the window reattaches to the
-  running turn and replays what it missed. Until that exists, a reload during a turn
-  loses its partial text — so if you must reload *while* a turn runs, prefer waiting.
+  run in flight and replays what it missed. Until that exists, a reload during a run
+  loses its partial text — so if you must reload *while* a run is in flight, prefer waiting.
 - **A patch that only adds a topic or a control changes the UI, not the node.** Ship
   it the same way.
 
@@ -68,7 +68,7 @@ that the change is live. If the version does not move, the window will not reloa
 
 `scripts/test-ui.ps1` is this technique, already written: it copies `ui/` to a temp
 directory, stubs the HTTP layer with `ui/test-fixtures.js`, injects a probe that
-replays a synthetic turn, and asserts structure. Run it before and after a change:
+replays a synthetic run, and asserts structure. Run it before and after a change:
 
 ```bash
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-ui.ps1

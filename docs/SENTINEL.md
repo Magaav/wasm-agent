@@ -7,7 +7,7 @@ The process outside the node.
 Every failure that mattered had one shape: **the only process that could act was the one that needed
 acting on.**
 
-- A node cannot restart itself. The turn doing the restarting runs on the node it is stopping, so the
+- A node cannot restart itself. The run doing the restarting runs on the node it is stopping, so the
   stop is the last command it ever executes — the copy never happens, the start never happens, and the
   node stays down with nobody to bring it back. This happened twice in one day.
 - A dead node cannot say why it died. Two outages left nothing in a file, which is why the cause had to
@@ -43,7 +43,7 @@ when you need it most.
 ## What it guarantees
 
 - **The node is never the first thing to change.** `restart` waits for the node to be idle before
-  stopping it, so it is never the reason a turn dies; `upgrade` proves the new binary answers on a
+  stopping it, so it is never the reason a run dies; `upgrade` proves the new binary answers on a
   scratch port before it goes near the running node.
 - **Stop by pid, never by image name.** Another `wa` on the machine may be somebody's session.
 - **Every action is logged with its reason** in `<config>/sentinel/sentinel.log`, including refusals.
@@ -76,14 +76,14 @@ a child of it.
 
 ## For an agent
 
-If you are running inside a turn, **you cannot restart the node you are running on** — the stop kills
-your turn before your next command runs. Ask instead:
+If you are running inside a run, **you cannot restart the node you are running on** — the stop kills
+your run before your next command runs. Ask instead:
 
 ```bash
 wa-sentinel request restart --reason "picking up the binary I just built"
 ```
 
-Your turn will die as `unfinished` when the node stops; that is expected, and the request is already on
+Your run will die as `unfinished` when the node stops; that is expected, and the request is already on
 disk. Write a `wake` request too if you want to be brought back to continue:
 
 ```bash
@@ -154,15 +154,15 @@ and everything else is refused before a single step runs:
 `post` is required here for the same reason it is required in `spells.lua`: a plan that cannot state
 its success condition cannot be settled, and "reported success while doing nothing" is the failure
 mode both exist to prevent. The sentinel settles it with its own `/health` check — the assertion an
-in-turn agent cannot make about itself.
+in-run agent cannot make about itself.
 
 A refused plan is refused **whole**: nothing runs, so a half-executed plan is impossible.
 
 ### What the agent cannot do
 
-An agent inside a turn cannot restart the node it is running on, and cannot run a spell about that
+An agent inside a run cannot restart the node it is running on, and cannot run a spell about that
 node (`spell_run` returns `needs_sentinel`). It cannot read the result either: `/client`, `/spell`,
-`/health`'s busy state and everything else that needs the interpreter queues behind the turn
+`/health`'s busy state and everything else that needs the interpreter queues behind the run
 holding the worker, so a call the agent makes to its own node waits on itself. The route out is
 always the same: **write a request and let this process do it.**
 
@@ -196,7 +196,7 @@ Four things were removed to get there, each found by timing the phase rather tha
 2. **Polling with PowerShell.** `Get-NetTCPConnection` costs ~600 ms to start; `netstat -ano` costs
    ~40 ms for the same answer. Every port question — the free-port scan, the port-free wait — now
    goes through `netstat`, except the two that genuinely need Windows APIs (stop and start).
-3. **A fixed 5 s idle tick.** Fine while a long turn runs, ruinous at the moment it ends, because the
+3. **A fixed 5 s idle tick.** Fine while a long run is in flight, ruinous at the moment it ends, because the
    swap cannot begin until a poll notices. It polls at 5 s while the node is known-busy, then at
    0.5 s.
 4. **Re-proving the same binary every time.** A build that answered once answers forever — the same

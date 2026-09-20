@@ -5,7 +5,7 @@ window, and a way to prove what it did.
 
 Most agents are a loop around an API call: they talk, they edit your files, and when
 something goes wrong you have a transcript and no evidence. wasm-agent keeps the
-evidence. Every turn is a record you can read, every file change is a diff you can
+evidence. Every run is a record you can read, every file change is a diff you can
 actually undo, every claim it makes was run before it was made, and the node it runs
 on reports its own health to anything that asks — including you.
 
@@ -14,11 +14,11 @@ on reports its own health to anything that asks — including you.
    your machine     │  wa-window (WebView2)    │   round avatar → chat → full screen
                     │  the same UI in a panel  │
                     └────────────┬─────────────┘
-                                 │  SSE, one turn at a time
+                                 │  SSE, one run at a time
                     ┌────────────▼─────────────┐
                     │  wa serve    (Rust host) │   /health /version /chat /diff /nodes …
                     │  ───────────────────────  │
-                    │  Lua core: loop, tools,  │   the agent's decisions live here,
+                    │  Lua core: loop, tools,  │   the agent's steps live here,
                     │  memory, sessions, skills│   and this is the part that will be WASM
                     └────────────┬─────────────┘
                                  │
@@ -34,8 +34,8 @@ on reports its own health to anything that asks — including you.
 
 - **Remembers on purpose.** An append-only ledger of everything that happened, and
   explicit memories you can edit. The model reads history; it never rewrites it.
-- **Shows its work.** A live token stream, a trace per turn, tool results kept whole,
-  and a diff topic per turn showing `+N −M` per file.
+- **Shows its work.** A live token stream, a trace per run, tool results kept whole,
+  and a diff topic per run showing `+N −M` per file.
 - **Undoes for real.** The changed files are stored as content-addressed blobs, so
   *undo* puts the files back — and refuses when the file moved on since, naming the
   file rather than clobbering your newer work.
@@ -48,7 +48,7 @@ on reports its own health to anything that asks — including you.
   master asks.
 - **Can be restarted by something that is not itself.** `wa-sentinel` is a separate
   process with a fixed verb list, a drop-box, an audit log and a wake budget — because
-  an agent that can restart the node it is running on will eventually do it mid-turn.
+  an agent that can restart the node it is running on will eventually do it mid-run.
 - **Can improve itself.** Self-evolution has been done and written down, with the
   measurements: see [`docs/EVOLUTION.md`](docs/EVOLUTION.md).
 - **Is honest about failure.** A failing tool opens its own topic; a skipped test is
@@ -71,7 +71,7 @@ Then:
 
 ```bash
 wa ui                      # the node + the desktop window (or your browser at :8799)
-wa chat                    # a turn in the terminal
+wa chat                    # a run in the terminal
 wa status                  # node, model, context budget, tools
 ```
 
@@ -93,7 +93,7 @@ Two halves, deliberately split by *what changes*:
 | | |
 |---|---|
 | **Rust host** (`rust/wa-host`) | one binary: HTTP + SSE, SQLite, files, hashing, process execution with deadlines, WASM plugins via `wasmtime`, the node fabric, and the embedded Lua 5.4 interpreter. Capabilities only — no agent logic. |
-| **Lua core** (`lua/core`) | the agent: the turn loop, prompt assembly, tools, memory policy, sessions, compaction, skills, spells, the node's role rules. This is the part intended to become a WASM component, so it is written to be portable and to ask the host for everything it needs. |
+| **Lua core** (`lua/core`) | the agent: the run loop, prompt assembly, tools, memory policy, sessions, compaction, skills, spells, the node's role rules. This is the part intended to become a WASM component, so it is written to be portable and to ask the host for everything it needs. |
 | **UI** (`ui/`) | the chat and control surfaces: web components, a wasm markdown renderer, and a documented design contract in [`DESIGN.md`](DESIGN.md). |
 | **Shell** (`rust/wa-window`) | the Windows WebView2 companion: translucent, always-on-top, collapses to a round avatar. It loads the same UI the browser does. |
 
@@ -123,7 +123,7 @@ cd rust && cargo build --release --offline     # Lua 5.4 is vendored; no network
 This is a working system, not a finished one, and the interesting part of a README is
 what it admits:
 
-- **One turn at a time per node.** A single interpreter serves the agent, so a second
+- **One run at a time per node.** A single interpreter serves the agent, so a second
   request queues behind the first. That is the current design, and lifting it is the
   first item on the roadmap.
 - **The desktop shell is Windows-first.** The node runs anywhere Rust does; the

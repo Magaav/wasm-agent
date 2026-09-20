@@ -98,20 +98,20 @@ sections, in order:
 
 1. **provider**, **model** (§5), and model-supported **reasoning** selects;
 2. **context** — last measured request input and selected model capacity. Never
-   substitute a whole turn's cumulative input for one request's context;
+   substitute a whole run's cumulative input for one request's context;
 3. **limits** — the provider's rolling windows: `5h` (`rolling`), `7d`
    (`weekly`), `30d` (`monthly`), each a percent with a meter and a reset
    estimate; "limits unavailable" when the provider exposes none;
 4. **tokens** — durable session input, disjoint uncached/cache-read/cache-write
    categories, output including reasoning, and priced cost including summaries;
 5. **harness diagnostics**, implemented as `<wa-harness-status>`: settings actually
-   sent; model/tool/turn latency and failures; context coverage and compaction;
+   sent; model/tool/run latency and failures; context coverage and compaction;
    trace completeness, request/source/binary fingerprints, and paginated exports.
 
 Use progressive disclosure and preserve expanded sections across refreshes.
 Missing usage, cache details and prices are **unknown**, never free or zero.
 Selected settings and the last observed request can differ; show that distinction.
-Answered turns are not verified task success. No synthetic efficiency score.
+Answered runs are not verified task success. No synthetic efficiency score.
 
 The base URL and database path belong in the balloon footer line.
 
@@ -143,9 +143,9 @@ from the engine button in the topbar. Do not mix the two.
 | `<wa-menu>` | A list of choices at a point or above its anchor. | `.items` (`{label, action, danger?, separator?, element?}`), `.selected`, `.openAt(x, y, {above, inset})`, `.move(±1)`, `.activate()` | `open`, `close` |
 | `<wa-message>` | A chat message bubble. | `role` (`user`/`assistant`), `.body` | — |
 | `<wa-tool>` | A tool-activity chip. | `name`, `.detail`, status class | — |
-| `<wa-trace>` | A decision's tool trace inside a reply bubble. `.body`, and `.setAge(seconds, bound)` on the in-flight line so `bash` reads `42s of 300s`, not just `bash`. | — |
+| `<wa-trace>` | A step's tool trace inside a reply bubble. `.body`, and `.setAge(seconds, bound)` on the in-flight line so `bash` reads `42s of 300s`, not just `bash`. | — |
 | `<wa-run>` | The collapsible topic a run's tool lines live in. | — | — |
-| `<wa-diff>` | The file changes a turn made, below its answer. | — | — |
+| `<wa-diff>` | The file changes a run made, below its answer. | — | — |
 | `<wa-window>` | A promoted panel in its own OS window (§3). | — | — |
 | `<wa-harness-status>` | §6's harness diagnostics. | — | `export` |
 
@@ -167,15 +167,15 @@ Two kinds, and they travel differently:
 - **text** — read as UTF-8 and inlined into the prompt (`[file: name]`), as before.
 - **image** — sent as a *structured part*, not inlined. The request body becomes
   `{"text": …, "images": [{name, mime, data}]}`; the plain-text body is kept for
-  every turn without images, so the CLI and peer relays are unaffected.
+  every run without images, so the CLI and peer relays are unaffected.
 
 Accepted image types are `png`, `jpeg`, `webp`, `gif` — the set the provider
 gateway itself accepts. Anything else is refused with a visible error rather
-than sent and rejected mid-turn.
+than sent and rejected mid-run.
 
 On the node, bytes are stored content-addressed by sha256 under
-`~/.wasm-agent/attachments/` and referenced from the turn; they are never stored
-in `turns.content`, which is FTS-indexed. `build_context` rebuilds the vision
+`~/.wasm-agent/attachments/` and referenced from the message; they are never stored
+in `messages.content`, which is FTS-indexed. `build_context` rebuilds the vision
 part on every replay, and a file that has gone missing is reported inside the
 text part — never silently dropped.
 
@@ -191,11 +191,11 @@ was worse than none.
 the files you have pasted, dropped or attached but not yet sent. It does not
 touch the transcript and it does not touch the ledger.
 
-That boundary is deliberate, not a limitation to be "fixed" later. The turn
+That boundary is deliberate, not a limitation to be "fixed" later. The run
 ledger is append-only: a conversation is what the model was actually shown, and
-letting someone silently delete a turn would make the transcript a claim about
-history that history cannot support. Undoing a *sent* turn would also have to
-reach the provider, the FTS index and every peer that mirrored the turn. If that
+letting someone silently delete a run would make the transcript a claim about
+history that history cannot support. Undoing a *sent* run would also have to
+reach the provider, the FTS index and every peer that mirrored the run. If that
 is ever wanted it is a separate feature with its own design, not a wider
 interpretation of this gesture.
 
@@ -222,8 +222,8 @@ choose, `Enter` runs the chosen one, and `Escape` closes it (§3 owns the close 
 The first match is chosen before any arrow key is pressed, so the list shows what `Enter` is about
 to do instead of waiting to be told.
 
-What a command may do is bounded by §12: the turn ledger is append-only, so nothing here deletes a
-transcript. `/new` starts a **thread** — this window's transcript is cleared and the next turn
+What a command may do is bounded by §12: the transcript ledger is append-only, so nothing here deletes a
+transcript. `/new` starts a **thread** — this window's transcript is cleared and the next run
 names the new thread — and the thread it leaves behind is untouched and still listed in the engine
 view. The empty transcript says so, because an empty transcript with no explanation reads as lost
 work rather than as a new start.

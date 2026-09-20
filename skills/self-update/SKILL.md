@@ -4,26 +4,26 @@ description: >-
   How to rebuild and replace the node you are running on, without breaking it. Use it whenever a
   change you made requires restarting or replacing this node - a new binary, a rebuilt wa.exe, a Lua
   or Rust change that must be live - and before trying to restart, re-exec or upgrade yourself, or
-  calling your own node's HTTP routes from inside a turn.
+  calling your own node's HTTP routes from inside a run.
 ---
 
 # Updating the node you are running on
 
-You are a Lua turn executing inside the process you want to replace. Several things follow from
+You are Lua executing inside a run, in the process you want to replace. Several things follow from
 that, and every one of them was learned by failing at them:
 
-- **You cannot restart yourself.** The stop is the last command your turn ever executes.
-- **You cannot call your own node's routes from inside a turn.** `/client`, `/spell`, `/diff`,
+- **You cannot restart yourself.** The stop is the last command your run ever executes.
+- **You cannot call your own node's routes from inside a run.** `/client`, `/spell`, `/diff`,
   `/health`'s busy state and everything else that needs the interpreter is served by the *worker you
-  are occupying*. Your request queues behind the turn that made it and waits on itself. This is not
+  are occupying*. Your request queues behind the run that made it and waits on itself. This is not
   slow - it is a deadlock, and the executor reports `HTTP=000` after a long timeout, or `worker:
-  stalled`. Measured: 10 occurrences in one session, each one a turn spent learning this again.
+  stalled`. Measured: 10 occurrences in one session, each one a run spent learning this again.
 - **Windows locks a running image.** You cannot `cp` over `wa.exe` while your own node runs it.
 - **You cannot verify the result from here.** After the swap, the proof is a *different* process.
 
 So the shape is always the same: **you write a request; something outside the node performs it.**
 
-## From a running turn
+## From inside a run
 
 Build and test the candidate, then write one durable request. Use an absolute
 binary path. If the current session id is known, include it and a continuation
@@ -43,14 +43,14 @@ sentinel receives an independently built binary, its source commit is only a
 hint, not verified provenance.
 
 `deploy.sh` and `upgrade.sh` refuse immediately when launched by a tool inside
-a running turn. Detaching either command does not make it safe: the child
-inherits the turn marker and would otherwise wait for its parent to go idle.
+a running run. Detaching either command does not make it safe: the child
+inherits the run marker and would otherwise wait for its parent to go idle.
 
 For a declared spell, `spell_export` and `request spell` remain available when
-the plan needs more than a binary upgrade. The outside-the-turn boundary still
+the plan needs more than a binary upgrade. The outside-the-run boundary still
 applies.
 
-The sentinel checks `/health` from outside after the turn ends. The request is
+The sentinel checks `/health` from outside after the run ends. The request is
 on disk before the process changes. A candidate whose checkout does not
 contain the installed commit is refused, avoiding a silent downgrade; bring
 that checkout forward and rebuild first.
@@ -66,15 +66,15 @@ The `post` conditions come with it, and the sentinel satisfies them with its own
 That is the assertion you cannot make about yourself: it is the *outside* that can see the new binary
 answering.
 
-A spell containing a `sentinel` step **cannot be run from a turn** — `spell_run` refuses with
+A spell containing a `sentinel` step **cannot be run from a run** — `spell_run` refuses with
 `needs_sentinel` rather than skipping the steps, because skipping them would report success for a
 plan whose point never happened.
 
 ## The rules that keep it from breaking
 
-1. **Queueing while this turn runs is expected.** The sentinel waits for idle
+1. **Queueing while this run is running is expected.** The sentinel waits for idle
    before swapping. Do not interpret "queued" as "done".
-2. **Check the idle state from *outside* the turn** (the sentinel log, a file, a wake from before).
+2. **Check the idle state from *outside* the run** (the sentinel log, a file, a wake from before).
    Asking your own node is the deadlock above.
 3. **Failure is silent only if you let it be.** Read `sentinel.log` and the request record in
    `<config>/sentinel/done/` or `failed/`. The record carries `ok`, `detail` and `at`. A queued
@@ -110,7 +110,7 @@ hand and read `sentinel.log`; do not hand-edit the database or the binary while 
 bash scripts/deploy.sh --reason "what changed and why"
 ```
 
-Run this from outside the node's turn. It refuses a dirty tree, refuses a tree behind `origin/main`, proves the binary on a scratch port before it
+Run this from outside the node's run. It refuses a dirty tree, refuses a tree behind `origin/main`, proves the binary on a scratch port before it
 goes near the running node, installs through `scripts/upgrade.sh`, records commit/branch/hash/time/reason in
 `installed.txt`, and refuses if the pid answering is not the pid the install recorded. The refusals are paid
 for: a node behind main served a diff route that answered `unknown_action:patch`; a gate that stopped one of

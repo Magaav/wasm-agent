@@ -106,7 +106,7 @@ bash scripts/test-behavior.sh                 # memory/language/session policy (
 
 On a Windows node, `powershell -File scripts/test-windows.ps1` runs the local
 suite: binary, identity, UUID uniqueness, config, memory, sessions, tools, a real
-turn, the UI on localhost, and that an unreachable remote node changes nothing.
+run, the UI on localhost, and that an unreachable remote node changes nothing.
 Both extra suites are safe to re-run and never print a credential.
 
 The smoke test is the gate for the Lua core and the WASM plugin ABI; it needs
@@ -128,7 +128,7 @@ bash scripts/build-window.sh                  # -> target/windows-x64/.../wa-win
   refuses a tree behind `origin/main`, proves the binary on a scratch port, installs
   via `upgrade.sh`, records `installed.txt`, and verifies the pid answering is its own.
   Never copy a binary over a running one by hand, and do not re-implement it.
-  From *inside* a running turn, do not launch this gate: it cannot wait for
+  From *inside* a run, do not launch this gate: it cannot wait for
   itself to become idle. Build and test, then request the external sentinel to
   upgrade; `skills/self-update/SKILL.md` gives the one-request continuation path.
 - **Never hand a POSIX path to a native Windows process.** `/c/...` is unusable as an
@@ -141,15 +141,15 @@ bash scripts/build-window.sh                  # -> target/windows-x64/.../wa-win
   running at all - ask it directly with
   `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333`.
 - **More than one worker is normal.** Read workers spawn on demand and retire when
-  idle; turns route by session. `/health`'s `workers[]` says who is busy with what.
+  idle; runs route by session. `/health`'s `workers[]` says who is busy with what.
 - **Skills carry procedures, not context.** A technique the agent should not
   have to be told twice belongs in `skills/<name>/SKILL.md` (the Agent Skills
   standard, shared with pi and Orca). Only the description is always in
   context; the body loads when a task matches. Write the *trigger* into the
   description. See `docs/SKILLS.md`.
 - **UI changes need the UI test, not an opinion.** `scripts/test-ui.ps1` replays a
-  synthetic turn in a real headless browser and asserts the structure (one reply
-  bubble per turn, decisions and tool topics *inside* it, pi-style tool lines, a
+  synthetic run in a real headless browser and asserts the structure (one reply
+  bubble per run, steps and tool topics *inside* it, pi-style tool lines, a
   failing tool opening its topic). Run it before claiming a UI change works: the
   UI is not observable through `bash`, `grep` or `read`, so without it you are
   guessing and cannot tell whether you built what was asked. It caught a crash on
@@ -169,7 +169,7 @@ bash scripts/build-window.sh                  # -> target/windows-x64/.../wa-win
 
 Never stop it by image name. `Stop-Process -Name wa` — and even a filter on the
 path, because an agent session runs the same binary from the same place — kills
-the UI server *and* every interactive session with it, mid-turn, leaving no crash
+the UI server *and* every interactive session with it, mid-run, leaving no crash
 and no trace. That has now cost two runs, the second while this very rule was
 being written. `wa ui` records the server's pid; stop that, or ask the port:
 
@@ -211,7 +211,7 @@ no trace, and no way to tell whether it was even wanted.
 
 ## Restarting the node you are running on
 
-You cannot: the stop is the last command your turn executes. Ask the sentinel - the procedure, and the
+You cannot: the stop is the last command your run executes. Ask the sentinel - the procedure, and the
 reasons, are in `skills/self-update/SKILL.md`.
 
 ## Keep your branch current with main

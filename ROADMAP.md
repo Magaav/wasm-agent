@@ -18,7 +18,7 @@ agent:
 | View | What it is for | Status |
 |---|---|---|
 | **Avatar** | Always there, always on top: a round, translucent presence you can drag anywhere and click to open. | ✅ |
-| **Compact chat** | The conversation: streaming tokens, tool topics, per-turn diffs with real undo, sessions, skills. | ✅ |
+| **Compact chat** | The conversation: streaming tokens, tool topics, per-run diffs with real undo, sessions, skills. | ✅ |
 | **Orchestrator** | The fleet: nodes and shells side by side, one lane per agent thread, dispatch and watch, compare results, merge. | 🔜 |
 
 The orchestrator is not a bigger chat window. It is a different surface: panes that
@@ -27,7 +27,7 @@ one, to all of them, and to see what came back.
 
 ## 🔜 Many threads, not one
 
-**The blocker for everything else.** A node has a single interpreter and runs one turn
+**The blocker for everything else.** A node has a single interpreter and serves one run
 at a time; a second request queues. The vision is 16–32 agent threads in one UI.
 
 Two mechanisms, and we want both:
@@ -39,8 +39,8 @@ Two mechanisms, and we want both:
    worktrees, and can call each other. A fleet is mostly *this*, and it works today —
    what it lacks is a UI that shows it.
 
-*How we would know:* N concurrent turns, measured — `scripts/bench-*.sh` extended to
-report wall-clock for N=1, 8, 16, 32 turns, and `/health` reporting per-lane state
+*How we would know:* N concurrent runs, measured — `scripts/bench-*.sh` extended to
+report wall-clock for N=1, 8, 16, 32 runs, and `/health` reporting per-lane state
 instead of one `current`.
 
 **Implementation notes, from reading the node's core (so the next pass starts from facts):**
@@ -63,12 +63,12 @@ instead of one `current`.
   default 1) and is measured before it becomes the default.
 - Safety rules the pool must not break: **one writer per session** (requests carrying
   the same `X-WA-Session` must not run concurrently), and per-session order. The cheap
-  first cut — worker 0 owns turns and writes, extra workers serve reads — gets the
-  responsiveness win with no ordering risk at all; affinity for concurrent turns is
+  first cut — worker 0 owns runs and writes, extra workers serve reads — gets the
+  responsiveness win with no ordering risk at all; affinity for concurrent runs is
   the second step.
 - The test that judges it already has a shape: `scripts/test-serve-concurrency.sh`
-  (it caught the single-threaded node answering nothing while a turn ran). With a
-  pool, a read must be answered *while* a turn is in flight, and `/health` must name
+  (it caught the single-threaded node answering nothing while a run was in flight). With a
+  pool, a read must be answered *while* a run is in flight, and `/health` must name
   the worker that is busy.
 
 ## 🔜 Orchestration context
@@ -78,7 +78,7 @@ one document that answers: *which nodes, which are alive, what is each one doing
 did each one change, what is waiting on a human.*
 
 Most of the inputs exist — `/nodes`, `/health`, `/sessions`, the rendezvous list, the
-relay, per-turn diffs, the ledger. What is missing is a **fleet state** assembled from
+relay, per-run diffs, the ledger. What is missing is a **fleet state** assembled from
 them and streamed as one SSE feed the UI (and the model) can subscribe to.
 
 Then the interesting half: **the agent gets that context too.** The UI is a service, not
@@ -87,8 +87,8 @@ node", "show me that diff", "dispatch this to the node that owns that worktree".
 is the user's own phrasing: *talk to the wasm-agent UI and it has the orchestration
 context itself.*
 
-*How we would know:* a turn that answers "what is running right now" correctly while
-four other turns are in flight, and a dispatch that lands in the right lane.
+*How we would know:* a run that answers "what is running right now" correctly while
+four other runs are in flight, and a dispatch that lands in the right lane.
 
 ## 🔜 The orchestrator view
 
@@ -106,7 +106,7 @@ mechanism used deliberately:
 
 ## 🧭 Wake word
 
-Talk to it without touching anything: a wake word, then a turn with the fleet context
+Talk to it without touching anything: a wake word, then a run with the fleet context
 already attached, answered out loud. Needs audio capture in the shell, a **local** wake
 model (a cloud round trip for "are you there" is the wrong trade), and a short "what is
 happening" summary the model can be handed.
@@ -116,8 +116,8 @@ the least useful until the fleet is real.
 
 ## Also on the list
 
-- 🔜 **Live-partial replay.** A page reloaded mid-turn shows history and the finished
-  reply, but not the tokens arriving now. Needs a per-turn event buffer and a replay
+- 🔜 **Live-partial replay.** A page reloaded mid-run shows history and the finished
+  reply, but not the tokens arriving now. Needs a per-run event buffer and a replay
   path (the relay already has one).
 - 🔜 **A branch that cannot drift.** A node that cannot see `main` cannot see the rules.
   A sentinel trigger — "when the node comes up, merge `origin/main` into its worktree" —
@@ -125,7 +125,7 @@ the least useful until the fleet is real.
 - 🔜 **The sentinel as a service.** The unit file exists; the installer does not install
   it yet.
 - 🔜 **`bash` refuses the node's own port.** The self-deadlock (an agent curling the node
-  it is running on, so the request queues behind the turn that made it) has happened
+  it is running on, so the request queues behind the run that made it) has happened
   three times. The exec deadline reports it; the tool should refuse it.
 - 🔜 **An anchored native balloon.** Undecorated, always-on-top, positioned at its
   anchor, closing on deactivation, sharing the main window's profile so it can talk to
