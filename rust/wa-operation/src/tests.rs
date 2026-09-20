@@ -205,6 +205,25 @@ fn descendant_cannot_write_after_foreground_completion() {
 }
 
 #[test]
+fn redirected_background_descendant_is_not_silent_success() {
+    let (m, root) = fixture();
+    let id = m
+        .start(shell("sleep 30 >/dev/null 2>&1 & printf visible"))
+        .unwrap();
+    let s = settled(&m, &id);
+    assert_eq!(s["ok"], false, "{s}");
+    assert_eq!(s["stdout"], "visible", "{s}");
+    assert!(
+        s["error"]
+            .as_str()
+            .unwrap()
+            .contains("background_descendants"),
+        "{s}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn launch_failure_is_visible() {
     let (m, root) = fixture();
     let id = m

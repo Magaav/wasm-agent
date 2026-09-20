@@ -38,11 +38,15 @@ reconciliation, not automatic replay; lack of attachment is not proof of death. 
 * Tail truncation and incomplete capture are different facts. The former has
   artifact paths; the latter cannot be clean success. Disk/read failures are failures.
 * Normal completion reaps the shell and terminates descendants. A shell exiting
-  while background descendants retain its pipes is a failure, with the original
-  process exit code and already printed output preserved.
+  while background descendants survive is a failure, even if they redirected their
+  pipes: cleanup must not masquerade as success. The original process exit code and
+  already printed output are preserved.
 * Foreground/background is an explicit API choice. To keep a server running, use
   `operation start` and leave the server foreground in that shell (or use `wait`).
   `&`, `nohup`, or closing a pipe is not permission to escape ownership.
+  A permanent sentinel/node service must be started by its external installer or
+  operator, not backgrounded from an agent-owned shell: its supervisor must live
+  outside the runtime it supervises.
 
 ## Platform guarantees and limits
 
@@ -94,6 +98,9 @@ idle and rollback gates. Never restart the desktop window to recover an operatio
 * `scripts/test-exec-timeout.lua`: same scenarios through the real host and Lua
   outcome projection, included in `scripts/test.sh`.
 * `scripts/test-jobs.cjs`: real sentinel and Chrome event delivery; no paid inference.
+* `scripts/test-operation-control.cjs`: a real tool holds the run worker while
+  another interpreter lists/reads/cancels it; the run then continues (local mock
+  provider, zero paid inference).
 * `scripts/test-operation-recovery.cjs`: a busy isolated listener is recovered
   without waiting for idle, graceful maintenance is deferred, disabling a job
   cancels its running script, and Windows host death kills contained descendants.

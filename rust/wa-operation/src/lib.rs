@@ -347,11 +347,12 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry) -> io::Result<()> {
             }
             // Launchers (notably Git's bin/bash.exe) may signal before their real shell finishes
             // closing stdio. One shared 50ms drain allowance, inside the absolute deadline, not per pipe.
+            let descendants = code.is_some() && process.descendants()?;
             let exited = code.is_some()
-                && (eof.iter().all(|v| *v)
+                && ((!descendants && eof.iter().all(|v| *v))
                     || parent_exit.unwrap().elapsed() >= Duration::from_millis(50));
             if exited || reason.is_some() {
-                if code.is_some() && !eof.iter().all(|v| *v) && process.descendants()? {
+                if descendants {
                     reason.get_or_insert("background_descendants: use an explicit operation and keep its shell waiting".into());
                 }
                 cleanup = Some(match process.terminate() {
@@ -371,7 +372,10 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry) -> io::Result<()> {
             state["process_exit_code"] = json!(code);
         }
         if let Some(at) = stopped {
-            if eof.iter().all(|v| *v) && code.is_some() {
+            // Windows can observe its contained tree. POSIX groups only prove signal delivery;
+            // zombies/escaped groups need stronger platform containment (see OPERATIONS.md).
+            let tree_done = !cfg!(windows) || !process.descendants()?;
+            if eof.iter().all(|v| *v) && code.is_some() && tree_done {
                 break;
             }
             if at.elapsed() >= Duration::from_millis(CLEANUP_MS) {
