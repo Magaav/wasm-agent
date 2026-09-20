@@ -261,9 +261,17 @@ cursor per peer.
 - `POST /sync/push` verifies the peer (`bad_signature`/`unknown_caller`/
   `stale_request`) and applies entries **idempotently**; an entry is never
   echoed back (its `origin` is checked).
-- Kinds: `turn`, `session` (last-writer-wins on `updated_at`), `memory`
-  (dedupe by the unique index), `run`. Traces replicate with the turn, so the
+- Kinds: `message`, `session` (last-writer-wins on `updated_at`), `memory`
+  (dedupe by the unique index), `run`. Traces replicate with the message, so the
   remote copy is as debuggable as the original.
+
+**A durable log's vocabulary changes in eras, not renames.** The journal is never rewritten, so an
+entry written before the rename still says `turn` and one written after says `message`. A reader accepts
+both - the old word is a *matcher for an era*, not a second vocabulary - and the migration records the
+boundary in `meta` (`journal_kind`, `journal_kind_legacy`, `journal_kind_changed_at`) so a later reader
+splits the log by era instead of inferring it from the commit graph. Nothing is pruned: the journal is
+read only by the sync loop and never enters a prompt, so its old words cannot mislead an agent, while
+the entries themselves are the record of what happened.
 
 Verified: node-b pushed 6 entries to openclaw (cursor 2→8, the host's session
 went 2→6 messages, traces included); a second tick pushed `0` (idempotent).

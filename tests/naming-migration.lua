@@ -170,4 +170,21 @@ end
 check(outgoing and outgoing.run_id == "r-new" and outgoing.turn_id == "r-new",
   "new run entries retain a legacy wire alias for older peers")
 
+-- The journal's vocabulary boundary: entries written before the rename say `turn`, entries after say
+-- `message`, and a reader accepts both, because the log is durable and is never rewritten. The boundary
+-- is recorded rather than inferred, so a later reader splits the log by era instead of guessing from the
+-- commit graph. Nothing is pruned: the journal never enters a prompt, so its old words cannot mislead an
+-- agent, and the log is the record of what happened.
+local function meta(key) return (one("SELECT value FROM meta WHERE key=?", {key}) or {}).value end
+check(meta("journal_kind") == "message", "the journal's current kind is recorded")
+check(meta("journal_kind_legacy") == "turn", "and the kind its older entries were written with")
+check(tonumber(meta("journal_kind_changed_at")) > 0, "with the moment they changed")
+
+-- And a pre-rename entry still replays, which is what the recorded era is for.
+check(memory.apply_entry({kind="turn", payload={id="m-legacy", session_id="s1", seq=99, role="user",
+  content="written before the rename", created_at=1}}), "a pre-rename journal entry still replays")
+check(tonumber(one("SELECT COUNT(*) AS n FROM messages WHERE id='m-legacy'").n) == 1,
+  "and its row lands in the transcript")
+check(not memory.apply_entry({kind="nonsense", payload={id="x"}}), "an unknown kind is still refused")
+
 if failures == 0 then print("ALL PASS") else print("FAILED (" .. failures .. ")") end
