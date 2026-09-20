@@ -151,6 +151,9 @@ pub(crate) fn worker_id() -> usize {
 /// Not in this list means worker 0 - the safe default, and the reason a missing entry is a performance
 /// question rather than a correctness one.
 fn is_read_route(request: &Request) -> bool {
+    // These controls use independent synchronized runtimes, never agent state. A blocked run must
+    // not queue its own cancellation or the operator's disable behind itself.
+    if matches!(split_path(&request.path).0.as_str(), "/jobs" | "/operations" | "/operation") {return true;}
     if request.method != "GET" {
         return false;
     }
@@ -696,7 +699,8 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
             Ok(Some(request)) => request,
             _ => continue,
         };
-        if std::env::var("WASM_AGENT_MANAGED").as_deref() == Ok("1") {
+        if std::env::var("WASM_AGENT_MANAGED").as_deref() == Ok("1")
+            || matches!(split_path(&request.path).0.as_str(), "/jobs" | "/operations" | "/operation") {
             let host = header_of(&request.node_headers, "host").to_ascii_lowercase();
             let origin = header_of(&request.node_headers, "origin").to_ascii_lowercase();
             let port = stream.local_addr().map(|a| a.port()).unwrap_or(0);
@@ -1228,6 +1232,10 @@ fn dispatch(
         }
         "/envelope" => (200, "application/json", call("wa_envelope", &[session]).into_bytes()),
         "/tools" => (200, "application/json", call("wa_tools", &[session]).into_bytes()),
+        "/jobs" if method == "GET" => (200,"application/json",call("wa_jobs", &["{}",session]).into_bytes()),
+        "/jobs" if method == "POST" => (200,"application/json",call("wa_jobs", &[body,session]).into_bytes()),
+        "/operations" if method == "GET" => (200,"application/json",call("wa_operation", &["{}",session]).into_bytes()),
+        "/operation" if method == "POST" => (200,"application/json",call("wa_operation", &[body,session]).into_bytes()),
         "/skills" => (200, "application/json", call("wa_skills", &[session]).into_bytes()),
         "/nodes" => (200, "application/json", call("wa_nodes", &[session]).into_bytes()),
         "/node/name" if method == "POST" => (200, "application/json", call("wa_set_node_name", &[body, session]).into_bytes()),

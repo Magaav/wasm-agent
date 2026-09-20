@@ -576,6 +576,22 @@ pub extern "C" fn operation(l: *mut LuaState) -> c_int {
     1
 }
 
+/// host.jobs(action, args_json): local automation management, never execution.
+pub extern "C" fn jobs(l: *mut LuaState) -> c_int {
+    let action=arg_string(l,1).unwrap_or_else(||"list".into());
+    let args:Value=serde_json::from_str(&arg_string(l,2).unwrap_or_else(||"{}".into())).unwrap_or(Value::Null);
+    let root=std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_|".".into())).join(".wasm-agent/sentinel/jobs.db");
+    let store=wa_jobs::Store::new(root);
+    let result=match action.as_str() {
+        "list"=>store.list().map(|jobs|json!({"jobs":jobs})),
+        "history"=>store.history(),
+        "enable"=>store.enable(args["id"].as_str().unwrap_or(""),true),
+        "disable"=>store.enable(args["id"].as_str().unwrap_or(""),false),
+        _=>Err("unknown_job_action".into()),
+    };
+    push_json(l,&result.unwrap_or_else(|e|json!({"error":e.to_string()})));1
+}
+
 pub extern "C" fn exec(l: *mut LuaState) -> c_int {
     let command = arg_string(l, 1).unwrap_or_default();
     let cwd = arg_string(l, 2).unwrap_or_default();

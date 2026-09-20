@@ -1049,3 +1049,37 @@ class WaHarnessStatus extends HTMLElement {
   }
 }
 customElements.define('wa-harness-status',WaHarnessStatus);
+
+// Jobs are automation rules. They are not the operations used to execute their actions.
+class WaJobs extends HTMLElement {
+  set items(items) {
+    this.replaceChildren();
+    if (!items.length) {
+      this.textContent = 'No jobs configured. Add a reviewed definition with wa-sentinel job put <file.json>. New or edited jobs are disabled.';
+      return;
+    }
+    for (const job of items) {
+      const row = document.createElement('section'); row.className = 'job-row';
+      const label = document.createElement('label'); label.className = 'job-toggle';
+      const toggle = document.createElement('input'); toggle.type = 'checkbox'; toggle.checked = job.enabled === true;
+      toggle.setAttribute('aria-label', `Enable job ${job.name || job.id}`);
+      const name = document.createElement('strong'); name.textContent = job.name || job.id;
+      label.append(toggle, name);
+      toggle.addEventListener('change', () => {
+        const enabled = toggle.checked;
+        toggle.checked = job.enabled === true; toggle.disabled = true;
+        this.dispatchEvent(new CustomEvent('job-toggle', { bubbles: true, detail: { id: job.id, enabled, control: toggle } }));
+      });
+      const status = document.createElement('div'); status.className = 'job-status';
+      status.textContent = `${job.enabled ? 'enabled' : 'disabled'} · ${job.trigger?.kind || '?'} → ${job.action?.kind === 'wake' ? 'agent wake' : 'deterministic execution'} · ${job.queued || 0} queued`;
+      const source = document.createElement('div'); source.textContent = job.source_status || 'source not observed';
+      const last = document.createElement('div');
+      last.textContent = job.last_delivery ? `Last delivery: ${job.last_delivery.state} · ${job.last_delivery.detail || ''}` : 'No deliveries yet';
+      const details = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = 'Review trigger and instruction';
+      const config = document.createElement('pre'); config.textContent = JSON.stringify({trigger: job.trigger, action: job.action, revision: job.revision}, null, 2);
+      details.append(summary, config); row.append(label, status, source, last, details); this.append(row);
+    }
+    const note = document.createElement('p'); note.textContent = 'Disabling cancels queued deliveries. An action already admitted may have effects; running scripts receive cancellation. Re-enabling does not replay cancelled deliveries. Browser events are untrusted data.'; this.append(note);
+  }
+}
+customElements.define('wa-jobs', WaJobs);

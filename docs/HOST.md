@@ -78,6 +78,16 @@ is readable later from the session view.
 The mask keeps the last four characters (`sk-...7f2a`) so an operator can still
 tell *which* key failed without being able to use it.
 
+## Supervised execution and automation
+
+`host.exec` is the synchronous facade for an owned **operation**. `host.operation`
+exposes explicit launch receipts, status, cursor-based output, bounded waits and
+cancellation; `host.jobs` manages automation definitions/enable state, never executes
+a job itself. Both always return one JSON value, including failure. Do not add a
+second shell runner with `Command::output`, `read_to_end` or detached reader threads.
+See [OPERATIONS.md](OPERATIONS.md) and [JOBS.md](JOBS.md) for contracts, platform
+limits, authority, recovery and the regression tests.
+
 ## Adding a capability
 
 `host.monotonic_ms()` measures elapsed time within a process. Use `host.now()` only

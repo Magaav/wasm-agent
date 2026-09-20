@@ -8,6 +8,8 @@ cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 
 cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
+# The execution and automation contracts have native, model-free adversarial tests.
+cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
 BIN=rust/target/release/wa
 # A turn cannot deploy the process serving that same turn. The marker crosses
 # the Rust host's shell boundary; both entry points must refuse before waiting

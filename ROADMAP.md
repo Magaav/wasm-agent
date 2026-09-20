@@ -31,7 +31,11 @@ screen, and 32 workers are not a prerequisite for helping one customer.
 Current mechanisms: local CLI and Windows companion; streaming chat; explicit
 memory; resumable sessions and compaction; tool evidence; tracked diffs and
 conflict-aware undo; signed nodes, rendezvous and relay; master/guest roles;
-skills, spells and plugins; external sentinel; on-demand workers.
+skills, spells and plugins; external sentinel; on-demand workers; supervised shell
+operations and managed automation jobs. Jobs (Engine, after tools) queue wakes or
+allow-listed deterministic actions from event/schedule/file/explicit CDP bindings.
+See [operation contract](docs/OPERATIONS.md) and [jobs contract](docs/JOBS.md) for
+the precise implemented boundaries, tests and remaining platform/adapter limits.
 
 Windows candidate packaging, a fresh installer and launcher setup/diagnostics now
 exist; clean-machine usability and public distribution remain gates. Guest setup
@@ -150,6 +154,10 @@ not a growing prompt or a reason to grant every customer every tool.
 
 - Use skills to explain procedures, spells to execute deterministic steps and
   plugins/native adapters for capabilities. Reuse these before adding a framework.
+- Managed jobs now provide default-off definitions, revision invalidation, durable
+  bounded delivery queues and source/action evidence. Site-specific adapters
+  (including WhatsApp), replayable browser event delivery, customer unattended
+  grants and immutable procedure packages remain work, not implicit guarantees.
 - Promote a successful task into a versioned automation with inputs,
   preconditions, postconditions, authority requirements and failure behavior.
 - Keep customer secrets and identifiers out of shared templates and fixtures.

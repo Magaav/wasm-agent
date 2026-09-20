@@ -1166,8 +1166,17 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "ureq",
+ "wa-jobs",
  "wa-operation",
  "wasmtime",
+]
+
+[[package]]
+name = "wa-jobs"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde_json",
 ]
 
 [[package]]

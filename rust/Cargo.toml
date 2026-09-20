@@ -1,3 +1,3 @@
 [workspace]
-members = ["wa-host", "wa-operation"]
+members = ["wa-host", "wa-operation", "wa-jobs"]
 resolver = "2"

@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 wa-operation = { path = "../wa-operation" }
+wa-jobs = { path = "../wa-jobs" }
 anyhow = "1"
 ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled"] }

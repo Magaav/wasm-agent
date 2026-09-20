@@ -198,6 +198,28 @@ local function require_master(session)
   return user
 end
 
+function wa_jobs(body, session)
+  if not require_master(session) then return json.encode({error="forbidden"}) end
+  local ok, args = pcall(json.decode, body or "{}")
+  if not ok or type(args) ~= "table" then return json.encode({error="invalid_job_request"}) end
+  local action = args.action or "list"
+  if action ~= "list" and action ~= "history" and action ~= "enable" and action ~= "disable" then
+    return json.encode({error="invalid_job_action"})
+  end
+  return host.jobs(action, json.encode(args))
+end
+
+function wa_operation(body, session)
+  local user = require_master(session)
+  if not user then return json.encode({error="forbidden"}) end
+  local ok, args = pcall(json.decode, body or "{}")
+  if not ok or type(args) ~= "table" then return json.encode({error="invalid_operation_request"}) end
+  -- Starting arbitrary work is a tool capability, not an engine read/control endpoint.
+  if args.action == "start" then return json.encode({error="start_requires_tool"}) end
+  args.owner = user.id
+  return host.operation(args.action or "list", json.encode(args))
+end
+
 function wa_shell(command, session)
   local user = require_master(session)
   if not user then return json.encode({ error = "forbidden" }) end

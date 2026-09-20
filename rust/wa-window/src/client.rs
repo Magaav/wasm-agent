@@ -137,40 +137,29 @@ fn shell(args: &Value) -> Value {
         return json!({"error": "command_required"});
     }
     let kind = args["shell"].as_str().unwrap_or("cmd");
-    let mut process = if kind.eq_ignore_ascii_case("powershell") {
-        let mut powershell = std::process::Command::new("powershell");
-        powershell.arg("-NoProfile").arg("-NonInteractive").arg("-Command").arg(command);
-        powershell
+    static OPERATIONS: std::sync::OnceLock<wa_operation::Manager> = std::sync::OnceLock::new();
+    let manager = OPERATIONS.get_or_init(|| wa_operation::Manager::new(
+        std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into()))
+            .join("wasm-agent/operations")));
+    let system = std::env::var("SystemRoot").unwrap_or_else(|_| "C:/Windows".into());
+    let (program, argv) = if kind.eq_ignore_ascii_case("powershell") {
+        (format!("{system}/System32/WindowsPowerShell/v1.0/powershell.exe"),
+            vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), command.into()])
     } else {
-        let mut cmd = std::process::Command::new("cmd");
-        cmd.arg("/C").arg(command);
-        cmd
+        (format!("{system}/System32/cmd.exe"), vec!["/C".into(), command.into()])
     };
-    if let Some(dir) = args["cwd"].as_str() {
-        if !dir.is_empty() {
-            process.current_dir(dir);
-        }
-    }
-    match process.output() {
-        Ok(output) => {
-            let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            if stdout.len() > 20000 {
-                stdout.truncate(20000);
-                stdout.push_str("\n…(truncated)");
-            }
-            if stderr.len() > 8000 {
-                stderr.truncate(8000);
-                stderr.push_str("\n…(truncated)");
-            }
-            json!({
-                "ok": true,
-                "code": output.status.code().unwrap_or(-1),
-                "stdout": stdout,
-                "stderr": stderr
-            })
-        }
-        Err(error) => json!({"error": error.to_string()}),
+    let mut spec = wa_operation::Spec::command(program, argv);
+    spec.cwd = args["cwd"].as_str().unwrap_or("").into();
+    spec.owner = "desktop-shell".into();
+    let seconds = std::env::var("WASM_AGENT_EXEC_TIMEOUT_SECONDS").ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(300);
+    spec.timeout = std::time::Duration::from_secs(seconds);
+    match manager.start(spec) {
+        Ok(id) => match manager.wait(&id, std::time::Duration::from_secs(seconds.saturating_add(2))) {
+            Ok(result) if result["settled"] == true => result,
+            Ok(_) => { let _ = manager.cancel(&id); json!({"operation_id":id,"ok":false,"error":"operation_supervisor_overdue","cleanup":"unknown"}) },
+            Err(error) => json!({"ok":false,"error":error.to_string()}),
+        },
+        Err(error) => json!({"ok":false,"error":error.to_string()}),
     }
 }
 

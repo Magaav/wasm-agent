@@ -238,6 +238,7 @@ fn main() {
     lua.register("write_file", host::write_file);
     lua.register("exec", host::exec);
     lua.register("operation", host::operation);
+    lua.register("jobs", host::jobs);
     lua.register("sleep", host::sleep);
     lua.register("node_identity", host::node_identity);
     lua.register("sign", host::sign);

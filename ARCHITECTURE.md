@@ -140,6 +140,15 @@ to match what the words already mean everywhere else rather than what was conven
 | **model call** | one provider request and response | `llm` span |
 | **tool call** | one tool execution | `tool` span |
 | **message** | one stored transcript row (user, assistant, tool, summary) | the `turns` table, `session_turns()` |
+| **operation** | one supervised external execution, with identity, owner, output, cancellation and settlement | formerly the blocking internals of `host.exec`; never called a job |
+| **job** | a durable, enabled/disabled automation definition: trigger plus declared action | new managed automation; legacy sentinel triggers are not silently migrated |
+| **trigger** | the job's event/schedule matching rule; it does not execute the action | legacy `triggers.json` combined rule/action fields |
+| **delivery** | one durable queued occurrence of a job, pinned to revision and source event id | new; not a run, message, or operation |
+
+A job can queue a wake (which starts a run and can apply a skill) or deterministic execution
+(which may use operations without any model inference). A tool call may await an operation or return
+its explicit launch receipt. A receipt is not completion. These contracts and their enforcement are in
+[docs/OPERATIONS.md](docs/OPERATIONS.md) and [docs/JOBS.md](docs/JOBS.md).
 
 A run has one user turn, one assistant turn, many steps, and each step has exactly one model call and zero or
 more tool calls. A step is **not** a model call: it contains one, and the tools that call asked for run between
@@ -205,7 +214,9 @@ change with both sides, and its old form survives only as a migration matcher. R
 journal's kinds, the model-facing tool list - is a different decision from renaming an internal word, and is
 recorded as one.
 
-**An asymmetry is written down.** A tool call has a deadline (`WASM_AGENT_EXEC_TIMEOUT_SECONDS`, 300s by
-default); a run has none. Measured, not assumed: a single `bash` of 993 seconds in the ledger, and a run of 47
+**An asymmetry is written down.** Foreground shell operations have an execution deadline
+(`WASM_AGENT_EXEC_TIMEOUT_SECONDS`, 300s by default) plus an explicitly reported 1000ms forced-cleanup
+budget; a run has no wall-clock deadline. Other tools do not inherit the shell's deadline merely
+because they are tool calls. `docs/OPERATIONS.md` names the actual mechanisms and their limits. Measured, not assumed: a single `bash` of 993 seconds in the ledger, and a run of 47
 steps that lasted 56 minutes. Neither number appears in `docs/` today, so the next reader learns it by watching
 it happen - which is the expensive way.

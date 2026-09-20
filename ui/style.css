@@ -777,3 +777,10 @@ body.view-only { margin: 0; background: var(--bg); }
 }
 .pop-head-action:hover { color: var(--text); border-color: var(--accent); }
 wa-balloon.file-diff .pop-head { display: flex; align-items: center; gap: var(--gap); }
+
+wa-jobs { display: block; padding: var(--pad); }
+wa-jobs .job-row { padding: var(--pad); border-bottom: 1px solid var(--line); }
+wa-jobs .job-toggle { display: flex; align-items: center; gap: var(--gap); }
+wa-jobs .job-status { color: var(--muted); }
+wa-jobs pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.job-error { color: var(--danger, #f88); padding: var(--pad); }

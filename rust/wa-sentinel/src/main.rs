@@ -38,6 +38,8 @@ use std::time::{Duration, Instant};
 // than more functions here, because it is a different kind of thing - the verbs in this file act on
 // the node, and this one carries out a sequence the *agent* wrote, under a whitelist.
 mod spell;
+mod jobs;
+mod cdp;
 
 // Stopping and starting a node through the Win32 API instead of through a spawned shell. The safety
 // rule it must preserve - act on a pid the OS gave us, never on an image name - lives in the caller,
@@ -159,6 +161,7 @@ fn health_agent() -> ureq::Agent {
         .timeout_connect(Some(Duration::from_secs(3)))
         .timeout_recv_response(Some(Duration::from_secs(5)))
         .timeout_recv_body(Some(Duration::from_secs(10)))
+        .timeout_global(Some(Duration::from_secs(2)))
         .build()
         .into()
 }
@@ -315,7 +318,7 @@ fn verb_wake(session: &str, prompt: &str, reason: &str) -> Result<String> {
         std::thread::sleep(Duration::from_millis(500));
     }
     let url = format!("http://127.0.0.1:{}/chat", node_port());
-    let body = json!({ "text": prompt }).to_string();
+    let body = json!({ "text": prompt, "thread": session }).to_string();
     // The streaming route, and a per-read timeout rather than a whole-request one.
     //
     // A wake runs a whole turn, which takes minutes, so the non-streaming route cannot answer inside any
@@ -328,15 +331,25 @@ fn verb_wake(session: &str, prompt: &str, reason: &str) -> Result<String> {
         .http_status_as_error(false)
         .timeout_connect(Some(Duration::from_secs(3)))
         .timeout_recv_response(Some(Duration::from_secs(120)))
-        .timeout_recv_body(Some(Duration::from_secs(120)))
+        .timeout_recv_body(Some(Duration::from_secs(600)))
+        .timeout_global(Some(Duration::from_secs(3600)))
         .build()
         .into();
     let mut last = String::new();
-    for attempt in 1..=6 {
+    for attempt in 1..=1 {
         // Say it started before it runs, not only when it finishes. A wake takes minutes, and a reader
         // inside that very turn looks for its own record - the agent did, and correctly reported "the
         // wake is not recorded as performed" because the completion line had not been written yet.
-        audit("wake-start", session, reason);
+        {
+            // Serialize reservations across workers and sentinel processes; failed attempts cost budget too.
+            let reservation=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(sentinel_dir().join("wake-budget.lock"))?;
+            reservation.lock()?;
+            if wakes_last_hour()>=budget {bail!("wake budget reached before submission")}
+            use std::io::Write;
+            let mut log=std::fs::OpenOptions::new().create(true).append(true).open(log_path())?;
+            writeln!(log,"{}\twake-start\t{}\t{}",now_epoch(),session.replace(['\n','\r','\t']," "),reason.replace(['\n','\r','\t']," "))?;
+            log.sync_all()?;
+        }
         match agent
             .post(&url)
             .header("Content-Type", "application/json")
@@ -378,6 +391,7 @@ fn verb_wake(session: &str, prompt: &str, reason: &str) -> Result<String> {
                     audit("wake-failed", session, &format!("{reason} (the turn failed: {error})"));
                     bail!("the turn failed: {error}");
                 }
+                if !saw_done { bail!("wake outcome unknown: stream ended without done; do not replay automatically"); }
                 audit("wake", session, &format!("{reason} ({events} events, done={saw_done})"));
                 return Ok(format!("{events} events, done={saw_done}"));
             }
@@ -388,7 +402,7 @@ fn verb_wake(session: &str, prompt: &str, reason: &str) -> Result<String> {
         }
     }
     audit("wake-failed", session, &format!("{reason} ({last})"));
-    bail!("the node did not accept the wake after 6 attempts: {last}")
+    bail!("wake outcome unknown after submission: {last}; not automatically replayed")
 }
 
 fn wakes_last_hour() -> u32 {
@@ -398,7 +412,7 @@ fn wakes_last_hour() -> u32 {
         .filter(|line| {
             let mut fields = line.split('\t');
             let at: u64 = fields.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-            at >= cutoff && fields.next() == Some("wake")
+            at >= cutoff && fields.next() == Some("wake-start")
         })
         .count() as u32
 }
@@ -408,16 +422,8 @@ pub(crate) fn verb_restart(reason: &str) -> Result<String> {
     if !binary.exists() {
         bail!("nothing installed at {}", binary.display());
     }
-    // Wait for the node to be idle before stopping it. It cannot save the turn that is running, but it
-    // can refuse to be the reason one dies: a restart nobody needed to interrupt is a restart that
-    // waited.
-    let deadline = Instant::now() + Duration::from_secs(900);
-    while !node_is_idle() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_secs(2));
-    }
-    if !node_is_idle() {
-        bail!("the node is still running a turn after 900s - not restarting under it");
-    }
+    // Graceful maintenance must not block the watcher. process_requests leaves it queued while busy.
+    if !node_is_idle() { bail!("node busy: graceful restart deferred; request recover to interrupt a failed node"); }
     if node_is_up() {
         stop_node(reason)?;
     } else {
@@ -483,7 +489,9 @@ fn shell_for_binary(binary: &str) -> String {
 /// `C:/dir/file` -> `/c/dir/file`. Only the drive form needs it; anything else is passed through
 /// unchanged rather than mangled into something worse.
 fn to_msys_path(path: &Path) -> String {
-    let text = path.display().to_string();
+    let raw = path.display().to_string();
+    // canonicalize on Windows returns a verbatim path; Git Bash cannot consume that prefix.
+    let text = raw.strip_prefix(r"\\?\").unwrap_or(&raw).replace('\\', "/");
     let bytes = text.as_bytes();
     if bytes.len() > 2 && bytes[1] == b':' && bytes[2] == b'/' {
         let drive = (bytes[0] as char).to_ascii_lowercase();
@@ -580,7 +588,7 @@ fn resolve_upgrade_script() -> Result<PathBuf> {
     )
 }
 
-fn verb_run(script: &str, reason: &str) -> Result<String> {
+fn approved_script(script: &str) -> Result<PathBuf> {
     if script.is_empty() {
         bail!("run needs --script");
     }
@@ -595,9 +603,27 @@ fn verb_run(script: &str, reason: &str) -> Result<String> {
     if !permitted {
         bail!("{} is not inside WA_SENTINEL_SCRIPTS", path.display());
     }
-    let status = std::process::Command::new(if cfg!(windows) { "bash" } else { "sh" }).arg(&path).status()?;
-    audit("run", &path.display().to_string(), reason);
-    if status.success() { Ok("ran".into()) } else { bail!("script exited {status}") }
+    Ok(path)
+}
+
+fn verb_run(script: &str, reason: &str) -> Result<String> {
+    let path=approved_script(script)?;
+    let (program,argument)=shell_for(&path);
+    let manager=wa_operation::Manager::new(sentinel_dir().join("operations"));
+    let mut spec=wa_operation::Spec::command(program,vec![argument]);spec.owner="sentinel:run".into();
+    let id=manager.start(spec)?;
+    let state=manager.wait(&id,Duration::from_secs(302))?;
+    audit("run",&path.display().to_string(),reason);
+    if state["ok"]==true {Ok(format!("operation {id} completed"))} else {let _=manager.cancel(&id);bail!("operation {id}: {}",state["error"])}
+}
+
+fn verb_recover(reason:&str)->Result<String> {
+    let binary=installed_binary();if !binary.is_file() {bail!("installed binary missing")}
+    // Recovery asks the OS, never the interpreter and never image names.
+    if pid_on_port(node_port()).is_some() {stop_node(reason)?;}
+    start_node(&binary,reason)?;
+    if !wait_up(60) {bail!("recovery started node but health was not confirmed")}
+    Ok("node recovered; interrupted effects must be reconciled".into())
 }
 
 fn perform(request: &Value) -> Result<String> {
@@ -605,6 +631,7 @@ fn perform(request: &Value) -> Result<String> {
     let reason = request.get("reason").and_then(Value::as_str).unwrap_or("(no reason given)");
     match verb {
         "restart" => verb_restart(reason),
+        "recover" => verb_recover(reason),
         "upgrade" => {
             let session = request.get("session").and_then(Value::as_str).unwrap_or("");
             let prompt = request.get("prompt").and_then(Value::as_str).unwrap_or("");
@@ -615,26 +642,15 @@ fn perform(request: &Value) -> Result<String> {
             if session.is_empty() {
                 Ok(detail)
             } else {
-                let (session, prompt, reason) = (session.to_string(), prompt.to_string(), reason.to_string());
-                std::thread::spawn(move || match verb_wake(&session, &prompt, &reason) {
-                    Ok(_) => {}
-                    Err(error) => audit("wake-error", &session, &error.to_string()),
-                });
-                Ok(format!("{detail}; continuation wake spawned"))
+                let wake=verb_wake(session,prompt,reason)?;
+                Ok(format!("{detail}; continuation {wake}"))
             }
         },
         "wake" => {
             let session = request.get("session").and_then(Value::as_str).unwrap_or("");
             let prompt = request.get("prompt").and_then(Value::as_str).unwrap_or("");
-            // A wake runs a whole turn, which takes minutes: it must not hold the watch loop. The
-            // record says "spawned", not "ok" - at this point the outcome is genuinely unknown, and a
-            // supervisor that reports success before it knows is the thing it exists to prevent.
-            let (session, prompt, reason) = (session.to_string(), prompt.to_string(), reason.to_string());
-            std::thread::spawn(move || match verb_wake(&session, &prompt, &reason) {
-                Ok(_) => {}
-                Err(error) => audit("wake-error", &session, &error.to_string()),
-            });
-            Ok("spawned".into())
+            // process_requests owns this worker until completion; even `once` cannot lose a spawned wake.
+            verb_wake(session,prompt,reason)
         }
         "run" => verb_run(request.get("script").and_then(Value::as_str).unwrap_or(""), reason),
         // A plan the agent exported. Validated against a whitelist before a single step runs, and
@@ -653,7 +669,26 @@ fn perform(request: &Value) -> Result<String> {
 
 // ---------------------------------------------------------------- the drop-box
 
-fn process_requests() -> Result<u32> {
+static REQUEST_ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static MAINTENANCE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn finish_request(claim: &Path, request: &Value) {
+    let outcome=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||perform(request)));
+    let (folder,ok,detail)=match outcome {
+        Ok(Ok(detail))=>("done",true,detail),
+        Ok(Err(error))=>("failed",false,error.to_string()),
+        Err(_)=>("failed",false,"request worker panicked; outcome unknown".into()),
+    };
+    let record=json!({"request":request,"ok":ok,"detail":detail,"at":now_epoch()});
+    let target=sentinel_dir().join(folder).join(claim.file_name().unwrap_or_default());
+    match wa_operation::atomic_json(&target,&record) {
+        Ok(())=>{let _=std::fs::remove_file(claim);},
+        Err(error)=>audit("request-record-failed",&claim.display().to_string(),&error.to_string()),
+    }
+    say(&format!("{}: {detail}",if ok {"ok"}else{"failed"}));
+}
+
+fn process_requests(background: bool) -> Result<u32> {
     let dir = sentinel_dir().join("requests");
     let mut handled = 0;
     let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -664,6 +699,14 @@ fn process_requests() -> Result<u32> {
     // Oldest first: a queue that runs backwards is a queue nobody can reason about.
     entries.sort();
     for path in entries {
+        use std::sync::atomic::Ordering;
+        let preview:Value=std::fs::read(&path).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+        let capacity=if preview["verb"]=="recover" {5}else{4};
+        if background && REQUEST_ACTIVE.load(Ordering::Acquire)>=capacity {continue;}
+        let management=matches!(preview["verb"].as_str(),Some("restart"|"recover"|"upgrade"|"spell"));
+        if management && MAINTENANCE_ACTIVE.load(Ordering::Acquire) {continue;}
+        // Maintenance stays queued; observing it never monopolizes the recovery/control loop.
+        if matches!(preview["verb"].as_str(),Some("restart"|"upgrade"|"spell")) && !node_is_idle() {continue;}
         // Claim before working, not after. This used to read the request, do the work, and only then
         // remove the file - so a second runner (the watcher and a stray `once`, which is exactly what
         // happened) could pick up the same file while the first was still inside it, and run the
@@ -684,26 +727,15 @@ fn process_requests() -> Result<u32> {
                 continue;
             }
         };
-        let outcome = perform(&request);
-        let (folder, detail) = match &outcome {
-            Ok(detail) => ("done", detail.clone()),
-            Err(error) => ("failed", error.to_string()),
-        };
-        let record = json!({
-            "request": request,
-            // Not `ok`: for a spawned wake the outcome is genuinely unknown at this point, and a
-            // supervisor that reports success before it knows is the thing it exists to prevent. The
-            // log carries what happened, when it happens.
-            "ok": if matches!(outcome.as_ref().map(|d| d.as_str()), Ok("spawned")) { Value::Null } else { json!(outcome.is_ok()) },
-            "detail": detail,
-            "at": now_epoch(),
-        });
-        let target = sentinel_dir().join(folder).join(claim.file_name().unwrap_or_default());
-        let _ = std::fs::write(&target, serde_json::to_string_pretty(&record).unwrap_or_default());
-        // The file is already out of `requests/` - it was renamed there as the claim. Only the
-        // transient copy in `claimed/` is removed here.
-        let _ = std::fs::remove_file(&claim);
-        say(&format!("{}: {}", if outcome.is_ok() { "ok" } else { "failed" }, detail));
+        if background {
+            REQUEST_ACTIVE.fetch_add(1,Ordering::AcqRel);
+            if management {MAINTENANCE_ACTIVE.store(true,Ordering::Release);}
+            std::thread::spawn(move|| {
+                finish_request(&claim,&request);
+                if management {MAINTENANCE_ACTIVE.store(false,Ordering::Release);}
+                REQUEST_ACTIVE.fetch_sub(1,Ordering::AcqRel);
+            });
+        } else {finish_request(&claim,&request);}
         handled += 1;
     }
     Ok(handled)
@@ -731,7 +763,7 @@ fn request(args: &[String]) -> Result<()> {
     // Read the reason before the map is moved into the file: the audit line is written from the same
     // request, and a supervisor's log must not depend on the order of two statements.
     let reason = fields.get("reason").and_then(Value::as_str).unwrap_or("(no reason given)").to_string();
-    std::fs::write(&path, serde_json::to_string_pretty(&Value::Object(fields))?)
+    wa_operation::atomic_json(&path,&Value::Object(fields))
         .with_context(|| format!("write {}", path.display()))?;
     audit("request", &verb, &reason);
     say(&format!("requested {verb}: {}", path.display()));
@@ -808,10 +840,9 @@ fn fire(trigger: &Value, event: &str) {
     }
     let reason = object.get("reason").and_then(Value::as_str).unwrap_or("a trigger fired").to_string();
     audit("trigger", &format!("{event}"), &reason);
-    match perform(&request) {
-        Ok(detail) => say(&format!("trigger: {detail}")),
-        Err(error) => audit("trigger-error", event, &error.to_string()),
-    }
+    let stamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let path=sentinel_dir().join("requests").join(format!("{stamp}-trigger.json"));
+    if let Err(error)=wa_operation::atomic_json(&path,&request) {audit("trigger-error",event,&error.to_string());}
 }
 
 fn check_triggers(state: &mut TriggerState) {
@@ -889,6 +920,9 @@ fn check_triggers(state: &mut TriggerState) {
 // ---------------------------------------------------------------- the loop
 
 fn watch() -> Result<()> {
+    let _runner_lock=jobs::lock()?;
+    jobs::store().recover(now_epoch() as i64).map_err(|e|anyhow::anyhow!(e.to_string()))?;
+    let mut automations=jobs::Runner::new();
     let _ = std::fs::remove_file(stop_path());
     std::fs::write(pid_path(), std::process::id().to_string())?;
     audit("watch", &format!("pid {}", std::process::id()), "sentinel started");
@@ -907,10 +941,11 @@ fn watch() -> Result<()> {
             let _ = std::fs::remove_file(pid_path());
             return Ok(());
         }
-        if let Err(error) = process_requests() {
+        if let Err(error) = process_requests(true) {
             audit("box-error", "requests", &error.to_string());
         }
         check_triggers(&mut triggers);
+        if let Err(error)=automations.tick() {audit("jobs-error","tick",&error.to_string());}
         // Watching the node, not restarting it: an auto-restart that nobody asked for would fight the
         // operator every time they stop a node on purpose. The outage is reported; restarting is a
         // request.
@@ -928,7 +963,7 @@ fn watch() -> Result<()> {
                 announced = true;
             }
         }
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(Duration::from_millis(200));
     }
 }
 
@@ -1033,7 +1068,10 @@ fn print_help() {
 
 const HELP: &str = r#"wa-sentinel - the process outside the node.
 
-  request restart  [--reason TEXT]
+  request restart  [--reason TEXT]     (graceful; queued while busy)
+  request recover  [--reason TEXT]     (explicit interruption; never waits for idle)
+  job list | history | put <file.json> | enable <id> | disable <id>
+  job emit <topic> <stable-event-id> <payload.json>
   request upgrade  --binary PATH [--session ID --prompt TEXT] [--reason TEXT]
   request wake     --session ID --prompt TEXT [--reason TEXT]
   request run      --script PATH [--reason TEXT]
@@ -1055,8 +1093,10 @@ fn main() -> Result<()> {
     let rest = if args.len() > 1 { &args[1..] } else { &[] };
     let outcome = match verb {
         "request" => request(rest),
+        "job" => jobs::cli(rest),
+        "recover" => verb_recover(rest.first().map(String::as_str).unwrap_or("explicit operator recovery")).map(|s|say(&s)),
         "watch" => watch(),
-        "once" => process_requests().map(|n| say(&format!("{n} request(s) handled"))),
+        "once" => {let _lock=jobs::lock()?;process_requests(false).map(|n| say(&format!("{n} request(s) handled")))},
         "status" => status(),
         "start" => start_self(),
         // Replacing the binary does not change a running process: the watcher keeps executing the image

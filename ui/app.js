@@ -3305,9 +3305,35 @@ async function openSessionById(id) {
 // when the node is simply busy, which is the opposite of what a status line is for.
 const pendingTopics = new Set();
 
+async function refreshJobs() {
+  const box = document.getElementById('jobs-box');
+  try {
+    const response = await apiFetch('jobs', {headers: apiHeaders()});
+    const payload = await response.json();
+    if (!response.ok || payload.error) throw new Error(payload.error || `HTTP ${response.status}`);
+    let panel = box.querySelector('wa-jobs');
+    if (!panel) { panel = document.createElement('wa-jobs'); box.replaceChildren(panel); }
+    panel.items = payload.jobs || [];
+  } catch (error) { box.textContent = `Jobs unavailable: ${error}`; }
+}
+document.getElementById('jobs-box').addEventListener('job-toggle', async (event) => {
+  const {id, enabled, control} = event.detail;
+  try {
+    const response = await apiFetch('jobs', {method: 'POST', headers: {...apiHeaders(), 'Content-Type': 'application/json'}, body: JSON.stringify({id, action: enabled ? 'enable' : 'disable'})});
+    const payload = await response.json();
+    if (!response.ok || payload.error) throw new Error(payload.error || `HTTP ${response.status}`);
+    await refreshJobs();
+  } catch (error) {
+    control.disabled = false;
+    let failure = document.getElementById('jobs-box').querySelector('.job-error');
+    if (!failure) { failure = document.createElement('p'); failure.className = 'job-error'; document.getElementById('jobs-box').append(failure); }
+    failure.textContent = `Job was not changed: ${error}`;
+  }
+});
+
 function loadTopic(id) {
   const box = document.getElementById(id);
-  if (busy) {
+  if (busy && id !== 'jobs-box') {
     // Do not even ask: the worker is inside a run, so the request would queue and then be abandoned by
     // the deadline. Say what is true and come back to it when the run ends.
     pendingTopics.add(id);
@@ -3320,6 +3346,7 @@ function loadTopic(id) {
   else if (id === "skills-box") refreshSkills();
   else if (id === "spells-box") refreshSpells();
   else if (id === "tools-box") refreshTools();
+  else if (id === "jobs-box") refreshJobs();
 }
 
 /// Everything the engine was asked for while the node was busy, plus whatever is open, once it is free.

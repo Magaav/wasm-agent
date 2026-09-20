@@ -61,7 +61,7 @@ $harness = @'
     // The stream belongs to the old page, so the new page must notice the worker become idle
     // and repaint the answer from the durable ledger, not open the engine's session view.
     window.__fixtures.session.state = { state: "answered", detail: "the last message is a reply" };
-    window.__fixtures.session.turns.push(
+    window.__fixtures.session.messages.push(
       { seq: 5, role: "tool", tool_name: "bash", content: "done", tool_calls: [] },
       { seq: 6, role: "assistant", content: "RELOAD-MID-RUN-ANSWER", tool_calls: [] });
     window.__fixtures.health.current = null;
@@ -80,6 +80,25 @@ $harness = @'
     document.body.append(reloadLog);
     return;
   }
+  // Managed jobs are rules, after tools, and never optimistically reported enabled.
+  check(document.querySelector('[data-target="tools-box"]').closest('.engine-topic').nextElementSibling.querySelector('[data-target="jobs-box"]'), 'jobs must follow tools in the engine');
+  await refreshJobs();
+  var jobPanel = document.querySelector('wa-jobs');
+  check(!!jobPanel && !jobPanel.querySelector('img'), 'job text must not execute as HTML');
+  var jobToggle = jobPanel.querySelector('input');
+  check(!jobToggle.checked, 'new jobs show disabled');
+  jobToggle.click();
+  check(jobToggle.disabled && !jobToggle.checked, 'job toggle waits for durable confirmation');
+  for (var jtick=0;jtick<30;jtick++) await tick();
+  check(document.querySelector('wa-jobs input').checked, 'accepted enable is displayed');
+  window.__fixtures.jobsRefuse = true;
+  document.querySelector('wa-jobs input').click();
+  for (var jtick=0;jtick<30;jtick++) await tick();
+  check(document.querySelector('wa-jobs input').checked && document.getElementById('jobs-box').textContent.includes('fixture_job_refused'), 'a refused toggle preserves state and reports failure');
+  window.__fixtures.jobsRefuse = false;
+  document.querySelector('wa-jobs input').click();
+  for (var jtick=0;jtick<30;jtick++) await tick();
+  check(!document.querySelector('wa-jobs input').checked, 'accepted disable is displayed');
   var events = [
     { type: "round", n: 1 },
     { type: "delta", text: "Reading the config module to see what it names." },
