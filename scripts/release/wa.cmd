@@ -3,6 +3,8 @@ setlocal
 if /I "%~1"=="setup" goto managed
 if /I "%~1"=="doctor" goto managed
 if /I "%~1"=="ui" goto managed
+if /I "%~1"=="connect" goto managed
+if /I "%~1"=="disconnect" goto managed
 "%~dp0..\wa.exe" %*
 exit /b %ERRORLEVEL%
 :managed

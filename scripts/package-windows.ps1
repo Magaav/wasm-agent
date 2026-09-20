@@ -84,7 +84,7 @@ try {
     }
     Copy-Asset (Join-Path $root "scripts/release/$asset") $relative
   }
-  foreach ($asset in @('first-run.ps1', 'release-package.ps1')) {
+  foreach ($asset in @('first-run.ps1', 'release-package.ps1', 'managed-guest.ps1')) {
     Copy-Asset (Join-Path $root "scripts/lib/$asset") "scripts/lib/$asset"
   }
   Assert-Clean

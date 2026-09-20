@@ -20,8 +20,9 @@ agent developer. For the customer, it should mean **“help me automate this”*
 
 > **Status: developer preview, not a public customer-ready release.** A Windows
 > candidate builder, fresh installer, setup and diagnostics are available. Public
-> distribution and consent-based customer enrollment remain release gates.
-> Guest setup is disconnected; the existing guest role is not a customer permission system.
+> distribution and live customer enrollment remain release gates. A model-free,
+> consent-based managed guest bootstrap is under isolated verification; its public
+> release descriptor stays disabled until the managed service and package are approved.
 
 ## The experience we are building
 
@@ -62,7 +63,7 @@ for the implementation boundary.
 | Evidence | Stored transcript, tool traces, usage accounting and retrievable large tool results. An answered run is not proof of task success. |
 | Tracked file changes | Content-addressed file snapshots, diffs and conflict-aware undo. This does not undo arbitrary shell, network or application effects. |
 | Multiple machines | Node keys, signed peer calls, rendezvous discovery and an outbound relay for NAT'd nodes. |
-| Guest execution | A guest has reduced local authority and can execute a verified master's requests. This is a foundation for assisted automation, not customer-grade enrollment or isolation. |
+| Guest execution | Managed guests pin operator keys, require expiring local consent, reject unrelated callers and support local revocation. The managed registry—not a node's claimed role—controls promotion. Public rollout remains gated. |
 | Reusable procedures | Skills for on-demand instructions; spells for repeatable procedures with postconditions; WASM tool plugins. |
 | Supervision | A separate sentinel handles requested restarts/upgrades and budgeted event-triggered wakes. |
 | Worker pool | On-demand interpreters keep reads responsive and route chat work across workers. Conversation ownership and overlapping streams still need release-level isolation verification. |
@@ -128,6 +129,23 @@ fresh-install script and `bin/wa.cmd setup`, `doctor` and `ui`. Setup stores you
 own credentials with restricted file permissions; guest mode stays disconnected.
 See the [candidate guide](docs/release/RUNTIME.md) and
 [release status](docs/release/RELEASE_STATUS.md) for instructions and verification.
+
+### Model-free assisted onboarding
+
+`scripts/bootstrap-windows.ps1` installs a checksum-pinned package in the background
+while asking for the node name, then asks for explicit full-account automation
+consent. It connects outbound through a **managed** rendezvous, without a model key.
+`wa disconnect` revokes access; `wa connect` renews it; `wa access log` shows recent
+operator activity. Consent defaults to 24 hours. No automatic Windows-login task is
+installed: reconnect after logout when wanted.
+
+An authorized operator can run `wa network role <node-id> master` (or `guest`).
+Promotion does not automatically authorize that node to control other customers.
+
+The public descriptor, `releases/windows-service.json`, is intentionally disabled:
+there is **not yet a working public download command**. Do not point it at the legacy
+open registry. [Managed onboarding](docs/ONBOARDING.md) documents the service,
+publication and verification gates.
 
 ## Architecture
 

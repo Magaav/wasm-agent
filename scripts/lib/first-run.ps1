@@ -140,6 +140,7 @@ function Save-WaSetup {
   # Neither entry path implicitly opts into a network. Remote enrollment has its
   # own security gates. Preserve unrelated settings, but disable connectivity.
   $updates['WASM_AGENT_RENDEZVOUS'] = ''
+  $updates['WASM_AGENT_RELAY'] = ''
   $updates['WASM_AGENT_ENDPOINT'] = ''
   $updates['WASM_AGENT_SYNC_TO'] = ''
   foreach ($key in $updates.Keys) {
@@ -201,7 +202,11 @@ function Test-WaWebView {
 function Start-WaLocalUi([string]$Install, [string]$Config, [int]$Port, [switch]$Browser, [switch]$NoOpen) {
   $settings = Read-WaConfiguration $Config
   if ($settings['WASM_AGENT_ONBOARDING_MODE'] -ne 'personal') {
-    throw 'personal_setup_required: guest networking is disabled pending verified enrollment'
+    if ($settings['WASM_AGENT_MANAGED'] -ne '1') {
+      throw 'personal_setup_required: guest networking is disabled pending verified enrollment'
+    }
+    . (Join-Path $PSScriptRoot 'managed-guest.ps1')
+    Read-WaEnrollment $Config | Out-Null
   }
   if (-not (Test-Path -LiteralPath $settings['WASM_AGENT_WORKSPACE'] -PathType Container)) {
     throw 'configured_workspace_unavailable'

@@ -1,7 +1,7 @@
 # Windows first-run shell. Native CLI, configuration and UI remain the runtime.
-# This script never enables remote enrollment or replaces a running installation.
+# Managed connection requires an existing explicitly approved, pinned guest profile.
 param(
-  [Parameter(Position = 0)][ValidateSet('setup', 'doctor', 'ui')][string]$Command = 'doctor',
+  [Parameter(Position = 0)][ValidateSet('setup', 'doctor', 'ui', 'connect', 'disconnect')][string]$Command = 'doctor',
   [ValidateSet('personal', 'guest')][string]$Mode,
   [string]$Name,
   [string]$Workspace,
@@ -11,6 +11,8 @@ param(
   [switch]$ValidateProvider,
   [switch]$Browser,
   [switch]$NoOpen,
+  [ValidateRange(1,8760)][int]$Hours = 24,
+  [switch]$AcceptAccess,
   [ValidateRange(1024, 65534)][int]$Port = 8799
 )
 $ErrorActionPreference = 'Stop'
@@ -84,7 +86,8 @@ try {
       $mode = $current['WASM_AGENT_ONBOARDING_MODE']
       if ($current['WASM_AGENT_DISPLAY_NAME']) { Write-Output ('Agent display name: ' + $current['WASM_AGENT_DISPLAY_NAME']) }
       Write-Output ('Mode: ' + $(if ($mode) { $mode } else { 'not configured' }))
-      if ($mode -eq 'guest') { Write-Output 'Operator access: DISCONNECTED; enrollment not enabled in this preview' }
+      if ($current['WASM_AGENT_MANAGED'] -eq '1') { & (Join-Path $install 'wa.exe') access }
+      elseif ($mode -eq 'guest') { Write-Output 'Operator access: DISCONNECTED; no managed enrollment' }
       Write-Output ('WebView2 Runtime: ' + $(if (Test-WaWebView) { 'detected' } else { 'not detected; use wa ui -Browser or install Microsoft WebView2 Runtime' }))
       Write-Output 'Native tool isolation: user-account authority, not a workspace sandbox'
       if ($ValidateProvider) {
@@ -93,7 +96,27 @@ try {
       } else { Write-Output 'Provider: NOT VALIDATED (read-only diagnostics; use -ValidateProvider for a model request)' }
       if (-not $mode) { exit 2 }
     }
+    'disconnect' {
+      . (Join-Path $PSScriptRoot 'lib/managed-guest.ps1')
+      Revoke-WaEnrollment $config
+    }
+    'connect' {
+      . (Join-Path $PSScriptRoot 'lib/managed-guest.ps1')
+      . (Join-Path $PSScriptRoot 'lib/release-package.ps1')
+      Test-WaReleasePackage $install | Out-Null
+      $profile = Read-WaEnrollment $config
+      if (-not $AcceptAccess -and -not (Confirm-WaAccess $profile.service $profile.operators $Hours)) { throw 'access_not_approved' }
+      Renew-WaEnrollment -Config $config -Hours $Hours -Consent
+      try { Start-WaLocalUi -Install $install -Config $config -Port $profile.port -NoOpen }
+      catch { Revoke-WaEnrollment $config; throw }
+      Write-Output 'Remote access authorized. Run wa access to verify registration; wa disconnect revokes it.'
+    }
     'ui' {
+      $current = Read-WaConfiguration $config
+      if ($current['WASM_AGENT_MANAGED'] -eq '1' -and -not $PSBoundParameters.ContainsKey('Port')) {
+        . (Join-Path $PSScriptRoot 'lib/managed-guest.ps1')
+        $Port = (Read-WaEnrollment $config).port
+      }
       . (Join-Path $PSScriptRoot 'lib/release-package.ps1')
       Test-WaReleasePackage $install | Out-Null
       Start-WaLocalUi -Install $install -Config $config -Port $Port -Browser:$Browser -NoOpen:$NoOpen
