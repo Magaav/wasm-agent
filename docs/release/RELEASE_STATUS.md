@@ -1,79 +1,123 @@
 # Release status
 
-**Verdict: NO-GO for public/customer release.** A packaging tool is not a passed
-release contract. No release has been tagged/published; no live node or customer
-has been installed, upgraded or enrolled by this work.
+**Windows developer candidate: built and verified as described below.**
+**Public/customer release: NO-GO.** Packaging and first-run delivery are complete
+for this slice; customer authorization and isolation are not. Guest setup is
+explicitly disconnected and cannot launch a network service through the packaged
+UI command. No release was published, no live installation was upgraded, and no
+customer was enrolled.
 
-## Baseline and ownership
+## Candidate
 
-- Review baseline: `62912e56d3882f04f49536e441149231c666c2ac` on `origin/main`.
-- Rebased onto `f6361370c4e62530c2e9943602b9c8b2655a93f2`; merge-tree check clean.
-- Tested implementation: `102adeff9ed5370bceb9b276d1ef350abc672a52`.
-- Change branch: `change/independent-onboarding`, in the `pi-astra` worktree.
-- Implementer: Pi session `01a0be4c-3bf7-775b-a001-2cc1538701ac`.
-- Owned surfaces: `README.md`, `ROADMAP.md`, `docs/release/`,
-  `scripts/package-windows.ps1`, `scripts/test-release-package.ps1`,
-  `scripts/test-release-tools.ps1`, `scripts/lib/release-package.ps1`.
-- Other live work: naming migration in another worktree; not modified here.
-- Independent verifier: **not assigned**. No delegation claimed.
+- Version: `0.1.0-alpha.2` (local candidate, not a published Git tag).
+- Source: `4ae9bae83bf7543b70557047e7395a1fa2e1d3a2`.
+- Target: `x86_64-pc-windows-msvc`.
+- Archive: `dist/wasm-agent-0.1.0-alpha.2-windows-x64.zip`.
+- SHA-256: `fd952378aa0607fb8473c91caafccc4ba73e82c666509c37a258d8c714387097`.
+- Inventory: 18 assets plus `manifest.json`; archive checksum alongside the ZIP.
+- Build command: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -Version 0.1.0-alpha.2`.
 
-## Delivered in this slice
+The ZIP is local, ignored build output—not a file committed to GitHub. The branch
+contains the sources to reproduce it. Timestamped archives are not claimed to be
+bit-for-bit reproducible. Later builds need their own hash and evidence.
 
-- Personal + assisted automation product vision, with guest/customer onboarding
-  as a first-class journey and operator tools/procedures as the reusable arsenal.
-- Explicit separation of existing node roles from planned customer consent,
-  grants, isolation, revocation and data/cost responsibilities.
-- Removal of private-host provisioning commands from public quick-start guidance.
-- Windows candidate builder: clean-source check, three locked offline Rust builds,
-  allowlisted assets, source revision, hashes, manifest, ZIP and archive checksum.
-  No installer, network enrollment, PATH change, service launch or deployment.
-- An extracted-package integrity verifier and mutation tests. No executable code
-  is run by the verifier; it does not certify a binary's behavior or publisher.
-- A neutral candidate README; repository-maintainer instructions and user state
-  are excluded from the package inventory.
+The initial offline build could not resolve the desktop shell's `tao` crate. Its
+locked dependencies were explicitly fetched into the developer cache with
+`cargo fetch --locked --manifest-path rust/wa-window/Cargo.toml --target
+x86_64-pc-windows-msvc`. All three candidate builds then ran locked and offline.
+The shell built with a warning that its optional embedded icon was omitted because
+`windres` was unavailable. This does not assert clean-machine runtime compatibility.
 
-## Evidence
+## Delivered
+
+- README and roadmap for personal agents **and** operator-assisted automation,
+  with explicit customer consent, isolation, data flow and cost responsibilities.
+- Independent candidate package and a fresh per-user installer, defaulting to
+  `%LOCALAPPDATA%/wasm-agent-preview`. No private SSH, maintainer configuration,
+  repo checkout, downloaded UI fragments or automatic service installation.
+- Packaged `bin/wa.cmd setup`, `doctor` and `ui` commands; native `wa.exe` still
+  handles agent commands. Masked API-key entry, restricted config-file DACL,
+  atomic config replacement, and neutral runtime instructions.
+- Setup preserves identity, memory, sessions, existing instructions and unrelated
+  settings. It refuses unmanaged configuration, conflicting environment values,
+  persisted provider-selection conflicts and recorded live servers.
+- Provider validation is optional and explicit about the request/cost. Failure
+  retains settings and gives a recovery instruction without echoing provider bodies.
+- Local UI launch verifies PID/port ownership, supports browser or server-only
+  operation and writes mutable launcher state outside the package. No window or
+  live executable is stopped or replaced by the launcher.
+- Guest setup stores an **offline** profile without requiring a model key. It is
+  not enrollment, not authorization, and not permission to bypass the release gates.
+- Browser test now waits for the asynchronous renderer/reload verdict and isolates
+  both its browser profile and node home, not only its database.
+
+## Verification
+
+Checks were run on the development Windows machine with isolated directories and
+ports. This is not a fresh Windows VM or an unfamiliar-user study.
 
 | Check | Result / boundary |
 | --- | --- |
-| `powershell -NoProfile -File scripts/test-release-tools.ps1` | PASS: 17 synthetic integrity checks, including tampered/missing/extra files, bad manifest identity, traversal and ZIP round trip. Runtime/user journeys not tested. |
-| Candidate builder on dirty source | PASS refusal: exit 1 with `dirty_source`, before any builds or output. |
-| `bash scripts/test.sh` during implementation | Initial runs exited 0 with one skipped downgrade-gate check (dirty tree, then main drift). Superseded by the clean rebased run below. |
-| `bash scripts/test.sh` at tested implementation | PASS: exit 0, `smoke ok`, zero skips; includes 21 deploy-downgrade checks. Log: `pi-astra-smoke-rebased.log` in the session's temporary directory. |
-| Local links in rewritten documentation | PASS: 16 local links resolve. |
-| Full candidate build | BLOCKED: host and sentinel compiled for Windows MSVC; desktop-shell build failed because `tao` is absent from the offline dependency cache. Exit 1, `build_failed: window`. No candidate/archive/checksum produced; temporary staging/build directories removed. |
-| Extracted real runtime | NOT RUN: no complete candidate exists. |
-| Clean unfamiliar Windows user / WebView2 / model task | NOT RUN. |
+| `scripts/test-release-tools.ps1` | PASS: 17 synthetic integrity/mutation checks, including changed/missing/extra assets, invalid identity, traversal and ZIP round trip. |
+| `scripts/test-first-run.ps1` | PASS: 27 isolated configuration checks; credentials/DACL, preservation, invalid input, environment conflicts, unmanaged/live configuration refusal and disconnected guest mode. |
+| `scripts/test-release-package.ps1` on alpha.2 | PASS: all 18 assets match the manifest. Integrity is not publisher authentication or behavioral certification. |
+| `scripts/test-release-runtime.ps1` on alpha.2 | PASS: 20 checks against extracted and freshly installed bytes outside the checkout, no Lua/script overrides, synthetic localhost provider. |
+| Actual task effect | The packaged agent received a mock model tool call and wrote exact unpredictable bytes to a real file; the persisted run settled as answered. This proves integration, not real-model task quality. |
+| Persistence | Remember/recall across separate processes; setup preserved node identity and existing memory. |
+| Launcher | Server-only launch verified actual PID ownership, served installed UI assets from a path containing spaces, and reused its recorded process on a second launch. No native window was opened by this test. |
+| Browser UI | PASS with the packaged binary: structure, interrupted tools and a real mid-run page reload, using the repository UI fixtures. |
+| `bash scripts/test.sh`, final serial run | PASS: exit 0, `smoke ok`, zero skips, including the deploy downgrade gate. |
+| Real model, unfamiliar user/clean VM | NOT RUN. |
 | Customer enrollment, two-customer isolation, revocation | NOT IMPLEMENTED / NOT RUN. |
-| Live authority/concurrency concerns from baseline review | Read-only authority probes and source findings; not fixed by packaging. |
 
-Candidate build command: `powershell -NoProfile -ExecutionPolicy Bypass -File
-scripts/package-windows.ps1 -Version 0.1.0-alpha.1`, at pre-rebase source
-`1132fa7c53b818f45438c2e7e3161f88742cbb5b`. Log: `pi-astra-package-build.log`
-in the session's temporary directory. Packaging sources are unchanged by rebase.
-The offline dependency rule was not bypassed; no network dependency download or
-cloud-tree modification was attempted. A build environment with the locked
-Windows shell dependencies must rerun the entire candidate build and verification.
+The exact runtime command was:
 
-Local command logs are scratch evidence, not distributable user transcripts.
-There is no archive hash to report. Later evidence must name the new exact source
-revision and archive hash; do not promote synthetic integrity checks to a claim
-that a real packaged runtime has been tested.
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-release-runtime.ps1 `
+  -ArchivePath dist/wasm-agent-0.1.0-alpha.2-windows-x64.zip `
+  -ExpectedSha256 fd952378aa0607fb8473c91caafccc4ba73e82c666509c37a258d8c714387097
+```
 
-## Next bounded changes
+Retained local scratch logs: `pi-astra-package-alpha2.log`,
+`pi-astra-runtime-alpha2.log`, `pi-astra-ui-alpha2.log`,
+`pi-astra-smoke-alpha2-serial.log`, `pi-astra-first-run-alpha2.log` and
+`pi-astra-tools-alpha2.log` in the session's temporary directory.
 
-1. **Authority + isolation:** reproduce the reviewed HTTP fallback, cross-worker
-   login state, conversation routing and global stream-sink risks in scratch
-   instances; fix with negative tests. No live attack probes.
-2. **Fresh installation + setup:** verify a real candidate outside the checkout,
-   supply a safe first-install path, reuse existing config, separate display name
-   from node/branch identity, and add thin read-only diagnostics. Existing installs
-   must stay on the external upgrade path.
-3. **Guest enrollment:** design the invitation/grant/revoke boundary and data flow,
-   then prove one operator with two isolated customer environments. No onboarding
-   button that simply sets `role=guest` and trusts the whole rendezvous.
-4. **Independent verification:** run both supported journeys against exact packaged
-   bytes; retain commands, assertions, failures, skips and interventions.
+### Failures retained, not erased by retries
 
-Only the human may approve publication and a real-customer pilot. See
-[RELEASE_CONTRACT.md](RELEASE_CONTRACT.md) for the gate definitions.
+- The first browser check dumped the DOM before the renderer/harness completed.
+  It failed, was fixed with a bounded virtual-time wait and isolated profile, and
+  then passed. The final browser run also uses a fresh node home.
+- One smoke run concurrent with browser tests exited 1 in the concurrency portion
+  after the wedge check. The parent script's grep obscured the sub-suite's failure
+  text. A standalone concurrency run and a complete serial smoke rerun passed.
+  Root cause is **not established**; logs `pi-astra-smoke-alpha2.log` and
+  `pi-astra-concurrency-detail.log` retain that distinction. Do not call the suite
+  proven stable under parallel load.
+- Earlier dirty/behind-main runs skipped the downgrade test. The final serial run
+  was clean and current and skipped nothing.
+
+## Remaining release blockers
+
+1. HTTP authority/origin handling and cross-worker conversation/stream ownership.
+   Baseline review findings were not fixed by this packaging work.
+2. Genuine customer enrollment: verified operator identity, consent, scoped grants,
+   customer isolation and effective revocation. An offline guest profile is not
+   an invitation implementation. Do not onboard customers by editing around it.
+3. Clean Windows environment, runtime prerequisite verification, a real model-backed
+   user journey, diff/undo/recovery acceptance and unfamiliar-user success.
+4. Review the intermittent concurrency-test failure and preserve full failure output.
+5. Publisher authenticity, public distribution and external update integration.
+   The fresh installer intentionally refuses existing installations.
+
+## Ownership and handoff
+
+- Branch: `change/independent-onboarding`, worktree `pi-astra`.
+- Implementer: Pi session `01a0be4c-3bf7-775b-a001-2cc1538701ac`.
+- Main base: `f6361370c4e62530c2e9943602b9c8b2655a93f2`.
+- Independent verifier: not assigned; no delegation claimed.
+- The other worktrees' naming migration was not modified.
+
+The human owns merges, publication and approval of a real-customer pilot. The
+[release contract](RELEASE_CONTRACT.md) remains the go/no-go checklist, not an
+assertion that all gates passed.
