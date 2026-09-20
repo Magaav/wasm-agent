@@ -232,7 +232,7 @@ pub fn watch(store: wa_jobs::Store, job: Value) {
                 };
                 if event.get("error").is_some() || event["result"].get("exceptionDetails").is_some()
                 {
-                    bail!("CDP adapter command failed: {}", event)
+                    bail!("CDP adapter command failed (command id {}); page exception text is not copied into job status", event["id"])
                 }
                 if event["id"] == 2 {
                     if let Some(expression) = expression {

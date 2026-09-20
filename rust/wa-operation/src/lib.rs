@@ -142,9 +142,7 @@ impl Manager {
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         );
         let dir = self.root.join(&id);
-        fs::create_dir_all(&dir)?;
         let state = json!({"operation_id":id,"owner":spec.owner,"state":"accepted","settled":false,"timeout_ms":spec.timeout.as_millis() as u64,"cleanup_budget_ms":CLEANUP_MS,"containment":Process::containment(),"stdout_path":dir.join("stdout").to_string_lossy(),"stderr_path":dir.join("stderr").to_string_lossy(),"output_bytes":0});
-        atomic_json(&dir.join("state.json"), &state)?;
         let entry = Arc::new(Entry {
             cancel: AtomicBool::new(false),
             state: Mutex::new(state),
@@ -157,6 +155,17 @@ impl Manager {
             .name("operation".into())
             .spawn(move || {
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // Persist admission before any external effect, but never hold the control
+                    // registry/state mutex across filesystem I/O.
+                    fs::create_dir_all(&dir)?;
+                    let accepted = entry.state.lock().unwrap().clone();
+                    atomic_json(&dir.join("state.json"), &accepted)?;
+                    if entry.cancel.load(Ordering::Acquire) {
+                        return Err(error("cancelled"));
+                    }
+                    if entry.started.elapsed() >= spec.timeout {
+                        return Err(error("deadline_exceeded"));
+                    }
                     execute(&spec, &dir, &entry)
                 }));
                 let failure = match outcome {
@@ -166,23 +175,24 @@ impl Manager {
                 };
                 if let Some(reason) = failure {
                     let mut s = entry.state.lock().unwrap_or_else(|e| e.into_inner());
-                    s["state"] = json!("failed");
+                    s["state"] = json!(if reason == "cancelled" {
+                        "cancelled"
+                    } else {
+                        "failed"
+                    });
                     s["settled"] = json!(true);
                     s["ok"] = json!(false);
                     s["error"] = json!(reason);
                     s["cleanup"] = json!("unknown");
                     s["output_complete"] = json!(false);
-                    let _ = atomic_json(&dir.join("state.json"), &s);
+                    s["elapsed_ms"] = json!(entry.started.elapsed().as_millis() as u64);
+                    let record = s.clone();
+                    drop(s);
+                    let _ = atomic_json(&dir.join("state.json"), &record);
                 }
             });
         if let Err(e) = result {
-            let entry = self.entries.lock().unwrap().remove(&id).unwrap();
-            let mut s = entry.state.lock().unwrap();
-            s["settled"] = json!(true);
-            s["ok"] = json!(false);
-            s["state"] = json!("failed");
-            s["error"] = json!(e.to_string());
-            atomic_json(&self.root.join(&id).join("state.json"), &s)?;
+            self.entries.lock().unwrap().remove(&id);
             return Err(e);
         }
         Ok(id)
@@ -192,7 +202,9 @@ impl Manager {
         if let Some(entry) = self.entries.lock().map_err(error)?.get(id).cloned() {
             let mut state = entry.state.lock().map_err(error)?.clone();
             let elapsed = entry.started.elapsed();
-            state["elapsed_ms"] = json!(elapsed.as_millis() as u64);
+            if state["settled"] != true {
+                state["elapsed_ms"] = json!(elapsed.as_millis() as u64);
+            }
             state["overdue"] = json!(
                 !state["settled"].as_bool().unwrap_or(false)
                     && elapsed > entry.deadline + Duration::from_millis(CLEANUP_MS)
@@ -202,11 +214,11 @@ impl Manager {
         let mut state: Value =
             serde_json::from_slice(&fs::read(self.root.join(id).join("state.json"))?)?;
         if state["settled"] != true {
-            state["state"] = json!("interrupted_unknown");
+            state["state"] = json!("outcome_unknown");
             state["settled"] = json!(true);
             state["ok"] = json!(false);
             state["error"] =
-                json!("operation_owner_lost; external effects must be reconciled, not replayed");
+                json!("operation_owner_not_attached; it may still be active elsewhere; reconcile effects, never replay blindly");
             state["cleanup"] = json!("unknown");
         }
         Ok(state)
@@ -216,6 +228,13 @@ impl Manager {
         json!(ids
             .iter()
             .filter_map(|id| self.snapshot(id).ok())
+            .map(|mut state| {
+                if let Some(fields) = state.as_object_mut() {
+                    fields.remove("stdout");
+                    fields.remove("stderr");
+                }
+                state
+            })
             .collect::<Vec<_>>())
     }
     pub fn cancel(&self, id: &str) -> io::Result<Value> {
@@ -371,7 +390,7 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry) -> io::Result<()> {
             .as_ref()
             .is_some_and(|s| s.starts_with("output_") || s == "cleanup_incomplete");
     let ok = reason.is_none() && code == Some(0) && complete;
-    let mut state = entry.state.lock().unwrap();
+    let mut state = entry.state.lock().unwrap().clone();
     state["state"] = json!(if ok {
         "completed"
     } else if reason.as_deref() == Some("cancelled") {
@@ -398,6 +417,7 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry) -> io::Result<()> {
         state["ok"] = json!(false);
         state["error"] = json!(format!("operation_record_failed:{e}"));
     }
+    *entry.state.lock().unwrap() = state;
     Ok(())
 }
 

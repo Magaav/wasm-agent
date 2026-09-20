@@ -228,15 +228,9 @@ fn execute(store: &wa_jobs::Store, delivery: &Value) -> Result<String> {
                         return Ok(format!("operation {operation} completed"));
                     }
                     bail!(
-                        "operation {operation}: code={} error={} stderr={}",
+                        "operation {operation}: code={} error={}; inspect its retained output",
                         state["code"],
-                        state["error"],
-                        state["stderr"]
-                            .as_str()
-                            .unwrap_or("")
-                            .chars()
-                            .take(500)
-                            .collect::<String>()
+                        state["error"]
                     )
                 }
                 if state["overdue"] == true {

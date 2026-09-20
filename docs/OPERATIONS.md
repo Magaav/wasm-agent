@@ -17,8 +17,9 @@ not execution success. Default execution budget is 300 seconds; explicit
 operations may request 1–86400 seconds. Eight operations may be active per manager.
 
 State: accepted → running → draining → completed / failed / cancelled.
-A lost owner is `interrupted_unknown`: external effects require reconciliation,
-not automatic replay. Metadata and captured output survive in
+A record not attached to this runtime is `outcome_unknown`: it may have been
+interrupted or may still be active in another process. External effects require
+reconciliation, not automatic replay; lack of attachment is not proof of death. Metadata and captured output survive in
 `<data>/operations/<operation_id>/`; they are not injected into model context.
 
 * All process output is read with nonblocking OS primitives. No `read_to_end`,
@@ -93,6 +94,9 @@ idle and rollback gates. Never restart the desktop window to recover an operatio
 * `scripts/test-exec-timeout.lua`: same scenarios through the real host and Lua
   outcome projection, included in `scripts/test.sh`.
 * `scripts/test-jobs.cjs`: real sentinel and Chrome event delivery; no paid inference.
+* `scripts/test-operation-recovery.cjs`: a busy isolated listener is recovered
+  without waiting for idle, graceful maintenance is deferred, disabling a job
+  cancels its running script, and Windows host death kills contained descendants.
 
 The tests prove those boundaries, not universal freedom from hangs or safe
 execution of arbitrary privileged commands.

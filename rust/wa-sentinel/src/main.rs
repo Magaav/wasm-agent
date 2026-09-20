@@ -354,7 +354,7 @@ fn verb_wake(session: &str, prompt: &str, reason: &str) -> Result<String> {
             .post(&url)
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
-            .header("X-WA-Session", session)
+            .header("X-WA-Session", &std::env::var("WA_SENTINEL_AUTH_SESSION").unwrap_or_default())
             .send(body.as_bytes())
         {
             Ok(response) => {

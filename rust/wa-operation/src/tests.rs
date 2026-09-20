@@ -139,7 +139,7 @@ fn cursor_read_and_restart_do_not_reexecute() {
     .unwrap();
     assert_eq!(
         reopened.snapshot("op-interrupted").unwrap()["state"],
-        "interrupted_unknown"
+        "outcome_unknown"
     );
     fs::remove_dir_all(root).unwrap();
 }
@@ -197,7 +197,10 @@ fn descendant_cannot_write_after_foreground_completion() {
     let s = settled(&m, &id);
     assert_eq!(s["ok"], false, "{s}");
     std::thread::sleep(Duration::from_millis(600));
-    assert!(!root.join("orphan-proof").exists(), "owned descendant survived settlement");
+    assert!(
+        !root.join("orphan-proof").exists(),
+        "owned descendant survived settlement"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 

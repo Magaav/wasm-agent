@@ -62,6 +62,8 @@ instruction. `skill` asks the agent to load that named skill; it does not turn
 untrusted message content into instructions or silently load memory.
 The conversation goes in the chat body's `thread` field, not the authentication
 session header. The distinction prevents wakes landing in the wrong conversation.
+If local login requires authentication, `WA_SENTINEL_AUTH_SESSION` supplies that
+separate credential; it is not taken from event data or logged.
 
 ## Deterministic execution without inference
 
