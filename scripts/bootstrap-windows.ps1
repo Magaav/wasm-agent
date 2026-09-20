@@ -1,6 +1,6 @@
 # Paste-once bootstrap. Only a checksum-pinned, published package may execute.
 param(
-  [string]$ReleaseManifestUri = 'https://raw.githubusercontent.com/Magaav/wasm-agent/main/releases/windows-service.json',
+  [string]$ReleaseManifestUri = 'https://rendezvous.colmeio.com/releases/windows-service.json',
   [string]$ManifestPath,
   [string]$Name,
   [string]$InstallDir,

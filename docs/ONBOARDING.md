@@ -80,12 +80,12 @@ silently claiming nothing happened.
 4. Only after merge/publication and service verification, the intended user command is:
 
    ```powershell
-   & ([scriptblock]::Create((Invoke-RestMethod https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/bootstrap-windows.ps1)))
+   & ([scriptblock]::Create((Invoke-RestMethod https://rendezvous.colmeio.com/releases/install.ps1)))
    ```
 
-   It is **not a working public installer yet**: the checked-in descriptor is
-   deliberately unavailable. For isolated testing, `-ManifestPath` accepts a local
-   descriptor and a `file:` package URL; production downloads require HTTPS.
+   The command becomes live only when the hosted descriptor says `available: true`.
+   For isolated testing, `-ManifestPath` accepts a local descriptor and a `file:`
+   package URL; production downloads require HTTPS.
 
 ## Deployment gate
 
