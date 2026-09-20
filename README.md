@@ -18,10 +18,10 @@ procedures into a service for customers—not asking every customer to become an
 agent developer. For the customer, it should mean **“help me automate this”**, not
 “configure an infrastructure stack.”
 
-> **Status: developer preview, not a public customer-ready release.** The local
-> agent and node fabric exist. Independent public installation, guided setup,
-> and consent-based customer enrollment are release work, not shipped promises.
-> The existing guest role is not yet the complete customer permission system.
+> **Status: developer preview, not a public customer-ready release.** A Windows
+> candidate builder, fresh installer, setup and diagnostics are available. Public
+> distribution and consent-based customer enrollment remain release gates.
+> Guest setup is disconnected; the existing guest role is not a customer permission system.
 
 ## The experience we are building
 
@@ -123,8 +123,11 @@ executable, not an assumed installed command. Without a model, local memory and
 ledger commands remain available.
 
 Public packaging work starts with `scripts/package-windows.ps1`: it builds a
-versioned **candidate archive**, not a public installer or a release approval.
-See [release status](docs/release/RELEASE_STATUS.md) for what has been verified.
+versioned **candidate archive**, not a release approval. The archive includes a
+fresh-install script and `bin/wa.cmd setup`, `doctor` and `ui`. Setup stores your
+own credentials with restricted file permissions; guest mode stays disconnected.
+See the [candidate guide](docs/release/RUNTIME.md) and
+[release status](docs/release/RELEASE_STATUS.md) for instructions and verification.
 
 ## Architecture
 

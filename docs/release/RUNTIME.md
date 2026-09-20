@@ -1,78 +1,108 @@
-# Windows developer candidate — not customer onboarding
+# wasm-agent — Windows developer preview
 
-This archive is a developer candidate, not a public release. Guest invitations,
-first-run setup and customer permission controls are not included. Do not use it
-to enroll customers or expose its HTTP service publicly.
+This package runs independently of the maintainers' computers. It is a developer
+preview, **not a customer-ready automation service**. Guest setup is deliberately
+disconnected until verified invitation, permission and revocation controls exist.
+Do not expose its HTTP service publicly or use the legacy SSH installer.
 
-## Contents and verification
+## Install and set up
 
-`manifest.json` names the source revision, build target and every runtime asset's
-SHA-256. The archive has a separate `.sha256` file. Obtain both through a trusted
-distribution channel: a matching checksum alone does not authenticate a publisher.
-The manifest's `candidate-unverified` status means behavior and release gates
-still require verification.
+1. Obtain the ZIP and its SHA-256 through a trusted distribution channel. Verify
+   the archive hash before extraction; checksums alone do not authenticate a publisher.
+2. Extract into a new folder. From PowerShell in that folder:
 
-Extract to a new folder, not over an existing installation. Existing installations
-must use the external upgrade procedure. Do not copy this binary over a running
-node or replace an existing window. User data is not included in this archive.
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+   ```
 
-## Isolated manual verification
+   The default destination is `%LOCALAPPDATA%\wasm-agent-preview`, separate from
+   the existing developer install. The installer verifies every asset, never
+   overwrites an existing directory, and starts no services. `-InstallDir` chooses
+   a different fresh destination. `-RegisterCommand` optionally adds its `bin`
+   directory to your user PATH; open a new terminal afterward.
 
-Use a disposable Windows user or VM with no operator configuration. These commands
-are for a verifier, not the proposed end-user experience. From the extracted folder,
-set a new absolute scratch home (not your real home) and clear development overrides:
+3. Run the exact command printed by the installer, for example:
 
-```powershell
-$env:WASM_AGENT_HOME = Join-Path $env:TEMP ("wa-candidate-" + [guid]::NewGuid())
-Remove-Item Env:WASM_AGENT_LUA_ROOT -ErrorAction SilentlyContinue
-Remove-Item Env:WA_SCRIPT -ErrorAction SilentlyContinue
-.\wa.exe --version
-.\wa.exe paths
-.\wa.exe help
-```
+   ```powershell
+   & "$env:LOCALAPPDATA\wasm-agent-preview\bin\wa.cmd" setup
+   ```
 
-The home override isolates configuration, identity and data. Use a clean process
-environment: do not inherit provider credentials, rendezvous, sync or other
-`WASM_AGENT_*` settings from an operator session. No remote enrollment is needed.
+   Choose `personal`, an agent display name, an existing workspace, your compatible
+   provider URL and model, and your own API key. Credential input is masked and
+   the configuration file's permissions are limited to your Windows account.
+   Keys are not accepted as command-line arguments.
 
-Without a model you can inspect paths, remember/recall facts and start the local
-UI server. Run it in one terminal, with two unused ports:
+4. Verify the provider and open the existing UI:
 
-```powershell
-.\wa.exe serve --port 18799 --client-port 18800 --ui "$PWD\ui"
-```
+   ```powershell
+   & "$env:LOCALAPPDATA\wasm-agent-preview\bin\wa.cmd" doctor -ValidateProvider
+   & "$env:LOCALAPPDATA\wasm-agent-preview\bin\wa.cmd" ui
+   ```
 
-Open `http://127.0.0.1:18799/` in a trusted local browser. To inspect the bundled
-Windows shell from a second terminal in the same extracted folder:
+   Provider validation makes one small billable model request. A bad credential
+   leaves configuration saved and reports failure; fix it with setup and retry.
+   `doctor` without the flag is read-only and makes no provider request.
 
-```powershell
-$env:WASM_AGENT_UI_URL = 'http://127.0.0.1:18799/'
-$env:WASM_AGENT_CLIENT_PORT = '18800'
-.\wa-window.exe
-```
+When `bin` is on PATH, these are `wa setup`, `wa doctor` and `wa ui`. Use the full
+`.cmd` path if an older `wa` command takes precedence. These three commands are
+provided by the Windows launcher; native `wa.exe` still provides the agent CLI.
 
-WebView2 Runtime must be available for the shell; its loader DLL is bundled, the
-runtime itself is not. Clean-machine runtime dependencies remain a release gate.
-Do not confuse a successful page load with a verified tool-backed task.
+The display name is onboarding metadata and a diagnostic label; it does not
+rename your node, change a branch or define a new model personality. The UI
+launches in your chosen workspace. Native one-shot CLI commands use their caller's
+working directory. Setup rerun preserves node identity, memory, sessions,
+existing instructions and unrelated configuration. Conflicting provider selections
+previously saved through the UI are reported, not silently overridden.
 
-To test model use, put only your own compatible provider configuration into the
-scratch `<config>/env` path reported by `paths`. Protect that file; do not put
-credentials in command arguments or evidence exports. `wa chat` is a native CLI
-command; `wa setup`, `wa doctor` and a packaged `wa ui` launcher are not supplied
-by this slice.
+Setup does not enroll either mode remotely; it clears rendezvous/sync settings.
+Do not use it to reconfigure an already connected operator deployment. Process
+environment can override configuration; setup refuses conflicts it detects.
 
-Stop only the scratch server you started, using its terminal or exact PID. Never
-stop all processes named `wa`. The sentinel and upgrade script are included for
-later integration verification; this archive does not start a watcher or install
-a service, and the current upgrade script requires its shell prerequisites.
+## Guest / assisted mode
 
-## Authority and evidence
+Selecting `guest` saves an offline guest profile without requiring a model key.
+It authorizes **no operator**, connects to **no service**, and refuses `wa ui`
+network startup. This is not a pairing wizard and must not be bypassed for customer
+use. The upcoming assisted flow must verify the operator, obtain consent for
+specific authority/data sharing, isolate customers and make revocation effective.
 
-Native shell/desktop tools run with the user's authority, not inside a guaranteed
-workspace sandbox. Do not use untrusted tasks or grant customer access before the
-release authority gates pass.
+## Windows prerequisites and recovery
 
-Remembered facts are explicit and retrieved on demand. Default conversation
-retention is seven days; debug transcripts persist. Tracked file undo is not an
-undo for arbitrary network, shell or application effects. Inspect actual results,
-not just an agent's success message.
+Windows x64 and Windows PowerShell 5.1 are the intended platform. WebView2 Runtime
+is needed for the native shell; its loader DLL is bundled, the runtime itself is
+not. `doctor` reports detection. Install Microsoft WebView2 Runtime or use
+`wa ui -Browser` with a trusted local browser. No SSH, Git or Rust is needed merely
+to launch the installed runtime. Some requested tasks/tools still need their own
+prerequisites, including Bash for POSIX shell commands.
+
+The launcher verifies the actual server PID owns its port. If another process
+owns it, it refuses rather than connecting to someone else's agent. Use
+`wa ui -Port 18799` to choose another unused port; the client bridge uses the next
+port. It does not stop or replace existing windows. Launcher logs and PID records
+live under the configuration directory, not inside the immutable package.
+
+If a launch fails, inspect the reported log and PID. Never stop all processes
+named `wa`. Existing installations must be upgraded by the external upgrade
+procedure; this fresh installer intentionally refuses them. The bundled sentinel
+and upgrade script are not automatically installed as a service; the current
+upgrade script still needs its shell prerequisites.
+
+## Data and authority
+
+`wa paths` identifies the configuration/data directory. Personal endpoint settings
+use the existing `<config>/env` file. `WASM_AGENT_HOME` may select a new absolute
+Windows scratch home for testing; never point test runs at your live home. Clear
+`WASM_AGENT_LUA_ROOT` and `WA_SCRIPT` to exercise embedded code.
+
+Native file, shell and desktop tools carry your Windows account's authority.
+**The workspace is not a sandbox.** This preview still has HTTP/concurrency
+hardening gates before public/customer use. Do not run untrusted tasks merely
+because a package passed its checksum checks.
+
+Memory is explicit and on demand. Default transcript retention is seven days;
+debug transcripts persist. Tracked file undo does not undo arbitrary external
+actions. A provider answering is not proof that an automation succeeded.
+
+The manifest records source revision and asset hashes; `candidate-unverified`
+means it does not certify release readiness. See the repository release status
+for tests performed, limitations and the public-release go/no-go decision.

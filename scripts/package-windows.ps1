@@ -76,6 +76,17 @@ try {
     Copy-Asset (Join-Path $root $asset) $asset
   }
   Copy-Asset (Join-Path $root 'docs/release/RUNTIME.md') 'README.md'
+  foreach ($asset in @('first-run.ps1', 'install.ps1', 'wa.cmd', 'AGENTS.runtime.md')) {
+    $relative = switch ($asset) {
+      'first-run.ps1' { 'scripts/first-run.ps1' }
+      'wa.cmd' { 'bin/wa.cmd' }
+      default { $asset }
+    }
+    Copy-Asset (Join-Path $root "scripts/release/$asset") $relative
+  }
+  foreach ($asset in @('first-run.ps1', 'release-package.ps1')) {
+    Copy-Asset (Join-Path $root "scripts/lib/$asset") "scripts/lib/$asset"
+  }
   Assert-Clean
   if ((Git-Value @('rev-parse', 'HEAD')) -cne $commit) { throw 'source_changed_during_build' }
   $records = @(foreach ($asset in Get-WaReleaseFiles) {
