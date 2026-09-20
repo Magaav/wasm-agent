@@ -63,6 +63,7 @@ $harness = @'
       { seq: 3, role: "tool", tool_name: "bash", content: "done", tool_calls: [] },
       { seq: 4, role: "assistant", content: "RELOAD-MID-RUN-ANSWER", tool_calls: [] });
     window.__fixtures.health.current = null;
+    window.__fixtures.health.workers = [];
     await window.__watchTurn();
     for (var settled = 0; settled < 100; settled++) await tick();
     check(restored.textContent.includes("RELOAD-MID-RUN-ANSWER"),
@@ -605,6 +606,12 @@ $harness = @'
     "a replayed tool must not start a new timer or remain pending");
   check(window.__calls.filter(function (call) { return call.url === "chat" && call.method === "POST"; }).length === sendsBeforeRestore,
     "restoring an unfinished tool must never execute it again");
+  window.__fixtures.health.current = { label: "GET /models", ms: 50 };
+  await window.__restoreSession();
+  var readNotice = document.querySelector(".unfinished-notice");
+  check(!!readNotice && /effects may have happened/.test(readNotice.textContent) && !!readNotice.querySelector("button"),
+    "a UI read must not be mistaken for a running agent turn");
+  window.__fixtures.health.current = null;
 
   // A session whose last turn *failed* is the same situation by another route, and it used to be
   // invisible here. Restoring it must say so without posting another turn: page navigation is read-only.

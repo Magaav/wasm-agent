@@ -137,7 +137,9 @@ if (sessionStorage.getItem("wa-ui-reload-stage") === "active") {
     ],
   };
   window.__fixtures.health = {
-    current: { label: "POST /chat", ms: 15000 }, ok: true, queue: 0,
+    // A UI read can occupy worker 0 while a chat turn runs on another worker.
+    current: { label: "GET /models", ms: 30 },
+    workers: [{ label: "POST /chat", busy_ms: 15000 }], ok: true, queue: 0,
     stalled_ms: 20, worker: "alive", exec_timeout_seconds: 300,
   };
 }

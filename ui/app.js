@@ -136,6 +136,13 @@ function apiHeaders(extra) {
   return headers;
 }
 
+// /health.current is the node's current request, which may be a harmless UI read.
+// A chat turn can also run on a secondary worker while worker 0 answers that read.
+function activeTurn(health) {
+  const isChat = (entry) => /^POST \/chat(?:\?|$)/.test(entry?.label || "");
+  return (health?.workers || []).find(isChat) || (isChat(health?.current) ? health.current : null);
+}
+
 function nodeQuery() {
   return activeNode ? "?node=" + encodeURIComponent(activeNode) : "";
 }
@@ -979,7 +986,7 @@ async function restoreSessionOnce() {
     // A reply can land between the transcript read and /health. When the node is idle,
     // reread once before declaring a run unfinished; otherwise a completed answer could
     // briefly be displayed as a lost tool call.
-    if (outcome.name === "unfinished" && health && !health.current) {
+    if (outcome.name === "unfinished" && health && !activeTurn(health)) {
       const latest = await (await apiFetch(route, { headers: apiHeaders() })).json();
       if (latest && !latest.error && Array.isArray(latest.turns)) {
         full = latest;
@@ -996,7 +1003,7 @@ async function restoreSessionOnce() {
           (outcome.detail || "the node recorded a failure") + ".";
       } else if (!health) {
         notice.textContent = "no result is recorded for the last turn; the node is unavailable, so its outcome is unknown.";
-      } else if (health.current) {
+      } else if (activeTurn(health)) {
         notice.textContent = "no result is recorded yet. The node is running a turn; this page will check again when it becomes idle.";
         sawTurnInFlight = true;
       } else {
@@ -1006,7 +1013,7 @@ async function restoreSessionOnce() {
       }
       // Reloading a page must never execute an unfinished tool a second time. Recovery
       // requires a person to inspect possible side effects and explicitly continue.
-      if (health && !health.current) {
+      if (health && !activeTurn(health)) {
         notice.append(nodeButton("continue", () => { notice.remove(); resumeSession(wanted.id); }));
       }
       messages.append(notice);
@@ -1061,7 +1068,8 @@ function startLiveness() {
     let health = null;
     try { health = await (await apiFetch("health", { headers: apiHeaders() })).json(); }
     catch (error) { return; }   // the offline path owns that case and says its piece
-    if (!health || !health.current) { setLiveness(null); return; }
+    const running = activeTurn(health);
+    if (!running) { setLiveness(null); return; }
 
     if (typeof health.exec_timeout_seconds === "number") execTimeoutSeconds = health.exec_timeout_seconds;
     const stalled = health.stalled_ms;
@@ -1075,7 +1083,7 @@ function startLiveness() {
     }
     lastStalled = stalled;
     const working = stalled < 5000 || !climbingSince;
-    const busyFor = health.current && health.current.ms ? health.current.ms : Date.now() - (turnStartedAt || Date.now());
+    const busyFor = running.busy_ms || running.ms || Date.now() - (turnStartedAt || Date.now());
     setLiveness({
       working,
       stalled,
@@ -1257,7 +1265,7 @@ async function send(text, options = {}) {
         // Asked and answered while the turn was ending: say nothing. The turn finished; there is
         // nothing to report and nothing to continue.
         if (turnFinished) { clearInterval(watchdog); asking = false; return; }
-        const running = health && health.current;
+        const running = activeTurn(health);
         if (running && health.worker !== "stalled") {
           // Working, and quiet because the work is quiet. Keep waiting, and start counting again.
           lastEvent = Date.now();
@@ -2394,7 +2402,7 @@ async function sync(reason) {
     // because the restore never ran. It cannot run while the turn holds the interpreter - that is
     // physical on a single-worker node - but the message can be true, and the retry does the rest.
     const health = await nodeHealth();
-    if (health && health.current) {
+    if (activeTurn(health)) {
       syncAttempts = 0;
       setConnecting("the node is running a turn — this window returns when it finishes");
     } else if (health) {
@@ -2434,7 +2442,7 @@ async function reconcile() {
   reconciling = true;
   try {
     const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
-    if (health && !health.current) {
+    if (health && !activeTurn(health)) {
       // What the live DOM still believes is worth checking *before* clearing it: if the page thought a turn was
       // running, then whatever it is still showing - a tool topic waiting for a result that already arrived,
       // a segment that never got its reply - is stale.
@@ -2486,7 +2494,7 @@ async function watchTurn() {
   try {
     const response = await apiFetch("health");
     const health = await response.json();
-    const current = health && health.current;
+    const current = activeTurn(health);
     if (current) { sawTurnInFlight = true; }
     else if (sawTurnInFlight) {
       sawTurnInFlight = false;
