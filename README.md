@@ -18,11 +18,10 @@ procedures into a service for customers—not asking every customer to become an
 agent developer. For the customer, it should mean **“help me automate this”**, not
 “configure an infrastructure stack.”
 
-> **Status: developer preview, not a public customer-ready release.** A Windows
-> candidate builder, fresh installer, setup and diagnostics are available. Public
-> distribution and live customer enrollment remain release gates. A model-free,
-> consent-based managed guest bootstrap is under isolated verification; its public
-> release descriptor stays disabled until the managed service and package are approved.
+> **Status: live assisted alpha, not a general customer-ready release.** The
+> Windows paste-once guest installer and managed service are public and have passed
+> one disposable end-to-end operator-effect/revocation check. Clean-VM usability,
+> publisher signing, conversation isolation and recovery remain release gates.
 
 ## The experience we are building
 
@@ -142,9 +141,17 @@ installed: reconnect after logout when wanted.
 An authorized operator can run `wa network role <node-id> master` (or `guest`).
 Promotion does not automatically authorize that node to control other customers.
 
-The public descriptor is served by the managed rendezvous only after its package,
-operator pins and service protocol pass the live gate. The one-liner fails closed
-while that descriptor is unavailable. [Managed onboarding](docs/ONBOARDING.md)
+The public descriptor is served by the managed rendezvous after its package,
+operator pins and service protocol pass the live gate. The current assisted-alpha
+one-liner is:
+
+```powershell
+& ([scriptblock]::Create((Invoke-RestMethod https://rendezvous.colmeio.com/releases/install.ps1)))
+```
+
+It installs in the background, asks for a node name, then requires explicit
+`CONNECT` consent for broad Windows-account automation. The one-liner fails closed
+when its descriptor is unavailable. [Managed onboarding](docs/ONBOARDING.md)
 documents the service, publication and verification gates.
 
 ## Architecture
