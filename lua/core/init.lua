@@ -227,12 +227,25 @@ elseif command == "call" then
     if ok and type(decoded) == "table" then payload = decoded end
   end
   print(json.encode(nodes.remote_call(args[2], args[3], payload)))
+elseif command == "network" then
+  if args[2] ~= "role" or not args[3] then
+    print(json.encode({ error = "usage: wa network role <node-id> master|guest" }))
+    os.exit(2)
+  end
+  local result = dofile("lua/core/nodes.lua").network_role(args[3], args[4])
+  print(json.encode(result))
+  if result.error then os.exit(1) end
+elseif command == "access" then
+  local access = dofile("lua/core/enrollment.lua")
+  print(json.encode(args[2] == "log" and access.events() or access.status()))
 elseif command == "help" then
   print("wa: chat [--continue|--session <id>] [prompt]  |  remember <text> | recall <query>")
   print("    memories | forget <id> | search <query> | conversation <id> | conversations")
   print("    sessions | skills | stats | status | nodes | call <node> <capability> [args-json]")
   print("    resume [--list] [--session <id>] [prompt]   see and continue an unfinished thread")
   print("    paths  where this node keeps its files, and the config file it would read")
+  print("    network role <node-id> master|guest  administrator-controlled network role")
+  print("    access [log]  managed-access status or recent local audit events (no model)")
 else
   print("unknown command: " .. tostring(command))
   os.exit(2)

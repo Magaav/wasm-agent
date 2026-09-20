@@ -14,7 +14,7 @@ pub fn hex(bytes: &[u8]) -> String {
 
 pub fn unhex(text: &str) -> Option<Vec<u8>> {
     let text = text.trim();
-    if text.len() % 2 != 0 {
+    if !text.is_ascii() || text.len() % 2 != 0 {
         return None;
     }
     (0..text.len() / 2)
@@ -81,6 +81,10 @@ impl Identity {
 /// Role: the environment, then `<config>/node.role`, then master. Anything that is not `guest`
 /// is a master, so a typo cannot quietly demote a node that is in the middle of work.
 fn announced_role(config: &str) -> String {
+    if std::env::var("WASM_AGENT_MANAGED").as_deref() == Ok("1") {
+        return managed_profile().and_then(|p| p["local_role"].as_str().map(str::to_string))
+            .filter(|role| role == "master").unwrap_or_else(|| "guest".into());
+    }
     let configured = std::env::var("WASM_AGENT_NODE_ROLE")
         .ok()
         .map(|value| value.trim().to_string())
@@ -147,6 +151,21 @@ pub fn verify(public_key_hex: &str, message: &str, signature_hex: &str) -> bool 
         .is_ok()
 }
 
+fn managed_profile() -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(format!("{}/.wasm-agent/enrollment.json", crate::resolve_home())).ok()?;
+    let p: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    if p["schema"].as_u64() == Some(1) && p["active"].as_bool() == Some(true)
+        && p["expires_at"].as_u64().unwrap_or(0) > now {
+        Some(p)
+    } else { None }
+}
+
+/// Revocation/expiry also pauses outbound polling. In-flight jobs still face the Lua gate.
+pub fn network_active() -> bool {
+    std::env::var("WASM_AGENT_MANAGED").as_deref() != Ok("1") || managed_profile().is_some()
+}
+
 /// The canonical string a node signs when announcing itself.
 pub fn announcement(node_id: &str, ts: u64) -> String {
     format!("{node_id}|{ts}")
@@ -168,10 +187,14 @@ pub fn spawn_heartbeat(url: String) {
         // nodes check. A node that is a guest locally and a master remotely is how a guest gets
         // master tools from a peer, and the announcement below is the only place that decides.
         let config = format!("{}/.wasm-agent", crate::resolve_home());
-        let role = announced_role(&config);
-        let name = announced_name(&config, &role);
         let mut registered = false;
         loop {
+            if !network_active() {
+                std::thread::sleep(Duration::from_secs(2));
+                continue;
+            }
+            let role = announced_role(&config);
+            let name = announced_name(&config, &role);
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_secs())

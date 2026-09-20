@@ -6,6 +6,7 @@
 local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
 local platform = dofile("lua/core/platform.lua")
+local enrollment = dofile("lua/core/enrollment.lua")
 local M = {}
 
 local CACHE_TTL = 15
@@ -40,6 +41,7 @@ end
 -- unrecognised value is a master rather than a silent guest: a typo must not quietly demote a
 -- node that is in the middle of work.
 function M.role()
+  if enrollment.managed() then return enrollment.role() end
   local from_env = tostring(host.getenv("WASM_AGENT_NODE_ROLE") or ""):lower():gsub("%s+", "")
   if from_env ~= "" then return from_env == "guest" and "guest" or "master" end
   local stored = host.read_file(M.role_file())
@@ -66,6 +68,7 @@ local function normalize_role(role)
 end
 
 function M.author_of(caller)
+  if enrollment.managed() then return enrollment.author(caller) end
   if type(caller) ~= "table" then return nil end
   if normalize_role(caller.role) ~= "master" then return nil end
   -- Who is allowed to be a master at all. The rendezvous records what each node says about
@@ -97,6 +100,7 @@ end
 local seen = {}
 
 function M.seen_before(id)
+  if enrollment.managed() then return enrollment.seen_before(id) end
   if seen[id] then return true end
   local now = host.now()
   for key, at in pairs(seen) do
@@ -243,7 +247,7 @@ local function fetch_peers(fresh)
   if not fresh and cache and (now - cache_at) < CACHE_TTL then return cache end
   local peers = {}
   pcall(function()
-    local headers = json.encode({ ["Accept"] = "application/json", ["User-Agent"] = "wasm-agent/0.1 node" })
+    local headers = json.encode(M.signed_headers("nodes") or {})
     local response = json.decode(host.http("GET", url:gsub("/+$", "") .. "/nodes", headers, ""))
     if response and tonumber(response.status) == 200 then
       local ok, payload = pcall(json.decode, response.body)
@@ -317,6 +321,7 @@ end
 -- with that node id. It does not prove the caller is well-intentioned - that is what the role
 -- check and `author_of`'s enrolment list are for - and it fails closed: no rendezvous, no answer.
 function M.verify_caller(node_id, public_key, opts)
+  if enrollment.managed() then return enrollment.caller(node_id, public_key) end
   if not node_id or not public_key then return nil end
   local peers = fetch_peers(type(opts) == "table" and opts.fresh)
   for _, node in ipairs(peers) do
@@ -448,6 +453,8 @@ function M.remote_call(selector, capability, args)
   -- covered by the hash like everything else.
   local body = json.encode({
     from_node_id = (M.identity() or {}).node_id,
+    to_node_id = node.node_id,
+    request_id = host.uuid(),
     capability = capability,
     args = args or {},
   })
@@ -467,6 +474,21 @@ function M.remote_call(selector, capability, args)
   if not ok or type(decoded) ~= "table" then return { result = response.body, node = node.name } end
   decoded.node = node.name
   return decoded
+end
+
+-- Registry authority first, then the recipient's pinned local grant. Report partial changes.
+function M.network_role(node_id, role)
+  if role ~= "master" and role ~= "guest" then return { error = "invalid_role" } end
+  local body = json.encode({ node_id = node_id, role = role, nonce = host.uuid() })
+  local headers = M.signed_headers("grant-role", body)
+  local response = json.decode(host.http("POST", M.rendezvous_url():gsub("/+$", "") .. "/role", json.encode(headers), body))
+  if not response or tonumber(response.status) ~= 200 then
+    return { error = "network_role_refused", detail = response and response.body }
+  end
+  M.invalidate()
+  local result = M.remote_call(node_id, "set_role", { role = role })
+  if result.error then return { error = "network_role_changed_local_update_failed", network_role = role, detail = result } end
+  return result
 end
 
 -- Stream a turn on a peer. Direct: its SSE is forwarded live. Via the relay the
