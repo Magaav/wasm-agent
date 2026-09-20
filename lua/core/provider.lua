@@ -29,7 +29,9 @@ local function write_state(name, value)
   state.write(name, value)
 end
 
--- Provider profiles. Add one here and it appears in the UI automatically.
+-- Provider profiles. Add one here and it appears in the UI automatically - and
+-- record its host in ATTRIBUTION below, or scripts/test.sh refuses the profile
+-- rather than letting it reach the provider with the wrong headers.
 function M.providers()
   return {
     {
@@ -104,15 +106,95 @@ function M.set_model(name)
   return true
 end
 
-local function headers_for(provider)
-  return {
+-- Attribution: what a provider's edge is told about who is calling, and which
+-- conversation this is. Matched on the *host* of the base URL rather than on the
+-- profile's id, because WASM_AGENT_LLM_BASE_URL can point any profile at another
+-- service, and the headers a service needs belong to the service and not to the
+-- label we happened to give it.
+--
+-- `session` names the header that must carry the conversation id, and it is not
+-- decoration. OpenCode Go documents it as a requirement - "Send a stable session
+-- ID in x-opencode-session for each conversation so we can optimize routing and
+-- prompt caching" - and lists clients that omit it under "Known Problematic
+-- Clients". A constant satisfies "a header is present" while defeating the whole
+-- point, which is what this file did: it sent the literal "wasm-agent" for every
+-- conversation on the node, so every conversation shared one cache shard.
+--
+-- Every host a shipped profile can reach must appear here, including the ones
+-- that need nothing beyond the credentials, because the entry *is* the decision.
+-- M.attribution_gaps() reports the profiles that have none, and scripts/test.sh
+-- asserts that list is empty - a new provider is refused until someone decides.
+local ATTRIBUTION = {
+  {
+    host = "opencode.ai",
+    session = "x-opencode-session",
+    -- pi, a validated client, also sends x-opencode-client: pi. The docs do not
+    -- ask for it and nothing here can show the edge reads it, so this does not
+    -- invent it.
+  },
+  {
+    -- OpenAI routes a conversation with the `prompt_cache_key` body field, which
+    -- cache_params already sends per conversation, and has no session header.
+    -- Declared so the absence is a decision a reader can see, not an oversight.
+    host = "api.openai.com",
+  },
+}
+
+-- The authority of a base URL, lowercased: "https://opencode.ai/zen/go/v1" gives
+-- "opencode.ai". Not a URL parser - just enough to match a rule.
+local function base_host(url)
+  local authority = tostring(url or ""):match("^%a[%w+.-]*://([^/?#]*)")
+  if not authority or authority == "" then return nil end
+  authority = authority:gsub("^.*@", ""):gsub(":%d+$", "")
+  if authority == "" then return nil end
+  return authority:lower()
+end
+
+-- The declared rule for a provider's host, or nil when nobody has decided what
+-- that host needs. A nil rule means credentials and the user agent, and never a
+-- guessed session header: routing a conversation by the wrong id is worse than
+-- not routing it at all, because it is invisible.
+function M.attribution_rule(provider)
+  local host = base_host(provider and provider.base_url)
+  if not host then return nil end
+  for _, rule in ipairs(ATTRIBUTION) do
+    if rule.host == host then return rule end
+  end
+  return nil
+end
+
+-- Shipped providers whose host has no rule. scripts/test.sh asserts this is
+-- empty; the names it prints are what the next person adds to ATTRIBUTION.
+function M.attribution_gaps()
+  local gaps = {}
+  for _, provider in ipairs(M.providers()) do
+    if not M.attribution_rule(provider) then
+      gaps[#gaps + 1] = tostring(provider.id) .. " -> " ..
+        tostring(base_host(provider.base_url) or provider.base_url)
+    end
+  end
+  return gaps
+end
+
+-- Headers for one request. `session_id` is the conversation this request belongs
+-- to; a request that is not part of a conversation (the model catalogue, the
+-- account's limits) passes nil and gets no session header. `cache = false` does
+-- not suppress it: that flag keeps a one-off prompt out of the cache *key*, while
+-- this header is what keeps the conversation on one shard at all. The applied
+-- rule is returned too, so the request can record which routing it used.
+local function headers_for(provider, session_id)
+  local headers = {
     ["Content-Type"] = "application/json",
     ["Authorization"] = "Bearer " .. provider.api_key,
     ["Accept"] = "application/json",
     -- The provider edge rejects a default urllib/ureq-style agent string.
     ["User-Agent"] = "wasm-agent/0.1 provider-proxy",
-    ["x-opencode-session"] = "wasm-agent",
   }
+  local rule = M.attribution_rule(provider)
+  if rule and rule.session and session_id and session_id ~= "" then
+    headers[rule.session] = tostring(session_id)
+  end
+  return headers, rule
 end
 
 -- Model catalogue for a provider (defaults to the active one). Cached, then
@@ -134,7 +216,9 @@ function M.list_models(id)
   if provider.api_key ~= "" then
     pcall(function()
       local url = provider.base_url:gsub("/+$", "") .. "/models"
-      local response = json.decode(host.http("GET", url, json.encode(headers_for(provider)), ""))
+      -- Listing models is not part of a conversation, so no session id is sent.
+      local headers = headers_for(provider)
+      local response = json.decode(host.http("GET", url, json.encode(headers), ""))
       if response and tonumber(response.status) == 200 then
         local ok, payload = pcall(json.decode, response.body)
         if ok and type(payload) == "table" and type(payload.data) == "table" then
@@ -161,7 +245,8 @@ function M.limits()
   local limits = {}
   pcall(function()
     local url = provider.base_url:gsub("/+$", "") .. "/usage"
-    local response = json.decode(host.http("GET", url, json.encode(headers_for(provider)), ""))
+    local headers = headers_for(provider)
+    local response = json.decode(host.http("GET", url, json.encode(headers), ""))
     if response and tonumber(response.status) == 200 then
       local ok, payload = pcall(json.decode, response.body)
       if ok and type(payload) == "table" and type(payload.usage) == "table" then
@@ -389,9 +474,14 @@ function M.complete_with(model, messages, tools, stream, opts)
   for key, value in pairs(M.cache_params(opts)) do body[key] = value end
   if stream then body.stream=true; body.stream_options={include_usage=true} end
   local url = provider.base_url:gsub("/+$", "") .. "/chat/completions"
-  local headers = headers_for(provider)
+  local headers, attribution = headers_for(provider, opts.session_id)
   local serialized=json.encode(body)
   local request_meta={model=body.model,provider=provider.id,round=opts.round,
+    -- Which routing this request used. Recorded because a cache miss and the
+    -- routing that produced it have to be readable together: without this the
+    -- ledger shows the miss and not the instruction that caused it.
+    attribution={host=base_host(provider.base_url) or "",rule=(attribution and attribution.host) or "",
+      session_header=(attribution and attribution.session) or "",session_id_present=(opts.session_id or "")~=""},
     settings=effective,request_hash=host.sha256(serialized),request_bytes=#serialized,
     messages=#messages,tools=tools and #tools or 0,
     system_hash=host.sha256(json.encode(messages[1] or {})),
