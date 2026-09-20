@@ -27,7 +27,7 @@ async function main(){
  const requests=path.join(root,'.wasm-agent/sentinel/requests');check(fs.readdirSync(requests).some(f=>f.endsWith('.json')),'graceful restart stays queued while busy');check(mock.exitCode===null,'graceful restart does not kill healthy busy work');
  const started=Date.now();cli(env,'request','recover','--reason','fixture non-cooperative recovery');
  await until(async()=>{try{return (await (await fetch(base+'/health')).json()).exec_timeout_seconds!==undefined}catch{return false}},'recovery replaced busy fixture');
- check(Date.now()-started<8000,'recovery acts without the 900-second idle wait');check(mock.exitCode!==null,'only the owned busy listener was terminated');
+ check(Date.now()-started<8000,'recovery acts without the 900-second idle wait');check(mock.exitCode!==null||mock.signalCode!==null,'only the owned busy listener was terminated');
  // Wait for the formerly deferred maintenance request to settle before cancelling a job.
  await until(()=>fs.readdirSync(requests).filter(f=>f.endsWith('.json')).length===0,'maintenance queue drained');await sleep(500);
  const procedure=path.join(root,'long.sh');fs.writeFileSync(procedure,'#!/bin/sh\nprintf active\nsleep 30\n');
@@ -41,7 +41,7 @@ async function main(){
 }
 async function cleanup(){
  // Stop our watcher before resolving the replacement listener so it cannot restart it.
- for(const p of children.reverse()){if(p.exitCode===null){p.kill();await Promise.race([new Promise(r=>p.once('exit',r)),sleep(2000)]);}}
+ for(const p of children.reverse()){if(p.exitCode===null&&p.signalCode===null){p.kill();await Promise.race([new Promise(r=>p.once('exit',r)),sleep(2000)]);}}
  if(nodePort&&installed){
   if(process.platform==='win32'){
    const script=`$p=Get-NetTCPConnection -State Listen -LocalPort ${nodePort} -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess; if($p){$x=Get-CimInstance Win32_Process -Filter "ProcessId=$p"; if($x.ExecutablePath -eq '${installed.replaceAll("'","''")}'){Stop-Process -Id $p -ErrorAction Stop}}`;
