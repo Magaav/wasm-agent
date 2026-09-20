@@ -289,6 +289,28 @@ fn wait_up(seconds: u64) -> bool {
 
 /// Wake the model: a turn, in a session, with a prompt. This is the only verb that costs money, so it
 /// is the only one that is budgeted.
+fn consume_wake(mut reader: impl std::io::BufRead) -> Result<u32> {
+    let mut events=0; let mut total=0; let mut failure=None;
+    loop {
+        let mut line=Vec::new();
+        let mut bounded=std::io::Read::take(&mut reader,1_048_577);
+        let count=std::io::BufRead::read_until(&mut bounded,b'\n',&mut line)
+            .map_err(|e|anyhow::anyhow!("wake outcome unknown: stream read failed: {e}"))?;
+        if count==0 {bail!("wake outcome unknown: stream ended without done; do not replay automatically")}
+        total+=count;
+        if count>1_048_576 || total>8*1024*1024 {bail!("wake outcome unknown: stream_limit_exceeded; do not replay automatically")}
+        if !line.starts_with(b"data: ") {continue;}
+        events+=1;
+        if let Ok(value)=serde_json::from_slice::<Value>(&line[6..]) {
+            match value["type"].as_str() {
+                Some("error")=>failure=Some(value["error"].as_str().unwrap_or("run failed").to_string()),
+                Some("done")=>{if let Some(error)=failure {bail!("the turn failed: {error}")}return Ok(events);},
+                _=>{},
+            }
+        }
+    }
+}
+
 fn verb_wake(session: &str, prompt: &str, reason: &str) -> Result<String> {
     if session.is_empty() {
         bail!("wake needs --session");
@@ -366,34 +388,9 @@ fn verb_wake(session: &str, prompt: &str, reason: &str) -> Result<String> {
                 }
                 // Read to the end of the turn: `done` is the node saying it finished. Anything shorter is
                 // reported, so a wake that half-happened is never recorded as a success.
-                let reader = std::io::BufReader::new(response.into_body().into_reader());
-                let mut events = 0u32;
-                let mut saw_done = false;
-                let mut failure: Option<String> = None;
-                for line in std::io::BufRead::lines(reader) {
-                    let Ok(line) = line else { break };
-                    if !line.starts_with("data: ") {
-                        continue;
-                    }
-                    events += 1;
-                    let payload = &line[6..];
-                    if payload.contains("\"type\":\"done\"") {
-                        saw_done = true;
-                        break;
-                    }
-                    if let Ok(value) = serde_json::from_str::<Value>(payload) {
-                        if value.get("type").and_then(Value::as_str) == Some("error") {
-                            failure = value.get("error").and_then(Value::as_str).map(str::to_string);
-                        }
-                    }
-                }
-                if let Some(error) = failure {
-                    audit("wake-failed", session, &format!("{reason} (the turn failed: {error})"));
-                    bail!("the turn failed: {error}");
-                }
-                if !saw_done { bail!("wake outcome unknown: stream ended without done; do not replay automatically"); }
-                audit("wake", session, &format!("{reason} ({events} events, done={saw_done})"));
-                return Ok(format!("{events} events, done={saw_done}"));
+                let events = consume_wake(std::io::BufReader::new(response.into_body().into_reader()))?;
+                audit("wake", session, &format!("{reason} ({events} events, done=true)"));
+                return Ok(format!("{events} events, done=true"));
             }
             Err(error) => {
                 last = error.to_string();
@@ -1120,6 +1117,15 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod self_update_tests {
     use super::*;
+
+    #[test]
+    fn wake_requires_a_real_terminal_event_and_bounds_capture() {
+        assert!(consume_wake(&b"data: {\"type\":\"tool\",\"nested\":{\"type\":\"done\"}}\n\n"[..]).unwrap_err().to_string().contains("unknown"));
+        assert_eq!(consume_wake(&b"data: { \"type\" : \"done\" }\n\n"[..]).unwrap(),1);
+        assert!(consume_wake(&b"data: {\"type\":\"error\",\"error\":\"fixture\"}\n\ndata: {\"type\":\"done\"}\n\n"[..]).is_err());
+        let flood=vec![b'x';1_048_577];
+        assert!(consume_wake(&flood[..]).unwrap_err().to_string().contains("stream_limit_exceeded"));
+    }
 
     #[test]
     fn continuation_requires_both_fields_before_any_upgrade() {

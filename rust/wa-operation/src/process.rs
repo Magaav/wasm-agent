@@ -13,6 +13,7 @@ pub struct Process {
     pub stdout: Option<std::process::ChildStdout>,
     pub stderr: Option<std::process::ChildStderr>,
     group: i32,
+    terminated: bool,
 }
 #[cfg(unix)]
 impl Process {
@@ -37,6 +38,7 @@ impl Process {
         let stderr = child.stderr.take();
         let result = Self {
             group: child.id() as i32,
+            terminated: false,
             child,
             stdout,
             stderr,
@@ -57,12 +59,18 @@ impl Process {
         Ok(self.child.try_wait()?.map(|s| s.code().unwrap_or(-1)))
     }
     pub fn terminate(&mut self) -> io::Result<()> {
+        // Do not signal a numeric PGID again after successful cleanup: after reaping,
+        // that number may be recycled while evidence is being persisted.
+        if self.terminated {
+            return Ok(());
+        }
         if unsafe { libc::kill(-self.group, libc::SIGKILL) } < 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() != Some(libc::ESRCH) {
                 return Err(error);
             }
         }
+        self.terminated = true;
         Ok(())
     }
     pub fn descendants(&self) -> io::Result<bool> {

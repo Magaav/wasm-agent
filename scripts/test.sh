@@ -10,6 +10,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 # The execution and automation contracts have native, model-free adversarial tests.
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
+cargo test --release --offline --manifest-path rust/wa-sentinel/Cargo.toml
 BIN=rust/target/release/wa
 # A turn cannot deploy the process serving that same turn. The marker crosses
 # the Rust host's shell boundary; both entry points must refuse before waiting
@@ -910,6 +911,10 @@ for t in tests/*.lua; do
   rm -f "$DB.attach"*
 done
 echo "attach tests ok"
+
+# A real long-running tool must remain observable/cancellable through another worker.
+# Local mock provider only; no account, paid model or external browser required.
+node scripts/test-operation-control.cjs "$BIN"
 
 # The UI tests are JS and run outside the embedded interpreter, so they need node
 # and they need the repo root as cwd (they read ui/app.js from disk). A test that does

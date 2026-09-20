@@ -132,11 +132,16 @@ claims and revision checks. The queue allows 128 pending deliveries globally and
 8 per job. Full queues fail visibly and do not acknowledge ingestion. Four action
 workers and eight CDP observers are the current limits; one delivery per job runs
 at once. Schedules/files are polled by the watcher; CDP listens independently.
+Queue, per-job status and budget lookups are indexed, avoiding a full history scan
+on every tick.
 
 Wake admission is budgeted (`WA_SENTINEL_WAKE_BUDGET`, default 6/hour). Claims
 reserve job budget; the common wake submission gate counts failed attempts too,
 serializes reservations, and records before HTTP submission. A timeout/EOF without
-`done` is not success. **Never retry an ambiguous model submission automatically.**
+`done` is not success. Only a root `type: done` event indicates completion, never
+matching text inside an event. Observation bounds each SSE line to 1 MiB and the
+stream to 8 MiB; exceeding either reports an unknown outcome.
+**Never retry an ambiguous model submission automatically.**
 
 An exclusive OS runner lock prevents two watchers consuming/observing concurrently.
 After acquiring it on restart, previously running deliveries become `unknown`,

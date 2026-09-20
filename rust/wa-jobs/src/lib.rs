@@ -101,7 +101,11 @@ impl Store {
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
           CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,enabled INTEGER NOT NULL,definition TEXT NOT NULL,next_at INTEGER NOT NULL DEFAULT 0,source_status TEXT NOT NULL DEFAULT 'not observed');
           CREATE TABLE IF NOT EXISTS deliveries(id INTEGER PRIMARY KEY AUTOINCREMENT,job_id TEXT NOT NULL,revision INTEGER NOT NULL,event_id TEXT NOT NULL,payload TEXT NOT NULL,action_kind TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL,started_at INTEGER,ended_at INTEGER,detail TEXT,UNIQUE(job_id,revision,event_id));
-          CREATE TABLE IF NOT EXISTS source_cursors(job_id TEXT NOT NULL,revision INTEGER NOT NULL,key TEXT NOT NULL,PRIMARY KEY(job_id,revision,key));")?;
+          CREATE TABLE IF NOT EXISTS source_cursors(job_id TEXT NOT NULL,revision INTEGER NOT NULL,key TEXT NOT NULL,PRIMARY KEY(job_id,revision,key));
+          CREATE INDEX IF NOT EXISTS deliveries_queue ON deliveries(state,id);
+          CREATE INDEX IF NOT EXISTS deliveries_job_state ON deliveries(job_id,state);
+          CREATE INDEX IF NOT EXISTS deliveries_job_recent ON deliveries(job_id,id DESC);
+          CREATE INDEX IF NOT EXISTS deliveries_wake_budget ON deliveries(action_kind,started_at);")?;
         Ok(db)
     }
     pub fn put(&self, definition: &Value) -> Result<Value> {

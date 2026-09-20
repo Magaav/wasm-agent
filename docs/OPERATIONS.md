@@ -58,7 +58,9 @@ another's pipes. Termination addresses an owned handle, never an image name.
 Unix currently uses a dedicated process group and nonblocking pipes. This handles
 ordinary descendants but is **not a sandbox**: deliberately escaping the group
 (e.g. setsid), or host death, requires stronger cgroup/service containment. Do not
-represent process groups as equivalent to Windows Job Objects. Privileged shell
+represent process groups as equivalent to Windows Job Objects: a numeric PGID is
+not a stable tree handle. Successful cleanup is not re-signalled later from a
+destructor after that number could be reused. Privileged shell
 code can affect things outside its own process tree on either platform.
 
 Filesystem calls, process creation and a broken OS can themselves stall. The host

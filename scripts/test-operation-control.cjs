@@ -27,6 +27,6 @@ async function until(f,label){const end=Date.now()+12000;while(Date.now()<end){c
  const start=Date.now();await control({action:'cancel',id:operation.operation_id});
  const final=await until(async()=>{const s=await control({action:'status',id:operation.operation_id});return s.settled&&s},'operation settles after independent cancel');
  check(final.state==='cancelled'&&final.ok===false,'cancellation is terminal failure, never fake success');check(Date.now()-start<2000,'control does not wait for the blocked run worker');
- const result=await Promise.race([chat,sleep(12000).then(()=>{throw Error('run did not recover')})]);fs.writeFileSync(path.join(root,'run.sse'),result);check(/"type"\s*:\s*"done"/.test(result)&&calls>=2,'run continues and settles after tool cancellation');
+ const result=await Promise.race([chat,new Promise((_,reject)=>setTimeout(()=>reject(Error('run did not recover')),12000).unref())]);fs.writeFileSync(path.join(root,'run.sse'),result);check(/"type"\s*:\s*"done"/.test(result)&&calls>=2,'run continues and settles after tool cancellation');
  console.log(`operation control ok (${checks} checks; real tool and local mock model, no paid inference)\nevidence: ${root}`);
  }catch(e){console.error(e.stack);console.error('evidence: '+root);process.exitCode=1}finally{if(child&&child.exitCode===null)child.kill();provider?.closeAllConnections();provider?.close()}})();

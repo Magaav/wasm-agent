@@ -12,6 +12,35 @@ fn definition() -> Value {
     json!({"id":"messages","name":"Message received","trigger":{"kind":"event","topic":"whatsapp.message"},"action":{"kind":"wake","session":"thread-id","prompt":"Apply the reviewed response policy.","skill":"reply-policy"}})
 }
 #[test]
+fn history_does_not_force_queue_and_budget_table_scans() {
+    let s = store();
+    let db = s.db().unwrap();
+    for (query, index) in [
+        (
+            "SELECT count(*) FROM deliveries WHERE state='queued'",
+            "deliveries_queue",
+        ),
+        (
+            "SELECT count(*) FROM deliveries WHERE job_id='x' AND state='running'",
+            "deliveries_job_state",
+        ),
+        (
+            "SELECT state FROM deliveries WHERE job_id='x' ORDER BY id DESC LIMIT 1",
+            "deliveries_job_recent",
+        ),
+        (
+            "SELECT count(*) FROM deliveries WHERE started_at>=1 AND action_kind='wake'",
+            "deliveries_wake_budget",
+        ),
+    ] {
+        let plan: String = db
+            .query_row(&format!("EXPLAIN QUERY PLAN {query}"), [], |r| r.get(3))
+            .unwrap();
+        assert!(plan.contains(index), "{plan}");
+    }
+}
+
+#[test]
 fn default_off_and_revision_invalidates_pending() {
     let s = store();
     assert_eq!(s.put(&definition()).unwrap()["enabled"], false);
