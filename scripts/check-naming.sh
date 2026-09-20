@@ -32,6 +32,8 @@ scanned=0
 hits=0
 for file in $(git ls-files); do
   case "$file" in
+    # The check itself *is* the list of old names, so it can never pass its own scan.
+    scripts/check-naming.sh) continue ;;
     ARCHITECTURE.md|tests/naming-migration.lua) continue ;;
     *target*|*.wasm|*.png|*.ico|*.bmp) continue ;;
   esac
