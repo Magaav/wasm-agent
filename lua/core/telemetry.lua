@@ -127,7 +127,7 @@ end
 function M.start(opts, kind, payload)
   opts = opts or {}
   local span = {id=host.uuid(), session_id=opts.session_id, run_id=opts.run_id,
-    kind=kind or "llm", started=M.clock()}
+    kind=kind or "model_call", started=M.clock()}
   M.event(span.session_id, span.run_id, span.id, span.kind, "start", payload)
   return span
 end
@@ -209,7 +209,7 @@ function M.snapshot(session_id)
   local active, durations, turn_ids, tool_keys, turn_durations = {}, {}, {}, {}, {}
   for _, row in ipairs(rows) do
     local p = json.decode(row.payload)
-    if row.kind == "turn" then
+    if row.kind == "step" then
       if not turn_ids[row.run_id] then report.turns=report.turns+1; turn_ids[row.run_id]=true end
       if p.outcome ~= "answered" then report.incomplete_turns=report.incomplete_turns+1 end
     elseif row.phase == "start" then
@@ -222,11 +222,11 @@ function M.snapshot(session_id)
     elseif row.phase == "end" then
       local start = active[row.span_id]
       active[row.span_id] = nil
-      if row.kind == "llm" or row.kind == "summary" then
+      if row.kind == "model_call" or row.kind == "summary" then
         add(report.total, p)
         add(row.kind == "summary" and report.compaction or report.inference, p)
         durations[#durations+1] = p.ms or 0
-        if row.kind == "llm" then
+        if row.kind == "model_call" then
           report.last = p
           report.last_request = start or report.last_request
         end
@@ -234,7 +234,7 @@ function M.snapshot(session_id)
         report.tool_calls = report.tool_calls + 1
         report.tool_ms = report.tool_ms + (p.ms or 0)
         report.tool_failures = report.tool_failures + (p.ok == false and 1 or 0)
-      elseif row.kind=='turn_span' then
+      elseif row.kind=='run' then
         report.turn_ms=report.turn_ms+(p.ms or 0)
         turn_durations[#turn_durations+1]=p.ms or 0
       end

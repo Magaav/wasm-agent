@@ -402,7 +402,7 @@ function M.complete_with(model, messages, tools, stream, opts)
     context_tokens_estimate=opts.context_tokens or telemetry.estimate_messages(messages)+math.ceil(#json.encode(tools or {})/4),
     estimation="text bytes/4 + 1200 per image estimate; provider usage is authoritative",
     runtime=telemetry.runtime(),context=opts.context}
-  local span=telemetry.start(opts,opts.kind or "llm",request_meta)
+  local span=telemetry.start(opts,opts.kind or "model_call",request_meta)
   local ok,result=pcall(function()
   if stream then
     local result = json.decode(host.http_stream("POST", url, json.encode(headers), serialized))

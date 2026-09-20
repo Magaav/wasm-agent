@@ -702,7 +702,7 @@ end
 
 function M:turn(text, images)
   self.run_id=host.uuid()
-  local span=telemetry.start({session_id=self.session_id,run_id=self.run_id},'turn_span',{})
+  local span=telemetry.start({session_id=self.session_id,run_id=self.run_id},'run',{})
   provider.pin()
   local ok,result=pcall(self.run_turn,self,text,images)
   provider.unpin()
@@ -725,7 +725,7 @@ function M:run_turn(text, images)
     local reply = self:local_turn(text)
     memory.append_turn(self.session_id, { role = "assistant", content = reply, debug = self.debug })
     self.emit({ type = "reply", text = reply })
-    telemetry.event(self.session_id,self.run_id,"","turn","end",{outcome="local_fallback"})
+    telemetry.event(self.session_id,self.run_id,"","step","end",{outcome="local_fallback"})
     return reply
   end
 
@@ -772,7 +772,7 @@ function M:run_turn(text, images)
     local context_tokens,context_source=self:context_tokens(messages)
     local capacity=provider.budget(self.model).context or 0
     if capacity>0 and context_tokens>=capacity then
-      telemetry.event(self.session_id,self.run_id,"","turn","end",{outcome="context_overflow",context_estimate=context_tokens})
+      telemetry.event(self.session_id,self.run_id,"","step","end",{outcome="context_overflow",context_estimate=context_tokens})
       error("context_overflow: compaction could not make a valid next request; transcript preserved")
     end
     -- Two rounds before the runaway guard, ask the model to wrap up. This is
@@ -803,13 +803,13 @@ function M:run_turn(text, images)
       {session_id=self.session_id,run_id=self.run_id,round=round,context_tokens=context_tokens,
        context={estimate_source=context_source,summary_watermark=(memory.session(self.session_id) or {}).summarized_until or 0}})
     if not ok then
-      trace[#trace + 1] = { kind = "llm", model = self.model, ok = false,
+      trace[#trace + 1] = { kind = "model_call", model = self.model, ok = false,
         ms = math.floor((host.now() - llm_started) * 1000), error = redact.text(tostring(result)):sub(1, 400) }
       memory.append_turn(self.session_id, {
         role = "assistant", content = "", ok = false, trace = trace, debug = self.debug,
         ms = math.floor((host.now() - turn_started) * 1000),
       })
-      telemetry.event(self.session_id,self.run_id,"","turn","end",{outcome="provider_failed"})
+      telemetry.event(self.session_id,self.run_id,"","step","end",{outcome="provider_failed"})
       error(result)
     end
 
@@ -835,7 +835,7 @@ function M:run_turn(text, images)
       M.usage_total.total = M.usage_total.total + total
       M.usage_total.cached = M.usage_total.cached + cached
       turn.cached = turn.cached + cached
-      local span = { kind = "llm", model = self.model, ok = true, round = round,
+      local span = { kind = "model_call", model = self.model, ok = true, round = round,
         ms = math.floor((host.now() - llm_started) * 1000), prefix = prefix_fingerprint,
         usage = usage,normalized=normalized,
         tokens = { prompt = prompt, completion = completion, total = total, cached = cached, cost = cost } }
@@ -856,7 +856,7 @@ function M:run_turn(text, images)
       self.measured_total=prompt+completion
       trace[#trace + 1] = span
     else
-      trace[#trace + 1] = { kind = "llm", model = self.model, ok = true, round = round,
+      trace[#trace + 1] = { kind = "model_call", model = self.model, ok = true, round = round,
         ms = math.floor((host.now() - llm_started) * 1000), prefix = prefix_fingerprint }
     end
     if result.model and result.model ~= "" then self.model = result.model end
@@ -874,7 +874,7 @@ function M:run_turn(text, images)
         failed_span.reasoning_bytes=#(result.reasoning or "")
       end
       memory.append_turn(self.session_id,{role="assistant",content=result.content or "",reasoning=result.reasoning or "",ok=false,trace=trace})
-      telemetry.event(self.session_id,self.run_id,"","turn","end",{outcome=reason})
+      telemetry.event(self.session_id,self.run_id,"","step","end",{outcome=reason})
       error(problem)
     end
     if #calls > 0 then assistant.tool_calls = calls end
@@ -891,7 +891,7 @@ function M:run_turn(text, images)
       if provider.visible_text(reply) == "" then
         local reason = provider.empty_reply_reason(result)
         local span = trace[#trace]
-        if type(span) == "table" and span.kind == "llm" then
+        if type(span) == "table" and span.kind == "model_call" then
           span.ok = false
           span.error = reason
           span.finish_reason = result.finish_reason
@@ -904,7 +904,7 @@ function M:run_turn(text, images)
           role = "assistant", content = "", reasoning=reply_reasoning, ok = false, trace = trace, debug = self.debug,
           ms = math.floor((host.now() - turn_started) * 1000),
         })
-        telemetry.event(self.session_id,self.run_id,"","turn","end",{outcome="empty_reply"})
+        telemetry.event(self.session_id,self.run_id,"","step","end",{outcome="empty_reply"})
         error(reason)
       end
       -- The final assistant message is recorded once, after the loop, with the
@@ -995,7 +995,7 @@ function M:run_turn(text, images)
     changes = changes,
   })
   memory.record_run(self.run_id, self.session_id, completed and "completed" or "incomplete", completed and "answered" or "runaway_guard", reply)
-  telemetry.event(self.session_id,self.run_id,"","turn","end",{outcome=completed and "answered" or "runaway_guard",assistant_message_id=message_id})
+  telemetry.event(self.session_id,self.run_id,"","step","end",{outcome=completed and "answered" or "runaway_guard",assistant_message_id=message_id})
   M.usage_total.runs = M.usage_total.runs + 1
   M.usage_total.last = turn
   self.emit({ type = "usage", total = M.usage_total, model = self.model })

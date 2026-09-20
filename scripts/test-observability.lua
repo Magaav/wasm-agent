@@ -35,12 +35,12 @@ local shape=telemetry.prompt_shape({
 check(shape.reasoning_source_bytes==8 and shape.tool_arguments_source_bytes==16 and shape.tool_calls==1 and shape.tool_results==1,'request shape separates assistant subsets and tool results')
 check(shape.system_bytes==#json.encode({role='system',content='rules'}) and shape.tool_result_bytes==#json.encode({role='tool',tool_call_id='call',content='file body'}),'role sizes are exact serialized JSON bytes')
 local sid=session('durability')
-local span=telemetry.start({session_id=sid,run_id="run"},'llm',{model='fixture'})
+local span=telemetry.start({session_id=sid,run_id="run"},'model_call',{model='fixture'})
 telemetry.finish(span,{ok=true,usage=raw,normalized=normalized})
 local summary=telemetry.start({session_id=sid,run_id="run"},'summary',{})
 telemetry.finish(summary,{ok=false,error='summary_failed',normalized=telemetry.normalize(nil)})
-telemetry.start({session_id=sid,turn_id='unfinished'},'llm',{})
-telemetry.event(sid,'turn','','turn','end',{outcome='answered'})
+telemetry.start({session_id=sid,run_id='unfinished'},'model_call',{})
+telemetry.event(sid,'run','','step','end',{outcome='answered'})
 local report=dofile('lua/core/telemetry.lua').snapshot(sid)
 check(report.total.calls==2 and report.compaction.calls==1 and report.total.failed==1,'summary failures included in durable totals')
 check(report.turns==1 and report.pending==1 and report.total.missing_usage==1,'unfinished starts and turn outcomes survive module restart')
@@ -188,7 +188,7 @@ check(sent[2].messages[#sent[2].messages].content:find('invalid_tool_arguments_j
 local final=memory.session_messages(run,{limit=1})[1]
 check(final.reasoning=='final thought','final reasoning persisted for continuation')
 local events=telemetry.events(run,0,100).events
-local first_request; for _,event in ipairs(events) do if event.kind=='llm' and event.phase=='start' then first_request=event; break end end
+local first_request; for _,event in ipairs(events) do if event.kind=='model_call' and event.phase=='start' then first_request=event; break end end
 check(first_request.payload.request_hash==host.sha256(json.encode(sent[1])),'hash matches exact streaming request including stream options')
 check(memory.session_messages(run,{all=true})[1].id==first_request.run_id,'request trace links to its actual user turn')
 report=original_dofile('lua/core/telemetry.lua').snapshot(run)

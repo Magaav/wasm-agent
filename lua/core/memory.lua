@@ -138,7 +138,15 @@ local function migrate_shape()
   rename_index("turns_session_idx", "messages_session_idx", "messages(session_id, seq)")
   rename_index("turns_time_idx", "messages_time_idx", "messages(created_at)")
 
-  -- 3. `turn_id` held a *run* in `runs` and `harness_events` (both are given the run's own id), and a
+  -- 3. The stored span kinds move with the readers: a `turn` span is the step (one model call and the
+  --    tools it asked for), a `turn_span` is the run, and an `llm` span is a model call.
+  if table_exists("harness_events") then
+    exec("UPDATE harness_events SET kind='step' WHERE kind='turn'")
+    exec("UPDATE harness_events SET kind='run' WHERE kind='turn_span'")
+    exec("UPDATE harness_events SET kind='model_call' WHERE kind='llm'")
+  end
+
+  -- 4. `turn_id` held a *run* in `runs` and `harness_events` (both are given the run's own id), and a
   --    *message* in the full-text index above - which is why this is three renames and not one.
   if table_exists("runs") and has_column("runs", "turn_id") and not has_column("runs", "run_id") then
     exec("ALTER TABLE runs RENAME COLUMN turn_id TO run_id")
@@ -651,7 +659,7 @@ function M.append_turn(session_id, turn)
   exec("INSERT INTO messages_fts(content,session_id,message_id) VALUES(?,?,?)",
        {turn.content or "", session_id, id})
   exec("UPDATE sessions SET updated_at=? WHERE id=?", {host.now(), session_id})
-  M.journal("turn", id, {
+  M.journal("message", id, {
     id = id, session_id = session_id, seq = seq, role = turn.role or "user",
     content = turn.content or "", images = turn.images or {}, tool_calls = turn.tool_calls or {},
     tool_call_id = turn.tool_call_id or "", tool_name = turn.tool_name or "",
@@ -1041,7 +1049,7 @@ function M.apply_entry(entry)
   end
   if type(payload) ~= "table" then return false end
 
-  if entry.kind == "turn" then
+  if entry.kind == "message" then
     exec("INSERT OR REPLACE INTO messages(id,session_id,seq,role,content,tool_calls,tool_call_id," ..
          "tool_name,tokens,ms,ok,debug,trace,created_at,reasoning,images,changes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
          {payload.id, payload.session_id, payload.seq, payload.role, payload.content or "",
