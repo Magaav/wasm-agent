@@ -954,7 +954,7 @@ async function restoreSession() {
       const notice = document.createElement("div");
       notice.className = "unfinished-notice";
       notice.textContent = (full.state === "failed"
-        ? "the last turn failed before it answered - "
+        ? "the last run failed before it answered - "
         : "this turn was stopped before it answered - ") +
         (full.state_detail || "the node did not record a result") + ".";
       const again = nodeButton("continue", () => { notice.remove(); resumeSession(wanted.id); });

@@ -87,7 +87,7 @@ pub fn cstr(s: &str) -> CString {
 // that reaches Lua in process (the accept thread answers static requests and
 // forwards the rest) goes through that one thread. This is what keeps the
 // "single-threaded" invariant while letting the node answer its own UI during a
-// running turn.
+// running run.
 unsafe impl Send for Lua {}
 
 pub struct Lua {

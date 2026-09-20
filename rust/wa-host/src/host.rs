@@ -426,11 +426,11 @@ pub extern "C" fn sha256(l: *mut LuaState) -> c_int {
 /// host.uuid() -> random uuid v4 string
 /// A v4 UUID.
 ///
-/// Uniqueness here is load-bearing: turns, memories, sessions and journal rows
+/// Uniqueness here is load-bearing: runs, memories, sessions and journal rows
 /// are all keyed by it. The previous implementation read
 /// /proc/sys/kernel/random/uuid and fell back to the *process id* everywhere
 /// else, which is one value per process - so off Linux the second write in any
-/// session died with `UNIQUE constraint failed: turns.id`.
+/// session died on a duplicate row id.
 fn new_uuid() -> String {
     let mut bytes = [0u8; 16];
     let random = SystemRandom::new();
@@ -566,7 +566,7 @@ pub(crate) fn exec_timeout_seconds() -> u64 {
 /// Two deadlocks live here, and both look identical from outside - a worker that never beats again:
 ///
 /// * a command that never finishes. It happened: an agent curled *this node's own* endpoint from
-///   inside a turn, the request queued behind the turn that made it, and the worker waited on itself
+///   inside a run, the request queued behind the run that made it, and the worker waited on itself
 ///   until somebody killed the curl six minutes later. The node reported it honestly - `ok:false`,
 ///   `worker:stalled`, the age of the silence - which is how it was found, but reporting a deadlock
 ///   is not the same as not having one.
@@ -585,6 +585,11 @@ fn run_bounded(program: &str, flag: &str, command: &str, cwd: &str) -> Result<Va
     let mut process = std::process::Command::new(program);
     process.arg(flag).arg(command);
     if crate::serve::in_turn() {
+        // `WASM_AGENT_IN_TURN` keeps its name deliberately: it is read by scripts/deploy.sh and
+        // scripts/upgrade.sh, which are installed independently of this binary, so renaming it here
+        // would silently disarm the in-run refusal until those scripts were replaced too. The marker
+        // says "this shell is inside a run" (ARCHITECTURE.md section 6); the rename needs a release
+        // that sets and checks both names.
         process.env("WASM_AGENT_IN_TURN", "1");
     }
     if !cwd.is_empty() {
@@ -637,7 +642,7 @@ fn run_bounded(program: &str, flag: &str, command: &str, cwd: &str) -> Result<Va
             "stderr": format!(
                 "the command did not finish within {seconds}s and was killed (WASM_AGENT_EXEC_TIMEOUT_SECONDS). \
                  If it was waiting on this node - a call to its own HTTP port - that request is queued \
-                 behind this very turn and can never be served: ask the node from outside the turn instead."
+                 behind this very run and can never be served: ask the node from outside the run instead."
             ),
         }));
     }
@@ -664,7 +669,7 @@ pub extern "C" fn client(l: *mut LuaState) -> c_int {
     let args: Value = serde_json::from_str(&arg_string(l, 2).unwrap_or_else(|| "{}".into()))
         .unwrap_or_else(|_| json!({}));
     // Fast-fail when no desktop client is attached. Blocking until the call
-    // timeout only to return `client_timeout` wastes the caller's turn, and the
+    // timeout only to return `client_timeout` wastes the caller's run, and the
     // tool then looks like it half-worked: an agent spent several rounds on it
     // before giving up. The bridge knows whether anything is polling.
     let status = host.client.status();
@@ -861,8 +866,8 @@ pub extern "C" fn http(l: *mut LuaState) -> c_int {
 /// host.beat() -> nil. Proof of life from inside the Lua loop.
 ///
 /// The accept thread answers /health without the interpreter, so without this a node
-/// whose turn loop is stuck cannot be distinguished from an idle one. The loop calls it
-/// at each turn and tool boundary; a long tool call or a stalled provider read is then
+/// whose run loop is stuck cannot be distinguished from an idle one. The loop calls it
+/// at each run and tool boundary; a long tool call or a stalled provider read is then
 /// visible as silence rather than as health.
 #[no_mangle]
 pub extern "C" fn beat(_l: *mut LuaState) -> c_int {
@@ -876,7 +881,7 @@ pub extern "C" fn beat(_l: *mut LuaState) -> c_int {
 /// (server-sent event `delta`), and returns `{status, content, reasoning,
 /// finish_reason, tool_calls, usage}` so the caller can continue the tool loop.
 /// Reasoning is kept apart from content: it is the model's thinking, not its
-/// answer, and conflating the two is how an unanswered turn looks answered.
+/// answer, and conflating the two is how an unanswered run looks answered.
 pub extern "C" fn http_stream(l: *mut LuaState) -> c_int {
     let method = arg_string(l, 1).unwrap_or_else(|| "POST".into()).to_uppercase();
     let url = arg_string(l, 2).unwrap_or_default();
@@ -934,7 +939,7 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
         return Err("method_not_supported".into());
     }
     // Same reasoning as `run_bounded`: a provider read is bounded by the connect/response/read
-    // timeouts on the agent, so a turn waiting on a slow model is not a stalled node.
+    // timeouts on the agent, so a run waiting on a slow model is not a stalled node.
     let _heartbeat = crate::serve::Heartbeat::start();
     let mut request = agent().post(url);
     for (key, value) in headers {
@@ -1023,7 +1028,7 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
                 if !text.is_empty() {
                     reasoning.push_str(text);
                     mark_delta("reasoning", elapsed_ms);
-                    // A long reasoning phase used to look like a hung turn. The UI
+                    // A long reasoning phase used to look like a hung run. The UI
                     // can now say how much thinking has happened.
                     crate::serve::write_event(
                         &json!({"type": "reasoning", "chars": reasoning.chars().count()}).to_string(),
@@ -1112,7 +1117,7 @@ pub extern "C" fn now(l: *mut LuaState) -> c_int {
 
 /// `host.exec_timeout()` -> the deadline a `bash`/`shell` call is given, in seconds.
 ///
-/// Reported rather than duplicated. A turn can spend 300 seconds inside one command and, until this
+/// Reported rather than duplicated. A run can spend 300 seconds inside one command and, until this
 /// existed, nothing said so: the trace showed a line that had not come back yet, and the only signal
 /// was the call being killed five minutes later - which reads as the agent being stuck rather than
 /// as a deadline that was always there. The number lives here because this is where it is enforced;
@@ -1254,7 +1259,7 @@ mod heartbeat_tests {
     ///
     /// This is the bug the user reported as "the node is offline": `ok` is `!stalled`, and `stalled`
     /// means no beat for WASM_AGENT_WORKER_STALL_SECONDS. A long `exec` beat nothing while it ran, so a
-    /// node running a command reported `ok:false` - and the window, whose reads queue behind the turn,
+    /// node running a command reported `ok:false` - and the window, whose reads queue behind the run,
     /// told the reader it was offline. The stall threshold is dropped to 2s here so the test is about
     /// the mechanism rather than about waiting 120 of them.
     #[test]

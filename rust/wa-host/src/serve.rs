@@ -7,7 +7,7 @@
 //! choice).
 //!
 //! The split exists because a single thread made the node deaf to its own UI while
-//! a turn was running: `POST /chat` holds its connection for a whole turn, so the
+//! a run was running: `POST /chat` holds its connection for a whole run, so the
 //! window's fetches queued behind a model call, Chromium gave up, and the user saw
 //! "TypeError: Failed to fetch" from a node that was local and alive. Reloading
 //! could not help either - the reload needed the same busy thread.
@@ -23,10 +23,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// Milliseconds since the process started, written by anything that is making
-/// progress: every event the worker emits, and every turn or tool boundary the Lua loop
+/// progress: every event the worker emits, and every run or tool boundary the Lua loop
 /// reports through host.beat.
 ///
-/// This is the only way to tell a slow turn from a wedged node. A wedged node answers
+/// This is the only way to tell a slow run from a wedged node. A wedged node answers
 /// /health perfectly (that reply needs no interpreter) and holds its listening socket,
 /// so from outside it looks idle rather than stuck. If this stops moving, the
 /// interpreter is not running anything, and that is a fact worth reporting.
@@ -36,7 +36,7 @@ static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::n
 static STALL_LOGGED_MS: AtomicU64 = AtomicU64::new(0);
 
 /// What the worker is doing right now, as (label, started_ms). A stall is only
-/// diagnosable if it says *what* it is stuck on: a local turn, a relayed peer request, or
+/// diagnosable if it says *what* it is stuck on: a local run, a relayed peer request, or
 /// housekeeping are three different bugs with one symptom.
 static IN_FLIGHT: Mutex<Option<(String, u64)>> = Mutex::new(None);
 /// Requests waiting for the worker. Housekeeping waits until this is zero.
@@ -67,7 +67,7 @@ static UI_ERROR: Mutex<Option<(String, u64)>> = Mutex::new(None);
 
 /// How many interpreters a node runs, and how it decides.
 ///
-/// Worker 0 is the turn worker and always exists: it owns every route that changes something - turns,
+/// Worker 0 is the run worker and always exists: it owns every route that changes something - runs,
 /// writes, sync, node calls - so "one writer per session" and per-session order hold by construction
 /// rather than by locking.
 ///
@@ -103,21 +103,21 @@ static WORKER_BEATS: OnceLock<Vec<AtomicU64>> = OnceLock::new();
 static WORKER_BUSY: OnceLock<Vec<Mutex<Option<(String, u64)>>>> = OnceLock::new();
 /// Which session each worker is currently running, if any.
 ///
-/// This is what makes concurrent *turns* safe. A turn is routed by session: the same session always goes to
-/// the worker already running it, so its turns stay ordered and "one writer per session" holds by routing
+/// This is what makes concurrent *runs* safe. A run is routed by session: the same session always goes to
+/// the worker already running it, so its runs stay ordered and "one writer per session" holds by routing
 /// rather than by a lock. A session nobody is running goes to an idle worker - which is the whole point, two
 /// conversations at once - and only a session with nowhere to go waits.
 static WORKER_SESSION: OnceLock<Vec<Mutex<Option<String>>>> = OnceLock::new();
 
-/// A deploy launched by a tool in a live turn cannot wait for that same turn
+/// A deploy launched by a tool in a live run cannot wait for that same run
 /// to go idle. This is a boolean, not the x-wa-session credential.
 pub(crate) fn in_turn() -> bool {
-    IN_TURN.with(|flag| flag.get())
+    IN_RUN.with(|flag| flag.get())
 }
 
 #[cfg(test)]
 pub(crate) fn test_mark_turn(value: bool) {
-    IN_TURN.with(|flag| flag.set(value));
+    IN_RUN.with(|flag| flag.set(value));
 }
 
 fn env_usize(name: &str, fallback: usize) -> usize {
@@ -140,7 +140,7 @@ thread_local! {
     /// Which worker this thread is. `beat()` is called from inside Lua and had no way to say *which*
     /// interpreter had made progress, so per-worker liveness was impossible until this existed.
     static WORKER_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static IN_TURN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static IN_RUN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn worker_id() -> usize {
@@ -158,7 +158,7 @@ fn is_read_route(request: &Request) -> bool {
     matches!(
         route.as_str(),
         "/sessions" | "/session" | "/models" | "/me" | "/users" | "/nodes" | "/skills"
-            | "/memories" | "/status" | "/spells" | "/sync" | "/toolchain" | "/turns" | "/observability/events"
+            | "/memories" | "/status" | "/spells" | "/sync" | "/toolchain" | "/messages" | "/observability/events"
     )
 }
 
@@ -214,7 +214,7 @@ fn worker_count() -> usize {
     }
 }
 
-/// The label a worker is currently busy with, if any. This is how the dispatcher asks "is the turn worker
+/// The label a worker is currently busy with, if any. This is how the dispatcher asks "is the run worker
 /// idle?" without holding the interpreter or guessing from a timestamp.
 fn worker_busy_label(index: usize) -> Option<String> {
     WORKER_BUSY
@@ -250,10 +250,10 @@ fn spawn_worker(slots: &mut Vec<Option<std::sync::mpsc::SyncSender<(TcpStream, R
     Some(index)
 }
 
-/// Is the turn worker free to take a request right now?
+/// Is the run worker free to take a request right now?
 ///
 /// Idle means *both*: nothing in its hands, and it has reported progress recently. A worker that is not
-/// beating is not idle, whatever its label says - which is the case that matters, because a wedged turn
+/// beating is not idle, whatever its label says - which is the case that matters, because a wedged run
 /// worker must not be handed more work, and a read must not be told the node is fine when it is not.
 fn turn_worker_is_idle() -> bool {
     if worker_busy_label(0).is_some() {
@@ -266,13 +266,13 @@ fn turn_worker_is_idle() -> bool {
     }
 }
 
-/// A turn: the one route that is routed by session rather than pinned to worker 0.
-fn is_turn_route(request: &Request) -> bool {
+/// A run: the one route that is routed by session rather than pinned to worker 0.
+fn is_run_route(request: &Request) -> bool {
     request.method == "POST" && split_path(&request.path).0 == "/chat"
 }
 
-/// The worker already running this session, if any. That worker is where the next turn for it belongs, so
-/// the session keeps one writer and its turns keep their order.
+/// The worker already running this session, if any. That worker is where the next run for it belongs, so
+/// the session keeps one writer and its runs keep their order.
 fn worker_running_session(session: &str) -> Option<usize> {
     if session.is_empty() {
         return None;
@@ -309,9 +309,9 @@ fn idle_worker() -> Option<usize> {
 /// Which worker a request goes to, growing the pool if that is what it takes.
 fn choose_worker(request: &Request) -> usize {
     let Some(pool) = POOL.get() else { return 0 };
-    // A turn first, because it is the one route with a rule of its own: routed by session, so two different
+    // A run first, because it is the one route with a rule of its own: routed by session, so two different
     // conversations run at once and one conversation never does.
-    if is_turn_route(request) {
+    if is_run_route(request) {
         if let Some(index) = worker_running_session(&request.session) {
             return index;
         }
@@ -323,11 +323,11 @@ fn choose_worker(request: &Request) -> usize {
                 return index;
             }
         }
-        // Nowhere to go: the turn waits behind worker 0, which is what a node with one interpreter always did.
+        // Nowhere to go: the run waits behind worker 0, which is what a node with one interpreter always did.
         return 0;
     }
     let read = is_read_route(request);
-    // Nothing to gain while the turn worker is idle - for a read as much as for a write. This is the rule
+    // Nothing to gain while the run worker is idle - for a read as much as for a write. This is the rule
     // that keeps an idle node at exactly one interpreter, and it is also why a read does not spawn a worker
     // that would then sit there doing nothing: the pool appears only when a request would otherwise wait.
     if turn_worker_is_idle() {
@@ -346,7 +346,7 @@ fn choose_worker(request: &Request) -> usize {
         let start = pool.next.fetch_add(1, Ordering::Relaxed);
         return live[start % live.len()];
     }
-    // A read, the turn worker is busy, and there is no read worker: this is the moment the pool earns its
+    // A read, the run worker is busy, and there is no read worker: this is the moment the pool earns its
     // keep. Everything else waits, which is what a node with one interpreter has always done.
     if let Some(index) = spawn_worker(&mut slots) {
         return index;
@@ -359,8 +359,8 @@ fn now_ms() -> u64 {
 }
 
 fn begin_work(label: String) {
-    // Only worker 0 sets `IN_FLIGHT`. That field is what the window reads to decide whether a *turn* is
-    // running - so a read being served on another interpreter must not make the UI think a turn is in
+    // Only worker 0 sets `IN_FLIGHT`. That field is what the window reads to decide whether a *run* is
+    // running - so a read being served on another interpreter must not make the UI think a run is in
     // flight, which would disable the composer for a status request.
     let index = worker_id();
     if index == 0 {
@@ -414,7 +414,7 @@ pub fn beat() {
 /// `exec` is not that - it has a deadline and is killed when the deadline passes - but it
 /// beat nothing while it ran, so a node *working correctly* reported `ok:false`,
 /// `worker:stalled`, and every reader believed it. The window was the worst of them: its
-/// own reads queue behind the turn, so `/me` and `/models` timed out and it told the user
+/// own reads queue behind the run, so `/me` and `/models` timed out and it told the user
 /// the node was offline, while the node was running their command. Past the exit threshold
 /// the node then killed itself in the middle of that command.
 ///
@@ -469,14 +469,14 @@ fn env_seconds(name: &str, fallback: u64) -> u64 {
 }
 
 /// How long a request may sit behind a worker that has shown no progress before it is
-/// told so instead of waiting. Long enough that a slow turn is not mistaken for a
+/// told so instead of waiting. Long enough that a slow run is not mistaken for a
 /// wedge; short enough that a client is not left holding an open socket for minutes.
 fn stall_seconds() -> u64 {
     env_seconds("WASM_AGENT_WORKER_STALL_SECONDS", 120)
 }
 
 /// Past this, the node stops being a node: exit so the service manager restarts it. A
-/// stalled turn is already lost - the provider connection is not coming back - and a
+/// stalled run is already lost - the provider connection is not coming back - and a
 /// fresh process beats a wedged one that answers /health.
 fn stall_exit_seconds() -> u64 {
     env_seconds("WASM_AGENT_WORKER_STALL_EXIT_SECONDS", 900)
@@ -485,8 +485,8 @@ fn stall_exit_seconds() -> u64 {
 /// The honest health body. `ok` is false when the interpreter has stopped reporting,
 /// which is the one thing this endpoint is uniquely placed to say.
 fn health_body() -> Vec<u8> {
-    // The aggregate answers one question: *can this node do work?* Work happens on worker 0 - turns and
-    // every route that changes something - so the aggregate is worker 0's age, and a wedged turn worker is
+    // The aggregate answers one question: *can this node do work?* Work happens on worker 0 - runs and
+    // every route that changes something - so the aggregate is worker 0's age, and a wedged run worker is
     // still reported as the node being stalled even while a read worker answers reads. Which lane is wedged
     // is a per-worker question, answered by the array below.
     let age_ms = worker_age_ms(0);
@@ -512,15 +512,15 @@ fn health_body() -> Vec<u8> {
                     .get()
                     .and_then(|slots| slots.get(index))
                     .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()));
-                let turn = busy.as_ref().is_some_and(|(label, _)| label.starts_with("POST /chat"));
-                if current.is_none() && turn {
+                let run = busy.as_ref().is_some_and(|(label, _)| label.starts_with("POST /chat"));
+                if current.is_none() && run {
                     if let Some((label, started)) = &busy {
                         current = Some(serde_json::json!({"label":label,"ms":now_ms().saturating_sub(*started),"worker_id":index}));
                     }
                 }
                 workers.push(serde_json::json!({
                     "id": index,
-                    "role": if index == 0 || turn { "turns" } else { "reads" },
+                    "role": if index == 0 || run { "runs" } else { "reads" },
                     "session": WORKER_SESSION.get().and_then(|slots| slots.get(index)).and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone())),
                     "state": if age >= stall_seconds() * 1000 { "stalled" } else if age < 1000 { "alive" } else { "busy" },
                     "age_ms": age,
@@ -565,12 +565,12 @@ fn health_body() -> Vec<u8> {
 static CLIENT: Mutex<Option<TcpStream>> = Mutex::new(None);
 
 /// When set, events are collected here instead of going to a socket: that is how
-/// a streaming turn is relayed to a peer that cannot hold a live connection.
+/// a streaming run is relayed to a peer that cannot hold a live connection.
 static EVENT_SINK: Mutex<Option<String>> = Mutex::new(None);
 
 /// Push one event to the streaming client, if any. Called from Lua via host.stream.
 ///
-/// Every event is also proof of life: a streaming turn emits deltas continuously, so a
+/// Every event is also proof of life: a streaming run emits deltas continuously, so a
 /// stalled provider read shows up here as silence long before anyone notices a hang.
 pub fn write_event(payload: &str) {
     beat();
@@ -637,7 +637,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     });
     let pool = POOL.get().expect("pool");
 
-    // Worker 0, always: the turn worker. It is the state main.rs already booted, so a node that never
+    // Worker 0, always: the run worker. It is the state main.rs already booted, so a node that never
     // grows a read worker boots exactly one interpreter, as it always did.
     let (sender, receiver) = std::sync::mpsc::sync_channel::<(TcpStream, Request)>(queue_depth);
     if let Ok(mut slots) = pool.slots.lock() {
@@ -656,7 +656,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
         }
     }
     eprintln!(
-        "[serve] one turn worker{} (reads: {warm} warm, up to {ceiling}, spawned on demand)",
+        "[serve] one run worker{} (reads: {warm} warm, up to {ceiling}, spawned on demand)",
         if warm == 0 { String::new() } else { format!(" + {warm} read worker(s)") }
     );
     // A node whose ui directory has no index.html serves 404 for every UI route and looks healthy doing
@@ -678,11 +678,11 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     }
 
     // Each worker owns an interpreter and reads its own queue, so requests still run one at a time *per
-    // interpreter* - what changed is that a running turn no longer stops the node answering anything at all.
+    // interpreter* - what changed is that a running run no longer stops the node answering anything at all.
     // `/health`, `/version` and the UI files were already answered on the accept thread; the reads that need
     // Lua (sessions, models, nodes) now have an interpreter of their own, created when they need one.
     //
-    // Bounded on purpose: an unbounded queue turns a busy node into an unbounded number of open sockets,
+    // Bounded on purpose: an unbounded queue runs a busy node into an unbounded number of open sockets,
     // and the accept thread can then only fail it loudly.
 
     for stream in listener.incoming() {
@@ -701,7 +701,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
             let _ = respond(&mut stream, status, content_type, &body);
             continue;
         }
-        // Which interpreter this request needs - and if that is a read arriving while the turn worker is
+        // Which interpreter this request needs - and if that is a read arriving while the run worker is
         // busy, this is the call that grows the pool. Anything that changes something goes to worker 0,
         // which is what keeps one writer per session true by construction.
         let target = choose_worker(&request);
@@ -732,7 +732,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
                 std::process::exit(3);
             }
             let body = format!(
-                "{{\"error\":\"worker_stalled\",\"worker\":{target},\"stalled_ms\":{age_ms},\"hint\":\"the interpreter has not reported progress; see the node log, and restart it if the turn is lost\"}}"
+                "{{\"error\":\"worker_stalled\",\"worker\":{target},\"stalled_ms\":{age_ms},\"hint\":\"the interpreter has not reported progress; see the node log, and restart it if the run is lost\"}}"
             );
             let _ = respond(&mut stream, 503, "application/json", body.as_bytes());
             continue;
@@ -797,7 +797,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
 }
 
 /// One interpreter's loop. Worker 0 also does the housekeeping - relayed work and the sync tick - because
-/// that work is a conversation with a peer and belongs where the turns are; a read worker does nothing but
+/// that work is a conversation with a peer and belongs where the runs are; a read worker does nothing but
 /// answer reads.
 fn worker_loop(
     lua: Lua,
@@ -827,7 +827,7 @@ fn worker_loop(
                 QUEUED.fetch_sub(1, Ordering::Relaxed);
                 LAST_SERVED_MS.store(now_ms(), Ordering::Relaxed);
                 begin_work(format!("{} {}", request.method, request.path));
-                // Which session this worker holds, so a second turn in the same session finds it and queues
+                // Which session this worker holds, so a second run in the same session finds it and queues
                 // behind it instead of starting a second writer on the same conversation.
                 if let Some(slots) = WORKER_SESSION.get() {
                     if let Some(slot) = slots.get(index) {
@@ -836,9 +836,9 @@ fn worker_loop(
                         }
                     }
                 }
-                IN_TURN.with(|flag| flag.set(is_turn_route(&request)));
+                IN_RUN.with(|flag| flag.set(is_run_route(&request)));
                 let _ = handle(&lua, &agent_ui, &mut stream, &request);
-                IN_TURN.with(|flag| flag.set(false));
+                IN_RUN.with(|flag| flag.set(false));
                 if let Some(slots) = WORKER_SESSION.get() {
                     if let Some(slot) = slots.get(index) {
                         if let Ok(mut guard) = slot.lock() {
@@ -1214,7 +1214,7 @@ fn dispatch(
         "/session" => (200, "application/json", call("wa_session", &[query_value(&query, "id").as_str(), session]).into_bytes()),
         "/session/mode" if method == "POST" => (200, "application/json", call("wa_session_mode", &[body, session]).into_bytes()),
         "/session/fixture" => (200, "application/json", call("wa_session_fixture", &[query_value(&query, "id").as_str(), session]).into_bytes()),
-        // A turn's changed files: "can it be undone?" and "do it", one route so the answer
+        // A run's changed files: "can it be undone?" and "do it", one route so the answer
         // the toggle shows and the handler's behaviour cannot disagree.
         "/diff" if method == "POST" => (200, "application/json", call("wa_diff", &[body.trim(), session]).into_bytes()),
         "/client" if method == "POST" => (200, "application/json", call("wa_client", &[body, session]).into_bytes()),

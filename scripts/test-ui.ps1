@@ -560,14 +560,14 @@ $harness = @'
       {
         id: "cccccccc-0000-0000-0000-000000000003", title: "failed thread",
         mode: "chat", turn_count: 3, updated_at: Math.floor(Date.now() / 1000) - 60,
-        state: "failed", state_detail: "the last turn failed (the model call errored)",
+        state: "failed", state_detail: "the last run failed (the model call errored)",
       },
     ],
   };
   window.__fixtures.session = {
     session: { id: "cccccccc-0000-0000-0000-000000000003", title: "failed thread" },
     state: "failed",
-    state_detail: "the last turn failed (the model call errored)",
+    state_detail: "the last run failed (the model call errored)",
     turns: [ { seq: 1, role: "user", content: "carry on with the cross-build", ok: 1, tool_calls: [] } ],
   };
   await window.__restoreSession();
