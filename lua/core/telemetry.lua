@@ -204,14 +204,14 @@ function M.snapshot(session_id)
   local rows = sql("sql_query", "SELECT seq,span_id,run_id,kind,phase,at,payload FROM harness_events WHERE session_id=? ORDER BY seq", {session_id})
   local report = {available=#rows>0, scope="session", session_id=session_id, events=#rows,
     since=rows[1] and rows[1].at, total=empty(), inference=empty(), compaction=empty(),
-    tool_calls=0, tool_failures=0, tool_ms=0, pending=0, turns=0, incomplete_turns=0,repeated_tools=0,turn_ms=0,
+    tool_calls=0, tool_failures=0, tool_ms=0, pending=0, runs=0, incomplete_runs=0,repeated_tools=0,run_ms=0,
     compaction_failures=0, errors={}, runtime=M.runtime(), verified_success_rate=false}
-  local active, durations, turn_ids, tool_keys, turn_durations = {}, {}, {}, {}, {}
+  local active, durations, run_ids, tool_keys, run_durations = {}, {}, {}, {}, {}
   for _, row in ipairs(rows) do
     local p = json.decode(row.payload)
     if row.kind == "step" then
-      if not turn_ids[row.run_id] then report.turns=report.turns+1; turn_ids[row.run_id]=true end
-      if p.outcome ~= "answered" then report.incomplete_turns=report.incomplete_turns+1 end
+      if not run_ids[row.run_id] then report.runs=report.runs+1; run_ids[row.run_id]=true end
+      if p.outcome ~= "answered" then report.incomplete_runs=report.incomplete_runs+1 end
     elseif row.phase == "start" then
       active[row.span_id] = p
       if row.kind=="tool" then
@@ -235,8 +235,8 @@ function M.snapshot(session_id)
         report.tool_ms = report.tool_ms + (p.ms or 0)
         report.tool_failures = report.tool_failures + (p.ok == false and 1 or 0)
       elseif row.kind=='run' then
-        report.turn_ms=report.turn_ms+(p.ms or 0)
-        turn_durations[#turn_durations+1]=p.ms or 0
+        report.run_ms=report.run_ms+(p.ms or 0)
+        run_durations[#run_durations+1]=p.ms or 0
       end
       if p.ok == false then
         report.errors[#report.errors+1] = {kind=row.kind, at=row.at, error=p.error, code=p.code, name=p.name}
@@ -251,9 +251,9 @@ function M.snapshot(session_id)
   table.sort(durations)
   report.request_p50_ms = durations[math.max(1,math.ceil(#durations*.5))]
   report.request_p95_ms = durations[math.max(1,math.ceil(#durations*.95))]
-  table.sort(turn_durations)
-  report.turn_p50_ms=turn_durations[math.max(1,math.ceil(#turn_durations*.5))]
-  report.turn_p95_ms=turn_durations[math.max(1,math.ceil(#turn_durations*.95))]
+  table.sort(run_durations)
+  report.run_p50_ms=run_durations[math.max(1,math.ceil(#run_durations*.5))]
+  report.run_p95_ms=run_durations[math.max(1,math.ceil(#run_durations*.95))]
   report.total.total = report.total.prompt + report.total.output
   report.total.cost_known = report.total.unpriced == 0 and report.total.calls > 0
   report.total.cache_known = report.total.missing_cache == 0 and report.total.calls > 0

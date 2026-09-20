@@ -36,7 +36,7 @@ window.__fixtures = {
           tool_result_bytes:400,reasoning_source_bytes:200,tool_arguments_source_bytes:100,
           tool_calls:3,tool_results:3}},
       context:{unsummarized_rows:620,summary_watermark:10},pending:1,tool_calls:2,tool_failures:1,
-      turns:1,incomplete_turns:0,compaction_failures:1,errors:[]},
+      runs:1,incomplete_runs:0,compaction_failures:1,errors:[]},
   },
   reasoning:{error:'unsupported_reasoning_level'},
   'observability/events':{error:'fixture_export_failure'},
@@ -44,23 +44,23 @@ window.__fixtures = {
     sessions: [
       {
         id: "aaaaaaaa-0000-0000-0000-000000000001", title: "unfinished thread",
-        mode: "chat", turn_count: 61, updated_at: Math.floor(Date.now() / 1000) - 3600,
-        state: "unfinished", state_detail: "stopped after a tool result with no next decision",
+        mode: "chat", message_count: 61, updated_at: Math.floor(Date.now() / 1000) - 3600,
+        state: "unfinished", state_detail: "stopped after a tool result with no next step",
       },
       {
         id: "bbbbbbbb-0000-0000-0000-000000000002", title: "settled thread",
-        mode: "chat", turn_count: 12, updated_at: Math.floor(Date.now() / 1000) - 120,
-        state: "answered", state_detail: "the last turn is a reply",
+        mode: "chat", message_count: 12, updated_at: Math.floor(Date.now() / 1000) - 120,
+        state: "answered", state_detail: "the last message is a reply",
       },
     ],
   },
   me: { user: { id: "master", name: "master" }, role: "master" },
-  // What the node says about right now. The window asks this before believing a turn is over, so a
-  // notice can be taken down when the thread is settled - and a turn that completed is not "unfinished".
+  // What the node says about right now. The window asks this before believing a run is over, so a
+  // notice can be taken down when the thread is settled - and a run that completed is not "unfinished".
   health: { current: null, ok: true, queue: 0, stalled_ms: 0, worker: "alive" },
-  // The resume path posts a turn. It must be answered *here*: the fallback below used to forward an
+  // The resume path posts a run. It must be answered *here*: the fallback below used to forward an
   // unstubbed route to the real node, and since the app now auto-resumes a failed session, a run of this
-  // harness queued 33 real turns on a live node before anyone noticed. A test that spends turns is not a
+  // harness queued 33 real runs on a live node before anyone noticed. A test that spends runs is not a
   // test. The body is deliberately not a stream: `send` fails to read it, catches, and the checks that
   // matter are about what the UI said, not what the model replied.
   chat: { ok: true, reply: "(the harness does not run a model)" },
@@ -190,7 +190,7 @@ window.fetch = function (input, init) {
     });
   }
   // Refused, not forwarded - with one exception. See the note on the `chat` fixture: reaching the real
-  // node by accident is how this harness queued real turns. API routes are where a turn is spent, so they
+  // node by accident is how this harness queued real runs. API routes are where a run is spent, so they
   // must be stubbed. Static assets cost nothing and one of them is a real file the checks need (the wasm
   // markdown renderer), so those may be fetched. A route that genuinely needs the live node asks by name.
   const isStaticAsset = /\.(wasm|css|js|png|jpg|svg|woff2?|ico)$/.test(path);
@@ -206,6 +206,6 @@ window.__classifyProbe = function () {
   if (!window.isConnectionLoss(new TypeError("network error"))) results.push("a TypeError must classify as a lost connection");
   if (window.isConnectionLoss({ name: "AbortError" })) results.push("an abort must not classify as a lost connection");
   if (!/wa ui/.test(window.connectionMessage())) results.push("the message must say how to start the node");
-  if (!/resume/.test(window.connectionMessage())) results.push("the message must say the turn is recoverable");
+  if (!/resume/.test(window.connectionMessage())) results.push("the message must say the run is recoverable");
   return results;
 };

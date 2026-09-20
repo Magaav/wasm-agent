@@ -30,24 +30,24 @@ host.write_file(target, "before\n")
 local entry = changeset.new()
 changeset.record(entry, target, "before\n", "after\n")
 host.write_file(target, "after\n")
-local turn_id = host.uuid()
+local message_id = host.uuid()
 memory.append_turn(session, {
-  id = turn_id, role = "assistant", content = "changed it", changes = entry,
+  id = message_id, role = "assistant", content = "changed it", changes = entry,
 })
 
 -- check: undoable, and it wrote nothing.
-local checked = call({ turn_id = turn_id, action = "check" })
+local checked = call({ message_id = message_id, action = "check" })
 assert(checked.can_undo == true, "a fresh change must be undoable, got " .. tostring(checked.reason))
 assert(host.read_file(target) == "after\n", "a check must not touch the file")
 
 -- undo: the file goes back. This is the assertion the whole feature rests on.
-local undone = call({ turn_id = turn_id, action = "undo" })
+local undone = call({ message_id = message_id, action = "undo" })
 assert(undone.ok == true, "undo must succeed, got " .. tostring(undone.reason))
 assert(host.read_file(target) == "before\n",
   "undo must restore the previous text, got " .. tostring(host.read_file(target)))
 
 -- redo: and forward again.
-local redone = call({ turn_id = turn_id, action = "redo" })
+local redone = call({ message_id = message_id, action = "redo" })
 assert(redone.ok == true, "redo must succeed, got " .. tostring(redone.reason))
 assert(host.read_file(target) == "after\n",
   "redo must reapply the change, got " .. tostring(host.read_file(target)))
@@ -55,12 +55,12 @@ assert(host.read_file(target) == "after\n",
 -- The refusals, and that they are the *same* refusals "check" would report: a file that
 -- moved on is refused, and nothing is written. This is the guard against eating newer work.
 host.write_file(target, "someone else was here\n")
-local refused = call({ turn_id = turn_id, action = "undo" })
+local refused = call({ message_id = message_id, action = "undo" })
 assert(refused.ok == false and refused.reason:find("changed_since_turn") == 1,
   "a moved-on file must be refused, got " .. tostring(refused.reason))
 assert(host.read_file(target) == "someone else was here\n", "a refused undo must not write")
 
-local also_refused = call({ turn_id = turn_id, action = "check" })
+local also_refused = call({ message_id = message_id, action = "check" })
 assert(also_refused.can_undo == false and also_refused.reason == refused.reason,
   "check must report the same reason undo would: got " .. tostring(also_refused.reason)
   .. " against " .. tostring(refused.reason))
@@ -68,9 +68,9 @@ assert(also_refused.can_undo == false and also_refused.reason == refused.reason,
 -- A turn that changed nothing has no topic to undo, and an unknown turn is not a crash.
 local plain = host.uuid()
 memory.append_turn(session, { id = plain, role = "assistant", content = "no changes" })
-local none = call({ turn_id = plain, action = "undo" })
+local none = call({ message_id = plain, action = "undo" })
 assert(none.error == "no_changes", "a plain answer has nothing to undo, got " .. tostring(none.error))
-local unknown = call({ turn_id = "not-a-turn", action = "undo" })
+local unknown = call({ message_id = "not-a-message", action = "undo" })
 assert(unknown.error == "unknown_turn", "an unknown turn must say so, got " .. tostring(unknown.error))
 
 -- The reasons are reported in words the reader can act on, not as a bare false.

@@ -218,9 +218,9 @@ class WaMessage extends HTMLElement {
 }
 customElements.define("wa-message", WaMessage);
 
-// <wa-trace> — one decision's tool activity, collapsed into a topic.
+// <wa-trace> — one step's tool activity, collapsed into a topic.
 //
-// The transcript should read as decisions, not as a wall of tool payloads: the
+// The transcript should read as steps, not as a wall of tool payloads: the
 // header says what happened (how many calls, which tools, how long) and the body
 // holds the sequential tool lines, hidden until the reader opens it. Failures are
 // the exception - an error opens the topic, because a silent failure is worse
@@ -360,7 +360,7 @@ class WaTrace extends HTMLElement {
   finish() {
     this._header.classList.remove("running");
     this._done = true;
-    if (!this._userToggled) this.open = false;   // the decision is over: fold it away
+    if (!this._userToggled) this.open = false;   // the step is over: fold it away
     this._elapsed = Date.now() - this._started;
     this._refresh();
   }
@@ -383,9 +383,9 @@ class WaTrace extends HTMLElement {
 }
 customElements.define("wa-trace", WaTrace);
 
-// <wa-run> — the whole turn's path, collapsed to one line at the top of the
+// <wa-run> — the whole run's path, collapsed to one line at the top of the
 // reply. A finished reply should read as an answer; how it got there (which
-// decisions, which tools) is one click away instead of pushing the answer off
+// steps, which tools) is one click away instead of pushing the answer off
 // the screen.
 class WaRun extends HTMLElement {
   static get observedAttributes() { return ["open"]; }
@@ -433,11 +433,11 @@ class WaRun extends HTMLElement {
 
   toggle() { this.open = !this.open; }
 
-  setSummary(decisions, calls, ms) {
+  setSummary(steps, calls, ms) {
     this._build();
     const seconds = ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms";
     const parts = [];
-    if (decisions > 0) parts.push(decisions + (decisions === 1 ? " decision" : " decisions"));
+    if (steps > 0) parts.push(steps + (steps === 1 ? " step" : " steps"));
     parts.push(calls + (calls === 1 ? " tool call" : " tool calls"));
     this._label.textContent = "run";
     this._meta.textContent = parts.join(" · ") + " · " + seconds;
@@ -462,7 +462,7 @@ class WaTool extends HTMLElement {
 }
 customElements.define("wa-tool", WaTool);
 
-// <wa-diff> — what the turn changed on disk, collapsed to one line after the answer.
+// <wa-diff> — what the run changed on disk, collapsed to one line after the answer.
 //
 // The answer is what the reader wants; the change to their files is the thing they may need
 // to *act* on, so the topic sits at the end of the bubble rather than the top. The header
@@ -473,7 +473,7 @@ customElements.define("wa-tool", WaTool);
 // there is no disabled state to guess at: when the patch is applied the button offers undo,
 // when it is undone it offers redo, and it is disabled only when neither is possible -
 // which the label states in words rather than leaving the reader clicking a dead control.
-// <wa-diff> — what the turn changed on disk, collapsed *below* the answer.
+// <wa-diff> — what the run changed on disk, collapsed *below* the answer.
 //
 // This is the same topic as <wa-run> on purpose, down to the markup: a `trace-head` button
 // holding glyph · label · meta · chevron, the same `attributeChangedCallback`, the same
@@ -620,7 +620,7 @@ class WaDiff extends HTMLElement {
     const removed = (summary && summary.removed) || 0;
     // One row per path, even when the ledger holds the file twice.
     //
-    // Turns recorded before the recorder merged repeats hold one entry per write, and those turns are
+    // Turns recorded before the recorder merged repeats hold one entry per write, and those runs are
     // still in the ledger - the ledger is append-only and is never rewritten to make a view prettier. So
     // the view merges them and says so ("\u00d72"), instead of showing the same file twice and leaving the
     // reader to work out that it is one change. The counts are summed the same way, so the rows and the
@@ -651,7 +651,7 @@ class WaDiff extends HTMLElement {
     this._body.replaceChildren();
     for (const file of rows) {
       // A button, not a list item: clicking a changed file is how you find out what changed in it. The
-      // diff itself is not in the transcript (the turn carries addresses, not bodies), so this click is
+      // diff itself is not in the transcript (the run carries addresses, not bodies), so this click is
       // what asks the node to build it - which is why it is a real control and not a decoration.
       const row = document.createElement("button");
       row.type = "button";
@@ -678,13 +678,13 @@ class WaDiff extends HTMLElement {
         tag.textContent = "new";
         row.append(tag);
       }
-      // More than one write to the same file in one turn: one change, and the reader is told how it was
+      // More than one write to the same file in one run: one change, and the reader is told how it was
       // recorded rather than being shown the same path twice.
       if (file.writes > 1) {
         const tag = document.createElement("span");
         tag.className = "diff-tag";
         tag.textContent = "\u00d7" + file.writes;
-        tag.title = "this file was written " + file.writes + " times in this turn";
+        tag.title = "this file was written " + file.writes + " times in this run";
         row.append(tag);
       }
       row.addEventListener("click", (event) => {
@@ -715,7 +715,7 @@ class WaDiff extends HTMLElement {
   }
 
   // The server says whether this change can still be undone (the file may have moved on
-  // since the turn). Until it says so the toggle stays disabled, so a click can never
+  // since the run). Until it says so the toggle stays disabled, so a click can never
   // promise something that will be refused.
   // "I do not know yet" is its own state, not a refusal.
   //
@@ -987,12 +987,12 @@ class WaHarnessStatus extends HTMLElement {
       ['model calls / failed',`${n(t.calls)} / ${n(t.failed)}`],
       ['inference / summaries',`${n(i.calls)} / ${n(c.calls)}`],
       ['model latency p50 / p95',`${ms(report.request_p50_ms)} / ${ms(report.request_p95_ms)}`],
-      ['turn wall time p50 / p95',`${ms(report.turn_p50_ms)} / ${ms(report.turn_p95_ms)}`],
+      ['run wall time p50 / p95',`${ms(report.run_p50_ms)} / ${ms(report.run_p95_ms)}`],
       ['inference / summary time',`${ms(i.ms)} / ${ms(c.ms)}`],
       ['tools / failed',`${n(report.tool_calls)} / ${n(report.tool_failures)}`],
       ['tool time',ms(report.tool_ms)],
       ['repeated tool arguments',`${n(report.repeated_tools)} (signal, not proof of waste)`],
-      ['recorded turns / incomplete',`${n(report.turns)} / ${n(report.incomplete_turns)}`],
+      ['recorded runs / incomplete',`${n(report.runs)} / ${n(report.incomplete_runs)}`],
       ['starts without ends',`${n(report.pending)} (running or interrupted)`],
     ]);
     const ctx=report.context || {}, compact=report.last_compaction || {};

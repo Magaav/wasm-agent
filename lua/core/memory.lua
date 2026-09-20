@@ -846,7 +846,7 @@ end
 -- call(s) never reported" rather than claiming they never ran.
 function detail_of(state, last, pending)
   if state == "empty" then return "no messages yet" end
-  if state == "answered" then return "settled - the last turn is a reply" end
+  if state == "answered" then return "settled - the last message is a reply" end
   if state == "failed" then return "the last run failed (the model call errored)" end
   if not last then return "nothing is recorded after the last turn" end
   if last.role == "user" then return "an unanswered question, " .. ago(last.created_at) end

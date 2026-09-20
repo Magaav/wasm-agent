@@ -47,7 +47,7 @@ $harness = @'
     { type: "delta", text: "Final: it exists." },
     // A turn that changed files, so the diff topic is exercised: without `changes` the topic
     // never renders and every assertion about it would pass vacuously.
-    { type: "reply", text: "Final: it exists.", turn_id: "turn-fixture-1", changes: {
+    { type: "reply", text: "Final: it exists.", message_id: "message-fixture-1", changes: {
       added: 7, removed: 2, files: [
         { path: "lua/core/paths.lua", added: 5, removed: 2, created: false, recorded: true },
         { path: "scripts/probe.lua", added: 2, removed: 0, created: true, recorded: true }
@@ -236,7 +236,7 @@ $harness = @'
   var runMeta = run ? run.querySelector(".trace-meta") : null;
   var runText = runMeta ? runMeta.textContent : "";
   check(runText.indexOf("2 tool calls") >= 0, "the run topic should total its tool calls, saw: " + runText);
-  check(runText.indexOf("2 decisions") >= 0, "the run topic should count its decisions, saw: " + runText);
+  check(runText.indexOf("2 steps") >= 0, "the run topic should count its steps, saw: " + runText);
 
   // Tool topics belong to the reply, not to the transcript.
   check(messages.querySelectorAll(":scope > wa-trace").length === 0,
@@ -649,10 +649,10 @@ $harness = @'
   check(!!diffTopic && /\+4/.test(diffTopic.textContent) && /3/.test(diffTopic.textContent),
     "and the GitHub-style totals, saw: " + (diffTopic ? diffTopic.textContent.slice(0, 60) : "nothing"));
   // The turn id is what the undo route is asked about. After the merge this is the branch's version, which
-  // carries it in `dataset.turnId` - my check read a property my own version had, so it was asserting the
+  // carries it in `dataset.messageId` - my check read a property my own version had, so it was asserting the
   // implementation rather than the behaviour. The behaviour is what matters: the topic knows its turn.
-  check(!!diffTopic && !!(diffTopic.dataset.turnId || diffTopic.turnId),
-    "and the turn id the undo route is asked about, saw: " + (diffTopic ? JSON.stringify(diffTopic.dataset.turnId) : "no topic"));
+  check(!!diffTopic && !!(diffTopic.dataset.messageId || diffTopic.messageId),
+    "and the message id the undo route is asked about, saw: " + (diffTopic ? JSON.stringify(diffTopic.dataset.messageId) : "no topic"));
 
   // Opening a topic while a turn runs must not look like a broken UI. The node's worker is inside the
   // turn, so a Lua read queues and the client's deadline abandons it - which showed as

@@ -13,7 +13,7 @@
 -- No model is involved: building the agent touches the ledger, never the provider.
 local memory = dofile("lua/core/memory.lua")
 local users = dofile("lua/core/users.lua")
-dofile("lua/core/server.lua") -- defines wa_agent_for / wa_parse_turn_body as globals
+dofile("lua/core/server.lua") -- defines wa_agent_for / wa_parse_run_body as globals
 
 local failed = 0
 local skipped = 0
@@ -63,16 +63,16 @@ ok(unnamed ~= third, "an unnamed turn must not be served by a named thread's age
 
 -- 5. What a body means. Text stays text, even when it parses as JSON - otherwise a
 --    message someone typed as {"text":"hi"} would silently arrive as "hi".
-local text, images, problem, thread = wa_parse_turn_body('{"text":"hi"}')
+local text, images, problem, thread = wa_parse_run_body('{"text":"hi"}')
 ok(text == '{"text":"hi"}', 'a JSON body with no pictures and no thread must stay verbatim text')
 ok(thread == nil, "and must not be read as naming a thread")
 ok(problem == nil and #images == 0, "and must carry no images")
 
-local text2, _, _, thread2 = wa_parse_turn_body('{"text":"hi","thread":"abc"}')
+local text2, _, _, thread2 = wa_parse_run_body('{"text":"hi","thread":"abc"}')
 ok(text2 == "hi", "a body naming a thread is structured: its text is the text")
 ok(thread2 == "abc", "and the thread it names is returned")
 
-local text3, _, _, thread3 = wa_parse_turn_body("just words")
+local text3, _, _, thread3 = wa_parse_run_body("just words")
 ok(text3 == "just words" and thread3 == nil, "a plain body is unchanged")
 
 -- 6. A foreign thread is refused, and the refusal is the safety boundary.

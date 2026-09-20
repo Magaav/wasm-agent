@@ -1,8 +1,8 @@
--- The agent turn loop.
+-- The agent message loop.
 --
 -- The transcript in `messages` IS the context: there is no separate in-memory
 -- message list, so a session survives a restart and can be inspected, replayed
--- and exported as a fixture. Observability is core: every turn carries a trace
+-- and exported as a fixture. Observability is core: every message carries a trace
 -- of llm calls and tool calls with timings, tokens and failures.
 local json = dofile("lua/vendor/json.lua")
 local tools = dofile("lua/core/tools.lua")
@@ -25,7 +25,7 @@ local SYSTEM = table.concat({
   "- Before answering anything about the user - their names, preferences, codewords,",
   "  settings, accounts, projects, or what was decided earlier - call `recall` first.",
   "- Never answer a question about the user from your own guesswork, and never say the",
-  "  memory store is empty without having called `recall` in this turn. Checking is",
+  "  memory store is empty without having called `recall` in this message. Checking is",
   "  cheap; being wrong about the user is not.",
   "- If `recall` returns nothing, say plainly that you have nothing stored about it.",
   "- When the user asks you to remember something, call `remember` and confirm briefly.",
@@ -49,12 +49,12 @@ local ENVIRONMENT = dofile("lua/core/platform.lua").describe()
 -- eight rounds is not enough for one. Configurable, because a bulk edit wants
 -- more and a chat wants fewer.
 -- Runaway guard, not a task budget: the loop is bounded by context (see the note
--- before the round loop). A long task compacts mid-turn and keeps going.
+-- before the round loop). A long task compacts mid-message and keeps going.
 -- pi's checkpoint summary, copied: the summary is the only place a run's plan
 -- lives. pi ships no todo tool on purpose ("No built-in to-dos. They confuse
 -- models."), so the goal, the work in progress, the blockers and the next steps
 -- have to survive compaction in a fixed shape or they are simply lost - and
--- compaction now happens mid-turn.
+-- compaction now happens mid-message.
 local CHECKPOINT_SUMMARY_PROMPT = table.concat({
   "The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.",
   "",
@@ -84,17 +84,17 @@ local CHECKPOINT_SUMMARY_PROMPT = table.concat({
   "1. [Ordered list of what should happen next]",
 }, "\n")
 
--- The split-turn case: the span being summarised is the early part of one turn
+-- The split-message case: the span being summarised is the early part of one message
 -- too large to keep, so there are no complete runs to summarise. pi generates
 -- this as a second summary and merges it with the history summary; here the
 -- span is summarised in one pass with the prefix shape.
 local PREFIX_SUMMARY_PROMPT = table.concat({
-  "This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.",
+  "This is the PREFIX of a message that was too large to keep. The SUFFIX (recent work) is retained.",
   "",
   "Summarize the prefix to provide context for the retained suffix:",
   "",
   "## Original Request",
-  "[What did the user ask for in this turn?]",
+  "[What did the user ask for in this message?]",
   "",
   "## Early Progress",
   "- [Key steps and work done in the prefix]",
@@ -125,7 +125,7 @@ local function estimate_tokens(text)
 end
 
 -- Instructions are the only thing injected into context by default, read
--- fresh every turn so editing the file takes effect immediately.
+-- fresh every message so editing the file takes effect immediately.
 --
 -- They are scoped by role. The operator instructions name internal paths and
 -- the deploy shape, so a guest is given its own file and deliberately does NOT
@@ -139,16 +139,16 @@ end
 -- Returns `text, path` for the first readable instruction file. The path
 -- matters: a node without the file silently runs uninstructed, so we record
 -- which one (if any) was used and warn when a configured path is unreadable.
--- Instructions are read once per node process, not once per turn.
+-- Instructions are read once per node process, not once per message.
 --
 -- They sit at the *front* of every request, so the provider's prompt cache only helps if that prefix is
--- byte-identical from call to call. Re-reading the files every turn means an edit to AGENTS.md - or to the
+-- byte-identical from call to call. Re-reading the files every message means an edit to AGENTS.md - or to the
 -- platform file - re-prices and re-slows every call for the rest of the session. That is not theoretical: the
 -- night this was written, two edits to AGENTS.md left `cached_tokens` at zero and time-to-first-token at 27
 -- seconds on a 723k prompt, and the provider dropped the stream.
 --
 -- The trade is explicit and it is the right way round: an instruction change takes effect on the next
--- restart, not on the next turn. Instructions are part of the harness's identity for the life of the process,
+-- restart, not on the next message. Instructions are part of the harness's identity for the life of the process,
 -- which is also how a system prompt behaves everywhere else.
 local instructions_cache = {}
 
@@ -269,7 +269,7 @@ function M.new(session_id, on_event, role, user, node, opts)
     -- A named thread that does not exist yet is a request to *start* one, not an
     -- error - that is what "new session" means from a client that has no id to
     -- offer. It is started under the name the caller asked for, so the caller's
-    -- next turn addresses the same thread without being told its id back.
+    -- next message addresses the same thread without being told its id back.
     if not session and opts.start_if_missing then
       memory.start_session(node, "chat", {
         id = session_id, user_id = user, node_id = node, title = "chat",
@@ -300,21 +300,21 @@ function M:summary_model()
   return host.getenv("WASM_AGENT_LLM_SUMMARY_MODEL") or provider.settings().model
 end
 
--- A stored user turn as a provider message.
+-- A stored user message as a provider message.
 --
--- With no images this is a plain string, which is what every existing turn is
+-- With no images this is a plain string, which is what every existing message is
 -- and what non-vision providers expect. With images it becomes the
 -- OpenAI-compatible parts array. A missing file is reported *inside* the text
--- part rather than dropped: a turn that silently lost its picture would let the
+-- part rather than dropped: a message that silently lost its picture would let the
 -- model answer confidently about something it never saw.
-local function user_message(turn)
-  local images = turn.images
+local function user_message(message)
+  local images = message.images
   if type(images) ~= "table" or #images == 0 then
-    return { role = "user", content = turn.content or "" }
+    return { role = "user", content = message.content or "" }
   end
   local parts = {}
-  if turn.content and turn.content ~= "" then
-    parts[#parts + 1] = { type = "text", text = turn.content }
+  if message.content and message.content ~= "" then
+    parts[#parts + 1] = { type = "text", text = message.content }
   end
   local lost = {}
   for _, reference in ipairs(images) do
@@ -334,7 +334,7 @@ local function user_message(turn)
       text = "[image unavailable: " .. table.concat(lost, ", ") .. "]",
     }
   end
-  -- An image-only turn still needs a non-empty content array.
+  -- An image-only message still needs a non-empty content array.
   if #parts == 0 then
     parts[1] = { type = "text", text = "(image)" }
   end
@@ -342,7 +342,7 @@ local function user_message(turn)
 end
 
 -- Rebuild the provider messages from the transcript: system (+AGENTS.md),
--- the compaction summary, then every turn after the watermark.
+-- the compaction summary, then every message after the watermark.
 function M:build_context()
   local session = memory.session(self.session_id) or {}
   local agents, agents_path = M.agents_md(self.role)
@@ -361,7 +361,7 @@ function M:build_context()
   -- last step either succeeded or never ran. Both assumptions are wrong: the step
   -- may have run without its result being written, and it may have run twice.
   -- Context-only by design - the transcript is what was said, and a synthetic
-  -- turn in it would be replayed to every later request as if the agent had said
+  -- message in it would be replayed to every later request as if the agent had said
   -- it (and indexed by search_messages).
   if self.resume_notice then
     messages[#messages + 1] = { role = "system", content = self.resume_notice }
@@ -376,24 +376,24 @@ function M:build_context()
   -- boundary, but this keeps a rebuilt context valid regardless.
   local started = false
   local replay_reasoning = provider.reasoning(self.model).replay
-  for _, turn in ipairs(rows) do
-    if not started and turn.role == "tool" then
+  for _, row in ipairs(rows) do
+    if not started and row.role == "tool" then
       -- skip the orphan
-    elseif turn.role == "user" then
+    elseif row.role == "user" then
       started = true
-      messages[#messages + 1] = user_message(turn)
-    elseif turn.role == "assistant" then
+      messages[#messages + 1] = user_message(row)
+    elseif row.role == "assistant" then
       started = true
-      local message = { role = "assistant", content = turn.content or "" }
-      if replay_reasoning then message.reasoning_content=turn.reasoning or "" end
-      if type(turn.tool_calls) == "table" and #turn.tool_calls > 0 then
-        message.tool_calls = turn.tool_calls
+      local message = { role = "assistant", content = row.content or "" }
+      if replay_reasoning then message.reasoning_content = row.reasoning or "" end
+      if type(row.tool_calls) == "table" and #row.tool_calls > 0 then
+        message.tool_calls = row.tool_calls
       end
       messages[#messages + 1] = message
-    elseif turn.role == "tool" then
+    elseif row.role == "tool" then
       messages[#messages + 1] = {
-        role = "tool", tool_call_id = turn.tool_call_id or "",
-        name = turn.tool_name or "", content = tool_output.context_view(turn.tool_name,turn.content),
+        role = "tool", tool_call_id = row.tool_call_id or "",
+        name = row.tool_name or "", content = tool_output.context_view(row.tool_name, row.content),
       }
     end
   end
@@ -401,7 +401,7 @@ function M:build_context()
   -- A tool call and its result are recorded as separate messages, so a message that
   -- dies between them leaves a half-written exchange. Providers reject both
   -- halves - a call with no result, and a result with no call - with a 400 that
-  -- would otherwise fail *every* later turn in this session, permanently
+  -- would otherwise fail *every* later message in this session, permanently
   -- bricking it. Repair the window instead: keep only exchanges that are
   -- complete, and say so, because silently dropping messages is exactly the
   -- kind of hidden data loss this project forbids.
@@ -594,9 +594,9 @@ function M:maybe_compact(messages)
       end
     end
   end
-  -- No user message in the span means the cut landed inside one oversized turn:
-  -- pi calls this a split turn and summarises the prefix differently, because
-  -- there is no completed turn to describe.
+  -- No user message in the span means the cut landed inside one oversized message:
+  -- pi calls this a split message and summarises the prefix differently, because
+  -- there is no completed message to describe.
   local split_turn = true
   for index = 1, cut_index do
     if rows[index].role == "user" then split_turn = false break end
@@ -659,8 +659,8 @@ end
 
 -- Detect a thread with no recorded answer and prepare the recovery notice.
 --
--- The moment to look is the first turn of a process, *before* the new question is
--- appended: at that point the transcript's tail is still the previous turn's, and a
+-- The moment to look is the first message of a process, *before* the new question is
+-- appended: at that point the transcript's tail is still the previous message's, and a
 -- tail that is a question, a tool result or a step with no recorded result means
 -- no answer was ever written. It does *not* mean the other process is dead - it may
 -- still be working, which is the case that made "interrupted" a word this code should
@@ -690,7 +690,7 @@ function M:note_interruption()
     work = "The transcript ends after a tool result, so nothing is recorded about what came next."
   end
   self.resume_notice =
-    "Recovery notice: this session has no recorded answer after its last turn. " .. state.detail
+    "Recovery notice: this session has no recorded answer after its last message. " .. state.detail
     .. ". " .. work .. " The process that was working on it may still be running, or it may have "
     .. "stopped - nothing after that point is recorded either way, so the unfinished step may have "
     .. "run without its result being saved, or may not have run at all, and re-running it may repeat "
@@ -700,18 +700,18 @@ function M:note_interruption()
   return self.resume_notice
 end
 
-function M:turn(text, images)
+function M:run(text, images)
   self.run_id=host.uuid()
   local span=telemetry.start({session_id=self.session_id,run_id=self.run_id},'run',{})
   provider.pin()
-  local ok,result=pcall(self.run_turn,self,text,images)
+  local ok,result=pcall(self.run_body,self,text,images)
   provider.unpin()
   telemetry.finish(span,{ok=ok,error=not ok and tostring(result) or nil})
   if not ok then error(result) end
   return result
 end
 
-function M:run_turn(text, images)
+function M:run_body(text, images)
   self.model=provider.settings().model
   self:note_interruption()
   self.emit({ type = "status", text = "thinking" })
@@ -722,7 +722,7 @@ function M:run_turn(text, images)
   })
 
   if not provider.configured() then
-    local reply = self:local_turn(text)
+    local reply = self:local_run(text)
     memory.append_turn(self.session_id, { role = "assistant", content = reply, debug = self.debug })
     self.emit({ type = "reply", text = reply })
     telemetry.event(self.session_id,self.run_id,"","step","end",{outcome="local_fallback"})
@@ -733,11 +733,11 @@ function M:run_turn(text, images)
   local trace = {}
   local reply = ""
   local reply_reasoning, completed = "", false
-  local turn = { prompt = 0, completion = 0, total = 0, cached = 0 }
-  local turn_started = host.now()
-  -- What this turn changes on disk, recorded by write/edit as it goes. It lives on the
-  -- turn, so the diff topic belongs to the turn that caused it and undo can reach the
-  -- previous text long after the turn ended.
+  local totals = { prompt = 0, completion = 0, total = 0, cached = 0 }
+  local run_started = host.now()
+  -- What this message changes on disk, recorded by write/edit as it goes. It lives on the
+  -- message, so the diff topic belongs to the message that caused it and undo can reach the
+  -- previous text long after the message ended.
   self.changes = changeset.new()
   local tool_list = self.tool_list or tools.all(self.role)
   -- Fingerprint of the *stable* prefix (system + AGENTS.md + tool schemas).
@@ -752,13 +752,13 @@ function M:run_turn(text, images)
     + estimate_tokens(json.encode(tool_list))
 
   -- The loop is bounded by *context*, not by a round budget - pi's model, and
-  -- the better one. A fixed round budget fails the worst way: it stops the turn
+  -- the better one. A fixed round budget fails the worst way: it stops the message
   -- mid-task, so the work exists in the transcript but nothing is verified,
   -- committed or reported. Telling the model "wrap up now" ahead of a cut-off
   -- only half-fixes it, because the deadline is artificial in the first place.
   --
-  -- Instead the turn keeps its rounds and, when the request approaches the
-  -- window, compacts mid-turn (pi calls this a split turn) and rebuilds the
+  -- Instead the message keeps its rounds and, when the request approaches the
+  -- window, compacts mid-message (pi calls this a split message) and rebuilds the
   -- context from the transcript. Each round checks; nothing is cut off.
   -- WASM_AGENT_MAX_TOOL_ROUNDS therefore only guards against a runaway loop, not
   -- against a long task: it should never fire in practice.
@@ -789,7 +789,7 @@ function M:run_turn(text, images)
     -- tools -> next step, instead of every tool topic stacked behind one
     -- growing block of text.
     -- Proof of life for the node's own watchdog: the interpreter is working, so a
-    -- /health check can tell this from a wedged turn. Cheap (an atomic store).
+    -- /health check can tell this from a wedged message. Cheap (an atomic store).
     host.beat()
     self.emit({ type = "round", n = round })
     self.emit({ type = "status", text = "model" })
@@ -807,7 +807,7 @@ function M:run_turn(text, images)
         ms = math.floor((host.now() - llm_started) * 1000), error = redact.text(tostring(result)):sub(1, 400) }
       memory.append_turn(self.session_id, {
         role = "assistant", content = "", ok = false, trace = trace, debug = self.debug,
-        ms = math.floor((host.now() - turn_started) * 1000),
+        ms = math.floor((host.now() - run_started) * 1000),
       })
       telemetry.event(self.session_id,self.run_id,"","step","end",{outcome="provider_failed"})
       error(result)
@@ -819,30 +819,30 @@ function M:run_turn(text, images)
       local prompt = normalized.prompt or 0
       local completion = normalized.output or 0
       local total = normalized.total or 0
-      turn.prompt = turn.prompt + prompt
-      turn.completion = turn.completion + completion
-      turn.total = turn.total + total
+      totals.prompt = totals.prompt + prompt
+      totals.completion = totals.completion + completion
+      totals.total = totals.total + total
       local cached = normalized.cacheRead or 0
       -- Cost, only when rates are configured: cache reads are a fraction of
-      -- input, so a cheap cached turn shows up as cheap rather than as "few".
+      -- input, so a cheap cached message shows up as cheap rather than as "few".
       local cost = normalized.cost
       if normalized.cost_known then
-        turn.cost = (turn.cost or 0) + cost
+        totals.cost = (totals.cost or 0) + cost
         M.usage_total.cost = (M.usage_total.cost or 0) + cost
       end
       M.usage_total.prompt = M.usage_total.prompt + prompt
       M.usage_total.completion = M.usage_total.completion + completion
       M.usage_total.total = M.usage_total.total + total
       M.usage_total.cached = M.usage_total.cached + cached
-      turn.cached = turn.cached + cached
+      totals.cached = totals.cached + cached
       local span = { kind = "model_call", model = self.model, ok = true, round = round,
         ms = math.floor((host.now() - llm_started) * 1000), prefix = prefix_fingerprint,
         usage = usage,normalized=normalized,
         tokens = { prompt = prompt, completion = completion, total = total, cached = cached, cost = cost } }
-      -- In debug mode keep the exact request so a failing turn can be replayed
+      -- In debug mode keep the exact request so a failing message can be replayed
       -- byte for byte (round 1 only: later rounds are derived from tool calls).
       if round == 1 then
-        -- Which instructions, if any, this turn ran with. A node without the
+        -- Which instructions, if any, this message ran with. A node without the
         -- file is visible here instead of being indistinguishable from one with it.
         span.agents_md = self.agents_source
         if self.debug then
@@ -885,7 +885,7 @@ function M:run_turn(text, images)
       reply_reasoning = result.reasoning or ""
       -- An empty answer with no tool call is not an answer. A reasoning model that
       -- runs out of output budget before it writes anything returns exactly this,
-      -- and this path used to record it as a finished turn: the model looked like
+      -- and this path used to record it as a finished message: the model looked like
       -- it had nothing to say instead of like it had failed. Explicit output
       -- limits do not eliminate this failure; detect it even with Pi-style caps.
       if provider.visible_text(reply) == "" then
@@ -902,13 +902,13 @@ function M:run_turn(text, images)
         end
         memory.append_turn(self.session_id, {
           role = "assistant", content = "", reasoning=reply_reasoning, ok = false, trace = trace, debug = self.debug,
-          ms = math.floor((host.now() - turn_started) * 1000),
+          ms = math.floor((host.now() - run_started) * 1000),
         })
         telemetry.event(self.session_id,self.run_id,"","step","end",{outcome="empty_reply"})
         error(reason)
       end
       -- The final assistant message is recorded once, after the loop, with the
-      -- turn's trace. Recording it here as well would duplicate it in context.
+      -- message's trace. Recording it here as well would duplicate it in context.
       completed=true
       break
     end
@@ -925,7 +925,7 @@ function M:run_turn(text, images)
         else argument_error="invalid_tool_arguments_json" end
       end
       -- The deadline travels with the call, not with the UI. `bash`/`shell` are bounded (300s
-      -- by default, WASM_AGENT_EXEC_TIMEOUT_SECONDS to change it), and a turn can spend all of it
+      -- by default, WASM_AGENT_EXEC_TIMEOUT_SECONDS to change it), and a message can spend all of it
       -- inside one command - which used to appear only as a trace line that had not come back, and
       -- was then killed five minutes later. It reads as the agent being stuck rather than as a
       -- deadline that was always there, so the number is reported by the side that enforces it.
@@ -970,44 +970,44 @@ function M:run_turn(text, images)
       }
     end
 
-    -- Mid-turn compaction (pi's "split turn"): everything so far is already in
+    -- Mid-message compaction (pi's "split message"): everything so far is already in
     -- the transcript, so when the request approaches the window we summarise the
-    -- older part and rebuild the context, then keep going in the same turn. The
-    -- alternative - stopping the turn to protect the window - throws away the
+    -- older part and rebuild the context, then keep going in the same message. The
+    -- alternative - stopping the message to protect the window - throws away the
     -- agent's momentum and leaves the work uncommitted.
   end
 
   if reply == "" then
     reply = "(runaway guard: " .. MAX_TOOL_ROUNDS .. " tool rounds without a final answer)"
   end
-  -- The turn's changed files ride with the turn, so the diff topic is rebuilt from the
+  -- The message's changed files ride with the message, so the diff topic is rebuilt from the
   -- ledger like everything else: a reload, a resume or another reader all see the same
   -- changes, and undo has the previous text to restore.
   local changes = changeset.summary(self.changes)
-  -- The turn id is minted here rather than by append_turn, because the reply event has to
-  -- name the turn *before* the record exists: the UI's topic carries the id it will ask
+  -- The message id is minted here rather than by append_turn, because the reply event has to
+  -- name the message *before* the record exists: the UI's topic carries the id it will ask
   -- about, and append_turn uses the same one so the topic and the ledger agree.
   local message_id = host.uuid()
   memory.append_turn(self.session_id, {
     id = message_id,ok=completed,
-    role = "assistant", content = reply, reasoning=reply_reasoning, trace = trace, tokens = turn.total, debug = self.debug,
-    ms = math.floor((host.now() - turn_started) * 1000),
+    role = "assistant", content = reply, reasoning=reply_reasoning, trace = trace, tokens = totals.total, debug = self.debug,
+    ms = math.floor((host.now() - run_started) * 1000),
     changes = changes,
   })
   memory.record_run(self.run_id, self.session_id, completed and "completed" or "incomplete", completed and "answered" or "runaway_guard", reply)
   telemetry.event(self.session_id,self.run_id,"","step","end",{outcome=completed and "answered" or "runaway_guard",assistant_message_id=message_id})
   M.usage_total.runs = M.usage_total.runs + 1
-  M.usage_total.last = turn
+  M.usage_total.last = message
   self.emit({ type = "usage", total = M.usage_total, model = self.model })
 
   -- The diff goes with the reply: the topic belongs to this bubble, and the reader should
-  -- not need a second request to learn what the turn touched.
-  self.emit({ type = "reply", text = reply, changes = changes, turn_id = message_id })
+  -- not need a second request to learn what the message touched.
+  self.emit({ type = "reply", text = reply, changes = changes, message_id = message_id })
   return reply
 end
 
 -- Deterministic fallback when no model provider is configured.
-function M:local_turn(text)
+function M:local_run(text)
   local lines = {}
   for _, row in ipairs(memory.recall(text, 5)) do lines[#lines + 1] = "- " .. row.content end
   for _, row in ipairs(memory.search_ledger(text, nil, 5)) do

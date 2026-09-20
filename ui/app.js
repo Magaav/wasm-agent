@@ -119,7 +119,7 @@ let nodeList = [];
 // second, and when the node was wedged one fetch that never resolved hung the loop
 // forever - so the page sat on "connecting…" long after the node had recovered. A hung
 // request must never be able to stop the retry. Requests that bring their own signal (the
-// chat stream) pass through untouched: a turn is legitimately long.
+// chat stream) pass through untouched: a run is legitimately long.
 let apiTimeout = 8000;
 function apiFetch(path, options = {}, timeout = apiTimeout) {
   if (!timeout || options.signal) return fetch(path, options);
@@ -235,23 +235,23 @@ if (typeof ResizeObserver === "function") {
 }
 jump.addEventListener("click", () => { setFollow(true); pin(true); });
 
-// One assistant bubble per turn. Decisions and their tool topics live *inside*
-// it as stacked segments: separate bubbles put a border between every decision,
+// One assistant bubble per run. Decisions and their tool topics live *inside*
+// it as stacked segments: separate bubbles put a border between every step,
 // which reads as a divider between unrelated messages instead of one reply that
 // thought, used tools, thought again, and answered. When the answer is ready the
 // whole path collapses into a single run topic at the top of the bubble.
-let turnBubble = null;
-let turnStartedAt = 0;
+let runBubble = null;
+let runStartedAt = 0;
 
 function currentBubble() {
-  if (!turnBubble) {
+  if (!runBubble) {
     document.getElementById("empty")?.remove();
-    turnBubble = document.createElement("wa-message");
-    turnBubble.setAttribute("role", "assistant");
-    messages.append(turnBubble);   // connecting is what builds .body
-    turnBubble.body.classList.add("steps");
+    runBubble = document.createElement("wa-message");
+    runBubble.setAttribute("role", "assistant");
+    messages.append(runBubble);   // connecting is what builds .body
+    runBubble.body.classList.add("steps");
   }
-  return turnBubble;
+  return runBubble;
 }
 
 function add(role, text, asHtml = false) {
@@ -387,15 +387,15 @@ function toolDetail(result) {
   return text.length > 4000 ? text.slice(0, 4000) + "\n…(truncated)" : text;
 }
 
-// The trace topic for the turn currently running. Created on the first tool call
-// and finished when the reply arrives, so one decision is one topic.
+// The trace topic for the run currently running. Created on the first tool call
+// and finished when the reply arrives, so one step is one topic.
 let trace = null;
 let lastTool = "";
 // The deadline a `bash`/`shell` call is given, from /health. The tool event usually carries its own
-// `timeout_ms`; this is the fallback for a window that joined mid-turn or an older node, so the bound
+// `timeout_ms`; this is the fallback for a window that joined mid-run or an older node, so the bound
 // is still shown rather than guessed at.
 let execTimeoutSeconds = 300;
-// One ticker for the page, not one per tool. Only the newest pending line is in flight (turns are
+// One ticker for the page, not one per tool. Only the newest pending line is in flight (runs are
 // ordered within a session), and a timer per call would outlive the line it was counting for.
 let toolTicker = null;
 
@@ -406,22 +406,22 @@ function renderDiff(bubble, changes) {
   topic.setSummary(changes);
   bubble.body.append(topic);
   // The toggle starts pending: the server has not yet said whether this can be undone (the files may have
-  // moved on since the turn), and enabling it first would be a button that promises something the handler
+  // moved on since the run), and enabling it first would be a button that promises something the handler
   // can then refuse. It used to say "checking…" in the refusal style, which showed a question as an error.
   topic.setPending();
   topic.addEventListener("diff-act", (event) => actOnDiff(topic, event.detail));
   return topic;
 }
 
-// Ask whether this turn's change can still be undone, and let the topic show the answer.
+// Ask whether this run's change can still be undone, and let the topic show the answer.
 // A refusal here is not an error: a file that moved on is a normal thing to find, and the
 // topic says which file rather than leaving the reader with a dead button.
 async function askUndoable(topic) {
-  if (!topic.dataset.turnId) return;
+  if (!topic.dataset.messageId) return;
   try {
     const response = await fetch("diff", {
       method: "POST", headers: apiHeaders({ "content-type": "application/json" }),
-      body: JSON.stringify({ turn_id: topic.dataset.turnId, action: "check" }),
+      body: JSON.stringify({ message_id: topic.dataset.messageId, action: "check" }),
     });
     const payload = await response.json();
     topic.setUndoable(payload.can_undo === true, payload.reason || "");
@@ -437,7 +437,7 @@ async function actOnDiff(topic, detail) {
   try {
     const response = await fetch("diff", {
       method: "POST", headers: apiHeaders({ "content-type": "application/json" }),
-      body: JSON.stringify({ turn_id: topic.dataset.turnId, action: act }),
+      body: JSON.stringify({ message_id: topic.dataset.messageId, action: act }),
     });
     const payload = await response.json();
     if (payload.error) return detail.done({ ok: false, reason: payload.error });
@@ -449,7 +449,7 @@ async function actOnDiff(topic, detail) {
 
 // ---- what changed in one file (the balloon behind a click) -----------------
 //
-// The turn carries addresses, not bodies, so the patch is built by the node on demand - which is why
+// The run carries addresses, not bodies, so the patch is built by the node on demand - which is why
 // this is a click and not a hover. A hover that fetched would spend a request on every pointer movement,
 // and the hover that showed nothing (which is what it did) is a control that lies about being one.
 // A second click on the same row closes it again.
@@ -478,19 +478,19 @@ function patchViewName(path) {
   return "patch:" + base;
 }
 
-function openPatchWindow(turnId, path) {
-  if (!turnId || !path) return false;
+function openPatchWindow(messageId, path) {
+  if (!messageId || !path) return false;
   if (!native || typeof native.openView !== "function") return false;
   // Never from inside a view: opening a window from a window is how you get two of them.
   if (viewMode()) return false;
   const url = location.origin + location.pathname +
     "?view=" + encodeURIComponent(patchViewName(path)) +
-    "&turn=" + encodeURIComponent(turnId) + "&path=" + encodeURIComponent(path);
+    "&message=" + encodeURIComponent(messageId) + "&path=" + encodeURIComponent(path);
   native.openView(patchViewName(path), url);
   return true;
 }
 
-function renderPatchView(turnId, path) {
+function renderPatchView(messageId, path) {
   const section = document.createElement("section");
   section.className = "patch-view";
   const head = document.createElement("div");
@@ -513,7 +513,7 @@ function renderPatchView(turnId, path) {
   document.body.append(section);
   fetch("diff", {
     method: "POST", headers: apiHeaders({ "content-type": "application/json" }),
-    body: JSON.stringify({ turn_id: turnId, action: "patch", path: path }),
+    body: JSON.stringify({ message_id: messageId, action: "patch", path: path }),
   })
     .then((response) => response.json())
     .then((payload) => {
@@ -524,8 +524,8 @@ function renderPatchView(turnId, path) {
 }
 
 async function openFileDiff(path, anchor, topic) {
-  const turnId = topic && topic.dataset.turnId;
-  if (!turnId || !path) return;
+  const messageId = topic && topic.dataset.messageId;
+  if (!messageId || !path) return;
   closeFileDiff();
   const balloon = document.createElement("wa-balloon");
   balloon.className = "file-diff";
@@ -543,7 +543,7 @@ async function openFileDiff(path, anchor, topic) {
   toWindow.textContent = "open in a window";
   toWindow.title = "show this patch in its own window";
   toWindow.addEventListener("click", () => {
-    if (openPatchWindow(turnId, path)) closeFileDiff();
+    if (openPatchWindow(messageId, path)) closeFileDiff();
   });
   head.append(headLabel, toWindow);
   const body = document.createElement("pre");
@@ -559,7 +559,7 @@ async function openFileDiff(path, anchor, topic) {
   try {
     const response = await fetch("diff", {
       method: "POST", headers: apiHeaders({ "content-type": "application/json" }),
-      body: JSON.stringify({ turn_id: turnId, action: "patch", path: path }),
+      body: JSON.stringify({ message_id: messageId, action: "patch", path: path }),
     });
     const payload = await response.json();
     if (payload.error) {
@@ -570,7 +570,7 @@ async function openFileDiff(path, anchor, topic) {
       // scrolled inside a box the size of a chat bubble. The reader is told which happened: the
       // balloon does not silently become a window, and a window does not silently become a balloon.
       const lines = String(payload.patch || "").split("\n").length;
-      if (lines >= PATCH_PROMOTE_LINES && openPatchWindow(turnId, path)) {
+      if (lines >= PATCH_PROMOTE_LINES && openPatchWindow(messageId, path)) {
         closeFileDiff();
         return;
       }
@@ -696,11 +696,11 @@ function finishTrace() {
   trace = null;
 }
 
-// The answer is the point; the route is reference. On reply, everything the turn
+// The answer is the point; the route is reference. On reply, everything the run
 // did before the answer moves into one collapsed run topic at the top of the
 // bubble, and the answer sits below it.
 function collapseRun() {
-  const bubble = turnBubble;
+  const bubble = runBubble;
   if (!bubble) return;
   const body = bubble.body;
   const answer = streamBody;
@@ -709,10 +709,10 @@ function collapseRun() {
   const traces = moves.filter((c) => c.tagName === "WA-TRACE");
   if (traces.length === 0) return;   // nothing ran: leave the plain answer alone
   let calls = 0;
-  let decisions = 0;
+  let steps = 0;
   for (const child of moves) {
     if (child.tagName === "WA-TRACE") calls += child.count || 0;
-    else if (child.classList && child.classList.contains("seg")) decisions += 1;
+    else if (child.classList && child.classList.contains("seg")) steps += 1;
   }
   const run = document.createElement("wa-run");
   body.prepend(run);
@@ -720,12 +720,12 @@ function collapseRun() {
     run.body.append(child);
     if (typeof child.reveal === "function") child.reveal();
   }
-  run.setSummary(decisions, calls, Date.now() - (turnStartedAt || Date.now()));
+  run.setSummary(steps, calls, Date.now() - (runStartedAt || Date.now()));
 }
 
-// A round is one decision: what the model said, then the tools it chose. Closing
+// A round is one step: what the model said, then the tools it chose. Closing
 // both here interleaves them inside the same bubble - text, tools, text, tools -
-// and the bubble only closes when the turn really ends.
+// and the bubble only closes when the run really ends.
 function flushDecision(final = false) {
   if (streamBody) {
     const text = stripThinking(streamText);
@@ -733,13 +733,13 @@ function flushDecision(final = false) {
       streamBody.innerHTML = renderMarkdown(text);
       streamBody.style.whiteSpace = "normal";
     } else {
-      streamBody.remove();   // a decision with no prose leaves no empty block
+      streamBody.remove();   // a step with no prose leaves no empty block
     }
     streamBody = null;
     streamText = "";
   }
   finishTrace();
-  if (final) turnBubble = null;
+  if (final) runBubble = null;
   pin();
 }
 
@@ -760,8 +760,8 @@ function typeOut(body, text) {
 
 function handleEvent(event) {
   if (event.type === "round") {
-    // A new decision begins: close the previous one (its text and its tool topic).
-    if (!turnStartedAt) turnStartedAt = Date.now();
+    // A new step begins: close the previous one (its text and its tool topic).
+    if (!runStartedAt) runStartedAt = Date.now();
     flushDecision();
   } else if (event.type === "node") {
     // Another window renamed this node, or this one did: either way the name is the node's,
@@ -774,7 +774,7 @@ function handleEvent(event) {
   } else if (event.type === "reasoning") {
     // A reasoning model can think for a long time before it says anything, and a
     // silent panel is indistinguishable from a hung one. The count also tells the
-    // reader where the output budget went when a turn ends with no answer.
+    // reader where the output budget went when a run ends with no answer.
     const chars = Number(event.chars) || 0;
     setStatus("thinking… " + chars + " chars of reasoning");
   } else if (event.type === "tool") {
@@ -787,7 +787,7 @@ function handleEvent(event) {
     settleTool(event.result);
   } else if (event.type === "delta") {
     clearStatus();
-    // A new segment per decision, inside the same bubble.
+    // A new segment per step, inside the same bubble.
     if (!streamBody) {
       streamBody = document.createElement("div");
       streamBody.className = "seg";
@@ -813,18 +813,18 @@ function handleEvent(event) {
     // The run topic goes *above* the answer; the diff goes *below* it. Order matters and was
     // wrong here: the diff used to be appended *before* collapseRun(), which moves every child
     // that is not the answer into the run topic - so the diff landed inside the run topic,
-    // where the reader had to open the turn's path to find out what it changed. The diff is
+    // where the reader had to open the run's path to find out what it changed. The diff is
     // created after the run is collapsed, and collapseRun() also refuses to swallow a WA-DIFF,
     // so the two cannot get back into that order.
     collapseRun();
     const diff = renderDiff(currentBubble(), event.changes);
     if (diff) {
-      diff.dataset.turnId = event.turn_id || "";
-      if (diff.dataset.turnId) askUndoable(diff);
+      diff.dataset.messageId = event.message_id || "";
+      if (diff.dataset.messageId) askUndoable(diff);
     }
     streamBody = null;
     streamText = "";
-    turnBubble = null;
+    runBubble = null;
   } else if (event.type === "usage") {    settings.usage = event.total || settings.usage;
     if (event.model) settings.model = event.model;
     updateChip();
@@ -833,7 +833,7 @@ function handleEvent(event) {
     clearStatus();
     add("assistant", "error: " + (event.error || "unknown"));
     finishTrace();
-    turnBubble = null;
+    runBubble = null;
   } else if (event.type === "done") {
     clearStatus();
     flushDecision(true);
@@ -856,31 +856,31 @@ function restoreDraft() {
 // repaint it, instead of starting blank and looking like the work is gone. It did start blank -
 // a patch reloaded the window and both the transcript and a half-written prompt disappeared.
 
-// Repaint a transcript by replaying the stored turns as the events the live view already
+// Repaint a transcript by replaying the stored runs as the events the live view already
 // understands. Reusing handleEvent is the point: a repainted bubble is built by exactly the code
 // that built it the first time, so the two cannot drift apart.
-function repaintTurns(turns) {
+function repaintMessages(runs) {
   messages.replaceChildren();
-  turnBubble = null;
+  runBubble = null;
   streamBody = null;
   streamText = "";
   let rendered = 0;
   let failed = 0;
   let firstFailure = "";
-  for (const turn of turns) {
-    // Per turn, so one malformed row cannot swallow the rest of the transcript. A repaint that
+  for (const message of messages) {
+    // Per run, so one malformed row cannot swallow the rest of the transcript. A repaint that
     // stops halfway is how "my own input is missing" becomes invisible: the rows before the throw
     // are drawn, the rows after it are not, and nothing says so.
     try {
-      if (turn.role === "user") {
-        add("user", turn.content || "");
-      } else if (turn.role === "assistant") {
-        // The stored turn carries its changes summary and its id, and both are needed: the summary is
+      if (message.role === "user") {
+        add("user", message.content || "");
+      } else if (message.role === "assistant") {
+        // The stored run carries its changes summary and its id, and both are needed: the summary is
         // the topic, and the id is what the undo route is asked about. Dropping them here is why a
         // reloaded transcript showed no diff topics at all - the live path had them, the repaint did
         // not, and a window that has been reloaded is a repaint.
-        if (turn.content) handleEvent({ type: "reply", text: turn.content, changes: turn.changes, turn_id: turn.id });
-        const calls = turn.tool_calls || [];
+        if (message.content) handleEvent({ type: "reply", text: message.content, changes: message.changes, message_id: message.id });
+        const calls = message.tool_calls || [];
         if (calls.length) {
           handleEvent({ type: "round", n: 1 });
           for (const raw of calls) {
@@ -892,21 +892,21 @@ function repaintTurns(turns) {
             handleEvent({ type: "tool", name: fn.name, arguments: args || {} });
           }
         }
-      } else if (turn.role === "tool") {
-        handleEvent({ type: "tool_result", name: turn.tool_name, result: { content: turn.content } });
+      } else if (message.role === "tool") {
+        handleEvent({ type: "tool_result", name: message.tool_name, result: { content: message.content } });
       }
       rendered += 1;
     } catch (error) {
       failed += 1;
       if (!firstFailure) {
-        firstFailure = `${turn.role} seq ${turn.seq}: ${error}`;
-        console.error("repaint failed", turn, error);
+        firstFailure = `${message.role} seq ${message.seq}: ${error}`;
+        console.error("repaint failed", run, error);
       }
     }
   }
   pin(true);
   if (failed) {
-    add("assistant", `repaint: ${rendered} of ${turns.length} turns drawn, ${failed} failed — first: ${firstFailure}`);
+    add("assistant", `repaint: ${rendered} of ${runs.length} runs drawn, ${failed} failed — first: ${firstFailure}`);
   }
   return { rendered, failed, firstFailure };
 }
@@ -924,11 +924,11 @@ async function learnSession() {
     const payload = await (await apiFetch("sessions", { headers: apiHeaders() })).json();
     const mine = (payload.sessions || []).filter((s) => !me.user || !s.user_id || s.user_id === me.user.id);
     if (mine.length) rememberSession(mine[0].id);
-  } catch (error) { /* unreachable: the next turn tries again */ }
+  } catch (error) { /* unreachable: the next run tries again */ }
 }
 
-// Sessions this page has already auto-resumed. A resume spends a turn, so it happens at most once per
-// session per page load: if the resumed turn fails too, the notice stays and offers the button, and
+// Sessions this page has already auto-resumed. A resume spends a run, so it happens at most once per
+// session per page load: if the resumed run fails too, the notice stays and offers the button, and
 // nothing loops.
 const autoResumed = new Set();
 
@@ -941,12 +941,12 @@ async function restoreSession() {
     const wanted = sessions.find((s) => s.id === chatSession) || mine[0] || sessions[0];
     rememberSession(wanted.id);
     const full = await (await apiFetch("session?id=" + encodeURIComponent(wanted.id), { headers: apiHeaders() })).json();
-    if (full && Array.isArray(full.messages) && full.messages.length) repaintTurns(full.messages);
-    // A thread whose last turn was cut off must say so *in the chat*: the answer never arrived, and a
+    if (full && Array.isArray(full.messages) && full.messages.length) repaintMessages(full.messages);
+    // A thread whose last run was cut off must say so *in the chat*: the answer never arrived, and a
     // transcript that just stops looks like the agent had nothing to say. The engine's badge says it
     // too, but the reader is here, so the offer belongs here.
     //
-    // 'failed' is the same situation by a different route - the model call errored instead of the turn
+    // 'failed' is the same situation by a different route - the model call errored instead of the run
     // being stopped - and it was invisible here, which is why a failed session looked like an agent
     // that had simply gone quiet.
     const resumable = full && (full.state === "failed" || full.state === "unfinished");
@@ -955,16 +955,16 @@ async function restoreSession() {
       notice.className = "unfinished-notice";
       notice.textContent = (full.state === "failed"
         ? "the last run failed before it answered - "
-        : "this turn was stopped before it answered - ") +
+        : "this run was stopped before it answered - ") +
         (full.state_detail || "the node did not record a result") + ".";
       const again = nodeButton("continue", () => { notice.remove(); resumeSession(wanted.id); });
       notice.append(again);
       messages.append(notice);
     }
     // And then resume it by itself, because a stuck session is not something the reader should have to
-    // notice and fix. Bounded and visible: once per session per page, only when the node reports no turn
-    // running - a turn that IS running also reads as unfinished, and resuming it would queue a second
-    // turn behind the first - and it says in the chat that it is doing it, so a turn is never spent in
+    // notice and fix. Bounded and visible: once per session per page, only when the node reports no run
+    // running - a run that IS running also reads as unfinished, and resuming it would queue a second
+    // run behind the first - and it says in the chat that it is doing it, so a run is never spent in
     // silence.
     if (resumable && !autoResumed.has(wanted.id)) {
       let idle = false;
@@ -976,7 +976,7 @@ async function restoreSession() {
         autoResumed.add(wanted.id);
         const line = document.createElement("div");
         line.className = "unfinished-notice";
-        line.textContent = "resuming it now - " + (full.state_detail || "the last turn did not finish") + ".";
+        line.textContent = "resuming it now - " + (full.state_detail || "the last run did not finish") + ".";
         messages.append(line);
         resumeSession(wanted.id);
       }
@@ -991,13 +991,13 @@ async function restoreSession() {
 
 function setBusy(value) {
   busy = value;
-  // A reload that was deferred for a running turn lands the moment it ends, so an update
-  // never sits invisible behind a finished turn.
+  // A reload that was deferred for a running run lands the moment it ends, so an update
+  // never sits invisible behind a finished run.
   if (!value && pendingReload) {
     pendingReload = false;
     reload();
   }
-  // A turn ending is what frees the node for everything the engine asked for while it ran.
+  // A run ending is what frees the node for everything the engine asked for while it ran.
   if (!value && document.body.classList.contains("engine")) reloadTopics();
   sendButton.classList.toggle("busy", value);
   sendButton.title = value ? "Stop" : "Send";
@@ -1005,9 +1005,9 @@ function setBusy(value) {
   if (value) startLiveness(); else stopLiveness();
 }
 
-// Whether this turn is *working* or *stuck*, which looked identical from outside.
+// Whether this run is *working* or *stuck*, which looked identical from outside.
 //
-// A turn can legitimately spend minutes inside one command, and until this existed the only signals
+// A run can legitimately spend minutes inside one command, and until this existed the only signals
 // were a spinner and a tool line that had not come back - so a long call and a wedged one were
 // indistinguishable, and the difference arrived 300 seconds later when the call was killed. The user
 // had no way to tell "still working" from "never coming back", which is exactly when they should be
@@ -1024,8 +1024,8 @@ function startLiveness() {
   let lastStalled = null;
   let climbingSince = 0;
   liveness = setInterval(async () => {
-    // Only while a turn is busy. The accept thread answers /health without the interpreter, so this
-    // costs nothing the turn needs and cannot itself be the thing that wedges.
+    // Only while a run is busy. The accept thread answers /health without the interpreter, so this
+    // costs nothing the run needs and cannot itself be the thing that wedges.
     if (!busy) return;
     let health = null;
     try { health = await (await apiFetch("health", { headers: apiHeaders() })).json(); }
@@ -1044,7 +1044,7 @@ function startLiveness() {
     }
     lastStalled = stalled;
     const working = stalled < 5000 || !climbingSince;
-    const busyFor = health.current && health.current.ms ? health.current.ms : Date.now() - (turnStartedAt || Date.now());
+    const busyFor = health.current && health.current.ms ? health.current.ms : Date.now() - (runStartedAt || Date.now());
     setLiveness({
       working,
       stalled,
@@ -1068,14 +1068,14 @@ function setLiveness(info) {
     node = document.createElement("div");
     node.id = "liveness";
     node.className = "liveness";
-    // Inside the message list, so it lives with the turn it describes and disappears with it - a
-    // status bar elsewhere would keep reporting a turn that has already been answered.
+    // Inside the message list, so it lives with the run it describes and disappears with it - a
+    // status bar elsewhere would keep reporting a run that has already been answered.
     messages.append(node);
   }
   const seconds = (ms) => (ms / 1000).toFixed(0);
   if (info.working) {
     node.classList.remove("stuck");
-    node.textContent = "working — node beat " + info.stalled + " ms ago · this turn "
+    node.textContent = "working — node beat " + info.stalled + " ms ago · this run "
       + seconds(info.busy_ms) + "s" + (info.queue ? " · " + info.queue + " queued" : "");
   } else {
     node.classList.add("stuck");
@@ -1097,7 +1097,7 @@ function composedText(text) {
 // actually attached. `data` is a full data URL; the server strips the envelope.
 function composedBody(text, options = {}) {
   const images = attachments.filter((file) => file.kind === "image");
-  // The thread this turn belongs to, named in the body.
+  // The thread this run belongs to, named in the body.
   //
   // It used to be sent as `X-WA-Session`, which is the *account* header: a thread id in that field
   // resolved to no user at all and fell back to master, so the window's choice was never read and
@@ -1105,7 +1105,7 @@ function composedBody(text, options = {}) {
   // naming a thread needed no HTTP route and no Rust change.
   //
   // Deliberately not gated on the role the page believes it has: that value arrives from `/me` and
-  // is `guest` until it does, so a guard here would silently send the first turn after `/new` to the
+  // is `guest` until it does, so a guard here would silently send the first run after `/new` to the
   // thread the reader just left. Who may address a thread is decided once, by the node, which knows
   // the caller - and refuses a thread that is not theirs with `forbidden_thread`.
   const thread = options.session || chatSession;
@@ -1118,17 +1118,17 @@ function composedBody(text, options = {}) {
   return { contentType: "application/json", body: JSON.stringify(payload) };
 }
 
-// A lost connection is not a failed turn. When the node dies mid-stream the
+// A lost connection is not a failed run. When the node dies mid-stream the
 // browser throws a TypeError, and printing it raw - "error: TypeError: network
 // error" - tells the reader nothing: not what broke, not what to do, and not
-// that the work is recoverable. It is: the turn is recorded as unfinished.
+// that the work is recoverable. It is: the run is recorded as unfinished.
 function isConnectionLoss(error) {
   return error instanceof TypeError;
 }
 
 function connectionMessage() {
-  return "lost the local node mid-turn (nothing is serving " + location.origin + ")." +
-    " Start it with `wa ui` - this turn is recorded as unfinished, and" +
+  return "lost the local node mid-run (nothing is serving " + location.origin + ")." +
+    " Start it with `wa ui` - this run is recorded as unfinished, and" +
     " `wa resume --list` will offer to continue it.";
 }
 
@@ -1151,7 +1151,7 @@ function watchNode() {
     } catch (error) { /* still down */ }
   }, 3000);
 }
-// A notice the page put up about this turn, so it can take it down again. A span that stays after the
+// A notice the page put up about this run, so it can take it down again. A span that stays after the
 // thing it described has gone is not a record, it is litter - and it grows the transcript with every
 // false alarm.
 let streamNotice = null;
@@ -1159,7 +1159,7 @@ let streamNotice = null;
 function clearStreamNotice() {
   if (streamNotice && streamNotice.isConnected) streamNotice.remove();
   streamNotice = null;
-  // The restore's notice is the same claim in a different place: "this turn did not finish". Once the
+  // The restore's notice is the same claim in a different place: "this run did not finish". Once the
   // node says the thread is settled, the claim is stale and the span should go - the durable record is
   // the engine's sessions topic, which is where a reader looks for it.
   for (const notice of document.querySelectorAll(".unfinished-notice")) notice.remove();
@@ -1174,8 +1174,8 @@ async function send(text, options = {}) {
   // reader had scrolled up to read something.
   setFollow(true);
   pin(true);
-  turnBubble = null;   // the reply gets its own bubble
-  turnStartedAt = Date.now();
+  runBubble = null;   // the reply gets its own bubble
+  runStartedAt = Date.now();
   controller = new AbortController();
   streamBody = null;
   streamText = "";
@@ -1189,32 +1189,32 @@ async function send(text, options = {}) {
   renderAttachments();
   setStatus("wasm-agent is thinking…");
   // Declared out here, not inside the `try` below: the `finally` clears it, and a `const` inside the try
-  // is not in scope there. It was inside, so every turn ended by throwing `watchdog is not defined` from
+  // is not in scope there. It was inside, so every run ended by throwing `watchdog is not defined` from
   // the first line of the `finally` - which meant `clearInterval`, `setBusy(false)`, `controller = null`
-  // and the meta refresh never ran, and the window sat there looking like it was still working on a turn
+  // and the meta refresh never ran, and the window sat there looking like it was still working on a run
   // that had finished. The gate's bug hunt found it; the product would only have shown it as "stuck".
   let watchdog = null;
   try {
     const headers = { "Content-Type": outgoing.contentType, "Accept": "text/event-stream" };
-    // Which thread this turn belongs to travels in the body (`composedBody`), not here: the header
+    // Which thread this run belongs to travels in the body (`composedBody`), not here: the header
     // this used to set is the *account* one, and a thread id in it resolved to no user and fell back
     // to master - so the window's choice was never read. `apiHeaders` supplies the account below.
     // Silence is not evidence of death.
     //
     // A tool that takes minutes - a build, a test suite, an install - produces no events at all, and
-    // the node keeps beating throughout. A client that counts seconds therefore kills turns that are
-    // working: this one aborted a healthy turn mid-build, told the reader it was "recorded as
-    // unfinished" when it was not, and the turn then finished normally in the ledger. A false alarm
+    // the node keeps beating throughout. A client that counts seconds therefore kills runs that are
+    // working: this one aborted a healthy run mid-build, told the reader it was "recorded as
+    // unfinished" when it was not, and the run then finished normally in the ledger. A false alarm
     // that also lies about the record is worse than no alarm.
     //
     // The node is the authority, and its accept thread answers /health without the interpreter, so it
-    // can say whether the worker is alive while a turn runs. Ask it, and act only on its answer.
+    // can say whether the worker is alive while a run runs. Ask it, and act only on its answer.
     let lastEvent = Date.now();
     let asking = false;
-    // Whether this turn finished under its own steam. Without it the watchdog cannot tell a turn that
-    // ended from a turn that died: both leave `current: null`, so a turn that completed while the
-    // watchdog was asking /health got reported as "no longer running this turn ... recorded as
-    // unfinished" - about a turn whose answer was already on screen. The message said `(alive)`, which
+    // Whether this run finished under its own steam. Without it the watchdog cannot tell a run that
+    // ended from a run that died: both leave `current: null`, so a run that completed while the
+    // watchdog was asking /health got reported as "no longer running this run ... recorded as
+    // unfinished" - about a run whose answer was already on screen. The message said `(alive)`, which
     // was the tell.
     let turnFinished = false;
     const watchdogTick = async () => {
@@ -1223,7 +1223,7 @@ async function send(text, options = {}) {
       asking = true;
       try {
         const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
-        // Asked and answered while the turn was ending: say nothing. The turn finished; there is
+        // Asked and answered while the run was ending: say nothing. The run finished; there is
         // nothing to report and nothing to continue.
         if (turnFinished) { clearInterval(watchdog); asking = false; return; }
         const running = health && health.current;
@@ -1233,10 +1233,10 @@ async function send(text, options = {}) {
           asking = false;
           return;
         }
-        // Not running any more, and the turn did not finish: the turn is genuinely over, and the page
+        // Not running any more, and the run did not finish: the run is genuinely over, and the page
         // should say so and stop pretending it is still listening.
         clearInterval(watchdog);
-        streamNotice = add("assistant", "the node is no longer running this turn (" + (health.worker || "no worker") +
+        streamNotice = add("assistant", "the node is no longer running this run (" + (health.worker || "no worker") +
           "). It is recorded as unfinished - the sessions topic offers to continue it.");
         watchNode();
         controller?.abort();
@@ -1276,8 +1276,8 @@ async function send(text, options = {}) {
           const line = part.split("\n").find((l) => l.startsWith("data: "));
           if (!line) continue;
           try { handleEvent(JSON.parse(line.slice(6))); lastEvent = Date.now(); } catch (error) { /* ignore */ }
-          // A turn that says it is done, or has answered, or has failed, is finished: whatever the
-          // watchdog asks next, this turn is not unfinished, and any notice it put up is stale.
+          // A run that says it is done, or has answered, or has failed, is finished: whatever the
+          // watchdog asks next, this run is not unfinished, and any notice it put up is stale.
           const kind = (() => { try { return JSON.parse(line.slice(6)).type; } catch (error) { return ""; } })();
           if (kind === "done" || kind === "reply" || kind === "error") {
             turnFinished = true;
@@ -1296,7 +1296,7 @@ async function send(text, options = {}) {
     setBusy(false);
     controller = null;
     refreshMeta();
-    // Learn which thread this turn went into, but only until we know one: after that the window
+    // Learn which thread this run went into, but only until we know one: after that the window
     // keeps the thread it is in, rather than following whatever happens to be newest.
     if (!chatSession) learnSession();
     if (!native) input.focus();
@@ -1464,7 +1464,7 @@ function renderLimits() {
   }
 }
 
-// Token accounting: last turn and session totals.
+// Token accounting: last run and session totals.
 function renderUsage() {
   usageBox.replaceChildren();
   harnessStatus.data=settings;
@@ -1752,7 +1752,7 @@ function newId() {
 // "the work is gone", and it is not.
 function newThread() {
   rememberSession(newId());
-  repaintTurns([]);
+  repaintMessages([]);
   clearStatus();
   const notice = document.createElement("div");
   notice.className = "thread-notice";
@@ -1892,7 +1892,7 @@ function setupVoice() {
 // Two kinds of attachment ride through here. Text files keep the original
 // behaviour: read as UTF-8, inlined into the prompt. Images are sent as
 // structured parts so the model can actually see them, and are handled by the
-// server (stored content-addressed, referenced from the turn).
+// server (stored content-addressed, referenced from the run).
 const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 
 function isImage(file) {
@@ -1991,7 +1991,7 @@ fileInput.addEventListener("change", async () => {
 // ---- paste (Ctrl+V) ------------------------------------------------------
 // A screenshot pasted from the clipboard arrives as a blob with no filename, so
 // give it one: an unnamed chip would be unreadable, and the name is what the
-// turn shows the model.
+// run shows the model.
 input.addEventListener("paste", async (event) => {
   const data = event.clipboardData;
   if (!data) return;
@@ -2216,9 +2216,9 @@ async function refreshMeta() {
 
 // Hot reload, in two halves.
 //
-// A stylesheet can be replaced under a running turn with no state lost, so styling changes
-// - the common case - never need a reload at all. Markup and JS cannot: a reload mid-turn
-// throws away the page's copy of a reply that is still arriving. Those wait for the turn to
+// A stylesheet can be replaced under a running run with no state lost, so styling changes
+// - the common case - never need a reload at all. Markup and JS cannot: a reload mid-run
+// throws away the page's copy of a reply that is still arriving. Those wait for the run to
 // finish, and say so while they wait.
 let pendingReload = false;
 // Every reload goes through here, so every reload can save where the reader was first.
@@ -2230,9 +2230,9 @@ let reload = () => { rememberPlace(); location.reload(); };
 // at a moment the reader did not choose. Saying so - and saying *why now* - is the difference
 // between "the window flickered and lost my place" and "the window told me it was updating".
 //
-// It is a lock rather than a toast because it covers the panel: a turn is still running behind it,
+// It is a lock rather than a toast because it covers the panel: a run is still running behind it,
 // and the reader should not be typing into a page that is about to be replaced. It is escapable -
-// reload now, or dismiss and let the reload land when the turn finishes.
+// reload now, or dismiss and let the reload land when the run finishes.
 function updateLock(reason) {
   let lock = document.getElementById("update-lock");
   if (!lock) {
@@ -2298,7 +2298,7 @@ function hotSwapStyles() {
   }
 }
 
-// Split out from the polling so the decision can be driven directly: the decision is the
+// Split out from the polling so the step can be driven directly: the step is the
 // part worth testing, not the fetch around it.
 function applyUiVersion(next) {
   if (version === null) { version = next; return "init"; }
@@ -2307,8 +2307,8 @@ function applyUiVersion(next) {
   hotSwapStyles();
   if (busy) {
     pendingReload = true;
-    setStatus("update ready - reloading when this turn finishes");
-    updateLock("A turn is running, so the reload waits for it to finish. Your place and your draft are kept.");
+    setStatus("update ready - reloading when this run finishes");
+    updateLock("A run is running, so the reload waits for it to finish. Your place and your draft are kept.");
     return "deferred";
   }
   updateLock("Reloading now - your place and your draft are kept.");
@@ -2333,15 +2333,15 @@ let syncAttempts = 0;
 
 function setConnecting(label) {
   // Say what is true and that it is being worked on. "connecting…" forever reads as broken, and
-  // "offline" with no retry reads as final. A node that is alive and inside a turn is neither: it is
-  // busy, and it will answer when the turn ends.
+  // "offline" with no retry reads as final. A node that is alive and inside a run is neither: it is
+  // busy, and it will answer when the run ends.
   const text = label || (syncAttempts > 2 ? "node offline — retrying" : "connecting…");
   chipModel.textContent = text;
   meta.textContent = text;
 }
 
 /// The node's own answer, which is served without the interpreter - so it works exactly when the Lua
-/// routes do not, which is while a turn is running. Null means the node really is not answering.
+/// routes do not, which is while a run is running. Null means the node really is not answering.
 async function nodeHealth() {
   try {
     return await (await apiFetch("health", { headers: apiHeaders() })).json();
@@ -2358,17 +2358,17 @@ async function sync(reason) {
   const metaOk = await refreshMeta();
   syncRunning = false;
   if (!meOk || !metaOk) {
-    // Why it failed decides what to say. A reload during a turn used to show "connecting…" and then
+    // Why it failed decides what to say. A reload during a run used to show "connecting…" and then
     // "node offline — retrying" on a node that was working perfectly, and the transcript stayed empty
-    // because the restore never ran. It cannot run while the turn holds the interpreter - that is
+    // because the restore never ran. It cannot run while the run holds the interpreter - that is
     // physical on a single-worker node - but the message can be true, and the retry does the rest.
     const health = await nodeHealth();
     if (health && health.current) {
       syncAttempts = 0;
-      setConnecting("the node is running a turn — this window returns when it finishes");
+      setConnecting("the node is running a run — this window returns when it finishes");
     } else if (health) {
       // The node answered, so it is not offline - it is busy, and the reads this window needs
-      // (`/me`, `/models`, the transcript) queue behind the turn because one interpreter serves
+      // (`/me`, `/models`, the transcript) queue behind the run because one interpreter serves
       // them. Calling that "offline" was a lie the reader could not check: the node was local,
       // alive, and running their command. Only a node that does not answer at all is offline.
       syncAttempts = 0;
@@ -2382,7 +2382,7 @@ async function sync(reason) {
   syncAttempts = 0;
   clearStatus();
   // The transcript is restored once, and only after the node has answered - then the reader's place
-  // is put back on top of it, because "fresh" should not mean "moved". Whether a turn is still
+  // is put back on top of it, because "fresh" should not mean "moved". Whether a run is still
   // running is reconciled by `watch`, which keeps asking; one check here would only cover the first
   // reconnection.
   restoreSession().then(restorePlace);
@@ -2391,7 +2391,7 @@ async function sync(reason) {
 // A window must never be more certain than the node.
 //
 // If the node says nothing is running, then nothing is - however sure the page was a moment ago. A
-// turn that died with the node left the composer disabled and a stop button showing, and the only way
+// run that died with the node left the composer disabled and a stop button showing, and the only way
 // out was a manual reload: that is the "locked" window, and it is not a state a reader should have to
 // escape. This is also what makes a reinstall feel seamless - the node goes away, comes back, and the
 // chat is usable again without anyone clicking anything.
@@ -2404,19 +2404,19 @@ async function reconcile() {
   try {
     const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
     if (health && !health.current) {
-      // What the live DOM still believes is worth checking *before* clearing it: if the page thought a turn was
+      // What the live DOM still believes is worth checking *before* clearing it: if the page thought a run was
       // running, then whatever it is still showing - a tool topic waiting for a result that already arrived,
       // a segment that never got its reply - is stale.
       const wasLive = busy || document.getElementById("update-lock") || document.querySelector(".unfinished-notice");
       if (busy) { setBusy(false); clearStatus(); }
       // Nothing to wait for any more, so the lock must not wait either: it is a message, not a trap.
       document.getElementById("update-lock")?.remove();
-      // And a notice about a turn that is over is litter: take it down.
+      // And a notice about a run that is over is litter: take it down.
       clearStreamNotice();
-      // The node says the turn is over, so the ledger is the authority - repaint from it. This is exactly what
+      // The node says the run is over, so the ledger is the authority - repaint from it. This is exactly what
       // a reload does, and it is why a reload fixed it: a tool whose result arrived while the stream was gone
       // stays open in the live DOM forever, because the only thing that settles a tool is its own event.
-      // Measured: the turn had finished, the answer was in the ledger, and the window still said "deciding…"
+      // Measured: the run had finished, the answer was in the ledger, and the window still said "deciding…"
       // until Ctrl+R. A window must never be more certain than the node.
       if (wasLive) restoreSession();
     }
@@ -2431,8 +2431,8 @@ async function watch() {
     applyUiVersion(payload.version);
     // The node answered, so finish the first sync if it never finished. This loop always runs.
     if (!synced) sync("watch");
-    // While this window believes a turn is running, is holding an update lock, or is showing a notice
-    // about a turn that did not finish, ask the node what is true - every few seconds, not every second.
+    // While this window believes a run is running, is holding an update lock, or is showing a notice
+    // about a run that did not finish, ask the node what is true - every few seconds, not every second.
     else if (busy || document.getElementById("update-lock") || document.querySelector(".unfinished-notice")) {
       if (Date.now() - reconciledAt > 5000) { reconciledAt = Date.now(); reconcile(); }
     }
@@ -2440,17 +2440,17 @@ async function watch() {
   setTimeout(watch, 1000);
 }
 
-// The node owns the turn; the browser only watches it. If one was running when this page
-// loaded - a reload mid-turn, or a reconnection after the node was busy - the reply is
+// The node owns the run; the browser only watches it. If one was running when this page
+// loaded - a reload mid-run, or a reconnection after the node was busy - the reply is
 // already in the ledger, so refresh the transcript once it is no longer in flight instead
 // of making the reader reload to see it.
 let sawTurnInFlight = false;
-let turnPolling = false;
+let runPolling = false;
 async function watchTurn() {
   // One at a time: a poll that has not answered yet is not a reason to start another, and on a
   // single-worker node that is the difference between asking and queueing.
-  if (turnPolling) { setTimeout(watchTurn, 3000); return; }
-  turnPolling = true;
+  if (runPolling) { setTimeout(watchTurn, 3000); return; }
+  runPolling = true;
   try {
     const response = await apiFetch("health");
     const health = await response.json();
@@ -2461,7 +2461,7 @@ async function watchTurn() {
       if (chatSession) openSession(chatSession);
     }
   } catch (error) { /* the node is down; watchNode handles that */ }
-  turnPolling = false;
+  runPolling = false;
   setTimeout(watchTurn, 3000);
 }
 
@@ -2802,7 +2802,7 @@ function applyViewMode() {
     // A view window is a client of the node like any other, so it fetches its own patch. Nothing is
     // passed through the main window: that is what makes it a view and not a screenshot of one.
     const params = new URLSearchParams(location.search);
-    renderPatchView(params.get("turn") || "", params.get("path") || "");
+    renderPatchView(params.get("message") || "", params.get("path") || "");
   }
   return true;
 }
@@ -3082,7 +3082,7 @@ function sessionMatches(session, query) {
 // The node records what was lost and prints the command; it does not act on its own, because a
 // repair nobody asked for destroys the evidence of the crash. That leaves a person to notice a
 // badge and type a command, which is not recovery - this is the same thing as one click, sent to
-// the node so the turn runs where the session lives and the window can watch it.
+// the node so the run runs where the session lives and the window can watch it.
 function resumeSession(id) {
   if (!id) return;
   rememberSession(id);
@@ -3121,7 +3121,7 @@ function renderSessions() {
     const meta = document.createElement("span");
     meta.className = "session-meta";
     const when = ago((Date.now() / 1000) - (session.updated_at || session.started_at || 0));
-    meta.textContent = `${session.turn_count} turns · ${when}`;
+    meta.textContent = `${session.message_count} runs · ${when}`;
     row.append(title, meta);
     // Only when there is something to recover: a badge on every row would be noise, and "answered"
     // is the case that needs no attention. The reason is the API's own words, so the UI cannot
@@ -3216,23 +3216,23 @@ async function openSessionById(id) {
     sessionsBox.append(summary);
   }
 
-  for (const turn of payload.messages || []) {
+  for (const message of payload.messages || []) {
     const row = document.createElement("div");
-    row.className = "turn turn-" + turn.role + (turn.ok ? "" : " bad");
+    row.className = "message message-" + message.role + (message.ok ? "" : " bad");
     const head = document.createElement("div");
-    head.className = "turn-head";
+    head.className = "message-head";
     head.textContent = [
-      turn.seq, turn.role, turn.tool_name, turn.ms ? turn.ms + "ms" : "",
-      turn.tokens ? turn.tokens + " tok" : "",
+      message.seq, message.role, message.tool_name, message.ms ? message.ms + "ms" : "",
+      message.tokens ? message.tokens + " tok" : "",
     ].filter(Boolean).join(" · ");
     const body = document.createElement("div");
-    body.className = "turn-body";
-    body.textContent = (turn.content || "").slice(0, 1500);
+    body.className = "message-body";
+    body.textContent = (message.content || "").slice(0, 1500);
     row.append(head, body);
-    const trace = turn.trace || [];
+    const trace = message.trace || [];
     if (trace.length) {
       const line = document.createElement("div");
-      line.className = "turn-trace";
+      line.className = "message-trace";
       line.textContent = trace.map((span) => {
         const parts = [span.kind + (span.name ? "(" + span.name + ")" : "")];
         if (span.ms != null) parts.push(span.ms + "ms");
@@ -3247,7 +3247,7 @@ async function openSessionById(id) {
 }
 
 // Topics waiting for the node to be free. The engine's reads are Lua, so on a single-worker node they
-// queue behind a turn - and the client's deadline is shorter than a turn, so opening one while the node
+// queue behind a run - and the client's deadline is shorter than a run, so opening one while the node
 // was working showed "AbortError: signal is aborted without reason". That reads as the UI being broken
 // when the node is simply busy, which is the opposite of what a status line is for.
 const pendingTopics = new Set();
@@ -3255,10 +3255,10 @@ const pendingTopics = new Set();
 function loadTopic(id) {
   const box = document.getElementById(id);
   if (busy) {
-    // Do not even ask: the worker is inside a turn, so the request would queue and then be abandoned by
-    // the deadline. Say what is true and come back to it when the turn ends.
+    // Do not even ask: the worker is inside a run, so the request would queue and then be abandoned by
+    // the deadline. Say what is true and come back to it when the run ends.
     pendingTopics.add(id);
-    if (box) box.textContent = "the node is busy with a turn — this loads when it finishes";
+    if (box) box.textContent = "the node is busy with a run — this loads when it finishes";
     return;
   }
   pendingTopics.delete(id);
@@ -3312,7 +3312,7 @@ engineClose.addEventListener("click", () => setEngine(false));
 // It is READ-ONLY, and that is a deliberate limit rather than an oversight:
 // showing drift must not cause it. Pushing from a button would make merely
 // looking at the panel a mutation of another node's ledger, which is the kind of
-// thing that should be its own decision with its own confirmation.
+// thing that should be its own step with its own confirmation.
 
 function driftRow(label, value, kind = "") {
   const row = document.createElement("div");

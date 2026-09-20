@@ -23,7 +23,7 @@ end
 
 -- Rebuild the agent when the signed-in user, their role, or the target node
 -- changes. The session is a resumable thread keyed by (user, node).
--- The role a *local* turn actually gets.
+-- The role a *local* run actually gets.
 --
 -- On a guest node every local session is a guest, whatever the session's user says: the node
 -- carries out a master's wish, it does not have a master's initiative of its own. Without this
@@ -90,7 +90,7 @@ end
 -- Rust HTTP layer so that the text path keeps working unchanged.
 --
 -- Returns text, images, or an error string when a named image cannot be stored.
-local function parse_turn_body(body)
+local function parse_run_body(body)
   local raw = body or ""
   if raw:sub(1, 1) ~= "{" then return raw, {} end
   local ok, decoded = pcall(json.decode, raw)
@@ -117,10 +117,10 @@ end
 -- a caller cannot see, and getting it wrong shows the model a different message than
 -- the one that was typed. Text stays text; only pictures and a thread name make a body
 -- structured.
-wa_parse_turn_body = parse_turn_body
+wa_parse_run_body = parse_run_body
 
 function wa_reply(text, session, node)
-  local prompt, images, problem, thread = parse_turn_body(text)
+  local prompt, images, problem, thread = parse_run_body(text)
   if problem then return json.encode({ error = redact.text(problem) }) end
   if remote_target(node) then
     local result = nodeslib.remote_call(node, "chat", { text = prompt or "" })
@@ -129,7 +129,7 @@ function wa_reply(text, session, node)
   end
   local bot, refusal = agent_for(session, node, thread)
   if not bot then return json.encode({ error = refusal }) end
-  local ok, reply = pcall(bot.turn, bot, prompt or "", images)
+  local ok, reply = pcall(bot.run, bot, prompt or "", images)
   if not ok then return json.encode({ error = redact.text(tostring(reply)) }) end
   return json.encode({ reply = reply })
 end
@@ -137,7 +137,7 @@ end
 -- Streaming turn: events are pushed to the SSE client as the agent runs.
 -- When a peer is selected, its stream is relayed here unchanged.
 function wa_reply_stream(text, session, node)
-  local prompt, images, problem, thread = parse_turn_body(text)
+  local prompt, images, problem, thread = parse_run_body(text)
   if problem then
     emit({ type = "error", error = redact.text(problem) })
     return ""
@@ -152,7 +152,7 @@ function wa_reply_stream(text, session, node)
     emit({ type = "error", error = refusal })
     return ""
   end
-  local ok, reply = pcall(bot.turn, bot, prompt or "", images)
+  local ok, reply = pcall(bot.run, bot, prompt or "", images)
   if not ok then emit({ type = "error", error = redact.text(tostring(reply)) }) end
   return ""
 end
@@ -327,7 +327,7 @@ local function node_capability(capability, args, caller)
   elseif capability == "chat" then
     local bot, agent_problem = node_agent(caller)
     if not bot then return { error = agent_problem } end
-    local ok, reply = pcall(bot.turn, bot, args.text or "")
+    local ok, reply = pcall(bot.run, bot, args.text or "")
     if not ok then return { error = tostring(reply) } end
     return { reply = reply }
   end
@@ -363,7 +363,7 @@ function wa_node_chat(from, public_key, ts, signature, text)
     emit({ type = "error", error = agent_problem })
     return ""
   end
-  local ok, reply = pcall(bot.turn, bot, text or "")
+  local ok, reply = pcall(bot.run, bot, text or "")
   if not ok then emit({ type = "error", error = tostring(reply) }) end
   return ""
 end
@@ -456,11 +456,11 @@ function wa_session(session_id, session)
   return json.encode({
     session = record,
     state = memory.session_state(session_id),
-    turns = memory.session_messages(session_id, { limit = 500 }),
+    messages = memory.session_messages(session_id, { limit = 500 }),
   })
 end
 
--- A turn's file changes: "can this still be undone?" and "do it".
+-- A message's file changes: "can this still be undone?" and "do it".
 --
 -- The check and the action are the same route on purpose. Asking whether a patch can be
 -- undone and then undoing it are two reads of the same facts, and splitting them into two
@@ -476,12 +476,12 @@ function wa_diff(payload, session)
   if not user then return json.encode({ error = "forbidden" }) end
   local ok, request = pcall(json.decode, payload)
   if not ok or type(request) ~= "table" then return json.encode({ error = "bad_request" }) end
-  local turn = memory.message(request.turn_id or "")
-  if not turn then return json.encode({ error = "unknown_turn" }) end
-  if not turn.changes then return json.encode({ error = "no_changes" }) end
+  local message = memory.message(request.message_id or "")
+  if not message then return json.encode({ error = "unknown_turn" }) end
+  if not message.changes then return json.encode({ error = "no_changes" }) end
 
-  local entry = { files = {}, added = turn.changes.added or 0, removed = turn.changes.removed or 0 }
-  for _, file in ipairs(turn.changes.files or {}) do
+  local entry = { files = {}, added = message.changes.added or 0, removed = message.changes.removed or 0 }
+  for _, file in ipairs(message.changes.files or {}) do
     entry.files[#entry.files + 1] = {
       path = file.path, before = file.before, after = file.after,
       added = file.added or 0, removed = file.removed or 0,
@@ -489,20 +489,20 @@ function wa_diff(payload, session)
     }
   end
   -- Turns recorded before repeats were merged hold one entry per write, and the second one's `before` is
-  -- text the turn itself wrote. Undo uses `before`, so without this an old turn's undo would restore an
+  -- text the message itself wrote. Undo uses `before`, so without this an old message's undo would restore an
   -- intermediate state and call it success. The ledger keeps its rows; the entry is merged as it is read.
   entry = changeset.normalize(entry)
 
   local action = request.action or "check"
   if action == "check" then
     -- The check is the undo's own guard, run without writing: it loads both texts and
-    -- compares the file to what the turn left, which is exactly what undo does first.
+    -- compares the file to what the message left, which is exactly what undo does first.
     local can, why = changeset.check(entry)
-    return json.encode({ turn_id = turn.id, can_undo = can == true, reason = why or "" })
+    return json.encode({ message_id = message.id, can_undo = can == true, reason = why or "" })
   end
   if action == "preview" then
     -- The changed lines of one file, for the hover balloon. Loading the text is the whole
-    -- cost of this action, so it is asked for per file rather than for the whole turn -
+    -- cost of this action, so it is asked for per file rather than for the whole message -
     -- a topic with seven files should not pull seven files' text to open one balloon.
     local wanted = request.path
     if not wanted or wanted == "" then return json.encode({ error = "path_required" }) end
@@ -510,10 +510,10 @@ function wa_diff(payload, session)
       if file.path == wanted then
         local preview, why = changeset.preview_file(file)
         if not preview then
-          return json.encode({ turn_id = turn.id, path = file.path, error = why or "no_preview" })
+          return json.encode({ message_id = message.id, path = file.path, error = why or "no_preview" })
         end
         return json.encode({
-          turn_id = turn.id, path = file.path,
+          message_id = message.id, path = file.path,
           lines = preview.lines, truncated = preview.truncated,
           added = preview.added, removed = preview.removed,
         })
@@ -523,21 +523,21 @@ function wa_diff(payload, session)
   end
   if action == "undo" then
     local done, why = changeset.undo(entry)
-    if not done then return json.encode({ turn_id = turn.id, ok = false, reason = why }) end
-    return json.encode({ turn_id = turn.id, ok = true })
+    if not done then return json.encode({ message_id = message.id, ok = false, reason = why }) end
+    return json.encode({ message_id = message.id, ok = true })
   end
   if action == "redo" then
     local done, why = changeset.redo(entry)
-    if not done then return json.encode({ turn_id = turn.id, ok = false, reason = why }) end
-    return json.encode({ turn_id = turn.id, ok = true })
+    if not done then return json.encode({ message_id = message.id, ok = false, reason = why }) end
+    return json.encode({ message_id = message.id, ok = true })
   end
   if action == "patch" then
     -- What one changed file actually did, built from its two blobs. The transcript only carries
     -- addresses, so this is the request that turns an address back into something a reader can read -
-    -- and it is asked for when a file is clicked, not when the turn ends.
+    -- and it is asked for when a file is clicked, not when the message ends.
     local file, why = changeset.patch(entry, request.path or "")
     if not file then return json.encode({ error = why or "patch_failed" }) end
-    file.turn_id = turn.id
+    file.message_id = message.id
     return json.encode(file)
   end
   return json.encode({ error = "unknown_action:" .. tostring(action) })

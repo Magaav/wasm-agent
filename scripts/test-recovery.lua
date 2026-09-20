@@ -130,7 +130,7 @@ assert(recovered.state == "answered", "the thread must be settled after a reply"
 assert(recovered.interruptions == 2 and recovered.recorded_reason ~= "",
   "the recorded history must survive being recovered from")
 assert(memory.message_count(asked) == #memory.session_messages(asked, { limit = 100 }),
-  "turn_count must agree with the ledger, got " .. memory.message_count(asked))
+  "message_count must agree with the ledger, got " .. memory.message_count(asked))
 
 print("durable record ok")
 

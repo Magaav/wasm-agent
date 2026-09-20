@@ -1,24 +1,24 @@
--- The file changes a turn made, and the way back.
+-- The file changes a run made, and the way back.
 --
 -- A diff topic the reader can undo is only honest if the undo is real: it has to put
 -- the *files* back, not fold the topic shut. So the change is recorded where it happens
 -- - `write`/`edit` already hold the previous text in their hand - as an inverse operation
 -- (path, before, after), and the pair is what the UI renders and what undo replays.
 --
--- Recorded per turn, not per process: the record belongs to the turn that made it, so a
--- node that restarts can still undo what its last turn did (the ledger survives, and so
--- does this). It is deliberately *not* a git patch: `git diff` cannot say what the turn
+-- Recorded per run, not per process: the record belongs to the run that made it, so a
+-- node that restarts can still undo what its last run did (the ledger survives, and so
+-- does this). It is deliberately *not* a git patch: `git diff` cannot say what the run
 -- did versus what was already dirty, and it cannot restore a file whose later edits have
 -- moved on - which is exactly the case where a naive undo destroys newer work.
 --
--- Only *content* changes are recorded. A file the turn created and a file it emptied are
+-- Only *content* changes are recorded. A file the run created and a file it emptied are
 -- the same record (before = ""), because the host has no remove_file: undo therefore
 -- never deletes, it restores text. That is a real limit, so it is stated here and shown in
 -- the topic ("created" is not a case this can undo) rather than hidden behind a button
 -- that would fail.
 --
 -- Restoring is guarded: undo refuses to clobber a file that no longer looks like what the
--- turn left, and says why. A silent revert that eats someone's newer edit is the failure
+-- run left, and says why. A silent revert that eats someone's newer edit is the failure
 -- this guard exists to prevent.
 local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
@@ -214,9 +214,9 @@ end
 -- the content-addressed store rather than into the entry, so the entry stays small enough
 -- to carry in a transcript.
 --
--- The same path recorded twice in one turn is *one* change, not two lines in the topic. A turn
+-- The same path recorded twice in one run is *one* change, not two lines in the topic. A run
 -- that writes a file, then edits it again, has done one thing to that file, and the reader means
--- the whole of it. So the entry keeps the first `before` - the turn's starting point, which is
+-- the whole of it. So the entry keeps the first `before` - the run's starting point, which is
 -- what undo has to restore - and takes the newest `after`. v8 arrived at the same rule from the
 -- other side: it kept `first_preimage` so that a later reread could not replace the session's
 -- baseline with a partial window.
@@ -237,8 +237,8 @@ function M.record(entry, path, before, after)
     if not before_id or not after_id then recorded = false end
   end
   if existing then
-    -- The delta is measured from where the turn started, not from the previous edit, so the
-    -- counts describe the turn rather than the last keystroke. The original text is loaded back
+    -- The delta is measured from where the run started, not from the previous edit, so the
+    -- counts describe the run rather than the last keystroke. The original text is loaded back
     -- from the store for that; if it is not there the current call's `before` is the honest
     -- fallback, because a wrong count is worse than a narrower one.
     local origin = before
@@ -253,8 +253,8 @@ function M.record(entry, path, before, after)
     -- Stricter wins: a change that could not be recorded once cannot be undone later just
     -- because a smaller edit followed it.
     existing.recorded = existing.recorded and recorded
-    -- `created` is left as first seen: a file that existed when the turn started was not
-    -- created by the turn's second write to it.
+    -- `created` is left as first seen: a file that existed when the run started was not
+    -- created by the run's second write to it.
   else
     local added, removed = line_delta(before, after)
     entry.files[#entry.files + 1] = {
@@ -280,10 +280,10 @@ function M.empty(entry)
   return not entry or #entry.files == 0
 end
 
--- The turn's changed files, as the UI wants them: no file bodies, just the counts and the
+-- The run's changed files, as the UI wants them: no file bodies, just the counts and the
 -- *addresses* of the reversible text. An address is a sha256, not the file, so it is safe
 -- to carry in a transcript - and it is what lets undo reach the previous text long after
--- the turn ended, from the ledger alone.
+-- the run ended, from the ledger alone.
 function M.summary(entry)
   if M.empty(entry) then return nil end
   local files = {}
@@ -302,12 +302,12 @@ end
 --
 -- Undo is all-or-nothing by design: a half-restored edit is worse than none, so the
 -- guards all run before the first write. The check is "does the file still look like what
--- the turn left?", compared on the whole text rather than a region, because the record
+-- the run left?", compared on the whole text rather than a region, because the record
 -- already holds the whole text and a partial comparison would have to guess where the
 -- edit was. A file that moved on is *refused*, never merged: guessing at intent here is
 -- how newer work gets eaten.
 -- Can this entry be undone right now? Loads everything undo needs and compares each file
--- to what the turn left, without writing anything.
+-- to what the run left, without writing anything.
 --
 -- Split out so the *check* and the *action* cannot disagree: `undo` calls this first, and
 -- the route that answers "can I undo this?" calls it too. If they were two implementations,
@@ -389,7 +389,7 @@ end
 
 -- A unified diff of one recorded file, built when it is asked for.
 --
--- The transcript carries addresses, not contents, so the patch cannot be stored with the turn - and it
+-- The transcript carries addresses, not contents, so the patch cannot be stored with the run - and it
 -- should not be: a diff topic that carried every file's body twice would be the largest thing in the
 -- transcript. It is built here from the two blobs instead, which is the whole reason the blobs are
 -- content-addressed and reachable from the ledger alone.
@@ -522,13 +522,13 @@ end
 -- Merge repeated paths in an entry that was read back from the ledger.
 --
 -- Turns recorded before `record` merged them hold one entry per write, and the *second* entry's `before`
--- is the text the turn itself had just written. Undo restores `before`, so undoing such a turn would put
+-- is the text the run itself had just written. Undo restores `before`, so undoing such a run would put
 -- the file back to an intermediate state and report success - which is precisely the failure the merge
 -- exists to prevent, and it is worse than a refusal because nothing says anything went wrong.
 --
 -- Those rows are not rewritten. The ledger is append-only and history that edits itself is not history,
 -- so the merge happens when the entry is read: first `before`, newest `after`, the stricter `recorded`,
--- and the delta measured from where the turn started rather than from the previous keystroke.
+-- and the delta measured from where the run started rather than from the previous keystroke.
 function M.normalize(entry)
   if not entry or type(entry.files) ~= "table" then return entry end
   local merged, order = {}, {}

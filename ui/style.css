@@ -93,14 +93,14 @@ wa-message { display: block; }
 wa-message.user { align-self: flex-end; background: var(--user); border-color: #2a3a63; }
 wa-message.assistant { align-self: flex-start; background: var(--assistant); }
 
-/* A reply is one bubble containing the turn's decisions and their tool topics,
-   stacked with the spacing scale - not one bubble per decision, which puts a
+/* A reply is one bubble containing the run's steps and their tool topics,
+   stacked with the spacing scale - not one bubble per step, which puts a
    border between each step and reads as unrelated messages. */
 .msg .body.steps { display: flex; flex-direction: column; gap: var(--gap); }
 .msg .body.steps .seg { white-space: pre-wrap; }
 .msg .body.steps wa-trace { width: 100%; max-width: none; }
 
-/* The run topic: the whole turn's path, collapsed above the answer. */
+/* The run topic: the whole run's path, collapsed above the answer. */
 .msg .body.steps wa-run { width: 100%; max-width: none; }
 .run { border: 1px solid var(--line); border-radius: var(--radius); background: rgba(15, 18, 25, .6); overflow: hidden; }
 .run-body {
@@ -111,7 +111,7 @@ wa-message.assistant { align-self: flex-start; background: var(--assistant); }
 .run-body .seg { padding-left: var(--space); color: var(--muted); }
 .run-body wa-trace { border: 0; border-left: 2px solid rgba(35, 41, 54, .8); border-radius: 0; background: none; }
 
-/* The diff topic: what the turn changed on disk, collapsed *after* the answer.
+/* The diff topic: what the run changed on disk, collapsed *after* the answer.
    It uses the same `trace-head` header as <wa-run>/<wa-trace> - a topic is a topic, and a
    second header style reads as a different kind of thing. What is its own: the header row
    is a flex wrapper (the right edge carries the single undo/redo toggle, and a button cannot
@@ -181,8 +181,8 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
 .tool.err { border-left-color: #f85149; }
 .tool-detail { color: #c9d1e0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-word; }
 
-/* Decision traces: one topic per assistant turn, collapsed to a summary line.
-   The transcript should read as decisions; the tool payloads are one click away. */
+/* Decision traces: one topic per assistant run, collapsed to a summary line.
+   The transcript should read as steps; the tool payloads are one click away. */
 wa-trace { display: block; align-self: flex-start; max-width: 760px; width: 100%; }
 .trace { border: 1px solid var(--line); border-radius: var(--radius); background: rgba(15, 18, 25, .6); overflow: hidden; }
 .trace.has-error { border-color: #f85149; }
@@ -308,14 +308,14 @@ body.drift .drift { display: flex; }
 .session-bar button { border: 1px solid var(--line); background: var(--panel-2); color: var(--text); border-radius: var(--radius-sm); padding: 2px var(--space); cursor: pointer; font-size: 11px; }
 .session-bar button:hover { border-color: var(--accent); }
 .session-summary { color: var(--muted); font-size: 11.5px; padding: var(--space); border-left: 2px solid var(--accent); margin-bottom: var(--pad); white-space: pre-wrap; }
-.turn { border-left: 2px solid var(--line); padding: var(--space) var(--pad); margin-bottom: var(--space); }
-.turn-user { border-left-color: var(--accent); }
-.turn-assistant { border-left-color: #3fb950; }
-.turn-tool { border-left-color: #d29922; }
-.turn.bad { border-left-color: #f85149; background: rgba(248,81,73,.06); }
-.turn-head { color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 2px; }
-.turn-body { color: #c9d1e0; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
-.turn-trace { margin-top: var(--space); color: #7f8ba3; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; }
+.message { border-left: 2px solid var(--line); padding: var(--space) var(--pad); margin-bottom: var(--space); }
+.message-user { border-left-color: var(--accent); }
+.message-assistant { border-left-color: #3fb950; }
+.message-tool { border-left-color: #d29922; }
+.message.bad { border-left-color: #f85149; background: rgba(248,81,73,.06); }
+.message-head { color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 2px; }
+.message-body { color: #c9d1e0; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+.message-trace { margin-top: var(--space); color: #7f8ba3; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; }
 .spell-row { display: flex; align-items: center; gap: var(--gap); padding: var(--space) 0; border-bottom: 1px solid rgba(35,41,54,.6); }
 .spell-name { font-weight: 500; }
 .spell-meta { color: var(--muted); font-size: 11px; flex: 1; }
@@ -581,7 +581,7 @@ wa-harness-status .usage-note { color: var(--muted); margin: var(--gap) var(--sp
    window the shell gave it. */
 body.view-only .panel { display: none; }
 
-/* A turn that was cut off says so where the answer would have been, and offers to continue: a
+/* A run that was cut off says so where the answer would have been, and offers to continue: a
    transcript that just stops looks like the agent had nothing to say. */
 .unfinished-notice {
   display: flex; align-items: center; gap: var(--gap); flex-wrap: wrap;
@@ -603,7 +603,7 @@ body.view-only .panel { display: none; }
   border-top: 1px solid var(--line); margin-top: var(--gap);
 }
 
-/* Working, or stuck? A running turn showed only a spinner and an unfinished tool line, so a
+/* Working, or stuck? A running run showed only a spinner and an unfinished tool line, so a
    command that was legitimately long and one that would never return looked the same - and the
    difference arrived 300 seconds later, when the second was killed. This reports the node's own
    heartbeat, so the distinction is evidence rather than a guess about how long things should take.
@@ -685,10 +685,10 @@ body.node-offline .composer textarea::placeholder { color: #d29922; }
 .msg .body, .seg, .status, .trace-meta, .tool-output { overflow-wrap: anywhere; }
 
 /* --- spacing inside a reply ----------------------------------------------
-   A decision and the tools it chose belong together; the gap that separates is
-   the one before the *next* decision. The old uniform gap made one decision read
+   A step and the tools it chose belong together; the gap that separates is
+   the one before the *next* step. The old uniform gap made one step read
    as two unrelated blocks - and when a model calls a tool before writing anything,
-   the topic comes first, which made it look like "tools, then a decision". */
+   the topic comes first, which made it look like "tools, then a step". */
 .msg .body.steps { gap: var(--space); }
 .msg .body.steps .seg:not(:first-child) { margin-top: var(--space); }
 

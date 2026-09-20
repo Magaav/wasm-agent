@@ -92,7 +92,7 @@ end
 answer = { status = 200, content = "", reasoning = string.rep("t", 500),
   finish_reason = "length", tool_calls = {} }
 local agent, session_id = turn("spent its budget")
-local ok, err = pcall(agent.turn, agent, "write an essay")
+local ok, err = pcall(agent.run, agent, "write an essay")
 checks = checks + 1
 if ok then error("an empty answer must fail the turn, not finish it") end
 has(tostring(err), "finish_reason=length", "the failure names the stop reason")
@@ -132,7 +132,7 @@ host.http_stream = function()
     finish_reason = "stop", tool_calls = {} })
 end
 local agent2 = turn("tool call with no prose")
-local ok2, reply2 = pcall(agent2.turn, agent2, "what is in AGENTS.md?")
+local ok2, reply2 = pcall(agent2.run, agent2, "what is in AGENTS.md?")
 checks = checks + 1
 if not ok2 then error("a tool call with no prose must not fail the turn: " .. tostring(reply2)) end
 has(tostring(reply2), "here is the answer", "the answer after the tool round comes back")
