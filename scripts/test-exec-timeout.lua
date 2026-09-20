@@ -29,6 +29,21 @@ ok(tostring(stuck.stderr):find("did not finish", 1, true) ~= nil,
 ok(tostring(stuck.stderr):find("this node", 1, true) ~= nil,
   "and one that names the self-call that causes it", tostring(stuck.stderr):sub(1, 120))
 
+-- 2. A command that *finishes* but leaves a background process holding its output must not wedge the
+--    call. The child exits well inside the deadline, so the deadline never fires; the orphan keeps
+--    the write end of the pipe open, so a reader blocked in `read_to_end` never sees EOF. Measured
+--    on a real node: a `bash` tool with a headless Chrome backgrounded behind it, the deadline four
+--    times past, the run 26 minutes old, and the worker still reporting itself alive.
+local started_bg = host.now()
+local bg = json.decode(host.exec("sleep 60 & echo started"))
+local took_bg = host.now() - started_bg
+ok(took_bg < 20, "a finished command with a background orphan must return, not wedge",
+  string.format("%.1fs", took_bg))
+ok(bg.code == 0, "and report the command's own exit code", tostring(bg.code))
+ok(tostring(bg.stderr):find("still holds its output pipe", 1, true) ~= nil,
+  "and say why the output is missing, rather than returning nothing and saying nothing",
+  tostring(bg.stderr):sub(1, 160))
+
 -- 2. Normal commands are unaffected - the same path, no deadline trouble.
 local hello = json.decode(host.exec("echo hello"))
 ok(hello.code == 0, "a normal command still succeeds", tostring(hello.code))

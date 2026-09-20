@@ -627,13 +627,42 @@ fn run_bounded(program: &str, flag: &str, command: &str, cwd: &str) -> Result<Va
     // for as long as it likes, and joining the readers here would put the stall straight back - the
     // deadline would fire at 2s and the call would return at 30s, which is exactly what the first
     // version of this did. The readers are left to end when the orphan does.
-    let (stdout, stderr) = if killed {
-        (Vec::new(), Vec::new())
+    //
+    // The same hole existed for a child that exits *on its own*: a command that backgrounds work
+    // with `&` leaves an orphan holding the write end of the pipe, the child exits well inside the
+    // deadline, and an unbounded join then waited on that orphan forever. Measured on a real node:
+    // one `bash` tool with a headless Chrome backgrounded behind it, the deadline four times past,
+    // the run 26 minutes old, the ledger holding no event after the tool started, and the worker
+    // still reporting itself alive - so nothing else could notice either. The deadline has to bound
+    // the whole call, not the child's lifetime.
+    let collect = |handle: Option<std::thread::JoinHandle<Vec<u8>>>| -> (Vec<u8>, bool) {
+        match handle {
+            None => (Vec::new(), false),
+            Some(handle) => {
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                while !handle.is_finished() && std::time::Instant::now() < until {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                if handle.is_finished() {
+                    (handle.join().ok().unwrap_or_default(), false)
+                } else {
+                    // Left to end when the orphan does; the thread is not joined, so this call
+                    // returns now. The same discipline the killed branch below already uses.
+                    (Vec::new(), true)
+                }
+            }
+        }
+    };
+    let (stdout, out_held) = collect(out_reader);
+    let (stderr, err_held) = collect(err_reader);
+    let held = if killed {
+        ""
+    } else if out_held || err_held {
+        " A background process started by this command still holds its output pipe, so its output \
+         was not collected - and it is still running. Detach background work from the command's \
+         output, or give it a deadline of its own."
     } else {
-        (
-            out_reader.and_then(|handle| handle.join().ok()).unwrap_or_default(),
-            err_reader.and_then(|handle| handle.join().ok()).unwrap_or_default(),
-        )
+        ""
     };
     if killed {
         return Ok(json!({
@@ -649,7 +678,7 @@ fn run_bounded(program: &str, flag: &str, command: &str, cwd: &str) -> Result<Va
     Ok(json!({
         "code": status.code().unwrap_or(-1),
         "stdout": String::from_utf8_lossy(&stdout),
-        "stderr": String::from_utf8_lossy(&stderr),
+        "stderr": format!("{}{}", String::from_utf8_lossy(&stderr), held),
     }))
 }
 
