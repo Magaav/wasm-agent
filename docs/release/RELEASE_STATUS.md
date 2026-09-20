@@ -1,13 +1,25 @@
 # Release status
 
 **Windows developer candidate: built and verified as described below.**
-**Public/customer release: NO-GO.** Packaging and first-run delivery are complete
-for this slice; customer authorization and isolation are not. Guest setup is
-explicitly disconnected and cannot launch a network service through the packaged
-UI command. No release was published, no live installation was upgraded, and no
-customer was enrolled.
+**Public/customer release: NO-GO.** The managed onboarding follow-up adds pinned
+operator consent, model-free guest execution, registry-controlled promotion,
+revocation and a background PowerShell bootstrap. Its public descriptor remains
+disabled pending package publication and managed-service deployment. Legacy guest
+setup remains offline. No live installation was upgraded or customer enrolled.
 
-## Candidate
+## Managed onboarding follow-up
+
+See [ONBOARDING.md](../ONBOARDING.md). Native isolated integration covers two
+operators and two customers: real file effects, unrelated callers, target binding,
+self-promotion refusal, administrator grants, relay result ownership, local
+revocation and expiry. Full follow-up artifact evidence is recorded after the
+candidate/bootstrap checks below; alpha.2 predates this protocol.
+
+The current public service has not been upgraded to managed protocol 1. The
+bootstrap refuses it. GitHub CLI on the cloud host is not authenticated; no public
+release asset was uploaded. Neither condition is bypassed by the installer.
+
+## Previous candidate (alpha.2)
 
 - Version: `0.1.0-alpha.2` (local candidate, not a published Git tag).
 - Source: `4ae9bae83bf7543b70557047e7395a1fa2e1d3a2`.

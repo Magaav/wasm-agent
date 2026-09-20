@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "available": false,
+  "version": "unpublished",
+  "package_url": "",
+  "sha256": "",
+  "service": "https://rendezvous.colmeio.com",
+  "operators": [],
+  "reason": "Publish a tested package and pin approved operator keys only after the live managed-service deployment gate passes. See docs/ONBOARDING.md."
+}
