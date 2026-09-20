@@ -121,10 +121,7 @@ try {
     if (Test-Path -LiteralPath $bin) { throw 'command_shim_exists: refusing to overwrite it' }
     New-Item -ItemType Directory -Path $bin | Out-Null
     # Keep mutable launch configuration outside the immutable release inventory.
-    $quotedHome = $NodeHome.Replace('%','%%')
-    $quotedCommand = (Join-Path $InstallDir 'bin/wa.cmd').Replace('%','%%')
-    $shim = "@echo off`r`nsetlocal`r`nset `"WASM_AGENT_HOME=$quotedHome`"`r`n`"$quotedCommand`" %*`r`nexit /b %ERRORLEVEL%`r`n"
-    Write-WaPrivateText (Join-Path $bin 'wa.cmd') $shim
+    Write-WaGuestShim -Path (Join-Path $bin 'wa.cmd') -Install $InstallDir -NodeHome $NodeHome
     $previous = [Environment]::GetEnvironmentVariable('Path','User')
     [Environment]::SetEnvironmentVariable('Path', ((@($bin) + @($previous -split ';' | Where-Object { $_ -and $_ -ne $bin })) -join ';'), 'User')
     $env:Path = $bin + ';' + $env:Path

@@ -162,17 +162,24 @@ async function stop(child) {
     fs.writeFileSync(descriptorPath,JSON.stringify(localRelease));
     const installed=path.join(work,'paste-once package'), nodeHome=path.join(work,'paste-once home');
     const psArgs=['-NoProfile','-ExecutionPolicy','Bypass','-File',path.join(root,'scripts/bootstrap-windows.ps1'),
-      '-ManifestPath',descriptorPath,'-Name','pasted-node','-InstallDir',installed,'-NodeHome',nodeHome,'-AcceptAccess','-NoRegisterCommand'];
+      '-ManifestPath',descriptorPath,'-InstallDir',installed,'-NodeHome',nodeHome,'-NoRegisterCommand'];
     let boot;
-    try { boot=spawnSync('powershell',psArgs,{env:clean,encoding:'utf8',timeout:180000,windowsHide:true}); }
+    // A background Windows child may inherit a pipe handle even after PowerShell exits.
+    // File-backed output lets this test wait for the installer, not the guest's lifetime.
+    const bootLog=path.join(work,'bootstrap.log'), bootFd=fs.openSync(bootLog,'w');
+    const inputFile=path.join(work,'bootstrap-input.txt'); fs.writeFileSync(inputFile,'pasted-node\r\nCONNECT\r\n');
+    const inputFd=fs.openSync(inputFile,'r');
+    try { boot=spawnSync('powershell',psArgs,{env:clean,stdio:[inputFd,bootFd,bootFd],timeout:180000,windowsHide:true}); }
     finally {
+      fs.closeSync(bootFd); fs.closeSync(inputFd);
       const launchers=path.join(nodeHome,'.wasm-agent','launchers');
       if(fs.existsSync(launchers)) for(const dir of fs.readdirSync(launchers)) for(const file of fs.readdirSync(path.join(launchers,dir))) {
         if(file.endsWith('.pid')) externalPids.push(Number(fs.readFileSync(path.join(launchers,dir,file),'utf8')));
       }
     }
-    if(boot.error || boot.status!==0) throw new Error('bootstrap: '+(boot.error || boot.stdout+'\n'+boot.stderr));
-    check(boot.stdout.includes('CONNECTED as guest'),'paste-once bootstrap installs extracted package and verifies guest registration');
+    const bootOutput=fs.readFileSync(bootLog,'utf8');
+    if(boot.error || boot.status!==0) throw new Error('bootstrap: '+(boot.error || '')+'\n'+bootOutput);
+    check(bootOutput.includes('CONNECTED as guest'),'paste-once bootstrap installs extracted package and verifies guest registration');
     const node={home:nodeHome,env:{...clean,WASM_AGENT_HOME:nodeHome}};
     Object.assign(node,cli(node,['node']).value);
     const profile=JSON.parse(fs.readFileSync(path.join(nodeHome,'.wasm-agent/enrollment.json'),'utf8'));
@@ -181,15 +188,27 @@ async function stop(child) {
     check(!(await direct(node,admin,'write',{path:file,content:'packaged bootstrap effect'})).value.error && fs.readFileSync(file,'utf8')==='packaged bootstrap effect','bootstrapped package accepts authorized tool effect with no model');
     check(fs.readFileSync(path.join(nodeHome,'.wasm-agent/node.name'),'utf8').trim()==='pasted-node','name prompt becomes the actual node name');
     check(!fs.readFileSync(path.join(nodeHome,'.wasm-agent/env'),'utf8').includes('API_KEY'),'fresh customer configuration contains no provider credentials');
+    const shim=path.join(work,'shim','wa.cmd'), forbiddenKey=path.join(work,'must-not-create.key');
+    const shimTest=spawnSync('powershell',['-NoProfile','-ExecutionPolicy','Bypass','-Command',
+      '. (Join-Path $env:WA_TEST_INSTALL scripts/lib/first-run.ps1); . (Join-Path $env:WA_TEST_INSTALL scripts/lib/managed-guest.ps1); Write-WaGuestShim -Path $env:WA_TEST_SHIM -Install $env:WA_TEST_INSTALL -NodeHome $env:WA_TEST_HOME; & $env:WA_TEST_SHIM node'],
+      {env:{...clean,WA_TEST_INSTALL:installed,WA_TEST_HOME:nodeHome,WA_TEST_SHIM:shim,
+        WASM_AGENT_HOME:registry.home,WASM_AGENT_NODE_KEY:forbiddenKey,WA_SCRIPT:'must-not-run.lua',WASM_AGENT_LLM_API_KEY:'synthetic-do-not-inherit'},encoding:'utf8',timeout:30000,windowsHide:true});
+    if(shimTest.status!==0) throw new Error('shim: '+shimTest.stdout+shimTest.stderr);
+    check(JSON.parse(shimTest.stdout.trim()).node_id===node.node_id && !fs.existsSync(forbiddenKey),'service command shim discards ambient operator identity, key and script overrides');
     const packagedCommand=path.join(installed,'scripts/first-run.ps1');
     const disconnect=spawnSync('powershell',['-NoProfile','-ExecutionPolicy','Bypass','-File',packagedCommand,'disconnect'],{env:node.env,encoding:'utf8',timeout:30000,windowsHide:true});
     check(disconnect.status===0 && (await direct(node,admin,'read',{path:file})).value.error==='unknown_caller','packaged disconnect revokes live access without killing another process');
     const reconnect=spawnSync('powershell',['-NoProfile','-ExecutionPolicy','Bypass','-File',packagedCommand,'connect','-AcceptAccess'],{env:node.env,encoding:'utf8',timeout:60000,windowsHide:true});
     if(reconnect.status!==0) throw new Error('reconnect: '+reconnect.stdout+reconnect.stderr);
     check(!(await direct(node,admin,'read',{path:file})).value.error,'packaged connect renews explicit consent and reuses its own server');
+    const cancelledHome=path.join(work,'cancelled home'), cancelledInstall=path.join(work,'cancelled install');
+    const cancelled=spawnSync('powershell',[...psArgs.slice(0,psArgs.indexOf('-InstallDir')),'-Name','cancelled-node','-InstallDir',cancelledInstall,'-NodeHome',cancelledHome,'-NoRegisterCommand'],
+      {env:clean,input:'NO\r\n',encoding:'utf8',timeout:60000,windowsHide:true});
+    check(cancelled.status!==0 && !fs.existsSync(cancelledHome),'declining consent never creates an enrolled customer home or starts a node');
+    check(!fs.existsSync(cancelledInstall) || cancelled.stdout.includes('Installation remains'),'cancellation reports a completed background installation if one remains');
     fs.writeFileSync(descriptorPath,JSON.stringify({...localRelease,sha256:'0'.repeat(64)}));
     const badInstall=path.join(work,'bad checksum install');
-    const bad=spawnSync('powershell',[...psArgs.slice(0,psArgs.indexOf('-InstallDir')),'-InstallDir',badInstall,'-NodeHome',path.join(work,'bad checksum home'),'-AcceptAccess','-NoRegisterCommand'],{env:clean,encoding:'utf8',timeout:60000,windowsHide:true});
+    const bad=spawnSync('powershell',[...psArgs.slice(0,psArgs.indexOf('-InstallDir')),'-Name','bad-checksum','-InstallDir',badInstall,'-NodeHome',path.join(work,'bad checksum home'),'-AcceptAccess','-NoRegisterCommand'],{env:clean,encoding:'utf8',timeout:60000,windowsHide:true});
     check(bad.status!==0 && !fs.existsSync(badInstall),'bootstrap refuses checksum mismatch before running packaged code');
   }
   guest.profile.active=false;
@@ -208,6 +227,7 @@ async function stop(child) {
   await until(async()=> (await request(service+'/health')).status===200,'administrator revocation');
   check((await direct(guest,admin,'read',{path:resultFile})).value.error==='unknown_caller','removing an administrator at the service revokes its pinned guest access');
   console.log(`managed network ok (${checks} checks, 0 skips; isolated service only)`);
+  if(!process.argv[3]) console.log('Package/bootstrap checks NOT RUN (no archive supplied).');
 })().catch(error=>{console.error(error.stack);process.exitCode=1;}).finally(async()=>{
   await Promise.all(children.map(stop));
   for(const pid of externalPids) { try { process.kill(pid); } catch {} }

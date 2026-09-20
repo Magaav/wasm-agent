@@ -1,8 +1,9 @@
 # wasm-agent — Windows developer preview
 
 This package runs independently of the maintainers' computers. It is a developer
-preview, **not a customer-ready automation service**. Guest setup is deliberately
-disconnected until verified invitation, permission and revocation controls exist.
+preview, **not a customer-ready automation service**. Ordinary guest setup stays
+disconnected. A separately gated managed bootstrap requires a published package,
+a managed registry, pinned operator identities and explicit remote-access consent.
 Do not expose its HTTP service publicly or use the legacy SSH installer.
 
 ## Install and set up
@@ -63,11 +64,35 @@ and the UI launcher refuses runtime overrides other than `WASM_AGENT_HOME`.
 
 ## Guest / assisted mode
 
-Selecting `guest` saves an offline guest profile without requiring a model key.
-It authorizes **no operator**, connects to **no service**, and refuses `wa ui`
-network startup. This is not a pairing wizard and must not be bypassed for customer
-use. The upcoming assisted flow must verify the operator, obtain consent for
-specific authority/data sharing, isolate customers and make revocation effective.
+Selecting `guest` in ordinary `wa setup` saves an offline profile without a model
+key. It authorizes **no operator**, connects to **no service**, and refuses network
+startup. Do not bypass this by copying an operator's environment or credentials.
+
+The managed bootstrap is a different, explicitly approved entry path. It installs
+in the background while asking for a node name, then asks for consent to **full
+Windows-user-account automation** by pinned operators. It uses an isolated data
+home, configures no model, adds no inbound firewall rule and verifies outbound
+relay attachment. It does not install an automatic Windows-login task.
+
+For an installation created by that bootstrap:
+
+- `wa access`: consent, expiry, local role, registration and relay attachment.
+- `wa access log`: recent local operator/capability/completion records. These are
+  not tamper-proof and do not undo or exhaustively describe arbitrary shell effects.
+- `wa disconnect`: revoke future/queued remote calls; pause outbound polling.
+  Already running native actions may finish; registry presence expires afterward.
+- `wa connect`: explicitly renew consent and start/reuse this installation's node.
+  Default consent is 24 hours; `-Hours` selects another duration. Use this after
+  expiry or logout if you want assistance again.
+
+The operator uses `wa network role <node-id> master` or `guest` to change your
+network/local role, without needing a model on your machine. Promotion does not
+make every other customer accessible. Disconnecting assistance preserves an
+already promoted owner's local master role.
+
+The public release descriptor is disabled until operator service deployment and
+package publication are approved. These controls are a tested prototype, not a
+claim that every public/customer release gate has passed.
 
 ## Windows prerequisites and recovery
 
