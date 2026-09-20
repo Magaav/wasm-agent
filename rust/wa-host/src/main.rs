@@ -4,6 +4,7 @@
 //! (sqlite, http, wasmtime, sha256, uuid, time, files). No Python anywhere.
 mod client_bridge;
 mod host;
+mod operations;
 mod lua;
 mod node;
 mod relay_client;
@@ -235,6 +236,7 @@ fn main() {
     lua.register("read_file", host::read_file);
     lua.register("write_file", host::write_file);
     lua.register("exec", host::exec);
+    lua.register("operation", host::operation);
     lua.register("sleep", host::sleep);
     lua.register("node_identity", host::node_identity);
     lua.register("sign", host::sign);

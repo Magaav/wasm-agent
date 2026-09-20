@@ -143,7 +143,7 @@ thread_local! {
     static IN_RUN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-fn worker_id() -> usize {
+pub(crate) fn worker_id() -> usize {
     WORKER_ID.with(|cell| cell.get())
 }
 
@@ -489,8 +489,10 @@ fn health_body() -> Vec<u8> {
     // every route that changes something - so the aggregate is worker 0's age, and a wedged run worker is
     // still reported as the node being stalled even while a read worker answers reads. Which lane is wedged
     // is a per-worker question, answered by the array below.
-    let age_ms = worker_age_ms(0);
-    let stalled = age_ms >= stall_seconds() * 1000;
+    let operations = crate::operations::health();
+    let operation_overdue = operations.as_array().is_some_and(|items|items.iter().any(|s|s["overdue"]==true));
+    let age_ms = live_worker_ids().into_iter().map(worker_age_ms).max().unwrap_or(0);
+    let stalled = age_ms >= stall_seconds() * 1000 || operation_overdue;
     let state = if stalled { "stalled" } else if age_ms < 1000 { "alive" } else { "busy" };
     let mut current = IN_FLIGHT.lock().ok().and_then(|slot| {
         slot.as_ref().map(|(label, started)| {
@@ -542,6 +544,8 @@ fn health_body() -> Vec<u8> {
         // against its deadline (`bash · 42s of 300s`) without waiting for the tool event to carry it.
         // Same number `host.exec_timeout()` reports, from the one place the host enforces it.
         "exec_timeout_seconds": crate::host::exec_timeout_seconds(),
+        "operations": operations,
+        "operation_overdue": operation_overdue,
         "current": current,
         "workers_count": worker_count(),
         "workers": workers,
