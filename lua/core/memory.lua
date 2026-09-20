@@ -126,13 +126,13 @@ local function migrate_shape()
   end
   -- Its full-text index is rebuilt rather than renamed. SQLite renames an fts5 table happily, but refuses
   -- `ALTER TABLE ... RENAME COLUMN` on a virtual table ("cannot rename columns of virtual table") - and
-  -- the column here is `turn_id`, where the row it points at is a message. Measured against this node's
+  -- the column here is `turn_id`, where the row it points at is a message. Measured against this node's -- naming-check: allow (a migration, or a wire key for a peer that has not migrated)
   -- own SQLite, not assumed: the rebuild below is the path it accepted.
   if table_exists("turns_fts") and not table_exists("messages_fts") then
     exec([[CREATE VIRTUAL TABLE messages_fts USING fts5(
   content, session_id UNINDEXED, message_id UNINDEXED,
   tokenize = 'unicode61 remove_diacritics 2')]])
-    exec("INSERT INTO messages_fts(content,session_id,message_id) SELECT content,session_id,turn_id FROM turns_fts")
+    exec("INSERT INTO messages_fts(content,session_id,message_id) SELECT content,session_id,turn_id FROM turns_fts") -- naming-check: allow (a migration, or a wire key for a peer that has not migrated)
     exec("DROP TABLE turns_fts")
   end
   rename_index("turns_session_idx", "messages_session_idx", "messages(session_id, seq)")
@@ -146,14 +146,14 @@ local function migrate_shape()
     exec("UPDATE harness_events SET kind='model_call' WHERE kind='llm'")
   end
 
-  -- 4. `turn_id` held a *run* in `runs` and `harness_events` (both are given the run's own id), and a
+  -- 4. `turn_id` held a *run* in `runs` and `harness_events` (both are given the run's own id), and a -- naming-check: allow (a migration, or a wire key for a peer that has not migrated)
   --    *message* in the full-text index above - which is why this is three renames and not one.
-  if table_exists("runs") and has_column("runs", "turn_id") and not has_column("runs", "run_id") then
-    exec("ALTER TABLE runs RENAME COLUMN turn_id TO run_id")
+  if table_exists("runs") and has_column("runs", "turn_id") and not has_column("runs", "run_id") then -- naming-check: allow (a migration, or a wire key for a peer that has not migrated)
+    exec("ALTER TABLE runs RENAME COLUMN turn_id TO run_id") -- naming-check: allow (a migration, or a wire key for a peer that has not migrated)
   end
-  if table_exists("harness_events") and has_column("harness_events", "turn_id")
+  if table_exists("harness_events") and has_column("harness_events", "turn_id") -- naming-check: allow (a migration, or a wire key for a peer that has not migrated)
      and not has_column("harness_events", "run_id") then
-    exec("ALTER TABLE harness_events RENAME COLUMN turn_id TO run_id")
+    exec("ALTER TABLE harness_events RENAME COLUMN turn_id TO run_id") -- naming-check: allow (a migration, or a wire key for a peer that has not migrated)
   end
 end
 
@@ -1005,7 +1005,11 @@ function M.record_run(run_id, session_id, status, outcome, reply)
        "ON CONFLICT(id) DO UPDATE SET status=excluded.status, outcome=excluded.outcome, reply=excluded.reply",
        {run_id, session_id, run_id, status or "", outcome or "", reply or "", host.now()})
   M.journal("run", run_id, {
-    id = run_id, session_id = session_id, run_id = run_id, status = status or "",
+    -- Old peers still read turn_id. Keep the alias in the wire payload until -- naming-check: allow (a migration, or a wire key for a peer that has not migrated)
+    -- every peer has migrated; the local table has only run_id.
+    -- Old peers still read `turn_id`; the local table has only run_id. Kept until every peer has -- naming-check: allow (a migration, or a wire key for a peer that has not migrated)
+    -- migrated, and marked because the old name is a wire key here, not a second word for a run.
+    id = run_id, session_id = session_id, run_id = run_id, turn_id = run_id, status = status or "", -- naming-check: allow (wire alias for unmigrated peers)
     outcome = outcome or "", reply = reply or "", started_at = host.now(),
   })
 end
@@ -1049,7 +1053,10 @@ function M.apply_entry(entry)
   end
   if type(payload) ~= "table" then return false end
 
-  if entry.kind == "message" then
+  -- `turn` is the name this kind carried before the rename. The journal is durable and is never
+  -- rewritten, so an entry written then still has to replay now: the old name is the matcher for an
+  -- era, not a second vocabulary. See `meta.journal_kind_legacy` and the boundary the migration records.
+  if entry.kind == "message" or entry.kind == "turn" then -- naming-check: allow (a pre-rename journal entry)
     exec("INSERT OR REPLACE INTO messages(id,session_id,seq,role,content,tool_calls,tool_call_id," ..
          "tool_name,tokens,ms,ok,debug,trace,created_at,reasoning,images,changes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
          {payload.id, payload.session_id, payload.seq, payload.role, payload.content or "",
@@ -1087,7 +1094,7 @@ function M.apply_entry(entry)
   elseif entry.kind == "run" then
     exec("INSERT OR REPLACE INTO runs(id,session_id,run_id,status,outcome,reply,started_at,ended_at) " ..
          "VALUES(?,?,?,?,?,?,?,?)",
-         {payload.id, payload.session_id or "", payload.run_id or "", payload.status or "",
+         {payload.id, payload.session_id or "", payload.run_id or payload.turn_id or "", payload.status or "", -- naming-check: allow (old journal entry)
           payload.outcome or "", payload.reply or "", payload.started_at or host.now(),
           payload.ended_at or 0})
   else

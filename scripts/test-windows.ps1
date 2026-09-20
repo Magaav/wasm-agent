@@ -67,12 +67,12 @@ Note "binary $WaExe"
 Note "scratch $scratch"
 
 # 1. the binary starts
-$version = Wa @("--version")
+$version = Wa @("--db", $db, "--version")
 if ($version -match "wasm-agent \d") { Ok "binary starts: $($version.Trim())" } else { Bad "binary did not report a version" }
 
 # 2. identity: stable here, and distinct from the remote node
-$identityA = Wa @("node")
-$identityB = Wa @("node")
+$identityA = Wa @("--db", $db, "node")
+$identityB = Wa @("--db", $db, "node")
 try {
   $idA = ($identityA | ConvertFrom-Json).node_id
   $idB = ($identityB | ConvertFrom-Json).node_id
@@ -303,7 +303,7 @@ if (-not (Test-Health $Port)) {
   # PassThru: this run owns the server, so it stops it again at the end. The
   # suite must be safe to run repeatedly, and a server left behind also keeps
   # this console open, which looks like a hang.
-  $serverProcess = Start-Process -FilePath $WaExe -ArgumentList @("serve", "--port", "$Port", "--ui", $uiDir) -WindowStyle Hidden -PassThru `
+  $serverProcess = Start-Process -FilePath $WaExe -ArgumentList @("serve", "--db", $db, "--port", "$Port", "--ui", $uiDir) -WindowStyle Hidden -PassThru `
     -RedirectStandardOutput (Join-Path $scratch "serve.log") -RedirectStandardError (Join-Path $scratch "serve.err.log")
   $started = $true
   for ($i = 0; $i -lt 40; $i++) { Start-Sleep -Milliseconds 250; if (Test-Health $Port) { break } }
@@ -317,7 +317,7 @@ if (Test-Health $Port) {
 } else { Bad "no local server on $Port" }
 
 # 13. remote discovery when it is available (optional, never fatal)
-$bogus = Wa @("nodes")
+$bogus = Wa @("--db", $db, "nodes")
 try {
   $null = $bogus | ConvertFrom-Json
   Ok "node discovery answers locally"
@@ -332,5 +332,10 @@ if ($started -and $serverProcess) {
   Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
   Note "stopped the server this run started"
 }
-Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+$resolvedScratch = [IO.Path]::GetFullPath($scratch)
+$resolvedTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+if ($resolvedScratch.StartsWith($resolvedTemp, [StringComparison]::OrdinalIgnoreCase) -and
+    [IO.Path]::GetFileName($resolvedScratch) -match '^wa-suite-[0-9a-f]{8}$') {
+  Remove-Item -LiteralPath $resolvedScratch -Recurse -Force -ErrorAction SilentlyContinue
+}
 exit ($fail -gt 0)

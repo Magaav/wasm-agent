@@ -398,6 +398,52 @@ function M:build_context()
     end
   end
 
+  -- A tool call and its result are separate rows, ordered by *arrival*. A message that
+  -- arrives while a tool is running - a user turn, a steering note - is therefore written
+  -- between the two halves of one exchange, and the provider requires each tool_call_id to
+  -- be answered by the messages *immediately* following the assistant message:
+  --
+  --   "An assistant message with 'tool_calls' must be followed by tool messages responding
+  --    to each 'tool_call_id'"  (400, upstream, measured)
+  --
+  -- The 400 repeats on every later turn of that session, so one interleaved message bricks
+  -- the thread. Move the result back into its call's block. Nothing is dropped and the rest
+  -- of the order is untouched: the result is read where it belongs, and the message that
+  -- arrived while the tool ran is read after it.
+  --
+  -- The scan runs to the end of the window: a result can arrive after a whole later
+  -- exchange when the call was recovered or re-run, and leaving it there keeps the
+  -- thread failing. Moving it up is the only repair that keeps every byte of the
+  -- transcript - and its position is the one thing about it that was wrong.
+  local moved_results = 0
+  for index = 1, #messages do
+    local message = messages[index]
+    if message.role == "assistant" and type(message.tool_calls) == "table" and #message.tool_calls > 0 then
+      local want = {}
+      for _, call in ipairs(message.tool_calls) do
+        if call.id then want[tostring(call.id)] = true end
+      end
+      local after = index + 1
+      while after <= #messages and messages[after].role == "tool" do
+        want[tostring(messages[after].tool_call_id)] = nil
+        after = after + 1
+      end
+      local scan = after
+      while scan <= #messages and next(want) ~= nil do
+        local candidate = messages[scan]
+        if candidate.role == "tool" and want[tostring(candidate.tool_call_id)] then
+          want[tostring(candidate.tool_call_id)] = nil
+          table.remove(messages, scan)
+          table.insert(messages, after, candidate)
+          after = after + 1
+          moved_results = moved_results + 1
+        else
+          scan = scan + 1
+        end
+      end
+    end
+  end
+
   -- A tool call and its result are recorded as separate messages, so a message that
   -- dies between them leaves a half-written exchange. Providers reject both
   -- halves - a call with no result, and a result with no call - with a 400 that
@@ -436,12 +482,13 @@ function M:build_context()
       dropped_results = dropped_results + 1
     end
   end
-  if dropped_calls > 0 or dropped_results > 0 then
+  if dropped_calls > 0 or dropped_results > 0 or moved_results > 0 then
     self.repaired = (self.repaired or 0) + 1
     self.emit({
       type = "status",
-      text = string.format("repaired an incomplete tool exchange in the transcript (%d call(s), %d result(s) dropped)",
-        dropped_calls, dropped_results),
+      text = string.format(
+        "repaired the transcript for the provider (%d call(s) dropped, %d result(s) dropped, %d result(s) moved back to their call)",
+        dropped_calls, dropped_results, moved_results),
     })
   end
   return messages

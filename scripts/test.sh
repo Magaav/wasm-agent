@@ -154,6 +154,84 @@ WASM_AGENT_HOME="$DB.home" WASM_AGENT_MODELS_CATALOGUE='http://10.255.255.1/api.
   WA_SCRIPT="$DB.cold.lua" "$BIN" --db "$DB" | grep "cold budget ok"
 rm -f "$DB.cold.lua"
 rm -f "$DB.budget.lua"
+
+# What a provider's edge is told about the caller, and which conversation this is. OpenCode Go
+# documents the requirement - "Send a stable session ID in x-opencode-session for each conversation
+# so we can optimize routing and prompt caching" - and this node sent the constant "wasm-agent" for
+# every conversation, so every conversation shared one cache shard. The assertion is the property,
+# not a string: two conversations get different ids, each equal to its own, the id does not change
+# between rounds, and a request that is not a conversation carries none. The catalogue is asserted
+# too, so adding a provider forces a decision about its headers instead of silently defaulting.
+# The base URL env vars are cleared because this asserts the *shipped* catalogue, not the shell's.
+cat > "$DB.headers.lua" <<'LUA'
+local provider = dofile("lua/core/provider.lua")
+local json = dofile("lua/vendor/json.lua")
+
+local gaps = provider.attribution_gaps()
+assert(#gaps == 0, "no attribution rule for: " .. table.concat(gaps, ", ") ..
+  " - decide what that host needs in ATTRIBUTION (lua/core/provider.lua)")
+
+local opencode
+for _, profile in ipairs(provider.providers()) do
+  if profile.id == "opencode-go" then opencode = profile end
+end
+assert(opencode, "the opencode-go profile must exist")
+local rule = provider.attribution_rule(opencode)
+assert(rule and rule.session == "x-opencode-session",
+  "opencode-go must route a conversation by x-opencode-session")
+
+-- Drive the real request path with a stubbed transport and keep what it sent. Both
+-- transports: the turn streams, the summariser does not, and the header must be on both.
+local sent = {}
+local real_http, real_stream = host.http, host.http_stream
+host.http = function(_, _, headers)
+  sent[#sent + 1] = json.decode(headers)
+  return json.encode({ status = 200, body = json.encode({
+    id = "fixture", model = "fixture",
+    choices = { { message = { content = "ok" }, finish_reason = "stop" } },
+    usage = { prompt_tokens = 1, completion_tokens = 1, total_tokens = 2 },
+  }) })
+end
+host.http_stream = function(_, _, headers)
+  sent[#sent + 1] = json.decode(headers)
+  return json.encode({ status = 200, content = "ok", finish_reason = "stop",
+    stream_complete = true, tool_calls = {},
+    usage = { prompt_tokens = 1, completion_tokens = 1, total_tokens = 2 } })
+end
+local function ask(session_id, stream)
+  return provider.complete_with("deepseek-v4.1-flash",
+    { { role = "system", content = "s" }, { role = "user", content = "u" } },
+    nil, stream, { session_id = session_id, round = 1 })
+end
+local first = ask("conversation-one", false)
+ask("conversation-one", true)
+ask("conversation-two", false)
+provider.list_models("opencode-go")
+host.http, host.http_stream = real_http, real_stream
+
+assert(#sent == 4, "expected four captured requests, got " .. #sent)
+local function session_header(i) return sent[i]["x-opencode-session"] end
+assert(session_header(1) == "conversation-one",
+  "the header must carry the conversation's own id, got " .. tostring(session_header(1)))
+assert(session_header(1) == session_header(2), "the id must not change between rounds")
+assert(session_header(1) ~= session_header(3), "two conversations must not share one routing id")
+assert(session_header(3) == "conversation-two", "and each must carry its own id")
+assert(session_header(4) == nil, "a model listing is not a conversation and must claim no id")
+assert(session_header(1) ~= "wasm-agent", "the constant that caused this must not come back")
+
+-- The routing used is recorded with the request, so a miss in the ledger can be read
+-- against the instruction that produced it instead of being argued about later.
+local meta = first.request_meta and first.request_meta.attribution
+assert(meta, "the request must record its attribution")
+assert(meta.host == "opencode.ai", "and the host it matched, got " .. tostring(meta.host))
+assert(meta.session_header == "x-opencode-session", "and the header it applied")
+assert(meta.session_id_present == true, "and whether the conversation id was sent")
+print("provider headers ok")
+LUA
+env -u WASM_AGENT_LLM_BASE_URL -u WASM_AGENT_OPENAI_BASE_URL -u OPENAI_BASE_URL \
+  WASM_AGENT_LLM_API_KEY=fixture-provider-headers \
+  WA_SCRIPT="$DB.headers.lua" "$BIN" --db "$DB" | grep "provider headers ok"
+rm -f "$DB.headers.lua"
 # `wa status` must report whether the toolchains its tools need resolve - a
 # service has no login PATH, which is how a remote build failed with
 # "cargo: not found" while nothing else said a word.
@@ -346,6 +424,14 @@ print("repair ok")
 LUA
 WA_SCRIPT="$DB.repair.lua" "$BIN" --db "$DB" | grep "repair ok"
 rm -f "$DB.repair.lua"
+
+# The transcript is ordered by arrival; the provider demands that a tool result follow its
+# call immediately. A session whose stored rows were out of order answered every new turn
+# with a 400 - "An assistant message with 'tool_calls' must be followed by tool messages
+# responding to each 'tool_call_id'" - while the running turn's own rounds kept working,
+# because only the round-1 rebuild sends the stored order. Each shape from that incident is
+# in the file, with a healthy transcript as the control.
+WA_SCRIPT=scripts/test-tool-adjacency.lua "$BIN" --db "$DB" | grep "tool adjacency ok"
 
 # Secret redaction is a security boundary, so it gets a unit test with fake
 # secrets: a value that survives redaction must fail the build, not reach a log.

@@ -16,10 +16,15 @@ Two rules drive all of this:
 | `memories` (+FTS) | distilled facts | `remember`, `recall` |
 | `ledger_messages` / `conversations` (+FTS) | **the external inbox/ledger** (WhatsApp, mail) | `search_ledger`, `conversation` |
 | `messages` (+FTS) | **the agent's own dialogue** — its transcript | `sessions`, `session`, `search_messages`, `resume_session` |
-| `runs` | effect/settlement record per turn | (internal) |
+| `runs` | effect/settlement record per run | (internal) |
 
-`messages` is *not* "what we talked about" — it is other people's messages.
-`runs` is not the conversation — it is one row per completed turn.
+`ledger_messages` holds other people's messages; `messages` holds the agent's transcript.
+`runs` is not the conversation — it is one row per completed ask-and-answer.
+Older databases used `messages` for the external ledger and `turns` for the transcript.
+The shape migration renames both before applying the new schema. It also renames
+`harness_events.turn_id` and `runs.turn_id` to `run_id`, preserving their rows. <!-- naming-check: allow (a migration names what it moves) -->
+Once migrated, an older binary is incompatible and must not be restarted against
+that database. Back up the database and install the matching binary in one upgrade.
 
 ## Sessions are resumable threads
 
@@ -190,6 +195,19 @@ What invalidates it: **compaction** (rewrites the middle), **editing AGENTS.md**
 - `prompt_cache_key` (a hash of the session id) pins a conversation to one cache
   shard; `WASM_AGENT_PROMPT_CACHE_KEY=auto|on|off` controls it, and
   `WASM_AGENT_PROMPT_CACHE_RETENTION` asks for extended retention.
+
+A shard can also be chosen by *header*, and then the header belongs to the
+conversation exactly as the key does. OpenCode Go documents one — "Send a stable
+session ID in `x-opencode-session` for each conversation so we can optimize
+routing and prompt caching" — and lists clients that omit it as problematic. This
+node sent the constant `wasm-agent` for every conversation, which is a header that
+is present and a routing decision that is not: every conversation landed on one
+shard. The rule now lives per host in `ATTRIBUTION` (`lua/core/provider.lua`),
+matched on the base URL rather than the profile's name, and a provider whose host
+has no entry fails `scripts/test.sh` instead of silently receiving the wrong
+instruction. Each request records the rule it used (`attribution` in the llm
+start payload), so a miss in the ledger can be read against the routing that
+produced it.
 
 Cached tokens are accumulated and shown in the status balloon; when
 `WASM_AGENT_MODEL_RATES` is set (USD per million tokens, per model) the balloon

@@ -9,8 +9,8 @@
 # user sees "TypeError: Failed to fetch" from a node that is local and alive. A
 # reload cannot help either, because the reload needs the same blocked server.
 #
-# So: start a turn that takes a while, and hammer /health and a static asset while
-# it runs. Both must keep answering.
+# So: start a turn that takes a while, and check the page assets and every read
+# needed to rehydrate a chat. They must answer before the turn finishes.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -19,11 +19,34 @@ BIN="${WA_BIN:-rust/target/release/wa}"
 PORT="${1:-8891}"
 CLIENT_PORT=$((PORT + 1))
 WORK="$(mktemp -d /tmp/wa-conc-XXXXXX)"
-trap 'kill "${SERVER:-}" "${WEDGE:-}" "${POOL:-}" "${TURNS:-}" "${MOCK_PID:-}" 2>/dev/null; rm -rf "$WORK"' EXIT
+cleanup() {
+  # A fixture that is still shutting down holds its own database, so the removal has to wait for
+  # the kill to take effect: removing first failed on a locked pool.db, and because this runs as an
+  # EXIT trap under `set -o pipefail`, that failure became the script’s exit status - a harness
+  # race reported as a product failure. Kill, wait, then remove, and never let the cleanup decide
+  # the verdict.
+  local pids=("${SERVER:-}" "${WEDGE:-}" "${POOL:-}" "${TURNS:-}" "${MOCK_PID:-}")
+  kill "${pids[@]}" 2>/dev/null
+  for _ in $(seq 1 20); do
+    local alive=0
+    for pid in "${pids[@]}"; do [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && alive=1; done
+    [ "$alive" = "0" ] && break
+    sleep 0.1
+  done
+  for pid in "${pids[@]}"; do [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null; done
+  # The only recursive removal is the exact directory mktemp created here.
+  case "$WORK" in /tmp/wa-conc-??????) rm -rf -- "$WORK" 2>/dev/null || true ;; esac
+  return 0
+}
+trap cleanup EXIT
+
+# Every fixture needs its own database. Omitting --db here used the operator's
+# live memory.db: a smoke run migrated its schema before the compatible binary
+# was deployed, then the still-running node failed on the renamed column.
 
 if [ ! -x "$BIN" ]; then echo "no binary at $BIN" >&2; exit 1; fi
 
-"$BIN" serve --port "$PORT" --client-port "$CLIENT_PORT" --ui "$ROOT/ui" > "$WORK/serve.log" 2>&1 &
+"$BIN" --db "$WORK/serve.db" serve --port "$PORT" --client-port "$CLIENT_PORT" --ui "$ROOT/ui" > "$WORK/serve.log" 2>&1 &
 SERVER=$!
 
 for _ in $(seq 1 40); do
@@ -45,6 +68,28 @@ if [ "${WEDGE_ONLY:-0}" != "1" ]; then
 TURN=$!
 
 sleep 2
+# A page reloaded in the middle of this turn needs /me, /models, /sessions,
+# /session and /health. /health and the assets bypass Lua, but the other reads
+# need a worker; checking only static files would miss a blank, "connecting" UI.
+reload_started="$(date +%s%3N)"
+for route in me models sessions; do
+  read_code="$(curl -s -m 2 -o "$WORK/$route.json" -w '%{http_code}' "http://127.0.0.1:$PORT/$route" 2>/dev/null)"
+  if [ "$read_code" != "200" ]; then
+    echo "  FAIL: /$route did not answer during a running turn (HTTP ${read_code:-none})"; exit 1
+  fi
+done
+thread_id="$(grep -oE '"id":"[0-9a-f-]{36}"' "$WORK/sessions.json" | head -1 | cut -d '"' -f 4)"
+if [ -z "$thread_id" ]; then echo '  FAIL: /sessions did not list the running thread'; exit 1; fi
+read_code="$(curl -s -m 2 -o "$WORK/session.json" -w '%{http_code}' "http://127.0.0.1:$PORT/session?id=$thread_id" 2>/dev/null)"
+if [ "$read_code" != "200" ] || ! grep -q '"state":{' "$WORK/session.json"; then
+  echo "  FAIL: /session did not return the nested state contract during a running turn"; exit 1
+fi
+reload_ms="$(( $(date +%s%3N) - reload_started ))"
+if [ "$reload_ms" -ge 3000 ] || ! kill -0 "$TURN" 2>/dev/null; then
+  echo "  FAIL: reload reads took ${reload_ms}ms or the turn finished before they completed"; exit 1
+fi
+echo "  ok: /me, /models, /sessions and /session loaded in ${reload_ms}ms during the turn"
+
 ok=0
 fail=0
 probes=0
@@ -91,7 +136,7 @@ WEDGE_CLIENT=$((WEDGE_PORT + 1))
 WASM_AGENT_TEST_STALL_WORKER=1 \
 WASM_AGENT_WORKER_STALL_SECONDS=1 \
 WASM_AGENT_WORKER_STALL_EXIT_SECONDS=0 \
-  "$BIN" serve --port "$WEDGE_PORT" --client-port "$WEDGE_CLIENT" --ui "$ROOT/ui" > "$WORK/wedge.log" 2>&1 &
+  "$BIN" --db "$WORK/wedge.db" serve --port "$WEDGE_PORT" --client-port "$WEDGE_CLIENT" --ui "$ROOT/ui" > "$WORK/wedge.log" 2>&1 &
 WEDGE=$!
 
 for _ in $(seq 1 40); do
@@ -143,7 +188,7 @@ WASM_AGENT_TEST_STALL_WORKER=1 \
 WASM_AGENT_WORKER_STALL_SECONDS=1 \
 WASM_AGENT_WORKER_STALL_EXIT_SECONDS=0 \
 WASM_AGENT_WORKERS_IDLE_SECONDS=2 \
-  "$BIN" serve --port "$POOL_PORT" --client-port "$POOL_CLIENT" --ui "$ROOT/ui" > "$WORK/pool.log" 2>&1 &
+  "$BIN" --db "$WORK/pool.db" serve --port "$POOL_PORT" --client-port "$POOL_CLIENT" --ui "$ROOT/ui" > "$WORK/pool.log" 2>&1 &
 POOL=$!
 
 for _ in $(seq 1 40); do
@@ -223,7 +268,7 @@ WASM_AGENT_LLM_API_KEY=test-only \
 WASM_AGENT_TEST_STALL_WORKER=1 \
 WASM_AGENT_WORKER_STALL_SECONDS=1 \
 WASM_AGENT_WORKER_STALL_EXIT_SECONDS=0 \
-  "$BIN" serve --port "$TURN_PORT" --client-port "$TURN_CLIENT" --ui "$ROOT/ui" > "$WORK/turns.log" 2>&1 &
+  "$BIN" --db "$WORK/turns.db" serve --port "$TURN_PORT" --client-port "$TURN_CLIENT" --ui "$ROOT/ui" > "$WORK/turns.log" 2>&1 &
 TURNS=$!
 for _ in $(seq 1 40); do
   code="$(curl -s -o /dev/null -m 2 -w '%{http_code}' "http://127.0.0.1:$TURN_PORT/health" 2>/dev/null)"

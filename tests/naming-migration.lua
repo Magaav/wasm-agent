@@ -155,4 +155,19 @@ check(tonumber(one("SELECT COUNT(*) AS n FROM messages WHERE role='user'").n) ==
 check(tonumber(one("SELECT COUNT(*) AS n FROM ledger_messages WHERE conversation_id='c1'").n) == 1,
   "and the ledger is still the ledger")
 
+-- A peer can replay a journal written before the column was renamed. New
+-- entries carry both keys until older peers are upgraded too.
+check(memory.apply_entry({kind="run",payload={id="r-legacy",session_id="s-old",
+  turn_id="r-legacy",status="completed",outcome="answered"}}),
+  "a pre-migration run journal entry still replays")
+check(one("SELECT run_id FROM runs WHERE id='r-legacy'").run_id == "r-legacy",
+  "replaying a legacy entry preserves the run identifier")
+memory.record_run("r-new", "s-old", "completed", "answered", "")
+local outgoing
+for _, entry in ipairs(memory.journal_since(0, 100)) do
+  if entry.kind == "run" and entry.entity_id == "r-new" then outgoing = entry.payload end
+end
+check(outgoing and outgoing.run_id == "r-new" and outgoing.turn_id == "r-new",
+  "new run entries retain a legacy wire alias for older peers")
+
 if failures == 0 then print("ALL PASS") else print("FAILED (" .. failures .. ")") end

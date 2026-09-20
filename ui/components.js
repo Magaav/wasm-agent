@@ -231,7 +231,7 @@ class WaTrace extends HTMLElement {
   constructor() {
     super();
     this._lines = new Map();
-    this._pending = null;
+    this._pending = [];
     this._count = 0;
     this._errors = 0;
     this._started = Date.now();
@@ -317,7 +317,7 @@ class WaTrace extends HTMLElement {
     if (detail) output.textContent = detail;
     line.append(output);
     this._lines.set(name, line);
-    this._pending = { line, output, outcome, started: Date.now(), bound: bound || null };
+    this._pending.push({ line, output, outcome, started: Date.now(), bound: bound || null });
     this._body.append(line);
     this._header.classList.add("running");
     this._refresh();
@@ -329,7 +329,7 @@ class WaTrace extends HTMLElement {
   // Called by the page's one shared ticker with no arguments (it reads the pending line's own clock),
   // and by the UI test with an explicit age so the text can be checked without waiting a real second.
   setAge(seconds, bound) {
-    const target = this._pending;
+    const target = this._pending[0];
     if (!target) return;
     const elapsed = seconds === undefined ? (Date.now() - target.started) / 1000 : seconds;
     const text = `${Math.max(0, Math.floor(elapsed))}s`;
@@ -337,11 +337,12 @@ class WaTrace extends HTMLElement {
     target.outcome.textContent = limit ? `${text} of ${Math.floor(limit)}s` : text;
   }
 
-  get pending() { return !!this._pending; }
+  get pending() { return this._pending.length > 0; }
 
-  // settle(outcome, detail, failed) finishes the most recent tool line.
+  // Tool calls in one decision execute in order; replay adds them all before their
+  // result rows, so settle the oldest pending line, not the most recently added one.
   settle(outcome, detail, failed) {
-    const target = this._pending;
+    const target = this._pending.shift();
     if (!target) return;
     target.outcome.textContent = outcome || "";
     target.line.classList.remove("pending");
@@ -353,7 +354,18 @@ class WaTrace extends HTMLElement {
       target.output.hidden = false;
       this.open = true;
     }
-    this._pending = null;
+    this._refresh();
+  }
+
+  // A replayed decision with no tool row is evidence of a missing result, not a live call.
+  // Do not leave its clock running or claim that the tool succeeded/failed.
+  unrecorded() {
+    for (const target of this._pending) {
+      target.outcome.textContent = "result not recorded";
+      target.line.classList.remove("pending");
+      target.line.classList.add("unrecorded");
+    }
+    this._pending = [];
     this._refresh();
   }
 

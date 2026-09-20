@@ -27,7 +27,10 @@ Pi 0.85.1's local source is the behavioral reference:
   usage plus estimated tail, image estimates, complete instructions/arguments,
   bounded tool excerpts and file-operation records;
 - `pi-coding-agent/dist/core/tools/truncate.js`: 2,000 lines / 50 KiB, head for
-  reads and tail for shell output with access to the original.
+  reads and tail for shell output with access to the original;
+- `pi-coding-agent/dist/core/provider-attribution.js`: an edge is told which
+  conversation it is serving, per request and only on requests that belong to one
+  — the session header `ATTRIBUTION` in `lua/core/provider.lua` implements.
 
 This implementation is not represented as identical to Pi. Unknown model
 compatibility is explicit; only supported reasoning levels are offered. The
