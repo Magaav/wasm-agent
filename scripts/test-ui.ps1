@@ -1182,6 +1182,12 @@ if ($busy) {
   exit 1
 }
 
+$runtimeEnvironment = @{}
+foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'WASM_AGENT_*' -or $_.Name -eq 'WA_SCRIPT' })) {
+  $runtimeEnvironment[$entry.Name] = $entry.Value
+  [Environment]::SetEnvironmentVariable($entry.Name, $null, 'Process')
+}
+$env:WASM_AGENT_HOME = Join-Path $tmp 'home'
 try {
   $server = Start-Process -FilePath $WaExe -ArgumentList @("serve", "--db", $db, "--port", "$Port", "--client-port", "$ClientPort", "--ui", $tmp) -WindowStyle Hidden -PassThru
   for ($i = 0; $i -lt 40; $i++) {
@@ -1194,7 +1200,11 @@ try {
   $previous = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
-    $dump = & $edge --headless=new --disable-gpu --dump-dom "http://127.0.0.1:$Port/" 2>$null | Out-String
+    # The renderer's WASM initialization and second navigation are asynchronous.
+    # A load-only dump can stop at "stage: start" before the harness has a verdict.
+    # Isolate the browser profile as well as the server; never reuse user storage.
+    $profile = Join-Path $tmp 'browser-profile'
+    $dump = & $edge --headless=new --disable-gpu --virtual-time-budget=10000 "--user-data-dir=$profile" --dump-dom "http://127.0.0.1:$Port/" 2>$null | Out-String
   } finally { $ErrorActionPreference = $previous }
   $match = [regex]::Match($dump, '<pre id="harness-log"[^>]*>([\s\S]*?)</pre>')
   if (-not $match.Success) {
@@ -1213,6 +1223,8 @@ try {
   }
 } finally {
   if ($server) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
+  Remove-Item Env:WASM_AGENT_HOME -ErrorAction SilentlyContinue
+  foreach ($key in $runtimeEnvironment.Keys) { [Environment]::SetEnvironmentVariable($key, $runtimeEnvironment[$key], 'Process') }
   $resolvedTmp = [IO.Path]::GetFullPath($tmp)
   $resolvedTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
   if ($resolvedTmp.StartsWith($resolvedTemp, [StringComparison]::OrdinalIgnoreCase) -and
