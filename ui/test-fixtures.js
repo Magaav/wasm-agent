@@ -130,8 +130,12 @@ if (sessionStorage.getItem("wa-ui-reload-stage") === "active") {
     session: { id, title: "running reload proof" },
     state: { state: "unfinished", detail: "1 tool call(s) with no recorded result: bash" },
     turns: [
-      { seq: 1, role: "user", content: "RELOAD-MID-RUN-QUESTION", tool_calls: [] },
+      { seq: 1, role: "user", content: "EARLIER-INTERRUPTED-QUESTION", tool_calls: [] },
       { seq: 2, role: "assistant", content: "", tool_calls: [
+        { id: "earlier-lost", type: "function", function: { name: "bash", arguments: "{\"command\":\"earlier check\"}" } },
+      ] },
+      { seq: 3, role: "user", content: "RELOAD-MID-RUN-QUESTION", tool_calls: [] },
+      { seq: 4, role: "assistant", content: "", tool_calls: [
         { id: "reload-tool", type: "function", function: { name: "bash", arguments: "{\"command\":\"slow check\"}" } },
       ] },
     ],

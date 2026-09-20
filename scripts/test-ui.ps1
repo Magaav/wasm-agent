@@ -51,6 +51,8 @@ $harness = @'
       "a reload during a turn must say the ledger is pending and the node is active");
     check(!restored.querySelector("wa-trace .pending") && !window.__toolTickerActive(),
       "a repainted tool must not invent a new 300-second execution clock");
+    check(restored.querySelectorAll("wa-trace .tool-line.unrecorded").length === 2,
+      "a real reload must close historical as well as current missing tool calls");
     check(!restored.querySelector(".unfinished-notice button"),
       "an active turn must not offer a duplicate continuation");
     check(!window.__calls.some(function (call) { return call.url === "chat" && call.method === "POST"; }),
@@ -60,8 +62,8 @@ $harness = @'
     // and repaint the answer from the durable ledger, not open the engine's session view.
     window.__fixtures.session.state = { state: "answered", detail: "the last turn is a reply" };
     window.__fixtures.session.turns.push(
-      { seq: 3, role: "tool", tool_name: "bash", content: "done", tool_calls: [] },
-      { seq: 4, role: "assistant", content: "RELOAD-MID-RUN-ANSWER", tool_calls: [] });
+      { seq: 5, role: "tool", tool_name: "bash", content: "done", tool_calls: [] },
+      { seq: 6, role: "assistant", content: "RELOAD-MID-RUN-ANSWER", tool_calls: [] });
     window.__fixtures.health.current = null;
     window.__fixtures.health.workers = [];
     await window.__watchTurn();
@@ -563,26 +565,35 @@ $harness = @'
   // The fixture is injected here rather than shipped in the defaults: the app restores its session at
   // load, so a `session` route present from the start repaints the transcript before the first check
   // runs - which is what happened, and it looked like a dozen unrelated failures.
+  var fixtureNow = Math.floor(Date.now() / 1000);
   window.__fixtures.session = {
     session: { id: "aaaaaaaa-0000-0000-0000-000000000001", title: "unfinished thread" },
     // Match the real /session route: state is an object, unlike the flattened /sessions rows.
     state: { state: "unfinished", detail: "1 tool call(s) with no recorded result: bash" },
     turns: [
-      { seq: 1, role: "user", content: "check the installer on the node", ok: 1, tool_calls: [] },
+      { seq: 1, role: "user", content: "check the installer on the node", created_at: fixtureNow - 120, ok: 1, tool_calls: [] },
       { seq: 2, role: "assistant", content: "Running it now.", ok: 1, tool_calls: [] },
       { seq: 3, role: "assistant", content: "", ok: 1,
         tool_calls: [{ id: "c1", type: "function", function: { name: "bash", arguments: "{\"command\":\"wa toolchain check\"}" } }] },
       { seq: 4, role: "tool", content: "{\"code\":0,\"stdout\":\"git yes\"}", ok: 1, tool_name: "bash", tool_calls: [] },
       // A turn that changed a file. The repaint used to drop this, so a reloaded transcript showed no diff
       // topics at all while a live one did - and a window that has been reloaded is a repaint.
-      { seq: 5, id: "turn-with-changes", role: "assistant", content: "Changed it.", ok: 1, tool_calls: [],
+      { seq: 5, id: "turn-with-changes", role: "assistant", content: "Changed it.", created_at: fixtureNow - 114, ok: 1, tool_calls: [],
         changes: { files: [{ path: "C:/tmp/proof.txt", added: 4, removed: 3, created: false }], added: 4, removed: 3 } },
-      { seq: 6, role: "assistant", content: "", ok: 1,
+      // A previous interruption was later continued. Its missing result is still in the ledger,
+      // but it must not leave a live-looking row that triggers a repaint every five seconds.
+      { seq: 6, role: "user", content: "first interrupted run", tool_calls: [] },
+      { seq: 7, role: "assistant", content: "", tool_calls: [
+        { id: "lost", type: "function", function: { name: "bash", arguments: "{\"command\":\"slow check\"}" } },
+      ] },
+      { seq: 8, role: "user", content: "continue after checking effects", tool_calls: [] },
+      { seq: 9, role: "assistant", content: "Recovered safely.", tool_calls: [] },
+      { seq: 10, role: "assistant", content: "", ok: 1,
         tool_calls: [
           { id: "c2", type: "function", function: { name: "read", arguments: "{\"path\":\"proof.txt\"}" } },
           { id: "c3", type: "function", function: { name: "bash", arguments: "{\"command\":\"wa toolchain check again\"}" } },
         ] },
-      { seq: 7, role: "tool", tool_name: "read", content: "{\"content\":\"read completed\"}", ok: 1, tool_calls: [] },
+      { seq: 11, role: "tool", tool_name: "read", content: "{\"content\":\"read completed\"}", ok: 1, tool_calls: [] },
     ],
   };
   var sendsBeforeRestore = window.__calls.filter(function (call) { return call.url === "chat" && call.method === "POST"; }).length;
@@ -593,9 +604,9 @@ $harness = @'
   check(!!notice && /1 tool call/.test(notice.textContent),
     "and show the ledger's reason, saw: " + (notice ? notice.textContent.slice(0, 100) : "nothing"));
   check(!!notice && !!notice.querySelector("button"), "and offer to continue it");
-  var unresolvedLine = document.querySelector("wa-trace .tool-line.unrecorded");
-  check(!!unresolvedLine && /result not recorded/.test(unresolvedLine.textContent),
-    "a replayed tool with no result must be marked unknown, never live");
+  var unresolvedLines = document.querySelectorAll("wa-trace .tool-line.unrecorded");
+  check(unresolvedLines.length === 2 && /result not recorded/.test(unresolvedLines[0].textContent),
+    "both historical and current missing tool results must be marked unknown, never live");
   var tracesForBatch = document.querySelectorAll("wa-trace");
   var batchTrace = tracesForBatch[tracesForBatch.length - 1];
   var completedLine = batchTrace && batchTrace.querySelector(".tool-line.ok");
@@ -604,6 +615,15 @@ $harness = @'
       Array.from(batchTrace ? batchTrace.querySelectorAll(".tool-line") : []).map(function (line) { return line.className + ":" + line.textContent.slice(0, 70); }).join(" | "));
   check(!window.__toolTickerActive() && !document.querySelector("wa-trace .pending"),
     "a replayed tool must not start a new timer or remain pending");
+  var firstRunMeta = document.querySelector("wa-run > button .trace-meta");
+  check(!!firstRunMeta && /6\.0s/.test(firstRunMeta.textContent),
+    "a replayed run must use recorded timestamps, not time since this page loaded");
+  var oldBubble = document.querySelector("wa-message.assistant");
+  var readsBeforeIdleReconcile = window.__calls.filter(function (call) { return call.url === "sessions"; }).length;
+  await window.__reconcile();
+  check(document.querySelector("wa-message.assistant") === oldBubble &&
+    window.__calls.filter(function (call) { return call.url === "sessions"; }).length === readsBeforeIdleReconcile,
+    "an idle page with historical missing results must not repaint the transcript");
   check(window.__calls.filter(function (call) { return call.url === "chat" && call.method === "POST"; }).length === sendsBeforeRestore,
     "restoring an unfinished tool must never execute it again");
   window.__fixtures.health.current = { label: "GET /models", ms: 50 };

@@ -699,6 +699,9 @@ function settleTool(result, name) {
 
 function finishTrace() {
   stopToolTicker();
+  // Every stored decision is historical, even when its tool result is absent.
+  // A later reply or user turn can close that decision before the replay ends.
+  if (replayingTurns && trace?.pending) trace.unrecorded();
   trace?.finish();
   trace = null;
 }
@@ -727,7 +730,8 @@ function collapseRun() {
     run.body.append(child);
     if (typeof child.reveal === "function") child.reveal();
   }
-  run.setSummary(decisions, calls, Date.now() - (turnStartedAt || Date.now()));
+  const endedAt = replayingTurns ? replayTurnEndedAt : Date.now();
+  run.setSummary(decisions, calls, Math.max(0, endedAt - (turnStartedAt || endedAt)));
 }
 
 // A round is one decision: what the model said, then the tools it chose. Closing
@@ -867,6 +871,7 @@ function restoreDraft() {
 // understands. Reusing handleEvent is the point: a repainted bubble is built by exactly the code
 // that built it the first time, so the two cannot drift apart.
 let replayingTurns = false;
+let replayTurnEndedAt = 0;
 function repaintTurns(turns) {
   // A repaint is a view of durable rows, not a resumed event stream. In particular, an
   // assistant tool call without a result must never inherit a live timer from this page.
@@ -877,6 +882,8 @@ function repaintTurns(turns) {
   turnBubble = null;
   streamBody = null;
   streamText = "";
+  turnStartedAt = 0;
+  replayTurnEndedAt = 0;
   let rendered = 0;
   let failed = 0;
   let firstFailure = "";
@@ -887,13 +894,18 @@ function repaintTurns(turns) {
     // are drawn, the rows after it are not, and nothing says so.
     try {
       if (turn.role === "user") {
+        flushDecision(true);
+        turnStartedAt = Number(turn.created_at) > 0 ? Number(turn.created_at) * 1000 : Date.now();
         add("user", turn.content || "");
       } else if (turn.role === "assistant") {
         // The stored turn carries its changes summary and its id, and both are needed: the summary is
         // the topic, and the id is what the undo route is asked about. Dropping them here is why a
         // reloaded transcript showed no diff topics at all - the live path had them, the repaint did
         // not, and a window that has been reloaded is a repaint.
-        if (turn.content) handleEvent({ type: "reply", text: turn.content, changes: turn.changes, turn_id: turn.id });
+        if (turn.content) {
+          replayTurnEndedAt = Number(turn.created_at) > 0 ? Number(turn.created_at) * 1000 : Date.now();
+          handleEvent({ type: "reply", text: turn.content, changes: turn.changes, turn_id: turn.id });
+        }
         const calls = turn.tool_calls || [];
         if (calls.length) {
           handleEvent({ type: "round", n: 1 });
@@ -918,11 +930,8 @@ function repaintTurns(turns) {
       }
     }
   }
+  if (trace) finishTrace();
   replayingTurns = false;
-  if (trace) {
-    trace.unrecorded();
-    finishTrace();
-  }
   pin(true);
   if (failed) {
     add("assistant", `repaint: ${rendered} of ${turns.length} turns drawn, ${failed} failed — first: ${firstFailure}`);
@@ -2446,7 +2455,7 @@ async function reconcile() {
       // What the live DOM still believes is worth checking *before* clearing it: if the page thought a turn was
       // running, then whatever it is still showing - a tool topic waiting for a result that already arrived,
       // a segment that never got its reply - is stale.
-      const wasLive = busy || document.getElementById("update-lock") || document.querySelector("wa-trace .pending");
+      const wasLive = busy || document.getElementById("update-lock") || trace?.pending;
       if (busy) { setBusy(false); clearStatus(); }
       // Nothing to wait for any more, so the lock must not wait either: it is a message, not a trap.
       document.getElementById("update-lock")?.remove();
@@ -2473,7 +2482,7 @@ async function watch() {
     else if (!transcriptReady) restoreSession();
     // A live stream or update lock needs reconciliation. A durable unfinished notice does not:
     // polling and repainting an interrupted transcript forever would waste reads and restart its view.
-    else if (busy || document.getElementById("update-lock") || document.querySelector("wa-trace .pending")) {
+    else if (busy || document.getElementById("update-lock") || trace?.pending) {
       if (Date.now() - reconciledAt > 5000) { reconciledAt = Date.now(); reconcile(); }
     }
   } catch (error) { /* keep polling: the deadline is what keeps this loop alive */ }
