@@ -34,6 +34,17 @@ function Save-WaEnrollment {
     authority='full-user-account'; consent_id=[guid]::NewGuid().ToString() }
   Write-WaPrivateText (Join-Path $Config 'enrollment.json') ($profile | ConvertTo-Json -Depth 8)
 }
+function Write-WaGuestShim([string]$Path, [string]$Install, [string]$NodeHome) {
+  $quotedHome = $NodeHome.Replace('%','%%')
+  $quotedCommand = (Join-Path $Install 'bin/wa.cmd').Replace('%','%%')
+  $lines = @('@echo off', 'setlocal',
+    'for /f "tokens=1 delims==" %%V in (''set WASM_AGENT_ 2^>nul'') do set "%%V="',
+    'for /f "tokens=1 delims==" %%V in (''set WA_ 2^>nul'') do set "%%V="',
+    'set "OPENAI_API_KEY="', 'set "OPENCODE_GO_API_KEY="',
+    ('set "WASM_AGENT_HOME=' + $quotedHome + '"'), ('"' + $quotedCommand + '" %*'),
+    'exit /b %ERRORLEVEL%')
+  Write-WaPrivateText $Path (($lines -join "`r`n") + "`r`n")
+}
 function Read-WaEnrollment([string]$Config) {
   $settings = Read-WaConfiguration $Config
   if ($settings['WASM_AGENT_MANAGED'] -ne '1') { throw 'managed_guest_required' }
