@@ -35,6 +35,48 @@ $harness = @'
   try {
   var tick = function () { return Promise.resolve(); };
   function check(ok, label) { if (!ok) problems.push(label); }
+  if (sessionStorage.getItem("wa-ui-reload-stage") === "active") {
+    // This is a real second navigation, not a second call to restoreSession in the old page.
+    // The fixture was installed before app.js loaded, just as a live /session response is.
+    sessionStorage.removeItem("wa-ui-reload-stage");
+    var loadedAt = performance.now();
+    await window.rendererLoaded;
+    for (var retry = 0; retry < 200 && !document.getElementById("messages").textContent.includes("RELOAD-MID-RUN-QUESTION"); retry++) await tick();
+    var restored = document.getElementById("messages");
+    check(restored.textContent.includes("RELOAD-MID-RUN-QUESTION"),
+      "a real reload during a turn must restore the transcript on boot");
+    check(performance.now() - loadedAt < 3000,
+      "the running-turn transcript should restore promptly, not wait for the turn to finish");
+    check(!!restored.querySelector(".unfinished-notice") && /running a turn/.test(restored.textContent),
+      "a reload during a turn must say the ledger is pending and the node is active");
+    check(!restored.querySelector("wa-trace .pending") && !window.__toolTickerActive(),
+      "a repainted tool must not invent a new 300-second execution clock");
+    check(!restored.querySelector(".unfinished-notice button"),
+      "an active turn must not offer a duplicate continuation");
+    check(!window.__calls.some(function (call) { return call.url === "chat" && call.method === "POST"; }),
+      "a page reload must never post another turn");
+
+    // The stream belongs to the old page, so the new page must notice the worker become idle
+    // and repaint the answer from the durable ledger, not open the engine's session view.
+    window.__fixtures.session.state = { state: "answered", detail: "the last turn is a reply" };
+    window.__fixtures.session.turns.push(
+      { seq: 3, role: "tool", tool_name: "bash", content: "done", tool_calls: [] },
+      { seq: 4, role: "assistant", content: "RELOAD-MID-RUN-ANSWER", tool_calls: [] });
+    window.__fixtures.health.current = null;
+    await window.__watchTurn();
+    for (var settled = 0; settled < 100; settled++) await tick();
+    check(restored.textContent.includes("RELOAD-MID-RUN-ANSWER"),
+      "when the turn ends, the reloaded chat must show the ledger's answer");
+    check(!restored.querySelector(".unfinished-notice") && !restored.querySelector("wa-trace .pending"),
+      "the pending notice and tool state must disappear after settlement");
+    check(!document.getElementById("sessions-box").textContent.includes("RELOAD-MID-RUN-ANSWER"),
+      "the answer belongs in chat, not in a switched engine view");
+    var reloadLog = document.createElement("pre");
+    reloadLog.id = "harness-log";
+    reloadLog.textContent = problems.length ? ("UI FAIL: " + problems.join(" ;; ")) : "UI PASS (real mid-run reload)";
+    document.body.append(reloadLog);
+    return;
+  }
   var events = [
     { type: "round", n: 1 },
     { type: "delta", text: "Reading the config module to see what it names." },
@@ -522,8 +564,8 @@ $harness = @'
   // runs - which is what happened, and it looked like a dozen unrelated failures.
   window.__fixtures.session = {
     session: { id: "aaaaaaaa-0000-0000-0000-000000000001", title: "unfinished thread" },
-    state: "unfinished",
-    state_detail: "1 tool call(s) with no recorded result: bash",
+    // Match the real /session route: state is an object, unlike the flattened /sessions rows.
+    state: { state: "unfinished", detail: "1 tool call(s) with no recorded result: bash" },
     turns: [
       { seq: 1, role: "user", content: "check the installer on the node", ok: 1, tool_calls: [] },
       { seq: 2, role: "assistant", content: "Running it now.", ok: 1, tool_calls: [] },
@@ -534,26 +576,42 @@ $harness = @'
       // topics at all while a live one did - and a window that has been reloaded is a repaint.
       { seq: 5, id: "turn-with-changes", role: "assistant", content: "Changed it.", ok: 1, tool_calls: [],
         changes: { files: [{ path: "C:/tmp/proof.txt", added: 4, removed: 3, created: false }], added: 4, removed: 3 } },
+      { seq: 6, role: "assistant", content: "", ok: 1,
+        tool_calls: [
+          { id: "c2", type: "function", function: { name: "read", arguments: "{\"path\":\"proof.txt\"}" } },
+          { id: "c3", type: "function", function: { name: "bash", arguments: "{\"command\":\"wa toolchain check again\"}" } },
+        ] },
+      { seq: 7, role: "tool", tool_name: "read", content: "{\"content\":\"read completed\"}", ok: 1, tool_calls: [] },
     ],
   };
+  var sendsBeforeRestore = window.__calls.filter(function (call) { return call.url === "chat" && call.method === "POST"; }).length;
   await window.__restoreSession();
   for (var un = 0; un < 30; un++) { await tick(); }
   var notice = document.querySelector(".unfinished-notice");
   check(!!notice, "a thread whose turn was cut off must say so in the chat");
-  check(!!notice && /stopped before it answered/.test(notice.textContent),
-    "and say what happened, saw: " + (notice ? notice.textContent.slice(0, 90) : "nothing"));
+  check(!!notice && /1 tool call/.test(notice.textContent),
+    "and show the ledger's reason, saw: " + (notice ? notice.textContent.slice(0, 100) : "nothing"));
   check(!!notice && !!notice.querySelector("button"), "and offer to continue it");
+  var unresolvedLine = document.querySelector("wa-trace .tool-line.unrecorded");
+  check(!!unresolvedLine && /result not recorded/.test(unresolvedLine.textContent),
+    "a replayed tool with no result must be marked unknown, never live");
+  var tracesForBatch = document.querySelectorAll("wa-trace");
+  var batchTrace = tracesForBatch[tracesForBatch.length - 1];
+  var completedLine = batchTrace && batchTrace.querySelector(".tool-line.ok");
+  check(!!completedLine && /read/.test(completedLine.textContent),
+    "a partially completed tool batch must settle the recorded first call, not the last one: " +
+      Array.from(batchTrace ? batchTrace.querySelectorAll(".tool-line") : []).map(function (line) { return line.className + ":" + line.textContent.slice(0, 70); }).join(" | "));
+  check(!window.__toolTickerActive() && !document.querySelector("wa-trace .pending"),
+    "a replayed tool must not start a new timer or remain pending");
+  check(window.__calls.filter(function (call) { return call.url === "chat" && call.method === "POST"; }).length === sendsBeforeRestore,
+    "restoring an unfinished tool must never execute it again");
 
   // A session whose last turn *failed* is the same situation by another route, and it used to be
-  // invisible here - which is why an agent that hit a provider error looked like one that had simply
-  // gone quiet. Restoring it must say so, and then resume it by itself: nobody should have to notice a
-  // stuck session and fix it. This is the case the user reported, so it is the case tested.
+  // invisible here. Restoring it must say so without posting another turn: page navigation is read-only.
   //
   // The app picks the session from the *sessions list*, not from the session fixture - the first
-  // attempt here set only the latter, so it restored the unfinished thread again, and the guard
-  // (correctly) refused to resume a session it had already resumed. The test was wrong, not the code.
-  // A fresh id is used because the guard is per session per page, and the fixtures are put back
-  // afterwards because the diff checks below re-restore the original one.
+  // attempt here set only the latter, so it restored the unfinished thread again. A fresh id
+  // makes this a distinct case, and the fixtures are put back for the diff checks below.
   var savedSessions = window.__fixtures.sessions;
   var savedSession = window.__fixtures.session;
   window.__fixtures.sessions = {
@@ -567,32 +625,26 @@ $harness = @'
   };
   window.__fixtures.session = {
     session: { id: "cccccccc-0000-0000-0000-000000000003", title: "failed thread" },
-    state: "failed",
-    state_detail: "the last turn failed (the model call errored)",
+    state: { state: "failed", detail: "the last turn failed (the model call errored)" },
     turns: [ { seq: 1, role: "user", content: "carry on with the cross-build", ok: 1, tool_calls: [] } ],
   };
+  var sendsBeforeFailure = window.__calls.filter(function (call) { return call.url === "chat" && call.method === "POST"; }).length;
   await window.__restoreSession();
   for (var uf = 0; uf < 30; uf++) { await tick(); }
   var failedNotice = Array.from(document.querySelectorAll(".unfinished-notice")).find(function (n) {
     return /failed before it answered/.test(n.textContent);
   });
   check(!!failedNotice, "a session whose turn failed must say so in the chat, not just go quiet");
-  var resuming = Array.from(document.querySelectorAll(".unfinished-notice")).filter(function (n) {
-    return /resuming it now/.test(n.textContent);
-  });
-  check(resuming.length === 1, "and resume itself, saw " + resuming.length + " resume notice(s)");
+  check(!!failedNotice && !!failedNotice.querySelector("button"),
+    "a failed turn must offer explicit continuation");
+  check(window.__calls.filter(function (call) { return call.url === "chat" && call.method === "POST"; }).length === sendsBeforeFailure,
+    "a failed turn must not spend another turn just because the page reloaded");
 
-  // Once per session per page. A resume spends a turn, so a second restore of the same session must not
-  // spend another - and if the resumed turn fails too, the notice and its button are the way forward,
-  // not another automatic attempt.
+  // Repeated restores remain read-only; a prior regression auto-posted a turn on each page load.
   await window.__restoreSession();
   for (var ug = 0; ug < 30; ug++) { await tick(); }
-  var resumedAgain = Array.from(document.querySelectorAll(".unfinished-notice")).filter(function (n) {
-    return /resuming it now/.test(n.textContent);
-  });
-  check(resumedAgain.length === 0,
-    "and never resume the same session twice on one page, saw " + resumedAgain.length +
-    " resume notice(s) - a resume always posts one, so none means it did not resume again");
+  check(window.__calls.filter(function (call) { return call.url === "chat" && call.method === "POST"; }).length === sendsBeforeFailure,
+    "repeated restores must remain read-only");
   window.__fixtures.sessions = savedSessions;
   window.__fixtures.session = savedSession;
 
@@ -602,10 +654,9 @@ $harness = @'
   // The ledger says this thread is settled, so the notice is not litter - it is simply not true any more.
   // The fixture must say so: it was unfinished, and the check passed only because the notice was never
   // re-derived. A test whose premise does not match its fixture is not testing what it claims.
-  window.__fixtures.session.state = "answered";
-  window.__fixtures.session.state_detail = "the last turn is a reply";
+  window.__fixtures.session.state = { state: "answered", detail: "the last turn is a reply" };
   window.__setBusy(false);
-  await window.__reconcile();
+  await window.__restoreSession();
   for (var ur = 0; ur < 10; ur++) { await tick(); }
   check(!document.querySelector(".unfinished-notice"),
     "a notice about a finished turn must be removed once the node says the thread is settled");
@@ -621,7 +672,7 @@ $harness = @'
   window.__fixtures.sessions = { sessions: [ { id: "dddddddd-0000-0000-0000-000000000004", title: "repaint proof", mode: "chat", turn_count: 2, updated_at: Math.floor(Date.now()/1000), state: "answered", state_detail: "the last turn is a reply" } ] };
   window.__fixtures.session = {
     session: { id: "dddddddd-0000-0000-0000-000000000004", title: "repaint proof" },
-    state: "answered", state_detail: "the last turn is a reply",
+    state: { state: "answered", detail: "the last turn is a reply" },
     turns: [ { seq: 1, role: "user", content: "REPAINT-PROOF-QUESTION", ok: 1, tool_calls: [] },
              { seq: 2, role: "assistant", content: "REPAINT-PROOF-ANSWER", ok: 1, tool_calls: [] } ],
   };
@@ -638,9 +689,8 @@ $harness = @'
   // A repainted turn that changed a file must show its diff topic. The live path always did; the repaint
   // dropped the changes summary and the turn id, so every reloaded transcript lost every diff topic.
   //
-  // The repaint is done here rather than relying on the transcript the block above left behind: the
-  // unfinished fixture now auto-resumes, and the resume sends a turn, so what is on screen at this point
-  // is whatever that did. A check that says "a repainted turn" should repaint.
+  // The repaint is done here rather than relying on the transcript the block above left behind:
+  // a check that says "a repainted turn" should explicitly repaint.
   await window.__restoreSession();
   for (var ud = 0; ud < 30; ud++) { await tick(); }
   var diffTopic = document.querySelector("wa-diff");
@@ -1054,6 +1104,14 @@ $harness = @'
     problems.push("the harness threw: " + ((error && error.stack) || error));
   }
   document.title = "stage: logging";
+  if (!problems.length) {
+    // Carry this page's verdict into a second real navigation. The next load gets an
+    // unfinished session and an active /health response from fixtures.js before app.js boots.
+    localStorage.setItem("wa-chat-session", "eeeeeeee-0000-0000-0000-000000000005");
+    sessionStorage.setItem("wa-ui-reload-stage", "active");
+    location.reload();
+    return;
+  }
   var log = document.createElement("pre");
   log.id = "harness-log";
   log.textContent = problems.length ? ("UI FAIL: " + problems.join(" ;; ")) : "UI PASS";
@@ -1074,7 +1132,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker;"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker;"
 
 $server = $null
 $edge = @(
@@ -1120,8 +1178,8 @@ try {
     exit 1
   }
   $result = $match.Groups[1].Value.Trim()
-  if ($result -like "UI PASS*") {
-    Write-Host "  ok   UI structure: reply bubble and run topic, plus the unfinished-session badge in the engine view" -ForegroundColor Green
+  if ($result -eq "UI PASS (real mid-run reload)") {
+    Write-Host "  ok   UI structure, interrupted tools, and a real mid-run page reload" -ForegroundColor Green
   } else {
     Write-Host "  FAIL $result" -ForegroundColor Red
     exit 1

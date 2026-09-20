@@ -9,8 +9,8 @@
 # user sees "TypeError: Failed to fetch" from a node that is local and alive. A
 # reload cannot help either, because the reload needs the same blocked server.
 #
-# So: start a turn that takes a while, and hammer /health and a static asset while
-# it runs. Both must keep answering.
+# So: start a turn that takes a while, and check the page assets and every read
+# needed to rehydrate a chat. They must answer before the turn finishes.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -54,6 +54,28 @@ if [ "${WEDGE_ONLY:-0}" != "1" ]; then
 TURN=$!
 
 sleep 2
+# A page reloaded in the middle of this turn needs /me, /models, /sessions,
+# /session and /health. /health and the assets bypass Lua, but the other reads
+# need a worker; checking only static files would miss a blank, "connecting" UI.
+reload_started="$(date +%s%3N)"
+for route in me models sessions; do
+  read_code="$(curl -s -m 2 -o "$WORK/$route.json" -w '%{http_code}' "http://127.0.0.1:$PORT/$route" 2>/dev/null)"
+  if [ "$read_code" != "200" ]; then
+    echo "  FAIL: /$route did not answer during a running turn (HTTP ${read_code:-none})"; exit 1
+  fi
+done
+thread_id="$(grep -oE '"id":"[0-9a-f-]{36}"' "$WORK/sessions.json" | head -1 | cut -d '"' -f 4)"
+if [ -z "$thread_id" ]; then echo '  FAIL: /sessions did not list the running thread'; exit 1; fi
+read_code="$(curl -s -m 2 -o "$WORK/session.json" -w '%{http_code}' "http://127.0.0.1:$PORT/session?id=$thread_id" 2>/dev/null)"
+if [ "$read_code" != "200" ] || ! grep -q '"state":{' "$WORK/session.json"; then
+  echo "  FAIL: /session did not return the nested state contract during a running turn"; exit 1
+fi
+reload_ms="$(( $(date +%s%3N) - reload_started ))"
+if [ "$reload_ms" -ge 3000 ] || ! kill -0 "$TURN" 2>/dev/null; then
+  echo "  FAIL: reload reads took ${reload_ms}ms or the turn finished before they completed"; exit 1
+fi
+echo "  ok: /me, /models, /sessions and /session loaded in ${reload_ms}ms during the turn"
+
 ok=0
 fail=0
 probes=0
