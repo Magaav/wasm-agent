@@ -211,9 +211,11 @@ async function stop(child) {
     const bad=spawnSync('powershell',[...psArgs.slice(0,psArgs.indexOf('-InstallDir')),'-Name','bad-checksum','-InstallDir',badInstall,'-NodeHome',path.join(work,'bad checksum home'),'-AcceptAccess','-NoRegisterCommand'],{env:clean,encoding:'utf8',timeout:60000,windowsHide:true});
     check(bad.status!==0 && !fs.existsSync(badInstall),'bootstrap refuses checksum mismatch before running packaged code');
   }
+  guest.profile=JSON.parse(fs.readFileSync(path.join(guest.home,'.wasm-agent/enrollment.json'),'utf8'));
   guest.profile.active=false;
   fs.writeFileSync(path.join(guest.home,'.wasm-agent/enrollment.json'),JSON.stringify(guest.profile));
   check((await direct(guest,admin,'write',{path:resultFile,content:'after revoke'})).value.error==='unknown_caller','local revocation blocks queued/future authority');
+  check(cli(guest,['access']).value.role==='master','revoking assistance preserves an already promoted owner local role');
   await stop(guest.child); guest.child=start(guest,guest.args);
   await until(async()=> (await request(guest.url+'/health')).status===200,'restart');
   check((await direct(guest,admin,'read',{path:resultFile})).value.error==='unknown_caller','revocation survives restart');

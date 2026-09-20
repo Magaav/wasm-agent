@@ -42,8 +42,9 @@ any model. The registry grants the role first; a signed, target-bound call then
 updates the enrolled node's local role. A failed second step is reported as a
 partial change, not success. Demotion uses the same command with `guest`.
 
-Promotion does not grant access to every other customer. Each managed recipient
-still checks its pinned operator grant. A node owner can edit their own computer;
+Promotion is a trust decision: a network master can discover peer registry
+records, but does not gain execution/file access to every other customer. Each
+managed recipient still checks its pinned operator grant. A node owner can edit their own computer;
 they cannot obtain a network role merely by changing a local role string.
 
 ## Distribution and launch
