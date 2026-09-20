@@ -165,3 +165,8 @@ The renames, mechanical and in this order:
 
 This is a mechanism, not a style preference: a reader debugging a session should not have to know which file
 they are in to know what a word means.
+
+**It is enforced, and the enforcement says what it does not cover.** `scripts/check-naming.sh`, run by
+`scripts/test.sh`, greps the tracked tree for the old *names* and fails if any remain. It never greps for the
+word "turn", so prose is a reader's job and not the check's: `naming ok` means no old name survived, not that
+every sentence was re-read.
