@@ -74,7 +74,18 @@ impl Runner {
         {
             let id = job["id"].as_str().unwrap();
             let rev = job["revision"].as_i64().unwrap();
-            match job["trigger"]["kind"].as_str().unwrap_or("") {
+            let kind = job["trigger"]["kind"].as_str().unwrap_or("");
+            let key = format!("{id}:{rev}");
+            if matches!(kind, "cdp" | "file")
+                && !self.observers.contains_key(&key)
+                && self.observers.len() >= 8
+            {
+                if job["source_status"] != "waiting: observer capacity (8)" {
+                    let _ = s.source_status(id, rev, "waiting: observer capacity (8)");
+                }
+                continue;
+            }
+            match kind {
                 "cdp" => {
                     let key = format!("{id}:{rev}");
                     if !self.observers.contains_key(&key) && self.observers.len() < 8 {
@@ -87,9 +98,17 @@ impl Runner {
                     }
                 }
                 "file" => {
+                    if !self.observers.contains_key(&key) {
+                        let job = job.clone();
+                        let s = s.clone();
+                        self.observers.insert(key,std::thread::spawn(move||{
+                            let id=job["id"].as_str().unwrap();
+                            while s.current(id,rev).unwrap_or(false) {
                     let result = (|| -> wa_jobs::Result<()> {
+                        s.source_status(id,rev,&format!("reading directory since {}",now_epoch()))?;
                         let primed = s.seen(id, rev, "primed")?;
-                        for entry in std::fs::read_dir(job["trigger"]["path"].as_str().unwrap())? {
+                        for (index,entry) in std::fs::read_dir(job["trigger"]["path"].as_str().unwrap())?.enumerate() {
+                            if index>=10000 {return Err("directory_entry_limit_exceeded (10000)".into());}
                             let entry = entry?;
                             if !entry.file_type()?.is_file() {
                                 continue;
@@ -124,6 +143,12 @@ impl Runner {
                     })();
                     if let Err(error) = result {
                         let _ = s.source_status(id, rev, &format!("source_error:{error}"));
+                    }
+                    // Filesystem calls never hold the watcher/control loop. A stuck OS read
+                    // consumes one bounded observer slot, visibly marked with its start time.
+                    std::thread::sleep(Duration::from_secs(1));
+                            }
+                        }));
                     }
                 }
                 "event" => {

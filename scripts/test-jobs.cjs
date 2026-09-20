@@ -2,6 +2,7 @@
 // node scripts/test-jobs.cjs [sentinel-executable] [wa-executable]
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),http=require('node:http'),assert=require('node:assert/strict');
 const {spawn,spawnSync}=require('node:child_process');
+const WebSocket=globalThis.WebSocket||require('undici').WebSocket; // Node 18 fixture compatibility; no download.
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-jobs-proof-'));
 const repo=path.resolve(__dirname,'..');
 const sentinel=path.resolve(process.argv[2]||path.join(repo,'rust/wa-sentinel/target/release',process.platform==='win32'?'wa-sentinel.exe':'wa-sentinel'));
@@ -36,6 +37,13 @@ async function main(){
  const script=path.join(root,'procedure.sh');fs.writeFileSync(script,'#!/bin/sh\nprintf "deterministic-proof\\n"\n');
  put(env,'script',{kind:'event',topic:'fixture.script'},{kind:'run',script,timeout_seconds:3});cli(env,'enable','script');emit(env,'fixture.script','s1',{text:'$(not executed as shell)'});
  await until(()=>cli(env,'history').some(d=>d.job_id==='script'&&d.state==='completed'),'deterministic delivery');check(requests.length===2,'script action makes no model call');
+ // Filesystem observation runs independently of the control/action loop.
+ const incoming=path.join(root,'incoming');fs.mkdirSync(incoming);
+ put(env,'files',{kind:'file',path:incoming,pattern:'.incoming'},{kind:'run',script,timeout_seconds:3});cli(env,'enable','files');
+ await until(()=>cli(env,'list').find(j=>j.id==='files').source_status==='watching directory','file baseline');
+ fs.writeFileSync(path.join(incoming,'fixture.incoming'),'untrusted event text');
+ await until(()=>cli(env,'history').some(d=>d.job_id==='files'&&d.state==='completed'),'file event caused deterministic execution');
+ check(requests.length===2,'file event makes no model call');cli(env,'disable','files');
  // A real isolated browser page, not the operator's profile or messaging account.
  const chrome=process.env.CHROME_BIN||(process.platform==='win32'?'C:/Program Files/Google/Chrome/Application/chrome.exe':'/usr/bin/chromium');
  check(fs.existsSync(chrome),'real Chrome available (missing is failure, not an inferred skip)');

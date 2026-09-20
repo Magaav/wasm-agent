@@ -286,7 +286,7 @@ impl Store {
     }
     pub fn source_status(&self, id: &str, revision: i64, status: &str) -> Result<()> {
         self.db()?.execute(
-            "UPDATE jobs SET source_status=? WHERE id=? AND revision=?",
+            "UPDATE jobs SET source_status=?1 WHERE id=?2 AND revision=?3 AND source_status<>?1",
             params![status, id, revision],
         )?;
         Ok(())

@@ -92,7 +92,11 @@ check its own postconditions.
   next due time. A long downtime coalesces missed ticks, not an inference storm.
 * **file**: absolute directory, optional filename substring. Existing files are
   baselined on enable; new/modified files are identified by path/mtime/size. This
-  is polling, not guaranteed delivery of every intermediate filesystem write.
+  is one-second polling, not guaranteed delivery of every intermediate filesystem
+  write; a scan is limited to 10,000 entries. Filesystem reads run in independent
+  observer threads, never on the control loop. A blocked OS read remains visibly
+  `reading directory since ...` and consumes a source slot; safely replacing that
+  thread requires an executor-process boundary not implemented here.
 * **cdp**: an explicit loopback **page** WebSocket and a named Runtime binding:
 
 ```json
@@ -130,8 +134,9 @@ raw browser notifications are not a durable message bus.
 `rust/wa-jobs` enforces durable deduplication on (job, revision, event id), atomic
 claims and revision checks. The queue allows 128 pending deliveries globally and
 8 per job. Full queues fail visibly and do not acknowledge ingestion. Four action
-workers and eight CDP observers are the current limits; one delivery per job runs
-at once. Schedules/files are polled by the watcher; CDP listens independently.
+workers and eight source observers (CDP/files combined) are the current limits;
+one delivery per job runs at once. Schedules are polled by the watcher; CDP/file
+observers work independently. Observer-capacity exhaustion is shown explicitly.
 Queue, per-job status and budget lookups are indexed, avoiding a full history scan
 on every tick.
 
