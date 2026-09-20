@@ -236,7 +236,7 @@ local function fetch_peers(fresh)
   local url = M.rendezvous_url()
   if url == "" then return {} end
   local now = host.now()
-  -- `fresh` skips the cache. A decision that changes state - may this caller run tools on this
+  -- `fresh` skips the cache. A step that changes state - may this caller run tools on this
   -- node - must not be made from a list read fifteen seconds ago: a peer removed from the
   -- rendezvous would stay welcome here for the rest of the window. A display can live with that;
   -- a capability check cannot.

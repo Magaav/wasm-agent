@@ -61,7 +61,7 @@ M.WINDOWS = {
 M.RESERVE = 16384
 M.KEEP = 20000
 
--- The catalogue changes on the order of weeks, not turns. A day is generous and keeps the
+-- The catalogue changes on the order of weeks, not runs. A day is generous and keeps the
 -- 4.7MB fetch off the hot path; `nodes.lua` uses 15s for the rendezvous, which is a
 -- different thing (liveness) and not a model here.
 local CATALOGUE_TTL = 86400

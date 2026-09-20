@@ -58,7 +58,7 @@ local json = dofile("lua/vendor/json.lua")
 memory.setup()
 local calls, failed = 0, 0
 for _, session in ipairs(memory.list_sessions(nil, 10)) do
-  for _, turn in ipairs(memory.session_turns(session.id, { limit = 2000 })) do
+  for _, turn in ipairs(memory.session_messages(session.id, { limit = 2000 })) do
     if turn.role == "assistant" and type(turn.tool_calls) == "table" then
       calls = calls + #turn.tool_calls
     elseif turn.role == "tool" then

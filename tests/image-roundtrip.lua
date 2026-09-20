@@ -41,14 +41,14 @@ check(loaded.b64 == probe_b64, "load_image returns the exact stored base64")
 -- A real turn, in a real sqlite row, must carry the reference.
 local sid = memory.start_session("", "chat", { user_id = "master", node_id = "", title = "image round-trip" })
 memory.append_turn(sid, { role = "user", content = "what is in this picture?", images = { ref } })
-local rows = memory.session_turns(sid, {})
+local rows = memory.session_messages(sid, {})
 check(#rows == 1, "one turn was stored")
 check(type(rows[1].images) == "table" and #rows[1].images == 1, "the images column survives sqlite as an array")
 check(rows[1].images[1].sha256 == ref.sha256, "the stored reference keeps its sha256")
 check(rows[1].content == "what is in this picture?", "the text content is untouched")
 
 -- FTS must not have been polluted by base64.
-local hits = memory.search_turns("picture", "master", 20)
+local hits = memory.search_messages("picture", "master", 20)
 local found = false
 for _, hit in ipairs(hits) do
   if hit.content and hit.content:find("picture", 1, true) then found = true end

@@ -44,7 +44,7 @@ elseif command == "memories" then
 elseif command == "forget" then
   print(json.encode({ forgotten = memory.forget(args[2]) }))
 elseif command == "search" then
-  each(memory.search_messages(args[2], args[3], limit_of(args[4], 20)))
+  each(memory.search_ledger(args[2], args[3], limit_of(args[4], 20)))
 elseif command == "conversation" then
   each(memory.conversation(args[2], limit_of(args[3], 50)))
 elseif command == "conversations" then
@@ -91,7 +91,7 @@ elseif command == "resume" then
 
   local function report(state)
     local short = string.sub(state.session_id or "", 1, 8)
-    print(string.format("  %s  turns=%d  %s", short, state.turns or 0, state.detail))
+    print(string.format("  %s  messages=%d  %s", short, state.messages or 0, state.detail))
     if state.question ~= "" then
       print("            asked     " .. tostring(state.question):gsub("%s+", " "):sub(1, 120))
     end
@@ -115,7 +115,7 @@ elseif command == "resume" then
       print("  list them with: wa sessions")
       os.exit(2)
     end
-    state.turns = memory.turn_count(target)
+    state.messages = memory.message_count(target)
     states, targeted = { state }, true
   else
     states = memory.unfinished(nil, 40)
@@ -141,8 +141,8 @@ elseif command == "resume" then
     -- be carried out, and the banner below repeats the detail. One line of
     -- orientation, then the handoff.
     local first = states[1]
-    print(string.format("  resuming %s  turns=%d  %s",
-      string.sub(first.session_id, 1, 8), first.turns or 0, first.detail))
+    print(string.format("  resuming %s  messages=%d  %s",
+      string.sub(first.session_id, 1, 8), first.messages or 0, first.detail))
   else
     if not targeted then print("  waiting: " .. (#states == 1 and "1 thread" or (#states .. " threads"))) end
     for _, state in ipairs(states) do report(state) end
@@ -158,8 +158,8 @@ elseif command == "sessions" then
   local rows = memory.list_sessions(nil, limit_of(args[2], 20), { states = true })
   if #rows == 0 then print("(no sessions)") end
   for _, row in ipairs(rows) do
-    print(string.format("%s  %-10s turns=%-3d %-12s %s", row.id, row.user_id or "",
-      tonumber(row.turn_count) or 0, row.state or "-", row.title or ""))
+    print(string.format("%s  %-10s messages=%-3d %-12s %s", row.id, row.user_id or "",
+      tonumber(row.message_count) or 0, row.state or "-", row.title or ""))
     -- A thread that needs attention says why, on its own line: the state column
     -- is a label, and a label alone would make the reader open every session.
     if row.state == "unfinished" then print("      " .. row.state_detail) end

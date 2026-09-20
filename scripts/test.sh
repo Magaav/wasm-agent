@@ -214,7 +214,7 @@ memory.append_turn(sid, { role = "tool", tool_call_id = "c1", tool_name = "read"
 memory.append_turn(sid, { role = "tool", tool_call_id = "c2", tool_name = "bash",
   content = string.rep("noise ", 2000) .. "FATAL: the error is at the end" })
 local stored_read
-for _, row in ipairs(memory.session_turns(sid, { limit = 10 })) do
+for _, row in ipairs(memory.session_messages(sid, { limit = 10 })) do
   if row.tool_name == "read" then stored_read = row end
 end
 assert(stored_read, "the read result must be in the transcript")
@@ -400,7 +400,7 @@ assert(after and after.id == second, "a finished session must still be the lates
 -- Memory is independent of conversational history.
 memory.remember("session test fact", "global", {})
 local sid = memory.start_session("", "chat", { user_id = "master", node_id = "", title = "three" })
-assert(#memory.session_turns(sid, {}) == 0, "a new session must start empty")
+assert(#memory.session_messages(sid, {}) == 0, "a new session must start empty")
 assert(#memory.recall("session test fact", 5) > 0, "memory must not depend on the session")
 print("sessions ok")
 LUA

@@ -3,7 +3,7 @@
 -- The half-wiring this catches: the `changes` column existed, the agent filled the field,
 -- and the INSERT did not carry it - so every turn reported its diff and the database kept
 -- none of them, silently. A test of the changeset alone cannot see that; only a round trip
--- through append_turn and session_turns can.
+-- through append_turn and session_messages can.
 local memory = dofile("lua/core/memory.lua")
 local changeset = dofile("lua/core/changeset.lua")
 local json = dofile("lua/vendor/json.lua")
@@ -30,11 +30,11 @@ memory.append_turn(session, {
 })
 memory.append_turn(session, { role = "assistant", content = "and nothing else" })
 
-local turns = memory.session_turns(session, { limit = 10 })
-assert(#turns == 2, "both turns must come back, got " .. #turns)
+local messages = memory.session_messages(session, { limit = 10 })
+assert(#messages == 2, "both messages must come back, got " .. #messages)
 
-local first, second = turns[1], turns[2]
-assert(type(first.changes) == "table", "the first turn's changes must survive the ledger, got "
+local first, second = messages[1], messages[2]
+assert(type(first.changes) == "table", "the first message's changes must survive the ledger, got "
   .. tostring(first.changes))
 assert(first.changes.added == with.added and first.changes.removed == with.removed,
   "the counts must survive as recorded, got +" .. tostring(first.changes.added)

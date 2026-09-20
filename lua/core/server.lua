@@ -456,7 +456,7 @@ function wa_session(session_id, session)
   return json.encode({
     session = record,
     state = memory.session_state(session_id),
-    turns = memory.session_turns(session_id, { limit = 500 }),
+    turns = memory.session_messages(session_id, { limit = 500 }),
   })
 end
 
@@ -476,7 +476,7 @@ function wa_diff(payload, session)
   if not user then return json.encode({ error = "forbidden" }) end
   local ok, request = pcall(json.decode, payload)
   if not ok or type(request) ~= "table" then return json.encode({ error = "bad_request" }) end
-  local turn = memory.turn(request.turn_id or "")
+  local turn = memory.message(request.turn_id or "")
   if not turn then return json.encode({ error = "unknown_turn" }) end
   if not turn.changes then return json.encode({ error = "no_changes" }) end
 

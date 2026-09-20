@@ -66,29 +66,29 @@ local function preview_view(name, output, encoded, ref)
 end
 
 local function session_view(output, ref)
-  if type(output.turns)~="table" then return nil end
+  if type(output.messages)~="table" then return nil end
   local session={}
   for key,value in pairs(output.session or {}) do session[key]=value end
   if type(session.summary)=="string" and #session.summary>8192 then
     session.summary=M.slice(session.summary,1,8192)
     session.summary_omitted=true
   end
-  local view={session=session,turns={},note=output.note,full_result=ref,omitted=true,
-    view_omitted_turns=#output.turns,view_note="Newest returned turns shown; use next_before_seq for earlier turns or tool_result for the exact original.",
+  local view={session=session,messages={},note=output.note,full_result=ref,omitted=true,
+    view_omitted_messages=#output.messages,view_note="Newest returned messages shown; use next_before_seq for earlier messages or tool_result for the exact original.",
     next_before_seq=output.next_before_seq}
-  for index=#output.turns,1,-1 do
-    table.insert(view.turns,1,output.turns[index])
-    view.view_omitted_turns=index-1
-    view.next_before_seq=view.turns[1].seq
+  for index=#output.messages,1,-1 do
+    table.insert(view.messages,1,output.messages[index])
+    view.view_omitted_messages=index-1
+    view.next_before_seq=view.messages[1].seq
     if #json.encode(view)>M.MAX_BYTES then
-      table.remove(view.turns,1)
-      view.view_omitted_turns=index
-      view.next_before_seq=view.turns[1] and view.turns[1].seq or output.next_before_seq
+      table.remove(view.messages,1)
+      view.view_omitted_messages=index
+      view.next_before_seq=view.messages[1] and view.messages[1].seq or output.next_before_seq
       break
     end
   end
-  if #view.turns==0 and #output.turns>0 then
-    local latest=output.turns[#output.turns]
+  if #view.messages==0 and #output.messages>0 then
+    local latest=output.messages[#output.messages]
     view.latest_turn={seq=latest.seq,role=latest.role,
       preview=M.slice(json.encode(latest),1,8192)}
   end

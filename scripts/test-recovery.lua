@@ -129,8 +129,8 @@ local recovered = state(asked)
 assert(recovered.state == "answered", "the thread must be settled after a reply")
 assert(recovered.interruptions == 2 and recovered.recorded_reason ~= "",
   "the recorded history must survive being recovered from")
-assert(memory.turn_count(asked) == #memory.session_turns(asked, { limit = 100 }),
-  "turn_count must agree with the ledger, got " .. memory.turn_count(asked))
+assert(memory.message_count(asked) == #memory.session_messages(asked, { limit = 100 }),
+  "turn_count must agree with the ledger, got " .. memory.message_count(asked))
 
 print("durable record ok")
 
@@ -145,7 +145,7 @@ memory.append_turn(notice_session, { role = "assistant", content = "",
 
 local events = {}
 local bot = agentlib.new(notice_session, function(event) events[#events + 1] = event end, "master", "master", "")
-local before_turns = memory.turn_count(notice_session)
+local before_turns = memory.message_count(notice_session)
 local notice = bot:note_interruption()
 assert(type(notice) == "string", "an unfinished thread must produce a notice")
 assert(notice:find("Recovery notice", 1, true), "the notice must announce itself")
@@ -187,13 +187,13 @@ assert(again == 1, "rebuilding the context must not duplicate the notice, saw " 
 
 -- The transcript is what was said, and memory is indexed from it: a synthetic
 -- turn in the ledger would be replayed to every later request as if the agent had
--- said it, and would be found by search_turns.
-assert(memory.turn_count(notice_session) == before_turns,
+-- said it, and would be found by search_messages.
+assert(memory.message_count(notice_session) == before_turns,
   "the notice must not be written to the transcript")
-for _, turn in ipairs(memory.session_turns(notice_session, { limit = 100 })) do
+for _, turn in ipairs(memory.session_messages(notice_session, { limit = 100 })) do
   assert(turn.role ~= "system", "a system turn must never enter the transcript")
 end
-assert(#memory.search_turns("Recovery notice", nil, 10) == 0,
+assert(#memory.search_messages("Recovery notice", nil, 10) == 0,
   "the notice must not be searchable as if the agent had said it")
 
 -- Negative control: a settled thread gets no notice and no record, so the whole

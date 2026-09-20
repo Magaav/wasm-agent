@@ -181,7 +181,7 @@ function M.run(argv)
     elseif line:sub(1, 8) == "/recall " then
       each(memory.recall(line:sub(9), 10), memory_line)
     elseif line:sub(1, 8) == "/search " then
-      each(memory.search_messages(line:sub(9), nil, 20), function(row)
+      each(memory.search_ledger(line:sub(9), nil, 20), function(row)
         return string.format("%s  %s  %s", row.conversation_id, row.sender_id or "-", row.body)
       end)
     elseif line:sub(1, 14) == "/conversation " then

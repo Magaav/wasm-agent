@@ -330,8 +330,8 @@ function toolTitle(name, args) {
     case "session_debug":
     case "session_fixture":
       return esc(String(a.session_id || a.id || ""));
-    case "search_turns":
     case "search_messages":
+    case "search_ledger":
       return esc(String(a.query || ""));
     case "nodes":
     case "spells":
@@ -941,7 +941,7 @@ async function restoreSession() {
     const wanted = sessions.find((s) => s.id === chatSession) || mine[0] || sessions[0];
     rememberSession(wanted.id);
     const full = await (await apiFetch("session?id=" + encodeURIComponent(wanted.id), { headers: apiHeaders() })).json();
-    if (full && Array.isArray(full.turns) && full.turns.length) repaintTurns(full.turns);
+    if (full && Array.isArray(full.messages) && full.messages.length) repaintTurns(full.messages);
     // A thread whose last turn was cut off must say so *in the chat*: the answer never arrived, and a
     // transcript that just stops looks like the agent had nothing to say. The engine's badge says it
     // too, but the reader is here, so the offer belongs here.
@@ -3216,7 +3216,7 @@ async function openSessionById(id) {
     sessionsBox.append(summary);
   }
 
-  for (const turn of payload.turns || []) {
+  for (const turn of payload.messages || []) {
     const row = document.createElement("div");
     row.className = "turn turn-" + turn.role + (turn.ok ? "" : " bad");
     const head = document.createElement("div");

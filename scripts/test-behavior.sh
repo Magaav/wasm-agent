@@ -165,7 +165,7 @@ bot.last_prompt_tokens = 99999
 local second = bot:maybe_compact()
 print("       compaction 1 ran: " .. tostring(first) .. ", compaction 2 ran: " .. tostring(second))
 local summaries = {}
-for _, turn in ipairs(memory.session_turns(sid, { limit = 500 })) do
+for _, turn in ipairs(memory.session_messages(sid, { limit = 500 })) do
   if turn.role == "summary" then
     for _, span in ipairs(turn.trace or {}) do
       if span.kind == "compact" then

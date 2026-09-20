@@ -135,7 +135,7 @@ memory.setup()
 local sessions = memory.list_sessions(nil, 10)
 local withTools, toolNames = 0, {}
 for _, session in ipairs(sessions) do
-  for _, turn in ipairs(memory.session_turns(session.id, { limit = 200 })) do
+  for _, turn in ipairs(memory.session_messages(session.id, { limit = 200 })) do
     if turn.role == "tool" then withTools = withTools + 1; toolNames[turn.tool_name or "?"] = true end
   end
 end

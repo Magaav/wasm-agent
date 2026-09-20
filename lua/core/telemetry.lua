@@ -117,18 +117,18 @@ function M.normalize(raw, rates)
   return result
 end
 
-function M.event(session_id, turn_id, span_id, kind, phase, payload)
+function M.event(session_id, run_id, span_id, kind, phase, payload)
   if not session_id or session_id == "" then return end
   M.setup()
   sql("sql_exec", "INSERT INTO harness_events(id,session_id,run_id,span_id,kind,phase,at,payload) VALUES(?,?,?,?,?,?,?,?)",
-    {host.uuid(), session_id, turn_id or "", span_id or "", kind, phase, host.now(), json.encode(payload or {})})
+    {host.uuid(), session_id, run_id or "", span_id or "", kind, phase, host.now(), json.encode(payload or {})})
 end
 
 function M.start(opts, kind, payload)
   opts = opts or {}
-  local span = {id=host.uuid(), session_id=opts.session_id, turn_id=opts.turn_id,
+  local span = {id=host.uuid(), session_id=opts.session_id, run_id=opts.run_id,
     kind=kind or "llm", started=M.clock()}
-  M.event(span.session_id, span.turn_id, span.id, span.kind, "start", payload)
+  M.event(span.session_id, span.run_id, span.id, span.kind, "start", payload)
   return span
 end
 
@@ -137,7 +137,7 @@ function M.finish(span, payload)
   payload.ms = math.max(0, math.floor(M.clock() - span.started))
   payload.clock = host.monotonic_ms and "monotonic" or "wall-fallback"
   if payload.error then payload.error = redact.text(tostring(payload.error)) end
-  M.event(span.session_id, span.turn_id, span.id, span.kind, "end", payload)
+  M.event(span.session_id, span.run_id, span.id, span.kind, "end", payload)
   return payload
 end
 

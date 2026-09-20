@@ -1,6 +1,6 @@
 -- The agent turn loop.
 --
--- The transcript in `turns` IS the context: there is no separate in-memory
+-- The transcript in `messages` IS the context: there is no separate in-memory
 -- message list, so a session survives a restart and can be inspected, replayed
 -- and exported as a fixture. Observability is core: every turn carries a trace
 -- of llm calls and tool calls with timings, tokens and failures.
@@ -30,8 +30,8 @@ local SYSTEM = table.concat({
   "- If `recall` returns nothing, say plainly that you have nothing stored about it.",
   "- When the user asks you to remember something, call `remember` and confirm briefly.",
   "- For other questions, answer directly: do not call memory tools just to look busy.",
-  "- For past conversations use `search_turns` (past sessions) or",
-  "  `search_messages`/`conversation` (the message ledger).",
+  "- For past conversations use `search_messages` (past sessions) or",
+  "  `search_ledger`/`conversation` (the message ledger).",
   "",
   "Language: reply in the language of the user's latest message, unless they ask for a",
   "different one. Match their language even when your instructions are in English.",
@@ -85,7 +85,7 @@ local CHECKPOINT_SUMMARY_PROMPT = table.concat({
 }, "\n")
 
 -- The split-turn case: the span being summarised is the early part of one turn
--- too large to keep, so there are no complete turns to summarise. pi generates
+-- too large to keep, so there are no complete runs to summarise. pi generates
 -- this as a second summary and merges it with the history summary; here the
 -- span is summarised in one pass with the prefix shape.
 local PREFIX_SUMMARY_PROMPT = table.concat({
@@ -97,7 +97,7 @@ local PREFIX_SUMMARY_PROMPT = table.concat({
   "[What did the user ask for in this turn?]",
   "",
   "## Early Progress",
-  "- [Key decisions and work done in the prefix]",
+  "- [Key steps and work done in the prefix]",
   "",
   "## Context for Suffix",
   "- [Information needed to understand the retained recent work]",
@@ -112,7 +112,7 @@ local COMPACT_RESERVE = 16384      -- tokens reserved for the reply (like pi)
 local COMPACT_KEEP = 20000         -- newest tokens left un-summarised (like pi)
 
 M.usage_total = {
-  prompt = 0, completion = 0, total = 0, cached = 0, cost = 0, turns = 0,
+  prompt = 0, completion = 0, total = 0, cached = 0, cost = 0, runs = 0,
   last = { prompt = 0, completion = 0, total = 0, cached = 0, cost = 0 },
 }
 
@@ -353,7 +353,7 @@ function M:build_context()
   if session.summary and session.summary ~= "" then
     messages[#messages + 1] = {
       role = "system",
-      content = "Summary of earlier turns in this session:\n" .. session.summary,
+      content = "Summary of earlier messages in this session:\n" .. session.summary,
     }
   end
   -- Recovery: if this thread has no recorded answer, the model has to be told, because
@@ -362,16 +362,16 @@ function M:build_context()
   -- may have run without its result being written, and it may have run twice.
   -- Context-only by design - the transcript is what was said, and a synthetic
   -- turn in it would be replayed to every later request as if the agent had said
-  -- it (and indexed by search_turns).
+  -- it (and indexed by search_messages).
   if self.resume_notice then
     messages[#messages + 1] = { role = "system", content = self.resume_notice }
   end
-  local rows = memory.session_turns(self.session_id, {
+  local rows = memory.session_messages(self.session_id, {
     after_seq = session.summarized_until or 0, all = true,exclude_summaries=true,
   })
   -- A window that begins with a tool result is missing the tool call it answers
   -- (it was summarised away, or the boundary was cut mid-exchange). Providers
-  -- reject an orphan tool result with a 400, so drop leading tool turns until
+  -- reject an orphan tool result with a 400, so drop leading tool messages until
   -- the window starts on a real message. Compaction avoids creating such a
   -- boundary, but this keeps a rebuilt context valid regardless.
   local started = false
@@ -398,7 +398,7 @@ function M:build_context()
     end
   end
 
-  -- A tool call and its result are recorded as separate turns, so a turn that
+  -- A tool call and its result are recorded as separate messages, so a message that
   -- dies between them leaves a half-written exchange. Providers reject both
   -- halves - a call with no result, and a result with no call - with a 400 that
   -- would otherwise fail *every* later turn in this session, permanently
@@ -500,7 +500,7 @@ function M:maybe_compact(messages)
   if before <= trigger then return false end
 
   local session = memory.session(self.session_id) or {}
-  local rows = memory.session_turns(self.session_id, {
+  local rows = memory.session_messages(self.session_id, {
     after_seq = session.summarized_until or 0, all = true,exclude_summaries=true,
   })
   if #rows < 4 then return false end
@@ -570,7 +570,7 @@ function M:maybe_compact(messages)
     cut_index=bounded_cut
     while cut_index>=1 and (rows[cut_index].role=='tool' or rows[cut_index+1].role=='tool') do cut_index=cut_index-1 end
     if cut_index<1 then
-      telemetry.event(self.session_id,self.turn_id,'','compact','failed',{ok=false,error='summary_input_exceeds_capacity',before=before})
+      telemetry.event(self.session_id,self.run_id,'','compact','failed',{ok=false,error='summary_input_exceeds_capacity',before=before})
       self.emit({type='status',text='compaction cannot fit the next complete exchange; transcript preserved'})
       return false
     end
@@ -617,11 +617,11 @@ function M:maybe_compact(messages)
   -- cache = false: a one-off prompt must not read or write the conversation's
   -- cache (pi does the same, to avoid paying a cache-write premium for nothing).
   local ok, result = pcall(provider.complete_with, self:summary_model(), prompt, nil, false,
-    {cache=false,session_id=self.session_id,turn_id=self.turn_id,kind="summary",max_output=math.floor(reserve*.8)})
+    {cache=false,session_id=self.session_id,run_id=self.run_id,kind="summary",max_output=math.floor(reserve*.8)})
   if not ok or provider.visible_text(type(result)=="table" and result.content or "")==""
       or (type(result)=="table" and (result.finish_reason=="length" or #(result.tool_calls or {})>0)) then
     local problem=type(result)=="table" and ("invalid summary: "..tostring(result.finish_reason or "empty/tool response")) or tostring(result)
-    telemetry.event(self.session_id,self.turn_id,"","compact","failed",{ok=false,error=redact.text(problem),before=before})
+    telemetry.event(self.session_id,self.run_id,"","compact","failed",{ok=false,error=redact.text(problem),before=before})
     self.emit({ type = "status", text = "compaction failed: " .. redact.text(problem):sub(1, 120) })
     return false
   end
@@ -650,7 +650,7 @@ function M:maybe_compact(messages)
       ms = math.floor((host.now() - started) * 1000),
     } },
   })
-  telemetry.event(self.session_id,self.turn_id,"","compact","applied",{ok=true,
+  telemetry.event(self.session_id,self.run_id,"","compact","applied",{ok=true,
     summarized_from=(session.summarized_until or 0)+1,summarized_until=cut.seq,
     before=before,after_estimate=after,summary_bytes=#merged,invalidates_cache=true})
   self.emit({ type = "compact", through = cut.seq, tokens_before = before, tokens_after = after })
@@ -661,7 +661,7 @@ end
 --
 -- The moment to look is the first turn of a process, *before* the new question is
 -- appended: at that point the transcript's tail is still the previous turn's, and a
--- tail that is a question, a tool result or a decision with no recorded result means
+-- tail that is a question, a tool result or a step with no recorded result means
 -- no answer was ever written. It does *not* mean the other process is dead - it may
 -- still be working, which is the case that made "interrupted" a word this code should
 -- never have used - so the notice states both possibilities rather than picking one.
@@ -684,7 +684,7 @@ function M:note_interruption()
     local question = tostring(state.question):gsub("%s+", " ")
     work = 'The question "' .. question:sub(1, 160) .. '" was never answered.'
   elseif #state.pending > 0 then
-    work = "The last decision was to run " .. table.concat(state.pending, ", ")
+    work = "The last step was to run " .. table.concat(state.pending, ", ")
       .. ", and no result for it is recorded."
   else
     work = "The transcript ends after a tool result, so nothing is recorded about what came next."
@@ -701,8 +701,8 @@ function M:note_interruption()
 end
 
 function M:turn(text, images)
-  self.turn_id=host.uuid()
-  local span=telemetry.start({session_id=self.session_id,turn_id=self.turn_id},'turn_span',{})
+  self.run_id=host.uuid()
+  local span=telemetry.start({session_id=self.session_id,run_id=self.run_id},'turn_span',{})
   provider.pin()
   local ok,result=pcall(self.run_turn,self,text,images)
   provider.unpin()
@@ -718,14 +718,14 @@ function M:run_turn(text, images)
   self.debug = (memory.session(self.session_id) or {}).mode == "debug"
 
   memory.append_turn(self.session_id, {
-    id=self.turn_id,role = "user", content = text, images = images or {}, debug = self.debug,
+    id=self.run_id,role = "user", content = text, images = images or {}, debug = self.debug,
   })
 
   if not provider.configured() then
     local reply = self:local_turn(text)
     memory.append_turn(self.session_id, { role = "assistant", content = reply, debug = self.debug })
     self.emit({ type = "reply", text = reply })
-    telemetry.event(self.session_id,self.turn_id,"","turn","end",{outcome="local_fallback"})
+    telemetry.event(self.session_id,self.run_id,"","turn","end",{outcome="local_fallback"})
     return reply
   end
 
@@ -741,7 +741,7 @@ function M:run_turn(text, images)
   self.changes = changeset.new()
   local tool_list = self.tool_list or tools.all(self.role)
   -- Fingerprint of the *stable* prefix (system + AGENTS.md + tool schemas).
-  -- Identical across turns unless instructions or tools change, which is what a
+  -- Identical across runs unless instructions or tools change, which is what a
   -- provider needs in order to serve the prefix from its KV/context cache.
   local prefix_fingerprint = host.sha256(
     tostring(messages[1] and messages[1].content or "") .. json.encode(tool_list))
@@ -772,7 +772,7 @@ function M:run_turn(text, images)
     local context_tokens,context_source=self:context_tokens(messages)
     local capacity=provider.budget(self.model).context or 0
     if capacity>0 and context_tokens>=capacity then
-      telemetry.event(self.session_id,self.turn_id,"","turn","end",{outcome="context_overflow",context_estimate=context_tokens})
+      telemetry.event(self.session_id,self.run_id,"","turn","end",{outcome="context_overflow",context_estimate=context_tokens})
       error("context_overflow: compaction could not make a valid next request; transcript preserved")
     end
     -- Two rounds before the runaway guard, ask the model to wrap up. This is
@@ -784,9 +784,9 @@ function M:run_turn(text, images)
         .. "changed, commit it, and state plainly what is unfinished." }
       self.emit({ type = "status", text = "runaway guard reached - asking the model to wrap up" })
     end
-    -- One round is one decision. Announcing it lets the UI close the previous
-    -- decision's text and tool topic, so the transcript reads decision -> its
-    -- tools -> next decision, instead of every tool topic stacked behind one
+    -- One round is one step. Announcing it lets the UI close the previous
+    -- step's text and tool topic, so the transcript reads step -> its
+    -- tools -> next step, instead of every tool topic stacked behind one
     -- growing block of text.
     -- Proof of life for the node's own watchdog: the interpreter is working, so a
     -- /health check can tell this from a wedged turn. Cheap (an atomic store).
@@ -800,7 +800,7 @@ function M:run_turn(text, images)
       self.emit({ type = "status", text = agents_var .. " configured but unreadable: " .. configured_agents })
     end
     local ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream,
-      {session_id=self.session_id,turn_id=self.turn_id,round=round,context_tokens=context_tokens,
+      {session_id=self.session_id,run_id=self.run_id,round=round,context_tokens=context_tokens,
        context={estimate_source=context_source,summary_watermark=(memory.session(self.session_id) or {}).summarized_until or 0}})
     if not ok then
       trace[#trace + 1] = { kind = "llm", model = self.model, ok = false,
@@ -809,7 +809,7 @@ function M:run_turn(text, images)
         role = "assistant", content = "", ok = false, trace = trace, debug = self.debug,
         ms = math.floor((host.now() - turn_started) * 1000),
       })
-      telemetry.event(self.session_id,self.turn_id,"","turn","end",{outcome="provider_failed"})
+      telemetry.event(self.session_id,self.run_id,"","turn","end",{outcome="provider_failed"})
       error(result)
     end
 
@@ -874,7 +874,7 @@ function M:run_turn(text, images)
         failed_span.reasoning_bytes=#(result.reasoning or "")
       end
       memory.append_turn(self.session_id,{role="assistant",content=result.content or "",reasoning=result.reasoning or "",ok=false,trace=trace})
-      telemetry.event(self.session_id,self.turn_id,"","turn","end",{outcome=reason})
+      telemetry.event(self.session_id,self.run_id,"","turn","end",{outcome=reason})
       error(problem)
     end
     if #calls > 0 then assistant.tool_calls = calls end
@@ -904,7 +904,7 @@ function M:run_turn(text, images)
           role = "assistant", content = "", reasoning=reply_reasoning, ok = false, trace = trace, debug = self.debug,
           ms = math.floor((host.now() - turn_started) * 1000),
         })
-        telemetry.event(self.session_id,self.turn_id,"","turn","end",{outcome="empty_reply"})
+        telemetry.event(self.session_id,self.run_id,"","turn","end",{outcome="empty_reply"})
         error(reason)
       end
       -- The final assistant message is recorded once, after the loop, with the
@@ -935,7 +935,7 @@ function M:run_turn(text, images)
       end
       self.emit(emitted)
       local tool_started = host.now()
-      local tool_span=telemetry.start({session_id=self.session_id,turn_id=self.turn_id},"tool",
+      local tool_span=telemetry.start({session_id=self.session_id,run_id=self.run_id},"tool",
         {name=function_.name,call_id=call.id,round=round,arguments_hash=host.sha256(function_.arguments or "")})
       host.beat()
       local handled, output = pcall(function() if argument_error then return {error=argument_error} end
@@ -987,22 +987,22 @@ function M:run_turn(text, images)
   -- The turn id is minted here rather than by append_turn, because the reply event has to
   -- name the turn *before* the record exists: the UI's topic carries the id it will ask
   -- about, and append_turn uses the same one so the topic and the ledger agree.
-  local turn_id = host.uuid()
+  local message_id = host.uuid()
   memory.append_turn(self.session_id, {
-    id = turn_id,ok=completed,
+    id = message_id,ok=completed,
     role = "assistant", content = reply, reasoning=reply_reasoning, trace = trace, tokens = turn.total, debug = self.debug,
     ms = math.floor((host.now() - turn_started) * 1000),
     changes = changes,
   })
-  memory.record_run(self.turn_id, self.session_id, completed and "completed" or "incomplete", completed and "answered" or "runaway_guard", reply)
-  telemetry.event(self.session_id,self.turn_id,"","turn","end",{outcome=completed and "answered" or "runaway_guard",assistant_turn_id=turn_id})
-  M.usage_total.turns = M.usage_total.turns + 1
+  memory.record_run(self.run_id, self.session_id, completed and "completed" or "incomplete", completed and "answered" or "runaway_guard", reply)
+  telemetry.event(self.session_id,self.run_id,"","turn","end",{outcome=completed and "answered" or "runaway_guard",assistant_message_id=message_id})
+  M.usage_total.runs = M.usage_total.runs + 1
   M.usage_total.last = turn
   self.emit({ type = "usage", total = M.usage_total, model = self.model })
 
   -- The diff goes with the reply: the topic belongs to this bubble, and the reader should
   -- not need a second request to learn what the turn touched.
-  self.emit({ type = "reply", text = reply, changes = changes, turn_id = turn_id })
+  self.emit({ type = "reply", text = reply, changes = changes, turn_id = message_id })
   return reply
 end
 
@@ -1010,7 +1010,7 @@ end
 function M:local_turn(text)
   local lines = {}
   for _, row in ipairs(memory.recall(text, 5)) do lines[#lines + 1] = "- " .. row.content end
-  for _, row in ipairs(memory.search_messages(text, nil, 5)) do
+  for _, row in ipairs(memory.search_ledger(text, nil, 5)) do
     lines[#lines + 1] = "- [" .. row.conversation_id .. "] " .. row.body
   end
   if #lines == 0 then return "No provider is configured and nothing in memory matched." end

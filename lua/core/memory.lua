@@ -69,7 +69,7 @@ local decode_calls, classify, ago, detail_of
 -- ---------------------------------------------------------------- the naming migration
 --
 -- ARCHITECTURE.md section 6 settles what these words mean, and three different things used to share
--- two of them: `session_turns()` returned *messages*, `turn_id` identified a *run* in one place and a
+-- two of them: `session_messages()` returned *messages*, `turn_id` identified a *run* in one place and a
 -- *message* in another, and the UI said "this turn" meaning the run. The names move once, here.
 --
 -- Two properties this has to have, both of them paid for elsewhere in this project:
@@ -190,7 +190,7 @@ local function migrate()
   -- are in their own columns and are untouched. Idempotent: a second run matches nothing.
   exec("UPDATE sessions SET interrupted_reason = replace(interrupted_reason, 'died after a tool result', 'stopped after a tool result') WHERE interrupted_reason LIKE '%died after a tool result%'")
   exec("UPDATE sessions SET interrupted_reason = replace(interrupted_reason, 'died right after a compaction', 'stopped right after a compaction') WHERE interrupted_reason LIKE '%died right after a compaction%'")
-  exec("UPDATE sessions SET interrupted_reason = replace(interrupted_reason, 'died after a decision', 'stopped after a decision') WHERE interrupted_reason LIKE '%died after a decision%'")
+  exec("UPDATE sessions SET interrupted_reason = replace(interrupted_reason, 'died after a decision', 'stopped after a step') WHERE interrupted_reason LIKE '%died after a decision%'")
 end
 
 function M.setup()
@@ -339,7 +339,7 @@ function M.record_message(message)
   end
 end
 
-function M.search_messages(text, conversation_id, limit)
+function M.search_ledger(text, conversation_id, limit)
   limit = limit or 20
   local match = M.fts_query(text)
   if match == "" then return {} end
@@ -376,10 +376,10 @@ function M.stats()
   return {
     memories = count("SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL"),
     conversations = count("SELECT COUNT(*) FROM conversations"),
-    messages = count("SELECT COUNT(*) FROM ledger_messages"),
+    ledger_messages = count("SELECT COUNT(*) FROM ledger_messages"),
     observations = count("SELECT COUNT(*) FROM observations"),
     sessions = count("SELECT COUNT(*) FROM sessions"),
-    turns = count("SELECT COUNT(*) FROM messages"),
+    messages = count("SELECT COUNT(*) FROM messages"),
     runs = count("SELECT COUNT(*) FROM runs"),
   }
 end
@@ -439,7 +439,7 @@ end
 function M.list_sessions(user_id, limit, opts)
   opts = opts or {}
   limit = limit or 30
-  local sql = "SELECT s.*, (SELECT COUNT(*) FROM messages t WHERE t.session_id=s.id) AS turn_count"
+  local sql = "SELECT s.*, (SELECT COUNT(*) FROM messages t WHERE t.session_id=s.id) AS message_count"
   if opts.states then
     -- The last turn per session, in the same query: one row per thread, no N+1.
     sql = sql .. ", l.role AS last_role, l.ok AS last_ok, l.tool_calls AS last_tool_calls, " ..
@@ -485,7 +485,7 @@ function M.finish_session(session_id)
   M.journal("session", session_id, M.session(session_id))
 end
 
--- ------------------------------------------------------------------- turns
+-- ---------------------------------------------------------------- messages
 
 local cached_origin = nil
 local function origin()
@@ -507,7 +507,7 @@ end
 -- -------------------------------------------------------------------- images
 -- Attached images live on disk, content-addressed by sha256, and are referenced
 -- from a turn by identity. Three reasons it is a file and not a column:
---   1. `turns.content` is FTS-indexed; base64 there would poison every search.
+--   1. `messages.content` is FTS-indexed; base64 there would poison every search.
 --   2. The same screenshot pasted twice is stored once.
 --   3. The path is stable, so replays and fixtures can resolve it.
 --
@@ -706,9 +706,9 @@ end
 -- were current. Nobody wants the head of a window; they want the tail.
 --
 -- `limit` bounds the window and `after_seq` moves its start. To know whether rows
--- were dropped, compare with M.turn_count(session_id) - the tool that shows a session
+-- were dropped, compare with M.message_count(session_id) - the tool that shows a session
 -- to the model says so in words, because a silent truncation is a memory bug.
-function M.session_turns(session_id, opts)
+function M.session_messages(session_id, opts)
   opts = opts or {}
   local limit = opts.limit or 200
   local sql, params
@@ -741,15 +741,15 @@ function M.session_turns(session_id, opts)
   return rows
 end
 
--- One turn, by id, with its `changes` decoded the same way session_turns decodes it.
+-- One turn, by id, with its `changes` decoded the same way session_messages decodes it.
 --
 -- Undo works from a turn id rather than from a position: the reader clicks a topic in the
 -- transcript, and what identifies that topic has to survive a reload, a compaction and a
 -- second reader. A sequence number would not - the window moves - and the id is what the
 -- journal already replicates, so a peer's turn resolves here too.
-function M.turn(turn_id)
-  if not turn_id or turn_id == "" then return nil end
-  local rows = query("SELECT * FROM messages WHERE id=?", {turn_id})
+function M.message(message_id)
+  if not message_id or message_id == "" then return nil end
+  local rows = query("SELECT * FROM messages WHERE id=?", {message_id})
   local row = rows[1]
   if not row then return nil end
   row.tool_calls = json.decode(row.tool_calls)
@@ -760,7 +760,7 @@ function M.turn(turn_id)
   return row
 end
 
-function M.search_turns(text, user_id, limit)
+function M.search_messages(text, user_id, limit)
   limit = limit or 20
   local match = M.fts_query(text)
   if match == "" then return {} end
@@ -787,14 +787,14 @@ end
 --                errored. That is a landed outcome, not an interruption, and
 --                conflating the two would send a reader looking for lost work
 --                that was never started.
---   unfinished   last turn is a question, a tool result, or a decision whose tools
+--   unfinished   last message is a question, a tool result, or a step whose tools
 --                have no recorded result. The process that was working on it may
 --                have stopped, or it may still be working - the ledger cannot tell
 --                those apart, so nothing here claims a death.
 --
 -- This state was called `interrupted`, and the word cost real credibility: a live
 -- 426-turn run was reported as interrupted on every poll while it was demonstrably
--- writing turns. A name that asserts something we cannot observe is a claim the code
+-- writing messages. A name that asserts something we cannot observe is a claim the code
 -- should not make. The durable history (`mark_unfinished`) is the part that *is*
 -- observable: a thread was picked up again after being left unfinished.
 --
@@ -837,7 +837,7 @@ end
 -- session) all of the last turn's calls are named, and the wording says "tool
 -- call(s) never reported" rather than claiming they never ran.
 function detail_of(state, last, pending)
-  if state == "empty" then return "no turns yet" end
+  if state == "empty" then return "no messages yet" end
   if state == "answered" then return "settled - the last turn is a reply" end
   if state == "failed" then return "the last turn failed (the model call errored)" end
   if not last then return "nothing is recorded after the last turn" end
@@ -855,35 +855,35 @@ function detail_of(state, last, pending)
       #names, #names > 0 and table.concat(names, ", ") or "unnamed", ago(last.created_at))
   end
   -- The tail is a tool result: something did report, so the interesting fact is
-  -- which calls of that same decision did not.
+  -- which calls of that same step did not.
   if pending and #pending > 0 then
     return string.format("stopped after a tool result; %d call(s) of that batch have no recorded result: %s, %s",
       #pending, table.concat(pending, ", "), ago(last.created_at))
   end
-  return "stopped after a tool result with no next decision, " .. ago(last.created_at)
+  return "stopped after a tool result with no next step, " .. ago(last.created_at)
 end
 
--- Which calls of the tail's own decision never reported a result. Returns the
--- pending names and how many calls the decision had (nil when there is no such
--- decision), because "1 of 2 never reported" and "1 of 1 never reported" are
+-- Which calls of the tail's own step never reported a result. Returns the
+-- pending names and how many calls the step had (nil when there is no such
+-- step), because "1 of 2 never reported" and "1 of 1 never reported" are
 -- different facts about the same tail.
 --
--- The tail is not always the decision: a batched decision writes one turn per
+-- The tail is not always the step: a batched step writes one turn per
 -- call, so a process killed between two calls leaves a *tool* turn on top with
 -- its sibling never run. That is the sharpest thing recovery can tell a reader -
--- which of the batch is missing - and it is only visible by looking the decision
+-- which of the batch is missing - and it is only visible by looking the step
 -- up, not at the tail.
 function M.pending_calls(session_id)
   local rows = query("SELECT tool_calls FROM messages WHERE session_id=? AND role='assistant' " ..
                      "AND tool_calls <> '[]' ORDER BY seq DESC LIMIT 1", {session_id})
-  local decision = rows[1]
-  if not decision then return nil, nil end
+  local step = rows[1]
+  if not step then return nil, nil end
   local answered = {}
   for _, row in ipairs(query("SELECT tool_call_id FROM messages WHERE session_id=? AND role='tool'",
                              {session_id})) do
     answered[row.tool_call_id] = true
   end
-  local calls, pending = decode_calls(decision.tool_calls), {}
+  local calls, pending = decode_calls(step.tool_calls), {}
   for _, call in ipairs(calls) do
     if not answered[call.id or ""] then
       pending[#pending + 1] = ((call["function"] or {}).name or "?")
@@ -905,7 +905,7 @@ function M.session_state(session_id)
   if state == "unfinished" and last and (last.role == "assistant" or last.role == "tool") then
     local total
     pending, total = M.pending_calls(session_id)
-    -- A tool tail whose result matches none of the decision's calls: the ledger
+    -- A tool tail whose result matches none of the step's calls: the ledger
     -- says a result arrived but not which call it answered, so the batch's state
     -- is unknown. Claiming "2 of 2 never reported" there would be a lie.
     if last.role == "tool" and pending and total and #pending == total then pending = nil end
@@ -927,7 +927,7 @@ function M.session_state(session_id)
   }
 end
 
-function M.turn_count(session_id)
+function M.message_count(session_id)
   local rows = query("SELECT COUNT(*) AS n FROM messages WHERE session_id=?", {session_id})
   return tonumber(rows[1] and rows[1].n) or 0
 end
@@ -961,7 +961,7 @@ function M.unfinished(user_id, limit)
     if row.state == "unfinished" then
       local state = M.session_state(row.id)
       if state then
-        state.turns = tonumber(row.turn_count) or 0
+        state.messages = tonumber(row.message_count) or 0
         found[#found + 1] = state
       end
     end
@@ -988,7 +988,7 @@ function M.session_fixture(session_id)
   return {
     schema = "wasm-agent.session_fixture.v1",
     session = session,
-    turns = M.session_turns(session_id, { all = true }),
+    turns = M.session_messages(session_id, { all = true }),
   }
 end
 

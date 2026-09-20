@@ -29,7 +29,7 @@ M.shared = {
     content = { type = "string", description = "The fact to remember, in full." },
     scope = { type = "string", description = "Optional scope, e.g. global or a conversation id." },
     tags = { type = "array", items = { type = "string" } } }, { "content" }),
-  schema("recall", "Look up facts the user previously asked you to remember. Call this before answering any question about the user, their preferences, names, codewords, settings, accounts, or earlier decisions - and before saying you do not know. The store is small and lookup is cheap; guessing is not.", {
+  schema("recall", "Look up facts the user previously asked you to remember. Call this before answering any question about the user, their preferences, names, codewords, settings, accounts, or earlier steps - and before saying you do not know. The store is small and lookup is cheap; guessing is not.", {
     query = { type = "string", description = "What to look for, in the user's own words." },
     scope = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 50 } }, { "query" }),
@@ -41,21 +41,21 @@ M.shared = {
   schema("capabilities", "List the tools available to this account (its capabilities).", {}),
   schema("sessions", "List your own past sessions (resumable threads), most recent first.", {
     limit = { type = "integer", minimum = 1, maximum = 100 } }),
-  schema("session", "Read a session. Defaults to newest turns; pass next_before_seq back as before_seq to retrieve earlier evidence.", {
+  schema("session", "Read a session. Defaults to newest messages; pass next_before_seq back as before_seq to retrieve earlier evidence.", {
     session_id = { type = "string" },
     before_seq = { type = "integer", minimum = 1 },
     limit = { type = "integer", minimum = 1, maximum = 1000 } }, { "session_id" }),
-  schema("search_turns", "Search your own past sessions for text (what did we decide about X?).", {
+  schema("search_messages", "Search your own past sessions for text (what did we decide about X?).", {
     query = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 50 } }, { "query" }),
-  schema("resume_session", "Fold a past session into this one: its summary and recent turns become context.", {
+  schema("resume_session", "Fold a past session into this one: its summary and recent messages become context.", {
     session_id = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 100 } }, { "session_id" }),
 }
 
 -- Admin only: the ledger and the pi-style environment tools.
 M.admin = {
-  schema("search_messages", "Search the message ledger (WhatsApp/chat history) for literal text.", {
+  schema("search_ledger", "Search the message ledger (WhatsApp/chat history) for literal text.", {
     query = { type = "string" },
     conversation_id = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 50 } }, { "query" }),
@@ -79,7 +79,7 @@ M.admin = {
     path = { type = "string" },
     offset = { type = "integer", minimum = 1 },
     limit = { type = "integer", minimum = 1, maximum = 2000 } }, { "path" }),
-  schema("read_many", "Read several independent files or line ranges in one decision. Results match individual read calls in request order; each item reports its own error.", {
+  schema("read_many", "Read several independent files or line ranges in one step. Results match individual read calls in request order; each item reports its own error.", {
     requests = { type = "array", minItems = 1, maxItems = 8, items = { type = "object",
       properties = { path = { type = "string" }, offset = { type = "integer", minimum = 1 },
         limit = { type = "integer", minimum = 1, maximum = 2000 } }, required = { "path" } } }
@@ -127,7 +127,7 @@ M.admin = {
   schema("spell_list", "List saved spells with version and parameter names.", {}),
   schema("spell_get", "Read one saved spell in full.", { name = { type = "string" } }, { "name" }),
   schema("spell_forget", "Delete a saved spell.", { name = { type = "string" } }, { "name" }),
-  schema("spell_export", "Write a spell out as a portable JSON plan for the sentinel to run outside this node. Use it for a spell containing a `sentinel` step (one that restarts or upgrades this node): such a plan cannot run here, because the turn doing the work dies with the node it changes and its postconditions could never be observed. Returns the file path; run it with: wa-sentinel request spell --file <path> --reason \"...\".", {
+  schema("spell_export", "Write a spell out as a portable JSON plan for the sentinel to run outside this node. Use it for a spell containing a `sentinel` step (one that restarts or upgrades this node): such a plan cannot run here, because the run doing the work dies with the node it changes and its postconditions could never be observed. Returns the file path; run it with: wa-sentinel request spell --file <path> --reason \"...\".", {
     name = { type = "string" },
     params = { type = "object", description = "Values for the spell's declared parameters." },
     binary = { type = "string", description = "For an `upgrade` step: the wa binary to install. Defaults to the step's own value." },
@@ -140,7 +140,7 @@ M.admin = {
   schema("session_debug", "Set a session's recording mode. debug keeps every turn verbatim and forever, so a failing task can be reproduced and exported as a fixture.", {
     session_id = { type = "string", description = "Defaults to the current session." },
     mode = { type = "string", enum = { "default", "debug" } } }, { "mode" }),
-  schema("session_fixture", "Export a session (turns, tool calls, traces) as a reproducible fixture for regression tests.", {
+  schema("session_fixture", "Export a session (messages, tool calls, traces) as a reproducible fixture for regression tests.", {
     session_id = { type = "string", description = "Defaults to the current session." } }),
 }
 
@@ -150,12 +150,12 @@ M.tier_of = {
   remember = "memory", recall = "memory", memories = "memory", forget = "memory",
   skill = "skills",
   capabilities = "capabilities",
-  sessions = "sessions", session = "sessions", search_turns = "sessions",
+  sessions = "sessions", session = "sessions", search_messages = "sessions",
   resume_session = "sessions", session_debug = "sessions", session_fixture = "sessions",
   bash = "environment", read = "environment", write = "environment",
   edit = "environment", ls = "environment", grep = "environment",
   shell = "shell",
-  search_messages = "ledger", conversation = "ledger", list_conversations = "ledger",
+  search_ledger = "ledger", conversation = "ledger", list_conversations = "ledger",
   client = "client",
   spell_save = "spells", spell_run = "spells", spell_list = "spells",
   spell_get = "spells", spell_forget = "spells", spell_export = "spells",
@@ -285,8 +285,8 @@ function M.dispatch(memory, name, args, role, ctx)
       end
     end
     return { role = role, capabilities = list, note = "ask a master to unlock more" }
-  elseif name == "search_messages" then
-    return memory.search_messages(args.query or "", args.conversation_id, args.limit or 20)
+  elseif name == "search_ledger" then
+    return memory.search_ledger(args.query or "", args.conversation_id, args.limit or 20)
   elseif name == "conversation" then
     return memory.conversation(args.conversation_id or "", args.limit or 50)
   elseif name == "list_conversations" then
@@ -394,33 +394,33 @@ function M.dispatch(memory, name, args, role, ctx)
     local session = memory.session(args.session_id)
     if not session then return { error = "unknown_session" } end
     if session.user_id ~= user_id and not is_master(role) then return { error = "forbidden" } end
-    local turns = memory.session_turns(args.session_id, { limit = math.min(1000,math.max(1,tonumber(args.limit) or 200)),before_seq=tonumber(args.before_seq) })
-    -- Say when it is a window. A model that reads 200 of 260 turns without being told
+    local messages = memory.session_messages(args.session_id, { limit = math.min(1000,math.max(1,tonumber(args.limit) or 200)),before_seq=tonumber(args.before_seq) })
+    -- Say when it is a window. A model that reads 200 of 260 messages without being told
     -- will treat the oldest row it can see as the start of the thread, which is how
     -- ancient history reads as current state.
-    local total = memory.turn_count(args.session_id)
+    local total = memory.message_count(args.session_id)
     local note
-    if total > #turns then
-      note = string.format("showing %d of %d turns; %d are outside this page; use before_seq for earlier evidence",
-        #turns, total, total - #turns)
-      if not args.before_seq then note=string.format("showing the newest %d of %d turns; use before_seq for earlier evidence",#turns,total) end
+    if total > #messages then
+      note = string.format("showing %d of %d messages; %d are outside this page; use before_seq for earlier evidence",
+        #messages, total, total - #messages)
+      if not args.before_seq then note=string.format("showing the newest %d of %d messages; use before_seq for earlier evidence",#messages,total) end
     end
-    return { session = session, turns = turns, note = note,next_before_seq=turns[1] and turns[1].seq }
-  elseif name == "search_turns" then
-    return { matches = memory.search_turns(args.query or "", is_master(role) and nil or user_id, args.limit or 20) }
+    return { session = session, messages = messages, note = note,next_before_seq=messages[1] and messages[1].seq }
+  elseif name == "search_messages" then
+    return { matches = memory.search_messages(args.query or "", is_master(role) and nil or user_id, args.limit or 20) }
   elseif name == "resume_session" then
     local target = memory.session(args.session_id)
     if not target then return { error = "unknown_session" } end
     if target.user_id ~= user_id and not is_master(role) then return { error = "forbidden" } end
-    local turns = memory.session_turns(args.session_id, { limit = args.limit or 30 })
+    local messages = memory.session_messages(args.session_id, { limit = args.limit or 30 })
     local lines = { "Resumed session " .. args.session_id .. " (" .. (target.title or "") .. "):" }
-    local total = memory.turn_count(args.session_id)
-    if total > #turns then
+    local total = memory.message_count(args.session_id)
+    if total > #messages then
       lines[#lines + 1] = string.format("(%d earlier turns omitted; showing the newest %d)",
-        total - #turns, #turns)
+        total - #messages, #messages)
     end
     if target.summary and target.summary ~= "" then lines[#lines + 1] = target.summary end
-    for _, turn in ipairs(turns) do
+    for _, message in ipairs(messages) do
       if turn.role == "user" or turn.role == "assistant" then
         lines[#lines + 1] = turn.role .. ": " .. (turn.content or ""):sub(1, 400)
       end
@@ -431,7 +431,7 @@ function M.dispatch(memory, name, args, role, ctx)
       if merged ~= "" then merged = merged .. "\n" end
       memory.set_session_summary(ctx.session_id, current.summarized_until or 0, merged .. table.concat(lines, "\n"))
     end
-    return { resumed = args.session_id, turns = #turns }
+    return { resumed = args.session_id, messages = #messages }
   elseif name == "session_debug" then
     local id = args.session_id or ctx.session_id
     if not id then return { error = "session_id_required" } end

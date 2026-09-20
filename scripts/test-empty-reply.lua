@@ -108,8 +108,8 @@ checks = checks + 1
 if state ~= "failed" then
   error("a turn that produced nothing must be recorded as failed, got state=" .. tostring(state))
 end
-local turns = memory.session_turns(session_id)
-local last = turns and turns[#turns] or nil
+local messages = memory.session_messages(session_id)
+local last = messages and messages[#messages] or nil
 checks = checks + 1
 if not last or last.ok ~= 0 then
   error("the failed turn must be recorded with ok=false, got: " .. json.encode(last or {}))

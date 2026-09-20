@@ -35,9 +35,9 @@ local shape=telemetry.prompt_shape({
 check(shape.reasoning_source_bytes==8 and shape.tool_arguments_source_bytes==16 and shape.tool_calls==1 and shape.tool_results==1,'request shape separates assistant subsets and tool results')
 check(shape.system_bytes==#json.encode({role='system',content='rules'}) and shape.tool_result_bytes==#json.encode({role='tool',tool_call_id='call',content='file body'}),'role sizes are exact serialized JSON bytes')
 local sid=session('durability')
-local span=telemetry.start({session_id=sid,turn_id='turn'},'llm',{model='fixture'})
+local span=telemetry.start({session_id=sid,run_id="run"},'llm',{model='fixture'})
 telemetry.finish(span,{ok=true,usage=raw,normalized=normalized})
-local summary=telemetry.start({session_id=sid,turn_id='turn'},'summary',{})
+local summary=telemetry.start({session_id=sid,run_id="run"},'summary',{})
 telemetry.finish(summary,{ok=false,error='summary_failed',normalized=telemetry.normalize(nil)})
 telemetry.start({session_id=sid,turn_id='unfinished'},'llm',{})
 telemetry.event(sid,'turn','','turn','end',{outcome='answered'})
@@ -88,14 +88,14 @@ local scalar_view=json.decode(output.project('plugin',string.rep('x',90000)))
 check(scalar_view.omitted and #json.encode(scalar_view)<=output.MAX_BYTES
   and json.decode(host.read_file(scalar_view.full_result.path))==string.rep('x',90000),
   'large scalar plugin output is bounded and exactly retrievable')
-local history_page={session={id='older-session',title='previous work',summary='checkpoint'},turns={}}
-for i=1,30 do history_page.turns[i]={seq=i,role='tool',content=string.rep('evidence '..i..' ',250)} end
+local history_page={session={id='older-session',title='previous work',summary='checkpoint'},messages={}}
+for i=1,30 do history_page.messages[i]={seq=i,role='tool',content=string.rep('evidence '..i..' ',250)} end
 history_page.next_before_seq=1
 local history_view=json.decode(output.project('session',history_page))
-check(#json.encode(history_view)<=output.MAX_BYTES and history_view.omitted and history_view.view_omitted_turns>0,
+check(#json.encode(history_view)<=output.MAX_BYTES and history_view.omitted and history_view.view_omitted_messages>0,
   'large session pages keep only a bounded model view')
-check(history_view.turns[#history_view.turns].seq==30 and history_view.next_before_seq==history_view.turns[1].seq,
-  'session view retains newest turns and a truthful pagination cursor')
+check(history_view.messages[#history_view.messages].seq==30 and history_view.next_before_seq==history_view.messages[1].seq,
+  'session view retains newest messages and a truthful pagination cursor')
 check(host.read_file(history_view.full_result.path)==json.encode(history_page),
   'full session page is exactly retrievable from the artifact')
 local write=host.write_file
@@ -120,8 +120,8 @@ memory.append_turn(legacy,{role='tool',tool_call_id='old-session-call',tool_name
 local legacy_context=agentlib.new(legacy,function() end,'master','master',''):build_context()
 local legacy_view=json.decode(legacy_context[#legacy_context].content)
 check(#legacy_context[#legacy_context].content<=output.MAX_BYTES and legacy_view.omitted
-  and legacy_view.turns[#legacy_view.turns].seq==30,'rebuild bounds pre-existing nested output')
-check(memory.session_turns(legacy,{all=true})[3].content==legacy_original
+  and legacy_view.messages[#legacy_view.messages].seq==30,'rebuild bounds pre-existing nested output')
+check(memory.session_messages(legacy,{all=true})[3].content==legacy_original
   and host.read_file(legacy_view.full_result.path)==legacy_original,'legacy ledger remains byte-for-byte intact')
 local history=session('coverage')
 for i=1,620 do memory.append_turn(history,{role=i%2==1 and 'user' or 'assistant',content='ROW_'..i}) end
@@ -166,7 +166,7 @@ local backlog_bot=agentlib.new(backlog,function() end,'master','master','')
 check(backlog_bot:maybe_compact(),'oversized backlog compacted in a bounded prefix')
 check(memory.session(backlog).summary:find('read: source-one.lua',1,true) and memory.session(backlog).summary:find('read: source-two.lua',1,true),
   'compaction records every batched read path')
-check(#memory.session_turns(backlog,{all=true,after_seq=memory.session(backlog).summarized_until})>20,'uncovered backlog is not falsely marked summarized')
+check(#memory.session_messages(backlog,{all=true,after_seq=memory.session(backlog).summarized_until})>20,'uncovered backlog is not falsely marked summarized')
 provider.budget=budget
 
 -- Exercise the real request serializer/accounting and real agent tool loop.
@@ -185,12 +185,12 @@ local reply=bot:turn('test the accounting without network')
 check(#reply==12000,'final reply is not silently truncated at 8000')
 check(sent[1].thinking.type=='enabled' and sent[1].reasoning_effort=='high' and sent[1].max_tokens>0,'Pi-compatible reasoning and output budget actually sent')
 check(sent[2].messages[#sent[2].messages].content:find('invalid_tool_arguments_json',1,true)~=nil,'malformed JSON rejected before effects')
-local final=memory.session_turns(run,{limit=1})[1]
+local final=memory.session_messages(run,{limit=1})[1]
 check(final.reasoning=='final thought','final reasoning persisted for continuation')
 local events=telemetry.events(run,0,100).events
 local first_request; for _,event in ipairs(events) do if event.kind=='llm' and event.phase=='start' then first_request=event; break end end
 check(first_request.payload.request_hash==host.sha256(json.encode(sent[1])),'hash matches exact streaming request including stream options')
-check(memory.session_turns(run,{all=true})[1].id==first_request.run_id,'request trace links to its actual user turn')
+check(memory.session_messages(run,{all=true})[1].id==first_request.run_id,'request trace links to its actual user turn')
 report=original_dofile('lua/core/telemetry.lua').snapshot(run)
 check(report.total.calls==2 and report.tool_failures==1 and report.turns==1,'real loop durable outcomes')
 check(report.total.prompt==2000 and report.total.input==400,'actual loop uses disjoint cache categories')
