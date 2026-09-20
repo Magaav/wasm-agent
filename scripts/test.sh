@@ -77,6 +77,7 @@ esac
 if WASM_AGENT_LUA_ROOT="$WASM_AGENT_LUA_ROOT" "$BIN" --db "$DB" status 2>&1 | grep -q "refusing on-disk Lua"; then
   echo "FAIL: a scratch ledger is a candidate node and must not be refused" >&2; exit 1
 fi
+mkdir -p "$DB.home"
 if WASM_AGENT_HOME="$DB.home" WASM_AGENT_LUA_ROOT="$WASM_AGENT_LUA_ROOT" "$BIN" status >/dev/null 2>&1; then :; else
   echo "FAIL: a candidate home must not be refused" >&2; exit 1
 fi
