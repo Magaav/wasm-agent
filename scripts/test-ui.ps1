@@ -245,8 +245,8 @@ $harness = @'
         check(opened.length === 1, "clicking it must ask the shell for a window, saw " + opened.length);
         var url = opened.length === 1 ? opened[0].url : "";
         check(/[?&]view=patch/.test(url), "and the window must be the patch view, saw: " + url);
-        check(/[?&]path=/.test(url) && /[?&]turn=/.test(url),
-          "carrying the turn and the file it is about, saw: " + url);
+        check(/[?&]path=/.test(url) && /[?&]message=/.test(url),
+          "carrying the message and the file it is about, saw: " + url);
         check(!document.querySelector("wa-balloon.file-diff"),
           "and the balloon must hand over to it rather than linger");
         window.__setShell(null);

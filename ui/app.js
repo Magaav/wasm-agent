@@ -872,7 +872,7 @@ function restoreDraft() {
 // that built it the first time, so the two cannot drift apart.
 let replayingMessages = false;
 let replayMessageEndedAt = 0;
-function repaintMessages(messages) {
+function repaintMessages(rows) {
   // A repaint is a view of durable rows, not a resumed event stream. In particular, an
   // assistant tool call without a result must never inherit a live timer from this page.
   stopToolTicker();
@@ -888,7 +888,7 @@ function repaintMessages(messages) {
   let failed = 0;
   let firstFailure = "";
   replayingMessages = true;
-  for (const message of messages) {
+  for (const message of rows) {
     // Per message, so one malformed row cannot swallow the rest of the transcript. A repaint that
     // stops halfway is how "my own input is missing" becomes invisible: the rows before the throw
     // are drawn, the rows after it are not, and nothing says so.
@@ -934,7 +934,7 @@ function repaintMessages(messages) {
   replayingMessages = false;
   pin(true);
   if (failed) {
-    add("assistant", `repaint: ${rendered} of ${runs.length} runs drawn, ${failed} failed — first: ${firstFailure}`);
+    add("assistant", `repaint: ${rendered} of ${rows.length} messages drawn, ${failed} failed — first: ${firstFailure}`);
   }
   return { rendered, failed, firstFailure };
 }
