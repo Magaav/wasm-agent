@@ -73,6 +73,13 @@ Or just use the launcher, which sets it for you:
 scripts\dev-agent.cmd        # `wa chat` with this checkout's Lua core
 ```
 
+The launcher also gives the dev node its own home (`WASM_AGENT_HOME=<checkout>\.wasm-agent-dev`,
+gitignored), because a candidate node must not write the production ledger. It did, and the bill
+arrived as tokens: one ledger held 39 binaries and four `lua_root`s, both naming generations were
+written into the same tables, and each switch between the on-disk and the embedded core changed the
+request prefix, so the provider re-billed a whole ~400k-token prompt. Set `WASM_AGENT_HOME`
+yourself to put that node elsewhere, or run plain `wa chat` to use the installed node and its ledger.
+
 That is what makes self-evolution possible at all on a machine with no toolchain:
 the agent edits `lua/`, runs the installed binary, and sees the change
 immediately.

@@ -45,3 +45,7 @@ id_ecdsa*
 
 # Scratch files: the probe scripts a run writes for itself. The convention is the mechanism.
 tmp-*
+
+# A dev-mode node's own home (scripts/dev-agent.cmd): a candidate node must not write the
+# operator's ledger, and its database, identity and env copy are not source.
+.wasm-agent-dev/
