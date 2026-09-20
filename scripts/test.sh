@@ -684,7 +684,9 @@ WASM_AGENT_HOME="$DB.home" WA_SCRIPT=scripts/test-guest.lua "$BIN" --db "$DB.gue
 # to report ok forever while every endpoint that needs Lua hung with zero bytes. This
 # stalls the worker on purpose and requires the node to say so. No model needed, which
 # is why it runs here and not in the concurrency test's model half.
-WEDGE_ONLY=1 WA_BIN="$BIN" bash scripts/test-serve-concurrency.sh 8893 | grep "a stalled worker is visible"
+# Preserve the whole sub-suite output: grep used to hide the actual failing
+# pool/session assertion while leaving only an earlier passing wedge line.
+WEDGE_ONLY=1 WA_BIN="$BIN" bash scripts/test-serve-concurrency.sh 8893
 rm -f "$DB.window"*
 echo "recovery cli ok"
 
