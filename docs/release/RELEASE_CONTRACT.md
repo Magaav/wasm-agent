@@ -98,8 +98,18 @@ Full verification must use extracted archive bytes outside the repository, a
 scratch user/home/database/ports and no `WASM_AGENT_LUA_ROOT` or `WA_SCRIPT`.
 Do not let those tests reuse the live ledger, node keys or operator configuration.
 
-The candidate contains no public installer or setup wizard yet. Do not promote
-manual launch instructions to a claim that first-run onboarding is complete.
+The candidate now includes a fresh per-user installer and Windows launcher
+setup/doctor/ui commands. The installer refuses existing destinations; setup
+preserves user state, masks credential entry and restricts config-file permissions.
+Guest mode stages an offline profile only. Native tools are not sandboxed and
+public customer enrollment is not enabled. Do not equate these mechanisms with
+a passed clean-machine or assisted-user journey.
+
+`scripts/test-first-run.ps1` tests isolated configuration/refusal behavior.
+`scripts/test-release-runtime.ps1 -ArchivePath <zip> -ExpectedSha256 <hash>`
+extracts and installs actual candidate bytes in temporary directories, uses the
+packaged commands and a localhost synthetic provider, and asserts an actual
+file effect. It never uses an operator credential or tests against the live node.
 
 ## Evidence format
 

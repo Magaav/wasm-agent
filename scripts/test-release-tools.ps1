@@ -51,7 +51,7 @@ function Reject([string]$Name, [scriptblock]$Mutate, [string]$Expected) {
 try {
   $good = New-Fixture 'valid package with spaces'
   $result = Test-WaReleasePackage $good
-  if ($result.files -ne 12 -or $result.status -cne 'integrity-only') { throw 'positive_control_failed' }
+  if ($result.files -ne 18 -or $result.status -cne 'integrity-only') { throw 'positive_control_failed' }
   $checks++
   Write-Output 'PASS complete synthetic candidate (integrity only)'
 

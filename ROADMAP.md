@@ -33,8 +33,12 @@ memory; resumable sessions and compaction; tool evidence; tracked diffs and
 conflict-aware undo; signed nodes, rendezvous and relay; master/guest roles;
 skills, spells and plugins; external sentinel; on-demand workers.
 
-Missing product boundaries: independent public installation and guided setup;
-agent identity distinct from node/workspace identity; customer invitations,
+Windows candidate packaging, a fresh installer and launcher setup/diagnostics now
+exist; clean-machine usability and public distribution remain gates. Guest setup
+is deliberately disconnected, not a shortcut around authorization.
+
+Missing product boundaries: stable agent identity beyond display metadata;
+customer invitations,
 consent, scoped authorization, isolation and revocation; trustworthy operational
 status and an operator engagement view. Existing concurrency is not yet proof
 of safe overlapping conversations. See [release status](docs/release/RELEASE_STATUS.md).
@@ -86,8 +90,9 @@ requirements such as WebView2 must be detected and explained, not assumed.
 Lua/script overrides, no private host access. Install → setup → tool-backed edit
 → inspect diff → remember a random fact → restart/new session → recall → undo.
 A later conflicting edit must survive an attempted undo. Test bad credentials,
-missing assets and interrupted runs. `setup` and `doctor` are planned commands,
-not commands currently promised by the native CLI.
+missing assets and interrupted runs. `setup`, `doctor` and `ui` are now supplied
+by the packaged Windows `bin/wa.cmd` launcher, not by native `wa.exe`. The guest
+entry point stages an offline profile and refuses networking; it is not enrollment.
 
 ## 2. Invited guest onboarding — first-class assisted automation
 
