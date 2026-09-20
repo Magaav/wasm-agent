@@ -8,6 +8,7 @@ local agentlib = dofile("lua/core/agent.lua")
 local users = dofile("lua/core/users.lua")
 local toolslib = dofile("lua/core/tools.lua")
 local nodeslib = dofile("lua/core/nodes.lua")
+local enrollment = dofile("lua/core/enrollment.lua")
 local skillslib = dofile("lua/core/skills.lua")
 -- Errors travel to a browser, a log and a test harness; mask secrets as they
 -- leave the server rather than trusting every future call site.
@@ -316,7 +317,11 @@ local function node_capability(capability, args, caller)
   args = args or {}
   local author = nodeslib.author_of(caller)
   if not author then return { error = "forbidden_role" } end
-  if capability == "status" then
+  if capability == "set_role" then
+    if not enrollment.managed() then return { error = "not_managed" } end
+    return enrollment.set_role(args.role)
+  elseif capability == "status" then
+    if enrollment.managed() then return enrollment.status() end
     return json.decode(wa_model("", ""))
   elseif capability == "set_provider" then
     provider.set_provider(args.id or "")
@@ -348,11 +353,26 @@ function wa_node_call(payload, from, public_key, ts, signature)
   if capability == "remote" then return json.encode({ error = "remote_cannot_recurse" }) end
   local caller, problem = verify_peer(from, public_key, ts, signature, "call", payload)
   if problem then return json.encode({ error = problem }) end
+  if enrollment.managed() then
+    if not enrollment.target(request) then return json.encode({ error = "wrong_target" }) end
+    local allowed = { status=true, set_role=true, read=true, write=true, edit=true,
+      ls=true, grep=true, bash=true, shell=true, client=true }
+    if not allowed[capability] then return json.encode({ error = "capability_not_granted" }) end
+    enrollment.audit(caller, capability, "started")
+    local ran, result = pcall(node_capability, capability, request.args, caller)
+    enrollment.audit(caller, capability, ran and not result.error and "completed" or "failed")
+    if not ran then return json.encode({ error = tostring(result) }) end
+    return json.encode(result)
+  end
   return json.encode(node_capability(capability, request.args, caller))
 end
 
 -- Streaming turn requested by a peer (/node/chat): events go to that stream.
 function wa_node_chat(from, public_key, ts, signature, text)
+  if enrollment.managed() then
+    emit({ type = "error", error = "managed_guest_uses_operator_model" })
+    return ""
+  end
   local caller, problem = verify_peer(from, public_key, ts, signature, "chat", text or "")
   if problem then
     emit({ type = "error", error = problem })
@@ -578,6 +598,7 @@ end
 
 -- Accept a batch from a peer: idempotent, and never echo an entry's own origin.
 function wa_sync_apply(payload, from, public_key, ts, signature)
+  if enrollment.managed() then return json.encode({ error = "managed_sync_disabled" }) end
   local _, problem = verify_peer(from, public_key, ts, signature, "sync")
   if problem then return json.encode({ error = problem }) end
   local ok, request = pcall(json.decode, payload)

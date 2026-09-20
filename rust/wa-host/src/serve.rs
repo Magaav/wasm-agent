@@ -691,10 +691,22 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
 
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
         let request = match read_request(&mut stream) {
             Ok(Some(request)) => request,
             _ => continue,
         };
+        if std::env::var("WASM_AGENT_MANAGED").as_deref() == Ok("1") {
+            let host = header_of(&request.node_headers, "host").to_ascii_lowercase();
+            let origin = header_of(&request.node_headers, "origin").to_ascii_lowercase();
+            let port = stream.local_addr().map(|a| a.port()).unwrap_or(0);
+            let local_host = host == format!("127.0.0.1:{port}") || host == format!("localhost:{port}");
+            let cross_site = header_of(&request.node_headers, "sec-fetch-site") == "cross-site";
+            if !local_host || cross_site || (!origin.is_empty() && origin != format!("http://{host}")) {
+                let _ = respond(&mut stream, 403, "application/json", b"{\"error\":\"foreign_origin\"}");
+                continue;
+            }
+        }
         // The page's own heartbeat, recorded where every request passes - including the ones the accept
         // thread answers itself, because `/version` is one of those and it is exactly the request that says
         // the page is alive.
@@ -916,6 +928,10 @@ fn process_relay_job(lua: &Lua, ui: &std::path::Path, job: &crate::relay_client:
         reply: job.reply.clone(),
     };
     let (route, _query) = split_path(&job.path);
+    // The relay is untrusted transport, never a tunnel into unauthenticated local UI APIs.
+    if job.method != "POST" || !matches!(route.as_str(), "/node/call" | "/node/chat" | "/sync/push") {
+        return (403, "{\"error\":\"relay_route_forbidden\"}".into());
+    }
     let session = header_of(&job.headers, "x-wa-session");
 
     if route == "/node/chat" && job.method == "POST" {
@@ -1022,11 +1038,12 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
                 } else if lower.starts_with("accept:") && lower.contains("text/event-stream") {
                     accept_sse = true;
                 } else if let Some((key, value)) = lower.split_once(':') {
-                    if key.trim().starts_with("x-wa-") {
+                    if key.trim().starts_with("x-wa-") || matches!(key.trim(), "host" | "origin" | "sec-fetch-site") {
                         node_headers.push((key.trim().to_string(), value.trim().to_string()));
                     }
                 }
             }
+            if length > 4_000_000 || end > 65536 { return Ok(None); }
             if data.len() >= end + 4 + length {
                 return Ok(Some(Request {
                     method,

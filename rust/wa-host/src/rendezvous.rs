@@ -40,6 +40,8 @@ struct RelayState {
     issued: HashMap<String, Instant>,
     /// Completed results kept briefly so a retry can still collect them.
     results: HashMap<String, ((u16, String), Instant)>,
+    // Request IDs are scoped to their authenticated sender, recipient and exact envelope.
+    owners: HashMap<String, (String, String, String)>,
     next_id: u64,
 }
 
@@ -64,10 +66,26 @@ pub fn run(bind: &str, port: u16, db_path: &str) {
                    endpoints TEXT,
                    last_seen INTEGER,
                    registered_at INTEGER
+                 );
+                 CREATE TABLE IF NOT EXISTS network_roles (
+                   node_id TEXT PRIMARY KEY, role TEXT NOT NULL, changed_by TEXT, changed_at INTEGER
+                 );
+                 CREATE TABLE IF NOT EXISTS role_requests (
+                   signature TEXT PRIMARY KEY, at INTEGER
                  );",
             ) {
                 eprintln!("[rendezvous] schema: {error}");
                 return;
+            }
+            if !network_admins().is_empty() {
+                if let Err(error) = connection.execute_batch(
+                    "UPDATE nodes SET role=COALESCE((SELECT role FROM network_roles WHERE network_roles.node_id=nodes.node_id),'guest');"
+                ) { eprintln!("[rendezvous] roles: {error}"); return; }
+                for id in network_admins() {
+                    if let Err(error) = connection.execute("UPDATE nodes SET role='master' WHERE node_id=?1", [&id]) {
+                        eprintln!("[rendezvous] admin: {error}"); return;
+                    }
+                }
             }
         }
         Err(error) => {
@@ -107,6 +125,7 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
         }
     };
 
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut data = Vec::new();
     let mut chunk = [0u8; 16384];
     let (method, target, headers, body) = loop {
@@ -130,6 +149,9 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
                 } else if let Some((key, value)) = lower.split_once(':') {
                     headers.push((key.trim().to_string(), value.trim().to_string()));
                 }
+            }
+            if length > MAX_BODY || end > 65536 {
+                return respond(stream, 413, "{\"error\":\"request_too_large\"}");
             }
             if data.len() >= end + 4 + length {
                 break (method, target, headers, data[end + 4..end + 4 + length].to_vec());
@@ -160,6 +182,19 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
         return respond(stream, 200, &banner(&connection, relay));
     }
 
+    if path == "/service" {
+        let admins = network_admins();
+        let operators: Vec<Value> = admins.iter().filter_map(|id| lookup(&connection, id)).map(|n|
+            json!({"node_id": n["node_id"], "public_key": n["public_key"], "name": n["name"]})
+        ).collect();
+        return respond(stream, 200, &json!({"protocol": 1,
+            "enrollment_ready": !admins.is_empty() && operators.len() == admins.len(),
+            "operators": operators}).to_string());
+    }
+    if path == "/role" && method == "POST" {
+        return grant_role(&connection, stream, &payload, &body, &header);
+    }
+
     // ---- registry --------------------------------------------------------
     if (path == "/register" || path == "/heartbeat") && method == "POST" {
         return register(&connection, stream, &payload, &path);
@@ -169,19 +204,36 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
     }
     if path == "/lookup" {
         let node_id = query_value(&query, "node_id");
+        let admins = network_admins();
+        if !admins.is_empty() && !admins.contains(&node_id) {
+            let from = header("x-wa-node");
+            if !verify(&connection, &from, "lookup", &header, None, stream) { return Ok(()); }
+            if from != node_id && !is_master(&connection, &from) {
+                return respond(stream, 403, "{\"error\":\"forbidden_role\"}");
+            }
+        }
         return match lookup(&connection, &node_id) {
-            Some(node) => respond(stream, 200, &node.to_string()),
+            Some(mut node) => {
+                node["relay_attached"] = json!(relay.lock().unwrap().last_poll.get(&node_id)
+                    .map(|at| at.elapsed() < Duration::from_secs(40)).unwrap_or(false));
+                respond(stream, 200, &node.to_string())
+            }
             None => respond(stream, 404, "{\"error\":\"unknown_node\"}"),
         };
     }
     if path == "/nodes" {
+        if !network_admins().is_empty() {
+            let from = header("x-wa-node");
+            if !verify(&connection, &from, "nodes", &header, None, stream) { return Ok(()); }
+            if !is_master(&connection, &from) { return respond(stream, 403, "{\"error\":\"forbidden_role\"}"); }
+        }
         return respond(stream, 200, &list(&connection).to_string());
     }
 
     // ---- relay -----------------------------------------------------------
     if path == "/relay/poll" {
         let node_id = query_value(&query, "node_id");
-        if !verify(&connection, &node_id, "relay-poll", &header, stream) {
+        if !verify(&connection, &node_id, "relay-poll", &header, None, stream) {
             return Ok(());
         }
         let deadline = Instant::now() + POLL_WAIT;
@@ -202,7 +254,7 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
     }
     if path == "/relay/respond" && method == "POST" {
         let node_id = payload["node_id"].as_str().unwrap_or_default().to_string();
-        if !verify(&connection, &node_id, "relay-respond", &header, stream) {
+        if !verify(&connection, &node_id, "relay-respond", &header, None, stream) {
             return Ok(());
         }
         let id = payload["id"].as_str().unwrap_or_default().to_string();
@@ -210,6 +262,10 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
         let body = payload["body"].as_str().unwrap_or_default().to_string();
         {
             let mut state = relay.lock().unwrap();
+            if !state.owners.get(&id).map(|owner| owner.1 == node_id).unwrap_or(false) {
+                return respond(stream, 403, "{\"error\":\"not_request_recipient\"}");
+            }
+            if state.results.contains_key(&id) { return respond(stream, 409, "{\"error\":\"already_completed\"}"); }
             state.issued.remove(&id);
             // Keep the result briefly even if nobody is waiting right now,
             // so a caller that timed out can still collect it.
@@ -221,7 +277,7 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
         respond(stream, 200, "{\"ok\":true}")
     } else if path == "/relay/send" && method == "POST" {
         let from = header("x-wa-node");
-        if !verify(&connection, &from, "relay-send", &header, stream) {
+        if !verify(&connection, &from, "relay-send", &header, None, stream) {
             return Ok(());
         }
         let caller = lookup(&connection, &from);
@@ -240,59 +296,42 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
         if lookup(&connection, &to).is_none() {
             return respond(stream, 404, "{\"error\":\"unknown_node\"}");
         }
-        // Idempotent by request id: a retry never re-runs the action.
         let id = payload["rid"].as_str().filter(|value| !value.is_empty()).map(str::to_string);
         let id = id.unwrap_or_else(|| {
             let mut state = relay.lock().unwrap();
             state.next_id += 1;
             format!("r{}", state.next_id)
         });
-        {
+        let (tx, rx) = mpsc::channel();
+        let attached_at_start = {
             let mut state = relay.lock().unwrap();
-            // Drop abandoned relay entries: a caller that stopped polling leaves
-            // results and issued ids behind, and they are only useful for a
-            // couple of minutes.
             state.results.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(120));
             state.issued.retain(|_, at| at.elapsed() < Duration::from_secs(120));
-            if let Some(((status, body), _)) = state.results.remove(&id) {
-                return respond(
-                    stream,
-                    200,
-                    &json!({"ok": true, "status": status, "body": body, "replayed": true}).to_string(),
-                );
+            let live: std::collections::HashSet<String> = state.issued.keys().chain(state.results.keys()).cloned().collect();
+            state.owners.retain(|id, _| live.contains(id));
+            for queue in state.queue.values_mut() { queue.retain(|r| r["id"].as_str().map(|id| live.contains(id)).unwrap_or(false)); }
+            let owner = (from.clone(), to.clone(), body_hash(&body));
+            if state.owners.get(&id).map(|old| old != &owner).unwrap_or(false) {
+                return respond(stream, 409, "{\"error\":\"request_id_conflict\"}");
             }
-        }
-        // Hold rather than fail when the target is not attached. It attaches by
-        // polling, so for the caller the difference is "this waited four seconds"
-        // rather than "this failed" - and nothing is lost if it never attaches,
-        // because the answer is retryable and the id is idempotent: a repeat
-        // re-fetches the result instead of re-running the action.
-        let attached_at_start = {
-            let state = relay.lock().unwrap();
-            state
-                .last_poll
-                .get(&to)
-                .map(|at| at.elapsed() < Duration::from_secs(40))
-                .unwrap_or(false)
-        };
-        let (tx, rx) = mpsc::channel();
-        let request = json!({
-            "id": id,
-            "from": from,
-            "method": payload["method"].as_str().unwrap_or("POST"),
-            "path": payload["path"].as_str().unwrap_or("/"),
-            "headers": payload["headers"].clone(),
-            "body": payload["body"].as_str().unwrap_or(""),
-        });
-        {
-            let mut state = relay.lock().unwrap();
+            if let Some(((status, result), _)) = state.results.get(&id) {
+                return respond(stream, 200, &json!({"ok":true,"status":status,"body":result,"replayed":true}).to_string());
+            }
+            if state.waiting.contains_key(&id) {
+                return respond(stream, 409, "{\"error\":\"request_in_flight\"}");
+            }
             state.waiting.insert(id.clone(), tx);
-            // Only queue if this id has not already been issued.
             if !state.issued.contains_key(&id) {
+                state.owners.insert(id.clone(), owner);
                 state.issued.insert(id.clone(), Instant::now());
-                state.queue.entry(to.clone()).or_default().push_back(request);
+                state.queue.entry(to.clone()).or_default().push_back(json!({
+                    "id":id,"from":from,"method":payload["method"].as_str().unwrap_or("POST"),
+                    "path":payload["path"].as_str().unwrap_or("/"),"headers":payload["headers"].clone(),
+                    "body":payload["body"].as_str().unwrap_or("")
+                }));
             }
-        }
+            state.last_poll.get(&to).map(|at| at.elapsed() < Duration::from_secs(40)).unwrap_or(false)
+        };
         let hold = if attached_at_start { SEND_WAIT } else { ATTACH_HOLD };
         match rx.recv_timeout(hold) {
             Ok((status, body)) => {
@@ -334,6 +373,11 @@ fn handle(db_path: &str, stream: &mut TcpStream, relay: &Arc<Mutex<RelayState>>)
             }
         }
     } else if path == "/relay/status" {
+        if !network_admins().is_empty() {
+            let from = header("x-wa-node");
+            if !verify(&connection, &from, "relay-status", &header, None, stream) { return Ok(()); }
+            if !is_master(&connection, &from) { return respond(stream, 403, "{\"error\":\"forbidden_role\"}"); }
+        }
         let state = relay.lock().unwrap();
         let queue: Vec<Value> = state
             .queue
@@ -387,12 +431,51 @@ fn banner(connection: &Connection, relay: &Arc<Mutex<RelayState>>) -> String {
     .to_string()
 }
 
+fn network_admins() -> Vec<String> {
+    std::env::var("WASM_AGENT_NETWORK_ADMINS").unwrap_or_default()
+        .split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect()
+}
+fn body_hash(bytes: &[u8]) -> String {
+    node::hex(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
+}
+fn is_master(connection: &Connection, id: &str) -> bool {
+    lookup(connection, id).map(|n| n["role"] == "master" || n["role"] == "admin").unwrap_or(false)
+}
+fn grant_role(connection: &Connection, stream: &mut TcpStream, payload: &Value,
+              body: &[u8], header: &dyn Fn(&str) -> String) -> std::io::Result<()> {
+    let from = header("x-wa-node");
+    let admins = network_admins();
+    if admins.is_empty() { return respond(stream, 403, "{\"error\":\"managed_service_required\"}"); }
+    if !verify(connection, &from, "grant-role", header, Some(body), stream) { return Ok(()); }
+    if !admins.contains(&from) { return respond(stream, 403, "{\"error\":\"administrator_required\"}"); }
+    let id = payload["node_id"].as_str().unwrap_or("");
+    let role = payload["role"].as_str().unwrap_or("");
+    if !matches!(role, "master" | "guest") || admins.iter().any(|a| a == id) {
+        return respond(stream, 400, "{\"error\":\"invalid_role_target\"}");
+    }
+    if lookup(connection, id).is_none() { return respond(stream, 404, "{\"error\":\"unknown_node\"}"); }
+    let result = (|| -> rusqlite::Result<()> {
+        let tx = connection.unchecked_transaction()?;
+        tx.execute("DELETE FROM role_requests WHERE at < ?1", [now() - 240])?;
+        tx.execute("INSERT INTO role_requests VALUES(?1,?2)", rusqlite::params![header("x-wa-sig"), now()])?;
+        tx.execute("INSERT INTO network_roles VALUES(?1,?2,?3,?4) ON CONFLICT(node_id) DO UPDATE SET role=excluded.role,changed_by=excluded.changed_by,changed_at=excluded.changed_at",
+            rusqlite::params![id, role, from, now()])?;
+        tx.execute("UPDATE nodes SET role=?1 WHERE node_id=?2", rusqlite::params![role, id])?;
+        tx.commit()
+    })();
+    match result {
+        Ok(()) => respond(stream, 200, &json!({"ok":true,"node_id":id,"role":role}).to_string()),
+        Err(error) => respond(stream, 409, &json!({"error":"role_change_failed","detail":error.to_string()}).to_string()),
+    }
+}
+
 /// Verify a signed relay call: `action|node_id|ts`.
 fn verify(
     connection: &Connection,
     node_id: &str,
     action: &str,
     header: &dyn Fn(&str) -> String,
+    body: Option<&[u8]>,
     stream: &mut TcpStream,
 ) -> bool {
     if node_id.is_empty() {
@@ -416,7 +499,9 @@ fn verify(
         let _ = respond(stream, 401, "{\"error\":\"stale_request\"}");
         return false;
     }
-    if !node::verify(&stored, &format!("{action}|{node_id}|{ts_value}"), &signature) {
+    let mut message = format!("{action}|{node_id}|{ts_value}");
+    if let Some(body) = body { message.push_str(&format!("|{}", body_hash(body))); }
+    if !node::verify(&stored, &message, &signature) {
         let _ = respond(stream, 401, "{\"error\":\"bad_signature\"}");
         return false;
     }
@@ -431,12 +516,25 @@ fn register(connection: &Connection, stream: &mut TcpStream, payload: &Value, pa
     if node_id.is_empty() || public_key.is_empty() {
         return respond(stream, 400, "{\"error\":\"node_id_and_public_key_required\"}");
     }
+    let key = node::unhex(public_key).unwrap_or_default();
+    if key.len() != 32 || body_hash(&key)[..32] != *node_id {
+        return respond(stream, 401, "{\"error\":\"node_id_key_mismatch\"}");
+    }
+    if now().abs_diff(ts) > 120 { return respond(stream, 401, "{\"error\":\"stale_request\"}"); }
+    if public_key_of(connection, node_id).map(|old| old != public_key).unwrap_or(false) {
+        return respond(stream, 409, "{\"error\":\"identity_conflict\"}");
+    }
     if !node::verify(public_key, &node::announcement(node_id, ts as u64), signature) {
         return respond(stream, 401, "{\"error\":\"bad_signature\"}");
     }
     let now = now();
     let name = payload["name"].as_str().unwrap_or_default().to_string();
-    let role = payload["role"].as_str().unwrap_or("guest").to_string();
+    let admins = network_admins();
+    let role = if admins.is_empty() {
+        payload["role"].as_str().unwrap_or("guest").to_string()
+    } else if admins.iter().any(|id| id == node_id) { "master".into() }
+    else { connection.query_row("SELECT role FROM network_roles WHERE node_id=?1", [node_id], |r| r.get::<_, String>(0))
+        .unwrap_or_else(|_| "guest".into()) };
     let endpoints = serde_json::to_string(&payload["endpoints"]).unwrap_or_else(|_| "[]".into());
     // A node key is per machine; a changing name means two processes share it.
     if let Ok(previous) = connection.query_row(
@@ -473,6 +571,7 @@ fn forget(connection: &Connection, stream: &mut TcpStream, payload: &Value) -> s
     let node_id = payload["node_id"].as_str().unwrap_or_default();
     let ts = payload["ts"].as_i64().unwrap_or(0);
     let signature = payload["signature"].as_str().unwrap_or_default();
+    if now().abs_diff(ts) > 120 { return respond(stream, 401, "{\"error\":\"stale_request\"}"); }
     let Some(public_key) = public_key_of(connection, node_id) else {
         return respond(stream, 404, "{\"error\":\"unknown_node\"}");
     };
