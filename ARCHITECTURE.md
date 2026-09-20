@@ -170,3 +170,42 @@ they are in to know what a word means.
 `scripts/test.sh`, greps the tracked tree for the old *names* and fails if any remain. It never greps for the
 word "turn", so prose is a reader's job and not the check's: `naming ok` means no old name survived, not that
 every sentence was re-read.
+
+## 7. What a contract owes the reader
+
+Section 4 says make it a mechanism. These are the four things that make a mechanism a *contract*, each paid
+for in this repository, most of them tonight.
+
+**A contract names its mechanism.** "Deterministic" is not enough: the contract says which mechanism, by name,
+so a reader can find it and a checker cannot be forgotten. The pairs in force today:
+
+| contract | mechanism |
+| --- | --- |
+| branch shape (§5) | `.githooks/commit-msg` |
+| never replace a better install | `scripts/deploy.sh`, step 3 |
+| a tool result follows its call | `scripts/test-tool-adjacency.lua` |
+| the names in §6 | `scripts/check-naming.sh`, wired into `scripts/test.sh` |
+| a skipped test is reported | the suites' verdict lines |
+
+A contract whose mechanism is unnamed is a contract a reader cannot check.
+
+**A mechanism states its blind spot.** `naming ok (200 files, no old names)` is true, and it is *not* "the docs
+are renamed": the check greps old names and deliberately never the word "turn", because §6 keeps that word for
+one speaker's contribution. A verdict read for more than it says is worse than no verdict at all, so the
+contract says what its check does not cover and the reader knows which half is theirs.
+
+**An exception carries its reason where the exception is.** A `naming-check: allow` marker, a `note:` line in
+`deploy.log`, `WASM_AGENT_ALLOW_MAIN=1`: each is permitted, and each states why, in the file, on the line. An
+exception without a reason is a hole.
+
+**How a word is added.** §6's table grows by one row per concept: the word, what it means, and what it
+replaced. Never borrow an existing word for a new thing - that is how three things came to share two words. A
+word that crosses a boundary (a wire key, an env var, a column, a tool name the model reads) moves in one
+change with both sides, and its old form survives only as a migration matcher. Renaming an *interface* - the
+journal's kinds, the model-facing tool list - is a different decision from renaming an internal word, and is
+recorded as one.
+
+**An asymmetry is written down.** A tool call has a deadline (`WASM_AGENT_EXEC_TIMEOUT_SECONDS`, 300s by
+default); a run has none. Measured, not assumed: a single `bash` of 993 seconds in the ledger, and a run of 47
+steps that lasted 56 minutes. Neither number appears in `docs/` today, so the next reader learns it by watching
+it happen - which is the expensive way.

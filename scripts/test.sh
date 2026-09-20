@@ -62,6 +62,25 @@ PLUGINS="$(mktemp -d)"
 trap 'rm -f "$DB" "$DB"-wal "$DB"-shm "$SDB" "$SDB"-wal "$SDB"-shm "$RDB" "$RDB"-wal "$RDB"-shm "$QDB" "$QDB"-wal "$QDB"-shm "$DB.title" "$DB.title"-wal "$DB.title"-shm "$DB.exec" "$DB.exec"-wal "$DB.exec"-shm; rm -rf "$PLUGINS" "$DB.home"' EXIT
 
 "$BIN" --db "$DB" init >/dev/null
+
+# A dev-mode node must not write the operator's ledger. The dangerous combination is on-disk Lua,
+# the operator's home, and the default database; an explicit --db or any WASM_AGENT_HOME is a
+# candidate node. Asserted by the message, not by the exit code, so this cannot pass vacuously -
+# and both directions, because a guard that refuses everything is as wrong as one that refuses
+# nothing. The refusal runs before memory.setup(), so the first invocation touches no database.
+guard_out="$(WASM_AGENT_LUA_ROOT="$WASM_AGENT_LUA_ROOT" "$BIN" status 2>&1 || true)"
+case "$guard_out" in
+  *"refusing on-disk Lua"*) ;;
+  *) echo "FAIL: on-disk Lua against the operator's database must be refused, got:" >&2
+     printf '%s\n' "$guard_out" | tail -3 >&2; exit 1 ;;
+esac
+if WASM_AGENT_LUA_ROOT="$WASM_AGENT_LUA_ROOT" "$BIN" --db "$DB" status 2>&1 | grep -q "refusing on-disk Lua"; then
+  echo "FAIL: a scratch ledger is a candidate node and must not be refused" >&2; exit 1
+fi
+if WASM_AGENT_HOME="$DB.home" WASM_AGENT_LUA_ROOT="$WASM_AGENT_LUA_ROOT" "$BIN" status >/dev/null 2>&1; then :; else
+  echo "FAIL: a candidate home must not be refused" >&2; exit 1
+fi
+echo "dev home guard ok"
 ID="$("$BIN" --db "$DB" remember "smoke fact about the rust lua core")"
 "$BIN" --db "$DB" recall smoke | grep -q "smoke fact"
 "$BIN" --db "$DB" memories | grep -q "$ID"

@@ -2,6 +2,40 @@
 local json = dofile("lua/vendor/json.lua")
 local memory = dofile("lua/core/memory.lua")
 
+-- A dev-mode node must not write the operator's ledger.
+--
+-- `WASM_AGENT_LUA_ROOT` makes the installed binary read `lua/` from a checkout, which is what
+-- makes self-evolution possible - and it is also how one ledger came to hold 39 binaries and
+-- four `lua_root`s, both naming generations in the same tables, and 25 full-prompt cache misses
+-- worth about half of everything this node had ever spent. `scripts/dev-agent.cmd` gives a dev
+-- node its own home; this is the other half, for the run that does not go through the launcher.
+--
+-- The test is the *ledger about to be opened*, not the flags: the host always sets
+-- `WASM_AGENT_DB` (to the resolved default when `--db` is absent), so "no override" cannot be
+-- read from the environment. Refused when that path is the operator's own ledger and the Lua
+-- came from a checkout; a scratch `--db`, or any `WASM_AGENT_HOME`, is a candidate node and is
+-- left alone - the suites and a candidate node run that way. Before `memory.setup()`, so the
+-- refusal costs no database work and writes nothing.
+do
+  local function norm(value)
+    return (tostring(value or ""):gsub("\\", "/"):gsub("/+$", "")):lower()
+  end
+  local root = host.getenv("WASM_AGENT_LUA_ROOT")
+  local operator_home = host.getenv("USERPROFILE") or host.getenv("HOME") or ""
+  local production_db = norm(operator_home .. "/.wasm-agent/memory.db")
+  if root and root ~= "" and norm(host.getenv("WASM_AGENT_DB")) == production_db
+     and host.getenv("WASM_AGENT_ALLOW_DEV_HOME") ~= "1" then
+    print("wa: refusing on-disk Lua (" .. root .. ") against the operator's ledger.")
+    print("    " .. tostring(host.getenv("WASM_AGENT_DB")))
+    print("    A dev node is a candidate node: give it its own home, or a scratch ledger.")
+    print("      scripts/dev-agent.cmd            its own home, gitignored (Windows)")
+    print("      WASM_AGENT_HOME=<dir> wa ...     any candidate home")
+    print("      wa --db <scratch.db> ...         a scratch ledger")
+    print("    Deliberate override: WASM_AGENT_ALLOW_DEV_HOME=1")
+    os.exit(2)
+  end
+end
+
 memory.setup()
 
 local function line(item)
