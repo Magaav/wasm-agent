@@ -425,6 +425,14 @@ LUA
 WA_SCRIPT="$DB.repair.lua" "$BIN" --db "$DB" | grep "repair ok"
 rm -f "$DB.repair.lua"
 
+# The transcript is ordered by arrival; the provider demands that a tool result follow its
+# call immediately. A session whose stored rows were out of order answered every new turn
+# with a 400 - "An assistant message with 'tool_calls' must be followed by tool messages
+# responding to each 'tool_call_id'" - while the running turn's own rounds kept working,
+# because only the round-1 rebuild sends the stored order. Each shape from that incident is
+# in the file, with a healthy transcript as the control.
+WA_SCRIPT=scripts/test-tool-adjacency.lua "$BIN" --db "$DB" | grep "tool adjacency ok"
+
 # Secret redaction is a security boundary, so it gets a unit test with fake
 # secrets: a value that survives redaction must fail the build, not reach a log.
 cat > "$DB.redact.lua" <<'LUA'
