@@ -144,7 +144,7 @@ function M.run(argv)
 
   local function turn(line)
     state.streamed = 0
-    local ok, reply = pcall(agent.turn, agent, line)
+    local ok, reply = pcall(agent.run, agent, line)
     if not ok then
       print("\n  error: " .. redact.text(tostring(reply)))
     elseif state.streamed == 0 then
