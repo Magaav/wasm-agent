@@ -22,7 +22,7 @@ Verification on the development Windows machine:
 | Check | Result / boundary |
 | --- | --- |
 | Locked/offline package build | PASS; all three binaries built from clean source. Optional window icon still omitted without `windres`. |
-| `test-managed-network.cjs <packaged-wa.exe> <alpha.4.zip>` | **PASS: 49 checks, zero skips.** Isolated registry, two administrators, two customer nodes, plus a freshly bootstrapped customer installation. |
+| `test-managed-network.cjs <packaged-wa.exe> <alpha.4.zip>` | **PASS: 50 checks, zero skips.** Isolated registry, two administrators, two customer nodes, plus a freshly bootstrapped customer installation. |
 | Paste-once UX | Typed name and CONNECT through redirected console input while installation runs in a background job; verified registration **and outbound relay attachment**, then a real signed file effect with no model. |
 | Negative controls | Self-promotion, wrong target, unrelated admin/customer, role-body tampering, replay across recipient/registry restart, relay-route bypass/result theft, foreign Origin/Host, revoked/expired access and bad package checksum refused. |
 | Owner control | Packaged disconnect/reconnect, operator promotion/demotion, local audit attribution, cancellation without enrollment; completed background install reported if retained. |
@@ -30,7 +30,7 @@ Verification on the development Windows machine:
 | Existing first-run/integrity suites | PASS: 27 setup checks and 17 synthetic integrity/mutation checks. |
 | Extracted alpha.4 personal runtime | PASS: 20 checks, synthetic local provider, actual native write, memory/session persistence, package integrity and launcher ownership. |
 | Browser UI with packaged binary | PASS: structure, interrupted tools, real mid-run reload using repository fixtures. |
-| Full smoke | Initial serial run FAILED in the concurrency sub-suite after the wedge line; standalone sub-suite rerun passed. Final full rerun recorded below. |
+| Full smoke | Final serial run PASS: `smoke ok`, zero skips, including downgrade, concurrency and plugin gates. Earlier failures remain documented below; this is not a claim that every concurrency issue is solved. |
 | Live deployment, public download, clean VM, real operator-model/customer journey | NOT RUN. |
 
 The packaged check command was:
@@ -41,11 +41,13 @@ node scripts/test-managed-network.cjs `
   dist/wasm-agent-0.1.0-alpha.4-windows-x64.zip
 ```
 
-Logs: `pi-astra-package-alpha4.log`, `pi-astra-bootstrap-alpha4-packaged.log`,
+Logs: `pi-astra-package-alpha4.log`, `pi-astra-bootstrap-alpha4-final.log`,
 `pi-astra-first-run-alpha4.log`, `pi-astra-tools-alpha4.log`,
 `pi-astra-runtime-alpha4.log`, `pi-astra-ui-alpha4.log`,
-`pi-astra-smoke-alpha4.log` and `pi-astra-concurrency-alpha4.log` in the session
-scratch directory. These checks use neither real provider credentials nor live
+`pi-astra-smoke-alpha4-final.log`, plus earlier failures
+`pi-astra-smoke-alpha4.log`, `pi-astra-smoke-alpha4-serial.log` and standalone
+`pi-astra-concurrency-alpha4.log` / `pi-astra-concurrency-alpha4-isolated.log` in the
+session scratch directory. These checks use neither real provider credentials nor live
 rendezvous enrollment. Alpha.2 below predates this protocol.
 
 The current public service has not been upgraded to managed protocol 1. The
@@ -129,6 +131,19 @@ Retained local scratch logs: `pi-astra-package-alpha2.log`,
 `pi-astra-tools-alpha2.log` in the session's temporary directory.
 
 ### Failures retained, not erased by retries
+
+- Alpha.3's first bootstrap harness waited on a Windows stdout pipe inherited by
+  the background node and timed out. File-backed harness output waits for the
+  installer instead of the node lifetime. Alpha.4's final 50-check run uses actual
+  redirected name/consent input and the packaged runtime; it passed.
+- Alpha.4's initial full smoke failed after a passing wedge line; the old grep
+  suppressed the later assertion. Once full output was retained, another run
+  exposed an empty wedge health response / HTTP 000. Standalone reruns passed.
+  The hermetic concurrency fixture now has its own home, clears inherited operator
+  configuration, cleans only owned jobs and retains logs on failure. The final
+  serial full smoke passed with zero skips. The precise cause of every earlier
+  intermittent failure is **not established**; stream/conversation ownership still
+  requires its independent release work.
 
 - The first browser check dumped the DOM before the renderer/harness completed.
   It failed, was fixed with a bounded virtual-time wait and isolated profile, and
