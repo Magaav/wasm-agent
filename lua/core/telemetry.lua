@@ -17,7 +17,7 @@ function M.setup()
   if ready then return end
   sql("sql_exec", [[CREATE TABLE IF NOT EXISTS harness_events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
-    session_id TEXT NOT NULL, turn_id TEXT NOT NULL, span_id TEXT NOT NULL,
+    session_id TEXT NOT NULL, run_id TEXT NOT NULL, span_id TEXT NOT NULL,
     kind TEXT NOT NULL, phase TEXT NOT NULL, at REAL NOT NULL, payload TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS harness_events_session ON harness_events(session_id,seq);
     CREATE INDEX IF NOT EXISTS harness_events_span ON harness_events(span_id,phase);]])
@@ -120,7 +120,7 @@ end
 function M.event(session_id, turn_id, span_id, kind, phase, payload)
   if not session_id or session_id == "" then return end
   M.setup()
-  sql("sql_exec", "INSERT INTO harness_events(id,session_id,turn_id,span_id,kind,phase,at,payload) VALUES(?,?,?,?,?,?,?,?)",
+  sql("sql_exec", "INSERT INTO harness_events(id,session_id,run_id,span_id,kind,phase,at,payload) VALUES(?,?,?,?,?,?,?,?)",
     {host.uuid(), session_id, turn_id or "", span_id or "", kind, phase, host.now(), json.encode(payload or {})})
 end
 
@@ -201,7 +201,7 @@ function M.snapshot(session_id)
   M.setup()
   local cached = snapshots[session_id]
   if cached and M.clock() - cached.at < 2000 then return cached.value end
-  local rows = sql("sql_query", "SELECT seq,span_id,turn_id,kind,phase,at,payload FROM harness_events WHERE session_id=? ORDER BY seq", {session_id})
+  local rows = sql("sql_query", "SELECT seq,span_id,run_id,kind,phase,at,payload FROM harness_events WHERE session_id=? ORDER BY seq", {session_id})
   local report = {available=#rows>0, scope="session", session_id=session_id, events=#rows,
     since=rows[1] and rows[1].at, total=empty(), inference=empty(), compaction=empty(),
     tool_calls=0, tool_failures=0, tool_ms=0, pending=0, turns=0, incomplete_turns=0,repeated_tools=0,turn_ms=0,
@@ -210,7 +210,7 @@ function M.snapshot(session_id)
   for _, row in ipairs(rows) do
     local p = json.decode(row.payload)
     if row.kind == "turn" then
-      if not turn_ids[row.turn_id] then report.turns=report.turns+1; turn_ids[row.turn_id]=true end
+      if not turn_ids[row.run_id] then report.turns=report.turns+1; turn_ids[row.run_id]=true end
       if p.outcome ~= "answered" then report.incomplete_turns=report.incomplete_turns+1 end
     elseif row.phase == "start" then
       active[row.span_id] = p
@@ -258,7 +258,7 @@ function M.snapshot(session_id)
   report.total.cost_known = report.total.unpriced == 0 and report.total.calls > 0
   report.total.cache_known = report.total.missing_cache == 0 and report.total.calls > 0
   local session=sql("sql_query","SELECT summarized_until,summary FROM sessions WHERE id=?",{session_id})[1] or {}
-  local coverage=sql("sql_query","SELECT COUNT(*) AS rows,MIN(seq) AS first_seq,MAX(seq) AS last_seq FROM turns WHERE session_id=? AND seq>? AND role<>'summary'",{session_id,session.summarized_until or 0})[1] or {}
+  local coverage=sql("sql_query","SELECT COUNT(*) AS rows,MIN(seq) AS first_seq,MAX(seq) AS last_seq FROM messages WHERE session_id=? AND seq>? AND role<>'summary'",{session_id,session.summarized_until or 0})[1] or {}
   report.context={summary_watermark=session.summarized_until or 0,summary_bytes=#(session.summary or ""),
     unsummarized_rows=coverage.rows,first_seq=coverage.first_seq,last_seq=coverage.last_seq,
     row_cap=false,estimate_is_not_a_tokenizer=true,summary_is_lossy=true}
