@@ -117,6 +117,37 @@ window.__fixtures = {
   usage: {},
 };
 
+// The UI test reloads the actual browser page halfway through a recorded tool call.
+// Install the second-load fixture before app.js starts its boot requests.
+if (sessionStorage.getItem("wa-ui-reload-stage") === "active") {
+  const id = "eeeeeeee-0000-0000-0000-000000000005";
+  window.__fixtures.sessions = { sessions: [{
+    id, title: "running reload proof", user_id: "master", mode: "chat", turn_count: 2,
+    updated_at: Math.floor(Date.now() / 1000), state: "unfinished",
+    state_detail: "1 tool call(s) with no recorded result: bash",
+  }] };
+  window.__fixtures.session = {
+    session: { id, title: "running reload proof" },
+    state: { state: "unfinished", detail: "1 tool call(s) with no recorded result: bash" },
+    turns: [
+      { seq: 1, role: "user", content: "EARLIER-INTERRUPTED-QUESTION", tool_calls: [] },
+      { seq: 2, role: "assistant", content: "", tool_calls: [
+        { id: "earlier-lost", type: "function", function: { name: "bash", arguments: "{\"command\":\"earlier check\"}" } },
+      ] },
+      { seq: 3, role: "user", content: "RELOAD-MID-RUN-QUESTION", tool_calls: [] },
+      { seq: 4, role: "assistant", content: "", tool_calls: [
+        { id: "reload-tool", type: "function", function: { name: "bash", arguments: "{\"command\":\"slow check\"}" } },
+      ] },
+    ],
+  };
+  window.__fixtures.health = {
+    // A UI read can occupy worker 0 while a chat turn runs on another worker.
+    current: { label: "GET /models", ms: 30 },
+    workers: [{ label: "POST /chat", busy_ms: 15000 }], ok: true, queue: 0,
+    stalled_ms: 20, worker: "alive", exec_timeout_seconds: 300,
+  };
+}
+
 const realFetch = window.fetch ? window.fetch.bind(window) : null;
 window.fetch = function (input, init) {
   const url = String(typeof input === "string" ? input : (input && input.url) || "");
