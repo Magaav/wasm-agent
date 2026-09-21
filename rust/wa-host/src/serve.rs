@@ -16,11 +16,15 @@
 //! requests the relay hands us (`relay_client`). Both end up in `dispatch`, so a
 //! node behaves identically whether it is reached directly or through the relay.
 use crate::lua::Lua;
+use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
+
+mod scheduler;
 
 /// Milliseconds since the process started, written by anything that is making
 /// progress: every event the worker emits, and every run or tool boundary the Lua loop
@@ -108,6 +112,9 @@ static WORKER_BUSY: OnceLock<Vec<Mutex<Option<(String, u64)>>>> = OnceLock::new(
 /// rather than by a lock. A session nobody is running goes to an idle worker - which is the whole point, two
 /// conversations at once - and only a session with nowhere to go waits.
 static WORKER_SESSION: OnceLock<Vec<Mutex<Option<String>>>> = OnceLock::new();
+/// The admission id of the run each worker is executing right now, if any. `/health` reports it so a
+/// run is identifiable by id and not only by the conversation it writes.
+static WORKER_RUN: OnceLock<Vec<Mutex<Option<u64>>>> = OnceLock::new();
 
 /// A deploy launched by a tool in a live run cannot wait for that same run
 /// to go idle. This is a boolean, not the x-wa-session credential.
@@ -227,6 +234,23 @@ fn worker_busy_label(index: usize) -> Option<String> {
         .map(|(label, _)| label)
 }
 
+/// The conversation a worker holds, if any. `/health` reports it, and the window uses it to
+/// scope an in-flight run to its own conversation instead of assuming any chat run is its own.
+fn worker_session(index: usize) -> Option<String> {
+    WORKER_SESSION
+        .get()
+        .and_then(|slots| slots.get(index))
+        .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()))
+}
+
+/// The admission id a worker is running, if any.
+fn worker_run_id(index: usize) -> Option<u64> {
+    WORKER_RUN
+        .get()
+        .and_then(|slots| slots.get(index))
+        .and_then(|slot| slot.lock().ok().and_then(|guard| *guard))
+}
+
 /// Start one more read worker, and return its index. Called while holding the slots lock.
 ///
 /// The interpreter is built *before* the lock is taken in spirit but inside it in practice, which is why
@@ -274,82 +298,92 @@ fn is_run_route(request: &Request) -> bool {
     request.method == "POST" && split_path(&request.path).0 == "/chat"
 }
 
-/// The session a run belongs to for routing: the header when it is present, otherwise the body's `thread`.
+/// The conversation a run belongs to for routing: the body's `thread` when it names one, otherwise the
+/// `x-wa-session` header.
 ///
-/// The sentinel deliberately keeps the conversation out of `x-wa-session` and puts it in `thread`, so that
-/// a wake cannot land in the wrong conversation when the header carries an authentication session. Reading
-/// only the header therefore saw *no* session for every wake, routed it to an idle worker, and let a second
-/// turn run on a session that already had one - the same-session guarantee ("one writer per session") is
-/// what makes concurrent runs safe, and this was the hole in it.
+/// The two are different things and must not be conflated. `x-wa-session` is the authenticated *identity*
+/// (who is asking, and therefore what the run may do); the body's `thread` is the *conversation* (which
+/// transcript the run writes, and therefore what must serialise). The window puts the account session in
+/// the header and the conversation in the body, and the sentinel does the same for a wake. Reading only
+/// the header made every wake look unrouted (a wake has no auth session) and made every logged-in window
+/// look as if all of its conversations were one: two writers on one transcript in the first case, and in
+/// the second needless serialisation plus a window that could not tell its own run from another
+/// conversation's.
+///
+/// The body `thread` is untrusted input, but it is only a scheduling key: authority is still decided in
+/// Lua from the authenticated session, and a run that names a conversation it does not own is refused
+/// there. The backlog a caller can be put behind this way is bounded by the scheduler.
 fn routing_session(method: &str, path: &str, header_session: &str, body: &[u8]) -> String {
-    if !header_session.is_empty() {
-        return header_session.to_string();
-    }
-    if method != "POST" || split_path(path).0 != "/chat" {
-        return String::new();
-    }
-    serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| value.get("thread").and_then(|thread| thread.as_str()).map(str::to_string))
-        .filter(|thread| !thread.is_empty())
-        .unwrap_or_default()
-}
-
-/// The worker already running this session, if any. That worker is where the next run for it belongs, so
-/// the session keeps one writer and its runs keep their order.
-fn worker_running_session(session: &str) -> Option<usize> {
-    if session.is_empty() {
-        return None;
-    }
-    let slots = WORKER_SESSION.get()?;
-    for (index, slot) in slots.iter().enumerate() {
-        let held = slot.lock().ok().and_then(|guard| guard.clone());
-        if held.as_deref() == Some(session) {
-            return Some(index);
+    if method == "POST" && split_path(path).0 == "/chat" {
+        if let Some(thread) = serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|value| value.get("thread").and_then(|thread| thread.as_str()).map(str::to_string))
+            .filter(|thread| !thread.is_empty())
+        {
+            return thread;
         }
     }
-    None
+    header_session.to_string()
 }
 
-/// The first worker doing nothing at all, for a session nobody is running.
+/// Choose a worker for a run. `class` picks the lane and `claimed` are workers already reserved by
+/// another admitted run, so a worker reserved for a run that has not started is not offered twice.
 ///
-/// Takes the slots lock itself, so it must be called *before* the caller takes it: `std::sync::Mutex` is not
-/// reentrant, and the first version of this called it while already holding that lock.
-fn idle_worker() -> Option<usize> {
+/// Worker 0 is the interactive reserve: a background run may not use it, so a burst of wakes cannot
+/// take the worker a person's next run needs. Interactive prefers worker 0 when it is free, so an idle
+/// node stays at one interpreter, and spreads across the others round-robin so parallel sessions are
+/// not always pinned to the same worker.
+fn pick_run_worker(class: scheduler::RunClass, claimed: &std::collections::HashSet<usize>) -> Option<usize> {
+    let pool = POOL.get()?;
+    let background = class == scheduler::RunClass::Background;
+    let floor = if background { 1 } else { 0 };
     let beats = WORKER_BEATS.get()?;
-    let slots = POOL.get()?.slots.lock().ok()?;
-    for (index, slot) in slots.iter().enumerate() {
-        if slot.is_none() || worker_busy_label(index).is_some() {
-            continue;
-        }
-        let beaten = beats.get(index).map(|b| b.load(Ordering::Relaxed) != u64::MAX).unwrap_or(false);
-        if beaten && worker_age_ms(index) < 1000 {
-            return Some(index);
-        }
+    let mut idle: Vec<usize> = live_worker_ids()
+        .into_iter()
+        .filter(|index| *index >= floor && !claimed.contains(index) && worker_busy_label(*index).is_none())
+        .filter(|index| {
+            // A worker that has not beaten is as idle as one that never existed; a worker that has gone
+            // quiet is not idle, whatever its label says.
+            beats.get(*index).map(|slot| slot.load(Ordering::Relaxed) != u64::MAX).unwrap_or(false)
+                && worker_age_ms(*index) < 1000
+        })
+        .collect();
+    idle.sort_unstable();
+    if !background && idle.first() == Some(&0) {
+        return Some(0);
     }
-    None
-}
-
-/// Which worker a request goes to, growing the pool if that is what it takes.
-fn choose_worker(request: &Request) -> usize {
-    let Some(pool) = POOL.get() else { return 0 };
-    // A run first, because it is the one route with a rule of its own: routed by session, so two different
-    // conversations run at once and one conversation never does.
-    if is_run_route(request) {
-        if let Some(index) = worker_running_session(&request.routing_session) {
-            return index;
-        }
-        if let Some(index) = idle_worker() {
-            return index;
-        }
-        if let Ok(mut slots) = pool.slots.lock() {
-            if let Some(index) = spawn_worker(&mut slots) {
-                return index;
+    if !idle.is_empty() {
+        let start = pool.next.fetch_add(1, Ordering::Relaxed);
+        return Some(idle[start % idle.len()]);
+    }
+    // No idle worker: grow the pool if the ceiling allows. `spawn_worker` never reuses worker 0 (it is
+    // always running), so a spawned worker is always outside the interactive reserve.
+    if let Ok(mut slots) = pool.slots.lock() {
+        if let Some(index) = spawn_worker(&mut slots) {
+            if index >= floor {
+                return Some(index);
             }
         }
-        // Nowhere to go: the run waits behind worker 0, which is what a node with one interpreter always did.
-        return 0;
     }
+    // Saturated. Interactive waits on worker 0's bounded queue; background waits on a background
+    // worker's bounded queue. Either send may still be refused when that queue is full - which is the
+    // bound, because refusing loudly beats an unbounded backlog every client waits in.
+    if background {
+        let candidates: Vec<usize> = live_worker_ids().into_iter().filter(|index| *index >= 1).collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        let start = pool.next.fetch_add(1, Ordering::Relaxed);
+        Some(candidates[start % candidates.len()])
+    } else {
+        Some(0)
+    }
+}
+
+/// Which worker a non-run request goes to, growing the pool if that is what it takes. Runs are admitted
+/// by the scheduler (`pick_run_worker`), never here, so this has no run branch to keep in sync.
+fn choose_worker(request: &Request) -> usize {
+    let Some(pool) = POOL.get() else { return 0 };
     let read = is_read_route(request);
     // Nothing to gain while the run worker is idle - for a read as much as for a write. This is the rule
     // that keeps an idle node at exactly one interpreter, and it is also why a read does not spawn a worker
@@ -520,7 +554,15 @@ fn health_body() -> Vec<u8> {
     let state = if stalled { "stalled" } else if age_ms < 1000 { "alive" } else { "busy" };
     let mut current = IN_FLIGHT.lock().ok().and_then(|slot| {
         slot.as_ref().map(|(label, started)| {
-            serde_json::json!({ "label": label, "ms": now_ms().saturating_sub(*started) })
+            // `session` is the conversation this run is writing, so a window can tell whether
+            // the in-flight run is *its* run or another conversation's. Without it the page had
+            // only "some chat run is active" and disabled its own composer for someone else's run.
+            serde_json::json!({
+                "label": label,
+                "ms": now_ms().saturating_sub(*started),
+                "session": worker_session(0),
+                "run_id": worker_run_id(0),
+            })
         })
     });
     // Per-worker detail, so "which one is busy, and with what" is answerable without reading a log. The
@@ -541,13 +583,14 @@ fn health_body() -> Vec<u8> {
                 let run = busy.as_ref().is_some_and(|(label, _)| label.starts_with("POST /chat"));
                 if current.is_none() && run {
                     if let Some((label, started)) = &busy {
-                        current = Some(serde_json::json!({"label":label,"ms":now_ms().saturating_sub(*started),"worker_id":index}));
+                        current = Some(serde_json::json!({"label":label,"ms":now_ms().saturating_sub(*started),"worker_id":index,"session":worker_session(index),"run_id":worker_run_id(index)}));
                     }
                 }
                 workers.push(serde_json::json!({
                     "id": index,
                     "role": if index == 0 || run { "runs" } else { "reads" },
-                    "session": WORKER_SESSION.get().and_then(|slots| slots.get(index)).and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone())),
+                    "session": worker_session(index),
+                    "run_id": worker_run_id(index),
                     "state": if age >= stall_seconds() * 1000 { "stalled" } else if age < 1000 { "alive" } else { "busy" },
                     "age_ms": age,
                     "busy_ms": busy.as_ref().map(|(_, started)| now_ms().saturating_sub(*started)),
@@ -573,6 +616,28 @@ fn health_body() -> Vec<u8> {
         "current": current,
         "workers_count": worker_count(),
         "workers": workers,
+        // Admission state: every conversation currently owned, the worker holding it, its lane and how
+        // many runs are pending behind it. This is what makes "one writer per conversation" and the
+        // lane bounds observable from outside the process rather than only from a log.
+        "runs": scheduler::global().map(|scheduler| {
+            scheduler.snapshot().into_iter().map(|(conversation, worker, class, pending)| {
+                serde_json::json!({
+                    "conversation": conversation,
+                    "worker": worker,
+                    "class": if class == scheduler::RunClass::Background { "background" } else { "interactive" },
+                    "pending": pending,
+                })
+            }).collect::<Vec<_>>()
+        }),
+        "run_limits": scheduler::global().map(|scheduler| {
+            let config = scheduler.config();
+            serde_json::json!({
+                "session_queue_depth": config.session_queue_depth,
+                "background_max": config.background_max,
+                "background_backlog": config.background_backlog,
+                "interactive_reserve_worker": 0,
+            })
+        }),
         "workers_spawned": POOL.get().map(|pool| pool.spawned.load(Ordering::Relaxed)).unwrap_or(0),
         "workers_retired": POOL.get().map(|pool| pool.retired.load(Ordering::Relaxed)).unwrap_or(0),
         // Milliseconds since a UI page last polled. `null` means no page has ever asked - a node that has
@@ -593,46 +658,89 @@ fn health_body() -> Vec<u8> {
     .into_bytes()
 }
 
-/// The one open SSE client. Only the agent thread touches it, but it is a static
-/// so that `host.stream` can reach it from inside Lua.
-static CLIENT: Mutex<Option<TcpStream>> = Mutex::new(None);
-
-/// When set, events are collected here instead of going to a socket: that is how
-/// a streaming run is relayed to a peer that cannot hold a live connection.
-static EVENT_SINK: Mutex<Option<String>> = Mutex::new(None);
-
-/// Push one event to the streaming client, if any. Called from Lua via host.stream.
+/// Where one run's events go. It is created when the run starts and dropped when it
+/// ends, and it belongs to the *run*, never to the process.
 ///
-/// Every event is also proof of life: a streaming run emits deltas continuously, so a
-/// stalled provider read shows up here as silence long before anyone notices a hang.
-pub fn write_event(payload: &str) {
-    beat();
-    if let Ok(mut sink) = EVENT_SINK.lock() {
-        if let Some(buffer) = sink.as_mut() {
-            buffer.push_str("data: ");
-            buffer.push_str(payload);
-            buffer.push_str("\n\n");
-            return;
-        }
-    }
-    if let Ok(mut guard) = CLIENT.lock() {
-        if let Some(socket) = guard.as_mut() {
-            let _ = socket.write_all(format!("data: {payload}\n\n").as_bytes());
-            let _ = socket.flush();
-        }
+/// This used to be two process-wide statics (`CLIENT`, `EVENT_SINK`) because there was
+/// one interpreter and therefore one run at a time. Once runs were routed by session,
+/// two workers could stream at once and the last one to set `CLIENT` silently owned both
+/// streams: the other run's events were written into a socket that belonged to a different
+/// conversation, or to nobody. A sink that lives with the run cannot be shared by mistake.
+enum Sink {
+    /// A live SSE socket for the run that owns it.
+    Socket(TcpStream),
+    /// A buffer, for a run relayed to a peer that cannot hold a live connection.
+    Buffer(Rc<RefCell<String>>),
+}
+
+thread_local! {
+    /// The sink of the run this worker thread is executing right now. `host.stream` runs
+    /// on the worker's own thread, so a thread-local resolves the run without a global
+    /// lookup and cannot resolve to a different run's sink.
+    static ACTIVE_SINK: RefCell<Option<Sink>> = const { RefCell::new(None) };
+}
+
+/// Installs a sink for the current run and restores the previous one on drop. A guard,
+/// not a set/clear pair, so an early return or a Lua error cannot leave a run's sink
+/// installed for the next request on that worker.
+struct SinkGuard {
+    previous: Option<Sink>,
+}
+
+impl SinkGuard {
+    fn set(sink: Sink) -> Self {
+        let previous = ACTIVE_SINK.with(|cell| cell.borrow_mut().replace(sink));
+        Self { previous }
     }
 }
 
-/// Run `f` collecting any events it emits, and return them as an SSE body.
+impl Drop for SinkGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        ACTIVE_SINK.with(|cell| {
+            *cell.borrow_mut() = previous;
+        });
+    }
+}
+
+/// Push one event to the streaming sink of the run on this thread, if it has one.
+/// Called from Lua via host.stream.
+///
+/// Every event is also proof of life: a streaming run emits deltas continuously, so a
+/// stalled provider read shows up here as silence long before anyone notices a hang.
+///
+/// With no sink there is no event. A non-streaming run (the CLI's `/chat`) has no
+/// client, and a run whose worker is between requests has no client either - and that is
+/// the point: there is deliberately no process-wide fallback to leak into.
+pub fn write_event(payload: &str) {
+    beat();
+    ACTIVE_SINK.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        match slot.as_mut() {
+            Some(Sink::Buffer(buffer)) => {
+                let mut buffer = buffer.borrow_mut();
+                buffer.push_str("data: ");
+                buffer.push_str(payload);
+                buffer.push_str("\n\n");
+            }
+            Some(Sink::Socket(socket)) => {
+                let _ = socket.write_all(format!("data: {payload}\n\n").as_bytes());
+                let _ = socket.flush();
+            }
+            None => {}
+        }
+    });
+}
+
+/// Run `f` collecting any events it emits, and return them as an SSE body. Used for a run
+/// relayed to a peer: the events are captured in a buffer local to this call and cannot
+/// reach a live socket belonging to another run.
 fn capture_events<F: FnOnce()>(f: F) -> String {
-    if let Ok(mut sink) = EVENT_SINK.lock() {
-        *sink = Some(String::new());
-    }
+    let buffer = Rc::new(RefCell::new(String::new()));
+    let _guard = SinkGuard::set(Sink::Buffer(buffer.clone()));
     f();
-    match EVENT_SINK.lock() {
-        Ok(mut sink) => sink.take().unwrap_or_default(),
-        Err(_) => String::new(),
-    }
+    let collected = buffer.borrow().clone();
+    collected
 }
 
 type Reply = (u16, &'static str, Vec<u8>);
@@ -652,6 +760,16 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     let ceiling = max_workers();
     let warm = warm_read_workers().min(ceiling);
     let queue_depth = env_usize("WASM_AGENT_QUEUE_DEPTH", 256);
+    // Admission bounds. `background_max` is how many background conversations may run at once and
+    // `background_backlog` how many more may wait; together they keep a wake storm from growing
+    // without limit. `session_queue_depth` bounds one conversation's own backlog so a single
+    // conversation cannot fill a worker's queue and starve another. Worker 0 is the interactive
+    // reserve, so background runs never use it.
+    scheduler::install(scheduler::Config {
+        session_queue_depth: env_usize("WASM_AGENT_SESSION_QUEUE_DEPTH", 4).max(1),
+        background_max: env_usize("WASM_AGENT_BACKGROUND_MAX", ceiling).max(1),
+        background_backlog: env_usize("WASM_AGENT_BACKGROUND_BACKLOG", 8),
+    });
     // Sized to the ceiling once, so a worker's liveness slot never has to be created later: the arrays are
     // indexed by worker id, and a slot whose sender is None is simply not running.
     // u64::MAX, not 0, for "never beaten": a worker beats at the top of its own loop, which can happen
@@ -659,6 +777,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     let _ = WORKER_BEATS.set((0..=ceiling).map(|_| AtomicU64::new(u64::MAX)).collect());
     let _ = WORKER_BUSY.set((0..=ceiling).map(|_| Mutex::new(None)).collect());
     let _ = WORKER_SESSION.set((0..=ceiling).map(|_| Mutex::new(None)).collect());
+    let _ = WORKER_RUN.set((0..=ceiling).map(|_| Mutex::new(None)).collect());
     let _ = POOL.set(Pool {
         slots: Mutex::new(Vec::new()),
         factory,
@@ -721,7 +840,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
         let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
-        let request = match read_request(&mut stream) {
+        let mut request = match read_request(&mut stream) {
             Ok(Some(request)) => request,
             _ => continue,
         };
@@ -747,10 +866,29 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
             let _ = respond(&mut stream, status, content_type, &body);
             continue;
         }
-        // Which interpreter this request needs - and if that is a read arriving while the run worker is
-        // busy, this is the call that grows the pool. Anything that changes something goes to worker 0,
-        // which is what keeps one writer per session true by construction.
-        let target = choose_worker(&request);
+        // Admission. A run goes through the scheduler, which owns its conversation from admission
+        // through completion and picks its lane; everything else keeps the old routing. The scheduler
+        // decides *and reserves* in one step, so two back-to-back admissions for one conversation
+        // cannot both be handed a fresh worker - the hole that let a conversation be written twice.
+        let is_run = is_run_route(&request);
+        let mut admitted_conversation = String::new();
+        let target = if is_run {
+            admitted_conversation = request.routing_session.clone();
+            match scheduler::admit(&admitted_conversation, request.run_class, pick_run_worker) {
+                scheduler::Decision::Run { run_id, worker } | scheduler::Decision::Behind { run_id, worker } => {
+                    request.run_id = run_id;
+                    worker
+                }
+                scheduler::Decision::Refused(refusal) => {
+                    let (code, hint) = refusal.as_error();
+                    let body = format!("{{\"error\":\"{code}\",\"hint\":\"{hint}\"}}");
+                    let _ = respond(&mut stream, 503, "application/json", body.as_bytes());
+                    continue;
+                }
+            }
+        } else {
+            choose_worker(&request)
+        };
         let age_ms = worker_age_ms(target);
         if age_ms >= stall_seconds() * 1000 {
             // The worker this request needs has not reported progress for longer than any healthy
@@ -777,6 +915,11 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
                 );
                 std::process::exit(3);
             }
+            if is_run {
+                // The admission is already claimed; the run is not going to start, so give the
+                // conversation's place back before refusing.
+                scheduler::complete(&admitted_conversation);
+            }
             let body = format!(
                 "{{\"error\":\"worker_stalled\",\"worker\":{target},\"stalled_ms\":{age_ms},\"hint\":\"the interpreter has not reported progress; see the node log, and restart it if the run is lost\"}}"
             );
@@ -801,7 +944,16 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
             let sender = match sender {
                 Some(sender) => sender,
                 None => {
-                    // The worker is gone (retired). Worker 0 always exists, so it is the honest fallback.
+                    if is_run {
+                        // The conversation's owner retired between admission and delivery. Release
+                        // the place rather than hand the run to a worker that does not own it.
+                        scheduler::complete(&admitted_conversation);
+                        QUEUED.fetch_sub(1, Ordering::Relaxed);
+                        let body = b"{\"error\":\"node_busy\",\"hint\":\"the worker retired before the run could start; retry shortly\"}";
+                        let _ = respond(&mut stream, 503, "application/json", body);
+                        break;
+                    }
+                    // A read/write worker is gone (retired). Worker 0 always exists, so it is the honest fallback.
                     if target != 0 && attempt < 2 {
                         attempt += 1;
                         target = 0;
@@ -817,6 +969,9 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
             match sender.try_send((stream, request)) {
                 Ok(()) => break,
                 Err(std::sync::mpsc::TrySendError::Full((mut stream, _request))) => {
+                    if is_run {
+                        scheduler::complete(&admitted_conversation);
+                    }
                     QUEUED.fetch_sub(1, Ordering::Relaxed);
                     // A bounded queue: refusing loudly beats an unbounded backlog that every client waits in.
                     let body = b"{\"error\":\"node_busy\",\"hint\":\"the node is answering other requests; retry shortly\"}";
@@ -824,6 +979,14 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
                     break;
                 }
                 Err(std::sync::mpsc::TrySendError::Disconnected(pair)) => {
+                    if is_run {
+                        scheduler::complete(&admitted_conversation);
+                        QUEUED.fetch_sub(1, Ordering::Relaxed);
+                        let (mut stream, _request) = pair;
+                        let body = b"{\"error\":\"node_busy\",\"hint\":\"the worker retired before the run could start; retry shortly\"}";
+                        let _ = respond(&mut stream, 503, "application/json", body);
+                        break;
+                    }
                     // Retired while this request was on its way. Try worker 0 once, then refuse.
                     if target != 0 && attempt < 2 {
                         attempt += 1;
@@ -878,14 +1041,40 @@ fn worker_loop(
                 if let Some(slots) = WORKER_SESSION.get() {
                     if let Some(slot) = slots.get(index) {
                         if let Ok(mut guard) = slot.lock() {
-                            *guard = if request.routing_session.is_empty() { None } else { Some(request.routing_session.clone()) };
+                            // Only a run holds a conversation. A read or a write does not, and reporting
+                            // one would make a read worker look like a run worker in `/health`.
+                            *guard = if is_run_route(&request) && !request.routing_session.is_empty() {
+                                Some(request.routing_session.clone())
+                            } else {
+                                None
+                            };
+                        }
+                    }
+                }
+                if let Some(slots) = WORKER_RUN.get() {
+                    if let Some(slot) = slots.get(index) {
+                        if let Ok(mut guard) = slot.lock() {
+                            *guard = if is_run_route(&request) { Some(request.run_id) } else { None };
                         }
                     }
                 }
                 IN_RUN.with(|flag| flag.set(is_run_route(&request)));
                 let _ = handle(&lua, &agent_ui, &mut stream, &request);
                 IN_RUN.with(|flag| flag.set(false));
+                // The run is over, so release its conversation. This happens for the queued runs too:
+                // the owner is held until the last one behind it completes, so the next admission can
+                // land anywhere once the backlog is empty.
+                if is_run_route(&request) {
+                    scheduler::complete(&request.routing_session);
+                }
                 if let Some(slots) = WORKER_SESSION.get() {
+                    if let Some(slot) = slots.get(index) {
+                        if let Ok(mut guard) = slot.lock() {
+                            *guard = None;
+                        }
+                    }
+                }
+                if let Some(slots) = WORKER_RUN.get() {
                     if let Some(slot) = slots.get(index) {
                         if let Ok(mut guard) = slot.lock() {
                             *guard = None;
@@ -1040,6 +1229,13 @@ struct Request {
     /// worker and ran a second turn on a conversation that was already running - two writers, one
     /// transcript, and the turn's final message landed after the wake's (seq inversion).
     routing_session: String,
+    /// The lane this run belongs to. Set from `X-WA-Run-Class`, which can only demote: see
+    /// `scheduler::RunClass::from_header`. A non-run request's class is never consulted.
+    run_class: scheduler::RunClass,
+    /// The admission id assigned when this request is admitted as a run (0 for anything else).
+    /// It is the run's identity in `/health` and in the node log, so "which run is on which
+    /// worker" is answerable without reading a conversation.
+    run_id: u64,
     node_headers: Vec<(String, String)>,
     body: Vec<u8>,
     accept_sse: bool,
@@ -1064,6 +1260,7 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
             let mut length = 0usize;
             let mut session = String::new();
             let mut accept_sse = false;
+            let mut run_class = scheduler::RunClass::Interactive;
             let mut node_headers: Vec<(String, String)> = Vec::new();
             for line in lines {
                 let lower = line.to_ascii_lowercase();
@@ -1071,6 +1268,10 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
                     length = value.trim().parse().unwrap_or(0);
                 } else if let Some(value) = lower.strip_prefix("x-wa-session:") {
                     session = value.trim().to_string();
+                } else if let Some(value) = lower.strip_prefix("x-wa-run-class:") {
+                    // One-way marker: `background` demotes, everything else (including `interactive`)
+                    // keeps the default. No header value can grant the interactive reserve.
+                    run_class = scheduler::RunClass::from_header(value);
                 } else if lower.starts_with("accept:") && lower.contains("text/event-stream") {
                     accept_sse = true;
                 } else if let Some((key, value)) = lower.split_once(':') {
@@ -1088,6 +1289,8 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
                     path,
                     session,
                     routing_session,
+                    run_class,
+                    run_id: 0,
                     node_headers,
                     body,
                     accept_sse,
@@ -1161,19 +1364,15 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream, request: &Req
                   Connection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
             )?;
             stream.flush()?;
-            if let Ok(clone) = stream.try_clone() {
-                if let Ok(mut guard) = CLIENT.lock() {
-                    *guard = Some(clone);
-                }
-            }
+            // The sink belongs to this run for exactly as long as the call below runs.
+            // `try_clone` gives the run its own handle; if it fails the run still executes
+            // and simply has no stream, rather than writing into another run's socket.
+            let _sink = stream.try_clone().ok().map(|clone| SinkGuard::set(Sink::Socket(clone)));
             let node = header_of(&node_headers, "x-wa-node");
             if let Err(error) = lua.call_string("wa_reply_stream", &[text.as_str(), session, node.as_str()]) {
                 write_event(&format!("{{\"type\":\"error\",\"error\":{}}}", json_escape(&error)));
             }
             write_event("{\"type\":\"done\"}");
-            if let Ok(mut guard) = CLIENT.lock() {
-                *guard = None;
-            }
             return Ok(());
         }
     }
@@ -1188,11 +1387,7 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream, request: &Req
               Connection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
         )?;
         stream.flush()?;
-        if let Ok(clone) = stream.try_clone() {
-            if let Ok(mut guard) = CLIENT.lock() {
-                *guard = Some(clone);
-            }
-        }
+        let _sink = stream.try_clone().ok().map(|clone| SinkGuard::set(Sink::Socket(clone)));
         if let Err(error) = lua.call_string(
             "wa_node_chat",
             &[from.as_str(), public_key.as_str(), ts.as_str(), signature.as_str(), text.as_str()],
@@ -1200,9 +1395,6 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream, request: &Req
             write_event(&format!("{{\"type\":\"error\",\"error\":{}}}", json_escape(&error)));
         }
         write_event("{\"type\":\"done\"}");
-        if let Ok(mut guard) = CLIENT.lock() {
-            *guard = None;
-        }
         return Ok(());
     }
 
@@ -1442,21 +1634,25 @@ mod ui_version_tests {
 mod routing_session_tests {
     use super::routing_session;
 
-    /// A wake is routed by its body's `thread`, because the sentinel keeps `x-wa-session` for
-    /// authentication. Reading only the header gave it an empty session, an idle worker, and a second
-    /// writer on a conversation that was already running - seq 4195 (wake) before 4196 (the live turn's
-    /// final message). This is the regression guard for that.
+    /// A run's *conversation* is its body `thread`, not its `x-wa-session` identity. The sentinel keeps
+    /// `x-wa-session` for authentication and puts the conversation in `thread`; the window does the same.
+    /// Conflating them gave a wake an empty session (two writers, one transcript, seq 4195/4196) and gave a
+    /// logged-in window one routing key for every conversation it owns.
     #[test]
-    fn a_wake_routes_by_its_thread_when_the_header_carries_only_auth() {
+    fn a_runs_conversation_is_its_thread_not_its_identity() {
         let body = br#"{"text":"hi","thread":"4ef4e372-8d84"}"#;
+        // The body names the conversation; it wins even when the header carries an auth session.
+        assert_eq!(routing_session("POST", "/chat", "auth-session", body), "4ef4e372-8d84");
+        // The sentinel's wake has an empty header, so its thread is the only conversation it can mean.
         assert_eq!(routing_session("POST", "/chat", "", body), "4ef4e372-8d84");
-        // The header wins when it is present: the window and `wa chat` set the session there.
-        assert_eq!(routing_session("POST", "/chat", "abc", body), "abc");
-        // Only /chat is a run; a different route has no thread to read and no session to hold.
-        assert_eq!(routing_session("POST", "/update", "", body), "");
-        assert_eq!(routing_session("GET", "/session", "", body), "");
+        // The header is the identity, and the fallback when the body names no conversation.
+        assert_eq!(routing_session("POST", "/chat", "auth-session", br#"{"text":"hi"}"#), "auth-session");
+        assert_eq!(routing_session("POST", "/chat", "auth-session", b"plain text"), "auth-session");
+        // Only /chat is a run; another route has no thread to read.
+        assert_eq!(routing_session("POST", "/update", "auth-session", body), "auth-session");
+        assert_eq!(routing_session("GET", "/session", "auth-session", body), "auth-session");
         // A run with neither header nor thread is unrouted, exactly as it was before.
-        assert_eq!(routing_session("POST", "/chat", "", br#"{"text":"hi"}"#), "");
         assert_eq!(routing_session("POST", "/chat", "", b""), "");
+        assert_eq!(routing_session("POST", "/chat", "", br#"{"text":"hi","thread":""}"#), "");
     }
 }
