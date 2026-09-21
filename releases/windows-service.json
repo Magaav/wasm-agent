@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "available": true,
+  "version": "0.1.0-alpha.10",
+  "package_url": "https://rendezvous.colmeio.com/releases/wasm-agent-0.1.0-alpha.10-windows-x64.zip",
+  "sha256": "e9c43edff98d7d9fd67a4ebd0a64baaf1cc6d31ba7ca4e7af871360a256aa018",
+  "service": "https://rendezvous.colmeio.com",
+  "operators": [
+    {
+      "node_id": "2b941f3d4af161ae991566af5e471cdf",
+      "public_key": "e8b0b997bfc48e1118e67062578ad72fd0895f7f7aaff8aabedf9a4e2a5fc2ae"
+    },
+    {
+      "node_id": "d40e7cb7654e4f0f9a62d844fc46e695",
+      "public_key": "ea001e18392d894d77cad1d7ee1bbf3b81ea0490fc7ffaff9c0ddd2d017f29e3"
+    }
+  ]
+}

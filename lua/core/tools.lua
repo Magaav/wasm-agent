@@ -72,9 +72,15 @@ M.admin = {
     id = { type = "string" } }, { "id" }),
   -- The dialect is in the description because the model otherwise assumes POSIX
   -- and wastes its tool budget on commands this machine does not have.
-  schema("bash", "Run a shell command on this machine and return stdout, stderr and the exit code. This machine runs " ..
-    platform.shell() .. (platform.os() == "windows" and ": use dir, type, findstr, copy." or "."), {
+  schema("bash", "Run a foreground command on this machine using " .. platform.shell() .. ". Its entire process tree is owned and cleaned up; background descendants cannot outlive this call. Output and process exit are separate evidence. For a long-lived server/browser use operation start, keep its command foreground, then observe/cancel its handle.", {
     command = { type = "string" }, cwd = { type = "string" } }, { "command" }),
+  schema("operation", "Start, observe, read streamed output, wait briefly for, or cancel a supervised external operation. A launch receipt is not completion. Jobs are automation rules, not operations. No automatic replay after an unknown outcome.", {
+    action = { type = "string", enum = {"start", "list", "status", "read", "wait", "cancel"} },
+    id = { type = "string" }, command = { type = "string" }, cwd = { type = "string" },
+    timeout_seconds = { type = "integer", minimum = 1, maximum = 86400 },
+    stream = { type = "string", enum = {"stdout", "stderr"} }, offset = { type = "integer", minimum = 0 },
+    limit = { type = "integer", minimum = 1, maximum = 24576 }, wait_ms = { type = "integer", minimum = 0, maximum = 10000 }
+  }, {"action"}),
   schema("read", "Read a text file, optionally a line range.", {
     path = { type = "string" },
     offset = { type = "integer", minimum = 1 },
@@ -247,6 +253,13 @@ function M.dispatch(memory, name, args, role, ctx)
   ctx = ctx or {}
   local user_id = ctx.user_id or "master"
   if not is_master(role) and admin_names()[name] then return { error = "forbidden_for_role:" .. role } end
+  if name == "operation" then
+    if not is_master(role) then return {error="forbidden_for_role:" .. role} end
+    args.owner = ctx.session_id or user_id
+    local ok, raw = pcall(host.operation, args.action or "status", json.encode(args))
+    if not ok then return {error=tostring(raw)} end
+    return json.decode(raw)
+  end
   if name=="tool_result" then
     if not is_master(role) then return {error="forbidden_for_role:"..role} end
     return tool_output.read(args.sha256,args.offset,args.limit)

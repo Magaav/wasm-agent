@@ -20,11 +20,9 @@ PORT="${1:-8891}"
 CLIENT_PORT=$((PORT + 1))
 WORK="$(mktemp -d /tmp/wa-conc-XXXXXX)"
 cleanup() {
-  # A fixture that is still shutting down holds its own database, so the removal has to wait for
-  # the kill to take effect: removing first failed on a locked pool.db, and because this runs as an
-  # EXIT trap under `set -o pipefail`, that failure became the script’s exit status - a harness
-  # race reported as a product failure. Kill, wait, then remove, and never let the cleanup decide
-  # the verdict.
+  local status=$?
+  # Only jobs owned by this fixture; wait for them so locked Windows databases do
+  # not turn cleanup into a product failure. Never kill by image name.
   local pids=("${SERVER:-}" "${WEDGE:-}" "${POOL:-}" "${TURNS:-}" "${MOCK_PID:-}")
   kill "${pids[@]}" 2>/dev/null
   for _ in $(seq 1 20); do
@@ -34,11 +32,31 @@ cleanup() {
     sleep 0.1
   done
   for pid in "${pids[@]}"; do [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null; done
-  # The only recursive removal is the exact directory mktemp created here.
-  case "$WORK" in /tmp/wa-conc-??????) rm -rf -- "$WORK" 2>/dev/null || true ;; esac
-  return 0
+  wait 2>/dev/null || true
+  if [ "$status" != "0" ]; then
+    echo "  fixture logs retained at $WORK" >&2
+  else
+    case "$WORK" in /tmp/wa-conc-??????) rm -rf -- "$WORK" 2>/dev/null || true ;; esac
+  fi
+  return "$status"
 }
 trap cleanup EXIT
+
+if [ "${WEDGE_ONLY:-0}" = "1" ]; then
+  # Hermetic smoke must not load the operator's node key, provider selection or
+  # rendezvous/relay configuration merely because its DB path is separate.
+  while IFS= read -r variable; do
+    case "$variable" in WASM_AGENT_*|WA_SCRIPT|OPENAI_API_KEY|OPENCODE_GO_API_KEY) unset "$variable" ;; esac
+  done < <(compgen -e)
+  mkdir -p "$WORK/home"
+  if command -v cygpath >/dev/null 2>&1; then
+    export WASM_AGENT_HOME="$(cygpath -w "$WORK/home")"
+    export WASM_AGENT_LUA_ROOT="$(cygpath -w "$ROOT")"
+  else
+    export WASM_AGENT_HOME="$WORK/home" WASM_AGENT_LUA_ROOT="$ROOT"
+  fi
+  export WASM_AGENT_LLM_MODEL=fixture
+fi
 
 # Every fixture needs its own database. Omitting --db here used the operator's
 # live memory.db: a smoke run migrated its schema before the compatible binary

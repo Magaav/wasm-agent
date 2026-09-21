@@ -122,7 +122,7 @@ A **mode** is a full-view switch (chat ⇄ engine ⇄ shell ⇄ control).
 
 **Keep concerns apart.** The status balloon diagnoses the *model and harness* (§6).
 Management of the *machine or the fabric*
-(nodes, spells, tools/envelope, accounts) lives in the **engine** view, reached
+(nodes, spells, tools/envelope, jobs, accounts) lives in the **engine** view, reached
 from the engine button in the topbar. Do not mix the two.
 
 - The switch lives in the **topbar**, beside the collapse control — never in the
@@ -148,12 +148,17 @@ from the engine button in the topbar. Do not mix the two.
 | `<wa-diff>` | The file changes a run made, below its answer. | — | — |
 | `<wa-window>` | A promoted panel in its own OS window (§3). | — | — |
 | `<wa-harness-status>` | §6's harness diagnostics. | — | `export` |
+| `<wa-jobs>` | Reviewed automation definitions, enabled state, queue/source/outcome evidence. Engine topic immediately after tools. | `.items` | `job-toggle` |
 
 Keyboard selection belongs to `<wa-menu>`, not to its caller: the highlight and the click target
 must be the same item, or Enter chooses something other than what the list shows.
 
 The engine view's topics (nodes, spells, tools) are expandable cards rendered in
 `app.js`; each loads its data on first expand (`GET /nodes`, `/spells`, `/tools`).
+Jobs follow tools and load `GET /jobs` even during a run: disabling automation must
+not wait for the work it stops. Toggles remain pending until persistence succeeds;
+errors never paint a successful change. Event/configuration text is rendered as text,
+not HTML. Jobs are automation definitions, not external process operations.
 
 
 ## 11. Attachments

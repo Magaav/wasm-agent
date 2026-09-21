@@ -60,6 +60,10 @@ pub fn spawn(relay_url: String) {
         let short = &identity.node_id[..identity.node_id.len().min(8)];
         eprintln!("[relay] attached to {relay_url} as {short}");
         loop {
+            if !crate::node::network_active() {
+                std::thread::sleep(Duration::from_secs(2));
+                continue;
+            }
             let (ts, signature, node_id) = signed(&identity, "relay-poll");
             let url = format!(
                 "{}/relay/poll?node_id={node_id}",

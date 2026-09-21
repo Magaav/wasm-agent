@@ -20,7 +20,8 @@ shell. The thing that can restart your agent must not be something your agent ca
 ## Asking
 
 ```
-wa-sentinel request restart  --reason "why"
+wa-sentinel request restart  --reason "why"    # graceful; stays queued while busy
+wa-sentinel request recover  --reason "why"    # explicit interruption; never waits for idle
 wa-sentinel request upgrade  --binary /path/to/wa --reason "why"
 wa-sentinel request upgrade  --binary /path/to/wa --session <id> --prompt "continue after upgrade" --reason "why"
 wa-sentinel request spell    --file /path/to/plan.json --reason "why"
@@ -42,8 +43,10 @@ when you need it most.
 
 ## What it guarantees
 
-- **The node is never the first thing to change.** `restart` waits for the node to be idle before
-  stopping it, so it is never the reason a run dies; `upgrade` proves the new binary answers on a
+- **Maintenance and recovery are distinct.** `restart` remains queued while the node is busy,
+  without blocking the watcher. `recover` interrupts by the listener PID without asking Lua to go
+  idle; use it only for deliberate recovery. Direct `wa-sentinel recover "reason"` is the independent
+  escape path even if legacy maintenance is occupying the request processor. `upgrade` proves the new binary answers on a
   scratch port before it goes near the running node.
 - **Stop by pid, never by image name.** Another `wa` on the machine may be somebody's session.
 - **Every action is logged with its reason** in `<config>/sentinel/sentinel.log`, including refusals.
@@ -92,7 +95,15 @@ wa-sentinel request wake --session "$MY_SESSION" --prompt "the node restarted; c
 
 Both requests are durable, so the order you write them in is the order they will be performed.
 
-## Waking the model on an event
+## Managed jobs
+
+For new automations use [JOBS.md](JOBS.md): durable definitions, default-off approval,
+revision-pinned queues, enabled/disabled Engine controls after tools, file/schedule/event/CDP
+sources, and either a skill-backed wake or deterministic allow-listed execution.
+External process executions are **operations**, never jobs ([OPERATIONS.md](OPERATIONS.md)).
+The runner holds an exclusive OS lock; interrupted deliveries are unknown and not replayed.
+
+## Waking the model on an event (legacy triggers)
 
 A trigger is a rule in `<config>/sentinel/triggers.json`. The trigger decides **when**; the verbs decide
 what, and they are the same fixed list as everywhere else — so a trigger can never do anything an

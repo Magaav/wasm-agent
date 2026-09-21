@@ -61,7 +61,7 @@ $harness = @'
     // The stream belongs to the old page, so the new page must notice the worker become idle
     // and repaint the answer from the durable ledger, not open the engine's session view.
     window.__fixtures.session.state = { state: "answered", detail: "the last message is a reply" };
-    window.__fixtures.session.turns.push(
+    window.__fixtures.session.messages.push(
       { seq: 5, role: "tool", tool_name: "bash", content: "done", tool_calls: [] },
       { seq: 6, role: "assistant", content: "RELOAD-MID-RUN-ANSWER", tool_calls: [] });
     window.__fixtures.health.current = null;
@@ -80,6 +80,25 @@ $harness = @'
     document.body.append(reloadLog);
     return;
   }
+  // Managed jobs are rules, after tools, and never optimistically reported enabled.
+  check(document.querySelector('[data-target="tools-box"]').closest('.engine-topic').nextElementSibling.querySelector('[data-target="jobs-box"]'), 'jobs must follow tools in the engine');
+  await refreshJobs();
+  var jobPanel = document.querySelector('wa-jobs');
+  check(!!jobPanel && !jobPanel.querySelector('img'), 'job text must not execute as HTML');
+  var jobToggle = jobPanel.querySelector('input');
+  check(!jobToggle.checked, 'new jobs show disabled');
+  jobToggle.click();
+  check(jobToggle.disabled && !jobToggle.checked, 'job toggle waits for durable confirmation');
+  for (var jtick=0;jtick<30;jtick++) await tick();
+  check(document.querySelector('wa-jobs input').checked, 'accepted enable is displayed');
+  window.__fixtures.jobsRefuse = true;
+  document.querySelector('wa-jobs input').click();
+  for (var jtick=0;jtick<30;jtick++) await tick();
+  check(document.querySelector('wa-jobs input').checked && document.getElementById('jobs-box').textContent.includes('fixture_job_refused'), 'a refused toggle preserves state and reports failure');
+  window.__fixtures.jobsRefuse = false;
+  document.querySelector('wa-jobs input').click();
+  for (var jtick=0;jtick<30;jtick++) await tick();
+  check(!document.querySelector('wa-jobs input').checked, 'accepted disable is displayed');
   var events = [
     { type: "round", n: 1 },
     { type: "delta", text: "Reading the config module to see what it names." },
@@ -1182,6 +1201,12 @@ if ($busy) {
   exit 1
 }
 
+$runtimeEnvironment = @{}
+foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'WASM_AGENT_*' -or $_.Name -eq 'WA_SCRIPT' })) {
+  $runtimeEnvironment[$entry.Name] = $entry.Value
+  [Environment]::SetEnvironmentVariable($entry.Name, $null, 'Process')
+}
+$env:WASM_AGENT_HOME = Join-Path $tmp 'home'
 try {
   $server = Start-Process -FilePath $WaExe -ArgumentList @("serve", "--db", $db, "--port", "$Port", "--client-port", "$ClientPort", "--ui", $tmp) -WindowStyle Hidden -PassThru
   for ($i = 0; $i -lt 40; $i++) {
@@ -1194,7 +1219,11 @@ try {
   $previous = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
-    $dump = & $edge --headless=new --disable-gpu --dump-dom "http://127.0.0.1:$Port/" 2>$null | Out-String
+    # The renderer's WASM initialization and second navigation are asynchronous.
+    # A load-only dump can stop at "stage: start" before the harness has a verdict.
+    # Isolate the browser profile as well as the server; never reuse user storage.
+    $profile = Join-Path $tmp 'browser-profile'
+    $dump = & $edge --headless=new --disable-gpu --virtual-time-budget=10000 "--user-data-dir=$profile" --dump-dom "http://127.0.0.1:$Port/" 2>$null | Out-String
   } finally { $ErrorActionPreference = $previous }
   $match = [regex]::Match($dump, '<pre id="harness-log"[^>]*>([\s\S]*?)</pre>')
   if (-not $match.Success) {
@@ -1213,6 +1242,8 @@ try {
   }
 } finally {
   if ($server) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
+  Remove-Item Env:WASM_AGENT_HOME -ErrorAction SilentlyContinue
+  foreach ($key in $runtimeEnvironment.Keys) { [Environment]::SetEnvironmentVariable($key, $runtimeEnvironment[$key], 'Process') }
   $resolvedTmp = [IO.Path]::GetFullPath($tmp)
   $resolvedTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
   if ($resolvedTmp.StartsWith($resolvedTemp, [StringComparison]::OrdinalIgnoreCase) -and

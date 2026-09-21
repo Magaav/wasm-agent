@@ -134,9 +134,9 @@ function M.run(argv)
   -- The banner is the last place a user can be told before they type: a thread
   -- that was cut off mid-answer looks like one that is simply quiet, and the
   -- recovery below (the model is told in its context) is invisible from here.
-  local state = memory.session_state(agent.session_id)
-  if state and state.state == "unfinished" then
-    print("  !        unfinished " .. state.detail)
+  local session_state = memory.session_state(agent.session_id)
+  if session_state and session_state.state == "unfinished" then
+    print("  !        unfinished " .. session_state.detail)
     print("           recovering: wa resume --session " .. agent.session_id)
   end
   print("  /help for commands, /exit to quit")
@@ -144,7 +144,7 @@ function M.run(argv)
 
   local function turn(line)
     state.streamed = 0
-    local ok, reply = pcall(agent.turn, agent, line)
+    local ok, reply = pcall(agent.run, agent, line)
     if not ok then
       print("\n  error: " .. redact.text(tostring(reply)))
     elseif state.streamed == 0 then

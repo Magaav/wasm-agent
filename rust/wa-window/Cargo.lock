@@ -2112,6 +2112,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "wa-operation"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "wa-window"
 version = "0.1.0"
 dependencies = [
@@ -2119,6 +2128,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tao",
+ "wa-operation",
  "windows",
  "wry",
 ]

@@ -8,6 +8,9 @@ cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 
 cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
+# The execution and automation contracts have native, model-free adversarial tests.
+cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
+cargo test --release --offline --manifest-path rust/wa-sentinel/Cargo.toml
 BIN=rust/target/release/wa
 # A turn cannot deploy the process serving that same turn. The marker crosses
 # the Rust host's shell boundary; both entry points must refuse before waiting
@@ -77,6 +80,7 @@ esac
 if WASM_AGENT_LUA_ROOT="$WASM_AGENT_LUA_ROOT" "$BIN" --db "$DB" status 2>&1 | grep -q "refusing on-disk Lua"; then
   echo "FAIL: a scratch ledger is a candidate node and must not be refused" >&2; exit 1
 fi
+mkdir -p "$DB.home"
 if WASM_AGENT_HOME="$DB.home" WASM_AGENT_LUA_ROOT="$WASM_AGENT_LUA_ROOT" "$BIN" status >/dev/null 2>&1; then :; else
   echo "FAIL: a candidate home must not be refused" >&2; exit 1
 fi
@@ -684,7 +688,9 @@ WASM_AGENT_HOME="$DB.home" WA_SCRIPT=scripts/test-guest.lua "$BIN" --db "$DB.gue
 # to report ok forever while every endpoint that needs Lua hung with zero bytes. This
 # stalls the worker on purpose and requires the node to say so. No model needed, which
 # is why it runs here and not in the concurrency test's model half.
-WEDGE_ONLY=1 WA_BIN="$BIN" bash scripts/test-serve-concurrency.sh 8893 | grep "a stalled worker is visible"
+# Preserve the whole sub-suite output: grep used to hide the actual failing
+# pool/session assertion while leaving only an earlier passing wedge line.
+WEDGE_ONLY=1 WA_BIN="$BIN" bash scripts/test-serve-concurrency.sh 8893
 rm -f "$DB.window"*
 echo "recovery cli ok"
 
@@ -905,6 +911,10 @@ for t in tests/*.lua; do
   rm -f "$DB.attach"*
 done
 echo "attach tests ok"
+
+# A real long-running tool must remain observable/cancellable through another worker.
+# Local mock provider only; no account, paid model or external browser required.
+node scripts/test-operation-control.cjs "$BIN"
 
 # The UI tests are JS and run outside the embedded interpreter, so they need node
 # and they need the repo root as cwd (they read ui/app.js from disk). A test that does

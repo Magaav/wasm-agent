@@ -4,6 +4,7 @@
 //! (sqlite, http, wasmtime, sha256, uuid, time, files). No Python anywhere.
 mod client_bridge;
 mod host;
+mod operations;
 mod lua;
 mod node;
 mod relay_client;
@@ -33,6 +34,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/users.lua", include_str!("../../../lua/core/users.lua")),
     ("lua/core/spells.lua", include_str!("../../../lua/core/spells.lua")),
     ("lua/core/nodes.lua", include_str!("../../../lua/core/nodes.lua")),
+    ("lua/core/enrollment.lua", include_str!("../../../lua/core/enrollment.lua")),
     ("lua/core/state.lua", include_str!("../../../lua/core/state.lua")),
     ("lua/core/status.lua", include_str!("../../../lua/core/status.lua")),
     ("lua/core/toolchain.lua", include_str!("../../../lua/core/toolchain.lua")),
@@ -235,6 +237,8 @@ fn main() {
     lua.register("read_file", host::read_file);
     lua.register("write_file", host::write_file);
     lua.register("exec", host::exec);
+    lua.register("operation", host::operation);
+    lua.register("jobs", host::jobs);
     lua.register("sleep", host::sleep);
     lua.register("node_identity", host::node_identity);
     lua.register("sign", host::sign);

@@ -20,6 +20,9 @@ window.__shellCalls = [];
 
 window.__fixtures = {
   version: { version: "test" },
+  jobs: {jobs: [{id:'fixture-job', name:'<img src=x onerror=alert(1)>', enabled:false, revision:1,
+    trigger:{kind:'event',topic:'fixture.message'}, action:{kind:'wake',session:'fixture',prompt:'review only'},
+    queued:0, source_status:'waiting for explicit event ingress'}]},
   models: {
     model: "fixture-model", provider: "fixture", configured: true,
     context_limit: 128000, database: "/tmp/fixture.db",
@@ -167,6 +170,13 @@ window.fetch = function (input, init) {
   // A relative fetch like "nodes" has no slash at all: keep it as the path.
   path = slashAt >= 0 ? path.slice(slashAt + 1) : path;
   if (path.endsWith("/")) path = path.slice(0, -1);
+  if (path === 'jobs' && init?.method === 'POST') {
+    const request = JSON.parse(init.body);
+    if (window.__fixtures.jobsRefuse) return Promise.resolve({ok:false,status:403,json:()=>Promise.resolve({error:'fixture_job_refused'})});
+    const job = window.__fixtures.jobs.jobs.find(j=>j.id===request.id);
+    if (job) job.enabled = request.action === 'enable';
+    return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve(job || {error:'not_found'})});
+  }
   const key = Object.keys(window.__fixtures).find((name) => path === name);
   if (key) {
     const payload = window.__fixtures[key];

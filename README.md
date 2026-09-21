@@ -1,152 +1,207 @@
 # wasm-agent
 
-**A coding agent you can hold to account.** One binary, its own memory, a desktop
-window, and a way to prove what it did.
+**Your agent. Your machines. Automation you can hold to account.**
 
-Most agents are a loop around an API call: they talk, they edit your files, and when
-something goes wrong you have a transcript and no evidence. wasm-agent keeps the
-evidence. Every run is a record you can read, every file change is a diff you can
-actually undo, every claim it makes was run before it was made, and the node it runs
-on reports its own health to anything that asks — including you.
+wasm-agent is building a personal agent that remembers what you ask it to,
+works with your files and applications, and can use other computers with your
+permission. Models provide the reasoning; they are not the agent's identity.
 
+There are **two ways into the same product**:
+
+- **Personal:** run your own agent, connect your model, and automate your work.
+- **Assisted:** join an automation provider's environment as a guest. An operator
+  helps build and run automations on your machine through access you explicitly
+  grant, can observe, and can revoke.
+
+For an automation professional, this means turning expertise, tools and tested
+procedures into a service for customers—not asking every customer to become an
+agent developer. For the customer, it should mean **“help me automate this”**, not
+“configure an infrastructure stack.”
+
+> **Status: live assisted alpha, not a general customer-ready release.** The
+> Windows paste-once guest installer and managed service are public and have passed
+> one disposable end-to-end operator-effect/revocation check. Clean-VM usability,
+> publisher signing, conversation isolation and recovery remain release gates.
+
+## The experience we are building
+
+### My own agent
+
+Install → name the agent → connect my model → choose a workspace → do useful
+work → inspect the result → return later with continuity.
+
+A friendly name belongs to the agent, not to a Git branch. Switching models or
+adding a device should not replace its identity or erase its memory.
+
+### Help from an automation professional
+
+Accept an invitation → verify the operator → review requested access and data
+sharing → connect this computer as a guest → approve a task → see what happened.
+
+The operator can use their models, tools, skills and reusable automations to help
+on the customer's machine. A customer should not need a model subscription or a
+coding toolchain merely to receive assisted automation. The service must explain
+who pays for model use and what data goes to which provider.
+
+The customer remains in control: visible operator access, pause/disconnect,
+revocation, and approval before expanding access. Being discoverable on the
+network is **not** permission to control a machine. Customers must not be able to
+see or operate each other's nodes, tasks, credentials or memories.
+
+These are the target experience and release requirements. See the
+[roadmap](ROADMAP.md) and [release contract](docs/release/RELEASE_CONTRACT.md)
+for the implementation boundary.
+
+## What exists today
+
+| Capability | Current implementation and boundary |
+| --- | --- |
+| Local agent | Rust host with an embedded Lua core; terminal chat and a web UI. You supply an OpenAI-compatible model endpoint. |
+| Desktop companion | Windows WebView2 window with avatar, compact chat and management views. The shell is Windows-first. |
+| Memory and continuity | Explicit remember/recall, resumable conversations and context compaction. Memory retrieval is on demand. |
+| Evidence | Stored transcript, tool traces, usage accounting and retrievable large tool results. An answered run is not proof of task success. |
+| Tracked file changes | Content-addressed file snapshots, diffs and conflict-aware undo. This does not undo arbitrary shell, network or application effects. |
+| Multiple machines | Node keys, signed peer calls, rendezvous discovery and an outbound relay for NAT'd nodes. |
+| Guest execution | Managed guests pin operator keys, require expiring local consent, reject unrelated callers and support local revocation. The managed registry—not a node's claimed role—controls promotion. Public rollout remains gated. |
+| Reusable procedures | Skills for on-demand instructions; spells for repeatable procedures with postconditions; WASM tool plugins. |
+| Supervision | A separate sentinel handles requested restarts/upgrades and budgeted event-triggered wakes. |
+| Worker pool | On-demand interpreters keep reads responsive and route chat work across workers. Conversation ownership and overlapping streams still need release-level isolation verification. |
+
+Default transcript retention is **seven days**; debug transcripts are retained.
+Explicit memories are a separate store. Tool artifacts and telemetry have their
+own retention limitations. “Evidence” does not mean unlimited archival storage;
+see [memory](docs/MEMORY.md) and [observability](docs/OBSERVABILITY.md).
+
+## Trust before reach
+
+The current runtime is intended for controlled development environments.
+
+- Native shell and desktop tools act with the process/user's authority. Selecting
+  a workspace is not an enforced filesystem sandbox.
+- WASM plugin isolation does **not** sandbox the entire agent or native tools.
+- HTTP authentication, origin checks and cross-worker state isolation need
+  hardening before public/customer use. Localhost alone is not authentication.
+- Peer signatures establish identity; they do not establish customer consent.
+  Existing master/guest roles and optional trusted-master configuration are not
+  a substitute for explicit enrollment, scoped grants and revocation.
+- Do not expose the development HTTP service publicly or enroll customer
+  machines as though those release gates had already passed.
+
+Remote assistance will be opt-in. There will be no silent enrollment, copied
+operator credentials, hidden control, or fallback to unrestricted access when
+a provider or authorization service is unavailable.
+
+## Running the developer preview
+
+There are currently no published release assets. `scripts/install.ps1` and
+`scripts/install.sh` are **legacy operator provisioning scripts** tied to the
+maintainers' infrastructure; they are not public installation instructions.
+Do not use them to onboard customers.
+
+From a source checkout with the Rust/C build prerequisites and cached crates:
+
+```bash
+cd rust
+cargo build --release --offline
+cd ..
 ```
-                    ┌──────────────────────────┐
-   your machine     │  wa-window (WebView2)    │   round avatar → chat → full screen
-                    │  the same UI in a panel  │
-                    └────────────┬─────────────┘
-                                 │  SSE, one run at a time
-                    ┌────────────▼─────────────┐
-                    │  wa serve    (Rust host) │   /health /version /chat /diff /nodes …
-                    │  ───────────────────────  │
-                    │  Lua core: loop, tools,  │   the agent's steps live here,
-                    │  memory, sessions, skills│   and this is the part that will be WASM
-                    └────────────┬─────────────┘
-                                 │
-              SQLite ledger (append-only) · content-addressed blobs · WASM plugins
-                                 │
-                    ┌────────────▼─────────────┐
-                    │  the fabric: other nodes │   ed25519 identity, rendezvous,
-                    │  masters and guests      │   relay, diff replication
-                    └──────────────────────────┘
+
+The executable is `rust/target/release/wa` (`wa.exe` on Windows). Use its `help`,
+`paths` and `status` commands. Configure your own endpoint through the existing
+`<config>/env` file reported by `paths`, or process environment:
+
+```text
+WASM_AGENT_LLM_BASE_URL=https://your-compatible-provider.example/v1
+WASM_AGENT_LLM_MODEL=your-model
+WASM_AGENT_LLM_API_KEY=your-own-key
 ```
 
-## What it does for you
+Keep that file private and out of Git. Do not copy a maintainer's configuration.
+Then run `wa chat`, or `wa serve --ui <absolute-path-to-ui>` and open
+`http://127.0.0.1:8799/` in a trusted local browser. Here `wa` means the built
+executable, not an assumed installed command. Without a model, local memory and
+ledger commands remain available.
 
-- **Remembers on purpose.** An append-only ledger of everything that happened, and
-  explicit memories you can edit. The model reads history; it never rewrites it.
-- **Shows its work.** A live token stream, a trace per run, tool results kept whole,
-  and a diff topic per run showing `+N −M` per file.
-- **Undoes for real.** The changed files are stored as content-addressed blobs, so
-  *undo* puts the files back — and refuses when the file moved on since, naming the
-  file rather than clobbering your newer work.
-- **Says what is true about itself.** `/health` is answered without the interpreter,
-  so a node inside a ten-minute build still answers. A busy node is never reported as
-  a dead one.
-- **Can be more than one.** Every node has an ed25519 identity and a name that is its
-  worktree. Nodes find each other through a rendezvous, replicate by diff, and can
-  call each other; a *guest* node owns no worktree and is read-only until a trusted
-  master asks.
-- **Can be restarted by something that is not itself.** `wa-sentinel` is a separate
-  process with a fixed verb list, a drop-box, an audit log and a wake budget — because
-  an agent that can restart the node it is running on will eventually do it mid-run.
-- **Can improve itself.** Self-evolution has been done and written down, with the
-  measurements: see [`docs/EVOLUTION.md`](docs/EVOLUTION.md).
-- **Is honest about failure.** A failing tool opens its own topic; a skipped test is
-  reported as skipped; a refusal says why. "Done" means proven — there is a handoff
-  gate in `scripts/handoff.sh` that fails when a claim outruns its evidence.
+Public packaging work starts with `scripts/package-windows.ps1`: it builds a
+versioned **candidate archive**, not a release approval. The archive includes a
+fresh-install script and `bin/wa.cmd setup`, `doctor` and `ui`. Setup stores your
+own credentials with restricted file permissions; guest mode stays disconnected.
+See the [candidate guide](docs/release/RUNTIME.md) and
+[release status](docs/release/RELEASE_STATUS.md) for instructions and verification.
 
-## Quick start
+### Model-free assisted onboarding
+
+`scripts/bootstrap-windows.ps1` installs a checksum-pinned package in the background
+while asking for the node name, then asks for explicit full-account automation
+consent. It connects outbound through a **managed** rendezvous, without a model key.
+`wa disconnect` revokes access; `wa connect` renews it; `wa access log` shows recent
+operator activity. Consent defaults to 24 hours. No automatic Windows-login task is
+installed: reconnect after logout when wanted.
+
+An authorized operator can run `wa network role <node-id> master` (or `guest`).
+Promotion does not automatically authorize that node to control other customers.
+
+The public descriptor is served by the managed rendezvous after its package,
+operator pins and service protocol pass the live gate. The current assisted-alpha
+one-liner is:
 
 ```powershell
-# Windows — installs `wa` on your PATH
-powershell -c "irm https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/install.ps1 | iex"
+& ([scriptblock]::Create((Invoke-RestMethod https://rendezvous.colmeio.com/releases/install.ps1)))
 ```
+
+It installs in the background, asks for a node name, then requires explicit
+`CONNECT` consent for broad Windows-account automation. The one-liner fails closed
+when its descriptor is unavailable. [Managed onboarding](docs/ONBOARDING.md)
+documents the service, publication and verification gates.
+
+## Architecture
+
+```text
+                 Your agent / automation operator
+                   identity · task · model access
+                              │
+                    Rust host + Lua agent core
+                  tools · memory · evidence · policy
+                              │
+            ┌─────────────────┼────────────────────┐
+       own computer      own remote nodes    customer guest nodes
+                                            explicit authorization
+```
+
+This is the product direction; shared agent identity and customer authorization
+are not all implemented. Today the runtime has node identities and per-node state.
+
+| Part | Responsibility |
+| --- | --- |
+| `lua/core/` | Agent loop, prompt/context policy, tools, memory, sessions and node policy. |
+| `rust/wa-host/` | Files, processes, HTTP/SSE, SQLite, cryptography, Lua and WASM execution. |
+| `ui/` and `rust/wa-window/` | Conversation, evidence and control surfaces; Windows desktop shell. |
+| `rust/wa-sentinel/` | External lifecycle supervision. |
+
+The core currently runs as embedded Lua, **not** a WASI component. Plugins use a
+small core-module ABI, not WIT/Component Model. Portability work remains on the
+roadmap; it does not block proving the first useful customer journey.
+
+## Development and verification
+
+Read [AGENTS.md](AGENTS.md) before editing. It governs contributor worktrees,
+commit provenance, testing and live-node safety; it is not an end-user identity.
 
 ```bash
-# Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/Magaav/wasm-agent/main/scripts/install.sh | sh
+bash scripts/test.sh
+powershell -File scripts/test-ui.ps1
+bash scripts/handoff.sh
 ```
 
-Then:
+Build from your own change branch. Deploy existing developer nodes only through
+`scripts/deploy.sh` and the external sentinel procedure—never copy over a running
+binary or restart someone else's session. Public candidate packaging does not
+install or deploy anything.
 
-```bash
-wa ui                      # the node + the desktop window (or your browser at :8799)
-wa chat                    # a run in the terminal
-wa status                  # node, model, context budget, tools
-```
-
-Bring your own model — any OpenAI-compatible endpoint:
-
-```
-WASM_AGENT_LLM_BASE_URL=https://…
-WASM_AGENT_LLM_API_KEY=…
-WASM_AGENT_LLM_MODEL=…
-```
-
-Without a model configured, `wa` still runs: memory, recall, sessions and the
-ledger all work locally.
-
-## How it is built
-
-Two halves, deliberately split by *what changes*:
-
-| | |
-|---|---|
-| **Rust host** (`rust/wa-host`) | one binary: HTTP + SSE, SQLite, files, hashing, process execution with deadlines, WASM plugins via `wasmtime`, the node fabric, and the embedded Lua 5.4 interpreter. Capabilities only — no agent logic. |
-| **Lua core** (`lua/core`) | the agent: the run loop, prompt assembly, tools, memory policy, sessions, compaction, skills, spells, the node's role rules. This is the part intended to become a WASM component, so it is written to be portable and to ask the host for everything it needs. |
-| **UI** (`ui/`) | the chat and control surfaces: web components, a wasm markdown renderer, and a documented design contract in [`DESIGN.md`](DESIGN.md). |
-| **Shell** (`rust/wa-window`) | the Windows WebView2 companion: translucent, always-on-top, collapses to a round avatar. It loads the same UI the browser does. |
-
-```bash
-cd rust && cargo build --release --offline     # Lua 5.4 is vendored; no network needed
-```
-
-## The parts worth reading
-
-- [`DESIGN.md`](DESIGN.md) — the enforced UI contract (reuse before you create, the
-  balloon close rule, the 5px scale, where a mode switch lives, capability tiers).
-- [`AGENTS.md`](AGENTS.md) — how to work in this repo, including commit provenance and
-  the rule that an agent's branch must stay current with `main`.
-- [`docs/MEMORY.md`](docs/MEMORY.md) — the ledger, explicit memories, and why they are
-  never mixed.
-- [`docs/ORCHESTRATION.md`](docs/ORCHESTRATION.md) — what was learned running multiple
-  agents against each other, including the failures.
-- [`docs/SENTINEL.md`](docs/SENTINEL.md) — the process that owns restarts, and why.
-- [`docs/RENDEZVOUS.md`](docs/RENDEZVOUS.md) — how nodes find each other and what a
-  guest is allowed to be.
-- [`docs/EVOLUTION.md`](docs/EVOLUTION.md) — self-improvement, with the numbers.
-- [`ROADMAP.md`](ROADMAP.md) — where this goes: many agents in one window, and a UI
-  that orchestrates a fleet.
-
-## Honest limits
-
-This is a working system, not a finished one, and the interesting part of a README is
-what it admits:
-
-- **One run at a time per node.** A single interpreter serves the agent, so a second
-  request queues behind the first. That is the current design, and lifting it is the
-  first item on the roadmap.
-- **The desktop shell is Windows-first.** The node runs anywhere Rust does; the
-  WebView2 shell is the part that is Windows-specific today.
-- **The window is a rectangle.** A balloon cannot paint outside it. Two containers are
-  supported — an in-page balloon (instant, closes on a press outside) and a real view
-  window (resizable, movable, survives the chat being collapsed) — and the UI picks.
-- **The plugin ABI is a tiny core-module ABI**, not the component model. Typed
-  interfaces and WIT are on the roadmap.
-- **The Lua core is not yet `wasm32-wasip2`.** That is the portability goal, and the
-  reason the split between host capabilities and agent logic is where it is.
-- **You supply the model.** Quality, cost and latency are your provider's.
-
-## Working on it
-
-```bash
-bash scripts/test.sh          # the gate: every suite, including the ones that must fail
-bash scripts/test-ui.ps1      # the UI harness (headless Edge, one line per run)
-bash scripts/handoff.sh       # "done" means proven, and this is what checks it
-```
-
-Contributions are welcome; `AGENTS.md` is the contract, and the gate is the referee.
+Further reading: [architecture](ARCHITECTURE.md), [UI contract](DESIGN.md),
+[host boundary](docs/HOST.md), [node fabric](docs/RENDEZVOUS.md),
+[sentinel](docs/SENTINEL.md), [self-evolution](docs/EVOLUTION.md).
 
 ## License
 
-MIT. Vendored Lua is MIT — see `rust/wa-host/vendor/lua`.
+MIT. Vendored Lua is MIT; see `rust/wa-host/vendor/lua`.

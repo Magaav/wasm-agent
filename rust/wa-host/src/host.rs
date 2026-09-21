@@ -560,126 +560,36 @@ pub(crate) fn exec_timeout_seconds() -> u64 {
         .unwrap_or(300u64)
 }
 
-/// host.exec(command, cwd?) -> {code, stdout, stderr} | {error}
-/// Run a command with a deadline, draining its pipes from their own threads.
-///
-/// Two deadlocks live here, and both look identical from outside - a worker that never beats again:
-///
-/// * a command that never finishes. It happened: an agent curled *this node's own* endpoint from
-///   inside a run, the request queued behind the run that made it, and the worker waited on itself
-///   until somebody killed the curl six minutes later. The node reported it honestly - `ok:false`,
-///   `worker:stalled`, the age of the silence - which is how it was found, but reporting a deadlock
-///   is not the same as not having one.
-/// * a child whose output pipe has filled while we wait for it to exit. Waiting on the child first is
-///   the obvious way to write this and it wedges the same way.
-///
-/// So: read both pipes on their own threads, poll for exit against a deadline, and kill what is still
-/// running when the deadline passes. The failure is returned as text a model can read and act on.
+/// Compatibility facade over the supervised operation runtime. No pipes, reader threads or
+/// independent heartbeat live here; the lifecycle is owned by wa-operation (docs/OPERATIONS.md).
 fn run_bounded(program: &str, flag: &str, command: &str, cwd: &str) -> Result<Value, String> {
-    use std::io::Read;
-    // A command is bounded by `seconds` below, so waiting on it is progress, not a stall. Without this
-    // a node running a long command reported `ok:false` and `worker:stalled` for its whole duration,
-    // and past WASM_AGENT_WORKER_STALL_EXIT_SECONDS it killed itself mid-command.
-    let _heartbeat = crate::serve::Heartbeat::start();
-    let seconds = exec_timeout_seconds();
-    let mut process = std::process::Command::new(program);
-    process.arg(flag).arg(command);
-    if crate::serve::in_turn() {
-        // `WASM_AGENT_IN_TURN` keeps its name deliberately: it is read by scripts/deploy.sh and
-        // scripts/upgrade.sh, which are installed independently of this binary, so renaming it here
-        // would silently disarm the in-run refusal until those scripts were replaced too. The marker
-        // says "this shell is inside a run" (ARCHITECTURE.md section 6); the rename needs a release
-        // that sets and checks both names.
-        process.env("WASM_AGENT_IN_TURN", "1");   // naming-check: allow (read by the deploy scripts)
-    }
-    if !cwd.is_empty() {
-        process.current_dir(cwd);
-    }
-    process.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-    let mut child = process.spawn().map_err(|error| error.to_string())?;
-    let reader = |pipe: Option<std::process::ChildStdout>| {
-        pipe.map(|mut pipe| std::thread::spawn(move || {
-            let mut buffer = Vec::new();
-            let _ = pipe.read_to_end(&mut buffer);
-            buffer
-        }))
+    crate::operations::foreground(program, flag, command, cwd, exec_timeout_seconds())
+}
+
+/// host.operation(action, args_json) -> operation receipt/state/output | {error}
+pub extern "C" fn operation(l: *mut LuaState) -> c_int {
+    let action = arg_string(l, 1).unwrap_or_default();
+    let args = arg_string(l, 2).unwrap_or_else(|| "{}".into());
+    let result = serde_json::from_str(&args).map_err(|e|e.to_string())
+        .and_then(|args|crate::operations::control(&action, &args, shell_config()));
+    push_json(l, &result.unwrap_or_else(|error|json!({"ok":false,"error":error})));
+    1
+}
+
+/// host.jobs(action, args_json): local automation management, never execution.
+pub extern "C" fn jobs(l: *mut LuaState) -> c_int {
+    let action=arg_string(l,1).unwrap_or_else(||"list".into());
+    let args:Value=serde_json::from_str(&arg_string(l,2).unwrap_or_else(||"{}".into())).unwrap_or(Value::Null);
+    let root=std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_|".".into())).join(".wasm-agent/sentinel/jobs.db");
+    let store=wa_jobs::Store::new(root);
+    let result=match action.as_str() {
+        "list"=>store.list().map(|jobs|json!({"jobs":jobs})),
+        "history"=>store.history(),
+        "enable"=>store.enable(args["id"].as_str().unwrap_or(""),true),
+        "disable"=>store.enable(args["id"].as_str().unwrap_or(""),false),
+        _=>Err("unknown_job_action".into()),
     };
-    let out_reader = reader(child.stdout.take());
-    let err_reader = child.stderr.take().map(|mut pipe| std::thread::spawn(move || {
-        let mut buffer = Vec::new();
-        let _ = pipe.read_to_end(&mut buffer);
-        buffer
-    }));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
-    let mut killed = false;
-    let status = loop {
-        match child.try_wait().map_err(|error| error.to_string())? {
-            Some(status) => break status,
-            None if std::time::Instant::now() >= deadline => {
-                let _ = child.kill();
-                killed = true;
-                break child.wait().map_err(|error| error.to_string())?;
-            }
-            None => std::thread::sleep(std::time::Duration::from_millis(50)),
-        }
-    };
-    // The kill stops the shell, not the whole tree on Windows: a grandchild can hold the pipe open
-    // for as long as it likes, and joining the readers here would put the stall straight back - the
-    // deadline would fire at 2s and the call would return at 30s, which is exactly what the first
-    // version of this did. The readers are left to end when the orphan does.
-    //
-    // The same hole existed for a child that exits *on its own*: a command that backgrounds work
-    // with `&` leaves an orphan holding the write end of the pipe, the child exits well inside the
-    // deadline, and an unbounded join then waited on that orphan forever. Measured on a real node:
-    // one `bash` tool with a headless Chrome backgrounded behind it, the deadline four times past,
-    // the run 26 minutes old, the ledger holding no event after the tool started, and the worker
-    // still reporting itself alive - so nothing else could notice either. The deadline has to bound
-    // the whole call, not the child's lifetime.
-    let collect = |handle: Option<std::thread::JoinHandle<Vec<u8>>>| -> (Vec<u8>, bool) {
-        match handle {
-            None => (Vec::new(), false),
-            Some(handle) => {
-                let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
-                while !handle.is_finished() && std::time::Instant::now() < until {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                if handle.is_finished() {
-                    (handle.join().ok().unwrap_or_default(), false)
-                } else {
-                    // Left to end when the orphan does; the thread is not joined, so this call
-                    // returns now. The same discipline the killed branch below already uses.
-                    (Vec::new(), true)
-                }
-            }
-        }
-    };
-    let (stdout, out_held) = collect(out_reader);
-    let (stderr, err_held) = collect(err_reader);
-    let held = if killed {
-        ""
-    } else if out_held || err_held {
-        " A background process started by this command still holds its output pipe, so its output \
-         was not collected - and it is still running. Detach background work from the command's \
-         output, or give it a deadline of its own."
-    } else {
-        ""
-    };
-    if killed {
-        return Ok(json!({
-            "code": -1,
-            "stdout": String::from_utf8_lossy(&stdout),
-            "stderr": format!(
-                "the command did not finish within {seconds}s and was killed (WASM_AGENT_EXEC_TIMEOUT_SECONDS). \
-                 If it was waiting on this node - a call to its own HTTP port - that request is queued \
-                 behind this very run and can never be served: ask the node from outside the run instead."
-            ),
-        }));
-    }
-    Ok(json!({
-        "code": status.code().unwrap_or(-1),
-        "stdout": String::from_utf8_lossy(&stdout),
-        "stderr": format!("{}{}", String::from_utf8_lossy(&stderr), held),
-    }))
+    push_json(l,&result.unwrap_or_else(|e|json!({"error":e.to_string()})));1
 }
 
 pub extern "C" fn exec(l: *mut LuaState) -> c_int {

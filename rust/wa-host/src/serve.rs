@@ -143,7 +143,7 @@ thread_local! {
     static IN_RUN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-fn worker_id() -> usize {
+pub(crate) fn worker_id() -> usize {
     WORKER_ID.with(|cell| cell.get())
 }
 
@@ -151,6 +151,9 @@ fn worker_id() -> usize {
 /// Not in this list means worker 0 - the safe default, and the reason a missing entry is a performance
 /// question rather than a correctness one.
 fn is_read_route(request: &Request) -> bool {
+    // These controls use independent synchronized runtimes, never agent state. A blocked run must
+    // not queue its own cancellation or the operator's disable behind itself.
+    if matches!(split_path(&request.path).0.as_str(), "/jobs" | "/operations" | "/operation") {return true;}
     if request.method != "GET" {
         return false;
     }
@@ -489,8 +492,10 @@ fn health_body() -> Vec<u8> {
     // every route that changes something - so the aggregate is worker 0's age, and a wedged run worker is
     // still reported as the node being stalled even while a read worker answers reads. Which lane is wedged
     // is a per-worker question, answered by the array below.
-    let age_ms = worker_age_ms(0);
-    let stalled = age_ms >= stall_seconds() * 1000;
+    let operations = crate::operations::health();
+    let operation_overdue = operations.as_array().is_some_and(|items|items.iter().any(|s|s["overdue"]==true));
+    let age_ms = live_worker_ids().into_iter().map(worker_age_ms).max().unwrap_or(0);
+    let stalled = age_ms >= stall_seconds() * 1000 || operation_overdue;
     let state = if stalled { "stalled" } else if age_ms < 1000 { "alive" } else { "busy" };
     let mut current = IN_FLIGHT.lock().ok().and_then(|slot| {
         slot.as_ref().map(|(label, started)| {
@@ -542,6 +547,8 @@ fn health_body() -> Vec<u8> {
         // against its deadline (`bash · 42s of 300s`) without waiting for the tool event to carry it.
         // Same number `host.exec_timeout()` reports, from the one place the host enforces it.
         "exec_timeout_seconds": crate::host::exec_timeout_seconds(),
+        "operations": operations,
+        "operation_overdue": operation_overdue,
         "current": current,
         "workers_count": worker_count(),
         "workers": workers,
@@ -687,10 +694,23 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
 
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
         let request = match read_request(&mut stream) {
             Ok(Some(request)) => request,
             _ => continue,
         };
+        if std::env::var("WASM_AGENT_MANAGED").as_deref() == Ok("1")
+            || matches!(split_path(&request.path).0.as_str(), "/jobs" | "/operations" | "/operation") {
+            let host = header_of(&request.node_headers, "host").to_ascii_lowercase();
+            let origin = header_of(&request.node_headers, "origin").to_ascii_lowercase();
+            let port = stream.local_addr().map(|a| a.port()).unwrap_or(0);
+            let local_host = host == format!("127.0.0.1:{port}") || host == format!("localhost:{port}");
+            let cross_site = header_of(&request.node_headers, "sec-fetch-site") == "cross-site";
+            if !local_host || cross_site || (!origin.is_empty() && origin != format!("http://{host}")) {
+                let _ = respond(&mut stream, 403, "application/json", b"{\"error\":\"foreign_origin\"}");
+                continue;
+            }
+        }
         // The page's own heartbeat, recorded where every request passes - including the ones the accept
         // thread answers itself, because `/version` is one of those and it is exactly the request that says
         // the page is alive.
@@ -912,6 +932,10 @@ fn process_relay_job(lua: &Lua, ui: &std::path::Path, job: &crate::relay_client:
         reply: job.reply.clone(),
     };
     let (route, _query) = split_path(&job.path);
+    // The relay is untrusted transport, never a tunnel into unauthenticated local UI APIs.
+    if job.method != "POST" || !matches!(route.as_str(), "/node/call" | "/node/chat" | "/sync/push") {
+        return (403, "{\"error\":\"relay_route_forbidden\"}".into());
+    }
     let session = header_of(&job.headers, "x-wa-session");
 
     if route == "/node/chat" && job.method == "POST" {
@@ -1018,11 +1042,12 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
                 } else if lower.starts_with("accept:") && lower.contains("text/event-stream") {
                     accept_sse = true;
                 } else if let Some((key, value)) = lower.split_once(':') {
-                    if key.trim().starts_with("x-wa-") {
+                    if key.trim().starts_with("x-wa-") || matches!(key.trim(), "host" | "origin" | "sec-fetch-site") {
                         node_headers.push((key.trim().to_string(), value.trim().to_string()));
                     }
                 }
             }
+            if length > 4_000_000 || end > 65536 { return Ok(None); }
             if data.len() >= end + 4 + length {
                 return Ok(Some(Request {
                     method,
@@ -1207,6 +1232,10 @@ fn dispatch(
         }
         "/envelope" => (200, "application/json", call("wa_envelope", &[session]).into_bytes()),
         "/tools" => (200, "application/json", call("wa_tools", &[session]).into_bytes()),
+        "/jobs" if method == "GET" => (200,"application/json",call("wa_jobs", &["{}",session]).into_bytes()),
+        "/jobs" if method == "POST" => (200,"application/json",call("wa_jobs", &[body,session]).into_bytes()),
+        "/operations" if method == "GET" => (200,"application/json",call("wa_operation", &["{}",session]).into_bytes()),
+        "/operation" if method == "POST" => (200,"application/json",call("wa_operation", &[body,session]).into_bytes()),
         "/skills" => (200, "application/json", call("wa_skills", &[session]).into_bytes()),
         "/nodes" => (200, "application/json", call("wa_nodes", &[session]).into_bytes()),
         "/node/name" if method == "POST" => (200, "application/json", call("wa_set_node_name", &[body, session]).into_bytes()),
