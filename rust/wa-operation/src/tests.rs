@@ -62,6 +62,16 @@ fn normal_command_succeeds_and_closes_stdin() {
     let s = settled(&m, &id);
     assert_eq!(s["ok"], true, "{s}");
     assert_eq!(s["stdout"], "done");
+    let timing=&s["timing"];
+    assert_eq!(timing["schema_version"],1,"{s}");
+    assert_eq!(timing["clock"],"monotonic","{s}");
+    assert_eq!(timing["complete"],true,"{s}");
+    assert_eq!(timing["final_state_record_excluded"],true,"{s}");
+    let measured=["setup_ms","accepted_record_ms","spawn_ms","execution_ms","drain_cleanup_ms","output_sync_ms"]
+        .iter().map(|name|timing[*name].as_u64().unwrap()).sum::<u64>();
+    assert_eq!(timing["measured_ms"],measured,"{s}");
+    assert_eq!(timing["total_ms"].as_u64().unwrap(),measured+timing["unattributed_ms"].as_u64().unwrap(),"{s}");
+    assert_eq!(s["elapsed_ms"],timing["total_ms"],"{s}");
     fs::remove_dir_all(root).unwrap();
 }
 #[test]
@@ -293,6 +303,10 @@ fn launch_failure_is_visible() {
     let s = settled(&m, &id);
     assert_eq!(s["ok"], false);
     assert!(s["error"].is_string());
+    assert_eq!(s["timing"]["schema_version"],1,"{s}");
+    assert_eq!(s["timing"]["complete"],false,"{s}");
+    assert!(s["timing"]["setup_ms"].is_number(),"{s}");
+    assert!(s["timing"]["spawn_ms"].is_number(),"{s}");
     // A notification is not permission to outrun the durable failure record.
     let restored=Manager::new(&root).snapshot(&id).unwrap();
     assert_eq!(restored["state"],"failed");

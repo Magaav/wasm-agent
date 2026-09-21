@@ -38,6 +38,12 @@ remain local, not in Git. The 2,185-event snapshot covers
   85,457 ms. Per-run bash share had p50 **14.1772%** and p95 **80.4431%**. Do not
   divide the all-tool population by this complete-run subset or present summed
   concurrent runs as elapsed clock time.
+* A later model-free Windows executor probe separated native phases. Seven direct
+  no-op fixtures measured 24 ms total p50 (21 ms child execution after spawn),
+  while seven Git Bash no-ops measured 53 ms total p50 (49 ms execution): about
+  3–4 ms of measured non-execution supervisor work and a 29 ms local shell/direct
+  gap. The probe does not retrofit phase data into this historical export and does
+  not explain its 88.2-second bash p95 or 24-minute maximum.
 * Prepared-prefix measurements are absent. No verified task outcomes or independent
   acceptance checks are attached to this historical sample.
 

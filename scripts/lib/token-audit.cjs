@@ -19,6 +19,7 @@ const PUBLIC_TOOL_NAMES = new Set(['remember','recall','memories','skill','capab
   'operation','read','read_many','write','edit','ls','grep','diagnose','client','shell','spell_save','spell_run',
   'spell_list','spell_get','spell_forget','spell_export','remote','nodes','session_debug','session_fixture','tool_result']);
 const publicToolName = name => typeof name === 'string' && PUBLIC_TOOL_NAMES.has(name) ? name : 'other';
+const OPERATION_PHASES=['setup_ms','accepted_record_ms','spawn_ms','execution_ms','drain_cleanup_ms','output_sync_ms'];
 const runKey = event => event && event.run_id ? JSON.stringify([event.session_id,event.run_id]) : null;
 
 function audit(input) {
@@ -59,6 +60,7 @@ function audit(input) {
   const timing = {model_ms:[],ttft_ms:[],run_ms:[],prefix_audit_ms:[]};
   const tools = {completed:0,failed:0,pending:0,repeated_arguments_within_run:0};
   const toolBuckets = new Map(), toolTimes = [], toolTimesByClock = new Map();
+  const executionTimings=[];let executionTimingReported=0,executionTimingIncomplete=0,executionTimingInvalid=0;
   const runParts = new Map(), completedRuns = [];
   const bucketFor = name => {
     name=publicToolName(name);
@@ -98,6 +100,16 @@ function audit(input) {
       } else {
         tools.completed++;bucket.completed++;
         if (end.ok === false) {tools.failed++;bucket.failed++;}
+        if(end.execution_timing!==undefined) {
+          executionTimingReported++;
+          const t=end.execution_timing;
+          const values=OPERATION_PHASES.map(field=>t?.[field]);
+          const measured=values.every(count)&&count(t?.unattributed_ms)&&count(t?.total_ms)&&count(t?.measured_ms);
+          const phaseTotal=measured?total(values):0;
+          if(t?.schema_version!==1||t?.clock!=='monotonic'||t?.complete!==true||!measured) executionTimingIncomplete++;
+          else if(phaseTotal!==t.measured_ms||phaseTotal+t.unattributed_ms!==t.total_ms||!number(end.ms)||t.total_ms>end.ms) executionTimingInvalid++;
+          else executionTimings.push({...t,name:publicToolName(name),tool_ms:end.ms,wrapper_ms:end.ms-t.total_ms});
+        }
         if(number(end.ms)&&pair.start) {
           const clockName=end.clock==='monotonic'?'monotonic':end.clock==='wall-fallback'?'wall_fallback':'unknown';
           toolTimes.push(end.ms);bucket.times.push(end.ms);bucket.clocks[clockName]=(bucket.clocks[clockName]||0)+1;
@@ -217,6 +229,28 @@ function audit(input) {
       share_of_measured_tool_ms:toolTotal?total(bucket.times)/toolTotal:null};
     return [name,summary];
   }));
+  const executionToolMs=total(executionTimings.map(t=>t.tool_ms));
+  const executionMs=total(executionTimings.map(t=>t.execution_ms));
+  const executionFields=[...OPERATION_PHASES,'unattributed_ms','wrapper_ms'];
+  const executionTotals=Object.fromEntries(executionFields.map(field=>[field,total(executionTimings.map(t=>t[field]))]));
+  const executionDistributions=Object.fromEntries(executionFields.map(field=>[field,timingSummary(executionTimings.map(t=>t[field]))]));
+  const executionByName={};
+  for(const item of executionTimings) {
+    const bucket=executionByName[item.name]||(executionByName[item.name]={samples:0,tool_ms:0,execution_ms:0,executor_overhead_ms:0});
+    bucket.samples++;bucket.tool_ms+=item.tool_ms;bucket.execution_ms+=item.execution_ms;
+    bucket.executor_overhead_ms+=item.tool_ms-item.execution_ms;
+  }
+  for(const bucket of Object.values(executionByName)) bucket.execution_share=bucket.tool_ms?bucket.execution_ms/bucket.tool_ms:null;
+  tools.execution_phases={reported:executionTimingReported,complete:executionTimings.length,
+    incomplete:executionTimingIncomplete,invalid:executionTimingInvalid,tool_ms:executionToolMs,
+    execution_ms:executionMs,executor_overhead_ms:executionToolMs-executionMs,
+    execution_share:executionToolMs?executionMs/executionToolMs:null,
+    phase_totals_ms:executionTotals,phase_timing:executionDistributions,
+    by_name:Object.fromEntries(Object.entries(executionByName).sort(([a],[b])=>a.localeCompare(b))),
+    scope:'operation total excludes its final state record; wrapper includes that record plus host adapter and tool projection'};
+  for(const value of [executionToolMs,executionMs,...Object.values(executionTotals),
+    ...Object.values(executionByName).flatMap(bucket=>[bucket.samples,bucket.tool_ms,bucket.execution_ms,bucket.executor_overhead_ms])])
+    if(!Number.isSafeInteger(value)) throw Error('execution_time_total_exceeds_safe_integer');
 
   const runTiming={completed_runs:completedRuns.length,measured_runs:0,decomposed_runs:0,
     unmeasured_runs:0,incomplete_child_timing_runs:0,inconsistent_runs:0,non_monotonic_clock_runs:0,

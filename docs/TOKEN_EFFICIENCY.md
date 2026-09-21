@@ -54,9 +54,13 @@ The report includes:
   aggregated as `other`), including measured/unmeasured counts, failures,
   clock source, total/mean/p50/p95/max and share of measured tool time. Run
   decomposition reports inference, summary, tool, bash/shell and unclassified
-  elapsed time only when every child span is measured and consistent. These are
-  summed spans: concurrent runs can overlap, tool spans include dispatch and
-  output projection, and neither measure is process CPU or global wall-clock share.
+  elapsed time only when every child span is measured and consistent. Native
+  execution timing further separates setup, durable admission, spawn, child
+  execution, drain/cleanup, output sync and the remaining wrapper; this detail is
+  recorded in telemetry and removed from ordinary bash results before they enter
+  model context. These are summed spans: concurrent runs can overlap, tool spans
+  include dispatch and output projection, and neither measure is process CPU or
+  global wall-clock share.
 * Repeated tool argument hashes **within a run**, never labeled wasted work.
   The same read after an edit can be necessary.
 

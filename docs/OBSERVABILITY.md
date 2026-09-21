@@ -103,6 +103,11 @@ elapsed time by built-in tool name and decomposes complete, consistently measure
 runs into model, tool and unclassified time. Tool time includes dispatch and output
 projection, not process CPU; summed runs can overlap, so it is not global wall-clock
 share. Unknown/plugin names are aggregated as `other` rather than disclosed.
+For newly recorded synchronous bash calls, monotonic native phase timing separates
+executor setup/admission/spawn/execution/drain/output-sync from the final-record /
+host-adapter / projection wrapper. The detail enters telemetry but is removed from
+the model-facing bash result; incomplete or internally inconsistent phases are
+reported separately rather than used in an overhead ratio.
 
 ## Offline efficiency audit
 

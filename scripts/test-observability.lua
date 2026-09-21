@@ -206,6 +206,25 @@ check(memory.session_messages(run,{all=true})[1].id==first_request.run_id,'reque
 report=original_dofile('lua/core/telemetry.lua').snapshot(run)
 check(report.total.calls==2 and report.tool_failures==1 and report.runs==1,'real loop durable outcomes')
 check(report.total.prompt==2000 and report.total.input==400,'actual loop uses disjoint cache categories')
+
+-- Native phase timings are durable aggregate evidence, never recurring model context.
+local timing_round=0
+host.http_stream=function()
+  timing_round=timing_round+1
+  if timing_round==1 then return json.encode({status=200,content='',stream_complete=true,finish_reason='tool_calls',usage=raw,
+    tool_calls={{id='timed-bash',type='function',['function']={name='bash',arguments='{"command":"printf timed"}'}}}}) end
+  return json.encode({status=200,content='done',stream_complete=true,finish_reason='stop',usage=raw,tool_calls={}})
+end
+local timing_session=session('execution-phase-timing')
+check(agentlib.new(timing_session,function() end,'master','master',''):run('measure one local fixture')=='done','timed bash run completes')
+local timing_messages=memory.session_messages(timing_session,{all=true});local stored_tool
+for _,message in ipairs(timing_messages) do if message.role=='tool' then stored_tool=message end end
+check(stored_tool and not stored_tool.content:find('"timing"',1,true),'native phase detail stays out of model-visible tool results')
+local timing_events=telemetry.events(timing_session,0,100).events;local timed_tool
+for _,event in ipairs(timing_events) do if event.kind=='tool' and event.phase=='end' then timed_tool=event.payload end end
+check(timed_tool and timed_tool.execution_timing and timed_tool.execution_timing.schema_version==1
+  and timed_tool.execution_timing.complete,'native phase detail reaches aggregate telemetry')
+
 host.http_stream=function() return json.encode({status=200,content='partial',stream_complete=false,tool_calls={},usage=raw}) end
 local interrupted=agentlib.new(session('interrupted-stream'),function() end,'master','master','')
 check(not pcall(interrupted.run,interrupted,'test interruption'),'incomplete stream cannot become a completed turn')

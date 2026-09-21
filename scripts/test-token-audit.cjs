@@ -84,7 +84,12 @@ elapsedRows.push(event('run-time','run','start',{},'a','timed'));
 elapsedRows.push(event('model-time','model_call','start',{},'a','timed'));
 elapsedRows.push(event('model-time','model_call','end',{ok:true,ms:1500,clock:'monotonic',normalized:{known:false}},'a','timed'));
 elapsedRows.push(tool('read-time','timed','read'),toolEnd('read-time','timed','read',100));
-elapsedRows.push(tool('bash-fast','timed','bash'),toolEnd('bash-fast','timed','bash',1000));
+const timedBashStart=tool('bash-fast','timed','bash');
+const timedBashEnd=toolEnd('bash-fast','timed','bash',1000);
+timedBashEnd.payload.execution_timing={schema_version:1,clock:'monotonic',complete:true,
+  setup_ms:10,accepted_record_ms:5,spawn_ms:20,execution_ms:800,drain_cleanup_ms:5,output_sync_ms:10,
+  measured_ms:850,unattributed_ms:50,total_ms:900,final_state_record_excluded:true};
+elapsedRows.push(timedBashStart,timedBashEnd);
 elapsedRows.push(tool('bash-slow','timed','bash'),toolEnd('bash-slow','timed','bash',9000,false));
 elapsedRows.push(event('run-time','run','end',{ms:12000,clock:'monotonic'},'a','timed'));
 elapsedRows.push(tool('pending-bash','pending','bash'));
@@ -98,7 +103,23 @@ assert.equal(r.tools.by_name.bash.completed,2);assert.equal(r.tools.by_name.bash
 assert.equal(r.tools.by_name.bash.elapsed.p50_ms,1000);assert.equal(r.tools.by_name.bash.elapsed.p95_ms,9000);
 assert.equal(r.tools.by_name.bash.elapsed.failed_ms,9000);
 assert.equal(r.tools.by_name.bash.share_of_measured_tool_ms,10000/10125);
+assert.equal(r.tools.execution_phases.reported,1);assert.equal(r.tools.execution_phases.complete,1);
+assert.equal(r.tools.execution_phases.tool_ms,1000);assert.equal(r.tools.execution_phases.execution_ms,800);
+assert.equal(r.tools.execution_phases.executor_overhead_ms,200);assert.equal(r.tools.execution_phases.phase_totals_ms.wrapper_ms,100);
+assert.equal(r.tools.execution_phases.phase_timing.execution_ms.p50_ms,800);
+assert.equal(r.tools.execution_phases.execution_share,.8);assert.equal(r.tools.execution_phases.by_name.bash.samples,1);
 assert.equal(r.tools.by_name.other.completed,1);
+const incompleteTimingStart=tool('incomplete-timing','phase-errors','bash');
+const incompleteTimingEnd=toolEnd('incomplete-timing','phase-errors','bash',10);
+incompleteTimingEnd.payload.execution_timing={schema_version:1,clock:'monotonic',complete:false};
+const invalidTimingStart=tool('invalid-timing','phase-errors','bash');
+const invalidTimingEnd=toolEnd('invalid-timing','phase-errors','bash',10);
+invalidTimingEnd.payload.execution_timing={schema_version:1,clock:'monotonic',complete:true,
+  setup_ms:1,accepted_record_ms:1,spawn_ms:1,execution_ms:1,drain_cleanup_ms:1,output_sync_ms:1,
+  measured_ms:99,unattributed_ms:1,total_ms:7};
+const phaseErrors=audit([incompleteTimingStart,incompleteTimingEnd,invalidTimingStart,invalidTimingEnd]);
+assert.equal(phaseErrors.tools.execution_phases.reported,2);assert.equal(phaseErrors.tools.execution_phases.complete,0);
+assert.equal(phaseErrors.tools.execution_phases.incomplete,1);assert.equal(phaseErrors.tools.execution_phases.invalid,1);
 assert.ok(!JSON.stringify(r).includes('private_customer_plugin'));
 assert.equal(r.run_timing.completed_runs,1);assert.equal(r.run_timing.decomposed_runs,1);
 assert.equal(r.run_timing.decomposed_run_ms,12000);assert.equal(r.run_timing.model_ms,1500);
