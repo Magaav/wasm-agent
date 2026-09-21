@@ -191,49 +191,7 @@ pub extern "C" fn grep(l: *mut LuaState) -> c_int {
     let path = arg_string(l, 2).unwrap_or_else(|| ".".to_string());
     let options = arg_string(l, 3).unwrap_or_default();
     let options: Value = serde_json::from_str(&options).unwrap_or(Value::Null);
-    let ignore_case = options.get("ignore_case").and_then(Value::as_bool).unwrap_or(true);
-    let limit = options.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
-
-    let needle = if ignore_case { pattern.to_lowercase() } else { pattern.clone() };
-    let mut matches: Vec<Value> = Vec::new();
-    let mut stack = vec![(std::path::PathBuf::from(&path), 0usize)];
-    // Skip the directories that only ever produce noise.
-    const SKIP: [&str; 4] = [".git", "target", "node_modules", ".wasm-agent"];
-    while let Some((current, depth)) = stack.pop() {
-        if matches.len() >= limit || depth > 12 {
-            break;
-        }
-        if current.is_dir() {
-            let Ok(entries) = std::fs::read_dir(&current) else { continue };
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if SKIP.contains(&name.as_str()) {
-                    continue;
-                }
-                stack.push((entry.path(), depth + 1));
-            }
-            continue;
-        }
-        let Ok(metadata) = current.metadata() else { continue };
-        if metadata.len() > 4 * 1024 * 1024 {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&current) else { continue };
-        for (index, line) in text.lines().enumerate() {
-            let haystack = if ignore_case { line.to_lowercase() } else { line.to_string() };
-            if haystack.contains(&needle) {
-                matches.push(json!({
-                    "file": current.to_string_lossy(),
-                    "line": index + 1,
-                    "text": line.chars().take(400).collect::<String>(),
-                }));
-                if matches.len() >= limit {
-                    break;
-                }
-            }
-        }
-    }
-    push_json(l, &json!({ "matches": matches, "count": matches.len() }));
+    push_json(l, &crate::file_search::search(&pattern, &path, &options));
     1
 }
 

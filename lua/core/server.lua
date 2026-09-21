@@ -216,6 +216,7 @@ function wa_operation(body, session)
   if not ok or type(args) ~= "table" then return json.encode({error="invalid_operation_request"}) end
   -- Starting arbitrary work is a tool capability, not an engine read/control endpoint.
   if args.action == "start" then return json.encode({error="start_requires_tool"}) end
+  if args.action == "await" then return json.encode({error="await_requires_tool; use bounded wait on the control route"}) end
   args.owner = user.id
   return host.operation(args.action or "list", json.encode(args))
 end

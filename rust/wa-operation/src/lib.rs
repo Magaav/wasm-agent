@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, Condvar,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -45,6 +45,7 @@ impl Spec {
 struct Entry {
     cancel: AtomicBool,
     state: Mutex<Value>,
+    settled: Condvar,
     started: Instant,
     deadline: Duration,
 }
@@ -146,6 +147,7 @@ impl Manager {
         let entry = Arc::new(Entry {
             cancel: AtomicBool::new(false),
             state: Mutex::new(state),
+            settled: Condvar::new(),
             started: Instant::now(),
             deadline: spec.timeout,
         });
@@ -174,7 +176,7 @@ impl Manager {
                     Err(_) => Some("operation_supervisor_panicked".into()),
                 };
                 if let Some(reason) = failure {
-                    let mut s = entry.state.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut s = entry.state.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     s["state"] = json!(if reason == "cancelled" {
                         "cancelled"
                     } else {
@@ -186,9 +188,11 @@ impl Manager {
                     s["cleanup"] = json!("unknown");
                     s["output_complete"] = json!(false);
                     s["elapsed_ms"] = json!(entry.started.elapsed().as_millis() as u64);
-                    let record = s.clone();
-                    drop(s);
-                    let _ = atomic_json(&dir.join("state.json"), &record);
+                    if let Err(e) = atomic_json(&dir.join("state.json"), &s) {
+                        s["persistence_error"] = json!(e.to_string());
+                    }
+                    *entry.state.lock().unwrap_or_else(|e| e.into_inner()) = s;
+                    entry.settled.notify_all();
                 }
             });
         if let Err(e) = result {
@@ -254,19 +258,27 @@ impl Manager {
         let mut data = vec![0; limit.clamp(1, VIEW_BYTES)];
         let n = file.read(&mut data)?;
         data.truncate(n);
-        Ok(
-            json!({"operation_id":id,"stream":stream,"offset":offset,"next_offset":offset+n as u64,"content":String::from_utf8_lossy(&data),"available_bytes":file.metadata()?.len()}),
-        )
+        let content = String::from_utf8_lossy(&data);
+        let text_lossy = matches!(content, std::borrow::Cow::Owned(_));
+        let mut page = json!({"operation_id":id,"stream":stream,"offset":offset,"next_offset":offset+n as u64,
+            "content":content,"text_lossy":text_lossy,"available_bytes":file.metadata()?.len()});
+        // Byte cursors can bisect UTF-8, and process output can be binary. Preserve
+        // the compatible text view, but never present replacement characters as exact bytes.
+        if text_lossy {
+            use base64::Engine;
+            page["content_base64"] = json!(base64::engine::general_purpose::STANDARD.encode(&data));
+        }
+        Ok(page)
     }
     pub fn wait(&self, id: &str, budget: Duration) -> io::Result<Value> {
-        let deadline = Instant::now() + budget;
-        loop {
-            let state = self.snapshot(id)?;
-            if state["settled"] == true || Instant::now() >= deadline {
-                return Ok(state);
-            }
-            std::thread::sleep(Duration::from_millis(5));
+        validate_id(id)?;
+        let entry = self.entries.lock().map_err(error)?.get(id).cloned();
+        if let Some(entry) = entry {
+            let state = entry.state.lock().map_err(error)?;
+            let (state, _) = entry.settled.wait_timeout_while(state, budget, |s| s["settled"] != true).map_err(error)?;
+            drop(state);
         }
+        self.snapshot(id)
     }
 }
 fn validate_id(id: &str) -> io::Result<()> {
@@ -422,6 +434,7 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry) -> io::Result<()> {
         state["error"] = json!(format!("operation_record_failed:{e}"));
     }
     *entry.state.lock().unwrap() = state;
+    entry.settled.notify_all();
     Ok(())
 }
 

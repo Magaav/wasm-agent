@@ -139,26 +139,9 @@ end
 -- Returns `text, path` for the first readable instruction file. The path
 -- matters: a node without the file silently runs uninstructed, so we record
 -- which one (if any) was used and warn when a configured path is unreadable.
--- Instructions are read once per node process, not once per message.
---
--- They sit at the *front* of every request, so the provider's prompt cache only helps if that prefix is
--- byte-identical from call to call. Re-reading the files every message means an edit to AGENTS.md - or to the
--- platform file - re-prices and re-slows every call for the rest of the session. That is not theoretical: the
--- night this was written, two edits to AGENTS.md left `cached_tokens` at zero and time-to-first-token at 27
--- seconds on a 723k prompt, and the provider dropped the stream.
---
--- The trade is explicit and it is the right way round: an instruction change takes effect on the next
--- restart, not on the next message. Instructions are part of the harness's identity for the life of the process,
--- which is also how a system prompt behaves everywhere else.
-local instructions_cache = {}
-
+-- Re-read when building a turn's context. Unchanged bytes preserve the prefix; a genuine
+-- instruction change must take effect, even when that legitimately invalidates provider caching.
 function M.agents_md(role)
-  -- The key is the role alone. The platform cannot change inside one process, and `tostring` on the
-  -- platform *table* yields an address rather than a name - which made the key change every call, so the
-  -- cache never hit and this fix silently did nothing until the test caught it.
-  local key = role or "master"
-  local hit = instructions_cache[key]
-  if hit then return hit[1], hit[2] end
   -- Build the list by appending: an explicit first element of nil would make
   -- `ipairs` stop immediately and silently skip everything else.
   local candidates = {}
@@ -170,7 +153,6 @@ function M.agents_md(role)
   for _, path in ipairs(candidates) do
     local text = host.read_file and host.read_file(path)
     if text and text ~= "" then
-      instructions_cache[key] = { text, path }
       return text, path
     end
   end
@@ -227,7 +209,11 @@ local function system_prompt(role, agents, agents_path, tool_list)
     for _, tool in ipairs(tool_list) do
       local function_ = tool["function"] or {}
       local snippet = tostring(function_.description or ""):match("^[^.]*") or ""
-      lines[#lines + 1] = string.format("- %s: %s", tostring(function_.name or "?"), snippet:sub(1, 110))
+      if host.getenv('WASM_AGENT_TOOL_SNIPPETS')=='names' then
+        lines[#lines+1]='- '..tostring(function_.name or '?')
+      else
+        lines[#lines + 1] = string.format("- %s: %s", tostring(function_.name or "?"), snippet:sub(1, 110))
+      end
     end
     parts[#parts + 1] = table.concat(lines, "\n")
     parts[#parts + 1] = "In addition to the tools above, you may have access to other tools " ..

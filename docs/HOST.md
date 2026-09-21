@@ -87,6 +87,17 @@ a job itself. Both always return one JSON value, including failure. Do not add a
 second shell runner with `Command::output`, `read_to_end` or detached reader threads.
 See [OPERATIONS.md](OPERATIONS.md) and [JOBS.md](JOBS.md) for contracts, platform
 limits, authority, recovery and the regression tests.
+## Portable file search
+
+`host.grep(pattern,path,options_json)` performs literal substring matching; Lua
+validates options before dispatch. It returns matches, scan counts, explicit skip
+categories and completeness, never silently substitutes shell grep/findstr semantics.
+Case sensitivity, bounded result/depth controls and exact extension filters are
+supported. Per-line clipping is marked; directories are sorted, symlinks skipped,
+file reads bounded to 4 MiB and traversal bounded to 20,000 entries. These are scan
+limits, not a hard filesystem deadline. See [TOKEN_EFFICIENCY.md](TOKEN_EFFICIENCY.md)
+for read paging, single-file batch-edit limits and local deterministic index caching.
+
 ## The client bridge: three states, one budget
 
 The desktop window is not a host function: the window dials *out* to the node and

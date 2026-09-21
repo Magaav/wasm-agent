@@ -23,6 +23,25 @@ fn settled(m: &Manager, id: &str) -> Value {
     value
 }
 #[test]
+fn settlement_wakes_all_observers_without_relaunch_or_lost_notification() {
+    let (m,root)=fixture();
+    let id=m.start(shell("sleep 30 & wait")).unwrap();
+    let barrier=Arc::new(std::sync::Barrier::new(3));
+    let workers: Vec<_>=(0..2).map(|_| {
+        let manager=m.clone();let id=id.clone();let barrier=barrier.clone();
+        std::thread::spawn(move || {barrier.wait();manager.wait(&id,Duration::from_secs(5)).unwrap()})
+    }).collect();
+    barrier.wait();
+    std::thread::sleep(Duration::from_millis(30));
+    m.cancel(&id).unwrap();
+    for worker in workers {assert_eq!(worker.join().unwrap()["state"],"cancelled");}
+    let before=Instant::now();
+    assert_eq!(m.wait(&id,Duration::from_secs(5)).unwrap()["settled"],true);
+    assert!(before.elapsed()<Duration::from_secs(1),"settled state must not wait for another event");
+    assert_eq!(m.list().as_array().unwrap().len(),1);
+    fs::remove_dir_all(root).unwrap();
+}
+#[test]
 fn output_and_exit_are_distinct() {
     let (m, root) = fixture();
     let id = m
@@ -144,6 +163,45 @@ fn cursor_read_and_restart_do_not_reexecute() {
     fs::remove_dir_all(root).unwrap();
 }
 #[test]
+fn split_utf8_and_binary_pages_retain_exact_bytes() {
+    let (m, root) = fixture();
+    let id = m.start(shell("printf '\\303\\251\\377'")).unwrap();
+    settled(&m, &id);
+    for (offset, encoded) in ["ww==", "qQ==", "/w=="].iter().enumerate() {
+        let page = m.read(&id, "stdout", offset as u64, 1).unwrap();
+        assert_eq!(page["text_lossy"], true, "{page}");
+        assert_eq!(page["content_base64"], *encoded);
+        assert_eq!(page["next_offset"], offset + 1);
+    }
+    let text = m.read(&id, "stdout", 0, 2).unwrap();
+    assert_eq!(text["content"], "é");
+    assert_eq!(text["text_lossy"], false);
+    assert!(text.get("content_base64").is_none());
+    let eof = m.read(&id, "stdout", 3, 1).unwrap();
+    assert_eq!(eof["content"], "");
+    assert_eq!(eof["text_lossy"], false);
+    assert_eq!(eof["next_offset"], 3);
+    // Exercise every byte, including NUL and genuinely valid replacement-character text.
+    use base64::Engine;
+    let bytes: Vec<u8> = (0..=255).collect();
+    fs::write(root.join(&id).join("stdout"), &bytes).unwrap();
+    let mut recovered = vec![];
+    let mut offset = 0;
+    while offset < bytes.len() as u64 {
+        let page = m.read(&id, "stdout", offset, 7).unwrap();
+        if page["text_lossy"] == true {
+            recovered.extend(base64::engine::general_purpose::STANDARD.decode(page["content_base64"].as_str().unwrap()).unwrap());
+        } else {
+            recovered.extend_from_slice(page["content"].as_str().unwrap().as_bytes());
+        }
+        offset = page["next_offset"].as_u64().unwrap();
+    }
+    assert_eq!(recovered, bytes);
+    fs::write(root.join(&id).join("stdout"), "�").unwrap();
+    assert_eq!(m.read(&id, "stdout", 0, 3).unwrap()["text_lossy"], false);
+    fs::remove_dir_all(root).unwrap();
+}
+#[test]
 fn parallel_launches_do_not_inherit_each_others_pipes() {
     let (m, root) = fixture();
     let long = m.start(shell("sleep 30")).unwrap();
@@ -235,5 +293,9 @@ fn launch_failure_is_visible() {
     let s = settled(&m, &id);
     assert_eq!(s["ok"], false);
     assert!(s["error"].is_string());
+    // A notification is not permission to outrun the durable failure record.
+    let restored=Manager::new(&root).snapshot(&id).unwrap();
+    assert_eq!(restored["state"],"failed");
+    assert_eq!(restored["error"],s["error"]);
     fs::remove_dir_all(root).unwrap();
 }

@@ -10,7 +10,13 @@ See [JOBS.md](JOBS.md) and ARCHITECTURE.md section 6.
 `rust/wa-operation` owns shell process lifetime and output independently of Lua.
 `rust/wa-host/src/operations.rs` is the adapter; agent policy remains in Lua.
 The existing `bash`/`host.exec` interface waits for an operation. The `operation`
-tool exposes start/list/status/read/wait/cancel for explicit long-lived work.
+tool exposes start/list/status/read/wait/await/cancel for explicit long-lived work.
+Native waits use a settlement condition variable. `await` waits in one model tool
+call under the operation's existing execution/cleanup budget, maintaining host
+heartbeats and returning terminal evidence or an explicit overdue/unknown outcome.
+It never launches/replays work or injects a synthetic conversation message. The
+independent HTTP route refuses long `await`; bounded `wait` and cancellation remain
+available there.
 `wait` is bounded to ten seconds; a still-running result is not failure and is
 never permission to launch the command again. `start` returns a launch receipt,
 not execution success. Default execution budget is 300 seconds; explicit
@@ -35,6 +41,12 @@ reconciliation, not automatic replay; lack of attachment is not proof of death. 
   per-operation limit (64 MiB API maximum). Crossing it terminates execution and
   reports `output_limit_exceeded`, never silent truncation. In-memory result tails
   are 24 KiB per stream; byte cursors retrieve the retained prefix/full output.
+  Cursor `content` is a UTF-8 text view, not necessarily the original bytes: a
+  page can split a character or contain binary output. `text_lossy=true` marks
+  replacement characters and supplies `content_base64` for that page's exact
+  bytes. Otherwise UTF-8 encoding `content` recovers the bytes. Advance using
+  `next_offset`, never the displayed text length. Status/tail views remain lossy
+  previews; use cursor pages when exact output matters.
 * Tail truncation and incomplete capture are different facts. The former has
   artifact paths; the latter cannot be clean success. Disk/read failures are failures.
 * Normal completion reaps the shell and terminates descendants. A shell exiting

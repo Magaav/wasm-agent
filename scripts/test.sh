@@ -10,6 +10,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 # The execution and automation contracts have native, model-free adversarial tests.
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
+cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host file_search::tests
 cargo test --release --offline --manifest-path rust/wa-sentinel/Cargo.toml
 BIN=rust/target/release/wa
 # A turn cannot deploy the process serving that same turn. The marker crosses
@@ -393,6 +394,12 @@ LUA
 WA_SCRIPT="$DB.evidence.lua" "$BIN" --db "$DB" | grep "tool evidence ok"
 rm -f "$DB.evidence.lua"
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB.observability" | grep 'observability ok'
+# Offline accounting must run even when UI tests are explicitly skipped.
+node scripts/test-token-audit.cjs
+WA_BIN="$BIN" node scripts/test-efficiency.cjs
+# Real projector, isolated home, exact artifact recovery. No paid model or ignored A/B switch.
+WA_BIN="$BIN" bash scripts/bench-tool-budget.sh
+WA_BIN="$BIN" bash scripts/bench-tool-tail.sh
 # Which conversation a turn lands in. The name a client sends is the only thing that
 # lets a window start a thread or return to one: before this, `agent_for` always passed
 # nil, so every turn from every window landed in the newest open session and that one
@@ -633,16 +640,22 @@ for _, required in ipairs({ "agent.lua", "provider.lua", "model_window.lua", "me
   for _, name in ipairs(names) do if name == required then found = true end end
   assert(found, required .. " is missing from lua/core")
 end
+local function embedded_chunk(path)
+  local source=EMBEDDED and EMBEDDED[path]
+  if type(source)~='string' then return nil end
+  return load(source,'@'..path)
+end
+-- loadfile reads disk, even with WASM_AGENT_LUA_ROOT unset. Test the actual embedded registry.
+local probe='lua/core/provider.lua';local saved=EMBEDDED[probe]
+EMBEDDED[probe]=nil;assert(not embedded_chunk(probe),'negative control: absent embedding must fail')
+EMBEDDED[probe]='!invalid Lua';assert(not embedded_chunk(probe),'negative control: invalid embedding must fail')
+EMBEDDED[probe]=saved
 local missing = {}
 for _, name in ipairs(names) do
-  local chunk = loadfile("lua/core/" .. name)
-  if not chunk then missing[#missing + 1] = name end
+  if not embedded_chunk('lua/core/'..name) then missing[#missing + 1] = name end
 end
 assert(#missing == 0, "on disk but not in the binary: " .. table.concat(missing, ", "))
--- Presence is not freshness. loadfile succeeding proves the module is IN the binary, not that it is the
--- module on disk - and the binary runs the embedded copy. A Lua edit that did not trigger a rebuild leaves
--- the old core inside, so a deploy ships a fix that is not in the artifact. Compare the text and name what
--- is stale; the fix is to rebuild, which deploy.sh does.
+-- Presence is not freshness: compare the exact embedded text to the working tree too.
 local stale = {}
 for _, name in ipairs(names) do
   local path = "lua/core/" .. name
@@ -721,13 +734,9 @@ WASM_AGENT_EXEC_TIMEOUT_SECONDS=2 WA_SCRIPT=scripts/test-exec-timeout.lua "$BIN"
 # created. Sandboxed home, because the reversible text is stored as content-addressed blobs under it.
 WASM_AGENT_HOME="$DB.home" WA_SCRIPT=scripts/test-changeset.lua "$BIN" --db "$DB.changeset" | grep "changeset ok"
 
-# Instructions must be read once per node process, not once per turn: they sit at the front of every request,
-# so an edit mid-session re-prices and re-slows every call after it (measured: cached_tokens 0, 27s
-# time-to-first-token, and a dropped stream). The test points the node at a scratch instruction file and edits
-# it between two reads - the only way the claim can fail. It was vacuous twice before that: first it compared
-# two reads without changing anything, then the cache key was a table address and never hit. The lua root is
-# already exported at the top of this script, so this does not set it again (doing so with the wrong variable
-# is how the first attempt failed inside the gate).
+# Unchanged instructions keep identical prefix bytes; edited instructions must take effect without
+# a restart. The fixture mutates a scratch file so a stale per-process cache cannot pass vacuously.
+# A legitimate authority change is allowed to invalidate provider caching.
 SCRATCH_AGENTS_MD="$DB.agents.md"
 printf 'ORIGINAL INSTRUCTIONS\n' > "$SCRATCH_AGENTS_MD"
 WASM_AGENT_AGENTS_MD="$SCRATCH_AGENTS_MD" \
@@ -976,6 +985,7 @@ echo "attach tests ok"
 # A real long-running tool must remain observable/cancellable through another worker.
 # Local mock provider only; no account, paid model or external browser required.
 node scripts/test-operation-control.cjs "$BIN"
+node scripts/test-operation-control.cjs "$BIN" --await
 
 # The UI tests are JS and run outside the embedded interpreter, so they need node
 # and they need the repo root as cwd (they read ui/app.js from disk). A test that does
