@@ -197,9 +197,10 @@ async function main() {
   check(enabled.enabled === true, "enabling is a separate deliberate act");
   const revision = enabled.revision;
 
-  // Guest import of the same artifact, claiming operator scope, is refused.
+  // Guest import of the same artifact is refused: a subagent would execute as the operator, and a profile
+  // name is not a principal binding.
   const guest = cliFailure(envA, "import", artifactFile, "--bindings", bindingsFile, "--approve", "--as-role", "guest");
-  check(guest.status !== 0 && guest.output.includes("guest_artifact_profile_not_permitted"), "guest import cannot spoof owner=operator or select an operator profile");
+  check(guest.status !== 0 && guest.output.includes("guest_subagent_requires_principal_binding"), "guest import cannot spoof owner=operator or execute a subagent as operator");
 
   const watcherA = child(sentinel, ["watch"], envA, homeA);
   check(cli(envA, "emit", "fixture.message", "m1", (() => { const f = path.join(homeA, "m1.json"); fs.writeFileSync(f, JSON.stringify({ conversation_id: "c@c.us", message_id: "m1", eligibility: { eligible: true } })); return f; })()).queued === 1, "eligible event enqueued");
@@ -208,7 +209,8 @@ async function main() {
   const start = fixtureA.state.starts.find((s) => s.idempotency_key === expectedKey);
   check(start.profile === "whatsapp-responder", "start carries the profile");
   check(typeof start.prompt === "string" && start.prompt.includes("never send"), "start carries the approved prompt");
-  check(start.context && start.context.conversation_id === "c@c.us", "start carries the trusted event context");
+  check(start.event && start.event.message_id === "m1", "start names only the trusted event message id");
+  check(!("context" in start), "the raw event is not forwarded as context");
   check(start.delivery_id !== undefined, "start carries the delivery id");
   check(fixtureA.state.health.some((busy) => busy === true), "the node reported busy while the subagent ran (reserved capacity)");
   check(cli(envA, "history").find((d) => d.job_id === "responder").state === "running", "a non-settled child leaves the delivery running, not completed");
