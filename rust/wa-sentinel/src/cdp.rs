@@ -47,7 +47,31 @@ impl Socket {
         {
             bail!("CDP must name an explicit loopback page")
         }
-        let address: SocketAddr = format!("127.0.0.1:{}", port.parse::<u16>()?).parse()?;
+        let port = port.parse::<u16>()?;
+        // Both loopback stacks, in order, and the *handshake* decides - not the connect. A browser binds
+        // one stack when the other is taken: on this machine Chrome listens on `[::1]:9222` only, because
+        // 127.0.0.1:9222 belongs to something that is not DevTools (it answers 404), and a trigger that
+        // only ever dials 127.0.0.1 reports `handshake not verified` forever with a working browser
+        // beside it. Trying the addresses rather than trusting one is the same rule the client's own
+        // DevTools discovery uses.
+        let mut last = anyhow::anyhow!("CDP handshake was not attempted");
+        // Constructed, not parsed from a string: `"::1:9222"` is not a socket address (IPv6 needs
+        // brackets), and the version of this loop that formatted a string failed with
+        // "invalid socket address syntax" before it ever reached the browser.
+        for address in [
+            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)),
+            std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port)),
+        ] {
+            match Self::handshake(address, authority, path) {
+                Ok(socket) => return Ok(socket),
+                Err(error) => last = error,
+            }
+        }
+        Err(last)
+    }
+
+    /// One full upgrade against one address: a port that merely accepts is not a browser.
+    fn handshake(address: SocketAddr, authority: &str, path: &str) -> Result<Self> {
         let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(1))?;
         stream.set_read_timeout(Some(Duration::from_millis(100)))?;
         stream.set_write_timeout(Some(Duration::from_secs(1)))?;
