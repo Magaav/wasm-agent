@@ -107,18 +107,75 @@ echo "cli ok"
 # polling the client bridge, instead of blocking for the call timeout: an agent
 # spent rounds on a tool that looked half-working. There is never a client
 # attached in this suite, so the failure is deterministic here.
+#
+# The failure must also say *which* failure it is. It used to say "start the
+# desktop client with `wa ui`" for every case, including the one that actually
+# happens - a wedged bridge with a perfectly healthy window - which sent the
+# reader to fix the wrong thing.
 cat > "$DB.client.lua" <<'LUA'
+local json = dofile('lua/vendor/json.lua')
 local started = host.now()
 local raw = host.client('screenshot', '{}')
 local elapsed = host.now() - started
-local result = dofile('lua/vendor/json.lua').decode(raw)
+local result = json.decode(raw)
 assert(result.error == 'client_not_connected', 'expected client_not_connected, got ' .. tostring(result.error))
-assert(result.hint and result.hint:find('wa ui', 1, true), 'the failure must say how to fix it')
+assert(result.next and #result.next > 10, 'the failure must say what to do')
+assert(result.observed and #result.observed > 10, 'the failure must say what was seen, not just what to do')
+-- The state fields are read flat, exactly as `status` returns them: an agent
+-- follows `bridge.health`, so an error that nests it one level deeper is a trap.
+assert(result.bridge and result.bridge.health, 'the bridge state must travel with the failure')
+assert(result.connected == false, 'the failure must say whether a client is connected')
+assert(not tostring(result.next):lower():find('restart'),
+  'a wedged bridge must never be answered with "restart the window": two windows split one bridge')
 assert(elapsed < 2, 'must fail fast, took ' .. string.format('%.2f', elapsed) .. 's')
+-- `status` is the cheap question, and it is answerable with nothing attached:
+-- that is the whole point of it.
+local status = json.decode(host.client('status', '{}'))
+assert(status.error == 'client_not_connected' and status.bridge and status.observed,
+  'status must answer with the state and the diagnosis')
+-- A result whose caller gave up is kept, and asking for one that is not kept is
+-- an answer rather than a crash.
+local late = json.decode(host.client('result', '{"id":"nothing"}'))
+assert(late.error == 'result_not_kept' and late.next, 'asking for an unkept result must explain itself')
+local link = json.decode(host.client_status())
+assert(link.bridge and link.bridge.health ~= nil and link.results_kept ~= nil,
+  'client_status must carry bridge/health/results_kept')
 print('client fast-fail ok')
 LUA
 WA_SCRIPT="$DB.client.lua" "$BIN" --db "$DB" | grep "client fast-fail ok"
 rm -f "$DB.client.lua"
+# The three states a control failure can be in are three different sentences with
+# three different remedies, and getting them the same way round is a unit test
+# rather than a guess.
+cargo test --release --offline --manifest-path rust/Cargo.toml --bin wa client_diagnosis >/dev/null
+echo "client diagnosis ok"
+# And what the agent is *told* about the tool, since that is what decides whether
+# it reaches for `status` after a failure or guesses at `cdp` again.
+cat > "$DB.clientschema.lua" <<'LUA'
+local tools = dofile('lua/core/tools.lua')
+local spec
+for _, tool in ipairs(tools.all('master')) do
+  if tool["function"] and tool["function"].name == 'client' then spec = tool["function"] end
+end
+assert(spec, 'the client tool must be in the schema')
+local props = spec.parameters.properties
+local actions = {}
+for _, action in ipairs(props.action.enum) do actions[action] = true end
+for _, action in ipairs({ 'status', 'browser', 'cdp', 'shell', 'screenshot' }) do
+  assert(actions[action], 'the client action enum must offer ' .. action)
+end
+assert(props.timeout_ms and props.timeout_ms.description:find('waits', 1, true)
+  and props.timeout_ms.description:find('result', 1, true),
+  'the schema must say what a timeout means and how to collect the outcome')
+assert(props.target and props.target.description:find('read', 1, true),
+  'the browser targets must be named in the schema')
+assert(spec.description:find('status', 1, true), 'the description must point at status when a call fails')
+assert(not spec.description:find('default 9222', 1, true),
+  'a port must not be advertised as the way in: it is discovered and reported')
+print('client schema ok')
+LUA
+WA_SCRIPT="$DB.clientschema.lua" "$BIN" --db "$DB" | grep "client schema ok"
+rm -f "$DB.clientschema.lua"
 # Context budget is per model (provider.budget), and it is NOT the same thing as
 # provider.limits, which fetches the account's rate limits for the UI. Confusing
 # the two silently disabled compaction once: the window came back nil, so
@@ -690,7 +747,11 @@ WASM_AGENT_HOME="$DB.home" WA_SCRIPT=scripts/test-guest.lua "$BIN" --db "$DB.gue
 # is why it runs here and not in the concurrency test's model half.
 # Preserve the whole sub-suite output: grep used to hide the actual failing
 # pool/session assertion while leaving only an earlier passing wedge line.
-WEDGE_ONLY=1 WA_BIN="$BIN" bash scripts/test-serve-concurrency.sh 8893
+WEDGE_ONLY=1 WA_BIN="$BIN" bash scripts/test-serve-concurrency.sh 8893 > "$DB.concurrency.log" 2>&1 || {
+  echo "the concurrency fixture failed; its output:"; tail -30 "$DB.concurrency.log"; exit 1; }
+# Both claims are read from one run: the pair costs one fixture, not two.
+grep "a stalled worker is visible" "$DB.concurrency.log"
+grep "the client bridge survived a connection that said nothing" "$DB.concurrency.log"
 rm -f "$DB.window"*
 echo "recovery cli ok"
 

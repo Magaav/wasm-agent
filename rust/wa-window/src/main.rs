@@ -6,6 +6,8 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 #[cfg(target_os = "windows")]
+mod cdp;
+#[cfg(target_os = "windows")]
 mod client;
 
 #[cfg(not(target_os = "windows"))]

@@ -274,10 +274,18 @@ function wa_nodes(session)
   local link = (host.client_status and json.decode(host.client_status())) or { connected = false }
   local list = nodeslib.list()
   -- The local client (the desktop running the window) sits next to the host.
+  -- Its state is reported as three separate facts because it has three separate
+  -- remedies: `online` is whether the window is polling, `bridge.health` is
+  -- whether the bridge answers its own probe, `busy` is what it is doing now.
+  -- Collapsing them cost one run: a wedged bridge read as "start wa ui", which
+  -- was both wrong and a way to end up with two windows on one bridge.
   table.insert(list, math.min(2, #list + 1), {
     id = "client", node_id = "client", name = "client", kind = "client", role = role,
     online = link.connected and true or false,
     last_seen_secs = link.last_seen_secs,
+    bridge = link.bridge,
+    busy = link.busy,
+    browser = (link.client or {}).chrome,
     local_node = true,
     capabilities = { "screenshot", "frame", "click", "move", "type", "key", "shell", "cdp" },
   })

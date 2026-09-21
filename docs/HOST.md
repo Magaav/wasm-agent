@@ -87,6 +87,40 @@ a job itself. Both always return one JSON value, including failure. Do not add a
 second shell runner with `Command::output`, `read_to_end` or detached reader threads.
 See [OPERATIONS.md](OPERATIONS.md) and [JOBS.md](JOBS.md) for contracts, platform
 limits, authority, recovery and the regression tests.
+## The client bridge: three states, one budget
+
+The desktop window is not a host function: the window dials *out* to the node and
+long-polls for commands, so the node needs no inbound path to the user's machine.
+
+That channel has one contract, and the reason each clause exists is a failure:
+
+- **A connection cannot cost another connection anything.** The accept loop used
+  to serve one connection at a time: a peer that opened a socket and said nothing
+  blocked every later poll, `mark_poll` never ran, and the only symptom was
+  `client_not_connected` — which blamed the window, which was healthy. Requests
+  are now read on their own thread with a read timeout.
+- **Three states, not one flag.** `bridge.health` (does the node's bridge answer
+  its own probe: `ok` / `degraded` / `wedged`), `connected` + `last_seen_secs`
+  (is the window polling), and `busy` (what it is doing right now) have three
+  different remedies. `/health` carries the same block as `client`, and the
+  `nodes` tool shows it as the `client` row, so the answer costs no round trip.
+- **The window is never the remedy.** The error text for a wedged bridge says so
+  explicitly: restarting the window is not a fix, and a second window would split
+  one bridge's commands between two pollers.
+- **The caller's patience travels with the command.** `host.client(action, args,
+  timeout_ms)` sends `budget_ms`; the client bounds its own work by it (a launch,
+  a shell command) so a `client_timeout` means the work *stopped* rather than that
+  the caller stopped waiting. The result is kept by id, so
+  `client {action:'result', id=...}` collects an outcome even if the window has
+  gone in the meantime.
+- **A poll carries state.** Every poll posts what the client is and what it last
+  did (no probes), which is what makes the awareness above free.
+
+Browser control (`client {action:'browser'|'cdp'}`) lives in
+`rust/wa-window/src/cdp.rs`, where a port is never assumed: an endpoint must
+prove it is DevTools, the profile's own `DevToolsActivePort` is the authority for
+which port Chrome chose, and a launch that hands off to an already-open profile is
+reported as itself instead of as a 35-second timeout.
 
 ## Adding a capability
 
