@@ -264,6 +264,21 @@ cmp -s "$UPGRADE" "$INSTALL_DIR/scripts/upgrade.sh" || fail "the node is install
 UPGRADE_HASH="$(sha256sum < "$INSTALL_DIR/scripts/upgrade.sh" 2>/dev/null | awk '{print $1}')"
 [ -n "$UPGRADE_HASH" ] || fail "the node is installed but upgrade.sh could not be hashed"
 
+# Ship this script beside the binary too. The sentinel's `deploy` verb resolves `scripts/deploy.sh`
+# beside the installed binary first - that is where an install keeps the scripts it is allowed to run -
+# but `upgrade.sh` ships only itself, so a `request deploy` from an installed node found no deploy.sh
+# and failed before it reached the gate, then fell back to the watcher's cwd (a checkout it should not
+# need). Installing from the checkout's copy here is the only chance to close that: a deploy has to
+# leave the next one able to run with no human at a shell.
+DEPLOY_SRC="$ROOT/scripts/deploy.sh"
+[ -f "$DEPLOY_SRC" ] || DEPLOY_SRC="$0"
+if [ -f "$DEPLOY_SRC" ]; then
+  mkdir -p "$INSTALL_DIR/scripts"
+  cmp -s "$DEPLOY_SRC" "$INSTALL_DIR/scripts/deploy.sh" \
+    || cp -f "$DEPLOY_SRC" "$INSTALL_DIR/scripts/deploy.sh" \
+    || fail "node installed, but could not ship deploy.sh beside the binary"
+fi
+
 RECORD_TMP="$INSTALL_DIR/.installed.txt.deploy.$$"
 REASON_LINE="$(printf '%s' "$REASON" | tr '\r\n' '  ')"
 printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\nsource_provenance=clean-built-by-deploy\nvia=deploy.sh\nat=%s\nreason=%s\n' \
