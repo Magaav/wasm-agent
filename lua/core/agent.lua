@@ -985,14 +985,26 @@ function M:run_body(text, images)
     for key, value in pairs(budget_opts or {}) do call_opts[key] = value end
     local ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
     if not ok then
+      -- A cancel can land *during* the provider call (the socket is shut down to wake a
+      -- silent read). Report it as the cancellation it is, not as a provider fault.
+      local cancelled = false
+      if host.run_cancelled then
+        local checked, raw = pcall(host.run_cancelled)
+        if checked then
+          local state = json.decode(raw)
+          cancelled = type(state) == "table" and state.cancelled == true
+        end
+      end
+      local problem = cancelled and "run_cancelled" or tostring(result)
       trace[#trace + 1] = { kind = "model_call", model = self.model, ok = false,
-        ms = math.floor((host.now() - llm_started) * 1000), error = redact.text(tostring(result)):sub(1, 400) }
+        ms = math.floor((host.now() - llm_started) * 1000), error = redact.text(problem):sub(1, 400) }
       memory.append_turn(self.session_id, {
         role = "assistant", content = "", ok = false, trace = trace, debug = self.debug,
         ms = math.floor((host.now() - run_started) * 1000),
       })
-      telemetry.event(self.session_id,self.run_id,"","step","end",{outcome="provider_failed"})
-      error(result)
+      telemetry.event(self.session_id,self.run_id,"","step","end",
+        {outcome = cancelled and "run_cancelled" or "provider_failed"})
+      error(problem)
     end
 
     if type(result.usage) == "table" then

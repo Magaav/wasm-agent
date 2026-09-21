@@ -216,6 +216,27 @@ fn set_current_run_cancel(flag: Option<Arc<AtomicBool>>) {
     });
 }
 
+/// Install (or clear) the whole current-run IO context for this worker thread: the run's cancel
+/// flag and its own socket slot. The transport registers the socket it connects on into this slot,
+/// so a cancel on the accept thread can `shutdown` it and wake a silent provider read at once. The
+/// slot belongs to one admitted run, so a later cancel can never close the next queued run's socket.
+fn set_current_run_io(
+    cancel: Option<Arc<AtomicBool>>,
+    sockets: Option<crate::subagents::SocketSlot>,
+    owner: String,
+) {
+    set_current_run_cancel(cancel.clone());
+    match cancel {
+        Some(cancel) => crate::subagents::enter_task(crate::subagents::TaskContext {
+            cancel,
+            deadline: None,
+            sockets: sockets.unwrap_or_else(|| Arc::new(Mutex::new(Vec::new()))),
+            owner,
+        }),
+        None => crate::subagents::leave_task(),
+    }
+}
+
 pub(crate) fn worker_id() -> usize {
     WORKER_ID.with(|cell| cell.get())
 }
@@ -1283,10 +1304,11 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
                 }
             }
             match scheduler::admit(&request.routing_session, &request.owner, request.run_class, pick_run_worker) {
-                scheduler::Decision::Run { run_id, worker, cancel }
-                | scheduler::Decision::Behind { run_id, worker, cancel } => {
+                scheduler::Decision::Run { run_id, worker, cancel, sockets }
+                | scheduler::Decision::Behind { run_id, worker, cancel, sockets } => {
                     request.run_id = run_id;
                     request.run_cancel = Some(cancel);
+                    request.run_sockets = Some(sockets);
                     worker
                 }
                 scheduler::Decision::Refused(refusal) => {
@@ -1482,9 +1504,10 @@ fn worker_loop(
                 }
                 IN_RUN.with(|flag| flag.set(is_run_route(&request)));
                 if is_run_route(&request) {
-                    // Install this run's own cancel flag and mark it running, so a cancel request
-                    // reaches the provider reader on this thread and the lifecycle is observable.
-                    set_current_run_cancel(request.run_cancel.clone());
+                    // Install this run's own cancel flag and socket slot, and mark it running, so a
+                    // cancel request reaches the provider reader on this thread and can wake a silent
+                    // read, while the lifecycle is observable.
+                    set_current_run_io(request.run_cancel.clone(), request.run_sockets.clone(), format!("run:{}", request.run_id));
                     scheduler::mark_running(request.run_id);
                 }
                 if is_run_route(&request) && run_cancel_requested() {
@@ -1493,7 +1516,9 @@ fn worker_loop(
                 } else {
                     let _ = handle(&lua, &agent_ui, &mut stream, &request);
                 }
-                set_current_run_cancel(None);
+                if is_run_route(&request) {
+                    set_current_run_io(None, None, String::new());
+                }
                 IN_RUN.with(|flag| flag.set(false));
                 // The run is over, so release its conversation. This happens for the queued runs too:
                 // the owner is held until the last one behind it completes, so the next admission can
@@ -1526,10 +1551,10 @@ fn worker_loop(
                 // as it runs, like any other run, and releases it the same way.
                 LAST_SERVED_MS.store(now_ms(), Ordering::Relaxed);
                 begin_work(format!("relay {} {}", relay.job.method, relay.job.path));
-                set_current_run_cancel(Some(relay.cancel.clone()));
+                set_current_run_io(Some(relay.cancel.clone()), Some(relay.sockets.clone()), format!("run:{}", relay.run_id));
                 scheduler::mark_running(relay.run_id);
                 let (status, body) = process_relay_job(&lua, &agent_ui, &relay.job, relay.verified.as_ref());
-                set_current_run_cancel(None);
+                set_current_run_io(None, None, String::new());
                 scheduler::complete_run(relay.run_id);
                 end_work();
                 beat();
@@ -1584,13 +1609,13 @@ fn worker_loop(
             let conversation = relay_conversation(&job, &verified.0);
             let owner = verified.0.clone();
             match scheduler::admit(&conversation, &owner, scheduler::RunClass::Background, pick_run_worker) {
-                scheduler::Decision::Run { run_id, worker, cancel }
-                | scheduler::Decision::Behind { run_id, worker, cancel } => {
+                scheduler::Decision::Run { run_id, worker, cancel, sockets }
+                | scheduler::Decision::Behind { run_id, worker, cancel, sockets } => {
                     let sender = POOL
                         .get()
                         .and_then(|pool| pool.slots.lock().ok().and_then(|slots| slots.get(worker).cloned().flatten()));
                     match sender {
-                        Some(sender) => match sender.try_send(Work::Relay(RelayWork { job, run_id, cancel, verified: Some(verified) })) {
+                        Some(sender) => match sender.try_send(Work::Relay(RelayWork { job, run_id, cancel, sockets, verified: Some(verified) })) {
                             Ok(()) => {}
                             Err(std::sync::mpsc::TrySendError::Full(Work::Relay(relay)))
                             | Err(std::sync::mpsc::TrySendError::Disconnected(Work::Relay(relay))) => {
@@ -1804,6 +1829,9 @@ struct Request {
     /// at admission; the run uses `wa_node_chat_verified` and never re-verifies (which would be a
     /// replay). The conversation and owner come from this, never from the raw `x-wa-node` header.
     peer_verified: Option<(String, String, String)>,
+    /// This run's own socket slot, held from admission through settlement so a cancel on the accept
+    /// thread can wake this run's silent provider read without touching the next queued run's.
+    run_sockets: Option<crate::subagents::SocketSlot>,
     node_headers: Vec<(String, String)>,
     body: Vec<u8>,
     accept_sse: bool,
@@ -1824,6 +1852,7 @@ struct RelayWork {
     job: crate::relay_client::RelayJob,
     run_id: u64,
     cancel: Arc<AtomicBool>,
+    sockets: crate::subagents::SocketSlot,
     verified: Option<(String, String, String)>,
 }
 
@@ -1881,6 +1910,7 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
                     owner: String::new(),
                     run_cancel: None,
                     peer_verified: None,
+                    run_sockets: None,
                     node_headers,
                     body,
                     accept_sse,
@@ -2270,6 +2300,7 @@ mod peer_conversation_tests {
             owner: String::new(),
             run_cancel: None,
             peer_verified: None,
+            run_sockets: None,
             node_headers: headers,
             body: body.to_vec(),
             accept_sse: true,
