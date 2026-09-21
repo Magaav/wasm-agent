@@ -22,7 +22,7 @@ function M.run(steps,dispatch)
     if not ok then value={error=tostring(value)} end
     local reason=value.error
     if value.ok==false then reason=reason or 'tool_failed' end
-    if step.tool=='read' and not value.eof then reason=reason or 'read_incomplete' end
+    if step.tool=='read' and not (step.args.limit and value.range_complete or value.eof) then reason=reason or 'read_incomplete' end
     if step.tool=='grep' and not value.complete then reason=reason or 'search_incomplete' end
     local expect=step.expect or {}
     if expect.contains and not tostring(value.content or ''):find(expect.contains,1,true) then reason=reason or 'expected_text_missing' end

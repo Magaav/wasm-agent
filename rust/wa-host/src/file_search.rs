@@ -2,17 +2,20 @@
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, fs, path::PathBuf};
 pub fn search(pattern: &str, path: &str, options: &Value) -> Value {
+    search_bounded(pattern,path,options,20000)
+}
+fn search_bounded(pattern: &str, path: &str, options: &Value, entry_budget: usize) -> Value {
     let ignore_case=options["ignore_case"].as_bool().unwrap_or(true);
     let limit=options["limit"].as_u64().unwrap_or(100).clamp(1,500) as usize;
     let max_depth=options["max_depth"].as_u64().unwrap_or(12).min(64) as usize;
     let extensions: Vec<&str>=options["extensions"].as_array().map(|a|a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
     let needle=if ignore_case {pattern.to_lowercase()} else {pattern.to_owned()};
     let mut matches=vec![];let mut stack=vec![(PathBuf::from(path),0)];
-    let mut skipped:BTreeMap<&str,usize>=BTreeMap::new();let mut scanned=0usize;let mut visited=0usize;
+    let mut skipped:BTreeMap<&str,usize>=BTreeMap::new();let mut scanned=0usize;let mut visited=0usize;let mut listed=0usize;
     let mut stop=None;
     while let Some((file,depth))=stack.pop() {
         visited+=1;
-        if visited>20000 {stop=Some("entry_budget");break;}
+        if visited>entry_budget {stop=Some("entry_budget");break;}
         let metadata=match fs::symlink_metadata(&file) {Ok(m)=>m,Err(_)=>{*skipped.entry("metadata_error").or_default()+=1;continue;}};
         if metadata.file_type().is_symlink() {*skipped.entry("symlink").or_default()+=1;continue;}
         if metadata.is_dir() {
@@ -20,6 +23,8 @@ pub fn search(pattern: &str, path: &str, options: &Value) -> Value {
             let entries=match fs::read_dir(&file) {Ok(e)=>e,Err(_)=>{*skipped.entry("directory_error").or_default()+=1;continue;}};
             let mut children=vec![];
             for entry in entries {
+                listed+=1;
+                if listed>entry_budget {stop=Some("entry_budget");break;}
                 match entry {
                     Ok(e)=>{
                         if [".git","target","node_modules",".wasm-agent"].contains(&e.file_name().to_string_lossy().as_ref()) {
@@ -28,7 +33,6 @@ pub fn search(pattern: &str, path: &str, options: &Value) -> Value {
                     },
                     Err(_)=>{*skipped.entry("directory_entry_error").or_default()+=1;}
                 }
-                if children.len()>20000 {stop=Some("directory_budget");break;}
             }
             if stop.is_some(){break;}
             children.sort();
@@ -62,7 +66,7 @@ pub fn search(pattern: &str, path: &str, options: &Value) -> Value {
     let complete=stop.is_none() && skipped.is_empty();
     json!({"matches":matches,"count":matches.len(),"literal":true,"ignore_case":ignore_case,
         "complete":complete,"truncated":stop.is_some(),"stop_reason":stop,"skipped":skipped,
-        "files_scanned":scanned,"max_depth":max_depth,"limit":limit,
+        "files_scanned":scanned,"directory_entries_observed":listed,"max_depth":max_depth,"limit":limit,
         "note":"Paths use the supplied root. Line text may be clipped; use read for exact evidence. No filesystem-wide snapshot."})
 }
 #[cfg(test)] mod tests {
@@ -73,6 +77,7 @@ pub fn search(pattern: &str, path: &str, options: &Value) -> Value {
         fs::write(root.join("a.rs"),"Needle\nneedle.*\nneedle\n").unwrap();
         fs::write(root.join("b.lua"),"needle").unwrap();
         let p=root.to_str().unwrap();
+        let bounded=search_bounded("needle",p,&json!({}),2);assert_eq!(bounded["stop_reason"],"entry_budget");assert_eq!(bounded["complete"],false);
         let r=search("needle.*",p,&json!({"ignore_case":false}));assert_eq!(r["count"],1);assert_eq!(r["complete"],true);
         let r=search("needle",p,&json!({"limit":1}));assert_eq!(r["count"],1);assert_eq!(r["stop_reason"],"result_limit");
         let r=search("Needle",p,&json!({"ignore_case":false,"extensions":["rs"]}));assert_eq!(r["count"],1);assert_eq!(r["skipped"]["extension_filter"],1);

@@ -42,7 +42,7 @@ function audit(input) {
     unpriced_calls:0, invalid_usage:0, pending_calls:0, unmatched_ends:0,
     observed_prompt_tokens:0, observed_output_tokens:0, observed_cache_read_tokens:0,
     observed_cache_write_tokens:0, observed_uncached_tokens:0, observed_priced_cost_usd:0};
-  const timing = {model_ms:[],ttft_ms:[],run_ms:[]};
+  const timing = {model_ms:[],ttft_ms:[],run_ms:[],prefix_audit_ms:[]};
   const tools = {completed:0,failed:0,pending:0,repeated_arguments_within_run:0};
   let cachePrompt = 0, cacheCalls = 0, cacheHitCalls = 0;
   const usable = new Map();
@@ -110,6 +110,7 @@ function audit(input) {
       repeated.add(key);
     }
     if (row.kind !== 'model_call' || row.phase !== 'start') continue;
+    if(number(p.prefix_audit_ms)) timing.prefix_audit_ms.push(p.prefix_audit_ms);
     const comparison=p.prefix_audit;
     if (comparison?.schema_version===1 && ['append_only','identical','rewritten','shortened'].includes(comparison.relation)) {
       prepared.measured++;prepared[comparison.relation]++;

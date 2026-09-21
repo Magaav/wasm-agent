@@ -477,9 +477,11 @@ function M.complete_with(model, messages, tools, stream, opts)
   local url = provider.base_url:gsub("/+$", "") .. "/chat/completions"
   local headers, attribution = headers_for(provider, opts.session_id)
   local serialized=json.encode(body)
+  local audit_started=telemetry.clock()
+  local prefix_comparison=prefix_audit.observe(opts.session_id,opts.kind,body,{
+    endpoint=url,session=attribution and attribution.session and headers[attribution.session] or nil})
   local request_meta={model=body.model,provider=provider.id,round=opts.round,
-    prefix_audit=prefix_audit.observe(opts.session_id,opts.kind,body,{
-      endpoint=url,session=attribution and attribution.session and headers[attribution.session] or nil}),
+    prefix_audit=prefix_comparison,prefix_audit_ms=math.max(0,telemetry.clock()-audit_started),
     -- Which routing this request used. Recorded because a cache miss and the
     -- routing that produced it have to be readable together: without this the
     -- ledger shows the miss and not the instruction that caused it.

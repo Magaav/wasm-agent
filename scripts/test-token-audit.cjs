@@ -69,9 +69,9 @@ const tool=(span,run)=>event(span,'tool','start',{name:'read',arguments_hash:h('
 r=audit([tool('a','1'),tool('b','1'),tool('c','2')]);
 assert.equal(r.tools.repeated_arguments_within_run,1);assert.equal(r.tools.pending,3);
 assert.ok(r.limitations.includes('repeated_arguments_are_not_automatically_waste'));
-const measured=start('measured',{prefix_audit:{schema_version:1,relation:'rewritten',first_changed_message:2,tools_changed:true,settings_changed:false,routing_changed:true}});
+const measured=start('measured',{prefix_audit_ms:2,prefix_audit:{schema_version:1,relation:'rewritten',first_changed_message:2,tools_changed:true,settings_changed:false,routing_changed:true}});
 r=audit([measured,end('measured')]);assert.equal(r.prepared_prefix.measured,1);
-assert.equal(r.prepared_prefix.rewritten,1);assert.equal(r.prepared_prefix.tools_changed,1);
+assert.equal(r.timing.prefix_audit_ms.p50,2);assert.equal(r.prepared_prefix.rewritten,1);assert.equal(r.prepared_prefix.tools_changed,1);
 assert.equal(r.prepared_prefix.routing_changed,1);assert.equal(r.prepared_prefix.settings_changed,0);
 assert.equal(audit([start('old'),end('old')]).prepared_prefix.unmeasured,1);
 const privateEvent=start('private',{system_hash:h('e'),arbitrary_secret:'DO_NOT_PRINT',settings:{secret:'DO_NOT_PRINT'}});

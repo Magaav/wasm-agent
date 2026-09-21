@@ -156,7 +156,10 @@ also covers intentional exclusions. A search is not a filesystem-wide snapshot.
 `diagnose` accepts 1–8 explicit `read`/`grep` steps with optional literal-content
 or match-count assertions. It validates the plan structure before execution, runs
 steps once in order, retains ordered results and a plan hash, and stops on errors,
-incomplete reads/searches or failed assertions. It never invokes a shell, edits,
+incomplete reads/searches or failed assertions. An explicitly requested line range
+must have `range_complete`; without an explicit limit, the read must reach `eof`.
+Thus byte clipping cannot pass as a complete range, and a complete requested range
+does not force an unrequested whole-file read. It never invokes a shell, edits,
 repairs, loops, retries, broadens scope or grants guest authority. Later steps are
 explicitly counted as not run. This narrow read-only pilot is deliberately not a
 new general workflow language; execution/test commands keep their existing tools.
@@ -204,7 +207,9 @@ Prompt text, authorization headers and per-message hashes are not stored in the
 ledger. Baselines are worker-local: at most 16 session/kind keys, 8,192 messages
 per key. A restart, eviction, oversize request or missing session is **unmeasured**.
 The offline reporter includes these observations when present and tolerates older
-exports without inventing them. Runtime fingerprints include the new Lua modules.
+exports without inventing them. `prefix_audit_ms` measures the audit's own runtime
+cost, with sample counts/p50/p95 in the report: instrumentation is not assumed free.
+Runtime fingerprints include the new Lua modules.
 
 These describe prepared request components, **not** provider acceptance, tokenizer
 prefix lengths, routing decisions, retention or guaranteed cache reuse. They do not

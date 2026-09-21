@@ -76,7 +76,7 @@ function M.read(args)
     if next_byte>#text then next_line=total+1 end
     local next_column=next_byte-(starts[next_line] or (#text+1))+1
     return {path=args.path,content=part,version=hash,offset=line,column=column,
-      next_offset=next_line,next_column=next_column,eof=next_byte>#text,
+      next_offset=next_line,next_column=next_column,eof=next_byte>#text,range_complete=next_byte>last,
       total_lines=total,bytes=#text,returned_bytes=#part,
       end_offset=#part>0 and (next_column==1 and next_line-1 or next_line) or nil,
       note='Raw text, no synthetic line numbering. Continue with next_offset, next_column and version.'}
