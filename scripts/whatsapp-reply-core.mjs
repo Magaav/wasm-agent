@@ -12,6 +12,47 @@ export function normalise(text) {
   return String(text || "").replace(/\s+/g, " ").trim();
 }
 
+export function normalizeDigits(value) {
+  return String(value || "").replace(/[^0-9]/g, "");
+}
+
+// The profile binds a local account identity; the route must prove it is acting as that identity. A
+// jid (`5511...@s.whatsapp.net`) and a bare number compare by digits.
+export function accountMatches(expected, actual) {
+  const want = normalizeDigits(expected), got = normalizeDigits(actual);
+  if (want && got) return want === got;
+  return String(expected) === String(actual);
+}
+
+// Compare the explicit page target and port of two ws endpoints. Loopback host spellings differ
+// (`localhost` / `127.0.0.1` / `[::1]`); the page id and port are the binding.
+export function endpointMatches(expected, actual) {
+  const parse = (value) => {
+    try {
+      const url = new URL(value);
+      const id = (url.pathname.split("/devtools/page/")[1] || "").split("/")[0];
+      return { port: url.port || (url.protocol === "wss:" ? "443" : "80"), id };
+    } catch { return null; }
+  };
+  const a = parse(expected), b = parse(actual);
+  if (!a || !b) return false;
+  return a.port === b.port && a.id !== "" && a.id === b.id;
+}
+
+// Returns an error code when the route cannot prove the bound identity, null when it can. Only checks
+// the expectations the profile actually bound.
+export function identityGuard({ expectedAccount, expectedEndpoint, actualAccount, actualEndpoint }) {
+  if (expectedAccount) {
+    if (!actualAccount) return "account_unproven";
+    if (!accountMatches(expectedAccount, actualAccount)) return "account_mismatch";
+  }
+  if (expectedEndpoint) {
+    if (!actualEndpoint) return "endpoint_unproven";
+    if (!endpointMatches(expectedEndpoint, actualEndpoint)) return "endpoint_mismatch";
+  }
+  return null;
+}
+
 // The raw reply script is reachable directly, not only through the profile-scoped Lua tool, so it must
 // refuse a non-self send by itself unless unread clearing was explicitly accepted. Returns an error code
 // when the send must not proceed, null when it may. A rehearsal (`send` false) always passes.

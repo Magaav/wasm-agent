@@ -55,7 +55,7 @@ const HOSTS = ["127.0.0.1", "[::1]"];
 const WHATSAPP_URL = "web.whatsapp.com";
 
 import { acquire as acquireSendLock, defaultLockPath } from "./whatsapp-sendlock.mjs";
-import { composerMatches, classifySendAttempt, sendGuard } from "./whatsapp-reply-core.mjs";
+import { composerMatches, classifySendAttempt, sendGuard, identityGuard } from "./whatsapp-reply-core.mjs";
 
 // The composer lock is released by `done`, but a crash between acquiring and sending must not leave the
 // lock for the stale timeout. One process-wide handler covers every abnormal exit.
@@ -65,7 +65,7 @@ process.on("exit", () => {
 });
 
 function parseArgs(argv) {
-  const args = { chat: "", body: "", bodyFile: "", send: false, toSelf: false, label: "", timeoutMs: 20000, lockWaitMs: 30000, allowMarkRead: process.env.WA_WHATSAPP_ALLOW_MARK_READ === "1", lookupOnly: false };
+  const args = { chat: "", body: "", bodyFile: "", send: false, toSelf: false, label: "", timeoutMs: 20000, lockWaitMs: 30000, allowMarkRead: process.env.WA_WHATSAPP_ALLOW_MARK_READ === "1", lookupOnly: false, expectAccount: "", expectBrowserEndpoint: "" };
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     const value = argv[index + 1];
@@ -80,6 +80,10 @@ function parseArgs(argv) {
     else if (flag === "--allow-mark-read") { args.allowMarkRead = true; }
     // Read-only resolution: report the target and the self chat id without opening anything.
     else if (flag === "--lookup-only") { args.lookupOnly = true; }
+    // The locally bound identity the route must prove it is acting as. Only the profile passes these; an
+    // event or a model argument never does.
+    else if (flag === "--expect-account") { args.expectAccount = String(value || ""); index += 1; }
+    else if (flag === "--expect-browser-endpoint") { args.expectBrowserEndpoint = String(value || ""); index += 1; }
     else if (flag === "--send") { args.send = true; }
     else if (flag === "--to-self") { args.toSelf = true; }
   }
@@ -146,6 +150,7 @@ function lookupExpression(chat, toSelf) {
       }
     }
     const ranked = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
+    const ownId = ranked[0] || '';
     const byChat = chats.filter((c) => ranked.indexOf(String(c.id)) >= 0).map((c) => String(c.id));
     const mine = msgs.filter((m) => m.id && m.id.fromMe).map((m) => String(m.id.remote || ''));
     const selfOnly = byChat.find((id) => mine.indexOf(id) >= 0
@@ -156,7 +161,7 @@ function lookupExpression(chat, toSelf) {
     if (!found) return JSON.stringify({ error: 'chat_not_found', target_id: targetId, self_id: selfId });
     return JSON.stringify({
       chat: { id: String(found.id), name: String(found.formattedTitle || found.name || '') },
-      self_id: selfId, unread: found.unreadCount || 0, messages: msgs.length,
+      self_id: selfId, own_id: ownId, unread: found.unreadCount || 0, messages: msgs.length,
       archived: !!(found.archive || found.isArchived),
     });
   })()`;
@@ -329,9 +334,29 @@ async function main() {
   const before = { unread: target.unread, messages: target.messages };
 
   // Read-only resolution: no lock, no open, no type, no send. This is how an operator or a proof script
-  // discovers the notes-to-self chat id (`self_id`) before binding it in the profile.
+  // discovers the notes-to-self chat id (`self_id`) and the account (`own_id`) before binding them.
+  const actualEndpoint = `ws://${endpoint.host}:${endpoint.port}/devtools/page/${tab.id}`;
+  const actualAccount = target.own_id || target.self_id || "";
   if (args.lookupOnly) {
-    return done({ ok: true, lookup_only: true, chat: target.chat, self_id: target.self_id || null, before }, 0);
+    return done({ ok: true, lookup_only: true, chat: target.chat, self_id: target.self_id || null,
+      account: actualAccount, browser_endpoint: actualEndpoint, before }, 0);
+  }
+
+  // The locally bound identity must be proven by the route before it opens anything. A profile that binds
+  // an account or a browser endpoint is not satisfied by a script that ignores it.
+  const identity = identityGuard({
+    expectedAccount: args.expectAccount,
+    expectedEndpoint: args.expectBrowserEndpoint,
+    actualAccount,
+    actualEndpoint,
+  });
+  if (identity) {
+    return done({
+      ok: false, error: identity, chat: target.chat, account: actualAccount, browser_endpoint: actualEndpoint,
+      expected_account: args.expectAccount || null, expected_browser_endpoint: args.expectBrowserEndpoint || null,
+      observed: "the route is not acting as the locally bound account/endpoint",
+      next: "bind the account and browser_endpoint the session actually uses",
+    }, 9);
   }
 
   // Raw-script guard, before anything is opened. Older jobs call this script directly, so the
@@ -346,7 +371,7 @@ async function main() {
   });
   if (guard) {
     return done({
-      ok: false, error: guard, chat: target.chat, before,
+      ok: false, error: guard, chat: target.chat, before, account: actualAccount, browser_endpoint: actualEndpoint,
       observed: "a non-self send would open the chat and clear its unread marker",
       next: "pass --allow-mark-read to accept that, reply to --to-self, or use an approved store route",
     }, 8);
@@ -419,7 +444,8 @@ async function main() {
     const cleared = await page(composerTextExpression());
     return done({
       ok: !!cleared.empty, dry_run: true, cleared: !!cleared.empty, chat: target.chat,
-      composer_label: label, body, before, typed: { preview: typed.preview, length: typed.length },
+      composer_label: label, body, before, account: actualAccount, browser_endpoint: actualEndpoint,
+      typed: { preview: typed.preview, length: typed.length },
     }, cleared.empty ? 0 : 5);
   }
 
@@ -474,7 +500,7 @@ async function main() {
   }
   return done({
     ok: true, sent: true, dispatch, chat: target.chat, composer_label: label, body: expected,
-    ...verified, unread_before: before.unread,
+    ...verified, unread_before: before.unread, account: actualAccount, browser_endpoint: actualEndpoint,
   }, 0);
 }
 

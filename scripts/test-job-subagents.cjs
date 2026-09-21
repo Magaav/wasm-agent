@@ -66,7 +66,9 @@ async function nodeFixture() {
     if (req.url === "/health") {
       state.health.push(state.busy);
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ ok: true, current: state.busy ? { label: "POST /chat" } : null }));
+      // The sentinel's idle contract requires a workers[] array; its absence is ambiguous, not idle.
+      res.end(JSON.stringify({ ok: true, current: state.busy ? { label: "POST /chat" } : null,
+        queue: 0, operation_overdue: false, workers: [{ state: "alive" }] }));
       return;
     }
     if (req.url === "/subagents" && req.method === "POST") {

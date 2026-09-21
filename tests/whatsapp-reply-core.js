@@ -7,7 +7,7 @@ let checked = 0;
 const check = (value, label) => { assert.ok(value, label); checked += 1; };
 
 (async () => {
-  const { normalise, composerMatches, classifySendAttempt, sendGuard } = await import("../scripts/whatsapp-reply-core.mjs");
+  const { normalise, composerMatches, classifySendAttempt, sendGuard, accountMatches, endpointMatches, identityGuard } = await import("../scripts/whatsapp-reply-core.mjs");
 
   check(normalise("  a\n b\tc ") === "a b c", "normalise collapses whitespace");
   check(composerMatches("a b c", "a\n b   c") === true, "matching ignores whitespace shape");
@@ -31,6 +31,19 @@ const check = (value, label) => { assert.ok(value, label); checked += 1; };
   check(sendGuard({ send: true, chatId: "me@c.us", selfId: "me@c.us" }) === null, "a resolved self id is allowed even without the flag");
   check(sendGuard({ send: true, chatId: "x@c.us", selfId: "me@c.us", allowMarkRead: true }) === null, "explicit unread acceptance allows a third-party send");
   check(sendGuard({ send: true, chatId: "x@c.us", selfId: "me@c.us" }) === "unread_would_be_broken", "a third-party send is refused by default");
+
+  // The locally bound account/endpoint must be proven by the route; loopback spellings are equivalent.
+  check(accountMatches("5511999999999", "5511999999999@s.whatsapp.net") === true, "an account matches its jid form");
+  check(accountMatches("5511999999999", "5511999999998") === false, "a different number does not match");
+  check(endpointMatches("ws://[::1]:9222/devtools/page/ABC", "ws://127.0.0.1:9222/devtools/page/ABC") === true, "loopback spellings are equivalent");
+  check(endpointMatches("ws://[::1]:9222/devtools/page/ABC", "ws://[::1]:9222/devtools/page/OTHER") === false, "a different page id does not match");
+  check(endpointMatches("ws://[::1]:9223/devtools/page/ABC", "ws://[::1]:9222/devtools/page/ABC") === false, "a different port does not match");
+  check(identityGuard({ expectedAccount: "5511", actualAccount: "5511" }) === null, "a proven identity passes");
+  check(identityGuard({ expectedAccount: "5511", actualAccount: "" }) === "account_unproven", "an unproven account is refused");
+  check(identityGuard({ expectedAccount: "5511", actualAccount: "5512" }) === "account_mismatch", "a mismatched account is refused");
+  check(identityGuard({ expectedEndpoint: "ws://[::1]:9222/devtools/page/A", actualEndpoint: "ws://[::1]:9222/devtools/page/B" }) === "endpoint_mismatch", "a mismatched endpoint is refused");
+  check(identityGuard({ expectedEndpoint: "ws://[::1]:9222/devtools/page/A", actualEndpoint: "" }) === "endpoint_unproven", "an unproven endpoint is refused");
+  check(identityGuard({}) === null, "an unbound identity is not checked");
 
   console.log("ALL PASS");
   void checked;

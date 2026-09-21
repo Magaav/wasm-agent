@@ -140,12 +140,13 @@ scope is empty and sending is unapproved, so its default is "read nothing, send 
 
 ### Scope is an account allow-list, narrowed by a trusted event
 
-A profile may permit several *direct* conversations (`allowed_conversations`, or a single
-`allowed_conversation`). The run never chooses the conversation from a model argument: the runtime
-resolves `ctx.event = {conversation_id, message_id}` from the ledger, and the tool refuses if that
-conversation is outside the profile's scope or if a ledger row it reads belongs to a different
-conversation. So the scope is locally approved, and the event can only narrow it to the one conversation
-it actually names.
+A profile may permit several *direct* conversations (`conversation`, `allowed_conversations`, or a single
+`allowed_conversation`), and it gates the two capabilities separately with `actions`
+(`["read","send"]`): a profile that may read a conversation is not thereby allowed to send. The run never
+chooses the conversation from a model argument: the runtime resolves `ctx.event = {conversation_id,
+message_id}` from the ledger, and the tool refuses a foreign `conversation_id` argument, a conversation
+outside the profile's scope, or a ledger row that belongs to a different conversation. So the scope is
+locally approved, and the event can only narrow it to the one conversation it actually names.
 
 ### Trusted context, not the event body
 
@@ -155,7 +156,8 @@ The tools read only trusted context, never the event payload beyond identity:
 | --- | --- |
 | `ctx.event` | `{conversation_id, message_id}`, resolved by the runtime from the ledger |
 | `ctx.effects` | the durable effect store: `reserve({message_id,conversation_id,body,limit})`, `confirm({message_id,conversation_id,message})`, and `record(decision)` for decisions, plus optional read-only `reconcile`/`release`/`unknown` |
-| `ctx.profile` / `ctx.profile_path` | the local approved profile |
+| `ctx.subagent` | the runtime's resolved snapshot (`id`, `allowed_tools`, `resources`, `limits`); the tool reads this instead of re-reading a file a child could change |
+| `ctx.profile` / `ctx.profile_path` | the local approved profile (tests/direct callers) |
 
 The event's other fields are ignored: an event cannot supply a `reply_script`, a `store_send_script`, a
 browser endpoint or a capability. A decision is written through `ctx.effects.record` (durable, keyed by the
@@ -178,6 +180,13 @@ After a store-verified send, `effects.confirm` must persist; if it does not, the
   the unread guard. The store script is an operator-asserted local binding: accept it only because the
   operator approved it, and do not claim it is a proven store route.
 - Any other route value is refused.
+
+The route must also prove the bound **identity**: when the profile binds `account` and/or
+`browser_endpoint`, they are passed to the raw script as `--expect-account`/`--expect-browser-endpoint`,
+and the script refuses a session logged in as a different account or against a different page before it
+opens or types. The tool re-checks the identity the route reports (`account`/`own_id`,
+`browser_endpoint`/`endpoint`); an unproven or mismatched identity is `send_account_unproven`,
+`send_account_mismatch`, `send_endpoint_unproven` or `send_endpoint_mismatch`, never a success.
 
 The script's result is verified: the host wrapper's exit code must be zero, its stdout must decode, and
 the decoded result must prove the exact recipient, body and message id (`verified: true`). A shell exit
