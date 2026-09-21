@@ -5,13 +5,14 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const assert = require('node:assert/strict');
-const {spawn} = require('node:child_process');
+const {spawn, spawnSync} = require('node:child_process');
 const repo = path.resolve(__dirname, '..');
 const wa = path.resolve(process.argv[2] || process.env.WA_BIN || path.join(repo, 'rust/target/release/wa' + (process.platform === 'win32' ? '.exe' : '')));
+const sentinel = path.resolve(process.argv[3] || path.join(repo,'rust/wa-sentinel/target/release/wa-sentinel'+(process.platform==='win32'?'.exe':'')));
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-orchestration-e2e-'));
 const config = path.join(root, '.wasm-agent');
 fs.mkdirSync(path.join(config, 'subagent-profiles'), {recursive:true});
-let checks = 0, child, provider, hostLog;
+let checks = 0, child, watcher, provider, hostLog, watcherLog;
 const held = new Map(), requests = [];
 const check = (value, label) => { assert.ok(value, label); checks++; };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -70,8 +71,34 @@ function answer(res, label) {
     check([...held.values()].every(r=>!r.writableEnded),'both background requests remain in flight');
     const duplicate=await api({action:'start',profile:'proof-lean',prompt:'BACKGROUND_1',idempotency_key:'proof-1'});
     check(duplicate.subagent_id===receipts[0].subagent_id,'same delivery returns the same child');
-    const queued=await api({action:'start',profile:'proof-lean',prompt:'BACKGROUND_3',idempotency_key:'proof-3'});
-    check(queued.subagent_id && !queued.error,'overflow accepted into bounded child queue');receipts.push(queued);
+    // Submit the queued child through an actual portable Job + Delivery, not a simulated endpoint.
+    const jobEnv={...env,WASM_AGENT_PORT:String(port),WASM_AGENT_MANAGED:'0',WASM_AGENT_RELAY:'',WASM_AGENT_RENDEZVOUS:'',
+      WA_SENTINEL_SCRIPTS:root,WA_SENTINEL_JOB_CONCURRENCY:'2',WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY:'1'};
+    const job=(...args)=>{
+      const r=spawnSync(sentinel,['job',...args],{env:jobEnv,encoding:'utf8',timeout:10000,windowsHide:true});
+      assert.equal(r.status,0,`job ${args.join(' ')}: ${r.error||r.stderr}`);return JSON.parse(r.stdout);
+    };
+    const jobFile=path.join(root,'background.json'), artifactFile=path.join(root,'background.artifact.json'), bindingsFile=path.join(root,'bindings.json');
+    fs.writeFileSync(jobFile,JSON.stringify({id:'proof-background',name:'Bounded fixture',trigger:{kind:'event',topic:'proof.background'},action:{kind:'subagent',profile:'proof-lean',prompt:'BACKGROUND_3',timeout_seconds:60}}));
+    job('put',jobFile);fs.writeFileSync(artifactFile,JSON.stringify(job('export','proof-background')));fs.writeFileSync(bindingsFile,'{}');
+    check(job('import',artifactFile,'--bindings',bindingsFile,'--approve').job.enabled===false,'portable artifact imports disabled');
+    job('enable','proof-background');
+    const marker=path.join(root,'deterministic.completed'), script=path.join(root,'deterministic.sh');
+    const quote=s=>"'"+s.replaceAll("'","'\\''")+"'";
+    fs.writeFileSync(script,'#!/usr/bin/env bash\nprintf proof > '+quote(marker.replaceAll('\\','/'))+'\n');
+    const deterministicFile=path.join(root,'deterministic.json');
+    fs.writeFileSync(deterministicFile,JSON.stringify({id:'proof-deterministic',name:'Deterministic fixture',trigger:{kind:'event',topic:'proof.deterministic'},action:{kind:'run',script,timeout_seconds:10}}));
+    job('put',deterministicFile);job('enable','proof-deterministic');
+    watcherLog=fs.openSync(path.join(root,'sentinel.log'),'a');
+    watcher=spawn(sentinel,['watch'],{env:jobEnv,stdio:['ignore',watcherLog,watcherLog],windowsHide:true});
+    watcher.on('error',error=>console.error(error));
+    const eventFile=path.join(root,'event.json');fs.writeFileSync(eventFile,'{"proof":true}');
+    check(job('emit','proof.background','proof-event',eventFile).queued===1,'durable background delivery enqueued');
+    let queued;
+    await until(async()=>{const r=await api({action:'list'});queued=r.subagents?.find(s=>!receipts.some(existing=>existing.subagent_id===s.subagent_id));return !!queued;},'sentinel submits queued child');
+    check(queued.subagent_id && !queued.error,'overflow delivery accepted into bounded child queue');receipts.push(queued);
+    check(job('emit','proof.deterministic','proof-deterministic-event',eventFile).queued===1,'deterministic delivery enqueued');
+    await until(()=>fs.existsSync(marker),'deterministic job progresses while inference saturated');checks++;
     const chats=await Promise.all(['A','B'].map(async name=>{
       const r=await fetch(base+'/chat',{method:'POST',headers:{'content-type':'application/json',accept:'text/event-stream'},body:JSON.stringify({thread:'proof-interactive-'+name,text:'INTERACTIVE_'+name}),signal:AbortSignal.timeout(8000)});
       return {name,status:r.status,text:await r.text()};
@@ -100,6 +127,10 @@ function answer(res, label) {
     for(const receipt of receipts.slice(1)){
       await until(async()=>{const r=await api({action:'result',subagent_id:receipt.subagent_id});return r.settled && r.state==='completed';},'durable child result'); checks++;
     }
+    await until(()=>job('history').some(d=>d.job_id==='proof-background' && d.state==='completed'),'delivery settles after actual child completion');checks++;
+    check(job('emit','proof.background','proof-event',eventFile).queued===0,'duplicate source event cannot submit a second child');
+    check((await api({action:'list'})).subagents.length===3,'exactly three durable children after delivery dedupe');
+    check(fs.existsSync(path.join(config,'subagents')),'child records use isolated node home, not ambient HOME');
     for(const name of ['A','B']){
       const data=await(await fetch(base+'/session?id=proof-interactive-'+name,{signal:AbortSignal.timeout(3000)})).json();
       const text=JSON.stringify(data.messages);
@@ -111,8 +142,9 @@ function answer(res, label) {
   }catch(error){console.error(error.stack);console.error('evidence: '+root);process.exitCode=1;
   }finally{
     for(const response of held.values())response.destroy();
-    if(child && child.exitCode===null){child.kill();await Promise.race([new Promise(r=>child.once('exit',r)),sleep(5000)]);}
+    for(const processHandle of [watcher,child])if(processHandle && processHandle.exitCode===null){processHandle.kill();await Promise.race([new Promise(r=>processHandle.once('exit',r)),sleep(5000)]);}
     if(hostLog!==undefined)fs.closeSync(hostLog);
+    if(watcherLog!==undefined)fs.closeSync(watcherLog);
     provider?.closeAllConnections();provider?.close();
   }
 })();
