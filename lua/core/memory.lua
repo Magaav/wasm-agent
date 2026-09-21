@@ -503,7 +503,7 @@ function M.ensure_session(user_id, node_id, title)
   node_id = node_id or ""
   local rows = query(
     "SELECT id FROM sessions WHERE user_id=? AND node_id=? AND ended_at IS NULL " ..
-    "AND parent_session_id IS NULL " ..
+    "AND parent_session_id IS NULL AND (objective IS NULL OR objective<>'subagent') " ..
     "ORDER BY started_at DESC LIMIT 1", {user_id, node_id})
   if #rows > 0 then return rows[1].id end
   return M.start_session(node_id, title or "chat", { user_id = user_id, node_id = node_id, title = title or "chat" })

@@ -323,11 +323,15 @@ impl Manager {
             pid: std::process::id(),
         };
         if !idempotency.is_empty() {
+            // Written only after the record exists, so a failed write cannot leave
+            // an idempotency key pointing at a child that was never admitted.
+        }
+        persist_task(&self.inner.root, &task).map_err(|error| format!("record_write_failed:{error}"))?;
+        if !idempotency.is_empty() {
             if let Ok(mut idem) = self.inner.idem.lock() {
                 idem.insert(format!("{owner}\u{1}{idempotency}"), id.to_string());
             }
         }
-        persist_task(&self.inner.root, &task);
         let view = task.view(false);
         let cancel = task.cancel.clone();
         tasks.insert(id.to_string(), task);
@@ -351,7 +355,9 @@ impl Manager {
                     task.settled_at = Some(now_secs());
                     let snapshot = task.view(true);
                     drop(tasks);
-                    persist_view(&self.inner.root, &snapshot);
+                    if let Err(error) = persist_view(&self.inner.root, &snapshot) {
+                        eprintln!("[subagents] could not record a spawn failure for {id}: {error}");
+                    }
                 }
                 error.to_string()
             })?;
@@ -452,9 +458,9 @@ impl Manager {
     }
 }
 
-fn persist_task(root: &Path, task: &Task) {
+fn persist_task(root: &Path, task: &Task) -> Result<(), String> {
     let directory = root.join(&task.id);
-    let _ = std::fs::create_dir_all(&directory);
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     let record = json!({
         "id": task.id,
         "spec": task.spec,
@@ -477,18 +483,19 @@ fn persist_task(root: &Path, task: &Task) {
         "boot": task.boot,
         "pid": task.pid,
     });
-    write_record(&directory, &record);
+    write_record(&directory, &record)
 }
 
 /// Persist a settled task from its own view, merged onto the durable record so
-/// the resolved `spec` written at admission is preserved.
-fn persist_view(root: &Path, view: &Value) {
+/// the resolved `spec` written at admission is preserved. A failure is returned
+/// so the caller can surface it rather than lose the only durable evidence.
+fn persist_view(root: &Path, view: &Value) -> Result<(), String> {
     let id = view["subagent_id"].as_str().unwrap_or_default();
     if id.is_empty() {
-        return;
+        return Ok(());
     }
     let directory = root.join(id);
-    let _ = std::fs::create_dir_all(&directory);
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     let path = directory.join("record.json");
     let mut record = std::fs::read_to_string(&path)
         .ok()
@@ -504,15 +511,18 @@ fn persist_view(root: &Path, view: &Value) {
     } else {
         record = view.clone();
     }
-    write_record(&directory, &record);
+    write_record(&directory, &record)
 }
 
-fn write_record(directory: &Path, record: &Value) {
+/// Write atomically, and return the error instead of swallowing it: a durable
+/// record that silently did not persist is the one failure a supervisor must not
+/// hide. On Windows `rename` may replace an existing file; where it cannot, the
+/// checked error reaches the caller rather than being dropped.
+fn write_record(directory: &Path, record: &Value) -> Result<(), String> {
     let path = directory.join("record.json");
     let temporary = directory.join(".record.json.tmp");
-    if std::fs::write(&temporary, record.to_string()).is_ok() {
-        let _ = std::fs::rename(&temporary, &path);
-    }
+    std::fs::write(&temporary, record.to_string()).map_err(|error| error.to_string())?;
+    std::fs::rename(&temporary, &path).map_err(|error| error.to_string())
 }
 
 /// The body of a child task's own thread. Capacity is acquired here, not in
@@ -614,7 +624,9 @@ fn settle_view(inner: &Arc<Inner>, id: &str, state: &str, result: Value, error: 
     task.settled_at = Some(now_secs());
     let view = task.view(true);
     drop(tasks);
-    persist_view(&inner.root, &view);
+    if let Err(error) = persist_view(&inner.root, &view) {
+        eprintln!("[subagents] could not record settlement for {id}: {error}");
+    }
     inner.changed.notify_all();
 }
 
@@ -898,5 +910,19 @@ mod tests {
         }
         let settled = manager.await_task("cancel-child", "heidi", 5_000).expect("await");
         assert_eq!(settled["state"], "cancelled");
+    }
+
+    #[test]
+    fn a_record_write_failure_is_reported_not_swallowed() {
+        // The durable record is the supervisor's evidence. A file where the task
+        // directory must be makes `create_dir_all` fail, and the start must report
+        // that rather than hand back a receipt for a child that is not durable.
+        let root = temp_root("record-fail");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("blocked"), b"not a directory").unwrap();
+        let manager = Manager::with_root(root, 2, 6);
+        let _ = manager.runner.set(Arc::new(|_receipt: &str| Ok(json!({"state": "completed"}))));
+        let error = manager.start(&spec("blocked", "ivy", "")).unwrap_err();
+        assert!(error.starts_with("record_write_failed"), "got {error}");
     }
 }
