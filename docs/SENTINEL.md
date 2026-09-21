@@ -30,6 +30,14 @@ wa-sentinel request wake     --session <id> --prompt "..." --reason "why"
 wa-sentinel request run      --script /path/to/script.sh --reason "why"
 ```
 
+### More than one node on a machine
+
+A node's home, key, database, ports and supervisor records are per **instance**, so one machine can
+host an operator's master node beside a guest node bound to another master. Select one with
+`--instance NAME` (or `WASM_AGENT_INSTANCE=NAME`); with no name the ambient/default node behaves
+exactly as before. `wa-sentinel instance add|list|show|remove|start|stop|status` manages them, and
+the sentinel will not stop a listener it cannot prove it started. See [INSTANCES.md](INSTANCES.md).
+
 ### `deploy` is not `upgrade`, and the difference matters
 
 `upgrade` installs the node and the UI. It **cannot** install a *sentinel*: `upgrade.sh` copies the node

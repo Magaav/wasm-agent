@@ -16,6 +16,11 @@ cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host file_s
 # than mtime (a `cp -f` of identical files must not force every open page to reload).
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host serve::
 cargo test --release --offline --manifest-path rust/wa-sentinel/Cargo.toml
+# The named-instance lifecycle, against two real co-located nodes: separate homes, keys, databases
+# and ports; a refused wrong listener; and a stop/restart of one that cannot reach the other. No
+# model and no network, so it belongs in the hermetic gate rather than the on-demand guest e2e.
+CARGO_BUILD_JOBS=2 cargo build --release --offline --manifest-path rust/wa-sentinel/Cargo.toml >/dev/null
+bash scripts/test-node-instances.sh
 BIN=rust/target/release/wa
 # A turn cannot deploy the process serving that same turn. The marker crosses
 # the Rust host's shell boundary; both entry points must refuse before waiting

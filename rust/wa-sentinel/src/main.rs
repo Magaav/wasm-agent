@@ -40,6 +40,7 @@ use std::time::{Duration, Instant};
 mod spell;
 mod jobs;
 mod cdp;
+mod instance;
 
 // Stopping and starting a node through the Win32 API instead of through a spawned shell. The safety
 // rule it must preserve - act on a pid the OS gave us, never on an image name - lives in the caller,
@@ -49,7 +50,7 @@ mod winproc;
 
 // ---------------------------------------------------------------- paths
 
-fn home() -> PathBuf {
+pub(crate) fn home() -> PathBuf {
     if let Ok(value) = std::env::var("WASM_AGENT_HOME") {
         if !value.is_empty() {
             return PathBuf::from(value);
@@ -71,7 +72,7 @@ fn config_dir() -> PathBuf {
     dir
 }
 
-fn sentinel_dir() -> PathBuf {
+pub(crate) fn sentinel_dir() -> PathBuf {
     let dir = config_dir().join("sentinel");
     // `claimed` too: a request is renamed into it before it is performed, and a missing directory
     // would make that rename fail - which, after the claim-before-work change, would mean no request
@@ -95,18 +96,18 @@ fn stop_path() -> PathBuf {
 }
 
 /// The node's port: what the operator set, else the default the installer uses.
-fn node_port() -> u16 {
+pub(crate) fn node_port() -> u16 {
     std::env::var("WASM_AGENT_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(8799)
 }
 
-fn client_port() -> u16 {
+pub(crate) fn client_port() -> u16 {
     std::env::var("WASM_AGENT_CLIENT_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(8800)
 }
 
 /// Where the installed binary lives. Not derived from the config directory: the install and the state
 /// are in different places, and guessing wrong made `restart` report "nothing installed at
 /// C:\Users\Victor\wasm-agent\wa.exe" - a path that never existed.
-fn installed_binary() -> PathBuf {
+pub(crate) fn installed_binary() -> PathBuf {
     if let Ok(value) = std::env::var("WA_INSTALL_DIR") {
         if !value.is_empty() {
             return PathBuf::from(value).join(if cfg!(windows) { "wa.exe" } else { "wa" });
@@ -130,7 +131,7 @@ fn ui_dir() -> PathBuf {
 
 // ---------------------------------------------------------------- logging
 
-fn now_epoch() -> u64 {
+pub(crate) fn now_epoch() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -147,7 +148,7 @@ pub(crate) fn audit(verb: &str, detail: &str, reason: &str) {
     }
 }
 
-fn say(message: &str) {
+pub(crate) fn say(message: &str) {
     println!("  {message}");
 }
 
@@ -178,15 +179,68 @@ fn node_is_up() -> bool {
 }
 
 pub(crate) fn node_is_idle() -> bool {
-    match health() {
-        Some(value) => value.get("current").map(|c| c.is_null()).unwrap_or(true),
-        None => true,
+    node_activity() == Some(true)
+}
+
+/// What `/health` says about whether a node can be interrupted, as a three-state answer.
+///
+/// `Some(true)` is a *positive* proof of idle: every signal the runtime offers says no work is in
+/// flight. `Some(false)` is busy. `None` is "cannot tell" — the node is down, or the body is
+/// missing a field this contract requires. Graceful maintenance treats `None` as busy and holds the
+/// request, because stopping a node whose state is unknown is how a supervisor turns a slow run
+/// into lost work. Starting a *down* node is still allowed: there is nothing to interrupt.
+pub(crate) fn node_activity() -> Option<bool> {
+    activity_of(&health()?)
+}
+
+/// The classification, split from the HTTP fetch so it can be tested against a literal body.
+pub(crate) fn activity_of(value: &Value) -> Option<bool> {
+    if !value.get("ok").and_then(Value::as_bool)? {
+        return Some(false); // stalled
+    }
+    if value.get("current").map(|current| !current.is_null()).unwrap_or(false) {
+        return Some(false);
+    }
+    if value.get("queue").and_then(Value::as_u64).unwrap_or(0) > 0 {
+        return Some(false);
+    }
+    if value.get("operation_overdue").and_then(Value::as_bool).unwrap_or(false) {
+        return Some(false);
+    }
+    // The contract requires a workers array; its absence is ambiguous, not idle. Every worker must
+    // be "alive": a busy read worker is still work this restart would interrupt.
+    let workers = value.get("workers").and_then(Value::as_array)?;
+    for worker in workers {
+        if worker.get("state").and_then(Value::as_str) != Some("alive") {
+            return Some(false);
+        }
+    }
+    // Subagents are consumed if the runtime reports them, as a list or a count: any accepted or
+    // running entry makes the node busy. Subagent policy is not this change's; the field is read so
+    // the sentinel cannot silently ignore it once the runtime grows it.
+    if let Some(subagents) = value.get("subagents") {
+        if subagents.as_array().map(|items| !items.is_empty()).unwrap_or(false) {
+            return Some(false);
+        }
+        if subagents.as_u64().unwrap_or(0) > 0 {
+            return Some(false);
+        }
+    }
+    Some(true)
+}
+
+/// Whether a verb that replaces the node may proceed now. A busy node holds the request; a down
+/// node is startable (nothing to interrupt); a node that answers but cannot prove its state holds.
+pub(crate) fn safe_to_start_maintenance() -> bool {
+    match node_activity() {
+        Some(idle) => idle,
+        None => !node_is_up(),
     }
 }
 
 /// The pid listening on a port. By *port*, never by image name: another `wa` on the machine may be
 /// somebody's session, and killing every process that shares a name is how that session dies.
-fn pid_on_port(port: u16) -> Option<u32> {
+pub(crate) fn pid_on_port(port: u16) -> Option<u32> {
     if cfg!(windows) {
         let output = std::process::Command::new("netstat").args(["-ano", "-p", "TCP"]).output().ok()?;
         let text = String::from_utf8_lossy(&output.stdout);
@@ -219,9 +273,93 @@ fn pid_on_port(port: u16) -> Option<u32> {
     None
 }
 
-fn stop_node(reason: &str) -> Result<()> {
-    let pid = pid_on_port(node_port()).context("nothing is listening on the node's port")?;
-    say(&format!("stopping node pid {pid} (by pid, never by image name)"));
+/// The node id a listener on `port` announces. `/sync/head` is unauthenticated and carries the
+/// identity, so this is the one probe that distinguishes "our node" from "some program on our
+/// port". It is best-effort: a wedged node may not answer, which is why `recover` does not require
+/// it (the pid, creation time and image are still proved).
+fn node_id_on_port(port: u16) -> Option<String> {
+    let url = format!("http://127.0.0.1:{port}/sync/head");
+    let response = health_agent().get(&url).call().ok()?;
+    let text = response.into_body().read_to_string().ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value.get("node_id").and_then(Value::as_str).map(str::to_string)
+}
+
+/// Prove that the pid listening on `port` is the node this sentinel started for the selected
+/// instance, and return it. This is the guard `SENTINEL.md` requires: a port is not an identity.
+///
+/// Order of proof, strongest first: the lifecycle record's pid, its process creation time (a
+/// recycled pid has a different one), its executable image, and — when `probe_identity` — the node
+/// id the listener announces. A missing record falls back to `serve.pid` plus the installed image,
+/// which is what a node started by `upgrade.sh` leaves behind; if even that is absent, the stop is
+/// refused rather than performed on a port alone.
+fn verify_target(port: u16, probe_identity: bool) -> Result<u32> {
+    let listener = pid_on_port(port)
+        .with_context(|| format!("nothing is listening on the node's port {port}"))?;
+    if let Some(record) = instance::read_record() {
+        if record.pid != listener {
+            bail!(
+                "refusing to stop pid {listener} on port {port}: it is not the node this sentinel started (record pid {})",
+                record.pid
+            );
+        }
+        match instance::process_start(listener) {
+            Some(start) if start == record.process_start => {}
+            Some(_) => bail!("refusing to stop pid {listener}: its creation time does not match the lifecycle record (the pid was reused)"),
+            None => bail!("refusing to stop pid {listener}: cannot read its creation time to prove it is ours"),
+        }
+        if !record.binary.is_empty() {
+            match instance::process_image(listener) {
+                Some(image) if instance::same_path(&image, Path::new(&record.binary)) => {}
+                Some(image) => bail!(
+                    "refusing to stop pid {listener}: image {} is not the recorded node {}",
+                    image.display(),
+                    record.binary
+                ),
+                None => bail!("refusing to stop pid {listener}: cannot read its image to prove it is ours"),
+            }
+        }
+        if probe_identity && !record.node_id.is_empty() {
+            let announced = node_id_on_port(port);
+            if announced.as_deref() != Some(record.node_id.as_str()) {
+                bail!(
+                    "refusing to stop pid {listener}: the node on port {port} announces {:?}, not the recorded node_id {}",
+                    announced,
+                    record.node_id
+                );
+            }
+        }
+        return Ok(listener);
+    }
+    let install = installed_binary();
+    let serve_pid = install
+        .parent()
+        .and_then(|dir| std::fs::read_to_string(dir.join("serve.pid")).ok())
+        .and_then(|text| text.trim().parse::<u32>().ok());
+    match serve_pid {
+        Some(pid) if pid == listener => {}
+        Some(pid) => bail!("refusing to stop pid {listener} on port {port}: serve.pid records {pid}"),
+        None => bail!("refusing to stop pid {listener} on port {port}: no lifecycle record and no serve.pid, so it cannot be proven to be this node"),
+    }
+    match instance::process_image(listener) {
+        Some(image) if instance::same_path(&image, &install) => {}
+        Some(image) => bail!(
+            "refusing to stop pid {listener}: image {} is not the installed node {}",
+            image.display(),
+            install.display()
+        ),
+        None => bail!("refusing to stop pid {listener}: cannot read its image to prove it is the installed node"),
+    }
+    Ok(listener)
+}
+
+/// Stop the verified listener. `probe_identity` is true for graceful maintenance (the node answers
+/// `/health`, so it can answer `/sync/head`) and false for `recover`, whose whole point is a node
+/// that may be too wedged to answer. Even then the pid, creation time and image are proved.
+pub(crate) fn stop_node_verified(reason: &str, probe_identity: bool) -> Result<()> {
+    let port = node_port();
+    let pid = verify_target(port, probe_identity)?;
+    say(&format!("stopping node pid {pid} (by pid and identity, never by image name)"));
     if cfg!(windows) {
         // Win32 directly, rather than `taskkill`: a spawned helper costs ~138ms and, worse, is a
         // second program that could be absent or shadowed. The pid was just read from the OS.
@@ -234,44 +372,87 @@ fn stop_node(reason: &str) -> Result<()> {
         // A freed port is not a dead process. The node may have released the listener and still be
         // flushing its turn's final message; starting the replacement (or delivering a wake) in that
         // window is what let two writers interleave one transcript. Wait for the pid itself to be gone.
-        if pid_on_port(node_port()).is_none() && !pid_alive(pid) {
+        if pid_on_port(port).is_none() && !pid_alive(pid) {
             audit("stop", &format!("pid {pid}"), reason);
+            instance::clear_record();
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(250));
     }
-    bail!("pid {pid} is still listening on {} or still alive", node_port())
+    bail!("pid {pid} is still listening on {port} or still alive")
 }
 
 fn start_node(binary: &Path, reason: &str) -> Result<()> {
     let ui = ui_dir();
-    let port = node_port().to_string();
-    let cport = client_port().to_string();
+    let port = node_port();
+    let cport = client_port();
+    // A port already held is a collision, not a start. Refuse loudly instead of spawning a node
+    // that fails to bind and then reads as "healthy" on the other instance's port.
+    if let Some(holder) = pid_on_port(port) {
+        bail!("port {port} is already held by pid {holder}; refusing to start a second node on it");
+    }
+    let selected = instance::selected().unwrap_or_else(|_| instance::default_instance());
+    // A named guest is launched with an explicit environment so it cannot inherit the operator's
+    // provider keys. The ambient/default instance keeps the historical inheritance, so a single-node
+    // machine sees no behaviour change; its isolation boundary is the named instance.
+    let named = std::env::var("WASM_AGENT_INSTANCE")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let sanitize = named && selected.is_guest();
     say(&format!("starting {} on port {port}", binary.display()));
+    let args = vec![
+        "serve".to_string(),
+        "--port".to_string(), port.to_string(),
+        "--client-port".to_string(), cport.to_string(),
+        "--ui".to_string(), ui.display().to_string(),
+    ];
     // CreateProcessW with DETACHED_PROCESS, rather than `powershell Start-Process`. Measured:
     // the shell hop costs ~243ms of the ~310ms it takes to see the node healthy, while the
-    // node's own boot is ~49ms. This is the last place a shell was in the hot path.
+    // node's own boot is ~49ms. This is the last place a shell was in the hot path. A guest gets
+    // an explicit environment; a master inherits (the historical behaviour) with the instance
+    // variables already set on us.
     #[cfg(windows)]
     let child_pid = {
-        let args = vec![
-            "serve".to_string(),
-            "--port".to_string(), port.clone(),
-            "--client-port".to_string(), cport.clone(),
-            "--ui".to_string(), ui.display().to_string(),
-        ];
-        winproc::start_detached(binary, &args).context("start the node")?
+        let env = if sanitize { Some(instance::guest_env(&selected)) } else { None };
+        winproc::start_detached_with_env(binary, &args, env.as_deref()).context("start the node")?
     };
     #[cfg(not(windows))]
-    let child_pid = std::process::Command::new(binary)
-        .args(["serve", "--port", &port, "--client-port", &cport, "--ui"])
-        .arg(&ui)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .context("spawn node")?
-        .id();
+    let child_pid = {
+        let mut command = std::process::Command::new(binary);
+        command
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        if sanitize {
+            command.env_clear();
+            command.envs(instance::guest_env(&selected));
+        }
+        command.spawn().context("spawn node")?.id()
+    };
     say(&format!("started pid {child_pid}"));
+    // Record what was started, so a later stop can prove it is the same process rather than trusting
+    // the port. `serve.pid` stays for the install tooling that reads it; the record is the proof.
+    let node_id = match instance::node_id_for(binary, &home(), sanitize) {
+        Ok(node_id) => node_id,
+        Err(error) => {
+            audit("identity-failed", &binary.display().to_string(), &error.to_string());
+            String::new()
+        }
+    };
+    let record = instance::Lifecycle {
+        schema: 1,
+        pid: child_pid,
+        node_id,
+        home: home().display().to_string(),
+        binary: binary.display().to_string(),
+        binary_sha256: instance::sha256_file(binary).unwrap_or_default(),
+        started_at: now_epoch(),
+        process_start: instance::process_start(child_pid).unwrap_or(0),
+    };
+    if let Err(error) = instance::write_record(&record) {
+        audit("record-failed", &instance::record_path().display().to_string(), &error.to_string());
+    }
     // The install records the serving pid in `serve.pid`: upgrade.sh writes it, and the sentinel did not.
     // So a `request restart`/`request recover` left the recorded pid naming a process that was gone, and
     // the deploy gate reads exactly that as "two nodes, one port" (it refused the next deploy), while
@@ -392,6 +573,10 @@ fn verb_wake(session: &str, prompt: &str, reason: &str) -> Result<String> {
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
             .header("X-WA-Session", &std::env::var("WA_SENTINEL_AUTH_SESSION").unwrap_or_default())
+            // This POST starts a run, but it is automation, not an operator's foreground request:
+            // the run-isolation contract demotes it to the background lane so a wake cannot starve
+            // the human's own work. See docs/OPERATIONS.md.
+            .header("X-WA-Run-Class", "background")
             .send(body.as_bytes())
         {
             Ok(response) => {
@@ -434,10 +619,13 @@ pub(crate) fn verb_restart(reason: &str) -> Result<String> {
     if !binary.exists() {
         bail!("nothing installed at {}", binary.display());
     }
-    // Graceful maintenance must not block the watcher. process_requests leaves it queued while busy.
-    if !node_is_idle() { bail!("node busy: graceful restart deferred; request recover to interrupt a failed node"); }
+    // Graceful maintenance must not block the watcher. process_requests leaves it queued while busy,
+    // and an ambiguous health body (a node that answers but cannot prove its state) holds too.
+    if !safe_to_start_maintenance() {
+        bail!("node busy or its state cannot be proven: graceful restart deferred; request recover to interrupt a failed node");
+    }
     if node_is_up() {
-        stop_node(reason)?;
+        stop_node_verified(reason, true)?;
     } else {
         say("the node was not running; starting it");
     }
@@ -709,8 +897,10 @@ fn verb_run(script: &str, reason: &str) -> Result<String> {
 
 fn verb_recover(reason:&str)->Result<String> {
     let binary=installed_binary();if !binary.is_file() {bail!("installed binary missing")}
-    // Recovery asks the OS, never the interpreter and never image names.
-    if pid_on_port(node_port()).is_some() {stop_node(reason)?;}
+    // Recovery asks the OS, never the interpreter and never image names. It is an explicit
+    // interruption, so it does not wait for idle - but it still proves the listener is ours, and
+    // does not require the identity probe a wedged node may be unable to answer.
+    if pid_on_port(node_port()).is_some() {stop_node_verified(reason,false)?;}
     start_node(&binary,reason)?;
     if !wait_up(60) {bail!("recovery started node but health was not confirmed")}
     Ok("node recovered; interrupted effects must be reconciled".into())
@@ -819,7 +1009,7 @@ fn process_requests(background: bool) -> Result<u32> {
         let management=is_management_verb(preview["verb"].as_str().unwrap_or(""));
         if management && MAINTENANCE_ACTIVE.load(Ordering::Acquire) {continue;}
         // Maintenance stays queued; observing it never monopolizes the recovery/control loop.
-        if waits_for_idle(preview["verb"].as_str().unwrap_or("")) && !node_is_idle() {continue;}
+        if waits_for_idle(preview["verb"].as_str().unwrap_or("")) && !safe_to_start_maintenance() {continue;}
         // Claim before working, not after. This used to read the request, do the work, and only then
         // remove the file - so a second runner (the watcher and a stray `once`, which is exactly what
         // happened) could pick up the same file while the first was still inside it, and run the
@@ -1189,6 +1379,12 @@ const HELP: &str = r#"wa-sentinel - the process outside the node.
   request wake     --session ID --prompt TEXT [--reason TEXT]
   request run      --script PATH [--reason TEXT]
   request spell    --file PATH [--reason TEXT]
+  instance add <name> --port N --client-port N [--role master|guest] [--master ID]
+                     [--home PATH] [--install-dir PATH] [--binary PATH] [--ui PATH]
+                     [--share KEY=VALUE]...
+  instance list | show <name> | remove <name> [--purge]
+  instance start <name> | stop <name> | status <name>
+  --instance <name>   run any verb against a named instance
   once | watch | status | start | restart | stop | help
 
 A node cannot restart itself: the turn doing the restarting runs on the node it is
@@ -1196,17 +1392,58 @@ stopping, so the stop is the last command it ever executes. It asks instead -
 `request` writes a file, and the sentinel, outside, performs it. The file survives
 the writer, which is the whole point.
 
+One machine can host several nodes: each instance has its own home, key, database,
+ports and supervisor records. `--instance NAME` selects one; with no name the
+ambient/default node is used exactly as before. A guest instance names the remote
+master it is bound to and is launched with an explicit environment, so it never
+inherits the operator's secrets.
+
 Waking the model is the only verb that costs money, so it is the only one that is
 budgeted (WA_SENTINEL_WAKE_BUDGET per hour, 6 by default). `run` is disabled unless
 WA_SENTINEL_SCRIPTS names the directories it may execute from."#;
 
 fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // The registry lives under the operator's ambient home. Capture it before any instance
+    // selection overwrites `WASM_AGENT_HOME`, and pin it so every later resolution sees the same
+    // file rather than the instance home we are about to select.
+    let base = instance::base_home();
+    std::env::set_var("WA_INSTANCE_BASE_HOME", &base);
+
+    // `--instance NAME` may appear anywhere; it selects a named instance for the whole invocation.
+    // With no flag, behaviour is exactly as before (the ambient/default instance).
+    let mut selected: Option<String> = None;
+    let mut args: Vec<String> = Vec::new();
+    let mut index = 0;
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    while index < raw.len() {
+        if raw[index] == "--instance" {
+            selected = raw.get(index + 1).cloned();
+            index += 2;
+            continue;
+        }
+        if let Some(value) = raw[index].strip_prefix("--instance=") {
+            selected = Some(value.to_string());
+            index += 1;
+            continue;
+        }
+        args.push(raw[index].clone());
+        index += 1;
+    }
+    if let Some(name) = selected {
+        match instance::resolve(&name) {
+            Ok(found) => instance::apply_env(&found),
+            Err(error) => {
+                eprintln!("  sentinel: {error:#}");
+                std::process::exit(1);
+            }
+        }
+    }
     let verb = args.first().map(String::as_str).unwrap_or("status");
     let rest = if args.len() > 1 { &args[1..] } else { &[] };
     let outcome = match verb {
         "request" => request(rest),
         "job" => jobs::cli(rest),
+        "instance" => instance::cli(rest),
         "recover" => verb_recover(rest.first().map(String::as_str).unwrap_or("explicit operator recovery")).map(|s|say(&s)),
         "watch" => watch(),
         "once" => {let _lock=jobs::lock()?;process_requests(false).map(|n| say(&format!("{n} request(s) handled")))},
@@ -1307,5 +1544,61 @@ mod self_update_tests {
         assert!(written.contains("--reason fixture"), "the reason must reach the script: {written}");
         std::env::remove_var("WA_SENTINEL_DEPLOY");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The idle contract. A node is idle only on positive proof; a body that omits a required
+    /// field is ambiguous (`None`), and a busy worker, a queued admission or a running subagent is
+    /// busy. These are the cases that decide whether a restart interrupts real work.
+    #[test]
+    fn idle_requires_positive_proof_and_unknown_health_is_not_idle() {
+        let idle = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+            "workers": [{"id": 0, "state": "alive"}]});
+        assert_eq!(activity_of(&idle), Some(true));
+
+        let busy_run = json!({"ok": true, "current": {"label": "POST /chat"}, "queue": 0,
+            "operation_overdue": false, "workers": [{"id": 0, "state": "busy"}]});
+        assert_eq!(activity_of(&busy_run), Some(false));
+
+        let queued = json!({"ok": true, "current": null, "queue": 3, "operation_overdue": false,
+            "workers": [{"id": 0, "state": "alive"}]});
+        assert_eq!(activity_of(&queued), Some(false));
+
+        let overdue = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": true,
+            "workers": [{"id": 0, "state": "alive"}]});
+        assert_eq!(activity_of(&overdue), Some(false));
+
+        let stalled = json!({"ok": false, "current": null, "queue": 0, "operation_overdue": false,
+            "workers": [{"id": 0, "state": "stalled"}]});
+        assert_eq!(activity_of(&stalled), Some(false));
+
+        let subagents = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+            "workers": [{"id": 0, "state": "alive"}], "subagents": [{"id": "s1", "state": "running"}]});
+        assert_eq!(activity_of(&subagents), Some(false));
+
+        let subagent_count = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+            "workers": [{"id": 0, "state": "alive"}], "subagents": 1});
+        assert_eq!(activity_of(&subagent_count), Some(false));
+
+        // An older node without a workers array is ambiguous, not idle: the sentinel must not stop
+        // it on the strength of a body it cannot fully read.
+        let no_workers = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false});
+        assert_eq!(activity_of(&no_workers), None);
+
+        // A body with no `ok` at all is ambiguous too.
+        assert_eq!(activity_of(&json!({"current": null})), None);
+    }
+
+    /// Path comparison is how the recorded image is matched to the running one; it must be case-
+    /// and separator-insensitive, and must ignore the Windows verbatim prefix.
+    #[test]
+    fn recorded_and_running_paths_compare_as_files() {
+        assert!(instance::same_path(
+            Path::new(r"C:\Users\Victor\wasm-agent\wa.exe"),
+            Path::new(r"\\?\C:/Users/Victor/wasm-agent/WA.EXE")
+        ));
+        assert!(!instance::same_path(
+            Path::new(r"C:\a\wa.exe"),
+            Path::new(r"C:\b\wa.exe")
+        ));
     }
 }
