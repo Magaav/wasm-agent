@@ -205,12 +205,13 @@ M.tier_of = {
   client = "client",
   spell_save = "spells", spell_run = "spells", spell_list = "spells",
   spell_get = "spells", spell_forget = "spells", spell_export = "spells",
+  whatsapp_read = "whatsapp", whatsapp_conversation = "whatsapp", whatsapp_decide = "whatsapp", whatsapp_send = "whatsapp",
   nodes = "nodes", remote = "nodes",
 }
 
 local TIER_ORDER = {
   "memory", "sessions", "capabilities", "subagents", "environment", "shell", "ledger",
-  "client", "spells", "nodes", "plugins",
+  "client", "spells", "nodes", "whatsapp", "plugins",
 }
 
 -- The envelope the model sees, grouped by tier.
@@ -239,6 +240,20 @@ local function wasm_plugins()
   return json.decode(raw) or {}
 end
 
+-- The scoped WhatsApp responder tools. Their schemas live in
+-- lua/core/whatsapp.lua; they are offered only to a master turn, and dispatch
+-- re-checks the profile ceiling before calling the module. A missing module (an
+-- older deployment) yields no schemas rather than a broken tool list.
+local WHATSAPP_TOOLS = { whatsapp_read = true, whatsapp_conversation = true, whatsapp_decide = true, whatsapp_send = true }
+
+local function whatsapp_schemas()
+  local ok, module = pcall(dofile, "lua/core/whatsapp.lua")
+  if not ok or type(module) ~= "table" or type(module.schemas) ~= "function" then return {} end
+  local listed, list = pcall(module.schemas)
+  if not listed or type(list) ~= "table" then return {} end
+  return list
+end
+
 local function admin_names()
   local names = {}
   for _, item in ipairs(M.admin) do names[item["function"].name] = true end
@@ -255,6 +270,7 @@ function M.all(role)
       sha256={type="string"},offset={type="integer",minimum=1},limit={type="integer",minimum=1,maximum=51200}
     },{"sha256"})
     for _, item in ipairs(M.admin) do list[#list + 1] = item end
+    for _, item in ipairs(whatsapp_schemas()) do list[#list + 1] = item end
     local plugins=wasm_plugins()
     table.sort(plugins,function(a,b)return tostring(a.name)<tostring(b.name) end)
     for _, plugin in ipairs(plugins) do
@@ -347,6 +363,21 @@ function M.dispatch(memory, name, args, role, ctx)
     -- One Lua facade for the model and for the HTTP control route; the owner is
     -- derived from `ctx` (server side), never from the arguments the model sent.
     return dofile("lua/core/subagents.lua").control(args, ctx)
+  elseif WHATSAPP_TOOLS[name] then
+    -- The scoped responder tools. They are only reachable from a subagent whose
+    -- approved profile names them, and the trusted profile/event/effects snapshot
+    -- arrives on ctx, never from the arguments.
+    if not ctx.subagent then return { error = "whatsapp_requires_subagent" } end
+    local module = dofile("lua/core/whatsapp.lua")
+    if type(module) ~= "table" or type(module.dispatch) ~= "function" then
+      return { error = "whatsapp_module_unavailable" }
+    end
+    return module.dispatch(memory, name, args, {
+      profile = ctx.subagent.profile,
+      event = ctx.subagent.event,
+      effects = ctx.subagent.effects,
+      sends = ctx.subagent.sends,
+    })
   elseif name == "search_ledger" then
     return memory.search_ledger(args.query or "", args.conversation_id, args.limit or 20)
   elseif name == "conversation" then

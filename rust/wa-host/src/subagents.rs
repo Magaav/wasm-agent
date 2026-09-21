@@ -59,12 +59,56 @@ fn subagent_root() -> PathBuf {
             return PathBuf::from(explicit);
         }
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".wasm-agent/subagents")
+    // The same resolved home the rest of the host uses: `WASM_AGENT_HOME` first,
+    // then the native Windows variables, then HOME. Reading `HOME` alone missed
+    // `WASM_AGENT_HOME`, so a candidate node's children landed in the operator's
+    // real home - and a test could write it.
+    PathBuf::from(crate::resolve_home()).join(".wasm-agent/subagents")
+}
+
+/// Sockets the current child request is blocked on, shared with the task so a
+/// cancel from another thread can `shutdown` a silent provider read.
+pub type SocketSlot = Arc<Mutex<Vec<std::net::TcpStream>>>;
+
+/// Register the socket a provider request just connected on, so cancelling the
+/// task can interrupt a read that is producing no chunks. The clone is stored in
+/// the shared slot; `shutdown(Both)` on it wakes the blocked read immediately.
+pub fn register_active_socket(stream: &std::net::TcpStream) {
+    if let Ok(clone) = stream.try_clone() {
+        CURRENT.with(|slot| {
+            if let Some(context) = slot.borrow().as_ref() {
+                if let Ok(mut sockets) = context.sockets.lock() {
+                    sockets.push(clone);
+                }
+            }
+        });
+    }
+}
+
+/// Forget the current request's sockets once it has finished, so a later cancel
+/// does not shut down a pooled connection that is no longer this call's.
+pub fn clear_active_socket() {
+    CURRENT.with(|slot| {
+        if let Some(context) = slot.borrow().as_ref() {
+            if let Ok(mut sockets) = context.sockets.lock() {
+                sockets.clear();
+            }
+        }
+    });
+}
+
+/// Wake every socket this task is blocked on. Called on cancel from any thread.
+pub fn shutdown_sockets(sockets: &SocketSlot) {
+    if let Ok(sockets) = sockets.lock() {
+        for stream in sockets.iter() {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+    }
 }
 
 /// What a running child thread may know about its own task: the cancel flag the
-/// manager flips, and the deadline the provider I/O must respect.
+/// manager flips, the deadline the provider I/O must respect, and the sockets its
+/// current provider request is blocked on.
 ///
 /// These are thread-local because the interpreter that makes the provider call is
 /// owned by exactly one child thread at a time. `host.http`/`host.http_stream`
@@ -74,6 +118,7 @@ fn subagent_root() -> PathBuf {
 pub struct TaskContext {
     pub cancel: Arc<AtomicBool>,
     pub deadline: Option<Instant>,
+    pub sockets: SocketSlot,
 }
 
 thread_local! {
@@ -86,6 +131,12 @@ pub fn enter_task(context: TaskContext) {
 
 pub fn leave_task() {
     CURRENT.with(|slot| *slot.borrow_mut() = None);
+}
+
+/// Is this thread running a child task? The http transport uses it to decide
+/// whether a request needs the shutdown-aware socket.
+pub fn in_task() -> bool {
+    CURRENT.with(|slot| slot.borrow().is_some())
 }
 
 /// Has the caller requested cancellation? Used by the provider reader and by the
@@ -122,6 +173,7 @@ struct Task {
     settled_at: Option<f64>,
     timeout_seconds: u64,
     cancel: Arc<AtomicBool>,
+    sockets: SocketSlot,
     boot: String,
     pid: u32,
 }
@@ -242,6 +294,7 @@ impl Manager {
                 settled_at: value["settled_at"].as_f64(),
                 timeout_seconds: value["timeout_seconds"].as_u64().unwrap_or(0),
                 cancel: Arc::new(AtomicBool::new(true)),
+                sockets: Arc::new(Mutex::new(Vec::new())),
                 boot: value["boot"].as_str().unwrap_or_default().to_string(),
                 pid: value["pid"].as_u64().unwrap_or(0) as u32,
             };
@@ -325,6 +378,7 @@ impl Manager {
             settled_at: None,
             timeout_seconds,
             cancel: Arc::new(AtomicBool::new(false)),
+            sockets: Arc::new(Mutex::new(Vec::new())),
             boot: boot_id().to_string(),
             pid: std::process::id(),
         };
@@ -340,6 +394,7 @@ impl Manager {
         }
         let view = task.view(false);
         let cancel = task.cancel.clone();
+        let sockets = task.sockets.clone();
         tasks.insert(id.to_string(), task);
         drop(tasks);
         self.notify();
@@ -349,7 +404,7 @@ impl Manager {
         let manager_id = id.to_string();
         std::thread::Builder::new()
             .name(format!("wa-subagent-{manager_id}"))
-            .spawn(move || run_child(inner, runner, manager_id, cancel))
+            .spawn(move || run_child(inner, runner, manager_id, cancel, sockets))
             .map_err(|error| {
                 // The thread could not start: settle the record rather than leave
                 // an accepted receipt that nothing will ever advance.
@@ -436,9 +491,42 @@ impl Manager {
         }
         task.cancel.store(true, Ordering::SeqCst);
         // Waking the capacity waiter lets a queued child observe its cancellation
-        // and settle instead of running after the caller stopped caring.
+        // and settle instead of running after the caller stopped caring. Shutting
+        // the sockets wakes a provider read that is producing nothing.
         self.inner.capacity.notify_all();
+        shutdown_sockets(&task.sockets);
         Ok(task.view(false))
+    }
+
+    /// One strict summary shape: `{queued, running, active}` where
+    /// `active = queued + running`, plus the optional retained `settled` counts.
+    /// A task whose cancellation was requested but whose execution has not
+    /// stopped is still running (or still queued), so it stays inside `active`
+    /// until it settles.
+    fn summary(&self) -> Value {
+        let tasks = self.inner.tasks.lock().expect("subagents tasks");
+        let mut queued = 0u64;
+        let mut running = 0u64;
+        let mut settled = json!({"completed": 0u64, "failed": 0u64, "cancelled": 0u64, "unknown": 0u64});
+        for task in tasks.values() {
+            if !task.settled {
+                if task.state == "accepted" {
+                    queued += 1;
+                } else {
+                    running += 1;
+                }
+            } else if let Some(slot) = settled.get_mut(&task.state) {
+                if let Some(count) = slot.as_u64() {
+                    *slot = json!(count + 1);
+                }
+            }
+        }
+        json!({
+            "queued": queued,
+            "running": running,
+            "active": queued + running,
+            "settled": settled,
+        })
     }
 
     fn resolve(&self, owner: &str, key: &str) -> Value {
@@ -543,7 +631,7 @@ fn write_record(directory: &Path, record: &Value) -> Result<(), String> {
 
 /// The body of a child task's own thread. Capacity is acquired here, not in
 /// `start`, so admission is a durable receipt and execution is bounded.
-fn run_child(inner: Arc<Inner>, runner: Runner, id: String, cancel: Arc<AtomicBool>) {
+fn run_child(inner: Arc<Inner>, runner: Runner, id: String, cancel: Arc<AtomicBool>, sockets: SocketSlot) {
     // Acquire a bounded execution slot; a cancelled or settled task is skipped.
     if !acquire(&inner, &cancel) {
         settle_view(&inner, &id, "cancelled", Value::Null, Some("cancelled_before_start".into()));
@@ -567,7 +655,7 @@ fn run_child(inner: Arc<Inner>, runner: Runner, id: String, cancel: Arc<AtomicBo
         tasks.get(&id).map(|task| task.timeout_seconds).unwrap_or(0)
     };
     let deadline = if timeout_seconds > 0 { Some(Instant::now() + Duration::from_secs(timeout_seconds)) } else { None };
-    enter_task(TaskContext { cancel: cancel.clone(), deadline });
+    enter_task(TaskContext { cancel: cancel.clone(), deadline, sockets });
     let receipt = {
         let tasks = inner.tasks.lock().expect("subagents tasks");
         tasks.get(&id).map(|task| {
@@ -714,36 +802,11 @@ pub fn control(action: &str, args: &Value) -> Result<Value, String> {
 }
 
 /// Public runtime summary for `/health`, without transcripts or prompts.
+/// Public runtime summary for `/health`, with one strict shape so every reader
+/// and every worker's summary agree: `{queued, running, active}`, where `active`
+/// is `queued + running`. `settled` is the optional retained count.
 pub fn health() -> Value {
-    let manager = manager();
-    let tasks = manager.inner.tasks.lock().expect("subagents tasks");
-    let running = *manager.inner.running.lock().expect("subagent running");
-    let mut items: Vec<Value> = tasks
-        .values()
-        .filter(|task| !task.settled)
-        .map(|task| {
-            json!({
-                "subagent_id": task.id,
-                "owner_user": task.owner_user,
-                "state": task.state,
-                "profile": task.profile,
-                "depth": task.depth,
-                "elapsed_ms": ((now_secs() - task.created_at) * 1000.0) as u64,
-                "timeout_ms": task.timeout_seconds * 1000,
-                "parent_session_id": task.parent_session_id,
-            })
-        })
-        .collect();
-    items.sort_by(|a, b| a["subagent_id"].as_str().cmp(&b["subagent_id"].as_str()));
-    json!({
-        "ok": true,
-        "runtime": "local",
-        "concurrency": manager.inner.max_concurrent,
-        "running": running,
-        "capacity": manager.max_live,
-        "active": items,
-        "active_count": items.len(),
-    })
+    manager().summary()
 }
 
 #[cfg(test)]
@@ -967,5 +1030,58 @@ mod tests {
         let _ = manager.runner.set(Arc::new(|_receipt: &str| Ok(json!({"state": "completed"}))));
         assert_eq!(manager.start(&spec("../escape", "jane", "")).unwrap_err(), "invalid_id");
         assert_eq!(manager.start(&spec("a/b", "jane", "")).unwrap_err(), "invalid_id");
+    }
+
+    #[test]
+    fn health_shape_is_strict_and_a_cancelling_task_stays_active() {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let manager = Manager::with_root(temp_root("health"), 1, 2);
+        let _ = manager.runner.set({
+            let gate = gate.clone();
+            Arc::new(move |_receipt: &str| {
+                let (lock, cond) = &*gate;
+                let mut open = lock.lock().unwrap();
+                while !*open {
+                    open = cond.wait(open).unwrap();
+                }
+                Ok(json!({"state": "completed", "result": {}}))
+            })
+        });
+        manager.start(&spec("health-1", "kate", "")).expect("start");
+        manager.start(&spec("health-2", "kate", "")).expect("queued start");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while manager.find("health-1", "kate").unwrap()["state"] != "running" && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let before = manager.summary();
+        assert_eq!(before["running"], 1);
+        assert_eq!(before["queued"], 1);
+        assert_eq!(before["active"], 2);
+        // A requested cancellation is not a settlement: the task is active until
+        // the execution actually stops.
+        manager.cancel("health-1", "kate").expect("cancel");
+        let during = manager.summary();
+        assert_eq!(during["active"], 2, "a cancelling task is still active: {during}");
+        {
+            let (lock, cond) = &*gate;
+            *lock.lock().unwrap() = true;
+            cond.notify_all();
+        }
+        manager.await_task("health-1", "kate", 3_000).expect("await");
+    }
+
+    #[test]
+    fn a_socket_shutdown_wakes_a_blocked_slot() {
+        // The cancel path must reach a socket the task is blocked on; this proves
+        // the shared slot is what `shutdown_sockets` empties, without a network.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("addr");
+        let mut client = std::net::TcpStream::connect(address).expect("connect");
+        let slot: SocketSlot = Arc::new(Mutex::new(vec![client.try_clone().expect("clone")]));
+        shutdown_sockets(&slot);
+        use std::io::Read;
+        let mut buffer = [0u8; 1];
+        let result = client.read(&mut buffer);
+        assert!(result.is_err() || result.unwrap() == 0, "a shut-down read must not block");
     }
 }

@@ -56,6 +56,36 @@ local final = control({ action = "await", id = slow.subagent_id, wait_ms = 60000
 assert(final.state == "cancelled", "cancel state=" .. tostring(final.state) .. " " .. json.encode(final))
 print("MARK ok-cancel")
 
+-- 4b. A silent provider (headers, then no body bytes) must be interrupted by the
+--     cancel, not waited out to the child's timeout. Only a socket shutdown
+--     reaches the blocked read; a chunk-boundary check never sees a chunk.
+local silent = control({ action = "start", profile = "explore", prompt = "SILENT provider", idempotency_key = "silent" }, ctx("alice"))
+assert(not silent.error, "silent start: " .. json.encode(silent))
+local waited = 0
+while waited < 5000 do
+  local view = control({ action = "status", subagent_id = silent.subagent_id }, ctx("alice"))
+  if view.state == "running" then break end
+  host.sleep(50)
+  waited = waited + 50
+end
+local started_at = host.now()
+control({ action = "cancel", subagent_id = silent.subagent_id }, ctx("alice"))
+local silent_final = control({ action = "await", subagent_id = silent.subagent_id, timeout_ms = 15000 }, ctx("alice"))
+local elapsed = host.now() - started_at
+assert(silent_final.state == "cancelled",
+  "silent cancel state=" .. tostring(silent_final.state) .. " " .. json.encode(silent_final))
+assert(elapsed < 10, "silent cancellation must wake the read, took " .. string.format("%.2f", elapsed) .. "s")
+print("MARK ok-silent-cancel")
+
+-- 4c. A long, healthy pause before the first token must still succeed: the
+--     transport polls no faster than the request's own budget.
+local delayed = control({ action = "start", profile = "explore", prompt = "DELAYED first token", idempotency_key = "delayed" }, ctx("alice"))
+assert(not delayed.error, "delayed start: " .. json.encode(delayed))
+local delayed_final = control({ action = "await", subagent_id = delayed.subagent_id, timeout_ms = 30000 }, ctx("alice"))
+assert(delayed_final.state == "completed", "delayed state=" .. tostring(delayed_final.state) .. " " .. json.encode(delayed_final))
+assert(tostring(delayed_final.result.reply):find("child-answer", 1, true), "delayed reply: " .. tostring(delayed_final.result.reply))
+print("MARK ok-delayed-ttft")
+
 -- 5. Queue overflow is an explicit refusal, never invisible loss.
 local ids, overflow = {}, nil
 for index = 1, 12 do
