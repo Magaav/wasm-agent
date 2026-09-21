@@ -157,7 +157,10 @@ if (sessionStorage.getItem("wa-ui-reload-stage") === "active") {
   window.__fixtures.health = {
     // A UI read can occupy worker 0 while a chat turn runs on another worker.
     current: { label: "GET /models", ms: 30 },
-    workers: [{ label: "POST /chat", busy_ms: 15000 }], ok: true, queue: 0,
+    // The run belongs to *this* window's conversation. `activeRun` matches the conversation, so a
+    // worker with no `session` would (correctly) not be claimed as this window's run - and this
+    // fixture exists to prove the reload sees its own run, so it must name it.
+    workers: [{ label: "POST /chat", busy_ms: 15000, session: id }], ok: true, queue: 0,
     stalled_ms: 20, worker: "alive", exec_timeout_seconds: 300,
   };
 }
