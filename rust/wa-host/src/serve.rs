@@ -1346,32 +1346,96 @@ fn content_type(path: &str) -> &'static str {
     }
 }
 
+/// A content hash of the UI, not a timestamp.
+///
+/// This used to hash each file's mtime, so an install that rewrote *identical* files changed the version:
+/// `upgrade.sh` copies every asset with `cp -f`, and every open page reloads on a version change. When that
+/// reload landed in the same deploy's node restart, the webview navigated into a dead port and stuck on an
+/// error page with no JavaScript - no heartbeat, no error report, a window that looked crashed but whose
+/// process was alive. The version must change when the bytes change, and only then.
 fn ui_version(ui: &std::path::Path) -> String {
     use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
     let mut entries: Vec<_> = std::fs::read_dir(ui)
         .map(|dir| dir.flatten().map(|entry| entry.path()).collect())
         .unwrap_or_default();
     entries.sort();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for path in entries {
-        if let Ok(metadata) = path.metadata() {
-            if metadata.is_file() {
-                path.to_string_lossy().hash(&mut hasher);
-                metadata.len().hash(&mut hasher);
-                metadata
-                    .modified()
-                    .ok()
-                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|duration| duration.as_millis())
-                    .hash(&mut hasher);
-            }
+        let Ok(metadata) = path.metadata() else { continue };
+        if !metadata.is_file() {
+            continue;
         }
+        path.to_string_lossy().hash(&mut hasher);
+        content_hash(&path, &metadata).hash(&mut hasher);
     }
     format!("{:x}", hasher.finish())
 }
 
+/// One file's content hash, cached by `(mtime, size)`. The version poll runs once a second per window, so
+/// the bytes are read only when the file actually changed - which is exactly when the stamp moves.
+fn content_hash(path: &std::path::Path, metadata: &std::fs::Metadata) -> u64 {
+    use std::hash::{Hash, Hasher};
+    type Stamp = (u64, u64);
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (Stamp, u64)>>> =
+        std::sync::OnceLock::new();
+    let stamp: Stamp = (
+        metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos() as u64)
+            .unwrap_or(0),
+        metadata.len(),
+    );
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some((cached, hash)) = guard.get(path) {
+            if *cached == stamp {
+                return *hash;
+            }
+        }
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match std::fs::read(path) {
+        Ok(bytes) => bytes.hash(&mut hasher),
+        Err(_) => 0u8.hash(&mut hasher),
+    }
+    let hash = hasher.finish();
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(path.to_path_buf(), (stamp, hash));
+    }
+    hash
+}
+
 fn json_escape(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"error\"".into())
+}
+
+#[cfg(test)]
+mod ui_version_tests {
+    use super::ui_version;
+
+    /// The regression: a deploy rewrites the UI with `cp -f` on every install, even when the bytes are
+    /// unchanged. Hashing the mtime made that a new version, which forced every open page to reload - into
+    /// the same deploy's node restart, where it stuck on an error page.
+    #[test]
+    fn the_version_tracks_content_not_timestamps() {
+        let dir = std::env::temp_dir().join(format!("wa-ui-version-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp ui dir");
+        let asset = dir.join("index.html");
+        std::fs::write(&asset, b"<html>one</html>").expect("write");
+        let first = ui_version(&dir);
+        // Same bytes, newer mtime: the version must not move.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(&asset, b"<html>one</html>").expect("rewrite");
+        assert_eq!(ui_version(&dir), first, "identical content must keep the version");
+        // Different bytes of the *same length* must still move it.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(&asset, b"<html>two</html>").expect("change");
+        assert_ne!(ui_version(&dir), first, "changed content must change the version");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]

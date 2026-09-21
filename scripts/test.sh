@@ -11,9 +11,10 @@ cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 # The execution and automation contracts have native, model-free adversarial tests.
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host file_search::tests
-# Run routing by session: a wake carries its conversation in the body's `thread`, not the auth header, and
-# reading only the header routed it to a second worker on a conversation that was already running.
-cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host serve::routing_session_tests
+# Run the serve-level invariants, each a measured regression: routing by session (a wake carries its
+# conversation in the body's `thread`, not the auth header) and the UI version tracking content rather
+# than mtime (a `cp -f` of identical files must not force every open page to reload).
+cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host serve::
 cargo test --release --offline --manifest-path rust/wa-sentinel/Cargo.toml
 BIN=rust/target/release/wa
 # A turn cannot deploy the process serving that same turn. The marker crosses
