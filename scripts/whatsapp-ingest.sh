@@ -44,4 +44,14 @@ if [ "${1:-}" = "--emit-events" ]; then
   shift
 fi
 
+# The chain first: is Chrome reachable by proof, is the page there, is the document-start hook bound -
+# and if not, bind it. A job turned on after being off finds the hook gone (CDP registers document-start
+# scripts per session), and this is what rebinds it - one line, with the reason when it cannot.
+#
+# A red preflight does not stop the ingest: reading the store needs no hook, and an inbox that stopped
+# updating because an optional binding was missing would be worse than one that says so. The verdict
+# travels with the report instead.
+preflight="$(bash "$ROOT/scripts/whatsapp-preflight.sh" 2>&1 | tail -1)"
+echo "whatsapp ingest preflight: $preflight"
+
 WA_SCRIPT="$lua_script" "$WA" "$@"

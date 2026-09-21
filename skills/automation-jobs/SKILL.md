@@ -38,6 +38,42 @@ description: Create or diagnose scheduled, file, event or Chrome/CDP automations
    require reconciliation, not an automatic retry. Browser disconnects can miss events;
    lossless delivery needs a replayable source, not just CDP notifications.
 
+## Page work: inject at document start, do not drive the UI
+
+For anything that touches a web app, the default path is a **CDP document-start script**
+(`Page.addScriptToEvaluateOnNewDocument`) that reaches the app's own modules - not clicks, typing and
+scrolling. Five measurements on one real app (WhatsApp Web) are why:
+
+| the UI route | what actually happened |
+| --- | --- |
+| find a chat in a virtualised list | only rendered rows exist; 40 viewports of wheel events pushed the renderer into CDP timeouts |
+| type into the search box | the value lands and **nothing filters** - no results, no filtering - with synthetic events *and* real `Input.insertText` |
+| `scrollTop` on any ancestor | does not move the list at all |
+| dispatch a keystroke | dropped: of 112 backspaces, 56 landed; Enter timed out twice *while the message delivered* |
+| reach a module by name | `window.require` resolves a name but exposes no cache: that build is Meta's Comet (`__d`), not webpack |
+
+Rules for a new page automation, in this order:
+
+1. **Learn the module names from the app itself.** Wrap the module *define* call at document start and
+   keep the factories: names that cannot be guessed (the model class, the action you need) become known,
+   and the factory source gives the call shape instead of a guess. `scripts/whatsapp-adapter.mjs`.
+2. **Value-wrap, then re-wrap.** Bundles replace their own functions with `Object.defineProperty`, which
+   bypasses a property setter: a trap on the property records nothing (0 modules) where a wrapper on the
+   value recorded 189, and a re-polling wrapper recorded 5990.
+3. **Keep the session.** A document-start script belongs to the CDP *session*: close the socket and it is
+   gone before the app's code runs. Something persistent has to hold it, and a job that is turned on
+   after being off has to rebind.
+4. **Fail open.** The hook runs before the app does, so an error there breaks the page, not just the
+   call. Every trap swallows its own failures and does nothing but record.
+5. **Verify by effect, never by acknowledgement.** A keystroke, a click or a call can report failure
+   while the effect happened. Ask the app's own state.
+6. **Preflight, and rebind on the off->on transition.** One line, with the reason when it cannot:
+   `scripts/whatsapp-preflight.sh` answers "is the browser reachable *by proof*, is the page there, is
+   the hook bound" and binds what is missing.
+
+The store/adapter route is also *faster and safer for the operator*: it opens nothing, so it marks
+nothing read, and a reply job cannot leave a chat's unread marker quietly cleared.
+
 ## Deterministic first: a rule for every job you write
 
 **If a step can be decided without judgement, it must not cost a token.** Write it as a script (`run`)

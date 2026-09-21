@@ -129,6 +129,29 @@ CDP disconnects are visible; events during disconnection may be missed. For loss
 business events, the adapter needs a replayable source/outbox and acknowledgment;
 raw browser notifications are not a durable message bus.
 
+### The default path for page work is document start, not the UI
+
+An adapter's job is to reach the page's own code, and the measurements now say plainly that driving the
+UI is not a route: on WhatsApp Web the chat list is virtualised, its search box does not filter, its
+`scrollTop` does nothing, and its keystrokes are dropped (of 112 backspaces, 56 landed; Enter timed out
+while the message delivered). So a `setup_expression` should be a **document-start** script
+(`Page.addScriptToEvaluateOnNewDocument`), which runs in the page's own world before the app's code -
+the same layer a native DLL injection targets, without injection, a sandbox escape or a 32/64-bit
+problem, and without putting a foreign library in the process holding the session. Three rules come
+with it:
+
+- **the script belongs to the CDP session.** Close the socket and it is gone before the app runs, which
+  is why something persistent must hold the connection, and why a job turned on after being off has to
+  rebind. `scripts/whatsapp-preflight.sh` is that check: browser reachable *by proof*, page present,
+  hook bound - one line, with the reason when it cannot.
+- **fail open.** The hook runs first, so a mistake breaks the page rather than the call.
+- **verify by effect.** A call, a click or a keystroke can report failure while the effect happened.
+  Ask the app's own state.
+
+The names to call come from the app itself: wrap its module *define* call at document start and keep the
+factories, so a module whose name cannot be guessed becomes known, and its factory source gives the call
+shape. See `scripts/whatsapp-adapter.mjs` and the `automation-jobs` skill.
+
 ## Queue and recovery contract
 
 `rust/wa-jobs` enforces durable deduplication on (job, revision, event id), atomic

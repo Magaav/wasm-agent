@@ -28,7 +28,7 @@
 //     its own function back.
 //   - **fail open.** A hook that breaks the page is worse than no hook: it runs before the app does, so
 //     every trap swallows its own errors and does nothing but record.
-const PORTS = [9222];
+const PORTS = [Number(process.env.WA_CDP_PORT) || 9222];
 const HOSTS = ["127.0.0.1", "[::1]"];
 
 async function text(url, init, timeoutMs = 4000) {
@@ -115,26 +115,65 @@ const command = process.argv[2] || "status";
 const argument = process.argv[3] || "";
 const connection = await connect();
 
-if (command === "install" || command === "learn") {
-  await connection.call("Page.enable", {});
-  await connection.call("Page.addScriptToEvaluateOnNewDocument", { source: HOOK });
-  await connection.call("Page.reload", { ignoreCache: false });
-  // The registered script belongs to *this* CDP session, so the session has to stay open while the page
-  // loads or it is gone before the document-start script runs (which is exactly how this failed first:
-  // `window.__wa_adapter` was null, the script never executed). Keeping the connection until the hook
-  // reports in is the whole difference.
-  let ready = false;
-  for (let attempt = 0; attempt < 24 && !ready; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 2500));
-    try {
-      const probe = await connection.evaluate("JSON.stringify({ hook: typeof window.__wa_adapter, names: window.__wa_adapter ? window.__wa_adapter.names.length : 0, title: document.title })");
-      const seen = JSON.parse(probe);
-      console.log(`t+${(attempt + 1) * 2.5}s ${probe}`);
-      ready = seen.names > 0;
-    } catch (error) { console.log(`t+${(attempt + 1) * 2.5}s ${String(error.message).slice(0, 60)}`); }
+// `status` / `ensure`: the preflight a job runs before it does anything. It answers the questions the
+// job actually depends on - is Chrome reachable *by proof*, is the WhatsApp tab there, is the app's
+// store readable, is the hook in the page - and writes the verdict where anything else can read it
+// (the adapter's status file), so "green" is a fact on disk rather than a hope.
+//
+// `ensure` also re-installs the hook when it is missing, which is the off->on transition: the job is
+// turned on, the preflight finds the chain broken and rebinds it, and says what it had to do. The hook
+// is session-scoped (CDP registers document-start scripts per session), so `ensure` reports how it was
+// bound: `page` (the hook was already there), `session` (installed by this invocation, and it will
+// survive navigations of this page as long as this session lives), or `not_bound`.
+function statusExpression() {
+  return [
+    "(() => {",
+    "  const out = { store: false, chats: 0, hook: false, names: 0, title: document.title, url: location.href };",
+    "  try {",
+    "    const chats = window.require('WAWebChatCollection').ChatCollection.getModelsArray() || [];",
+    "    out.chats = chats.length; out.store = chats.length > 0;",
+    "  } catch (e) { out.storeError = String(e).slice(0, 80); }",
+    "  try {",
+    "    if (window.__wa_adapter) { out.hook = true; out.names = window.__wa_adapter.names.length; }",
+    "  } catch (e) { /* keep false */ }",
+    "  return JSON.stringify(out);",
+    "})()",
+  ].join("\n");
+}
+
+async function statusOf(connection) {
+  const page = JSON.parse(await connection.evaluate(statusExpression()));
+  return { page: page, cdp: { host: connection.host, port: connection.port } };
+}
+
+if (command === "status" || command === "ensure") {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const statusFile = path.join(process.env.LOCALAPPDATA || process.env.HOME || ".", "wasm-agent", "whatsapp-adapter.json");
+  const report = { at: new Date().toISOString(), ok: false, bound: "not_bound", did: [], cdp: { host: connection.host, port: connection.port }, page: null, errors: [] };
+  try {
+    const before = await statusOf(connection);
+    report.page = before.page;
+    if (before.page.hook) {
+      report.bound = "page";
+      report.did.push("hook already in the page");
+    } else if (command === "ensure") {
+      await connection.call("Page.enable", {});
+      await connection.call("Page.addScriptToEvaluateOnNewDocument", { source: HOOK });
+      report.bound = "session";
+      report.did.push("installed the document-start hook for this session");
+      report.did.push("it takes effect on the next page load, not in this document");
+    }
+    report.ok = !!(report.page && report.page.store) && report.bound !== "not_bound";
+    if (!report.page || !report.page.store) report.errors.push("the app store is not readable in this page");
+    if (report.bound === "not_bound") report.errors.push("the hook is not in the page and was not installed");
+  } catch (error) {
+    report.errors.push(String((error && error.message) || error).slice(0, 160));
   }
-  if (!ready) { console.log(JSON.stringify({ ok: false, error: "hook_recorded_nothing" })); connection.ws.close(); process.exit(5); }
-  // Give the app a moment to define the rest, then dump everything it saw.
+  try { fs.mkdirSync(path.dirname(statusFile), { recursive: true }); fs.writeFileSync(statusFile, JSON.stringify(report, null, 1)); } catch (error) { /* a status file that cannot be written is not a crash */ }
+  console.log(JSON.stringify(report));
+  if (!report.ok) process.exitCode = 5;
+} else if (command === "install" || command === "learn") {
   await new Promise((resolve) => setTimeout(resolve, 8000));
   const all = JSON.parse(await connection.evaluate("JSON.stringify(window.__wa_adapter.names)"));
   const names = Array.from(new Set(all));
