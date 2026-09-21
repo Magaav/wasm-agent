@@ -36,7 +36,9 @@ A node's home, key, database, ports and supervisor records are per **instance**,
 host an operator's master node beside a guest node bound to another master. Select one with
 `--instance NAME` (or `WASM_AGENT_INSTANCE=NAME`); with no name the ambient/default node behaves
 exactly as before. `wa-sentinel instance add|list|show|remove|start|stop|status` manages them, and
-the sentinel will not stop a listener it cannot prove it started. See [INSTANCES.md](INSTANCES.md).
+the sentinel will not stop a listener it cannot prove it started. This is **application home
+isolation, not an OS sandbox**: instances run as the same operating-system account, so a guest
+process can still read what that account can read. See [INSTANCES.md](INSTANCES.md).
 
 ### `deploy` is not `upgrade`, and the difference matters
 

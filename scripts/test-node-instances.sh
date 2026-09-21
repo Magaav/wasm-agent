@@ -4,14 +4,18 @@
 # This is the hermetic counterpart to scripts/test-guest-e2e.sh: no model, no rendezvous, no
 # network. It starts an operator master node and a guest node that belongs to another master,
 # both from the built `wa`, each through the sentinel's named-instance lifecycle, and then checks
-# the properties that make "co-located" safe:
+# the properties that make "co-located" safe, including the mutations a review found:
 #
-#   1. named setup: two instances, separate homes, keys, databases, ports and supervisor records
-#   2. port collision rejected at add and at start
-#   3. the guest cannot read the operator's sessions or memory
-#   4. stop/restart of A cannot touch B (and the identities survive a restart)
-#   5. a wrong listener is refused: the sentinel never stops a pid on the strength of a port alone
-#   6. a guest is launched with an explicit environment that does not inherit the operator's secrets
+#   1. named setup: separate homes, keys, databases, ports and supervisor records
+#   2. port collision rejected at add (including node-vs-client cross-role) and at start
+#   3. home/install collisions and a nonempty foreign home are rejected
+#   4. the guest cannot read the operator's sessions or memory
+#   5. stop/restart of A cannot touch B, and the identities survive a restart
+#   6. a wrong listener, a corrupt record, and a forged legacy pid/home are refused, not killed
+#   7. legacy adoption works only with positive proof, and records the creation marker first
+#   8. a protected environment share is refused; a guest cannot be turned into a master
+#   9. a corrupt registry is an error and is never overwritten
+#  10. remove --purge refuses a home the sentinel does not own
 #
 # Usage:  bash scripts/test-node-instances.sh
 # Needs:  the built wa and wa-sentinel binaries. Build with CARGO_BUILD_JOBS=2.
@@ -35,6 +39,8 @@ export WA_INSTANCE_REGISTRY="$BASE/instances.json"
 # A secret in the supervisor's environment must not reach the guest. It is deliberately only in the
 # environment, never written to any file, so a leak could only come from inheritance.
 export WA_TEST_SECRET_API_KEY="sk-operator-secret-do-not-leak"
+
+VALID_MASTER="0123456789abcdef0123456789abcdef"
 
 checks=0
 failed=0
@@ -79,19 +85,21 @@ pid_on_port() {
     ss -ltnp 2>/dev/null | grep ":$1 " | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1
   fi
 }
+kill_port() {
+  local pid
+  pid="$(pid_on_port "$1")"
+  [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+}
 
-STARTED=()
+OP_RECORD="$BASE/.wasm-agent/instances/op/.wasm-agent/sentinel/node.json"
+GUEST_RECORD="$BASE/.wasm-agent/instances/guest1/.wasm-agent/sentinel/node.json"
 stop_all() {
   for name in op guest1; do
     "$SENTINEL" instance stop "$name" >/dev/null 2>&1 || true
   done
-  # Anything the graceful stop could not prove (e.g. the foreign listener is not ours to stop) is
-  # left for the operator; only the nodes this test started are killed here, by recorded pid.
-  for name in op guest1; do
-    rec="$BASE/.wasm-agent/instances/$name/.wasm-agent/sentinel/node.json"
-    pid="$(pid_of "$rec")"
-    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
-  done
+  # Anything the graceful stop could not prove is killed by port here, for cleanup only.
+  kill_port "$OP_PORT" 2>/dev/null || true
+  kill_port "$GUEST_PORT" 2>/dev/null || true
   sleep 1
   rm -rf "$BASE" 2>/dev/null || true
 }
@@ -108,27 +116,94 @@ say "setting up two named instances with separate homes, keys, databases and por
 ok "$([ -f "$BASE/.wasm-agent/instances/op/.wasm-agent/node.role" ] && echo 1 || echo 0)" \
   "the operator instance has its own home and role file"
 "$SENTINEL" instance add guest1 --port "$GUEST_PORT" --client-port "$GUEST_CLIENT" --role guest \
-  --master "remote-master-fixture" --binary "$BIN" >/dev/null 2>&1
+  --master "$VALID_MASTER" --binary "$BIN" >/dev/null 2>&1
 ok "$([ "$(cat "$BASE/.wasm-agent/instances/guest1/.wasm-agent/node.role" 2>/dev/null)" = "guest" ] && echo 1 || echo 0)" \
   "the guest instance records its role"
-ok "$(grep -q 'WASM_AGENT_TRUSTED_MASTERS=remote-master-fixture' "$BASE/.wasm-agent/instances/guest1/.wasm-agent/env" && echo 1 || echo 0)" \
-  "the guest is explicitly bound to a remote master"
+ok "$(grep -q "WASM_AGENT_TRUSTED_MASTERS=$VALID_MASTER" "$BASE/.wasm-agent/instances/guest1/.wasm-agent/env" && echo 1 || echo 0)" \
+  "the guest is explicitly bound to a remote master node id"
 
-# A guest without a master is refused: role must not be implicit.
+# A guest without a master, or with a name instead of a node id, is refused.
 if "$SENTINEL" instance add rogue --port $((P + 10)) --client-port $((P + 11)) --role guest --binary "$BIN" >/dev/null 2>&1; then
   ok 0 "a guest without a remote master is refused"
 else
   ok 1 "a guest without a remote master is refused"
 fi
+if "$SENTINEL" instance add rogue --port $((P + 10)) --client-port $((P + 11)) --role guest --master friendly-name --binary "$BIN" >/dev/null 2>&1; then
+  ok 0 "a master alias is not accepted as a node id"
+else
+  ok 1 "a master alias is not accepted as a node id"
+fi
 
-# 2. port collision ---------------------------------------------------------
+# 2. port and path collisions ----------------------------------------------
 if "$SENTINEL" instance add collide --port "$OP_PORT" --client-port "$EXTRA_CLIENT" --binary "$BIN" >/dev/null 2>&1; then
   ok 0 "a second instance cannot claim the operator's node port"
 else
   ok 1 "a second instance cannot claim the operator's node port"
 fi
+# The cross-role case the first version missed: node port == the guest's *client* port.
+if "$SENTINEL" instance add collide --port "$GUEST_CLIENT" --client-port "$EXTRA_CLIENT" --binary "$BIN" >/dev/null 2>&1; then
+  ok 0 "a node port cannot collide with another instance's client port"
+else
+  ok 1 "a node port cannot collide with another instance's client port"
+fi
+# A home inside another instance's home.
+if "$SENTINEL" instance add collide --port $((P + 12)) --client-port $((P + 13)) \
+  --home "$BASE/.wasm-agent/instances/op/nested" --binary "$BIN" >/dev/null 2>&1; then
+  ok 0 "a home inside another instance's home is refused"
+else
+  ok 1 "a home inside another instance's home is refused"
+fi
+# The operator home itself.
+if "$SENTINEL" instance add collide --port $((P + 12)) --client-port $((P + 13)) \
+  --home "$BASE" --binary "$BIN" >/dev/null 2>&1; then
+  ok 0 "a named home cannot be the operator home"
+else
+  ok 1 "a named home cannot be the operator home"
+fi
+# A nonempty directory the operator points at by hand.
+mkdir -p "$BASE/foreign-home"
+echo "do not lose me" > "$BASE/foreign-home/precious.txt"
+if "$SENTINEL" instance add collide --port $((P + 12)) --client-port $((P + 13)) \
+  --home "$BASE/foreign-home" --binary "$BIN" >/dev/null 2>&1; then
+  ok 0 "a nonempty foreign home is never overwritten"
+else
+  ok 1 "a nonempty foreign home is never overwritten"
+fi
+ok "$([ -f "$BASE/foreign-home/precious.txt" ] && echo 1 || echo 0)" "the foreign home is left intact"
 
-# 3. start both -------------------------------------------------------------
+# 3. protected environment shares -------------------------------------------
+if "$SENTINEL" instance add share-bad --port $((P + 12)) --client-port $((P + 13)) \
+  --role guest --master "$VALID_MASTER" --share "WASM_AGENT_NODE_ROLE=master" --binary "$BIN" >/dev/null 2>&1; then
+  ok 0 "a share cannot set the node role"
+else
+  ok 1 "a share cannot set the node role"
+fi
+if "$SENTINEL" instance add share-bad --port $((P + 12)) --client-port $((P + 13)) \
+  --role guest --master "$VALID_MASTER" --share "WASM_AGENT_HOME=$BASE" --binary "$BIN" >/dev/null 2>&1; then
+  ok 0 "a share cannot set the node home"
+else
+  ok 1 "a share cannot set the node home"
+fi
+# A malicious registry entry (as if hand-edited) is refused on load, so start never spawns it.
+ORIGINAL_REGISTRY="$(cat "$BASE/instances.json")"
+node -e '
+const fs = require("fs");
+const path = process.argv[1];
+const doc = JSON.parse(fs.readFileSync(path, "utf8"));
+doc.instances["evil"] = { name: "evil", home: process.argv[2], install_dir: process.argv[3],
+  node_port: Number(process.argv[4]), client_port: Number(process.argv[5]), role: "guest",
+  master: "0123456789abcdef0123456789abcdef", shared_env: { WASM_AGENT_NODE_ROLE: "master" } };
+fs.writeFileSync(path, JSON.stringify(doc));
+' "$(winpath "$BASE/instances.json")" "$(winpath "$BASE/evil-home")" "$(winpath "$BASE/evil-home/install")" $((P + 12)) $((P + 13))
+if "$SENTINEL" instance start evil >/dev/null 2>&1; then
+  ok 0 "a protected share smuggled into the registry does not spawn a master guest"
+else
+  ok 1 "a protected share smuggled into the registry does not spawn a master guest"
+fi
+ok "$([ -z "$(pid_on_port $((P + 12)))" ] && echo 1 || echo 0)" "the malicious instance did not start"
+printf '%s' "$ORIGINAL_REGISTRY" > "$BASE/instances.json"
+
+# 4. start both -------------------------------------------------------------
 say "starting the operator and the guest through the sentinel lifecycle"
 "$SENTINEL" --instance op instance start >/dev/null 2>&1
 "$SENTINEL" --instance guest1 instance start >/dev/null 2>&1
@@ -149,8 +224,6 @@ ok "$([ -f "$OP_DB" ] && [ -f "$GUEST_DB" ] && [ "$OP_DB" != "$GUEST_DB" ] && ec
 ok "$([ -f "$OP_KEY" ] && [ -f "$GUEST_KEY" ] && ! cmp -s "$OP_KEY" "$GUEST_KEY" && echo 1 || echo 0)" \
   "each node has its own identity key"
 
-OP_RECORD="$OP_HOME/.wasm-agent/sentinel/node.json"
-GUEST_RECORD="$GUEST_HOME/.wasm-agent/sentinel/node.json"
 ok "$([ -f "$OP_RECORD" ] && [ -f "$GUEST_RECORD" ] && echo 1 || echo 0)" \
   "each instance has its own supervisor lifecycle record"
 OP_PID="$(pid_of "$OP_RECORD")"
@@ -158,7 +231,7 @@ GUEST_PID="$(pid_of "$GUEST_RECORD")"
 ok "$([ -n "$OP_PID" ] && [ -n "$GUEST_PID" ] && [ "$OP_PID" != "$GUEST_PID" ] && echo 1 || echo 0)" \
   "the two nodes are different processes" "op pid $OP_PID guest pid $GUEST_PID"
 
-# 4. the guest cannot read the operator's sessions or memory -----------------
+# 5. the guest cannot read the operator's sessions or memory -----------------
 say "checking the guest cannot see the operator's sessions or memory"
 node -e '
 const {DatabaseSync} = require("node:sqlite");
@@ -185,11 +258,7 @@ GUEST_SESSION="$(curl -s -m 5 "http://127.0.0.1:$GUEST_PORT/session?id=op-secret
 ok "$(printf '%s' "$GUEST_SESSION" | grep -q 'op-secret-session' && echo 0 || echo 1)" \
   "the guest cannot read the operator's session by id"
 
-# 5. guest environment ------------------------------------------------------
-# On Linux the running process's environment is readable and the secret's absence is provable
-# directly. On Windows it is not readable without PEB access, so the unit test
-# (instance::tests::guest_env_shares_nothing_but_the_allowlist_and_explicit_values) proves the
-# construction and this checks the home's env file carries only instance keys.
+# 6. guest environment ------------------------------------------------------
 if [ "$(uname -s 2>/dev/null)" = "Linux" ] && [ -n "$GUEST_PID" ]; then
   if tr '\0' '\n' < "/proc/$GUEST_PID/environ" 2>/dev/null | grep -q 'WA_TEST_SECRET_API_KEY'; then
     ok 0 "the guest process did not inherit the operator's secret"
@@ -205,7 +274,7 @@ else
   skip "the guest process did not inherit the operator's secret" "process environment is not readable on this platform; the unit test proves the construction"
 fi
 
-# 6. a wrong listener is refused --------------------------------------------
+# 7. a wrong listener is refused --------------------------------------------
 say "checking a foreign listener on an instance port is refused"
 "$SENTINEL" instance add foreign --port "$FOREIGN_PORT" --client-port "$EXTRA_CLIENT" --binary "$BIN" >/dev/null 2>&1
 node -e 'require("net").createServer().listen(Number(process.argv[1]), "127.0.0.1")' "$FOREIGN_PORT" &
@@ -227,6 +296,13 @@ if "$SENTINEL" --instance foreign instance stop >/dev/null 2>&1; then
 else
   ok 1 "a stale lifecycle record is refused"
 fi
+# A *corrupt* record must refuse rather than fall back to serve.pid.
+printf '{ broken' > "$BASE/.wasm-agent/instances/foreign/.wasm-agent/sentinel/node.json"
+if "$SENTINEL" --instance foreign instance stop >/dev/null 2>&1; then
+  ok 0 "a corrupt lifecycle record is refused"
+else
+  ok 1 "a corrupt lifecycle record is refused"
+fi
 # Starting a node on an occupied port is refused before it is spawned.
 if "$SENTINEL" --instance foreign instance start >/dev/null 2>&1; then
   ok 0 "a start on an occupied port is refused"
@@ -235,32 +311,137 @@ else
 fi
 kill "$FOREIGN_JS" 2>/dev/null || true
 
-# 7. stop/restart A cannot affect B -----------------------------------------
+# 8. lifecycle record mutations against the running operator ---------------
+say "mutating the operator's lifecycle record; the sentinel must refuse, not kill"
+cp "$OP_RECORD" "$BASE/op-record.bak"
+printf '{ broken' > "$OP_RECORD"
+if "$SENTINEL" --instance op instance stop >/dev/null 2>&1; then
+  ok 0 "a corrupt operator record does not stop the node"
+else
+  ok 1 "a corrupt operator record does not stop the node"
+fi
+ok "$([ "$(node_id_of "$OP_PORT")" = "$OP_ID" ] && echo 1 || echo 0)" "the operator is still running after the corrupt record"
+cp "$BASE/op-record.bak" "$OP_RECORD"
+
+# A forged serve.pid (legacy path) must not be adopted.
+OP_INSTALL="$OP_HOME/install"
+cp "$OP_INSTALL/serve.pid" "$BASE/op-serve.pid.bak" 2>/dev/null || true
+rm -f "$OP_RECORD"
+printf '999999\n' > "$OP_INSTALL/serve.pid"
+if "$SENTINEL" --instance op instance stop >/dev/null 2>&1; then
+  ok 0 "a forged legacy serve.pid is refused"
+else
+  ok 1 "a forged legacy serve.pid is refused"
+fi
+ok "$([ "$(node_id_of "$OP_PORT")" = "$OP_ID" ] && echo 1 || echo 0)" "the operator is still running after the forged pid"
+
+# A record naming a different home must be refused.
+cp "$BASE/op-record.bak" "$OP_RECORD"
+node -e '
+const fs=require("fs"); const p=process.argv[1]; const d=JSON.parse(fs.readFileSync(p,"utf8"));
+d.home=process.argv[2]; fs.writeFileSync(p, JSON.stringify(d));
+' "$(winpath "$OP_RECORD")" "$(winpath "$BASE/other-home")"
+if "$SENTINEL" --instance op instance stop >/dev/null 2>&1; then
+  ok 0 "a record naming a different home is refused"
+else
+  ok 1 "a record naming a different home is refused"
+fi
+ok "$([ "$(node_id_of "$OP_PORT")" = "$OP_ID" ] && echo 1 || echo 0)" "the operator is still running after the wrong-home record"
+
+# A record whose node_id is not the live identity must be refused.
+cp "$BASE/op-record.bak" "$OP_RECORD"
+node -e '
+const fs=require("fs"); const p=process.argv[1]; const d=JSON.parse(fs.readFileSync(p,"utf8"));
+d.node_id="00000000000000000000000000000000"; fs.writeFileSync(p, JSON.stringify(d));
+' "$(winpath "$OP_RECORD")"
+if "$SENTINEL" --instance op instance stop >/dev/null 2>&1; then
+  ok 0 "a record with a forged node_id is refused"
+else
+  ok 1 "a record with a forged node_id is refused"
+fi
+ok "$([ "$(node_id_of "$OP_PORT")" = "$OP_ID" ] && echo 1 || echo 0)" "the operator is still running after the forged identity"
+
+# A record whose process marker does not match (a reused pid) must be refused.
+cp "$BASE/op-record.bak" "$OP_RECORD"
+node -e '
+const fs=require("fs"); const p=process.argv[1]; const d=JSON.parse(fs.readFileSync(p,"utf8"));
+d.process_start=1; fs.writeFileSync(p, JSON.stringify(d));
+' "$(winpath "$OP_RECORD")"
+if "$SENTINEL" --instance op instance stop >/dev/null 2>&1; then
+  ok 0 "a record with a stale process marker is refused"
+else
+  ok 1 "a record with a stale process marker is refused"
+fi
+ok "$([ "$(node_id_of "$OP_PORT")" = "$OP_ID" ] && echo 1 || echo 0)" "the operator is still running after the stale marker"
+cp "$BASE/op-record.bak" "$OP_RECORD"
+
+# Positive legacy adoption: no record, the real serve.pid, and a live /sync/head.
+rm -f "$OP_RECORD"
+printf '%s\n' "$(pid_on_port "$OP_PORT")" > "$OP_INSTALL/serve.pid"
+ok "$([ ! -f "$OP_RECORD" ] && echo 1 || echo 0)" "the record is gone before adoption"
+"$SENTINEL" --instance op instance stop >/dev/null 2>&1
+ok "$([ -z "$(node_id_of "$OP_PORT")" ] && echo 1 || echo 0)" "a proven legacy node is adopted and stopped"
+"$SENTINEL" --instance op instance start >/dev/null 2>&1
+ok "$([ "$(node_id_of "$OP_PORT")" = "$OP_ID" ] && echo 1 || echo 0)" "the operator restarts with the same identity"
+
+# 9. stop/restart A cannot affect B -----------------------------------------
 say "stopping and restarting the operator; the guest must not move"
+GUEST_PID_AFTER="$(pid_of "$GUEST_RECORD")"
 "$SENTINEL" --instance op instance stop >/dev/null 2>&1
 sleep 1
 ok "$([ -z "$(node_id_of "$OP_PORT")" ] && echo 1 || echo 0)" "the operator is stopped"
-GUEST_AFTER_STOP="$(node_id_of "$GUEST_PORT")"
-GUEST_PID_AFTER="$(pid_of "$GUEST_RECORD")"
-ok "$([ "$GUEST_AFTER_STOP" = "$GUEST_ID" ] && [ "$GUEST_PID_AFTER" = "$GUEST_PID" ] && echo 1 || echo 0)" \
-  "the guest is untouched by the operator's stop" "guest $GUEST_AFTER_STOP pid $GUEST_PID_AFTER"
+ok "$([ "$(node_id_of "$GUEST_PORT")" = "$GUEST_ID" ] && [ "$(pid_of "$GUEST_RECORD")" = "$GUEST_PID_AFTER" ] && echo 1 || echo 0)" \
+  "the guest is untouched by the operator's stop"
 "$SENTINEL" --instance op instance start >/dev/null 2>&1
 ok "$([ "$(node_id_of "$OP_PORT")" = "$OP_ID" ] && echo 1 || echo 0)" \
   "the operator restarts with the same identity"
-ok "$([ "$(node_id_of "$GUEST_PORT")" = "$GUEST_ID" ] && [ "$(pid_of "$GUEST_RECORD")" = "$GUEST_PID" ] && echo 1 || echo 0)" \
+ok "$([ "$(node_id_of "$GUEST_PORT")" = "$GUEST_ID" ] && [ "$(pid_of "$GUEST_RECORD")" = "$GUEST_PID_AFTER" ] && echo 1 || echo 0)" \
   "the guest is untouched by the operator's restart"
 
-# 8. the sentinel refuses to stop a port with no proof at all ---------------
-# A port with a listener and neither a record nor serve.pid: exactly the "trust the port" failure.
-kill "$GUEST_PID" 2>/dev/null || true
-sleep 1
-if "$SENTINEL" --instance guest1 instance stop >/dev/null 2>&1; then
-  # If the kill was slow the record still matched and the stop is legitimate; only a *refusal*
-  # here would be a pass, so re-check whether a listener remains.
-  ok "$([ -z "$(pid_on_port "$GUEST_PORT")" ] && echo 1 || echo 0)" "a killed guest is not stopped twice"
+# 10. corrupt registry is an error and is not overwritten --------------------
+say "corrupting the registry; load must fail and the file must not change"
+cp "$BASE/instances.json" "$BASE/registry.bak"
+printf '{ not json' > "$BASE/instances.json"
+BEFORE="$(cat "$BASE/instances.json")"
+if "$SENTINEL" instance list >/dev/null 2>&1; then
+  ok 0 "a corrupt registry is an error, not an empty registry"
 else
-  ok 1 "a guest whose record no longer matches is refused"
+  ok 1 "a corrupt registry is an error, not an empty registry"
 fi
+if "$SENTINEL" instance add after-corrupt --port $((P + 12)) --client-port $((P + 13)) --binary "$BIN" >/dev/null 2>&1; then
+  ok 0 "add refuses to overwrite a corrupt registry"
+else
+  ok 1 "add refuses to overwrite a corrupt registry"
+fi
+AFTER="$(cat "$BASE/instances.json")"
+ok "$([ "$BEFORE" = "$AFTER" ] && echo 1 || echo 0)" "the corrupt registry is byte-for-byte unchanged"
+cp "$BASE/registry.bak" "$BASE/instances.json"
+
+# 11. purge refuses a home the sentinel does not own -------------------------
+say "checking remove --purge safety"
+if "$SENTINEL" instance remove op --purge >/dev/null 2>&1; then
+  ok 0 "purge refuses a running instance"
+else
+  ok 1 "purge refuses a running instance"
+fi
+"$SENTINEL" --instance op instance stop >/dev/null 2>&1
+# A home whose owned marker was removed must not be purged.
+"$SENTINEL" instance add markerless --port $((P + 14)) --client-port $((P + 15)) --binary "$BIN" >/dev/null 2>&1
+MARKERLESS_HOME="$BASE/.wasm-agent/instances/markerless"
+rm -f "$MARKERLESS_HOME/.wasm-agent/instance.json"
+if "$SENTINEL" instance remove markerless --purge >/dev/null 2>&1; then
+  ok 0 "purge refuses a home without an owned marker"
+else
+  ok 1 "purge refuses a home without an owned marker"
+fi
+ok "$([ -d "$MARKERLESS_HOME" ] && echo 1 || echo 0)" "the markerless home is left in place"
+"$SENTINEL" --instance guest1 instance stop >/dev/null 2>&1
+if "$SENTINEL" instance remove guest1 --purge >/dev/null 2>&1; then
+  ok 1 "purge removes an owned home"
+else
+  ok 0 "purge removes an owned home"
+fi
+ok "$([ ! -d "$GUEST_HOME" ] && echo 1 || echo 0)" "the owned guest home is gone"
 
 # verdict -------------------------------------------------------------------
 {
