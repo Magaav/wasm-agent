@@ -393,6 +393,8 @@ LUA
 WA_SCRIPT="$DB.evidence.lua" "$BIN" --db "$DB" | grep "tool evidence ok"
 rm -f "$DB.evidence.lua"
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB.observability" | grep 'observability ok'
+# Offline accounting must run even when UI tests are explicitly skipped.
+node scripts/test-token-audit.cjs
 # Real projector, isolated home, exact artifact recovery. No paid model or ignored A/B switch.
 WA_BIN="$BIN" bash scripts/bench-tool-budget.sh
 WA_BIN="$BIN" bash scripts/bench-tool-tail.sh

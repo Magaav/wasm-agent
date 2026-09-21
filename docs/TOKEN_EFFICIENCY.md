@@ -88,7 +88,8 @@ control demonstrates omission only; it is **not a runtime arm or model-quality
 measurement**. Reported bytes and artifact pages are not provider tokens, inference
 rounds or financial savings.
 
-Both probes run in `scripts/test.sh`. `tests/token-audit.js` tests the reporter,
+Both probes run in `scripts/test.sh`. `scripts/test-token-audit.cjs` tests the reporter,
+independently of the UI test toggle,
 including missing usage, failed/pending work, summaries, privacy, inconsistent
 accounting, cross-session isolation and duplicate exports.
 

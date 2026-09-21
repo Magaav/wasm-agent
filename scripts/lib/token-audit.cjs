@@ -16,14 +16,14 @@ function audit(input) {
   const events = [], seen = new Map(), spans = new Map();
   let duplicates = 0;
   for (const row of rows) {
-    if (!row || typeof row.id !== 'string' || !row.id || typeof row.session_id !== 'string'
+    if (!row || typeof row.id !== 'string' || !row.id || typeof row.session_id !== 'string' || typeof row.run_id !== 'string'
         || !count(row.seq) || typeof row.kind !== 'string' || typeof row.phase !== 'string') {
       throw Error('invalid_event_envelope');
     }
     let payload = row.payload;
     if (typeof payload === 'string') { try { payload = JSON.parse(payload); } catch { throw Error('invalid_event_payload'); } }
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw Error('invalid_event_payload');
-    const event = {...row, payload}, identity = JSON.stringify([row.session_id,row.id]);
+    const event = {...row, payload}, identity = row.id;
     const fingerprint = digest(event);
     if (seen.has(identity)) {
       if (seen.get(identity) !== fingerprint) throw Error('conflicting_duplicate_event');

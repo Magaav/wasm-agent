@@ -1,5 +1,5 @@
 const assert=require('node:assert/strict');
-const {audit}=require('../scripts/lib/token-audit.cjs');
+const {audit}=require('./lib/token-audit.cjs');
 const h=c=>c.repeat(64);let seq=0;
 const event=(span,kind,phase,payload,session='a',run='r')=>({id:'e'+(++seq),seq,session_id:session,run_id:run,span_id:span,kind,phase,payload});
 const start=(span,extra={},session='a')=>event(span,'model_call','start',{
@@ -55,6 +55,7 @@ assert.equal(r.prefix.stable_recorded_components,0);
 const a=start('1'),b=end('1');r=audit([a,b,a,b]);
 assert.equal(r.events,2);assert.equal(r.duplicate_events,2);assert.equal(r.usage.completed_calls,1);
 assert.throws(()=>audit([a,{...a,payload:{different:true}}]),/conflicting_duplicate/);
+assert.throws(()=>audit([a,{...a,session_id:'different'}]),/conflicting_duplicate/);
 assert.throws(()=>audit([a,{...a,id:'different'}]),/ambiguous_span/);
 assert.throws(()=>audit({events:[a,b],has_more:true}),/incomplete_export/);
 assert.throws(()=>audit([{}]),/invalid_event/);
@@ -80,11 +81,11 @@ try {
   const fixture=path.join(scratch,'export.json');
   fs.writeFileSync(fixture,JSON.stringify({events:[a,b]}));
   const before=fs.readFileSync(fixture);
-  const run=spawnSync(process.execPath,[path.resolve(__dirname,'../scripts/audit-tokens.cjs'),fixture],{encoding:'utf8'});
+  const run=spawnSync(process.execPath,[path.resolve(__dirname,'audit-tokens.cjs'),fixture],{encoding:'utf8'});
   assert.equal(run.status,0,run.stderr);assert.equal(JSON.parse(run.stdout).usage.completed_calls,1);
   assert.deepEqual(fs.readFileSync(fixture),before);
   fs.writeFileSync(fixture,'{"DO_NOT_PRINT": INVALID_SECRET}');
-  const invalidRun=spawnSync(process.execPath,[path.resolve(__dirname,'../scripts/audit-tokens.cjs'),fixture],{encoding:'utf8'});
+  const invalidRun=spawnSync(process.execPath,[path.resolve(__dirname,'audit-tokens.cjs'),fixture],{encoding:'utf8'});
   assert.notEqual(invalidRun.status,0);assert.ok(!invalidRun.stderr.includes('INVALID_SECRET'));
 } finally {fs.rmSync(scratch,{recursive:true,force:true});}
 console.log('ALL PASS');
