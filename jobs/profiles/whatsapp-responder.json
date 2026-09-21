@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "id": "whatsapp-responder",
+  "description": "A conversation-scoped responder: read one permitted conversation, record a decision, and send one validated reply. Read and send are separate capabilities.",
+  "instructions": "Read only the conversation named in your resources. Decide whether a reply is appropriate and draft it. Use whatsapp_send only when the operator has permitted sending for this conversation; otherwise report the draft and stop. Never invent the conversation's title or a participant's identity, and never send to a recipient you were not given.",
+  "allowed_tools": ["whatsapp_read", "whatsapp_decide", "whatsapp_send"],
+  "resources": {
+    "conversation": "",
+    "allowed_conversations": [],
+    "actions": ["read"],
+    "self_destination": "",
+    "account": "",
+    "browser_endpoint": "",
+    "send_path": "ui",
+    "allow_mark_read": false,
+    "send_approved": false,
+    "reply_script": "",
+    "store_send_script": ""
+  },
+  "limits": {
+    "context_messages": 20,
+    "body_bytes": 4096,
+    "sends_per_run": 1
+  },
+  "model": null,
+  "reasoning": null
+}

@@ -1,11 +1,19 @@
 -- Model-free contract checks for the local-subagent policy layer.
 --
--- Run with the real host: WASM_AGENT_LUA_ROOT=<repo> wa --db <scratch> WA_SCRIPT=scripts/test-subagents-profiles.lua
+-- Run ONLY through: node scripts/test-subagents-policy.cjs [wa-binary]
+-- A scratch database alone is NOT isolation: this suite writes profiles under paths.config().
 local json = dofile("lua/vendor/json.lua")
+local paths = dofile("lua/core/paths.lua")
+local expected_home = host.getenv("WA_TEST_SUBAGENT_HOME") or ""
+local fixture_token = host.getenv("WA_TEST_SUBAGENT_TOKEN") or ""
+local function normalized(value) return tostring(value):gsub("\\", "/"):gsub("/+$", "") end
+assert(expected_home ~= "" and fixture_token ~= "", "policy_fixture_requires_isolated_wrapper")
+assert(normalized(paths.home()) == normalized(expected_home), "policy_fixture_home_mismatch")
+assert(host.read_file(paths.home() .. "/.subagent-policy-fixture") == fixture_token,
+  "policy_fixture_marker_mismatch")
 local memory = dofile("lua/core/memory.lua")
 local tools = dofile("lua/core/tools.lua")
 local agentlib = dofile("lua/core/agent.lua")
-local paths = dofile("lua/core/paths.lua")
 memory.setup()
 
 local subagents = dofile("lua/core/subagents.lua")

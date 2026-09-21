@@ -64,9 +64,10 @@ before and after and is unchanged.
 
 ### Notes and limits
 
-- **Node identity is per machine** (`~/.wasm-agent/node.key`), so one host is one
-  node. Two processes on the same machine share a key and overwrite each other's
-  registration; real multi-node means one installation per machine.
+- **Node identity is per instance.** It was per machine (`~/.wasm-agent/node.key`), so two
+  processes on one host shared a key and overwrote each other's registration. With named instances
+  ([INSTANCES.md](INSTANCES.md)) each node has its own home, key, database and ports, and several
+  nodes co-exist on one host; the rendezvous still sees them as separate `node_id`s.
 - Port 80 is **not** reachable from Let's Encrypt (the http-01 challenge timed
   out), which is why issuance used **tls-alpn-01 on 443**. Renewal will keep
   using it; no port-80 rule is required.

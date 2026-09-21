@@ -243,6 +243,11 @@ end
 local function conversation_tool(memory, args, profile, ctx)
   local event = M.trusted_event(ctx)
   if event.conversation_id == "" then return fail("event_context_required") end
+  -- The conversation is the trusted event's, never an argument: a model cannot steer a read to another
+  -- chat, and a foreign argument is refused rather than ignored so the attempt is visible.
+  if type(args.conversation_id) == "string" and args.conversation_id ~= "" and args.conversation_id ~= event.conversation_id then
+    return fail("event_conversation_immutable", { bound = event.conversation_id })
+  end
   if not in_scope(profile, event.conversation_id) then
     return fail("conversation_not_in_profile")
   end
@@ -335,6 +340,9 @@ end
 local function send_tool(args, profile, ctx)
   local event = M.trusted_event(ctx)
   if event.conversation_id == "" or event.message_id == "" then return fail("event_context_required") end
+  if type(args.conversation_id) == "string" and args.conversation_id ~= "" and args.conversation_id ~= event.conversation_id then
+    return fail("event_conversation_immutable", { bound = event.conversation_id })
+  end
   if not in_scope(profile, event.conversation_id) then return fail("conversation_not_in_profile") end
   if not action_allowed(profile, "send") then return fail("action_not_in_profile", { action = "send" }) end
   if args.confirm ~= true then return fail("confirm_required") end
@@ -451,6 +459,11 @@ local function send_tool(args, profile, ctx)
     if type(effects.unknown) == "function" then
       pcall(effects.unknown, { message_id = event.message_id, conversation_id = event.conversation_id, detail = verify_error })
     end
+    -- An identity violation is a definite refusal the child should see by name; a missing verification
+    -- is an ambiguous outcome and is reported as unknown.
+    local identity_error = verify_error == "send_account_mismatch" or verify_error == "send_account_unproven"
+      or verify_error == "send_endpoint_mismatch" or verify_error == "send_endpoint_unproven"
+    if identity_error then return fail(verify_error, { observed = result }) end
     return fail("send outcome unknown: " .. verify_error, { observed = result })
   end
 

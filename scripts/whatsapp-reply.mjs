@@ -54,14 +54,36 @@
 const HOSTS = ["127.0.0.1", "[::1]"];
 const WHATSAPP_URL = "web.whatsapp.com";
 
+import { acquire as acquireSendLock, defaultLockPath } from "./whatsapp-sendlock.mjs";
+import { composerMatches, classifySendAttempt, sendGuard, identityGuard, lookupExpression } from "./whatsapp-reply-core.mjs";
+
+// The composer lock is released by `done`, but a crash between acquiring and sending must not leave the
+// lock for the stale timeout. One process-wide handler covers every abnormal exit.
+let sendLock = null;
+process.on("exit", () => {
+  if (sendLock) { try { sendLock.release(); } catch { /* already gone */ } }
+});
+
 function parseArgs(argv) {
-  const args = { chat: "", body: "", send: false, toSelf: false, label: "", timeoutMs: 20000 };
+  const args = { chat: "", body: "", bodyFile: "", send: false, toSelf: false, label: "", timeoutMs: 20000, lockWaitMs: 30000, allowMarkRead: process.env.WA_WHATSAPP_ALLOW_MARK_READ === "1", lookupOnly: false, expectAccount: "", expectBrowserEndpoint: "" };
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     const value = argv[index + 1];
     if (flag === "--chat") { args.chat = String(value || ""); index += 1; }
     else if (flag === "--body") { args.body = String(value || ""); index += 1; }
+    // A body can arrive from a file so an untrusted message never travels through a shell command line.
+    else if (flag === "--body-file") { args.bodyFile = String(value || ""); index += 1; }
     else if (flag === "--label") { args.label = String(value || ""); index += 1; }
+    else if (flag === "--lock-wait-ms") { args.lockWaitMs = Number(value) || 0; index += 1; }
+    // Explicit acceptance that opening this chat will clear its unread marker. Without it a non-self
+    // `--send` is refused before the chat is opened.
+    else if (flag === "--allow-mark-read") { args.allowMarkRead = true; }
+    // Read-only resolution: report the target and the self chat id without opening anything.
+    else if (flag === "--lookup-only") { args.lookupOnly = true; }
+    // The locally bound identity the route must prove it is acting as. Only the profile passes these; an
+    // event or a model argument never does.
+    else if (flag === "--expect-account") { args.expectAccount = String(value || ""); index += 1; }
+    else if (flag === "--expect-browser-endpoint") { args.expectBrowserEndpoint = String(value || ""); index += 1; }
     else if (flag === "--send") { args.send = true; }
     else if (flag === "--to-self") { args.toSelf = true; }
   }
@@ -110,39 +132,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // NOTE: each of these is a template literal. A backtick anywhere inside - including in a comment -
 // ends the string and breaks the file; that has bitten this repo twice already.
 
-// Resolve the target in the store: read-only, and where "message yourself" is decided. The self chat
-// is proved, not guessed - my number's @c.us form is not a chat in this build, the account also has a
-// LID identity, and "message yourself" lives under one of them.
-function lookupExpression(chat, toSelf) {
-  return `(() => {
-    const chats = window.require('WAWebChatCollection').ChatCollection.getModelsArray() || [];
-    const msgs = window.require('WAWebMsgCollection').MsgCollection.getModelsArray() || [];
-    const CHAT = ${JSON.stringify(chat)};
-    const TO_SELF = ${toSelf ? "true" : "false"};
-    let selfId = '';
-    const counts = {};
-    for (const message of msgs) {
-      if (message.id && message.id.fromMe) {
-        const from = String(message.from || '');
-        if (from) counts[from] = (counts[from] || 0) + 1;
-      }
-    }
-    const ranked = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
-    const byChat = chats.filter((c) => ranked.indexOf(String(c.id)) >= 0).map((c) => String(c.id));
-    const mine = msgs.filter((m) => m.id && m.id.fromMe).map((m) => String(m.id.remote || ''));
-    const selfOnly = byChat.find((id) => mine.indexOf(id) >= 0
-      && msgs.filter((m) => String((m.id && m.id.remote) || '') === id && !(m.id && m.id.fromMe)).length === 0);
-    selfId = selfOnly || byChat[0] || '';
-    const targetId = TO_SELF ? selfId : CHAT;
-    const found = chats.find((c) => String(c.id) === targetId) || null;
-    if (!found) return JSON.stringify({ error: 'chat_not_found', target_id: targetId, self_id: selfId });
-    return JSON.stringify({
-      chat: { id: String(found.id), name: String(found.formattedTitle || found.name || '') },
-      self_id: selfId, unread: found.unreadCount || 0, messages: msgs.length,
-      archived: !!(found.archive || found.isArchived),
-    });
-  })()`;
-}
+// `lookupExpression` lives in the pure core module so the verified-self resolver can be evaluated against
+// an adversarial fake store in tests. See scripts/whatsapp-reply-core.mjs.
 
 function focusExpression(which) {
   return `(() => {
@@ -213,25 +204,30 @@ function composerTextExpression() {
       || document.querySelector('div[contenteditable="true"][role="textbox"]');
     if (!composer) return JSON.stringify({ error: 'composer_missing' });
     const text = String(composer.innerText || '');
-    return JSON.stringify({ text: text.slice(0, 160), empty: text.trim() === '', label: String(composer.getAttribute('aria-label') || '') });
+    return JSON.stringify({ text: text, preview: text.slice(0, 160), length: text.length, empty: text.trim() === '', label: String(composer.getAttribute('aria-label') || '') });
   })()`;
 }
 
-// The message must exist in the store: that chat, mine, that body. A send nobody can see did not
-// happen, and saying so is the only honest report.
-function verifyExpression(chatId, body) {
+// The message must exist in the store: that chat, mine, that body, and *new since the snapshot*. The
+// `excludeId` is the newest matching message id taken before the send, so an identical body sent earlier
+// cannot be mistaken for this send. A send nobody can see did not happen, and saying so is the only
+// honest report.
+function verifyExpression(chatId, body, excludeId) {
   return `(() => {
     const chats = window.require('WAWebChatCollection').ChatCollection.getModelsArray() || [];
     const msgs = window.require('WAWebMsgCollection').MsgCollection.getModelsArray() || [];
     const CHAT = ${JSON.stringify(chatId)};
     const BODY = ${JSON.stringify(body)};
+    const EXCLUDE = ${JSON.stringify(excludeId || "")};
     let found = null;
     for (let index = msgs.length - 1; index >= 0; index -= 1) {
       const message = msgs[index];
       if (String((message.id && message.id.remote) || '') !== CHAT) continue;
       if (!(message.id && message.id.fromMe)) continue;
       if (String(message.body || '') !== BODY) continue;
-      found = { id: String((message.id && message.id.id) || ''), t: message.t || 0, ack: message.ack };
+      const id = String((message.id && message.id.id) || '');
+      if (EXCLUDE && id === EXCLUDE) continue;
+      found = { id: id, t: message.t || 0, ack: message.ack };
       break;
     }
     const chat = chats.find((c) => String(c.id) === CHAT) || null;
@@ -246,7 +242,11 @@ function verifyExpression(chatId, body) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  if (!args.body) { console.log(JSON.stringify({ error: "body_required" })); process.exitCode = 1; return; }
+  if (!args.body && args.bodyFile) {
+    const { readFileSync } = await import("node:fs");
+    try { args.body = readFileSync(args.bodyFile, "utf8"); } catch (error) { args.body = ""; }
+  }
+  if (!args.body && !args.lookupOnly) { console.log(JSON.stringify({ error: "body_required" })); process.exitCode = 1; return; }
   const endpoint = await discover();
   if (!endpoint) { console.log(JSON.stringify({ ok: false, error: "no_cdp_endpoint" })); process.exitCode = 3; return; }
   const targets = JSON.parse(await text(`http://${endpoint.host}:${endpoint.port}/json/list`));
@@ -264,6 +264,7 @@ async function main() {
     return JSON.parse(result.result.value);
   };
   const done = (payload, code) => {
+    if (sendLock) { sendLock.release(); sendLock = null; }
     console.log(JSON.stringify({ endpoint, ...payload }));
     // exitCode rather than process.exit: exiting while the socket is closing trips a libuv assertion
     // on Windows, and a scary line in the output of a tool that can send messages is exactly the noise
@@ -300,7 +301,58 @@ async function main() {
   const body = args.label ? `${args.label}\n\n${args.body}` : args.body;
   const before = { unread: target.unread, messages: target.messages };
 
-  // Sending refuses *before* any UI work, because the route is not implemented (see the header): a
+  // Read-only resolution: no lock, no open, no type, no send. This is how an operator or a proof script
+  // discovers the notes-to-self chat id (`self_id`) and the account (`account`) before binding them.
+  const actualEndpoint = `ws://${endpoint.host}:${endpoint.port}/devtools/page/${tab.id}`;
+  const actualAccount = target.account || target.self_id || "";
+  if (args.lookupOnly) {
+    return done({ ok: true, lookup_only: true, chat: target.chat, self_id: target.self_id || null,
+      account: actualAccount, is_me: target.is_me === true, account_known: target.account_known === true,
+      browser_endpoint: actualEndpoint, before }, 0);
+  }
+
+  // The locally bound identity must be proven by the route before it opens anything. A profile that binds
+  // an account or a browser endpoint is not satisfied by a script that ignores it.
+  const identity = identityGuard({
+    expectedAccount: args.expectAccount,
+    expectedEndpoint: args.expectBrowserEndpoint,
+    actualAccount,
+    actualEndpoint,
+  });
+  if (identity) {
+    return done({
+      ok: false, error: identity, chat: target.chat, account: actualAccount, browser_endpoint: actualEndpoint,
+      expected_account: args.expectAccount || null, expected_browser_endpoint: args.expectBrowserEndpoint || null,
+      observed: "the route is not acting as the locally bound account/endpoint",
+      next: "bind the account and browser_endpoint the session actually uses",
+    }, 9);
+  }
+
+  // Raw-script guard, before anything is opened. Older jobs call this script directly, so the
+  // profile-scoped Lua check is not the only line of defence: a non-self `--send` is refused unless the
+  // caller explicitly accepted that opening the chat clears the marker. A rehearsal is unaffected.
+  const guard = sendGuard({
+    send: args.send,
+    toSelf: args.toSelf,
+    isMe: target.is_me === true,
+    allowMarkRead: args.allowMarkRead,
+  });
+  if (guard) {
+    return done({
+      ok: false, error: guard, chat: target.chat, before, account: actualAccount, browser_endpoint: actualEndpoint,
+      observed: "a non-self send would open the chat and clear its unread marker",
+      next: "pass --allow-mark-read to accept that, reply to --to-self, or use an approved store route",
+    }, 8);
+  }
+
+  // The composer is one shared resource, and two jobs (or two sentinel processes) can each want it. The
+  // lock serialises them; a live holder is reported as `send_resource_busy` rather than typed over. The
+  // target lookup above is read-only and does not need the lock.
+  sendLock = await acquireSendLock(defaultLockPath(), { waitMs: args.lockWaitMs });
+  if (!sendLock.ok) {
+    return done({ ok: false, error: "send_resource_busy", holder: sendLock.holder, chat: target.chat }, 7);
+  }
+
   // 2. Open the chat through the app's own action (no row, no scroll, no search), then require the
   //    composer to confirm *which* chat opened - the difference between a reply and a message typed
   //    into whatever was on screen.
@@ -320,27 +372,35 @@ async function main() {
     }, 5);
   }
 
+  // A human's draft is not the job's to destroy. Before anything is typed, the composer must be empty;
+  // if it holds a restored draft or a half-written message, the tool refuses and leaves it exactly as it
+  // was. This is what makes "clean only proven own residue" true: from here on, anything in the composer
+  // was typed by this process.
+  if (!composer.empty) {
+    return done({
+      ok: false, error: "composer_preoccupied", chat: target.chat, composer: { preview: composer.preview, length: composer.length },
+      observed: "the composer already holds text (a restored draft or an unsent human message)",
+      next: "nothing was typed and nothing was cleared; a human's draft is not the job's to destroy",
+      before,
+    }, 5);
+  }
+
   // 3. Type into the composer, with real input events.
   const composerFocus = await page(focusExpression("composer"));
   if (composerFocus.error) return done({ ok: false, ...composerFocus, chat: target.chat }, 5);
   await typeText(body);
   await sleep(400);
   const typed = await page(composerTextExpression());
-  const normalise = (value) => String(value || "").replace(/\s+/g, " ").trim();
   // WhatsApp restores a chat's unsent draft, so "the composer contains my text" is not enough: a
   // leftover draft would be sent *with* the reply. Either it is my body and nothing else, or nothing is
-  // sent at all.
-  //
-  // With `--label` the composer holds `label\n\nbody`, not `body` - so comparing against `body` alone made
-  // every labelled note fail as "composer holds something other than the exact reply". That is what the
-  // reply job meant when it reported "the summary note did not go either": the route was fine, the check
-  // was measuring the wrong string, and the tool refused to send for that reason.
+  // sent at all. The comparison sees the *whole* composer - a 160-character preview once made a correct
+  // labelled note look like "something other than the exact reply" and the tool refused to send.
   const expected = args.label ? `${args.label}\n\n${body}` : body;
-  if (normalise(typed.text) !== normalise(expected)) {
+  if (!composerMatches(typed.text, expected)) {
     return done({
-      ok: false, error: "composer_not_exactly_the_body", typed, chat: target.chat, body: expected, before,
-      observed: "the composer holds something other than the exact reply (a restored draft is the usual reason)",
-      next: "the job must clear the draft before sending; nothing was sent",
+      ok: false, error: "composer_not_exactly_the_body", typed: { preview: typed.preview, length: typed.length }, chat: target.chat, body: expected, before,
+      observed: "the composer holds something other than the exact reply",
+      next: "nothing was sent; the composer was left untouched",
     }, 5);
   }
 
@@ -352,26 +412,64 @@ async function main() {
     const cleared = await page(composerTextExpression());
     return done({
       ok: !!cleared.empty, dry_run: true, cleared: !!cleared.empty, chat: target.chat,
-      composer_label: label, body, before, typed,
+      composer_label: label, body, before, account: actualAccount, browser_endpoint: actualEndpoint,
+      typed: { preview: typed.preview, length: typed.length },
     }, cleared.empty ? 0 : 5);
   }
 
   // 4. Send, and let the *effect* decide. This browser's input pipeline drops key dispatches (measured:
-  //    of 112 backspaces, 56 landed; Enter timed out twice), so the send is retried a bounded number of
-  //    times and each attempt is settled against the store. The dispatch's own reply is recorded, never
-  //    trusted.
+  //    of 112 backspaces, 56 landed; Enter timed out twice), so a send is retried - but only when the
+  //    effect proves it did not happen. The snapshot id is taken first so an identical body sent earlier
+  //    cannot be mistaken for this send, and a dispatch whose outcome is ambiguous is never retried.
+  const snapshot = await page(verifyExpression(target.chat.id, body, ""));
+  const priorId = snapshot.message ? snapshot.message.id : "";
   let dispatch = "not_attempted";
   let verified = { verified: false };
+  let ambiguous = false;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     dispatch = await pressKey("Enter", "Enter", 13, 0, "\r");
     await sleep(3500);
-    verified = await page(verifyExpression(target.chat.id, body));
+    verified = await page(verifyExpression(target.chat.id, body, priorId));
     if (verified.verified) break;
+    // Reconcile before retrying: only a composer that still holds exactly our body proves the send did
+    // not happen. An empty composer with no message in the store is ambiguous - it may be in flight - so
+    // the loop stops rather than dispatching a second Enter.
+    const composerAfter = await page(composerTextExpression());
+    const verdict = classifySendAttempt({ verified: false, composerText: composerAfter.text, expectedText: expected });
+    if (verdict === "retry") continue;
+    if (verdict === "ambiguous") ambiguous = true;
+    break;
+  }
+  if (!verified.verified && ambiguous) {
+    return done({
+      ok: false, error: "ambiguous_send", dispatch, chat: target.chat, composer_label: label, body: expected,
+      ...verified, unread_before: before.unread,
+      observed: "Enter was dispatched and the store has no matching message, but the composer is empty; the send may have happened",
+      next: "no retry was dispatched; reconcile the store before trying again",
+    }, 5);
+  }
+  if (!verified.verified) {
+    // A safe abort: the precheck proved the composer was empty before typing, so content equal to our
+    // body is proven our own residue and can be cleared. Anything else is left untouched.
+    const composerAfter = await page(composerTextExpression());
+    let cleared = false;
+    if (composerMatches(composerAfter.text, expected)) {
+      await pressKey("a", "KeyA", 65, 2); // 2 = Ctrl
+      await pressKey("Backspace", "Backspace", 8);
+      await sleep(600);
+      cleared = !!(await page(composerTextExpression())).empty;
+    }
+    return done({
+      ok: false, error: "not_verified", dispatch, chat: target.chat, composer_label: label, body: expected,
+      ...verified, unread_before: before.unread, cleared_own_residue: cleared,
+      observed: "the store does not hold the sent message",
+      next: "no further retry; reconcile before trying again",
+    }, 5);
   }
   return done({
-    ok: !!verified.verified, sent: true, dispatch, chat: target.chat, composer_label: label, body,
-    ...verified, unread_before: before.unread,
-  }, verified.verified ? 0 : 5);
+    ok: true, sent: true, dispatch, chat: target.chat, composer_label: label, body: expected,
+    ...verified, unread_before: before.unread, account: actualAccount, browser_endpoint: actualEndpoint,
+  }, 0);
 }
 
 main().catch((error) => {

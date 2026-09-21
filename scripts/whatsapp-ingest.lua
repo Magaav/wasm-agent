@@ -137,11 +137,16 @@ local function main()
   -- removes it. A failure keeps it, because the one useful thing about a failed read is the bytes
   -- that made it fail.
   local dump = paths.temp() .. "/wa-whatsapp-" .. tostring(host.uuid()) .. ".json"
+  -- The operator's own ids are a local binding used to verify a group mention; they are not part of the
+  -- reader's output and never leave this machine. Absent, group mentions cannot be verified and every
+  -- group message fails closed in the reader's eligibility pass.
+  local operator = host.getenv and host.getenv("WA_WHATSAPP_OPERATOR") or nil
   local command = table.concat({
     quote(node),
     quote(directory .. "/whatsapp-read.mjs"),
     "--since", tostring(since),
     "--out", quote(dump),
+    (operator and operator ~= "") and ("--operator " .. quote(operator)) or "",
   }, " ")
   local result = shell(command)
   if not result then
@@ -178,6 +183,7 @@ local function main()
     report("whatsapp ingest note=emit_requested_but_no_sentinel")
   end
   local emitted, emit_error = 0, nil
+  local skipped_ineligible = 0
   for _, message in ipairs(payload.messages or {}) do
     memory.record_message({
       conversation_id = message.conversation_id,
@@ -190,20 +196,26 @@ local function main()
       source = "whatsapp-cdp",
       observed_at = host.now(),
     })
-    -- Only what arrived after the previous read, and only what somebody else sent: the first pass
-    -- fills the ledger (emitting there would be a burst of a thousand events nobody asked for), and
-    -- my own replies are not news to be woken about.
-    if emit_on and sentinel and cursor > 0 and (message.sent_at or 0) > cursor
-       and message.direction == "incoming" then
-      local ok, why = emit_event(sentinel, "whatsapp.message", message.message_id, {
-        conversation_id = message.conversation_id,
-        message_id = message.message_id,
-        sender_id = message.sender_id,
-        sent_at = message.sent_at,
-        direction = message.direction,
-        body = message.body,
-      })
-      if ok then emitted = emitted + 1 else emit_error = emit_error or why end
+    -- Only what arrived after the previous read, only what somebody else sent, and only what the
+    -- deterministic eligibility rule accepts: a group mention, archived, left and unknown metadata are
+    -- all decided without a model, here. The reply job never wakes for a message a rule already excludes.
+    local verdict = message.eligibility
+    local eligible = type(verdict) == "table" and verdict.eligible == true
+    if emit_on and cursor > 0 and (message.sent_at or 0) > cursor and message.direction == "incoming" then
+      if not eligible then
+        skipped_ineligible = skipped_ineligible + 1
+      elseif sentinel then
+        local ok, why = emit_event(sentinel, "whatsapp.message", message.message_id, {
+          conversation_id = message.conversation_id,
+          message_id = message.message_id,
+          sender_id = message.sender_id,
+          sent_at = message.sent_at,
+          direction = message.direction,
+          body = message.body,
+          eligibility = verdict,
+        })
+        if ok then emitted = emitted + 1 else emit_error = emit_error or why end
+      end
     end
   end
   local after = memory.stats().ledger_messages or 0
@@ -217,10 +229,12 @@ local function main()
   -- One line, greppable, with the numbers that say whether the diff is working: `read` is what the
   -- reader returned (the rescan window), `new` is what the ledger did not already have.
   report(string.format(
-    "whatsapp ingest ok db=%s read=%d new=%d conversations=%d cursor=%d events=%d%s ms=%d",
+    "whatsapp ingest ok db=%s read=%d new=%d conversations=%d eligible=%d ineligible=%d cursor=%d events=%d skipped=%d%s ms=%d",
     paths.data(), math.floor(#(payload.messages or {})), math.floor(after - before),
-    math.floor(#(payload.conversations or {})), math.floor(math.max(cursor, newest)),
-    math.floor(emitted), emit_error and (" event_error=" .. tostring(emit_error)) or "",
+    math.floor(#(payload.conversations or {})), math.floor(tonumber(payload.eligible) or 0),
+    math.floor(tonumber(payload.ineligible) or 0), math.floor(math.max(cursor, newest)),
+    math.floor(emitted), math.floor(skipped_ineligible),
+    emit_error and (" event_error=" .. tostring(emit_error)) or "",
     math.floor(elapsed)))
 end
 

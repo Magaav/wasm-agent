@@ -197,3 +197,81 @@ fn two_consumers_cannot_claim_one_delivery() {
         1
     );
 }
+
+/// The two lanes are explicit. A deterministic `run` is claimed even when the inference lane is closed,
+/// and an inference `wake` is never claimed on the deterministic pass - so a person's interactive turn
+/// cannot stall the inbox ingest, and the ingest cannot spend a wake allowance.
+#[test]
+fn deterministic_and_inference_lanes_are_separate() {
+    let s = store();
+    let mut run_job = definition();
+    run_job["id"] = json!("ingest");
+    run_job["action"] = json!({"kind":"run","script":std::env::temp_dir().join("ingest.sh")});
+    s.put(&run_job).unwrap();
+    s.enable("ingest", true).unwrap();
+    s.emit("whatsapp.message", "s1", &json!({}), 10).unwrap();
+
+    let deterministic = s.claim_next(11, 0, false).unwrap().unwrap();
+    assert_eq!(deterministic["action"]["kind"], "run");
+    assert_eq!(deterministic["event_id"], "s1", "idempotency key needs the stable source id");
+    s.finish(deterministic["id"].as_i64().unwrap(), "completed", "ok", 11)
+        .unwrap();
+    s.enable("ingest", false).unwrap();
+
+    s.put(&definition()).unwrap();
+    s.enable("messages", true).unwrap();
+    s.emit("whatsapp.message", "m1", &json!({}), 10).unwrap();
+    assert!(
+        s.claim_next(11, 6, false).unwrap().is_none(),
+        "a wake must not be claimed on the deterministic lane"
+    );
+    let wake = s.claim_next(11, 6, true).unwrap().unwrap();
+    assert_eq!(wake["action"]["kind"], "wake");
+    assert_eq!(wake["event_id"], "m1");
+}
+
+/// A subagent action is the profile-scoped route: it is valid JSON, it carries a profile, and it is an
+/// inference action (so it never rides the deterministic lane).
+#[test]
+fn subagent_action_validates_and_is_inference() {
+    let s = store();
+    let job = json!({"id":"respond","name":"Respond as operator",
+        "trigger":{"kind":"event","topic":"whatsapp.message"},
+        "action":{"kind":"subagent","profile":"whatsapp-responder","prompt":"Decide; never send without approval.","timeout_seconds":900}});
+    s.put(&job).unwrap();
+    s.enable("respond", true).unwrap();
+    s.emit("whatsapp.message", "m1", &json!({}), 10).unwrap();
+    assert!(s.claim_next(11, 6, false).unwrap().is_none());
+    let claimed = s.claim_next(11, 6, true).unwrap().unwrap();
+    assert_eq!(claimed["action"]["profile"], "whatsapp-responder");
+    let mut bad = job;
+    bad["action"] = json!({"kind":"subagent","prompt":"no profile"});
+    assert_eq!(s.put(&bad).unwrap_err().to_string(), "subagent_needs_profile");
+}
+
+/// Artifact round trip through the store: installs disabled, an identical import is a revision no-op,
+/// and a changed artifact invalidates approval exactly like any other edit.
+#[test]
+fn artifact_import_installs_disabled_and_is_revision_safe() {
+    let s = store();
+    let job = json!({"id":"documents","name":"Validate incoming",
+        "trigger":{"kind":"file","path":std::env::temp_dir().join("approved/incoming"),"pattern":".json"},
+        "action":{"kind":"run","script":std::env::temp_dir().join("approved/procedures/validate.sh"),"timeout_seconds":60}});
+    s.put(&job).unwrap();
+    let artifact = s.export_job("documents").unwrap();
+    assert!(artifact["trigger"].get("path").is_none());
+
+    let bindings = json!({"trigger_path":std::env::temp_dir().join("approved/incoming"),
+        "script":std::env::temp_dir().join("approved/procedures/validate.sh")});
+    let imported = s.put_artifact(&artifact, &bindings, true, "operator").unwrap();
+    assert_eq!(imported["job"]["enabled"], false, "an import is always disabled");
+    let revision = imported["job"]["revision"].as_i64().unwrap();
+    let again = s.put_artifact(&artifact, &bindings, true, "operator").unwrap();
+    assert_eq!(again["job"]["revision"].as_i64().unwrap(), revision, "an identical import is a no-op");
+    assert_eq!(again["job"]["enabled"], false);
+    let mut edited = artifact.clone();
+    edited["action"]["timeout_seconds"] = json!(120);
+    let changed = s.put_artifact(&edited, &bindings, true, "operator").unwrap();
+    assert!(changed["job"]["revision"].as_i64().unwrap() > revision, "an edit bumps the revision");
+    assert_eq!(changed["job"]["enabled"], false);
+}

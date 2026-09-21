@@ -19,6 +19,8 @@
 // scheduled job that must stay quiet when the window is closed.
 const DEFAULT_PORTS = [9222];
 const WHATSAPP_URL = "web.whatsapp.com";
+
+import { eligibility } from "./whatsapp-eligibility.mjs";
 // A message whose body is media is stored as base64 by the app; keeping that would put megabytes in
 // the ledger per photo, so the body is a marker and the caption only.
 const MAX_BODY = 4000;
@@ -27,7 +29,7 @@ const MAX_BODY = 4000;
 const STATUS_CHAT = "status@broadcast";
 
 function parseArgs(argv) {
-  const args = { since: 0, limit: 2000, ports: DEFAULT_PORTS, out: "" };
+  const args = { since: 0, limit: 2000, ports: DEFAULT_PORTS, out: "", operator: process.env.WA_WHATSAPP_OPERATOR || "" };
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     const value = argv[index + 1];
@@ -35,6 +37,9 @@ function parseArgs(argv) {
     else if (flag === "--limit") { args.limit = Number(value) || 2000; index += 1; }
     else if (flag === "--port") { args.ports = [Number(value)]; index += 1; }
     else if (flag === "--out") { args.out = String(value || ""); index += 1; }
+    // The operator's own ids are a *local binding*, not part of any portable artifact: they are how a
+    // group mention is verified. Passed as a comma-separated list, or via WA_WHATSAPP_OPERATOR.
+    else if (flag === "--operator") { args.operator = String(value || ""); index += 1; }
     else if (flag === "--print-expression") { args.printExpression = true; }
   }
   return args;
@@ -78,6 +83,18 @@ function expression(since) {
     const SINCE = ${Number(since)};
     const STATUS = ${JSON.stringify(STATUS_CHAT)};
     const MAX_BODY = ${MAX_BODY};
+    // Metadata is tri-state on purpose: true, false, or null when this build does not expose the field.
+    // A missing field is *unknown*, and an unknown archived/left state must fail closed, not read as
+    // "not archived".
+    const firstBool = (obj, keys) => { for (const key of keys) { if (typeof obj[key] === 'boolean') return obj[key]; } return null; };
+    let meId = '';
+    try {
+      const me = window.require('WAWebUserPrefsMeUser');
+      const candidate = (me && me.getMaybeMeLidUser && me.getMaybeMeLidUser())
+        || (me && me.getMaybeMePnUser && me.getMaybeMePnUser())
+        || (me && me.getMeUser && me.getMeUser());
+      meId = String((candidate && ((candidate.id && candidate.id._serialized) || candidate._serialized)) || '');
+    } catch (error) { meId = ''; }
     const conversations = [];
     for (const chat of chats) {
       const id = String((chat.id && chat.id._serialized) || "");
@@ -92,6 +109,9 @@ function expression(since) {
           : id.endsWith('@c.us') ? 'direct'
           : id.endsWith('@lid') ? 'direct'
           : 'unknown',
+        // Verified adapter metadata. null means this build did not expose the field: unknown, not false.
+        archived: firstBool(chat, ['archive', 'isArchived', 'archived']),
+        left: firstBool(chat, ['isLeft', 'left', 'hasLeft', 'isExited']),
         unread: chat.unreadCount || 0,
         updated_at: chat.t || null,
       });
@@ -122,6 +142,11 @@ function expression(since) {
       let body = isText ? String(message.body || '') : '[' + kind + ']';
       if (!isText && caption) body = '[' + kind + '] ' + caption;
       if (body.length > MAX_BODY) body = body.slice(0, MAX_BODY);
+      // Mention evidence, for group eligibility. Coerce Wid-like objects at the boundary once.
+      const mentioned = message.mentionedJidList || message.mentionedJids || null;
+      const mentionedIds = Array.isArray(mentioned)
+        ? mentioned.map((value) => String((value && value._serialized) || value)) : null;
+      const mentionedMe = meId && Array.isArray(mentionedIds) ? mentionedIds.indexOf(meId) >= 0 : null;
       out.push({
         conversation_id: remote,
         message_id: id,
@@ -129,10 +154,12 @@ function expression(since) {
         direction: key.fromMe ? 'outgoing' : 'incoming',
         sent_at: at,
         body: body,
+        mentioned_ids: mentionedIds,
+        mentioned_me: mentionedMe,
         media: [{ type: kind, caption: caption ? caption.slice(0, 200) : null }],
       });
     }
-    return JSON.stringify({ conversations: conversations, messages: out, skipped_no_timestamp: skipped, newest: newest,
+    return JSON.stringify({ conversations: conversations, messages: out, skipped_no_timestamp: skipped, newest: newest, me_id: meId,
       store: { chats: chats.length, messages: messages.length, msg_module: !!msgModule, chat_module: !!chatModule } });
   })()`;
 }
@@ -192,6 +219,22 @@ async function main() {
     process.exit(5);
   }
   const messages = payload.messages.slice(0, args.limit);
+  // Deterministic eligibility, in Node, on the adapter's verified metadata. The reply job never spends a
+  // model turn on a message that a rule already excludes, and an unverifiable chat fails closed here.
+  const chatById = new Map((payload.conversations || []).map((chat) => [String(chat.id), chat]));
+  const operatorIds = String(args.operator || "").split(",").map((value) => value.trim()).filter(Boolean);
+  const eligibilityOptions = { operator: { ids: operatorIds, phones: operatorIds } };
+  let eligible = 0;
+  let ineligible = 0;
+  for (const message of messages) {
+    const conversation = chatById.get(String(message.conversation_id)) || {
+      id: message.conversation_id, title: "", archived: null, left: null,
+    };
+    const verdict = eligibility({ conversation, message }, eligibilityOptions);
+    message.eligibility = verdict;
+    if (verdict.eligible) eligible += 1;
+    else ineligible += 1;
+  }
   const full = {
     ok: true,
     endpoint,
@@ -203,6 +246,8 @@ async function main() {
     store: payload.store || null,
     dropped_over_limit: payload.messages.length - messages.length,
     newest: payload.newest || 0,
+    eligible,
+    ineligible,
   };
   // The inbox does not fit in a pipe: 700 conversations and their messages are hundreds of
   // kilobytes, and a caller that reads this through a shell gets a truncated string that parses as
@@ -216,6 +261,8 @@ async function main() {
       out: args.out,
       conversations: full.conversations.length,
       messages: full.messages.length,
+      eligible: full.eligible,
+      ineligible: full.ineligible,
       dropped_over_limit: full.dropped_over_limit,
       skipped_no_timestamp: full.skipped_no_timestamp,
       store: full.store,
