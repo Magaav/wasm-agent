@@ -11,6 +11,10 @@ cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 # The execution and automation contracts have native, model-free adversarial tests.
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host file_search::tests
+# Run the serve-level invariants, each a measured regression: routing by session (a wake carries its
+# conversation in the body's `thread`, not the auth header) and the UI version tracking content rather
+# than mtime (a `cp -f` of identical files must not force every open page to reload).
+cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host serve::
 cargo test --release --offline --manifest-path rust/wa-sentinel/Cargo.toml
 BIN=rust/target/release/wa
 # A turn cannot deploy the process serving that same turn. The marker crosses
@@ -26,8 +30,10 @@ if WASM_AGENT_IN_TURN=1 bash scripts/upgrade.sh "$BIN" >"$GUARD_HOME/upgrade.log
   echo "FAIL: upgrade.sh accepted a running-turn invocation" >&2; exit 1
 fi
 grep -q 'refused inside a running turn' "$GUARD_HOME/upgrade.log"
-rm -f "$GUARD_HOME/deploy.log" "$GUARD_HOME/upgrade.log" "$GUARD_HOME/install/deploy.log"
-rmdir "$GUARD_HOME/install" "$GUARD_HOME"
+# `deploy.sh` now records a machine-readable result beside the install, so the temp home is not empty of
+# files after the guard fires; remove the whole tree rather than a fixed list, or the smoke gate aborts
+# here and never reaches the tests that matter.
+rm -rf "$GUARD_HOME"
 echo "self-update turn guard ok"
 # The other half of the install gate: it must refuse to replace an install that is ahead of this tree. Its
 # own file, because it asserts five cases (ahead, ancestor, no record, no commit=, an unresolvable commit)
@@ -695,6 +701,10 @@ assert(#memory.recall("session test fact", 5) > 0, "memory must not depend on th
 print("sessions ok")
 LUA
 WA_SCRIPT="$DB.sessions.lua" "$BIN" --db "$DB" | grep "sessions ok"
+# The ledger's order under concurrent writers: several processes appending to one session at once. A
+# single-process test cannot catch a `MAX(seq)+1` race. The check is mutation-tested: removing the
+# transaction in `append_turn` makes it fail with a duplicate seq.
+WA_BIN="$BIN" bash scripts/test-append-race.sh | grep "append race ok"
 rm -f "$DB.sessions.lua"
 
 # Session recovery. The contract - what an unfinished thread is, what is recorded

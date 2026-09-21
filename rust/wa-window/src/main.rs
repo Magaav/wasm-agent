@@ -76,7 +76,26 @@ mod companion {
         mode: String,
         topmost: bool,
         next_topmost: Instant,
+        /// Where to re-navigate when the page has to be reloaded.
+        ui_url: String,
+        /// The last time this window's page said its loop was running. `None` = it never has.
+        last_heartbeat: Option<Instant>,
         views: Vec<View>,
+    }
+
+    /// Whether the page's heartbeat has gone quiet long enough to call the page dead. `None` - it never
+    /// beat - is dead too: that is the page that started on an error page.
+    ///
+    /// The proof has to come from the page itself. WebView2 reports a *failed* navigation as `Finished`
+    /// (measured - a window pointed at a dead port logged "page loaded" three times), so "did the load
+    /// finish" cannot tell an error page from a good one. And it has to be *this* window's page: the
+    /// node's page-age counter is global, so one live window would hide a dead one.
+    fn heartbeat_stale(age: Option<Duration>, timeout: Duration) -> bool {
+        age.map(|age| age >= timeout).unwrap_or(true)
+    }
+
+    fn env_ms(name: &str, fallback: u64) -> u64 {
+        std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(fallback)
     }
 
     /// Give the window (taskbar, alt-tab) the embedded wasm-agent icon.
@@ -135,6 +154,9 @@ mod companion {
     maximize: () => send('set_mode', { mode: 'maximized' }),
     drag: () => send('drag'),
     topmost: (enabled) => send('topmost', { enabled: enabled !== false }),
+    // The page's once-a-second loop, forwarded here. The window has no other per-window proof that the
+    // page's JavaScript is alive, and a page stuck on an error page cannot report it itself.
+    heartbeat: () => send('heartbeat'),
     // A view in its own window: the chat stays the chat, and this is a screen you work in. The URL
     // is built by the page, because the page is what knows where it was loaded from.
     openView: (view, url) => send('open_view', { view: String(view || 'view'), url: String(url || '') }),
@@ -367,6 +389,11 @@ mod companion {
                 let _ = main_webview;
                 return true;
             }
+            // The page's once-a-second loop. `from_main` because only the chat's page is watched - a
+            // view's heartbeats must not keep a dead chat's timestamp fresh.
+            "heartbeat" if from_main => {
+                state.last_heartbeat = Some(Instant::now());
+            }
             _ => {}
         }
         false
@@ -502,9 +529,12 @@ mod companion {
             mode: "compact".into(),
             topmost: true,
             next_topmost: Instant::now() + TOPMOST_INTERVAL,
+            ui_url: url.clone(),
+            last_heartbeat: Some(Instant::now()),
             views: Vec::new(),
         };
         let view_proxy = event_loop.create_proxy();
+        let heartbeat_timeout = Duration::from_millis(env_ms("WASM_AGENT_UI_HEARTBEAT_TIMEOUT_MS", 15000));
         event_loop.run(move |event, target, control_flow| {
             *control_flow = ControlFlow::WaitUntil(state.next_topmost);
             match event {
@@ -513,6 +543,17 @@ mod companion {
                         window.set_always_on_top(true);
                     }
                     state.next_topmost = Instant::now() + TOPMOST_INTERVAL;
+                    // A page that stopped heartbeating is an error page or a hung one; nothing inside it
+                    // can recover, so the window reloads it. The node's up/down state does not matter:
+                    // the page's own loop is the signal, and a reload while the node is away simply
+                    // retries rather than sticking.
+                    if heartbeat_stale(state.last_heartbeat.map(|last| last.elapsed()), heartbeat_timeout) {
+                        note("the page stopped heartbeating - reloading it");
+                        if let Err(error) = webview.load_url(&state.ui_url) {
+                            note(&format!("reload failed: {error}"));
+                        }
+                        state.last_heartbeat = Some(Instant::now());
+                    }
                 }
                 Event::UserEvent(UserEvent::Ipc(sender, body)) => {
                     if handle(&window, &webview, &mut state, sender, &body, target, &view_proxy) {
@@ -548,6 +589,22 @@ mod companion {
                 _ => {}
             }
         });
+    }
+
+    #[cfg(test)]
+    mod heartbeat_tests {
+        use super::heartbeat_stale;
+        use std::time::Duration;
+
+        #[test]
+        fn a_page_that_stops_heartbeating_is_reloaded_and_a_live_one_is_not() {
+            let timeout = Duration::from_secs(15);
+            assert!(!heartbeat_stale(Some(Duration::from_secs(1)), timeout), "beating");
+            assert!(!heartbeat_stale(Some(Duration::from_secs(14)), timeout), "still inside");
+            assert!(heartbeat_stale(Some(Duration::from_secs(15)), timeout), "at the deadline");
+            assert!(heartbeat_stale(Some(Duration::from_secs(300)), timeout), "long dead");
+            assert!(heartbeat_stale(None, timeout), "never beat: dead from the start");
+        }
     }
 }
 

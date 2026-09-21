@@ -2523,6 +2523,11 @@ async function watch() {
   try {
     const response = await apiFetch("version");
     const payload = await response.json();
+    // Tell the shell this page's loop is alive. It is the only per-window proof: the node's page-age
+    // counter is global, and WebView2 reports a failed navigation as "finished", so a shell cannot tell
+    // an error page from a good one by the load alone. A page stuck on an error page cannot send this,
+    // which is exactly what the shell watches for.
+    if (native && typeof native.heartbeat === "function") native.heartbeat();
     applyUiVersion(payload.version);
     // The node answered, so finish the first sync if it never finished. This loop always runs.
     if (!synced) sync("watch");

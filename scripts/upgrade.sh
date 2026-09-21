@@ -315,6 +315,9 @@ wait_health() {
 SWAP_OK=1
 if [ "$NEW" -ef "$INSTALLED" ]; then
   say "the new binary is already the installed one ($INSTALLED) - nothing to swap, restarting it"
+elif cmp -s "$NEW" "$INSTALLED"; then
+  # Same bytes, different file: copying would only move the mtime, which nothing should read as a change.
+  say "the new binary is byte-identical to $INSTALLED - nothing to swap, restarting it"
 else
   cp -f "$NEW" "$INSTALLED" || SWAP_OK=0
   say "installed $(basename "$NEW") over $INSTALLED"
@@ -322,7 +325,11 @@ fi
 UI_OK=$SWAP_OK
 if [ -d "$SOURCE_UI" ] && [ "$SOURCE_UI" != "$UI_DIR" ]; then
   mkdir -p "$UI_DIR"
-  for asset in $UI_FILES; do cp -f "$SOURCE_UI/$asset" "$UI_DIR/$asset" || UI_OK=0; done
+  # `cmp` first: an unconditional `cp -f` moves the mtime of an *unchanged* asset, and the UI's version is
+  # read by every open page. A no-op install must be a no-op, not a reason for every window to reload.
+  for asset in $UI_FILES; do
+    cmp -s "$SOURCE_UI/$asset" "$UI_DIR/$asset" || cp -f "$SOURCE_UI/$asset" "$UI_DIR/$asset" || UI_OK=0
+  done
 fi
 start_node "$INSTALLED"
 if [ "$UI_OK" = "1" ] && wait_health; then

@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Deploy a node: the one gate through which a build becomes the installed one.
 #
-#   bash scripts/deploy.sh [--reason "why"]
+#   bash scripts/deploy.sh [--reason "why"] [--session <id> --prompt "continue with…"]
+#
+# The tree it builds from is `..` when this script is run from a worktree, `WA_DEPLOY_ROOT` if that is set,
+# and otherwise the runtime worktree recorded in <install>/runtime-worktree.txt. The last case is not a
+# convenience: `request deploy` runs the copy installed beside the supervisor, whose parent is the install
+# directory, so `..` alone is never a worktree there.
 #
 # Why this exists. Two parties install this node - the operator and the agent working in it - and for a day
 # they installed over each other: the agent rebuilt from its worktree while a fix was being deployed from
@@ -24,13 +29,14 @@
 #   6. what was installed is recorded, and the pid answering must be the pid the install recorded.
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
-
 REASON=""
+SESSION=""
+PROMPT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --reason) REASON="${2:-}"; shift 2 ;;
+    --session) SESSION="${2:-}"; shift 2 ;;
+    --prompt) PROMPT="${2:-}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -39,6 +45,32 @@ INSTALL_DIR="${WA_INSTALL_DIR:-$HOME/AppData/Local/wasm-agent}"
 [ -d "$INSTALL_DIR" ] || INSTALL_DIR="${WA_INSTALL_DIR:-$HOME/.local/share/wasm-agent}"
 PORT="${WA_PORT:-8799}"
 CLIENT_PORT="${WA_CLIENT_PORT:-8800}"
+SENTINEL_CONFIG="${WASM_AGENT_HOME:-${USERPROFILE:-$HOME}}/.wasm-agent"
+
+# The sentinel executes `run` scripts only from directories named here, and the install's own scripts (the
+# whatsapp hooks, the preflight) live in <install>/scripts. Without this, every job whose action is `run`
+# fails with "run is disabled: set WA_SENTINEL_SCRIPTS" - which is exactly how whatsapp-ingest was failing.
+# Export it so the watcher this deploy starts or restarts inherits it; the service unit and the logon task
+# set it too, because a watcher not started by this script must still have it.
+#
+# The path must be in the native form: the sentinel is a native Windows process, and a POSIX `/c/...`
+# canonicalizes against `C:` into a directory that does not exist, after which every script is refused as
+# "not inside WA_SENTINEL_SCRIPTS". This is the project's oldest trap, applied to itself.
+WA_SCRIPTS_DIR="$INSTALL_DIR/scripts"
+command -v cygpath >/dev/null 2>&1 && WA_SCRIPTS_DIR="$(cygpath -w "$WA_SCRIPTS_DIR")"
+export WA_SENTINEL_SCRIPTS="${WA_SENTINEL_SCRIPTS:-$WA_SCRIPTS_DIR}"
+
+# A machine-readable result, written on both sides of the outcome. `installed.txt` says what is installed;
+# this says what the *deploy* did, so a woken run reads one small file instead of re-deriving the answer
+# from installed.txt, deploy.log, hashes and the sentinel status. `fail` writes it too, so a refusal is a
+# result and not only a log line.
+write_result() { # ok detail
+  _esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\r\n' '  '; }
+  printf '{"ok":%s,"commit":"%s","branch":"%s","node_sha256":"%s","sentinel_sha256":"%s","watcher_pid":"%s","detail":"%s","reason":"%s","at":"%s"}\n' \
+    "$1" "${COMMIT:-}" "${BRANCH:-}" "${HASH:-}" "${SENTINEL_HASH:-}" \
+    "${SENTINEL_NEW_PID:-${SENTINEL_WATCH_PID:-}}" "$(_esc "$2")" "$(_esc "$REASON")" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$INSTALL_DIR/deploy-result.json" 2>/dev/null || true
+}
 
 # A refusal is evidence: the gate saying no, with a reason, at a moment. Printing to stderr is not enough -
 # after the fact, "did it refuse anything?" has to be answerable. Every refusal is appended to
@@ -47,6 +79,26 @@ fail() {
   echo "deploy: $*" >&2
   printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${COMMIT:-unknown}" "${BRANCH:-unknown}" "$*" \
     >> "$INSTALL_DIR/deploy.log" 2>/dev/null
+  write_result false "$*"
+  # A requested deploy is answered, including when the answer is no. This is the other half of the wake
+  # below: that one says the install landed, and without this one a deploy that failed *before* the swap
+  # told nobody - the request was already `done` (it had been spawned), the node was untouched, and the
+  # only trace was a line in deploy.log nobody had a reason to read. A hand-run deploy passes no --session
+  # and wakes nobody: a refusal at a shell is read by the person at the shell.
+  # The wording claims nothing about the install, because `fail` is reached on both sides of the swap.
+  if [ -n "${SESSION:-}" ]; then
+    FAIL_SENTINEL="${INSTALL_DIR:-}/wa-sentinel.exe"
+    [ -x "$FAIL_SENTINEL" ] || FAIL_SENTINEL="${INSTALL_DIR:-}/wa-sentinel"
+    if [ -x "$FAIL_SENTINEL" ]; then
+      if "$FAIL_SENTINEL" request wake --session "$SESSION" \
+        --prompt "The deploy you requested failed: $*  Nothing is claimed here about what is installed - $INSTALL_DIR/installed.txt and $INSTALL_DIR/deploy.log are the evidence. Fix the cause, then request deploy again." \
+        --reason "deploy failed: $*" >/dev/null 2>&1; then
+        echo "deploy: failure reported to $SESSION" >&2
+      else
+        echo "deploy: WARNING could not report the failure to $SESSION" >&2
+      fi
+    fi
+  fi
   exit 1
 }
 
@@ -63,6 +115,33 @@ note() {
 if [ "${WASM_AGENT_IN_TURN:-}" = "1" ]; then
   fail "cannot deploy from a running turn: it cannot become idle while this command waits. Build, then request an upgrade through wa-sentinel; see skills/self-update/SKILL.md"
 fi
+
+# Which tree does this deploy build from? `dirname $0/..` is a worktree only when this script is run from
+# one, and the sentinel's `deploy` verb runs the copy installed beside the supervisor - whose parent is the
+# install directory. Resolve it the way upgrade.sh resolves the runtime worktree, and refuse loudly rather
+# than build something that cannot say what it is.
+resolve_root() {
+  if [ -n "${WA_DEPLOY_ROOT:-}" ]; then printf '%s' "$WA_DEPLOY_ROOT"; return; fi
+  local beside=""
+  beside="$(cd "$(dirname "$0")/.." && pwd)"
+  if git -C "$beside" rev-parse --is-inside-work-tree >/dev/null 2>&1; then printf '%s' "$beside"; return; fi
+  local recorded=""
+  if [ -f "$INSTALL_DIR/runtime-worktree.txt" ]; then
+    recorded="$(tr -d '\r\n' < "$INSTALL_DIR/runtime-worktree.txt")"
+  fi
+  case "$recorded" in
+    *\\*)
+      if command -v cygpath >/dev/null 2>&1; then recorded="$(cygpath -u "$recorded")"; fi ;;
+  esac
+  if [ -n "$recorded" ] && git -C "$recorded" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf '%s' "$recorded"; return
+  fi
+  printf ''
+}
+ROOT="$(resolve_root)"
+[ -n "$ROOT" ] || fail "cannot tell which worktree to deploy from: run this script from one, set WA_DEPLOY_ROOT, or record it in $INSTALL_DIR/runtime-worktree.txt - a deploy that cannot say what it builds does not build"
+[ -d "$ROOT" ] || fail "the worktree to deploy from does not exist: $ROOT"
+cd "$ROOT" || fail "cannot enter the worktree to deploy from: $ROOT"
 
 # 1. Clean. A build from a half-edited tree is not reproducible, and the file being edited is often the one
 #    that matters.
@@ -172,12 +251,19 @@ if [ -n "${WA_RUNTIME_WORKTREE:-}" ]; then
 fi
 WA_INSTALL_DIR="$INSTALL_DIR" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
   WA_UPGRADE_REASON="$REASON" WA_UPGRADE_VIA=deploy.sh \
-  bash "$UPGRADE" "$(cd "$(dirname "$NEW")" && pwd)/$(basename "$NEW")" 2>&1 | sed "s/^/  upgrade: /"
-UPGRADE_STATUS=${PIPESTATUS[0]}
+  # upgrade.sh writes to a *file*, not into a pipe. A deploy runs detached, and a detached process's stdout
+  # belongs to whoever spawned it - so when that parent went away, a write into the pipe raised SIGPIPE and
+  # upgrade.sh died with exit 141 before it could say what it was doing. That transcript is also the evidence
+  # that was missing: the failure was reported and nothing could say why.
+  bash "$UPGRADE" "$(cd "$(dirname "$NEW")" && pwd)/$(basename "$NEW")" > "$INSTALL_DIR/deploy-upgrade.log" 2>&1
+UPGRADE_STATUS=$?
+# Reporting must never fail the deploy: with stdout gone, `sed` dies of EPIPE and pipefail would then report
+# its status instead of upgrade.sh's.
+sed "s/^/  upgrade: /" "$INSTALL_DIR/deploy-upgrade.log" 2>/dev/null | tail -20 || true
 if [ "$UPGRADE_STATUS" = "3" ]; then
   fail "the node upgraded, but its script or install record failed (exit 3); inspect the live pid and installed.txt"
 fi
-[ "$UPGRADE_STATUS" = "0" ] || fail "upgrade.sh failed (exit $UPGRADE_STATUS); inspect its rollback output before assuming which binary is live"
+[ "$UPGRADE_STATUS" = "0" ] || fail "upgrade.sh failed (exit $UPGRADE_STATUS); its own output is in $INSTALL_DIR/deploy-upgrade.log"
 
 # 7. Verify that the node answering is *this* install: the listener's pid must be the pid the install
 #    recorded. Without this, a second node on the port answers /health and the deploy reports success for
@@ -254,11 +340,93 @@ if [ -n "$SENTINEL_WATCH_PID" ]; then
   [ -n "$SENTINEL_NEW_PID" ] && [ "$SENTINEL_NEW_PID" != "$SENTINEL_WATCH_PID" ] \
     || fail "node installed, but the sentinel did not start as a new watcher"
   echo "deploy: sentinel pid $SENTINEL_WATCH_PID -> $SENTINEL_NEW_PID"
+elif [ ! -f "$SENTINEL_CONFIG/sentinel/stop" ]; then
+  # No watcher, and no stop file, means nothing is left that can perform a request - a fresh install, a
+  # reboot, or a watcher that died. Start one. The stop file is what `wa-sentinel stop` writes, so an
+  # intentional stop is respected: this only fixes the case where there was never one, or it crashed.
+  echo "deploy: no sentinel watching - starting one"
+  "$INSTALL_DIR/$SENTINEL_NAME" start || fail "node installed, but the sentinel would not start"
+  SENTINEL_NEW_PID=""
+  for _ in $(seq 1 50); do
+    SENTINEL_NEW_PID="$("$INSTALL_DIR/$SENTINEL_NAME" status 2>/dev/null \
+      | awk '$1=="sentinel:" && $2=="watching" {gsub(/[^0-9]/,"",$4); print $4; exit}')"
+    [ -n "$SENTINEL_NEW_PID" ] && break
+    sleep 0.1
+  done
+  [ -n "$SENTINEL_NEW_PID" ] || fail "node installed, but the sentinel did not start watching"
+  echo "deploy: sentinel started (pid $SENTINEL_NEW_PID)"
+else
+  echo "deploy: sentinel stopped by request (stop file present) - not starting it"
 fi
 
 cmp -s "$UPGRADE" "$INSTALL_DIR/scripts/upgrade.sh" || fail "the node is installed but the sentinel's upgrade.sh differs from this release"
 UPGRADE_HASH="$(sha256sum < "$INSTALL_DIR/scripts/upgrade.sh" 2>/dev/null | awk '{print $1}')"
 [ -n "$UPGRADE_HASH" ] || fail "the node is installed but upgrade.sh could not be hashed"
+
+# Ship this script beside the binary too. The sentinel's `deploy` verb resolves `scripts/deploy.sh`
+# beside the installed binary first - that is where an install keeps the scripts it is allowed to run -
+# but `upgrade.sh` ships only itself, so a `request deploy` from an installed node found no deploy.sh
+# and failed before it reached the gate, then fell back to the watcher's cwd (a checkout it should not
+# need). Installing from the checkout's copy here is the only chance to close that: a deploy has to
+# leave the next one able to run with no human at a shell.
+DEPLOY_SRC="$ROOT/scripts/deploy.sh"
+[ -f "$DEPLOY_SRC" ] || DEPLOY_SRC="$0"
+if [ -f "$DEPLOY_SRC" ]; then
+  mkdir -p "$INSTALL_DIR/scripts"
+  cmp -s "$DEPLOY_SRC" "$INSTALL_DIR/scripts/deploy.sh" \
+    || cp -f "$DEPLOY_SRC" "$INSTALL_DIR/scripts/deploy.sh" \
+    || fail "node installed, but could not ship deploy.sh beside the binary"
+fi
+
+# Ship the WhatsApp pipeline with the node it belongs to. `upgrade.sh` installs the binary, the UI and the
+# self-update skill, and has never carried these: the scripts that read the inbox, the job files that
+# schedule and trigger them, and the entry point that says "emit" were placed in <install>/scripts by hand.
+# That is how the ingest came to emit on a topic (`app.message`) that no job listened for, with the mismatch
+# invisible because nothing ever shipped the two together - the reply job's history was a wall of "waiting
+# for explicit event ingress" and nothing could say why. A pipeline that exists on one machine's install
+# directory is not deployed, so it is deployed here.
+if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
+  PIPELINE=0
+  for source in "$ROOT"/scripts/whatsapp-*; do
+    [ -f "$source" ] || continue
+    cp -f "$source" "$INSTALL_DIR/scripts/" || fail "node installed, but could not ship $(basename "$source")"
+    PIPELINE=$((PIPELINE + 1))
+  done
+  INSTALL_MIXED="$(cygpath -m "$INSTALL_DIR" 2>/dev/null || printf '%s' "$INSTALL_DIR")"
+  for source in "$ROOT"/jobs/whatsapp-*.json; do
+    [ -f "$source" ] || continue
+    JOB_NAME="$(basename "$source" .json)"
+    # The job files name their script as PREPARED_BY_INSTALL/... so one file works from a checkout and from
+    # an install: this substitution is what that placeholder was written for.
+    sed "s|PREPARED_BY_INSTALL|$INSTALL_MIXED|g" "$source" > "$INSTALL_DIR/scripts/$JOB_NAME.job.json" \
+      || fail "node installed, but could not prepare job $JOB_NAME"
+    # Skip an unchanged definition, and this is not an optimisation. `job put` and `job enable` both
+    # increment the job's revision, and a delivery is pinned to a revision - so re-putting a job that did
+    # not change *cancels every pending delivery* for it. On 2026-09-21 that turned eight freshly ingested
+    # messages into `definition changed`/`cancelled` rows: the pipeline was connected and the deploy's own
+    # bookkeeping dropped the first events through it.
+    if cmp -s "$INSTALL_DIR/scripts/$JOB_NAME.job.json" "$INSTALL_DIR/scripts/$JOB_NAME.job.json.shipped" 2>/dev/null; then
+      echo "deploy: job $JOB_NAME unchanged"
+      continue
+    fi
+    if "$INSTALL_DIR/$SENTINEL_NAME" job put "$INSTALL_DIR/scripts/$JOB_NAME.job.json" >/dev/null 2>&1; then
+      PIPELINE=$((PIPELINE + 1))
+      # The store is deliberately default-off: an import must not be able to start automation by itself
+      # (docs/JOBS.md). A deploy is the operator's own action, so it applies the state this tree declares
+      # for the job - without which every deploy would silently disable a pipeline that was running.
+      if grep -q '"enabled"[[:space:]]*:[[:space:]]*true' "$source"; then
+        "$INSTALL_DIR/$SENTINEL_NAME" job enable "$JOB_NAME" >/dev/null 2>&1 \
+          || echo "deploy: WARNING could not enable job $JOB_NAME"
+      fi
+      cp -f "$INSTALL_DIR/scripts/$JOB_NAME.job.json" "$INSTALL_DIR/scripts/$JOB_NAME.job.json.shipped" \
+        || echo "deploy: WARNING could not record the shipped revision of job $JOB_NAME"
+    else
+      echo "deploy: WARNING could not put job $JOB_NAME into the store"
+    fi
+  done
+  # Durable, not only stdout: a deploy runs detached and its stdout belongs to nobody afterwards.
+  note "shipped $PIPELINE pipeline file(s) into $INSTALL_DIR/scripts"
+fi
 
 RECORD_TMP="$INSTALL_DIR/.installed.txt.deploy.$$"
 REASON_LINE="$(printf '%s' "$REASON" | tr '\r\n' '  ')"
@@ -270,3 +438,26 @@ printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nupgrade_s
 echo "deploy: installed $COMMIT ($HASH)"
 echo "deploy: recorded in $INSTALL_DIR/installed.txt"
 echo "deploy: /health -> $(curl -s -m 5 "http://127.0.0.1:$PORT/health" | head -c 260)"
+write_result true "installed $COMMIT; watcher ${SENTINEL_NEW_PID:-${SENTINEL_WATCH_PID:-none}}"
+VERDICT="[deploy result] ok commit=$COMMIT node_sha=$HASH sentinel_sha=$SENTINEL_HASH watcher=${SENTINEL_WATCH_PID:-none}->${SENTINEL_NEW_PID:-none}. Evidence: $INSTALL_DIR/deploy-result.json and installed.txt; run scripts/verify-install.sh for the checks."
+
+# The continuation, and the reason this script takes --session/--prompt at all: the deploy is performed
+# detached (the sentinel cannot replace itself while it is the process running the replacement), so the
+# wake is the only completion signal the run that asked for this will ever see. Queued *here* - after the
+# new node answered /health - and performed by the **new** watcher, which is the one thing that can
+# honestly say the upgrade landed. A failure to queue it is reported and does not fail the deploy: the
+# node and the sentinel are already installed, and saying so is better than rolling back over a wake.
+if [ -n "$SESSION" ]; then
+  SENTINEL_BIN="$INSTALL_DIR/wa-sentinel.exe"
+  [ -x "$SENTINEL_BIN" ] || SENTINEL_BIN="$INSTALL_DIR/wa-sentinel"
+  if [ -x "$SENTINEL_BIN" ] && [ -n "$PROMPT" ]; then
+    "$SENTINEL_BIN" request wake --session "$SESSION" --prompt "$PROMPT
+
+$VERDICT" \
+      --reason "deploy finished: $REASON" >/dev/null 2>&1 \
+      && echo "deploy: continuation queued for $SESSION" \
+      || echo "deploy: WARNING could not queue the continuation for $SESSION; the install itself is done"
+  else
+    echo "deploy: WARNING no sentinel beside $INSTALL_DIR to queue the continuation with"
+  fi
+fi

@@ -230,14 +230,17 @@ fn stop_node(reason: &str) -> Result<()> {
     } else {
         std::process::Command::new("kill").arg(pid.to_string()).output()?;
     }
-    for _ in 0..20 {
-        if pid_on_port(node_port()).is_none() {
+    for _ in 0..40 {
+        // A freed port is not a dead process. The node may have released the listener and still be
+        // flushing its turn's final message; starting the replacement (or delivering a wake) in that
+        // window is what let two writers interleave one transcript. Wait for the pid itself to be gone.
+        if pid_on_port(node_port()).is_none() && !pid_alive(pid) {
             audit("stop", &format!("pid {pid}"), reason);
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(250));
     }
-    bail!("pid {pid} is still listening on {}", node_port())
+    bail!("pid {pid} is still listening on {} or still alive", node_port())
 }
 
 fn start_node(binary: &Path, reason: &str) -> Result<()> {
@@ -245,30 +248,38 @@ fn start_node(binary: &Path, reason: &str) -> Result<()> {
     let port = node_port().to_string();
     let cport = client_port().to_string();
     say(&format!("starting {} on port {port}", binary.display()));
-    if cfg!(windows) {
-        // CreateProcessW with DETACHED_PROCESS, rather than `powershell Start-Process`. Measured:
-        // the shell hop costs ~243ms of the ~310ms it takes to see the node healthy, while the
-        // node's own boot is ~49ms. This is the last place a shell was in the hot path.
-        #[cfg(windows)]
-        {
-            let args = vec![
-                "serve".to_string(),
-                "--port".to_string(), port.clone(),
-                "--client-port".to_string(), cport.clone(),
-                "--ui".to_string(), ui.display().to_string(),
-            ];
-            let child = winproc::start_detached(binary, &args).context("start the node")?;
-            say(&format!("started pid {child}"));
+    // CreateProcessW with DETACHED_PROCESS, rather than `powershell Start-Process`. Measured:
+    // the shell hop costs ~243ms of the ~310ms it takes to see the node healthy, while the
+    // node's own boot is ~49ms. This is the last place a shell was in the hot path.
+    #[cfg(windows)]
+    let child_pid = {
+        let args = vec![
+            "serve".to_string(),
+            "--port".to_string(), port.clone(),
+            "--client-port".to_string(), cport.clone(),
+            "--ui".to_string(), ui.display().to_string(),
+        ];
+        winproc::start_detached(binary, &args).context("start the node")?
+    };
+    #[cfg(not(windows))]
+    let child_pid = std::process::Command::new(binary)
+        .args(["serve", "--port", &port, "--client-port", &cport, "--ui"])
+        .arg(&ui)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("spawn node")?
+        .id();
+    say(&format!("started pid {child_pid}"));
+    // The install records the serving pid in `serve.pid`: upgrade.sh writes it, and the sentinel did not.
+    // So a `request restart`/`request recover` left the recorded pid naming a process that was gone, and
+    // the deploy gate reads exactly that as "two nodes, one port" (it refused the next deploy), while
+    // `wa ui`'s stop instruction pointed at a dead pid. Record the pid the OS just gave us.
+    if let Some(dir) = binary.parent() {
+        if let Err(error) = std::fs::write(dir.join("serve.pid"), format!("{child_pid}\n")) {
+            audit("serve-pid-failed", &dir.display().to_string(), &error.to_string());
         }
-    } else {
-        std::process::Command::new(binary)
-            .args(["serve", "--port", &port, "--client-port", &cport, "--ui"])
-            .arg(&ui)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .context("spawn node")?;
     }
     audit("start", &binary.display().to_string(), reason);
     Ok(())
@@ -324,8 +335,12 @@ fn verb_wake(session: &str, prompt: &str, reason: &str) -> Result<String> {
         .unwrap_or(6);
     let used = wakes_last_hour();
     if used >= budget {
-        audit("wake-refused", session, &format!("{reason} (budget {budget}/hour used)"));
-        bail!("wake budget reached ({used}/{budget} in the last hour) - refusing, and saying so");
+        // Refusing is the wrong shape for a budget. A wake that is refused for budget has had no side
+        // effect at all - nothing happened - so the honest answer is "not yet": the caller puts it back in
+        // the queue and it runs when the allowance rolls. Marked `wake-budget:` so callers can tell this
+        // apart from a real failure, and audited as `wake-deferred` rather than `wake-refused`.
+        audit("wake-deferred", session, &format!("{reason} (budget {budget}/hour used)"));
+        bail!("wake-budget: {used}/{budget} in the last hour - deferred, not dropped");
     }
     // Wait for the node to be listening. A wake is usually written *beside* a restart, and a node that
     // has just been started takes seconds to bind - so a wake that fires immediately loses the race and
@@ -366,7 +381,7 @@ fn verb_wake(session: &str, prompt: &str, reason: &str) -> Result<String> {
             // Serialize reservations across workers and sentinel processes; failed attempts cost budget too.
             let reservation=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(sentinel_dir().join("wake-budget.lock"))?;
             reservation.lock()?;
-            if wakes_last_hour()>=budget {bail!("wake budget reached before submission")}
+            if wakes_last_hour()>=budget {bail!("wake-budget: reached before submission - deferred, not dropped")}
             use std::io::Write;
             let mut log=std::fs::OpenOptions::new().create(true).append(true).open(log_path())?;
             writeln!(log,"{}\twake-start\t{}\t{}",now_epoch(),session.replace(['\n','\r','\t']," "),reason.replace(['\n','\r','\t']," "))?;
@@ -536,6 +551,58 @@ pub(crate) fn verb_upgrade(binary: &str, reason: &str) -> Result<String> {
     }
 }
 
+/// Install everything that needs installing - the node, the UI **and the sentinel** - which is the one
+/// thing `upgrade` cannot do, because `upgrade.sh` never copies a sentinel.
+///
+/// Detached, on purpose, and this is the opposite of how every other verb works. Every other verb is a
+/// supervised child whose output is evidence; this one has to outlive its parent, because the parent
+/// *is* what is being replaced: a child of ours would be stopped with the watcher, mid-swap, and the
+/// only way to replace a running image on Windows is to be a different process while it happens. The
+/// evidence is not lost by that - `deploy.sh` proves the new node on a scratch port before it goes near
+/// the live one, records `installed.txt` and `deploy.log`, and rolls back on its own - and the completion
+/// signal is the continuation wake, which the *new* watcher performs.
+pub(crate) fn verb_deploy(session: &str, prompt: &str, reason: &str) -> Result<String> {
+    let script = resolve_deploy_script()?;
+    let (interpreter, script_arg) = shell_for(&script);
+    let mut args = vec![script_arg, "--reason".to_string(), reason.to_string()];
+    if !session.is_empty() {
+        args.push("--session".to_string());
+        args.push(session.to_string());
+    }
+    if !prompt.is_empty() {
+        args.push("--prompt".to_string());
+        args.push(prompt.to_string());
+    }
+    #[cfg(windows)]
+    let pid = winproc::start_detached(Path::new(&interpreter), &args)
+        .context("start the deploy script detached")?;
+    // POSIX: spawn without waiting and without inheriting our stdio. There is no DETACHED_PROCESS to ask
+    // for, so the process outlives us by virtue of not being waited on - which is all this needs, because
+    // the deploy restarts the watcher itself.
+    #[cfg(not(windows))]
+    let pid = {
+        use std::process::Stdio;
+        std::process::Command::new(&interpreter)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("start the deploy script detached")?
+            .id()
+    };
+    audit("deploy", &script.display().to_string(), reason);
+    let continuation = if session.is_empty() {
+        "no continuation was requested (no --session)".to_string()
+    } else {
+        format!("{session} will be woken when it finishes")
+    };
+    Ok(format!(
+        "deploy started detached (pid {pid}) from {}; it waits for idle, installs the node, the UI and the sentinel, and {continuation}",
+        script.display()
+    ))
+}
+
 /// Where `scripts/upgrade.sh` is.
 ///
 /// The default used to be the bare relative path `scripts/upgrade.sh`, checked against the
@@ -546,28 +613,28 @@ pub(crate) fn verb_upgrade(binary: &str, reason: &str) -> Result<String> {
 /// swap and no explanation. It happened twice before this was traced.
 ///
 /// Resolution order, so an upgrade works from a detached watcher:
-///   1. `WA_UPGRADE_SCRIPT`, the explicit override.
-///   2. `scripts/upgrade.sh` beside the *installed binary* (the upgrade target's directory) - this
+///   1. the explicit override (`WA_UPGRADE_SCRIPT`, `WA_SENTINEL_DEPLOY`).
+///   2. `scripts/<file>` beside the *installed binary* (the upgrade target's directory) - this
 ///      is where an install that ships the script puts it.
-///   3. `scripts/upgrade.sh` under the current directory, for a watcher started from a checkout.
-fn resolve_upgrade_script() -> Result<PathBuf> {
-    if let Ok(explicit) = std::env::var("WA_UPGRADE_SCRIPT") {
+///   3. `scripts/<file>` under the current directory, for a watcher started from a checkout.
+fn resolve_script(file: &str, override_env: &str) -> Result<PathBuf> {
+    if let Ok(explicit) = std::env::var(override_env) {
         if Path::new(&explicit).exists() {
             return Ok(PathBuf::from(explicit));
         }
-        bail!("WA_UPGRADE_SCRIPT points at {explicit}, which does not exist");
+        bail!("{override_env} points at {explicit}, which does not exist");
     }
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(me) = std::env::current_exe() {
         if let Some(dir) = me.parent() {
-            candidates.push(dir.join("scripts").join("upgrade.sh"));
+            candidates.push(dir.join("scripts").join(file));
         }
     }
     if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("scripts").join("upgrade.sh"));
+        candidates.push(cwd.join("scripts").join(file));
         // One level up, because a watcher is often started from a subdirectory of the checkout.
         if let Some(up) = cwd.parent() {
-            candidates.push(up.join("scripts").join("upgrade.sh"));
+            candidates.push(up.join("scripts").join(file));
         }
     }
     for candidate in &candidates {
@@ -576,13 +643,39 @@ fn resolve_upgrade_script() -> Result<PathBuf> {
         }
     }
     bail!(
-        "no upgrade script found (looked at {}; set WA_UPGRADE_SCRIPT to the full path)",
+        "no {file} found (looked at {}; set {override_env} to the full path)",
         candidates
             .iter()
             .map(|c| c.display().to_string())
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+fn resolve_upgrade_script() -> Result<PathBuf> {
+    resolve_script("upgrade.sh", "WA_UPGRADE_SCRIPT")
+}
+
+/// The deploy script, which is a different job from the upgrade script: `upgrade.sh` installs the node
+/// and the UI, while only `deploy.sh` installs a **sentinel**. That distinction is the whole reason the
+/// `deploy` verb exists - without it, a sentinel fix could only be installed by a human at a shell.
+fn resolve_deploy_script() -> Result<PathBuf> {
+    resolve_script("deploy.sh", "WA_SENTINEL_DEPLOY")
+}
+
+/// Verbs that change what the node is running. One at a time: two of these interleaved would fight over
+/// the same binary and the same pid file.
+fn is_management_verb(verb: &str) -> bool {
+    matches!(verb, "restart" | "recover" | "upgrade" | "spell" | "deploy")
+}
+
+/// Verbs that stop or replace the node, which therefore must not start while a turn is running: the run
+/// they would interrupt belongs to the session that asked for them. This is not a nicety - a deploy
+/// launched inside a turn waits for the idle that only its own parent can produce, and `run`'s 302s
+/// child deadline turns that deadlock into a kill. Kept as a named predicate so the next verb that
+/// stops the node has somewhere to be right, and `tests` below fail if it is forgotten.
+fn waits_for_idle(verb: &str) -> bool {
+    matches!(verb, "restart" | "upgrade" | "spell" | "deploy")
 }
 
 fn approved_script(script: &str) -> Result<PathBuf> {
@@ -649,6 +742,19 @@ fn perform(request: &Value) -> Result<String> {
             // process_requests owns this worker until completion; even `once` cannot lose a spawned wake.
             verb_wake(session,prompt,reason)
         }
+        // The change a plain `upgrade` cannot make: only `deploy.sh` installs a *sentinel*, and this is
+        // how a run asks for one without a human at a shell. Spawned **detached**, because the process
+        // being replaced is the one that would otherwise be its parent - a child of ours would be
+        // stopped together with the watcher mid-swap. The idle wait has already happened by the time this
+        // runs (`waits_for_idle`), so the script's budget is spent installing rather than waiting.
+        "deploy" => {
+            let session = request.get("session").and_then(Value::as_str).unwrap_or("");
+            let prompt = request.get("prompt").and_then(Value::as_str).unwrap_or("");
+            if session.is_empty() != prompt.is_empty() {
+                bail!("deploy continuation requires both --session and --prompt");
+            }
+            verb_deploy(session, prompt, reason)
+        }
         "run" => verb_run(request.get("script").and_then(Value::as_str).unwrap_or(""), reason),
         // A plan the agent exported. Validated against a whitelist before a single step runs, and
         // settled by this process's own /health check - the assertion the node cannot make about
@@ -676,6 +782,16 @@ fn finish_request(claim: &Path, request: &Value) {
         Ok(Err(error))=>("failed",false,error.to_string()),
         Err(_)=>("failed",false,"request worker panicked; outcome unknown".into()),
     };
+    // A wake deferred for budget is neither a failure nor a completion: the request goes back to the queue
+    // and is retried when the allowance rolls over. Before this, the budget turned a deploy's continuation
+    // into a `failed` record - so the run that asked for the deploy was never woken and nobody was told.
+    if !ok && detail.starts_with("wake-budget") {
+        let back = sentinel_dir().join("requests").join(claim.file_name().unwrap_or_default());
+        if std::fs::rename(claim, &back).is_ok() {
+            audit("wake-deferred", &back.display().to_string(), &detail);
+            return;
+        }
+    }
     let record=json!({"request":request,"ok":ok,"detail":detail,"at":now_epoch()});
     let target=sentinel_dir().join(folder).join(claim.file_name().unwrap_or_default());
     match wa_operation::atomic_json(&target,&record) {
@@ -700,10 +816,10 @@ fn process_requests(background: bool) -> Result<u32> {
         let preview:Value=std::fs::read(&path).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
         let capacity=if preview["verb"]=="recover" {5}else{4};
         if background && REQUEST_ACTIVE.load(Ordering::Acquire)>=capacity {continue;}
-        let management=matches!(preview["verb"].as_str(),Some("restart"|"recover"|"upgrade"|"spell"));
+        let management=is_management_verb(preview["verb"].as_str().unwrap_or(""));
         if management && MAINTENANCE_ACTIVE.load(Ordering::Acquire) {continue;}
         // Maintenance stays queued; observing it never monopolizes the recovery/control loop.
-        if matches!(preview["verb"].as_str(),Some("restart"|"upgrade"|"spell")) && !node_is_idle() {continue;}
+        if waits_for_idle(preview["verb"].as_str().unwrap_or("")) && !node_is_idle() {continue;}
         // Claim before working, not after. This used to read the request, do the work, and only then
         // remove the file - so a second runner (the watcher and a stray `once`, which is exactly what
         // happened) could pick up the same file while the first was still inside it, and run the
@@ -1132,9 +1248,64 @@ mod self_update_tests {
         for request in [
             json!({"verb":"upgrade","binary":"not-a-binary","session":"thread"}),
             json!({"verb":"upgrade","binary":"not-a-binary","prompt":"continue"}),
+            // The deploy path has the same rule: half a continuation is a wake nobody can receive.
+            json!({"verb":"deploy","session":"thread"}),
+            json!({"verb":"deploy","prompt":"continue"}),
         ] {
             let error = perform(&request).unwrap_err().to_string();
             assert!(error.contains("requires both --session and --prompt"), "{error}");
         }
+    }
+
+    /// The rule that a verb which stops the node waits for idle, asserted as a table so the next verb
+    /// that replaces the node has to be added here on purpose. Its absence is what killed a deploy: the
+    /// `run` verb does not wait, and its 302s child deadline expires while the deploy waits for the turn
+    /// that asked for it to end.
+    #[test]
+    fn verbs_that_replace_the_node_wait_for_idle_and_are_serialised() {
+        for verb in ["restart", "upgrade", "spell", "deploy"] {
+            assert!(waits_for_idle(verb), "{verb} must wait for idle");
+            assert!(is_management_verb(verb), "{verb} must not run beside another maintenance verb");
+        }
+        for verb in ["wake", "run"] {
+            assert!(!waits_for_idle(verb), "{verb} must not wait for idle");
+        }
+    }
+
+    /// A deploy request reaches a script and returns without blocking: the script is detached, because
+    /// the process it replaces is the one that would have been its parent.
+    #[test]
+    fn a_deploy_request_spawns_the_script_and_returns() {
+        let dir = std::env::temp_dir().join(format!("wa-deploy-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let marker = dir.join("ran.txt");
+        let script = dir.join("deploy-stub.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\n", marker.display()),
+        )
+        .expect("stub");
+        // `WA_SENTINEL_DEPLOY` is the same override an operator uses when the script lives elsewhere.
+        std::env::set_var("WA_SENTINEL_DEPLOY", &script);
+        let detail = verb_deploy("thread-1", "continue", "fixture").expect("deploy accepted");
+        assert!(detail.contains("detached"), "{detail}");
+        assert!(detail.contains("thread-1"), "the continuation must be named: {detail}");
+        // The child is detached, so it is *not* awaited - that is the property under test. Give it a
+        // moment and read what it wrote.
+        let mut wrote = None;
+        for _ in 0..40 {
+            if let Ok(text) = std::fs::read_to_string(&marker) {
+                wrote = Some(text);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let written = wrote.unwrap_or_else(|| "(the stub never ran)".to_string());
+        assert!(written.contains("--session thread-1"), "the session must reach the script: {written}");
+        assert!(written.contains("--prompt continue"), "the prompt must reach the script: {written}");
+        assert!(written.contains("--reason fixture"), "the reason must reach the script: {written}");
+        std::env::remove_var("WA_SENTINEL_DEPLOY");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

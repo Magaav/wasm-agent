@@ -113,8 +113,25 @@ impl Store {
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let id = definition["id"].as_str().unwrap();
+        let prepared = definition.to_string();
+        // A put that says nothing new must not invalidate anything. A delivery is pinned to a revision, so
+        // bumping the revision cancels every queued delivery for this job - and that is not hypothetical: a
+        // re-deploy that re-sent a byte-identical job turned eight freshly ingested messages into
+        // `definition changed`/`cancelled` rows. An import may be repeated safely, so it has to be a no-op.
+        let unchanged: bool = tx
+            .query_row(
+                "SELECT definition=?2 FROM jobs WHERE id=?1",
+                params![id, prepared],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if unchanged {
+            tx.commit()?;
+            return self.get(id);
+        }
         // Editing invalidates approval, including edits to the trigger or instruction.
-        tx.execute("INSERT INTO jobs(id,revision,enabled,definition) VALUES(?1,1,0,?2) ON CONFLICT(id) DO UPDATE SET revision=revision+1,enabled=0,definition=excluded.definition,next_at=0,source_status='not observed'",params![id,definition.to_string()])?;
+        tx.execute("INSERT INTO jobs(id,revision,enabled,definition) VALUES(?1,1,0,?2) ON CONFLICT(id) DO UPDATE SET revision=revision+1,enabled=0,definition=excluded.definition,next_at=0,source_status='not observed'",params![id,prepared])?;
         tx.execute("UPDATE deliveries SET state='cancelled',detail='definition changed' WHERE job_id=? AND state='queued'",[id])?;
         tx.commit()?;
         self.get(id)
@@ -378,6 +395,22 @@ impl Store {
     // Caller MUST hold the sentinel's exclusive runner lock. Never retry an ambiguous side effect.
     pub fn recover(&self, now: i64) -> Result<usize> {
         Ok(self.db()?.execute("UPDATE deliveries SET state='unknown',detail='sentinel restarted; reconcile external effects before retry',ended_at=? WHERE state='running'",[now])?)
+    }
+    /// Put a claimed delivery back in the queue, because the reason it could not run is temporary.
+    ///
+    /// The wake budget is the case this exists for: a model turn that is refused for budget has not had an
+    /// ambiguous side effect - nothing happened at all - so marking it `failed` throws away a delivery that
+    /// only needed to wait. Clearing `started_at` also keeps the refusal from spending the allowance it was
+    /// refused from, which `claim` counts from `started_at`.
+    pub fn defer(&self, id: i64, detail: &str) -> Result<()> {
+        if self.db()?.execute(
+            "UPDATE deliveries SET state='queued',started_at=NULL,detail=? WHERE id=? AND state='running'",
+            params![detail.chars().take(2000).collect::<String>(), id],
+        )? != 1
+        {
+            return fail("delivery_not_running");
+        }
+        Ok(())
     }
     pub fn history(&self) -> Result<Value> {
         let db = self.db()?;

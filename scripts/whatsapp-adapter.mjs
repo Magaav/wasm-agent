@@ -28,6 +28,11 @@
 //     its own function back.
 //   - **fail open.** A hook that breaks the page is worse than no hook: it runs before the app does, so
 //     every trap swallows its own errors and does nothing but record.
+// The hook itself lives in one place (`whatsapp-hook.mjs`) because two things install it: this adapter,
+// to learn the module names, and the sentinel's cdp trigger, as its `setup_expression`, so the page keeps
+// it across reloads. Two copies would drift.
+import { HOOK } from "./whatsapp-hook.mjs";
+
 const PORTS = [Number(process.env.WA_CDP_PORT) || 9222];
 const HOSTS = ["127.0.0.1", "[::1]"];
 
@@ -77,39 +82,6 @@ async function connect() {
 }
 
 // The hook. Every line here runs before the app, on every page load.
-const HOOK = [
-  "(() => {",
-  "  const state = window.__wa_adapter = window.__wa_adapter || { names: [], factories: {}, rewraps: 0, errors: [], polls: 0 };",
-  "  const note = (name, factory) => {",
-  "    if (typeof name !== 'string' || !name) return;",
-  "    if (!(name in state.factories)) state.names.push(name);",
-  "    state.factories[name] = factory;",
-  "  };",
-  "  const wrap = (original) => {",
-  "    if (typeof original !== 'function') return original;",
-  "    const wrapped = function (name, deps, factory) {",
-  "      try { note(name, factory); } catch (e) { state.errors.push('note: ' + String(e).slice(0, 50)); }",
-  "      return original.apply(this, arguments);",
-  "    };",
-  "    wrapped.__wa_wrapped = true;",
-  "    return wrapped;",
-  "  };",
-  "  const install = () => {",
-  "    const current = window.__d;",
-  "    if (typeof current !== 'function') return false;",
-  "    if (current.__wa_wrapped) return true;",
-  "    const wrapped = wrap(current);",
-  "    try { window.__d = wrapped; } catch (e) { state.errors.push('assign: ' + String(e).slice(0, 50)); return false; }",
-  "    return window.__d === wrapped;",
-  "  };",
-  "  const tick = () => {",
-  "    state.polls += 1;",
-  "    try { if (install()) state.rewraps += 0; } catch (e) { state.errors.push('tick: ' + String(e).slice(0, 50)); }",
-  "    if (state.polls < 1200) setTimeout(tick, 250);",
-  "  };",
-  "  tick();",
-  "})();",
-].join("\n");
 
 const command = process.argv[2] || "status";
 const argument = process.argv[3] || "";

@@ -25,6 +25,31 @@ remain local, not in Git. The 2,185-event snapshot covers
 * 524 completed tools, 20 failed; 368 bash, 89 edit, 18 read, three read_many,
   six operation calls. Repeated arguments within a run: two. Repetition is not
   automatically waste; failures are not automatically failed tasks.
+* A follow-up with the elapsed-time auditor found valid monotonic duration on all
+  524 completed tool spans: 6,875,581 ms summed, of which bash contributed
+  6,714,101 ms (**97.6514%**). Bash p50 was 292 ms, p95 88,211 ms and maximum
+  1,450,737 ms; its 11 failed calls consumed 606,601 ms. The duration distribution
+  was: 244 calls below one second / 55,571 ms; 51 at 1–10 seconds / 178,869 ms;
+  44 at 10–60 seconds / 1,183,859 ms; and only 29 at least 60 seconds but
+  5,295,802 ms (**78.8758%** of bash time). Two of those long calls failed and
+  consumed 604,094 ms—**99.5868%** of failed bash time. All 29 long calls had
+  distinct argument hashes, so exact-command repetition is not the cause visible
+  in this sample. Hashes and command text remain private. These spans include
+  dispatch and output projection and can overlap work in other runs; they are not
+  process CPU or global wall-clock time.
+* Only 17 runs in this time-bounded export had complete, internally consistent
+  parent/child timing. Within that separate population, summed run time was
+  8,863,196 ms: model calls 3,658,835 ms (**41.2812%**), all tools 5,118,904 ms
+  (**57.7546%**), bash/shell 4,957,605 ms (**55.9347%**) and unclassified work
+  85,457 ms. Per-run bash share had p50 **14.1772%** and p95 **80.4431%**. Do not
+  divide the all-tool population by this complete-run subset or present summed
+  concurrent runs as elapsed clock time.
+* A later model-free Windows executor probe separated native phases. Seven direct
+  no-op fixtures measured 24 ms total p50 (21 ms child execution after spawn),
+  while seven Git Bash no-ops measured 53 ms total p50 (49 ms execution): about
+  3–4 ms of measured non-execution supervisor work and a 29 ms local shell/direct
+  gap. The probe does not retrofit phase data into this historical export and does
+  not explain its 88.2-second bash p95 or 24-minute maximum.
 * Prepared-prefix measurements are absent. No verified task outcomes or independent
   acceptance checks are attached to this historical sample.
 

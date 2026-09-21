@@ -1,6 +1,7 @@
 {
   "id": "whatsapp-message",
   "name": "Answer a WhatsApp message as the operator (draft first; sending is gated)",
+  "enabled": true,
   "trigger": { "kind": "event", "topic": "whatsapp.message" },
   "action": {
     "kind": "wake",
