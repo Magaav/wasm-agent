@@ -305,18 +305,18 @@ curl -s -o /dev/null -m 3 -X POST -H 'content-type: application/json' -d '{}' "h
 sleep 2
 
 # A turn for a session nobody is running: it must not wait behind the wedged worker.
-curl -s -N -m 20 -X POST -H 'content-type: text/plain' -H 'x-wa-session: turn-session-a' \
-  --data 'reply with the single word: ok' "http://127.0.0.1:$TURN_PORT/chat" > "$WORK/turn-a.txt" 2>&1 &
+curl -s -N -m 20 -X POST -H 'content-type: application/json' \
+  --data '{"text":"reply with the single word: ok","thread":"turn-session-a"}' "http://127.0.0.1:$TURN_PORT/chat" > "$WORK/turn-a.txt" 2>&1 &
 sleep 3
 turns_health="$(curl -s -m 3 "http://127.0.0.1:$TURN_PORT/health" 2>/dev/null)"
 # The same session again: it must land on the worker already running it, not on a third one.
-curl -s -N -m 20 -X POST -H 'content-type: text/plain' -H 'x-wa-session: turn-session-a' \
-  --data 'reply with the single word: ok' "http://127.0.0.1:$TURN_PORT/chat" > "$WORK/turn-a2.txt" 2>&1 &
+curl -s -N -m 20 -X POST -H 'content-type: application/json' \
+  --data '{"text":"reply with the single word: ok","thread":"turn-session-a"}' "http://127.0.0.1:$TURN_PORT/chat" > "$WORK/turn-a2.txt" 2>&1 &
 sleep 3
 affinity_health="$(curl -s -m 3 "http://127.0.0.1:$TURN_PORT/health" 2>/dev/null)"
 # A different session: a second conversation, which is the point.
-curl -s -N -m 20 -X POST -H 'content-type: text/plain' -H 'x-wa-session: turn-session-b' \
-  --data 'reply with the single word: ok' "http://127.0.0.1:$TURN_PORT/chat" > "$WORK/turn-b.txt" 2>&1 &
+curl -s -N -m 20 -X POST -H 'content-type: application/json' \
+  --data '{"text":"reply with the single word: ok","thread":"turn-session-b"}' "http://127.0.0.1:$TURN_PORT/chat" > "$WORK/turn-b.txt" 2>&1 &
 TURN_B=$!
 sleep 4
 concurrent_health="$(curl -s -m 3 "http://127.0.0.1:$TURN_PORT/health" 2>/dev/null)"
