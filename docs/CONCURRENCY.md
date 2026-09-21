@@ -143,25 +143,33 @@ A `/node/chat` body is an envelope whose `to_node_id` is inside the signed bytes
 
     {"to_node_id":"<target node id>","text":"<prompt>","thread":"<optional conversation>"}
 
-The signature is `chat|<from>|<ts>|<sha256(body)>`, so the target, the prompt and the thread are all
-authenticated. The receiver checks `to_node_id` against its own node id at admission, before any
-conversation, worker or model call. This is what stops a relay (or anyone on the path) from
-redirecting a valid chat: the relay envelope's outer `to`/`path` are not covered by the transport
-signature, but a chat signed for node A delivered to node B is refused `wrong_target`, a changed path
-is refused because the signature names the `chat` kind, and a changed body is refused `bad_signature`.
-The fixture proves this with two real destination nodes that both trust the same peer: A and B are
-both valid recipients, so only the signed target tells them apart.
+The signature domain is **`chat-v2`**: `chat-v2|<from>|<ts>|<sha256(body)>`. The version is part of
+the signed message, so the target, the prompt and the thread are all authenticated *and* a new request
+cannot execute on an old receiver. The receiver checks `to_node_id` against its own node id at
+admission, before any conversation, worker or model call. This is what stops a relay (or anyone on the
+path) from redirecting a valid chat: the relay envelope's outer `to`/`path` are not covered by the
+transport signature, but a chat signed for node A delivered to node B is refused `wrong_target`, a
+changed path is refused because the signature names the `chat-v2` kind, and a changed body is refused
+`bad_signature`. The fixture proves this with two real destination nodes that both trust the same
+peer: A and B are both valid recipients, so only the signed target tells them apart.
 
 ### Compatibility and migration
 
-There is no insecure legacy fallback. A `/node/chat` body that is not the target-bound envelope is
-refused with `legacy_peer_protocol` (direct: 400; relay: 403), and a request whose `to_node_id` names
-another node is refused `wrong_target`. Upgrade both ends together:
+**Both directions fail closed until both ends are upgraded, and nothing ever runs the body as text.**
 
-- a new sender -> a new receiver works (the envelope);
-- a legacy sender -> a new receiver is refused with `legacy_peer_protocol` and must be upgraded;
-- a new sender -> a legacy receiver would run the envelope as the prompt text, so do not mix versions;
-  upgrade the peer before (or with) the sender.
+The signature domain changed from `chat` to `chat-v2`:
 
-The transport (`relay-send|node_id|ts`) is unchanged, so the deployed rendezvous keeps working; the
-binding is in the inner request, which is the part the target verifies.
+- a new sender -> a new receiver works (the target-bound envelope, verified as `chat-v2`);
+- a legacy sender -> a new receiver: the legacy `chat|...` signature does not verify as `chat-v2`, so
+the receiver refuses `legacy_peer_protocol` (direct: 400; relay: 403) and the request never reaches a
+model. This holds even when the body carries the new target fields;
+- a new sender -> a legacy receiver: the legacy verifier reconstructs `chat|...` and the signature is
+`chat-v2|...`, so it refuses `bad_signature` before any model. A new request cannot execute on an old
+receiver, even if a malicious relay redirects it.
+
+The version is deliberately breaking: there is no capability negotiation and no insecure fallback.
+Upgrade both ends together. The fixture proves both directions with a faithful legacy ed25519
+verification routine (it accepts a real `chat|...` signature and rejects a `chat-v2` one), so the
+old-receiver check is not a stub. The transport (`relay-send|node_id|ts`) is unchanged, so the
+deployed rendezvous keeps working; the binding and the version are in the inner request, which is the
+part the target verifies.

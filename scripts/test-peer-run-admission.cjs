@@ -83,6 +83,19 @@ function chatEnvelope(targetNodeId, text, thread) {
   if (thread) envelope.thread = thread;
   return JSON.stringify(envelope);
 }
+/// New-protocol chat headers: the signature domain is `chat-v2`.
+function chatHeaders(node, body) { return signedHeaders(node, 'chat-v2', body); }
+/// The legacy `/node/chat` verifier, faithfully: `chat|from|ts|sha256(body)` verified with the
+/// node's ed25519 public key. Used to prove a new `chat-v2` request cannot execute on an old
+/// receiver even when a relay redirects it - the old receiver reconstructs `chat|...`, so the v2
+/// signature does not verify.
+function legacyChatVerifies(publicKeyHex, from, ts, body, signatureHex) {
+  const message = 'chat|' + from + '|' + ts + '|' + hash(body);
+  const raw = Buffer.from(publicKeyHex, 'hex');
+  const der = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), raw]);
+  const key = crypto.createPublicKey({ key: der, format: 'der', type: 'spki' });
+  try { return crypto.verify(null, Buffer.from(message), key, Buffer.from(signatureHex, 'hex')); } catch { return false; }
+}
 async function request(url, method = 'GET', body, headers = {}) {
   const response = await fetch(url, { method, headers, body, signal: AbortSignal.timeout(90000) });
   const text = await response.text();
@@ -223,14 +236,14 @@ async function startDestination(node, service, mockPort) {
   // ---- direct signed /node/chat -----------------------------------------------------------------
   const directThread = 'peer-direct';
   const directBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-DIRECT', directThread);
-  const direct = await request(primary.url + '/node/chat', 'POST', directBody, { ...signedHeaders(peer, 'chat', directBody), accept: 'text/event-stream' });
+  const direct = await request(primary.url + '/node/chat', 'POST', directBody, { ...chatHeaders(peer, directBody), accept: 'text/event-stream' });
   check(direct.status === 200 && /RUN-MARKER-PEER-DIRECT/.test(direct.text), 'a signed direct /node/chat runs and answers as the verified peer');
   const operatorStatus = await request(primary.url + '/runs', 'POST', JSON.stringify({ action: 'status', thread: directThread }), { 'content-type': 'application/json' });
   check((operatorStatus.value.runs || []).length === 0, 'the peer conversation is owned by the verified peer, not the local operator');
   await until(async () => runIds((await request(primary.url + '/health')).value).some((row) => row.conversation === directThread), 'the direct run is keyed by its body thread');
   check(true, 'the authenticated body thread is preserved as the conversation key');
   const noThreadBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-NOTHREAD');
-  const noThread = await request(primary.url + '/node/chat', 'POST', noThreadBody, { ...signedHeaders(peer, 'chat', noThreadBody), accept: 'text/event-stream' });
+  const noThread = await request(primary.url + '/node/chat', 'POST', noThreadBody, { ...chatHeaders(peer, noThreadBody), accept: 'text/event-stream' });
   check(noThread.status === 200 && /RUN-MARKER-PEER-NOTHREAD/.test(noThread.text), 'a peer run with no body thread still runs');
   await until(async () => runIds((await request(primary.url + '/health')).value).some((row) => row.conversation === 'peer:' + peer.node_id), 'the no-thread run is keyed by the verified author');
   check(true, 'a body with no thread is keyed by the verified peer node id, not the credential');
@@ -238,13 +251,13 @@ async function startDestination(node, service, mockPort) {
   // ---- signature verified once -------------------------------------------------------------------
   const onceThread = 'peer-once';
   const onceBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-ONCE', onceThread);
-  const once = await request(primary.url + '/node/chat', 'POST', onceBody, { ...signedHeaders(peer, 'chat', onceBody), accept: 'text/event-stream' });
+  const once = await request(primary.url + '/node/chat', 'POST', onceBody, { ...chatHeaders(peer, onceBody), accept: 'text/event-stream' });
   check(once.status === 200 && /RUN-MARKER-PEER-ONCE/.test(once.text) && !/replayed_request/.test(once.text), 'a peer run succeeds, so the signature was verified exactly once (no re-verify replay)');
 
   // ---- duplicate / replayed request refused ------------------------------------------------------
   const replayThread = 'peer-replay';
   const replayBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-REPLAY', replayThread);
-  const replayHeaders = signedHeaders(peer, 'chat', replayBody);
+  const replayHeaders = chatHeaders(peer, replayBody);
   const first = await request(primary.url + '/node/chat', 'POST', replayBody, { ...replayHeaders, accept: 'text/event-stream' });
   const second = await request(primary.url + '/node/chat', 'POST', replayBody, { ...replayHeaders, accept: 'text/event-stream' });
   check(first.status === 200 && /RUN-MARKER-PEER-REPLAY/.test(first.text), 'the first signed request runs');
@@ -256,7 +269,7 @@ async function startDestination(node, service, mockPort) {
   // conversation, admission or inference.
   const redirectThread = 'peer-redirect';
   const redirectBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-REDIRECT', redirectThread);
-  const redirectHeaders = signedHeaders(peer, 'chat', redirectBody);
+  const redirectHeaders = chatHeaders(peer, redirectBody);
   const directRedirect = await request(primaryB.url + '/node/chat', 'POST', redirectBody, { ...redirectHeaders, accept: 'text/event-stream' });
   check(directRedirect.status === 400 || directRedirect.status === 403, 'a chat signed for A and sent directly to B is refused by B');
   check(/wrong_target/.test(directRedirect.text), 'B names the target mismatch: wrong_target');
@@ -273,45 +286,62 @@ async function startDestination(node, service, mockPort) {
 
   // A modified target, path or body invalidates the signature or the request kind.
   const modifiedTarget = JSON.stringify({ to_node_id: primaryB.node_id, text: 'answer with RUN-MARKER-PEER-MODIFIED', thread: 'peer-modified' });
-  const modifiedTargetRun = await request(primaryB.url + '/node/chat', 'POST', modifiedTarget, { ...signedHeaders(peer, 'chat', redirectBody), accept: 'text/event-stream' });
+  const modifiedTargetRun = await request(primaryB.url + '/node/chat', 'POST', modifiedTarget, { ...chatHeaders(peer, redirectBody), accept: 'text/event-stream' });
   check(modifiedTargetRun.status === 401 || modifiedTargetRun.status === 403, 'changing the signed target invalidates the signature');
   const modifiedBodyRun = await request(primary.url + '/node/chat', 'POST', redirectBody + 'tampered', { ...redirectHeaders, accept: 'text/event-stream' });
   check(modifiedBodyRun.status === 401 || modifiedBodyRun.status === 403, 'changing the signed body invalidates the signature');
   const pathBody = chatEnvelope(primaryB.node_id, 'answer with RUN-MARKER-PEER-PATH', 'peer-path');
-  const pathHeaders = signedHeaders(peer, 'chat', pathBody);
+  const pathHeaders = chatHeaders(peer, pathBody);
   const wrongPathEnvelope = JSON.stringify({ rid: crypto.randomUUID(), to: primaryB.node_id, method: 'POST', path: '/node/call', body: pathBody, headers: pathHeaders });
   const wrongPath = await request(service + '/relay/send', 'POST', wrongPathEnvelope, signedHeaders(peer, 'relay-send'));
   const wrongPathBody = (wrongPath.value && wrongPath.value.body) || '';
   check(wrongPath.status === 200 && /error/.test(wrongPathBody) && !/RUN-MARKER-PEER-PATH/.test(wrongPathBody), 'a relay envelope whose path is changed to /node/call is refused (the chat body is not a call, and the signature is for chat)');
   await sleep(200);
   check(!mock.seen.includes('RUN-MARKER-PEER-PATH'), 'the path-changed request never reached inference');
-  // A legacy plain-text body has no signed target and is refused with a visible migration error.
-  const legacyBody = 'answer with RUN-MARKER-PEER-LEGACY';
+  // ---- versioned signature domain: both directions fail closed --------------------------------
+  // A legacy sender signs `chat|...`. The new receiver knows only `chat-v2`, so it refuses with a
+  // visible migration error - even when the body carries the new target fields. Nothing falls back
+  // to running the body as text.
+  const legacyThread = 'peer-legacy';
+  const legacyBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-LEGACY', legacyThread);
   const legacy = await request(primary.url + '/node/chat', 'POST', legacyBody, { ...signedHeaders(peer, 'chat', legacyBody), accept: 'text/event-stream' });
-  check(legacy.status === 400 && /legacy_peer_protocol/.test(legacy.text), 'a legacy plain-text body is refused with a migration error, not run unbound');
-  check(!mock.seen.includes('RUN-MARKER-PEER-LEGACY'), 'the legacy body never reached inference');
+  check(legacy.status === 400 && /legacy_peer_protocol/.test(legacy.text), 'a legacy chat|... signature is refused legacy_peer_protocol on the new receiver, even with target fields present');
+  check(!mock.seen.includes('RUN-MARKER-PEER-LEGACY'), 'the legacy-signed chat never reached inference');
+  // A new sender signs `chat-v2|...`. A legacy receiver reconstructs `chat|...`, so it must reject
+  // the request before any model. The legacy verification routine is faithful - it accepts a real
+  // legacy signature and rejects the v2 one - so this is a real old-receiver check, not a stub.
+  const v2Thread = 'peer-v2';
+  const v2Body = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-V2', v2Thread);
+  const v2Headers = chatHeaders(peer, v2Body);
+  const v2Ts = Number(v2Headers['x-wa-ts']);
+  const v2Signature = v2Headers['x-wa-sig'];
+  const legacySignature = signature(peer, 'chat|' + peer.node_id + '|' + v2Ts + '|' + hash(v2Body));
+  check(legacyChatVerifies(peer.public_key, peer.node_id, v2Ts, v2Body, legacySignature) === true, 'the legacy verifier accepts a legacy chat|... signature (the routine is faithful)');
+  check(legacyChatVerifies(peer.public_key, peer.node_id, v2Ts, v2Body, v2Signature) === false, 'a new chat-v2 signature does not verify under the legacy chat domain, so an old receiver cannot execute a redirected v2 request');
+  const v2Run = await request(primary.url + '/node/chat', 'POST', v2Body, { ...v2Headers, accept: 'text/event-stream' });
+  check(v2Run.status === 200 && /RUN-MARKER-PEER-V2/.test(v2Run.text), 'a new chat-v2 request is valid for its target A');
 
   // ---- forged / unregistered / guest -------------------------------------------------------------
   const forgedBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-FORGED', 'peer-forged');
-  const tampered = await request(primary.url + '/node/chat', 'POST', forgedBody + 'tampered', { ...signedHeaders(peer, 'chat', forgedBody), accept: 'text/event-stream' });
+  const tampered = await request(primary.url + '/node/chat', 'POST', forgedBody + 'tampered', { ...chatHeaders(peer, forgedBody), accept: 'text/event-stream' });
   check(tampered.status === 401 || tampered.status === 403, 'a body that does not match its signature is refused before admission');
   check(!runIds((await request(primary.url + '/health')).value).some((row) => row.conversation === 'peer-forged'), 'the forged request created no admission');
   const strangerBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-STRANGER', 'peer-stranger');
-  const strangerRun = await request(primary.url + '/node/chat', 'POST', strangerBody, { ...signedHeaders(stranger, 'chat', strangerBody), accept: 'text/event-stream' });
+  const strangerRun = await request(primary.url + '/node/chat', 'POST', strangerBody, { ...chatHeaders(stranger, strangerBody), accept: 'text/event-stream' });
   check(strangerRun.status === 403 && /unknown_caller/.test(strangerRun.text), 'an unregistered master is denied before admission');
   const guestBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-GUEST', 'peer-guest');
-  const guestRun = await request(primary.url + '/node/chat', 'POST', guestBody, { ...signedHeaders(guest, 'chat', guestBody), accept: 'text/event-stream' });
+  const guestRun = await request(primary.url + '/node/chat', 'POST', guestBody, { ...chatHeaders(guest, guestBody), accept: 'text/event-stream' });
   check(guestRun.status === 403 && /forbidden_role/.test(guestRun.text), 'a registered guest cannot command a peer');
   const spoofThread = 'operator-session';
   const spoofBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-SPOOF', spoofThread);
-  await request(primary.url + '/node/chat', 'POST', spoofBody, { ...signedHeaders(peer, 'chat', spoofBody), accept: 'text/event-stream' });
+  await request(primary.url + '/node/chat', 'POST', spoofBody, { ...chatHeaders(peer, spoofBody), accept: 'text/event-stream' });
   const spoofStatus = await request(primary.url + '/runs', 'POST', JSON.stringify({ action: 'status', thread: spoofThread }), { 'content-type': 'application/json' });
   check((spoofStatus.value.runs || []).length === 0, 'a peer run naming another owner\'s thread is not owned by the local operator');
 
   // ---- peer forced background cannot borrow the two interactive slots ----------------------------
   const holdThread = 'peer-hold';
   const holdBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-HOLD', holdThread);
-  const holdRun = request(primary.url + '/node/chat', 'POST', holdBody, { ...signedHeaders(peer, 'chat', holdBody), accept: 'text/event-stream' });
+  const holdRun = request(primary.url + '/node/chat', 'POST', holdBody, { ...chatHeaders(peer, holdBody), accept: 'text/event-stream' });
   await until(async () => {
     const health = (await request(primary.url + '/health')).value;
     return runs(health).some((row) => row.conversation === holdThread && row.class === 'background');
@@ -331,7 +361,7 @@ async function startDestination(node, service, mockPort) {
   const relayThread = 'peer-relay';
   const relayBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-RELAY', relayThread);
   const rid = crypto.randomUUID();
-  const envelope = JSON.stringify({ rid, to: primary.node_id, method: 'POST', path: '/node/chat', body: relayBody, headers: signedHeaders(peer, 'chat', relayBody) });
+  const envelope = JSON.stringify({ rid, to: primary.node_id, method: 'POST', path: '/node/chat', body: relayBody, headers: chatHeaders(peer, relayBody) });
   const relayAnswer = await request(service + '/relay/send', 'POST', envelope, signedHeaders(peer, 'relay-send'));
   check(relayAnswer.status === 200 && /RUN-MARKER-PEER-RELAY/.test(relayAnswer.value.body || ''), 'a signed relayed /node/chat runs and answers as the verified peer');
   await until(async () => runIds((await request(primary.url + '/health')).value).some((row) => row.conversation === relayThread), 'the relayed run is keyed by its body thread');
