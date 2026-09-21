@@ -35,8 +35,6 @@ let checks = 0, failures = 0, skipped = 0;
 const failureList = [];
 let child, sentinelProcess, provider;
 let rpc = 0;
-const pending = new Map();
-const held = new Map();
 const modelRequests = [];
 
 class DependencyMissing extends Error {}
@@ -363,7 +361,13 @@ async function main() {
   const guestProbe = await api(base, { action: "start", profile: "whatsapp-responder", prompt: "guest", idempotency_key: "guest-1" });
   check(guestProbe.value && (guestProbe.value.error || guestProbe.status !== 200), "an unauthenticated/guest spawn of the operator profile is refused");
 
-  requireDependency(failures === 0, `checks_failed:${failures}:${failureList.join("|")}`);
+  if (failures > 0) {
+    writeVerdict("failed", { error: failureList.join(" | ") });
+    console.error(`FAILED: ${failures} check(s): ${failureList.join(" | ")}`);
+    console.error("evidence: " + root);
+    process.exitCode = 1;
+    return;
+  }
   const verdict = writeVerdict("ok");
   console.log(`whatsapp subagent e2e ok (${verdict.checks} checks, ${verdict.failed} failed, ${verdict.skipped} skipped; mock model, fake send, no live browser)`);
   console.log(`evidence: ${root}`);
@@ -389,7 +393,6 @@ async function main() {
       process.exitCode = 1;
     }
   } finally {
-    for (const response of held.values()) response.destroy();
     for (const handle of [sentinelProcess, child]) {
       if (handle && handle.exitCode === null) {
         handle.kill();
