@@ -37,6 +37,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::subagents::SocketSlot;
+
 /// Which lane a run belongs to. The default is interactive because the common case is a person
 /// waiting; the marker can only move a run *out* of that default, never into a privilege.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -112,13 +114,15 @@ impl Refusal {
 }
 
 /// What admission decided. `cancel` is the run's own flag; the worker installs it as the
-/// current-run context so the provider reader can observe a cancellation request.
+/// current-run context so the provider reader can observe a cancellation request. `sockets`
+/// is the run's own slot: the worker binds it while the run executes and the accept thread
+/// shuts exactly these sockets down when it cancels this run, never the next queued one's.
 #[derive(Debug)]
 pub enum Decision {
     /// Run on this worker. The conversation is now owned by it until `complete_run`.
-    Run { run_id: u64, worker: usize, cancel: Arc<AtomicBool> },
+    Run { run_id: u64, worker: usize, cancel: Arc<AtomicBool>, sockets: SocketSlot },
     /// The conversation is owned by this worker; queue behind it there.
-    Behind { run_id: u64, worker: usize, cancel: Arc<AtomicBool> },
+    Behind { run_id: u64, worker: usize, cancel: Arc<AtomicBool>, sockets: SocketSlot },
     /// No room. The caller replies 503 and admits nothing.
     Refused(Refusal),
 }
@@ -171,6 +175,7 @@ struct RunRecord {
     conversation: String,
     class: RunClass,
     cancel: Arc<AtomicBool>,
+    sockets: SocketSlot,
     state: RunState,
 }
 
@@ -205,12 +210,18 @@ impl Scheduler {
         inner.next_run_id = inner.next_run_id.wrapping_add(1);
         let run_id = inner.next_run_id;
         let cancel = Arc::new(AtomicBool::new(false));
+        // The run's own socket slot lives from admission through settlement, so a cancel on the
+        // accept thread can wake this run's silent provider read without touching the queued run
+        // behind it (whose slot is a different Arc).
+        let sockets: SocketSlot = Arc::new(Mutex::new(Vec::new()));
 
-        let record = |owner: &str, conversation: &str, class: RunClass, cancel: &Arc<AtomicBool>| RunRecord {
+        let record = |owner: &str, conversation: &str, class: RunClass, cancel: &Arc<AtomicBool>,
+                      sockets: &SocketSlot| RunRecord {
             owner: owner.to_string(),
             conversation: conversation.to_string(),
             class,
             cancel: cancel.clone(),
+            sockets: sockets.clone(),
             state: RunState::Queued,
         };
 
@@ -222,8 +233,8 @@ impl Scheduler {
                 }
                 owner_record.pending += 1;
                 let worker = owner_record.worker;
-                inner.runs.insert(run_id, record(owner, conversation, class, &cancel));
-                return Decision::Behind { run_id, worker, cancel };
+                inner.runs.insert(run_id, record(owner, conversation, class, &cancel, &sockets));
+                return Decision::Behind { run_id, worker, cancel, sockets };
             }
         }
 
@@ -253,8 +264,8 @@ impl Scheduler {
         if !conversation.is_empty() {
             inner.owners.insert(conversation.to_string(), Owner { worker, class, pending: 1 });
         }
-        inner.runs.insert(run_id, record(owner, conversation, class, &cancel));
-        Decision::Run { run_id, worker, cancel }
+        inner.runs.insert(run_id, record(owner, conversation, class, &cancel, &sockets));
+        Decision::Run { run_id, worker, cancel, sockets }
     }
 
     /// The worker picked the run up and is about to execute it.
@@ -330,6 +341,9 @@ impl Scheduler {
             return CancelOutcome::Forbidden;
         }
         record.cancel.store(true, Ordering::SeqCst);
+        // Wake a read that is producing nothing. This is the run's own slot, so a later cancel can
+        // never shut down the socket of the run queued behind this one.
+        crate::subagents::shutdown_sockets(&record.sockets);
         CancelOutcome::Requested { run_id: id, state: record.state }
     }
 
@@ -402,7 +416,12 @@ pub fn admit(
         Some(scheduler) => scheduler.admit(conversation, owner, class, pick),
         // Before `run()` installs the scheduler (unit tests that never serve), every run is
         // unrouted and goes to worker 0, exactly as a single-interpreter node did.
-        None => Decision::Run { run_id: 0, worker: 0, cancel: Arc::new(AtomicBool::new(false)) },
+        None => Decision::Run {
+            run_id: 0,
+            worker: 0,
+            cancel: Arc::new(AtomicBool::new(false)),
+            sockets: Arc::new(Mutex::new(Vec::new())),
+        },
     }
 }
 

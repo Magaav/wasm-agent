@@ -80,6 +80,8 @@ pub fn register_active_socket(stream: &std::net::TcpStream) {
                 if let Ok(mut sockets) = context.sockets.lock() {
                     sockets.push(clone);
                 }
+            } else {
+                eprintln!("[dbg-sock] register with no task context");
             }
         });
     }
@@ -724,7 +726,7 @@ fn run_child(inner: Arc<Inner>, runner: Runner, id: String, cancel: Arc<AtomicBo
     let (timeout_seconds, owner) = {
         let tasks = inner.tasks.lock().expect("subagents tasks");
         match tasks.get(&id) {
-            Some(task) => (task.timeout_seconds, task.session_id.clone()),
+            Some(task) => (task.timeout_seconds, format!("subagent:{}", task.session_id)),
             None => (0, String::new()),
         }
     };
