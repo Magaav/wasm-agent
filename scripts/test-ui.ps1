@@ -656,6 +656,30 @@ $harness = @'
     "a UI read must not be mistaken for a running agent turn");
   window.__fixtures.health.current = null;
 
+  // A chat run for a *different* conversation is not this window's run. Before `activeRun` was
+  // scoped to the conversation, it returned the first chat run on the node, so a window watching
+  // conversation B disabled its own composer and deferred its reconcile for conversation A's run.
+  window.__fixtures.health.workers = [{ label: "POST /chat", busy_ms: 4000, session: "another-conversation" }];
+  await window.__restoreSession();
+  var foreignNotice = document.querySelector(".unfinished-notice");
+  check(!!foreignNotice && /effects may have happened/.test(foreignNotice.textContent) && !!foreignNotice.querySelector("button"),
+    "another conversation's run must not be treated as this window's run, saw: " +
+      (foreignNotice ? foreignNotice.textContent.slice(0, 120) : "no notice"));
+  window.__fixtures.health.workers = [];
+
+  // Stop must tell the node, not only stop reading the stream: a client-side abort leaves the model
+  // call running. The request is `POST /runs {action:cancel, thread}` for this window's conversation.
+  var cancelCalls = window.__calls.filter(function (call) { return call.url === "runs" && call.method === "POST"; }).length;
+  window.__setBusy(true);
+  window.__cancelActiveRun();
+  for (var cancelTick = 0; cancelTick < 10; cancelTick++) await tick();
+  var runCalls = window.__calls.filter(function (call) { return call.url === "runs" && call.method === "POST"; });
+  check(runCalls.length === cancelCalls + 1,
+    "stopping a run must ask the node to cancel it, not only abort the stream");
+  check(runCalls.some(function (call) { return /"action":"cancel"/.test(call.body || "") && /"thread"/.test(call.body || ""); }),
+    "the cancel request must name the action and the conversation");
+  window.__setBusy(false);
+
   // A session whose last turn *failed* is the same situation by another route, and it used to be
   // invisible here. Restoring it must say so without posting another turn: page navigation is read-only.
   //
@@ -1213,7 +1237,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker; window.__updateNotice = updateNotice;"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__cancelActiveRun = cancelActiveRun; window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker; window.__updateNotice = updateNotice;"
 
 $server = $null
 $edge = @(

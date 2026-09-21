@@ -121,6 +121,59 @@ end
 -- structured.
 wa_parse_run_body = parse_run_body
 
+-- The authoritative pre-admission resolution for a run.
+--
+-- Admission happens in Rust, but *who* is asking and *which conversation* the run writes are decisions
+-- only Lua can make: the credential is a DB-backed token, and a named thread belongs to its author.
+-- Resolving here, before any worker is reserved, means the scheduler owns the real conversation (not the
+-- credential, and not an empty key), a foreign thread is refused before a slot is taken, and an invalid
+-- nonempty credential never reaches a run as the default user.
+--
+-- Returns JSON:
+--   {"ok":true,"user":{...},"role":...,"conversation":<id>,"remote":<bool>}
+--   {"error":"invalid_session"|"unknown_user"|"forbidden_thread"}
+--
+-- The body `thread` is untrusted, but it is only a scheduling key here: authority is still decided by
+-- `agent_for` at run time, and this resolver refuses a thread the caller does not own before that.
+function wa_admission(session, node, body)
+  local user, problem = users.resolve(session)
+  if not user then return json.encode({ error = problem or "invalid_session" }) end
+  local role = effective_role(user)
+  node = node or ""
+  local thread = ""
+  local raw = body or ""
+  if raw:sub(1, 1) == "{" then
+    local ok, decoded = pcall(json.decode, raw)
+    if ok and type(decoded) == "table" and type(decoded.thread) == "string" then thread = decoded.thread end
+  end
+  -- A peer target runs on the peer; the local node owns no local conversation for it and creating a
+  -- local session would be a phantom. The thread the caller named still travels so the peer can order it.
+  if remote_target(node) then
+    return json.encode({ ok = true, user = users.public(user), role = role, conversation = thread, remote = true })
+  end
+  if thread ~= "" then
+    local existing = memory.session(thread)
+    if existing and existing.user_id ~= user.id and not users.is_master(role) then
+      return json.encode({ error = "forbidden_thread" })
+    end
+    return json.encode({ ok = true, user = users.public(user), role = role, conversation = thread, remote = false })
+  end
+  -- No thread: the run resumes the newest open conversation for (user, node), exactly as `agent_for`
+  -- will. Returning the real id is what lets the scheduler enforce affinity; without it the key would be
+  -- empty and two unnamed runs could write one transcript.
+  local chosen = memory.ensure_session(user.id, node, "chat")
+  return json.encode({ ok = true, user = users.public(user), role = role, conversation = chosen, remote = false })
+end
+
+-- Identity only, for a control route that is owner-scoped but must not be admitted as a run and must
+-- not create a conversation. Used by `POST /runs` (status/cancel). Invalid credentials are an error,
+-- never the default user.
+function wa_identity(session)
+  local user, problem = users.resolve(session)
+  if not user then return json.encode({ error = problem or "invalid_session" }) end
+  return json.encode({ ok = true, user = users.public(user), role = effective_role(user) })
+end
+
 function wa_reply(text, session, node)
   local prompt, images, problem, thread = parse_run_body(text)
   if problem then return json.encode({ error = redact.text(problem) }) end
@@ -345,6 +398,15 @@ local function verify_peer(from, public_key, ts, signature, action, body)
   return caller
 end
 
+-- Verify a peer's signature ONCE, at admission, and return the verified author so the run can use
+-- it without verifying again. A second verification of the same signed request is refused as a
+-- replay (`verify_peer` records the request id), so the run half must not re-check.
+function wa_verify_peer(from, public_key, ts, signature, body)
+  local caller, problem = verify_peer(from, public_key, ts, signature, "chat", body or "")
+  if not caller then return json.encode({ error = problem or "bad_signature" }) end
+  return json.encode({ ok = true, node_id = caller.node_id, role = caller.role, name = caller.name or "" })
+end
+
 -- A turn requested by a peer runs as the caller, not as this node.
 --
 -- The master who asked is the author of the work; this node is only where it happens. A guest
@@ -428,6 +490,24 @@ function wa_node_chat(from, public_key, ts, signature, text)
     return ""
   end
   local bot, agent_problem = node_agent(caller)
+  if not bot then
+    emit({ type = "error", error = agent_problem })
+    return ""
+  end
+  local ok, reply = pcall(bot.run, bot, text or "")
+  if not ok then emit({ type = "error", error = tostring(reply) }) end
+  return ""
+end
+
+-- The run half of a peer chat whose signature was verified at admission. It deliberately does not
+-- re-verify: the signed request was already recorded as seen, and verifying again would be refused
+-- as a replay. The caller is reconstructed from the verified fields, never from the raw body.
+function wa_node_chat_verified(from, role, name, text)
+  if enrollment.managed() then
+    emit({ type = "error", error = "managed_guest_uses_operator_model" })
+    return ""
+  end
+  local bot, agent_problem = node_agent({ node_id = from, role = role, name = name })
   if not bot then
     emit({ type = "error", error = agent_problem })
     return ""

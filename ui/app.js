@@ -136,11 +136,18 @@ function apiHeaders(extra) {
   return headers;
 }
 
-// /health.current is the node's current request, which may be a harmless UI read.
-// A chat message can also run on a secondary worker while worker 0 answers that read.
-function activeRun(health) {
+// A run is *this window's* run only when it belongs to this window's conversation.
+//
+// This used to return the first chat run on the node, whichever conversation it belonged to. Once two
+// conversations can run at once, that made a window watching conversation B see conversation A's run:
+// it disabled its own composer, announced "a run is in progress", and deferred its own reconcile until
+// a stranger's run finished. `/health` carries the conversation (`session`) on every worker and on
+// `current`, so the match is exact. With no session known yet the window claims no run, which is the
+// safe default - it has no transcript to reconcile.
+function activeRun(health, session = chatSession) {
   const isChat = (entry) => /^POST \/chat(?:\?|$)/.test(entry?.label || "");
-  return (health?.workers || []).find(isChat) || (isChat(health?.current) ? health.current : null);
+  const mine = (entry) => isChat(entry) && !!session && entry.session === session;
+  return (health?.workers || []).find(mine) || (mine(health?.current) ? health.current : null);
 }
 
 function nodeQuery() {
@@ -995,7 +1002,7 @@ async function restoreSessionOnce() {
     // A reply can land between the transcript read and /health. When the node is idle,
     // reread once before declaring a run unfinished; otherwise a completed answer could
     // briefly be displayed as a lost tool call.
-    if (outcome.name === "unfinished" && health && !activeRun(health)) {
+    if (outcome.name === "unfinished" && health && !activeRun(health, wanted.id)) {
       const latest = await (await apiFetch(route, { headers: apiHeaders() })).json();
       if (latest && !latest.error && Array.isArray(latest.messages)) {
         full = latest;
@@ -1012,7 +1019,7 @@ async function restoreSessionOnce() {
           (outcome.detail || "the node recorded a failure") + ".";
       } else if (!health) {
         notice.textContent = "no result is recorded for the last message; the node is unavailable, so its outcome is unknown.";
-      } else if (activeRun(health)) {
+      } else if (activeRun(health, wanted.id)) {
         notice.textContent = "no result is recorded yet. A run is in progress on the node; this page will check again when it becomes idle.";
         sawTurnInFlight = true;
       } else {
@@ -1022,7 +1029,7 @@ async function restoreSessionOnce() {
       }
       // Reloading a page must never execute an unfinished tool a second time. Recovery
       // requires a person to inspect possible side effects and explicitly continue.
-      if (health && !activeRun(health)) {
+      if (health && !activeRun(health, wanted.id)) {
         notice.append(nodeButton("continue", () => { notice.remove(); resumeSession(wanted.id); }));
       }
       messages.append(notice);
@@ -1692,10 +1699,27 @@ function redoDraft() {
 // named function because the callers describe an intent - "the stacks moved" - not a widget.
 function syncUndoButtons() {}
 
+// Stop means "stop on the node", not only "stop reading the stream". A client-side abort leaves the
+// model call running and the ledger records an unfinished run. `POST /runs {action:cancel}` sets the
+// run's own cancel flag, which the provider reader observes on the node; the abort then only stops
+// this page reading. The request is fire-and-forget: the reader has already asked to stop, and the
+// node reports the settled state in the ledger and `/health`.
+function cancelActiveRun() {
+  const thread = chatSession;
+  if (thread) {
+    apiFetch("runs", {
+      method: "POST",
+      headers: apiHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ action: "cancel", thread }),
+    }).catch(() => { /* the abort below is what the reader sees; the node still gets the request */ });
+  }
+  controller?.abort();
+}
+
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   if (busy) {
-    controller?.abort();
+    cancelActiveRun();
     return;
   }
   const text = input.value.trim();
