@@ -393,9 +393,15 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
     # an install: this substitution is what that placeholder was written for.
     sed "s|PREPARED_BY_INSTALL|$INSTALL_MIXED|g" "$source" > "$INSTALL_DIR/scripts/$JOB_NAME.job.json" \
       || fail "node installed, but could not prepare job $JOB_NAME"
-    # `put` is an upsert by id, so re-deploying updates the job's revision instead of duplicating it.
-    # A job that cannot be put is reported, not fatal: the node and its scripts are already installed, and a
-    # store that refuses one job is better answered by a visible line than by a rollback.
+    # Skip an unchanged definition, and this is not an optimisation. `job put` and `job enable` both
+    # increment the job's revision, and a delivery is pinned to a revision - so re-putting a job that did
+    # not change *cancels every pending delivery* for it. On 2026-09-21 that turned eight freshly ingested
+    # messages into `definition changed`/`cancelled` rows: the pipeline was connected and the deploy's own
+    # bookkeeping dropped the first events through it.
+    if cmp -s "$INSTALL_DIR/scripts/$JOB_NAME.job.json" "$INSTALL_DIR/scripts/$JOB_NAME.job.json.shipped" 2>/dev/null; then
+      echo "deploy: job $JOB_NAME unchanged"
+      continue
+    fi
     if "$INSTALL_DIR/$SENTINEL_NAME" job put "$INSTALL_DIR/scripts/$JOB_NAME.job.json" >/dev/null 2>&1; then
       PIPELINE=$((PIPELINE + 1))
       # The store is deliberately default-off: an import must not be able to start automation by itself
@@ -405,6 +411,8 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
         "$INSTALL_DIR/$SENTINEL_NAME" job enable "$JOB_NAME" >/dev/null 2>&1 \
           || echo "deploy: WARNING could not enable job $JOB_NAME"
       fi
+      cp -f "$INSTALL_DIR/scripts/$JOB_NAME.job.json" "$INSTALL_DIR/scripts/$JOB_NAME.job.json.shipped" \
+        || echo "deploy: WARNING could not record the shipped revision of job $JOB_NAME"
     else
       echo "deploy: WARNING could not put job $JOB_NAME into the store"
     fi
