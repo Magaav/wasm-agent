@@ -174,12 +174,12 @@ After a store-verified send, `effects.confirm` must persist; if it does not, the
 
 ### Routes and the unread marker
 
-- `send_path = "ui"` is the deterministic reply tool. It opens the chat, so it is allowed only when the
-  bound conversation is the profile's **self destination** (notes-to-self clear nothing) or when
-  `allow_mark_read = true` explicitly accepts the marker being cleared. The self check is against the
-  trusted local binding, never an event assertion. When `allow_mark_read = true` and the chat is not self,
-  the tool passes `--allow-mark-read` to the raw script - derived from the profile only, never from an
-  event.
+- `send_path = "ui"` is the deterministic reply tool. It opens the chat, and opening clears the unread
+  marker, so a **non-self** target always needs `allow_mark_read = true`; a **self** target is allowed here
+  and the raw script independently refuses it when its unread is nonzero or unproven (a
+  manually-marked-unread notes-to-self has unread too). The self check is against the app's own identity,
+  never a string match. When `allow_mark_read = true`, the tool passes `--allow-mark-read` to the raw
+  script - derived from the profile only, never from an event.
 - `send_path = "store"` requires a `store_send_script`. Declaring `store` cannot make the UI script bypass
   the unread guard. The store script is an operator-asserted local binding: accept it only because the
   operator approved it, and do not claim it is a proven store route.
@@ -190,7 +190,12 @@ The route must also prove the bound **identity**: when the profile binds `accoun
 and the script refuses a session logged in as a different account or against a different page before it
 opens or types. The tool re-checks the identity the route reports (`account`/`own_id`,
 `browser_endpoint`/`endpoint`); an unproven or mismatched identity is `send_account_unproven`,
-`send_account_mismatch`, `send_endpoint_unproven` or `send_endpoint_mismatch`, never a success.
+`send_account_mismatch`, `send_endpoint_unproven` or `send_endpoint_mismatch`, never a success. An account
+compares by digits only when both sides are phone/PN shapes (`@c.us` / `@s.whatsapp.net`, or a
+bare/formatted number); a `@lid` or a label compares exactly, so `operator1` never equals `other1`. An
+endpoint compares protocol, port and page id exactly, and only genuine loopback aliases
+(`localhost`/`127.0.0.1`/`[::1]`) are interchangeable; a non-loopback host never matches a loopback
+binding.
 
 The script's result is verified: the host wrapper's exit code must be zero, its stdout must decode, and
 the decoded result must prove the exact recipient, body and message id (`verified: true`). A shell exit

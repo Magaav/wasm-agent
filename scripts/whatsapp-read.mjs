@@ -112,7 +112,8 @@ function expression(since) {
         // Verified adapter metadata. null means this build did not expose the field: unknown, not false.
         archived: firstBool(chat, ['archive', 'isArchived', 'archived']),
         left: firstBool(chat, ['isLeft', 'left', 'hasLeft', 'isExited']),
-        unread: chat.unreadCount || 0,
+        // A real number is an unread count; absent or non-numeric stays unknown (null), never 0.
+        unread: typeof chat.unreadCount === 'number' ? chat.unreadCount : null,
         updated_at: chat.t || null,
       });
     }

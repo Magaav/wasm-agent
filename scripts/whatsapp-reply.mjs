@@ -328,20 +328,19 @@ async function main() {
     }, 9);
   }
 
-  // Raw-script guard, before anything is opened. Older jobs call this script directly, so the
-  // profile-scoped Lua check is not the only line of defence: a non-self `--send` is refused unless the
-  // caller explicitly accepted that opening the chat clears the marker. A rehearsal is unaffected.
+  // Opening the chat is what clears the unread marker, and this applies to a rehearsal too (it opens and
+  // types). `isMe` is not a bypass: a manually-marked-unread notes-to-self can have unread. Nonself keeps
+  // the stricter approval rule; self may open without approval only when unread is a proven zero.
   const guard = sendGuard({
-    send: args.send,
-    toSelf: args.toSelf,
     isMe: target.is_me === true,
+    unread: target.unread,
     allowMarkRead: args.allowMarkRead,
   });
   if (guard) {
     return done({
       ok: false, error: guard, chat: target.chat, before, account: actualAccount, browser_endpoint: actualEndpoint,
-      observed: "a non-self send would open the chat and clear its unread marker",
-      next: "pass --allow-mark-read to accept that, reply to --to-self, or use an approved store route",
+      observed: "opening this chat would clear an unread marker that is nonzero or unproven",
+      next: "pass --allow-mark-read to accept that, or use an approved store route that opens nothing",
     }, 8);
   }
 

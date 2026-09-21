@@ -184,10 +184,29 @@ end
 -- own store. A keystroke's reply is not evidence; neither is a shell exit code. When the profile binds an
 -- account or a browser endpoint, the *route* must report the identity it actually used and it must match
 -- the local binding; an unproven or mismatched identity fails closed.
+-- A phone/PN identity is a bare/formatted phone, or a jid ending `@c.us` / `@s.whatsapp.net`. Anything
+-- else (notably a `@lid`, or a label with letters) is opaque and compares exactly. Stripping *all*
+-- non-digits made `operator1` equal `other1`, and a PN equal a LID with the same digits.
+local function phone_digits(value)
+  local text = tostring(value or ""):match("^%s*(.-)%s*$")
+  if text == "" then return nil end
+  local at = text:find("@", 1, true)
+  if at then
+    local domain = text:sub(at + 1):lower()
+    if domain ~= "c.us" and domain ~= "s.whatsapp.net" then return nil end
+    local digits = text:sub(1, at - 1):gsub("[^0-9]", "")
+    if digits == "" then return nil end
+    return digits
+  end
+  if text:match("[A-Za-z]") then return nil end
+  local digits = text:gsub("[^0-9]", "")
+  if #digits < 7 then return nil end
+  return digits
+end
+
 function M.account_matches(expected, actual)
-  local function digits(value) return tostring(value or ""):gsub("[^0-9]", "") end
-  local want, got = digits(expected), digits(actual)
-  if want ~= "" and got ~= "" then return want == got end
+  local want, got = phone_digits(expected), phone_digits(actual)
+  if want and got then return want == got end
   return tostring(expected) == tostring(actual)
 end
 
@@ -291,8 +310,10 @@ local function decide_tool(args, profile, ctx)
 end
 
 -- Resolve the real route before anything is sent. A profile cannot declare `store` and then run the UI
--- script: that string used to bypass the unread guard. `store` needs a store send script; `ui` needs an
--- accepted unread consequence, which notes-to-self do not have (opening your own notes clears nothing).
+-- script: that string used to bypass the unread guard. `store` needs a store send script; `ui` always
+-- opens the chat, so a *non-self* send needs the explicit unread approval, while a self send is allowed
+-- here and the raw script independently refuses it when its unread is nonzero or unproven (a
+-- manually-marked-unread notes-to-self has unread too).
 local function resolve_route(profile, conversation_id)
   local route = profile.resources.send_path
   if route == nil or route == "" then route = "ui" end
@@ -316,7 +337,9 @@ end
 -- not take it. Exposed so the pass-through is testable without a subprocess.
 function M.route_flags(profile, route)
   local flags = {}
-  if route.name == "ui" and not route.self_only and profile.resources.allow_mark_read == true then
+  -- The approved flag is passed whenever the operator approved it, self or not; the raw script then
+  -- enforces the unread guard for the exact target.
+  if route.name == "ui" and profile.resources.allow_mark_read == true then
     flags[#flags + 1] = "--allow-mark-read"
   end
   return flags
@@ -363,7 +386,6 @@ local function send_tool(args, profile, ctx)
       extra.options = {
         "bind resources.store_send_script to an operator-approved store send path (opens nothing, marks nothing read)",
         "set resources.allow_mark_read=true so the approved flag is passed to the raw UI script",
-        "reply only to the bound self destination, where opening clears nothing",
       }
     end
     return fail(why, extra)
