@@ -1138,7 +1138,7 @@ node scripts/test-operation-control.cjs "$BIN"
 node scripts/test-operation-control.cjs "$BIN" --await
 
 # Actual child runtime and real sentinel deliveries, never a /subagents route stub.
-WA_SCRIPT=scripts/test-subagents-profiles.lua "$BIN" --db "$DB.subagent-policy" | grep 'subagents profiles ok'
+node scripts/test-subagents-policy.cjs "$BIN"
 node scripts/test-subagents.cjs "$BIN"
 node scripts/test-job-subagents.cjs
 node scripts/test-orchestration-e2e.cjs "$BIN"

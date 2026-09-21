@@ -157,7 +157,7 @@ and never as an automatic retry.
   simultaneous-start barrier, owner scoping, capacity/overflow, cancel-wins-label,
   restart-unknown, corrupt-record quarantine, the strict health shape and
   socket-shutdown wakeup.
-- `WA_SCRIPT=scripts/test-subagents-profiles.lua wa --db <scratch>` — profile
+- `node scripts/test-subagents-policy.cjs [wa-binary]` — isolated profile
   validation (including empty `allowed_tools` and malformed/negative limits),
   caller clamping, the empty-ceiling rule, operator authorization, schema/dispatch
   parity, the durable effect adapter, the WhatsApp dispatch shapes, trusted-event

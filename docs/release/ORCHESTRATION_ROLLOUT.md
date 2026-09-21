@@ -81,6 +81,29 @@ composer modified, and no message sent by this observation. It is **not** a live
   has occurred. Read-only source discovery found an app send module, **not** a proven
   unread-preserving store send implementation.
 
+## Test containment incident and correction
+
+The second staged gate failed at the policy fixture because the coordinator invoked
+it with a scratch database but **without an isolated home**. It created eight test
+profiles in the default configuration, and the cost-limit negative test inherited a
+priced default model, unexpectedly admitting a child instead of refusing.
+
+Containment evidence (operator temp `wa-policy-containment-u4sxMK/containment.json`):
+
+- The profile directory was newly created at the fixture's exact execution time;
+  all eight matching test files were quarantined, not deleted. No pre-existing profile
+  directory was overwritten.
+- The single fixture receipt was `accepted`, with `started_at:null`; its process
+  (`17732`) was gone and its scratch transcript contained zero messages. That receipt
+  was quarantined with the files. No live send or deployment occurred.
+- The correction is `node scripts/test-subagents-policy.cjs`: fresh marked home,
+  system-only environment, dummy loopback provider and explicitly unpriced fixture
+  model. The Lua fixture refuses direct execution without the matching home/token.
+  Missing-marker and wrong-home mutations are tested **inside scratch homes**.
+- Corrected run: 59 policy assertions plus 3 containment checks, exit 0, zero skips,
+  and an assertion that no child was admitted. Evidence: `wa-subagent-policy-TMoA4D`.
+  The failed gate remains recorded at `wa-orchestration-staged-gate2.log`.
+
 ## Stages and ownership
 
 1. Canonical terminology and contracts: `ARCHITECTURE.md`, `docs/EXECUTION.md`.
