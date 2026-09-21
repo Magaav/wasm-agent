@@ -66,6 +66,25 @@ distinct_workers_for() {
       console.log(workers.size);
     });' "$1"
 }
+runs_status() {
+  local thread="$1" token="${2:-}"
+  if [ -n "$token" ]; then
+    curl -s -m 3 -X POST -H 'content-type: application/json' -H "x-wa-session: $token" -d "{\"action\":\"status\",\"thread\":\"$thread\"}" "http://127.0.0.1:$PORT/runs"
+  else
+    curl -s -m 3 -X POST -H 'content-type: application/json' -d "{\"action\":\"status\",\"thread\":\"$thread\"}" "http://127.0.0.1:$PORT/runs"
+  fi
+}
+runs_cancel() {
+  local thread="$1" token="${2:-}" run_id="${3:-}"
+  local body="{\"action\":\"cancel\",\"thread\":\"$thread\""
+  [ -n "$run_id" ] && body="$body,\"run_id\":$run_id"
+  body="$body}"
+  if [ -n "$token" ]; then
+    curl -s -m 3 -X POST -H 'content-type: application/json' -H "x-wa-session: $token" -d "$body" "http://127.0.0.1:$PORT/runs"
+  else
+    curl -s -m 3 -X POST -H 'content-type: application/json' -d "$body" "http://127.0.0.1:$PORT/runs"
+  fi
+}
 chat() {
   # chat <file> <thread> <marker> [extra header...]
   local file="$1" thread="$2" marker="$3"; shift 3
@@ -93,6 +112,8 @@ WASM_AGENT_WORKERS_MAX=3 \
 WASM_AGENT_BACKGROUND_MAX=1 \
 WASM_AGENT_BACKGROUND_BACKLOG=0 \
 WASM_AGENT_SESSION_QUEUE_DEPTH=4 \
+WASM_AGENT_CONTROL_WORKERS=1 \
+WASM_AGENT_SUBAGENT_AWAIT_MS=800 \
   "$BIN" --db "$WORK/iso.db" serve --port "$PORT" --client-port "$CLIENT_PORT" --ui "$ROOT/ui" > "$WORK/serve.log" 2>&1 &
 PIDS+=("$!")
 for _ in $(seq 1 60); do
@@ -299,6 +320,135 @@ case "$code:$body" in
   403:*forbidden_thread*) echo "  ok: a guest cannot address another user's thread" ;;
   *) fail "expected 403 forbidden_thread, got $code $body" ;;
 esac
+
+echo
+echo "cancel: owner-scoped, per-run, and never claimed before it settles"
+chat "$WORK/cancel.sse" "cancel-thread" "RUN-MARKER-CANCELME" &
+CANCEL_PID=$!
+for _ in $(seq 1 40); do
+  [ -n "$(runs_for cancel-thread)" ] && break
+  sleep 0.1
+done
+cancel_run_id="$(runs_status cancel-thread | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=(JSON.parse(s).runs||[])[0];console.log(r?r.run_id:"")})')"
+[ -n "$cancel_run_id" ] || fail "no run id for cancel-thread"
+# A guest cannot cancel it, even knowing the id.
+code="$(curl -s -o "$WORK/guest-cancel.json" -w '%{http_code}' -m 3 -X POST -H 'content-type: application/json' -H "x-wa-session: $guest_token" -d "{\"action\":\"cancel\",\"thread\":\"cancel-thread\",\"run_id\":$cancel_run_id}" "http://127.0.0.1:$PORT/runs")"
+case "$code" in
+  403) echo "  ok: another user cannot cancel this run even by id" ;;
+  *) fail "expected 403 for a foreign cancel, got $code $(cat "$WORK/guest-cancel.json" 2>/dev/null)" ;;
+esac
+# Master cancel is a request, reported with the state it was in - never "cancelled" before it stops.
+resp="$(runs_cancel cancel-thread)"
+printf '%s' "$resp" | grep -q '"cancel_requested":true' || fail "cancel did not set the flag: $resp"
+printf '%s' "$resp" | grep -q '"state":"running"' || fail "cancel must not claim the run stopped: $resp"
+echo "  ok: cancel is a request that reports the current state ($resp)"
+runs_status cancel-thread | grep -q '"cancelled":true' || fail "status must show the cancel request"
+wait "$CANCEL_PID"
+[ "$(grep -c '"type":"done"' "$WORK/cancel.sse")" = "1" ] || fail "the cancelled run must settle its stream exactly once"
+grep -q 'run_cancelled' "$WORK/cancel.sse" || fail "the running run did not observe the cancel through the provider path"
+# The state only becomes `cancelled` after the run actually stopped, and the flag is scoped to this
+# run, so the queued run behind it (if any) is untouched.
+runs_status cancel-thread | grep -q '"state":"cancelled"' || fail "the cancelled run did not settle as cancelled"
+echo "  ok: the running run observed the cancel, settled once, and is reported cancelled"
+
+# A run queued behind a running one is cancelled on its own flag: it settles without executing, and
+# the running run is untouched. This is the per-run guarantee - cancelling one run cannot cancel the
+# next.
+echo
+echo "cancel: a queued run settles without executing"
+chat "$WORK/q1.sse" "queue-cancel" "RUN-MARKER-Q1" &
+Q1=$!
+for _ in $(seq 1 40); do
+  [ -n "$(runs_for queue-cancel)" ] && break
+  sleep 0.1
+done
+chat "$WORK/q2.sse" "queue-cancel" "RUN-MARKER-Q2" &
+Q2=$!
+q2_id=""
+for _ in $(seq 1 40); do
+  q2_id="$(runs_status queue-cancel | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const rs=JSON.parse(s).runs||[];const q=rs.find(r=>r.state==="queued");console.log(q?q.run_id:"")})')"
+  [ -n "$q2_id" ] && break
+  sleep 0.1
+done
+[ -n "$q2_id" ] || fail "the second run was never queued"
+runs_cancel queue-cancel "" "$q2_id" >/dev/null
+wait "$Q1"; wait "$Q2"
+grep -q 'RUN-MARKER-Q1' "$WORK/q1.sse" || fail "the running run was disturbed by the queued run's cancel"
+grep -q 'run_cancelled' "$WORK/q2.sse" || fail "the queued run did not settle as cancelled"
+grep -q 'RUN-MARKER-Q2' "$WORK/q2.sse" && fail "the cancelled queued run executed anyway"
+[ "$(grep -c '"type":"done"' "$WORK/q2.sse")" = "1" ] || fail "the queued run must settle its stream exactly once"
+echo "  ok: the queued run was cancelled without executing, and the running run was untouched"
+
+# Mixed classes for one conversation: the class picks the lane, but ownership still serialises the
+# conversation, so a background run cannot race an interactive run on one transcript.
+echo
+echo "mixed: background and interactive runs for one conversation share an owner"
+chat "$WORK/mix1.sse" "mixed-session" "RUN-MARKER-MIX1" &
+MIX1=$!
+for _ in $(seq 1 40); do
+  [ -n "$(runs_for mixed-session)" ] && break
+  sleep 0.1
+done
+chat "$WORK/mix2.sse" "mixed-session" "RUN-MARKER-MIX2" "x-wa-run-class: background" &
+MIX2=$!
+sleep 0.3
+distinct="$(distinct_workers_for mixed-session)"
+[ "$distinct" = "1" ] || fail "mixed classes opened $distinct owners for one conversation"
+wait "$MIX1"; wait "$MIX2"
+grep -q 'RUN-MARKER-MIX1' "$WORK/mix1.sse" || fail "the interactive run did not answer"
+grep -q 'RUN-MARKER-MIX2' "$WORK/mix2.sse" || fail "the background run did not answer"
+echo "  ok: the background run queued behind the interactive run on the same conversation"
+
+# Subagents are a control call, never a run: an invalid credential is refused at the boundary, and a
+# long HTTP await cannot hold the lane while /runs and /health stay prompt.
+# A peer run is admitted only after its signature is verified. A forged request is refused before
+# admission and creates no owner, so the scheduler never keys a conversation by a header a caller wrote.
+echo
+echo "peer: a forged /node/chat is refused before admission"
+code="$(curl -s -o "$WORK/forged.json" -w '%{http_code}' -m 5 -X POST -H 'content-type: application/json' -H 'accept: text/event-stream' \
+  -H 'x-wa-node: attacker' -H 'x-wa-pub: deadbeef' -H "x-wa-ts: $(date +%s)" -H 'x-wa-sig: forged' \
+  -d '{"text":"peer run"}' "http://127.0.0.1:$PORT/node/chat")"
+case "$code" in
+  401|403) echo "  ok: a forged peer signature is refused before admission ($code)" ;;
+  *) fail "a forged peer request must be refused before admission, got $code $(cat "$WORK/forged.json" 2>/dev/null)" ;;
+esac
+[ -z "$(runs_for 'peer:attacker')" ] || fail "a forged peer request created a run owner"
+echo "  ok: the forged request created no admission"
+
+echo
+echo "subagents: control lane, bounded await, auth refused"
+code="$(curl -s -o "$WORK/sub-auth.json" -w '%{http_code}' -m 3 -X POST -H 'content-type: application/json' -H 'x-wa-session: bogus-token' -d '{"action":"list"}' "http://127.0.0.1:$PORT/subagents")"
+[ "$code" = "401" ] || fail "an invalid credential must be refused 401 on /subagents, got $code"
+echo "  ok: /subagents refuses an invalid credential with 401"
+started="$(curl -s -m 5 -X POST -H 'content-type: application/json' -d '{"action":"start","profile":"explore","prompt":"answer with RUN-MARKER-CHILD"}' "http://127.0.0.1:$PORT/subagents")"
+child_id="$(printf '%s' "$started" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).subagent_id||"")}catch(e){console.log("")}})')"
+[ -n "$child_id" ] || fail "subagent start did not return an id: $started"
+echo "  ok: /subagents start returned a durable id ($child_id)"
+curl -s -m 5 -X POST -H 'content-type: application/json' -d "{\"action\":\"await\",\"id\":\"$child_id\",\"wait_ms\":60000}" "http://127.0.0.1:$PORT/subagents" > "$WORK/await.json" &
+AWAIT_PID=$!
+sleep 0.3
+t0=$(date +%s%3N)
+runs_status cancel-thread >/dev/null
+t1=$(date +%s%3N)
+[ $((t1 - t0)) -lt 2000 ] || fail "/runs status blocked behind a control await ($((t1 - t0))ms)"
+echo "  ok: /runs status answered in $((t1 - t0))ms while a control await was in flight"
+wait "$AWAIT_PID"
+waited="$(cat "$WORK/await.json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const v=JSON.parse(s);console.log(v.waited_ms||v.state||"")}catch(e){console.log("")}})')"
+echo "  ok: the HTTP await was bounded ($waited)"
+# GET is the read half of the same control lane, and /health carries the versioned strict shape.
+code="$(curl -s -o "$WORK/sub-get.json" -w '%{http_code}' -m 3 "http://127.0.0.1:$PORT/subagents")"
+[ "$code" = "200" ] || fail "GET /subagents must answer 200, got $code"
+echo "  ok: GET /subagents answers on the control lane"
+health | node -e '
+  let s = "";
+  process.stdin.on("data", (d) => s += d).on("end", () => {
+    const h = JSON.parse(s);
+    if (h.execution_schema !== 1) throw new Error("execution_schema");
+    const sub = h.subagents || {};
+    if (typeof sub.queued !== "number" || typeof sub.running !== "number" || typeof sub.active !== "number") throw new Error("subagents shape");
+    if (sub.active !== sub.queued + sub.running) throw new Error("active != queued + running");
+  });' || fail "health must carry execution_schema:1 and strict subagents {queued,running,active}"
+echo "  ok: /health carries execution_schema:1 and strict subagent counts"
 
 echo
 echo "run isolation ok"

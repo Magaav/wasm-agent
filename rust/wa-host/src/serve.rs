@@ -21,8 +21,8 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 mod scheduler;
 
@@ -151,11 +151,69 @@ fn interactive_reserve() -> usize {
     env_usize("WASM_AGENT_INTERACTIVE_RESERVE", 2).clamp(1, 8)
 }
 
+/// How many worker slots are reserved for the control lane (reads, engine control, `/subagents`).
+/// They sit at the *top* of the worker index range, above the run lanes, so control work can never
+/// occupy an interactive or background run slot and a long `/subagents await` cannot hold a run
+/// worker. Two by default: one control slot may be blocked in an await while cancel/status/health
+/// stay answerable on the other (and `/runs` and `/health` do not use a worker at all).
+fn control_workers() -> usize {
+    env_usize("WASM_AGENT_CONTROL_WORKERS", 2).clamp(1, 8)
+}
+
+/// The first worker index the control lane owns. Run lanes are `0..run_capacity`, control is
+/// `run_capacity..=max_workers`.
+fn control_floor() -> usize {
+    run_capacity()
+}
+
+/// How many workers may serve runs (interactive + background). The control reserve is taken off the
+/// top of the index range so the two capacities are independent rather than merely differently
+/// prioritised.
+fn run_capacity() -> usize {
+    (max_workers() + 1).saturating_sub(control_workers()).max(1)
+}
+
+/// Is this a route served by the independent control lane rather than a run or a plain read?
+/// `/subagents` is the one that can block for seconds, so it must never use worker 0.
+fn is_control_route(request: &Request) -> bool {
+    split_path(&request.path).0 == "/subagents"
+}
+
+/// How long the accept thread will wait for the resolver before refusing, so a busy SQLite lock or a
+/// slow Lua call cannot stop the node accepting connections.
+fn admission_timeout_ms() -> u64 {
+    env_usize("WASM_AGENT_ADMISSION_TIMEOUT_MS", 8000) as u64
+}
+
 thread_local! {
     /// Which worker this thread is. `beat()` is called from inside Lua and had no way to say *which*
     /// interpreter had made progress, so per-worker liveness was impossible until this existed.
     static WORKER_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static IN_RUN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The cancel flag of the run this thread is executing right now. The runtime's provider reader
+    /// and agent loop poll `run_cancel_requested()`, so a cancel request reaches a model call on the
+    /// same thread that is blocked in it, without a global lookup and without reaching another run.
+    static CURRENT_RUN_CANCEL: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+/// Has the owner of the run on this thread requested cancellation?
+///
+/// This is the serve-side half of cancellation: the runtime worker polls it in the provider reader
+/// and the agent loop, combined with its own `subagents::cancel_requested()`. It is deliberately
+/// per-run: the flag belongs to one admitted run, so cancelling a running run does not also cancel
+/// the run queued behind it. A `false` here means "not requested", never "not cancelled" - a run is
+/// reported cancelled only after it settles.
+pub fn run_cancel_requested() -> bool {
+    CURRENT_RUN_CANCEL.with(|cell| {
+        cell.borrow().as_ref().map(|flag| flag.load(Ordering::SeqCst)).unwrap_or(false)
+    })
+}
+
+/// Install (or clear) the current-run cancel flag for this worker thread.
+fn set_current_run_cancel(flag: Option<Arc<AtomicBool>>) {
+    CURRENT_RUN_CANCEL.with(|cell| {
+        *cell.borrow_mut() = flag;
+    });
 }
 
 pub(crate) fn worker_id() -> usize {
@@ -263,15 +321,15 @@ fn worker_run_id(index: usize) -> Option<u64> {
 ///
 /// The interpreter is built *before* the lock is taken in spirit but inside it in practice, which is why
 /// the caller must not be a hot path: this happens once per growth, not once per request.
-fn spawn_worker(slots: &mut Vec<Option<std::sync::mpsc::SyncSender<Work>>>, min_index: usize) -> Option<usize> {
+fn spawn_worker(slots: &mut Vec<Option<std::sync::mpsc::SyncSender<Work>>>, min_index: usize, max_index: usize) -> Option<usize> {
     let pool = POOL.get()?;
-    // `min_index` keeps a spawned worker outside a lane it may not use. Background work starts at the
-    // interactive reserve, so it never creates (or occupies) a worker below it; gaps are `None`, which is
+    // `min_index`/`max_index` keep a spawned worker inside its lane. Background work starts at the
+    // interactive reserve, and run workers stop below the control floor; gaps are `None`, which is
     // exactly what an unused slot is.
-    let index = (min_index..slots.len())
+    let index = (min_index..slots.len().min(max_index + 1))
         .find(|index| slots[*index].is_none())
         .unwrap_or_else(|| slots.len().max(min_index));
-    if index >= max_workers() + 1 {
+    if index > max_index {
         return None;
     }
     let state = (pool.factory)();
@@ -324,10 +382,13 @@ fn pick_run_worker(class: scheduler::RunClass, claimed: &std::collections::HashS
     // Background work may not occupy the interactive reserve: worker indices below `floor` are kept
     // for runs a person is waiting on, whatever the background backlog looks like.
     let floor = if background { interactive_reserve() } else { 0 };
+    // Run lanes stop below the control floor: the control reserve is independent, not merely a
+    // different priority, so a run is never admitted to a worker the control lane owns.
+    let ceiling = run_capacity().saturating_sub(1);
     let beats = WORKER_BEATS.get()?;
     let mut idle: Vec<usize> = live_worker_ids()
         .into_iter()
-        .filter(|index| *index >= floor && !claimed.contains(index) && worker_busy_label(*index).is_none())
+        .filter(|index| *index >= floor && *index <= ceiling && !claimed.contains(index) && worker_busy_label(*index).is_none())
         .filter(|index| {
             // A worker that has not beaten is as idle as one that never existed; a worker that has gone
             // quiet is not idle, whatever its label says.
@@ -346,7 +407,7 @@ fn pick_run_worker(class: scheduler::RunClass, claimed: &std::collections::HashS
     // No idle worker: grow the pool if the ceiling allows. `spawn_worker` never reuses worker 0 (it is
     // always running), so a spawned worker is always outside the interactive reserve.
     if let Ok(mut slots) = pool.slots.lock() {
-        if let Some(index) = spawn_worker(&mut slots, floor) {
+        if let Some(index) = spawn_worker(&mut slots, floor, run_capacity().saturating_sub(1)) {
             if index >= floor {
                 return Some(index);
             }
@@ -356,7 +417,10 @@ fn pick_run_worker(class: scheduler::RunClass, claimed: &std::collections::HashS
     // worker's bounded queue. Either send may still be refused when that queue is full - which is the
     // bound, because refusing loudly beats an unbounded backlog every client waits in.
     if background {
-        let candidates: Vec<usize> = live_worker_ids().into_iter().filter(|index| *index >= floor).collect();
+        let candidates: Vec<usize> = live_worker_ids()
+            .into_iter()
+            .filter(|index| *index >= floor && *index <= ceiling)
+            .collect();
         if candidates.is_empty() {
             return None;
         }
@@ -371,6 +435,24 @@ fn pick_run_worker(class: scheduler::RunClass, claimed: &std::collections::HashS
 /// by the scheduler (`pick_run_worker`), never here, so this has no run branch to keep in sync.
 fn choose_worker(request: &Request) -> usize {
     let Some(pool) = POOL.get() else { return 0 };
+    // The control lane is independent of both run lanes: `/subagents` may block for seconds, so it
+    // never uses worker 0 and never a run slot. It lives at the top of the index range and grows on
+    // demand. `/runs` and `/health` are answered without a worker at all, so cancel and health stay
+    // prompt even when every control slot is awaiting.
+    if is_control_route(request) {
+        let Ok(mut slots) = pool.slots.lock() else { return control_floor() };
+        let live: Vec<usize> = (control_floor()..slots.len())
+            .filter(|index| slots[*index].is_some() && worker_busy_label(*index).is_none())
+            .collect();
+        if !live.is_empty() {
+            let start = pool.next.fetch_add(1, Ordering::Relaxed);
+            return live[start % live.len()];
+        }
+        if let Some(index) = spawn_worker(&mut slots, control_floor(), max_workers()) {
+            return index;
+        }
+        return control_floor();
+    }
     let read = is_read_route(request);
     // Nothing to gain while the run worker is idle - for a read as much as for a write. This is the rule
     // that keeps an idle node at exactly one interpreter, and it is also why a read does not spawn a worker
@@ -386,14 +468,18 @@ fn choose_worker(request: &Request) -> usize {
     if !read {
         return 0;
     }
-    let live: Vec<usize> = (1..slots.len()).filter(|index| slots[*index].is_some()).collect();
+    // Read workers live in the run lanes, below the control floor: a read must not occupy control
+    // capacity, and a control worker must not be counted as a read worker.
+    let live: Vec<usize> = (1..slots.len().min(run_capacity()))
+        .filter(|index| slots[*index].is_some())
+        .collect();
     if !live.is_empty() {
         let start = pool.next.fetch_add(1, Ordering::Relaxed);
         return live[start % live.len()];
     }
     // A read, the run worker is busy, and there is no read worker: this is the moment the pool earns its
     // keep. Everything else waits, which is what a node with one interpreter has always done.
-    if let Some(index) = spawn_worker(&mut slots, 1) {
+    if let Some(index) = spawn_worker(&mut slots, 1, run_capacity().saturating_sub(1)) {
         return index;
     }
     0
@@ -586,10 +672,31 @@ fn health_body() -> Vec<u8> {
             }
         }
     }
+    // Local subagent runtime. Computed here rather than inside the macro so the strict counts are a
+    // plain value. Never contains a prompt or a credential.
+    let subagent_health = crate::subagents::health();
+    let subagent_queued = subagent_health.get("queued").and_then(|value| value.as_u64()).unwrap_or(0);
+    let subagent_running = subagent_health.get("running").and_then(|value| value.as_u64()).unwrap_or(0);
+    // `active == queued + running`, from the runtime's own counts; a runtime that only names
+    // `active_count` is still read correctly.
+    let subagent_active = subagent_health
+        .get("active")
+        .and_then(|value| value.as_u64())
+        .or_else(|| subagent_health.get("active_count").and_then(|value| value.as_u64()))
+        .unwrap_or(subagent_queued + subagent_running);
+    let subagent_counts = serde_json::json!({
+        "queued": subagent_queued,
+        "running": subagent_running,
+        "active": subagent_active,
+    });
     // Built with serde_json rather than a hand-escaped format string: the escaping
     // is exactly the kind of thing that silently produces invalid JSON, and this is
     // the one endpoint that must never be the thing that lies.
     serde_json::json!({
+        // Versioned execution surface: a client that sees schema 1 may rely on the fields below
+        // (`subagents`, `runs`, `run_ids`, `current`, `queue`, `workers`) existing. A client that does
+        // not see it must fall back to the legacy fields explicitly.
+        "execution_schema": 1,
         "ok": !stalled,
         "worker": state,
         "stalled_ms": age_ms,
@@ -623,8 +730,21 @@ fn health_body() -> Vec<u8> {
                 "background_max": config.background_max,
                 "background_backlog": config.background_backlog,
                 "interactive_reserve": interactive_reserve(),
+                "control_workers": control_workers(),
             })
         }),
+        // The admitted run ids, by conversation and state, so a client can show and poll a run it is
+        // cancelling without guessing. No prompts and no credentials.
+        "run_ids": scheduler::global().map(|scheduler| {
+            scheduler.run_ids().into_iter().map(|(conversation, run_id, state)| {
+                serde_json::json!({"conversation": conversation, "run_id": run_id, "state": state.as_str()})
+            }).collect::<Vec<_>>()
+        }),
+        // Local subagent runtime. `subagents` is the strict, versioned shape `{queued,running,active}`
+        // with `active == queued + running`; `subagents_detail` carries the runtime's own view. Neither
+        // contains a prompt or a credential.
+        "subagents": subagent_counts,
+        "subagents_detail": subagent_health,
         "workers_spawned": POOL.get().map(|pool| pool.spawned.load(Ordering::Relaxed)).unwrap_or(0),
         "workers_retired": POOL.get().map(|pool| pool.retired.load(Ordering::Relaxed)).unwrap_or(0),
         // Milliseconds since a UI page last polled. `null` means no page has ever asked - a node that has
@@ -743,32 +863,119 @@ fn ok_json(body: String) -> Reply {
 /// named thread belongs to its author, so only Lua can answer it. Doing it here means an invalid
 /// nonempty credential never reaches a worker as the default user, and a foreign thread is refused
 /// before a slot is taken.
-fn resolve_admission(control: &Lua, request: &Request) -> Result<String, (u16, String, String)> {
+/// A pre-admission resolution request. The accept thread hands the raw request to the resolver
+/// thread and waits with a bound, so a busy SQLite lock cannot stop the node accepting connections.
+struct ResolveRequest {
+    function: &'static str,
+    args: Vec<String>,
+    reply: std::sync::mpsc::SyncSender<Result<serde_json::Value, (u16, String, String)>>,
+}
+
+/// Resolve on the resolver thread: call the Lua resolver and shape the reply. No model call is ever
+/// made here; the functions are `users.resolve`/`memory.session`/`host.verify` and nothing else.
+fn resolve_sync(
+    control: &Lua,
+    function: &str,
+    args: &[String],
+) -> Result<serde_json::Value, (u16, String, String)> {
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let raw = control
+        .call_string(function, &refs)
+        .map_err(|error| (500, "resolve_failed".to_string(), error))?;
+    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|_| {
+        (500, "resolve_failed".to_string(), "the resolver returned invalid JSON".to_string())
+    })?;
+    if let Some(error) = value.get("error").and_then(|error| error.as_str()) {
+        let status = match error {
+            "invalid_session" | "unknown_user" | "bad_signature" | "stale_request" => 401,
+            "forbidden_thread" | "unknown_caller" | "forbidden_role" | "replayed_request" => 403,
+            _ => 400,
+        };
+        return Err((status, error.to_string(), "the request was refused before admission".to_string()));
+    }
+    Ok(value)
+}
+
+/// Ask the resolver thread, waiting no longer than `admission_timeout_ms`. The accept thread never
+/// blocks unbounded on SQLite or on a slow interpreter.
+fn resolve_with(
+    tx: &std::sync::mpsc::SyncSender<ResolveRequest>,
+    function: &'static str,
+    args: Vec<String>,
+) -> Result<serde_json::Value, (u16, String, String)> {
+    let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+    tx.try_send(ResolveRequest { function, args, reply: reply_tx }).map_err(|_| {
+        (503, "admission_busy".to_string(), "the admission resolver is busy; retry shortly".to_string())
+    })?;
+    match reply_rx.recv_timeout(std::time::Duration::from_millis(admission_timeout_ms())) {
+        Ok(result) => result,
+        Err(_) => Err((503, "admission_timeout".to_string(), "the admission resolver did not answer in time; retry shortly".to_string())),
+    }
+}
+
+/// The `(conversation, owner)` for a run, resolved before it is admitted.
+fn resolve_admission(
+    tx: &std::sync::mpsc::SyncSender<ResolveRequest>,
+    request: &Request,
+) -> Result<(String, String), (u16, String, String)> {
     let (_, query) = split_path(&request.path);
     let from_query = query_value(&query, "node");
     let node = if !from_query.is_empty() { from_query } else { header_of(&request.node_headers, "x-wa-node") };
     let body = String::from_utf8_lossy(&request.body).to_string();
-    let raw = control
-        .call_string("wa_admission", &[request.session.as_str(), node.as_str(), body.as_str()])
-        .map_err(|error| (500, "admission_failed".to_string(), error))?;
-    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|_| {
-        (500, "admission_failed".to_string(), "the admission resolver returned invalid JSON".to_string())
-    })?;
-    if let Some(error) = value.get("error").and_then(|error| error.as_str()) {
-        let status = match error {
-            "invalid_session" | "unknown_user" => 401,
-            "forbidden_thread" => 403,
-            _ => 400,
-        };
-        return Err((status, error.to_string(), "the run was refused before admission".to_string()));
-    }
-    Ok(value.get("conversation").and_then(|value| value.as_str()).unwrap_or_default().to_string())
+    let value = resolve_with(tx, "wa_admission", vec![request.session.clone(), node, body])?;
+    let conversation = value.get("conversation").and_then(|value| value.as_str()).unwrap_or_default().to_string();
+    let owner = value
+        .get("user")
+        .and_then(|user| user.get("id"))
+        .and_then(|id| id.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Ok((conversation, owner))
 }
 
-/// The conversation a directly-arriving peer run belongs to. A peer is authenticated by its signature
-/// in `wa_node_chat`, not by a local credential, so it is keyed by the peer node id (or a thread the
-/// peer named), and it is always background.
-fn peer_conversation(request: &Request) -> String {
+/// The authenticated user id for a control route that is owner-scoped but not admitted as a run.
+fn resolve_identity(
+    tx: &std::sync::mpsc::SyncSender<ResolveRequest>,
+    session: &str,
+) -> Result<String, (u16, String, String)> {
+    let value = resolve_with(tx, "wa_identity", vec![session.to_string()])?;
+    Ok(value
+        .get("user")
+        .and_then(|user| user.get("id"))
+        .and_then(|id| id.as_str())
+        .unwrap_or_default()
+        .to_string())
+}
+
+/// Verify a peer's signature before admission, so the scheduler keys the conversation by the verified
+/// author and not by a header the caller supplied. The run half then uses `wa_node_chat_verified`, which
+/// does not re-verify - a second check of the same signed request is refused as a replay.
+fn resolve_peer(
+    tx: &std::sync::mpsc::SyncSender<ResolveRequest>,
+    headers: &[(String, String)],
+    body: &str,
+) -> Result<(String, String, String), (u16, String, String)> {
+    let value = resolve_with(
+        tx,
+        "wa_verify_peer",
+        vec![
+            header_of(headers, "x-wa-node"),
+            header_of(headers, "x-wa-pub"),
+            header_of(headers, "x-wa-ts"),
+            header_of(headers, "x-wa-sig"),
+            body.to_string(),
+        ],
+    )?;
+    let node_id = value.get("node_id").and_then(|value| value.as_str()).unwrap_or_default().to_string();
+    let role = value.get("role").and_then(|value| value.as_str()).unwrap_or("master").to_string();
+    let name = value.get("name").and_then(|value| value.as_str()).unwrap_or_default().to_string();
+    Ok((node_id, role, name))
+}
+
+/// The conversation a directly-arriving peer run belongs to. A peer is authenticated by its signature,
+/// verified before admission, so the key uses the verified node id (or a thread the peer named) and
+/// never the raw header. It is always background.
+fn peer_conversation(request: &Request, verified_node_id: &str) -> String {
     if let Some(thread) = serde_json::from_slice::<serde_json::Value>(&request.body)
         .ok()
         .and_then(|value| value.get("thread").and_then(|thread| thread.as_str()).map(str::to_string))
@@ -776,8 +983,122 @@ fn peer_conversation(request: &Request) -> String {
     {
         return thread;
     }
-    let peer = header_of(&request.node_headers, "x-wa-node");
-    if peer.is_empty() { String::new() } else { format!("peer:{peer}") }
+    if verified_node_id.is_empty() { String::new() } else { format!("peer:{verified_node_id}") }
+}
+
+/// `POST /runs`: owner-scoped status and cancellation for a foreground conversation.
+///
+/// Answered on the accept thread from the scheduler's own state, so it never queues behind the very
+/// run it is trying to cancel. The response never claims a run stopped: `cancel` sets a request and
+/// reports the state it was in, and the caller polls `status` until the run settles as `cancelled`
+/// or `completed`.
+fn handle_runs(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<ResolveRequest>) -> Reply {
+    let owner = match resolve_identity(resolve_tx, &request.session) {
+        Ok(owner) => owner,
+        Err((status, error, hint)) => {
+            let body = format!("{{\"error\":\"{error}\",\"hint\":\"{hint}\"}}");
+            return (status, "application/json", body.into_bytes());
+        }
+    };
+    let parsed: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null);
+    let action = parsed.get("action").and_then(|action| action.as_str()).unwrap_or("status");
+    let conversation = parsed
+        .get("thread")
+        .and_then(|value| value.as_str())
+        .or_else(|| parsed.get("conversation").and_then(|value| value.as_str()))
+        .unwrap_or_default()
+        .to_string();
+    if conversation.is_empty() {
+        return (400, "application/json", b"{\"error\":\"conversation_required\"}".to_vec());
+    }
+    let run_id = parsed.get("run_id").and_then(|value| value.as_u64());
+    let Some(scheduler) = scheduler::global() else {
+        return (503, "application/json", b"{\"error\":\"admission_unavailable\"}".to_vec());
+    };
+    match action {
+        "status" => {
+            let runs: Vec<serde_json::Value> = scheduler
+                .runs_for(&owner, &conversation)
+                .into_iter()
+                .map(|view| {
+                    serde_json::json!({
+                        "run_id": view.run_id,
+                        "state": view.state.as_str(),
+                        "cancel_requested": view.cancel_requested,
+                    })
+                })
+                .collect();
+            let cancelled = runs.iter().any(|run| run["cancel_requested"] == serde_json::json!(true));
+            let body = serde_json::json!({
+                "ok": true,
+                "conversation": conversation,
+                "runs": runs,
+                "cancelled": cancelled,
+            })
+            .to_string();
+            (200, "application/json", body.into_bytes())
+        }
+        "cancel" => match scheduler.cancel_run(&owner, &conversation, run_id) {
+            scheduler::CancelOutcome::Requested { run_id, state } => {
+                let body = serde_json::json!({
+                    "ok": true,
+                    "run_id": run_id,
+                    "cancel_requested": true,
+                    "state": state.as_str(),
+                })
+                .to_string();
+                (200, "application/json", body.into_bytes())
+            }
+            scheduler::CancelOutcome::NotFound => (404, "application/json", b"{\"error\":\"run_not_found\"}".to_vec()),
+            scheduler::CancelOutcome::Forbidden => (403, "application/json", b"{\"error\":\"forbidden\"}".to_vec()),
+        },
+        other => {
+            let body = format!("{{\"error\":\"unknown_action\",\"action\":{}}}", json_escape(other));
+            (400, "application/json", body.into_bytes())
+        }
+    }
+}
+
+/// Bound the HTTP `await` of a subagent control call. A caller may ask to wait minutes; the HTTP
+/// route holds a control slot, and a slot held for minutes is a slot `cancel` and `start` cannot
+/// use. The tool-level await may be longer because it runs inside a run, not on the control lane.
+fn cap_subagent_await(body: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(body) else { return body.to_string() };
+    if value.get("action").and_then(|action| action.as_str()) != Some("await") {
+        return body.to_string();
+    }
+    let cap = env_usize("WASM_AGENT_SUBAGENT_AWAIT_MS", 10_000) as u64;
+    let requested = value
+        .get("wait_ms")
+        .and_then(|value| value.as_u64())
+        .or_else(|| value.get("timeout_ms").and_then(|value| value.as_u64()))
+        .unwrap_or(cap);
+    if requested <= cap {
+        return body.to_string();
+    }
+    value["wait_ms"] = serde_json::json!(cap);
+    if value.get("timeout_ms").is_some() {
+        value["timeout_ms"] = serde_json::json!(cap);
+    }
+    value.to_string()
+}
+
+/// Call the runtime's global `wa_subagents(body, session)`. An invalid nonempty credential is a `401`
+/// at the boundary; the owner is derived from the authenticated session, never from the body.
+fn subagent_reply(lua: &Lua, body: &str, session: &str) -> Reply {
+    let capped = cap_subagent_await(body);
+    match lua.call_string("wa_subagents", &[capped.as_str(), session]) {
+        Ok(text) => (200, "application/json", text.into_bytes()),
+        Err(error) => {
+            let (status, code) = if error.contains("invalid_session") || error.contains("unknown_user") {
+                (401, "invalid_session")
+            } else {
+                (500, "subagent_error")
+            };
+            let body = format!("{{\"error\":\"{code}\",\"hint\":{}}}", json_escape(&error));
+            (status, "application/json", body.into_bytes())
+        }
+    }
 }
 
 pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, ui: PathBuf) {
@@ -791,11 +1112,18 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     let ceiling = max_workers();
     let warm = warm_read_workers().min(ceiling);
     let queue_depth = env_usize("WASM_AGENT_QUEUE_DEPTH", 256);
-    // The control interpreter. Admission resolves the credential and the conversation in Lua *before*
-    // a worker is reserved, and the accept thread is the only place that decision can be made: it owns
-    // the request. It is one interpreter, created once, and it never runs a model - it resolves
-    // identity, ownership of a named thread, and the session an unnamed run would resume.
+    // The control interpreter, owned by the resolver thread. Admission resolves the credential and
+    // the conversation in Lua *before* a worker is reserved; running it on its own thread lets the
+    // accept thread bound the wait, so a busy SQLite lock or a slow interpreter cannot stop the node
+    // accepting connections. It never runs a model.
     let control = factory();
+    let (resolve_tx, resolve_rx) = std::sync::mpsc::sync_channel::<ResolveRequest>(4);
+    std::thread::spawn(move || {
+        while let Ok(request) = resolve_rx.recv() {
+            let result = resolve_sync(&control, request.function, &request.args);
+            let _ = request.reply.send(result);
+        }
+    });
     // Admission bounds. `background_max` is how many background conversations may run at once and
     // `background_backlog` how many more may wait; together they keep a wake storm from growing
     // without limit. `session_queue_depth` bounds one conversation's own backlog so a single
@@ -808,6 +1136,10 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
         background_max: env_usize("WASM_AGENT_BACKGROUND_MAX", (ceiling + 1).saturating_sub(interactive_reserve())).max(1),
         background_backlog: env_usize("WASM_AGENT_BACKGROUND_BACKLOG", 8),
     });
+    // Register the run half of unified cancellation with the host, so the provider reader and the
+    // agent loop observe a run's own flag as well as a child's. One name (`host::run_cancel_requested`)
+    // combines both, and a caller cannot check the wrong one.
+    crate::host::set_run_cancel_probe(crate::serve::run_cancel_requested);
     // Sized to the ceiling once, so a worker's liveness slot never has to be created later: the arrays are
     // indexed by worker id, and a slot whose sender is None is simply not running.
     // u64::MAX, not 0, for "never beaten": a worker beats at the top of its own loop, which can happen
@@ -842,7 +1174,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     // so the default is to have none until that happens.
     for _ in 0..warm {
         if let Ok(mut slots) = pool.slots.lock() {
-            spawn_worker(&mut slots, 1);
+            spawn_worker(&mut slots, 1, run_capacity().saturating_sub(1));
         }
     }
     eprintln!(
@@ -883,7 +1215,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
             _ => continue,
         };
         if std::env::var("WASM_AGENT_MANAGED").as_deref() == Ok("1")
-            || matches!(split_path(&request.path).0.as_str(), "/jobs" | "/operations" | "/operation") {
+            || matches!(split_path(&request.path).0.as_str(), "/jobs" | "/operations" | "/operation" | "/subagents" | "/runs") {
             let host = header_of(&request.node_headers, "host").to_ascii_lowercase();
             let origin = header_of(&request.node_headers, "origin").to_ascii_lowercase();
             let port = stream.local_addr().map(|a| a.port()).unwrap_or(0);
@@ -904,21 +1236,45 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
             let _ = respond(&mut stream, status, content_type, &body);
             continue;
         }
+        // `POST /runs` is answered here, without a worker: cancellation and status must stay prompt
+        // even while every control slot is awaiting a subagent, and the run's state and cancel flag
+        // live in the scheduler, not in an interpreter. Only identity resolution touches Lua, and it
+        // is bounded by the resolver thread.
+        if split_path(&request.path).0 == "/runs" && request.method == "POST" {
+            let (status, content_type, body) = handle_runs(&request, &resolve_tx);
+            let _ = respond(&mut stream, status, content_type, &body);
+            continue;
+        }
         // Admission. A run goes through the scheduler, which owns its conversation from admission
         // through completion and picks its lane; everything else keeps the old routing. The scheduler
         // decides *and reserves* in one step, so two back-to-back admissions for one conversation
         // cannot both be handed a fresh worker - the hole that let a conversation be written twice.
         let is_run = is_run_route(&request);
-        let mut admitted_conversation = String::new();
         let target = if is_run {
             if split_path(&request.path).0 == "/node/chat" {
-                // A peer run is authenticated by its signature, not a local credential, and it is always
-                // background. It still shares the same admission as a local run.
-                request.routing_session = peer_conversation(&request);
-                request.run_class = scheduler::RunClass::Background;
+                // A peer run is authenticated by its signature, verified ONCE here, before admission,
+                // so the conversation and owner come from the verified author and not from a header
+                // the caller supplied. The run half uses `wa_node_chat_verified` and does not re-check.
+                let body = String::from_utf8_lossy(&request.body).to_string();
+                match resolve_peer(&resolve_tx, &request.node_headers, &body) {
+                    Ok((node_id, role, name)) => {
+                        request.routing_session = peer_conversation(&request, &node_id);
+                        request.run_class = scheduler::RunClass::Background;
+                        request.owner = node_id.clone();
+                        request.peer_verified = Some((node_id, role, name));
+                    }
+                    Err((status, error, hint)) => {
+                        let body = format!("{{\"error\":\"{error}\",\"hint\":\"{hint}\"}}");
+                        let _ = respond(&mut stream, status, "application/json", body.as_bytes());
+                        continue;
+                    }
+                }
             } else {
-                match resolve_admission(&control, &request) {
-                    Ok(conversation) => request.routing_session = conversation,
+                match resolve_admission(&resolve_tx, &request) {
+                    Ok((conversation, owner)) => {
+                        request.routing_session = conversation;
+                        request.owner = owner;
+                    }
                     Err((status, error, hint)) => {
                         let body = format!("{{\"error\":\"{error}\",\"hint\":\"{hint}\"}}");
                         let _ = respond(&mut stream, status, "application/json", body.as_bytes());
@@ -926,10 +1282,11 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
                     }
                 }
             }
-            admitted_conversation = request.routing_session.clone();
-            match scheduler::admit(&admitted_conversation, request.run_class, pick_run_worker) {
-                scheduler::Decision::Run { run_id, worker } | scheduler::Decision::Behind { run_id, worker } => {
+            match scheduler::admit(&request.routing_session, &request.owner, request.run_class, pick_run_worker) {
+                scheduler::Decision::Run { run_id, worker, cancel }
+                | scheduler::Decision::Behind { run_id, worker, cancel } => {
                     request.run_id = run_id;
+                    request.run_cancel = Some(cancel);
                     worker
                 }
                 scheduler::Decision::Refused(refusal) => {
@@ -971,7 +1328,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
             if is_run {
                 // The admission is already claimed; the run is not going to start, so give the
                 // conversation's place back before refusing.
-                scheduler::complete(&admitted_conversation);
+                scheduler::complete_run(request.run_id);
             }
             let body = format!(
                 "{{\"error\":\"worker_stalled\",\"worker\":{target},\"stalled_ms\":{age_ms},\"hint\":\"the interpreter has not reported progress; see the node log, and restart it if the run is lost\"}}"
@@ -985,6 +1342,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
         // which is what makes the retry possible rather than a lost request.
         let mut attempt = 0;
         let mut target = target;
+        let admitted_run_id = request.run_id;
         let mut pending = Some((stream, request));
         loop {
             let sender = POOL
@@ -1000,7 +1358,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
                     if is_run {
                         // The conversation's owner retired between admission and delivery. Release
                         // the place rather than hand the run to a worker that does not own it.
-                        scheduler::complete(&admitted_conversation);
+                        scheduler::complete_run(admitted_run_id);
                         QUEUED.fetch_sub(1, Ordering::Relaxed);
                         let body = b"{\"error\":\"node_busy\",\"hint\":\"the worker retired before the run could start; retry shortly\"}";
                         let _ = respond(&mut stream, 503, "application/json", body);
@@ -1024,7 +1382,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
                 Err(std::sync::mpsc::TrySendError::Full(work)) => {
                     let (mut stream, _request) = unwrap_http(work);
                     if is_run {
-                        scheduler::complete(&admitted_conversation);
+                        scheduler::complete_run(admitted_run_id);
                     }
                     QUEUED.fetch_sub(1, Ordering::Relaxed);
                     // A bounded queue: refusing loudly beats an unbounded backlog that every client waits in.
@@ -1035,7 +1393,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
                 Err(std::sync::mpsc::TrySendError::Disconnected(work)) => {
                     let pair = unwrap_http(work);
                     if is_run {
-                        scheduler::complete(&admitted_conversation);
+                        scheduler::complete_run(admitted_run_id);
                         QUEUED.fetch_sub(1, Ordering::Relaxed);
                         let (mut stream, _request) = pair;
                         let body = b"{\"error\":\"node_busy\",\"hint\":\"the worker retired before the run could start; retry shortly\"}";
@@ -1123,13 +1481,26 @@ fn worker_loop(
                     }
                 }
                 IN_RUN.with(|flag| flag.set(is_run_route(&request)));
-                let _ = handle(&lua, &agent_ui, &mut stream, &request);
+                if is_run_route(&request) {
+                    // Install this run's own cancel flag and mark it running, so a cancel request
+                    // reaches the provider reader on this thread and the lifecycle is observable.
+                    set_current_run_cancel(request.run_cancel.clone());
+                    scheduler::mark_running(request.run_id);
+                }
+                if is_run_route(&request) && run_cancel_requested() {
+                    // Cancelled while queued: settle its own stream exactly once and never execute.
+                    let _ = settle_cancelled_run(&mut stream, &request);
+                } else {
+                    let _ = handle(&lua, &agent_ui, &mut stream, &request);
+                }
+                set_current_run_cancel(None);
                 IN_RUN.with(|flag| flag.set(false));
                 // The run is over, so release its conversation. This happens for the queued runs too:
                 // the owner is held until the last one behind it completes, so the next admission can
-                // land anywhere once the backlog is empty.
+                // land anywhere once the backlog is empty. A run whose cancel flag was set settles as
+                // `cancelled`, not `completed` - the state is only reported after it actually stopped.
                 if is_run_route(&request) {
-                    scheduler::complete(&request.routing_session);
+                    scheduler::complete_run(request.run_id);
                 }
                 if let Some(slots) = WORKER_SESSION.get() {
                     if let Some(slot) = slots.get(index) {
@@ -1150,17 +1521,19 @@ fn worker_loop(
                 idle_since = std::time::Instant::now();
                 continue;
             }
-            Ok(Work::Relay(job)) => {
+            Ok(Work::Relay(relay)) => {
                 // A peer run that admission routed here. It owns its conversation for exactly as long
                 // as it runs, like any other run, and releases it the same way.
                 LAST_SERVED_MS.store(now_ms(), Ordering::Relaxed);
-                begin_work(format!("relay {} {}", job.method, job.path));
-                let conversation = relay_conversation(&job);
-                let (status, body) = process_relay_job(&lua, &agent_ui, &job);
-                scheduler::complete(&conversation);
+                begin_work(format!("relay {} {}", relay.job.method, relay.job.path));
+                set_current_run_cancel(Some(relay.cancel.clone()));
+                scheduler::mark_running(relay.run_id);
+                let (status, body) = process_relay_job(&lua, &agent_ui, &relay.job, relay.verified.as_ref());
+                set_current_run_cancel(None);
+                scheduler::complete_run(relay.run_id);
                 end_work();
                 beat();
-                let _ = job.reply.send((status, body));
+                let _ = relay.job.reply.send((status, body));
                 idle_since = std::time::Instant::now();
                 continue;
             }
@@ -1193,32 +1566,43 @@ fn worker_loop(
             let route = split_path(&job.path).0;
             if !(job.method == "POST" && route == "/node/chat") {
                 begin_work(format!("relay {} {}", job.method, job.path));
-                let (status, body) = process_relay_job(&lua, &agent_ui, &job);
+                let (status, body) = process_relay_job(&lua, &agent_ui, &job, None);
                 end_work();
                 beat();
                 let _ = job.reply.send((status, body));
                 continue;
             }
-            let conversation = relay_conversation(&job);
-            match scheduler::admit(&conversation, scheduler::RunClass::Background, pick_run_worker) {
-                scheduler::Decision::Run { worker, .. } | scheduler::Decision::Behind { worker, .. } => {
+            // Verify the peer's signature ONCE here, before admission, so the conversation is keyed by
+            // the verified author and the run half never re-verifies (a replay).
+            let verified = match verify_peer_sync(&lua, &job.headers, &job.body) {
+                Ok(triple) => triple,
+                Err(error) => {
+                    let _ = job.reply.send((403, format!("{{\"error\":{}}}", json_escape(&error))));
+                    continue;
+                }
+            };
+            let conversation = relay_conversation(&job, &verified.0);
+            let owner = verified.0.clone();
+            match scheduler::admit(&conversation, &owner, scheduler::RunClass::Background, pick_run_worker) {
+                scheduler::Decision::Run { run_id, worker, cancel }
+                | scheduler::Decision::Behind { run_id, worker, cancel } => {
                     let sender = POOL
                         .get()
                         .and_then(|pool| pool.slots.lock().ok().and_then(|slots| slots.get(worker).cloned().flatten()));
                     match sender {
-                        Some(sender) => match sender.try_send(Work::Relay(job)) {
+                        Some(sender) => match sender.try_send(Work::Relay(RelayWork { job, run_id, cancel, verified: Some(verified) })) {
                             Ok(()) => {}
-                            Err(std::sync::mpsc::TrySendError::Full(Work::Relay(job)))
-                            | Err(std::sync::mpsc::TrySendError::Disconnected(Work::Relay(job))) => {
-                                scheduler::complete(&conversation);
-                                let _ = job.reply.send((503, "{\"error\":\"node_busy\",\"hint\":\"the relay run could not be delivered; the peer may retry\"}".into()));
+                            Err(std::sync::mpsc::TrySendError::Full(Work::Relay(relay)))
+                            | Err(std::sync::mpsc::TrySendError::Disconnected(Work::Relay(relay))) => {
+                                scheduler::complete_run(relay.run_id);
+                                let _ = relay.job.reply.send((503, "{\"error\":\"node_busy\",\"hint\":\"the relay run could not be delivered; the peer may retry\"}".into()));
                             }
                             Err(_) => {
-                                scheduler::complete(&conversation);
+                                scheduler::complete_run(run_id);
                             }
                         },
                         None => {
-                            scheduler::complete(&conversation);
+                            scheduler::complete_run(run_id);
                             let _ = job.reply.send((503, "{\"error\":\"node_busy\",\"hint\":\"the relay run could not be delivered; the peer may retry\"}".into()));
                         }
                     }
@@ -1249,7 +1633,7 @@ fn worker_loop(
 /// The conversation a relayed peer run belongs to. A `/node/chat` body may name a `thread`; without one
 /// the peer's node id is the key, so two calls from one peer serialise instead of racing on one
 /// transcript. The peer is already authenticated by its signature before this is called.
-fn relay_conversation(job: &crate::relay_client::RelayJob) -> String {
+fn relay_conversation(job: &crate::relay_client::RelayJob, verified_node_id: &str) -> String {
     if let Some(thread) = serde_json::from_str::<serde_json::Value>(&job.body)
         .ok()
         .and_then(|value| value.get("thread").and_then(|thread| thread.as_str()).map(str::to_string))
@@ -1257,18 +1641,50 @@ fn relay_conversation(job: &crate::relay_client::RelayJob) -> String {
     {
         return thread;
     }
-    let peer = header_of(&job.headers, "x-wa-node");
-    if peer.is_empty() {
+    if verified_node_id.is_empty() {
         String::new()
     } else {
-        format!("peer:{peer}")
+        format!("peer:{verified_node_id}")
     }
+}
+
+/// Verify a peer's signature on the worker that owns the relay housekeeping path. The result is the
+/// verified author, carried to whichever worker runs the job so the run never re-verifies.
+fn verify_peer_sync(
+    lua: &Lua,
+    headers: &[(String, String)],
+    body: &str,
+) -> Result<(String, String, String), String> {
+    let raw = lua.call_string(
+        "wa_verify_peer",
+        &[
+            &header_of(headers, "x-wa-node"),
+            &header_of(headers, "x-wa-pub"),
+            &header_of(headers, "x-wa-ts"),
+            &header_of(headers, "x-wa-sig"),
+            body,
+        ],
+    )?;
+    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+    if let Some(error) = value.get("error").and_then(|error| error.as_str()) {
+        return Err(error.to_string());
+    }
+    Ok((
+        value.get("node_id").and_then(|value| value.as_str()).unwrap_or_default().to_string(),
+        value.get("role").and_then(|value| value.as_str()).unwrap_or("master").to_string(),
+        value.get("name").and_then(|value| value.as_str()).unwrap_or_default().to_string(),
+    ))
 }
 
 /// Process a request that arrived over the relay. Streaming routes are captured
 /// rather than written to a socket, so the peer gets the events and can replay
 /// them locally.
-fn process_relay_job(lua: &Lua, ui: &std::path::Path, job: &crate::relay_client::RelayJob) -> (u16, String) {
+fn process_relay_job(
+    lua: &Lua,
+    ui: &std::path::Path,
+    job: &crate::relay_client::RelayJob,
+    verified: Option<&(String, String, String)>,
+) -> (u16, String) {
     let ui = ui.to_path_buf();
     let job = crate::relay_client::RelayJob {
         id: job.id.clone(),
@@ -1286,16 +1702,27 @@ fn process_relay_job(lua: &Lua, ui: &std::path::Path, job: &crate::relay_client:
     let session = header_of(&job.headers, "x-wa-session");
 
     if route == "/node/chat" && job.method == "POST" {
-        let from = header_of(&job.headers, "x-wa-node");
-        let public_key = header_of(&job.headers, "x-wa-pub");
-        let ts = header_of(&job.headers, "x-wa-ts");
-        let signature = header_of(&job.headers, "x-wa-sig");
         let text = job.body.clone();
         let events = capture_events(|| {
-            if let Err(error) = lua.call_string(
-                "wa_node_chat",
-                &[from.as_str(), public_key.as_str(), ts.as_str(), signature.as_str(), text.as_str()],
-            ) {
+            // A relayed peer run whose signature was verified before admission uses the verified-author
+            // entry point and does not re-verify; a second check of the same signed request is a replay.
+            let result = match verified {
+                Some((node_id, role, name)) => lua.call_string(
+                    "wa_node_chat_verified",
+                    &[node_id.as_str(), role.as_str(), name.as_str(), text.as_str()],
+                ),
+                None => {
+                    let from = header_of(&job.headers, "x-wa-node");
+                    let public_key = header_of(&job.headers, "x-wa-pub");
+                    let ts = header_of(&job.headers, "x-wa-ts");
+                    let signature = header_of(&job.headers, "x-wa-sig");
+                    lua.call_string(
+                        "wa_node_chat",
+                        &[from.as_str(), public_key.as_str(), ts.as_str(), signature.as_str(), text.as_str()],
+                    )
+                }
+            };
+            if let Err(error) = result {
                 write_event(&format!("{{\"type\":\"error\",\"error\":{}}}", json_escape(&error)));
             }
             write_event("{\"type\":\"done\"}");
@@ -1367,6 +1794,16 @@ struct Request {
     /// It is the run's identity in `/health` and in the node log, so "which run is on which
     /// worker" is answerable without reading a conversation.
     run_id: u64,
+    /// The authenticated owner of this run, resolved before admission. `/runs cancel` is scoped by
+    /// it, so one user can never cancel another's run.
+    owner: String,
+    /// This run's own cancel flag. Installed as the worker's current-run context so the runtime's
+    /// provider reader can observe a cancellation request on the thread blocked in the model call.
+    run_cancel: Option<Arc<AtomicBool>>,
+    /// A peer run's verified author `(node_id, role, name)`. Set only when the signature was verified
+    /// at admission; the run uses `wa_node_chat_verified` and never re-verifies (which would be a
+    /// replay). The conversation and owner come from this, never from the raw `x-wa-node` header.
+    peer_verified: Option<(String, String, String)>,
     node_headers: Vec<(String, String)>,
     body: Vec<u8>,
     accept_sse: bool,
@@ -1377,7 +1814,17 @@ struct Request {
 /// worker 0's housekeeping path.
 enum Work {
     Http(TcpStream, Request),
-    Relay(crate::relay_client::RelayJob),
+    Relay(RelayWork),
+}
+
+/// A relayed run admitted on the accept-thread side of the relay: the job, its admission id, and its
+/// own cancel flag, so it settles exactly like a local run. `verified` is the peer author verified
+/// before admission, so the run half never re-verifies.
+struct RelayWork {
+    job: crate::relay_client::RelayJob,
+    run_id: u64,
+    cancel: Arc<AtomicBool>,
+    verified: Option<(String, String, String)>,
 }
 
 /// Read one request off the socket. `None` means the peer closed.
@@ -1431,6 +1878,9 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
                     routing_session: String::new(),
                     run_class,
                     run_id: 0,
+                    owner: String::new(),
+                    run_cancel: None,
+                    peer_verified: None,
                     node_headers,
                     body,
                     accept_sse,
@@ -1488,6 +1938,24 @@ fn version_body(ui: &std::path::Path) -> String {
     format!("{{\"version\":\"{}\"}}", ui_version(ui))
 }
 
+/// Settle a run that was cancelled while it was queued: it must produce exactly one terminal event
+/// on its own stream and never execute. This is deliberately separate from the streaming handler so
+/// a cancelled run cannot be mistaken for one that ran and answered.
+fn settle_cancelled_run(stream: &mut TcpStream, request: &Request) -> std::io::Result<()> {
+    let route = split_path(&request.path).0;
+    if request.accept_sse || route == "/node/chat" {
+        stream.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\
+              Connection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+        )?;
+        stream.write_all(b"data: {\"type\":\"error\",\"error\":\"run_cancelled\"}\n\n")?;
+        stream.write_all(b"data: {\"type\":\"done\"}\n\n")?;
+        stream.flush()
+    } else {
+        respond(stream, 200, "application/json", b"{\"error\":\"run_cancelled\"}")
+    }
+}
+
 fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream, request: &Request) -> std::io::Result<()> {
     let method = request.method.as_str();
     let path = request.path.as_str();
@@ -1518,20 +1986,32 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream, request: &Req
     }
     if route == "/node/chat" && method == "POST" {
         let text = String::from_utf8_lossy(&body).to_string();
-        let from = header_of(&node_headers, "x-wa-node");
-        let public_key = header_of(&node_headers, "x-wa-pub");
-        let ts = header_of(&node_headers, "x-wa-ts");
-        let signature = header_of(&node_headers, "x-wa-sig");
         stream.write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\
               Connection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
         )?;
         stream.flush()?;
         let _sink = stream.try_clone().ok().map(|clone| SinkGuard::set(Sink::Socket(clone)));
-        if let Err(error) = lua.call_string(
-            "wa_node_chat",
-            &[from.as_str(), public_key.as_str(), ts.as_str(), signature.as_str(), text.as_str()],
-        ) {
+        // A peer run whose signature was verified at admission uses the verified-author entry point
+        // and does not re-verify (a second check of the same signed request is a replay). A direct
+        // call that skipped admission still verifies here.
+        let result = match &request.peer_verified {
+            Some((node_id, role, name)) => lua.call_string(
+                "wa_node_chat_verified",
+                &[node_id.as_str(), role.as_str(), name.as_str(), text.as_str()],
+            ),
+            None => {
+                let from = header_of(&node_headers, "x-wa-node");
+                let public_key = header_of(&node_headers, "x-wa-pub");
+                let ts = header_of(&node_headers, "x-wa-ts");
+                let signature = header_of(&node_headers, "x-wa-sig");
+                lua.call_string(
+                    "wa_node_chat",
+                    &[from.as_str(), public_key.as_str(), ts.as_str(), signature.as_str(), text.as_str()],
+                )
+            }
+        };
+        if let Err(error) = result {
             write_event(&format!("{{\"type\":\"error\",\"error\":{}}}", json_escape(&error)));
         }
         write_event("{\"type\":\"done\"}");
@@ -1603,6 +2083,11 @@ fn dispatch(
         "/jobs" if method == "POST" => (200,"application/json",call("wa_jobs", &[body,session]).into_bytes()),
         "/operations" if method == "GET" => (200,"application/json",call("wa_operation", &["{}",session]).into_bytes()),
         "/operation" if method == "POST" => (200,"application/json",call("wa_operation", &[body,session]).into_bytes()),
+        // Local subagents. This is a control call, never a run admission: `start` launches a native
+        // background child, so the route itself must not occupy an interactive or background run slot.
+        // The HTTP `await` is bounded so one control slot cannot be held indefinitely.
+        "/subagents" if method == "POST" => subagent_reply(lua, body, session),
+        "/subagents" if method == "GET" => subagent_reply(lua, "{}", session),
         "/skills" => (200, "application/json", call("wa_skills", &[session]).into_bytes()),
         "/nodes" => (200, "application/json", call("wa_nodes", &[session]).into_bytes()),
         "/node/name" if method == "POST" => (200, "application/json", call("wa_set_node_name", &[body, session]).into_bytes()),
@@ -1782,22 +2267,26 @@ mod peer_conversation_tests {
             routing_session: String::new(),
             run_class: super::scheduler::RunClass::Background,
             run_id: 0,
+            owner: String::new(),
+            run_cancel: None,
+            peer_verified: None,
             node_headers: headers,
             body: body.to_vec(),
             accept_sse: true,
         }
     }
 
-    /// A peer run's conversation is the thread it named, else the peer's node id. It is never the local
-    /// credential (a peer has none here), and two calls from one peer must serialise rather than race on
-    /// one transcript.
+    /// A peer run's conversation is the thread it named, else the *verified* peer's node id. It is
+    /// never the raw header and never the local credential, and two calls from one peer must serialise
+    /// rather than race on one transcript.
     #[test]
-    fn a_peer_run_is_keyed_by_its_thread_or_its_peer_id() {
-        let with_thread = request(br#"{"text":"hi","thread":"peer-thread"}"#, vec![("x-wa-node".into(), "node-1".into())]);
-        assert_eq!(peer_conversation(&with_thread), "peer-thread");
-        let without_thread = request(br#"{"text":"hi"}"#, vec![("x-wa-node".into(), "node-1".into())]);
-        assert_eq!(peer_conversation(&without_thread), "peer:node-1");
+    fn a_peer_run_is_keyed_by_its_thread_or_its_verified_peer_id() {
+        let with_thread = request(br#"{"text":"hi","thread":"peer-thread"}"#, vec![("x-wa-node".into(), "attacker-supplied".into())]);
+        assert_eq!(peer_conversation(&with_thread, "node-1"), "peer-thread");
+        // No thread: the verified node id wins, not the header the caller wrote.
+        let without_thread = request(br#"{"text":"hi"}"#, vec![("x-wa-node".into(), "attacker-supplied".into())]);
+        assert_eq!(peer_conversation(&without_thread, "node-1"), "peer:node-1");
         let anonymous = request(b"plain text", vec![]);
-        assert_eq!(peer_conversation(&anonymous), "");
+        assert_eq!(peer_conversation(&anonymous, ""), "");
     }
 }

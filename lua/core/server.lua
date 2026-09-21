@@ -165,6 +165,15 @@ function wa_admission(session, node, body)
   return json.encode({ ok = true, user = users.public(user), role = role, conversation = chosen, remote = false })
 end
 
+-- Identity only, for a control route that is owner-scoped but must not be admitted as a run and must
+-- not create a conversation. Used by `POST /runs` (status/cancel). Invalid credentials are an error,
+-- never the default user.
+function wa_identity(session)
+  local user, problem = users.resolve(session)
+  if not user then return json.encode({ error = problem or "invalid_session" }) end
+  return json.encode({ ok = true, user = users.public(user), role = effective_role(user) })
+end
+
 function wa_reply(text, session, node)
   local prompt, images, problem, thread = parse_run_body(text)
   if problem then return json.encode({ error = redact.text(problem) }) end
@@ -389,6 +398,15 @@ local function verify_peer(from, public_key, ts, signature, action, body)
   return caller
 end
 
+-- Verify a peer's signature ONCE, at admission, and return the verified author so the run can use
+-- it without verifying again. A second verification of the same signed request is refused as a
+-- replay (`verify_peer` records the request id), so the run half must not re-check.
+function wa_verify_peer(from, public_key, ts, signature, body)
+  local caller, problem = verify_peer(from, public_key, ts, signature, "chat", body or "")
+  if not caller then return json.encode({ error = problem or "bad_signature" }) end
+  return json.encode({ ok = true, node_id = caller.node_id, role = caller.role, name = caller.name or "" })
+end
+
 -- A turn requested by a peer runs as the caller, not as this node.
 --
 -- The master who asked is the author of the work; this node is only where it happens. A guest
@@ -472,6 +490,24 @@ function wa_node_chat(from, public_key, ts, signature, text)
     return ""
   end
   local bot, agent_problem = node_agent(caller)
+  if not bot then
+    emit({ type = "error", error = agent_problem })
+    return ""
+  end
+  local ok, reply = pcall(bot.run, bot, text or "")
+  if not ok then emit({ type = "error", error = tostring(reply) }) end
+  return ""
+end
+
+-- The run half of a peer chat whose signature was verified at admission. It deliberately does not
+-- re-verify: the signed request was already recorded as seen, and verifying again would be refused
+-- as a replay. The caller is reconstructed from the verified fields, never from the raw body.
+function wa_node_chat_verified(from, role, name, text)
+  if enrollment.managed() then
+    emit({ type = "error", error = "managed_guest_uses_operator_model" })
+    return ""
+  end
+  local bot, agent_problem = node_agent({ node_id = from, role = role, name = name })
   if not bot then
     emit({ type = "error", error = agent_problem })
     return ""

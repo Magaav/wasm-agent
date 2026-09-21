@@ -1699,10 +1699,27 @@ function redoDraft() {
 // named function because the callers describe an intent - "the stacks moved" - not a widget.
 function syncUndoButtons() {}
 
+// Stop means "stop on the node", not only "stop reading the stream". A client-side abort leaves the
+// model call running and the ledger records an unfinished run. `POST /runs {action:cancel}` sets the
+// run's own cancel flag, which the provider reader observes on the node; the abort then only stops
+// this page reading. The request is fire-and-forget: the reader has already asked to stop, and the
+// node reports the settled state in the ledger and `/health`.
+function cancelActiveRun() {
+  const thread = chatSession;
+  if (thread) {
+    apiFetch("runs", {
+      method: "POST",
+      headers: apiHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ action: "cancel", thread }),
+    }).catch(() => { /* the abort below is what the reader sees; the node still gets the request */ });
+  }
+  controller?.abort();
+}
+
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   if (busy) {
-    controller?.abort();
+    cancelActiveRun();
     return;
   }
   const text = input.value.trim();
