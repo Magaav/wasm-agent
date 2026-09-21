@@ -1,0 +1,10 @@
+{
+  "id": "whatsapp-ingest",
+  "name": "Ingest WhatsApp into the ledger (deterministic, no model)",
+  "trigger": { "kind": "schedule", "every_seconds": 300 },
+  "action": {
+    "kind": "run",
+    "script": "PREPARED_BY_INSTALL/scripts/whatsapp-ingest.sh",
+    "timeout_seconds": 180
+  }
+}

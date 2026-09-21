@@ -342,6 +342,30 @@ function M.ingest_observation(source, payload, device_id)
   return hash
 end
 
+function M.record_conversation(conversation)
+  local id = tostring(conversation.id or "")
+  if id == "" then error("conversation_identity_required") end
+  local now = conversation.updated_at or host.now()
+  -- A conversation is known even when none of its messages are new, which is why this exists
+  -- separately from `record_message`: an inbox that only knows about chats that just spoke is an
+  -- inbox that forgets everyone else.
+  exec("INSERT INTO conversations(id,kind,title,created_at,updated_at) VALUES(?,?,?,?,?) " ..
+       "ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, title=excluded.title, updated_at=excluded.updated_at",
+       {id, conversation.kind or "unknown", conversation.title or "", now, now})
+end
+
+-- `meta` is the key/value table beside the ledger, and a cursor belongs there: it is the position
+-- this database has read to in an external source, so it has to move in the same transaction as the
+-- rows it describes. A cursor in a separate file drifts from the ledger the first time one write
+-- succeeds and the other does not.
+function M.meta_get(key)
+  return meta_get(key)
+end
+
+function M.meta_set(key, value)
+  return meta_set(key, value)
+end
+
 function M.record_message(message)
   local conversation_id = tostring(message.conversation_id or "")
   local message_id = tostring(message.message_id or "")
@@ -351,23 +375,36 @@ function M.record_message(message)
   exec("INSERT INTO conversations(id,kind,title,created_at,updated_at) VALUES(?,?,?,?,?) " ..
        "ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at",
        {conversation_id, message.kind or "unknown", message.title or "", now, now})
-  local existing = query("SELECT body_sha256 FROM ledger_messages WHERE conversation_id=? AND message_id=?",
+  local existing = query("SELECT body_sha256, sent_at, reply_to FROM ledger_messages " ..
+                         "WHERE conversation_id=? AND message_id=?",
                          {conversation_id, message_id})
   local hash = host.sha256(body)
+  -- A SQL parameter list cannot carry NULL here: the JSON encoder refuses a table with holes, so a nil
+  -- parameter is a hard error ("invalid table: sparse array") rather than a NULL - which is how a
+  -- message with no reply target crashed the first WhatsApp ingest, and how the *update* branch kept
+  -- crashing after the insert branch was fixed. Every nullable column therefore gets a concrete value:
+  -- an unknown send time becomes the observation time on insert and stays what it was on update, and
+  -- "no reply target" is the empty string.
   if #existing == 0 then
+    local sent_at = message.sent_at or now
+    local reply_to = message.reply_to or ""
     exec("INSERT INTO ledger_messages(conversation_id,message_id,sender_id,direction,sent_at,observed_at," ..
          "body,reply_to,media,source,body_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
          {conversation_id, message_id, message.sender_id or "", message.direction or "incoming",
-          message.sent_at, now, body, message.reply_to, json.encode(message.media or {}),
+          sent_at, now, body, reply_to, json.encode(message.media or {}),
           message.source or "observer", hash})
     exec("INSERT INTO ledger_messages_fts(body,conversation_id,message_id) VALUES(?,?,?)",
          {body, conversation_id, message_id})
   elseif existing[1].body_sha256 ~= hash then
+    -- "Keep whatever is there" is read and passed rather than expressed as COALESCE(?, column): a nil
+    -- parameter is impossible in this list, so the value it would have protected has to come from here.
+    local sent_at = message.sent_at or existing[1].sent_at or now
+    local reply_to = message.reply_to or existing[1].reply_to or ""
     exec("UPDATE ledger_messages SET body=?, body_sha256=?, sender_id=?, direction=?, " ..
-         "sent_at=COALESCE(?,sent_at), observed_at=?, reply_to=COALESCE(?,reply_to), media=?, source=? " ..
+         "sent_at=?, observed_at=?, reply_to=?, media=?, source=? " ..
          "WHERE conversation_id=? AND message_id=?",
-         {body, hash, message.sender_id or "", message.direction or "incoming", message.sent_at, now,
-          message.reply_to, json.encode(message.media or {}), message.source or "observer",
+         {body, hash, message.sender_id or "", message.direction or "incoming", sent_at, now,
+          reply_to, json.encode(message.media or {}), message.source or "observer",
           conversation_id, message_id})
     exec("DELETE FROM ledger_messages_fts WHERE conversation_id=? AND message_id=?",
          {conversation_id, message_id})
