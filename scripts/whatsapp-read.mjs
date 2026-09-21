@@ -85,7 +85,7 @@ function expression(since) {
       conversations.push({
         id: id,
         title: String(chat.formattedTitle || chat.name || ''),
-        // From the id, not from `chat.isGroup`: in this build `isGroup` is false even for a `@g.us`
+        // From the id, not from chat.isGroup: in this build isGroup is false even for a @g.us
         // chat, so every group was stored as a direct conversation (217 of them here).
         kind: id.endsWith('@g.us') ? 'group'
           : id.endsWith('@broadcast') ? 'broadcast'
