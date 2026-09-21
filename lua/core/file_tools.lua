@@ -80,15 +80,17 @@ function M.edit(args,record)
   for key in pairs(edits) do
     if type(key)~='number' or key%1~=0 or key<1 or key>#edits then return {error='edits_must_be_dense_array'} end
   end
+  for i,item in ipairs(edits) do
+    if type(item)~='table' or type(item.old_text)~='string' or item.old_text=='' then return {error='old_text_required',edit=i} end
+    if type(item.new_text)~='string' then return {error='new_text_required',edit=i} end
+    for key in pairs(item) do if key~='old_text' and key~='new_text' then return {error='unsupported_replacement_field',edit=i} end end
+  end
   local text=host.read_file(args.path)
   if not text then return {error='not_found'} end
   local hash=host.sha256(text)
   if args.version and args.version~=hash then return {error='file_changed',version=hash} end
   local ranges={}
   for i,item in ipairs(edits) do
-    if type(item)~='table' or type(item.old_text)~='string' or item.old_text=='' then return {error='old_text_required',edit=i} end
-    if type(item.new_text)~='string' then return {error='new_text_required',edit=i} end
-    for key in pairs(item) do if key~='old_text' and key~='new_text' then return {error='unsupported_replacement_field',edit=i} end end
     local a,b=text:find(item.old_text,1,true)
     if not a then return {error='old_text_not_found',edit=i} end
     -- Overlapping occurrences are ambiguous too (e.g. 'aa' in 'aaa').
