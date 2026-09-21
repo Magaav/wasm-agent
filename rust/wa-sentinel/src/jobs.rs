@@ -160,7 +160,20 @@ impl Runner {
                 _ => {}
             }
         }
-        while ACTIVE.load(Ordering::Acquire) < 4 {
+        // A job wake is a long model turn, and a person's turn must never queue behind one. Two guards,
+        // both learned from the same complaint: with waking unbounded, four job turns ran at once and the
+        // operator's own messages queued for minutes behind them. So one wake at a time by default, and
+        // none at all while the node is busy with a turn somebody asked for. Deliveries wait in the queue,
+        // which is what a queue is for - and the person always wins.
+        let concurrency = std::env::var("WA_SENTINEL_JOB_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1)
+            .max(1);
+        while ACTIVE.load(Ordering::Acquire) < concurrency {
+            if !crate::node_is_idle() {
+                break;
+            }
             // Job wakes get their own ceiling, defaulting to the shared one. They are the ones a busy inbox
             // produces, and they used to spend the same allowance an agent's own continuation needs - so a
             // chatty hour could starve the run that was waiting to be told a deploy had finished.
