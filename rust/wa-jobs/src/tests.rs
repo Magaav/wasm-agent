@@ -66,6 +66,42 @@ fn changed_instruction_requires_reapproval() {
     assert_eq!(s.put(&job).unwrap()["enabled"], false);
     assert!(s.claim(11, 6).unwrap().is_none());
 }
+
+/// An import that says nothing new must change nothing: not the revision, not the enabled state, and not
+/// the deliveries already waiting. Re-sending a byte-identical job used to bump the revision, which
+/// cancels every queued delivery - so a re-deploy silently ate the events that had just arrived.
+#[test]
+fn identical_put_is_a_no_op_and_keeps_pending_deliveries() {
+    let s = store();
+    s.put(&definition()).unwrap();
+    s.enable("messages", true).unwrap();
+    let enabled = s.get("messages").unwrap();
+    assert_eq!(s.emit("whatsapp.message", "m1", &json!({}), 10).unwrap(), 1);
+    let again = s.put(&definition()).unwrap();
+    // `enable` legitimately bumps the revision, so the no-op is measured against the state just before it.
+    assert_eq!(again["revision"], enabled["revision"]);
+    assert_eq!(again["enabled"], true);
+    assert_eq!(again["queued"], 1);
+    assert!(s.claim(11, 6).unwrap().is_some());
+}
+
+/// A delivery refused for budget has not had a side effect - nothing happened - so it goes back to the
+/// queue instead of failing, and the refusal does not spend the allowance it was refused from.
+#[test]
+fn defer_requeues_without_spending_the_budget() {
+    let s = store();
+    s.put(&definition()).unwrap();
+    s.enable("messages", true).unwrap();
+    s.emit("whatsapp.message", "m1", &json!({}), 10).unwrap();
+    let claimed = s.claim(11, 1).unwrap().unwrap();
+    assert!(s.claim(11, 1).unwrap().is_none());
+    s.defer(claimed["id"].as_i64().unwrap(), "wake budget reached")
+        .unwrap();
+    let again = s.claim(11, 1).unwrap();
+    assert!(again.is_some(), "a deferred delivery must be claimable again");
+    s.finish(again.unwrap()["id"].as_i64().unwrap(), "completed", "ok", 12)
+        .unwrap();
+}
 #[test]
 fn exclusive_claim_budget_and_unknown_recovery() {
     let s = store();

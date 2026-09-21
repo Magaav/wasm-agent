@@ -161,8 +161,12 @@ impl Runner {
             }
         }
         while ACTIVE.load(Ordering::Acquire) < 4 {
-            let budget = std::env::var("WA_SENTINEL_WAKE_BUDGET")
+            // Job wakes get their own ceiling, defaulting to the shared one. They are the ones a busy inbox
+            // produces, and they used to spend the same allowance an agent's own continuation needs - so a
+            // chatty hour could starve the run that was waiting to be told a deploy had finished.
+            let budget = std::env::var("WA_SENTINEL_JOB_WAKE_BUDGET")
                 .ok()
+                .or_else(|| std::env::var("WA_SENTINEL_WAKE_BUDGET").ok())
                 .and_then(|v| v.parse::<i64>().ok())
                 .unwrap_or(6)
                 .max(0);
@@ -176,6 +180,31 @@ impl Runner {
             let source = s.clone();
             std::thread::spawn(move || {
                 let result = std::panic::catch_unwind(|| execute(&source, &delivery));
+                // A wake deferred for budget is not a failure: nothing happened, so the delivery goes back to
+                // the queue and runs when the allowance rolls over. Recording it as `failed` is what turned a
+                // busy inbox into a wall of failures while every message in it was fine.
+                if let Ok(Err(error)) = &result {
+                    if error.to_string().contains("wake-budget") {
+                        let detail = error.to_string();
+                        if let Err(record) =
+                            source.defer(delivery["id"].as_i64().unwrap(), &detail)
+                        {
+                            audit(
+                                "job-record-failed",
+                                delivery["job_id"].as_str().unwrap_or(""),
+                                &record.to_string(),
+                            );
+                        } else {
+                            audit(
+                                "wake-deferred",
+                                delivery["job_id"].as_str().unwrap_or(""),
+                                &detail,
+                            );
+                        }
+                        ACTIVE.fetch_sub(1, Ordering::AcqRel);
+                        return;
+                    }
+                }
                 let (state, detail) = match result {
                     Ok(Ok(detail)) => ("completed", detail),
                     Ok(Err(e)) if e.to_string().contains("outcome unknown") => {

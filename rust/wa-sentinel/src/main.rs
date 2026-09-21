@@ -335,8 +335,12 @@ fn verb_wake(session: &str, prompt: &str, reason: &str) -> Result<String> {
         .unwrap_or(6);
     let used = wakes_last_hour();
     if used >= budget {
-        audit("wake-refused", session, &format!("{reason} (budget {budget}/hour used)"));
-        bail!("wake budget reached ({used}/{budget} in the last hour) - refusing, and saying so");
+        // Refusing is the wrong shape for a budget. A wake that is refused for budget has had no side
+        // effect at all - nothing happened - so the honest answer is "not yet": the caller puts it back in
+        // the queue and it runs when the allowance rolls. Marked `wake-budget:` so callers can tell this
+        // apart from a real failure, and audited as `wake-deferred` rather than `wake-refused`.
+        audit("wake-deferred", session, &format!("{reason} (budget {budget}/hour used)"));
+        bail!("wake-budget: {used}/{budget} in the last hour - deferred, not dropped");
     }
     // Wait for the node to be listening. A wake is usually written *beside* a restart, and a node that
     // has just been started takes seconds to bind - so a wake that fires immediately loses the race and
@@ -377,7 +381,7 @@ fn verb_wake(session: &str, prompt: &str, reason: &str) -> Result<String> {
             // Serialize reservations across workers and sentinel processes; failed attempts cost budget too.
             let reservation=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(sentinel_dir().join("wake-budget.lock"))?;
             reservation.lock()?;
-            if wakes_last_hour()>=budget {bail!("wake budget reached before submission")}
+            if wakes_last_hour()>=budget {bail!("wake-budget: reached before submission - deferred, not dropped")}
             use std::io::Write;
             let mut log=std::fs::OpenOptions::new().create(true).append(true).open(log_path())?;
             writeln!(log,"{}\twake-start\t{}\t{}",now_epoch(),session.replace(['\n','\r','\t']," "),reason.replace(['\n','\r','\t']," "))?;
@@ -778,6 +782,16 @@ fn finish_request(claim: &Path, request: &Value) {
         Ok(Err(error))=>("failed",false,error.to_string()),
         Err(_)=>("failed",false,"request worker panicked; outcome unknown".into()),
     };
+    // A wake deferred for budget is neither a failure nor a completion: the request goes back to the queue
+    // and is retried when the allowance rolls over. Before this, the budget turned a deploy's continuation
+    // into a `failed` record - so the run that asked for the deploy was never woken and nobody was told.
+    if !ok && detail.starts_with("wake-budget") {
+        let back = sentinel_dir().join("requests").join(claim.file_name().unwrap_or_default());
+        if std::fs::rename(claim, &back).is_ok() {
+            audit("wake-deferred", &back.display().to_string(), &detail);
+            return;
+        }
+    }
     let record=json!({"request":request,"ok":ok,"detail":detail,"at":now_epoch()});
     let target=sentinel_dir().join(folder).join(claim.file_name().unwrap_or_default());
     match wa_operation::atomic_json(&target,&record) {
