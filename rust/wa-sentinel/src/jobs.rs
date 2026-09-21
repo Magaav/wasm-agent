@@ -68,6 +68,7 @@ pub fn cli(args: &[String]) -> Result<()> {
             let artifact: Value = serde_json::from_slice(&std::fs::read(file)?)?;
             let mut bindings = json!({});
             let mut approved = false;
+            let mut role = "operator";
             let mut index = 2;
             while index < args.len() {
                 match args[index].as_str() {
@@ -80,10 +81,19 @@ pub fn cli(args: &[String]) -> Result<()> {
                         approved = true;
                         index += 1;
                     }
+                    // The caller's authority is explicit and defaults to operator; a guest import is
+                    // restricted whatever the artifact claims about itself.
+                    "--as-role" => {
+                        role = args.get(index + 1).context("--as-role operator|guest")?;
+                        if role != "operator" && role != "guest" {
+                            bail!("unknown import role {role}");
+                        }
+                        index += 2;
+                    }
                     other => bail!("unknown import option {other}"),
                 }
             }
-            s.put_artifact(&artifact, &bindings, approved)
+            s.put_artifact(&artifact, &bindings, approved, role)
         }
         "requirements" => {
             let file = args.get(1).context("job requirements <artifact.json>")?;

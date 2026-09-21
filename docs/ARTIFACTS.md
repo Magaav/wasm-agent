@@ -66,7 +66,10 @@ The rules, and why each exists:
   refusal, not a default.
 - **Bindings need explicit approval.** `--approve` authorises the *binding*; it does not enable the job.
   An artifact cannot approve itself, so the approval is an argument from the operator, never a field the
-  artifact carries.
+  artifact carries. A binding for a slot the artifact did not declare is refused, not ignored.
+- **The importer's role is explicit.** `--as-role guest` (default `operator`) is the caller's authority.
+  It is recorded on the imported definition as `imported_by`, so a later reader never has to trust the
+  artifact's own scope claim.
 - **The import is always disabled.** New and edited definitions are disabled by the same rule everywhere
   (`docs/JOBS.md`): editing invalidates approval.
 - **Revision-safety is the job store's.** An identical import is a no-op - it does not bump the revision
@@ -78,22 +81,30 @@ The rules, and why each exists:
 Export refuses to produce an artifact that still contains:
 
 - a **credential-shaped key** anywhere (`token`, `secret`, `password`, `credential`, `authorization`,
-  `api_key`, `private_key`, `access_key`); and
-- a **machine binding** in free text: a drive-letter path (`C:\` / `C:/`) or a loopback websocket
+  `api_key`, `private_key`, `access_key`) or a **credential-shaped value** (`sk-…`, `xoxb-…`, `ghp_…`,
+  `AKIA…`, `-----BEGIN …`, `authorization: bearer …`, `token=…`); and
+- a **machine binding** anywhere, including a nested param, a prompt or a context string: a drive-letter
+  path (`C:\` / `C:/`), a POSIX absolute path (`/home/…`, `/tmp/…`, `/c/…`) or a loopback websocket
   (`ws://127.0.0.1`, `ws://localhost`, `ws://[::1]`).
 
-The second check is deliberately blunt. A prompt that happens to name `C:/some/tool` is not portable, and
-silently exporting it is how a machine path travels to another node and fails there.
+The scan is recursive over the whole artifact, not only its top-level keys. It is deliberately blunt: a
+prompt that happens to name `C:/some/tool` or `/tmp/scratch` is not portable, and silently exporting it is
+how a machine path travels to another node and fails there. A relative path (`scripts/reply.mjs`) is not a
+binding and passes.
 
 ## Guest scope is not a smaller operator scope
 
-An artifact may declare `scope.guest_owned`. A guest-owned artifact:
+Guest scope is the **importer's** authority, not the artifact's claim. A guest import (`--as-role guest`)
+is restricted whatever the artifact says about itself, and an artifact that declares `guest_owned` is
+restricted even when an operator imports it. A guest-owned or guest-imported artifact:
 
-- may not set `requirements.elevation`; and
-- may only name a profile in the guest-approved list (`job-deterministic`).
+- may not set `requirements.elevation`;
+- may only name a profile in the guest-approved list (`job-deterministic`); and
+- may not be a `wake` (the operator's own conversation) or a `run` (operator-controlled shell).
 
-This is checked in `rust/wa-jobs/src/artifact.rs`, structurally, not by asking the model to behave. A
-guest that imports an operator artifact gets a refusal that names the reason, not an elevated run.
+An artifact that says `owner: operator` therefore cannot hand a guest operator capabilities, and a guest
+cannot select an arbitrary profile id. This is checked in `rust/wa-jobs/src/artifact.rs`, structurally,
+not by asking the model to behave.
 
 ## Profiles and the `subagent` action
 
@@ -162,8 +173,17 @@ See `docs/JOBS.md` for the deterministic eligibility rule that decides which mes
 
 ## Proof
 
-- `cargo test -p wa-jobs --offline` covers export stripping, credential/machine-binding refusal, required
-  and approved bindings, loopback page bindings, guest elevation and unknown schema versions, plus the
-  store-level install-disabled and revision-safety round trip.
+- `cargo test -p wa-jobs --offline` covers export stripping, credential/machine-binding refusal
+  (including nested params, prompts and context, POSIX paths and value credentials), unknown binding
+  slots, required and approved bindings, loopback page bindings, importer-role guest refusal and owner
+  spoofing, unknown schema versions, and the store-level install-disabled and revision-safety round trip.
 - `tests/whatsapp-scoped.lua` covers the profile-scoped tools: conversation scope, decision-without-send,
-  send approval, the unread blocker, body and per-run limits.
+  send approval, the unread blocker, body and per-run limits, idempotency and durable effects.
+- `tests/whatsapp-reply-core.js` covers the raw-script guard: a non-self `--send` is refused before the
+  chat is opened unless unread clearing was explicitly accepted, and a notes-to-self send is allowed.
+- `scripts/test-subagents.cjs` (run with `node scripts/test-subagents.cjs`) starts a real sentinel against
+  an isolated home and a local `/subagents` protocol fixture: it imports an artifact through the public
+  CLI, proves import-disabled, reserved-capacity execution while the node is busy, exact start payload and
+  idempotency key, settlement only on a settled child, `unknown` without retry, waiting without reserved
+  capacity, guest import denial, and the scoped-tool denial suite. No paid inference.
+- `docs/WHATSAPP-PROOF.md` is the self-chat live-proof setup (performed by the coordinator, not here).

@@ -475,9 +475,16 @@ impl Store {
     }
     /// Import a portable artifact with explicit local bindings. Always installs disabled; `put` keeps the
     /// revision no-op rule, so a repeated identical import changes nothing and a changed one invalidates
-    /// approval. `approved` authorises the *bindings*, never the enabling.
-    pub fn put_artifact(&self, artifact: &Value, bindings: &Value, approved: bool) -> Result<Value> {
-        let imported = artifact::import_artifact(artifact, bindings, approved)?;
+    /// approval. `approved` authorises the *bindings*, never the enabling. `importer_role` is the caller's
+    /// authority, so a guest import cannot select operator capabilities by claiming them.
+    pub fn put_artifact(
+        &self,
+        artifact: &Value,
+        bindings: &Value,
+        approved: bool,
+        importer_role: &str,
+    ) -> Result<Value> {
+        let imported = artifact::import_artifact(artifact, bindings, approved, importer_role)?;
         let stored = self.put(&imported["definition"])?;
         Ok(json!({"job": stored, "bound": imported["bound"], "artifact": imported["artifact"]}))
     }

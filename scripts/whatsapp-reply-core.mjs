@@ -12,6 +12,22 @@ export function normalise(text) {
   return String(text || "").replace(/\s+/g, " ").trim();
 }
 
+// The raw reply script is reachable directly, not only through the profile-scoped Lua tool, so it must
+// refuse a non-self send by itself unless unread clearing was explicitly accepted. Returns an error code
+// when the send must not proceed, null when it may. A rehearsal (`send` false) always passes.
+//   - toSelf: the resolved target is the operator's own notes-to-self chat
+//   - chatId/selfId: the resolved ids, so the check does not depend on the caller's flag
+//   - allowMarkRead: the explicit `--allow-mark-read` / env approval
+//   - opening the chat is what clears the marker, so this must be decided *before* the chat is opened
+//     (the tool checks `open` false).
+export function sendGuard({ send, toSelf, chatId, selfId, allowMarkRead }) {
+  if (!send) return null;
+  if (toSelf) return null;
+  if (selfId && chatId && String(chatId) === String(selfId)) return null;
+  if (allowMarkRead) return null;
+  return "unread_would_be_broken";
+}
+
 export function composerMatches(composerText, expectedText) {
   return normalise(composerText) === normalise(expectedText);
 }

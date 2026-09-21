@@ -263,15 +263,15 @@ fn artifact_import_installs_disabled_and_is_revision_safe() {
 
     let bindings = json!({"trigger_path":std::env::temp_dir().join("approved/incoming"),
         "script":std::env::temp_dir().join("approved/procedures/validate.sh")});
-    let imported = s.put_artifact(&artifact, &bindings, true).unwrap();
+    let imported = s.put_artifact(&artifact, &bindings, true, "operator").unwrap();
     assert_eq!(imported["job"]["enabled"], false, "an import is always disabled");
     let revision = imported["job"]["revision"].as_i64().unwrap();
-    let again = s.put_artifact(&artifact, &bindings, true).unwrap();
+    let again = s.put_artifact(&artifact, &bindings, true, "operator").unwrap();
     assert_eq!(again["job"]["revision"].as_i64().unwrap(), revision, "an identical import is a no-op");
     assert_eq!(again["job"]["enabled"], false);
     let mut edited = artifact.clone();
     edited["action"]["timeout_seconds"] = json!(120);
-    let changed = s.put_artifact(&edited, &bindings, true).unwrap();
+    let changed = s.put_artifact(&edited, &bindings, true, "operator").unwrap();
     assert!(changed["job"]["revision"].as_i64().unwrap() > revision, "an edit bumps the revision");
     assert_eq!(changed["job"]["enabled"], false);
 }

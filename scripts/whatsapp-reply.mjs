@@ -55,7 +55,7 @@ const HOSTS = ["127.0.0.1", "[::1]"];
 const WHATSAPP_URL = "web.whatsapp.com";
 
 import { acquire as acquireSendLock, defaultLockPath } from "./whatsapp-sendlock.mjs";
-import { composerMatches, classifySendAttempt } from "./whatsapp-reply-core.mjs";
+import { composerMatches, classifySendAttempt, sendGuard } from "./whatsapp-reply-core.mjs";
 
 // The composer lock is released by `done`, but a crash between acquiring and sending must not leave the
 // lock for the stale timeout. One process-wide handler covers every abnormal exit.
@@ -65,7 +65,7 @@ process.on("exit", () => {
 });
 
 function parseArgs(argv) {
-  const args = { chat: "", body: "", bodyFile: "", send: false, toSelf: false, label: "", timeoutMs: 20000, lockWaitMs: 30000 };
+  const args = { chat: "", body: "", bodyFile: "", send: false, toSelf: false, label: "", timeoutMs: 20000, lockWaitMs: 30000, allowMarkRead: process.env.WA_WHATSAPP_ALLOW_MARK_READ === "1" };
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     const value = argv[index + 1];
@@ -75,6 +75,9 @@ function parseArgs(argv) {
     else if (flag === "--body-file") { args.bodyFile = String(value || ""); index += 1; }
     else if (flag === "--label") { args.label = String(value || ""); index += 1; }
     else if (flag === "--lock-wait-ms") { args.lockWaitMs = Number(value) || 0; index += 1; }
+    // Explicit acceptance that opening this chat will clear its unread marker. Without it a non-self
+    // `--send` is refused before the chat is opened.
+    else if (flag === "--allow-mark-read") { args.allowMarkRead = true; }
     else if (flag === "--send") { args.send = true; }
     else if (flag === "--to-self") { args.toSelf = true; }
   }
@@ -322,6 +325,24 @@ async function main() {
   if (target.error) return done({ ok: false, ...target }, 4);
   const body = args.label ? `${args.label}\n\n${args.body}` : args.body;
   const before = { unread: target.unread, messages: target.messages };
+
+  // Raw-script guard, before anything is opened. Older jobs call this script directly, so the
+  // profile-scoped Lua check is not the only line of defence: a non-self `--send` is refused unless the
+  // caller explicitly accepted that opening the chat clears the marker. A rehearsal is unaffected.
+  const guard = sendGuard({
+    send: args.send,
+    toSelf: args.toSelf,
+    chatId: target.chat.id,
+    selfId: target.self_id,
+    allowMarkRead: args.allowMarkRead,
+  });
+  if (guard) {
+    return done({
+      ok: false, error: guard, chat: target.chat, before,
+      observed: "a non-self send would open the chat and clear its unread marker",
+      next: "pass --allow-mark-read to accept that, reply to --to-self, or use an approved store route",
+    }, 8);
+  }
 
   // The composer is one shared resource, and two jobs (or two sentinel processes) can each want it. The
   // lock serialises them; a live holder is reported as `send_resource_busy` rather than typed over. The

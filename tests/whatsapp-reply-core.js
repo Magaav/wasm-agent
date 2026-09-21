@@ -7,7 +7,7 @@ let checked = 0;
 const check = (value, label) => { assert.ok(value, label); checked += 1; };
 
 (async () => {
-  const { normalise, composerMatches, classifySendAttempt } = await import("../scripts/whatsapp-reply-core.mjs");
+  const { normalise, composerMatches, classifySendAttempt, sendGuard } = await import("../scripts/whatsapp-reply-core.mjs");
 
   check(normalise("  a\n b\tc ") === "a b c", "normalise collapses whitespace");
   check(composerMatches("a b c", "a\n b   c") === true, "matching ignores whitespace shape");
@@ -24,6 +24,13 @@ const check = (value, label) => { assert.ok(value, label); checked += 1; };
   check(classifySendAttempt({ verified: false, composerText: "hi", expectedText: "hi" }) === "retry", "an intact composer means safe to retry");
   check(classifySendAttempt({ verified: false, composerText: "", expectedText: "hi" }) === "ambiguous", "an empty composer with no store match is ambiguous");
   check(classifySendAttempt({ verified: false, composerText: "something else", expectedText: "hi" }) === "stop", "an unexpected composer stops the loop");
+
+  // The raw script refuses a non-self send before it opens anything, unless unread clearing was accepted.
+  check(sendGuard({ send: false, chatId: "x@c.us", selfId: "me@c.us" }) === null, "a rehearsal is never blocked");
+  check(sendGuard({ send: true, toSelf: true, chatId: "me@c.us", selfId: "me@c.us" }) === null, "a notes-to-self send is allowed");
+  check(sendGuard({ send: true, chatId: "me@c.us", selfId: "me@c.us" }) === null, "a resolved self id is allowed even without the flag");
+  check(sendGuard({ send: true, chatId: "x@c.us", selfId: "me@c.us", allowMarkRead: true }) === null, "explicit unread acceptance allows a third-party send");
+  check(sendGuard({ send: true, chatId: "x@c.us", selfId: "me@c.us" }) === "unread_would_be_broken", "a third-party send is refused by default");
 
   console.log("ALL PASS");
   void checked;
