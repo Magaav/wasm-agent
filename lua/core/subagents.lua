@@ -195,14 +195,20 @@ function M.resolve(id, ctx)
     allowed_tools = allowed_list,
     allowed = allowed_set,
     resources = profile.resources or {},
-    limits = {
-      max_depth = math.min(tonumber(limits.max_depth) or 0, max_depth),
-      timeout_seconds = tonumber(limits.timeout_seconds) or 600,
-      max_output_bytes = tonumber(limits.max_output_bytes) or 65536,
-      max_tokens = tonumber(limits.max_tokens) or 200000,
-      max_cost_usd = tonumber(limits.max_cost_usd),
-      max_children = tonumber(limits.max_children),
-    },
+    limits = (function()
+      -- Pass every declared limit through so a specialist profile's own budget
+      -- names (context_messages, body_bytes, sends_per_run) survive to the child;
+      -- clamp only the fields this runtime owns.
+      local resolved = {}
+      for key, value in pairs(limits) do resolved[key] = value end
+      resolved.max_depth = math.min(tonumber(limits.max_depth) or 0, max_depth)
+      resolved.timeout_seconds = tonumber(limits.timeout_seconds) or 600
+      resolved.max_output_bytes = tonumber(limits.max_output_bytes) or 65536
+      resolved.max_tokens = tonumber(limits.max_tokens) or 200000
+      resolved.max_cost_usd = tonumber(limits.max_cost_usd)
+      resolved.max_children = tonumber(limits.max_children)
+      return resolved
+    end)(),
     model = profile.model,
     reasoning = profile.reasoning,
     approved_models = profile.approved_models,
@@ -235,8 +241,11 @@ local function approved_model(profile, requested, caller_model)
 end
 
 local function approved_reasoning(model, requested)
-  if not requested or requested == "" then return true, nil end
+  if not requested or requested == "" or requested == "provider" then return true, nil end
   local reasoning = provider.reasoning(model)
+  -- A model with no reasoning levels ignores the field; an explicit level for it
+  -- is a request the provider cannot honour, so it is refused rather than dropped.
+  if not reasoning.supported then return false, "reasoning_not_supported:" .. tostring(requested) end
   for _, level in ipairs(reasoning.levels or {}) do
     if level == requested then return true, nil end
   end
@@ -261,19 +270,20 @@ local function derive_ctx(ctx)
     subagent = ctx.subagent,
     depth = depth,
     ceiling = ctx.ceiling or ceiling_for(role),
+    -- The caller's *actual* model/reasoning, so inheritance means the model that
+    -- run is using and not merely whatever is configured globally.
+    model = ctx.model,
+    reasoning = ctx.reasoning,
   }
 end
 
 local function truthy_limits(profile)
-  local limits = profile.limits or {}
-  return {
-    max_depth = limits.max_depth,
-    timeout_seconds = limits.timeout_seconds,
-    max_output_bytes = limits.max_output_bytes,
-    max_tokens = limits.max_tokens,
-    max_cost_usd = limits.max_cost_usd,
-    max_children = limits.max_children,
-  }
+  -- Copy every declared limit: the child loop enforces the generic budgets, and a
+  -- specialist module (whatsapp) reads its own. A dropped field is a budget that
+  -- silently does not apply.
+  local limits = {}
+  for key, value in pairs(profile.limits or {}) do limits[key] = value end
+  return limits
 end
 
 -- Start one child. Ownership, depth and the allowed set are derived here; the
@@ -292,7 +302,8 @@ function M.start(args, ctx)
     return out
   end
 
-  local caller_model = provider.settings().model
+  local caller_model = ctx.model
+  if caller_model == nil or caller_model == "" then caller_model = provider.settings().model end
   local model = args.model
   if model == nil or model == "" then model = profile.model end
   local model_ok, model_error = approved_model(profile, model, caller_model)
@@ -300,6 +311,7 @@ function M.start(args, ctx)
   local effective_model = model or caller_model
   local reasoning = args.reasoning
   if reasoning == nil or reasoning == "" then reasoning = profile.reasoning end
+  if reasoning == nil or reasoning == "" then reasoning = ctx.reasoning end
   local reasoning_ok, reasoning_error = approved_reasoning(effective_model, reasoning)
   if not reasoning_ok then return { error = reasoning_error } end
   local limits = truthy_limits(profile)
@@ -329,7 +341,10 @@ function M.start(args, ctx)
     parent_session_id = ctx.session_id,
   })
   local spec = {
-    id = tostring(args.id or host.uuid()),
+    -- Generated here, never taken from the caller: the id is a path component and
+    -- a caller-supplied one would be a traversal and a collision with an existing
+    -- child. The acceptance contract accepts `subagent_id` as an *output* only.
+    id = host.uuid(),
     session_id = session_id,
     profile = profile.id,
     prompt = prompt,
@@ -337,11 +352,13 @@ function M.start(args, ctx)
     instructions = profile.instructions,
     allowed_tools = profile.allowed_tools,
     limits = limits,
-    model = model,
+    model = effective_model,
     reasoning = reasoning,
     owner_user = ctx.user_id,
     parent_session_id = ctx.session_id,
-    parent_run_id = tostring(args.parent_run_id or ctx.run_id),
+    -- Derived from the authenticated context, not from the body: a caller cannot
+    -- name the run a child is filed under.
+    parent_run_id = ctx.run_id,
     node_id = ctx.node_id,
     role = ctx.role,
     depth = ctx.depth,
@@ -397,8 +414,11 @@ function M.control(args, ctx)
   end
 
   local call = { owner_user = ctx.user_id }
-  if args.id then call.id = tostring(args.id) end
-  if action == "await" then call.wait_ms = tonumber(args.wait_ms) or 60000 end
+  -- `subagent_id`/`timeout_ms` are the agreed acceptance aliases for the same
+  -- fields; a caller may use either name.
+  local target = args.id or args.subagent_id
+  if target then call.id = tostring(target) end
+  if action == "await" then call.wait_ms = tonumber(args.wait_ms) or tonumber(args.timeout_ms) or 60000 end
   if action == "list" then
     return json.decode(host.subagent("list", json.encode({ owner_user = ctx.user_id })))
   end
@@ -424,6 +444,11 @@ function wa_subagent_run(receipt_json)
     limits = limits,
     model = receipt.model,
     reasoning = receipt.reasoning,
+    -- The resolved resource bindings (permitted conversation, action, account,
+    -- destination). They are the child's trusted snapshot, resolved once at
+    -- admission by an approved profile, and travel with the receipt so the child
+    -- cannot be handed a different set than the one that was approved.
+    resources = receipt.resources or {},
   }
   local allowed = as_set(profile.allowed_tools)
   local child_role = tostring(receipt.role or "master")
@@ -436,6 +461,7 @@ function wa_subagent_run(receipt_json)
       id = profile.id, allowed = allowed, allowed_tools = profile.allowed_tools,
       instructions = profile.instructions, limits = limits,
       model = profile.model, reasoning = profile.reasoning,
+      resources = profile.resources,
       depth = tonumber(receipt.depth) or 1,
     },
   })

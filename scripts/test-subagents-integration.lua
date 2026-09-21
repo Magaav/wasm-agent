@@ -19,7 +19,11 @@ local function control(args, c) return subagents.control(args, c) end
 local started = control({ action = "start", profile = "explore", prompt = "basic task", idempotency_key = "basic" }, ctx("alice"))
 assert(not started.error, "start failed: " .. json.encode(started))
 assert(started.state == "accepted" and started.settled == false, "a receipt is not completion: " .. json.encode(started))
-local settled = control({ action = "await", id = started.subagent_id, wait_ms = 60000 }, ctx("alice"))
+-- A caller-supplied id is ignored: the runtime generates a safe path component.
+assert(not tostring(started.subagent_id):find("/", 1, true) and not tostring(started.subagent_id):find("%.%."),
+  "the runtime must generate the child id: " .. tostring(started.subagent_id))
+-- The agreed acceptance aliases (`subagent_id`, `timeout_ms`) are accepted.
+local settled = control({ action = "await", subagent_id = started.subagent_id, timeout_ms = 60000 }, ctx("alice"))
 assert(settled.state == "completed", "await state=" .. tostring(settled.state) .. " " .. json.encode(settled))
 assert(tostring(settled.result.reply):find("child-answer", 1, true), "child reply: " .. tostring(settled.result.reply))
 assert(memory.message_count(parent_id) == 0, "the parent transcript must not be written by a child")
@@ -37,9 +41,9 @@ control({ action = "await", id = first.subagent_id, wait_ms = 60000 }, ctx("alic
 print("MARK ok-idempotency")
 
 -- 3. Per-user isolation: another user cannot inspect or cancel this task.
-local blocked = control({ action = "status", id = started.subagent_id }, ctx("bob"))
+local blocked = control({ action = "status", subagent_id = started.subagent_id }, ctx("bob"))
 assert(blocked.error == "forbidden_subagent", "status isolation: " .. json.encode(blocked))
-local cancel_blocked = control({ action = "cancel", id = started.subagent_id }, ctx("bob"))
+local cancel_blocked = control({ action = "cancel", subagent_id = started.subagent_id }, ctx("bob"))
 assert(cancel_blocked.error == "forbidden_subagent", "cancel isolation: " .. json.encode(cancel_blocked))
 print("MARK ok-isolation")
 

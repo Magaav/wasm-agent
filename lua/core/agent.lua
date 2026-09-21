@@ -1076,7 +1076,10 @@ function M:run_body(text, images)
       local handled, output = pcall(function() if argument_error then return {error=argument_error} end
         return tools.dispatch(memory, function_.name, args, self.role,
         { session_id = self.session_id, user_id = self.user, node_id = self.node,
-          run_id = self.run_id, subagent = self.subagent, changes = self.changes }) end)
+          run_id = self.run_id, subagent = self.subagent, changes = self.changes,
+          -- The caller's actual model and reasoning, so a child inherits what this
+          -- run is using rather than whatever is configured globally.
+          model = self.model, reasoning = (provider.reasoning(self.model) or {}).selected }) end)
       host.beat()
       if not handled then output = { error = tostring(output) } end
       -- Native execution phase timing belongs in aggregate telemetry, not in the

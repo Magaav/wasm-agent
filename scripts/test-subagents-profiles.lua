@@ -53,12 +53,18 @@ check(insecure == nil, "a broad profile without operator_authorized must be refu
 check(tostring(insecure_refusal):find("profile_not_authorized", 1, true), "the refusal names authorization: " .. tostring(insecure_refusal))
 write_profile("worker-secure", {
   schema_version = 1, id = "worker-secure", operator_authorized = true,
-  allowed_tools = { "read", "write", "edit" }, limits = { timeout_seconds = 120 },
+  allowed_tools = { "read", "write", "edit" },
+  resources = { conversation = "conv-1" },
+  limits = { timeout_seconds = 120, sends_per_run = 3 },
   instructions = "do the narrow task",
 })
 local secure, secure_refusal = subagents.resolve("worker-secure", ctx("alice"))
 check(secure, "an operator-authorized broad profile resolves: " .. tostring(secure_refusal))
 check(secure.allowed.write and secure.allowed.read, "the authorized profile keeps its exact tools")
+-- A specialist profile's own resources and limit names must survive resolution, or
+-- the child is handed a different authority than the operator approved.
+check(secure.resources.conversation == "conv-1", "the resolved resources must survive")
+check(secure.limits.sends_per_run == 3, "a specialist limit must survive resolution")
 
 -- 4. A malformed or misnamed file is reported, never silently dropped.
 write_profile("wrong-name", { schema_version = 1, id = "another-id", allowed_tools = { "read" } })
