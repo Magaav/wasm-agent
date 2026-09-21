@@ -1094,6 +1094,9 @@ fi
 # than not doing it, so it is a check rather than a convention - and it greps for the old *names*, not for
 # the word "turn", which section 6 keeps for one speaker's contribution.
 bash scripts/check-naming.sh
+node scripts/test-naming-check.cjs
+node scripts/test-execution-terminology.cjs
+node scripts/test-auth-sessions.cjs "$BIN"
 
 # The image-attachment tests, plus the helper tests that came with them. They were
 # written, they passed when run by hand, and nothing ran them - which is how a test

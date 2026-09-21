@@ -1,0 +1,60 @@
+-- Invoked only by test-auth-sessions.cjs in isolated homes/databases.
+local json = dofile('lua/vendor/json.lua')
+local users = dofile('lua/core/users.lua')
+local paths = host.paths()
+local phase = host.getenv('WA_AUTH_TEST_PHASE')
+local token_file = host.getenv('WA_AUTH_TEST_TOKEN_FILE')
+local function check(ok, label) assert(ok, label); print('ok auth ' .. label) end
+local function query(statement, params)
+  local value = json.decode(host.sql_query(statement, json.encode(params or {})))
+  assert(not value.error, value.error)
+  return value
+end
+if phase == 'create' then
+  check(users.current('').id == 'master', 'empty credential keeps trusted local default')
+  local token, user = users.login('guest')
+  check(type(token) == 'string' and #token >= 64 and user.id == 'guest', 'guest credential minted')
+  check(users.current(token).role == 'guest', 'guest credential resolves in original module')
+  local second = dofile('lua/core/users.lua')
+  check(second.current(token).id == 'guest', 'guest credential survives module boundary')
+  local bad, why = second.resolve('not-a-credential')
+  check(bad == nil and why == 'invalid_session', 'unknown credential never becomes default master')
+  check(not pcall(second.current, 'not-a-credential'), 'legacy current also fails closed')
+  check(second.resolve({}) == nil, 'non-string credential rejected')
+  check(second.resolve(string.rep('x', 513)) == nil, 'oversized credential rejected')
+  local rows = query('SELECT * FROM auth_sessions')
+  check(#rows == 1 and rows[1].token_hash == host.sha256(token), 'only hashed token stored')
+  check(not json.encode(rows):find(token, 1, true), 'raw bearer token not persisted in auth store')
+  check(rows[1].expires_at > host.now(), 'credential expires in future')
+  local cfg = paths.config .. '/users.json'
+  local saved = host.read_file(cfg)
+  host.write_file(cfg, json.encode({users={{id='master',role='master'}},default_user='master'}))
+  check(second.resolve(token) == nil, 'removed principal revoked across warm modules')
+  host.write_file(cfg, saved)
+  check(second.current(token).id == 'guest', 'restored configured principal resolves')
+  host.write_file(cfg, '{invalid-json')
+  check(not pcall(second.resolve, token), 'malformed users config fails closed')
+  check(host.read_file(cfg) == '{invalid-json', 'malformed config never overwritten with defaults')
+  host.write_file(cfg, saved)
+  host.write_file(token_file, token)
+elseif phase == 'read' then
+  local token = assert(host.read_file(token_file))
+  check(users.current(token).id == 'guest', 'credential resolves across process boundary')
+elseif phase == 'other-node' then
+  local token = assert(host.read_file(token_file))
+  local value, why = users.resolve(token)
+  check(value == nil and why == 'invalid_session', 'different node identity cannot reuse same database token')
+elseif phase == 'logout' then
+  local token = assert(host.read_file(token_file))
+  check(users.current(token).id == 'guest', 'credential valid before logout')
+  users.logout(token)
+  check(users.resolve(token) == nil, 'logout revokes credential')
+elseif phase == 'revoked' then
+  local token = assert(host.read_file(token_file))
+  check(users.resolve(token) == nil, 'logout visible to another process')
+  local expiring = assert(users.login('guest'))
+  local r = json.decode(host.sql_exec('UPDATE auth_sessions SET expires_at=? WHERE token_hash=?',json.encode({host.now()-1,host.sha256(expiring)})))
+  check(not r.error, 'expiry fixture committed')
+  local value, why = users.resolve(expiring)
+  check(value == nil and why == 'invalid_session', 'expired credential never becomes master')
+else error('unknown fixture phase') end
