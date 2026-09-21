@@ -928,6 +928,7 @@ WA_BIN="$BIN" bash scripts/test-run-isolation.sh "$ISOLATION_PORT" > "$DB.isolat
 grep '^run isolation ok$' "$DB.isolation.log"
 node scripts/test-sqlite-isolation.cjs "$BIN"
 node scripts/test-peer-run-admission.cjs "$BIN"
+bash scripts/test-foreground-cancel.sh
 rm -f "$DB.window"*
 echo "recovery cli ok"
 
