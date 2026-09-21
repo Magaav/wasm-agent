@@ -168,7 +168,15 @@ the durable telemetry totals, including unsuccessful attempts.
 Summaries are **lossy interpretations**, not lossless compression. The retained
 original transcript is the evidence, accessible via `session`/`search_messages`;
 `session` supports `before_seq` pagination. Default transcript retention remains
-seven days; debug transcripts persist. Oversized tool output is kept as hashed
+seven days; debug transcripts persist. `session`/`search_messages` also offer an
+explicit `view:'compact'` with omitted diagnostic fields and exact-row references;
+full remains the default. Exact `message_id` lookup checks session identity and
+ownership before returning anything. Byte-paged exact row JSON is available to the
+row's authorized reader, including guests, without operator artifact access. See
+[TOKEN_EFFICIENCY.md](TOKEN_EFFICIENCY.md) for those bounded presentation contracts.
+No projection rewrites the ledger or the active conversation.
+
+Oversized tool output is kept as hashed
 JSON under `data/tool-results/` and retrieved with `tool_result`. Views are created
 once (2,000 lines / 50 KiB per text field), saved, and replayed unchanged. Artifacts
 are node-local, not automatically replicated or pruned. Back them up with the DB.

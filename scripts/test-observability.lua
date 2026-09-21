@@ -190,6 +190,18 @@ check(final.reasoning=='final thought','final reasoning persisted for continuati
 local events=telemetry.events(run,0,100).events
 local first_request; for _,event in ipairs(events) do if event.kind=='model_call' and event.phase=='start' then first_request=event; break end end
 check(first_request.payload.request_hash==host.sha256(json.encode(sent[1])),'hash matches exact streaming request including stream options')
+check(first_request.payload.prefix_audit.reason=='baseline_missing','first prepared prefix is unmeasured, not a cache promise')
+local second_request
+for _,event in ipairs(events) do if event.kind=='model_call' and event.phase=='start' and event.seq>first_request.seq then second_request=event;break end end
+check(second_request.payload.prefix_audit.relation=='append_only' and not second_request.payload.prefix_audit.tools_changed,
+  'actual provider loop records append-only messages with unchanged tool schemas')
+overrides.WASM_AGENT_TOOL_SNIPPETS='full'
+local full_context=bot:build_context();local full_tools=json.encode(bot.tool_list)
+overrides.WASM_AGENT_TOOL_SNIPPETS='names'
+local short_context=bot:build_context()
+check(#short_context[1].content<#full_context[1].content and json.encode(bot.tool_list)==full_tools,'opt-in short index retains every full tool schema')
+for i=2,#full_context do check(json.encode(full_context[i])==json.encode(short_context[i]),'short index never rewrites history') end
+overrides.WASM_AGENT_TOOL_SNIPPETS='full'
 check(memory.session_messages(run,{all=true})[1].id==first_request.run_id,'request trace links to its actual user turn')
 report=original_dofile('lua/core/telemetry.lua').snapshot(run)
 check(report.total.calls==2 and report.tool_failures==1 and report.runs==1,'real loop durable outcomes')

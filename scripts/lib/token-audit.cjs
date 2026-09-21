@@ -98,6 +98,8 @@ function audit(input) {
   const prefix = {comparisons:0,stable_recorded_components:0,changed_recorded_components:0,
     incomplete_metadata_pairs:0,stable_components_zero_cache_calls:0,changed_fields:{}};
   const fields = ['system_hash','schema_hash','model','provider','settings','attribution','runtime','summary_watermark'];
+  const prepared = {measured:0,unmeasured:0,append_only:0,identical:0,rewritten:0,shortened:0,
+    tools_changed:0,settings_changed:0,routing_changed:0};
   const previous = new Map(), repeated = new Set();
   const shape = {}, shapeSamples = {};
   for (const row of events) {
@@ -108,6 +110,11 @@ function audit(input) {
       repeated.add(key);
     }
     if (row.kind !== 'model_call' || row.phase !== 'start') continue;
+    const comparison=p.prefix_audit;
+    if (comparison?.schema_version===1 && ['append_only','identical','rewritten','shortened'].includes(comparison.relation)) {
+      prepared.measured++;prepared[comparison.relation]++;
+      for (const field of ['tools_changed','settings_changed','routing_changed']) if(comparison[field]===true) prepared[field]++;
+    } else prepared.unmeasured++;
     for (const name of ['system_bytes','schema_bytes','user_bytes','assistant_bytes','tool_result_bytes',
       'reasoning_source_bytes','tool_arguments_source_bytes']) {
       if (count(p.prompt_shape?.[name])) {
@@ -136,12 +143,12 @@ function audit(input) {
   }
   if (Object.values(shape).some(n=>!count(n))) throw Error('byte_total_exceeds_safe_integer');
   return {schema:'wasm-agent.token-audit/v1',events:events.length,duplicate_events:duplicates,
-    usage,tools,prefix,
+    usage,tools,prefix,prepared_prefix:prepared,
     timing:Object.fromEntries(Object.entries(timing).map(([name,values])=>[name,
       {samples:values.length,p50:percentile(values,.5),p95:percentile(values,.95)}])),
     average_request_bytes:Object.fromEntries(Object.keys(shape).map(k=>[k,{mean:shape[k]/shapeSamples[k],samples:shapeSamples[k]}])),
     verified_task_efficiency:null,
-    limitations:['metadata_only_not_exact_prefix_proof','cache_cause_not_inferred',
+    limitations:['metadata_only_not_exact_prefix_proof','cache_cause_not_inferred','prepared_prefix_is_not_proof_of_provider_acceptance_or_cache_retention',
       'reasoning_and_arguments_are_byte_subsets_not_additional_tokens','repeated_arguments_are_not_automatically_waste',
       'observed_cost_is_not_an_invoice_or_complete_task_cost','task_quality_requires_independent_verification']};
 }

@@ -148,7 +148,7 @@ function M.runtime()
   if runtime then return runtime end
   local root = host.getenv("WASM_AGENT_LUA_ROOT") or ""
   local sources = {}
-  for _, name in ipairs({"agent", "provider", "memory", "tools", "telemetry", "tool_output", "model_window"}) do
+  for _, name in ipairs({"agent", "provider", "memory", "tools", "telemetry", "tool_output", "model_window", "file_tools", "evidence_view", "diagnose", "prefix_audit"}) do
     local key = "lua/core/" .. name .. ".lua"
     sources[name] = (LOADED_SOURCES or {})[key] or "unavailable (older host)"
   end

@@ -10,7 +10,13 @@ See [JOBS.md](JOBS.md) and ARCHITECTURE.md section 6.
 `rust/wa-operation` owns shell process lifetime and output independently of Lua.
 `rust/wa-host/src/operations.rs` is the adapter; agent policy remains in Lua.
 The existing `bash`/`host.exec` interface waits for an operation. The `operation`
-tool exposes start/list/status/read/wait/cancel for explicit long-lived work.
+tool exposes start/list/status/read/wait/await/cancel for explicit long-lived work.
+Native waits use a settlement condition variable. `await` waits in one model tool
+call under the operation's existing execution/cleanup budget, maintaining host
+heartbeats and returning terminal evidence or an explicit overdue/unknown outcome.
+It never launches/replays work or injects a synthetic conversation message. The
+independent HTTP route refuses long `await`; bounded `wait` and cancellation remain
+available there.
 `wait` is bounded to ten seconds; a still-running result is not failure and is
 never permission to launch the command again. `start` returns a launch receipt,
 not execution success. Default execution budget is 300 seconds; explicit

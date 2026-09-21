@@ -104,8 +104,13 @@ as automatic evidence of waste.
 
 [Token efficiency](TOKEN_EFFICIENCY.md) documents the opt-in metadata-export
 reporter and the model-free replacements for the ineffective tool-budget A/B
-scripts. They do not change requests, schemas or runtime policy. Byte reduction,
-cache share and retained originals alone do not prove equal task quality.
+scripts. Those offline tools do not change runtime policy. Subsequent runtime
+work adds prepared-prefix comparison metadata without changing the provider body:
+worker-local message hashes locate the first changed message, and tools/settings/
+known routing are compared separately. Missing baselines remain unmeasured; no
+prompt text or per-message hashes enter the ledger. This is not proof of provider
+acceptance or cache retention. Byte reduction, cache share and retained originals
+alone do not prove equal task quality.
 
 ## Verification
 

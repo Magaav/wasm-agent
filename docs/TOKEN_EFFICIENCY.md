@@ -110,15 +110,106 @@ Source `467c803`:
 The full Windows smoke suite and paid-model behavior suite were **not run**.
 There is no measured task-quality or financial improvement claim in this stage.
 
-## Subsequent stages: not implemented by this change
+## Remaining stages: implemented
 
-1. Explicit, version-aware file paging and honest search controls/completeness.
-2. Validated non-overlapping batch edits with stale-file checks and retained evidence.
-3. One bounded read-only diagnostic/test workflow whose steps the model selects;
-   unexpected conditions return to the model, without invented repairs or retries.
-4. Event-driven operation observation and content-addressed local computation caches.
-5. Separately evaluated session/search projections and shorter redundant snippets,
-   preserving identifiers, failures, exact retrieval and authorization.
+### Files and deterministic computation
+
+`read`/`read_many` return raw UTF-8 text (no synthetic line-number prefixes), a
+whole-file SHA-256 `version`, actual starting/ending line, byte column, `eof`, and
+`next_offset`/`next_column`. Pass both next coordinates **and version** to continue.
+Long lines can span pages. CRLF, trailing newlines and UTF-8 boundaries are retained.
+Pages account for JSON escaping before returning a cursor; the generic projector
+must not truncate them again and silently skip bytes. An intervening edit rejects
+versioned continuation. Independent ranges remain available without a prior receipt.
+
+Each call reads fresh file bytes. Only the deterministic line index is cached by
+content hash plus index-format/configuration version: at most 16 entries and an
+estimated 2 MiB of index storage per module instance. No file contents, file-exists
+results, test outcomes or external state are substituted by this cache. This saves
+re-indexing, not file I/O or hashing. The underlying read still loads the file;
+bounded pages/index cache are **not** a bound on whole-file memory or filesystem time.
+
+`edit` accepts either the original `old_text`/`new_text` pair or up to 64 `edits`
+pairs. Every unique match is resolved against one original snapshot; ambiguity
+(including overlapping occurrences), overlapping edits and invalid later edits
+reject the whole batch before writing. An optional `version` rejects stale reads;
+a second read detects intervening changes before the write. Successful changes
+retain the existing changeset record. A recording failure after writing explicitly
+says the edit was applied; a failed write has an unknown outcome requiring inspection.
+No-op replacements do not rewrite the file.
+
+This is a **single-file validation boundary, not an OS-wide compare-and-swap**:
+arbitrary editors can still race the final check/write. It is not a multi-file
+transaction. Do not claim those stronger guarantees or retry an ambiguous write.
+
+`grep` is explicitly literal, with `ignore_case`, `limit` (1–500), `max_depth`
+(0–64), and exact `extensions` filters. Unsupported options fail rather than
+silently changing semantics or falling back to a different shell matcher. Traversal
+is sorted and symlinks are not followed. Skipped/error categories, scan counts,
+result/entry/depth limits and clipped line text remain visible; `complete=false`
+also covers intentional exclusions. A search is not a filesystem-wide snapshot.
+
+### Predetermined diagnostics, not autonomous judgment
+
+`diagnose` accepts 1–8 explicit `read`/`grep` steps with optional literal-content
+or match-count assertions. It validates the plan structure before execution, runs
+steps once in order, retains ordered results and a plan hash, and stops on errors,
+incomplete reads/searches or failed assertions. It never invokes a shell, edits,
+repairs, loops, retries, broadens scope or grants guest authority. Later steps are
+explicitly counted as not run. This narrow read-only pilot is deliberately not a
+new general workflow language; execution/test commands keep their existing tools.
+
+### Event-driven operation settlement
+
+Native operation waits now use settlement notifications rather than 5 ms status
+polls. `operation {action:'await',id:...}` keeps **one** model tool call waiting for
+settlement under the existing operation deadline/cleanup budget, with host heartbeats.
+Cancellation stays independent, and completed/failed/cancelled/unknown states stay
+distinct. It never launches or replays the command. An overdue supervisor returns
+an explicit unknown outcome, not an endless model-polling loop. Short `wait` remains
+available. The independent HTTP control route refuses long `await` calls so an
+observer cannot occupy that route for an operation's lifetime. No new automatic
+model wake, job approval or conversation injection is introduced.
+
+### Optional evidence views; unchanged default access
+
+`session` and `search_messages` accept `view:'compact'`. The default stays `full`.
+Compact views retain content, identity, chronology, timing/outcome, concise call
+identities and trace failures; they omit argument bodies, reasoning, images, diffs
+and accounting details **explicitly**, with exact-row references. No stored row or
+active conversation is rewritten. `session {session_id,message_id,view:'full'}`
+retrieves the original row after checking both ownership and row/session identity.
+
+Oversized rows can be paged with `byte_offset`, `byte_limit` (up to 20,000), and
+`message_version`, following `next_offset` until `eof`. This exact JSON route works
+for a guest's own messages without granting access to operator-only artifacts.
+It rejects changed messages. Pruned messages remain unavailable, not reconstructed
+or silently replaced by summaries. Oversized session previews retain these pointers.
+
+`WASM_AGENT_TOOL_SNIPPETS=names` opts into a shorter system-prompt tool index.
+Every tool name and its **full schema/description** remain available; default
+snippets are unchanged. No tool-hiding profiles or discovery rounds are introduced.
+Plugin schemas are sorted by name, and `capabilities` derives from the same complete
+role-filtered list rather than an incomplete hard-coded list.
+
+### Actual prepared-prefix evidence and instruction freshness
+
+Each provider start records `prefix_audit`: canonical message hashes are compared
+in memory to report append-only/identical/rewritten/shortened histories and the first
+changed message index. Tools, non-message request settings (including cache routing
+parameters) and known endpoint/session-header routing are compared separately.
+Prompt text, authorization headers and per-message hashes are not stored in the
+ledger. Baselines are worker-local: at most 16 session/kind keys, 8,192 messages
+per key. A restart, eviction, oversize request or missing session is **unmeasured**.
+The offline reporter includes these observations when present and tolerates older
+exports without inventing them. Runtime fingerprints include the new Lua modules.
+
+These describe prepared request components, **not** provider acceptance, tokenizer
+prefix lengths, routing decisions, retention or guaranteed cache reuse. They do not
+modify the serialized provider body. In particular, instructions are read afresh
+when building context; unchanged bytes stay identical, but an actual `AGENTS.md`
+change no longer waits for a process restart just to protect cache hits. Guest
+instructions still never fall back to operator instructions.
 
 No tool hiding, per-round schema shuffle, aggressive compaction, reasoning removal,
 mandatory repository-map injection or new compact encoding is part of this plan.
