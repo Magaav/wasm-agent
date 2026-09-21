@@ -119,3 +119,29 @@ Stated so a verdict is not read for more than it says:
 - **A slow write still occupies worker 0.** Writes remain pinned to worker 0 for the
   one-writer guarantee; the two interactive slots mean an operator's *run* is not stuck
   behind it, but an operator's next *write* can be.
+
+## Peer-run proof
+
+`scripts/test-peer-run-admission.cjs` proves the authorized peer path end to end with two isolated
+nodes, a local rendezvous/relay and a local mock model - no cloud rendezvous, no paid account:
+
+    node scripts/test-peer-run-admission.cjs [wa-binary]
+
+It runs a signed direct `POST /node/chat` and a signed relayed one, and asserts against the node's own
+`/health` that the run went *through admission*: the verified peer author owns the conversation, the
+authenticated body `thread` is the scheduling key, the peer run is `background` on a background worker
+(not one of the two interactive slots), a duplicate signed request is `replayed_request`, a body that
+does not match its signature and an unregistered master are refused before admission (no owner is
+created), a registered guest is `forbidden_role`, and the peer's transcript is not in the local
+operator's session list. A successful reply is itself the proof that the signature was verified
+exactly once: the run half does not re-verify, because a second verification of the same signed
+request would be refused as a replay.
+
+The guest-to-exact-master binding and the managed-guest refusals are the subject of
+`scripts/test-managed-network.cjs`; this fixture is the non-managed peer half.
+
+Observation for the rendezvous owner: `/relay/send` verifies `relay-send|node_id|ts` and does not
+include the envelope body, so the `to`/`path` fields are not covered by the transport signature (the
+inner `/node/chat` headers still cover the prompt and the target re-verifies the peer author). The
+fixture asserts the current behaviour explicitly, so a change to that contract is visible rather than
+silent.
