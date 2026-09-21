@@ -1,36 +1,33 @@
-// The adapter route (a) needs: reach the app's own modules, which is what lets a reply be sent through
-// the app's action instead of by driving its UI.
+// The adapter: reach the app's own modules, so a reply is sent through the app's action instead of by
+// driving its UI.
 //
-//   node scripts/whatsapp-adapter.mjs install      # add the document-start hook, then reload the tab
-//   node scripts/whatsapp-adapter.mjs dump <file>  # write the module names the hook recorded
-//   node scripts/whatsapp-adapter.mjs find <regex> # names matching a pattern
+//   node scripts/whatsapp-adapter.mjs install           # add the document-start hook, reload the tab
+//   node scripts/whatsapp-adapter.mjs find <regex>      # module names matching a pattern
+//   node scripts/whatsapp-adapter.mjs dump <file>       # every recorded name (JSON)
+//   node scripts/whatsapp-adapter.mjs source <name>     # the module's own factory source
+//   node scripts/whatsapp-adapter.mjs eval <expr>       # evaluate in the page (for probing a module)
 //
 // Why this and not a DLL injector: the blocker was never "we cannot get code into the page" - CDP's
 // `Page.addScriptToEvaluateOnNewDocument` runs a script in the page's own world before any of the app's
 // code, which is the same layer an injected DLL would have to reach for, with none of the cost: no
-// injection, no sandbox escape, no 64-bit/32-bit problem, nothing foreign in the process that holds the
-// session. The blocker was that this build is **not webpack**: it uses Meta's Comet module system
-// (`__d(name, deps, factory)`, plus `require`, `requireLazy`, `requireInterop`, `requireDynamic`), so
-// `window.require` resolves a name but exposes no cache to enumerate - there is nothing to walk.
+// injection, no sandbox escape, no 64-bit/32-bit problem, nothing foreign in the process holding the
+// session.
 //
-// `__d` is the define call, so wrapping it lists every module the bundle defines, including the ones
-// whose names cannot be guessed (the Msg model, the unread command, the send action). And because the
-// wrapper sees the *factory*, `String(factory)` is the module's own source: the call shape can be read
-// instead of guessed.
+// This build is **not webpack**: it uses Meta's Comet module system (`__d(name, deps, factory)` plus
+// `require`, `requireLazy`, `requireInterop`, `requireDynamic`), so `window.require` resolves a name
+// but exposes no cache to enumerate. `__d` is the define call, so wrapping it lists every module the
+// bundle defines - including the names that cannot be guessed (the Msg model, the unread command, the
+// send action) - and the wrapper keeps the *factory*, whose source gives the call shape instead of
+// leaving it to be guessed.
 //
-// Two lessons are baked into the hook, both learned by getting them wrong first:
-//   - trap the **property**, not the value. webpack created its registry and pushed into it in one
-//     tick, and this bundle re-assigns `__d` later, so a wrapper installed on the value is silently
-//     replaced: 189 modules recorded instead of thousands.
-//   - it must **fail open**: if WhatsApp changes, the page must keep working. Every trap swallows its
-//     own errors and does nothing but record.
-//
-// STATE: the *value* wrapper around `__d` records real module names (a first pass recorded 189, e.g.
-// `WAWebVoipIncomingCallQpl`, `VultureJSSampleRatesLoader`), which proves the surface is reachable from
-// a document-start script. The property trap below records **nothing** in this build: the bundle
-// installs `__d` with `Object.defineProperty`, which replaces a configurable accessor without calling
-// its setter. So the next step is the hybrid - value-wrap, then poll every few hundred milliseconds and
-// re-wrap when the bundle has replaced it - rather than either variant alone.
+// Two lessons are baked in, both learned by getting them wrong first:
+//   - **value-wrap, then re-wrap.** The bundle installs `__d` and later replaces it, and it uses
+//     `Object.defineProperty`, which replaces a configurable accessor *without* calling its setter - so
+//     a property trap records nothing (it recorded 0) while a value wrapper recorded 189 names before
+//     being replaced. The hook therefore value-wraps and polls, re-wrapping whenever the bundle has put
+//     its own function back.
+//   - **fail open.** A hook that breaks the page is worse than no hook: it runs before the app does, so
+//     every trap swallows its own errors and does nothing but record.
 const PORTS = [9222];
 const HOSTS = ["127.0.0.1", "[::1]"];
 
@@ -68,97 +65,104 @@ async function connect() {
         });
         const evaluate = async (expression) => {
           const out = await call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
-          if (out.exceptionDetails) throw new Error(out.exceptionDetails.text || "page_threw");
-          return JSON.parse(out.result.value);
+          if (out.exceptionDetails) throw new Error(String((out.exceptionDetails.exception && out.exceptionDetails.exception.description) || out.exceptionDetails.text).slice(0, 300));
+          return out.result.value;
         };
         return { ws, call, evaluate, host, port };
-      } catch { /* next */ }
+      } catch { /* next candidate */ }
     }
   }
   console.log(JSON.stringify({ error: "no_cdp_endpoint" }));
   process.exit(3);
 }
 
-// The hook. Property traps that re-wrap on every assignment, so a later re-assignment cannot bypass
-// them; every failure is recorded and swallowed so the page keeps working.
+// The hook. Every line here runs before the app, on every page load.
 const HOOK = [
   "(() => {",
-  "  const state = window.__wa_adapter = window.__wa_adapter || { names: [], wrapped: 0, errors: [] };",
-  "  const note = (name) => { if (typeof name === 'string' && state.names.length < 30000) state.names.push(name); };",
-  "  const trap = (property, wrap) => {",
-  "    let stored;",
-  "    try {",
-  "      const descriptor = Object.getOwnPropertyDescriptor(window, property);",
-  "      if (descriptor && descriptor.set && descriptor.get && descriptor.configurable === false) return;",
-  "      Object.defineProperty(window, property, {",
-  "        configurable: true,",
-  "        get() { return stored; },",
-  "        set(value) { try { stored = wrap(value) || value; } catch (e) { state.errors.push(property + ': ' + String(e).slice(0, 60)); stored = value; } },",
-  "      });",
-  "      if (descriptor && descriptor.value !== undefined) { stored = wrap(descriptor.value) || descriptor.value; }",
-  "    } catch (e) { state.errors.push('trap ' + property + ': ' + String(e).slice(0, 60)); }",
+  "  const state = window.__wa_adapter = window.__wa_adapter || { names: [], factories: {}, rewraps: 0, errors: [], polls: 0 };",
+  "  const note = (name, factory) => {",
+  "    if (typeof name !== 'string' || !name) return;",
+  "    if (!(name in state.factories)) state.names.push(name);",
+  "    state.factories[name] = factory;",
   "  };",
-  "  const wrapDefine = (original) => {",
-  "    if (typeof original !== 'function' || original.__wa_wrapped) return original;",
-  "    const wrapped = function (name) { note(name); return original.apply(this, arguments); };",
+  "  const wrap = (original) => {",
+  "    if (typeof original !== 'function') return original;",
+  "    const wrapped = function (name, deps, factory) {",
+  "      try { note(name, factory); } catch (e) { state.errors.push('note: ' + String(e).slice(0, 50)); }",
+  "      return original.apply(this, arguments);",
+  "    };",
   "    wrapped.__wa_wrapped = true;",
-  "    state.wrapped += 1;",
   "    return wrapped;",
   "  };",
-  "  const wrapRequire = (original) => {",
-  "    if (typeof original !== 'function' || original.__wa_wrapped) return original;",
-  "    const wrapped = function (name) { note('require:' + name); return original.apply(this, arguments); };",
-  "    wrapped.__wa_wrapped = true;",
-  "    state.wrapped += 1;",
-  "    return wrapped;",
+  "  const install = () => {",
+  "    const current = window.__d;",
+  "    if (typeof current !== 'function') return false;",
+  "    if (current.__wa_wrapped) return true;",
+  "    const wrapped = wrap(current);",
+  "    try { window.__d = wrapped; } catch (e) { state.errors.push('assign: ' + String(e).slice(0, 50)); return false; }",
+  "    return window.__d === wrapped;",
   "  };",
-  "  trap('__d', wrapDefine);",
-  "  trap('require', wrapRequire);",
-  "  // the bundle replaces __d with defineProperty (bypassing a setter), but it calls these.",
-  "  trap('__onAfterModuleFactory', (original) => {",
-  "    if (typeof original !== 'function' || original.__wa_wrapped) return original;",
-  "    const wrapped = function (name) { note('module:' + name); return original.apply(this, arguments); };",
-  "    wrapped.__wa_wrapped = true;",
-  "    state.wrapped += 1;",
-  "    return wrapped;",
-  "  });",
-  "  trap('__onBeforeModuleFactory', (original) => {",
-  "    if (typeof original !== 'function' || original.__wa_wrapped) return original;",
-  "    const wrapped = function (name) { note('before:' + name); return original.apply(this, arguments); };",
-  "    wrapped.__wa_wrapped = true;",
-  "    state.wrapped += 1;",
-  "    return wrapped;",
-  "  });",
+  "  const tick = () => {",
+  "    state.polls += 1;",
+  "    try { if (install()) state.rewraps += 0; } catch (e) { state.errors.push('tick: ' + String(e).slice(0, 50)); }",
+  "    if (state.polls < 1200) setTimeout(tick, 250);",
+  "  };",
+  "  tick();",
   "})();",
 ].join("\n");
 
-const command = process.argv[2] || "dump";
+const command = process.argv[2] || "status";
 const argument = process.argv[3] || "";
-
 const connection = await connect();
-if (command === "install") {
+
+if (command === "install" || command === "learn") {
   await connection.call("Page.enable", {});
   await connection.call("Page.addScriptToEvaluateOnNewDocument", { source: HOOK });
   await connection.call("Page.reload", { ignoreCache: false });
-  console.log(JSON.stringify({ ok: true, installed: true, reloaded: true, note: "wait for the page, then run dump" }));
+  // The registered script belongs to *this* CDP session, so the session has to stay open while the page
+  // loads or it is gone before the document-start script runs (which is exactly how this failed first:
+  // `window.__wa_adapter` was null, the script never executed). Keeping the connection until the hook
+  // reports in is the whole difference.
+  let ready = false;
+  for (let attempt = 0; attempt < 24 && !ready; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    try {
+      const probe = await connection.evaluate("JSON.stringify({ hook: typeof window.__wa_adapter, names: window.__wa_adapter ? window.__wa_adapter.names.length : 0, title: document.title })");
+      const seen = JSON.parse(probe);
+      console.log(`t+${(attempt + 1) * 2.5}s ${probe}`);
+      ready = seen.names > 0;
+    } catch (error) { console.log(`t+${(attempt + 1) * 2.5}s ${String(error.message).slice(0, 60)}`); }
+  }
+  if (!ready) { console.log(JSON.stringify({ ok: false, error: "hook_recorded_nothing" })); connection.ws.close(); process.exit(5); }
+  // Give the app a moment to define the rest, then dump everything it saw.
+  await new Promise((resolve) => setTimeout(resolve, 8000));
+  const all = JSON.parse(await connection.evaluate("JSON.stringify(window.__wa_adapter.names)"));
+  const names = Array.from(new Set(all));
+  const fs = await import("node:fs");
+  const target = command === "dump" && argument ? argument : "wa-module-names.json";
+  fs.writeFileSync(target, JSON.stringify(names, null, 1));
+  const interesting = names.filter((name) => /SendMsg|Unread|MarkRead|MsgKey|MsgModel|OpenChat|ChatOpen|ReadReceipt/i.test(name)).sort();
+  console.log(JSON.stringify({ ok: true, wrote: target, names: names.length, interesting }, null, 1));
+} else if (command === "eval") {
+  console.log(await connection.evaluate(argument));
+} else if (command === "source") {
+  const source = await connection.evaluate(`(() => { const f = (window.__wa_adapter && window.__wa_adapter.factories[${JSON.stringify(argument)}]) || null; return f ? String(f) : 'not recorded'; })()`);
+  console.log(typeof source === "string" ? source.slice(0, 6000) : JSON.stringify(source));
 } else {
-  const stateName = "window.__wa_adapter || null";
-  const summary = await connection.evaluate(`JSON.stringify({ state: ${stateName}, names: (window.__wa_adapter ? window.__wa_adapter.names.length : 0), dWrapped: !!(window.__d && window.__d.__wa_wrapped) })`);
-  if (command === "find" || command === "dump") {
-    const all = await connection.evaluate(`JSON.stringify(window.__wa_adapter ? window.__wa_adapter.names : [])`);
-    const names = Array.from(new Set(all));
-    if (command === "dump") {
-      const fs = await import("node:fs");
-      const target = argument || "wa-module-names.json";
-      fs.writeFileSync(target, JSON.stringify(names, null, 1));
-      console.log(JSON.stringify({ ok: true, wrote: target, names: names.length, wrapped: summary.dWrapped, errors: (summary.state && summary.state.errors) || [] }));
-    } else {
-      const pattern = new RegExp(argument || ".");
-      const hits = names.filter((name) => pattern.test(name));
-      console.log(JSON.stringify({ matching: hits.length, names: hits.slice(0, 60) }, null, 1));
-    }
+  const names = await connection.evaluate("JSON.stringify(window.__wa_adapter ? window.__wa_adapter.names : [])");
+  const list = Array.from(new Set(JSON.parse(names || "[]")));
+  if (command === "dump") {
+    const fs = await import("node:fs");
+    const target = argument || "wa-module-names.json";
+    fs.writeFileSync(target, JSON.stringify(list, null, 1));
+    console.log(JSON.stringify({ ok: true, wrote: target, names: list.length }));
+  } else if (command === "find") {
+    const pattern = new RegExp(argument || ".");
+    const hits = list.filter((name) => pattern.test(name)).sort();
+    console.log(JSON.stringify({ total: list.length, matching: hits.length, names: hits.slice(0, 60) }, null, 1));
   } else {
-    console.log(JSON.stringify(summary, null, 1));
+    const state = await connection.evaluate("JSON.stringify(window.__wa_adapter ? { names: window.__wa_adapter.names.length, rewraps: window.__wa_adapter.rewraps, polls: window.__wa_adapter.polls, errors: window.__wa_adapter.errors.slice(0, 5) } : null)");
+    console.log(JSON.stringify({ recorded: list.length, state: JSON.parse(state || "null") }, null, 1));
   }
 }
 connection.ws.close();

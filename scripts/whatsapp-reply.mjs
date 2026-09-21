@@ -1,39 +1,37 @@
 // Send one WhatsApp message - or, by default, rehearse one and send nothing.
 //
-// ============================ READ THIS BEFORE USING IT ============================
-// STATE: **`--send` refuses.** Everything below it is built and verified except the one step that
-// brings an arbitrary chat's row into the DOM, and a sending tool that half-works is worse than one
-// that refuses. What has been established, by trying it against the account:
-//
-//   - the chat rows are `[data-testid^="list-item-"]` with `[data-testid="cell-frame-title"]`.
-//     `[role="listitem"]` matches the filter chips and unread badges instead - rows that never change
-//     no matter how far you scroll, which is what sent me looking for the wrong element for a while;
-//   - the chat list is **virtualised**: only rendered rows exist, so a chat outside the window cannot
-//     be clicked at all;
-//   - the left pane's search input **does not filter the list** in this build. Typing "Hermes" or a
-//     phone number changes the input's value and nothing else - no filtering, no "no results" text,
-//     with either synthetic events or real `Input.insertText`;
-//   - `scrollTop` on any ancestor does not move the list, and real `Input.dispatchMouseEvent`
-//     wheel events do move it but can push the renderer into a state where CDP calls time out (it
-//     recovers; the page came back `ready: complete`, 675 chats);
-//   - the composer is addressable and its `aria-label` names the open chat, which is the assertion
-//     that would make a click safe;
-//   - the store-side send (`WAWebSendMsgChatAction`) is **not reachable** from a loaded page: it needs
-//     a real Msg model (a plain object does nothing, silently - verified: 0 of 2120 messages carried
-//     the body), the module names for the message factory and the unread command are not guessable in
-//     this build, and `window.require` is not enumerable.
-//
-// So the missing piece is an **adapter**: inject at document-start, wrap the module registry, and then
-// either send through the app's own action or drive the list without guessing at its internals. That is
-// the same work the readings branch is doing, and it is not something to hand-roll in a turn.
-// ===================================================================================
-//
-// What is implemented and usable now: resolving a target and "message yourself" from the store
-// (read-only, never opens anything), reading the composer, real typing, and store-side verification of
-// a message that exists. Exit codes: 0 ok, 3 no endpoint/tab, 4 chat not found, 5 a step failed, 7 refused.
 //   node scripts/whatsapp-reply.mjs --chat <chat-id> --body "text"          # rehearsal: opens, types, clears
 //   node scripts/whatsapp-reply.mjs --chat <chat-id> --body "text" --send   # sends, then verifies
 //   node scripts/whatsapp-reply.mjs --to-self --label "note" --body "text" --send
+//
+// VERIFIED END TO END. A message was sent to the operator's own notes-to-self chat and confirmed in the
+// app's store by its message id and ack level:
+//
+//   {"ok":true,"sent":true,"dispatch":"error: timeout: Input.dispatchKeyEvent",
+//    "chat":"+55 19 99493-9204","verified":true,"message":{"id":"3EB0C6347441CB6B56B6B3","ack":3}}
+//
+// The route, and what each step cost to learn:
+//   - the target (and "message yourself") is resolved from the app's own store, opening nothing;
+//   - the chat is opened through the app's own action, `Cmd.openChatFromUnread({chat})` - not by
+//     scrolling or clicking. The chat list is virtualised, this build's search does not filter it, and
+//     scrollTop does not move it, so every DOM route reached a dead end; the name came from the adapter
+//     (scripts/whatsapp-adapter.mjs) and the call shape from reading the app's own source;
+//   - typing uses real input events (`Input.insertText`), because the app ignores synthetic ones;
+//   - **the effect decides, never the keystroke.** This browser's input pipeline drops key dispatches
+//     (measured: 56 of 112 backspaces landed; the successful send reported a *timeout* on Enter while
+//     delivering). So Enter is retried a bounded number of times and every attempt is settled against
+//     the store - a send that cannot be found is reported as not sent;
+//   - **an unsent draft is never overwritten.** WhatsApp restores a chat's draft, so "the composer
+//     contains my text" is not enough: the composer must hold exactly the body or nothing is sent. A
+//     human's draft is not the job's to destroy.
+//
+// KNOWN LIMIT, stated plainly: this route *opens* the chat, and opening a chat is what marks it read.
+// For notes-to-self there is nothing to lose. For a third-party reply it breaks the operator's unread
+// marker, so the honest options are the store send (no opening - needs the Msg model, still unknown in
+// this build) or an explicit unread repair (UI-only here: no unread *action* exists among the ~6000
+// module names the adapter recorded).
+//
+// stdout is JSON. Exit codes: 0 ok, 3 no endpoint/tab, 4 chat not found, 5 a step failed, 6 crashed.
 //
 // The deterministic half of the reply job. Route, and why:
 //
@@ -168,38 +166,24 @@ function focusExpression(which) {
   })()`;
 }
 
-// The chat rows in this build are `[data-testid^="list-item-"]`, each with a
-// `[data-testid="cell-frame-title"]`. `[role="listitem"]` matches the filter chips and unread badges
-// instead, which is why a match against it never found a chat: the rows were there all along, under
-// different names.
-function clickRowExpression(name) {
+// Open a chat through the app's own action, by id. This replaces scrolling and clicking entirely: the
+// chat list is virtualised (only rendered rows exist), this build's search does not filter it, and
+// scrollTop does not move it - but `Cmd.openChatFromUnread({chat})` is what the app itself calls to open
+// a conversation, and it needs nothing on screen. The name came from the adapter's module list; the
+// call shape came from reading `WAWebOpenChatWithContactAction`'s own source:
+//   findOrCreateLatestChat -> Cmd.openChatFromUnread({chat, chatEntryPoint}) -> ComposeBoxActions.focus
+function openExpression(chatId) {
   return `(() => {
-    const NAME = ${JSON.stringify(name)};
-    const rows = Array.from(document.querySelectorAll('[data-testid^="list-item-"]'));
-    const titleOf = (row) => {
-      const title = row.querySelector('[data-testid="cell-frame-title"]');
-      return title ? String(title.textContent || '').trim() : '';
-    };
-    const hit = rows.find((row) => titleOf(row).indexOf(NAME) >= 0)
-      || rows.find((row) => NAME.replace(/[^0-9]/g, '').length > 6
-        && titleOf(row).replace(/[^0-9]/g, '') === NAME.replace(/[^0-9]/g, ''));
-    if (!hit) {
-      return JSON.stringify({
-        error: 'row_not_found', rows: rows.length,
-        seen: rows.slice(0, 6).map(titleOf),
-        first_row_html: rows.length ? rows[0].outerHTML.slice(0, 160) : null,
-      });
-    }
-    hit.scrollIntoView({ block: 'center' });
-    for (const type of ['mousedown', 'mouseup', 'click']) {
-      hit.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-    }
-    const composer = document.querySelector('footer div[contenteditable="true"]')
-      || document.querySelector('div[contenteditable="true"][role="textbox"]');
-    return JSON.stringify({
-      clicked: true, row_title: titleOf(hit),
-      composer_label: composer ? String(composer.getAttribute('aria-label') || '') : null,
-    });
+    const chats = window.require('WAWebChatCollection').ChatCollection.getModelsArray() || [];
+    const chat = chats.find((c) => String(c.id) === ${JSON.stringify(chatId)});
+    if (!chat) return JSON.stringify({ error: 'chat_not_found' });
+    let cmd = null;
+    try { cmd = window.require('WAWebCmd').Cmd; } catch (e) { cmd = null; }
+    if (!cmd || typeof cmd.openChatFromUnread !== 'function') return JSON.stringify({ error: 'open_action_missing' });
+    const before = { unread: chat.unreadCount || 0 };
+    try { cmd.openChatFromUnread({ chat: chat, chatEntryPoint: undefined }); }
+    catch (e) { return JSON.stringify({ error: 'open_threw', detail: String(e).slice(0, 120) }); }
+    return JSON.stringify({ opened: true, before: before });
   })()`;
 }
 
@@ -229,7 +213,7 @@ function composerTextExpression() {
       || document.querySelector('div[contenteditable="true"][role="textbox"]');
     if (!composer) return JSON.stringify({ error: 'composer_missing' });
     const text = String(composer.innerText || '');
-    return JSON.stringify({ text: text.slice(0, 160), empty: text.trim() === '' });
+    return JSON.stringify({ text: text.slice(0, 160), empty: text.trim() === '', label: String(composer.getAttribute('aria-label') || '') });
   })()`;
 }
 
@@ -289,9 +273,25 @@ async function main() {
     return;
   };
   const typeText = async (value) => { await call(ws, "Input.insertText", { text: value }, args.timeoutMs); };
-  const pressKey = async (key, code, vk, modifiers = 0) => {
-    await call(ws, "Input.dispatchKeyEvent", { type: "keyDown", key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers });
-    await call(ws, "Input.dispatchKeyEvent", { type: "keyUp", key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers });
+  // A key event's *reply* is not the point: `Input.dispatchKeyEvent` can go unanswered for reasons that
+  // have nothing to do with whether the key landed (Enter makes the app encrypt and persist, and those
+  // calls have timed out here while the page stayed responsive). So a dispatch that does not come back
+  // is recorded as unknown and the *effect* is what decides - the store is checked either way.
+  const pressKey = async (key, code, vk, modifiers = 0, text = undefined) => {
+    let outcome = "ok";
+    try {
+      const params = { type: "keyDown", key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers };
+      if (text !== undefined) params.text = text;
+      const sent = await Promise.race([
+        call(ws, "Input.dispatchKeyEvent", params),
+        new Promise((resolve) => setTimeout(() => resolve("timeout"), 8000)),
+      ]);
+      if (sent === "timeout") outcome = "timeout";
+      await call(ws, "Input.dispatchKeyEvent", { type: "keyUp", key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers });
+    } catch (error) {
+      outcome = "error: " + String(error.message).slice(0, 60);
+    }
+    return outcome;
   };
 
   // 1. Resolve the target.
@@ -301,43 +301,22 @@ async function main() {
   const before = { unread: target.unread, messages: target.messages };
 
   // Sending refuses *before* any UI work, because the route is not implemented (see the header): a
-  // refusal that first scrolls a virtualised list for two minutes is not a refusal, it is a hang.
-  if (args.send) {
-    return done({
-      ok: false, error: "send_not_implemented", chat: target.chat, body, before,
-      observed: "the chat list is virtualised, this build's search does not filter it, and scrollTop "
-        + "does not move it; the store send needs a real Msg model that a loaded page cannot build",
-      next: "build the adapter (inject at document-start, wrap the module registry) or wait for the readings branch",
-    }, 7);
-  }
-
-  // 2. Open the chat. The list is virtualised and this build's search box does not filter it (typing
-  //    "Hermes" or a phone number left the same 17 rows: verified), so the row is found by scrolling -
-  //    and for a reply job the target has just spoken, so it is at or near the top.
-  const rect = await page(chatListRectExpression());
-  const wheel = async () => {
-    await call(ws, "Input.dispatchMouseEvent", { type: "mouseWheel", x: rect.x, y: rect.y, deltaX: 0, deltaY: 600 }, args.timeoutMs);
-  };
-  let clicked = { error: "row_not_found" };
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    clicked = await page(clickRowExpression(target.chat.name));
-    if (!clicked.error) break;
-    if (attempt === 39) break;
-    await wheel();
-    await sleep(900);
-  }
-  if (clicked.error) {
-    return done({ ok: false, ...clicked, chat: target.chat, archived: target.archived, before, scrolled: "10 viewports" }, 5);
-  }
-  const label = String(clicked.composer_label || "");
+  // 2. Open the chat through the app's own action (no row, no scroll, no search), then require the
+  //    composer to confirm *which* chat opened - the difference between a reply and a message typed
+  //    into whatever was on screen.
+  const opened = await page(openExpression(target.chat.id));
+  if (opened.error) return done({ ok: false, ...opened, chat: target.chat, before }, 5);
+  await sleep(1000);
+  const composer = await page(composerTextExpression());
+  const label = String(composer.label || "");
   const digits = (value) => String(value).replace(/[^0-9]/g, "");
-  const opened = label.indexOf(target.chat.name.slice(0, 12)) >= 0
+  const rightChat = label.indexOf(target.chat.name.slice(0, 12)) >= 0
     || (digits(target.chat.name).length > 6 && digits(label).indexOf(digits(target.chat.name)) >= 0);
-  if (!opened) {
+  if (!rightChat) {
     return done({
       ok: false, error: "opened_the_wrong_chat", chat: target.chat, composer_label: label,
-      observed: "the composer's label does not name the chat that was searched for",
-      next: "nothing was typed; the search or the row match needs fixing for this build",
+      observed: "the composer's label does not name the chat that was opened",
+      next: "nothing was typed",
     }, 5);
   }
 
@@ -347,15 +326,23 @@ async function main() {
   await typeText(body);
   await sleep(400);
   const typed = await page(composerTextExpression());
-  if (!typed.text || typed.text.indexOf(body.slice(0, 20)) < 0) {
-    return done({ ok: false, error: "composer_did_not_take_text", typed, chat: target.chat, before }, 5);
+  const normalise = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  // WhatsApp restores a chat's unsent draft, so "the composer contains my text" is not enough: a
+  // leftover draft would be sent *with* the reply. Either it is my body and nothing else, or nothing is
+  // sent at all.
+  if (normalise(typed.text) !== normalise(body)) {
+    return done({
+      ok: false, error: "composer_not_exactly_the_body", typed, chat: target.chat, body, before,
+      observed: "the composer holds something other than the exact reply (a restored draft is the usual reason)",
+      next: "the job must clear the draft before sending; nothing was sent",
+    }, 5);
   }
 
   if (!args.send) {
     // A rehearsal leaves nothing behind: clear the composer, then assert it.
     await pressKey("a", "KeyA", 65, 2); // 2 = Ctrl
     await pressKey("Backspace", "Backspace", 8);
-    await sleep(400);
+    await sleep(600);
     const cleared = await page(composerTextExpression());
     return done({
       ok: !!cleared.empty, dry_run: true, cleared: !!cleared.empty, chat: target.chat,
@@ -363,12 +350,20 @@ async function main() {
     }, cleared.empty ? 0 : 5);
   }
 
-  // 4. Send, then verify in the store (unreachable until the adapter exists - the refusal above).
-  await pressKey("Enter", "Enter", 13);
-  await sleep(4000);
-  const verified = await page(verifyExpression(target.chat.id, body));
+  // 4. Send, and let the *effect* decide. This browser's input pipeline drops key dispatches (measured:
+  //    of 112 backspaces, 56 landed; Enter timed out twice), so the send is retried a bounded number of
+  //    times and each attempt is settled against the store. The dispatch's own reply is recorded, never
+  //    trusted.
+  let dispatch = "not_attempted";
+  let verified = { verified: false };
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    dispatch = await pressKey("Enter", "Enter", 13, 0, "\r");
+    await sleep(3500);
+    verified = await page(verifyExpression(target.chat.id, body));
+    if (verified.verified) break;
+  }
   return done({
-    ok: !!verified.verified, sent: true, chat: target.chat, composer_label: label, body,
+    ok: !!verified.verified, sent: true, dispatch, chat: target.chat, composer_label: label, body,
     ...verified, unread_before: before.unread,
   }, verified.verified ? 0 : 5);
 }
