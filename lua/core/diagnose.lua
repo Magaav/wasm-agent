@@ -14,6 +14,7 @@ function M.run(steps,dispatch)
     if step.expect~=nil and type(step.expect)~='table' then return {error='invalid_expectation',step=i} end
     for key,value in pairs(step.expect or {}) do
       if key=='contains' then
+        if step.tool~='read' then return {error='contains_requires_read',step=i} end
         if type(value)~='string' then return {error='invalid_expectation',step=i} end
       elseif key=='min_matches' or key=='max_matches' then
         if step.tool~='grep' or type(value)~='number' or value<0 or value%1~=0 then return {error='invalid_expectation',step=i} end

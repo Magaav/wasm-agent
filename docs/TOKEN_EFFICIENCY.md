@@ -154,7 +154,9 @@ also covers intentional exclusions. A search is not a filesystem-wide snapshot.
 ### Predetermined diagnostics, not autonomous judgment
 
 `diagnose` accepts 1–8 explicit `read`/`grep` steps with optional literal-content
-or match-count assertions. It validates the plan structure before execution, runs
+assertions (`contains`, read only) or match-count assertions (`min_matches` /
+`max_matches`, grep only). Unsupported expectation/tool combinations are rejected
+before any step executes. It validates the plan structure before execution, runs
 steps once in order, retains ordered results and a plan hash, and stops on errors,
 incomplete reads/searches or failed assertions. An explicitly requested line range
 must have `range_complete`; without an explicit limit, the read must reach `eof`.
@@ -163,6 +165,13 @@ does not force an unrequested whole-file read. It never invokes a shell, edits,
 repairs, loops, retries, broadens scope or grants guest authority. Later steps are
 explicitly counted as not run. This narrow read-only pilot is deliberately not a
 new general workflow language; execution/test commands keep their existing tools.
+
+Practical limitation: a repository-root grep normally encounters `.git`, and an
+extension-filtered grep can omit other files. Both report `complete=false`, so the
+workflow **stops** even if it found matches. Use a deliberately bounded evidence
+scope; do not describe this pilot as a general repository-debugging accelerator.
+Changing that conservative completeness policy requires a separate reviewed
+contract, not silently accepting omissions to improve a benchmark.
 
 ### Event-driven operation settlement
 
@@ -239,8 +248,10 @@ Source `a58c39d`:
   storage failure is explicit. Native tests verify immediately reopened failure
   records and notification of multiple waiting observers.
 
-No live deployment, desktop restart, production DB access or paid-provider inference
-was used. The full Windows smoke suite, real-browser UI gate and paid-model behavior
+That implementation gate used no live deployment, desktop restart, production DB
+access or paid-provider inference. The subsequent read-only field audit and bounded
+real code-review attempts are recorded separately in
+[the release review](release/TOKEN_EFFICIENCY_REVIEW.md). The full Windows smoke suite, real-browser UI gate and paid-model behavior
 suite were **not run** for this change. There is no new UI code. No controlled
 real-task cost/latency or model-quality equivalence claim is made; the optional
 compact views and shorter index have **not** become defaults.

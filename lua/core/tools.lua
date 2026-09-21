@@ -82,7 +82,7 @@ M.admin = {
   -- and wastes its tool budget on commands this machine does not have.
   schema("bash", "Run a foreground command on this machine using " .. platform.shell() .. ". Its entire process tree is owned and cleaned up; background descendants cannot outlive this call. Output and process exit are separate evidence. For a long-lived server/browser use operation start, keep its command foreground, then observe/cancel its handle.", {
     command = { type = "string" }, cwd = { type = "string" } }, { "command" }),
-  schema("operation", "Start, observe, read streamed output, wait briefly for, or cancel a supervised external operation. A launch receipt is not completion. Use await once to wait for settlement without repeated model polling (up to the operation deadline); wait is a short peek. Jobs are automation rules, not operations. No automatic replay after an unknown outcome.", {
+  schema("operation", "Start, observe, read streamed output, wait briefly for, or cancel a supervised external operation. A launch receipt is not completion. Output read uses byte cursors; when text_lossy is true, decode content_base64 for exact bytes instead of concatenating content. Use await once to wait for settlement without repeated model polling (up to the operation deadline); wait is a short peek. Jobs are automation rules, not operations. No automatic replay after an unknown outcome.", {
     action = { type = "string", enum = {"start", "list", "status", "read", "wait", "await", "cancel"} },
     id = { type = "string" }, command = { type = "string" }, cwd = { type = "string" },
     timeout_seconds = { type = "integer", minimum = 1, maximum = 86400 },
@@ -117,7 +117,7 @@ M.admin = {
   schema("diagnose", "Execute up to eight predetermined read/grep steps once, in order. Stop on failure, incomplete evidence or an unmet expectation. No shell, repair, retry or effects.", {
     steps={type="array",minItems=1,maxItems=8,items={type="object",properties={
       tool={type="string",enum={"read","grep"}},args={type="object"},
-      expect={type="object",properties={contains={type="string"},min_matches={type="integer",minimum=0},max_matches={type="integer",minimum=0}}}
+      expect={type="object",properties={contains={type="string",description="Literal text assertion for read steps only."},min_matches={type="integer",minimum=0,description="Minimum match count for grep steps only."},max_matches={type="integer",minimum=0,description="Maximum match count for grep steps only."}}}
     },required={"tool","args"}}}
   }, {"steps"}),
   -- Scoped deliberately. It used to read as "here is how you look at a web page",

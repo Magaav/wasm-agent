@@ -22,6 +22,8 @@ function audit(input) {
     }
     let payload = row.payload;
     if (typeof payload === 'string') { try { payload = JSON.parse(payload); } catch { throw Error('invalid_event_payload'); } }
+    // Lua's empty table serializes as []; it is a valid fieldless payload, not missing usage = zero.
+    if (Array.isArray(payload) && payload.length === 0) payload = {};
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw Error('invalid_event_payload');
     const event = {...row, payload}, identity = row.id;
     const fingerprint = digest(event);

@@ -41,6 +41,12 @@ reconciliation, not automatic replay; lack of attachment is not proof of death. 
   per-operation limit (64 MiB API maximum). Crossing it terminates execution and
   reports `output_limit_exceeded`, never silent truncation. In-memory result tails
   are 24 KiB per stream; byte cursors retrieve the retained prefix/full output.
+  Cursor `content` is a UTF-8 text view, not necessarily the original bytes: a
+  page can split a character or contain binary output. `text_lossy=true` marks
+  replacement characters and supplies `content_base64` for that page's exact
+  bytes. Otherwise UTF-8 encoding `content` recovers the bytes. Advance using
+  `next_offset`, never the displayed text length. Status/tail views remain lossy
+  previews; use cursor pages when exact output matters.
 * Tail truncation and incomplete capture are different facts. The former has
   artifact paths; the latter cannot be clean success. Disk/read failures are failures.
 * Normal completion reaps the shell and terminates descendants. A shell exiting

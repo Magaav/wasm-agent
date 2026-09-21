@@ -61,6 +61,13 @@ assert.throws(()=>audit({events:[a,b],has_more:true}),/incomplete_export/);
 assert.throws(()=>audit([{}]),/invalid_event/);
 assert.equal(audit([]).usage.recorded_calls_cost_usd,null);
 assert.equal(audit([]).usage.cached_input_share,null);
+// Real Lua telemetry encodes an empty payload table as [], including run starts.
+const emptyRun=event('empty-run','run','start',[]),endedRun=event('empty-run','run','end',{ms:7});
+assert.equal(audit([emptyRun,endedRun]).timing.run_ms.p50,7);
+assert.equal(audit([{...emptyRun,payload:'[]'},endedRun]).events,2);
+assert.throws(()=>audit([{...emptyRun,payload:[{unexpected:true}]}]),/invalid_event_payload/);
+r=audit([event('empty-model','model_call','start',[]),event('empty-model','model_call','end',[])]);
+assert.equal(r.usage.missing_usage,1);assert.equal(r.usage.recorded_calls_cost_usd,null);
 
 const summaryStart=event('s','summary','start',{}),summaryEnd=event('s','summary','end',b.payload);
 r=audit([a,b,summaryStart,summaryEnd]);assert.equal(r.usage.summaries,1);

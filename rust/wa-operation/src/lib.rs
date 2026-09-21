@@ -258,9 +258,17 @@ impl Manager {
         let mut data = vec![0; limit.clamp(1, VIEW_BYTES)];
         let n = file.read(&mut data)?;
         data.truncate(n);
-        Ok(
-            json!({"operation_id":id,"stream":stream,"offset":offset,"next_offset":offset+n as u64,"content":String::from_utf8_lossy(&data),"available_bytes":file.metadata()?.len()}),
-        )
+        let content = String::from_utf8_lossy(&data);
+        let text_lossy = matches!(content, std::borrow::Cow::Owned(_));
+        let mut page = json!({"operation_id":id,"stream":stream,"offset":offset,"next_offset":offset+n as u64,
+            "content":content,"text_lossy":text_lossy,"available_bytes":file.metadata()?.len()});
+        // Byte cursors can bisect UTF-8, and process output can be binary. Preserve
+        // the compatible text view, but never present replacement characters as exact bytes.
+        if text_lossy {
+            use base64::Engine;
+            page["content_base64"] = json!(base64::engine::general_purpose::STANDARD.encode(&data));
+        }
+        Ok(page)
     }
     pub fn wait(&self, id: &str, budget: Duration) -> io::Result<Value> {
         validate_id(id)?;
