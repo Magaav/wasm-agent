@@ -194,36 +194,120 @@ pub(crate) fn node_activity() -> Option<bool> {
 }
 
 /// The classification, split from the HTTP fetch so it can be tested against a literal body.
+///
+/// Fail-closed: every required field must be present and well-formed, and the new subagent summary
+/// must have the exact shape the runtime promised. Anything else is `None` (ambiguous), which
+/// graceful maintenance treats as busy. Scalars and arrays for `subagents` are rejected: the
+/// contract is one object, not "whatever looks like a count".
 pub(crate) fn activity_of(value: &Value) -> Option<bool> {
     if !value.get("ok").and_then(Value::as_bool)? {
         return Some(false); // stalled
     }
-    if value.get("current").map(|current| !current.is_null()).unwrap_or(false) {
+    // These are required by the health contract. The old code defaulted `current`/`queue` to idle,
+    // which is how a supervisor stops a node whose state it cannot actually see.
+    let current = value.get("current")?;
+    let queue = value.get("queue")?.as_u64()?;
+    let overdue = value.get("operation_overdue")?.as_bool()?;
+    if !current.is_null() {
         return Some(false);
     }
-    if value.get("queue").and_then(Value::as_u64).unwrap_or(0) > 0 {
+    if queue > 0 {
         return Some(false);
     }
-    if value.get("operation_overdue").and_then(Value::as_bool).unwrap_or(false) {
+    if overdue {
         return Some(false);
     }
-    // The contract requires a workers array; its absence is ambiguous, not idle. Every worker must
-    // be "alive": a busy read worker is still work this restart would interrupt.
-    let workers = value.get("workers").and_then(Value::as_array)?;
+    // `workers` must be present, and each child must be an object with a string state. A malformed
+    // child is ambiguous, not alive.
+    let workers = value.get("workers")?.as_array()?;
     for worker in workers {
-        if worker.get("state").and_then(Value::as_str) != Some("alive") {
+        let state = worker.as_object()?.get("state")?.as_str()?;
+        if state != "alive" {
             return Some(false);
         }
     }
-    // Subagents are consumed if the runtime reports them, as a list or a count: any accepted or
-    // running entry makes the node busy. Subagent policy is not this change's; the field is read so
-    // the sentinel cannot silently ignore it once the runtime grows it.
-    if let Some(subagents) = value.get("subagents") {
-        if subagents.as_array().map(|items| !items.is_empty()).unwrap_or(false) {
-            return Some(false);
+    // `execution_schema` is the runtime declaring which execution summary it reports. Schema 1
+    // requires `subagents`; a legacy body may omit both. Any *other* schema is one this sentinel
+    // does not know how to read, so it is ambiguous rather than idle. A present `subagents` field
+    // must always have the strict shape, whatever the schema.
+    let execution_schema = match value.get("execution_schema") {
+        None => None,
+        Some(Value::Number(number)) => Some(number.as_u64()?),
+        Some(_) => return None,
+    };
+    if execution_schema.is_some_and(|schema| schema != 1) {
+        return None; // an unknown execution schema cannot be read as idle
+    }
+    // Active operations are real side effects, not queued model work: a background command can
+    // outlive the run that launched it, and `operation_overdue` only flags the tardy ones. So the
+    // array itself is what says "busy". Schema 1 requires it; a legacy body may omit it.
+    let operations = value.get("operations");
+    if execution_schema == Some(1) && operations.is_none() {
+        return None;
+    }
+    if let Some(operations) = operations {
+        if !operations.is_null() {
+            for entry in operations.as_array()? {
+                let object = entry.as_object()?;
+                // `operations::health()` filters to unsettled entries and omits `settled`, so an
+                // absent marker means "not settled" (busy), not "malformed". A present one must be
+                // a bool.
+                let settled = match object.get("settled") {
+                    None => false,
+                    Some(value) => value.as_bool()?,
+                };
+                let state = object.get("state")?.as_str()?;
+                if let Some(overdue) = object.get("overdue") {
+                    if overdue.as_bool()? {
+                        return Some(false);
+                    }
+                }
+                if !settled {
+                    return Some(false);
+                }
+                if let Some(cleanup) = object.get("cleanup") {
+                    if cleanup.as_str()? == "unknown" {
+                        return Some(false);
+                    }
+                }
+                if !matches!(state, "done" | "cancelled" | "failed" | "exited" | "completed" | "ok") {
+                    return None; // a settled state this sentinel does not know is ambiguous
+                }
+            }
         }
-        if subagents.as_u64().unwrap_or(0) > 0 {
-            return Some(false);
+    }
+    let subagents = value.get("subagents");
+    if execution_schema == Some(1) && subagents.is_none() {
+        return None; // schema 1 promises the field; its absence is ambiguous
+    }
+    if let Some(subagents) = subagents {
+        if !subagents.is_null() {
+            let object = subagents.as_object()?;
+            let queued = object.get("queued")?.as_u64()?;
+            let running = object.get("running")?.as_u64()?;
+            let active = object.get("active")?.as_u64()?;
+            if active != queued + running {
+                return None; // a contradictory summary is ambiguous, never idle
+            }
+            if active > 0 {
+                return Some(false);
+            }
+        }
+    }
+    // Optional legacy run reservations: any pending reservation or busy entry is work.
+    if let Some(runs) = value.get("runs") {
+        if !runs.is_null() {
+            for entry in runs.as_array()? {
+                let object = entry.as_object()?;
+                if object.get("pending").and_then(Value::as_u64).unwrap_or(0) > 0 {
+                    return Some(false);
+                }
+                if let Some(state) = object.get("state").and_then(Value::as_str) {
+                    if matches!(state, "accepted" | "running" | "active" | "queued" | "pending" | "busy") {
+                        return Some(false);
+                    }
+                }
+            }
         }
     }
     Some(true)
@@ -288,27 +372,44 @@ fn node_id_on_port(port: u16) -> Option<String> {
 /// Prove that the pid listening on `port` is the node this sentinel started for the selected
 /// instance, and return it. This is the guard `SENTINEL.md` requires: a port is not an identity.
 ///
-/// Order of proof, strongest first: the lifecycle record's pid, its process creation time (a
-/// recycled pid has a different one), its executable image, and — when `probe_identity` — the node
-/// id the listener announces. A missing record falls back to `serve.pid` plus the installed image,
-/// which is what a node started by `upgrade.sh` leaves behind; if even that is absent, the stop is
-/// refused rather than performed on a port alone.
+/// A valid record proves pid, process creation time (a recycled pid has a different one), image,
+/// home, binary and — when `probe_identity` — the live announced node id. A **missing** record is
+/// the legacy case (a node started by `upgrade.sh`, which writes only `serve.pid`); it is adopted
+/// only for a graceful stop and only with positive proof. A record that exists but is corrupt is an
+/// error, never a fallback to the weaker path.
 fn verify_target(port: u16, probe_identity: bool) -> Result<u32> {
     let listener = pid_on_port(port)
         .with_context(|| format!("nothing is listening on the node's port {port}"))?;
-    if let Some(record) = instance::read_record() {
-        if record.pid != listener {
-            bail!(
-                "refusing to stop pid {listener} on port {port}: it is not the node this sentinel started (record pid {})",
-                record.pid
-            );
-        }
-        match instance::process_start(listener) {
-            Some(start) if start == record.process_start => {}
-            Some(_) => bail!("refusing to stop pid {listener}: its creation time does not match the lifecycle record (the pid was reused)"),
-            None => bail!("refusing to stop pid {listener}: cannot read its creation time to prove it is ours"),
-        }
-        if !record.binary.is_empty() {
+    let selected = instance::selected().unwrap_or_else(|_| instance::default_instance());
+    let expected_home = PathBuf::from(&selected.home);
+    let expected_binary = installed_binary();
+    match instance::read_record() {
+        Ok(Some(record)) => {
+            if record.pid != listener {
+                bail!(
+                    "refusing to stop pid {listener} on port {port}: it is not the node this sentinel started (record pid {})",
+                    record.pid
+                );
+            }
+            if !instance::same_path(Path::new(&record.home), &expected_home) {
+                bail!(
+                    "refusing to stop pid {listener}: the record's home {} is not this instance's home {}",
+                    record.home,
+                    expected_home.display()
+                );
+            }
+            if !instance::same_path(Path::new(&record.binary), &expected_binary) {
+                bail!(
+                    "refusing to stop pid {listener}: the record's binary {} is not the installed node {}",
+                    record.binary,
+                    expected_binary.display()
+                );
+            }
+            match instance::process_start(listener) {
+                Some(start) if start == record.process_start => {}
+                Some(_) => bail!("refusing to stop pid {listener}: its creation time does not match the lifecycle record (the pid was reused)"),
+                None => bail!("refusing to stop pid {listener}: cannot read its creation time to prove it is ours"),
+            }
             match instance::process_image(listener) {
                 Some(image) if instance::same_path(&image, Path::new(&record.binary)) => {}
                 Some(image) => bail!(
@@ -318,39 +419,97 @@ fn verify_target(port: u16, probe_identity: bool) -> Result<u32> {
                 ),
                 None => bail!("refusing to stop pid {listener}: cannot read its image to prove it is ours"),
             }
+            if probe_identity {
+                let announced = node_id_on_port(port);
+                if announced.as_deref() != Some(record.node_id.as_str()) {
+                    bail!(
+                        "refusing to stop pid {listener}: the node on port {port} announces {:?}, not the recorded node_id {}",
+                        announced,
+                        record.node_id
+                    );
+                }
+            }
+            Ok(listener)
         }
-        if probe_identity && !record.node_id.is_empty() {
-            let announced = node_id_on_port(port);
-            if announced.as_deref() != Some(record.node_id.as_str()) {
+        Ok(None) => {
+            if !probe_identity {
                 bail!(
-                    "refusing to stop pid {listener}: the node on port {port} announces {:?}, not the recorded node_id {}",
-                    announced,
-                    record.node_id
+                    "refusing to recover pid {listener} on port {port}: no lifecycle record, so its home and identity cannot be proven; legacy recovery is refused"
                 );
             }
+            adopt_legacy(port, listener, &expected_home, &expected_binary)
         }
-        return Ok(listener);
+        Err(error) => bail!(
+            "refusing to stop pid {listener} on port {port}: the lifecycle record is unreadable or corrupt ({error}); refusing to fall back to serve.pid"
+        ),
     }
-    let install = installed_binary();
+}
+
+/// Adopt a node started outside the sentinel (only `serve.pid` exists) — but only with positive
+/// proof, and only for a graceful stop. The proof is: `serve.pid` names this listener, the image is
+/// the installed node, the process creation marker is readable, the home's own key derives the
+/// expected node id, and the live node announces exactly that id. The record is written **before**
+/// the stop, so the creation marker is saved while the process is still alive.
+fn adopt_legacy(port: u16, listener: u32, home: &Path, install: &Path) -> Result<u32> {
     let serve_pid = install
         .parent()
         .and_then(|dir| std::fs::read_to_string(dir.join("serve.pid")).ok())
         .and_then(|text| text.trim().parse::<u32>().ok());
     match serve_pid {
         Some(pid) if pid == listener => {}
-        Some(pid) => bail!("refusing to stop pid {listener} on port {port}: serve.pid records {pid}"),
-        None => bail!("refusing to stop pid {listener} on port {port}: no lifecycle record and no serve.pid, so it cannot be proven to be this node"),
+        Some(pid) => bail!("refusing to adopt pid {listener} on port {port}: serve.pid records {pid}"),
+        None => bail!("refusing to adopt pid {listener} on port {port}: no lifecycle record and no serve.pid, so it cannot be proven to be this node"),
     }
     match instance::process_image(listener) {
-        Some(image) if instance::same_path(&image, &install) => {}
+        Some(image) if instance::same_path(&image, install) => {}
         Some(image) => bail!(
-            "refusing to stop pid {listener}: image {} is not the installed node {}",
+            "refusing to adopt pid {listener}: image {} is not the installed node {}",
             image.display(),
             install.display()
         ),
-        None => bail!("refusing to stop pid {listener}: cannot read its image to prove it is the installed node"),
+        None => bail!("refusing to adopt pid {listener}: cannot read its image to prove it is the installed node"),
     }
+    let process_start = instance::process_start(listener)
+        .with_context(|| format!("refusing to adopt pid {listener}: cannot read its creation time"))?;
+    let expected = instance::expected_node_id_from_home(home).with_context(|| {
+        format!(
+            "refusing to adopt pid {listener}: cannot derive the expected node id from {}",
+            home.display()
+        )
+    })?;
+    let announced = node_id_on_port(port).with_context(|| {
+        format!("refusing to adopt pid {listener}: the node on port {port} did not answer /sync/head")
+    })?;
+    if announced != expected {
+        bail!(
+            "refusing to adopt pid {listener}: the node announces {announced}, but this home's key derives {expected}"
+        );
+    }
+    let record = instance::Lifecycle {
+        schema: 1,
+        pid: listener,
+        node_id: expected,
+        home: home.display().to_string(),
+        binary: install.display().to_string(),
+        binary_sha256: instance::sha256_file(install).unwrap_or_default(),
+        started_at: now_epoch(),
+        process_start,
+    };
+    instance::write_record(&record)?;
+    audit("legacy-adopted", &format!("pid {listener}"), "serve.pid plus live identity proof");
     Ok(listener)
+}
+
+/// Kill a pid the sentinel just started, for the failure path where no verifiable record could be
+/// written. Best-effort: the caller is already returning an error.
+fn stop_child(pid: u32) -> Result<()> {
+    if cfg!(windows) {
+        #[cfg(windows)]
+        winproc::kill_pid(pid)?;
+    } else {
+        std::process::Command::new("kill").arg(pid.to_string()).output()?;
+    }
+    Ok(())
 }
 
 /// Stop the verified listener. `probe_identity` is true for graceful maintenance (the node answers
@@ -440,6 +599,23 @@ fn start_node(binary: &Path, reason: &str) -> Result<()> {
             String::new()
         }
     };
+    // The creation marker must be read while the child is alive. Retry briefly, and if it cannot be
+    // read, stop the child rather than leave a running node the sentinel can never prove it owns.
+    let mut process_start = instance::process_start(child_pid);
+    for _ in 0..20 {
+        if process_start.map(|value| value != 0).unwrap_or(false) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        process_start = instance::process_start(child_pid);
+    }
+    let process_start = match process_start {
+        Some(value) if value != 0 => value,
+        _ => {
+            let _ = stop_child(child_pid);
+            bail!("started pid {child_pid} but could not read its creation time; stopped it rather than run an unverifiable node");
+        }
+    };
     let record = instance::Lifecycle {
         schema: 1,
         pid: child_pid,
@@ -448,10 +624,12 @@ fn start_node(binary: &Path, reason: &str) -> Result<()> {
         binary: binary.display().to_string(),
         binary_sha256: instance::sha256_file(binary).unwrap_or_default(),
         started_at: now_epoch(),
-        process_start: instance::process_start(child_pid).unwrap_or(0),
+        process_start,
     };
     if let Err(error) = instance::write_record(&record) {
-        audit("record-failed", &instance::record_path().display().to_string(), &error.to_string());
+        // A node with no record cannot be proven later. Stop it rather than run it unverifiable.
+        let _ = stop_child(child_pid);
+        bail!("started pid {child_pid} but could not record its lifecycle ({error}); stopped it");
     }
     // The install records the serving pid in `serve.pid`: upgrade.sh writes it, and the sentinel did not.
     // So a `request restart`/`request recover` left the recorded pid naming a process that was gone, and
@@ -1403,11 +1581,16 @@ budgeted (WA_SENTINEL_WAKE_BUDGET per hour, 6 by default). `run` is disabled unl
 WA_SENTINEL_SCRIPTS names the directories it may execute from."#;
 
 fn main() -> Result<()> {
-    // The registry lives under the operator's ambient home. Capture it before any instance
-    // selection overwrites `WASM_AGENT_HOME`, and pin it so every later resolution sees the same
-    // file rather than the instance home we are about to select.
+    // The registry and the operator's own paths live under the ambient environment. Capture them
+    // before any instance selection overwrites `WASM_AGENT_HOME`/`WA_INSTALL_DIR`, and pin them so
+    // every later resolution sees the operator's paths rather than the selected instance's.
     let base = instance::base_home();
     std::env::set_var("WA_INSTANCE_BASE_HOME", &base);
+    let operator_install = crate::installed_binary()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    std::env::set_var("WA_INSTANCE_OPERATOR_INSTALL", &operator_install);
 
     // `--instance NAME` may appear anywhere; it selects a named instance for the whole invocation.
     // With no flag, behaviour is exactly as before (the ambient/default instance).
@@ -1551,9 +1734,10 @@ mod self_update_tests {
     /// busy. These are the cases that decide whether a restart interrupts real work.
     #[test]
     fn idle_requires_positive_proof_and_unknown_health_is_not_idle() {
-        let idle = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+        // Legacy body: no execution_schema/subagents, but every required field present.
+        let legacy_idle = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
             "workers": [{"id": 0, "state": "alive"}]});
-        assert_eq!(activity_of(&idle), Some(true));
+        assert_eq!(activity_of(&legacy_idle), Some(true));
 
         let busy_run = json!({"ok": true, "current": {"label": "POST /chat"}, "queue": 0,
             "operation_overdue": false, "workers": [{"id": 0, "state": "busy"}]});
@@ -1571,18 +1755,90 @@ mod self_update_tests {
             "workers": [{"id": 0, "state": "stalled"}]});
         assert_eq!(activity_of(&stalled), Some(false));
 
-        let subagents = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
-            "workers": [{"id": 0, "state": "alive"}], "subagents": [{"id": "s1", "state": "running"}]});
-        assert_eq!(activity_of(&subagents), Some(false));
+        // Schema 1: the strict subagent summary, `active == queued + running`, and the operations array.
+        let schema_idle = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+            "workers": [{"id": 0, "state": "alive"}], "execution_schema": 1, "operations": [],
+            "subagents": {"queued": 0, "running": 0, "active": 0}});
+        assert_eq!(activity_of(&schema_idle), Some(true));
+        let subagent_running = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+            "workers": [{"id": 0, "state": "alive"}], "execution_schema": 1, "operations": [],
+            "subagents": {"queued": 1, "running": 1, "active": 2}});
+        assert_eq!(activity_of(&subagent_running), Some(false));
 
-        let subagent_count = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
-            "workers": [{"id": 0, "state": "alive"}], "subagents": 1});
-        assert_eq!(activity_of(&subagent_count), Some(false));
+        // An unsettled operation is real work even when it is not overdue: a background command can
+        // outlive the run that launched it.
+        let active_operation = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+            "workers": [{"id": 0, "state": "alive"}],
+            "operations": [{"state": "running", "settled": false, "overdue": false}]});
+        assert_eq!(activity_of(&active_operation), Some(false));
+        // The live health array omits `settled`; an entry with no marker is unsettled, so busy.
+        let live_operation = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+            "workers": [{"id": 0, "state": "alive"}],
+            "operations": [{"state": "running", "overdue": false, "elapsed_ms": 12}]});
+        assert_eq!(activity_of(&live_operation), Some(false));
+        let settled_operation = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+            "workers": [{"id": 0, "state": "alive"}],
+            "operations": [{"state": "done", "settled": true, "cleanup": "terminated", "overdue": false}]});
+        assert_eq!(activity_of(&settled_operation), Some(true));
+        let cleanup_unknown = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+            "workers": [{"id": 0, "state": "alive"}],
+            "operations": [{"state": "failed", "settled": true, "cleanup": "unknown"}]});
+        assert_eq!(activity_of(&cleanup_unknown), Some(false));
+        let malformed_operation = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+            "workers": [{"id": 0, "state": "alive"}],
+            "operations": [{"settled": false}]});
+        assert_eq!(activity_of(&malformed_operation), None);
+        let unknown_settled_state = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+            "workers": [{"id": 0, "state": "alive"}],
+            "operations": [{"state": "mystery", "settled": true}]});
+        assert_eq!(activity_of(&unknown_settled_state), None);
 
-        // An older node without a workers array is ambiguous, not idle: the sentinel must not stop
-        // it on the strength of a body it cannot fully read.
+        // A present subagent field with any other shape is ambiguous, never idle.
+        for malformed in [
+            json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+                "workers": [{"id": 0, "state": "alive"}], "subagents": [{"state": "running"}]}),
+            json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+                "workers": [{"id": 0, "state": "alive"}], "subagents": 1}),
+            json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+                "workers": [{"id": 0, "state": "alive"}], "subagents": {"queued": 0, "running": 0}}),
+            json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+                "workers": [{"id": 0, "state": "alive"}], "subagents": {"queued": 0, "running": 0, "active": 5}}),
+            json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+                "workers": [{"id": 0, "state": "alive"}], "subagents": "busy"}),
+        ] {
+            assert_eq!(activity_of(&malformed), None, "{malformed}");
+        }
+
+        // Schema 1 promises the field; its absence is ambiguous.
+        let schema_missing = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+            "workers": [{"id": 0, "state": "alive"}], "execution_schema": 1, "operations": []});
+        assert_eq!(activity_of(&schema_missing), None);
+
+        // An unknown execution schema cannot be read as idle.
+        let unknown_schema = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+            "workers": [{"id": 0, "state": "alive"}], "execution_schema": 2});
+        assert_eq!(activity_of(&unknown_schema), None);
+
+        // Missing required fields are ambiguous, not idle: the old defaults were the bug.
         let no_workers = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false});
         assert_eq!(activity_of(&no_workers), None);
+        let no_queue = json!({"ok": true, "current": null, "operation_overdue": false,
+            "workers": [{"id": 0, "state": "alive"}]});
+        assert_eq!(activity_of(&no_queue), None);
+        let no_current = json!({"ok": true, "queue": 0, "operation_overdue": false,
+            "workers": [{"id": 0, "state": "alive"}]});
+        assert_eq!(activity_of(&no_current), None);
+        let bad_worker = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+            "workers": [{"id": 0}]});
+        assert_eq!(activity_of(&bad_worker), None);
+
+        // Legacy run reservations.
+        let pending = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+            "workers": [{"id": 0, "state": "alive"}], "runs": [{"pending": 1}]});
+        assert_eq!(activity_of(&pending), Some(false));
+        let running = json!({"ok": true, "current": null, "queue": 0, "operation_overdue": false,
+            "workers": [{"id": 0, "state": "alive"}], "runs": [{"state": "running"}]});
+        assert_eq!(activity_of(&running), Some(false));
 
         // A body with no `ok` at all is ambiguous too.
         assert_eq!(activity_of(&json!({"current": null})), None);
