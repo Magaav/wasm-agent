@@ -4,6 +4,7 @@
 //! (sqlite, http, wasmtime, sha256, uuid, time, files). No Python anywhere.
 mod client_bridge;
 mod host;
+mod file_search;
 mod operations;
 mod lua;
 mod node;

@@ -7,6 +7,9 @@ local spellslib = dofile("lua/core/spells.lua")
 local nodeslib = dofile("lua/core/nodes.lua")
 local changeset = dofile("lua/core/changeset.lua")
 local tool_output = dofile("lua/core/tool_output.lua")
+local file_tools = dofile("lua/core/file_tools.lua")
+local evidence_view = dofile("lua/core/evidence_view.lua")
+local diagnose = dofile("lua/core/diagnose.lua")
 local M = {}
 
 local function is_master(role)
@@ -44,9 +47,14 @@ M.shared = {
   schema("session", "Read a session. Defaults to newest messages; pass next_before_seq back as before_seq to retrieve earlier evidence.", {
     session_id = { type = "string" },
     before_seq = { type = "integer", minimum = 1 },
+    message_id = { type = "string", description = "Exact row, with ownership checked against this session." },
+    byte_offset = { type = "integer", minimum = 1, description = "With message_id, page exact row JSON without requiring operator artifact access." },
+    byte_limit = { type = "integer", minimum = 4, maximum = 20000 }, message_version = {type="string"},
+    view = { type = "string", enum = {"full", "compact"}, description = "Full is default; compact omits diagnostic details, not content, with exact-row references." },
     limit = { type = "integer", minimum = 1, maximum = 1000 } }, { "session_id" }),
   schema("search_messages", "Search your own past sessions for text (what did we decide about X?).", {
     query = { type = "string" },
+    view = { type = "string", enum = {"full", "compact"} },
     limit = { type = "integer", minimum = 1, maximum = 50 } }, { "query" }),
   schema("resume_session", "Fold a past session into this one: its summary and recent messages become context.", {
     session_id = { type = "string" },
@@ -74,31 +82,44 @@ M.admin = {
   -- and wastes its tool budget on commands this machine does not have.
   schema("bash", "Run a foreground command on this machine using " .. platform.shell() .. ". Its entire process tree is owned and cleaned up; background descendants cannot outlive this call. Output and process exit are separate evidence. For a long-lived server/browser use operation start, keep its command foreground, then observe/cancel its handle.", {
     command = { type = "string" }, cwd = { type = "string" } }, { "command" }),
-  schema("operation", "Start, observe, read streamed output, wait briefly for, or cancel a supervised external operation. A launch receipt is not completion. Jobs are automation rules, not operations. No automatic replay after an unknown outcome.", {
-    action = { type = "string", enum = {"start", "list", "status", "read", "wait", "cancel"} },
+  schema("operation", "Start, observe, read streamed output, wait briefly for, or cancel a supervised external operation. A launch receipt is not completion. Use await once to wait for settlement without repeated model polling (up to the operation deadline); wait is a short peek. Jobs are automation rules, not operations. No automatic replay after an unknown outcome.", {
+    action = { type = "string", enum = {"start", "list", "status", "read", "wait", "await", "cancel"} },
     id = { type = "string" }, command = { type = "string" }, cwd = { type = "string" },
     timeout_seconds = { type = "integer", minimum = 1, maximum = 86400 },
     stream = { type = "string", enum = {"stdout", "stderr"} }, offset = { type = "integer", minimum = 0 },
     limit = { type = "integer", minimum = 1, maximum = 24576 }, wait_ms = { type = "integer", minimum = 0, maximum = 10000 }
   }, {"action"}),
-  schema("read", "Read a text file, optionally a line range.", {
+  schema("read", "Read exact text with versioned line/byte-column continuation. Follow next_offset/next_column with version until eof; a long line may span pages.", {
     path = { type = "string" },
     offset = { type = "integer", minimum = 1 },
+    column = { type = "integer", minimum = 1 }, version = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 2000 } }, { "path" }),
   schema("read_many", "Read several independent files or line ranges in one step. Results match individual read calls in request order; each item reports its own error.", {
     requests = { type = "array", minItems = 1, maxItems = 8, items = { type = "object",
       properties = { path = { type = "string" }, offset = { type = "integer", minimum = 1 },
+        column = { type = "integer", minimum = 1 }, version = { type = "string" },
         limit = { type = "integer", minimum = 1, maximum = 2000 } }, required = { "path" } } }
   }, { "requests" }),
   schema("write", "Create or overwrite a text file with the given content.", {
     path = { type = "string" }, content = { type = "string" } }, { "path", "content" }),
-  schema("edit", "Replace the first exact occurrence of old_text with new_text in a file.", {
-    path = { type = "string" },
-    old_text = { type = "string" },
-    new_text = { type = "string" } }, { "path", "old_text", "new_text" }),
+  schema("edit", "Apply exact replacements against one original file. Use old_text/new_text OR edits; every match must be unique and non-overlapping. Optional version rejects a stale read. No multi-file transaction.", {
+    path = { type = "string" }, version = { type = "string" },
+    old_text = { type = "string" }, new_text = { type = "string" },
+    edits = { type = "array", minItems = 1, maxItems = 64, items = { type = "object",
+      properties = { old_text = {type="string"}, new_text = {type="string"} }, required = {"old_text","new_text"} } }
+  }, { "path" }),
   schema("ls", "List a directory (portable: works the same on every platform).", { path = { type = "string" } }),
-  schema("grep", "Search files for a pattern and return matching lines. Uses a portable matcher, so it works the same on every platform.", {
-    pattern = { type = "string" }, path = { type = "string" } }, { "pattern" }),
+  schema("grep", "Literal substring search, not regex. Reports omitted files and clipped lines. Results use the supplied root; extensions are exact suffixes without dots.", {
+    pattern = { type = "string" }, path = { type = "string" },
+    ignore_case = {type="boolean"}, limit={type="integer",minimum=1,maximum=500},
+    max_depth={type="integer",minimum=0,maximum=64}, extensions={type="array",items={type="string"}}
+  }, { "pattern" }),
+  schema("diagnose", "Execute up to eight predetermined read/grep steps once, in order. Stop on failure, incomplete evidence or an unmet expectation. No shell, repair, retry or effects.", {
+    steps={type="array",minItems=1,maxItems=8,items={type="object",properties={
+      tool={type="string",enum={"read","grep"}},args={type="object"},
+      expect={type="object",properties={contains={type="string"},min_matches={type="integer",minimum=0},max_matches={type="integer",minimum=0}}}
+    },required={"tool","args"}}}
+  }, {"steps"}),
   -- Scoped deliberately. It used to read as "here is how you look at a web page",
   -- and an agent verifying its own UI spent 28 calls driving Chrome through CDP:
   -- fighting the debug endpoint, falling back to PowerShell one-liners mangled by
@@ -162,7 +183,8 @@ M.tier_of = {
   capabilities = "capabilities",
   sessions = "sessions", session = "sessions", search_messages = "sessions",
   resume_session = "sessions", session_debug = "sessions", session_fixture = "sessions",
-  bash = "environment", read = "environment", write = "environment",
+  bash = "environment", read = "environment", read_many = "environment", write = "environment",
+  diagnose = "environment", operation = "environment",
   edit = "environment", ls = "environment", grep = "environment",
   shell = "shell",
   search_ledger = "ledger", conversation = "ledger", list_conversations = "ledger",
@@ -219,7 +241,9 @@ function M.all(role)
       sha256={type="string"},offset={type="integer",minimum=1},limit={type="integer",minimum=1,maximum=51200}
     },{"sha256"})
     for _, item in ipairs(M.admin) do list[#list + 1] = item end
-    for _, plugin in ipairs(wasm_plugins()) do
+    local plugins=wasm_plugins()
+    table.sort(plugins,function(a,b)return tostring(a.name)<tostring(b.name) end)
+    for _, plugin in ipairs(plugins) do
       list[#list + 1] = schema(plugin.name, plugin.description or "", plugin.parameters and plugin.parameters.properties, plugin.parameters and plugin.parameters.required)
     end
   end
@@ -236,19 +260,6 @@ local function run(command)
   local decoded = json.decode(raw)
   if type(decoded) ~= "table" then return { error = tostring(raw) } end
   return decoded
-end
-
-local function read_lines(path, offset, limit)
-  local text = host.read_file and host.read_file(path)
-  if not text then return nil end
-  if not offset and not limit then return text end
-  local lines = {}
-  for line in (text .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
-  local from = offset or 1
-  local to = limit and (from + limit - 1) or #lines
-  local slice = {}
-  for index = from, math.min(to, #lines) do slice[#slice + 1] = string.format("%6d\t%s", index, lines[index]) end
-  return table.concat(slice, "\n")
 end
 
 function M.dispatch(memory, name, args, role, ctx)
@@ -295,12 +306,8 @@ function M.dispatch(memory, name, args, role, ctx)
     if not args.id or args.id == "" then return { error = "id_required" } end
     return { id = args.id, forgotten = memory.forget(args.id) and true or false }
   elseif name == "capabilities" then
-    local list = { "remember", "recall", "capabilities" }
-    if is_master(role) then
-      for _, extra in ipairs({ "bash", "read", "read_many", "write", "edit", "ls", "grep", "shell", "client", "spell_save", "spell_run", "spell_get", "nodes", "remote" }) do
-        list[#list + 1] = extra
-      end
-    end
+    local list = {}
+    for _,item in ipairs(M.all(role)) do list[#list+1]=item['function'].name end
     return { role = role, capabilities = list, note = "ask a master to unlock more" }
   elseif name == "search_ledger" then
     return memory.search_ledger(args.query or "", args.conversation_id, args.limit or 20)
@@ -313,9 +320,11 @@ function M.dispatch(memory, name, args, role, ctx)
     local result = run(args.cwd and ("cd " .. shell_quote(args.cwd) .. " && " .. args.command) or args.command)
     return result
   elseif name == "read" then
-    local content = read_lines(args.path, args.offset, args.limit)
-    if not content then return { error = "not_found" } end
-    return { path = args.path, content = content }
+    return file_tools.read(args)
+  elseif name == "diagnose" then
+    return diagnose.run(args.steps,function(tool,options)
+      return M.dispatch(memory,tool,options,role,ctx)
+    end)
   elseif name == "read_many" then
     if type(args.requests) ~= "table" or #args.requests < 1 or #args.requests > 8 then
       return { error = "requests_required_1_to_8" }
@@ -325,9 +334,7 @@ function M.dispatch(memory, name, args, role, ctx)
       if type(request) ~= "table" or type(request.path) ~= "string" or request.path == "" then
         results[index] = { error = "path_required" }
       else
-        local content = read_lines(request.path, request.offset, request.limit)
-        results[index] = content and { path = request.path, content = content }
-          or { path = request.path, error = "not_found" }
+        results[index] = file_tools.read(request)
       end
       if results[index].error then failed = failed + 1 end
     end
@@ -344,17 +351,9 @@ function M.dispatch(memory, name, args, role, ctx)
     end
     return { ok = ok and true or false, path = args.path, error=not ok and "write_failed" or nil }
   elseif name == "edit" then
-    if type(args.old_text)~="string" or args.old_text=="" then return {error="old_text_required"} end
-    if type(args.new_text)~="string" then return {error="new_text_required"} end
-    local text = host.read_file and host.read_file(args.path)
-    if not text then return { error = "not_found" } end
-    local from, to = text:find(args.old_text or "", 1, true)
-    if not from then return { error = "old_text_not_found" } end
-    if text:find(args.old_text,to+1,true) then return {error="old_text_ambiguous"} end
-    local updated = text:sub(1, from - 1) .. (args.new_text or "") .. text:sub(to + 1)
-    if not host.write_file(args.path, updated) then return {ok=false,error="write_failed",path=args.path} end
-    if ctx and ctx.changes then changeset.record(ctx.changes, args.path, text, updated) end
-    return { ok = true, path = args.path }
+    return file_tools.edit(args,ctx.changes and function(path,before,after)
+      changeset.record(ctx.changes,path,before,after)
+    end or nil)
   elseif name == "ls" then
     -- Native listing: `ls -la` does not exist on Windows, and the description
     -- promises portability.
@@ -367,19 +366,25 @@ function M.dispatch(memory, name, args, role, ctx)
     end
     return run("ls -la -- " .. shell_quote(args.path or "."))
   elseif name == "grep" then
-    -- Native matcher: shelling out to `grep` fails on Windows, where the tool
-    -- shell is cmd /C.
-    local native = host.grep
-    if native then
-      local ok, result = pcall(native, args.pattern or "", args.path or ".",
-        json.encode({ ignore_case = true, limit = args.limit or 100 }))
-      if ok and result then return json.decode(result) end
+    local allowed={pattern=true,path=true,ignore_case=true,limit=true,max_depth=true,extensions=true}
+    for key in pairs(args) do if not allowed[key] then return {error='unsupported_search_option',option=key} end end
+    if type(args.pattern)~='string' then return {error='pattern_required'} end
+    if args.path~=nil and type(args.path)~='string' then return {error='invalid_search_path'} end
+    if args.ignore_case~=nil and type(args.ignore_case)~='boolean' then return {error='invalid_ignore_case'} end
+    for key,bounds in pairs({limit={1,500},max_depth={0,64}}) do
+      local n=args[key]
+      if n~=nil and (type(n)~='number' or n%1~=0 or n<bounds[1] or n>bounds[2]) then return {error='invalid_search_range',option=key} end
     end
-    if platform.os() == "windows" then
-      return run("findstr /s /n /i /c:" .. shell_quote(args.pattern or "") .. " " ..
-        shell_quote((args.path or ".") .. "\\*"))
+    if args.extensions~=nil then
+      if type(args.extensions)~='table' then return {error='invalid_extensions'} end
+      for key,ext in pairs(args.extensions) do
+        if type(key)~='number' or key%1~=0 or key<1 or key>#args.extensions or type(ext)~='string' then return {error='invalid_extensions'} end
+      end
     end
-    return run("grep -rn -- " .. shell_quote(args.pattern or "") .. " " .. shell_quote(args.path or "."))
+    if not host.grep then return {error='native_search_unavailable'} end
+    local ok,result=pcall(host.grep,args.pattern,args.path or '.',json.encode(args))
+    if not ok then return {error=tostring(result)} end
+    return json.decode(result)
   elseif name == "client" then
     local ok, raw = pcall(host.client, args.action or "", json.encode(args))
     if not ok then return { error = tostring(raw) } end
@@ -411,7 +416,25 @@ function M.dispatch(memory, name, args, role, ctx)
     local session = memory.session(args.session_id)
     if not session then return { error = "unknown_session" } end
     if session.user_id ~= user_id and not is_master(role) then return { error = "forbidden" } end
+    if args.view~=nil and args.view~='full' and args.view~='compact' then return {error='invalid_view'} end
+    if args.message_id then
+      local row=memory.message(args.message_id)
+      if not row or row.session_id~=args.session_id then return {error='unknown_message'} end
+      if args.byte_offset~=nil then
+        local offset,limit=tonumber(args.byte_offset),tonumber(args.byte_limit) or 20000
+        if not offset or offset<1 or offset%1~=0 or limit<4 or limit>20000 or limit%1~=0 then return {error='invalid_message_range'} end
+        local encoded=json.encode(row);local version=host.sha256(encoded)
+        if offset>#encoded+1 then return {error='message_range_out_of_bounds'} end
+        if offset<=#encoded and encoded:byte(offset)>=128 and encoded:byte(offset)<192 then return {error='offset_inside_utf8'} end
+        if args.message_version and args.message_version~=version then return {error='message_changed',message_version=version} end
+        local content,next_offset=tool_output.slice(encoded,offset,limit)
+        return {content=content,encoding='exact_message_json',message_id=row.id,message_version=version,
+          next_offset=next_offset,bytes=#encoded,eof=next_offset>#encoded}
+      end
+      return {message=args.view=='compact' and evidence_view.message(row) or row}
+    end
     local messages = memory.session_messages(args.session_id, { limit = math.min(1000,math.max(1,tonumber(args.limit) or 200)),before_seq=tonumber(args.before_seq) })
+    if args.view=='compact' then messages=evidence_view.messages(messages) end
     -- Say when it is a window. A model that reads 200 of 260 messages without being told
     -- will treat the oldest row it can see as the start of the thread, which is how
     -- ancient history reads as current state.
@@ -424,7 +447,10 @@ function M.dispatch(memory, name, args, role, ctx)
     end
     return { session = session, messages = messages, note = note,next_before_seq=messages[1] and messages[1].seq }
   elseif name == "search_messages" then
-    return { matches = memory.search_messages(args.query or "", is_master(role) and nil or user_id, args.limit or 20) }
+    if args.view~=nil and args.view~='full' and args.view~='compact' then return {error='invalid_view'} end
+    local matches=memory.search_messages(args.query or '',is_master(role) and nil or user_id,math.min(50,math.max(1,tonumber(args.limit) or 20)))
+    if args.view=='compact' then matches=evidence_view.messages(matches) end
+    return {matches=matches,limit_reached=#matches==math.min(50,math.max(1,tonumber(args.limit) or 20))}
   elseif name == "resume_session" then
     local target = memory.session(args.session_id)
     if not target then return { error = "unknown_session" } end
@@ -438,8 +464,8 @@ function M.dispatch(memory, name, args, role, ctx)
     end
     if target.summary and target.summary ~= "" then lines[#lines + 1] = target.summary end
     for _, message in ipairs(messages) do
-      if turn.role == "user" or turn.role == "assistant" then
-        lines[#lines + 1] = turn.role .. ": " .. (turn.content or ""):sub(1, 400)
+      if message.role == "user" or message.role == "assistant" then
+        lines[#lines + 1] = message.role .. ": " .. (message.content or ""):sub(1, 400)
       end
     end
     if ctx.session_id then

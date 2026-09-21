@@ -23,6 +23,25 @@ fn settled(m: &Manager, id: &str) -> Value {
     value
 }
 #[test]
+fn settlement_wakes_all_observers_without_relaunch_or_lost_notification() {
+    let (m,root)=fixture();
+    let id=m.start(shell("sleep 30 & wait")).unwrap();
+    let barrier=Arc::new(std::sync::Barrier::new(3));
+    let workers: Vec<_>=(0..2).map(|_| {
+        let manager=m.clone();let id=id.clone();let barrier=barrier.clone();
+        std::thread::spawn(move || {barrier.wait();manager.wait(&id,Duration::from_secs(5)).unwrap()})
+    }).collect();
+    barrier.wait();
+    std::thread::sleep(Duration::from_millis(30));
+    m.cancel(&id).unwrap();
+    for worker in workers {assert_eq!(worker.join().unwrap()["state"],"cancelled");}
+    let before=Instant::now();
+    assert_eq!(m.wait(&id,Duration::from_secs(5)).unwrap()["settled"],true);
+    assert!(before.elapsed()<Duration::from_secs(1),"settled state must not wait for another event");
+    assert_eq!(m.list().as_array().unwrap().len(),1);
+    fs::remove_dir_all(root).unwrap();
+}
+#[test]
 fn output_and_exit_are_distinct() {
     let (m, root) = fixture();
     let id = m

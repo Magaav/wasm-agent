@@ -10,6 +10,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 # The execution and automation contracts have native, model-free adversarial tests.
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
+cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host file_search::tests
 cargo test --release --offline --manifest-path rust/wa-sentinel/Cargo.toml
 BIN=rust/target/release/wa
 # A turn cannot deploy the process serving that same turn. The marker crosses
@@ -395,6 +396,7 @@ rm -f "$DB.evidence.lua"
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB.observability" | grep 'observability ok'
 # Offline accounting must run even when UI tests are explicitly skipped.
 node scripts/test-token-audit.cjs
+WA_BIN="$BIN" node scripts/test-efficiency.cjs
 # Real projector, isolated home, exact artifact recovery. No paid model or ignored A/B switch.
 WA_BIN="$BIN" bash scripts/bench-tool-budget.sh
 WA_BIN="$BIN" bash scripts/bench-tool-tail.sh

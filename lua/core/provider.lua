@@ -9,6 +9,7 @@ local redact = dofile("lua/core/redact.lua")
 -- Per-model context windows. The window belongs to the model, not to the process.
 local windowlib = dofile("lua/core/model_window.lua")
 local telemetry = dofile("lua/core/telemetry.lua")
+local prefix_audit = dofile("lua/core/prefix_audit.lua")
 local M = {}
 
 local function env(name) return host.getenv(name) end
@@ -477,6 +478,8 @@ function M.complete_with(model, messages, tools, stream, opts)
   local headers, attribution = headers_for(provider, opts.session_id)
   local serialized=json.encode(body)
   local request_meta={model=body.model,provider=provider.id,round=opts.round,
+    prefix_audit=prefix_audit.observe(opts.session_id,opts.kind,body,{
+      endpoint=url,session=attribution and attribution.session and headers[attribution.session] or nil}),
     -- Which routing this request used. Recorded because a cache miss and the
     -- routing that produced it have to be readable together: without this the
     -- ledger shows the miss and not the instruction that caused it.

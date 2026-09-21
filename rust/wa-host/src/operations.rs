@@ -87,6 +87,19 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
         }
         "list" => return Ok(manager().list()),
         "status" => manager().snapshot(id),
+        "await" => {
+            // One model call observes settlement; no synthesized conversation events or replay.
+            loop {
+                let state=manager().wait(id,Duration::from_millis(250)).map_err(|e|e.to_string())?;
+                if state["settled"] == true {return Ok(state);}
+                if state["overdue"] == true {
+                    return Ok(json!({"operation_id":id,"ok":false,"settled":false,
+                        "error":"operation_supervisor_overdue","outcome":"unknown",
+                        "note":"No replay or inferred success. Inspect or explicitly cancel/recover."}));
+                }
+                crate::serve::beat();
+            }
+        },
         "cancel" => manager().cancel(id),
         "wait" => manager().wait(
             id,

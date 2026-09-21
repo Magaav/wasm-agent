@@ -89,7 +89,8 @@ local function session_view(output, ref)
   end
   if #view.messages==0 and #output.messages>0 then
     local latest=output.messages[#output.messages]
-    view.latest_turn={seq=latest.seq,role=latest.role,
+    view.latest_turn={seq=latest.seq,role=latest.role,id=latest.id,session_id=latest.session_id,
+      evidence={tool='session',session_id=latest.session_id,message_id=latest.id,byte_offset=1,view='full'},
       preview=M.slice(json.encode(latest),1,8192)}
   end
   local encoded=json.encode(view)
@@ -103,6 +104,10 @@ function M.project(name, output)
     if #encoded<=M.MAX_BYTES then return encoded end
     return preview_view(name,{},encoded,M.store(encoded))
   end
+  -- A native read page already obeys both limits and carries a byte-exact cursor. A trailing
+  -- newline is not a 2001st line; re-truncating here would skip bytes on the next page.
+  if name=='read' and output.version and output.next_column and type(output.content)=='string'
+      and output.returned_bytes==#output.content and #encoded<=M.MAX_BYTES then return encoded end
   local view = {}
   for key,value in pairs(output) do view[key]=value end
   local changed=false

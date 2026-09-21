@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, Condvar,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -45,6 +45,7 @@ impl Spec {
 struct Entry {
     cancel: AtomicBool,
     state: Mutex<Value>,
+    settled: Condvar,
     started: Instant,
     deadline: Duration,
 }
@@ -146,6 +147,7 @@ impl Manager {
         let entry = Arc::new(Entry {
             cancel: AtomicBool::new(false),
             state: Mutex::new(state),
+            settled: Condvar::new(),
             started: Instant::now(),
             deadline: spec.timeout,
         });
@@ -188,6 +190,7 @@ impl Manager {
                     s["elapsed_ms"] = json!(entry.started.elapsed().as_millis() as u64);
                     let record = s.clone();
                     drop(s);
+                    entry.settled.notify_all();
                     let _ = atomic_json(&dir.join("state.json"), &record);
                 }
             });
@@ -259,14 +262,14 @@ impl Manager {
         )
     }
     pub fn wait(&self, id: &str, budget: Duration) -> io::Result<Value> {
-        let deadline = Instant::now() + budget;
-        loop {
-            let state = self.snapshot(id)?;
-            if state["settled"] == true || Instant::now() >= deadline {
-                return Ok(state);
-            }
-            std::thread::sleep(Duration::from_millis(5));
+        validate_id(id)?;
+        let entry = self.entries.lock().map_err(error)?.get(id).cloned();
+        if let Some(entry) = entry {
+            let state = entry.state.lock().map_err(error)?;
+            let (state, _) = entry.settled.wait_timeout_while(state, budget, |s| s["settled"] != true).map_err(error)?;
+            drop(state);
         }
+        self.snapshot(id)
     }
 }
 fn validate_id(id: &str) -> io::Result<()> {
@@ -422,6 +425,7 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry) -> io::Result<()> {
         state["error"] = json!(format!("operation_record_failed:{e}"));
     }
     *entry.state.lock().unwrap() = state;
+    entry.settled.notify_all();
     Ok(())
 }
 
