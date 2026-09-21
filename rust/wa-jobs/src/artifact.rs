@@ -20,8 +20,10 @@ use std::path::Path;
 pub const SCHEMA: &str = "wasm-agent/automation";
 pub const SCHEMA_VERSION: u64 = 1;
 
-/// Profiles a guest-owned artifact may name. Everything else needs operator scope, because the profile
-/// decides which tools the child run can reach (`docs/ARTIFACTS.md`).
+/// Profiles a guest could name *if* a guest principal were enforced at dispatch. It is not: the sentinel
+/// authenticates as the local operator, so a `job-deterministic` guest import would execute as operator.
+/// Guest subagent imports are therefore refused outright (see `import_artifact`); the list is kept only
+/// as documentation of the shape a future principal binding would allow.
 pub const GUEST_PROFILES: [&str; 1] = ["job-deterministic"];
 
 fn fail<T>(why: &str) -> super::Result<T> {
@@ -552,10 +554,11 @@ pub fn import_artifact(
         }
         match action["kind"].as_str().unwrap_or("") {
             "subagent" => {
-                let profile = action.get("profile").and_then(Value::as_str).unwrap_or("");
-                if !GUEST_PROFILES.contains(&profile) {
-                    return fail("guest_artifact_profile_not_permitted");
-                }
+                // The runtime executes a child as the local operator; it cannot currently enforce a guest
+                // principal at dispatch, so an `imported_by:"guest"` claim would not match execution. A
+                // profile *name* is not a principal binding: refuse the guest subagent import rather than
+                // trust `job-deterministic` to mean something the runtime does not enforce.
+                return fail("guest_subagent_requires_principal_binding");
             }
             // A wake is the operator's own conversation; a run is operator-controlled shell. Neither is
             // a guest capability.
@@ -699,7 +702,8 @@ mod tests {
     }
 
     /// The importer's authority is what restricts an import; an artifact claiming `owner: operator`
-    /// cannot grant a guest operator capabilities, and a guest cannot name an arbitrary profile.
+    /// cannot grant a guest operator capabilities, and a guest subagent import is refused entirely until
+    /// a guest principal is enforced at dispatch (a profile name is not a principal binding).
     #[test]
     fn guest_import_cannot_spoof_owner_or_select_an_operator_profile() {
         let bindings = json!({});
@@ -707,14 +711,14 @@ mod tests {
         assert_eq!(artifact["scope"]["owner"], "operator", "the artifact claims operator scope");
         assert_eq!(
             import_artifact(&artifact, &bindings, true, "guest").unwrap_err().to_string(),
-            "guest_artifact_profile_not_permitted",
+            "guest_subagent_requires_principal_binding",
             "a guest import cannot select an operator profile by claiming owner=operator"
         );
         let mut arbitrary = artifact.clone();
         arbitrary["action"]["profile"] = json!("operator-tools");
         assert_eq!(
             import_artifact(&arbitrary, &bindings, true, "guest").unwrap_err().to_string(),
-            "guest_artifact_profile_not_permitted"
+            "guest_subagent_requires_principal_binding"
         );
         let mut wake = artifact.clone();
         wake["action"] = json!({"kind":"wake","session":"s","prompt":"p"});
@@ -730,14 +734,21 @@ mod tests {
             import_artifact(&run, &json!({"script":"C:/approved/x.sh"}), true, "guest").unwrap_err().to_string(),
             "guest_artifact_capability_not_permitted"
         );
-        let mut guest_ok = artifact.clone();
-        guest_ok["action"]["profile"] = json!("job-deterministic");
-        assert!(import_artifact(&guest_ok, &bindings, true, "guest").is_ok());
+        // Regression: a guest cannot import even the guest-named deterministic profile, because it would
+        // execute as the operator; a profile name is not a principal binding.
+        let mut guest_named = artifact.clone();
+        guest_named["action"]["profile"] = json!("job-deterministic");
+        assert_eq!(
+            import_artifact(&guest_named, &bindings, true, "guest").unwrap_err().to_string(),
+            "guest_subagent_requires_principal_binding"
+        );
+        // ...but a local operator import of the same artifact still works.
+        assert!(import_artifact(&guest_named, &bindings, true, "operator").is_ok());
         let mut self_guest = artifact.clone();
         self_guest["scope"] = json!({"owner":"guest","guest_owned":true});
         assert_eq!(
             import_artifact(&self_guest, &bindings, true, "operator").unwrap_err().to_string(),
-            "guest_artifact_profile_not_permitted"
+            "guest_subagent_requires_principal_binding"
         );
         let mut elevated = artifact.clone();
         elevated["action"]["profile"] = json!("job-deterministic");
@@ -747,7 +758,10 @@ mod tests {
             "guest_artifact_cannot_request_elevation"
         );
         elevated["requirements"]["elevation"] = json!(false);
-        assert!(import_artifact(&elevated, &bindings, true, "guest").is_ok());
+        assert_eq!(
+            import_artifact(&elevated, &bindings, true, "guest").unwrap_err().to_string(),
+            "guest_subagent_requires_principal_binding"
+        );
     }
 
     #[test]
@@ -798,11 +812,11 @@ mod tests {
             import_artifact(&artifact, &json!({}), true, "operator").unwrap_err().to_string(),
             "inconsistent_artifact_scope"
         );
-        // scope.role=guest is honoured even when owner is omitted.
+        // scope.role=guest is honoured even when owner is omitted (and a subagent is refused outright).
         artifact["scope"] = json!({"role":"guest"});
         assert_eq!(
             import_artifact(&artifact, &json!({}), true, "operator").unwrap_err().to_string(),
-            "guest_artifact_profile_not_permitted"
+            "guest_subagent_requires_principal_binding"
         );
     }
 
