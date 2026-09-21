@@ -17,50 +17,50 @@
 #     the *matcher* for rows written before this change, and changing them would stop matching them;
 #   * `tests/naming-migration.lua`, which builds the old shape on purpose so it can be migrated, and
 #     `ARCHITECTURE.md`, whose table records what things *were* called - that is its whole point.
-set -uo pipefail
+set -euo pipefail
 cd "$(dirname "$0")/.."
 
-OLD_NAMES=(
-  'session_turns' 'turn_id' 'turn_span' 'turns_fts' 'turns_session_idx' 'turns_time_idx'
-  'FROM turns' 'INTO turns' 'UPDATE turns' 'DELETE FROM turns'
-  'renderTurns' 'repaintTurns' 'turnBubble' 'turnPolling' 'turnStartedAt' 'turnId'
-  'turn_count' 'parse_turn_body' 'run_turn' 'local_turn' 'search_turns'
-  'turn-shape' 'the last turn failed'
-)
-
-scanned=0
-hits=0
-for file in $(git ls-files); do
-  case "$file" in
-    # The check itself *is* the list of old names, so it can never pass its own scan.
-    scripts/check-naming.sh) continue ;;
-    ARCHITECTURE.md|tests/naming-migration.lua) continue ;;
-    *target*|*.wasm|*.png|*.ico|*.bmp) continue ;;
-  esac
-  [ -f "$file" ] || continue
-  # A migration is exempt by name, and only for the function that does the moving.
-  if [ "$file" = "lua/core/memory.lua" ]; then
-    awk '/^local function migrate_shape\(\)/{inside=1} inside && /^end$/{inside=0; next} !inside' \
-      "$file" > /tmp/naming-check-scan.$$
-    scan=/tmp/naming-check-scan.$$
-  else
-    scan="$file"
-  fi
-  scanned=$((scanned + 1))
-  for name in "${OLD_NAMES[@]}"; do
-    found="$(grep -nF -- "$name" "$scan" 2>/dev/null | grep -v 'naming-check: allow' || true)"
-    if [ -n "$found" ]; then
-      printf '  FAIL %s still says %s\n' "$file" "$name"
-      printf '%s\n' "$found" | head -3 | sed 's/^/         /'
-      hits=$((hits + 1))
-    fi
-  done
-  [ "$file" = "lua/core/memory.lua" ] && rm -f /tmp/naming-check-scan.$$
-done
-
-if [ "$hits" -eq 0 ]; then
-  echo "naming ok ($scanned files, no old names)"
-else
-  echo "naming FAILED ($hits old name(s) left)"
-  exit 1
-fi
+# One interpreter and one git invocation, not two grep processes per name per file.
+# The old loop spawned tens of thousands of processes and exhausted MSYS fork resources
+# during the orchestration baseline gate. Node is already required by test.sh.
+node <<'NODE'
+const fs = require('node:fs');
+const { execFileSync } = require('node:child_process');
+const names = [
+  'session_turns', 'turn_id', 'turn_span', 'turns_fts', 'turns_session_idx', 'turns_time_idx',
+  'FROM turns', 'INTO turns', 'UPDATE turns', 'DELETE FROM turns',
+  'renderTurns', 'repaintTurns', 'turnBubble', 'turnPolling', 'turnStartedAt', 'turnId',
+  'turn_count', 'parse_turn_body', 'run_turn', 'local_turn', 'search_turns',
+  'turn-shape', 'the last turn failed',
+];
+let scanned = 0, hits = 0;
+const files = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }).split('\0').filter(Boolean);
+for (const file of files) {
+  if (['scripts/check-naming.sh', 'ARCHITECTURE.md', 'tests/naming-migration.lua'].includes(file)
+      || file.includes('target') || /\.(wasm|png|ico|bmp)$/.test(file)) continue;
+  if (!fs.existsSync(file) || !fs.statSync(file).isFile()) continue;
+  const lines = fs.readFileSync(file, 'utf8').split('\n');
+  let inside = false;
+  const visible = [];
+  for (let index = 0; index < lines.length; index++) {
+    const text = lines[index];
+    if (file === 'lua/core/memory.lua') {
+      if (/^local function migrate_shape\(\)/.test(text)) inside = true;
+      if (inside && /^end$/.test(text)) { inside = false; continue; }
+      if (inside) continue;
+    }
+    if (!text.includes('naming-check: allow')) visible.push({ number: index + 1, text });
+  }
+  scanned++;
+  for (const name of names) {
+    const found = visible.filter(line => line.text.includes(name));
+    if (found.length) {
+      hits++;
+      console.log(`  FAIL ${file} still says ${name}`);
+      for (const line of found.slice(0, 3)) console.log(`         ${line.number}:${line.text}`);
+    }
+  }
+}
+console.log(hits ? `naming FAILED (${hits} old name(s) left)` : `naming ok (${scanned} files, no old names)`);
+process.exitCode = hits ? 1 : 0;
+NODE
