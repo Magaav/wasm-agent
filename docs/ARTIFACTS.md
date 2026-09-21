@@ -67,9 +67,14 @@ The rules, and why each exists:
 - **Bindings need explicit approval.** `--approve` authorises the *binding*; it does not enable the job.
   An artifact cannot approve itself, so the approval is an argument from the operator, never a field the
   artifact carries. A binding for a slot the artifact did not declare is refused, not ignored.
-- **The importer's role is explicit.** `--as-role guest` (default `operator`) is the caller's authority.
-  It is recorded on the imported definition as `imported_by`, so a later reader never has to trust the
-  artifact's own scope claim.
+- **The artifact is an allowlist, checked on import too.** Only the known portable fields are accepted: a
+  raw `trigger.path`, `trigger.websocket_url` or `action.script` is refused (`artifact_contains_raw_binding`)
+  rather than allowed to bypass the resource slots, and an unrecognised field is refused
+  (`unknown_artifact_field`). The same credential/machine-binding scans that guard export guard import.
+- **The importer's role is explicit.** `--as-role operator|master|guest` (default `operator`) is the
+  caller's authority, and only those values are accepted - a typo is `unknown_importer_role`, never a
+  silent operator. It is recorded on the imported definition as `imported_by`, so a later reader never has
+  to trust the artifact's own scope claim.
 - **The import is always disabled.** New and edited definitions are disabled by the same rule everywhere
   (`docs/JOBS.md`): editing invalidates approval.
 - **Revision-safety is the job store's.** An identical import is a no-op - it does not bump the revision
@@ -78,7 +83,10 @@ The rules, and why each exists:
 
 ## What must not leave
 
-Export refuses to produce an artifact that still contains:
+Export is an **allowlist**: an installed job with an unrecognised trigger/action field is refused
+(`unknown_job_field:...`), so a hidden binding or credential in an unexpected field cannot be silently
+dropped or shipped, and only the known portable fields are emitted. It also refuses to produce an artifact
+that still contains:
 
 - a **credential-shaped key** anywhere (`token`, `secret`, `password`, `credential`, `authorization`,
   `api_key`, `private_key`, `access_key`) or a **credential-shaped value** (`sk-…`, `xoxb-…`, `ghp_…`,
@@ -87,16 +95,16 @@ Export refuses to produce an artifact that still contains:
   path (`C:\` / `C:/`), a POSIX absolute path (`/home/…`, `/tmp/…`, `/c/…`) or a loopback websocket
   (`ws://127.0.0.1`, `ws://localhost`, `ws://[::1]`).
 
-The scan is recursive over the whole artifact, not only its top-level keys. It is deliberately blunt: a
-prompt that happens to name `C:/some/tool` or `/tmp/scratch` is not portable, and silently exporting it is
-how a machine path travels to another node and fails there. A relative path (`scripts/reply.mjs`) is not a
-binding and passes.
+The scan is deliberately blunt, and it is defence-in-depth behind the allowlist - it is not claimed to be
+a total secret detector. A relative path (`scripts/reply.mjs`) is not a binding and passes.
 
 ## Guest scope is not a smaller operator scope
 
 Guest scope is the **importer's** authority, not the artifact's claim. A guest import (`--as-role guest`)
-is restricted whatever the artifact says about itself, and an artifact that declares `guest_owned` is
-restricted even when an operator imports it. A guest-owned or guest-imported artifact:
+is restricted whatever the artifact says about itself, and an artifact that declares `guest_owned`,
+`owner: guest` or `role: guest` is restricted even when an operator imports it. An owner/role disagreement
+is `inconsistent_artifact_scope`, refused rather than resolved in the artifact's favour. A guest-owned or
+guest-imported artifact:
 
 - may not set `requirements.elevation`;
 - may only name a profile in the guest-approved list (`job-deterministic`); and
@@ -146,23 +154,29 @@ The tools read only trusted context, never the event payload beyond identity:
 | seam | meaning |
 | --- | --- |
 | `ctx.event` | `{conversation_id, message_id}`, resolved by the runtime from the ledger |
-| `ctx.effects` | `{find(message_id), record(record)}`: a durable effect store for decisions and sends |
-| `ctx.sends` | `{count}`: the persistent per-child send counter |
+| `ctx.effects` | the durable effect store: `reserve({message_id,conversation_id,body,limit})`, `confirm({message_id,conversation_id,message})`, and `record(decision)` for decisions, plus optional read-only `reconcile`/`release`/`unknown` |
 | `ctx.profile` / `ctx.profile_path` | the local approved profile |
 
 The event's other fields are ignored: an event cannot supply a `reply_script`, a `store_send_script`, a
-browser endpoint or a capability. A decision is written through `ctx.effects` (durable, keyed by the
-message id), and a send is idempotent on that same id - a repeated delivery is `already_sent`, never a
-second send. A missing effect store or counter is a refusal, not "unlimited".
+browser endpoint or a capability. A decision is written through `ctx.effects.record` (durable, keyed by the
+message id, and it must not clobber a send reservation). A send is gated by an **atomic reservation**:
+`effects.reserve` persists the pending effect and consumes the per-run budget **before** the send, so a
+crash in the send/confirm window cannot replay. `reserve` returns `already_sent` (do not send), `ambiguous`
+(a prior pending send may have happened - reconcile read-only or refuse, never send) or `budget_exceeded`.
+After a store-verified send, `effects.confirm` must persist; if it does not, the tool reports
+`send_not_confirmed`, not success. A missing effect store or capability is a refusal, not "unlimited".
 
 ### Routes and the unread marker
 
 - `send_path = "ui"` is the deterministic reply tool. It opens the chat, so it is allowed only when the
   bound conversation is the profile's **self destination** (notes-to-self clear nothing) or when
   `allow_mark_read = true` explicitly accepts the marker being cleared. The self check is against the
-  trusted local binding, never an event assertion.
-- `send_path = "store"` requires a real `store_send_script`. Declaring `store` cannot make the UI script
-  bypass the unread guard.
+  trusted local binding, never an event assertion. When `allow_mark_read = true` and the chat is not self,
+  the tool passes `--allow-mark-read` to the raw script - derived from the profile only, never from an
+  event.
+- `send_path = "store"` requires a `store_send_script`. Declaring `store` cannot make the UI script bypass
+  the unread guard. The store script is an operator-asserted local binding: accept it only because the
+  operator approved it, and do not claim it is a proven store route.
 - Any other route value is refused.
 
 The script's result is verified: the host wrapper's exit code must be zero, its stdout must decode, and
@@ -173,15 +187,19 @@ See `docs/JOBS.md` for the deterministic eligibility rule that decides which mes
 
 ## Proof
 
-- `cargo test -p wa-jobs --offline` covers export stripping, credential/machine-binding refusal
-  (including nested params, prompts and context, POSIX paths and value credentials), unknown binding
-  slots, required and approved bindings, loopback page bindings, importer-role guest refusal and owner
-  spoofing, unknown schema versions, and the store-level install-disabled and revision-safety round trip.
+- `cargo test -p wa-jobs --offline` covers export stripping, the field allowlist (unknown fields
+  refused), credential/machine-binding refusal (including nested params, prompts and context, POSIX paths
+  and value credentials), raw-binding refusal on import, unknown binding slots, required and approved
+  bindings, loopback page bindings, importer-role allowlisting and normalization, owner spoofing and
+  inconsistent scope, unknown schema versions, and the store-level install-disabled and revision-safety
+  round trip.
 - `tests/whatsapp-scoped.lua` covers the profile-scoped tools: conversation scope, decision-without-send,
-  send approval, the unread blocker, body and per-run limits, idempotency and durable effects.
+  send approval, the unread blocker, body and per-run limits, the atomic reserve/confirm contract
+  (crash-window replay, ambiguous reconciliation, budget, persistence failure) and the approved-flag
+  pass-through.
 - `tests/whatsapp-reply-core.js` covers the raw-script guard: a non-self `--send` is refused before the
   chat is opened unless unread clearing was explicitly accepted, and a notes-to-self send is allowed.
-- `scripts/test-subagents.cjs` (run with `node scripts/test-subagents.cjs`) starts a real sentinel against
+- `scripts/test-job-subagents.cjs` (run with `node scripts/test-job-subagents.cjs`) starts a real sentinel against
   an isolated home and a local `/subagents` protocol fixture: it imports an artifact through the public
   CLI, proves import-disabled, reserved-capacity execution while the node is busy, exact start payload and
   idempotency key, settlement only on a settled child, `unknown` without retry, waiting without reserved

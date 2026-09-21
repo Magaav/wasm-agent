@@ -81,13 +81,10 @@ pub fn cli(args: &[String]) -> Result<()> {
                         approved = true;
                         index += 1;
                     }
-                    // The caller's authority is explicit and defaults to operator; a guest import is
-                    // restricted whatever the artifact claims about itself.
+                    // The caller's authority is explicit and defaults to operator; the library validates it
+                    // (operator|master|guest), so a typo cannot fall through to operator.
                     "--as-role" => {
-                        role = args.get(index + 1).context("--as-role operator|guest")?;
-                        if role != "operator" && role != "guest" {
-                            bail!("unknown import role {role}");
-                        }
+                        role = args.get(index + 1).context("--as-role operator|master|guest")?;
                         index += 2;
                     }
                     other => bail!("unknown import option {other}"),
@@ -310,6 +307,9 @@ fn spawn_delivery(source: wa_jobs::Store, delivery: Value) {
         }
         let (state, detail) = match result {
             Ok(Ok(detail)) => ("completed", detail),
+            Ok(Err(e)) if e.to_string().contains("delivery cancelled") => {
+                ("cancelled", e.to_string())
+            }
             Ok(Err(e)) if e.to_string().contains("outcome unknown") => {
                 ("unknown", e.to_string())
             }
@@ -372,7 +372,10 @@ fn execute(store: &wa_jobs::Store, delivery: &Value) -> Result<String> {
                 "context":delivery["event"],
                 "delivery_id":delivery["id"],
                 "idempotency_key":idempotency_key,
-            }))?;
+            }))
+            // An admission whose response was lost may have created a child. It is an unknown outcome, not a
+            // failure, and is never replayed automatically.
+            .map_err(|e| anyhow::anyhow!("subagent outcome unknown: admission failed: {e}"))?;
             let subagent_id = started["subagent_id"]
                 .as_str()
                 .or_else(|| started["id"].as_str())
@@ -386,6 +389,15 @@ fn execute(store: &wa_jobs::Store, delivery: &Value) -> Result<String> {
             let deadline = std::time::Instant::now()
                 + Duration::from_secs(action["timeout_seconds"].as_u64().unwrap_or(900));
             loop {
+                // A job disabled or revised while the child runs must not keep an unowned child. Cancel it
+                // and settle the delivery rather than leaving it running.
+                if !store
+                    .current(id, rev)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?
+                {
+                    let _ = node_subagents(&json!({"action":"cancel","subagent_id":subagent_id}));
+                    bail!("delivery cancelled: job {id} disabled or revised during subagent; cancelled child {subagent_id}");
+                }
                 let awaited = node_subagents(&json!({
                     "action":"await",
                     "subagent_id":subagent_id,
@@ -443,25 +455,42 @@ fn execute(store: &wa_jobs::Store, delivery: &Value) -> Result<String> {
 }
 
 /// True when the subagent service reports a terminal state, using either the explicit `settled` flag or
-/// a terminal state name. The two are both accepted so a service that only reports one of them is still
-/// correct here.
+/// A terminal state name. `settled` alone is not enough: a `settled: true` with an unknown/unspecified
+/// state is not a success, and `subagent_outcome` decides which terminal states succeed.
 fn settled_subagent(value: &Value) -> bool {
-    value["settled"].as_bool().unwrap_or(false)
-        || matches!(
-            value["state"].as_str().unwrap_or(""),
-            "completed" | "failed" | "cancelled"
-        )
+    if value["settled"].as_bool() == Some(true) {
+        return true;
+    }
+    matches!(
+        value["state"].as_str().unwrap_or(""),
+        "completed" | "failed" | "cancelled" | "unknown"
+    )
 }
 
+/// Only an explicit `completed` state, with `settled: true`, no error and no `ok: false`, is a success.
+/// Every other terminal outcome is `failed` or `unknown` - never a success, and never a replay.
 fn subagent_outcome(id: &str, value: &Value) -> Result<String> {
-    let state = value["state"].as_str().unwrap_or("completed");
-    if matches!(state, "failed" | "cancelled") {
+    let state = value["state"].as_str().unwrap_or("");
+    let settled = value["settled"].as_bool() == Some(true);
+    let error = value.get("error").filter(|error| !error.is_null());
+    let ok_false = value["ok"].as_bool() == Some(false);
+    if state == "completed" && settled && error.is_none() && !ok_false {
+        return Ok(format!("subagent {id} completed"));
+    }
+    if state == "failed" || state == "cancelled" {
         bail!(
             "subagent {id} {state}: {}",
-            value["error"].as_str().unwrap_or("no detail")
+            error.and_then(Value::as_str).unwrap_or("no detail")
         );
     }
-    Ok(format!("subagent {id} {state}"))
+    // Everything else - unknown, an empty/unspecified state, `completed` without `settled`, an error, or
+    // `ok: false` - is an unknown outcome. It is never retried.
+    bail!(
+        "subagent outcome unknown: {id} state={} settled={} error={}",
+        if state.is_empty() { "unspecified" } else { state },
+        settled,
+        error.and_then(Value::as_str).unwrap_or("none")
+    );
 }
 
 /// POST one request to the node's local subagent service. The node's HTTP surface is the shared contract
