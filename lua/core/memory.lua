@@ -442,6 +442,17 @@ function M.conversations(limit)
                "FROM conversations c ORDER BY c.updated_at DESC LIMIT ?", {limit})
 end
 
+-- One ledger row by its message id, for resolving a trusted event. Returns nil
+-- when the id is absent OR names more than one conversation: an ambiguous id is
+-- not an identity, and picking one would let an event choose its own scope.
+function M.ledger_message(message_id)
+  message_id = tostring(message_id or "")
+  if message_id == "" then return nil end
+  local rows = query("SELECT * FROM ledger_messages WHERE message_id=? LIMIT 2", {message_id})
+  if #rows ~= 1 then return nil end
+  return rows[1]
+end
+
 function M.stats()
   local function count(sql)
     local rows = query(sql)

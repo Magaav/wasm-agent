@@ -279,7 +279,7 @@ fn http_timeouts() -> (u64, u64, u64) {
     (connect, read, respond)
 }
 
-fn build_agent(read: u64) -> ureq::Agent {
+fn build_config(read: u64) -> ureq::config::Config {
     let (connect, _, respond) = http_timeouts();
     ureq::Agent::config_builder()
         .http_status_as_error(false)
@@ -287,36 +287,70 @@ fn build_agent(read: u64) -> ureq::Agent {
         .timeout_recv_response(Some(std::time::Duration::from_secs(respond)))
         .timeout_recv_body(Some(std::time::Duration::from_secs(read)))
         .build()
-        .into()
 }
 
 fn agent() -> ureq::Agent {
     static HTTP_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
-    HTTP_AGENT.get_or_init(|| {
-        let (_, read, _) = http_timeouts();
-        build_agent(read)
-    })
-    .clone()
+    HTTP_AGENT
+        .get_or_init(|| {
+            let (_, read, _) = http_timeouts();
+            build_config(read).into()
+        })
+        .clone()
 }
 
 /// The agent to use for one provider call.
 ///
 /// A child runs under a deadline the runtime owns, and that deadline has to
 /// affect the network read rather than only being checked between model calls.
-/// When this thread is a child with a remaining budget, its provider call is
-/// bounded by that budget, so a stalled provider returns to the child instead of
-/// holding its thread (and a grandchild's slot) forever. `cancel_requested` is
-/// read by the callers between streamed chunks; together they are the native half
-/// of cancellation, the Lua half being the between-step check.
+/// When this thread is a child, its provider call uses the shutdown-aware
+/// transport (`http_transport`): the socket is registered with the task, so a
+/// cancel from another thread wakes a silent read immediately, and the body
+/// budget still bounds a provider that never speaks at all.
 fn agent_for_call() -> ureq::Agent {
-    match crate::subagents::remaining_budget() {
-        Some(remaining) => {
-            let (_, read, _) = http_timeouts();
-            let body = remaining.as_secs().clamp(1, read.max(1));
-            build_agent(body)
-        }
-        None => agent(),
+    if !crate::subagents::in_task() {
+        return agent();
     }
+    let (_, read, _) = http_timeouts();
+    let body = match crate::subagents::remaining_budget() {
+        Some(remaining) => remaining.as_secs().clamp(1, read.max(1)),
+        None => read,
+    };
+    crate::http_transport::agent(build_config(body))
+}
+
+/// Unified cancellation for the Lua loop: true when the current run or the
+/// current child has been asked to stop.
+///
+/// The run half is a probe the serve layer registers (`set_run_cancel_probe`),
+/// so host.rs does not depend on serve's internals; the child half is the task's
+/// own flag. One name means a caller cannot check the wrong one.
+static RUN_CANCEL_PROBE: OnceLock<fn() -> bool> = OnceLock::new();
+
+pub fn set_run_cancel_probe(probe: fn() -> bool) {
+    let _ = RUN_CANCEL_PROBE.set(probe);
+}
+
+pub(crate) fn run_cancel_requested() -> bool {
+    RUN_CANCEL_PROBE.get().map(|probe| probe()).unwrap_or(false) || crate::subagents::cancel_requested()
+}
+
+/// host.run_cancelled() -> {cancelled, run_cancel, subagent_cancel}
+///
+/// `cancelled` is true while either source is set. A foreground run's scoped
+/// cancellation is the run half; a supervised child's is the subagent half.
+pub extern "C" fn run_cancelled(l: *mut LuaState) -> c_int {
+    let run_cancel = RUN_CANCEL_PROBE.get().map(|probe| probe()).unwrap_or(false);
+    let subagent_cancel = crate::subagents::cancel_requested();
+    push_json(
+        l,
+        &json!({
+            "cancelled": run_cancel || subagent_cancel,
+            "run_cancel": run_cancel,
+            "subagent_cancel": subagent_cancel,
+        }),
+    );
+    1
 }
 
 fn parse_headers(headers_json: &str) -> Vec<(String, String)> {
@@ -953,8 +987,8 @@ pub extern "C" fn http(l: *mut LuaState) -> c_int {
     // Every request here carries a connect/response/read timeout, so it is bounded work.
     // A child's deadline narrows the read; a child that has been cancelled returns
     // before opening a connection at all.
-    if crate::subagents::cancel_requested() {
-        push_json(l, &json!({"error": "subagent_cancelled"}));
+    if run_cancel_requested() {
+        push_json(l, &json!({"error": "run_cancelled"}));
         return 1;
     }
     let _heartbeat = crate::serve::Heartbeat::start();
@@ -981,6 +1015,7 @@ pub extern "C" fn http(l: *mut LuaState) -> c_int {
         Ok(json!({"status": status, "body": text}))
     })();
     push_json(l, &outcome.unwrap_or_else(|error| json!({"error": error})));
+    crate::subagents::clear_active_socket();
     1
 }
 
@@ -1062,8 +1097,9 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
     // Same reasoning as `run_bounded`: a provider read is bounded by the connect/response/read
     // timeouts on the agent, so a run waiting on a slow model is not a stalled node.
     let _heartbeat = crate::serve::Heartbeat::start();
-    if crate::subagents::cancel_requested() {
-        return Err("subagent_cancelled".into());
+    if run_cancel_requested() {
+        crate::subagents::clear_active_socket();
+        return Err("run_cancelled".into());
     }
     let mut request = agent_for_call().post(url);
     for (key, value) in headers {
@@ -1104,12 +1140,13 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
     let mut last_delta_ms: Option<u64> = None;
     let mut max_gap_ms = 0u64;
     for line in reader.lines() {
-        // A cancelled child stops reading its provider stream at the next chunk,
-        // so cancellation is a native effect on I/O, not only a check between
-        // model calls. The read itself is bounded by the child's remaining
-        // budget through `agent_for_call`.
-        if crate::subagents::cancel_requested() {
-            return Err("subagent_cancelled".into());
+        // A cancelled run or child stops reading its provider stream at the next
+        // chunk; a silent provider is woken by the socket shutdown the cancel path
+        // performs. The read is bounded by the child's remaining budget through
+        // `agent_for_call`.
+        if run_cancel_requested() {
+            crate::subagents::clear_active_socket();
+            return Err("run_cancelled".into());
         }
         let line = line.map_err(|error| error.to_string())?;
         let Some(data) = line.trim().strip_prefix("data:") else { continue };

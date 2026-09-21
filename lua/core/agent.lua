@@ -888,6 +888,15 @@ function M:run_body(text, images)
   -- WASM_AGENT_MAX_TOOL_ROUNDS therefore only guards against a runaway loop, not
   -- against a long task: it should never fire in practice.
   for round = 1, MAX_TOOL_ROUNDS do
+    -- Unified cancellation: a foreground run's scoped cancel and a supervised
+    -- child's cancel both answer here, so the loop checks one name.
+    if host.run_cancelled then
+      local checked, raw = pcall(host.run_cancelled)
+      if checked then
+        local state = json.decode(raw)
+        if type(state) == "table" and state.cancelled then error("run_cancelled") end
+      end
+    end
     local child_state = child_status()
     if child_state and child_state.cancelled then error("subagent_cancelled") end
     while self:maybe_compact(messages) do

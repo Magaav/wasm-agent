@@ -49,6 +49,23 @@ function check(value, label) { assert.ok(value, label); checks++; }
           }
         };
         if (isChild) {
+          if (text.includes('SILENT')) {
+            // Headers, then no body bytes at all: the read this cancellation must
+            // interrupt is the one that is producing nothing.
+            res.writeHead(200, { 'content-type': 'text/event-stream' });
+            res.flushHeaders();
+            return;
+          }
+          if (text.includes('DELAYED')) {
+            // A long, healthy pause before the first token: a transport that polls
+            // with a tiny read timeout would fail this.
+            res.writeHead(200, { 'content-type': 'text/event-stream' });
+            setTimeout(() => {
+              if (res.writableEnded) return;
+              res.end('data: ' + JSON.stringify({ id: 'mock', choices: [{ delta: { content: 'child-answer-42' }, finish_reason: 'stop' }], usage }) + '\n\ndata: [DONE]\n\n');
+            }, 3000);
+            return;
+          }
           if (text.includes('SLOW')) {
             res.writeHead(200, { 'content-type': 'text/event-stream' });
             const timer = setInterval(() => {
@@ -114,7 +131,7 @@ function check(value, label) { assert.ok(value, label); checks++; }
     const out = fs.readFileSync(path.join(root, 'wa.log'), 'utf8');
     check(code === 0, 'the integration script must exit 0, got ' + code + '\n' + out);
     check(out.includes('SUBAGENTS_INTEGRATION_OK'), 'the script must print its verdict\n' + out);
-    for (const marker of ['ok-success', 'ok-idempotency', 'ok-isolation', 'ok-cancel', 'ok-overflow', 'ok-result', 'ok-tool-denial', 'ok-restart-unknown', 'ok-parent-run']) {
+    for (const marker of ['ok-success', 'ok-idempotency', 'ok-isolation', 'ok-cancel', 'ok-overflow', 'ok-result', 'ok-tool-denial', 'ok-restart-unknown', 'ok-parent-run', 'ok-silent-cancel', 'ok-delayed-ttft']) {
       check(out.includes('MARK ' + marker), 'missing marker ' + marker + '\n' + out);
     }
     // The child's durable record survives on disk with its terminal state.

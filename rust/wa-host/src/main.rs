@@ -5,6 +5,7 @@
 mod client_bridge;
 mod host;
 mod file_search;
+mod http_transport;
 mod operations;
 mod lua;
 mod node;
@@ -48,6 +49,8 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/provider.lua", include_str!("../../../lua/core/provider.lua")),
     ("lua/core/model_window.lua", include_str!("../../../lua/core/model_window.lua")),
     ("lua/core/changeset.lua", include_str!("../../../lua/core/changeset.lua")),
+    ("lua/core/effects.lua", include_str!("../../../lua/core/effects.lua")),
+    ("lua/core/whatsapp.lua", include_str!("../../../lua/core/whatsapp.lua")),
     ("lua/core/subagents.lua", include_str!("../../../lua/core/subagents.lua")),
     ("lua/core/agent.lua", include_str!("../../../lua/core/agent.lua")),
     ("lua/core/chat.lua", include_str!("../../../lua/core/chat.lua")),
@@ -248,6 +251,7 @@ fn main() {
     lua.register("operation", host::operation);
     lua.register("jobs", host::jobs);
     lua.register("subagent", host::subagent);
+    lua.register("run_cancelled", host::run_cancelled);
     lua.register("sleep", host::sleep);
     lua.register("node_identity", host::node_identity);
     lua.register("sign", host::sign);
