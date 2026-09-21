@@ -230,14 +230,17 @@ fn stop_node(reason: &str) -> Result<()> {
     } else {
         std::process::Command::new("kill").arg(pid.to_string()).output()?;
     }
-    for _ in 0..20 {
-        if pid_on_port(node_port()).is_none() {
+    for _ in 0..40 {
+        // A freed port is not a dead process. The node may have released the listener and still be
+        // flushing its turn's final message; starting the replacement (or delivering a wake) in that
+        // window is what let two writers interleave one transcript. Wait for the pid itself to be gone.
+        if pid_on_port(node_port()).is_none() && !pid_alive(pid) {
             audit("stop", &format!("pid {pid}"), reason);
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(250));
     }
-    bail!("pid {pid} is still listening on {}", node_port())
+    bail!("pid {pid} is still listening on {} or still alive", node_port())
 }
 
 fn start_node(binary: &Path, reason: &str) -> Result<()> {

@@ -189,6 +189,17 @@ else
   ok "$CAME" "the agent came back and answered" "$TAIL"
   ok "$DELIVERED" "the wake delivered its prompt into the session"
 fi
+# The transcript order must survive the restart. The failure this guards: the wake's user message was
+# appended while the previous turn was still running (so the turn's final message landed *after* it), and
+# the woken turn - handed a transcript ending on the old answer - echoed it instead of replying. Assert the
+# previous turn's reply precedes the wake prompt in the window.
+ORDER_OK=0
+for _ in $(seq 1 20); do
+  ORDER_OK="$(curl -s -m 20 "http://127.0.0.1:$PORT/session?id=$SID" | node -e 'let r="";process.stdin.on("data",c=>r+=c).on("end",()=>{try{const d=JSON.parse(r);const m=d.messages||[];let reply=-1,wake=-1;for(let i=0;i<m.length;i++){const c=String((m[i]||{}).content||"");if(c.includes("Both requests are written"))reply=i;if(c.includes("reply with the single word: woken"))wake=i;}console.log(reply>=0&&wake>=0&&reply<wake?1:0)}catch(e){console.log("0")}})')"
+  [ "$ORDER_OK" = "1" ] && break
+  sleep 2
+done
+ok "$ORDER_OK" "the previous turn's reply precedes the wake in the transcript" "reply index < wake index"
 
 # 7. a trigger: an event wakes the model with nobody asking for anything. The other half of the idea -
 # not "restart this for me" but "wake me when this happens". The rules file is read on every pass, so

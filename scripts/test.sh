@@ -11,6 +11,9 @@ cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 # The execution and automation contracts have native, model-free adversarial tests.
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host file_search::tests
+# Run routing by session: a wake carries its conversation in the body's `thread`, not the auth header, and
+# reading only the header routed it to a second worker on a conversation that was already running.
+cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host serve::routing_session_tests
 cargo test --release --offline --manifest-path rust/wa-sentinel/Cargo.toml
 BIN=rust/target/release/wa
 # A turn cannot deploy the process serving that same turn. The marker crosses
@@ -26,8 +29,10 @@ if WASM_AGENT_IN_TURN=1 bash scripts/upgrade.sh "$BIN" >"$GUARD_HOME/upgrade.log
   echo "FAIL: upgrade.sh accepted a running-turn invocation" >&2; exit 1
 fi
 grep -q 'refused inside a running turn' "$GUARD_HOME/upgrade.log"
-rm -f "$GUARD_HOME/deploy.log" "$GUARD_HOME/upgrade.log" "$GUARD_HOME/install/deploy.log"
-rmdir "$GUARD_HOME/install" "$GUARD_HOME"
+# `deploy.sh` now records a machine-readable result beside the install, so the temp home is not empty of
+# files after the guard fires; remove the whole tree rather than a fixed list, or the smoke gate aborts
+# here and never reaches the tests that matter.
+rm -rf "$GUARD_HOME"
 echo "self-update turn guard ok"
 # The other half of the install gate: it must refuse to replace an install that is ahead of this tree. Its
 # own file, because it asserts five cases (ahead, ancestor, no record, no commit=, an unresolvable commit)

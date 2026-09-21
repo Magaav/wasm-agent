@@ -274,6 +274,27 @@ fn is_run_route(request: &Request) -> bool {
     request.method == "POST" && split_path(&request.path).0 == "/chat"
 }
 
+/// The session a run belongs to for routing: the header when it is present, otherwise the body's `thread`.
+///
+/// The sentinel deliberately keeps the conversation out of `x-wa-session` and puts it in `thread`, so that
+/// a wake cannot land in the wrong conversation when the header carries an authentication session. Reading
+/// only the header therefore saw *no* session for every wake, routed it to an idle worker, and let a second
+/// turn run on a session that already had one - the same-session guarantee ("one writer per session") is
+/// what makes concurrent runs safe, and this was the hole in it.
+fn routing_session(method: &str, path: &str, header_session: &str, body: &[u8]) -> String {
+    if !header_session.is_empty() {
+        return header_session.to_string();
+    }
+    if method != "POST" || split_path(path).0 != "/chat" {
+        return String::new();
+    }
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("thread").and_then(|thread| thread.as_str()).map(str::to_string))
+        .filter(|thread| !thread.is_empty())
+        .unwrap_or_default()
+}
+
 /// The worker already running this session, if any. That worker is where the next run for it belongs, so
 /// the session keeps one writer and its runs keep their order.
 fn worker_running_session(session: &str) -> Option<usize> {
@@ -315,7 +336,7 @@ fn choose_worker(request: &Request) -> usize {
     // A run first, because it is the one route with a rule of its own: routed by session, so two different
     // conversations run at once and one conversation never does.
     if is_run_route(request) {
-        if let Some(index) = worker_running_session(&request.session) {
+        if let Some(index) = worker_running_session(&request.routing_session) {
             return index;
         }
         if let Some(index) = idle_worker() {
@@ -857,7 +878,7 @@ fn worker_loop(
                 if let Some(slots) = WORKER_SESSION.get() {
                     if let Some(slot) = slots.get(index) {
                         if let Ok(mut guard) = slot.lock() {
-                            *guard = if request.session.is_empty() { None } else { Some(request.session.clone()) };
+                            *guard = if request.routing_session.is_empty() { None } else { Some(request.routing_session.clone()) };
                         }
                     }
                 }
@@ -1013,6 +1034,12 @@ struct Request {
     method: String,
     path: String,
     session: String,
+    /// The session this request belongs to for *routing*, which is not always the auth session. A wake
+    /// puts its conversation in the body's `thread` and keeps `x-wa-session` for authentication (see
+    /// docs/JOBS.md). Routing on the header alone gave a wake an empty session, so it went to an idle
+    /// worker and ran a second turn on a conversation that was already running - two writers, one
+    /// transcript, and the turn's final message landed after the wake's (seq inversion).
+    routing_session: String,
     node_headers: Vec<(String, String)>,
     body: Vec<u8>,
     accept_sse: bool,
@@ -1054,12 +1081,15 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
             }
             if length > 4_000_000 || end > 65536 { return Ok(None); }
             if data.len() >= end + 4 + length {
+                let body = data[end + 4..end + 4 + length].to_vec();
+                let routing_session = routing_session(&method, &path, &session, &body);
                 return Ok(Some(Request {
                     method,
                     path,
                     session,
+                    routing_session,
                     node_headers,
-                    body: data[end + 4..end + 4 + length].to_vec(),
+                    body,
                     accept_sse,
                 }));
             }
@@ -1342,4 +1372,27 @@ fn ui_version(ui: &std::path::Path) -> String {
 
 fn json_escape(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"error\"".into())
+}
+
+#[cfg(test)]
+mod routing_session_tests {
+    use super::routing_session;
+
+    /// A wake is routed by its body's `thread`, because the sentinel keeps `x-wa-session` for
+    /// authentication. Reading only the header gave it an empty session, an idle worker, and a second
+    /// writer on a conversation that was already running - seq 4195 (wake) before 4196 (the live turn's
+    /// final message). This is the regression guard for that.
+    #[test]
+    fn a_wake_routes_by_its_thread_when_the_header_carries_only_auth() {
+        let body = br#"{"text":"hi","thread":"4ef4e372-8d84"}"#;
+        assert_eq!(routing_session("POST", "/chat", "", body), "4ef4e372-8d84");
+        // The header wins when it is present: the window and `wa chat` set the session there.
+        assert_eq!(routing_session("POST", "/chat", "abc", body), "abc");
+        // Only /chat is a run; a different route has no thread to read and no session to hold.
+        assert_eq!(routing_session("POST", "/update", "", body), "");
+        assert_eq!(routing_session("GET", "/session", "", body), "");
+        // A run with neither header nor thread is unrouted, exactly as it was before.
+        assert_eq!(routing_session("POST", "/chat", "", br#"{"text":"hi"}"#), "");
+        assert_eq!(routing_session("POST", "/chat", "", b""), "");
+    }
 }
