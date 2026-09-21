@@ -25,7 +25,7 @@ INSTANCE_VERDICT="$(mktemp)"
 rm -f "$INSTANCE_VERDICT" # The child must produce NEW evidence, never a previous run's verdict.
 INSTANCE_STATUS=0
 WA_INSTANCE_VERDICT="$INSTANCE_VERDICT" bash scripts/test-node-instances.sh || INSTANCE_STATUS=$?
-INSTANCE_SKIPPED=$(node scripts/lib/suite-verdict.cjs "$INSTANCE_VERDICT" test-node-instances "$INSTANCE_STATUS" 25)
+INSTANCE_SKIPPED=$(node scripts/lib/suite-verdict.cjs "$INSTANCE_VERDICT" test-node-instances "$INSTANCE_STATUS" 56)
 SKIPPED=$((SKIPPED + INSTANCE_SKIPPED))
 rm -f "$INSTANCE_VERDICT"
 BIN=rust/target/release/wa
@@ -1142,6 +1142,7 @@ WA_SCRIPT=scripts/test-subagents-profiles.lua "$BIN" --db "$DB.subagent-policy" 
 node scripts/test-subagents.cjs "$BIN"
 node scripts/test-job-subagents.cjs
 node scripts/test-orchestration-e2e.cjs "$BIN"
+node scripts/test-whatsapp-subagent-e2e.cjs
 
 # The UI tests are JS and run outside the embedded interpreter, so they need node
 # and they need the repo root as cwd (they read ui/app.js from disk). A test that does

@@ -59,6 +59,28 @@ Read-only live readiness observation: WhatsApp's existing page/store was reachab
 `[::1]:9222` (Chrome 153, hook present); IPv4 returned 404. No chats were opened, no
 composer modified, and no message sent by this observation. It is **not** a live proof.
 
+## Staged integration observations
+
+- Combined candidate `fe222c2` built both native binaries. Coordinator runs of
+  `scripts/test-run-isolation.sh` and `scripts/test-ui.ps1` exited 0; retained logs
+  `wa-staged-isolation.log` and `wa-staged-ui.log` in operator temp. These do not prove
+  the later cancellation/control changes that were still pending.
+- `node scripts/test-subagents.cjs`: 13 checks passed against the actual child runtime
+  and local mock provider; evidence `wa-subagents-Ug3VO7`. Silent-provider cancellation
+  and stronger budgets were not established by this early fixture.
+- Combined candidate's first whole-gate attempt failed, exit 1, at mock-provider
+  startup (`EADDRINUSE` on port 8933). Full log `wa-orchestration-staged-gate1.log`,
+  fixture evidence `wa-conc-AiFfkB`. The gate now selects free port blocks instead of
+  competing with other worker fixtures on fixed ports. No foreign listener was killed.
+- Coordinator reran the hardened two-node lifecycle fixture: 56 checks, 1 skipped,
+  exit 0. Logs `wa-instance-hardening-fixture.log`, machine verdict
+  `wa-instance-hardening-verdict.json`. The nested-verdict validator reports `1`, and
+  the parent gate propagates it. Thirteen mutation checks cover missing verdicts,
+  dropped counts, contradictory counts, process failure and skip evidence.
+- Verified self-identity and nonce-owned send-lock fixes are staged; no live send
+  has occurred. Read-only source discovery found an app send module, **not** a proven
+  unread-preserving store send implementation.
+
 ## Stages and ownership
 
 1. Canonical terminology and contracts: `ARCHITECTURE.md`, `docs/EXECUTION.md`.
@@ -85,7 +107,7 @@ worker deploys or mutates the live WhatsApp account. The integrator owns live pr
 | Portable jobs disabled until local approval | pending | pending |
 | Deterministic WhatsApp eligibility and bounded context | pending | pending |
 | Exact send verification, draft/unread protection, ambiguity | pending | pending |
-| Independent co-located node lifecycle | pending | pending |
+| Independent co-located node lifecycle | coordinator run: 56 checks, 1 Windows environment-inspection skip, exit 0; two actual isolated nodes | pending |
 | UI observability, correct session busy/cancel | pending | pending |
 | Full regression gate with counted skips | baseline `e3ac17a`: exit 0, no skips; integrated gate pending | n/a |
 | Verified installed version / hashes | n/a | pending |
