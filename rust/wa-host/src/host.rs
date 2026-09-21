@@ -260,9 +260,7 @@ fn push_json(l: *mut LuaState, value: &Value) {
 ///
 /// The read timeout is per read, not for the whole exchange, which is the point: a long
 /// stream that keeps producing is fine, and one that goes quiet is not.
-fn agent() -> ureq::Agent {
-    static HTTP_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
-    HTTP_AGENT.get_or_init(|| {
+fn http_timeouts() -> (u64, u64, u64) {
     let connect = std::env::var("WASM_AGENT_HTTP_CONNECT_TIMEOUT")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -278,6 +276,11 @@ fn agent() -> ureq::Agent {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(120u64);
+    (connect, read, respond)
+}
+
+fn build_agent(read: u64) -> ureq::Agent {
+    let (connect, _, respond) = http_timeouts();
     ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(std::time::Duration::from_secs(connect)))
@@ -285,7 +288,35 @@ fn agent() -> ureq::Agent {
         .timeout_recv_body(Some(std::time::Duration::from_secs(read)))
         .build()
         .into()
-    }).clone()
+}
+
+fn agent() -> ureq::Agent {
+    static HTTP_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    HTTP_AGENT.get_or_init(|| {
+        let (_, read, _) = http_timeouts();
+        build_agent(read)
+    })
+    .clone()
+}
+
+/// The agent to use for one provider call.
+///
+/// A child runs under a deadline the runtime owns, and that deadline has to
+/// affect the network read rather than only being checked between model calls.
+/// When this thread is a child with a remaining budget, its provider call is
+/// bounded by that budget, so a stalled provider returns to the child instead of
+/// holding its thread (and a grandchild's slot) forever. `cancel_requested` is
+/// read by the callers between streamed chunks; together they are the native half
+/// of cancellation, the Lua half being the between-step check.
+fn agent_for_call() -> ureq::Agent {
+    match crate::subagents::remaining_budget() {
+        Some(remaining) => {
+            let (_, read, _) = http_timeouts();
+            let body = remaining.as_secs().clamp(1, read.max(1));
+            build_agent(body)
+        }
+        None => agent(),
+    }
 }
 
 fn parse_headers(headers_json: &str) -> Vec<(String, String)> {
@@ -548,6 +579,22 @@ pub extern "C" fn jobs(l: *mut LuaState) -> c_int {
         _=>Err("unknown_job_action".into()),
     };
     push_json(l,&result.unwrap_or_else(|e|json!({"error":e.to_string()})));1
+}
+
+/// host.subagent(action, args_json): the local subagent runtime.
+///
+/// Agent policy lives in Lua (`lua/core/subagents.lua`): which profile, which
+/// tools, which prompt, which budgets, and how a caller's owner is derived. This
+/// host function only owns the durable record, the OS thread, the capacity and
+/// the cancellation flag, so a Lua interpreter is never the thing that keeps a
+/// child alive. Owner scoping is enforced here as well as in Lua: a caller can
+/// only read or cancel a task it owns.
+pub extern "C" fn subagent(l: *mut LuaState) -> c_int {
+    let action = arg_string(l, 1).unwrap_or_default();
+    let args: Value = serde_json::from_str(&arg_string(l, 2).unwrap_or_else(|| "{}".into()))
+        .unwrap_or(Value::Null);
+    push_json(l, &crate::subagents::control(&action, &args).unwrap_or_else(|error| json!({"ok": false, "error": error})));
+    1
 }
 
 pub extern "C" fn exec(l: *mut LuaState) -> c_int {
@@ -904,18 +951,24 @@ pub extern "C" fn http(l: *mut LuaState) -> c_int {
     let body = arg_string(l, 4).unwrap_or_default();
     let headers = parse_headers(&headers_json);
     // Every request here carries a connect/response/read timeout, so it is bounded work.
+    // A child's deadline narrows the read; a child that has been cancelled returns
+    // before opening a connection at all.
+    if crate::subagents::cancel_requested() {
+        push_json(l, &json!({"error": "subagent_cancelled"}));
+        return 1;
+    }
     let _heartbeat = crate::serve::Heartbeat::start();
     let outcome = (|| -> Result<Value, String> {
         let response = match method.as_str() {
             "GET" => {
-                let mut request = agent().get(&url);
+                let mut request = agent_for_call().get(&url);
                 for (key, value) in &headers {
                     request = request.header(key, value);
                 }
                 request.call().map_err(|e| e.to_string())?
             }
             "POST" => {
-                let mut request = agent().post(&url);
+                let mut request = agent_for_call().post(&url);
                 for (key, value) in &headers {
                     request = request.header(key, value);
                 }
@@ -1009,7 +1062,10 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
     // Same reasoning as `run_bounded`: a provider read is bounded by the connect/response/read
     // timeouts on the agent, so a run waiting on a slow model is not a stalled node.
     let _heartbeat = crate::serve::Heartbeat::start();
-    let mut request = agent().post(url);
+    if crate::subagents::cancel_requested() {
+        return Err("subagent_cancelled".into());
+    }
+    let mut request = agent_for_call().post(url);
     for (key, value) in headers {
         request = request.header(key, value);
     }
@@ -1048,6 +1104,13 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
     let mut last_delta_ms: Option<u64> = None;
     let mut max_gap_ms = 0u64;
     for line in reader.lines() {
+        // A cancelled child stops reading its provider stream at the next chunk,
+        // so cancellation is a native effect on I/O, not only a check between
+        // model calls. The read itself is bounded by the child's remaining
+        // budget through `agent_for_call`.
+        if crate::subagents::cancel_requested() {
+            return Err("subagent_cancelled".into());
+        }
         let line = line.map_err(|error| error.to_string())?;
         let Some(data) = line.trim().strip_prefix("data:") else { continue };
         let data = data.trim();
