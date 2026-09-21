@@ -212,6 +212,13 @@ function runs(health) { return (health && health.runs) || []; }
   // The body's authenticated thread is the scheduling key admission used.
   await until(async () => runIds((await request(primary.url + '/health')).value).some((row) => row.conversation === directThread), 'the direct run is keyed by its body thread');
   check(true, 'the authenticated body thread is preserved as the conversation key');
+  // With no thread, the key is the verified author (the peer node id), not the credential or a body
+  // marker: this is the "signed author resolves the conversation owner" case.
+  const noThreadBody = 'answer with RUN-MARKER-PEER-NOTHREAD';
+  const noThread = await request(primary.url + '/node/chat', 'POST', noThreadBody, { ...signedHeaders(peer, 'chat', noThreadBody), accept: 'text/event-stream' });
+  check(noThread.status === 200 && /RUN-MARKER-PEER-NOTHREAD/.test(noThread.text), 'a peer run with no body thread still runs');
+  await until(async () => runIds((await request(primary.url + '/health')).value).some((row) => row.conversation === 'peer:' + peer.node_id), 'the no-thread run is keyed by the verified author');
+  check(true, 'a body with no thread is keyed by the verified peer node id, not the credential');
 
   // ---- signature verified once (a successful reply is the proof) ---------------------------------
   // If the run half re-verified the same signed request it would be refused as a replay, so the
