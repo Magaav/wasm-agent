@@ -152,40 +152,38 @@ how the same file collects three different fixes and none of them merge.
 
 ## Adapt the words to this repository
 
-This procedure is generic. Map its words to the repository before relying on it:
+This procedure is generic — it is not tied to any project, language or harness. Before relying on
+it, find the repository's own rules (`AGENTS.md`, `CONTRIBUTING.md`, `.github/`) and map its words:
 
 | this file says | find the repository's word for it |
 | --- | --- |
-| integration branch | the branch everyone merges into (here: `main`) |
-| gate | the test entry point (here: `bash scripts/test.sh`) |
-| board / drift | the branch-status command (here: `bash scripts/worktrees.sh`) |
-| change branch | the short-lived branch name (here: `change/<name>`) |
-| provenance trailer | what the commit hook requires (here: `Agent: … session=…`) |
+| integration branch | the branch everyone merges into |
+| gate | the test entry point |
+| board / drift | the branch-status command |
+| change branch | the short-lived branch name |
+| provenance trailer | what the commit hook requires |
 | judge | the human, or an agent the human nominates |
 
-In wasm-agent specifically: work in a worktree, never in the `main` checkout; a node stays
-on the branch named after it and cuts `change/<name>` for each task; and a commit with no
-`Agent:` trailer is refused.
+If the repository has no gate, say so in your report rather than inventing one.
 
-### wasm-agent, concretely
+### Example: the wasm-agent repository
 
-- **Your branch is your name.** `git symbolic-ref --short HEAD`; `main` is never a node's name.
+**If you are not in wasm-agent, ignore this section** — it is one repository's worked mapping.
+Here `main` is the integration branch; the gate is `bash scripts/test.sh`; the board is
+`bash scripts/worktrees.sh`; a change branch is `change/<name>`; the trailer is
+`Agent: wasm-agent node=<node> session=<id>` or `Agent: pi session=<id>`; hooks are enabled with
+`git config core.hooksPath .githooks`.
+
+- **Your branch is your name** (`git symbolic-ref --short HEAD`); `main` is never a node's name.
 - **Work in your own worktree.** Never switch, commit in, or leave a branch in another checkout —
-  a live run did exactly that and left the human's `main` checkout sitting on its branch.
-- **One `change/<name>` per concern**, cut from `origin/main`, kept current, merged and deleted.
-  A node's own branch is its *home* (keep it current with `main`); each task is a short-lived
-  change branch off `main`.
-- **Before you start:** `git fetch origin && git merge origin/main`. A node that cannot see `main`
-  cannot see the rules — an agent read a doc that was on `main` while its branch was 21 commits
-  behind, correctly got `not_found`, and repeated the mistake the rule existed to prevent.
+  a live run did that and left the human's `main` checkout sitting on its branch.
+- **One `change/<name>` per concern**, cut from `origin/main`, merged and deleted.
+- **Before you start:** `git fetch origin && git merge origin/main`.
 - **Before you report done:** rebase onto `origin/main` and prove it with
-  `git merge-tree --write-tree origin/main HEAD`. A branch that conflicts is unfinished work.
-- **Commit before you stop.** An uncommitted edit is invisible, unattributable and lost the moment
-  anyone pulls; if you must pause, commit `wip(...)` and say what remains.
-- **Enable the hooks once per clone** (worktrees share the git dir):
-  `git config core.hooksPath .githooks`. The commit-msg hook refuses a commit on `main` and refuses
-  a commit with no trailer; the pre-commit hook refuses CRLF in the index, so `core.autocrlf` must
-  be `false`.
-- **The trailer:** `Agent: wasm-agent node=<node> session=<id>` or `Agent: pi session=<id>`.
-- **The board:** `bash scripts/worktrees.sh` prints every worktree with its drift, its uncommitted
-  files and whether it merges — run it before you start. The gate is `bash scripts/test.sh`.
+  `git merge-tree --write-tree origin/main HEAD`.
+- **Commit before you stop**; a `wip(...)` commit that says what remains beats a dirty tree.
+- **Build and verify:** `cargo build --release --offline --manifest-path rust/Cargo.toml`, then
+  `bash scripts/test.sh` (hermetic, no model). `bash scripts/test-behavior.sh` needs a model; on
+  Windows `powershell -File scripts/test-windows.ps1` runs the local suite. The smoke test needs
+  `cargo` on `PATH` — run it on the cloud tree if the local one lacks it. The window shell is
+  cross-built from Linux with `bash scripts/build-window.sh`.
