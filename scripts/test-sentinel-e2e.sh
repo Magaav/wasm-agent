@@ -139,7 +139,7 @@ ok "$WOKEN" "the wake ran a full turn" "$(grep 'wake	' "$LOG" 2>/dev/null | tail
 
 # 6. the agent must have come back: a turn after the wake
 sleep 5
-TAIL="$(curl -s -m 20 "http://127.0.0.1:$PORT/session?id=$SID" | node -e 'let r="";process.stdin.on("data",c=>r+=c).on("end",()=>{try{const d=JSON.parse(r);const t=(d.turns||[]);const last=t[t.length-1]||{};console.log(String(last.role)+": "+String(last.content||"").replace(/\s+/g," ").slice(0,70))}catch(e){console.log("")}})')"
+TAIL="$(curl -s -m 20 "http://127.0.0.1:$PORT/session?id=$SID" | node -e 'let r="";process.stdin.on("data",c=>r+=c).on("end",()=>{try{const d=JSON.parse(r);const t=(d.messages||[]);const last=t[t.length-1]||{};console.log(String(last.role)+": "+String(last.content||"").replace(/\s+/g," ").slice(0,70))}catch(e){console.log("")}})')"
 ok "$(grep -q '^assistant' <<<"$TAIL" && echo 1 || echo 0)" "the agent came back and answered" "$TAIL"
 ok "$(grep -qi 'woken' <<<"$TAIL" && echo 1 || echo 0)" "with the reply the wake asked for" "$TAIL"
 
@@ -166,7 +166,7 @@ for _ in $(seq 1 90); do
 done
 ok "$TRIGGERED" "an event woke the model with no request at all" "$(grep 'trigger' "$LOG" 2>/dev/null | tail -1)"
 sleep 4
-TAIL2="$(curl -s -m 20 "http://127.0.0.1:$PORT/session?id=$SID" | node -e 'let r="";process.stdin.on("data",c=>r+=c).on("end",()=>{try{const d=JSON.parse(r);const t=(d.turns||[]);const last=t[t.length-1]||{};console.log(String(last.role)+": "+String(last.content||"").replace(/\s+/g," ").slice(0,80))}catch(e){console.log("")}})')"
+TAIL2="$(curl -s -m 20 "http://127.0.0.1:$PORT/session?id=$SID" | node -e 'let r="";process.stdin.on("data",c=>r+=c).on("end",()=>{try{const d=JSON.parse(r);const t=(d.messages||[]);const last=t[t.length-1]||{};console.log(String(last.role)+": "+String(last.content||"").replace(/\s+/g," ").slice(0,80))}catch(e){console.log("")}})')"
 ok "$(grep -qi 'triggered' <<<"$TAIL2" && echo 1 || echo 0)" "and it answered what the trigger asked for" "$TAIL2"
 rm -f "$CONFIG/sentinel/triggers.json"
 
