@@ -236,8 +236,26 @@ pub fn watch(store: wa_jobs::Store, job: Value) {
                 }
                 if event["id"] == 2 {
                     if let Some(expression) = expression {
+                        // The setup runs twice, on purpose, and both are needed:
+                        //   - `Page.addScriptToEvaluateOnNewDocument` registers it for *future* documents,
+                        //     which is what makes it survive a reload. Chrome re-applies the Runtime
+                        //     binding by itself (measured: the binding was still callable after a reload)
+                        //     but not a one-off evaluate (measured: the evaluated hook was gone), so a
+                        //     reload used to leave the status saying "listening" while nothing was.
+                        //   - `Runtime.evaluate` applies it to the document that is *already* loaded, so a
+                        //     job enabled on a page that is already open works immediately.
+                        //
+                        // `Page.enable` first is not optional: without it the registration still answers
+                        // with an identifier and simply never runs on the next document (measured both
+                        // ways) - a silent failure that would have looked exactly like a working fix.
+                        socket.command(3, "Page.enable", json!({}))?;
                         socket.command(
-                            3,
+                            4,
+                            "Page.addScriptToEvaluateOnNewDocument",
+                            json!({"source": expression}),
+                        )?;
+                        socket.command(
+                            5,
                             "Runtime.evaluate",
                             json!({"expression":expression,"returnByValue":true}),
                         )?;
@@ -245,7 +263,7 @@ pub fn watch(store: wa_jobs::Store, job: Value) {
                         ready = true;
                     }
                 }
-                if event["id"] == 3 {
+                if event["id"] == 5 {
                     ready = true;
                 }
                 if ready {
