@@ -35,6 +35,31 @@ wa-sentinel request upgrade --binary "<absolute path to wa.exe>" \
   --reason "why"
 ```
 
+**When the change is in the sentinel, `upgrade` cannot carry it** — `upgrade.sh` installs the node and
+the UI and never copies `wa-sentinel.exe`. Use `deploy` for that, and it is the same shape:
+
+```
+wa-sentinel request deploy \
+  --session "<current session id>" --prompt "The deploy finished; verify it and continue." \
+  --reason "why"
+```
+
+`deploy` runs the full gate (`scripts/deploy.sh`), waits until no turn is running before it starts, and
+runs **detached** — the process it replaces is the one that would otherwise be its parent. It installs
+the node, the UI and the sentinel, proves the new node on a scratch port, rolls back on its own if that
+proof fails, and queues your continuation once the new node answers `/health`. Read the outcome from
+`installed.txt` and `deploy.log`, not from the request: the request says "started detached", which is a
+launch receipt, not a result.
+
+Two limits worth knowing before you rely on this:
+
+- **A stopped watcher cannot be revived from a run.** Nothing running can hear a request, so use
+  `deploy`/`upgrade` while the watcher is up, and keep the supervisor in a service or logon task so it
+  comes back by itself (`deploy/wa-sentinel.service` is the systemd unit).
+- **The first sentinel that understands `deploy` has to get there by hand once.** A watcher running an
+  older build answers `unknown verb "deploy"`, so that one step is a shell command: build, then
+  `bash scripts/deploy.sh --reason "…"` from outside the run.
+
 Omit `--session` and `--prompt` together if no continuation is wanted. The
 request command only queues work; the record in `sentinel/done` or `failed` and
 `installed.txt` report what actually happened. A separate wake request could

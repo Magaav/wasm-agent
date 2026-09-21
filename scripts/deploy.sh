@@ -28,9 +28,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 REASON=""
+SESSION=""
+PROMPT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --reason) REASON="${2:-}"; shift 2 ;;
+    --session) SESSION="${2:-}"; shift 2 ;;
+    --prompt) PROMPT="${2:-}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -270,3 +274,22 @@ printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nupgrade_s
 echo "deploy: installed $COMMIT ($HASH)"
 echo "deploy: recorded in $INSTALL_DIR/installed.txt"
 echo "deploy: /health -> $(curl -s -m 5 "http://127.0.0.1:$PORT/health" | head -c 260)"
+
+# The continuation, and the reason this script takes --session/--prompt at all: the deploy is performed
+# detached (the sentinel cannot replace itself while it is the process running the replacement), so the
+# wake is the only completion signal the run that asked for this will ever see. Queued *here* - after the
+# new node answered /health - and performed by the **new** watcher, which is the one thing that can
+# honestly say the upgrade landed. A failure to queue it is reported and does not fail the deploy: the
+# node and the sentinel are already installed, and saying so is better than rolling back over a wake.
+if [ -n "$SESSION" ]; then
+  SENTINEL_BIN="$INSTALL_DIR/wa-sentinel.exe"
+  [ -x "$SENTINEL_BIN" ] || SENTINEL_BIN="$INSTALL_DIR/wa-sentinel"
+  if [ -x "$SENTINEL_BIN" ] && [ -n "$PROMPT" ]; then
+    "$SENTINEL_BIN" request wake --session "$SESSION" --prompt "$PROMPT" \
+      --reason "deploy finished: $REASON" >/dev/null 2>&1 \
+      && echo "deploy: continuation queued for $SESSION" \
+      || echo "deploy: WARNING could not queue the continuation for $SESSION; the install itself is done"
+  else
+    echo "deploy: WARNING no sentinel beside $INSTALL_DIR to queue the continuation with"
+  fi
+fi

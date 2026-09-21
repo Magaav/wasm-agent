@@ -24,10 +24,37 @@ wa-sentinel request restart  --reason "why"    # graceful; stays queued while bu
 wa-sentinel request recover  --reason "why"    # explicit interruption; never waits for idle
 wa-sentinel request upgrade  --binary /path/to/wa --reason "why"
 wa-sentinel request upgrade  --binary /path/to/wa --session <id> --prompt "continue after upgrade" --reason "why"
+wa-sentinel request deploy   [--session <id> --prompt "continue after deploy"] --reason "why"
 wa-sentinel request spell    --file /path/to/plan.json --reason "why"
 wa-sentinel request wake     --session <id> --prompt "..." --reason "why"
 wa-sentinel request run      --script /path/to/script.sh --reason "why"
 ```
+
+### `deploy` is not `upgrade`, and the difference matters
+
+`upgrade` installs the node and the UI. It **cannot** install a *sentinel*: `upgrade.sh` copies the node
+binary, the UI, itself and the self-update skill, and only ever *reads* the sentinel's hash. So a fix in
+the sentinel — the process that supervises everything else — had no path from inside a run, and needed a
+human at a shell running `deploy.sh`.
+
+`deploy` closes that: it runs `scripts/deploy.sh` (the gate: clean tree, not behind `main`, the binary
+proved on a scratch port, install, rollback if the new node does not answer), which installs the node,
+the UI **and** the sentinel. Two properties make it work, and both are deliberate:
+
+- **it waits for idle before it starts.** `deploy` is in the same group as `restart`/`upgrade`/`spell`:
+  the watcher holds the request until no turn is running. Without that, the script's own idle wait would
+  be waiting for the very turn that asked for it, and the supervised child's 302 s deadline would turn
+  that deadlock into a kill — which is exactly how the first attempt failed.
+- **it runs detached.** Every other verb is a supervised child whose output is evidence; this one must
+  outlive its parent, because the parent is the process being replaced, and on Windows only a *different*
+  process can overwrite the image of a running one. Nothing is lost by that: `deploy.sh` proves the new
+  node before it goes near the live one, records `installed.txt` and `deploy.log`, and rolls back on its
+  own. The completion signal is the continuation wake, queued by the script once the new node answers
+  `/health` and performed by the **new** watcher.
+
+A stopped watcher can still only be restarted from outside a turn: nothing that is running can hear a
+request. That is why the supervisor belongs in a service or a logon task (`deploy/wa-sentinel.service`
+is the systemd unit). This verb removes the human step for *updating*; the one for *reviving* remains.
 
 `request` **writes a file** and returns. `watch` (or `once`) performs it. That split is the whole
 point: the writer may die immediately afterwards, and the request still lands.
