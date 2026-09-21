@@ -27,6 +27,30 @@ conversation. Resolve its owner before admitting work; never substitute the cred
 for the conversation name. Keep the historical header compatible, but describe its
 meaning explicitly wherever it crosses a boundary.
 
+### Local authentication sessions
+
+`lua/core/users.lua` stores SHA-256 bearer-token hashes in the node-local
+`auth_sessions` table, bound to node identity and user. This table is not replicated
+as conversation data. Every interpreter/process resolves the same credential;
+logout, account removal and expiry revoke it across workers. A nonempty unknown
+credential is an error, never the default master. `users.resolve` returns the error;
+legacy `users.current` raises it so a missed check cannot escalate authority.
+
+The default lifetime is 24 hours (`WASM_AGENT_AUTH_TTL_SECONDS`, clamped to 60 seconds
+through 30 days). Old interpreter-local tokens cannot be migrated; the client must
+sign in again. No transcript or existing user definition is deleted by this change.
+
+**Security scope:** the existing local account chooser is not password authentication.
+An empty header still selects the configured trusted-local default. Loopback access
+is consequently operator authority on a master node; a bearer token does not turn
+that port into a safe public multi-tenant endpoint. Guest nodes clamp local authority
+to their guest role, and remote fabric calls require their separate verified peer
+identity. Do not expose an operator's local port to untrusted clients.
+
+Mechanism proof: `node scripts/test-auth-sessions.cjs` checks independent processes,
+module boundaries, revocation, expiry, node binding and malformed configuration;
+it does not claim remote login security.
+
 ## Relationships
 
 ```text

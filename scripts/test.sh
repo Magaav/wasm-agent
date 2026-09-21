@@ -1096,6 +1096,7 @@ fi
 bash scripts/check-naming.sh
 node scripts/test-naming-check.cjs
 node scripts/test-execution-terminology.cjs
+node scripts/test-auth-sessions.cjs "$BIN"
 
 # The image-attachment tests, plus the helper tests that came with them. They were
 # written, they passed when run by hand, and nothing ran them - which is how a test
