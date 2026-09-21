@@ -114,6 +114,35 @@ Containment evidence (operator temp `wa-policy-containment-u4sxMK/containment.js
   and an assertion that no child was admitted. Evidence: `wa-subagent-policy-TMoA4D`.
   The failed gate remains recorded at `wa-orchestration-staged-gate2.log`.
 
+## Further adversarial findings and isolation
+
+- `scripts/test-sqlite-isolation.cjs` uses two **actual HTTP workers**, a copied Lua
+  tree with a fixture-only handler, and no model. Worker A holds an uncommitted row;
+  worker B must not see it. Negative baseline fails deterministically (`1 != 0`),
+  exit 1, evidence `wa-sqlite-workers-ifofk3`. This demonstrates cross-interpreter
+  transaction leakage, not merely a flaky nested-BEGIN error. The gate requires
+  a passing rerun after the connection-ownership fix.
+- Public scheduler Run IDs are currently per-boot integers while Lua telemetry and
+  child parent links use another UUID. A stable admitted Run ID must correlate all
+  of them; stale IDs must not cancel another execution after restart. Assigned to
+  the runtime owner; not accepted as a vocabulary-only fix.
+- The peer fixture demonstrated that the relay transport signature does not cover
+  its envelope destination. Inner destination binding is staged; a versioned
+  signature domain is additionally required so redirected new requests cannot be
+  executed by a legacy receiver that ignores the new envelope fields. No insecure
+  compatibility fallback is permitted. Coordinator rerun remains pending.
+- `scripts/test.sh` now fences the **entire gate** with a fresh home, dummy provider
+  and cleared runtime/account environment, preserving the in-turn deploy guard
+  and explicit UI skip request. The policy fixture retains its independent marker
+  guard. The new whole-gate setup has syntax validation; its integrated run is pending.
+- Actual UI rerun on the staged source completed with exit 0: structure,
+  interrupted tools and a real mid-run reload; `wa-staged-ui-stop.log`. This does
+  not prove the pending socket-cancellation or Run-ID corrections.
+- Linux/aarch64 preparation uses only `/tmp/wa-orchestration-proof.JM0kdM`: an owned
+  clone and checksum-verified Node 24.21.0, because system Node is 18.19.1. A
+  single-job, low-priority native build is in progress. The authoritative cloud
+  checkout remains unchanged at `d596a34`; no live node has been replaced.
+
 ## Stages and ownership
 
 1. Canonical terminology and contracts: `ARCHITECTURE.md`, `docs/EXECUTION.md`.
