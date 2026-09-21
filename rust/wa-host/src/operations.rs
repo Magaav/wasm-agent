@@ -15,7 +15,9 @@ fn spec(program: &str, flag: &str, command: &str, cwd: &str, seconds: u64, owner
     let mut spec = Spec::command(program, vec![flag.into(), command.into()]);
     spec.cwd = cwd.into();
     spec.timeout = Duration::from_secs(seconds);
-    spec.owner = owner;
+    // A child's operation is owned by the child session/run, not by whatever
+    // interpreter slot happens to be on this thread, so settlement is attributable.
+    spec.owner = crate::subagents::current_owner().map(|child| format!("subagent:{child}")).unwrap_or(owner);
     if crate::serve::in_turn() {
         spec.env.push(("WASM_AGENT_IN_TURN".into(), "1".into()));
     } // naming-check: allow (installed deploy scripts)

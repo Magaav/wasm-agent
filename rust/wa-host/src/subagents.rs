@@ -119,6 +119,9 @@ pub struct TaskContext {
     pub cancel: Arc<AtomicBool>,
     pub deadline: Option<Instant>,
     pub sockets: SocketSlot,
+    /// The child's session id, so an operation it starts is owned by the child
+    /// session/run rather than by the interpreter's worker slot.
+    pub owner: String,
 }
 
 thread_local! {
@@ -137,6 +140,15 @@ pub fn leave_task() {
 /// whether a request needs the shutdown-aware socket.
 pub fn in_task() -> bool {
     CURRENT.with(|slot| slot.borrow().is_some())
+}
+
+/// The child session an operation should be owned by, if this thread is a child.
+pub fn current_owner() -> Option<String> {
+    CURRENT.with(|slot| {
+        slot.borrow().as_ref().and_then(|context| {
+            if context.owner.is_empty() { None } else { Some(context.owner.clone()) }
+        })
+    })
 }
 
 /// Has the caller requested cancellation? Used by the provider reader and by the
@@ -709,12 +721,15 @@ fn run_child(inner: Arc<Inner>, runner: Runner, id: String, cancel: Arc<AtomicBo
     }
     // The execution budget begins when execution does, not when the receipt was
     // admitted, so queueing does not secretly eat a child's timeout.
-    let timeout_seconds = {
+    let (timeout_seconds, owner) = {
         let tasks = inner.tasks.lock().expect("subagents tasks");
-        tasks.get(&id).map(|task| task.timeout_seconds).unwrap_or(0)
+        match tasks.get(&id) {
+            Some(task) => (task.timeout_seconds, task.session_id.clone()),
+            None => (0, String::new()),
+        }
     };
     let deadline = if timeout_seconds > 0 { Some(Instant::now() + Duration::from_secs(timeout_seconds)) } else { None };
-    enter_task(TaskContext { cancel: cancel.clone(), deadline, sockets });
+    enter_task(TaskContext { cancel: cancel.clone(), deadline, sockets, owner });
     let receipt = {
         let tasks = inner.tasks.lock().expect("subagents tasks");
         tasks.get(&id).map(|task| {
