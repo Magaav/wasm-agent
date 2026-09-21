@@ -52,7 +52,13 @@ SENTINEL_CONFIG="${WASM_AGENT_HOME:-${USERPROFILE:-$HOME}}/.wasm-agent"
 # fails with "run is disabled: set WA_SENTINEL_SCRIPTS" - which is exactly how whatsapp-ingest was failing.
 # Export it so the watcher this deploy starts or restarts inherits it; the service unit and the logon task
 # set it too, because a watcher not started by this script must still have it.
-export WA_SENTINEL_SCRIPTS="${WA_SENTINEL_SCRIPTS:-$INSTALL_DIR/scripts}"
+#
+# The path must be in the native form: the sentinel is a native Windows process, and a POSIX `/c/...`
+# canonicalizes against `C:` into a directory that does not exist, after which every script is refused as
+# "not inside WA_SENTINEL_SCRIPTS". This is the project's oldest trap, applied to itself.
+WA_SCRIPTS_DIR="$INSTALL_DIR/scripts"
+command -v cygpath >/dev/null 2>&1 && WA_SCRIPTS_DIR="$(cygpath -w "$WA_SCRIPTS_DIR")"
+export WA_SENTINEL_SCRIPTS="${WA_SENTINEL_SCRIPTS:-$WA_SCRIPTS_DIR}"
 
 # A machine-readable result, written on both sides of the outcome. `installed.txt` says what is installed;
 # this says what the *deploy* did, so a woken run reads one small file instead of re-deriving the answer
