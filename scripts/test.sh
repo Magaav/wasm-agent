@@ -895,12 +895,14 @@ WASM_AGENT_HOME="$DB.home" WA_SCRIPT=scripts/test-guest.lua "$BIN" --db "$DB.gue
 # is why it runs here and not in the concurrency test's model half.
 # Preserve the whole sub-suite output: grep used to hide the actual failing
 # pool/session assertion while leaving only an earlier passing wedge line.
-WEDGE_ONLY=1 WA_BIN="$BIN" bash scripts/test-serve-concurrency.sh 8893 > "$DB.concurrency.log" 2>&1 || {
+CONCURRENCY_PORT=$(node scripts/free-test-port-block.cjs)
+WEDGE_ONLY=1 WA_BIN="$BIN" bash scripts/test-serve-concurrency.sh "$CONCURRENCY_PORT" > "$DB.concurrency.log" 2>&1 || {
   echo "the concurrency fixture failed; its output:"; tail -30 "$DB.concurrency.log"; exit 1; }
 # Both claims are read from one run: the pair costs one fixture, not two.
 grep "a stalled worker is visible" "$DB.concurrency.log"
 grep "the client bridge survived a connection that said nothing" "$DB.concurrency.log"
-WA_BIN="$BIN" bash scripts/test-run-isolation.sh 8961 > "$DB.isolation.log" 2>&1 || {
+ISOLATION_PORT=$(node scripts/free-test-port-block.cjs)
+WA_BIN="$BIN" bash scripts/test-run-isolation.sh "$ISOLATION_PORT" > "$DB.isolation.log" 2>&1 || {
   echo "the run-isolation fixture failed; its output:"; tail -40 "$DB.isolation.log"; exit 1; }
 grep '^run isolation ok$' "$DB.isolation.log"
 rm -f "$DB.window"*
