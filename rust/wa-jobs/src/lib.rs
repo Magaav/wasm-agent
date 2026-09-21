@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+pub mod artifact;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 #[derive(Clone)]
 pub struct Store {
@@ -15,6 +16,9 @@ fn fail<T>(why: &str) -> Result<T> {
     Err(why.into())
 }
 fn ident(s: &str) -> bool {
+    ident_str(s)
+}
+fn ident_str(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 100
         && s.bytes()
@@ -71,6 +75,27 @@ pub fn validate(job: &Value) -> Result<()> {
             if let Some(skill) = action["skill"].as_str() {
                 if !ident(skill) {
                     return fail("invalid_skill_name");
+                }
+            }
+            if let Some(profile) = action.get("profile").and_then(Value::as_str) {
+                if !ident(profile) {
+                    return fail("invalid_action_profile");
+                }
+            }
+        }
+        // A durable child run with its own capacity and a profile-scoped tool envelope. Distinct from
+        // `wake`, which is the legacy operator-chat route: a subagent action never falls back to `/chat`
+        // because the whole point of the profile is that the run cannot reach the operator's tools.
+        "subagent" => {
+            if !action.get("profile").and_then(Value::as_str).map(|p| ident_str(p)).unwrap_or(false) {
+                return fail("subagent_needs_profile");
+            }
+            if action["prompt"].as_str().unwrap_or("").trim().is_empty() {
+                return fail("subagent_needs_prompt");
+            }
+            if action.get("timeout_seconds").is_some() {
+                if !matches!(action["timeout_seconds"].as_u64(), Some(1..=86400)) {
+                    return fail("invalid_action_timeout");
                 }
             }
         }
@@ -322,11 +347,36 @@ impl Store {
         )?;
         Ok(())
     }
+    /// Claim the next delivery. `allow_inference` separates the two lanes explicitly: a deterministic
+    /// `run` action never waits behind a person's interactive turn, and an inference action (`wake` or
+    /// `subagent`) is only claimed when its own lane has capacity. The wake budget is spent only by
+    /// legacy `wake`; a `subagent` has its own reserved child capacity in the subagent service.
     pub fn claim(&self, now: i64, wake_budget: i64) -> Result<Option<Value>> {
+        self.claim_next(now, wake_budget, true)
+    }
+    pub fn claim_next(&self, now: i64, wake_budget: i64, allow_inference: bool) -> Result<Option<Value>> {
+        if allow_inference {
+            self.claim_kinds(now, wake_budget, None)
+        } else {
+            self.claim_kinds(now, wake_budget, Some(&["run"]))
+        }
+    }
+    /// Claim only an inference delivery. The sentinel runs deterministic and inference work on their own
+    /// lanes, so this is how the inference lane stays free of run deliveries. A `subagent` has reserved
+    /// child capacity in the subagent service and therefore does not spend the legacy `wake` allowance.
+    pub fn claim_inference(&self, now: i64, wake_budget: i64) -> Result<Option<Value>> {
+        self.claim_kinds(now, wake_budget, Some(&["wake", "subagent"]))
+    }
+    fn claim_kinds(
+        &self,
+        now: i64,
+        wake_budget: i64,
+        kinds: Option<&[&str]>,
+    ) -> Result<Option<Value>> {
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute("UPDATE deliveries SET state='cancelled',detail='disabled or superseded' WHERE state='queued' AND NOT EXISTS(SELECT 1 FROM jobs WHERE jobs.id=deliveries.job_id AND jobs.enabled=1 AND jobs.revision=deliveries.revision)",[])?;
-        let mut statement=tx.prepare("SELECT d.id,d.job_id,d.revision,d.payload,j.definition FROM deliveries d JOIN jobs j ON j.id=d.job_id WHERE d.state='queued' AND NOT EXISTS(SELECT 1 FROM deliveries active WHERE active.job_id=d.job_id AND active.state='running') ORDER BY d.id")?;
+        let mut statement=tx.prepare("SELECT d.id,d.job_id,d.revision,d.event_id,d.payload,j.definition FROM deliveries d JOIN jobs j ON j.id=d.job_id WHERE d.state='queued' AND NOT EXISTS(SELECT 1 FROM deliveries active WHERE active.job_id=d.job_id AND active.state='running') ORDER BY d.id")?;
         let rows = statement
             .query_map([], |r| {
                 Ok((
@@ -335,13 +385,20 @@ impl Store {
                     r.get::<_, i64>(2)?,
                     r.get::<_, String>(3)?,
                     r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         drop(statement);
-        for (id, job_id, revision, payload, definition) in rows {
+        for (id, job_id, revision, event_id, payload, definition) in rows {
             let job: Value = serde_json::from_str(&definition)?;
-            if job["action"]["kind"] == "wake" {
+            let action_kind = job["action"]["kind"].as_str().unwrap_or("");
+            if let Some(kinds) = kinds {
+                if !kinds.contains(&action_kind) {
+                    continue;
+                }
+            }
+            if action_kind == "wake" {
                 let used: i64 = tx.query_row(
                     "SELECT count(*) FROM deliveries WHERE started_at>=? AND action_kind='wake'",
                     [now - 3600],
@@ -357,7 +414,7 @@ impl Store {
             )?;
             tx.commit()?;
             return Ok(Some(
-                json!({"id":id,"job_id":job_id,"revision":revision,"event":serde_json::from_str::<Value>(&payload)?,"action":job["action"]}),
+                json!({"id":id,"job_id":job_id,"revision":revision,"event_id":event_id,"event":serde_json::from_str::<Value>(&payload)?,"action":job["action"]}),
             ));
         }
         tx.commit()?;
@@ -411,6 +468,25 @@ impl Store {
             return fail("delivery_not_running");
         }
         Ok(())
+    }
+    /// Export an installed job as a portable, machine-independent artifact.
+    pub fn export_job(&self, id: &str) -> Result<Value> {
+        artifact::export_artifact(&self.get(id)?)
+    }
+    /// Import a portable artifact with explicit local bindings. Always installs disabled; `put` keeps the
+    /// revision no-op rule, so a repeated identical import changes nothing and a changed one invalidates
+    /// approval. `approved` authorises the *bindings*, never the enabling. `importer_role` is the caller's
+    /// authority, so a guest import cannot select operator capabilities by claiming them.
+    pub fn put_artifact(
+        &self,
+        artifact: &Value,
+        bindings: &Value,
+        approved: bool,
+        importer_role: &str,
+    ) -> Result<Value> {
+        let imported = artifact::import_artifact(artifact, bindings, approved, importer_role)?;
+        let stored = self.put(&imported["definition"])?;
+        Ok(json!({"job": stored, "bound": imported["bound"], "artifact": imported["artifact"]}))
     }
     pub fn history(&self) -> Result<Value> {
         let db = self.db()?;

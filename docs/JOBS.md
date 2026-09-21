@@ -152,16 +152,45 @@ The names to call come from the app itself: wrap its module *define* call at doc
 factories, so a module whose name cannot be guessed becomes known, and its factory source gives the call
 shape. See `scripts/whatsapp-adapter.mjs` and the `automation-jobs` skill.
 
+## Inference as a profile-scoped child run
+
+A job that needs judgement uses a `subagent` action, not the operator's own chat:
+
+```json
+{
+  "id": "whatsapp-message",
+  "trigger": {"kind": "event", "topic": "whatsapp.message"},
+  "action": {"kind": "subagent", "profile": "whatsapp-responder", "timeout_seconds": 900,
+              "prompt": "Read the conversation, decide, and send only if the profile approves it."}
+}
+```
+
+The sentinel POSTs the action to the node's local subagent service (`POST /subagents`), which owns the
+child run and its **reserved capacity**. It never falls back to `/chat`: the point of the profile is that
+the child cannot reach the operator's tools, and a fallback would hand it exactly those. The spawn is
+idempotent on the delivery's stable source event id, so a restart reconciles the existing child instead of
+starting a second one. A bounded wait that expires while the child is still running is recorded `unknown`
+and never retried. A profile is a local approved config; artifact import installs it disabled, and the
+profile's resources (the conversation, the destination, send approval) are bound locally before enable.
+See [ARTIFACTS.md](ARTIFACTS.md).
+
+Legacy `wake` remains a distinct action for the operator's own conversation. It is not a substitute for a
+profile and never carries one's authority.
+
 ## Queue and recovery contract
 
 `rust/wa-jobs` enforces durable deduplication on (job, revision, event id), atomic
 claims and revision checks. The queue allows 128 pending deliveries globally and
-8 per job. Full queues fail visibly and do not acknowledge ingestion. Four action
-workers and eight source observers (CDP/files combined) are the current limits;
-one delivery per job runs at once. Schedules are polled by the watcher; CDP/file
-observers work independently. Observer-capacity exhaustion is shown explicitly.
-Queue, per-job status and budget lookups are indexed, avoiding a full history scan
-on every tick.
+8 per job. Full queues fail visibly and do not acknowledge ingestion. Eight source observers (CDP/files
+combined) are the current limit; one delivery per job runs at once.
+
+**Two execution lanes, not one gate.** A deterministic `run` is claimed regardless of whether a person's
+turn is in progress, so a scheduled ingest never stops because somebody is chatting
+(`WA_SENTINEL_JOB_DETERMINISTIC_CONCURRENCY`, default 4). An inference action (`wake` or `subagent`) is
+claimed only when its own lane has capacity (`WA_SENTINEL_JOB_WAKE_CONCURRENCY`, default 1): the subagent
+service's reserved child capacity, or - until that is configured - an idle node, so a wake cannot queue a
+person's turn behind it. The reservation is `WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY`; without it a wake
+waits in the durable queue and is never failed for it.
 
 Wake admission is budgeted (`WA_SENTINEL_WAKE_BUDGET`, default 6/hour). Claims
 reserve job budget; the common wake submission gate counts failed attempts too,
@@ -181,6 +210,30 @@ implemented. Queue bounds are not storage-retention bounds.
 Legacy `triggers.json` remains supported for existing installations. It is not
 silently imported into jobs, does not appear as an approved enabled job, and
 retains its legacy semantics. Prefer new jobs for new automations.
+
+## Portable artifacts
+
+A job can be exported as a versioned, machine-independent artifact and imported elsewhere with explicit
+local bindings and approval. Importing installs the job disabled; an identical import is a revision no-op.
+See [ARTIFACTS.md](ARTIFACTS.md).
+
+## WhatsApp: eligibility before a model turn
+
+The declared pipeline is deterministic first. `scripts/whatsapp-read.mjs` reads the app's own store,
+attaches verified adapter metadata and applies `scripts/whatsapp-eligibility.mjs` to every message:
+
+- the chat's kind comes from its **id suffix**, never from its title or a group label;
+- direct chats are eligible; archived and left chats are excluded;
+- a group is eligible only on a verifiable operator mention (the app's mention list, or a literal
+  `@<bound number>`);
+- if this build does not expose archived/left (or mention) metadata, the message **fails closed** with a
+  reason. Unknown is not "no".
+
+Only an eligible incoming message produces a `whatsapp.message` event, so the reply profile never spends a
+turn on group chatter or a chat the operator has archived. The send itself is serialized across jobs and
+processes by `scripts/whatsapp-sendlock.mjs`, prechecks a human draft (refusing to overwrite it), compares
+the **whole** composer rather than a preview, and reconciles an ambiguous send against the store before
+any retry - an ambiguous send is never retried.
 
 ## Proof
 
