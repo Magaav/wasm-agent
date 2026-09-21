@@ -36,12 +36,19 @@ mod companion {
     const TOPMOST_INTERVAL: Duration = Duration::from_millis(750);
     const DEFAULT_URL: &str = "http://127.0.0.1:8799/";
 
+    /// How long a navigation may stay unfinished before it is treated as failed. A page that began to
+    /// load and never finished - the WebView's error page, from a node that was down mid-reload - is the
+    /// state this window used to sit in forever: no JavaScript to reload itself, no next event.
+    const LOAD_TIMEOUT: Duration = Duration::from_millis(12000);
+
     #[derive(Debug)]
     enum UserEvent {
         /// An IPC message, tagged with the window that sent it: operations act on the window that
         /// asked, not on the main one. A second window whose "maximize" resized the chat would be
         /// worse than no second window.
         Ipc(usize, String),
+        /// A navigation began. Paired with `Loaded`; a start with no finish is what the watchdog catches.
+        LoadStarted,
         Loaded,
     }
 
@@ -76,7 +83,18 @@ mod companion {
         mode: String,
         topmost: bool,
         next_topmost: Instant,
+        /// Where to re-navigate when a load stalls.
+        ui_url: String,
+        /// When the current navigation started, if one is in flight. Cleared by `Loaded`.
+        nav_started: Option<Instant>,
+        nav_retries: u32,
         views: Vec<View>,
+    }
+
+    /// Whether an unfinished navigation has waited long enough to be retried. Pure, so the rule is a
+    /// test and not a comment.
+    fn retry_due(elapsed: Option<Duration>, timeout: Duration) -> bool {
+        elapsed.is_some_and(|elapsed| elapsed >= timeout)
     }
 
     /// Give the window (taskbar, alt-tab) the embedded wasm-agent icon.
@@ -472,8 +490,13 @@ mod companion {
                 let _ = ipc_proxy.send_event(UserEvent::Ipc(main_id, request.body().clone()));
             })
             .with_on_page_load_handler(move |event, _url| {
-                if matches!(event, PageLoadEvent::Finished) {
-                    let _ = load_proxy.send_event(UserEvent::Loaded);
+                match event {
+                    PageLoadEvent::Started => {
+                        let _ = load_proxy.send_event(UserEvent::LoadStarted);
+                    }
+                    PageLoadEvent::Finished => {
+                        let _ = load_proxy.send_event(UserEvent::Loaded);
+                    }
                 }
             })
             .build(&window)
@@ -502,6 +525,9 @@ mod companion {
             mode: "compact".into(),
             topmost: true,
             next_topmost: Instant::now() + TOPMOST_INTERVAL,
+            ui_url: url.clone(),
+            nav_started: None,
+            nav_retries: 0,
             views: Vec::new(),
         };
         let view_proxy = event_loop.create_proxy();
@@ -513,6 +539,23 @@ mod companion {
                         window.set_always_on_top(true);
                     }
                     state.next_topmost = Instant::now() + TOPMOST_INTERVAL;
+                    // The page's own reload can land while the node is restarting, and WebView2 answers that
+                    // with an error page that has no JavaScript to recover with. Nothing else in this loop
+                    // would ever fire again, so the window retries the navigation itself until it lands.
+                    if retry_due(state.nav_started.map(|started| started.elapsed()), LOAD_TIMEOUT) {
+                        state.nav_retries += 1;
+                        note(&format!(
+                            "navigation unfinished after {}s - reloading (attempt {})",
+                            LOAD_TIMEOUT.as_secs(),
+                            state.nav_retries
+                        ));
+                        if let Err(error) = webview.load_url(&state.ui_url) {
+                            note(&format!("reload failed: {error}"));
+                        }
+                        // Arm the deadline again whether or not `load_url` emits another `Started`, so a
+                        // node that is down does not stop the retries.
+                        state.nav_started = Some(Instant::now());
+                    }
                 }
                 Event::UserEvent(UserEvent::Ipc(sender, body)) => {
                     if handle(&window, &webview, &mut state, sender, &body, target, &view_proxy) {
@@ -520,7 +563,14 @@ mod companion {
                         *control_flow = ControlFlow::Exit;
                     }
                 }
-                Event::UserEvent(UserEvent::Loaded) => note("page loaded"),
+                Event::UserEvent(UserEvent::LoadStarted) => {
+                    state.nav_started = Some(Instant::now());
+                }
+                Event::UserEvent(UserEvent::Loaded) => {
+                    note("page loaded");
+                    state.nav_started = None;
+                    state.nav_retries = 0;
+                }
                 Event::WindowEvent { window_id, event: WindowEvent::Resized(_), .. } => {
                     // Manual resize: re-pin the WebView and re-cut the region. Only the main window
                     // is hand-styled; a view is an ordinary window and the OS sizes it.
@@ -548,6 +598,21 @@ mod companion {
                 _ => {}
             }
         });
+    }
+
+    #[cfg(test)]
+    mod retry_tests {
+        use super::retry_due;
+        use std::time::Duration;
+
+        #[test]
+        fn a_stuck_navigation_is_retried_and_a_finished_one_is_not() {
+            let timeout = Duration::from_secs(12);
+            assert!(!retry_due(None, timeout), "nothing is navigating");
+            assert!(!retry_due(Some(Duration::from_secs(3)), timeout), "still loading");
+            assert!(retry_due(Some(Duration::from_secs(12)), timeout), "at the deadline");
+            assert!(retry_due(Some(Duration::from_secs(30)), timeout), "well past it");
+        }
     }
 }
 
