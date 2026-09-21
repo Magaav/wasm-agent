@@ -121,6 +121,20 @@ with `--ui /c/Users/...`, so it could not read `index.html` and answered 404 for
 "not found", ran no JavaScript, and looked like a dead shell for an afternoon. `upgrade.sh` converts it with
 `cygpath`, and the node now warns at startup when its ui directory has no `index.html`.
 
+## Stopping the node safely
+
+Never stop it by image name. `Stop-Process -Name wa` — and even a filter on the path, because an
+agent session runs the same binary from the same place — kills the UI server *and* every
+interactive session with it, mid-run, leaving no crash and no trace. `wa ui` records the server's
+pid; stop that, or ask the port:
+
+```powershell
+Stop-Process -Id (Get-Content "$env:LOCALAPPDATA\wasm-agent\serve.pid")
+```
+
+An unfinished session is not lost: `wa chat --continue` resumes the thread with its transcript
+intact, and the window offers to continue it where it stopped.
+
 ## Never touch the window
 
 The window is a client: it reconnects on its own, it reloads when the UI hash changes, and restarting it is a
