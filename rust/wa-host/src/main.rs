@@ -11,6 +11,7 @@ mod node;
 mod relay_client;
 mod rendezvous;
 mod plugins;
+mod subagents;
 mod serve;
 
 use host::Host;
@@ -47,6 +48,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/provider.lua", include_str!("../../../lua/core/provider.lua")),
     ("lua/core/model_window.lua", include_str!("../../../lua/core/model_window.lua")),
     ("lua/core/changeset.lua", include_str!("../../../lua/core/changeset.lua")),
+    ("lua/core/subagents.lua", include_str!("../../../lua/core/subagents.lua")),
     ("lua/core/agent.lua", include_str!("../../../lua/core/agent.lua")),
     ("lua/core/chat.lua", include_str!("../../../lua/core/chat.lua")),
     ("lua/core/server.lua", include_str!("../../../lua/core/server.lua")),
@@ -245,6 +247,7 @@ fn main() {
     lua.register("exec", host::exec);
     lua.register("operation", host::operation);
     lua.register("jobs", host::jobs);
+    lua.register("subagent", host::subagent);
     lua.register("sleep", host::sleep);
     lua.register("node_identity", host::node_identity);
     lua.register("sign", host::sign);
@@ -307,6 +310,30 @@ fn main() {
     };
     let lua = boot_state(host as *mut c_void);
 
+    // A fresh, initialized interpreter: the boot sequence plus the modules an
+    // interpreter needs to answer a request or run a subagent. Built once and
+    // shared so `serve`, ordinary CLI runs and the subagent runtime cannot drift.
+    // The factory is registered with the runtime here, before any command runs,
+    // so a child is never left unable to build its own interpreter.
+    let host_address = host as usize;
+    let worker: std::sync::Arc<dyn Fn() -> Lua + Send + Sync> = std::sync::Arc::new(move || {
+        let state = boot_state(host_address as *mut c_void);
+        // A pool worker or a child interpreter must never take the process down
+        // with it: an interpreter that cannot load its module reports the failure
+        // and runs on, so a spawned child settles as failed rather than killing
+        // the parent and every sibling. The main serve interpreter still exits on
+        // a broken module above.
+        if let Err(error) = state.do_string(&core_source("lua/core/server.lua"), "lua/core/server.lua") {
+            eprintln!("lua error: {error}");
+        }
+        if let Err(error) = state.do_string(&core_source("lua/core/subagents.lua"), "lua/core/subagents.lua") {
+            eprintln!("lua error: {error}");
+        }
+        state
+    });
+    let worker_for_subagents = worker.clone();
+    subagents::set_factory(Box::new(move || worker_for_subagents()));
+
     if let Ok(script) = std::env::var("WA_SCRIPT") {
         let source = std::fs::read_to_string(&script).unwrap_or_else(|e| panic!("read {script}: {e}"));
         if let Err(error) = lua.do_string(&source, &script) {
@@ -319,6 +346,10 @@ fn main() {
     let command = lua_args.first().map(String::as_str).unwrap_or("");
     if command == "serve" {
         if let Err(error) = lua.do_string(&core_source("lua/core/server.lua"), "lua/core/server.lua") {
+            eprintln!("lua error: {error}");
+            std::process::exit(1);
+        }
+        if let Err(error) = lua.do_string(&core_source("lua/core/subagents.lua"), "lua/core/subagents.lua") {
             eprintln!("lua error: {error}");
             std::process::exit(1);
         }
@@ -336,20 +367,12 @@ fn main() {
                 node::spawn_heartbeat(rendezvous_url);
             }
         }
-        // The pool builds its own interpreters on demand, so what it needs is a way to make one rather
-        // than a pile of them up front. The host pointer travels as a usize because it is a leaked raw
+        // The pool builds its own interpreters on demand from the factory registered above, so what it needs is a way to make one
+        // rather than a pile of them up front. The host pointer travels as a usize because it is a leaked raw
         // pointer for the life of the process; a newtype with an unsafe Send would be the same claim with
         // more ceremony.
-        let host_address = host as usize;
-        let factory = move || -> Lua {
-            let state = boot_state(host_address as *mut c_void);
-            if let Err(error) = state.do_string(&core_source("lua/core/server.lua"), "lua/core/server.lua") {
-                eprintln!("lua error: {error}");
-                std::process::exit(1);
-            }
-            state
-        };
-        serve::run(lua, Box::new(factory), port, PathBuf::from(ui));
+        let worker_for_serve = worker.clone();
+        serve::run(lua, Box::new(move || worker_for_serve()), port, PathBuf::from(ui));
         return;
     }
 
@@ -390,6 +413,10 @@ fn main() {
         return;
     }
 
+    if let Err(error) = lua.do_string(&core_source("lua/core/subagents.lua"), "lua/core/subagents.lua") {
+        eprintln!("lua error: {error}");
+        std::process::exit(1);
+    }
     if let Err(error) = lua.do_string(&core_source("lua/core/init.lua"), "lua/core/init.lua") {
         eprintln!("lua error: {error}");
         std::process::exit(1);
