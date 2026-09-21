@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Deploy a node: the one gate through which a build becomes the installed one.
 #
-#   bash scripts/deploy.sh [--reason "why"]
+#   bash scripts/deploy.sh [--reason "why"] [--session <id> --prompt "continue with…"]
+#
+# The tree it builds from is `..` when this script is run from a worktree, `WA_DEPLOY_ROOT` if that is set,
+# and otherwise the runtime worktree recorded in <install>/runtime-worktree.txt. The last case is not a
+# convenience: `request deploy` runs the copy installed beside the supervisor, whose parent is the install
+# directory, so `..` alone is never a worktree there.
 #
 # Why this exists. Two parties install this node - the operator and the agent working in it - and for a day
 # they installed over each other: the agent rebuilt from its worktree while a fix was being deployed from
@@ -23,9 +28,6 @@
 #      verification was reading someone else's outcome, which is the trap this project keeps writing down;
 #   6. what was installed is recorded, and the pid answering must be the pid the install recorded.
 set -uo pipefail
-
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
 
 REASON=""
 SESSION=""
@@ -51,6 +53,25 @@ fail() {
   echo "deploy: $*" >&2
   printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${COMMIT:-unknown}" "${BRANCH:-unknown}" "$*" \
     >> "$INSTALL_DIR/deploy.log" 2>/dev/null
+  # A requested deploy is answered, including when the answer is no. This is the other half of the wake
+  # below: that one says the install landed, and without this one a deploy that failed *before* the swap
+  # told nobody - the request was already `done` (it had been spawned), the node was untouched, and the
+  # only trace was a line in deploy.log nobody had a reason to read. A hand-run deploy passes no --session
+  # and wakes nobody: a refusal at a shell is read by the person at the shell.
+  # The wording claims nothing about the install, because `fail` is reached on both sides of the swap.
+  if [ -n "${SESSION:-}" ]; then
+    FAIL_SENTINEL="${INSTALL_DIR:-}/wa-sentinel.exe"
+    [ -x "$FAIL_SENTINEL" ] || FAIL_SENTINEL="${INSTALL_DIR:-}/wa-sentinel"
+    if [ -x "$FAIL_SENTINEL" ]; then
+      if "$FAIL_SENTINEL" request wake --session "$SESSION" \
+        --prompt "The deploy you requested failed: $*  Nothing is claimed here about what is installed - $INSTALL_DIR/installed.txt and $INSTALL_DIR/deploy.log are the evidence. Fix the cause, then request deploy again." \
+        --reason "deploy failed: $*" >/dev/null 2>&1; then
+        echo "deploy: failure reported to $SESSION" >&2
+      else
+        echo "deploy: WARNING could not report the failure to $SESSION" >&2
+      fi
+    fi
+  fi
   exit 1
 }
 
@@ -67,6 +88,33 @@ note() {
 if [ "${WASM_AGENT_IN_TURN:-}" = "1" ]; then
   fail "cannot deploy from a running turn: it cannot become idle while this command waits. Build, then request an upgrade through wa-sentinel; see skills/self-update/SKILL.md"
 fi
+
+# Which tree does this deploy build from? `dirname $0/..` is a worktree only when this script is run from
+# one, and the sentinel's `deploy` verb runs the copy installed beside the supervisor - whose parent is the
+# install directory. Resolve it the way upgrade.sh resolves the runtime worktree, and refuse loudly rather
+# than build something that cannot say what it is.
+resolve_root() {
+  if [ -n "${WA_DEPLOY_ROOT:-}" ]; then printf '%s' "$WA_DEPLOY_ROOT"; return; fi
+  local beside=""
+  beside="$(cd "$(dirname "$0")/.." && pwd)"
+  if git -C "$beside" rev-parse --is-inside-work-tree >/dev/null 2>&1; then printf '%s' "$beside"; return; fi
+  local recorded=""
+  if [ -f "$INSTALL_DIR/runtime-worktree.txt" ]; then
+    recorded="$(tr -d '\r\n' < "$INSTALL_DIR/runtime-worktree.txt")"
+  fi
+  case "$recorded" in
+    *\\*)
+      if command -v cygpath >/dev/null 2>&1; then recorded="$(cygpath -u "$recorded")"; fi ;;
+  esac
+  if [ -n "$recorded" ] && git -C "$recorded" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf '%s' "$recorded"; return
+  fi
+  printf ''
+}
+ROOT="$(resolve_root)"
+[ -n "$ROOT" ] || fail "cannot tell which worktree to deploy from: run this script from one, set WA_DEPLOY_ROOT, or record it in $INSTALL_DIR/runtime-worktree.txt - a deploy that cannot say what it builds does not build"
+[ -d "$ROOT" ] || fail "the worktree to deploy from does not exist: $ROOT"
+cd "$ROOT" || fail "cannot enter the worktree to deploy from: $ROOT"
 
 # 1. Clean. A build from a half-edited tree is not reproducible, and the file being edited is often the one
 #    that matters.

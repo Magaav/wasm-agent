@@ -52,6 +52,19 @@ the UI **and** the sentinel. Two properties make it work, and both are deliberat
   own. The completion signal is the continuation wake, queued by the script once the new node answers
   `/health` and performed by the **new** watcher.
 
+Two details that decide whether a *requested* deploy can work at all:
+
+- **it must find the tree to build from.** `request deploy` runs the copy of `deploy.sh` installed beside
+  the supervisor, so `dirname $0/..` is the *install* directory, not a worktree. It resolves the tree as
+  `WA_DEPLOY_ROOT`, else `..` if that is really a git work tree, else the runtime worktree recorded in
+  `<install>/runtime-worktree.txt` — the same file `upgrade.sh` reads. The first self-driven deploy failed
+  on exactly this: it read `unknown` for the commit, built in the install directory and reported "the
+  build failed", with the tree it should have used recorded in a file nothing read.
+- **a failure answers the requester.** The request is `done` as soon as the script is *spawned*, so for a
+  deploy that is a launch receipt and nothing more: a deploy that refused before the swap left the node
+  untouched and told nobody. `deploy.sh` now wakes the requesting session on its failure path too, naming
+  the refusal and where the evidence is; a hand-run deploy passes no `--session` and wakes nobody.
+
 A stopped watcher can still only be restarted from outside a turn: nothing that is running can hear a
 request. That is why the supervisor belongs in a service or a logon task (`deploy/wa-sentinel.service`
 is the systemd unit). This verb removes the human step for *updating*; the one for *reviving* remains.

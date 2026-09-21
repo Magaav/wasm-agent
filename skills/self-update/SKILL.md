@@ -51,6 +51,14 @@ proof fails, and queues your continuation once the new node answers `/health`. R
 `installed.txt` and `deploy.log`, not from the request: the request says "started detached", which is a
 launch receipt, not a result.
 
+The copy that `request deploy` runs sits beside the supervisor, so it cannot find a worktree by looking
+at its own parent. It resolves the tree to build from as `WA_DEPLOY_ROOT`, else its `..` when that is a
+git work tree, else the runtime worktree recorded in `<install>/runtime-worktree.txt` — pass
+`WA_DEPLOY_ROOT` when you want a deploy from somewhere else. A requested deploy that *fails* also wakes
+you, naming the refusal: the request being `done` only means it was spawned, and a deploy that refuses
+before the swap leaves the node untouched and would otherwise tell nobody. A deploy run by hand passes no
+session and wakes nobody.
+
 Two limits worth knowing before you rely on this:
 
 - **A stopped watcher cannot be revived from a run.** Nothing running can hear a request, so use
