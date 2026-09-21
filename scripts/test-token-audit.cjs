@@ -124,7 +124,7 @@ assert.equal(phaseErrors.tools.execution_phases.reported,2);assert.equal(phaseEr
 assert.equal(phaseErrors.tools.execution_phases.incomplete,1);assert.equal(phaseErrors.tools.execution_phases.invalid,1);
 const slowAStart=tool('slow-a','slow','bash'),slowAEnd=toolEnd('slow-a','slow','bash',60000);
 const slowBStart=tool('slow-b','slow','bash'),slowBEnd=toolEnd('slow-b','slow','bash',120000,false);
-slowBEnd.payload.error='deadline_exceeded';slowBEnd.payload.timeout_ms=120000;
+slowBEnd.payload.error='deadline_exceeded';
 const slowCStart=tool('slow-c','slow','bash');slowCStart.payload.arguments_hash=h('e');
 const slowCEnd=toolEnd('slow-c','slow','bash',70000);
 const slowAudit=audit([slowAStart,slowAEnd,slowBStart,slowBEnd,slowCStart,slowCEnd]);

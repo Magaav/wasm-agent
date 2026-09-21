@@ -2,7 +2,6 @@
 -- Run with WASM_AGENT_EXEC_TIMEOUT_SECONDS=2 and an isolated home/database.
 local json = dofile("lua/vendor/json.lua")
 local output = dofile("lua/core/tool_output.lua")
-local tools = dofile("lua/core/tools.lua")
 local checks = 0
 local function ok(value, label)
   checks=checks+1
@@ -16,18 +15,6 @@ ok(stuck.ok==false and stuck.code~=0, "timeout is failure")
 ok(stuck.error=="deadline_exceeded", "typed timeout reason")
 ok(stuck.stdout=="before", "partial output survives cancellation")
 ok(stuck.output_complete==true, "both pipes actually drained after termination")
-local short_started=host.monotonic_ms()
-local short=json.decode(host.exec("sleep 30", "", "1"))
-ok(short.error=="deadline_exceeded" and short.timeout_ms==1000, "a call may shorten the configured deadline")
-ok(host.monotonic_ms()-short_started<1800, "the shorter per-call deadline is enforced")
-local invalid=json.decode(host.exec("echo never", "", "0"))
-ok(invalid.error=="invalid_exec_timeout", "an invalid per-call deadline is refused before execution")
-local bash_schema
-for _,tool in ipairs(tools.all("master")) do if tool["function"].name=="bash" then bash_schema=tool["function"] end end
-ok(bash_schema.parameters.properties.timeout_seconds.maximum==86400
-  and bash_schema.description:find("shorten",1,true), "the model is told the deadline can only be shortened")
-ok(tools.dispatch(nil,"bash",{command="echo never",timeout_seconds=0},"master").error=="invalid_timeout_seconds",
-  "direct dispatch refuses an invalid deadline before execution")
 local before=host.monotonic_ms()
 local bg=json.decode(host.exec("sleep 60 & echo started"))
 ok(host.monotonic_ms()-before<1800, "shell exit cannot wait for background pipe EOF")

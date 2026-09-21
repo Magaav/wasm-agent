@@ -110,8 +110,7 @@ the model-facing bash result; incomplete or internally inconsistent phases are
 reported separately rather than used in an overhead ratio. Duration buckets show
 whether time is concentrated in long calls; bash calls of at least 60 seconds are
 grouped by existing argument hashes, but only aggregate distinct/repeated counts
-are emitted—never hashes or command text. A per-call bash deadline may shorten,
-never extend, the configured host limit.
+are emitted—never hashes or command text.
 
 ## Offline efficiency audit
 

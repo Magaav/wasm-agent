@@ -127,7 +127,7 @@ function audit(input) {
         if(number(end.ms)&&pair.start) {
           const clockName=end.clock==='monotonic'?'monotonic':end.clock==='wall-fallback'?'wall_fallback':'unknown';
           toolTimes.push(end.ms);bucket.times.push(end.ms);bucket.samples.push({ms:end.ms,failed:end.ok===false,
-            deadline:end.error==='deadline_exceeded',timeout_ms:count(end.timeout_ms)?end.timeout_ms:null});bucket.clocks[clockName]=(bucket.clocks[clockName]||0)+1;
+            deadline:end.error==='deadline_exceeded'});bucket.clocks[clockName]=(bucket.clocks[clockName]||0)+1;
           if(name==='bash'&&end.ms>=60000) {
             const argumentHash=pair.start.payload.arguments_hash;
             if(hash(argumentHash)) {

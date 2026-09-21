@@ -80,9 +80,8 @@ M.admin = {
     id = { type = "string" } }, { "id" }),
   -- The dialect is in the description because the model otherwise assumes POSIX
   -- and wastes its tool budget on commands this machine does not have.
-  schema("bash", "Run a foreground command on this machine using " .. platform.shell() .. ". Its entire process tree is owned and cleaned up; background descendants cannot outlive this call. Output and process exit are separate evidence. Use timeout_seconds to fail a bounded probe sooner; it can only shorten the host limit. For long work use operation start, keep its command foreground, then observe/cancel its handle.", {
-    command = { type = "string" }, cwd = { type = "string" },
-    timeout_seconds = { type = "integer", minimum = 1, maximum = 86400, description = "Optional shorter deadline; never increases the host's configured bash limit." } }, { "command" }),
+  schema("bash", "Run a foreground command on this machine using " .. platform.shell() .. ". Its entire process tree is owned and cleaned up; background descendants cannot outlive this call. Output and process exit are separate evidence. For a long-lived server/browser use operation start, keep its command foreground, then observe/cancel its handle.", {
+    command = { type = "string" }, cwd = { type = "string" } }, { "command" }),
   schema("operation", "Start, observe, read streamed output, wait briefly for, or cancel a supervised external operation. A launch receipt is not completion. Output read uses byte cursors; when text_lossy is true, decode content_base64 for exact bytes instead of concatenating content. Use await once to wait for settlement without repeated model polling (up to the operation deadline); wait is a short peek. Jobs are automation rules, not operations. No automatic replay after an unknown outcome.", {
     action = { type = "string", enum = {"start", "list", "status", "read", "wait", "await", "cancel"} },
     id = { type = "string" }, command = { type = "string" }, cwd = { type = "string" },
@@ -255,8 +254,8 @@ local function shell_quote(value)
   return "'" .. tostring(value or ""):gsub("'", "'\\''") .. "'"
 end
 
-local function run(command,timeout_seconds)
-  local ok, raw = pcall(host.exec, command, "", timeout_seconds and tostring(timeout_seconds) or "")
+local function run(command)
+  local ok, raw = pcall(host.exec, command, "")
   if not ok then return { error = tostring(raw) } end
   local decoded = json.decode(raw)
   if type(decoded) ~= "table" then return { error = tostring(raw) } end
@@ -318,9 +317,7 @@ function M.dispatch(memory, name, args, role, ctx)
     return memory.conversations(args.limit or 50)
   elseif name == "bash" then
     if not args.command or args.command == "" then return { error = "command_required" } end
-    if args.timeout_seconds~=nil and (type(args.timeout_seconds)~="number" or args.timeout_seconds%1~=0
-        or args.timeout_seconds<1 or args.timeout_seconds>86400) then return {error="invalid_timeout_seconds"} end
-    local result = run(args.cwd and ("cd " .. shell_quote(args.cwd) .. " && " .. args.command) or args.command,args.timeout_seconds)
+    local result = run(args.cwd and ("cd " .. shell_quote(args.cwd) .. " && " .. args.command) or args.command)
     return result
   elseif name == "read" then
     return file_tools.read(args)
