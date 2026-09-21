@@ -57,6 +57,13 @@ const WHATSAPP_URL = "web.whatsapp.com";
 import { acquire as acquireSendLock, defaultLockPath } from "./whatsapp-sendlock.mjs";
 import { composerMatches, classifySendAttempt } from "./whatsapp-reply-core.mjs";
 
+// The composer lock is released by `done`, but a crash between acquiring and sending must not leave the
+// lock for the stale timeout. One process-wide handler covers every abnormal exit.
+let sendLock = null;
+process.on("exit", () => {
+  if (sendLock) { try { sendLock.release(); } catch { /* already gone */ } }
+});
+
 function parseArgs(argv) {
   const args = { chat: "", body: "", bodyFile: "", send: false, toSelf: false, label: "", timeoutMs: 20000, lockWaitMs: 30000 };
   for (let index = 0; index < argv.length; index += 1) {
@@ -278,7 +285,6 @@ async function main() {
     if (result.exceptionDetails) throw new Error(result.exceptionDetails.text || "page_threw");
     return JSON.parse(result.result.value);
   };
-  let sendLock = null;
   const done = (payload, code) => {
     if (sendLock) { sendLock.release(); sendLock = null; }
     console.log(JSON.stringify({ endpoint, ...payload }));
