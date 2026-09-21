@@ -87,4 +87,22 @@ local stale = json.decode(host.subagent("status", json.encode({ id = "stale-chil
 assert(stale.state == "unknown" and stale.settled == true, "restart unknown: " .. json.encode(stale))
 print("MARK ok-restart-unknown")
 
+-- 9. The ordinary-run path: a parent agent calls the `subagent` tool, awaits the
+--    child in one bounded wait, and answers from its result. This is the path a
+--    real run and a job use; the mock distinguishes parent from child by the
+--    system prompt, so both loops really ran.
+local agentlib = dofile("lua/core/agent.lua")
+local run_session = memory.start_session("", "chat", { user_id = "alice", node_id = "", title = "parent-run" })
+local parent = agentlib.new(run_session, function() end, "master", "alice", "")
+local parent_reply = parent:run("spawn a child and report its answer")
+assert(tostring(parent_reply):find("parent-done", 1, true), "parent reply: " .. tostring(parent_reply))
+local saw_start, saw_await = false, false
+for _, message in ipairs(memory.session_messages(run_session, { all = true, exclude_summaries = true })) do
+  if message.role == "tool" and tostring(message.content):find('"subagent_id"', 1, true) then saw_start = true end
+  if message.role == "tool" and tostring(message.content):find('"reply"', 1, true) then saw_await = true end
+end
+assert(saw_start, "the parent transcript must record the start receipt")
+assert(saw_await, "the parent transcript must record the awaited child result")
+print("MARK ok-parent-run")
+
 print("SUBAGENTS_INTEGRATION_OK")
