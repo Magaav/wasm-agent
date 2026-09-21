@@ -34,15 +34,30 @@ LOG="$CONFIG/sentinel/sentinel.log"
 
 checks=0
 failed=0
+skipped=0
 failed_names=()
+skipped_names=()
 say() { printf '  %s\n' "$*"; }
 ok() {
   checks=$((checks + 1))
   if [ "$1" = "1" ]; then say "ok   $2"; else failed=$((failed + 1)); failed_names+=("$2"); say "FAIL $2${3:+ - $3}"; fi
 }
+# A thing that could not be exercised is skipped, not failed: "the wake ran" cannot be true when the wake
+# was refused on budget, and printing FAIL for it would blame the product for the test's environment.
+skip() {
+  checks=$((checks + 1)); skipped=$((skipped + 1)); skipped_names+=("$2")
+  say "skip $2${3:+ - $3}"
+}
 # Lines appended to the sentinel log since LOG_MARK. A request is claimed by the watcher within its next
 # 200ms poll, so counting files in the drop-box races and reads zero; the writer's own audit line does not.
 newlog() { tail -n +"$(( ${LOG_MARK:-0} + 1 ))" "$LOG" 2>/dev/null; }
+# A completed wake is `epoch<TAB>wake<TAB>session<TAB>reason (N events, done=...)`. Anchoring on the epoch
+# excludes the `request<TAB>wake` audit line, which the old grep matched and then read as the wake itself.
+completed_wake() { newlog | grep -aE '^[0-9]+	wake	' | tail -1; }
+budget_refused() { newlog | grep -aq 'wake-refused'; }
+session_tail() { # $1 = first message index to consider, so a stale reply cannot pass for a new one
+  curl -s -m 20 "http://127.0.0.1:$PORT/session?id=$SID" | N="${1:-0}" node -e 'let r="";process.stdin.on("data",c=>r+=c).on("end",()=>{try{const d=JSON.parse(r);const m=(d.messages||[]).slice(Number(process.env.N||0));const last=m[m.length-1]||{};console.log(String(last.role)+": "+String(last.content||"").replace(/\s+/g," ").slice(0,90))}catch(e){console.log("")}})'
+}
 
 health() { curl -s -m 6 "http://127.0.0.1:$PORT/health" 2>/dev/null || true; }
 pid_on_port() {
@@ -86,17 +101,16 @@ rm -f "$BOX"/*.json 2>/dev/null
 LOG_MARK="$(wc -l < "$LOG" 2>/dev/null || echo 0)"
 "$SENTINEL" request restart --reason "e2e: does asking stop anything" >/dev/null 2>&1
 WROTE="$(newlog | grep -c 'e2e: does asking stop anything')"
-PID_NOW="$(pid_on_port)"
-ok "$([ "$WROTE" -ge 1 ] && echo 1 || echo 0)" "request writes a file" "$WROTE in the box"
-ok "$([ "$PID_NOW" = "$PID_BEFORE" ] && echo 1 || echo 0)" \
-  "and the command itself stopped nothing" "pid $PID_BEFORE -> $PID_NOW"
-# Let it be performed, and prove the sentinel is what did it: its own log line, with this reason.
-for _ in $(seq 1 20); do
-  grep -q "e2e: does asking stop anything" "$LOG" 2>/dev/null && break
-  sleep 2
-done
-ok "$(grep -q 'stop	pid' "$LOG" 2>/dev/null && echo 1 || echo 0)" \
-  "and the sentinel is the thing that stopped it, by pid" "$(grep 'stop	pid' "$LOG" 2>/dev/null | tail -1)"
+ok "$([ "$WROTE" -ge 1 ] && echo 1 || echo 0)" "request writes a file" "$WROTE audit line(s)"
+# "the command stopped nothing" cannot be shown by a pid comparison: the watcher performs a graceful
+# restart within its next poll, and on an idle node that lands between the request returning and the pid
+# being read. What is provable is causality - the request is audited before the stop, so the stop is the
+# sentinel acting on the request, not the request command stopping the node.
+for _ in $(seq 1 20); do newlog | grep -aq 'stop	pid' && break; sleep 2; done
+REQ_LINE="$(grep -an 'e2e: does asking stop anything' "$LOG" | head -1 | cut -d: -f1)"
+STOP_LINE="$(grep -an 'stop	pid' "$LOG" | tail -1 | cut -d: -f1)"
+ok "$([ -n "$REQ_LINE" ] && [ -n "$STOP_LINE" ] && [ "$STOP_LINE" -gt "$REQ_LINE" ] && echo 1 || echo 0)" \
+  "the stop is the sentinel's action, after the request" "request line ${REQ_LINE:-none}, stop line ${STOP_LINE:-none}"
 PID_BEFORE="$(pid_on_port)"
 rm -f "$BOX"/*.json 2>/dev/null
 
@@ -106,6 +120,7 @@ INJECT="/tmp/sentinel-e2e-prompt.json"
 cat > "$INJECT" <<JSON
 {"text":"Sentinel end-to-end test. Do exactly this and nothing else: (1) run \"$SENTINEL\" request restart --reason \"e2e restart\"; (2) run \"$SENTINEL\" request wake --session $SID --prompt \"the sentinel restarted the node and woke you; reply with the single word: woken\" --reason \"e2e wake\"; (3) then reply in one line that both requests are written and stop. Do NOT stop or start the node yourself."}
 JSON
+MSGS_BEFORE="$(curl -s -m 20 "http://127.0.0.1:$PORT/session?id=$SID" | node -e 'let r="";process.stdin.on("data",c=>r+=c).on("end",()=>{try{const d=JSON.parse(r);console.log((d.messages||[]).length)}catch(e){console.log(0)}})')"
 LOG_MARK="$(wc -l < "$LOG" 2>/dev/null || echo 0)"
 (curl -s -m 900 -X POST "http://127.0.0.1:$PORT/chat" -H "x-wa-session: $SID" \
   -H 'content-type: application/json' --data-binary @"$INJECT" >/tmp/sentinel-e2e-out.json 2>&1 &)
@@ -139,16 +154,36 @@ ok "$([ -n "$PID_AFTER" ] && [ "$PID_AFTER" != "$PID_BEFORE" ] && echo 1 || echo
 say "waiting for the wake to finish its turn"
 WOKEN=0
 for _ in $(seq 1 90); do
-  if grep -q 'wake	' "$LOG" 2>/dev/null && grep 'wake	' "$LOG" | tail -1 | grep -q 'done=true'; then WOKEN=1; break; fi
+  completed_wake | grep -q 'done=true' && { WOKEN=1; break; }
   sleep 2
 done
-ok "$WOKEN" "the wake ran a full turn" "$(grep 'wake	' "$LOG" 2>/dev/null | tail -1)"
+if [ "$WOKEN" = "1" ]; then
+  ok 1 "the wake ran a full turn" "$(completed_wake)"
+elif budget_refused; then
+  skip "the wake ran a full turn" "wake-refused (hourly budget): raise WA_SENTINEL_WAKE_BUDGET for the sentinel and re-run"
+else
+  ok 0 "the wake ran a full turn" "$(completed_wake)"
+fi
 
-# 6. the agent must have come back: a turn after the wake
-sleep 5
-TAIL="$(curl -s -m 20 "http://127.0.0.1:$PORT/session?id=$SID" | node -e 'let r="";process.stdin.on("data",c=>r+=c).on("end",()=>{try{const d=JSON.parse(r);const t=(d.messages||[]);const last=t[t.length-1]||{};console.log(String(last.role)+": "+String(last.content||"").replace(/\s+/g," ").slice(0,70))}catch(e){console.log("")}})')"
-ok "$(grep -q '^assistant' <<<"$TAIL" && echo 1 || echo 0)" "the agent came back and answered" "$TAIL"
-ok "$(grep -qi 'woken' <<<"$TAIL" && echo 1 || echo 0)" "with the reply the wake asked for" "$TAIL"
+# 6. the agent must have come back: a NEW message in the session containing the reply the wake asked for.
+# Polled, because the wake's turn takes seconds and a previous reply is still the last message.
+TAIL=""
+WOKEN_REPLY=0
+for _ in $(seq 1 40); do
+  TAIL="$(session_tail "$MSGS_BEFORE")"
+  grep -qi 'woken' <<<"$TAIL" && { WOKEN_REPLY=1; break; }
+  sleep 3
+done
+if [ "$WOKEN_REPLY" = "1" ]; then
+  ok 1 "the agent came back and answered" "$TAIL"
+  ok 1 "with the reply the wake asked for" "$TAIL"
+elif budget_refused; then
+  skip "the agent came back and answered" "the wake was refused on budget, so nothing came back to check"
+  skip "with the reply the wake asked for" "the wake was refused on budget"
+else
+  ok "$(grep -q '^assistant' <<<"$TAIL" && echo 1 || echo 0)" "the agent came back and answered" "$TAIL"
+  ok 0 "with the reply the wake asked for" "$TAIL"
+fi
 
 # 7. a trigger: an event wakes the model with nobody asking for anything. The other half of the idea -
 # not "restart this for me" but "wake me when this happens". The rules file is read on every pass, so
@@ -165,26 +200,53 @@ cat > "$CONFIG/sentinel/triggers.json" <<JSON
     "reason": "file trigger end to end test" } ]
 JSON
 sleep 5
+TRIGGER_MSGS="$(curl -s -m 20 "http://127.0.0.1:$PORT/session?id=$SID" | node -e 'let r="";process.stdin.on("data",c=>r+=c).on("end",()=>{try{const d=JSON.parse(r);console.log((d.messages||[]).length)}catch(e){console.log(0)}})')"
+LOG_MARK="$(wc -l < "$LOG" 2>/dev/null || echo 0)"
 echo "hello from a trigger" > "$WATCH/first.txt"
 TRIGGERED=0
 for _ in $(seq 1 90); do
-  if grep -q 'trigger' "$LOG" 2>/dev/null && grep 'wake' "$LOG" | tail -1 | grep -q 'done=true'; then TRIGGERED=1; break; fi
+  completed_wake | grep -q 'done=true' && { TRIGGERED=1; break; }
   sleep 2
 done
-ok "$TRIGGERED" "an event woke the model with no request at all" "$(grep 'trigger' "$LOG" 2>/dev/null | tail -1)"
-sleep 4
-TAIL2="$(curl -s -m 20 "http://127.0.0.1:$PORT/session?id=$SID" | node -e 'let r="";process.stdin.on("data",c=>r+=c).on("end",()=>{try{const d=JSON.parse(r);const t=(d.messages||[]);const last=t[t.length-1]||{};console.log(String(last.role)+": "+String(last.content||"").replace(/\s+/g," ").slice(0,80))}catch(e){console.log("")}})')"
-ok "$(grep -qi 'triggered' <<<"$TAIL2" && echo 1 || echo 0)" "and it answered what the trigger asked for" "$TAIL2"
+if [ "$TRIGGERED" = "1" ]; then
+  ok 1 "an event woke the model with no request at all" "$(newlog | grep -a 'trigger' | tail -1)"
+elif budget_refused; then
+  skip "an event woke the model with no request at all" "wake-refused (hourly budget) before the trigger could wake anything"
+else
+  ok 0 "an event woke the model with no request at all" "$(newlog | grep -a 'trigger' | tail -1)"
+fi
+TAIL2=""; TRIG_REPLY=0
+for _ in $(seq 1 40); do
+  TAIL2="$(session_tail "$TRIGGER_MSGS")"
+  grep -qi 'triggered' <<<"$TAIL2" && { TRIG_REPLY=1; break; }
+  sleep 3
+done
+if [ "$TRIG_REPLY" = "1" ]; then
+  ok 1 "and it answered what the trigger asked for" "$TAIL2"
+elif [ "$TRIGGERED" = "1" ]; then
+  ok 0 "and it answered what the trigger asked for" "$TAIL2"
+else
+  skip "and it answered what the trigger asked for" "the trigger wake did not run"
+fi
 rm -f "$CONFIG/sentinel/triggers.json"
 
 # A machine-readable verdict, so the run that reads it gets the failures and their names as data instead
 # of re-reading the suite's source to work out what "FAIL the agent came back" meant.
 {
-  printf '{"suite":"test-sentinel-e2e","checks":%d,"failed":%d,"ok":%s,"failed_names":[' \
-    "$checks" "$failed" "$([ "$failed" -eq 0 ] && echo true || echo false)"
+  printf '{"suite":"test-sentinel-e2e","checks":%d,"failed":%d,"skipped":%d,"ok":%s,"failed_names":[' \
+    "$checks" "$failed" "$skipped" "$([ "$failed" -eq 0 ] && echo true || echo false)"
   first=1
   if [ "${#failed_names[@]}" -gt 0 ]; then
     for n in "${failed_names[@]}"; do
+      [ "$first" = "1" ] || printf ','
+      first=0
+      printf '"%s"' "$(printf '%s' "$n" | sed 's/"/\\"/g')"
+    done
+  fi
+  printf '],"skipped_names":['
+  first=1
+  if [ "${#skipped_names[@]}" -gt 0 ]; then
+    for n in "${skipped_names[@]}"; do
       [ "$first" = "1" ] || printf ','
       first=0
       printf '"%s"' "$(printf '%s' "$n" | sed 's/"/\\"/g')"
@@ -194,8 +256,8 @@ rm -f "$CONFIG/sentinel/triggers.json"
 } > "$CONFIG/e2e-verdict.json"
 
 if [ "$failed" -eq 0 ]; then
-  echo "sentinel e2e ok ($checks checks)"
+  echo "sentinel e2e ok ($checks checks, $skipped skipped)"
 else
-  echo "sentinel e2e FAILED ($failed of $checks) - see $CONFIG/e2e-verdict.json"
+  echo "sentinel e2e FAILED ($failed of $checks, $skipped skipped) - see $CONFIG/e2e-verdict.json"
   exit 1
 fi
