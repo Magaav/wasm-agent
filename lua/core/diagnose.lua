@@ -3,7 +3,11 @@ local json=dofile('lua/vendor/json.lua')
 local M={}
 function M.run(steps,dispatch)
   if type(steps)~='table' or #steps<1 or #steps>8 then return {error='steps_required_1_to_8'} end
-  for i,step in ipairs(steps) do
+  for key in pairs(steps) do
+    if type(key)~='number' or key%1~=0 or key<1 or key>#steps then return {error='steps_must_be_dense_array'} end
+  end
+  for i=1,#steps do
+    local step=steps[i]
     if type(step)~='table' or (step.tool~='read' and step.tool~='grep') or type(step.args)~='table' then
       return {error='only_read_and_grep_steps',step=i}
     end

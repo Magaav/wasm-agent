@@ -254,5 +254,9 @@ fn launch_failure_is_visible() {
     let s = settled(&m, &id);
     assert_eq!(s["ok"], false);
     assert!(s["error"].is_string());
+    // A notification is not permission to outrun the durable failure record.
+    let restored=Manager::new(&root).snapshot(&id).unwrap();
+    assert_eq!(restored["state"],"failed");
+    assert_eq!(restored["error"],s["error"]);
     fs::remove_dir_all(root).unwrap();
 }

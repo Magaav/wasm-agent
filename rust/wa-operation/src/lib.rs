@@ -176,7 +176,7 @@ impl Manager {
                     Err(_) => Some("operation_supervisor_panicked".into()),
                 };
                 if let Some(reason) = failure {
-                    let mut s = entry.state.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut s = entry.state.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     s["state"] = json!(if reason == "cancelled" {
                         "cancelled"
                     } else {
@@ -188,10 +188,11 @@ impl Manager {
                     s["cleanup"] = json!("unknown");
                     s["output_complete"] = json!(false);
                     s["elapsed_ms"] = json!(entry.started.elapsed().as_millis() as u64);
-                    let record = s.clone();
-                    drop(s);
+                    if let Err(e) = atomic_json(&dir.join("state.json"), &s) {
+                        s["persistence_error"] = json!(e.to_string());
+                    }
+                    *entry.state.lock().unwrap_or_else(|e| e.into_inner()) = s;
                     entry.settled.notify_all();
-                    let _ = atomic_json(&dir.join("state.json"), &record);
                 }
             });
         if let Err(e) = result {

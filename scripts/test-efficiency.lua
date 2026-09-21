@@ -54,6 +54,8 @@ r=diagnosis.run(steps,function(_,args)called=called+1;return files.read(args)end
 check(not r.ok and r.stopped_at==1 and r.not_run==1 and called==1,'workflow stops without repair or retry')
 called=0;r=diagnosis.run({{tool='read',args={path=path}},{tool='bash',args={command='never'}}},function()called=called+1 end)
 check(r.error and called==0,'entire workflow validated before first step')
+r=diagnosis.run({[1]={tool='read',args={path=path}},[3]={tool='read',args={path=path}}},function()called=called+1 end)
+check(r.error and called==0,'sparse plans cannot silently skip requested steps')
 r=tools.dispatch(memory,'diagnose',{steps={{tool='read',args={path=path},expect={contains='aaa'}},{tool='grep',args={path=path,pattern='aa'},expect={min_matches=1,max_matches=1}}}},'master')
 check(r.ok and #r.results==2,'predetermined diagnostics complete with evidence')
 local range_path=save('range','first\nsecond\n')
