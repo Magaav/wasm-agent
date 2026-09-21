@@ -100,6 +100,13 @@ causal claim that one harness wins. Investigate repeated identical tool argument
 cache misses, large views, compaction frequency and failed tools as signals—not
 as automatic evidence of waste.
 
+## Offline efficiency audit
+
+[Token efficiency](TOKEN_EFFICIENCY.md) documents the opt-in metadata-export
+reporter and the model-free replacements for the ineffective tool-budget A/B
+scripts. They do not change requests, schemas or runtime policy. Byte reduction,
+cache share and retained originals alone do not prove equal task quality.
+
 ## Verification
 
 `scripts/test-observability.lua` runs through the actual Lua agent/provider with

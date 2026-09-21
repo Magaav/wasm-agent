@@ -393,6 +393,9 @@ LUA
 WA_SCRIPT="$DB.evidence.lua" "$BIN" --db "$DB" | grep "tool evidence ok"
 rm -f "$DB.evidence.lua"
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB.observability" | grep 'observability ok'
+# Real projector, isolated home, exact artifact recovery. No paid model or ignored A/B switch.
+WA_BIN="$BIN" bash scripts/bench-tool-budget.sh
+WA_BIN="$BIN" bash scripts/bench-tool-tail.sh
 # Which conversation a turn lands in. The name a client sends is the only thing that
 # lets a window start a thread or return to one: before this, `agent_for` always passed
 # nil, so every turn from every window landed in the newest open session and that one
