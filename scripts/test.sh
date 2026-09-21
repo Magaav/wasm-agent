@@ -905,6 +905,7 @@ ISOLATION_PORT=$(node scripts/free-test-port-block.cjs)
 WA_BIN="$BIN" bash scripts/test-run-isolation.sh "$ISOLATION_PORT" > "$DB.isolation.log" 2>&1 || {
   echo "the run-isolation fixture failed; its output:"; tail -40 "$DB.isolation.log"; exit 1; }
 grep '^run isolation ok$' "$DB.isolation.log"
+node scripts/test-sqlite-isolation.cjs "$BIN"
 rm -f "$DB.window"*
 echo "recovery cli ok"
 

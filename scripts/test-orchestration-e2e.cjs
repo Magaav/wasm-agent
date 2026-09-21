@@ -49,7 +49,7 @@ function answer(res, label) {
       allowed_tools:[],resources:{},limits:{timeout_seconds:40,max_output_bytes:4096,max_tokens:8000},
     }));
     const clean=Object.fromEntries(Object.entries(process.env).filter(([k])=>!/^(WASM_AGENT_|WA_|OPENAI_|OPENCODE_)/.test(k)));
-    const env={...clean,WASM_AGENT_HOME:root,WASM_AGENT_LUA_ROOT:repo,WASM_AGENT_LLM_BASE_URL:`http://127.0.0.1:${modelPort}`,
+    const env={...clean,WASM_AGENT_HOME:root,WASM_AGENT_LUA_ROOT:repo,WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_RELAY:'',WASM_AGENT_MANAGED:'0',WASM_AGENT_LLM_BASE_URL:`http://127.0.0.1:${modelPort}`,
       WASM_AGENT_LLM_API_KEY:'fixture-only',WASM_AGENT_LLM_MODEL:'fixture',WASM_AGENT_AGENTS_MD:path.join(config,'AGENTS.md'),
       WASM_AGENT_SUBAGENT_CONCURRENCY:'2',WASM_AGENT_SUBAGENT_QUEUE_DEPTH:'4'};
     hostLog=fs.openSync(path.join(root,'node.log'),'a');
