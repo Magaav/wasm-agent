@@ -15,12 +15,19 @@ cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host file_s
 # conversation in the body's `thread`, not the auth header) and the UI version tracking content rather
 # than mtime (a `cp -f` of identical files must not force every open page to reload).
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host serve::
+cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host subagents::
 cargo test --release --offline --manifest-path rust/wa-sentinel/Cargo.toml
 # The named-instance lifecycle, against two real co-located nodes: separate homes, keys, databases
 # and ports; a refused wrong listener; and a stop/restart of one that cannot reach the other. No
 # model and no network, so it belongs in the hermetic gate rather than the on-demand guest e2e.
 CARGO_BUILD_JOBS=2 cargo build --release --offline --manifest-path rust/wa-sentinel/Cargo.toml >/dev/null
-bash scripts/test-node-instances.sh
+INSTANCE_VERDICT="$(mktemp)"
+rm -f "$INSTANCE_VERDICT" # The child must produce NEW evidence, never a previous run's verdict.
+INSTANCE_STATUS=0
+WA_INSTANCE_VERDICT="$INSTANCE_VERDICT" bash scripts/test-node-instances.sh || INSTANCE_STATUS=$?
+INSTANCE_SKIPPED=$(node scripts/lib/suite-verdict.cjs "$INSTANCE_VERDICT" test-node-instances "$INSTANCE_STATUS" 25)
+SKIPPED=$((SKIPPED + INSTANCE_SKIPPED))
+rm -f "$INSTANCE_VERDICT"
 BIN=rust/target/release/wa
 # A turn cannot deploy the process serving that same turn. The marker crosses
 # the Rust host's shell boundary; both entry points must refuse before waiting
@@ -893,6 +900,9 @@ WEDGE_ONLY=1 WA_BIN="$BIN" bash scripts/test-serve-concurrency.sh 8893 > "$DB.co
 # Both claims are read from one run: the pair costs one fixture, not two.
 grep "a stalled worker is visible" "$DB.concurrency.log"
 grep "the client bridge survived a connection that said nothing" "$DB.concurrency.log"
+WA_BIN="$BIN" bash scripts/test-run-isolation.sh 8961 > "$DB.isolation.log" 2>&1 || {
+  echo "the run-isolation fixture failed; its output:"; tail -40 "$DB.isolation.log"; exit 1; }
+grep '^run isolation ok$' "$DB.isolation.log"
 rm -f "$DB.window"*
 echo "recovery cli ok"
 
@@ -1103,6 +1113,7 @@ node scripts/test-naming-check.cjs
 node scripts/test-execution-terminology.cjs
 node scripts/test-auth-sessions.cjs "$BIN"
 node scripts/test-fixture-verdict.cjs
+node scripts/test-suite-verdict.cjs
 
 # The image-attachment tests, plus the helper tests that came with them. They were
 # written, they passed when run by hand, and nothing ran them - which is how a test
@@ -1123,6 +1134,12 @@ echo "attach tests ok"
 # Local mock provider only; no account, paid model or external browser required.
 node scripts/test-operation-control.cjs "$BIN"
 node scripts/test-operation-control.cjs "$BIN" --await
+
+# Actual child runtime and real sentinel deliveries, never a /subagents route stub.
+WA_SCRIPT=scripts/test-subagents-profiles.lua "$BIN" --db "$DB.subagent-policy" | grep 'subagents profiles ok'
+node scripts/test-subagents.cjs "$BIN"
+node scripts/test-job-subagents.cjs
+node scripts/test-orchestration-e2e.cjs "$BIN"
 
 # The UI tests are JS and run outside the embedded interpreter, so they need node
 # and they need the repo root as cwd (they read ui/app.js from disk). A test that does
