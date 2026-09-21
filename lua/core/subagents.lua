@@ -114,15 +114,27 @@ function M.profiles()
   return profiles, errors
 end
 
-local function as_set(list)
+local function as_set(value)
+  -- Accepts either a list of names or a name->true map, because a caller may pass
+  -- a ceiling in either shape; `ipairs` alone silently emptied the map case.
   local set = {}
-  for _, name in ipairs(list or {}) do set[tostring(name)] = true end
+  if type(value) ~= "table" then return set end
+  for key, entry in pairs(value) do
+    if type(key) == "number" then
+      set[tostring(entry)] = true
+    else
+      set[tostring(key)] = true
+    end
+  end
   return set
 end
 
 local function check_profile(profile, path)
   local problems = {}
-  if type(profile.allowed_tools) ~= "table" or #profile.allowed_tools == 0 then
+  -- An empty `allowed_tools` is allowed: it means reasoning-only, with no tools
+  -- at all. A missing table is still refused, because that is a profile that
+  -- forgot the field rather than one that chose to have none.
+  if type(profile.allowed_tools) ~= "table" then
     problems[#problems + 1] = "allowed_tools_required"
   else
     local seen = {}
@@ -157,15 +169,18 @@ function M.resolve(id, ctx)
   local problems = check_profile(profile)
   if #problems > 0 then return nil, "invalid_profile:" .. table.concat(problems, ",") end
 
-  local ceiling = as_set(ctx.ceiling or {})
-  if next(ceiling) == nil then
+  local ceiling = ctx.ceiling
+  if ceiling == nil then
     -- No server-built ceiling was supplied (a direct policy call): derive it from
-    -- the role's own schema list rather than trusting a caller to narrow itself.
+    -- the role's own schema list. An explicitly empty ceiling is NOT re-derived -
+    -- "this principal has no tools" must mean none, not the role default.
+    ceiling = {}
     for _, item in ipairs(tools.all(ctx.role or "master")) do
       local name = item["function"] and item["function"].name
       if name then ceiling[name] = true end
     end
   end
+  ceiling = as_set(ceiling)
   local allowed_list, allowed_set = {}, {}
   for _, name in ipairs(profile.allowed_tools) do
     name = tostring(name)
@@ -286,6 +301,48 @@ local function truthy_limits(profile)
   return limits
 end
 
+-- Is this conversation in the profile's approved scope?
+local function scope_has(profile, conversation_id)
+  local resources = profile.resources or {}
+  if type(resources.allowed_conversations) == "table" then
+    for _, value in ipairs(resources.allowed_conversations) do
+      if value == conversation_id then return true end
+    end
+  end
+  if resources.conversation == conversation_id then return true end
+  return resources.allowed_conversation == conversation_id
+end
+
+local function profile_is_scoped(profile)
+  local resources = profile.resources or {}
+  return resources.conversation ~= nil or resources.allowed_conversation ~= nil
+    or type(resources.allowed_conversations) == "table"
+end
+
+-- Resolve the trusted event from the ledger: the caller may name a message id,
+-- and nothing else. The conversation is read off the row, so an event cannot
+-- choose its own scope, and a scoped profile refuses a message outside it. A raw
+-- event field like a script, path or endpoint is ignored entirely.
+local function resolve_event(profile, args)
+  local requested = args.event
+  local scoped = profile_is_scoped(profile)
+  if type(requested) ~= "table" then
+    if scoped then return nil, "event_context_required" end
+    return nil, nil
+  end
+  local message_id = tostring(requested.message_id or "")
+  if message_id == "" then
+    if scoped then return nil, "event_context_required" end
+    return nil, nil
+  end
+  local row = memory.ledger_message(message_id)
+  if not row then return nil, "event_message_unknown_or_ambiguous" end
+  if scoped and not scope_has(profile, row.conversation_id) then
+    return nil, "event_conversation_not_in_profile"
+  end
+  return { conversation_id = row.conversation_id, message_id = row.message_id }, nil
+end
+
 -- Start one child. Ownership, depth and the allowed set are derived here; the
 -- caller supplies only the task, an optional profile, and approved overrides.
 function M.start(args, ctx)
@@ -315,6 +372,8 @@ function M.start(args, ctx)
   local reasoning_ok, reasoning_error = approved_reasoning(effective_model, reasoning)
   if not reasoning_ok then return { error = reasoning_error } end
   local limits = truthy_limits(profile)
+  local event, event_error = resolve_event(profile, args)
+  if event_error then return { error = event_error } end
   -- A dollar cap is only meaningful when the model's rates are known. Fail
   -- closed: an unpriceable model cannot promise a dollar bound.
   if limits.max_cost_usd and not provider.rates(effective_model) then
@@ -365,6 +424,7 @@ function M.start(args, ctx)
     timeout_seconds = limits.timeout_seconds,
     idempotency_key = idempotency,
     resources = profile.resources,
+    event = event,
   }
   local receipt = json.decode(host.subagent("start", json.encode(spec)))
   if type(receipt) ~= "table" then return { error = "subagent_runtime_error" } end
@@ -453,6 +513,21 @@ function wa_subagent_run(receipt_json)
   local allowed = as_set(profile.allowed_tools)
   local child_role = tostring(receipt.role or "master")
   local events = {}
+  -- The approved profile is snapshotted here, immutably: a specialist tool
+  -- (whatsapp) must see the resources and limits the operator approved, not a
+  -- re-derived or caller-supplied subset.
+  local profile_snapshot = {
+    schema_version = 1,
+    id = profile.id,
+    allowed_tools = profile.allowed_tools,
+    instructions = profile.instructions,
+    resources = profile.resources,
+    limits = profile.limits,
+  }
+  -- Durable effects and the persistent per-child send budget, bound to this
+  -- child's session.
+  local effects = dofile("lua/core/effects.lua").new(receipt.session_id)
+  local sends = { count = effects.count(), limit = tonumber(limits.sends_per_run) or 1 }
   local child_ok, child = pcall(agentlib.new, receipt.session_id, function(event)
     -- Events stay local: a child must never write into the parent's stream.
     events[#events + 1] = event
@@ -462,6 +537,10 @@ function wa_subagent_run(receipt_json)
       instructions = profile.instructions, limits = limits,
       model = profile.model, reasoning = profile.reasoning,
       resources = profile.resources,
+      profile = profile_snapshot,
+      event = receipt.event,
+      effects = effects,
+      sends = sends,
       depth = tonumber(receipt.depth) or 1,
     },
   })

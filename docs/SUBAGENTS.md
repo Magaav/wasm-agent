@@ -165,13 +165,45 @@ and never as an automatic retry.
 
 ## WhatsApp responder seam (with the automation worker)
 
-The specialist profile is `whatsapp-responder`. Its `allowed_tools` must name the
-tools the automation worker exposes from `lua/core/whatsapp.lua`; the proposed
-names are `whatsapp_read` (read a permitted conversation) and `whatsapp_send`
-(validate and send an exact body to an exact recipient). Those schemas must be in
-`tools.all(role)` for `all_for` and `resolve` to see them — that is the adapter:
-the automation worker adds the tools, this subsystem filters and re-checks them.
-The profile should record the permitted conversation and action in `resources`
-(e.g. `{"conversation": "<id>", "actions": ["read", "send"]}`) so the authority is
-the resource, not the tool name. Drafting and sending remain different
-capabilities: a child that may read a conversation is not thereby allowed to send.
+The specialist profile is `whatsapp-responder`, and `lua/core/whatsapp.lua` is
+embedded in the host. Its advertised tools are `whatsapp_read`,
+`whatsapp_decide` and `whatsapp_send`; the schemas are added to `tools.all(role)`
+and filtered by the profile's exact `allowed_tools`, with `tools.dispatch`
+re-checking the ceiling before routing to `whatsapp.dispatch`.
+
+The runtime passes the module the trusted snapshot the child already holds:
+`ctx.subagent` (the immutable resolved profile, with its `resources` and every
+declared limit), `ctx.event` (only `{conversation_id, message_id}`, resolved from
+the ledger - a raw event cannot supply a script, path, endpoint or wider scope),
+and `ctx.effects` (the durable SQLite adapter built by `lua/core/effects.lua` for
+this child session). `ctx.send` is for tests only.
+
+`ctx.effects` satisfies the contract the module documents:
+
+```
+effects.reserve({message_id, conversation_id, body, limit})
+  -> {status="reserved"|"already_sent"|"ambiguous"|"budget_exceeded", record?}
+effects.confirm({message_id, conversation_id, message})
+  -> boolean   -- only advances a pending reservation
+effects.record(decision_record)
+  -> boolean   -- separate table; can never erase a send reservation
+effects.reconcile({message_id, ...}) -> {status="sent"|"not_sent"|"unknown", record?}
+effects.release({message_id}) -> boolean   -- only when no effect happened
+effects.unknown({message_id, detail}) -> boolean   -- ambiguous, never replayed
+effects.find(message_id) -> record|nil
+effects.count() -> n   -- this child's persistent send budget used
+```
+
+`reserve` is one atomic `INSERT .. SELECT`: a new reservation is created only
+when no send record exists for the message and this child's pending+sent+unknown
+count is below `limit`. A crash between reserve and confirm therefore leaves a
+pending row, and the next attempt returns `ambiguous` (`reconcile` is read-only
+and returns `unknown`, never `not_sent`, because this adapter cannot see the
+app's store). A send whose confirmation cannot be written is reported as
+not-success, not as sent. Decisions live in their own table, keyed by the message
+id, so recording one never erases a reservation.
+
+Drafting and sending remain different capabilities: `resources.actions` gates
+them separately, `resources.send_approved` must be true to send, and the route
+(`store` vs `ui`) is bound in the profile, never derived from an event or an
+argument.

@@ -132,4 +132,110 @@ check(memory.ensure_session("routing-user", "routing-node", "chat") == normal,
 check(memory.session(child_session).parent_session_id == normal,
   "a subagent session must carry its parent link")
 
+-- 11. An empty `allowed_tools` means reasoning-only: no tools at all, and the
+--     schema list a child is offered is empty.
+write_profile("reason-only", {
+  schema_version = 1, id = "reason-only", allowed_tools = {}, limits = { timeout_seconds = 60 },
+})
+local reason_only, reason_refusal = subagents.resolve("reason-only", ctx("alice"))
+check(reason_only, "an empty allowed_tools profile must resolve: " .. tostring(reason_refusal))
+check(#reason_only.allowed_tools == 0, "an empty profile must allow no tools")
+check(#tools.all_for(reason_only.allowed, "master") == 0, "an empty profile must offer no schemas")
+
+-- 12. An explicitly empty parent ceiling means none, never the role default.
+local no_tools, no_tools_why = subagents.resolve("explore", { role = "master", ceiling = {} })
+check(no_tools == nil, "an empty ceiling must not be re-derived from the role")
+check(tostring(no_tools_why):find("profile_exceeds_caller", 1, true), "the refusal names the tool: " .. tostring(no_tools_why))
+
+-- 13. The durable effect adapter: one send per source message, a persistent
+--     per-child budget, and a decision that cannot erase a reservation.
+local effects = dofile("lua/core/effects.lua")
+local store = effects.new("effects-session-1")
+local first = store.reserve({ message_id = "m-1", conversation_id = "c-1", body = "a", limit = 1 })
+check(first.status == "reserved", "first reserve: " .. json.encode(first))
+local second = store.reserve({ message_id = "m-1", conversation_id = "c-1", body = "a", limit = 1 })
+check(second.status == "ambiguous", "a second reserve of a pending message is ambiguous: " .. json.encode(second))
+check(store.count() == 1, "the budget counts the pending reservation")
+check(store.confirm({ message_id = "m-1", message = { id = "sent-1" } }) == true, "confirm must persist")
+local replayed = store.reserve({ message_id = "m-1", conversation_id = "c-1", body = "a", limit = 1 })
+check(replayed.status == "already_sent", "a confirmed send must not be reserved again: " .. json.encode(replayed))
+local over_budget = store.reserve({ message_id = "m-2", conversation_id = "c-1", body = "b", limit = 1 })
+check(over_budget.status == "budget_exceeded", "the per-child budget must persist: " .. json.encode(over_budget))
+check(store.record({ message_id = "m-1", conversation_id = "c-1", decision = "reply", reason = "r" }) == true,
+  "a decision must be durable")
+check(store.reserve({ message_id = "m-1", conversation_id = "c-1", body = "a", limit = 1 }).status == "already_sent",
+  "a decision must not erase the send reservation")
+local unknown_store = effects.new("effects-session-2")
+unknown_store.reserve({ message_id = "m-3", conversation_id = "c-1", body = "c", limit = 2 })
+unknown_store.unknown({ message_id = "m-3", detail = "ambiguous" })
+check(unknown_store.find("m-3").state == "unknown", "an ambiguous outcome must be recorded, never replayed")
+
+-- 14. The WhatsApp responder reaches only the conversation of the trusted event,
+--     and a verified send is confirmed durably with the profile's budget.
+memory.record_message({ conversation_id = "c-wa", message_id = "m-wa", body = "hello", kind = "direct", title = "Direct" })
+memory.record_message({ conversation_id = "c-other", message_id = "m-other", body = "elsewhere", kind = "direct", title = "Other" })
+local whatsapp = dofile("lua/core/whatsapp.lua")
+local wa_profile = {
+  schema_version = 1, id = "whatsapp-responder",
+  allowed_tools = { "whatsapp_read", "whatsapp_decide", "whatsapp_send" },
+  instructions = "",
+  resources = { conversation = "c-wa", send_approved = true, send_path = "ui",
+    reply_script = "reply.js", self_destination = "c-wa" },
+  limits = { context_messages = 20, body_bytes = 4096, sends_per_run = 1 },
+}
+local wa_store = effects.new("wa-session-1")
+local wa_ctx = { profile = wa_profile, event = { conversation_id = "c-wa", message_id = "m-wa" },
+  effects = wa_store, sends = { count = 0, limit = 1 } }
+local conversation = whatsapp.dispatch(memory, "whatsapp_read", { limit = 10 }, wa_ctx)
+check(conversation.conversation_id == "c-wa" and #conversation.messages >= 1,
+  "the event's conversation must be read: " .. json.encode(conversation))
+local wrong_scope = whatsapp.dispatch(memory, "whatsapp_read", {}, {
+  profile = wa_profile, event = { conversation_id = "c-other", message_id = "m-other" }, effects = wa_store })
+check(wrong_scope.error == "conversation_not_in_profile", "a conversation outside the profile must be refused")
+check(whatsapp.dispatch(memory, "whatsapp_decide", { decision = "reply", reason = "r" }, wa_ctx).recorded == true,
+  "the decision must be recorded")
+local verified = whatsapp.dispatch(memory, "whatsapp_send", { body = "hi there", confirm = true }, {
+  profile = wa_profile, event = { conversation_id = "c-wa", message_id = "m-wa" }, effects = wa_store,
+  send = function(request)
+    return { ok = true, sent = true, verified = true, chat = { id = request.conversation_id },
+      body = request.body, message = { id = "sent-1" } }
+  end,
+})
+check(verified.ok == true, "a verified send must succeed: " .. json.encode(verified))
+check(wa_store.find("m-wa").state == "sent", "a verified send must be confirmed durably")
+local wa_replay = whatsapp.dispatch(memory, "whatsapp_send", { body = "hi there", confirm = true }, {
+  profile = wa_profile, event = { conversation_id = "c-wa", message_id = "m-wa" }, effects = wa_store,
+  send = function(request) return { ok = true, sent = true, verified = true, chat = { id = request.conversation_id }, body = request.body, message = { id = "sent-2" } } end,
+})
+check(wa_replay.already_sent == true, "a replay must return the sent record, not send again")
+
+-- 15. The trusted event is resolved from the ledger, and a scoped profile refuses
+--     a message outside its conversation before any child is admitted.
+local wa_path = paths.config() .. "/subagent-profiles/whatsapp-responder.json"
+check(host.write_file(wa_path, json.encode(wa_profile)), "write the approved whatsapp profile")
+local bad_event = subagents.control({ action = "start", profile = "whatsapp-responder", prompt = "x",
+  event = { message_id = "m-other", conversation_id = "c-wa" } }, ctx("alice"))
+check(bad_event.error == "event_conversation_not_in_profile", "an out-of-scope event must be refused: " .. json.encode(bad_event))
+local missing_event = subagents.control({ action = "start", profile = "whatsapp-responder", prompt = "x",
+  event = { message_id = "does-not-exist" } }, ctx("alice"))
+check(missing_event.error == "event_message_unknown_or_ambiguous", "an unknown event must be refused: " .. json.encode(missing_event))
+local no_event = subagents.control({ action = "start", profile = "whatsapp-responder", prompt = "x" }, ctx("alice"))
+check(no_event.error == "event_context_required", "a scoped profile needs a trusted event: " .. json.encode(no_event))
+
+-- 16. The tool registry routes the WhatsApp tools through the scoped snapshot,
+--     and the profile ceiling refuses one it does not list.
+local wa_registry = tools.dispatch(memory, "whatsapp_read", { limit = 5 }, "master", {
+  user_id = "alice",
+  subagent = { profile = wa_profile, event = { conversation_id = "c-wa", message_id = "m-wa" },
+    effects = wa_store, sends = { count = 0 }, allowed = { whatsapp_read = true } },
+})
+check(wa_registry.conversation_id == "c-wa", "the registry must route whatsapp_read: " .. json.encode(wa_registry))
+local denied_wa = tools.dispatch(memory, "whatsapp_send", { body = "x", confirm = true }, "master", {
+  user_id = "alice",
+  subagent = { profile = wa_profile, event = { conversation_id = "c-wa", message_id = "m-wa" },
+    effects = wa_store, sends = { count = 0 }, allowed = { whatsapp_read = true } },
+})
+check(denied_wa.error == "capability_not_in_profile:whatsapp_send",
+  "the ceiling must refuse an unlisted whatsapp tool: " .. json.encode(denied_wa))
+
 print(string.format("subagents profiles ok (%d checks)", checks))

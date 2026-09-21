@@ -111,3 +111,33 @@ CREATE TABLE IF NOT EXISTS sync_cursors (
   cursor     INTEGER NOT NULL DEFAULT 0,
   updated_at REAL NOT NULL
 );
+
+-- ---------------------------------------------------------- subagent effects
+-- A child's side effects (a WhatsApp send and its decision) need a durable
+-- reservation BEFORE the effect and a confirmation after it, so a crash leaves a
+-- pending record rather than a replayable message. `effect_sends` is keyed by the
+-- source message id: one send per incoming message, ever. `effect_decisions` is a
+-- separate table so recording a decision can never erase a pending or sent send.
+CREATE TABLE IF NOT EXISTS effect_sends (
+  message_id      TEXT PRIMARY KEY,
+  session_id      TEXT NOT NULL,
+  conversation_id TEXT NOT NULL DEFAULT '',
+  body            TEXT NOT NULL DEFAULT '',
+  state           TEXT NOT NULL DEFAULT 'pending',
+  message         TEXT NOT NULL DEFAULT '{}',
+  detail          TEXT NOT NULL DEFAULT '',
+  created_at      REAL NOT NULL,
+  updated_at      REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS effect_sends_session_idx ON effect_sends(session_id, state);
+
+CREATE TABLE IF NOT EXISTS effect_decisions (
+  message_id      TEXT PRIMARY KEY,
+  session_id      TEXT NOT NULL,
+  conversation_id TEXT NOT NULL DEFAULT '',
+  decision        TEXT NOT NULL DEFAULT '',
+  reason          TEXT NOT NULL DEFAULT '',
+  created_at      REAL NOT NULL,
+  updated_at      REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS effect_decisions_session_idx ON effect_decisions(session_id);
