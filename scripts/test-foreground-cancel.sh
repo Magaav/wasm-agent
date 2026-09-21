@@ -123,10 +123,11 @@ done
 #    seconds, while a second conversation completes normally.
 echo
 echo "foreground cancel: a silent header read is interrupted, not timed out"
+headers_before="$(kind_count headers)"
 chat "$WORK/headers.sse" "fg-headers" "RUN-MARKER-SILENT-HEADERS" &
 H=$!
 await_admission "fg-headers" || fail "the silent-headers run was never admitted"
-wait_for_kind headers 1 || fail "the silent-headers run never reached the provider"
+wait_for_kind headers "$((headers_before + 1))" || fail "the silent-headers run never reached the provider"
 # A healthy second conversation, with a long first-token pause, must still run.
 chat "$WORK/delayed.sse" "fg-delayed" "RUN-MARKER-DELAYED" &
 D=$!
@@ -150,10 +151,11 @@ echo "  ok: silent headers cancelled in ${elapsed}ms; the other session complete
 # 2. A foreground run silently waiting for the response body is cancelled too.
 echo
 echo "foreground cancel: a silent body read is interrupted, not timed out"
+body_before="$(kind_count body)"
 chat "$WORK/body.sse" "fg-body" "RUN-MARKER-SILENT-BODY" &
 B=$!
 await_admission "fg-body" || fail "the silent-body run was never admitted"
-wait_for_kind body 1 || fail "the silent-body run never reached the provider"
+wait_for_kind body "$((body_before + 1))" || fail "the silent-body run never reached the provider"
 run_id="$(run_id_for fg-body)"
 [ -n "$run_id" ] || fail "no run id for the silent-body run"
 started="$(now_ms)"
@@ -171,10 +173,10 @@ echo "  ok: silent body cancelled in ${elapsed}ms"
 #    slot is the cancelled run's own, and the queued run then completes.
 echo
 echo "foreground cancel: a later queued run is not affected by the earlier cancel"
+queue_body_before="$(kind_count body)"
 chat "$WORK/q1.sse" "fg-queue" "RUN-MARKER-SILENT-BODY" &
 Q1=$!
 await_admission "fg-queue" || fail "the first queued run was never admitted"
-queue_body_before="$(kind_count body)"
 wait_for_kind body "$((queue_body_before + 1))" || fail "the first queued run never reached the provider"
 chat "$WORK/q2.sse" "fg-queue" "RUN-MARKER-QUEUED-OK" &
 Q2=$!

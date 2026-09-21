@@ -48,9 +48,12 @@ pub extern "C" fn db_ready(l: *mut LuaState) -> c_int {
 }
 
 /// host.mark_db_ready() -> nil: record that the schema migration has run.
-pub extern "C" fn mark_db_ready(_l: *mut LuaState) -> c_int {
+pub extern "C" fn mark_db_ready(l: *mut LuaState) -> c_int {
     DB_READY.store(true, std::sync::atomic::Ordering::SeqCst);
-    0
+    // One explicit nil, never zero results: `select('#', host.mark_db_ready())`
+    // must be 1, or a caller that passes the result around gets nothing.
+    unsafe { crate::lua::lua_pushnil(l) };
+    1
 }
 
 pub fn set_env_overrides(values: HashMap<String, String>) {
@@ -405,20 +408,15 @@ fn params(values: &[Value]) -> Vec<Box<dyn rusqlite::ToSql>> {
         .collect()
 }
 
-/// A transaction left open by a failed statement holds the write lock until the
-/// interpreter (or the process) dies, stalling every other writer. Roll it back and
-/// say so in the error, so a Lua error cannot leave the database half-committed.
-pub(crate) fn annotate_rollback(conn: &Connection, error: String) -> String {
-    if conn.is_autocommit() {
-        return error;
-    }
-    match conn.execute_batch("ROLLBACK") {
-        Ok(()) => format!("{error} (open transaction rolled back)"),
-        Err(rollback) => format!("{error} (rollback failed: {rollback})"),
-    }
-}
-
 /// host.sql_exec(sql, params_json) -> {ok, changes} | {error}
+///
+/// A statement error is RETURNED, never forced into a rollback: SQLite lets the
+/// caller recover inside its transaction (catch the error, compensate, commit or
+/// roll back explicitly). Forcing a rollback here would silently end the
+/// transaction, and a Lua caller that caught the error and wrote again would then
+/// autocommit the later write, breaking atomicity. A transaction is closed only at
+/// an uncaught callback error (`Lua::rollback_if_open`) or when the interpreter's
+/// connection drops.
 pub extern "C" fn sql_exec(l: *mut LuaState) -> c_int {
     let host = host_of(l);
     let sql = arg_string(l, 1).unwrap_or_default();
@@ -426,17 +424,15 @@ pub extern "C" fn sql_exec(l: *mut LuaState) -> c_int {
     let values: Vec<Value> = serde_json::from_str(&params_json).unwrap_or_default();
     let outcome = (|| -> Result<Value, String> {
         let conn = host.db.lock().map_err(|e| e.to_string())?;
-        let result = if values.is_empty() {
-            conn.execute_batch(&sql).map(|_| conn.changes()).map_err(|e| e.to_string())
+        if values.is_empty() {
+            conn.execute_batch(&sql).map_err(|e| e.to_string())?;
+            Ok(json!({"ok": true, "changes": conn.changes()}))
         } else {
             let owned = params(&values);
-            conn.execute(&sql, params_from_iter(owned.iter().map(|p| p.as_ref())))
-                .map(|changes| changes as u64)
-                .map_err(|e| e.to_string())
-        };
-        match result {
-            Ok(changes) => Ok(json!({"ok": true, "changes": changes})),
-            Err(error) => Err(annotate_rollback(&conn, error)),
+            let changes = conn
+                .execute(&sql, params_from_iter(owned.iter().map(|p| p.as_ref())))
+                .map_err(|e| e.to_string())?;
+            Ok(json!({"ok": true, "changes": changes}))
         }
     })();
     push_json(l, &outcome.unwrap_or_else(|error| json!({"error": error})));
@@ -451,31 +447,28 @@ pub extern "C" fn sql_query(l: *mut LuaState) -> c_int {
     let values: Vec<Value> = serde_json::from_str(&params_json).unwrap_or_default();
     let outcome = (|| -> Result<Value, String> {
         let conn = host.db.lock().map_err(|e| e.to_string())?;
-        let queried = (|| -> Result<Value, String> {
-            let mut statement = conn.prepare(&sql).map_err(|e| e.to_string())?;
-            let names: Vec<String> = statement.column_names().iter().map(|s| s.to_string()).collect();
-            let owned = params(&values);
-            let mut rows = statement
-                .query(params_from_iter(owned.iter().map(|p| p.as_ref())))
-                .map_err(|e| e.to_string())?;
-            let mut out = Vec::new();
-            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-                let mut object = serde_json::Map::new();
-                for (index, name) in names.iter().enumerate() {
-                    let value = match row.get_ref(index).map_err(|e| e.to_string())? {
-                        rusqlite::types::ValueRef::Null => Value::Null,
-                        rusqlite::types::ValueRef::Integer(n) => json!(n),
-                        rusqlite::types::ValueRef::Real(f) => json!(f),
-                        rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
-                        rusqlite::types::ValueRef::Blob(b) => json!(format!("<{} bytes>", b.len())),
-                    };
-                    object.insert(name.clone(), value);
-                }
-                out.push(Value::Object(object));
+        let mut statement = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let names: Vec<String> = statement.column_names().iter().map(|s| s.to_string()).collect();
+        let owned = params(&values);
+        let mut rows = statement
+            .query(params_from_iter(owned.iter().map(|p| p.as_ref())))
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let mut object = serde_json::Map::new();
+            for (index, name) in names.iter().enumerate() {
+                let value = match row.get_ref(index).map_err(|e| e.to_string())? {
+                    rusqlite::types::ValueRef::Null => Value::Null,
+                    rusqlite::types::ValueRef::Integer(n) => json!(n),
+                    rusqlite::types::ValueRef::Real(f) => json!(f),
+                    rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
+                    rusqlite::types::ValueRef::Blob(b) => json!(format!("<{} bytes>", b.len())),
+                };
+                object.insert(name.clone(), value);
             }
-            Ok(Value::Array(out))
-        })();
-        queried.map_err(|error| annotate_rollback(&conn, error))
+            out.push(Value::Object(object));
+        }
+        Ok(Value::Array(out))
     })();
     push_json(l, &outcome.unwrap_or_else(|error| json!({"error": error})));
     1

@@ -494,13 +494,19 @@ mod db_tests {
         drop(a);
         let after: i64 = b.query_row("SELECT COUNT(*) FROM t WHERE k='b'", [], |row| row.get(0)).unwrap();
         assert_eq!(after, 0, "closing a connection must roll back its open transaction");
-        // A failed statement inside a transaction is rolled back with a visible note.
+        // A statement error is RETURNED, not forced into a rollback: the caller can
+        // recover inside the transaction. BEGIN; INSERT A; a bad statement; INSERT B;
+        // explicit ROLLBACK must remove BOTH rows. A forced rollback here would have
+        // ended the transaction, made INSERT B autocommit, and left it behind.
         b.execute_batch("BEGIN IMMEDIATE").unwrap();
-        b.execute("INSERT INTO t(k) VALUES('dup')", []).unwrap();
-        let error = b.execute("INSERT INTO t(k) VALUES('dup')", []).unwrap_err();
-        let message = host::annotate_rollback(&b, error.to_string());
-        assert!(message.contains("rolled back"), "got {message}");
-        assert!(b.is_autocommit(), "a failed statement must not leave the transaction open");
+        b.execute("INSERT INTO t(k) VALUES('c')", []).unwrap();
+        let bad = b.execute("INSERT INTO no_such_table(k) VALUES('x')", []);
+        assert!(bad.is_err(), "a bad statement must return an error");
+        assert!(!b.is_autocommit(), "a returned statement error must not end the transaction");
+        b.execute("INSERT INTO t(k) VALUES('d')", []).unwrap();
+        b.execute_batch("ROLLBACK").unwrap();
+        let recovered: i64 = b.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0)).unwrap();
+        assert_eq!(recovered, 0, "an explicit rollback must remove both rows, not leave the second autocommitted");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
