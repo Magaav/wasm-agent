@@ -14,8 +14,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 pub struct Host {
+    /// This interpreter's OWN SQLite connection, to the same WAL database. Two
+    /// interpreters must not share one connection: a transaction one holds open
+    /// would otherwise be visible to the other, and a rollback there could erase a
+    /// peer's work. Each connection has its own busy timeout and rolls back on
+    /// close, so a dropped interpreter cannot leave a transaction behind.
     pub db: Mutex<Connection>,
-    pub plugins: Mutex<PluginRegistry>,
+    /// Shared, because there is one plugin runtime per process.
+    pub plugins: std::sync::Arc<Mutex<PluginRegistry>>,
+    /// The client bridge is a process-wide resource, so it is shared too.
     pub client: std::sync::Arc<crate::client_bridge::Bridge>,
 }
 
@@ -26,6 +33,25 @@ pub struct Host {
 // returning what the process was launched with. The effect was silent: the
 // entire config file was ignored and the agent ran with "no model configured".
 static ENV_OVERRIDES: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+/// Set once the process has run the schema migration. Every interpreter opens its
+/// own connection, so a second interpreter booting while another holds a write
+/// transaction must NOT replay the DDL - it would block on the write lock and fail.
+/// The first interpreter migrates; the rest assume the schema and use their own
+/// connection. Process-wide because the database is.
+static DB_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// host.db_ready() -> boolean: has this process already migrated the schema?
+pub extern "C" fn db_ready(l: *mut LuaState) -> c_int {
+    unsafe { crate::lua::lua_pushboolean(l, DB_READY.load(std::sync::atomic::Ordering::SeqCst) as c_int) };
+    1
+}
+
+/// host.mark_db_ready() -> nil: record that the schema migration has run.
+pub extern "C" fn mark_db_ready(_l: *mut LuaState) -> c_int {
+    DB_READY.store(true, std::sync::atomic::Ordering::SeqCst);
+    0
+}
 
 pub fn set_env_overrides(values: HashMap<String, String>) {
     let _ = ENV_OVERRIDES.set(values);
@@ -379,6 +405,19 @@ fn params(values: &[Value]) -> Vec<Box<dyn rusqlite::ToSql>> {
         .collect()
 }
 
+/// A transaction left open by a failed statement holds the write lock until the
+/// interpreter (or the process) dies, stalling every other writer. Roll it back and
+/// say so in the error, so a Lua error cannot leave the database half-committed.
+pub(crate) fn annotate_rollback(conn: &Connection, error: String) -> String {
+    if conn.is_autocommit() {
+        return error;
+    }
+    match conn.execute_batch("ROLLBACK") {
+        Ok(()) => format!("{error} (open transaction rolled back)"),
+        Err(rollback) => format!("{error} (rollback failed: {rollback})"),
+    }
+}
+
 /// host.sql_exec(sql, params_json) -> {ok, changes} | {error}
 pub extern "C" fn sql_exec(l: *mut LuaState) -> c_int {
     let host = host_of(l);
@@ -387,15 +426,17 @@ pub extern "C" fn sql_exec(l: *mut LuaState) -> c_int {
     let values: Vec<Value> = serde_json::from_str(&params_json).unwrap_or_default();
     let outcome = (|| -> Result<Value, String> {
         let conn = host.db.lock().map_err(|e| e.to_string())?;
-        if values.is_empty() {
-            conn.execute_batch(&sql).map_err(|e| e.to_string())?;
-            Ok(json!({"ok": true, "changes": conn.changes()}))
+        let result = if values.is_empty() {
+            conn.execute_batch(&sql).map(|_| conn.changes()).map_err(|e| e.to_string())
         } else {
             let owned = params(&values);
-            let changes = conn
-                .execute(&sql, params_from_iter(owned.iter().map(|p| p.as_ref())))
-                .map_err(|e| e.to_string())?;
-            Ok(json!({"ok": true, "changes": changes}))
+            conn.execute(&sql, params_from_iter(owned.iter().map(|p| p.as_ref())))
+                .map(|changes| changes as u64)
+                .map_err(|e| e.to_string())
+        };
+        match result {
+            Ok(changes) => Ok(json!({"ok": true, "changes": changes})),
+            Err(error) => Err(annotate_rollback(&conn, error)),
         }
     })();
     push_json(l, &outcome.unwrap_or_else(|error| json!({"error": error})));
@@ -410,28 +451,31 @@ pub extern "C" fn sql_query(l: *mut LuaState) -> c_int {
     let values: Vec<Value> = serde_json::from_str(&params_json).unwrap_or_default();
     let outcome = (|| -> Result<Value, String> {
         let conn = host.db.lock().map_err(|e| e.to_string())?;
-        let mut statement = conn.prepare(&sql).map_err(|e| e.to_string())?;
-        let names: Vec<String> = statement.column_names().iter().map(|s| s.to_string()).collect();
-        let owned = params(&values);
-        let mut rows = statement
-            .query(params_from_iter(owned.iter().map(|p| p.as_ref())))
-            .map_err(|e| e.to_string())?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            let mut object = serde_json::Map::new();
-            for (index, name) in names.iter().enumerate() {
-                let value = match row.get_ref(index).map_err(|e| e.to_string())? {
-                    rusqlite::types::ValueRef::Null => Value::Null,
-                    rusqlite::types::ValueRef::Integer(n) => json!(n),
-                    rusqlite::types::ValueRef::Real(f) => json!(f),
-                    rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
-                    rusqlite::types::ValueRef::Blob(b) => json!(format!("<{} bytes>", b.len())),
-                };
-                object.insert(name.clone(), value);
+        let queried = (|| -> Result<Value, String> {
+            let mut statement = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let names: Vec<String> = statement.column_names().iter().map(|s| s.to_string()).collect();
+            let owned = params(&values);
+            let mut rows = statement
+                .query(params_from_iter(owned.iter().map(|p| p.as_ref())))
+                .map_err(|e| e.to_string())?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                let mut object = serde_json::Map::new();
+                for (index, name) in names.iter().enumerate() {
+                    let value = match row.get_ref(index).map_err(|e| e.to_string())? {
+                        rusqlite::types::ValueRef::Null => Value::Null,
+                        rusqlite::types::ValueRef::Integer(n) => json!(n),
+                        rusqlite::types::ValueRef::Real(f) => json!(f),
+                        rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
+                        rusqlite::types::ValueRef::Blob(b) => json!(format!("<{} bytes>", b.len())),
+                    };
+                    object.insert(name.clone(), value);
+                }
+                out.push(Value::Object(object));
             }
-            out.push(Value::Object(object));
-        }
-        Ok(Value::Array(out))
+            Ok(Value::Array(out))
+        })();
+        queried.map_err(|error| annotate_rollback(&conn, error))
     })();
     push_json(l, &outcome.unwrap_or_else(|error| json!({"error": error})));
     1

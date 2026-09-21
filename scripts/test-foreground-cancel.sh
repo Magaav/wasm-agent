@@ -154,7 +154,8 @@ echo "foreground cancel: a later queued run is not affected by the earlier cance
 chat "$WORK/q1.sse" "fg-queue" "RUN-MARKER-SILENT-BODY" &
 Q1=$!
 await_admission "fg-queue" || fail "the first queued run was never admitted"
-wait_for_kind body 1 || fail "the first queued run never reached the provider"
+queue_body_before="$(kind_count body)"
+wait_for_kind body "$((queue_body_before + 1))" || fail "the first queued run never reached the provider"
 chat "$WORK/q2.sse" "fg-queue" "RUN-MARKER-QUEUED-OK" &
 Q2=$!
 for _ in $(seq 1 40); do run_id_for fg-queue | grep -q '^[0-9]' && break; sleep 0.05; done

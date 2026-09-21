@@ -80,18 +80,56 @@ impl Transport for ShutdownTcpTransport {
     }
 
     fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, Error> {
-        update_timeout(timeout, &mut self.timeout_read, &self.stream, |stream, value| {
-            stream.set_read_timeout(value)
-        })
-        .map_err(Error::Io)?;
-        let input = self.buffers.input_append_buf();
-        let amount = match self.stream.read(input) {
-            Ok(amount) => amount,
-            Err(error) if is_timeout(&error) => return Err(Error::Timeout(timeout.reason)),
-            Err(error) => return Err(Error::Io(error)),
-        };
-        self.buffers.input_appended(amount);
-        Ok(amount > 0)
+        if !crate::subagents::in_task() {
+            // No task, no cancellation to observe: one read on the request's own budget.
+            update_timeout(timeout, &mut self.timeout_read, &self.stream, |stream, value| {
+                stream.set_read_timeout(value)
+            })
+            .map_err(Error::Io)?;
+            let input = self.buffers.input_append_buf();
+            let amount = match self.stream.read(input) {
+                Ok(amount) => amount,
+                Err(error) if is_timeout(&error) => return Err(Error::Timeout(timeout.reason)),
+                Err(error) => return Err(Error::Io(error)),
+            };
+            self.buffers.input_appended(amount);
+            return Ok(amount > 0);
+        }
+        // A task may be cancelled while this read is silent. `shutdown` on a
+        // duplicated handle does not wake a blocked `recv` on Windows (measured: the
+        // read stays blocked with the socket open), so wait in short slices and
+        // re-check the cancellation flag. A slice timeout is a POLL, not a failure:
+        // the read is retried, so a long healthy pause before the first token is not
+        // cut short, and the request's own budget still bounds the whole wait.
+        let budget = timeout.not_zero().map(|value| *value);
+        let started = std::time::Instant::now();
+        let slice = std::time::Duration::from_millis(250);
+        loop {
+            if crate::host::run_cancel_requested() {
+                return Err(Error::Timeout(timeout.reason));
+            }
+            let wait = match budget {
+                Some(total) => {
+                    let elapsed = started.elapsed();
+                    if elapsed >= total {
+                        return Err(Error::Timeout(timeout.reason));
+                    }
+                    (total - elapsed).min(slice)
+                }
+                None => slice,
+            };
+            self.stream.set_read_timeout(Some(wait)).map_err(Error::Io)?;
+            self.timeout_read = Some(wait);
+            let input = self.buffers.input_append_buf();
+            match self.stream.read(input) {
+                Ok(amount) => {
+                    self.buffers.input_appended(amount);
+                    return Ok(amount > 0);
+                }
+                Err(error) if is_timeout(&error) => continue,
+                Err(error) => return Err(Error::Io(error)),
+            }
+        }
     }
 
     fn is_open(&mut self) -> bool {
@@ -145,6 +183,12 @@ impl<In: Transport> Connector<In> for ShutdownTcpConnector {
                     }
                     // The handle that lets another thread shut this read down.
                     crate::subagents::register_active_socket(&stream);
+                    // Close the window between a cancel arriving and this socket being
+                    // registered: if it was already requested, the read that is about to
+                    // block must not wait for a chunk that may never come.
+                    if crate::host::run_cancel_requested() {
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
+                    }
                     return Ok(Some(Either::B(ShutdownTcpTransport::new(stream))));
                 }
                 Err(error) => last_error = Some(error),

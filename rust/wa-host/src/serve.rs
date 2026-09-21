@@ -1111,6 +1111,8 @@ fn subagent_reply(lua: &Lua, body: &str, session: &str) -> Reply {
     match lua.call_string("wa_subagents", &[capped.as_str(), session]) {
         Ok(text) => (200, "application/json", text.into_bytes()),
         Err(error) => {
+            // Close a transaction the failed call may have left open.
+            lua.rollback_if_open();
             let (status, code) = if error.contains("invalid_session") || error.contains("unknown_user") {
                 (401, "invalid_session")
             } else {
@@ -1759,6 +1761,7 @@ fn process_relay_job(
         let node = header_of(&job.headers, "x-wa-node");
         let events = capture_events(|| {
             if let Err(error) = lua.call_string("wa_reply_stream", &[text.as_str(), session.as_str(), node.as_str()]) {
+                lua.rollback_if_open();
                 write_event(&format!("{{\"type\":\"error\",\"error\":{}}}", json_escape(&error)));
             }
             write_event("{\"type\":\"done\"}");
@@ -2008,6 +2011,7 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream, request: &Req
             let _sink = stream.try_clone().ok().map(|clone| SinkGuard::set(Sink::Socket(clone)));
             let node = header_of(&node_headers, "x-wa-node");
             if let Err(error) = lua.call_string("wa_reply_stream", &[text.as_str(), session, node.as_str()]) {
+                lua.rollback_if_open();
                 write_event(&format!("{{\"type\":\"error\",\"error\":{}}}", json_escape(&error)));
             }
             write_event("{\"type\":\"done\"}");
@@ -2076,8 +2080,15 @@ fn dispatch(
         header_of(node_headers, "x-wa-node")
     };
     let call = |name: &str, args: &[&str]| -> String {
-        lua.call_string(name, args)
-            .unwrap_or_else(|error| format!("{{\"error\":{}}}", json_escape(&error)))
+        match lua.call_string(name, args) {
+            Ok(value) => value,
+            Err(error) => {
+                // A Lua error can abandon a BEGIN on this interpreter's connection;
+                // close it before answering, or the write lock outlives the request.
+                lua.rollback_if_open();
+                format!("{{\"error\":{}}}", json_escape(&error))
+            }
+        }
     };
 
     let reply = match route.as_str() {

@@ -214,6 +214,12 @@ local function migrate()
 end
 
 function M.setup()
+  -- Migrations are idempotent but they WRITE. Every interpreter opens its own
+  -- connection now, so a second interpreter booting while another holds a write
+  -- transaction would block on the write lock (and fail with "database is
+  -- locked") merely to re-run DDL that is already applied. The first interpreter
+  -- in the process migrates; the rest trust the schema and use their connection.
+  if host.db_ready and host.db_ready() then return end
   -- The shape migration runs *before* the schema. `schema.sql` creates `messages`, so a rename that
   -- arrived after it would find the name taken, skip, and strand the old rows in a table nothing reads
   -- any more. Renaming first moves the rows; the schema then fills in whatever a fresh database lacks.
@@ -247,6 +253,8 @@ function M.setup()
     local first = query("SELECT content FROM messages WHERE session_id=? AND role='user' ORDER BY seq ASC LIMIT 1", {row.id})
     if first[1] then M.name_session(row.id, first[1].content or "") end
   end
+  -- The schema is now present on this connection; later interpreters skip the DDL.
+  if host.mark_db_ready then host.mark_db_ready() end
 end
 
 -- ---------------------------------------------------------------- memories
