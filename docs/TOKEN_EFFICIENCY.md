@@ -218,6 +218,33 @@ when building context; unchanged bytes stay identical, but an actual `AGENTS.md`
 change no longer waits for a process restart just to protect cache hits. Guest
 instructions still never fall back to operator instructions.
 
+## Full implementation verification
+
+Source `a58c39d`:
+
+* Windows: offline release build; **74 integration checks in disk mode and 74 in
+  embedded mode**; **14 operation tests**; native search regression; **74 mocked
+  observability assertions**; offline audit unit/CLI tests; independent HTTP control
+  in both ordinary-shell and awaited-operation modes (**9 checks each**).
+* Linux: complete `bash scripts/test.sh` passed with **no skips**, including both
+  74-check integration modes, 13 operation tests, native search, accounting,
+  instruction freshness, guest isolation, plugin ABI, existing jobs/sentinel tests
+  and both independent control modes. Logs and exit receipt:
+  `openclaw.ohana:/tmp/wa-efficiency-proof-3AwI3l/smoke-complete.log` and
+  `smoke-complete.exit` (`0`).
+* The gate caught an empty-edit validation-order regression and missing embedded
+  modules. Both were fixed. The embedding check now verifies the actual embedded
+  registry with negative controls, rather than accidentally loading disk files.
+* Failure settlement does not notify observers ahead of its persistence attempt;
+  storage failure is explicit. Native tests verify immediately reopened failure
+  records and notification of multiple waiting observers.
+
+No live deployment, desktop restart, production DB access or paid-provider inference
+was used. The full Windows smoke suite, real-browser UI gate and paid-model behavior
+suite were **not run** for this change. There is no new UI code. No controlled
+real-task cost/latency or model-quality equivalence claim is made; the optional
+compact views and shorter index have **not** become defaults.
+
 No tool hiding, per-round schema shuffle, aggressive compaction, reasoning removal,
 mandatory repository-map injection or new compact encoding is part of this plan.
 Do not replay side effects because observations were lost. Do not cache command
