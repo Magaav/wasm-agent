@@ -409,7 +409,8 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
       echo "deploy: WARNING could not put job $JOB_NAME into the store"
     fi
   done
-  echo "deploy: shipped $PIPELINE pipeline file(s) into $INSTALL_DIR/scripts"
+  # Durable, not only stdout: a deploy runs detached and its stdout belongs to nobody afterwards.
+  note "shipped $PIPELINE pipeline file(s) into $INSTALL_DIR/scripts"
 fi
 
 RECORD_TMP="$INSTALL_DIR/.installed.txt.deploy.$$"
