@@ -964,7 +964,11 @@ function M:run_body(text, images)
       -- deadline that was always there, so the number is reported by the side that enforces it.
       local emitted = { type = "tool", name = function_.name, arguments = args }
       if function_.name == "bash" or function_.name == "shell" then
-        if host.exec_timeout then emitted.timeout_ms = math.floor(host.exec_timeout() * 1000) end
+        if host.exec_timeout then
+          local timeout=host.exec_timeout()
+          if function_.name=="bash" and tonumber(args.timeout_seconds) then timeout=math.min(timeout,args.timeout_seconds) end
+          emitted.timeout_ms = math.floor(timeout * 1000)
+        end
       end
       self.emit(emitted)
       local tool_started = host.now()
@@ -992,7 +996,8 @@ function M:run_body(text, images)
       end
       telemetry.finish(tool_span,{name=function_.name,ok=ok_tool,code=type(output)=="table" and output.code or nil,
         error=not projected and "tool_output_storage_failed" or type(output)=="table" and output.error or nil,
-        full_bytes=#json.encode(output),view_bytes=#content,storage_ok=projected,execution_timing=execution_timing})
+        full_bytes=#json.encode(output),view_bytes=#content,storage_ok=projected,
+        timeout_ms=type(output)=="table" and output.timeout_ms or nil,execution_timing=execution_timing})
       trace[#trace + 1] = { kind = "tool", name = function_.name, ok = ok_tool, round = round,
         ms = math.floor((host.now() - tool_started) * 1000) }
       self.emit({ type = "tool_result", name = function_.name, result = output })

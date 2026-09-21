@@ -60,7 +60,10 @@ The report includes:
   recorded in telemetry and removed from ordinary bash results before they enter
   model context. These are summed spans: concurrent runs can overlap, tool spans
   include dispatch and output projection, and neither measure is process CPU or
-  global wall-clock share.
+  global wall-clock share. Tool durations are also bucketed at 1/10/60 seconds.
+  For bash calls at least 60 seconds, the report counts distinct/repeated
+  argument-hash groups without emitting hashes or command text, so concentration
+  is visible without making commands public.
 * Repeated tool argument hashes **within a run**, never labeled wasted work.
   The same read after an edit can be necessary.
 

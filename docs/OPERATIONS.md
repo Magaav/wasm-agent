@@ -19,8 +19,9 @@ independent HTTP route refuses long `await`; bounded `wait` and cancellation rem
 available there.
 `wait` is bounded to ten seconds; a still-running result is not failure and is
 never permission to launch the command again. `start` returns a launch receipt,
-not execution success. Default execution budget is 300 seconds; explicit
-operations may request 1–86400 seconds. Eight operations may be active per manager.
+not execution success. Default execution budget is 300 seconds; `bash.timeout_seconds`
+may shorten that configured limit for a bounded probe but can never increase it.
+Explicit operations may request 1–86400 seconds. Eight operations may be active per manager.
 
 State: accepted → running → draining → completed / failed / cancelled.
 Settled results include monotonic phase timing (`timing.schema_version=1`): exclusive

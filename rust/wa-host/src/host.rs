@@ -520,8 +520,12 @@ pub(crate) fn exec_timeout_seconds() -> u64 {
 
 /// Compatibility facade over the supervised operation runtime. No pipes, reader threads or
 /// independent heartbeat live here; the lifecycle is owned by wa-operation (docs/OPERATIONS.md).
+fn run_bounded_for(program: &str, flag: &str, command: &str, cwd: &str, seconds: u64) -> Result<Value, String> {
+    crate::operations::foreground(program, flag, command, cwd, seconds)
+}
+#[cfg(test)]
 fn run_bounded(program: &str, flag: &str, command: &str, cwd: &str) -> Result<Value, String> {
-    crate::operations::foreground(program, flag, command, cwd, exec_timeout_seconds())
+    run_bounded_for(program, flag, command, cwd, exec_timeout_seconds())
 }
 
 /// host.operation(action, args_json) -> operation receipt/state/output | {error}
@@ -553,8 +557,20 @@ pub extern "C" fn jobs(l: *mut LuaState) -> c_int {
 pub extern "C" fn exec(l: *mut LuaState) -> c_int {
     let command = arg_string(l, 1).unwrap_or_default();
     let cwd = arg_string(l, 2).unwrap_or_default();
+    let configured = exec_timeout_seconds();
+    let requested = arg_string(l, 3).filter(|value| !value.is_empty());
+    let seconds = match requested {
+        Some(value) => match value.parse::<u64>() {
+            Ok(value) if (1..=86400).contains(&value) => value.min(configured),
+            _ => {
+                push_json(l, &json!({"error":"invalid_exec_timeout","minimum":1,"maximum":86400}));
+                return 1;
+            }
+        },
+        None => configured,
+    };
     let (program, flag) = shell_config();
-    let outcome = run_bounded(program, flag, &command, &cwd);
+    let outcome = run_bounded_for(program, flag, &command, &cwd, seconds);
     push_json(l, &outcome.unwrap_or_else(|error| json!({"error": error})));
     1
 }

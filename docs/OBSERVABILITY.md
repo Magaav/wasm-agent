@@ -107,7 +107,11 @@ For newly recorded synchronous bash calls, monotonic native phase timing separat
 executor setup/admission/spawn/execution/drain/output-sync from the final-record /
 host-adapter / projection wrapper. The detail enters telemetry but is removed from
 the model-facing bash result; incomplete or internally inconsistent phases are
-reported separately rather than used in an overhead ratio.
+reported separately rather than used in an overhead ratio. Duration buckets show
+whether time is concentrated in long calls; bash calls of at least 60 seconds are
+grouped by existing argument hashes, but only aggregate distinct/repeated counts
+are emitted—never hashes or command text. A per-call bash deadline may shorten,
+never extend, the configured host limit.
 
 ## Offline efficiency audit
 

@@ -20,6 +20,19 @@ const PUBLIC_TOOL_NAMES = new Set(['remember','recall','memories','skill','capab
   'spell_list','spell_get','spell_forget','spell_export','remote','nodes','session_debug','session_fixture','tool_result']);
 const publicToolName = name => typeof name === 'string' && PUBLIC_TOOL_NAMES.has(name) ? name : 'other';
 const OPERATION_PHASES=['setup_ms','accepted_record_ms','spawn_ms','execution_ms','drain_cleanup_ms','output_sync_ms'];
+const DURATION_BUCKETS=[['lt_1s',0,1000],['1s_to_10s',1000,10000],['10s_to_60s',10000,60000],['gte_60s',60000,Infinity]];
+const durationBuckets = samples => {
+  const allMs=total(samples.map(sample=>sample.ms));
+  return Object.fromEntries(DURATION_BUCKETS.map(([name,min,max])=>{
+    const selected=samples.filter(sample=>sample.ms>=min&&sample.ms<max);
+    const totalMs=total(selected.map(sample=>sample.ms));
+    return [name,{calls:selected.length,failed:selected.filter(sample=>sample.failed).length,
+      deadline_exceeded:selected.filter(sample=>sample.deadline).length,total_ms:totalMs,
+      failed_ms:total(selected.filter(sample=>sample.failed).map(sample=>sample.ms)),
+      deadline_exceeded_ms:total(selected.filter(sample=>sample.deadline).map(sample=>sample.ms)),
+      share_of_measured_ms:allMs?totalMs/allMs:null}];
+  }));
+};
 const runKey = event => event && event.run_id ? JSON.stringify([event.session_id,event.run_id]) : null;
 
 function audit(input) {
@@ -61,10 +74,11 @@ function audit(input) {
   const tools = {completed:0,failed:0,pending:0,repeated_arguments_within_run:0};
   const toolBuckets = new Map(), toolTimes = [], toolTimesByClock = new Map();
   const executionTimings=[];let executionTimingReported=0,executionTimingIncomplete=0,executionTimingInvalid=0;
+  const slowBashArguments=new Map(),slowBashMissing={calls:0,total_ms:0,failed:0};
   const runParts = new Map(), completedRuns = [];
   const bucketFor = name => {
     name=publicToolName(name);
-    if(!toolBuckets.has(name)) toolBuckets.set(name,{completed:0,failed:0,pending:0,times:[],failedTimes:[],clocks:{}});
+    if(!toolBuckets.has(name)) toolBuckets.set(name,{completed:0,failed:0,pending:0,times:[],failedTimes:[],samples:[],clocks:{}});
     return toolBuckets.get(name);
   };
   const partsFor = event => {
@@ -112,7 +126,16 @@ function audit(input) {
         }
         if(number(end.ms)&&pair.start) {
           const clockName=end.clock==='monotonic'?'monotonic':end.clock==='wall-fallback'?'wall_fallback':'unknown';
-          toolTimes.push(end.ms);bucket.times.push(end.ms);bucket.clocks[clockName]=(bucket.clocks[clockName]||0)+1;
+          toolTimes.push(end.ms);bucket.times.push(end.ms);bucket.samples.push({ms:end.ms,failed:end.ok===false,
+            deadline:end.error==='deadline_exceeded',timeout_ms:count(end.timeout_ms)?end.timeout_ms:null});bucket.clocks[clockName]=(bucket.clocks[clockName]||0)+1;
+          if(name==='bash'&&end.ms>=60000) {
+            const argumentHash=pair.start.payload.arguments_hash;
+            if(hash(argumentHash)) {
+              const group=slowBashArguments.get(argumentHash)||{calls:0,total_ms:0,failed:0};
+              group.calls++;group.total_ms+=end.ms;if(end.ok===false) group.failed++;
+              slowBashArguments.set(argumentHash,group);
+            } else {slowBashMissing.calls++;slowBashMissing.total_ms+=end.ms;if(end.ok===false) slowBashMissing.failed++;}
+          }
           if(!toolTimesByClock.has(clockName)) toolTimesByClock.set(clockName,[]);
           toolTimesByClock.get(clockName).push(end.ms);
           if(end.ok===false) bucket.failedTimes.push(end.ms);
@@ -226,9 +249,16 @@ function audit(input) {
   tools.by_name=Object.fromEntries([...toolBuckets].sort(([a],[b])=>a.localeCompare(b)).map(([name,bucket])=>{
     const summary={completed:bucket.completed,failed:bucket.failed,pending:bucket.pending,
       elapsed:{...timingSummary(bucket.times),failed_ms:total(bucket.failedTimes),clock_samples:bucket.clocks},
-      share_of_measured_tool_ms:toolTotal?total(bucket.times)/toolTotal:null};
+      duration_buckets:durationBuckets(bucket.samples),share_of_measured_tool_ms:toolTotal?total(bucket.times)/toolTotal:null};
     return [name,summary];
   }));
+  const slowGroups=[...slowBashArguments.values()];
+  tools.slow_bash_argument_groups={threshold_ms:60000,calls:total(slowGroups.map(group=>group.calls))+slowBashMissing.calls,
+    total_ms:total(slowGroups.map(group=>group.total_ms))+slowBashMissing.total_ms,
+    failed:total(slowGroups.map(group=>group.failed))+slowBashMissing.failed,
+    distinct_groups:slowGroups.length,repeated_groups:slowGroups.filter(group=>group.calls>1).length,
+    largest_group_calls:slowGroups.length?Math.max(...slowGroups.map(group=>group.calls)):0,missing_hash:slowBashMissing.calls,
+    note:'group identities and command text are not emitted'};
   const executionToolMs=total(executionTimings.map(t=>t.tool_ms));
   const executionMs=total(executionTimings.map(t=>t.execution_ms));
   const executionFields=[...OPERATION_PHASES,'unattributed_ms','wrapper_ms'];

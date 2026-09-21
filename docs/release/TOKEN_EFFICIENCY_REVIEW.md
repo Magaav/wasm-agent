@@ -28,7 +28,13 @@ remain local, not in Git. The 2,185-event snapshot covers
 * A follow-up with the elapsed-time auditor found valid monotonic duration on all
   524 completed tool spans: 6,875,581 ms summed, of which bash contributed
   6,714,101 ms (**97.6514%**). Bash p50 was 292 ms, p95 88,211 ms and maximum
-  1,450,737 ms; its 11 failed calls consumed 606,601 ms. These spans include
+  1,450,737 ms; its 11 failed calls consumed 606,601 ms. The duration distribution
+  was: 244 calls below one second / 55,571 ms; 51 at 1–10 seconds / 178,869 ms;
+  44 at 10–60 seconds / 1,183,859 ms; and only 29 at least 60 seconds but
+  5,295,802 ms (**78.8758%** of bash time). Two of those long calls failed and
+  consumed 604,094 ms—**99.5868%** of failed bash time. All 29 long calls had
+  distinct argument hashes, so exact-command repetition is not the cause visible
+  in this sample. Hashes and command text remain private. These spans include
   dispatch and output projection and can overlap work in other runs; they are not
   process CPU or global wall-clock time.
 * Only 17 runs in this time-bounded export had complete, internally consistent
