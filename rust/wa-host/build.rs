@@ -4,7 +4,7 @@ fn main() {
     // The Lua core is embedded with include_str!, so a change to lua/core must rebuild this crate or the
     // binary keeps the core it was last built with. It did not, and the consequence is the one this project
     // keeps paying for: a deploy ships a fix that is not in the artifact. Presence is not freshness.
-    println!("cargo:rerun-if-changed=lua/core");
+    println!("cargo:rerun-if-changed=../../lua/core");
     // Lua's configuration is selected by defines, and the platform matters:
     // LUA_USE_LINUX pulls in LUA_USE_POSIX, which switches the error handling to
     // _setjmp/_longjmp. mingw-w64 declares `_setjmp(jmp_buf, void *)` - two

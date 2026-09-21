@@ -640,16 +640,22 @@ for _, required in ipairs({ "agent.lua", "provider.lua", "model_window.lua", "me
   for _, name in ipairs(names) do if name == required then found = true end end
   assert(found, required .. " is missing from lua/core")
 end
+local function embedded_chunk(path)
+  local source=EMBEDDED and EMBEDDED[path]
+  if type(source)~='string' then return nil end
+  return load(source,'@'..path)
+end
+-- loadfile reads disk, even with WASM_AGENT_LUA_ROOT unset. Test the actual embedded registry.
+local probe='lua/core/provider.lua';local saved=EMBEDDED[probe]
+EMBEDDED[probe]=nil;assert(not embedded_chunk(probe),'negative control: absent embedding must fail')
+EMBEDDED[probe]='!invalid Lua';assert(not embedded_chunk(probe),'negative control: invalid embedding must fail')
+EMBEDDED[probe]=saved
 local missing = {}
 for _, name in ipairs(names) do
-  local chunk = loadfile("lua/core/" .. name)
-  if not chunk then missing[#missing + 1] = name end
+  if not embedded_chunk('lua/core/'..name) then missing[#missing + 1] = name end
 end
 assert(#missing == 0, "on disk but not in the binary: " .. table.concat(missing, ", "))
--- Presence is not freshness. loadfile succeeding proves the module is IN the binary, not that it is the
--- module on disk - and the binary runs the embedded copy. A Lua edit that did not trigger a rebuild leaves
--- the old core inside, so a deploy ships a fix that is not in the artifact. Compare the text and name what
--- is stale; the fix is to rebuild, which deploy.sh does.
+-- Presence is not freshness: compare the exact embedded text to the working tree too.
 local stale = {}
 for _, name in ipairs(names) do
   local path = "lua/core/" .. name
@@ -979,6 +985,7 @@ echo "attach tests ok"
 # A real long-running tool must remain observable/cancellable through another worker.
 # Local mock provider only; no account, paid model or external browser required.
 node scripts/test-operation-control.cjs "$BIN"
+node scripts/test-operation-control.cjs "$BIN" --await
 
 # The UI tests are JS and run outside the embedded interpreter, so they need node
 # and they need the repo root as cwd (they read ui/app.js from disk). A test that does
