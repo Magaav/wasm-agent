@@ -738,8 +738,73 @@ pub extern "C" fn client(l: *mut LuaState) -> c_int {
     }
     let timeout_ms = args["timeout_ms"].as_u64().unwrap_or_else(crate::client_bridge::default_timeout_ms);
     let result = host.client.call(&action, args, timeout_ms);
+    // `status` is the one answer a caller may reasonably expect to be complete:
+    // the client knows what it is doing, the node knows whether the channel works.
+    // Merging here means one call answers both, whatever vintage the window is.
+    if action == "status" {
+        push_json(l, &status_payload(result, &status));
+        return 1;
+    }
     push_json(l, &result);
     1
+}
+
+/// The `status` answer: the client's own view, the node's view of the channel, and
+/// - for a window that predates the action - a sentence instead of an error code.
+///
+/// Found by using it: with a connected client, `status` was forwarded and returned
+/// only what the client said, so a *new* window's answer was missing `bridge.health`
+/// and an *old* window's answer was `unknown_action:status`, which tells a reader
+/// nothing about what to do next.
+fn status_payload(client_reply: Value, status: &Value) -> Value {
+    let mut payload = match client_reply["error"].as_str() {
+        Some(error) if error.starts_with("unknown_action:") => json!({
+            "ok": false,
+            "error": "window_too_old",
+            "observed": format!("the connected window answered '{error}': it predates the `status` action"),
+            "next": "restart the desktop window to load the new client (this node is already new). \
+                     Meanwhile the actions that window knows still work: screenshot, frame, click, move, type, key, shell, cdp",
+        }),
+        _ => client_reply,
+    };
+    if let Some(map) = payload.as_object_mut() {
+        map.insert("connected".into(), status["connected"].clone());
+        map.insert("busy".into(), status["busy"].clone());
+        map.insert("queued".into(), status["queued"].clone());
+        map.insert("bridge".into(), status["bridge"].clone());
+    }
+    payload
+}
+
+#[cfg(test)]
+mod client_status_tests {
+    use super::status_payload;
+    use serde_json::json;
+
+    fn bridge() -> serde_json::Value {
+        json!({ "connected": true, "queued": 0, "busy": null,
+                "bridge": { "port": 8800, "health": "ok", "self_probe_failures": 0 } })
+    }
+
+    #[test]
+    fn a_new_window_s_answer_gains_the_node_s_view() {
+        let reply = json!({ "ok": true, "chrome": { "running": true, "port": 2532 }, "pages": [] });
+        let merged = status_payload(reply, &bridge());
+        assert_eq!(merged["chrome"]["port"], 2532, "the client's answer must survive");
+        assert_eq!(merged["bridge"]["health"], "ok", "the node's view must be added");
+        assert_eq!(merged["connected"], true);
+    }
+
+    #[test]
+    fn an_old_window_gets_a_sentence_instead_of_an_error_code() {
+        let reply = json!({ "error": "unknown_action:status" });
+        let merged = status_payload(reply, &bridge());
+        assert_eq!(merged["error"], "window_too_old");
+        assert!(merged["observed"].as_str().unwrap().contains("predates"));
+        assert!(merged["next"].as_str().unwrap().contains("restart the desktop window"));
+        // And it still carries what the node knows, which is the half that is new.
+        assert_eq!(merged["bridge"]["port"], 8800);
+    }
 }
 
 /// What is wrong, said as what was seen rather than as a guess.
