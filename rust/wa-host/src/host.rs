@@ -586,7 +586,14 @@ pub(crate) fn exec_timeout_seconds() -> u64 {
 /// Compatibility facade over the supervised operation runtime. No pipes, reader threads or
 /// independent heartbeat live here; the lifecycle is owned by wa-operation (docs/OPERATIONS.md).
 fn run_bounded(program: &str, flag: &str, command: &str, cwd: &str) -> Result<Value, String> {
-    crate::operations::foreground(program, flag, command, cwd, exec_timeout_seconds())
+    // A child's shell call must not outlive the child: the operation timeout is the
+    // smaller of the configured exec deadline and the child's remaining budget, and
+    // a cancel stops the operation rather than leaving it running past settlement.
+    let mut seconds = exec_timeout_seconds();
+    if let Some(remaining) = crate::subagents::remaining_budget() {
+        seconds = seconds.min(remaining.as_secs().max(1));
+    }
+    crate::operations::foreground(program, flag, command, cwd, seconds)
 }
 
 /// host.operation(action, args_json) -> operation receipt/state/output | {error}

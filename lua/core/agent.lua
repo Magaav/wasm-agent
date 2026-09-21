@@ -569,6 +569,11 @@ end
 -- once instead of constantly. The transcript keeps everything regardless; only
 -- the context is windowed.
 function M:maybe_compact(messages)
+  -- A lean child does not compact: an automatic summary is unaccounted work
+  -- outside its token budget, and a child that reaches the context limit should
+  -- stop with that reason rather than silently spend more. The caller's
+  -- `context_overflow` error is the visible outcome.
+  if self.subagent then return false end
   local limits = provider.budget(self.model)
   local limit = limits.context or 0
   if limit <= 0 then return false end
@@ -876,6 +881,45 @@ function M:run_body(text, images)
     return type(state) == "table" and state or nil
   end
 
+  -- Preflight a child call against the remaining token and cost budgets.
+  -- The post-call check cannot be a hard budget: by then the provider has been
+  -- paid. This narrows the request's own output cap to what is left, refuses the
+  -- call before it is made when nothing is left, and returns the reservation to
+  -- charge if the provider reports no usable usage at all.
+  local function child_call_budget(context_tokens)
+    if not child_limits then return nil, nil end
+    local opts = {}
+    local rates = provider.rates(self.model)
+    local reserved_prompt = context_tokens or self:context_tokens()
+    local max_output = provider.budget(self.model).output or 0
+    if max_output <= 0 then max_output = math.huge end
+    if child_limits.max_tokens then
+      local remaining = child_limits.max_tokens - (totals.total or 0)
+      if remaining <= 0 then error("subagent_token_budget: exhausted before the call") end
+      -- The prompt alone must fit: if it does not, the call is refused before it
+      -- is made, so an oversized input costs zero provider calls.
+      if reserved_prompt >= remaining then
+        error("subagent_token_budget: the prompt exceeds the remaining budget")
+      end
+      max_output = math.min(max_output, remaining - reserved_prompt)
+      if max_output <= 0 then error("subagent_token_budget: no output budget remains") end
+    end
+    local reserved_cost = 0
+    if child_limits.max_cost_usd then
+      if type(rates) ~= "table" or type(rates.output) ~= "number" then
+        error("subagent_cost_budget: model rates unavailable")
+      end
+      -- A conservative reservation: the whole prompt plus the whole output at
+      -- the output rate, so a cheaper call still cannot exceed the cap.
+      reserved_cost = ((reserved_prompt + (max_output == math.huge and 0 or max_output)) * rates.output) / 1000000
+      if (totals.cost or 0) + reserved_cost > child_limits.max_cost_usd then
+        error("subagent_cost_budget: the next call could exceed the cap")
+      end
+    end
+    if max_output ~= math.huge and max_output > 0 then opts.max_output = math.floor(max_output) end
+    return opts, { prompt = reserved_prompt, output = (max_output == math.huge and 0 or max_output), cost = reserved_cost }
+  end
+
   -- The loop is bounded by *context*, not by a round budget - pi's model, and
   -- the better one. A fixed round budget fails the worst way: it stops the message
   -- mid-task, so the work exists in the transcript but nothing is verified,
@@ -935,9 +979,11 @@ function M:run_body(text, images)
     if round == 1 and configured_agents and configured_agents ~= "" and not self.agents_source then
       self.emit({ type = "status", text = agents_var .. " configured but unreadable: " .. configured_agents })
     end
-    local ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream,
-      {session_id=self.session_id,run_id=self.run_id,round=round,context_tokens=context_tokens,
-       context={estimate_source=context_source,summary_watermark=(memory.session(self.session_id) or {}).summarized_until or 0}})
+    local budget_opts, budget_reserved = child_call_budget(context_tokens)
+    local call_opts = {session_id=self.session_id,run_id=self.run_id,round=round,context_tokens=context_tokens,
+       context={estimate_source=context_source,summary_watermark=(memory.session(self.session_id) or {}).summarized_until or 0}}
+    for key, value in pairs(budget_opts or {}) do call_opts[key] = value end
+    local ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
     if not ok then
       trace[#trace + 1] = { kind = "model_call", model = self.model, ok = false,
         ms = math.floor((host.now() - llm_started) * 1000), error = redact.text(tostring(result)):sub(1, 400) }
@@ -994,6 +1040,24 @@ function M:run_body(text, images)
     else
       trace[#trace + 1] = { kind = "model_call", model = self.model, ok = true, round = round,
         ms = math.floor((host.now() - llm_started) * 1000), prefix = prefix_fingerprint }
+    end
+    if child_limits and budget_reserved then
+      local normalized = result.observation and result.observation.normalized
+      if type(result.usage) == "table" and not normalized then
+        normalized = telemetry.normalize(result.usage, provider.rates(self.model))
+      end
+      local usage_known = type(normalized) == "table" and normalized.known == true
+      if not usage_known then
+        -- Charge the reservation: a provider that reports nothing must not turn
+        -- a hard token or cost budget into an unlimited one.
+        totals.total = (totals.total or 0) + (budget_reserved.prompt or 0) + (budget_reserved.output or 0)
+        totals.completion = (totals.completion or 0) + (budget_reserved.output or 0)
+        totals.prompt = (totals.prompt or 0) + (budget_reserved.prompt or 0)
+        if budget_reserved.cost and budget_reserved.cost > 0 then
+          totals.cost = (totals.cost or 0) + budget_reserved.cost
+        end
+        totals.unaccounted = (totals.unaccounted or 0) + 1
+      end
     end
     if child_limits then
       if child_limits.max_tokens and totals.total > child_limits.max_tokens then

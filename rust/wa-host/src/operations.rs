@@ -55,6 +55,24 @@ pub fn foreground(
                 json!({"operation_id":id,"ok":false,"code":-1,"error":"operation_supervisor_overdue","cleanup":"unknown","output_complete":false}),
             );
         }
+        // A cancelled run or child cancels its operation too, and stays attached
+        // until the operation actually settles: returning while it still runs would
+        // let the effect outlive the execution that owns it.
+        if crate::host::run_cancel_requested() {
+            let _ = manager().cancel(&id);
+            let cleanup = std::time::Instant::now() + Duration::from_millis(1000);
+            while std::time::Instant::now() < cleanup {
+                let stopped = manager()
+                    .wait(&id, Duration::from_millis(50))
+                    .map_err(|e| e.to_string())?;
+                if stopped["settled"] == true {
+                    return Ok(json!({"operation_id":id,"ok":false,"error":"run_cancelled",
+                        "state":stopped["state"],"cleanup":"settled","output_complete":stopped["output_complete"]}));
+                }
+            }
+            return Ok(json!({"operation_id":id,"ok":false,"error":"run_cancelled",
+                "cleanup":"unknown","output_complete":false}));
+        }
         // This is the waiting interpreter observing the supervisor, not a helper beating forever.
         crate::serve::beat();
     }

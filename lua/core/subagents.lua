@@ -203,6 +203,34 @@ function M.resolve(id, ctx)
     return nil, "profile_depth_exceeded"
   end
 
+  -- Pass every declared limit through so a specialist profile's own budget
+  -- names (context_messages, body_bytes, sends_per_run) survive to the child;
+  -- clamp only the fields this runtime owns. A malformed, negative or NaN budget
+  -- on a field this runtime enforces is refused, not silently coerced.
+  for _, key in ipairs({ "max_depth", "timeout_seconds", "max_output_bytes", "max_tokens",
+      "max_cost_usd", "max_children", "max_prompt_bytes" }) do
+    local raw_value = limits[key]
+    if raw_value ~= nil and (type(raw_value) ~= "number" or raw_value ~= raw_value) then
+      return nil, "invalid_limit:" .. key
+    end
+  end
+  local resolved_limits = {}
+  for key, value in pairs(limits) do resolved_limits[key] = value end
+  resolved_limits.max_depth = math.min(tonumber(limits.max_depth) or 0, max_depth)
+  resolved_limits.timeout_seconds = tonumber(limits.timeout_seconds) or 600
+  resolved_limits.max_output_bytes = tonumber(limits.max_output_bytes) or 65536
+  resolved_limits.max_tokens = tonumber(limits.max_tokens) or 200000
+  resolved_limits.max_cost_usd = tonumber(limits.max_cost_usd)
+  resolved_limits.max_children = tonumber(limits.max_children)
+  resolved_limits.max_prompt_bytes = tonumber(limits.max_prompt_bytes) or 262144
+  for _, key in ipairs({ "max_depth", "timeout_seconds", "max_output_bytes", "max_tokens",
+      "max_cost_usd", "max_children", "max_prompt_bytes" }) do
+    local value = resolved_limits[key]
+    if value ~= nil and (type(value) ~= "number" or value ~= value or value < 0) then
+      return nil, "invalid_limit:" .. key
+    end
+  end
+
   return {
     id = profile.id,
     description = profile.description or "",
@@ -210,20 +238,7 @@ function M.resolve(id, ctx)
     allowed_tools = allowed_list,
     allowed = allowed_set,
     resources = profile.resources or {},
-    limits = (function()
-      -- Pass every declared limit through so a specialist profile's own budget
-      -- names (context_messages, body_bytes, sends_per_run) survive to the child;
-      -- clamp only the fields this runtime owns.
-      local resolved = {}
-      for key, value in pairs(limits) do resolved[key] = value end
-      resolved.max_depth = math.min(tonumber(limits.max_depth) or 0, max_depth)
-      resolved.timeout_seconds = tonumber(limits.timeout_seconds) or 600
-      resolved.max_output_bytes = tonumber(limits.max_output_bytes) or 65536
-      resolved.max_tokens = tonumber(limits.max_tokens) or 200000
-      resolved.max_cost_usd = tonumber(limits.max_cost_usd)
-      resolved.max_children = tonumber(limits.max_children)
-      return resolved
-    end)(),
+    limits = resolved_limits,
     model = profile.model,
     reasoning = profile.reasoning,
     approved_models = profile.approved_models,
@@ -301,6 +316,27 @@ local function truthy_limits(profile)
   return limits
 end
 
+-- Bound a caller-supplied text or table. A table is JSON-encoded (never
+-- `tostring`, which yields "table: 0x..."), and both shapes are clipped inside
+-- the profile's prompt budget with an explicit marker.
+local function bounded_text(value, maximum)
+  maximum = tonumber(maximum) or 262144
+  local text
+  if value == nil then
+    text = ""
+  elseif type(value) == "table" then
+    local ok, encoded = pcall(json.encode, value)
+    text = ok and encoded or "{}"
+  else
+    text = tostring(value)
+  end
+  if #text > maximum then
+    local marker = "\n[truncated: input exceeded the profile's prompt budget]"
+    text = text:sub(1, math.max(0, maximum - #marker)) .. marker
+  end
+  return text
+end
+
 -- Is this conversation in the profile's approved scope?
 local function scope_has(profile, conversation_id)
   local resources = profile.resources or {}
@@ -349,8 +385,8 @@ function M.start(args, ctx)
   args = args or {}
   ctx = derive_ctx(ctx)
   if ctx.subagent then return { error = "subagent_recursion_forbidden" } end
-  local prompt = tostring(args.prompt or "")
-  if prompt == "" then return { error = "prompt_required" } end
+  local raw_prompt = tostring(args.prompt or "")
+  if raw_prompt == "" then return { error = "prompt_required" } end
   local profile_id = tostring(args.profile or "explore")
   local profile, refusal, detail = M.resolve(profile_id, ctx)
   if not profile then
@@ -372,6 +408,10 @@ function M.start(args, ctx)
   local reasoning_ok, reasoning_error = approved_reasoning(effective_model, reasoning)
   if not reasoning_ok then return { error = reasoning_error } end
   local limits = truthy_limits(profile)
+  -- Bound the task and its context before a child session or a native thread is
+  -- created, so an oversized payload is refused rather than queued.
+  local prompt = bounded_text(raw_prompt, limits.max_prompt_bytes)
+  local context = bounded_text(args.context, limits.max_prompt_bytes)
   local event, event_error = resolve_event(profile, args)
   if event_error then return { error = event_error } end
   -- A dollar cap is only meaningful when the model's rates are known. Fail
@@ -407,7 +447,7 @@ function M.start(args, ctx)
     session_id = session_id,
     profile = profile.id,
     prompt = prompt,
-    context = tostring(args.context or ""),
+    context = context,
     instructions = profile.instructions,
     allowed_tools = profile.allowed_tools,
     limits = limits,
@@ -558,7 +598,10 @@ function wa_subagent_run(receipt_json)
   reply = tostring(reply or "")
   local truncated = false
   if limits.max_output_bytes and #reply > limits.max_output_bytes then
-    reply = reply:sub(1, limits.max_output_bytes) .. "\n[truncated at the child's output budget]"
+    -- The marker counts against the cap: the stored reply must not exceed the
+    -- budget it was given.
+    local marker = "\n[truncated at the child's output budget]"
+    reply = reply:sub(1, math.max(0, limits.max_output_bytes - #marker)) .. marker
     truncated = true
   end
   local usage = child.usage_total and child.usage_total.last or {}
