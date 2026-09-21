@@ -22,7 +22,9 @@ local target = dir .. "/wa-diff-route.txt"
 local session = memory.start_session("", "diff route", { title = "diff route" })
 
 local function call(payload)
-  return json.decode(wa_diff(json.encode(payload), {}))
+  -- No credential means the trusted local account. A table is not a credential
+  -- and must no longer accidentally fall back to master on another interpreter.
+  return json.decode(wa_diff(json.encode(payload), ""))
 end
 
 -- A real change to a real file, recorded the way a turn records it.
