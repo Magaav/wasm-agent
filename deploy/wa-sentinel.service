@@ -26,6 +26,11 @@ Restart=always
 RestartSec=5
 # Same home as the node: the drop-box, the log and the triggers all live beside its config.
 Environment=WASM_AGENT_HOME=/home/ubuntu
+# Where the sentinel may execute `run` scripts from. Without it every `run` job is refused with
+# "run is disabled: set WA_SENTINEL_SCRIPTS". Both install locations are named because the unit starts
+# the binary from /usr/local/bin while upgrades install to ~/.local/bin on this host.
+Environment=WA_SENTINEL_SCRIPTS=/usr/local/bin/scripts;/home/ubuntu/.local/bin/scripts
+WorkingDirectory=/usr/local/bin
 # Waking the model costs money, so the budget is set where an operator can see it.
 Environment=WA_SENTINEL_WAKE_BUDGET=6
 StandardOutput=append:/home/ubuntu/.wasm-agent/sentinel/sentinel.out

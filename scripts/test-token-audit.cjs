@@ -72,10 +72,95 @@ assert.equal(r.usage.missing_usage,1);assert.equal(r.usage.recorded_calls_cost_u
 const summaryStart=event('s','summary','start',{}),summaryEnd=event('s','summary','end',b.payload);
 r=audit([a,b,summaryStart,summaryEnd]);assert.equal(r.usage.summaries,1);
 assert.equal(r.usage.recorded_calls_cost_usd,.02);assert.equal(r.prefix.comparisons,0);
-const tool=(span,run)=>event(span,'tool','start',{name:'read',arguments_hash:h('f')},'a',run);
+const tool=(span,run,name='read',session='a')=>event(span,'tool','start',{name,arguments_hash:h('f')},session,run);
+const toolEnd=(span,run,name,ms,ok=true,clock='monotonic',session='a')=>event(span,'tool','end',{name,ms,ok,clock},session,run);
 r=audit([tool('a','1'),tool('b','1'),tool('c','2')]);
 assert.equal(r.tools.repeated_arguments_within_run,1);assert.equal(r.tools.pending,3);
 assert.ok(r.limitations.includes('repeated_arguments_are_not_automatically_waste'));
+
+// Tool elapsed time is attributed without exposing arguments or private plugin names.
+const elapsedRows=[];
+elapsedRows.push(event('run-time','run','start',{},'a','timed'));
+elapsedRows.push(event('model-time','model_call','start',{},'a','timed'));
+elapsedRows.push(event('model-time','model_call','end',{ok:true,ms:1500,clock:'monotonic',normalized:{known:false}},'a','timed'));
+elapsedRows.push(tool('read-time','timed','read'),toolEnd('read-time','timed','read',100));
+const timedBashStart=tool('bash-fast','timed','bash');
+const timedBashEnd=toolEnd('bash-fast','timed','bash',1000);
+timedBashEnd.payload.execution_timing={schema_version:1,clock:'monotonic',complete:true,
+  setup_ms:10,accepted_record_ms:5,spawn_ms:20,execution_ms:800,drain_cleanup_ms:5,output_sync_ms:10,
+  measured_ms:850,unattributed_ms:50,total_ms:900,final_state_record_excluded:true};
+elapsedRows.push(timedBashStart,timedBashEnd);
+elapsedRows.push(tool('bash-slow','timed','bash'),toolEnd('bash-slow','timed','bash',9000,false));
+elapsedRows.push(event('run-time','run','end',{ms:12000,clock:'monotonic'},'a','timed'));
+elapsedRows.push(tool('pending-bash','pending','bash'));
+elapsedRows.push(tool('private-tool','private','private_customer_plugin'),
+  toolEnd('private-tool','private','private_customer_plugin',25));
+r=audit(elapsedRows);
+assert.equal(r.tools.completed,4);assert.equal(r.tools.pending,1);assert.equal(r.tools.failed,1);
+assert.equal(r.tools.measured_elapsed,4);assert.equal(r.tools.unmeasured_elapsed,0);
+assert.equal(r.tools.elapsed.total_ms,10125);assert.equal(r.tools.elapsed.by_clock.monotonic.total_ms,10125);
+assert.equal(r.tools.by_name.bash.completed,2);assert.equal(r.tools.by_name.bash.elapsed.total_ms,10000);
+assert.equal(r.tools.by_name.bash.elapsed.p50_ms,1000);assert.equal(r.tools.by_name.bash.elapsed.p95_ms,9000);
+assert.equal(r.tools.by_name.bash.elapsed.failed_ms,9000);
+assert.equal(r.tools.by_name.bash.duration_buckets['1s_to_10s'].calls,2);
+assert.equal(r.tools.by_name.bash.duration_buckets['1s_to_10s'].total_ms,10000);
+assert.equal(r.tools.by_name.bash.share_of_measured_tool_ms,10000/10125);
+assert.equal(r.tools.execution_phases.reported,1);assert.equal(r.tools.execution_phases.complete,1);
+assert.equal(r.tools.execution_phases.tool_ms,1000);assert.equal(r.tools.execution_phases.execution_ms,800);
+assert.equal(r.tools.execution_phases.executor_overhead_ms,200);assert.equal(r.tools.execution_phases.phase_totals_ms.wrapper_ms,100);
+assert.equal(r.tools.execution_phases.phase_timing.execution_ms.p50_ms,800);
+assert.equal(r.tools.execution_phases.execution_share,.8);assert.equal(r.tools.execution_phases.by_name.bash.samples,1);
+assert.equal(r.tools.by_name.other.completed,1);
+const incompleteTimingStart=tool('incomplete-timing','phase-errors','bash');
+const incompleteTimingEnd=toolEnd('incomplete-timing','phase-errors','bash',10);
+incompleteTimingEnd.payload.execution_timing={schema_version:1,clock:'monotonic',complete:false};
+const invalidTimingStart=tool('invalid-timing','phase-errors','bash');
+const invalidTimingEnd=toolEnd('invalid-timing','phase-errors','bash',10);
+invalidTimingEnd.payload.execution_timing={schema_version:1,clock:'monotonic',complete:true,
+  setup_ms:1,accepted_record_ms:1,spawn_ms:1,execution_ms:1,drain_cleanup_ms:1,output_sync_ms:1,
+  measured_ms:99,unattributed_ms:1,total_ms:7};
+const phaseErrors=audit([incompleteTimingStart,incompleteTimingEnd,invalidTimingStart,invalidTimingEnd]);
+assert.equal(phaseErrors.tools.execution_phases.reported,2);assert.equal(phaseErrors.tools.execution_phases.complete,0);
+assert.equal(phaseErrors.tools.execution_phases.incomplete,1);assert.equal(phaseErrors.tools.execution_phases.invalid,1);
+const slowAStart=tool('slow-a','slow','bash'),slowAEnd=toolEnd('slow-a','slow','bash',60000);
+const slowBStart=tool('slow-b','slow','bash'),slowBEnd=toolEnd('slow-b','slow','bash',120000,false);
+slowBEnd.payload.error='deadline_exceeded';
+const slowCStart=tool('slow-c','slow','bash');slowCStart.payload.arguments_hash=h('e');
+const slowCEnd=toolEnd('slow-c','slow','bash',70000);
+const slowAudit=audit([slowAStart,slowAEnd,slowBStart,slowBEnd,slowCStart,slowCEnd]);
+assert.equal(slowAudit.tools.by_name.bash.duration_buckets.gte_60s.calls,3);
+assert.equal(slowAudit.tools.by_name.bash.duration_buckets.gte_60s.total_ms,250000);
+assert.equal(slowAudit.tools.by_name.bash.duration_buckets.gte_60s.failed_ms,120000);
+assert.equal(slowAudit.tools.by_name.bash.duration_buckets.gte_60s.deadline_exceeded,1);
+assert.equal(slowAudit.tools.by_name.bash.duration_buckets.gte_60s.deadline_exceeded_ms,120000);
+assert.equal(slowAudit.tools.slow_bash_argument_groups.calls,3);
+assert.equal(slowAudit.tools.slow_bash_argument_groups.distinct_groups,2);
+assert.equal(slowAudit.tools.slow_bash_argument_groups.repeated_groups,1);
+assert.equal(slowAudit.tools.slow_bash_argument_groups.largest_group_calls,2);
+assert.ok(!JSON.stringify(r).includes('private_customer_plugin'));
+assert.equal(r.run_timing.completed_runs,1);assert.equal(r.run_timing.decomposed_runs,1);
+assert.equal(r.run_timing.decomposed_run_ms,12000);assert.equal(r.run_timing.model_ms,1500);
+assert.equal(r.run_timing.tool_ms,10100);assert.equal(r.run_timing.bash_ms,10000);
+assert.equal(r.run_timing.unclassified_ms,400);
+assert.equal(r.run_timing.bash_share_of_decomposed_run_ms,10000/12000);
+assert.equal(r.run_timing.non_monotonic_clock_runs,0);
+assert.ok(r.limitations.includes('summed_span_time_is_not_global_wall_clock'));
+
+const missingMs=[tool('missing-ms','missing','bash'),toolEnd('missing-ms','missing','bash',undefined)];
+r=audit(missingMs);assert.equal(r.tools.unmeasured_elapsed,1);assert.equal(r.tools.elapsed.samples,0);
+const mismatchStart=tool('mismatch','mismatch','read'),mismatchEnd=toolEnd('mismatch','mismatch','bash',1);
+assert.throws(()=>audit([mismatchStart,mismatchEnd]),/inconsistent_tool_name/);
+r=audit([tool('wall-clock','wall','read'),toolEnd('wall-clock','wall','read',7,true,'wall-fallback')]);
+assert.equal(r.tools.elapsed.by_clock.wall_fallback.total_ms,7);
+const incompleteRun=[event('incomplete-run','run','start',{},'a','incomplete'),tool('unfinished','incomplete','bash'),
+  event('incomplete-run','run','end',{ms:20,clock:'monotonic'},'a','incomplete')];
+r=audit(incompleteRun);assert.equal(r.run_timing.incomplete_child_timing_runs,1);assert.equal(r.run_timing.decomposed_runs,0);
+const inconsistentRun=[event('short-run','run','start',{},'a','short'),tool('long-tool','short','bash'),
+  toolEnd('long-tool','short','bash',11),event('short-run','run','end',{ms:10,clock:'monotonic'},'a','short')];
+r=audit(inconsistentRun);assert.equal(r.run_timing.inconsistent_runs,1);assert.equal(r.run_timing.decomposed_runs,0);
+const hugeToolA=tool('huge-tool-a','huge-a','bash'),hugeToolAEnd=toolEnd('huge-tool-a','huge-a','bash',Number.MAX_SAFE_INTEGER);
+const hugeToolB=tool('huge-tool-b','huge-b','bash'),hugeToolBEnd=toolEnd('huge-tool-b','huge-b','bash',1);
+assert.throws(()=>audit([hugeToolA,hugeToolAEnd,hugeToolB,hugeToolBEnd]),/tool_time_total_exceeds_safe_integer/);
 const measured=start('measured',{prefix_audit_ms:2,prefix_audit:{schema_version:1,relation:'rewritten',first_changed_message:2,tools_changed:true,settings_changed:false,routing_changed:true}});
 r=audit([measured,end('measured')]);assert.equal(r.prepared_prefix.measured,1);
 assert.equal(r.timing.prefix_audit_ms.p50,2);assert.equal(r.prepared_prefix.rewritten,1);assert.equal(r.prepared_prefix.tools_changed,1);

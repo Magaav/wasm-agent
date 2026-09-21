@@ -1,10 +1,12 @@
 ---
 name: self-update
 description: >-
-  How to rebuild and replace the node you are running on, without breaking it. Use it whenever a
-  change you made requires restarting or replacing this node - a new binary, a rebuilt wa.exe, a Lua
-  or Rust change that must be live - and before trying to restart, re-exec or upgrade yourself, or
-  calling your own node's HTTP routes from inside a run.
+  How to rebuild and replace the node you are running on - and, when the change is in the supervisor
+  itself, how to deploy a new wa-sentinel - without breaking it. Use it whenever a change you made
+  requires restarting or replacing this node: a new binary, a rebuilt wa.exe, a Lua or Rust change
+  that must be live, a sentinel fix, a self-update, or before you try to restart, re-exec, upgrade or
+  deploy yourself (`wa-sentinel request upgrade` / `request deploy`), or call your own node's HTTP
+  routes from inside a run.
 ---
 
 # Updating the node you are running on
@@ -34,6 +36,54 @@ wa-sentinel request upgrade --binary "<absolute path to wa.exe>" \
   --session "<current session id>" --prompt "The upgrade finished; verify it and continue." \
   --reason "why"
 ```
+
+**When the change is in the sentinel, `upgrade` cannot carry it** — `upgrade.sh` installs the node and
+the UI and never copies `wa-sentinel.exe`. Use `deploy` for that, and it is the same shape:
+
+```
+wa-sentinel request deploy \
+  --session "<current session id>" --prompt "The deploy finished; verify it and continue." \
+  --reason "why"
+```
+
+`deploy` runs the full gate (`scripts/deploy.sh`), waits until no turn is running before it starts, and
+runs **detached** — the process it replaces is the one that would otherwise be its parent. It installs
+the node, the UI and the sentinel, proves the new node on a scratch port, rolls back on its own if that
+proof fails, and queues your continuation once the new node answers `/health`. Read the outcome from
+`installed.txt` and `deploy.log`, not from the request: the request says "started detached", which is a
+launch receipt, not a result.
+
+The copy that `request deploy` runs sits beside the supervisor, so it cannot find a worktree by looking
+at its own parent. It resolves the tree to build from as `WA_DEPLOY_ROOT`, else its `..` when that is a
+git work tree, else the runtime worktree recorded in `<install>/runtime-worktree.txt` — pass
+`WA_DEPLOY_ROOT` when you want a deploy from somewhere else. A requested deploy that *fails* also wakes
+you, naming the refusal: the request being `done` only means it was spawned, and a deploy that refuses
+before the swap leaves the node untouched and would otherwise tell nobody. A deploy run by hand passes no
+session and wakes nobody.
+
+### Verifying a deploy without re-deriving it
+
+`scripts/verify-install.sh` prints one PASS/FAIL per comparison - installed vs built hashes, shipped
+scripts vs the repo, the recorded pid vs the listener, the watcher alive - and `--json` for a machine
+verdict. Run that instead of hashing binaries, diffing scripts and reading `/health` by hand: they are
+comparisons, not judgement. A deploy also writes `<install>/deploy-result.json`, and the continuation wake
+carries a one-line verdict, so the outcome is data you read once.
+
+`request run --script <path>` is the sanctioned way to run a script **outside** the node's turn. The
+sentinel executes it only from directories in `WA_SENTINEL_SCRIPTS` (the install's `scripts/` is what the
+gate and the service set). That is a deliberate boundary, not an obstacle to route around with
+`Start-Process` or Task Scheduler - a run that fights the OS for eight rounds is a run that should have
+queued a request.
+
+Two limits worth knowing before you rely on this:
+
+- **A stopped watcher cannot be revived from a run.** Nothing running can hear a request, so use
+  `deploy`/`upgrade` while the watcher is up, and keep the supervisor in a service or logon task so it
+  comes back by itself (`deploy/wa-sentinel.service` for systemd; `scripts/install-sentinel-task.ps1`
+  registers the Windows logon task, with the `run` allow-list set).
+- **The first sentinel that understands `deploy` has to get there by hand once.** A watcher running an
+  older build answers `unknown verb "deploy"`, so that one step is a shell command: build, then
+  `bash scripts/deploy.sh --reason "…"` from outside the run.
 
 Omit `--session` and `--prompt` together if no continuation is wanted. The
 request command only queues work; the record in `sentinel/done` or `failed` and
@@ -87,15 +137,16 @@ plan whose point never happened.
 
 ## What a fresh node must have
 
-Self-update is unavailable without both of these beside the binary, and a fresh install has been
-missing them before:
+Self-update is unavailable without these beside the binary, and a fresh install has been missing them
+before:
 
 | needed | why |
 | --- | --- |
 | `wa-sentinel.exe` | the only process that can stop or start this node |
 | `scripts/upgrade.sh` | what the sentinel resolves and runs for an `upgrade` step |
+| `scripts/deploy.sh` | what the sentinel resolves and runs for a `deploy` step - the one that installs a sentinel; `deploy.sh` ships it, so a node that has only ever had `upgrade` may lack it |
 
-If `request upgrade` is accepted and nothing changes, check those two first — the sentinel deliberately
+If `request upgrade` is accepted and nothing changes, check those first — the sentinel deliberately
 fails loudly now, and says which paths it tried.
 
 ## Recovering when a node does not come back

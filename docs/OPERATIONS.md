@@ -23,6 +23,16 @@ not execution success. Default execution budget is 300 seconds; explicit
 operations may request 1–86400 seconds. Eight operations may be active per manager.
 
 State: accepted → running → draining → completed / failed / cancelled.
+Settled results include monotonic phase timing (`timing.schema_version=1`): exclusive
+setup, accepted-record persistence, process spawn, execution, drain/cleanup and
+output-sync milliseconds, plus measured/unattributed/total time. `execution_ms`
+is child lifetime after spawn until settlement begins; it is not CPU time. The
+final atomic state record is explicitly excluded because its duration cannot be
+written into itself. For synchronous `bash`, the agent copies this object into
+aggregate telemetry and removes it from the model-facing tool result; the audit
+reports the remaining wrapper time (final record, host adapter and projection)
+separately. Missing/partial timing is reported, never converted to zero.
+
 A record not attached to this runtime is `outcome_unknown`: it may have been
 interrupted or may still be active in another process. External effects require
 reconciliation, not automatic replay; lack of attachment is not proof of death. Metadata and captured output survive in
@@ -104,6 +114,28 @@ explicit interruption: it acts by listener PID without waiting for idle. Neither
 implies safe replay of an interrupted side effect. Upgrades retain their proof,
 idle and rollback gates. Never restart the desktop window to recover an operation.
 
+## Model-free phase benchmark
+
+Run `bash scripts/bench-operation-phases.sh`; `WA_OPERATION_BENCH_RUNS` changes the
+short-case count (1–50). It launches only packaged fixtures in a scratch operation
+home and reports aggregate JSON—no model, live node, user command or command text.
+
+On the Windows development host, seven short-case samples measured:
+
+| fixture | total p50 / p95 | execution p50 / p95 | non-execution observation |
+| --- | ---: | ---: | ---: |
+| direct no-op executable | 24 / 31 ms | 21 / 27 ms | about 3 ms at p50 |
+| Git Bash no-op | 53 / 63 ms | 49 / 60 ms | about 4 ms at p50 |
+| direct 10 ms delay | 35 / 40 ms | 32 / 37 ms | about 3 ms at p50 |
+| direct 64 KiB output | 25 / 27 ms | 22 / 22 ms | about 3 ms at p50 |
+| direct failure | 20 / 20 ms | 16 / 16 ms | about 4 ms at p50 |
+
+Three timeout fixtures settled at 58 ms p50 for a 50 ms deadline; three owned
+background-cleanup fixtures settled at 107 ms p50. These are individual local
+measurements, not throughput or cross-platform claims. The shell/direct no-op gap
+is about 29 ms here; it cannot explain the field audit's 88.2-second bash p95 or
+24-minute maximum.
+
 ## Enforcement
 
 * `cargo test -p wa-operation --offline`: real children, inherited pipes, both
@@ -115,6 +147,8 @@ idle and rollback gates. Never restart the desktop window to recover an operatio
 * `scripts/test-operation-control.cjs`: a real tool holds the run worker while
   another interpreter lists/reads/cancels it; the run then continues (local mock
   provider, zero paid inference).
+* `scripts/bench-operation-phases.sh`: model-free phase distributions for direct,
+  shell, output, failure, timeout and descendant-cleanup fixtures.
 * `scripts/test-operation-recovery.cjs`: a busy isolated listener is recovered
   without waiting for idle, graceful maintenance is deferred, disabling a job
   cancels its running script, and Windows host death kills contained descendants.

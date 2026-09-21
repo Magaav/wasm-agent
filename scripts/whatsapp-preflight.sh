@@ -36,4 +36,15 @@ fi
 
 # The verdict is JSON: read the three facts the line carries, without assuming they are there.
 field() { printf '%s' "$report" | tr -d '\r' | sed -n "s/.*\"$1\":\([^,}]*\).*/\1/p" | head -1 | tr -d '"'; }
+
+# The trigger is the other half of the chain: it is what keeps the hook across reloads, and its own
+# status can be optimistic (it says "listening" after a reload even when the page lost the hook - which
+# is why the hook check above exists). Reported, not trusted: the pin is compared with the live target,
+# because a browser restart replaces the target id and then nothing is listening at all.
+trigger_line=""
+if command -v node >/dev/null 2>&1; then
+  trigger_line="$(timeout 60 node "$ROOT/scripts/whatsapp-trigger.mjs" status --line 2>/dev/null | tail -1)"
+fi
+
 echo "whatsapp preflight ok cdp=$(field host):$(field port) chats=$(field chats) bound=$(field bound) hook=$(field hook)"
+[ -n "$trigger_line" ] && echo "whatsapp preflight $trigger_line"

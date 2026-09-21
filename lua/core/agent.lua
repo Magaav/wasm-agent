@@ -977,6 +977,10 @@ function M:run_body(text, images)
           changes = self.changes }) end)
       host.beat()
       if not handled then output = { error = tostring(output) } end
+      -- Native execution phase timing belongs in aggregate telemetry, not in the
+      -- model-facing result where it would spend context on every shell call.
+      local execution_timing=type(output)=="table" and output.timing or nil
+      if function_.name=="bash" and execution_timing then output.timing=nil end
       local ok_tool = tool_output.outcome(function_.name,output)
       local projected,content=pcall(tool_output.project,function_.name,output)
       if not projected then
@@ -988,7 +992,7 @@ function M:run_body(text, images)
       end
       telemetry.finish(tool_span,{name=function_.name,ok=ok_tool,code=type(output)=="table" and output.code or nil,
         error=not projected and "tool_output_storage_failed" or type(output)=="table" and output.error or nil,
-        full_bytes=#json.encode(output),view_bytes=#content,storage_ok=projected})
+        full_bytes=#json.encode(output),view_bytes=#content,storage_ok=projected,execution_timing=execution_timing})
       trace[#trace + 1] = { kind = "tool", name = function_.name, ok = ok_tool, round = round,
         ms = math.floor((host.now() - tool_started) * 1000) }
       self.emit({ type = "tool_result", name = function_.name, result = output })

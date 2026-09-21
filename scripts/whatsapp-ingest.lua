@@ -73,7 +73,7 @@ local function unavailable(reason, detail)
 end
 
 -- Emitting, not waking: the ingest knows exactly which messages are new, so it is the only thing that
--- has to *say* so. An event per new incoming message (topic `app.message`, the message id as the
+-- has to *say* so. An event per new incoming message (topic `whatsapp.message`, the message id as the
 -- stable event id) means the job store dedupes a repeated emission by itself - `UNIQUE(job_id,
 -- revision, event_id)` - so a re-run cannot wake anyone twice for one message. That is the whole
 -- reason the emit lives here instead of in a browser listener: nothing to reload, nothing to miss,
@@ -195,7 +195,7 @@ local function main()
     -- my own replies are not news to be woken about.
     if emit_on and sentinel and cursor > 0 and (message.sent_at or 0) > cursor
        and message.direction == "incoming" then
-      local ok, why = emit_event(sentinel, "app.message", message.message_id, {
+      local ok, why = emit_event(sentinel, "whatsapp.message", message.message_id, {
         conversation_id = message.conversation_id,
         message_id = message.message_id,
         sender_id = message.sender_id,

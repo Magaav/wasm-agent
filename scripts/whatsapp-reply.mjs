@@ -330,9 +330,15 @@ async function main() {
   // WhatsApp restores a chat's unsent draft, so "the composer contains my text" is not enough: a
   // leftover draft would be sent *with* the reply. Either it is my body and nothing else, or nothing is
   // sent at all.
-  if (normalise(typed.text) !== normalise(body)) {
+  //
+  // With `--label` the composer holds `label\n\nbody`, not `body` - so comparing against `body` alone made
+  // every labelled note fail as "composer holds something other than the exact reply". That is what the
+  // reply job meant when it reported "the summary note did not go either": the route was fine, the check
+  // was measuring the wrong string, and the tool refused to send for that reason.
+  const expected = args.label ? `${args.label}\n\n${body}` : body;
+  if (normalise(typed.text) !== normalise(expected)) {
     return done({
-      ok: false, error: "composer_not_exactly_the_body", typed, chat: target.chat, body, before,
+      ok: false, error: "composer_not_exactly_the_body", typed, chat: target.chat, body: expected, before,
       observed: "the composer holds something other than the exact reply (a restored draft is the usual reason)",
       next: "the job must clear the draft before sending; nothing was sent",
     }, 5);

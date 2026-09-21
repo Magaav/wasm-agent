@@ -98,7 +98,19 @@ print a finite efficiency score. Report completion quality and uncertainty besid
 cost, latency and tokens. Natural runs identify engineering hypotheses, not a
 causal claim that one harness wins. Investigate repeated identical tool arguments,
 cache misses, large views, compaction frequency and failed tools as signals—not
-as automatic evidence of waste.
+as automatic evidence of waste. The offline audit attributes completed tool-span
+elapsed time by built-in tool name and decomposes complete, consistently measured
+runs into model, tool and unclassified time. Tool time includes dispatch and output
+projection, not process CPU; summed runs can overlap, so it is not global wall-clock
+share. Unknown/plugin names are aggregated as `other` rather than disclosed.
+For newly recorded synchronous bash calls, monotonic native phase timing separates
+executor setup/admission/spawn/execution/drain/output-sync from the final-record /
+host-adapter / projection wrapper. The detail enters telemetry but is removed from
+the model-facing bash result; incomplete or internally inconsistent phases are
+reported separately rather than used in an overhead ratio. Duration buckets show
+whether time is concentrated in long calls; bash calls of at least 60 seconds are
+grouped by existing argument hashes, but only aggregate distinct/repeated counts
+are emitted—never hashes or command text.
 
 ## Offline efficiency audit
 

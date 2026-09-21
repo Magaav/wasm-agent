@@ -711,34 +711,53 @@ function M.next_seq(session_id)
   return rows[1] and rows[1].seq or 1
 end
 
+-- One write unit. `seq` is the transcript's order, and it used to be `MAX(seq)+1` read and then inserted
+-- as two statements with no transaction: two writers - the node being replaced and the node that replaced
+-- it, or two workers - could read the same MAX, so two messages could share a seq or come out ordered
+-- against the turn that produced them. `BEGIN IMMEDIATE` takes the write lock for the whole append, so the
+-- read-modify-write is atomic, writers are serialised, and the three writes (message, search row, session
+-- touch) are one unit a kill cannot tear in half.
+local function in_transaction(fn)
+  exec("BEGIN IMMEDIATE")
+  local ok, result = pcall(fn)
+  if not ok then
+    pcall(exec, "ROLLBACK")
+    error(result)
+  end
+  exec("COMMIT")
+  return result
+end
+
 function M.append_turn(session_id, turn)
-  local seq = turn.seq or M.next_seq(session_id)
-  local id = turn.id or host.uuid()
-  exec("INSERT INTO messages(id,session_id,seq,role,content,images,tool_calls,tool_call_id,tool_name," ..
-       "tokens,ms,ok,debug,trace,changes,created_at,reasoning) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-       {id, session_id, seq, turn.role or "user", turn.content or "",
-        json.encode(turn.images or {}),
-        json.encode(turn.tool_calls or {}), turn.tool_call_id or "", turn.tool_name or "",
-        turn.tokens or 0, turn.ms or 0, turn.ok == false and 0 or 1,
-        turn.debug and 1 or 0, json.encode(turn.trace or {}),
-        json.encode(turn.changes or {}), host.now(), turn.reasoning or ""})
-  exec("INSERT INTO messages_fts(content,session_id,message_id) VALUES(?,?,?)",
-       {turn.content or "", session_id, id})
-  exec("UPDATE sessions SET updated_at=? WHERE id=?", {host.now(), session_id})
-  M.journal("message", id, {
-    id = id, session_id = session_id, seq = seq, role = turn.role or "user",
-    content = turn.content or "", images = turn.images or {}, tool_calls = turn.tool_calls or {},
-    tool_call_id = turn.tool_call_id or "", tool_name = turn.tool_name or "",
-    tokens = turn.tokens or 0, ms = turn.ms or 0,
-    ok = turn.ok == false and 0 or 1, debug = turn.debug and 1 or 0,
-    trace = turn.trace or {}, created_at = host.now(), reasoning=turn.reasoning or "",
-    changes=turn.changes or {},
-  })
-  -- A thread is named after the first thing asked in it, the way a chat is named after its opening
-  -- message. Set once and never rewritten: a name that drifts as the conversation moves is worse
-  -- than no name, because the reader cannot use it to find the thread they remember.
-  if (turn.role or "user") == "user" then M.name_session(session_id, turn.content or "") end
-  return seq
+  return in_transaction(function()
+    local seq = turn.seq or M.next_seq(session_id)
+    local id = turn.id or host.uuid()
+    exec("INSERT INTO messages(id,session_id,seq,role,content,images,tool_calls,tool_call_id,tool_name," ..
+         "tokens,ms,ok,debug,trace,changes,created_at,reasoning) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+         {id, session_id, seq, turn.role or "user", turn.content or "",
+          json.encode(turn.images or {}),
+          json.encode(turn.tool_calls or {}), turn.tool_call_id or "", turn.tool_name or "",
+          turn.tokens or 0, turn.ms or 0, turn.ok == false and 0 or 1,
+          turn.debug and 1 or 0, json.encode(turn.trace or {}),
+          json.encode(turn.changes or {}), host.now(), turn.reasoning or ""})
+    exec("INSERT INTO messages_fts(content,session_id,message_id) VALUES(?,?,?)",
+         {turn.content or "", session_id, id})
+    exec("UPDATE sessions SET updated_at=? WHERE id=?", {host.now(), session_id})
+    M.journal("message", id, {
+      id = id, session_id = session_id, seq = seq, role = turn.role or "user",
+      content = turn.content or "", images = turn.images or {}, tool_calls = turn.tool_calls or {},
+      tool_call_id = turn.tool_call_id or "", tool_name = turn.tool_name or "",
+      tokens = turn.tokens or 0, ms = turn.ms or 0,
+      ok = turn.ok == false and 0 or 1, debug = turn.debug and 1 or 0,
+      trace = turn.trace or {}, created_at = host.now(), reasoning=turn.reasoning or "",
+      changes=turn.changes or {},
+    })
+    -- A thread is named after the first thing asked in it, the way a chat is named after its opening
+    -- message. Set once and never rewritten: a name that drifts as the conversation moves is worse
+    -- than no name, because the reader cannot use it to find the thread they remember.
+    if (turn.role or "user") == "user" then M.name_session(session_id, turn.content or "") end
+    return seq
+  end)
 end
 
 -- A name has to survive being read in a list and typed into a search box: one line, no markdown

@@ -274,6 +274,27 @@ fn is_run_route(request: &Request) -> bool {
     request.method == "POST" && split_path(&request.path).0 == "/chat"
 }
 
+/// The session a run belongs to for routing: the header when it is present, otherwise the body's `thread`.
+///
+/// The sentinel deliberately keeps the conversation out of `x-wa-session` and puts it in `thread`, so that
+/// a wake cannot land in the wrong conversation when the header carries an authentication session. Reading
+/// only the header therefore saw *no* session for every wake, routed it to an idle worker, and let a second
+/// turn run on a session that already had one - the same-session guarantee ("one writer per session") is
+/// what makes concurrent runs safe, and this was the hole in it.
+fn routing_session(method: &str, path: &str, header_session: &str, body: &[u8]) -> String {
+    if !header_session.is_empty() {
+        return header_session.to_string();
+    }
+    if method != "POST" || split_path(path).0 != "/chat" {
+        return String::new();
+    }
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("thread").and_then(|thread| thread.as_str()).map(str::to_string))
+        .filter(|thread| !thread.is_empty())
+        .unwrap_or_default()
+}
+
 /// The worker already running this session, if any. That worker is where the next run for it belongs, so
 /// the session keeps one writer and its runs keep their order.
 fn worker_running_session(session: &str) -> Option<usize> {
@@ -315,7 +336,7 @@ fn choose_worker(request: &Request) -> usize {
     // A run first, because it is the one route with a rule of its own: routed by session, so two different
     // conversations run at once and one conversation never does.
     if is_run_route(request) {
-        if let Some(index) = worker_running_session(&request.session) {
+        if let Some(index) = worker_running_session(&request.routing_session) {
             return index;
         }
         if let Some(index) = idle_worker() {
@@ -857,7 +878,7 @@ fn worker_loop(
                 if let Some(slots) = WORKER_SESSION.get() {
                     if let Some(slot) = slots.get(index) {
                         if let Ok(mut guard) = slot.lock() {
-                            *guard = if request.session.is_empty() { None } else { Some(request.session.clone()) };
+                            *guard = if request.routing_session.is_empty() { None } else { Some(request.routing_session.clone()) };
                         }
                     }
                 }
@@ -1013,6 +1034,12 @@ struct Request {
     method: String,
     path: String,
     session: String,
+    /// The session this request belongs to for *routing*, which is not always the auth session. A wake
+    /// puts its conversation in the body's `thread` and keeps `x-wa-session` for authentication (see
+    /// docs/JOBS.md). Routing on the header alone gave a wake an empty session, so it went to an idle
+    /// worker and ran a second turn on a conversation that was already running - two writers, one
+    /// transcript, and the turn's final message landed after the wake's (seq inversion).
+    routing_session: String,
     node_headers: Vec<(String, String)>,
     body: Vec<u8>,
     accept_sse: bool,
@@ -1054,12 +1081,15 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
             }
             if length > 4_000_000 || end > 65536 { return Ok(None); }
             if data.len() >= end + 4 + length {
+                let body = data[end + 4..end + 4 + length].to_vec();
+                let routing_session = routing_session(&method, &path, &session, &body);
                 return Ok(Some(Request {
                     method,
                     path,
                     session,
+                    routing_session,
                     node_headers,
-                    body: data[end + 4..end + 4 + length].to_vec(),
+                    body,
                     accept_sse,
                 }));
             }
@@ -1316,30 +1346,117 @@ fn content_type(path: &str) -> &'static str {
     }
 }
 
+/// A content hash of the UI, not a timestamp.
+///
+/// This used to hash each file's mtime, so an install that rewrote *identical* files changed the version:
+/// `upgrade.sh` copies every asset with `cp -f`, and every open page reloads on a version change. When that
+/// reload landed in the same deploy's node restart, the webview navigated into a dead port and stuck on an
+/// error page with no JavaScript - no heartbeat, no error report, a window that looked crashed but whose
+/// process was alive. The version must change when the bytes change, and only then.
 fn ui_version(ui: &std::path::Path) -> String {
     use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
     let mut entries: Vec<_> = std::fs::read_dir(ui)
         .map(|dir| dir.flatten().map(|entry| entry.path()).collect())
         .unwrap_or_default();
     entries.sort();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for path in entries {
-        if let Ok(metadata) = path.metadata() {
-            if metadata.is_file() {
-                path.to_string_lossy().hash(&mut hasher);
-                metadata.len().hash(&mut hasher);
-                metadata
-                    .modified()
-                    .ok()
-                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|duration| duration.as_millis())
-                    .hash(&mut hasher);
-            }
+        let Ok(metadata) = path.metadata() else { continue };
+        if !metadata.is_file() {
+            continue;
         }
+        path.to_string_lossy().hash(&mut hasher);
+        content_hash(&path, &metadata).hash(&mut hasher);
     }
     format!("{:x}", hasher.finish())
 }
 
+/// One file's content hash, cached by `(mtime, size)`. The version poll runs once a second per window, so
+/// the bytes are read only when the file actually changed - which is exactly when the stamp moves.
+fn content_hash(path: &std::path::Path, metadata: &std::fs::Metadata) -> u64 {
+    use std::hash::{Hash, Hasher};
+    type Stamp = (u64, u64);
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (Stamp, u64)>>> =
+        std::sync::OnceLock::new();
+    let stamp: Stamp = (
+        metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos() as u64)
+            .unwrap_or(0),
+        metadata.len(),
+    );
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some((cached, hash)) = guard.get(path) {
+            if *cached == stamp {
+                return *hash;
+            }
+        }
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match std::fs::read(path) {
+        Ok(bytes) => bytes.hash(&mut hasher),
+        Err(_) => 0u8.hash(&mut hasher),
+    }
+    let hash = hasher.finish();
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(path.to_path_buf(), (stamp, hash));
+    }
+    hash
+}
+
 fn json_escape(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"error\"".into())
+}
+
+#[cfg(test)]
+mod ui_version_tests {
+    use super::ui_version;
+
+    /// The regression: a deploy rewrites the UI with `cp -f` on every install, even when the bytes are
+    /// unchanged. Hashing the mtime made that a new version, which forced every open page to reload - into
+    /// the same deploy's node restart, where it stuck on an error page.
+    #[test]
+    fn the_version_tracks_content_not_timestamps() {
+        let dir = std::env::temp_dir().join(format!("wa-ui-version-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp ui dir");
+        let asset = dir.join("index.html");
+        std::fs::write(&asset, b"<html>one</html>").expect("write");
+        let first = ui_version(&dir);
+        // Same bytes, newer mtime: the version must not move.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(&asset, b"<html>one</html>").expect("rewrite");
+        assert_eq!(ui_version(&dir), first, "identical content must keep the version");
+        // Different bytes of the *same length* must still move it.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(&asset, b"<html>two</html>").expect("change");
+        assert_ne!(ui_version(&dir), first, "changed content must change the version");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod routing_session_tests {
+    use super::routing_session;
+
+    /// A wake is routed by its body's `thread`, because the sentinel keeps `x-wa-session` for
+    /// authentication. Reading only the header gave it an empty session, an idle worker, and a second
+    /// writer on a conversation that was already running - seq 4195 (wake) before 4196 (the live turn's
+    /// final message). This is the regression guard for that.
+    #[test]
+    fn a_wake_routes_by_its_thread_when_the_header_carries_only_auth() {
+        let body = br#"{"text":"hi","thread":"4ef4e372-8d84"}"#;
+        assert_eq!(routing_session("POST", "/chat", "", body), "4ef4e372-8d84");
+        // The header wins when it is present: the window and `wa chat` set the session there.
+        assert_eq!(routing_session("POST", "/chat", "abc", body), "abc");
+        // Only /chat is a run; a different route has no thread to read and no session to hold.
+        assert_eq!(routing_session("POST", "/update", "", body), "");
+        assert_eq!(routing_session("GET", "/session", "", body), "");
+        // A run with neither header nor thread is unrouted, exactly as it was before.
+        assert_eq!(routing_session("POST", "/chat", "", br#"{"text":"hi"}"#), "");
+        assert_eq!(routing_session("POST", "/chat", "", b""), "");
+    }
 }

@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex, Condvar,
+        Arc, Condvar, Mutex,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -56,6 +56,37 @@ pub struct Manager {
 }
 fn error(message: impl ToString) -> io::Error {
     io::Error::other(message.to_string())
+}
+const TIMING_PHASES: [&str; 6] = [
+    "setup_ms",
+    "accepted_record_ms",
+    "spawn_ms",
+    "execution_ms",
+    "drain_cleanup_ms",
+    "output_sync_ms",
+];
+fn timing_payload() -> Value {
+    json!({"schema_version":1,"clock":"monotonic","complete":false,
+        "setup_ms":null,"accepted_record_ms":null,"spawn_ms":null,"execution_ms":null,
+        "drain_cleanup_ms":null,"output_sync_ms":null,"measured_ms":0,"unattributed_ms":0,
+        "total_ms":0,"final_state_record_excluded":true})
+}
+fn phase(entry: &Entry, name: &str, elapsed: Duration) {
+    entry.state.lock().unwrap()["timing"][name] = json!(elapsed.as_millis() as u64);
+}
+fn finish_timing(state: &mut Value, total_ms: u64) {
+    let measured = TIMING_PHASES
+        .iter()
+        .filter_map(|name| state["timing"][name].as_u64())
+        .fold(0u64, u64::saturating_add);
+    let complete = TIMING_PHASES
+        .iter()
+        .all(|name| state["timing"][name].as_u64().is_some())
+        && measured <= total_ms;
+    state["timing"]["complete"] = json!(complete);
+    state["timing"]["measured_ms"] = json!(measured);
+    state["timing"]["unattributed_ms"] = json!(total_ms.saturating_sub(measured));
+    state["timing"]["total_ms"] = json!(total_ms);
 }
 pub fn atomic_json(path: &Path, value: &Value) -> io::Result<()> {
     let temporary = path.with_extension(format!(
@@ -143,7 +174,7 @@ impl Manager {
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         );
         let dir = self.root.join(&id);
-        let state = json!({"operation_id":id,"owner":spec.owner,"state":"accepted","settled":false,"timeout_ms":spec.timeout.as_millis() as u64,"cleanup_budget_ms":CLEANUP_MS,"containment":Process::containment(),"stdout_path":dir.join("stdout").to_string_lossy(),"stderr_path":dir.join("stderr").to_string_lossy(),"output_bytes":0});
+        let state = json!({"operation_id":id,"owner":spec.owner,"state":"accepted","settled":false,"timeout_ms":spec.timeout.as_millis() as u64,"cleanup_budget_ms":CLEANUP_MS,"containment":Process::containment(),"stdout_path":dir.join("stdout").to_string_lossy(),"stderr_path":dir.join("stderr").to_string_lossy(),"output_bytes":0,"timing":timing_payload()});
         let entry = Arc::new(Entry {
             cancel: AtomicBool::new(false),
             state: Mutex::new(state),
@@ -161,7 +192,13 @@ impl Manager {
                     // registry/state mutex across filesystem I/O.
                     fs::create_dir_all(&dir)?;
                     let accepted = entry.state.lock().unwrap().clone();
+                    let accepted_record_started = Instant::now();
                     atomic_json(&dir.join("state.json"), &accepted)?;
+                    phase(
+                        &entry,
+                        "accepted_record_ms",
+                        accepted_record_started.elapsed(),
+                    );
                     if entry.cancel.load(Ordering::Acquire) {
                         return Err(error("cancelled"));
                     }
@@ -176,7 +213,11 @@ impl Manager {
                     Err(_) => Some("operation_supervisor_panicked".into()),
                 };
                 if let Some(reason) = failure {
-                    let mut s = entry.state.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    let mut s = entry
+                        .state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
                     s["state"] = json!(if reason == "cancelled" {
                         "cancelled"
                     } else {
@@ -187,7 +228,9 @@ impl Manager {
                     s["error"] = json!(reason);
                     s["cleanup"] = json!("unknown");
                     s["output_complete"] = json!(false);
-                    s["elapsed_ms"] = json!(entry.started.elapsed().as_millis() as u64);
+                    let total_ms = entry.started.elapsed().as_millis() as u64;
+                    s["elapsed_ms"] = json!(total_ms);
+                    finish_timing(&mut s, total_ms);
                     if let Err(e) = atomic_json(&dir.join("state.json"), &s) {
                         s["persistence_error"] = json!(e.to_string());
                     }
@@ -275,7 +318,10 @@ impl Manager {
         let entry = self.entries.lock().map_err(error)?.get(id).cloned();
         if let Some(entry) = entry {
             let state = entry.state.lock().map_err(error)?;
-            let (state, _) = entry.settled.wait_timeout_while(state, budget, |s| s["settled"] != true).map_err(error)?;
+            let (state, _) = entry
+                .settled
+                .wait_timeout_while(state, budget, |s| s["settled"] != true)
+                .map_err(error)?;
             drop(state);
         }
         self.snapshot(id)
@@ -302,7 +348,20 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry) -> io::Result<()> {
         File::create(dir.join("stdout"))?,
         File::create(dir.join("stderr"))?,
     ];
-    let mut process = Process::spawn(spec)?;
+    let accepted_record_ms = entry.state.lock().unwrap()["timing"]["accepted_record_ms"]
+        .as_u64()
+        .unwrap_or(0);
+    let setup_total = entry.started.elapsed();
+    phase(
+        entry,
+        "setup_ms",
+        setup_total.saturating_sub(Duration::from_millis(accepted_record_ms)),
+    );
+    let spawn_started = Instant::now();
+    let process_result = Process::spawn(spec);
+    phase(entry, "spawn_ms", spawn_started.elapsed());
+    let mut process = process_result?;
+    let execution_started = Instant::now();
     entry.state.lock().unwrap()["state"] = json!("running");
     let mut views = [Vec::new(), Vec::new()];
     let mut eof = [false, false];
@@ -311,6 +370,7 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry) -> io::Result<()> {
     let mut reason = None;
     let mut cleanup = None;
     let mut stopped = None;
+    let mut drain_started = None;
     let mut parent_exit = None;
     let mut buffer = [0u8; 8192];
     loop {
@@ -364,6 +424,8 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry) -> io::Result<()> {
                 && ((!descendants && eof.iter().all(|v| *v))
                     || parent_exit.unwrap().elapsed() >= Duration::from_millis(50));
             if exited || reason.is_some() {
+                phase(entry, "execution_ms", execution_started.elapsed());
+                drain_started = Some(Instant::now());
                 if descendants {
                     reason.get_or_insert("background_descendants: use an explicit operation and keep its shell waiting".into());
                 }
@@ -398,9 +460,14 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry) -> io::Result<()> {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+    if let Some(started) = drain_started {
+        phase(entry, "drain_cleanup_ms", started.elapsed());
+    }
+    let sync_started = Instant::now();
     for file in &mut files {
         file.sync_all()?;
     }
+    phase(entry, "output_sync_ms", sync_started.elapsed());
     let complete = eof.iter().all(|v| *v)
         && !reason
             .as_ref()
@@ -428,7 +495,9 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry) -> io::Result<()> {
     state["stdout"] = json!(String::from_utf8_lossy(&views[0]));
     state["stderr"] = json!(String::from_utf8_lossy(&views[1]));
     state["output_truncated"] = json!(bytes > views.iter().map(Vec::len).sum());
-    state["elapsed_ms"] = json!(entry.started.elapsed().as_millis() as u64);
+    let total_ms = entry.started.elapsed().as_millis() as u64;
+    state["elapsed_ms"] = json!(total_ms);
+    finish_timing(&mut state, total_ms);
     if let Err(e) = atomic_json(&dir.join("state.json"), &state) {
         state["ok"] = json!(false);
         state["error"] = json!(format!("operation_record_failed:{e}"));
