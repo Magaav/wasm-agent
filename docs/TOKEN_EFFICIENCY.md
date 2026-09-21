@@ -93,6 +93,23 @@ independently of the UI test toggle,
 including missing usage, failed/pending work, summaries, privacy, inconsistent
 accounting, cross-session isolation and duplicate exports.
 
+## Stage 1 verification
+
+Source `467c803`:
+
+* Windows: offline release build, reporter unit/CLI checks and both isolated
+  production-projector probes passed. Obsolete positional run counts were refused.
+* Linux: complete `bash scripts/test.sh` passed with **no skips**, including the
+  reporter, both projector probes and existing native/Lua/plugin/control gates.
+  Isolated checkout and retained logs:
+  `openclaw.ohana:/tmp/wa-efficiency-proof-3AwI3l/`;
+  `smoke-final.log` ends in `smoke ok`, `smoke-final.exit` is `0`.
+* Each projector fixture recovered its original exactly across 33 artifact pages.
+  No paid-model calls, live deployment, service restart or production DB access.
+
+The full Windows smoke suite and paid-model behavior suite were **not run**.
+There is no measured task-quality or financial improvement claim in this stage.
+
 ## Subsequent stages: not implemented by this change
 
 1. Explicit, version-aware file paging and honest search controls/completeness.
