@@ -195,6 +195,7 @@ so a reader can find it and a checker cannot be forgotten. The pairs in force to
 | a tool result follows its call | `scripts/test-tool-adjacency.lua` |
 | the names in §6 | `scripts/check-naming.sh`, wired into `scripts/test.sh` |
 | a skipped test is reported | the suites' verdict lines |
+| concurrent runs: one writer per conversation, lanes | `rust/wa-host/src/serve/scheduler.rs` + `scripts/test-run-isolation.sh` |
 
 A contract whose mechanism is unnamed is a contract a reader cannot check.
 

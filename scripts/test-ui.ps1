@@ -656,6 +656,17 @@ $harness = @'
     "a UI read must not be mistaken for a running agent turn");
   window.__fixtures.health.current = null;
 
+  // A chat run for a *different* conversation is not this window's run. Before `activeRun` was
+  // scoped to the conversation, it returned the first chat run on the node, so a window watching
+  // conversation B disabled its own composer and deferred its reconcile for conversation A's run.
+  window.__fixtures.health.workers = [{ label: "POST /chat", busy_ms: 4000, session: "another-conversation" }];
+  await window.__restoreSession();
+  var foreignNotice = document.querySelector(".unfinished-notice");
+  check(!!foreignNotice && /effects may have happened/.test(foreignNotice.textContent) && !!foreignNotice.querySelector("button"),
+    "another conversation's run must not be treated as this window's run, saw: " +
+      (foreignNotice ? foreignNotice.textContent.slice(0, 120) : "no notice"));
+  window.__fixtures.health.workers = [];
+
   // A session whose last turn *failed* is the same situation by another route, and it used to be
   // invisible here. Restoring it must say so without posting another turn: page navigation is read-only.
   //
