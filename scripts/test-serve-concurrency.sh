@@ -25,7 +25,7 @@ cleanup() {
   # EXIT trap under `set -o pipefail`, that failure became the script’s exit status - a harness
   # race reported as a product failure. Kill, wait, then remove, and never let the cleanup decide
   # the verdict.
-  local pids=("${SERVER:-}" "${WEDGE:-}" "${POOL:-}" "${TURNS:-}" "${MOCK_PID:-}")
+  local pids=("${SERVER:-}" "${WEDGE:-}" "${POOL:-}" "${TURNS:-}" "${BRIDGE:-}" "${MOCK_PID:-}")
   kill "${pids[@]}" 2>/dev/null
   for _ in $(seq 1 20); do
     local alive=0
@@ -329,3 +329,72 @@ else
   exit 1
 fi
 echo "  ok: turns are routed by session - concurrent across sessions, ordered within one"
+
+# ---------------------------------------------------------------------------
+# The client bridge must not be wedgeable by a peer that says nothing.
+#
+# The failure this exists for: the bridge served one connection at a time on its
+# accept loop and read requests with no timeout at all, so a single connection
+# that was opened and then left silent blocked every later poll *forever*. The
+# listener stayed bound, the log stayed quiet, and the only symptom was
+# `client_not_connected` - which blamed the window, which was healthy. A real run
+# lost five minutes to it, and the diagnosis it printed was wrong.
+BRIDGE_PORT=$((PORT + 20))
+BRIDGE_CLIENT=$((BRIDGE_PORT + 1))
+"$BIN" --db "$WORK/bridge.db" serve --port "$BRIDGE_PORT" --client-port "$BRIDGE_CLIENT" --ui "$ROOT/ui" > "$WORK/bridge.log" 2>&1 &
+BRIDGE=$!
+for _ in $(seq 1 40); do
+  code="$(curl -s -o /dev/null -m 2 -w '%{http_code}' "http://127.0.0.1:$BRIDGE_PORT/health" 2>/dev/null)"
+  [ "$code" = "200" ] && break
+  sleep 0.25
+done
+if [ "${code:-}" != "200" ]; then echo "  bridge fixture did not come up (see $WORK/bridge.log)" >&2; exit 1; fi
+echo
+echo "bridge: the client port is $BRIDGE_CLIENT"
+
+health="$(curl -s -m 3 "http://127.0.0.1:$BRIDGE_PORT/health" 2>/dev/null)"
+case "$health" in
+  *'"client":{'*) echo "  ok: /health carries the client block" ;;
+  *) echo "  FAIL: /health has no client block, so a wedged bridge is invisible until a call fails"; exit 1 ;;
+esac
+
+# A connection that is opened and never finished. Held open for the rest of this
+# section: everything below must work *while* it sits there.
+exec 3<>"/dev/tcp/127.0.0.1/$BRIDGE_CLIENT" || { echo "  FAIL: could not open a connection to the client port"; exit 1; }
+printf 'GET /client/poll HTTP/1.1\r\n' >&3
+
+# 1. A fresh connection is still served. Before the fix this hung until curl gave up.
+fresh="$(curl -s -o /dev/null -m 3 -w '%{http_code}' "http://127.0.0.1:$BRIDGE_CLIENT/" 2>/dev/null)"
+[ "$fresh" = "404" ] || { echo "  FAIL: a silent connection blocked a fresh one (http_code=$fresh)"; exec 3<&-; exit 1; }
+echo "  ok: a fresh connection was served ($fresh) while a silent one was held"
+
+# 2. A poll is still answered, and it counts as a poll: the old handler never got
+#    as far as mark_poll, which is why the window looked disconnected.
+poll="$(curl -s -o /dev/null -m 26 -w '%{http_code}' -X POST -H 'content-type: application/json' \
+  -d '{"v":2,"state":{"client":{"actions":0}}}' "http://127.0.0.1:$BRIDGE_CLIENT/client/poll" 2>/dev/null)"
+[ "$poll" = "200" ] || { echo "  FAIL: the poll was not answered (http_code=$poll)"; exec 3<&-; exit 1; }
+seen="$(curl -s -m 3 "http://127.0.0.1:$BRIDGE_PORT/health" 2>/dev/null)"
+case "$seen" in
+  *'"connected":true'*) echo "  ok: the poll was answered and registered as a client" ;;
+  *) echo "  FAIL: the poll was answered but the bridge did not register it: $seen"; exec 3<&-; exit 1 ;;
+esac
+# What the client volunteers on the poll is readable from the node, which is what
+# makes "what is this client doing" cost no round trip.
+case "$seen" in
+  *'"age_ms"'*) echo "  ok: the state a client posts on its poll is visible at /health" ;;
+  *) echo "  FAIL: the polled state did not reach /health: $seen"; exec 3<&-; exit 1 ;;
+esac
+exec 3<&-
+
+# 3. The node can tell whether its own bridge is answering, without a call failing.
+for _ in $(seq 1 20); do
+  health="$(curl -s -m 3 "http://127.0.0.1:$BRIDGE_PORT/health" 2>/dev/null)"
+  case "$health" in *'"health":"ok"'*) break ;; esac
+  sleep 1
+done
+case "$health" in
+  *'"health":"ok"'*) ;;
+  *) echo "  FAIL: the bridge never reported itself healthy: $health"; exit 1 ;;
+esac
+echo "  ok: the bridge answers its own probe, so a wedge is reportable as one"
+echo "  ok: the client bridge survived a connection that said nothing"

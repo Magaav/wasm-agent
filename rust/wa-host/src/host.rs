@@ -692,27 +692,133 @@ pub extern "C" fn exec(l: *mut LuaState) -> c_int {
 }
 
 /// host.client(action, args_json) -> result from the client machine | {error}
+///
+/// The failure path is deliberately verbose, because it is the only part of this
+/// interface an agent reads *while confused*. It used to say "start the desktop
+/// client with `wa ui`" for every case, which was wrong for the one that actually
+/// happens (a wedged bridge, with the window perfectly healthy) and would have
+/// put a second window on the same bridge.
 pub extern "C" fn client(l: *mut LuaState) -> c_int {
     let host = host_of(l);
     let action = arg_string(l, 1).unwrap_or_default();
     let args: Value = serde_json::from_str(&arg_string(l, 2).unwrap_or_else(|| "{}".into()))
         .unwrap_or_else(|_| json!({}));
-    // Fast-fail when no desktop client is attached. Blocking until the call
-    // timeout only to return `client_timeout` wastes the caller's run, and the
-    // tool then looks like it half-worked: an agent spent several rounds on it
-    // before giving up. The bridge knows whether anything is polling.
     let status = host.client.status();
-    if !status.get("connected").and_then(Value::as_bool).unwrap_or(false) {
-        push_json(l, &json!({
-            "error": "client_not_connected",
-            "hint": "nothing is polling this node's client bridge, so actions on the user's machine cannot run. Start the desktop client with `wa ui`, or use `bash` for commands on the node itself.",
-            "status": status,
-        }));
+
+    // `result` is answered from the bridge itself: the whole point of it is to
+    // collect a command whose caller gave up, possibly after the client left.
+    if action == "result" {
+        let id = args["id"].as_str().unwrap_or_default();
+        let mut value = host.client.result(id);
+        if let Some(map) = value.as_object_mut() {
+            map.insert("bridge".into(), status["bridge"].clone());
+        }
+        push_json(l, &value);
         return 1;
     }
-    let result = host.client.call(&action, args);
+
+    let connected = status.get("connected").and_then(Value::as_bool).unwrap_or(false);
+    // A `status` call is how a caller learns what is wrong, so it is answered
+    // even when nothing is attached - with the bridge's own view, which is the
+    // half the client cannot see.
+    if !connected {
+        // The state fields are spread flat, not nested under `bridge`: an agent
+        // reads `bridge.health`, and a payload whose shape differs from the one
+        // `status` returns is a trap. (`bridge` is the probe's own state, which
+        // is exactly what the reader expects to find there.)
+        let mut payload = status.clone();
+        if let Some(map) = payload.as_object_mut() {
+            map.insert("ok".into(), json!(action == "status" && false));
+            map.insert("error".into(), json!("client_not_connected"));
+            map.insert("observed".into(), json!(diagnosis(&status)));
+            map.insert("next".into(), json!(remedy(&status)));
+        }
+        push_json(l, &payload);
+        return 1;
+    }
+    let timeout_ms = args["timeout_ms"].as_u64().unwrap_or_else(crate::client_bridge::default_timeout_ms);
+    let result = host.client.call(&action, args, timeout_ms);
     push_json(l, &result);
     1
+}
+
+/// What is wrong, said as what was seen rather than as a guess.
+fn diagnosis(status: &Value) -> String {
+    let bridge = &status["bridge"];
+    // No bridge at all is not "no client": it is a process that never had one
+    // (`wa chat`, a script run). Saying "start the window" there sends the reader
+    // looking for a window that was never in the picture.
+    if bridge["port"].is_null() {
+        return "this process runs no client-tools bridge, so it has no client to act on".to_string();
+    }
+    let health = bridge["health"].as_str().unwrap_or("unknown");
+    match health {
+        "wedged" => format!(
+            "the client-tools bridge stopped answering its own probe ({} failures on 127.0.0.1:{}); \
+             the desktop window is not the problem",
+            bridge["self_probe_failures"], bridge["port"]
+        ),
+        "degraded" => format!(
+            "the bridge missed its own probe {} time(s) on 127.0.0.1:{}",
+            bridge["self_probe_failures"], bridge["port"]
+        ),
+        _ => match status["last_seen_secs"].as_u64() {
+            Some(seconds) => format!("nothing has polled the bridge (127.0.0.1:{}) for {seconds}s", bridge["port"]),
+            None => format!("nothing has ever polled the bridge (127.0.0.1:{})", bridge["port"]),
+        },
+    }
+}
+
+/// What to do about it — and the window is never to be restarted: it is a client,
+/// it reconnects on its own, and two windows split one bridge's commands between
+/// them.
+fn remedy(status: &Value) -> String {
+    let bridge = &status["bridge"];
+    if bridge["port"].is_null() {
+        return "the controls need a node that serves a window: `wa ui` (or `wa serve`) on the machine whose \
+                desktop you want to act on. Use `bash` for work on the node itself."
+            .to_string();
+    }
+    match bridge["health"].as_str().unwrap_or("unknown") {
+        "wedged" | "degraded" => {
+            "the bridge recovers by itself and the window must not be restarted; \
+             the node answers again on its own. Use `bash` for work on the node meanwhile."
+                .to_string()
+        }
+        _ => "the desktop window is closed or its executor stopped. Open it with `wa ui` \
+              (never stop the node to do it), or use `bash` for work on the node instead."
+            .to_string(),
+    }
+}
+
+#[cfg(test)]
+mod client_diagnosis_tests {
+    use super::{diagnosis, remedy};
+    use serde_json::json;
+
+    /// Three worlds, three sentences. Collapsing them cost a run: a wedged bridge
+    /// was reported as "start the desktop client", which was both wrong and a way
+    /// to end up with two windows polling one bridge.
+    #[test]
+    fn each_state_is_diagnosed_as_itself() {
+        // 1. No bridge in this process at all.
+        let none = json!({ "connected": false, "last_seen_secs": null, "bridge": { "port": null, "health": "unknown" } });
+        assert!(diagnosis(&none).contains("no client-tools bridge"), "{}", diagnosis(&none));
+        assert!(remedy(&none).contains("wa ui"));
+
+        // 2. A served node with a healthy bridge and nothing polling.
+        let idle = json!({ "connected": false, "last_seen_secs": 12, "bridge": { "port": 8800, "health": "ok", "self_probe_failures": 0 } });
+        assert!(diagnosis(&idle).contains("nothing has polled the bridge"), "{}", diagnosis(&idle));
+        assert!(diagnosis(&idle).contains("8800"), "the port must be in the message");
+        assert!(remedy(&idle).contains("wa ui"));
+
+        // 3. A wedged bridge, with a window that is fine.
+        let wedged = json!({ "connected": false, "last_seen_secs": 300, "bridge": { "port": 8801, "health": "wedged", "self_probe_failures": 3 } });
+        assert!(diagnosis(&wedged).contains("not the problem"), "{}", diagnosis(&wedged));
+        let fix = remedy(&wedged);
+        assert!(fix.contains("must not be restarted"), "{fix}");
+        assert!(!fix.contains("wa ui"), "a wedged bridge is not fixed by opening a window: {fix}");
+    }
 }
 
 /// host.client_status() -> {connected, last_seen_secs, queued}

@@ -98,15 +98,19 @@ M.admin = {
   -- fighting the debug endpoint, falling back to PowerShell one-liners mangled by
   -- the shell, and briefly overwriting the installed app.js to instrument it.
   -- None of that was needed - the UI is a page this node serves.
-  schema("client", "Act on the user's machine at their request: screenshot, mouse, keyboard, a shell on their machine, and a Chrome DevTools session for browsing tasks. This is not how to inspect the wasm-agent UI - that is a page this node serves, so fetch it or load it in a headless browser. `cdp` launches its own Chrome profile and is slow to become ready.", {
-    action = { type = "string", enum = { "screenshot", "frame", "click", "move", "type", "key", "shell", "cdp" } },
+  schema("client", "Act on the user's machine at their request: screenshot, mouse, keyboard, a shell on their machine, and a browser (Chrome DevTools). When a call has failed, ask `status` first - it says whether the window is polling, what its browser is doing and on which port. Use `browser` to browse (target: open/read/list/eval/close/activate/quit) and `cdp` only as the low-level escape hatch. This is not how to inspect the wasm-agent UI - that is a page this node serves, so fetch it or load it in a headless browser.", {
+    action = { type = "string", enum = { "screenshot", "frame", "click", "move", "type", "key", "shell", "status", "browser", "cdp" } },
     x = { type = "integer" }, y = { type = "integer" },
     text = { type = "string" }, key = { type = "string" },
-    target = { type = "string", description = "CDP: list | open | close | activate | navigate | evaluate | launch" },
-    script = { type = "string", description = "CDP evaluate: JavaScript expression" },
-    id = { type = "string", description = "CDP target id for close/activate" },
-    url = { type = "string" },
-    port = { type = "integer", description = "CDP port (default 9222)" },
+    button = { type = "string", enum = { "left", "right" }, description = "click: default left" },
+    target = { type = "string", description = "browser: list | open | read | eval | close | activate | quit. cdp: launch | list | open | close | activate | navigate | evaluate" },
+    script = { type = "string", description = "JavaScript expression to evaluate" },
+    id = { type = "string", description = "CDP target id, for close/activate/read/eval" },
+    url = { type = "string", description = "browser open/navigate" },
+    reuse = { type = "boolean", description = "browser open: reuse a tab already on that URL (default true, so repeats are safe)" },
+    max_chars = { type = "integer", description = "browser read: page text to return (default 2000)" },
+    timeout_ms = { type = "integer", description = "How long the node waits for the client, default 75000. The client bounds its own work by the same number, so a timeout means the work stopped - collect it with action:'result'" },
+    port = { type = "integer", description = "CDP port of a browser you already know about. Normally omit: the port is discovered and reported back" },
     profile = { type = "string", description = "Chrome user-data-dir (defaults to the wasm-agent account)" } },
     { "action" }),
   schema("shell", "Run a shell command on the wasm-agent client machine (this is the machine running the desktop UI, which must be open). Prefer `bash` for commands on the node itself.", {

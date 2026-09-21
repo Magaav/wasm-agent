@@ -555,6 +555,11 @@ fn health_body() -> Vec<u8> {
             0 => serde_json::Value::Null,
             seen => serde_json::json!(now_ms().saturating_sub(seen)),
         },
+        // The client-tools bridge and the desktop client behind it. Information, not liveness: `ok`
+        // above must not turn false because a window is closed, and the sentinel reads `ok`. It is
+        // here because this endpoint is the one thing every caller already looks at, and
+        // "the controls are wedged" is otherwise indistinguishable from "nothing is polling".
+        "client": crate::client_bridge::global_status(),
     })
     .to_string()
     .into_bytes()
