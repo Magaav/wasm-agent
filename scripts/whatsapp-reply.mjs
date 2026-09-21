@@ -55,7 +55,7 @@ const HOSTS = ["127.0.0.1", "[::1]"];
 const WHATSAPP_URL = "web.whatsapp.com";
 
 import { acquire as acquireSendLock, defaultLockPath } from "./whatsapp-sendlock.mjs";
-import { composerMatches, classifySendAttempt, sendGuard, identityGuard } from "./whatsapp-reply-core.mjs";
+import { composerMatches, classifySendAttempt, sendGuard, identityGuard, lookupExpression } from "./whatsapp-reply-core.mjs";
 
 // The composer lock is released by `done`, but a crash between acquiring and sending must not leave the
 // lock for the stale timeout. One process-wide handler covers every abnormal exit.
@@ -132,40 +132,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // NOTE: each of these is a template literal. A backtick anywhere inside - including in a comment -
 // ends the string and breaks the file; that has bitten this repo twice already.
 
-// Resolve the target in the store: read-only, and where "message yourself" is decided. The self chat
-// is proved, not guessed - my number's @c.us form is not a chat in this build, the account also has a
-// LID identity, and "message yourself" lives under one of them.
-function lookupExpression(chat, toSelf) {
-  return `(() => {
-    const chats = window.require('WAWebChatCollection').ChatCollection.getModelsArray() || [];
-    const msgs = window.require('WAWebMsgCollection').MsgCollection.getModelsArray() || [];
-    const CHAT = ${JSON.stringify(chat)};
-    const TO_SELF = ${toSelf ? "true" : "false"};
-    let selfId = '';
-    const counts = {};
-    for (const message of msgs) {
-      if (message.id && message.id.fromMe) {
-        const from = String(message.from || '');
-        if (from) counts[from] = (counts[from] || 0) + 1;
-      }
-    }
-    const ranked = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
-    const ownId = ranked[0] || '';
-    const byChat = chats.filter((c) => ranked.indexOf(String(c.id)) >= 0).map((c) => String(c.id));
-    const mine = msgs.filter((m) => m.id && m.id.fromMe).map((m) => String(m.id.remote || ''));
-    const selfOnly = byChat.find((id) => mine.indexOf(id) >= 0
-      && msgs.filter((m) => String((m.id && m.id.remote) || '') === id && !(m.id && m.id.fromMe)).length === 0);
-    selfId = selfOnly || byChat[0] || '';
-    const targetId = TO_SELF ? selfId : CHAT;
-    const found = chats.find((c) => String(c.id) === targetId) || null;
-    if (!found) return JSON.stringify({ error: 'chat_not_found', target_id: targetId, self_id: selfId });
-    return JSON.stringify({
-      chat: { id: String(found.id), name: String(found.formattedTitle || found.name || '') },
-      self_id: selfId, own_id: ownId, unread: found.unreadCount || 0, messages: msgs.length,
-      archived: !!(found.archive || found.isArchived),
-    });
-  })()`;
-}
+// `lookupExpression` lives in the pure core module so the verified-self resolver can be evaluated against
+// an adversarial fake store in tests. See scripts/whatsapp-reply-core.mjs.
 
 function focusExpression(which) {
   return `(() => {
@@ -334,12 +302,13 @@ async function main() {
   const before = { unread: target.unread, messages: target.messages };
 
   // Read-only resolution: no lock, no open, no type, no send. This is how an operator or a proof script
-  // discovers the notes-to-self chat id (`self_id`) and the account (`own_id`) before binding them.
+  // discovers the notes-to-self chat id (`self_id`) and the account (`account`) before binding them.
   const actualEndpoint = `ws://${endpoint.host}:${endpoint.port}/devtools/page/${tab.id}`;
-  const actualAccount = target.own_id || target.self_id || "";
+  const actualAccount = target.account || target.self_id || "";
   if (args.lookupOnly) {
     return done({ ok: true, lookup_only: true, chat: target.chat, self_id: target.self_id || null,
-      account: actualAccount, browser_endpoint: actualEndpoint, before }, 0);
+      account: actualAccount, is_me: target.is_me === true, account_known: target.account_known === true,
+      browser_endpoint: actualEndpoint, before }, 0);
   }
 
   // The locally bound identity must be proven by the route before it opens anything. A profile that binds
@@ -365,8 +334,7 @@ async function main() {
   const guard = sendGuard({
     send: args.send,
     toSelf: args.toSelf,
-    chatId: target.chat.id,
-    selfId: target.self_id,
+    isMe: target.is_me === true,
     allowMarkRead: args.allowMarkRead,
   });
   if (guard) {

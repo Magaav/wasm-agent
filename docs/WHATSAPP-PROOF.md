@@ -74,13 +74,18 @@ Bindings, and why each is required:
 
 ## The commands
 
-1. **Resolve the self chat id, read-only.** `--lookup-only` reads the app's store and returns the target
-   and `self_id` without acquiring the send lock, opening a chat, typing or sending:
+1. **Resolve the self chat id, read-only.** `--lookup-only` reads the app's store and returns the target,
+   the account and `self_id` without acquiring the send lock, opening a chat, typing or sending:
 
    ```
    node <INSTALL>/scripts/whatsapp-reply.mjs --to-self --lookup-only
-   # {"ok":true,"lookup_only":true,"chat":{"id":"<SELF_CHAT_ID>",...},"self_id":"<SELF_CHAT_ID>",...}
+   # {"ok":true,"lookup_only":true,"chat":{"id":"<SELF_CHAT_ID>",...},"self_id":"<SELF_CHAT_ID>","account":"<OWN_ACCOUNT_ID>","is_me":true,...}
    ```
+
+   Self is **proven by the app**, never inferred: the resolver asks `WAWebUserPrefsMeUser`
+   (`isMeAccount`/`isSerializedWidMe` and the current PN/LID) and refuses
+   (`self_chat_unresolved`/`self_chat_ambiguous`) when it cannot identify exactly one self chat. Message
+   direction and display names are never evidence - an unanswered stranger has outgoing-only history too.
 
    Put `chat.id` in `conversation`, `allowed_conversations` and `self_destination`, and `account` in
    `account`. The lookup also returns the account (`account`) and the discovered endpoint
@@ -92,7 +97,8 @@ Bindings, and why each is required:
    which is empty anyway). Use it only when you intend to interact with the page.
 
 2. **Confirm the raw-script guard.** With the id bound, a non-self `--send` must be refused *before the
-   chat is opened*:
+   chat is opened*. The self exemption is the app's `isMeAccount` proof, not a string comparison against a
+   guessed id:
 
    ```
    node <INSTALL>/scripts/whatsapp-reply.mjs --chat <OTHER_CHAT_ID> --body "should not send" --send
