@@ -156,7 +156,7 @@ check(first.status == "reserved", "first reserve: " .. json.encode(first))
 local second = store.reserve({ message_id = "m-1", conversation_id = "c-1", body = "a", limit = 1 })
 check(second.status == "ambiguous", "a second reserve of a pending message is ambiguous: " .. json.encode(second))
 check(store.count() == 1, "the budget counts the pending reservation")
-check(store.confirm({ message_id = "m-1", message = { id = "sent-1" } }) == true, "confirm must persist")
+check(store.confirm({ message_id = "m-1", conversation_id = "c-1", message = { id = "sent-1" } }) == true, "confirm must persist")
 local replayed = store.reserve({ message_id = "m-1", conversation_id = "c-1", body = "a", limit = 1 })
 check(replayed.status == "already_sent", "a confirmed send must not be reserved again: " .. json.encode(replayed))
 local over_budget = store.reserve({ message_id = "m-2", conversation_id = "c-1", body = "b", limit = 1 })
@@ -237,5 +237,19 @@ local denied_wa = tools.dispatch(memory, "whatsapp_send", { body = "x", confirm 
 })
 check(denied_wa.error == "capability_not_in_profile:whatsapp_send",
   "the ceiling must refuse an unlisted whatsapp tool: " .. json.encode(denied_wa))
+
+-- 17. Malformed, negative or unpriceable budgets are refused, not coerced.
+write_profile("bad-token-limit", { schema_version = 1, id = "bad-token-limit", allowed_tools = {}, limits = { max_tokens = -5 } })
+local bad, bad_why = subagents.resolve("bad-token-limit", ctx("alice"))
+check(bad == nil and tostring(bad_why) == "invalid_limit:max_tokens",
+  "a negative limit must be refused: " .. tostring(bad_why))
+write_profile("malformed-limit", { schema_version = 1, id = "malformed-limit", allowed_tools = {}, limits = { max_tokens = "many" } })
+local malformed, malformed_why = subagents.resolve("malformed-limit", ctx("alice"))
+check(malformed == nil and tostring(malformed_why) == "invalid_limit:max_tokens",
+  "a non-numeric limit must be refused: " .. tostring(malformed_why))
+write_profile("cost-cap", { schema_version = 1, id = "cost-cap", allowed_tools = {}, limits = { max_cost_usd = 0.5 } })
+local cost_start = subagents.control({ action = "start", profile = "cost-cap", prompt = "x" }, ctx("alice"))
+check(cost_start.error == "cost_budget_requires_rates",
+  "a dollar cap without known rates must fail closed: " .. json.encode(cost_start))
 
 print(string.format("subagents profiles ok (%d checks)", checks))

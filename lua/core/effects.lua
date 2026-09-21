@@ -85,15 +85,17 @@ function M.new(session_id)
     return { status = "ambiguous", record = existing }
   end
 
-  -- Confirmation only advances a pending reservation; a terminal record is never
-  -- rewritten by a later call.
+  -- Confirmation only advances a pending reservation and only when the caller
+  -- names the same conversation the reservation was made for; a terminal record is
+  -- never rewritten by a later call.
   function adapter.confirm(args)
     args = args or {}
     local message_id = tostring(args.message_id or "")
     if message_id == "" then return false end
     local result = exec(
-      "UPDATE effect_sends SET state='sent', message=?, updated_at=? WHERE message_id=? AND state='pending'",
-      { json.encode(args.message or {}), host.now(), message_id })
+      "UPDATE effect_sends SET state='sent', message=?, updated_at=? " ..
+      "WHERE message_id=? AND state='pending' AND conversation_id=?",
+      { json.encode(args.message or {}), host.now(), message_id, tostring(args.conversation_id or "") })
     return result ~= nil and not result.error and tonumber(result.changes) == 1
   end
 

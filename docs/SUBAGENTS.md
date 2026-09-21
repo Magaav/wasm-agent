@@ -153,15 +153,39 @@ and never as an automatic retry.
 
 ## Tests
 
-- `cargo test -p wa-host subagents::` — durable receipt, idempotency, owner
-  scoping, capacity/overflow, cancel-wins-label, restart-unknown.
+- `cargo test -p wa-host subagents::` — durable receipt, idempotency under a
+  simultaneous-start barrier, owner scoping, capacity/overflow, cancel-wins-label,
+  restart-unknown, corrupt-record quarantine, the strict health shape and
+  socket-shutdown wakeup.
 - `WA_SCRIPT=scripts/test-subagents-profiles.lua wa --db <scratch>` — profile
-  validation, caller clamping, operator authorization, schema/dispatch parity,
-  the lean prompt and recursion refusal. Model-free.
+  validation (including empty `allowed_tools` and malformed/negative limits),
+  caller clamping, the empty-ceiling rule, operator authorization, schema/dispatch
+  parity, the durable effect adapter, the WhatsApp dispatch shapes, trusted-event
+  resolution and the lean prompt. Model-free.
 - `node scripts/test-subagents.cjs <wa>` — mock-inference integration: start,
-  await, idempotency, per-user isolation, cancellation on provider I/O, queue
-  overflow, tool denial, restart-unknown and independent transcripts. Zero paid
-  inference.
+  await, idempotency, per-user isolation, cancellation on provider I/O,
+  **silent-provider cancellation** and delayed first token, queue overflow, tool
+  denial, restart-unknown, independent transcripts, the ordinary-run parent tool
+  path, an over-budget prompt making zero provider calls, and a provider that
+  reports no usage being stopped by its reservation. Zero paid inference.
+
+## Health
+
+`crate::subagents::health()` returns one strict shape inside `/health`'s top-level
+`subagents` object:
+
+```json
+{ "queued": 0, "running": 0, "active": 0,
+  "settled": {"completed":0,"failed":0,"cancelled":0,"unknown":0},
+  "recovery_error": null }
+```
+
+`active` is `queued + running`. `queued` counts admitted children waiting for a
+execution slot; everything else that is not settled counts as `running`, so a
+cancellation that has been requested but whose execution has not stopped is still
+active. `recovery_error` is non-null when a durable record could not be read; in
+that state new admission is refused (a lost record also lost the idempotency key
+that prevents a replay). No prompts, transcripts or credentials are included.
 
 ## WhatsApp responder seam (with the automation worker)
 

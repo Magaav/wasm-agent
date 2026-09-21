@@ -86,6 +86,45 @@ assert(delayed_final.state == "completed", "delayed state=" .. tostring(delayed_
 assert(tostring(delayed_final.result.reply):find("child-answer", 1, true), "delayed reply: " .. tostring(delayed_final.result.reply))
 print("MARK ok-delayed-ttft")
 
+-- 4d. A prompt larger than the child's whole token budget makes ZERO provider
+--     calls: the preflight refuses before the request is sent.
+local paths = dofile("lua/core/paths.lua")
+local base_url = tostring(host.getenv("WASM_AGENT_LLM_BASE_URL") or "")
+local function model_calls()
+  local response = json.decode(host.http("GET", base_url .. "/calls"))
+  return tonumber(response and response.body) or 0
+end
+host.write_file(paths.config() .. "/subagent-profiles/tiny-budget.json", json.encode({
+  schema_version = 1, id = "tiny-budget", allowed_tools = {},
+  limits = { max_tokens = 1, timeout_seconds = 60 },
+}))
+local calls_before = model_calls()
+local tiny = control({ action = "start", profile = "tiny-budget", prompt = "a", idempotency_key = "tiny" }, ctx("alice"))
+assert(not tiny.error, "tiny start: " .. json.encode(tiny))
+local tiny_final = control({ action = "await", subagent_id = tiny.subagent_id, timeout_ms = 30000 }, ctx("alice"))
+assert(tiny_final.state == "failed", "tiny state=" .. tostring(tiny_final.state))
+assert(tostring(tiny_final.error):find("subagent_token_budget", 1, true), "tiny error: " .. tostring(tiny_final.error))
+local calls_after = model_calls()
+assert(calls_after == calls_before, "an over-budget child must make zero provider calls: " .. calls_before .. " -> " .. calls_after)
+print("MARK ok-budget-zero-calls")
+
+-- 4e. A provider that reports no usage must not become an unlimited tool loop:
+--     the runtime charges its reservation and stops within a bounded number of
+--     calls instead of running forever.
+host.write_file(paths.config() .. "/subagent-profiles/nousage-budget.json", json.encode({
+  schema_version = 1, id = "nousage-budget", allowed_tools = { "ls" },
+  limits = { max_tokens = 8000, timeout_seconds = 60 },
+}))
+local nousage_before = model_calls()
+local nousage = control({ action = "start", profile = "nousage-budget", prompt = "NOUSAGE loop", idempotency_key = "nousage" }, ctx("alice"))
+assert(not nousage.error, "nousage start: " .. json.encode(nousage))
+local nousage_final = control({ action = "await", subagent_id = nousage.subagent_id, timeout_ms = 30000 }, ctx("alice"))
+assert(nousage_final.state == "failed", "nousage state=" .. tostring(nousage_final.state) .. " " .. json.encode(nousage_final))
+assert(tostring(nousage_final.error):find("subagent_token_budget", 1, true), "nousage error: " .. tostring(nousage_final.error))
+local nousage_calls = model_calls() - nousage_before
+assert(nousage_calls <= 12, "missing usage must not run unlimited tools, made " .. nousage_calls .. " calls")
+print("MARK ok-missing-usage-bounded")
+
 -- 5. Queue overflow is an explicit refusal, never invisible loss.
 local ids, overflow = {}, nil
 for index = 1, 12 do

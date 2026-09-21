@@ -15,7 +15,9 @@ fn spec(program: &str, flag: &str, command: &str, cwd: &str, seconds: u64, owner
     let mut spec = Spec::command(program, vec![flag.into(), command.into()]);
     spec.cwd = cwd.into();
     spec.timeout = Duration::from_secs(seconds);
-    spec.owner = owner;
+    // A child's operation is owned by the child session/run, not by whatever
+    // interpreter slot happens to be on this thread, so settlement is attributable.
+    spec.owner = crate::subagents::current_owner().map(|child| format!("subagent:{child}")).unwrap_or(owner);
     if crate::serve::in_turn() {
         spec.env.push(("WASM_AGENT_IN_TURN".into(), "1".into()));
     } // naming-check: allow (installed deploy scripts)
@@ -54,6 +56,24 @@ pub fn foreground(
             return Ok(
                 json!({"operation_id":id,"ok":false,"code":-1,"error":"operation_supervisor_overdue","cleanup":"unknown","output_complete":false}),
             );
+        }
+        // A cancelled run or child cancels its operation too, and stays attached
+        // until the operation actually settles: returning while it still runs would
+        // let the effect outlive the execution that owns it.
+        if crate::host::run_cancel_requested() {
+            let _ = manager().cancel(&id);
+            let cleanup = std::time::Instant::now() + Duration::from_millis(1000);
+            while std::time::Instant::now() < cleanup {
+                let stopped = manager()
+                    .wait(&id, Duration::from_millis(50))
+                    .map_err(|e| e.to_string())?;
+                if stopped["settled"] == true {
+                    return Ok(json!({"operation_id":id,"ok":false,"error":"run_cancelled",
+                        "state":stopped["state"],"cleanup":"settled","output_complete":stopped["output_complete"]}));
+                }
+            }
+            return Ok(json!({"operation_id":id,"ok":false,"error":"run_cancelled",
+                "cleanup":"unknown","output_complete":false}));
         }
         // This is the waiting interpreter observing the supervisor, not a helper beating forever.
         crate::serve::beat();

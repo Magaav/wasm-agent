@@ -119,6 +119,9 @@ pub struct TaskContext {
     pub cancel: Arc<AtomicBool>,
     pub deadline: Option<Instant>,
     pub sockets: SocketSlot,
+    /// The child's session id, so an operation it starts is owned by the child
+    /// session/run rather than by the interpreter's worker slot.
+    pub owner: String,
 }
 
 thread_local! {
@@ -137,6 +140,15 @@ pub fn leave_task() {
 /// whether a request needs the shutdown-aware socket.
 pub fn in_task() -> bool {
     CURRENT.with(|slot| slot.borrow().is_some())
+}
+
+/// The child session an operation should be owned by, if this thread is a child.
+pub fn current_owner() -> Option<String> {
+    CURRENT.with(|slot| {
+        slot.borrow().as_ref().and_then(|context| {
+            if context.owner.is_empty() { None } else { Some(context.owner.clone()) }
+        })
+    })
 }
 
 /// Has the caller requested cancellation? Used by the provider reader and by the
@@ -211,6 +223,10 @@ struct Inner {
     max_concurrent: usize,
     tasks: Mutex<HashMap<String, Task>>,
     idem: Mutex<HashMap<String, String>>,
+    /// Set when a durable record could not be read or is inconsistent. New
+    /// admission is refused while it is set, because a lost record also loses the
+    /// idempotency key that prevents a replay.
+    recovery_error: Mutex<Option<String>>,
     /// Notified whenever a task changes state, so `await` can wake.
     changed: Condvar,
     /// Bounded concurrency: at most `max_concurrent` children execute at once.
@@ -244,6 +260,7 @@ impl Manager {
                 max_concurrent,
                 tasks: Mutex::new(HashMap::new()),
                 idem: Mutex::new(HashMap::new()),
+                recovery_error: Mutex::new(None),
                 changed: Condvar::new(),
                 running: Mutex::new(0),
                 capacity: Condvar::new(),
@@ -253,19 +270,66 @@ impl Manager {
         }
     }
 
+    fn set_recovery_error(&self, message: String) {
+        if let Ok(mut slot) = self.inner.recovery_error.lock() {
+            if slot.is_none() {
+                *slot = Some(message);
+            }
+        }
+    }
+
     /// Load records left by an earlier boot. Anything still `running`/`accepted`
     /// is `unknown`: not attached to this runtime, so it may have died and must
     /// not be silently replayed.
+    ///
+    /// A record that cannot be read is NOT skipped silently: skipping it would
+    /// also lose the idempotency key it carries, so a repeat start could spawn a
+    /// second child and replay an effect. The fault is recorded and admission is
+    /// refused until it is resolved.
     fn recover(&self) {
-        let Ok(entries) = std::fs::read_dir(&self.inner.root) else { return };
+        let entries = match std::fs::read_dir(&self.inner.root) {
+            Ok(entries) => entries,
+            // A node that has never run a child simply has no root yet.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                self.set_recovery_error(format!("subagent_root_unreadable: {error}"));
+                return;
+            }
+        };
         let boot = boot_id();
         let mut tasks = self.inner.tasks.lock().expect("subagents tasks");
-        for entry in entries.flatten() {
-            let record = entry.path().join("record.json");
-            let Ok(text) = std::fs::read_to_string(&record) else { continue };
-            let Ok(value) = serde_json::from_str::<Value>(&text) else { continue };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    self.set_recovery_error(format!("subagent_root_entry_unreadable: {error}"));
+                    continue;
+                }
+            };
+            let directory = entry.path();
+            if !directory.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let record = directory.join("record.json");
+            let text = match std::fs::read_to_string(&record) {
+                Ok(text) => text,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    self.set_recovery_error(format!("subagent_record_unreadable:{name}: {error}"));
+                    continue;
+                }
+            };
+            let value: Value = match serde_json::from_str(&text) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.set_recovery_error(format!("subagent_record_corrupt:{name}: {error}"));
+                    continue;
+                }
+            };
             let id = value["id"].as_str().unwrap_or_default().to_string();
-            if id.is_empty() {
+            if id.is_empty() || id != name {
+                self.set_recovery_error(format!("subagent_record_id_mismatch:{name}"));
                 continue;
             }
             let settled = value["settled"].as_bool().unwrap_or(false);
@@ -331,6 +395,17 @@ impl Manager {
             return Err("owner_user_required".into());
         }
         let idempotency = spec["idempotency_key"].as_str().unwrap_or_default().to_string();
+        let timeout_seconds = spec["timeout_seconds"].as_u64().unwrap_or(0);
+        // ONE admission lock covers the recovery fault, idempotency, capacity, the
+        // durable record and the in-memory insert. Releasing it between the
+        // idempotency check and the insert let two simultaneous starts with the
+        // same key both create a child and both run inference.
+        let mut tasks = self.inner.tasks.lock().map_err(|_| "subagent_state_poisoned".to_string())?;
+        if let Ok(slot) = self.inner.recovery_error.lock() {
+            if let Some(error) = slot.as_ref() {
+                return Err(format!("recovery_error: {error}"));
+            }
+        }
         if !idempotency.is_empty() {
             let key = format!("{owner}\u{1}{idempotency}");
             let existing = self
@@ -341,7 +416,6 @@ impl Manager {
                 .get(&key)
                 .cloned();
             if let Some(existing_id) = existing {
-                let tasks = self.inner.tasks.lock().map_err(|_| "subagent_state_poisoned".to_string())?;
                 if let Some(task) = tasks.get(&existing_id) {
                     let mut view = task.view(true);
                     view["deduplicated"] = json!(true);
@@ -349,8 +423,6 @@ impl Manager {
                 }
             }
         }
-        let timeout_seconds = spec["timeout_seconds"].as_u64().unwrap_or(0);
-        let mut tasks = self.inner.tasks.lock().map_err(|_| "subagent_state_poisoned".to_string())?;
         if tasks.contains_key(id) {
             return Err("subagent_id_exists".into());
         }
@@ -382,10 +454,6 @@ impl Manager {
             boot: boot_id().to_string(),
             pid: std::process::id(),
         };
-        if !idempotency.is_empty() {
-            // Written only after the record exists, so a failed write cannot leave
-            // an idempotency key pointing at a child that was never admitted.
-        }
         persist_task(&self.inner.root, &task).map_err(|error| format!("record_write_failed:{error}"))?;
         if !idempotency.is_empty() {
             if let Ok(mut idem) = self.inner.idem.lock() {
@@ -526,6 +594,9 @@ impl Manager {
             "running": running,
             "active": queued + running,
             "settled": settled,
+            // Visible fault: while this is set, new admission is refused because a
+            // lost record also lost the idempotency key that prevents a replay.
+            "recovery_error": self.inner.recovery_error.lock().ok().and_then(|slot| slot.clone()),
         })
     }
 
@@ -534,19 +605,19 @@ impl Manager {
             return json!({ "found": false });
         }
         let lookup = format!("{owner}\u{1}{key}");
+        // Same lock order as `start` (tasks then idem), so admission and lookup
+        // cannot deadlock or disagree.
+        let tasks = self.inner.tasks.lock().expect("subagents tasks");
         let id = self.inner.idem.lock().ok().and_then(|idem| idem.get(&lookup).cloned());
         match id {
-            Some(id) => {
-                let tasks = self.inner.tasks.lock().expect("subagents tasks");
-                match tasks.get(&id) {
-                    Some(task) => {
-                        let mut view = task.view(true);
-                        view["found"] = json!(true);
-                        view
-                    }
-                    None => json!({ "found": false }),
+            Some(id) => match tasks.get(&id) {
+                Some(task) => {
+                    let mut view = task.view(true);
+                    view["found"] = json!(true);
+                    view
                 }
-            }
+                None => json!({ "found": false }),
+            },
             None => json!({ "found": false }),
         }
     }
@@ -650,12 +721,15 @@ fn run_child(inner: Arc<Inner>, runner: Runner, id: String, cancel: Arc<AtomicBo
     }
     // The execution budget begins when execution does, not when the receipt was
     // admitted, so queueing does not secretly eat a child's timeout.
-    let timeout_seconds = {
+    let (timeout_seconds, owner) = {
         let tasks = inner.tasks.lock().expect("subagents tasks");
-        tasks.get(&id).map(|task| task.timeout_seconds).unwrap_or(0)
+        match tasks.get(&id) {
+            Some(task) => (task.timeout_seconds, task.session_id.clone()),
+            None => (0, String::new()),
+        }
     };
     let deadline = if timeout_seconds > 0 { Some(Instant::now() + Duration::from_secs(timeout_seconds)) } else { None };
-    enter_task(TaskContext { cancel: cancel.clone(), deadline, sockets });
+    enter_task(TaskContext { cancel: cancel.clone(), deadline, sockets, owner });
     let receipt = {
         let tasks = inner.tasks.lock().expect("subagents tasks");
         tasks.get(&id).map(|task| {
@@ -1030,6 +1104,61 @@ mod tests {
         let _ = manager.runner.set(Arc::new(|_receipt: &str| Ok(json!({"state": "completed"}))));
         assert_eq!(manager.start(&spec("../escape", "jane", "")).unwrap_err(), "invalid_id");
         assert_eq!(manager.start(&spec("a/b", "jane", "")).unwrap_err(), "invalid_id");
+    }
+
+    #[test]
+    fn simultaneous_same_key_starts_create_one_child() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = Arc::new(Manager::with_root(temp_root("race"), 4, 8));
+        let _ = manager.runner.set({
+            let calls = calls.clone();
+            Arc::new(move |_receipt: &str| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({"state": "completed", "result": {}}))
+            })
+        });
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for index in 0..2 {
+            let manager = manager.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                manager.start(&spec(&format!("race-{index}"), "mia", "same-key"))
+            }));
+        }
+        let results: Vec<_> = handles.into_iter().map(|handle| handle.join().unwrap()).collect();
+        let ids: std::collections::HashSet<String> = results
+            .iter()
+            .filter_map(|result| result.as_ref().ok().and_then(|value| value["subagent_id"].as_str().map(str::to_string)))
+            .collect();
+        assert_eq!(ids.len(), 1, "both starts must resolve to one child: {results:?}");
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "one child, one inference");
+    }
+
+    #[test]
+    fn a_corrupt_record_blocks_admission_and_replay() {
+        let root = temp_root("corrupt");
+        let directory = root.join("corrupt-child");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("record.json"), b"{not json").unwrap();
+        let manager = Manager::with_root(root, 2, 6);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let _ = manager.runner.set({
+            let calls = calls.clone();
+            Arc::new(move |_receipt: &str| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({"state": "completed"}))
+            })
+        });
+        manager.recover();
+        // The corrupt record may have carried the idempotency key, so new
+        // admission is refused rather than risk a replay, and no inference runs.
+        let error = manager.start(&spec("new-child", "nina", "key-x")).unwrap_err();
+        assert!(error.starts_with("recovery_error"), "got {error}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no inference while recovery is unresolved");
+        assert!(manager.summary()["recovery_error"].is_string(), "health must show the fault");
     }
 
     #[test]

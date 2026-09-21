@@ -19,17 +19,37 @@ function check(value, label) { assert.ok(value, label); checks++; }
 
 (async () => {
   let child, provider;
+  let modelCalls = 0;
   try {
     provider = http.createServer((req, res) => {
+      if (req.url === '/calls') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ calls: modelCalls }));
+        return;
+      }
       let body = '';
       req.on('data', (chunk) => { body += chunk; });
       req.on('end', () => {
+        modelCalls += 1;
         const isStream = (() => { try { return JSON.parse(body).stream === true; } catch { return false; } })();
         const usage = { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 };
         const messages = (() => { try { return JSON.parse(body).messages || []; } catch { return []; } })();
         const text = JSON.stringify(messages);
         const system = String((messages.find((message) => message.role === 'system') || {}).content || '');
         const isChild = system.includes('You are a subagent');
+        const sendToolCall = (call, withUsage) => {
+          const payload = { id: 'mock', choices: [{ delta: { tool_calls: [call] }, finish_reason: 'tool_calls' }] };
+          if (withUsage) payload.usage = usage;
+          if (isStream) {
+            res.writeHead(200, { 'content-type': 'text/event-stream' });
+            res.end('data: ' + JSON.stringify(payload) + '\n\ndata: [DONE]\n\n');
+          } else {
+            const message = { id: 'mock', choices: [{ message: { role: 'assistant', content: null, tool_calls: [call] }, finish_reason: 'tool_calls' }] };
+            if (withUsage) message.usage = usage;
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(JSON.stringify(message));
+          }
+        };
         const replyToolCall = (call) => {
           if (isStream) {
             res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -49,6 +69,12 @@ function check(value, label) { assert.ok(value, label); checks++; }
           }
         };
         if (isChild) {
+          if (text.includes('NOUSAGE')) {
+            // A tool call every round with no usage at all: the runtime must charge
+            // its reservation rather than let the loop continue unbounded.
+            sendToolCall({ index: 0, id: 'nousage-' + messages.length, type: 'function', function: { name: 'ls', arguments: JSON.stringify({ path: '.' }) } }, false);
+            return;
+          }
           if (text.includes('SILENT')) {
             // Headers, then no body bytes at all: the read this cancellation must
             // interrupt is the one that is producing nothing.
@@ -131,7 +157,7 @@ function check(value, label) { assert.ok(value, label); checks++; }
     const out = fs.readFileSync(path.join(root, 'wa.log'), 'utf8');
     check(code === 0, 'the integration script must exit 0, got ' + code + '\n' + out);
     check(out.includes('SUBAGENTS_INTEGRATION_OK'), 'the script must print its verdict\n' + out);
-    for (const marker of ['ok-success', 'ok-idempotency', 'ok-isolation', 'ok-cancel', 'ok-overflow', 'ok-result', 'ok-tool-denial', 'ok-restart-unknown', 'ok-parent-run', 'ok-silent-cancel', 'ok-delayed-ttft']) {
+    for (const marker of ['ok-success', 'ok-idempotency', 'ok-isolation', 'ok-cancel', 'ok-overflow', 'ok-result', 'ok-tool-denial', 'ok-restart-unknown', 'ok-parent-run', 'ok-silent-cancel', 'ok-delayed-ttft', 'ok-budget-zero-calls', 'ok-missing-usage-bounded']) {
       check(out.includes('MARK ' + marker), 'missing marker ' + marker + '\n' + out);
     }
     // The child's durable record survives on disk with its terminal state.
