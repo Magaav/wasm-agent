@@ -97,9 +97,29 @@ Other review leads:
 
 ## Regression gate
 
-The fixes have fail-before/pass-after reproductions. Final cross-platform gate
-receipts are recorded below after source is committed and tested. This section is
-not permission to merge or deploy, and does not close the independent-review gap.
+Runtime fixes: `ddc4df2`; complete consumer lockfiles: `a996dbd`.
+
+* Windows: offline release build, **78 checks in disk mode and 78 embedded**, **15
+  operation tests**, two sentinel tests, **74 mocked observability assertions**,
+  offline audit unit/CLI tests, and both independent control modes (**9 checks
+  each**). Desktop shell `cargo check --offline --locked` also passed; its existing
+  missing-icon-tool / unused-import warnings are not a GUI execution test.
+* Linux: full `bash scripts/test.sh` on `a996dbd`, **no skips**, including both
+  78-check integration modes, **14 operation tests**, jobs/sentinel, native search,
+  accounting, authorization, instruction freshness, embedding, plugin/JS checks
+  and both independent cancellation modes. Exit receipt `0` and full log:
+  `openclaw.ohana:/tmp/wa-efficiency-proof-3AwI3l/smoke-review-complete.{exit,log}`.
+* The first Linux run had **one skip**: adding the dependency dirtied the sentinel
+  lockfile, so its clean-tree deployment-refusal test did not run. Fixed both
+  sentinel and desktop lockfiles and repeated the full suite, rather than counting
+  that run as complete. The original `smoke-review.log` is retained.
+* Windows receipts include `%TEMP%/wa-observability-gate-sZxvTO`,
+  `wa-operation-control-XKauuI` (await) and `wa-operation-control-sW2Jmt` (bash).
+  The UTF-8 fail-before reproduction is in `wa-review-op-read-rAwyc0`.
+
+The full Windows smoke suite, real-browser UI gate, paid behavior suite and matched
+model task comparison were **not run**. These regression results do not close the
+independent-review gap or grant permission to merge/deploy.
 
 ## Reproducible whole-task comparison protocol — not yet executed
 
