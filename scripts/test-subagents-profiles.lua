@@ -114,4 +114,16 @@ check(recurse.error == "subagent_recursion_forbidden", "a child must not start a
 local facade = json.decode(wa_subagents(json.encode({ action = "profiles" }), ""))
 check(type(facade.profiles) == "table", "the facade answers a control action")
 
+-- 10. Session routing: a normal session must stay reusable, and a subagent
+--     session must never be picked up as the conversation for a normal turn.
+local normal = memory.start_session("", "chat", { user_id = "routing-user", node_id = "routing-node" })
+check(memory.ensure_session("routing-user", "routing-node", "chat") == normal,
+  "ensure_session must reuse a normal open session")
+local child_session = memory.start_session("routing-node", "subagent",
+  { user_id = "routing-user", node_id = "routing-node", parent_session_id = normal })
+check(memory.ensure_session("routing-user", "routing-node", "chat") == normal,
+  "ensure_session must never pick a subagent session")
+check(memory.session(child_session).parent_session_id == normal,
+  "a subagent session must carry its parent link")
+
 print(string.format("subagents profiles ok (%d checks)", checks))

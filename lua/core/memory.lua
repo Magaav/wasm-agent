@@ -472,16 +472,25 @@ function M.start_session(route_id, objective, opts)
   opts = opts or {}
   local id = opts.id or host.uuid()
   local now = host.now()
-  -- `parent_session_id` is what makes a subagent's transcript independent but
-  -- linked: the child session is its own row, so the parent transcript is never
-  -- written by a child, while its owner can still find it.
-  exec("INSERT INTO sessions(id,route_id,objective,started_at,user_id,node_id,title,mode,updated_at,parent_session_id) " ..
-       "VALUES(?,?,?,?,?,?,?,?,?,?)",
-       {id, route_id or "", objective or "", now, opts.user_id or "master",
-        opts.node_id or "", opts.title or objective or "", opts.mode or "default", now,
-        -- An empty string, never nil: a nil makes the params table sparse, the JSON
-        -- encoder drops the last element, and the insert fails "got 9, needed 10".
-        opts.parent_session_id or ""})
+  -- `parent_session_id` links a subagent's transcript to its parent without
+  -- writing the parent's. A normal session stores NULL, which is what lets
+  -- `ensure_session` reuse it; a subagent session always stores a value (possibly
+  -- empty when it has no conversation), which keeps normal routing out of it.
+  -- Written as two inserts rather than one with a nil parameter: a nil in the
+  -- parameter array makes it sparse, the JSON encoder drops the tail, and the
+  -- insert fails "got 9, needed 10" (the bug that cost an afternoon in apply_entry).
+  local parent = opts.parent_session_id
+  if parent == nil and route_id == "subagent" then parent = "" end
+  local base = {id, route_id or "", objective or "", now, opts.user_id or "master",
+                opts.node_id or "", opts.title or objective or "", opts.mode or "default", now}
+  if parent ~= nil then
+    exec("INSERT INTO sessions(id,route_id,objective,started_at,user_id,node_id,title,mode,updated_at,parent_session_id) " ..
+         "VALUES(?,?,?,?,?,?,?,?,?,?)",
+         {base[1], base[2], base[3], base[4], base[5], base[6], base[7], base[8], base[9], parent})
+  else
+    exec("INSERT INTO sessions(id,route_id,objective,started_at,user_id,node_id,title,mode,updated_at) " ..
+         "VALUES(?,?,?,?,?,?,?,?,?)", base)
+  end
   M.journal("session", id, M.session(id))
   return id
 end
