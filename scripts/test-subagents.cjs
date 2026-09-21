@@ -229,6 +229,8 @@ async function main() {
   void watcherA; void watcherB;
   console.log(`subagent integration ok (${checked} checks; real sentinel, protocol fixture, no paid inference)`);
   console.log(`evidence: ${root}`);
+  // The gate's fixture verdict requires a terminal `ALL PASS` line (scripts/lib/test-verdict.cjs).
+  console.log("ALL PASS");
 }
 
 (async () => {
