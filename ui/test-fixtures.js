@@ -72,6 +72,9 @@ window.__fixtures = {
   // What the node says about right now. The window asks this before believing a run is over, so a
   // notice can be taken down when the thread is settled - and a run that completed is not "unfinished".
   health: { current: null, ok: true, queue: 0, stalled_ms: 0, worker: "alive" },
+  // `POST /runs` is the node-side cancel/status route. The UI fires it and does not wait on the
+  // answer, but the fixture must exist so the request is answered locally and never reaches a node.
+  runs: { ok: true, conversation: "fixture", runs: [], cancelled: false },
   // The resume path posts a run. It must be answered *here*: the fallback below used to forward an
   // unstubbed route to the real node, and since the app now auto-resumes a failed session, a run of this
   // harness queued 33 real runs on a live node before anyone noticed. A test that spends runs is not a

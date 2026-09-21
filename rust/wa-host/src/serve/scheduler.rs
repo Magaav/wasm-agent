@@ -14,13 +14,16 @@
 //!    cannot be handed to a different worker. This is what keeps a conversation's runs
 //!    ordered even when they arrive back to back.
 //! 2. **Identity is not conversation.** The authenticated identity (`owner`) decides what a
-//!    run may do; the conversation decides what it may write and therefore what serialises.
-//!    They travel separately, and ownership is on the conversation.
-//! 3. **Interactive capacity is reserved.** Worker 0 is the interactive reserve: a background
-//!    run (a wake, an automation) may not occupy it, so a flood of background work cannot
-//!    take the worker a person's next run needs. Background runs are additionally bounded in
-//!    both concurrency and backlog, and a conversation's own backlog is bounded so one
-//!    conversation cannot fill a worker's queue.
+//!    run may do and who may cancel it; the conversation decides what it may write and
+//!    therefore what serialises. They travel separately, and ownership is on the conversation.
+//! 3. **Interactive capacity is reserved.** A background run may not use an interactive
+//!    worker, so a flood of background work cannot take the worker a person's next run needs.
+//!    Background runs are additionally bounded in both concurrency and backlog, and a
+//!    conversation's own backlog is bounded so one conversation cannot fill a worker's queue.
+//!
+//! Each admitted run also carries a **cancel flag of its own**. The flag is per-run, not
+//! per-conversation, so cancelling a running run cannot also cancel the run queued behind it.
+//! The flag is a request: a run is reported `cancelled` only when it actually settles.
 //!
 //! The class marker is deliberately one-way. `X-WA-Run-Class: background` demotes a run into
 //! the background lane. Any other value, including `interactive`, is ignored: no request
@@ -31,7 +34,8 @@
 //! capacity rules are unit-testable without sockets or an interpreter.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Which lane a run belongs to. The default is interactive because the common case is a person
 /// waiting; the marker can only move a run *out* of that default, never into a privilege.
@@ -53,6 +57,30 @@ impl RunClass {
             RunClass::Background
         } else {
             RunClass::Interactive
+        }
+    }
+}
+
+/// The lifecycle of an admitted run, as a caller sees it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RunState {
+    /// Admitted, waiting for its worker.
+    Queued,
+    /// Executing.
+    Running,
+    /// Cancellation was requested and the run has settled.
+    Cancelled,
+    /// Finished on its own.
+    Completed,
+}
+
+impl RunState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunState::Queued => "queued",
+            RunState::Running => "running",
+            RunState::Cancelled => "cancelled",
+            RunState::Completed => "completed",
         }
     }
 }
@@ -83,15 +111,36 @@ impl Refusal {
     }
 }
 
-/// What admission decided.
-#[derive(Debug, PartialEq)]
+/// What admission decided. `cancel` is the run's own flag; the worker installs it as the
+/// current-run context so the provider reader can observe a cancellation request.
+#[derive(Debug)]
 pub enum Decision {
-    /// Run on this worker. The conversation is now owned by it until `complete`.
-    Run { run_id: u64, worker: usize },
+    /// Run on this worker. The conversation is now owned by it until `complete_run`.
+    Run { run_id: u64, worker: usize, cancel: Arc<AtomicBool> },
     /// The conversation is owned by this worker; queue behind it there.
-    Behind { run_id: u64, worker: usize },
+    Behind { run_id: u64, worker: usize, cancel: Arc<AtomicBool> },
     /// No room. The caller replies 503 and admits nothing.
     Refused(Refusal),
+}
+
+/// The outcome of a cancel request, scoped to the authenticated owner.
+#[derive(Debug, PartialEq)]
+pub enum CancelOutcome {
+    /// The flag was set. `state` is the run's state *before* it settles: the caller must poll
+    /// `status` until it becomes `cancelled` or `completed`, because a request is not a stop.
+    Requested { run_id: u64, state: RunState },
+    /// No such run for this owner and conversation.
+    NotFound,
+    /// The run exists but belongs to another owner.
+    Forbidden,
+}
+
+/// A run as `/runs status` reports it: no prompts, no credentials, just identity and lifecycle.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RunView {
+    pub run_id: u64,
+    pub state: RunState,
+    pub cancel_requested: bool,
 }
 
 /// The bounds. `background_max` is concurrent background conversations; `background_backlog` is
@@ -117,9 +166,18 @@ struct Owner {
     pending: usize,
 }
 
+struct RunRecord {
+    owner: String,
+    conversation: String,
+    class: RunClass,
+    cancel: Arc<AtomicBool>,
+    state: RunState,
+}
+
 #[derive(Default)]
 struct Inner {
     owners: HashMap<String, Owner>,
+    runs: HashMap<u64, RunRecord>,
     next_run_id: u64,
 }
 
@@ -139,22 +197,33 @@ impl Scheduler {
     /// Claim a place for a run. `pick` chooses a worker for a conversation nobody owns; it is
     /// called at most once, under the lock, and is told which workers are already claimed so two
     /// admissions cannot both choose the same idle worker.
-    pub fn admit<F>(&self, conversation: &str, class: RunClass, pick: F) -> Decision
+    pub fn admit<F>(&self, conversation: &str, owner: &str, class: RunClass, pick: F) -> Decision
     where
         F: FnOnce(RunClass, &HashSet<usize>) -> Option<usize>,
     {
         let mut inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
         inner.next_run_id = inner.next_run_id.wrapping_add(1);
         let run_id = inner.next_run_id;
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let record = |owner: &str, conversation: &str, class: RunClass, cancel: &Arc<AtomicBool>| RunRecord {
+            owner: owner.to_string(),
+            conversation: conversation.to_string(),
+            class,
+            cancel: cancel.clone(),
+            state: RunState::Queued,
+        };
 
         // 1. Same conversation: queue behind its owner. This is the whole of same-session ordering.
         if !conversation.is_empty() {
-            if let Some(owner) = inner.owners.get_mut(conversation) {
-                if owner.pending >= self.config.session_queue_depth {
+            if let Some(owner_record) = inner.owners.get_mut(conversation) {
+                if owner_record.pending >= self.config.session_queue_depth {
                     return Decision::Refused(Refusal::SessionQueueFull);
                 }
-                owner.pending += 1;
-                return Decision::Behind { run_id, worker: owner.worker };
+                owner_record.pending += 1;
+                let worker = owner_record.worker;
+                inner.runs.insert(run_id, record(owner, conversation, class, &cancel));
+                return Decision::Behind { run_id, worker, cancel };
             }
         }
 
@@ -184,22 +253,101 @@ impl Scheduler {
         if !conversation.is_empty() {
             inner.owners.insert(conversation.to_string(), Owner { worker, class, pending: 1 });
         }
-        Decision::Run { run_id, worker }
+        inner.runs.insert(run_id, record(owner, conversation, class, &cancel));
+        Decision::Run { run_id, worker, cancel }
     }
 
-    /// A run finished (or was never delivered). Releases one place in its conversation's backlog;
-    /// when the last place goes, the conversation is unowned and free to run elsewhere.
-    pub fn complete(&self, conversation: &str) {
-        if conversation.is_empty() {
-            return;
-        }
+    /// The worker picked the run up and is about to execute it.
+    pub fn mark_running(&self, run_id: u64) {
         let mut inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
-        if let Some(owner) = inner.owners.get_mut(conversation) {
-            owner.pending = owner.pending.saturating_sub(1);
-            if owner.pending == 0 {
-                inner.owners.remove(conversation);
+        if let Some(record) = inner.runs.get_mut(&run_id) {
+            if record.state == RunState::Queued {
+                record.state = RunState::Running;
             }
         }
+    }
+
+    /// A run settled. If cancellation was requested, it settles as `cancelled`, not `completed` -
+    /// the state is only ever reported after the run actually stopped.
+    pub fn complete_run(&self, run_id: u64) {
+        let mut inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+        let Some(record) = inner.runs.get_mut(&run_id) else { return };
+        let conversation = record.conversation.clone();
+        record.state = if record.cancel.load(Ordering::SeqCst) { RunState::Cancelled } else { RunState::Completed };
+        if let Some(owner) = inner.owners.get_mut(&conversation) {
+            owner.pending = owner.pending.saturating_sub(1);
+            if owner.pending == 0 {
+                inner.owners.remove(&conversation);
+            }
+        }
+        // Keep the last few settled runs per conversation so `status` can report them, without
+        // letting the table grow for the life of the process.
+        let mut settled: Vec<u64> = inner
+            .runs
+            .iter()
+            .filter(|(_, record)| {
+                record.conversation == conversation
+                    && matches!(record.state, RunState::Cancelled | RunState::Completed)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        settled.sort_unstable();
+        for stale in settled.iter().rev().skip(4) {
+            inner.runs.remove(stale);
+        }
+    }
+
+    /// Request cancellation of one run, or of the current run for a conversation. Owner-scoped:
+    /// a caller can never cancel a run that belongs to someone else. The flag is set on one run
+    /// only, so the run queued behind it is untouched.
+    pub fn cancel_run(&self, owner: &str, conversation: &str, run_id: Option<u64>) -> CancelOutcome {
+        let mut inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+        let target = match run_id {
+            Some(id) => match inner.runs.get(&id) {
+                Some(record) if record.conversation == conversation => Some(id),
+                Some(_) => return CancelOutcome::NotFound,
+                None => return CancelOutcome::NotFound,
+            },
+            None => {
+                let mut running = None;
+                let mut queued = None;
+                for (id, record) in inner.runs.iter() {
+                    if record.conversation != conversation || record.owner != owner {
+                        continue;
+                    }
+                    match record.state {
+                        RunState::Running if running.is_none() || *id < running.unwrap() => running = Some(*id),
+                        RunState::Queued if queued.is_none() || *id < queued.unwrap() => queued = Some(*id),
+                        _ => {}
+                    }
+                }
+                running.or(queued)
+            }
+        };
+        let Some(id) = target else { return CancelOutcome::NotFound };
+        let record = inner.runs.get_mut(&id).expect("target run exists");
+        if record.owner != owner {
+            return CancelOutcome::Forbidden;
+        }
+        record.cancel.store(true, Ordering::SeqCst);
+        CancelOutcome::Requested { run_id: id, state: record.state }
+    }
+
+    /// The runs of one conversation, as seen by their owner. A caller only ever sees its own.
+    pub fn runs_for(&self, owner: &str, conversation: &str) -> Vec<RunView> {
+        let inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut views: Vec<RunView> = inner
+            .runs
+            .iter()
+            .filter(|(_, record)| record.conversation == conversation && record.owner == owner)
+            .map(|(id, record)| RunView {
+                run_id: *id,
+                state: record.state,
+                cancel_requested: record.cancel.load(Ordering::SeqCst),
+            })
+            .collect();
+        views.sort_by_key(|view| view.run_id);
+        views
     }
 
     /// Observability: the conversations currently owned and their pending counts. `/health` does
@@ -212,6 +360,18 @@ impl Scheduler {
             .map(|(conversation, owner)| (conversation.clone(), owner.worker, owner.class, owner.pending))
             .collect();
         rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows
+    }
+
+    /// The active run ids per conversation, for `/health`'s `run_ids`. No prompts, no credentials.
+    pub fn run_ids(&self) -> Vec<(String, u64, RunState)> {
+        let inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut rows: Vec<_> = inner
+            .runs
+            .iter()
+            .map(|(id, record)| (record.conversation.clone(), *id, record.state))
+            .collect();
+        rows.sort_by_key(|(_, id, _)| *id);
         rows
     }
 
@@ -232,18 +392,29 @@ pub fn global() -> Option<&'static Scheduler> {
     SCHEDULER.get()
 }
 
-pub fn admit(conversation: &str, class: RunClass, pick: impl FnOnce(RunClass, &HashSet<usize>) -> Option<usize>) -> Decision {
+pub fn admit(
+    conversation: &str,
+    owner: &str,
+    class: RunClass,
+    pick: impl FnOnce(RunClass, &HashSet<usize>) -> Option<usize>,
+) -> Decision {
     match global() {
-        Some(scheduler) => scheduler.admit(conversation, class, pick),
+        Some(scheduler) => scheduler.admit(conversation, owner, class, pick),
         // Before `run()` installs the scheduler (unit tests that never serve), every run is
         // unrouted and goes to worker 0, exactly as a single-interpreter node did.
-        None => Decision::Run { run_id: 0, worker: 0 },
+        None => Decision::Run { run_id: 0, worker: 0, cancel: Arc::new(AtomicBool::new(false)) },
     }
 }
 
-pub fn complete(conversation: &str) {
+pub fn mark_running(run_id: u64) {
     if let Some(scheduler) = global() {
-        scheduler.complete(conversation);
+        scheduler.mark_running(run_id);
+    }
+}
+
+pub fn complete_run(run_id: u64) {
+    if let Some(scheduler) = global() {
+        scheduler.complete_run(run_id);
     }
 }
 
@@ -261,15 +432,15 @@ mod tests {
     #[test]
     fn back_to_back_admissions_for_one_conversation_share_an_owner() {
         let scheduler = scheduler();
-        let first = scheduler.admit("conversation-a", RunClass::Interactive, |_, _| Some(0));
+        let first = scheduler.admit("conversation-a", "master", RunClass::Interactive, |_, _| Some(0));
         assert!(matches!(first, Decision::Run { worker: 0, .. }));
-        let second = scheduler.admit("conversation-a", RunClass::Interactive, |_, _| Some(1));
+        let second = scheduler.admit("conversation-a", "master", RunClass::Interactive, |_, _| Some(1));
         match second {
             Decision::Behind { worker, .. } => assert_eq!(worker, 0, "the second run must follow its owner, not a fresh worker"),
             other => panic!("expected Behind, got {other:?}"),
         }
         // The pick closure is never consulted while the conversation is owned.
-        let third = scheduler.admit("conversation-a", RunClass::Interactive, |_, _| panic!("must not pick"));
+        let third = scheduler.admit("conversation-a", "master", RunClass::Interactive, |_, _| panic!("must not pick"));
         assert!(matches!(third, Decision::Behind { worker: 0, .. }));
     }
 
@@ -277,9 +448,10 @@ mod tests {
     #[test]
     fn completion_releases_ownership() {
         let scheduler = scheduler();
-        scheduler.admit("conversation-a", RunClass::Interactive, |_, _| Some(0));
-        scheduler.complete("conversation-a");
-        let next = scheduler.admit("conversation-a", RunClass::Interactive, |_, _| Some(2));
+        let decision = scheduler.admit("conversation-a", "master", RunClass::Interactive, |_, _| Some(0));
+        let run_id = match decision { Decision::Run { run_id, .. } => run_id, _ => unreachable!() };
+        scheduler.complete_run(run_id);
+        let next = scheduler.admit("conversation-a", "master", RunClass::Interactive, |_, _| Some(2));
         assert!(matches!(next, Decision::Run { worker: 2, .. }));
     }
 
@@ -287,12 +459,12 @@ mod tests {
     #[test]
     fn a_conversations_backlog_is_bounded() {
         let scheduler = scheduler();
-        scheduler.admit("c", RunClass::Interactive, |_, _| Some(0));
-        scheduler.admit("c", RunClass::Interactive, |_, _| None); // behind, pending 2
-        scheduler.admit("c", RunClass::Interactive, |_, _| None); // behind, pending 3 == depth
-        assert_eq!(scheduler.admit("c", RunClass::Interactive, |_, _| None), Decision::Refused(Refusal::SessionQueueFull));
+        scheduler.admit("c", "master", RunClass::Interactive, |_, _| Some(0));
+        scheduler.admit("c", "master", RunClass::Interactive, |_, _| None); // behind, pending 2
+        scheduler.admit("c", "master", RunClass::Interactive, |_, _| None); // behind, pending 3 == depth
+        assert!(matches!(scheduler.admit("c", "master", RunClass::Interactive, |_, _| None), Decision::Refused(Refusal::SessionQueueFull)));
         // A different conversation is unaffected by the first one's backlog.
-        assert!(matches!(scheduler.admit("d", RunClass::Interactive, |_, _| Some(1)), Decision::Run { .. }));
+        assert!(matches!(scheduler.admit("d", "master", RunClass::Interactive, |_, _| Some(1)), Decision::Run { .. }));
     }
 
     /// Background capacity is bounded by max + backlog and cannot consume the interactive reserve:
@@ -300,16 +472,13 @@ mod tests {
     #[test]
     fn background_capacity_is_bounded_and_reserved() {
         let scheduler = scheduler();
-        // Two background conversations fill `background_max`.
-        assert!(matches!(scheduler.admit("bg-1", RunClass::Background, |class, _| { assert_eq!(class, RunClass::Background); Some(1) }), Decision::Run { .. }));
-        assert!(matches!(scheduler.admit("bg-2", RunClass::Background, |_, _| Some(2)), Decision::Run { .. }));
-        // Two more wait in the backlog.
-        assert!(matches!(scheduler.admit("bg-3", RunClass::Background, |_, _| Some(3)), Decision::Run { .. }));
-        assert!(matches!(scheduler.admit("bg-4", RunClass::Background, |_, _| Some(4)), Decision::Run { .. }));
-        // The fifth exceeds max(2) + backlog(2).
-        assert_eq!(scheduler.admit("bg-5", RunClass::Background, |_, _| Some(5)), Decision::Refused(Refusal::BackgroundQueueFull));
+        assert!(matches!(scheduler.admit("bg-1", "master", RunClass::Background, |class, _| { assert_eq!(class, RunClass::Background); Some(1) }), Decision::Run { .. }));
+        assert!(matches!(scheduler.admit("bg-2", "master", RunClass::Background, |_, _| Some(2)), Decision::Run { .. }));
+        assert!(matches!(scheduler.admit("bg-3", "master", RunClass::Background, |_, _| Some(3)), Decision::Run { .. }));
+        assert!(matches!(scheduler.admit("bg-4", "master", RunClass::Background, |_, _| Some(4)), Decision::Run { .. }));
+        assert!(matches!(scheduler.admit("bg-5", "master", RunClass::Background, |_, _| Some(5)), Decision::Refused(Refusal::BackgroundQueueFull)));
         // Interactive is never refused by background saturation.
-        assert!(matches!(scheduler.admit("person", RunClass::Interactive, |_, _| Some(0)), Decision::Run { .. }));
+        assert!(matches!(scheduler.admit("person", "master", RunClass::Interactive, |_, _| Some(0)), Decision::Run { .. }));
     }
 
     /// The claimed set is handed to the pick callback, so a reserved-but-not-started worker is
@@ -317,9 +486,9 @@ mod tests {
     #[test]
     fn a_claimed_worker_is_not_offered_again() {
         let scheduler = scheduler();
-        scheduler.admit("a", RunClass::Interactive, |_, _| Some(0));
+        scheduler.admit("a", "master", RunClass::Interactive, |_, _| Some(0));
         let seen = std::sync::Mutex::new(None);
-        scheduler.admit("b", RunClass::Interactive, |_, claimed| {
+        scheduler.admit("b", "master", RunClass::Interactive, |_, claimed| {
             *seen.lock().unwrap() = Some(claimed.clone());
             Some(1)
         });
@@ -331,8 +500,8 @@ mod tests {
     #[test]
     fn an_empty_conversation_is_not_shared() {
         let scheduler = scheduler();
-        assert!(matches!(scheduler.admit("", RunClass::Interactive, |_, _| Some(0)), Decision::Run { .. }));
-        assert!(matches!(scheduler.admit("", RunClass::Interactive, |_, _| Some(1)), Decision::Run { .. }));
+        assert!(matches!(scheduler.admit("", "master", RunClass::Interactive, |_, _| Some(0)), Decision::Run { .. }));
+        assert!(matches!(scheduler.admit("", "master", RunClass::Interactive, |_, _| Some(1)), Decision::Run { .. }));
         assert!(scheduler.snapshot().is_empty());
     }
 
@@ -345,7 +514,6 @@ mod tests {
         assert_eq!(RunClass::from_header("interactive"), RunClass::Interactive);
         assert_eq!(RunClass::from_header(""), RunClass::Interactive);
         assert_eq!(RunClass::from_header("urgent"), RunClass::Interactive);
-        // There is no value that returns anything but the default or the demotion.
         assert_eq!(RunClass::from_header("reserved"), RunClass::Interactive);
     }
 
@@ -353,20 +521,71 @@ mod tests {
     #[test]
     fn a_background_run_with_no_worker_is_refused() {
         let scheduler = scheduler();
-        assert_eq!(
-            scheduler.admit("bg", RunClass::Background, |_, _| None),
+        assert!(matches!(
+            scheduler.admit("bg", "master", RunClass::Background, |_, _| None),
             Decision::Refused(Refusal::BackgroundQueueFull)
-        );
+        ));
     }
 
-    /// Completion is idempotent-safe: an extra complete for an unknown conversation does nothing.
+    /// Completing an unknown run is a no-op, and a double complete does not double-release.
     #[test]
-    fn completing_an_unknown_conversation_is_a_no_op() {
+    fn completing_an_unknown_run_is_a_no_op() {
         let scheduler = scheduler();
-        scheduler.complete("never-admitted");
-        scheduler.admit("c", RunClass::Interactive, |_, _| Some(0));
-        scheduler.complete("c");
-        scheduler.complete("c");
+        scheduler.complete_run(999);
+        let decision = scheduler.admit("c", "master", RunClass::Interactive, |_, _| Some(0));
+        let run_id = match decision { Decision::Run { run_id, .. } => run_id, _ => unreachable!() };
+        scheduler.complete_run(run_id);
+        scheduler.complete_run(run_id);
         assert!(scheduler.snapshot().is_empty());
+    }
+
+    /// Cancelling one run must not touch the run queued behind it: the flags are per-run.
+    #[test]
+    fn a_cancel_flag_is_per_run_not_per_conversation() {
+        let scheduler = scheduler();
+        let first = scheduler.admit("c", "master", RunClass::Interactive, |_, _| Some(0));
+        let (first_id, first_flag) = match first { Decision::Run { run_id, cancel, .. } => (run_id, cancel), _ => unreachable!() };
+        let second = scheduler.admit("c", "master", RunClass::Interactive, |_, _| None);
+        let second_flag = match second { Decision::Behind { cancel, .. } => cancel, _ => unreachable!() };
+        assert_eq!(scheduler.cancel_run("master", "c", Some(first_id)), CancelOutcome::Requested { run_id: first_id, state: RunState::Queued });
+        assert!(first_flag.load(Ordering::SeqCst), "the cancelled run's flag is set");
+        assert!(!second_flag.load(Ordering::SeqCst), "the queued run behind it is untouched");
+        scheduler.mark_running(first_id);
+        scheduler.complete_run(first_id);
+        // The cancelled run settles as cancelled; the queued run still completes normally.
+        let views = scheduler.runs_for("master", "c");
+        assert_eq!(views[0].state, RunState::Cancelled);
+        assert_eq!(views[1].state, RunState::Queued);
+    }
+
+    /// Owner scoping: another user cannot cancel this run.
+    #[test]
+    fn a_foreign_owner_cannot_cancel() {
+        let scheduler = scheduler();
+        let decision = scheduler.admit("c", "master", RunClass::Interactive, |_, _| Some(0));
+        let run_id = match decision { Decision::Run { run_id, .. } => run_id, _ => unreachable!() };
+        assert_eq!(scheduler.cancel_run("guest", "c", Some(run_id)), CancelOutcome::Forbidden);
+        assert_eq!(scheduler.cancel_run("guest", "c", None), CancelOutcome::NotFound);
+        assert_eq!(scheduler.cancel_run("master", "c", Some(run_id)), CancelOutcome::Requested { run_id, state: RunState::Queued });
+    }
+
+    /// A cancel without a run id targets the running run, else the oldest queued one, and never
+    /// reports `cancelled` before the run settles.
+    #[test]
+    fn cancel_without_a_run_id_targets_the_current_run() {
+        let scheduler = scheduler();
+        let first = match scheduler.admit("c", "master", RunClass::Interactive, |_, _| Some(0)) { Decision::Run { run_id, .. } => run_id, _ => unreachable!() };
+        let second = match scheduler.admit("c", "master", RunClass::Interactive, |_, _| None) { Decision::Behind { run_id, .. } => run_id, _ => unreachable!() };
+        scheduler.mark_running(first);
+        let outcome = scheduler.cancel_run("master", "c", None);
+        assert_eq!(outcome, CancelOutcome::Requested { run_id: first, state: RunState::Running });
+        // Before it settles, status still says running with a cancel request - not cancelled.
+        let views = scheduler.runs_for("master", "c");
+        assert_eq!(views[0].state, RunState::Running);
+        assert!(views[0].cancel_requested);
+        assert_eq!(views[1].run_id, second);
+        assert!(!views[1].cancel_requested);
+        scheduler.complete_run(first);
+        assert_eq!(scheduler.runs_for("master", "c")[0].state, RunState::Cancelled);
     }
 }

@@ -3,11 +3,13 @@
 The canonical execution concepts and the target contract are in
 [ARCHITECTURE.md section 6](../ARCHITECTURE.md#6-naming-and-execution-ownership) and
 [EXECUTION.md](EXECUTION.md). This file is only the **mechanism** behind the admission,
-lane and per-run-output clauses, so a reader can find the code and a reviewer can see what
-is not yet covered. Read EXECUTION.md for the contract; read this for where it lives.
+lane, cancellation and per-run-output clauses, so a reader can find the code and a
+reviewer can see what is not yet covered. Read EXECUTION.md for the contract; read this for
+where it lives.
 
 Mechanism: `rust/wa-host/src/serve/scheduler.rs`, the admission block in
-`rust/wa-host/src/serve.rs`, and `wa_admission` in `lua/core/server.lua`.
+`rust/wa-host/src/serve.rs`, `wa_admission`/`wa_identity`/`wa_verify_peer` in
+`lua/core/server.lua`, and the runtime's `subagents` module.
 Proof: that module's unit tests, `scripts/test-run-isolation.sh` (hermetic, local
 marker-echoing provider) and the UI check in `scripts/test-ui.ps1`.
 
@@ -16,17 +18,18 @@ marker-echoing provider) and the UI check in `scripts/test-ui.ps1`.
 `X-WA-Session` is an authenticated **credential**; the chat body's `thread` is the
 **conversation**. They are separate, and the conversation is never taken from the header.
 
-The accept thread owns one **control interpreter** and calls
-`wa_admission(session, node, body)` before it reserves a worker. The resolver returns the
-authenticated user and the real conversation id, or an error:
+The accept thread owns one **control interpreter**, and it runs on its own **resolver
+thread** so the accept thread can bound the wait (`WASM_AGENT_ADMISSION_TIMEOUT_MS`,
+default 8000) - a busy SQLite lock or a slow interpreter must not stop the node accepting.
+The resolver calls `wa_admission(session, node, body)` before any worker is reserved and
+returns the authenticated user and the real conversation id, or an error:
 
 - a nonempty invalid/expired credential is refused `401 invalid_session` - it never reaches a
   run as the default master (`lua/core/users.lua`'s strict `users.resolve`);
 - a named thread owned by another user is refused `403 forbidden_thread` before a slot is
   taken;
 - a body with no thread returns the session `agent_for` would resume (created if needed), so
-  the scheduler owns a real id instead of an empty key. This is what makes same-conversation
-  ordering hold for unnamed runs too.
+  the scheduler owns a real id instead of an empty key.
 
 This matches [EXECUTION.md](EXECUTION.md#seven-concepts-seven-different-identities).
 
@@ -39,25 +42,50 @@ This matches [EXECUTION.md](EXECUTION.md#seven-concepts-seven-different-identiti
 2. **A worker never executes a conversation it does not own.** The claimed set is passed
    to the worker pick, so a worker reserved for a run that has not started is not offered
    to another conversation.
-3. **Two interactive slots are reserved.** Worker indices below
-   `WASM_AGENT_INTERACTIVE_RESERVE` (default **2**) are never given to background work, so
-   two concurrent chats remain possible while background work saturates the rest. Background
+3. **The lanes are separate index ranges, not priorities.** Run workers live below the
+   control floor; the control lane owns the top of the range. Background runs use only
+   indices `WASM_AGENT_INTERACTIVE_RESERVE..run_capacity` (default reserve **2**), so two
+   concurrent chats remain possible while background work saturates the rest. Background
    concurrency and backlog are bounded (`WASM_AGENT_BACKGROUND_MAX`, default
-   `capacity - reserve`; `WASM_AGENT_BACKGROUND_BACKLOG`, default 8), and one conversation's
-   own backlog is bounded (`WASM_AGENT_SESSION_QUEUE_DEPTH`, default 4). Overflow is an
-   explicit 503 (`background_queue_full`, `session_queue_full`), never invisible loss.
+   `capacity - reserve`; `WASM_AGENT_BACKGROUND_BACKLOG`, default 8), and one
+   conversation's own backlog is bounded (`WASM_AGENT_SESSION_QUEUE_DEPTH`, default 4).
+   Overflow is an explicit 503 (`background_queue_full`, `session_queue_full`), never
+   invisible loss.
 4. **One admission for every run.** A local `/chat`, a directly-arriving peer `/node/chat`,
    and a relayed `/node/chat` all travel the same scheduler. The worker channel carries both
    HTTP and relay work, so a peer run cannot bypass admission on worker 0's housekeeping
-   path. A peer run is forced background and keyed by its thread, else its peer node id.
+   path. A peer's signature is verified **once, before admission**
+   (`wa_verify_peer`), and the conversation is keyed by the verified author, never by the
+   `x-wa-node` header; the run half (`wa_node_chat_verified`) does not re-verify, because a
+   second check of the same signed request is refused as a replay.
 5. **The class marker is one-way.** `X-WA-Run-Class: background` (case-insensitive)
    demotes a run into the background lane. Every other value, including `interactive`, is
    ignored and the run keeps the default. **No header value grants reserved capacity**, so
-   an untrusted caller cannot promote itself; the worst it can do is enter the smaller lane.
+   an untrusted caller cannot promote itself.
 
-`/health` reports `runs[]` (conversation, worker, lane, pending) and `run_limits`
-(session backlog, background bounds, interactive reserve), so the guarantees are observable
-from outside the process.
+`/health` reports `runs[]` (conversation, worker, lane, pending), `run_ids[]`
+(conversation, run_id, state), `run_limits` (session backlog, background bounds,
+interactive reserve, control workers) and `subagents`/`subagent_counts`, so the guarantees
+are observable from outside the process. None of these carry a prompt or a credential.
+
+## Cancellation
+
+`POST /runs {action:"status"|"cancel", thread|conversation:"<id>", run_id?}` is answered on
+the accept thread from the scheduler's own state, so it never queues behind the run it is
+cancelling. Identity comes from `wa_identity`; an invalid credential is `401`, and a run
+owned by another user is `403` (with a run id) or `404` (without). A run has its **own**
+cancel flag, so cancelling a running run does not cancel the run queued behind it.
+
+`cancel` sets the flag and reports the state the run was in; it never claims the run
+stopped. The run's state becomes `cancelled` only when it settles, and a queued run that was
+cancelled before it started settles its own stream exactly once and never executes.
+
+The worker installs the run's flag as a thread-local current-run context, and
+`serve::run_cancel_requested()` is registered with the runtime as the run half of unified
+cancellation (`host::set_run_cancel_probe`). The runtime's provider reader and agent loop
+poll `host::run_cancel_requested()`, which combines the run flag with a child task's own
+flag. The UI's Stop sends this request before aborting the stream, so stopping a run stops
+it on the node rather than only in the page.
 
 ## The per-run output sink
 
@@ -65,23 +93,29 @@ from outside the process.
 signature without changing `host.rs`; the signature is deliberately unchanged. The sink is
 **thread-local**: the SSE handler installs the run's socket for the length of the Lua call
 and restores the previous sink on drop; a relayed run installs a buffer local to that call.
-There is deliberately no process-wide fallback. Before this, two concurrent runs shared
-`CLIENT`/`EVENT_SINK` and the last run to set it owned both streams - the other run's deltas
-were written into a socket belonging to a different conversation, or to nobody.
+There is deliberately no process-wide fallback.
+
+## Subagents are a control call
+
+`POST /subagents` calls the runtime's global `wa_subagents(body, session)`. It is served by
+the **control lane**, never a run slot, and is never admitted as a run: `start` launches a
+native background child, so the route itself is a control call. An invalid credential is
+refused `401` at the boundary. The HTTP `await` is capped
+(`WASM_AGENT_SUBAGENT_AWAIT_MS`, default 10000) so one control slot cannot be held
+indefinitely; `POST /runs` and `/health` are answered without a worker, so cancel and
+health stay prompt even while every control slot is awaiting.
 
 ## What this does not cover
 
 Stated so a verdict is not read for more than it says:
 
-- **The sentinel does not set `X-WA-Run-Class`.** Until the sentinel owner adds it, a wake
-  takes the default (interactive). The sentinel already limits wake concurrency and refuses
-  to wake while a person's turn is running, so the reserve is not unprotected - but the
-  node-side lane would be the belt to that suspenders.
-- **Run cancellation is not implemented here.** `/health` has no per-run cancelled state and
-  no route sets one. Cancelling a model call needs the Lua run loop to observe a stop signal,
-  which is the runtime worker's module; the admission bookkeeping here is ready to carry a
-  `cancel(conversation)` flag but nothing consumes it yet. This is a real gap, not a silent
-  success.
+- **A foreground run's silent provider read is not socket-interruptible.** Cancellation is
+  observed between provider chunks, and the runtime's socket shutdown is wired for child
+  tasks. A foreground run blocked on a provider that has sent nothing is stopped when the
+  next chunk arrives or the read times out, not the instant the flag is set.
+- **The sentinel does not set `X-WA-Run-Class`.** A wake takes the default (interactive);
+  the sentinel already limits wake concurrency and refuses to wake while a person's turn is
+  running, so the reserve is not unprotected.
 - **A slow write still occupies worker 0.** Writes remain pinned to worker 0 for the
   one-writer guarantee; the two interactive slots mean an operator's *run* is not stuck
   behind it, but an operator's next *write* can be.
