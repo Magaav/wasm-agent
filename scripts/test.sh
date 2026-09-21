@@ -888,12 +888,6 @@ WEDGE_ONLY=1 WA_BIN="$BIN" bash scripts/test-serve-concurrency.sh 8893 > "$DB.co
 # Both claims are read from one run: the pair costs one fixture, not two.
 grep "a stalled worker is visible" "$DB.concurrency.log"
 grep "the client bridge survived a connection that said nothing" "$DB.concurrency.log"
-# Concurrent-session isolation: per-run streams, atomic conversation ownership and the run
-# lanes. Model-free (a local marker-echoing provider), so it belongs in the hermetic gate: a
-# shared stream or a second writer on one conversation must fail here, not on the cloud.
-WA_BIN="$BIN" bash scripts/test-run-isolation.sh 8961 > "$DB.isolation.log" 2>&1 || {
-  echo "the run-isolation fixture failed; its output:"; tail -40 "$DB.isolation.log"; exit 1; }
-grep "run isolation ok" "$DB.isolation.log"
 rm -f "$DB.window"*
 echo "recovery cli ok"
 

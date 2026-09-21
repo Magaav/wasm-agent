@@ -90,7 +90,7 @@ static UI_ERROR: Mutex<Option<(String, u64)>> = Mutex::new(None);
 struct Pool {
     /// One slot per possible worker, index 0 first. `None` means that worker is not running. Slots rather
     /// than a list, because a worker retires itself and a list would renumber everyone under it.
-    slots: Mutex<Vec<Option<std::sync::mpsc::SyncSender<(TcpStream, Request)>>>>,
+    slots: Mutex<Vec<Option<std::sync::mpsc::SyncSender<Work>>>>,
     /// Builds a fresh interpreter. It lives here as a boxed closure because the boot sequence belongs to
     /// main.rs - a second copy of it in the pool is how the two would drift.
     factory: Box<dyn Fn() -> Lua + Send + Sync>,
@@ -141,6 +141,14 @@ fn max_workers() -> usize {
 
 fn read_idle_seconds() -> u64 {
     env_usize("WASM_AGENT_WORKERS_IDLE_SECONDS", 60) as u64
+}
+
+/// How many worker slots are reserved for interactive runs. A background run may not use a worker
+/// with an index below this, so a burst of wakes cannot take the capacity a person's next run needs.
+/// Two, not one: the operator requires two concurrent chats even while background work saturates the
+/// rest, and worker 0 alone cannot both run a chat and absorb a slow mutation.
+fn interactive_reserve() -> usize {
+    env_usize("WASM_AGENT_INTERACTIVE_RESERVE", 2).clamp(1, 8)
 }
 
 thread_local! {
@@ -255,19 +263,23 @@ fn worker_run_id(index: usize) -> Option<u64> {
 ///
 /// The interpreter is built *before* the lock is taken in spirit but inside it in practice, which is why
 /// the caller must not be a hot path: this happens once per growth, not once per request.
-fn spawn_worker(slots: &mut Vec<Option<std::sync::mpsc::SyncSender<(TcpStream, Request)>>>) -> Option<usize> {
+fn spawn_worker(slots: &mut Vec<Option<std::sync::mpsc::SyncSender<Work>>>, min_index: usize) -> Option<usize> {
     let pool = POOL.get()?;
-    let index = slots.iter().position(|slot| slot.is_none()).unwrap_or(slots.len());
+    // `min_index` keeps a spawned worker outside a lane it may not use. Background work starts at the
+    // interactive reserve, so it never creates (or occupies) a worker below it; gaps are `None`, which is
+    // exactly what an unused slot is.
+    let index = (min_index..slots.len())
+        .find(|index| slots[*index].is_none())
+        .unwrap_or_else(|| slots.len().max(min_index));
     if index >= max_workers() + 1 {
         return None;
     }
     let state = (pool.factory)();
-    let (sender, receiver) = std::sync::mpsc::sync_channel::<(TcpStream, Request)>(pool.queue_depth);
-    if index == slots.len() {
-        slots.push(Some(sender));
-    } else {
-        slots[index] = Some(sender);
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<Work>(pool.queue_depth);
+    while slots.len() <= index {
+        slots.push(None);
     }
+    slots[index] = Some(sender);
     let worker_ui = pool.ui.clone();
     pool.spawned.fetch_add(1, Ordering::Relaxed);
     std::thread::spawn(move || {
@@ -293,50 +305,25 @@ fn turn_worker_is_idle() -> bool {
     }
 }
 
-/// A run: the one route that is routed by session rather than pinned to worker 0.
+/// A run: the routes that execute a model turn and therefore go through admission. `/chat` is a local
+/// run; `/node/chat` is a peer run and shares the same admission rather than bypassing it.
 fn is_run_route(request: &Request) -> bool {
-    request.method == "POST" && split_path(&request.path).0 == "/chat"
-}
-
-/// The conversation a run belongs to for routing: the body's `thread` when it names one, otherwise the
-/// `x-wa-session` header.
-///
-/// The two are different things and must not be conflated. `x-wa-session` is the authenticated *identity*
-/// (who is asking, and therefore what the run may do); the body's `thread` is the *conversation* (which
-/// transcript the run writes, and therefore what must serialise). The window puts the account session in
-/// the header and the conversation in the body, and the sentinel does the same for a wake. Reading only
-/// the header made every wake look unrouted (a wake has no auth session) and made every logged-in window
-/// look as if all of its conversations were one: two writers on one transcript in the first case, and in
-/// the second needless serialisation plus a window that could not tell its own run from another
-/// conversation's.
-///
-/// The body `thread` is untrusted input, but it is only a scheduling key: authority is still decided in
-/// Lua from the authenticated session, and a run that names a conversation it does not own is refused
-/// there. The backlog a caller can be put behind this way is bounded by the scheduler.
-fn routing_session(method: &str, path: &str, header_session: &str, body: &[u8]) -> String {
-    if method == "POST" && split_path(path).0 == "/chat" {
-        if let Some(thread) = serde_json::from_slice::<serde_json::Value>(body)
-            .ok()
-            .and_then(|value| value.get("thread").and_then(|thread| thread.as_str()).map(str::to_string))
-            .filter(|thread| !thread.is_empty())
-        {
-            return thread;
-        }
-    }
-    header_session.to_string()
+    request.method == "POST" && matches!(split_path(&request.path).0.as_str(), "/chat" | "/node/chat")
 }
 
 /// Choose a worker for a run. `class` picks the lane and `claimed` are workers already reserved by
 /// another admitted run, so a worker reserved for a run that has not started is not offered twice.
 ///
-/// Worker 0 is the interactive reserve: a background run may not use it, so a burst of wakes cannot
-/// take the worker a person's next run needs. Interactive prefers worker 0 when it is free, so an idle
-/// node stays at one interpreter, and spreads across the others round-robin so parallel sessions are
-/// not always pinned to the same worker.
+/// Worker 0 and worker 1 are the interactive reserve (see `interactive_reserve`): a background run may
+/// not use either, so a burst of wakes cannot take the capacity a person's next run needs. Interactive
+/// prefers worker 0 when it is free, so an idle node stays at one interpreter, and spreads across the
+/// others round-robin so parallel sessions are not always pinned to the same worker.
 fn pick_run_worker(class: scheduler::RunClass, claimed: &std::collections::HashSet<usize>) -> Option<usize> {
     let pool = POOL.get()?;
     let background = class == scheduler::RunClass::Background;
-    let floor = if background { 1 } else { 0 };
+    // Background work may not occupy the interactive reserve: worker indices below `floor` are kept
+    // for runs a person is waiting on, whatever the background backlog looks like.
+    let floor = if background { interactive_reserve() } else { 0 };
     let beats = WORKER_BEATS.get()?;
     let mut idle: Vec<usize> = live_worker_ids()
         .into_iter()
@@ -359,7 +346,7 @@ fn pick_run_worker(class: scheduler::RunClass, claimed: &std::collections::HashS
     // No idle worker: grow the pool if the ceiling allows. `spawn_worker` never reuses worker 0 (it is
     // always running), so a spawned worker is always outside the interactive reserve.
     if let Ok(mut slots) = pool.slots.lock() {
-        if let Some(index) = spawn_worker(&mut slots) {
+        if let Some(index) = spawn_worker(&mut slots, floor) {
             if index >= floor {
                 return Some(index);
             }
@@ -369,7 +356,7 @@ fn pick_run_worker(class: scheduler::RunClass, claimed: &std::collections::HashS
     // worker's bounded queue. Either send may still be refused when that queue is full - which is the
     // bound, because refusing loudly beats an unbounded backlog every client waits in.
     if background {
-        let candidates: Vec<usize> = live_worker_ids().into_iter().filter(|index| *index >= 1).collect();
+        let candidates: Vec<usize> = live_worker_ids().into_iter().filter(|index| *index >= floor).collect();
         if candidates.is_empty() {
             return None;
         }
@@ -406,7 +393,7 @@ fn choose_worker(request: &Request) -> usize {
     }
     // A read, the run worker is busy, and there is no read worker: this is the moment the pool earns its
     // keep. Everything else waits, which is what a node with one interpreter has always done.
-    if let Some(index) = spawn_worker(&mut slots) {
+    if let Some(index) = spawn_worker(&mut slots, 1) {
         return index;
     }
     0
@@ -635,7 +622,7 @@ fn health_body() -> Vec<u8> {
                 "session_queue_depth": config.session_queue_depth,
                 "background_max": config.background_max,
                 "background_backlog": config.background_backlog,
-                "interactive_reserve_worker": 0,
+                "interactive_reserve": interactive_reserve(),
             })
         }),
         "workers_spawned": POOL.get().map(|pool| pool.spawned.load(Ordering::Relaxed)).unwrap_or(0),
@@ -749,6 +736,50 @@ fn ok_json(body: String) -> Reply {
     (200, "application/json", body.into_bytes())
 }
 
+/// Resolve the authenticated identity and the conversation for a run, in Lua, before any worker is
+/// reserved. Returns the conversation on success, or `(status, error, hint)` to refuse at the boundary.
+///
+/// This is the one place authority is decided for a run: the credential is a DB-backed token and a
+/// named thread belongs to its author, so only Lua can answer it. Doing it here means an invalid
+/// nonempty credential never reaches a worker as the default user, and a foreign thread is refused
+/// before a slot is taken.
+fn resolve_admission(control: &Lua, request: &Request) -> Result<String, (u16, String, String)> {
+    let (_, query) = split_path(&request.path);
+    let from_query = query_value(&query, "node");
+    let node = if !from_query.is_empty() { from_query } else { header_of(&request.node_headers, "x-wa-node") };
+    let body = String::from_utf8_lossy(&request.body).to_string();
+    let raw = control
+        .call_string("wa_admission", &[request.session.as_str(), node.as_str(), body.as_str()])
+        .map_err(|error| (500, "admission_failed".to_string(), error))?;
+    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|_| {
+        (500, "admission_failed".to_string(), "the admission resolver returned invalid JSON".to_string())
+    })?;
+    if let Some(error) = value.get("error").and_then(|error| error.as_str()) {
+        let status = match error {
+            "invalid_session" | "unknown_user" => 401,
+            "forbidden_thread" => 403,
+            _ => 400,
+        };
+        return Err((status, error.to_string(), "the run was refused before admission".to_string()));
+    }
+    Ok(value.get("conversation").and_then(|value| value.as_str()).unwrap_or_default().to_string())
+}
+
+/// The conversation a directly-arriving peer run belongs to. A peer is authenticated by its signature
+/// in `wa_node_chat`, not by a local credential, so it is keyed by the peer node id (or a thread the
+/// peer named), and it is always background.
+fn peer_conversation(request: &Request) -> String {
+    if let Some(thread) = serde_json::from_slice::<serde_json::Value>(&request.body)
+        .ok()
+        .and_then(|value| value.get("thread").and_then(|thread| thread.as_str()).map(str::to_string))
+        .filter(|thread| !thread.is_empty())
+    {
+        return thread;
+    }
+    let peer = header_of(&request.node_headers, "x-wa-node");
+    if peer.is_empty() { String::new() } else { format!("peer:{peer}") }
+}
+
 pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, ui: PathBuf) {
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(listener) => listener,
@@ -760,14 +791,21 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     let ceiling = max_workers();
     let warm = warm_read_workers().min(ceiling);
     let queue_depth = env_usize("WASM_AGENT_QUEUE_DEPTH", 256);
+    // The control interpreter. Admission resolves the credential and the conversation in Lua *before*
+    // a worker is reserved, and the accept thread is the only place that decision can be made: it owns
+    // the request. It is one interpreter, created once, and it never runs a model - it resolves
+    // identity, ownership of a named thread, and the session an unnamed run would resume.
+    let control = factory();
     // Admission bounds. `background_max` is how many background conversations may run at once and
     // `background_backlog` how many more may wait; together they keep a wake storm from growing
     // without limit. `session_queue_depth` bounds one conversation's own backlog so a single
-    // conversation cannot fill a worker's queue and starve another. Worker 0 is the interactive
-    // reserve, so background runs never use it.
+    // conversation cannot fill a worker's queue and starve another. The interactive reserve is
+    // `WASM_AGENT_INTERACTIVE_RESERVE` workers (default two), and background runs never use one.
     scheduler::install(scheduler::Config {
         session_queue_depth: env_usize("WASM_AGENT_SESSION_QUEUE_DEPTH", 4).max(1),
-        background_max: env_usize("WASM_AGENT_BACKGROUND_MAX", ceiling).max(1),
+        // The interactive reserve is subtracted from the run capacity, so background work is bounded
+        // to the workers the reserve does not own.
+        background_max: env_usize("WASM_AGENT_BACKGROUND_MAX", (ceiling + 1).saturating_sub(interactive_reserve())).max(1),
         background_backlog: env_usize("WASM_AGENT_BACKGROUND_BACKLOG", 8),
     });
     // Sized to the ceiling once, so a worker's liveness slot never has to be created later: the arrays are
@@ -791,7 +829,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
 
     // Worker 0, always: the run worker. It is the state main.rs already booted, so a node that never
     // grows a read worker boots exactly one interpreter, as it always did.
-    let (sender, receiver) = std::sync::mpsc::sync_channel::<(TcpStream, Request)>(queue_depth);
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<Work>(queue_depth);
     if let Ok(mut slots) = pool.slots.lock() {
         slots.push(Some(sender));
     }
@@ -804,7 +842,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     // so the default is to have none until that happens.
     for _ in 0..warm {
         if let Ok(mut slots) = pool.slots.lock() {
-            spawn_worker(&mut slots);
+            spawn_worker(&mut slots, 1);
         }
     }
     eprintln!(
@@ -873,6 +911,21 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
         let is_run = is_run_route(&request);
         let mut admitted_conversation = String::new();
         let target = if is_run {
+            if split_path(&request.path).0 == "/node/chat" {
+                // A peer run is authenticated by its signature, not a local credential, and it is always
+                // background. It still shares the same admission as a local run.
+                request.routing_session = peer_conversation(&request);
+                request.run_class = scheduler::RunClass::Background;
+            } else {
+                match resolve_admission(&control, &request) {
+                    Ok(conversation) => request.routing_session = conversation,
+                    Err((status, error, hint)) => {
+                        let body = format!("{{\"error\":\"{error}\",\"hint\":\"{hint}\"}}");
+                        let _ = respond(&mut stream, status, "application/json", body.as_bytes());
+                        continue;
+                    }
+                }
+            }
             admitted_conversation = request.routing_session.clone();
             match scheduler::admit(&admitted_conversation, request.run_class, pick_run_worker) {
                 scheduler::Decision::Run { run_id, worker } | scheduler::Decision::Behind { run_id, worker } => {
@@ -966,9 +1019,10 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
                     break;
                 }
             };
-            match sender.try_send((stream, request)) {
+            match sender.try_send(Work::Http(stream, request)) {
                 Ok(()) => break,
-                Err(std::sync::mpsc::TrySendError::Full((mut stream, _request))) => {
+                Err(std::sync::mpsc::TrySendError::Full(work)) => {
+                    let (mut stream, _request) = unwrap_http(work);
                     if is_run {
                         scheduler::complete(&admitted_conversation);
                     }
@@ -978,7 +1032,8 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
                     let _ = respond(&mut stream, 503, "application/json", body);
                     break;
                 }
-                Err(std::sync::mpsc::TrySendError::Disconnected(pair)) => {
+                Err(std::sync::mpsc::TrySendError::Disconnected(work)) => {
+                    let pair = unwrap_http(work);
                     if is_run {
                         scheduler::complete(&admitted_conversation);
                         QUEUED.fetch_sub(1, Ordering::Relaxed);
@@ -1005,13 +1060,22 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     }
 }
 
+/// Recover the HTTP request from a work item a `try_send` handed back. The accept loop only ever sends
+/// HTTP work, so a relay item here would be a bug rather than a case to answer.
+fn unwrap_http(work: Work) -> (TcpStream, Request) {
+    match work {
+        Work::Http(stream, request) => (stream, request),
+        Work::Relay(_) => unreachable!("the accept loop only sends HTTP work"),
+    }
+}
+
 /// One interpreter's loop. Worker 0 also does the housekeeping - relayed work and the sync tick - because
 /// that work is a conversation with a peer and belongs where the runs are; a read worker does nothing but
 /// answer reads.
 fn worker_loop(
     lua: Lua,
     index: usize,
-    receiver: std::sync::mpsc::Receiver<(TcpStream, Request)>,
+    receiver: std::sync::mpsc::Receiver<Work>,
     agent_ui: PathBuf,
 ) {
     let mut next_sync = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -1027,7 +1091,7 @@ fn worker_loop(
         // putting it in front of the queue is how a peer's slow call made the window say "connecting…".
         let local = receiver.recv_timeout(std::time::Duration::from_millis(100));
         match local {
-            Ok((mut stream, request)) => {
+            Ok(Work::Http(mut stream, request)) => {
                 if test_stall && !stalled_once {
                     stalled_once = true;
                     eprintln!("[serve] test hook: stalling worker 0 on purpose");
@@ -1086,6 +1150,20 @@ fn worker_loop(
                 idle_since = std::time::Instant::now();
                 continue;
             }
+            Ok(Work::Relay(job)) => {
+                // A peer run that admission routed here. It owns its conversation for exactly as long
+                // as it runs, like any other run, and releases it the same way.
+                LAST_SERVED_MS.store(now_ms(), Ordering::Relaxed);
+                begin_work(format!("relay {} {}", job.method, job.path));
+                let conversation = relay_conversation(&job);
+                let (status, body) = process_relay_job(&lua, &agent_ui, &job);
+                scheduler::complete(&conversation);
+                end_work();
+                beat();
+                let _ = job.reply.send((status, body));
+                idle_since = std::time::Instant::now();
+                continue;
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
         }
@@ -1108,13 +1186,48 @@ fn worker_loop(
             }
             continue;
         }
-        // Requests the relay handed to us (NAT'd peers, or peers relaying us).
+        // Relayed peer work goes through the same admission as a direct request. A peer run must not
+        // bypass the scheduler by arriving on worker 0's housekeeping path; `/node/chat` is a run and is
+        // forced into the background lane, while the other relay routes are control calls and stay here.
         for job in crate::relay_client::take_jobs() {
-            begin_work(format!("relay {} {}", job.method, job.path));
-            let (status, body) = process_relay_job(&lua, &agent_ui, &job);
-            end_work();
-            beat();
-            let _ = job.reply.send((status, body));
+            let route = split_path(&job.path).0;
+            if !(job.method == "POST" && route == "/node/chat") {
+                begin_work(format!("relay {} {}", job.method, job.path));
+                let (status, body) = process_relay_job(&lua, &agent_ui, &job);
+                end_work();
+                beat();
+                let _ = job.reply.send((status, body));
+                continue;
+            }
+            let conversation = relay_conversation(&job);
+            match scheduler::admit(&conversation, scheduler::RunClass::Background, pick_run_worker) {
+                scheduler::Decision::Run { worker, .. } | scheduler::Decision::Behind { worker, .. } => {
+                    let sender = POOL
+                        .get()
+                        .and_then(|pool| pool.slots.lock().ok().and_then(|slots| slots.get(worker).cloned().flatten()));
+                    match sender {
+                        Some(sender) => match sender.try_send(Work::Relay(job)) {
+                            Ok(()) => {}
+                            Err(std::sync::mpsc::TrySendError::Full(Work::Relay(job)))
+                            | Err(std::sync::mpsc::TrySendError::Disconnected(Work::Relay(job))) => {
+                                scheduler::complete(&conversation);
+                                let _ = job.reply.send((503, "{\"error\":\"node_busy\",\"hint\":\"the relay run could not be delivered; the peer may retry\"}".into()));
+                            }
+                            Err(_) => {
+                                scheduler::complete(&conversation);
+                            }
+                        },
+                        None => {
+                            scheduler::complete(&conversation);
+                            let _ = job.reply.send((503, "{\"error\":\"node_busy\",\"hint\":\"the relay run could not be delivered; the peer may retry\"}".into()));
+                        }
+                    }
+                }
+                scheduler::Decision::Refused(refusal) => {
+                    let (code, _) = refusal.as_error();
+                    let _ = job.reply.send((503, format!("{{\"error\":\"{code}\"}}")));
+                }
+            }
         }
         // Housekeeping last, and only when nobody is waiting and the node has been quiet: the sync tick
         // talks to a peer over the network, and on worker 0 that means this interpreter stops answering
@@ -1132,6 +1245,25 @@ fn worker_loop(
     }
 }
 
+
+/// The conversation a relayed peer run belongs to. A `/node/chat` body may name a `thread`; without one
+/// the peer's node id is the key, so two calls from one peer serialise instead of racing on one
+/// transcript. The peer is already authenticated by its signature before this is called.
+fn relay_conversation(job: &crate::relay_client::RelayJob) -> String {
+    if let Some(thread) = serde_json::from_str::<serde_json::Value>(&job.body)
+        .ok()
+        .and_then(|value| value.get("thread").and_then(|thread| thread.as_str()).map(str::to_string))
+        .filter(|thread| !thread.is_empty())
+    {
+        return thread;
+    }
+    let peer = header_of(&job.headers, "x-wa-node");
+    if peer.is_empty() {
+        String::new()
+    } else {
+        format!("peer:{peer}")
+    }
+}
 
 /// Process a request that arrived over the relay. Streaming routes are captured
 /// rather than written to a socket, so the peer gets the events and can replay
@@ -1223,11 +1355,10 @@ struct Request {
     method: String,
     path: String,
     session: String,
-    /// The session this request belongs to for *routing*, which is not always the auth session. A wake
-    /// puts its conversation in the body's `thread` and keeps `x-wa-session` for authentication (see
-    /// docs/JOBS.md). Routing on the header alone gave a wake an empty session, so it went to an idle
-    /// worker and ran a second turn on a conversation that was already running - two writers, one
-    /// transcript, and the turn's final message landed after the wake's (seq inversion).
+    /// The conversation this run writes, resolved before admission. The body's `thread` is the
+    /// conversation; `x-wa-session` is a credential and is never used as one. When the body names no
+    /// thread the resolver returns the session `agent_for` would resume, so the scheduler owns the real
+    /// id rather than an empty key.
     routing_session: String,
     /// The lane this run belongs to. Set from `X-WA-Run-Class`, which can only demote: see
     /// `scheduler::RunClass::from_header`. A non-run request's class is never consulted.
@@ -1239,6 +1370,14 @@ struct Request {
     node_headers: Vec<(String, String)>,
     body: Vec<u8>,
     accept_sse: bool,
+}
+
+/// One unit of work a worker can be handed. HTTP requests and relayed peer requests travel the same
+/// queue and the same admission, so a peer run can no longer bypass the scheduler by arriving on
+/// worker 0's housekeeping path.
+enum Work {
+    Http(TcpStream, Request),
+    Relay(crate::relay_client::RelayJob),
 }
 
 /// Read one request off the socket. `None` means the peer closed.
@@ -1283,12 +1422,13 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
             if length > 4_000_000 || end > 65536 { return Ok(None); }
             if data.len() >= end + 4 + length {
                 let body = data[end + 4..end + 4 + length].to_vec();
-                let routing_session = routing_session(&method, &path, &session, &body);
                 return Ok(Some(Request {
                     method,
                     path,
                     session,
-                    routing_session,
+                    // Filled in by admission, from the Lua resolver: the conversation is the body's
+                    // `thread` (or the session an unnamed run resumes), never the credential.
+                    routing_session: String::new(),
                     run_class,
                     run_id: 0,
                     node_headers,
@@ -1631,28 +1771,33 @@ mod ui_version_tests {
 }
 
 #[cfg(test)]
-mod routing_session_tests {
-    use super::routing_session;
+mod peer_conversation_tests {
+    use super::{peer_conversation, Request};
 
-    /// A run's *conversation* is its body `thread`, not its `x-wa-session` identity. The sentinel keeps
-    /// `x-wa-session` for authentication and puts the conversation in `thread`; the window does the same.
-    /// Conflating them gave a wake an empty session (two writers, one transcript, seq 4195/4196) and gave a
-    /// logged-in window one routing key for every conversation it owns.
+    fn request(body: &[u8], headers: Vec<(String, String)>) -> Request {
+        Request {
+            method: "POST".into(),
+            path: "/node/chat".into(),
+            session: String::new(),
+            routing_session: String::new(),
+            run_class: super::scheduler::RunClass::Background,
+            run_id: 0,
+            node_headers: headers,
+            body: body.to_vec(),
+            accept_sse: true,
+        }
+    }
+
+    /// A peer run's conversation is the thread it named, else the peer's node id. It is never the local
+    /// credential (a peer has none here), and two calls from one peer must serialise rather than race on
+    /// one transcript.
     #[test]
-    fn a_runs_conversation_is_its_thread_not_its_identity() {
-        let body = br#"{"text":"hi","thread":"4ef4e372-8d84"}"#;
-        // The body names the conversation; it wins even when the header carries an auth session.
-        assert_eq!(routing_session("POST", "/chat", "auth-session", body), "4ef4e372-8d84");
-        // The sentinel's wake has an empty header, so its thread is the only conversation it can mean.
-        assert_eq!(routing_session("POST", "/chat", "", body), "4ef4e372-8d84");
-        // The header is the identity, and the fallback when the body names no conversation.
-        assert_eq!(routing_session("POST", "/chat", "auth-session", br#"{"text":"hi"}"#), "auth-session");
-        assert_eq!(routing_session("POST", "/chat", "auth-session", b"plain text"), "auth-session");
-        // Only /chat is a run; another route has no thread to read.
-        assert_eq!(routing_session("POST", "/update", "auth-session", body), "auth-session");
-        assert_eq!(routing_session("GET", "/session", "auth-session", body), "auth-session");
-        // A run with neither header nor thread is unrouted, exactly as it was before.
-        assert_eq!(routing_session("POST", "/chat", "", b""), "");
-        assert_eq!(routing_session("POST", "/chat", "", br#"{"text":"hi","thread":""}"#), "");
+    fn a_peer_run_is_keyed_by_its_thread_or_its_peer_id() {
+        let with_thread = request(br#"{"text":"hi","thread":"peer-thread"}"#, vec![("x-wa-node".into(), "node-1".into())]);
+        assert_eq!(peer_conversation(&with_thread), "peer-thread");
+        let without_thread = request(br#"{"text":"hi"}"#, vec![("x-wa-node".into(), "node-1".into())]);
+        assert_eq!(peer_conversation(&without_thread), "peer:node-1");
+        let anonymous = request(b"plain text", vec![]);
+        assert_eq!(peer_conversation(&anonymous), "");
     }
 }

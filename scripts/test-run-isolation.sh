@@ -261,4 +261,44 @@ done
 echo "  ok: the runs inside the bound all completed"
 
 echo
+echo "auth: the credential is not the conversation, and invalid credentials are refused"
+# Mint a guest credential (local account switch; no password by design).
+guest_token="$(curl -s -m 3 -X POST --data 'guest' "http://127.0.0.1:$PORT/login" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).session||"")}catch(e){console.log("")}})')"
+[ -n "$guest_token" ] || fail "could not mint a guest credential"
+# A run with a valid credential and a named thread is owned by the THREAD, not by the token.
+curl -sN -m 40 -X POST -H 'content-type: application/json' -H 'accept: text/event-stream' \
+  -H "x-wa-session: $guest_token" \
+  -d '{"text":"answer with RUN-MARKER-AUTHTHREAD","thread":"guest-thread"}' \
+  "http://127.0.0.1:$PORT/chat" > "$WORK/auth.sse" 2>&1 &
+AUTHRUN=$!
+for _ in $(seq 1 40); do
+  [ -n "$(runs_for guest-thread)" ] && break
+  sleep 0.1
+done
+[ -n "$(runs_for guest-thread)" ] || fail "the credentialed run was not owned by its thread"
+wait "$AUTHRUN"
+grep -q 'RUN-MARKER-AUTHTHREAD' "$WORK/auth.sse" || fail "the credentialed run did not answer"
+echo "  ok: a valid credential's run is keyed by its thread, not by the credential"
+# A nonempty invalid credential is refused at the boundary, never served as the default user.
+code="$(curl -s -o "$WORK/badtoken.json" -w '%{http_code}' -m 5 -X POST \
+  -H 'content-type: application/json' -H 'accept: text/event-stream' \
+  -H 'x-wa-session: not-a-real-token' \
+  -d '{"text":"answer with RUN-MARKER-NOPE","thread":"nope-thread"}' "http://127.0.0.1:$PORT/chat")"
+body="$(cat "$WORK/badtoken.json" 2>/dev/null)"
+case "$code:$body" in
+  401:*invalid_session*) echo "  ok: an invalid credential is refused with 401, not served as master" ;;
+  *) fail "expected 401 invalid_session, got $code $body" ;;
+esac
+# A guest must not address a thread that belongs to another user.
+code="$(curl -s -o "$WORK/foreign.json" -w '%{http_code}' -m 5 -X POST \
+  -H 'content-type: application/json' -H 'accept: text/event-stream' \
+  -H "x-wa-session: $guest_token" \
+  -d '{"text":"answer with RUN-MARKER-FOREIGN","thread":"order-session"}' "http://127.0.0.1:$PORT/chat")"
+body="$(cat "$WORK/foreign.json" 2>/dev/null)"
+case "$code:$body" in
+  403:*forbidden_thread*) echo "  ok: a guest cannot address another user's thread" ;;
+  *) fail "expected 403 forbidden_thread, got $code $body" ;;
+esac
+
+echo
 echo "run isolation ok"
