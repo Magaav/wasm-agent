@@ -1097,16 +1097,18 @@ bash scripts/check-naming.sh
 node scripts/test-naming-check.cjs
 node scripts/test-execution-terminology.cjs
 node scripts/test-auth-sessions.cjs "$BIN"
+node scripts/test-fixture-verdict.cjs
 
 # The image-attachment tests, plus the helper tests that came with them. They were
 # written, they passed when run by hand, and nothing ran them - which is how a test
 # quietly stops being true. Each file is self-contained and prints its own verdict,
 # so the gate is that verdict rather than a fixed string.
 for t in tests/*.lua; do
-  out=$(WA_SCRIPT="$t" "$BIN" --db "$DB.attach" 2>&1 || true)
-  # Anchored: a harness that appends "but ..." to a pass must not read as a pass.
-  if ! printf '%s' "$out" | grep -qE "^ALL PASS[[:space:]]*$|^true$|ok$"; then
-    echo "FAIL $t"; printf '%s\n' "$out" | tail -6; exit 1
+  fixture_status=0
+  out=$(WA_SCRIPT="$t" "$BIN" --db "$DB.attach" 2>&1) || fixture_status=$?
+  # Both pieces of evidence matter: a verdict printed before a crash is not success.
+  if ! printf '%s' "$out" | node scripts/lib/test-verdict.cjs lua "$fixture_status"; then
+    echo "FAIL $t (exit $fixture_status)"; printf '%s\n' "$out" | tail -6; exit 1
   fi
   rm -f "$DB.attach"*
 done
@@ -1127,9 +1129,10 @@ if [ "${WASM_AGENT_SKIP_UI_TESTS:-}" = "1" ]; then
 elif command -v node >/dev/null 2>&1; then
   for t in tests/*.js; do
     [ -e "$t" ] || continue
-    out=$(node "$t" 2>&1 || true)
-    if ! printf '%s' "$out" | grep -q "^ALL PASS[[:space:]]*$"; then
-      echo "FAIL $t"; printf '%s\n' "$out" | tail -8; exit 1
+    fixture_status=0
+    out=$(node "$t" 2>&1) || fixture_status=$?
+    if ! printf '%s' "$out" | node scripts/lib/test-verdict.cjs js "$fixture_status"; then
+      echo "FAIL $t (exit $fixture_status)"; printf '%s\n' "$out" | tail -8; exit 1
     fi
   done
   echo "ui tests ok"
