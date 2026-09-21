@@ -370,6 +370,14 @@ function wa_nodes(session)
 end
 
 -- Accept a signed capability call from a peer (see nodes.lua for the caller).
+-- Signature-only check for one action. Split out so the chat receiver can probe the legacy action
+-- without touching the rendezvous, the replay record, or the role checks.
+local function signature_matches(public_key, action, from, ts, body, signature)
+  local parts = { action, from, tostring(ts) }
+  if type(body) == "string" then parts[#parts + 1] = host.sha256(body) end
+  return host.verify(public_key or "", table.concat(parts, "|"), signature or "")
+end
+
 -- A peer must be a rendezvous-known master with a valid, fresh signature.
 local function verify_peer(from, public_key, ts, signature, action, body)
   if not from or from == "" then return nil, "bad_request" end
@@ -377,10 +385,7 @@ local function verify_peer(from, public_key, ts, signature, action, body)
   -- The signed message includes the hash of the body, so a valid signature covers *what* was
   -- asked for and not only that something was. The signature itself arrives in the headers; the
   -- body is hashed exactly as received.
-  local parts = { action, from, tostring(stamp) }
-  if type(body) == "string" then parts[#parts + 1] = host.sha256(body) end
-  local message = table.concat(parts, "|")
-  if not host.verify(public_key or "", message, signature or "") then return nil, "bad_signature" end
+  if not signature_matches(public_key, action, from, stamp, body, signature) then return nil, "bad_signature" end
   if math.abs(host.now() - stamp) > 120 then return nil, "stale_request" end
   -- Fresh from the rendezvous, not from the local cache: a peer that has been removed there
   -- must stop being welcome here at once, and if the rendezvous cannot be reached the call is
@@ -394,6 +399,29 @@ local function verify_peer(from, public_key, ts, signature, action, body)
   -- real one. Two minutes is the freshness window; the record is kept a little longer than
   -- that so a request cannot be replayed at the edge of its own validity.
   local id = table.concat({ from, action, tostring(stamp), tostring(signature) }, "|")
+  if nodeslib.seen_before(id) then return nil, "replayed_request" end
+  return caller
+end
+
+-- `/node/chat` is signed under the `chat-v2` domain. The version is in the signed message, so a new
+-- request cannot execute on an old receiver (which only knows `chat`): the old verifier reconstructs
+-- `chat|...`, the signature is `chat-v2|...`, and it refuses `bad_signature`. The reverse is refused
+-- here with `legacy_peer_protocol`. Both directions fail closed; nothing falls back to running the
+-- body as text.
+local function verify_peer_chat(from, public_key, ts, signature, body)
+  if not from or from == "" then return nil, "bad_request" end
+  local stamp = math.floor(tonumber(ts) or 0)
+  if not signature_matches(public_key, "chat-v2", from, stamp, body, signature) then
+    if signature_matches(public_key, "chat", from, stamp, body, signature) then
+      return nil, "legacy_peer_protocol"
+    end
+    return nil, "bad_signature"
+  end
+  if math.abs(host.now() - stamp) > 120 then return nil, "stale_request" end
+  local caller = nodeslib.verify_caller(from, public_key, { fresh = true })
+  if not caller then return nil, "unknown_caller" end
+  if users.normalize(caller.role) ~= "master" then return nil, "forbidden_role" end
+  local id = table.concat({ from, "chat-v2", tostring(stamp), tostring(signature) }, "|")
   if nodeslib.seen_before(id) then return nil, "replayed_request" end
   return caller
 end
@@ -422,7 +450,7 @@ end
 -- The target check runs here, before admission, so a redirected chat never creates a conversation,
 -- never reaches a worker, and never reaches the model.
 function wa_verify_peer(from, public_key, ts, signature, body)
-  local caller, problem = verify_peer(from, public_key, ts, signature, "chat", body or "")
+  local caller, problem = verify_peer_chat(from, public_key, ts, signature, body or "")
   if not caller then return json.encode({ error = problem or "bad_signature" }) end
   local envelope, envelope_problem = parse_chat_envelope(body)
   if not envelope then return json.encode({ error = envelope_problem }) end
@@ -506,7 +534,7 @@ function wa_node_chat(from, public_key, ts, signature, body)
     emit({ type = "error", error = "managed_guest_uses_operator_model" })
     return ""
   end
-  local caller, problem = verify_peer(from, public_key, ts, signature, "chat", body or "")
+  local caller, problem = verify_peer_chat(from, public_key, ts, signature, body or "")
   if problem then
     emit({ type = "error", error = problem })
     return ""

@@ -500,9 +500,10 @@ function M.remote_chat(selector, text)
   -- The intended target is inside the signed body, exactly as `/node/call` puts `to_node_id` there.
   -- A relay (or anyone on the path) can change the envelope's `to`, but the receiver checks this
   -- signed field against itself, so a valid chat for one node cannot be redirected to another node
-  -- or endpoint. The body is the envelope; the prompt is its `text` field.
+  -- or endpoint. The signature domain is `chat-v2`, which is also what stops a new request from
+  -- executing on an old receiver: the old verifier only knows `chat`, so it refuses `bad_signature`.
   local body = json.encode({ to_node_id = node.node_id, text = text or "" })
-  local headers, problem = M.signed_headers("chat", body)
+  local headers, problem = M.signed_headers("chat-v2", body)
   if not headers then return { error = problem } end
   headers["Content-Type"] = "application/json; charset=utf-8"
   headers["Accept"] = "text/event-stream"
