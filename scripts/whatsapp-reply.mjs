@@ -54,14 +54,20 @@
 const HOSTS = ["127.0.0.1", "[::1]"];
 const WHATSAPP_URL = "web.whatsapp.com";
 
+import { acquire as acquireSendLock, defaultLockPath } from "./whatsapp-sendlock.mjs";
+import { composerMatches, classifySendAttempt } from "./whatsapp-reply-core.mjs";
+
 function parseArgs(argv) {
-  const args = { chat: "", body: "", send: false, toSelf: false, label: "", timeoutMs: 20000 };
+  const args = { chat: "", body: "", bodyFile: "", send: false, toSelf: false, label: "", timeoutMs: 20000, lockWaitMs: 30000 };
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     const value = argv[index + 1];
     if (flag === "--chat") { args.chat = String(value || ""); index += 1; }
     else if (flag === "--body") { args.body = String(value || ""); index += 1; }
+    // A body can arrive from a file so an untrusted message never travels through a shell command line.
+    else if (flag === "--body-file") { args.bodyFile = String(value || ""); index += 1; }
     else if (flag === "--label") { args.label = String(value || ""); index += 1; }
+    else if (flag === "--lock-wait-ms") { args.lockWaitMs = Number(value) || 0; index += 1; }
     else if (flag === "--send") { args.send = true; }
     else if (flag === "--to-self") { args.toSelf = true; }
   }
@@ -213,25 +219,30 @@ function composerTextExpression() {
       || document.querySelector('div[contenteditable="true"][role="textbox"]');
     if (!composer) return JSON.stringify({ error: 'composer_missing' });
     const text = String(composer.innerText || '');
-    return JSON.stringify({ text: text.slice(0, 160), empty: text.trim() === '', label: String(composer.getAttribute('aria-label') || '') });
+    return JSON.stringify({ text: text, preview: text.slice(0, 160), length: text.length, empty: text.trim() === '', label: String(composer.getAttribute('aria-label') || '') });
   })()`;
 }
 
-// The message must exist in the store: that chat, mine, that body. A send nobody can see did not
-// happen, and saying so is the only honest report.
-function verifyExpression(chatId, body) {
+// The message must exist in the store: that chat, mine, that body, and *new since the snapshot*. The
+// `excludeId` is the newest matching message id taken before the send, so an identical body sent earlier
+// cannot be mistaken for this send. A send nobody can see did not happen, and saying so is the only
+// honest report.
+function verifyExpression(chatId, body, excludeId) {
   return `(() => {
     const chats = window.require('WAWebChatCollection').ChatCollection.getModelsArray() || [];
     const msgs = window.require('WAWebMsgCollection').MsgCollection.getModelsArray() || [];
     const CHAT = ${JSON.stringify(chatId)};
     const BODY = ${JSON.stringify(body)};
+    const EXCLUDE = ${JSON.stringify(excludeId || "")};
     let found = null;
     for (let index = msgs.length - 1; index >= 0; index -= 1) {
       const message = msgs[index];
       if (String((message.id && message.id.remote) || '') !== CHAT) continue;
       if (!(message.id && message.id.fromMe)) continue;
       if (String(message.body || '') !== BODY) continue;
-      found = { id: String((message.id && message.id.id) || ''), t: message.t || 0, ack: message.ack };
+      const id = String((message.id && message.id.id) || '');
+      if (EXCLUDE && id === EXCLUDE) continue;
+      found = { id: id, t: message.t || 0, ack: message.ack };
       break;
     }
     const chat = chats.find((c) => String(c.id) === CHAT) || null;
@@ -246,6 +257,10 @@ function verifyExpression(chatId, body) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (!args.body && args.bodyFile) {
+    const { readFileSync } = await import("node:fs");
+    try { args.body = readFileSync(args.bodyFile, "utf8"); } catch (error) { args.body = ""; }
+  }
   if (!args.body) { console.log(JSON.stringify({ error: "body_required" })); process.exitCode = 1; return; }
   const endpoint = await discover();
   if (!endpoint) { console.log(JSON.stringify({ ok: false, error: "no_cdp_endpoint" })); process.exitCode = 3; return; }
@@ -263,7 +278,9 @@ async function main() {
     if (result.exceptionDetails) throw new Error(result.exceptionDetails.text || "page_threw");
     return JSON.parse(result.result.value);
   };
+  let sendLock = null;
   const done = (payload, code) => {
+    if (sendLock) { sendLock.release(); sendLock = null; }
     console.log(JSON.stringify({ endpoint, ...payload }));
     // exitCode rather than process.exit: exiting while the socket is closing trips a libuv assertion
     // on Windows, and a scary line in the output of a tool that can send messages is exactly the noise
@@ -300,7 +317,14 @@ async function main() {
   const body = args.label ? `${args.label}\n\n${args.body}` : args.body;
   const before = { unread: target.unread, messages: target.messages };
 
-  // Sending refuses *before* any UI work, because the route is not implemented (see the header): a
+  // The composer is one shared resource, and two jobs (or two sentinel processes) can each want it. The
+  // lock serialises them; a live holder is reported as `send_resource_busy` rather than typed over. The
+  // target lookup above is read-only and does not need the lock.
+  sendLock = await acquireSendLock(defaultLockPath(), { waitMs: args.lockWaitMs });
+  if (!sendLock.ok) {
+    return done({ ok: false, error: "send_resource_busy", holder: sendLock.holder, chat: target.chat }, 7);
+  }
+
   // 2. Open the chat through the app's own action (no row, no scroll, no search), then require the
   //    composer to confirm *which* chat opened - the difference between a reply and a message typed
   //    into whatever was on screen.
@@ -320,27 +344,35 @@ async function main() {
     }, 5);
   }
 
+  // A human's draft is not the job's to destroy. Before anything is typed, the composer must be empty;
+  // if it holds a restored draft or a half-written message, the tool refuses and leaves it exactly as it
+  // was. This is what makes "clean only proven own residue" true: from here on, anything in the composer
+  // was typed by this process.
+  if (!composer.empty) {
+    return done({
+      ok: false, error: "composer_preoccupied", chat: target.chat, composer: { preview: composer.preview, length: composer.length },
+      observed: "the composer already holds text (a restored draft or an unsent human message)",
+      next: "nothing was typed and nothing was cleared; a human's draft is not the job's to destroy",
+      before,
+    }, 5);
+  }
+
   // 3. Type into the composer, with real input events.
   const composerFocus = await page(focusExpression("composer"));
   if (composerFocus.error) return done({ ok: false, ...composerFocus, chat: target.chat }, 5);
   await typeText(body);
   await sleep(400);
   const typed = await page(composerTextExpression());
-  const normalise = (value) => String(value || "").replace(/\s+/g, " ").trim();
   // WhatsApp restores a chat's unsent draft, so "the composer contains my text" is not enough: a
   // leftover draft would be sent *with* the reply. Either it is my body and nothing else, or nothing is
-  // sent at all.
-  //
-  // With `--label` the composer holds `label\n\nbody`, not `body` - so comparing against `body` alone made
-  // every labelled note fail as "composer holds something other than the exact reply". That is what the
-  // reply job meant when it reported "the summary note did not go either": the route was fine, the check
-  // was measuring the wrong string, and the tool refused to send for that reason.
+  // sent at all. The comparison sees the *whole* composer - a 160-character preview once made a correct
+  // labelled note look like "something other than the exact reply" and the tool refused to send.
   const expected = args.label ? `${args.label}\n\n${body}` : body;
-  if (normalise(typed.text) !== normalise(expected)) {
+  if (!composerMatches(typed.text, expected)) {
     return done({
-      ok: false, error: "composer_not_exactly_the_body", typed, chat: target.chat, body: expected, before,
-      observed: "the composer holds something other than the exact reply (a restored draft is the usual reason)",
-      next: "the job must clear the draft before sending; nothing was sent",
+      ok: false, error: "composer_not_exactly_the_body", typed: { preview: typed.preview, length: typed.length }, chat: target.chat, body: expected, before,
+      observed: "the composer holds something other than the exact reply",
+      next: "nothing was sent; the composer was left untouched",
     }, 5);
   }
 
@@ -352,26 +384,63 @@ async function main() {
     const cleared = await page(composerTextExpression());
     return done({
       ok: !!cleared.empty, dry_run: true, cleared: !!cleared.empty, chat: target.chat,
-      composer_label: label, body, before, typed,
+      composer_label: label, body, before, typed: { preview: typed.preview, length: typed.length },
     }, cleared.empty ? 0 : 5);
   }
 
   // 4. Send, and let the *effect* decide. This browser's input pipeline drops key dispatches (measured:
-  //    of 112 backspaces, 56 landed; Enter timed out twice), so the send is retried a bounded number of
-  //    times and each attempt is settled against the store. The dispatch's own reply is recorded, never
-  //    trusted.
+  //    of 112 backspaces, 56 landed; Enter timed out twice), so a send is retried - but only when the
+  //    effect proves it did not happen. The snapshot id is taken first so an identical body sent earlier
+  //    cannot be mistaken for this send, and a dispatch whose outcome is ambiguous is never retried.
+  const snapshot = await page(verifyExpression(target.chat.id, body, ""));
+  const priorId = snapshot.message ? snapshot.message.id : "";
   let dispatch = "not_attempted";
   let verified = { verified: false };
+  let ambiguous = false;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     dispatch = await pressKey("Enter", "Enter", 13, 0, "\r");
     await sleep(3500);
-    verified = await page(verifyExpression(target.chat.id, body));
+    verified = await page(verifyExpression(target.chat.id, body, priorId));
     if (verified.verified) break;
+    // Reconcile before retrying: only a composer that still holds exactly our body proves the send did
+    // not happen. An empty composer with no message in the store is ambiguous - it may be in flight - so
+    // the loop stops rather than dispatching a second Enter.
+    const composerAfter = await page(composerTextExpression());
+    const verdict = classifySendAttempt({ verified: false, composerText: composerAfter.text, expectedText: expected });
+    if (verdict === "retry") continue;
+    if (verdict === "ambiguous") ambiguous = true;
+    break;
+  }
+  if (!verified.verified && ambiguous) {
+    return done({
+      ok: false, error: "ambiguous_send", dispatch, chat: target.chat, composer_label: label, body: expected,
+      ...verified, unread_before: before.unread,
+      observed: "Enter was dispatched and the store has no matching message, but the composer is empty; the send may have happened",
+      next: "no retry was dispatched; reconcile the store before trying again",
+    }, 5);
+  }
+  if (!verified.verified) {
+    // A safe abort: the precheck proved the composer was empty before typing, so content equal to our
+    // body is proven our own residue and can be cleared. Anything else is left untouched.
+    const composerAfter = await page(composerTextExpression());
+    let cleared = false;
+    if (composerMatches(composerAfter.text, expected)) {
+      await pressKey("a", "KeyA", 65, 2); // 2 = Ctrl
+      await pressKey("Backspace", "Backspace", 8);
+      await sleep(600);
+      cleared = !!(await page(composerTextExpression())).empty;
+    }
+    return done({
+      ok: false, error: "not_verified", dispatch, chat: target.chat, composer_label: label, body: expected,
+      ...verified, unread_before: before.unread, cleared_own_residue: cleared,
+      observed: "the store does not hold the sent message",
+      next: "no further retry; reconcile before trying again",
+    }, 5);
   }
   return done({
-    ok: !!verified.verified, sent: true, dispatch, chat: target.chat, composer_label: label, body,
+    ok: true, sent: true, dispatch, chat: target.chat, composer_label: label, body: expected,
     ...verified, unread_before: before.unread,
-  }, verified.verified ? 0 : 5);
+  }, 0);
 }
 
 main().catch((error) => {

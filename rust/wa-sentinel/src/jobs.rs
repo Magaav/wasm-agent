@@ -2,7 +2,34 @@
 //! the engine UI; action workers never run on the watcher/control loop.
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
-static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static DETERMINISTIC_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static INFERENCE_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+fn env_usize(name: &str, fallback: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(fallback)
+        .max(1)
+}
+
+/// True for the actions that spend a model turn. They use their own lane: a deterministic `run` must
+/// never wait behind a person's interactive turn, and a wake must never share the lane that runs scripts.
+fn inference_action(kind: &str) -> bool {
+    matches!(kind, "wake" | "subagent")
+}
+
+/// The inference lane is available when the subagent service reserves child capacity, or - legacy - when
+/// the node is idle. This is the seam the subagent service fills: with reserved capacity, a job wake no
+/// longer takes the interactive lane at all. Until that capacity is advertised, an inference delivery
+/// waits in the durable queue instead of being claimed, which is what a queue is for.
+fn inference_lane_available() -> bool {
+    let reserved = std::env::var("WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    reserved > 0 || crate::node_is_idle()
+}
 pub fn store() -> wa_jobs::Store {
     wa_jobs::Store::new(sentinel_dir().join("jobs.db"))
 }
@@ -31,6 +58,38 @@ pub fn cli(args: &[String]) -> Result<()> {
             args.get(1).context("job enable|disable <id>")?,
             action == "enable",
         ),
+        "export" => s.export_job(args.get(1).context("job export <id>")?),
+        // Importing a portable artifact always installs it disabled. `--approve` authorises the *local
+        // bindings*; it does not enable the job, because enabling is the deliberate act (docs/JOBS.md).
+        "import" => {
+            let file = args
+                .get(1)
+                .context("job import <artifact.json> [--bindings <file>] [--approve]")?;
+            let artifact: Value = serde_json::from_slice(&std::fs::read(file)?)?;
+            let mut bindings = json!({});
+            let mut approved = false;
+            let mut index = 2;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--bindings" => {
+                        let path = args.get(index + 1).context("--bindings <file>")?;
+                        bindings = serde_json::from_slice(&std::fs::read(path)?)?;
+                        index += 2;
+                    }
+                    "--approve" => {
+                        approved = true;
+                        index += 1;
+                    }
+                    other => bail!("unknown import option {other}"),
+                }
+            }
+            s.put_artifact(&artifact, &bindings, approved)
+        }
+        "requirements" => {
+            let file = args.get(1).context("job requirements <artifact.json>")?;
+            let artifact: Value = serde_json::from_slice(&std::fs::read(file)?)?;
+            wa_jobs::artifact::requirements(&artifact)
+        }
         "emit" => {
             let topic = args
                 .get(1)
@@ -160,92 +219,110 @@ impl Runner {
                 _ => {}
             }
         }
-        // A job wake is a long model turn, and a person's turn must never queue behind one. Two guards,
-        // both learned from the same complaint: with waking unbounded, four job turns ran at once and the
-        // operator's own messages queued for minutes behind them. So one wake at a time by default, and
-        // none at all while the node is busy with a turn somebody asked for. Deliveries wait in the queue,
-        // which is what a queue is for - and the person always wins.
-        let concurrency = std::env::var("WA_SENTINEL_JOB_CONCURRENCY")
+        // Two explicit lanes. A deterministic `run` is claimed even while a person's turn is running -
+        // the inbox ingest must not stop because somebody is chatting. An inference action (`wake` or
+        // `subagent`) is only claimed when its own lane has capacity, so it can never push a person's turn
+        // behind it. The two used to share one counter behind a global `node_is_idle()` gate, which is how
+        // a scheduled ingest ended up blocked by a long model turn.
+        //
+        // Job wakes get their own ceiling, defaulting to the shared one. Legacy `wake` spends this
+        // allowance; a `subagent` uses the subagent service's reserved child capacity instead.
+        let budget = std::env::var("WA_SENTINEL_JOB_WAKE_BUDGET")
             .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(1)
-            .max(1);
-        while ACTIVE.load(Ordering::Acquire) < concurrency {
-            if !crate::node_is_idle() {
-                break;
-            }
-            // Job wakes get their own ceiling, defaulting to the shared one. They are the ones a busy inbox
-            // produces, and they used to spend the same allowance an agent's own continuation needs - so a
-            // chatty hour could starve the run that was waiting to be told a deploy had finished.
-            let budget = std::env::var("WA_SENTINEL_JOB_WAKE_BUDGET")
-                .ok()
-                .or_else(|| std::env::var("WA_SENTINEL_WAKE_BUDGET").ok())
-                .and_then(|v| v.parse::<i64>().ok())
-                .unwrap_or(6)
-                .max(0);
+            .or_else(|| std::env::var("WA_SENTINEL_WAKE_BUDGET").ok())
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(6)
+            .max(0);
+        let deterministic_concurrency = env_usize("WA_SENTINEL_JOB_DETERMINISTIC_CONCURRENCY", 4);
+        while DETERMINISTIC_ACTIVE.load(Ordering::Acquire) < deterministic_concurrency {
             let Some(delivery) = s
-                .claim(now_epoch() as i64, budget)
+                .claim_next(now_epoch() as i64, budget, false)
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?
             else {
                 break;
             };
-            ACTIVE.fetch_add(1, Ordering::AcqRel);
-            let source = s.clone();
-            std::thread::spawn(move || {
-                let result = std::panic::catch_unwind(|| execute(&source, &delivery));
-                // A wake deferred for budget is not a failure: nothing happened, so the delivery goes back to
-                // the queue and runs when the allowance rolls over. Recording it as `failed` is what turned a
-                // busy inbox into a wall of failures while every message in it was fine.
-                if let Ok(Err(error)) = &result {
-                    if error.to_string().contains("wake-budget") {
-                        let detail = error.to_string();
-                        if let Err(record) =
-                            source.defer(delivery["id"].as_i64().unwrap(), &detail)
-                        {
-                            audit(
-                                "job-record-failed",
-                                delivery["job_id"].as_str().unwrap_or(""),
-                                &record.to_string(),
-                            );
-                        } else {
-                            audit(
-                                "wake-deferred",
-                                delivery["job_id"].as_str().unwrap_or(""),
-                                &detail,
-                            );
-                        }
-                        ACTIVE.fetch_sub(1, Ordering::AcqRel);
-                        return;
-                    }
-                }
-                let (state, detail) = match result {
-                    Ok(Ok(detail)) => ("completed", detail),
-                    Ok(Err(e)) if e.to_string().contains("outcome unknown") => {
-                        ("unknown", e.to_string())
-                    }
-                    Ok(Err(e)) => ("failed", e.to_string()),
-                    Err(_) => (
-                        "unknown",
-                        "action worker panicked; reconcile effects".into(),
-                    ),
+            spawn_delivery(s.clone(), delivery);
+        }
+        let inference_concurrency = env_usize(
+            "WA_SENTINEL_JOB_WAKE_CONCURRENCY",
+            env_usize("WA_SENTINEL_JOB_CONCURRENCY", 1),
+        );
+        if inference_lane_available() {
+            while INFERENCE_ACTIVE.load(Ordering::Acquire) < inference_concurrency {
+                let Some(delivery) = s
+                    .claim_inference(now_epoch() as i64, budget)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?
+                else {
+                    break;
                 };
-                if let Err(e) = source.finish(
-                    delivery["id"].as_i64().unwrap(),
-                    state,
-                    &detail,
-                    now_epoch() as i64,
-                ) {
-                    audit(
-                        "job-record-failed",
-                        delivery["job_id"].as_str().unwrap_or(""),
-                        &e.to_string(),
-                    );
-                }
-                ACTIVE.fetch_sub(1, Ordering::AcqRel);
-            });
+                spawn_delivery(s.clone(), delivery);
+            }
         }
         Ok(())
     }
+}
+
+/// Run one claimed delivery on its lane and settle it. Extracted so both lanes share the settle rules:
+/// a budget refusal is deferred (not failed), a panic and a timeout are `unknown` (never retried), and a
+/// recorded outcome failure is visible in the audit log.
+fn spawn_delivery(source: wa_jobs::Store, delivery: Value) {
+    let inference = inference_action(delivery["action"]["kind"].as_str().unwrap_or(""));
+    let counter: &'static AtomicUsize = if inference {
+        &INFERENCE_ACTIVE
+    } else {
+        &DETERMINISTIC_ACTIVE
+    };
+    counter.fetch_add(1, Ordering::AcqRel);
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(|| execute(&source, &delivery));
+        // A wake deferred for budget is not a failure: nothing happened, so the delivery goes back to
+        // the queue and runs when the allowance rolls over. Recording it as `failed` is what turned a
+        // busy inbox into a wall of failures while every message in it was fine.
+        if let Ok(Err(error)) = &result {
+            if error.to_string().contains("wake-budget") {
+                let detail = error.to_string();
+                if let Err(record) = source.defer(delivery["id"].as_i64().unwrap(), &detail) {
+                    audit(
+                        "job-record-failed",
+                        delivery["job_id"].as_str().unwrap_or(""),
+                        &record.to_string(),
+                    );
+                } else {
+                    audit(
+                        "wake-deferred",
+                        delivery["job_id"].as_str().unwrap_or(""),
+                        &detail,
+                    );
+                }
+                counter.fetch_sub(1, Ordering::AcqRel);
+                return;
+            }
+        }
+        let (state, detail) = match result {
+            Ok(Ok(detail)) => ("completed", detail),
+            Ok(Err(e)) if e.to_string().contains("outcome unknown") => {
+                ("unknown", e.to_string())
+            }
+            Ok(Err(e)) => ("failed", e.to_string()),
+            Err(_) => (
+                "unknown",
+                "action worker panicked; reconcile effects".into(),
+            ),
+        };
+        if let Err(e) = source.finish(
+            delivery["id"].as_i64().unwrap(),
+            state,
+            &detail,
+            now_epoch() as i64,
+        ) {
+            audit(
+                "job-record-failed",
+                delivery["job_id"].as_str().unwrap_or(""),
+                &e.to_string(),
+            );
+        }
+        counter.fetch_sub(1, Ordering::AcqRel);
+    });
 }
 fn execute(store: &wa_jobs::Store, delivery: &Value) -> Result<String> {
     let id = delivery["job_id"].as_str().unwrap();
@@ -267,6 +344,51 @@ fn execute(store: &wa_jobs::Store, delivery: &Value) -> Result<String> {
                 &prompt,
                 &format!("job {id} delivery {}", delivery["id"]),
             )
+        }
+        // A durable child run with a profile-scoped tool envelope. This route never falls back to
+        // `/chat`: the whole point of the profile is that the child cannot reach the operator's tools, and
+        // a fallback would silently hand it exactly those. The spawn is idempotent on the delivery's stable
+        // source id, so a sentinel restart that re-runs the action reconciles the existing child instead of
+        // starting a second one. A bounded wait that expires while the child is still running is `unknown`,
+        // never a second spawn.
+        "subagent" => {
+            let profile = action["profile"].as_str().unwrap();
+            let event_id = delivery["event_id"].as_str().unwrap_or("");
+            let idempotency_key = format!("{id}:{rev}:{event_id}");
+            let started = node_subagents(&json!({
+                "action":"start",
+                "profile":profile,
+                "prompt":action["prompt"],
+                "context":delivery["event"],
+                "delivery_id":delivery["id"],
+                "idempotency_key":idempotency_key,
+            }))?;
+            let subagent_id = started["subagent_id"]
+                .as_str()
+                .or_else(|| started["id"].as_str())
+                .ok_or_else(|| anyhow::anyhow!("subagent service did not return an id: {started}"))?
+                .to_string();
+            if settled_subagent(&started) {
+                return subagent_outcome(&subagent_id, &started);
+            }
+            // Poll in bounded waits rather than one long call, so a sentinel restart cannot leave an
+            // ambiguous submission in flight with no record of where it got to.
+            let deadline = std::time::Instant::now()
+                + Duration::from_secs(action["timeout_seconds"].as_u64().unwrap_or(900));
+            loop {
+                let awaited = node_subagents(&json!({
+                    "action":"await",
+                    "subagent_id":subagent_id,
+                    "timeout_ms":60000,
+                }))?;
+                if settled_subagent(&awaited) {
+                    return subagent_outcome(&subagent_id, &awaited);
+                }
+                if std::time::Instant::now() >= deadline {
+                    bail!("subagent outcome unknown: {subagent_id} still {} after its deadline; not retried",
+                        awaited["state"].as_str().unwrap_or("running"));
+                }
+            }
         }
         "run" => {
             let path = approved_script(action["script"].as_str().unwrap())?;
@@ -308,4 +430,58 @@ fn execute(store: &wa_jobs::Store, delivery: &Value) -> Result<String> {
         }
         _ => bail!("unsupported action"),
     }
+}
+
+/// True when the subagent service reports a terminal state, using either the explicit `settled` flag or
+/// a terminal state name. The two are both accepted so a service that only reports one of them is still
+/// correct here.
+fn settled_subagent(value: &Value) -> bool {
+    value["settled"].as_bool().unwrap_or(false)
+        || matches!(
+            value["state"].as_str().unwrap_or(""),
+            "completed" | "failed" | "cancelled"
+        )
+}
+
+fn subagent_outcome(id: &str, value: &Value) -> Result<String> {
+    let state = value["state"].as_str().unwrap_or("completed");
+    if matches!(state, "failed" | "cancelled") {
+        bail!(
+            "subagent {id} {state}: {}",
+            value["error"].as_str().unwrap_or("no detail")
+        );
+    }
+    Ok(format!("subagent {id} {state}"))
+}
+
+/// POST one request to the node's local subagent service. The node's HTTP surface is the shared contract
+/// with the runtime worker (`POST /subagents`); the sentinel never invents a second execution path and
+/// never falls back to `/chat` for a profile-scoped child.
+fn node_subagents(request: &Value) -> Result<Value> {
+    let url = format!("http://127.0.0.1:{}/subagents", crate::node_port());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_connect(Some(Duration::from_secs(3)))
+        .timeout_recv_response(Some(Duration::from_secs(30)))
+        .timeout_recv_body(Some(Duration::from_secs(120)))
+        .timeout_global(Some(Duration::from_secs(300)))
+        .build()
+        .into();
+    let response = agent
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .header(
+            "X-WA-Session",
+            &std::env::var("WA_SENTINEL_AUTH_SESSION").unwrap_or_default(),
+        )
+        .send(request.to_string().as_bytes())?;
+    let status = response.status().as_u16();
+    let text = response.into_body().read_to_string().unwrap_or_default();
+    if status != 200 {
+        bail!(
+            "subagent service HTTP {status}: {}",
+            text.chars().take(200).collect::<String>()
+        );
+    }
+    Ok(serde_json::from_str(&text)?)
 }
