@@ -371,6 +371,47 @@ if [ -f "$DEPLOY_SRC" ]; then
     || fail "node installed, but could not ship deploy.sh beside the binary"
 fi
 
+# Ship the WhatsApp pipeline with the node it belongs to. `upgrade.sh` installs the binary, the UI and the
+# self-update skill, and has never carried these: the scripts that read the inbox, the job files that
+# schedule and trigger them, and the entry point that says "emit" were placed in <install>/scripts by hand.
+# That is how the ingest came to emit on a topic (`app.message`) that no job listened for, with the mismatch
+# invisible because nothing ever shipped the two together - the reply job's history was a wall of "waiting
+# for explicit event ingress" and nothing could say why. A pipeline that exists on one machine's install
+# directory is not deployed, so it is deployed here.
+if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
+  PIPELINE=0
+  for source in "$ROOT"/scripts/whatsapp-*; do
+    [ -f "$source" ] || continue
+    cp -f "$source" "$INSTALL_DIR/scripts/" || fail "node installed, but could not ship $(basename "$source")"
+    PIPELINE=$((PIPELINE + 1))
+  done
+  INSTALL_MIXED="$(cygpath -m "$INSTALL_DIR" 2>/dev/null || printf '%s' "$INSTALL_DIR")"
+  for source in "$ROOT"/jobs/whatsapp-*.json; do
+    [ -f "$source" ] || continue
+    JOB_NAME="$(basename "$source" .json)"
+    # The job files name their script as PREPARED_BY_INSTALL/... so one file works from a checkout and from
+    # an install: this substitution is what that placeholder was written for.
+    sed "s|PREPARED_BY_INSTALL|$INSTALL_MIXED|g" "$source" > "$INSTALL_DIR/scripts/$JOB_NAME.job.json" \
+      || fail "node installed, but could not prepare job $JOB_NAME"
+    # `put` is an upsert by id, so re-deploying updates the job's revision instead of duplicating it.
+    # A job that cannot be put is reported, not fatal: the node and its scripts are already installed, and a
+    # store that refuses one job is better answered by a visible line than by a rollback.
+    if "$INSTALL_DIR/$SENTINEL_NAME" job put "$INSTALL_DIR/scripts/$JOB_NAME.job.json" >/dev/null 2>&1; then
+      PIPELINE=$((PIPELINE + 1))
+      # The store is deliberately default-off: an import must not be able to start automation by itself
+      # (docs/JOBS.md). A deploy is the operator's own action, so it applies the state this tree declares
+      # for the job - without which every deploy would silently disable a pipeline that was running.
+      if grep -q '"enabled"[[:space:]]*:[[:space:]]*true' "$source"; then
+        "$INSTALL_DIR/$SENTINEL_NAME" job enable "$JOB_NAME" >/dev/null 2>&1 \
+          || echo "deploy: WARNING could not enable job $JOB_NAME"
+      fi
+    else
+      echo "deploy: WARNING could not put job $JOB_NAME into the store"
+    fi
+  done
+  echo "deploy: shipped $PIPELINE pipeline file(s) into $INSTALL_DIR/scripts"
+fi
+
 RECORD_TMP="$INSTALL_DIR/.installed.txt.deploy.$$"
 REASON_LINE="$(printf '%s' "$REASON" | tr '\r\n' '  ')"
 printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\nsource_provenance=clean-built-by-deploy\nvia=deploy.sh\nat=%s\nreason=%s\n' \

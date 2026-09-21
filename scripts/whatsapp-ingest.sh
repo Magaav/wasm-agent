@@ -36,9 +36,10 @@ if command -v cygpath >/dev/null 2>&1; then
   lua_script="$(cygpath -m "$lua_script")"
 fi
 # `--emit-events` asks for the deterministic emission of the messages that are *new* (see the Lua):
-# one `app.message` event per new incoming message, whose id is the message id, so a re-run cannot
+# one `whatsapp.message` event per new incoming message, whose id is the message id, so a re-run cannot
 # wake anyone twice for the same message. Off by default - a wake is a turn, and turning one on is a
-# decision the operator makes, not a side effect of reading the inbox.
+# decision the operator makes, not a side effect of reading the inbox. The job runs
+# `whatsapp-ingest-emit.sh`, which is where that decision is recorded.
 if [ "${1:-}" = "--emit-events" ]; then
   export WA_WHATSAPP_EMIT=1
   shift

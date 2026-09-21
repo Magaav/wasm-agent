@@ -1,10 +1,11 @@
 {
   "id": "whatsapp-ingest",
-  "name": "Ingest WhatsApp into the ledger (deterministic, no model)",
+  "name": "Ingest WhatsApp into the ledger and emit one event per new message (deterministic, no model)",
+  "enabled": true,
   "trigger": { "kind": "schedule", "every_seconds": 300 },
   "action": {
     "kind": "run",
-    "script": "PREPARED_BY_INSTALL/scripts/whatsapp-ingest.sh",
+    "script": "PREPARED_BY_INSTALL/scripts/whatsapp-ingest-emit.sh",
     "timeout_seconds": 180
   }
 }
