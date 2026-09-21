@@ -34,11 +34,15 @@ LOG="$CONFIG/sentinel/sentinel.log"
 
 checks=0
 failed=0
+failed_names=()
 say() { printf '  %s\n' "$*"; }
 ok() {
   checks=$((checks + 1))
-  if [ "$1" = "1" ]; then say "ok   $2"; else failed=$((failed + 1)); say "FAIL $2${3:+ - $3}"; fi
+  if [ "$1" = "1" ]; then say "ok   $2"; else failed=$((failed + 1)); failed_names+=("$2"); say "FAIL $2${3:+ - $3}"; fi
 }
+# Lines appended to the sentinel log since LOG_MARK. A request is claimed by the watcher within its next
+# 200ms poll, so counting files in the drop-box races and reads zero; the writer's own audit line does not.
+newlog() { tail -n +"$(( ${LOG_MARK:-0} + 1 ))" "$LOG" 2>/dev/null; }
 
 health() { curl -s -m 6 "http://127.0.0.1:$PORT/health" 2>/dev/null || true; }
 pid_on_port() {
@@ -79,8 +83,9 @@ done
 PID_BEFORE="$STABLE"
 ok "$([ -n "$PID_BEFORE" ] && echo 1 || echo 0)" "the node is up and its pid is stable" "pid $PID_BEFORE"
 rm -f "$BOX"/*.json 2>/dev/null
+LOG_MARK="$(wc -l < "$LOG" 2>/dev/null || echo 0)"
 "$SENTINEL" request restart --reason "e2e: does asking stop anything" >/dev/null 2>&1
-WROTE="$(ls "$BOX"/*.json 2>/dev/null | wc -l)"
+WROTE="$(newlog | grep -c 'e2e: does asking stop anything')"
 PID_NOW="$(pid_on_port)"
 ok "$([ "$WROTE" -ge 1 ] && echo 1 || echo 0)" "request writes a file" "$WROTE in the box"
 ok "$([ "$PID_NOW" = "$PID_BEFORE" ] && echo 1 || echo 0)" \
@@ -101,17 +106,19 @@ INJECT="/tmp/sentinel-e2e-prompt.json"
 cat > "$INJECT" <<JSON
 {"text":"Sentinel end-to-end test. Do exactly this and nothing else: (1) run \"$SENTINEL\" request restart --reason \"e2e restart\"; (2) run \"$SENTINEL\" request wake --session $SID --prompt \"the sentinel restarted the node and woke you; reply with the single word: woken\" --reason \"e2e wake\"; (3) then reply in one line that both requests are written and stop. Do NOT stop or start the node yourself."}
 JSON
+LOG_MARK="$(wc -l < "$LOG" 2>/dev/null || echo 0)"
 (curl -s -m 900 -X POST "http://127.0.0.1:$PORT/chat" -H "x-wa-session: $SID" \
   -H 'content-type: application/json' --data-binary @"$INJECT" >/tmp/sentinel-e2e-out.json 2>&1 &)
 
-# wait for both requests to appear (the agent writes them a few seconds apart)
-requests=0
+# Wait for both requests (the agent writes them a few seconds apart). Counted from the writer's audit
+# lines, not from `$BOX`: the watcher claims each file within its next poll, so a box count reads zero and
+# reports a failure for work that happened. This was the check that printed "0 in the box".
+both=0
 for _ in $(seq 1 40); do
-  requests="$(ls "$BOX"/*.json 2>/dev/null | wc -l)"
-  [ "$requests" -ge 2 ] && break
+  if newlog | grep -q 'e2e restart' && newlog | grep -q 'e2e wake'; then both=1; break; fi
   sleep 2
 done
-ok "$([ "$requests" -ge 2 ] && echo 1 || echo 0)" "the turn wrote both requests" "$requests in the box"
+ok "$both" "the turn wrote both requests" "restart $(newlog | grep -c 'e2e restart'), wake $(newlog | grep -c 'e2e wake')"
 # The turn must not have stopped the node itself: the sentinel's own log is what says a restart happened,
 # and it is written when the sentinel performs one - not when a turn writes a file.
 ok "$(grep -q 'stop	pid' "$LOG" 2>/dev/null && echo 1 || echo 0)" \
@@ -170,9 +177,25 @@ TAIL2="$(curl -s -m 20 "http://127.0.0.1:$PORT/session?id=$SID" | node -e 'let r
 ok "$(grep -qi 'triggered' <<<"$TAIL2" && echo 1 || echo 0)" "and it answered what the trigger asked for" "$TAIL2"
 rm -f "$CONFIG/sentinel/triggers.json"
 
+# A machine-readable verdict, so the run that reads it gets the failures and their names as data instead
+# of re-reading the suite's source to work out what "FAIL the agent came back" meant.
+{
+  printf '{"suite":"test-sentinel-e2e","checks":%d,"failed":%d,"ok":%s,"failed_names":[' \
+    "$checks" "$failed" "$([ "$failed" -eq 0 ] && echo true || echo false)"
+  first=1
+  if [ "${#failed_names[@]}" -gt 0 ]; then
+    for n in "${failed_names[@]}"; do
+      [ "$first" = "1" ] || printf ','
+      first=0
+      printf '"%s"' "$(printf '%s' "$n" | sed 's/"/\\"/g')"
+    done
+  fi
+  printf '],"at":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$CONFIG/e2e-verdict.json"
+
 if [ "$failed" -eq 0 ]; then
   echo "sentinel e2e ok ($checks checks)"
 else
-  echo "sentinel e2e FAILED ($failed of $checks)"
+  echo "sentinel e2e FAILED ($failed of $checks) - see $CONFIG/e2e-verdict.json"
   exit 1
 fi

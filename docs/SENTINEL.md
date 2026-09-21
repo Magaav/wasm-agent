@@ -65,9 +65,17 @@ Two details that decide whether a *requested* deploy can work at all:
   untouched and told nobody. `deploy.sh` now wakes the requesting session on its failure path too, naming
   the refusal and where the evidence is; a hand-run deploy passes no `--session` and wakes nobody.
 
+`scripts/verify-install.sh` is the one-command check afterwards: installed vs built hashes, shipped
+scripts vs the repo, the recorded pid vs the listener, the watcher alive - PASS/FAIL, `--json` if you want
+it as data. `deploy.sh` also writes `<install>/deploy-result.json` and puts a one-line verdict in the
+continuation wake, so the outcome is read once instead of re-derived. `request run --script` executes only
+from directories in `WA_SENTINEL_SCRIPTS` (the install's `scripts/`, set by the gate, the unit and
+`scripts/install-sentinel-task.ps1`); use it for work that must happen outside a turn.
+
 A stopped watcher can still only be restarted from outside a turn: nothing that is running can hear a
 request. That is why the supervisor belongs in a service or a logon task (`deploy/wa-sentinel.service`
-is the systemd unit). This verb removes the human step for *updating*; the one for *reviving* remains.
+is the systemd unit; `scripts/install-sentinel-task.ps1` registers the Windows logon task). This verb
+removes the human step for *updating*; the one for *reviving* remains.
 
 `request` **writes a file** and returns. `watch` (or `once`) performs it. That split is the whole
 point: the writer may die immediately afterwards, and the request still lands.

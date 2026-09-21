@@ -245,30 +245,38 @@ fn start_node(binary: &Path, reason: &str) -> Result<()> {
     let port = node_port().to_string();
     let cport = client_port().to_string();
     say(&format!("starting {} on port {port}", binary.display()));
-    if cfg!(windows) {
-        // CreateProcessW with DETACHED_PROCESS, rather than `powershell Start-Process`. Measured:
-        // the shell hop costs ~243ms of the ~310ms it takes to see the node healthy, while the
-        // node's own boot is ~49ms. This is the last place a shell was in the hot path.
-        #[cfg(windows)]
-        {
-            let args = vec![
-                "serve".to_string(),
-                "--port".to_string(), port.clone(),
-                "--client-port".to_string(), cport.clone(),
-                "--ui".to_string(), ui.display().to_string(),
-            ];
-            let child = winproc::start_detached(binary, &args).context("start the node")?;
-            say(&format!("started pid {child}"));
+    // CreateProcessW with DETACHED_PROCESS, rather than `powershell Start-Process`. Measured:
+    // the shell hop costs ~243ms of the ~310ms it takes to see the node healthy, while the
+    // node's own boot is ~49ms. This is the last place a shell was in the hot path.
+    #[cfg(windows)]
+    let child_pid = {
+        let args = vec![
+            "serve".to_string(),
+            "--port".to_string(), port.clone(),
+            "--client-port".to_string(), cport.clone(),
+            "--ui".to_string(), ui.display().to_string(),
+        ];
+        winproc::start_detached(binary, &args).context("start the node")?
+    };
+    #[cfg(not(windows))]
+    let child_pid = std::process::Command::new(binary)
+        .args(["serve", "--port", &port, "--client-port", &cport, "--ui"])
+        .arg(&ui)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("spawn node")?
+        .id();
+    say(&format!("started pid {child_pid}"));
+    // The install records the serving pid in `serve.pid`: upgrade.sh writes it, and the sentinel did not.
+    // So a `request restart`/`request recover` left the recorded pid naming a process that was gone, and
+    // the deploy gate reads exactly that as "two nodes, one port" (it refused the next deploy), while
+    // `wa ui`'s stop instruction pointed at a dead pid. Record the pid the OS just gave us.
+    if let Some(dir) = binary.parent() {
+        if let Err(error) = std::fs::write(dir.join("serve.pid"), format!("{child_pid}\n")) {
+            audit("serve-pid-failed", &dir.display().to_string(), &error.to_string());
         }
-    } else {
-        std::process::Command::new(binary)
-            .args(["serve", "--port", &port, "--client-port", &cport, "--ui"])
-            .arg(&ui)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .context("spawn node")?;
     }
     audit("start", &binary.display().to_string(), reason);
     Ok(())

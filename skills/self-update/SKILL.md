@@ -61,11 +61,26 @@ you, naming the refusal: the request being `done` only means it was spawned, and
 before the swap leaves the node untouched and would otherwise tell nobody. A deploy run by hand passes no
 session and wakes nobody.
 
+### Verifying a deploy without re-deriving it
+
+`scripts/verify-install.sh` prints one PASS/FAIL per comparison - installed vs built hashes, shipped
+scripts vs the repo, the recorded pid vs the listener, the watcher alive - and `--json` for a machine
+verdict. Run that instead of hashing binaries, diffing scripts and reading `/health` by hand: they are
+comparisons, not judgement. A deploy also writes `<install>/deploy-result.json`, and the continuation wake
+carries a one-line verdict, so the outcome is data you read once.
+
+`request run --script <path>` is the sanctioned way to run a script **outside** the node's turn. The
+sentinel executes it only from directories in `WA_SENTINEL_SCRIPTS` (the install's `scripts/` is what the
+gate and the service set). That is a deliberate boundary, not an obstacle to route around with
+`Start-Process` or Task Scheduler - a run that fights the OS for eight rounds is a run that should have
+queued a request.
+
 Two limits worth knowing before you rely on this:
 
 - **A stopped watcher cannot be revived from a run.** Nothing running can hear a request, so use
   `deploy`/`upgrade` while the watcher is up, and keep the supervisor in a service or logon task so it
-  comes back by itself (`deploy/wa-sentinel.service` is the systemd unit).
+  comes back by itself (`deploy/wa-sentinel.service` for systemd; `scripts/install-sentinel-task.ps1`
+  registers the Windows logon task, with the `run` allow-list set).
 - **The first sentinel that understands `deploy` has to get there by hand once.** A watcher running an
   older build answers `unknown verb "deploy"`, so that one step is a shell command: build, then
   `bash scripts/deploy.sh --reason "…"` from outside the run.

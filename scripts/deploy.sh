@@ -45,6 +45,26 @@ INSTALL_DIR="${WA_INSTALL_DIR:-$HOME/AppData/Local/wasm-agent}"
 [ -d "$INSTALL_DIR" ] || INSTALL_DIR="${WA_INSTALL_DIR:-$HOME/.local/share/wasm-agent}"
 PORT="${WA_PORT:-8799}"
 CLIENT_PORT="${WA_CLIENT_PORT:-8800}"
+SENTINEL_CONFIG="${WASM_AGENT_HOME:-${USERPROFILE:-$HOME}}/.wasm-agent"
+
+# The sentinel executes `run` scripts only from directories named here, and the install's own scripts (the
+# whatsapp hooks, the preflight) live in <install>/scripts. Without this, every job whose action is `run`
+# fails with "run is disabled: set WA_SENTINEL_SCRIPTS" - which is exactly how whatsapp-ingest was failing.
+# Export it so the watcher this deploy starts or restarts inherits it; the service unit and the logon task
+# set it too, because a watcher not started by this script must still have it.
+export WA_SENTINEL_SCRIPTS="${WA_SENTINEL_SCRIPTS:-$INSTALL_DIR/scripts}"
+
+# A machine-readable result, written on both sides of the outcome. `installed.txt` says what is installed;
+# this says what the *deploy* did, so a woken run reads one small file instead of re-deriving the answer
+# from installed.txt, deploy.log, hashes and the sentinel status. `fail` writes it too, so a refusal is a
+# result and not only a log line.
+write_result() { # ok detail
+  _esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\r\n' '  '; }
+  printf '{"ok":%s,"commit":"%s","branch":"%s","node_sha256":"%s","sentinel_sha256":"%s","watcher_pid":"%s","detail":"%s","reason":"%s","at":"%s"}\n' \
+    "$1" "${COMMIT:-}" "${BRANCH:-}" "${HASH:-}" "${SENTINEL_HASH:-}" \
+    "${SENTINEL_NEW_PID:-${SENTINEL_WATCH_PID:-}}" "$(_esc "$2")" "$(_esc "$REASON")" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$INSTALL_DIR/deploy-result.json" 2>/dev/null || true
+}
 
 # A refusal is evidence: the gate saying no, with a reason, at a moment. Printing to stderr is not enough -
 # after the fact, "did it refuse anything?" has to be answerable. Every refusal is appended to
@@ -53,6 +73,7 @@ fail() {
   echo "deploy: $*" >&2
   printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${COMMIT:-unknown}" "${BRANCH:-unknown}" "$*" \
     >> "$INSTALL_DIR/deploy.log" 2>/dev/null
+  write_result false "$*"
   # A requested deploy is answered, including when the answer is no. This is the other half of the wake
   # below: that one says the install landed, and without this one a deploy that failed *before* the swap
   # told nobody - the request was already `done` (it had been spawned), the node was untouched, and the
@@ -306,6 +327,23 @@ if [ -n "$SENTINEL_WATCH_PID" ]; then
   [ -n "$SENTINEL_NEW_PID" ] && [ "$SENTINEL_NEW_PID" != "$SENTINEL_WATCH_PID" ] \
     || fail "node installed, but the sentinel did not start as a new watcher"
   echo "deploy: sentinel pid $SENTINEL_WATCH_PID -> $SENTINEL_NEW_PID"
+elif [ ! -f "$SENTINEL_CONFIG/sentinel/stop" ]; then
+  # No watcher, and no stop file, means nothing is left that can perform a request - a fresh install, a
+  # reboot, or a watcher that died. Start one. The stop file is what `wa-sentinel stop` writes, so an
+  # intentional stop is respected: this only fixes the case where there was never one, or it crashed.
+  echo "deploy: no sentinel watching - starting one"
+  "$INSTALL_DIR/$SENTINEL_NAME" start || fail "node installed, but the sentinel would not start"
+  SENTINEL_NEW_PID=""
+  for _ in $(seq 1 50); do
+    SENTINEL_NEW_PID="$("$INSTALL_DIR/$SENTINEL_NAME" status 2>/dev/null \
+      | awk '$1=="sentinel:" && $2=="watching" {gsub(/[^0-9]/,"",$4); print $4; exit}')"
+    [ -n "$SENTINEL_NEW_PID" ] && break
+    sleep 0.1
+  done
+  [ -n "$SENTINEL_NEW_PID" ] || fail "node installed, but the sentinel did not start watching"
+  echo "deploy: sentinel started (pid $SENTINEL_NEW_PID)"
+else
+  echo "deploy: sentinel stopped by request (stop file present) - not starting it"
 fi
 
 cmp -s "$UPGRADE" "$INSTALL_DIR/scripts/upgrade.sh" || fail "the node is installed but the sentinel's upgrade.sh differs from this release"
@@ -337,6 +375,8 @@ printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nupgrade_s
 echo "deploy: installed $COMMIT ($HASH)"
 echo "deploy: recorded in $INSTALL_DIR/installed.txt"
 echo "deploy: /health -> $(curl -s -m 5 "http://127.0.0.1:$PORT/health" | head -c 260)"
+write_result true "installed $COMMIT; watcher ${SENTINEL_NEW_PID:-${SENTINEL_WATCH_PID:-none}}"
+VERDICT="[deploy result] ok commit=$COMMIT node_sha=$HASH sentinel_sha=$SENTINEL_HASH watcher=${SENTINEL_WATCH_PID:-none}->${SENTINEL_NEW_PID:-none}. Evidence: $INSTALL_DIR/deploy-result.json and installed.txt; run scripts/verify-install.sh for the checks."
 
 # The continuation, and the reason this script takes --session/--prompt at all: the deploy is performed
 # detached (the sentinel cannot replace itself while it is the process running the replacement), so the
@@ -348,7 +388,9 @@ if [ -n "$SESSION" ]; then
   SENTINEL_BIN="$INSTALL_DIR/wa-sentinel.exe"
   [ -x "$SENTINEL_BIN" ] || SENTINEL_BIN="$INSTALL_DIR/wa-sentinel"
   if [ -x "$SENTINEL_BIN" ] && [ -n "$PROMPT" ]; then
-    "$SENTINEL_BIN" request wake --session "$SESSION" --prompt "$PROMPT" \
+    "$SENTINEL_BIN" request wake --session "$SESSION" --prompt "$PROMPT
+
+$VERDICT" \
       --reason "deploy finished: $REASON" >/dev/null 2>&1 \
       && echo "deploy: continuation queued for $SESSION" \
       || echo "deploy: WARNING could not queue the continuation for $SESSION; the install itself is done"
