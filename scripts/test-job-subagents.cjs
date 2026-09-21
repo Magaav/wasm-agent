@@ -60,7 +60,7 @@ function child(exe, args, env, home) {
 
 // The node fixture: `/health` and the `/subagents` protocol. `mode` decides whether an await settles.
 async function nodeFixture() {
-  const state = { busy: true, mode: "complete", starts: [], awaits: 0, health: [] };
+  const state = { busy: true, mode: "complete", starts: [], awaits: 0, health: [], cancels: [] };
   const seen = new Map();
   const server = http.createServer((req, res) => {
     if (req.url === "/health") {
@@ -76,9 +76,10 @@ async function nodeFixture() {
         let request = {};
         try { request = JSON.parse(body); } catch { /* reported below */ }
         if (request.action === "start") {
-          state.starts.push(request);
           const existing = seen.get(request.idempotency_key);
-          const id = existing || `sub-${state.starts.length}`;
+          const id = existing || `sub-${state.starts.length + 1}`;
+          request.assigned_id = id;
+          state.starts.push(request);
           if (!existing) seen.set(request.idempotency_key, id);
           res.setHeader("content-type", "application/json");
           res.end(JSON.stringify({ subagent_id: id, state: "running", settled: false, session_id: "fixture", queue_position: 0, duplicate: !!existing }));
@@ -87,9 +88,26 @@ async function nodeFixture() {
         if (request.action === "await") {
           state.awaits += 1;
           await sleep(200);
-          const settled = state.mode !== "hang";
+          // The service decides the terminal view; the sentinel must treat only a settled `completed`
+          // with no error as success, and everything else as failed or unknown.
+          const modes = {
+            complete: { state: "completed", settled: true, result: { ok: true }, error: null },
+            unknown_settled: { state: "unknown", settled: true, result: null, error: null },
+            completed_unsettled: { state: "completed", settled: false, result: null, error: null },
+            completed_with_error: { state: "completed", settled: true, result: { ok: false }, error: "boom" },
+            failed: { state: "failed", settled: true, result: null, error: "boom" },
+            cancelled: { state: "cancelled", settled: true, result: null, error: null },
+            hang: { state: "running", settled: false, result: null, error: null },
+          };
+          const view = modes[state.mode] || modes.complete;
           res.setHeader("content-type", "application/json");
-          res.end(JSON.stringify({ subagent_id: request.subagent_id, state: settled ? "completed" : "running", settled, result: settled ? { ok: true } : null, error: null }));
+          res.end(JSON.stringify({ subagent_id: request.subagent_id, ...view }));
+          return;
+        }
+        if (request.action === "cancel") {
+          state.cancels.push(request.subagent_id);
+          res.setHeader("content-type", "application/json");
+          res.end(JSON.stringify({ subagent_id: request.subagent_id, state: "cancelled", settled: true }));
           return;
         }
         res.statusCode = 400;
@@ -138,6 +156,21 @@ function artifactFixture(home, env, id) {
   const bindingsFile = path.join(home, `${id}.bindings.json`);
   fs.writeFileSync(bindingsFile, "{}");
   return { artifact, artifactFile, bindingsFile };
+}
+
+// Emit one event and wait for its delivery (the newest for the job) to reach a terminal state.
+async function emitAndSettle(env, fixture, home, jobId, messageId, mode, timeoutMs = 30000) {
+  fixture.state.mode = mode;
+  const before = cli(env, "history").filter((d) => d.job_id === jobId).length;
+  const file = path.join(home, `${messageId}.json`);
+  fs.writeFileSync(file, JSON.stringify({ conversation_id: "c@c.us", message_id: messageId, eligibility: { eligible: true } }));
+  cli(env, "emit", "fixture.message", messageId, file);
+  return until(() => {
+    const rows = cli(env, "history").filter((d) => d.job_id === jobId);
+    if (rows.length <= before) return null;
+    const newest = rows[0];
+    return ["completed", "failed", "unknown", "cancelled"].includes(newest.state) ? newest : null;
+  }, `${messageId} -> ${mode}`, timeoutMs);
 }
 
 async function main() {
@@ -198,6 +231,28 @@ async function main() {
   const m2Starts = fixtureA.state.starts.filter((s) => s.idempotency_key === `responder:${revision}:m2`).length;
   check(m2Starts === 1, "an unknown outcome is not retried");
   check(cli(envA, "history").find((d) => d.job_id === "responder").state !== "completed", "unknown is not reported as completed");
+
+  // Only a settled `completed` with no error is success. Every other terminal view is failed or unknown -
+  // a `settled:true` with `state:"unknown"` used to be reported as success.
+  check((await emitAndSettle(envA, fixtureA, homeA, "responder", "o_complete", "complete")).state === "completed", "a settled completed child completes the job");
+  check((await emitAndSettle(envA, fixtureA, homeA, "responder", "o_unknown", "unknown_settled")).state === "unknown", "settled:true with state unknown is NOT success");
+  check((await emitAndSettle(envA, fixtureA, homeA, "responder", "o_unsettled", "completed_unsettled")).state === "unknown", "completed without settled is unknown, never success");
+  check((await emitAndSettle(envA, fixtureA, homeA, "responder", "o_error", "completed_with_error")).state === "unknown", "completed with an error/ok:false is not success");
+  check((await emitAndSettle(envA, fixtureA, homeA, "responder", "o_failed", "failed")).state === "failed", "a failed child is a failed job");
+  check((await emitAndSettle(envA, fixtureA, homeA, "responder", "o_cancelled", "cancelled")).state === "failed", "a cancelled child is not success");
+
+  // A job disabled while its child runs must cancel the owned child and settle the delivery, not leave it
+  // running or replay it.
+  fixtureA.state.mode = "hang";
+  const dFile = path.join(homeA, "d1.json");
+  fs.writeFileSync(dFile, JSON.stringify({ conversation_id: "c@c.us", message_id: "d1", eligibility: { eligible: true } }));
+  cli(envA, "emit", "fixture.message", "d1", dFile);
+  await until(() => fixtureA.state.starts.some((s) => s.idempotency_key.endsWith(":d1")), "disabled-case child started");
+  const d1Start = fixtureA.state.starts.find((s) => s.idempotency_key.endsWith(":d1"));
+  cli(envA, "disable", "responder");
+  await until(() => fixtureA.state.cancels.includes(d1Start.assigned_id), "disabled job cancels its owned child", 15000);
+  await until(() => cli(envA, "history").some((d) => d.job_id === "responder" && d.state === "cancelled"), "disabled job settles the delivery cancelled", 15000);
+  check(fixtureA.state.starts.filter((s) => s.idempotency_key.endsWith(":d1")).length === 1, "a cancelled child is not respawned");
 
   // ---- fixture B: without reserved capacity, an inference action waits for idle ------------------
   const homeB = path.join(root, "home-b");

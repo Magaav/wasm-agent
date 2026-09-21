@@ -42,6 +42,14 @@ function message(overrides) {
   check(eligibility({ conversation: conversation({ left: true }), message: message() }, { operator }).reason === "left", "left is excluded");
   check(eligibility({ conversation: conversation({ archived: null }), message: message() }, { operator }).reason === "archived_unknown", "unknown archived fails closed");
   check(eligibility({ conversation: conversation({ left: null }), message: message() }, { operator }).reason === "left_unknown", "unknown left fails closed");
+  // A string, a number or an object is INVALID metadata, not false: it must fail closed, never read as
+  // "not archived". `"false"` reading as false was a real defect.
+  for (const bad of ["false", "true", 0, 1, {}, [], "no"]) {
+    check(eligibility({ conversation: conversation({ archived: bad }), message: message() }, { operator }).reason === "archived_unknown", `archived ${JSON.stringify(bad)} is unknown, not false`);
+  }
+  for (const bad of ["false", 0, {}, []]) {
+    check(eligibility({ conversation: conversation({ left: bad }), message: message() }, { operator }).reason === "left_unknown", `left ${JSON.stringify(bad)} is unknown, not false`);
+  }
 
   // Broadcast and status are not people.
   check(eligibility({ conversation: conversation({ id: "status@broadcast" }), message: message() }, { operator }).reason === "not_a_person", "status is excluded");
@@ -62,6 +70,30 @@ function message(overrides) {
   check(noMention.eligible === false && noMention.reason === "group_without_operator_mention", "absent mention evidence fails closed");
   const unknownMention = eligibility({ conversation: group, message: message() }, {});
   check(unknownMention.reason === "mention_unknown", "no operator binding means mentions cannot be verified");
+
+  // Numeric prose and digit substrings are NOT mentions. `normalizeDigits(body).includes(number)` made a
+  // random phone number in a sentence an operator mention; each of these would have matched it.
+  for (const body of [
+    "call me on 5511999999999",
+    "my number is 5511999999999",
+    "15511999999999",
+    "1235511999999999",
+    "55 11 99999-9999",
+  ]) {
+    check(
+      eligibility({ conversation: group, message: message({ body, mentioned_ids: [] }) }, { operator }).reason === "group_without_operator_mention",
+      `not a mention: ${body}`
+    );
+  }
+  // Only an EXACT @<bound number> token, with boundaries on both sides.
+  check(eligibility({ conversation: group, message: message({ body: "hey @5511999999999 please", mentioned_ids: [] }) }, { operator }).eligible === true, "an exact @token mid-sentence is a mention");
+  check(eligibility({ conversation: group, message: message({ body: "@5511999999999", mentioned_ids: [] }) }, { operator }).eligible === true, "an exact @token at end is a mention");
+  check(eligibility({ conversation: group, message: message({ body: "@55119999999990", mentioned_ids: [] }) }, { operator }).reason === "group_without_operator_mention", "a longer @number is not an exact mention");
+  check(eligibility({ conversation: group, message: message({ body: "@5511999999999abc", mentioned_ids: [] }) }, { operator }).reason === "group_without_operator_mention", "no boundary after the @number is not a mention");
+  check(eligibility({ conversation: group, message: message({ body: "x@5511999999999", mentioned_ids: [] }) }, { operator }).reason === "group_without_operator_mention", "an email-like @ is not a mention");
+  // Mention metadata must be the app's real types, not strings.
+  check(eligibility({ conversation: group, message: message({ mentioned_me: "true", mentioned_ids: [] }) }, { operator }).reason === "group_without_operator_mention", "a string mentioned_me is not a verified mention");
+  check(eligibility({ conversation: group, message: message({ mentioned_ids: "5511999999999@s.whatsapp.net" }) }, { operator }).reason === "group_without_operator_mention", "a non-array mentioned_ids is not verified");
 
   console.log("ALL PASS");
   void checked;

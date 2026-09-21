@@ -40,19 +40,57 @@ function operatorIds(options) {
   return ids;
 }
 
-function mentioned(body, mentionedIds, options) {
+// The numeric part of a jid or a bare number: `55119...@s.whatsapp.net` and `55119...` both give the
+// same digits, and a `@lid` gives its own digits. Only used against the app's verified mention list.
+function badgeDigits(value) {
+  return normalizeDigits(String(value || "").split("@")[0] || "");
+}
+
+// A mention is verified by the app's own `mentionedJidList` only: an exact id match, or an exact digit
+// match against a bound operator identity. It is never inferred from the message text here.
+function mentioned(mentionedIds, options) {
+  if (!Array.isArray(mentionedIds)) return false;
   const ids = operatorIds(options);
   if (!ids.length) return false;
-  const digits = new Set(ids.map(normalizeDigits).filter((value) => value.length > 6));
-  for (const id of mentionedIds || []) {
-    if (ids.includes(String(id))) return true;
-    if (digits.has(normalizeDigits(id))) return true;
-  }
-  const bodyDigits = normalizeDigits(body);
-  for (const value of digits) {
-    if (bodyDigits.includes(value)) return true;
+  const wantedIds = new Set(ids.map((value) => String(value)));
+  const wantedDigits = new Set(ids.map(badgeDigits).filter((value) => value.length > 6));
+  for (const raw of mentionedIds) {
+    const id = String(raw);
+    if (wantedIds.has(id)) return true;
+    if (wantedDigits.size && wantedDigits.has(badgeDigits(id))) return true;
   }
   return false;
+}
+
+// A literal `@<operator number>` in the body counts only as an EXACT token: the `@` at a boundary, the
+// whole digit run equal to a bound operator number, and a boundary after it. Plain digits, a substring
+// of a longer number, and numeric prose never count - `normalizeDigits(body).includes(number)` made a
+// random phone number in a sentence an operator mention.
+function mentionsPhoneToken(body, options) {
+  const phones = operatorIds(options)
+    .map(badgeDigits)
+    .filter((value) => value.length > 6);
+  if (!phones.length) return false;
+  const text = String(body || "");
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] !== "@") continue;
+    const before = index === 0 ? "" : text[index - 1];
+    if (before && /[0-9A-Za-z_]/.test(before)) continue;
+    let end = index + 1;
+    while (end < text.length && text[end] >= "0" && text[end] <= "9") end += 1;
+    const after = end >= text.length ? "" : text[end];
+    if (after && /[0-9A-Za-z_]/.test(after)) continue;
+    if (phones.includes(text.slice(index + 1, end))) return true;
+  }
+  return false;
+}
+
+// archived/left must be a real boolean. A string, a number or an object is invalid metadata and fails
+// closed exactly like a missing field; `"false"` must never read as "not archived".
+function triBool(value) {
+  if (value === true) return true;
+  if (value === false) return false;
+  return null;
 }
 
 // `input.conversation`: { id, title, archived, left }  (archived/left are true | false | null = unknown)
@@ -70,25 +108,25 @@ export function eligibility(input, options = {}) {
   if (message.direction !== "incoming") return reject("not_incoming");
   if (kind === "status" || kind === "broadcast") return reject("not_a_person");
   if (kind === "unknown") return reject("unknown_chat_kind");
-  if (conversation.archived === null || conversation.archived === undefined) {
-    return reject("archived_unknown");
-  }
-  if (conversation.archived === true) return reject("archived");
-  if (conversation.left === null || conversation.left === undefined) {
-    return reject("left_unknown");
-  }
-  if (conversation.left === true) return reject("left");
+  const archived = triBool(conversation.archived);
+  if (archived === null) return reject("archived_unknown");
+  if (archived === true) return reject("archived");
+  const left = triBool(conversation.left);
+  if (left === null) return reject("left_unknown");
+  if (left === true) return reject("left");
 
   if (kind === "group") {
-    // A verified mention is either the app's own flag/list, or a literal @number in the body matched
-    // against a bound operator identity. When neither can verify anything, the group fails closed.
+    // A verified mention is the app's own flag/list, or an exact `@<bound number>` token in the body.
+    // When neither can verify anything, the group fails closed.
     if (message.mentioned_me === true) return { eligible: true, reason: "operator_mentioned", ...base };
-    if (mentioned(message.body, message.mentioned_ids, options)) {
+    if (mentioned(message.mentioned_ids, options)) {
+      return { eligible: true, reason: "operator_mentioned", ...base };
+    }
+    if (mentionsPhoneToken(message.body, options)) {
       return { eligible: true, reason: "operator_mentioned", ...base };
     }
     const mentionKnown =
-      (message.mentioned_me !== null && message.mentioned_me !== undefined) ||
-      Array.isArray(message.mentioned_ids);
+      typeof message.mentioned_me === "boolean" || Array.isArray(message.mentioned_ids);
     if (!mentionKnown && operatorIds(options).length === 0) return reject("mention_unknown");
     return reject("group_without_operator_mention");
   }

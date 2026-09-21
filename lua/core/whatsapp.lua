@@ -104,10 +104,30 @@ local function in_scope(profile, conversation_id)
   return profile.resources.allowed_conversation == conversation_id
 end
 
-local function effect_store(ctx)
+-- The durable effect store. Sends need `reserve` + `confirm`; decisions need `record`. A missing
+-- capability is a refusal, never an implicit "unlimited". The contract the runtime adapter must satisfy:
+--
+--   effects.reserve({message_id, conversation_id, body, limit}) -> {status, record?}
+--     status one of: "reserved" (a new reservation was created atomically and the caller may send),
+--     "already_sent" (a prior *confirmed* send exists; do not send), "ambiguous" (a prior reservation
+--     exists without a confirmed send; reconcile or refuse), "budget_exceeded".
+--     The reservation must be durable BEFORE the send and atomically consume the per-run budget.
+--   effects.confirm({message_id, conversation_id, message}) -> boolean
+--     Persist a confirmed, store-verified send. False means the effect was not recorded.
+--   effects.record(decision_record) -> boolean
+--     Persist a decision. MUST NOT overwrite a pending/sent send record for the same message id, so
+--     `reserve` stays truthful.
+--   effects.reconcile({message_id, conversation_id, body}) -> {status="sent"|"not_sent"|"unknown", record?}
+--     Optional, read-only: reconcile a prior ambiguous reservation against the app's store. Never sends.
+--   effects.release({message_id}) -> boolean
+--     Optional: clear a reservation ONLY when the route proved no effect happened.
+--   effects.unknown({message_id, detail}) -> boolean
+--     Optional: record an ambiguous outcome (the reservation may have had an effect) so it is not replayed.
+local function effect_store(ctx, need)
   local effects = ctx and ctx.effects
-  if type(effects) ~= "table" or type(effects.find) ~= "function" or type(effects.record) ~= "function" then
-    return nil
+  if type(effects) ~= "table" then return nil end
+  for _, name in ipairs(need) do
+    if type(effects[name]) ~= "function" then return nil end
   end
   return effects
 end
@@ -187,7 +207,7 @@ local function decide_tool(args, profile, ctx)
   local event = M.trusted_event(ctx)
   if event.message_id == "" then return fail("event_context_required") end
   if args.decision ~= "reply" and args.decision ~= "no_reply" then return fail("invalid_decision") end
-  local effects = effect_store(ctx)
+  local effects = effect_store(ctx, { "record" })
   if not effects then return fail("effect_store_unbound", { note = "the runtime must pass a durable effect store" }) end
   local record = {
     kind = "decision",
@@ -197,6 +217,7 @@ local function decide_tool(args, profile, ctx)
     reason = tostring(args.reason or ""),
     at = host.now and host.now() or nil,
   }
+  -- A decision is durable, and the adapter must store it without clobbering a send reservation.
   if not effects.record(record) then return fail("decision_not_recorded") end
   return {
     decision = args.decision,
@@ -228,6 +249,17 @@ local function resolve_route(profile, conversation_id)
   return { name = "ui", script = script, self_only = self_only }, nil
 end
 
+-- The raw-script flags are derived from the profile binding only, never from an event or an argument. A
+-- non-self UI send needs the explicit `--allow-mark-read` approval; notes-to-self and the store route do
+-- not take it. Exposed so the pass-through is testable without a subprocess.
+function M.route_flags(profile, route)
+  local flags = {}
+  if route.name == "ui" and not route.self_only and profile.resources.allow_mark_read == true then
+    flags[#flags + 1] = "--allow-mark-read"
+  end
+  return flags
+end
+
 local function send_tool(args, profile, ctx)
   local event = M.trusted_event(ctx)
   if event.conversation_id == "" or event.message_id == "" then return fail("event_context_required") end
@@ -238,25 +270,6 @@ local function send_tool(args, profile, ctx)
       note = "sending is approved by the local profile binding, never by a decision or an event",
     })
   end
-
-  -- The per-child counter is trusted persistent context. A missing counter is not "unlimited": it is a
-  -- refusal.
-  if type(ctx.sends) ~= "table" then
-    return fail("send_counter_unbound", { note = "the runtime must pass the persistent child counter" })
-  end
-
-  -- Idempotency comes before the per-run limit: a repeated delivery of the same message is not a second
-  -- send, and must not spend the allowance the first one already spent.
-  local effects = effect_store(ctx)
-  if not effects then return fail("effect_store_unbound", { note = "the runtime must pass a durable effect store" }) end
-  local prior = effects.find(event.message_id)
-  if prior and prior.kind == "send" and prior.verified == true then
-    return { already_sent = true, message = prior.message, conversation_id = event.conversation_id }
-  end
-
-  local limit = tonumber(profile.limits and profile.limits.sends_per_run) or 1
-  if (tonumber(ctx.sends.count) or 0) >= limit then return fail("sends_per_run_exceeded", { limit = limit }) end
-
   local body = tostring(args.body or "")
   if body == "" then return fail("body_required") end
   local maximum = tonumber(profile.limits and profile.limits.body_bytes) or 4096
@@ -267,31 +280,79 @@ local function send_tool(args, profile, ctx)
     local extra = { route = profile.resources.send_path }
     if why == "unread_would_be_broken" then
       extra.options = {
-        "bind resources.store_send_script to an approved store send path (opens nothing, marks nothing read)",
-        "set resources.allow_mark_read=true to accept the marker being cleared",
+        "bind resources.store_send_script to an operator-approved store send path (opens nothing, marks nothing read)",
+        "set resources.allow_mark_read=true so the approved flag is passed to the raw UI script",
         "reply only to the bound self destination, where opening clears nothing",
       }
     end
     return fail(why, extra)
   end
 
+  local effects = effect_store(ctx, { "reserve", "confirm" })
+  if not effects then
+    return fail("effect_store_unbound", { note = "the runtime must pass a durable effect store with reserve+confirm" })
+  end
+
+  -- Atomically reserve BEFORE any send, and consume the per-run budget in the reservation. A crash
+  -- between send and confirm then leaves a durable pending record rather than a replayable message.
+  local limit = tonumber(profile.limits and profile.limits.sends_per_run) or 1
+  local reservation = effects.reserve({
+    message_id = event.message_id,
+    conversation_id = event.conversation_id,
+    body = body,
+    limit = limit,
+  })
+  if type(reservation) ~= "table" then return fail("reservation_failed") end
+  local status = reservation.status
+  if status == "already_sent" then
+    return { already_sent = true, message = reservation.record and reservation.record.message or nil,
+      conversation_id = event.conversation_id }
+  end
+  if status == "ambiguous" then
+    -- A prior reservation may have had an effect. Reconcile read-only if the adapter can; NEVER send.
+    local reconciled = nil
+    if type(effects.reconcile) == "function" then
+      reconciled = effects.reconcile({ message_id = event.message_id, conversation_id = event.conversation_id, body = body })
+    end
+    if type(reconciled) == "table" and reconciled.status == "sent" then
+      return { already_sent = true, reconciled = true,
+        message = reconciled.record and reconciled.record.message or nil, conversation_id = event.conversation_id }
+    end
+    return fail("ambiguous_prior_send", {
+      reconciliation = type(reconciled) == "table" and reconciled.status or "unavailable",
+      note = "a prior reservation for this message may have sent; reconcile before any retry",
+    })
+  end
+  if status == "budget_exceeded" then return fail("sends_per_run_exceeded", { limit = limit }) end
+  if status ~= "reserved" then return fail("reservation_refused", { status = tostring(status) }) end
+
   local result
   if type(ctx.send) == "function" then
     result = ctx.send({ conversation_id = event.conversation_id, body = body, message_id = event.message_id, route = route.name, profile = profile })
   else
     if type(route.script) ~= "string" or route.script == "" then
+      if type(effects.release) == "function" then pcall(effects.release, { message_id = event.message_id }) end
       return fail("send_route_unbound", { route = route.name })
     end
     local node = (host.getenv and host.getenv("WA_NODE")) or "node"
     -- The body goes through a file, never the shell command line: a message is untrusted text.
     local body_file = paths.temp() .. "/wa-whatsapp-body-" .. tostring(host.uuid()) .. ".txt"
-    if not (host.write_file and host.write_file(body_file, body)) then return fail("body_not_written") end
-    local command = table.concat({
+    if not (host.write_file and host.write_file(body_file, body)) then
+      if type(effects.release) == "function" then pcall(effects.release, { message_id = event.message_id }) end
+      return fail("body_not_written")
+    end
+    local script_args = {
       quote(node), quote(route.script),
       "--chat", quote(event.conversation_id),
       "--body-file", quote(body_file),
       "--send",
-    }, " ")
+    }
+    -- The approved flag comes from the profile binding only, never from an event or an argument: the raw
+    -- script refuses a non-self send without it.
+    for _, flag in ipairs(M.route_flags(profile, route)) do
+      script_args[#script_args + 1] = flag
+    end
+    local command = table.concat(script_args, " ")
     local ok, raw = pcall(host.exec, command, "")
     if host.exec then pcall(host.exec, "rm -f " .. quote(body_file), "") end
     if not ok then return fail("send_route_failed", { detail = tostring(raw):sub(1, 200) }) end
@@ -301,17 +362,25 @@ local function send_tool(args, profile, ctx)
   end
 
   local verify_error = M.verify_send_result(result, event.conversation_id, body)
-  if verify_error then return fail(verify_error, { observed = result }) end
+  if verify_error then
+    -- No effect is proven only when the route refused before dispatching. Otherwise the send may have
+    -- happened, so the outcome is unknown and the reservation stays (never replayed).
+    local refused = type(result) == "table" and result.error ~= nil and result.dispatch == nil
+    if refused then
+      if type(effects.release) == "function" then pcall(effects.release, { message_id = event.message_id }) end
+      return fail(tostring(result.error), { observed = result })
+    end
+    if type(effects.unknown) == "function" then
+      pcall(effects.unknown, { message_id = event.message_id, conversation_id = event.conversation_id, detail = verify_error })
+    end
+    return fail("send outcome unknown: " .. verify_error, { observed = result })
+  end
 
-  effects.record({
-    kind = "send",
-    message_id = event.message_id,
-    conversation_id = event.conversation_id,
-    verified = true,
-    message = result.message,
-    at = host.now and host.now() or nil,
-  })
-  ctx.sends.count = (tonumber(ctx.sends.count) or 0) + 1
+  -- A verified send whose durable confirmation fails is NOT success: the effect happened but the record
+  -- did not, and the reservation remains so a replay is refused.
+  if not effects.confirm({ message_id = event.message_id, conversation_id = event.conversation_id, message = result.message }) then
+    return fail("send_not_confirmed: verified in the app but the durable effect was not recorded", { observed = result })
+  end
   return result
 end
 

@@ -27,9 +27,10 @@ passed. A third-party live proof is out of scope here: it needs an approved stor
 
 ## The exact profile
 
-Install this as `<config>/subagent-profiles/whatsapp-responder.json` (`<config>` is `paths.config()`,
-e.g. `%LOCALAPPDATA%\wasm-agent` on Windows). It is a **local approved** binding; none of it appears in a
-portable artifact.
+Install this as `<WASM_AGENT_HOME>/.wasm-agent/subagent-profiles/whatsapp-responder.json`. The host's
+`paths.config()` is `<WASM_AGENT_HOME>/.wasm-agent` (default `%USERPROFILE%\.wasm-agent` on Windows) -
+**not** `%LOCALAPPDATA%`; the *install* directory (`%LOCALAPPDATA%\wasm-agent`) is a different tree. It is
+a **local approved** binding; none of it appears in a portable artifact.
 
 ```json
 {
@@ -42,7 +43,7 @@ portable artifact.
     "allowed_conversations": ["<SELF_CHAT_ID>"],
     "self_destination": "<SELF_CHAT_ID>",
     "account": "operator",
-    "browser_endpoint": "ws://localhost:9222/devtools/page/<EXPLICIT_TARGET_ID>",
+    "browser_endpoint": "ws://[::1]:9222/devtools/page/<EXPLICIT_TARGET_ID>",
     "send_path": "ui",
     "allow_mark_read": false,
     "send_approved": true,
@@ -61,7 +62,7 @@ Bindings, and why each is required:
 | --- | --- |
 | `allowed_conversation` / `allowed_conversations` | the notes-to-self chat id, from the store |
 | `self_destination` | the **same** id; this is what makes the UI route's unread consequence acceptable |
-| `browser_endpoint` | the explicit loopback DevTools page, from `whatsapp-preflight.sh` |
+| `browser_endpoint` | the explicit loopback DevTools page from `whatsapp-preflight.sh`. On the verified machine the store and hook are on **IPv6 `[::1]:9222`**; IPv4 `127.0.0.1:9222` answers 404 (not a browser) |
 | `send_path` | `ui` (the only proven route); `store` is refused without a real `store_send_script` |
 | `allow_mark_read` | `false`; the self exemption applies, so it is not needed |
 | `send_approved` | `true` **only for the proof**; a decision never grants it |
@@ -70,15 +71,21 @@ Bindings, and why each is required:
 
 ## The commands
 
-1. **Resolve the self chat id (read-only, no send).** A rehearsal types the body, asserts the composer,
-   and clears it:
+1. **Resolve the self chat id, read-only.** `--lookup-only` reads the app's store and returns the target
+   and `self_id` without acquiring the send lock, opening a chat, typing or sending:
 
    ```
-   node <INSTALL>/scripts/whatsapp-reply.mjs --to-self --body "live proof rehearsal" 
+   node <INSTALL>/scripts/whatsapp-reply.mjs --to-self --lookup-only
+   # {"ok":true,"lookup_only":true,"chat":{"id":"<SELF_CHAT_ID>",...},"self_id":"<SELF_CHAT_ID>",...}
    ```
 
-   Read `chat.id` (and `self_id`) from the JSON output and put it in `allowed_conversation`,
-   `allowed_conversations` and `self_destination`.
+   Put `chat.id` in `allowed_conversation`, `allowed_conversations` and `self_destination`. To read recent
+   context without opening anything either, use `node <INSTALL>/scripts/whatsapp-read.mjs` (the store
+   reader).
+
+   A **rehearsal** (`--to-self --body "..."` without `--send`) is *not* read-only: it opens the chat,
+   types the body, asserts the composer and clears its own text (opening clears the self chat's marker,
+   which is empty anyway). Use it only when you intend to interact with the page.
 
 2. **Confirm the raw-script guard.** With the id bound, a non-self `--send` must be refused *before the
    chat is opened*:
@@ -103,7 +110,9 @@ Bindings, and why each is required:
 
 4. **Record the ledger.** The reply job, when it runs, summarises to the same notes chat with
    `whatsapp-reply.mjs --to-self` and first calls `whatsapp_decide`, which writes a durable effect
-   through `ctx.effects`.
+   through `ctx.effects` (reserve/confirm; a decision must not clobber a send reservation).
+
+This task performed none of the live steps above: no browser was opened and no message was sent.
 
 ## What is proven, and what is not
 

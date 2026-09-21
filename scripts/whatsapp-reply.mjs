@@ -65,7 +65,7 @@ process.on("exit", () => {
 });
 
 function parseArgs(argv) {
-  const args = { chat: "", body: "", bodyFile: "", send: false, toSelf: false, label: "", timeoutMs: 20000, lockWaitMs: 30000, allowMarkRead: process.env.WA_WHATSAPP_ALLOW_MARK_READ === "1" };
+  const args = { chat: "", body: "", bodyFile: "", send: false, toSelf: false, label: "", timeoutMs: 20000, lockWaitMs: 30000, allowMarkRead: process.env.WA_WHATSAPP_ALLOW_MARK_READ === "1", lookupOnly: false };
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     const value = argv[index + 1];
@@ -78,6 +78,8 @@ function parseArgs(argv) {
     // Explicit acceptance that opening this chat will clear its unread marker. Without it a non-self
     // `--send` is refused before the chat is opened.
     else if (flag === "--allow-mark-read") { args.allowMarkRead = true; }
+    // Read-only resolution: report the target and the self chat id without opening anything.
+    else if (flag === "--lookup-only") { args.lookupOnly = true; }
     else if (flag === "--send") { args.send = true; }
     else if (flag === "--to-self") { args.toSelf = true; }
   }
@@ -271,7 +273,7 @@ async function main() {
     const { readFileSync } = await import("node:fs");
     try { args.body = readFileSync(args.bodyFile, "utf8"); } catch (error) { args.body = ""; }
   }
-  if (!args.body) { console.log(JSON.stringify({ error: "body_required" })); process.exitCode = 1; return; }
+  if (!args.body && !args.lookupOnly) { console.log(JSON.stringify({ error: "body_required" })); process.exitCode = 1; return; }
   const endpoint = await discover();
   if (!endpoint) { console.log(JSON.stringify({ ok: false, error: "no_cdp_endpoint" })); process.exitCode = 3; return; }
   const targets = JSON.parse(await text(`http://${endpoint.host}:${endpoint.port}/json/list`));
@@ -325,6 +327,12 @@ async function main() {
   if (target.error) return done({ ok: false, ...target }, 4);
   const body = args.label ? `${args.label}\n\n${args.body}` : args.body;
   const before = { unread: target.unread, messages: target.messages };
+
+  // Read-only resolution: no lock, no open, no type, no send. This is how an operator or a proof script
+  // discovers the notes-to-self chat id (`self_id`) before binding it in the profile.
+  if (args.lookupOnly) {
+    return done({ ok: true, lookup_only: true, chat: target.chat, self_id: target.self_id || null, before }, 0);
+  }
 
   // Raw-script guard, before anything is opened. Older jobs call this script directly, so the
   // profile-scoped Lua check is not the only line of defence: a non-self `--send` is refused unless the
