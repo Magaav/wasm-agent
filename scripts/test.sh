@@ -177,6 +177,94 @@ print('client schema ok')
 LUA
 WA_SCRIPT="$DB.clientschema.lua" "$BIN" --db "$DB" | grep "client schema ok"
 rm -f "$DB.clientschema.lua"
+# `/update` decides whether there is anything to install and writes one request for the sentinel -
+# it never installs anything itself (the node is the process being replaced). The decision is a pure
+# function of the facts, so every case is checkable without a tree, a build or a sentinel; the one
+# case that is *not* pure - the path a recorded worktree is handed to the shell in - is checked with
+# a real file, because that is where a Windows backslash actually breaks.
+cat > "$DB.update.lua" <<'LUA'
+local update = dofile('lua/core/update.lua')
+local function ok(condition, message) if not condition then error(message, 2) end end
+
+-- Nothing to update from at all.
+local v = update.verdict({ install = '/install' })
+ok(v.ok == false and v.error == 'no_runtime_tree', 'no tree must be a refusal, got ' .. tostring(v.error))
+ok(v.message and #v.message > 20, 'every answer must carry a sentence')
+ok(v.next and #v.next > 20, 'a refusal must say where to go')
+
+-- A tree with nothing built in it: the common case right after an edit, and it must not queue.
+v = update.verdict({ install = '/i', tree = '/tree', candidate = '/tree/rust/target/release/wa.exe' })
+ok(v.error == 'nothing_built', 'an unbuilt tree must be a refusal, got ' .. tostring(v.error))
+ok(v.next:find('cargo build', 1, true), 'the refusal must name the build command: ' .. tostring(v.next))
+
+-- Built, but the only process that could install it is not there.
+v = update.verdict({ install = '/i', tree = '/t', candidate = '/c', candidate_bytes = 10, sentinel_present = false })
+ok(v.error == 'no_sentinel', 'a missing sentinel must be a refusal, got ' .. tostring(v.error))
+
+-- Already running exactly what the tree holds: nothing to queue, and no claim of work done.
+v = update.verdict({ install = '/i', tree = '/t', candidate = '/c', candidate_bytes = 10,
+  sentinel_present = true, tree_commit = 'abc1234', installed_commit = 'abc1234', dirty = 0 })
+ok(v.ok == true and v.changed == false and v.status == 'already_current', 'same commit must be a no-op')
+ok(not v.queued, 'already current must not queue a request')
+
+-- A different commit queues, and says queued rather than done.
+v = update.verdict({ install = '/i', tree = '/t', candidate = '/c', candidate_bytes = 10,
+  sentinel_present = true, tree_commit = 'def5678', installed_commit = 'abc1234', dirty = 0 })
+ok(v.queued == true and v.commit == 'def5678', 'a newer tree must queue')
+ok(v.message:find('queued', 1, true) and v.message:find('not done yet', 1, true),
+  'queued must not read as done: ' .. tostring(v.message))
+
+-- Uncommitted work queues even at the same commit: the commit does not describe the binary, so
+-- "you already run that" would be a claim about code that was never built.
+v = update.verdict({ install = '/i', tree = '/t', candidate = '/c', candidate_bytes = 10,
+  sentinel_present = true, tree_commit = 'abc1234', installed_commit = 'abc1234', dirty = 3 })
+ok(v.queued == true, 'a dirty tree must still queue')
+
+-- The path a recorded worktree comes back as is a Windows path with backslashes, which the shell
+-- this node runs commands in cannot use: a backslash inside a single-quoted word reaches a native
+-- git as an escape. It must be normalised before it is quoted.
+local home = host.paths().temp .. '/wa-update-test'
+host.write_file(home .. '/runtime-worktree.txt', 'C:\\work\\foundation\r\n')
+local tree, source = update.runtime_tree(home)
+ok(tree == 'C:/work/foundation', 'the recorded tree must be normalised, got ' .. tostring(tree))
+ok(source == 'runtime-worktree.txt', 'the source of the tree must be named, got ' .. tostring(source))
+
+-- The command that will be run, without running it. A reason with a quote in it must not be able to
+-- end the quoting early: the sentinel would then read a different verb than the one intended.
+local command = update.request_command(
+  { sentinel = 'C:/install/wa-sentinel.exe', candidate = 'C:/tree/rust/target/release/wa.exe' },
+  "/update: it's mine")
+ok(command:find("'C:/install/wa%-sentinel%.exe' request upgrade"), 'the verb must be spelled out: ' .. command)
+ok(command:find("'C:/tree/rust/target/release/wa%.exe'", 1), 'the binary must be quoted: ' .. command)
+ok(not command:find("it's", 1, true) and command:find("it'\\''s", 1, true),
+  'a quote in the reason must be escaped, not left to end the word: ' .. command)
+
+-- A sentinel that exists and does not work must be a refusal - never a crash, and never a claim of
+-- success. The fixture is a real file that is not a program, reached through the same seam a node
+-- uses (WA_INSTALL_DIR), so nothing here touches the machine's own install or its sentinel. The tree
+-- is a directory of this test's own: the candidate binary is derived from the tree, so a fixture that
+-- put it anywhere else would be testing the wrong thing (and did, once).
+local tree = host.paths().temp .. '/wa-update-tree'
+local broken = host.paths().temp .. '/wa-update-broken'
+host.exec("mkdir -p '" .. tree .. "/rust/target/release' '" .. broken .. "'", "")
+host.write_file(tree .. '/rust/target/release/wa.e' .. 'xe', 'placeholder\n')
+host.write_file(broken .. '/runtime-worktree.txt', (tree:gsub('/', '\\')) .. "\r\n")
+host.write_file(broken .. '/installed.txt', 'commit=0000000\nsource_commit_hint=0000000\n')
+host.write_file(broken .. '/wa-sentinel.e' .. 'xe', 'not a program\n')
+local report = update.run({ install = broken, reason = 'the update test' })
+ok(report.ok == false, 'a sentinel that cannot run must not report success: ' .. tostring(report.message))
+ok(report.error == 'sentinel_refused' or report.error == 'sentinel_unreachable',
+  'the refusal must name what happened, got ' .. tostring(report.error) .. ' (' .. tostring(report.observed) .. ')')
+ok(not report.queued, 'a refused request must not claim to be queued')
+ok(report.observed and #report.observed > 10, 'the refusal must carry what was seen')
+print('update decision ok')
+LUA
+WA_SCRIPT="$DB.update.lua" "$BIN" --db "$DB" | grep "update decision ok"
+rm -f "$DB.update.lua"
+# The same decisions through the route, on a node whose install dir is a fixture. Its sentinel is a
+# stub: a live check that dropped a request into the operator's real request box could install a
+# placeholder over the node that is running. It also asserts that it did not.
+WA_BIN="$BIN" bash scripts/test-update.sh 8874 | grep "the real sentinel's request box is untouched"
 # Context budget is per model (provider.budget), and it is NOT the same thing as
 # provider.limits, which fetches the account's rate limits for the UI. Confusing
 # the two silently disabled compaction once: the window came back nil, so

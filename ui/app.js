@@ -1771,7 +1771,9 @@ input.addEventListener("input", () => {
 // item by construction.
 const commandMenu = document.getElementById("command-menu");
 
-// Only commands that can keep their promise. `/new` starts a thread; nothing here deletes a
+// Only commands that can keep their promise. `/new` starts a thread; `/update` asks the node to
+// install what is already built in its own tree - which the node cannot do to itself, so the honest
+// answer is a *queued* request for the sentinel, and the notice says so. Nothing here deletes a
 // transcript, because the ledger is append-only (§12) and a command that silently removed
 // history would make the record a claim it cannot support.
 const COMMANDS = [
@@ -1779,6 +1781,11 @@ const COMMANDS = [
     name: "/new",
     hint: "start a new session — this window's transcript is cleared, the old thread is not touched",
     run: newThread,
+  },
+  {
+    name: "/update",
+    hint: "install the newest build in this node's tree — the sentinel does it once the node is idle",
+    run: updateNode,
   },
 ];
 
@@ -1791,6 +1798,46 @@ function newId() {
   if (typeof crypto !== "undefined" && crypto.getRandomValues) crypto.getRandomValues(bytes);
   else for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256);
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// `/update` asks the node to install the newest build of its own tree.
+//
+// It cannot install anything from here: the node is the process being replaced, and the sentinel is
+// the only thing that stops or starts it. So the node answers with a report, the report says
+// `queued` (not "done"), and this shows that sentence rather than inventing a second wording for it.
+// A refusal - nothing built, no tree, no sentinel - is displayed with what was seen and where to go.
+async function updateNode() {
+  const notice = document.createElement("div");
+  notice.className = "thread-notice";
+  notice.textContent = "/update — asking the node what it runs and what its tree holds…";
+  messages.append(notice);
+  pin();
+  try {
+    const response = await apiFetch("update", {
+      method: "POST",
+      headers: apiHeaders({ "Content-Type": "application/json" }),
+      body: "{}",
+    });
+    const payload = await response.json();
+    notice.textContent = updateNotice(payload);
+    notice.dataset.state = payload && payload.queued ? "queued" : payload && payload.ok === false ? "refused" : "current";
+  } catch (error) {
+    notice.textContent = "/update could not be asked: " + String(error);
+    notice.dataset.state = "refused";
+  }
+  pin();
+}
+
+// The wording lives in the node (`lua/core/update.lua`), so the window and `wa chat` cannot drift
+// into saying two different things about the same answer. This only has to cope with a node that
+// answered in a shape it does not recognise.
+function updateNotice(payload) {
+  if (!payload || typeof payload !== "object") return "/update: the node did not answer with a report.";
+  const message = payload.message || "";
+  const tail = payload.next ? " " + payload.next : "";
+  if (message) return "/update — " + message + tail;
+  if (payload.queued) return "/update — queued: the sentinel will install it once this node is idle." + tail;
+  return "/update — refused: " + (payload.observed || payload.error || "no reason given") + tail;
 }
 
 // Start a thread with nothing in it.
