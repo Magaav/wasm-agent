@@ -23,6 +23,17 @@ window.__fixtures = {
   jobs: {jobs: [{id:'fixture-job', name:'<img src=x onerror=alert(1)>', enabled:false, revision:1,
     trigger:{kind:'event',topic:'fixture.message'}, action:{kind:'wake',session:'fixture',prompt:'review only'},
     queued:0, source_status:'waiting for explicit event ingress'}]},
+  // The `/update` report. Shaped like the node's answer (lua/core/update.lua), because the window
+  // shows the node's own sentence rather than inventing one: a fixture that invents its own wording
+  // would let the two drift and still pass.
+  update: {
+    ok: true, queued: true, status: "queued", commit: "abc1234", dirty: 0,
+    tree: "C:/work/foundation", candidate: "C:/work/foundation/rust/target/release/wa.exe",
+    request: "C:/Users/test/.wasm-agent/sentinel/requests/1789987058-5708.json",
+    reason: "/update: install the build in C:/work/foundation",
+    message: "queued: the sentinel will install abc1234 once this node is idle. This is not done yet.",
+    next: "the sentinel performs it when this node is idle.",
+  },
   models: {
     model: "fixture-model", provider: "fixture", configured: true,
     context_limit: 128000, database: "/tmp/fixture.db",

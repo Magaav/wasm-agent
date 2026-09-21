@@ -6,6 +6,7 @@ local agentlib = dofile("lua/core/agent.lua")
 -- Everything this REPL prints is captured by whatever launched it (a terminal,
 -- an orchestrator, a test), so it all goes out through the redactor.
 local redact = dofile("lua/core/redact.lua")
+local updater = dofile("lua/core/update.lua")
 
 local M = {}
 
@@ -28,6 +29,7 @@ commands:
   /search <query>      search the message ledger
   /conversation <id>   read a conversation
   /stats               database counts
+  /update              install the newest build in this node's tree (the sentinel does it, once idle)
   /help                this help
   /exit                quit
 anything else is sent to the model.]]
@@ -174,6 +176,12 @@ function M.run(argv)
       print(agent.session_id)
     elseif line == "/stats" then
       print(json.encode(memory.stats()))
+    elseif line == "/update" then
+      -- The same report the window gets from POST /update, and the same sentence: this node cannot
+      -- replace itself, so the answer is what it decided and what it queued for the sentinel.
+      local report = updater.run({ reason = "requested from the interactive chat" })
+      print(redact.text(report.message or json.encode(report)))
+      if report.next then print(redact.text("  next: " .. report.next)) end
     elseif line == "/memories" then
       each(memory.memories(nil, 50), memory_line)
     elseif line:sub(1, 10) == "/remember " then

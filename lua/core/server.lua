@@ -14,6 +14,7 @@ local skillslib = dofile("lua/core/skills.lua")
 -- leave the server rather than trusting every future call site.
 local redact = dofile("lua/core/redact.lua")
 local telemetry = dofile("lua/core/telemetry.lua")
+local updater = dofile("lua/core/update.lua")
 
 memory.setup()
 local agent
@@ -265,6 +266,23 @@ function wa_spell_export(payload, session)
   return json.encode(toolslib.dispatch(memory, "spell_export", {
     name = request.name, params = request.params, binary = request.binary, path = request.path,
   }, user.role))
+end
+
+-- ---- update ---------------------------------------------------------------
+-- `/update` in the composer: install the newest build of this node's own tree.
+--
+-- The node cannot replace itself - the stop is the last command a run executes - so this does not
+-- install anything. It reports what it runs, what its tree holds, and writes one *request* for the
+-- sentinel, which performs it when the node is idle. `lua/core/update.lua` holds the decision and
+-- the wording; a refusal here is an answer, not a failure to answer.
+function wa_update(payload, session)
+  local user = require_master(session)
+  if not user then return json.encode({ error = "forbidden" }) end
+  local request = {}
+  local ok, decoded = pcall(json.decode, payload or "{}")
+  if ok and type(decoded) == "table" then request = decoded end
+  local report = updater.run({ reason = request.reason })
+  return json.encode(report)
 end
 
 -- ---- nodes ---------------------------------------------------------------

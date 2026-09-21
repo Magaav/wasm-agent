@@ -37,6 +37,25 @@ requests. `installed.txt` records the exact hash even for sentinel upgrades;
 their source commit remains explicitly unverified unless built by the clean
 deployment gate. The detailed upgrade transcript is in `sentinel/upgrade.log`.
 
+### `/update`: the node asking, on a human's behalf
+
+The same request can be written from inside the node — `/update` in the composer, or in `wa chat` —
+because the operator should not have to leave the window to say "install the build in your own
+tree". It is the same box and the same verb:
+
+```
+/update          # the window (POST /update) and the CLI both run lua/core/update.lua
+```
+
+That module asks three questions and answers them honestly: is there a runtime tree
+(`runtime-worktree.txt`), is anything built in it (`rust/target/release/wa`), and is that build
+newer than what is installed (tree commit against `installed.txt`). Then it writes one request
+through this binary and reports **queued** — never "updated", because the record that settles it is
+in `sentinel/done/` or `failed/`. A refusal is also an answer: `nothing_built` names the build
+command, `no_runtime_tree` names what it looked for, `no_sentinel` says which path is missing, and a
+tree with uncommitted files installs but warns that `deploy.sh` would have refused it. The node never
+installs anything itself, and the request it writes is the same one a human would type.
+
 The box is `<config>/sentinel/requests/*.json` — `~/.wasm-agent/sentinel/requests` by default. A file
 survives the death of whoever wrote it, needs no socket, and works **when the node is down**, which is
 when you need it most.

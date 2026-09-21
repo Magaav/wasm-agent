@@ -61,6 +61,10 @@ $harness = @'
     // The stream belongs to the old page, so the new page must notice the worker become idle
     // and repaint the answer from the durable ledger, not open the engine's session view.
     window.__fixtures.session.state = { state: "answered", detail: "the last message is a reply" };
+    // `messages`, not `turns`: the wire key was renamed (10326b4 renamed it in the fixtures and in
+    // app.js, which reads payload.messages) and this stage was left pushing into a field nothing
+    // defines. A stage that throws asserted nothing - and reported itself as `FAIL the harness threw`
+    // for every later run, which is how a dead assertion hides.
     window.__fixtures.session.messages.push(
       { seq: 5, role: "tool", tool_name: "bash", content: "done", tool_calls: [] },
       { seq: 6, role: "assistant", content: "RELOAD-MID-RUN-ANSWER", tool_calls: [] });
@@ -1069,9 +1073,28 @@ $harness = @'
     type("/");
     check(menu.open, "commands: `/` must open the list");
     var items = Array.prototype.slice.call(menu.querySelectorAll(".menu-item"));
-    check(items.length === 1, "commands: `/` must offer the commands, got " + items.length);
+    check(items.length === 2, "commands: `/` must offer both commands, got " + items.length);
     check(items[0] && items[0].textContent.indexOf("/new") >= 0,
-      "commands: the list must offer /new, got: " + (items[0] && items[0].textContent));
+      "commands: the list must offer /new first, got: " + (items[0] && items[0].textContent));
+    check(items[1] && items[1].textContent.indexOf("/update") >= 0,
+      "commands: the list must offer /update, got: " + (items[1] && items[1].textContent));
+
+    // `/update` asks the node to install its own tree's build. The three answers it can give must
+    // read as three different things: queued is *not* done, and a refusal is not a silence. The
+    // sentence comes from the node, so this asserts that it is shown, not that it was invented here.
+    var notice = window.__updateNotice({
+      ok: true, queued: true, message: "queued: the sentinel will install abc1234 once this node is idle. This is not done yet.",
+      next: "the sentinel performs it when this node is idle.",
+    });
+    check(notice.indexOf("queued") === 0 || notice.indexOf("/update — queued") >= 0,
+      "commands: a queued update must say queued, got: " + notice);
+    check(notice.indexOf("abc1234") >= 0, "commands: the queued notice must name the commit, got: " + notice);
+    var current = window.__updateNotice({ ok: true, changed: false, message: "nothing to do: this node already runs commit abc1234." });
+    check(current.indexOf("nothing to do") >= 0,
+      "commands: an already-current node must say so, got: " + current);
+    var refused = window.__updateNotice({ ok: false, error: "nothing_built", observed: "no binary at C:/work/foundation/rust/target/release/wa.exe", next: "build it first." });
+    check(refused.indexOf("refused") >= 0 && refused.indexOf("no binary at") >= 0 && refused.indexOf("build it first") >= 0,
+      "commands: a refusal must carry what was seen and where to go, got: " + refused);
 
     // The first match is chosen before any arrow key is pressed, so Enter does what the list shows.
     var chosen = menu.querySelectorAll(".menu-item.selected");
@@ -1104,6 +1127,18 @@ $harness = @'
     var now = window.__chatThread();
     check(!!now && now !== was, "commands: /new must move the window to a different thread");
     check(input.value === "", "commands: the command text must not be left in the composer");
+
+    // Running `/update` must actually ask the node. A notice that says "queued" without a request
+    // behind it would look identical in the transcript, so the request is what is asserted - the
+    // fixtures record it synchronously, the way the fetch wrapper sees it.
+    type("/update");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    var asked = (window.__calls || []).some(function (call) {
+      return String(call.url).indexOf("update") >= 0 && call.method === "POST";
+    });
+    check(asked, "commands: running /update must POST to the node's update route");
+    check(messages.lastElementChild && messages.lastElementChild.classList.contains("thread-notice"),
+      "commands: /update must leave its answer in the transcript");
 
     // And the turn must name that thread, or the transcript is new and the ledger is not.
     var body = window.__composed("hello");
@@ -1178,7 +1213,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker;"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker; window.__updateNotice = updateNotice;"
 
 $server = $null
 $edge = @(

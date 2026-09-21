@@ -1258,6 +1258,7 @@ fn dispatch(
         // it writes nothing to the node's behaviour and reads nothing about a run - it produces a
         // file for *another process*, and the two must not be confusable.
         "/spell/export" if method == "POST" => (200, "application/json", call("wa_spell_export", &[body.trim(), session]).into_bytes()),
+        "/update" if method == "POST" => (200, "application/json", call("wa_update", &[body.trim(), session]).into_bytes()),
         "/spell" if method == "POST" => (200, "application/json", call("wa_spell_run", &[body.trim(), session]).into_bytes()),
         "/provider" if method == "POST" => (200, "application/json", call("wa_set_provider", &[body.trim(), node.as_str(), session]).into_bytes()),
         "/model" if method == "POST" => (200, "application/json", call("wa_set_model", &[body.trim(), node.as_str(), session]).into_bytes()),
