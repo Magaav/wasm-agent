@@ -1,10 +1,12 @@
 ---
 name: self-update
 description: >-
-  How to rebuild and replace the node you are running on, without breaking it. Use it whenever a
-  change you made requires restarting or replacing this node - a new binary, a rebuilt wa.exe, a Lua
-  or Rust change that must be live - and before trying to restart, re-exec or upgrade yourself, or
-  calling your own node's HTTP routes from inside a run.
+  How to rebuild and replace the node you are running on - and, when the change is in the supervisor
+  itself, how to deploy a new wa-sentinel - without breaking it. Use it whenever a change you made
+  requires restarting or replacing this node: a new binary, a rebuilt wa.exe, a Lua or Rust change
+  that must be live, a sentinel fix, a self-update, or before you try to restart, re-exec, upgrade or
+  deploy yourself (`wa-sentinel request upgrade` / `request deploy`), or call your own node's HTTP
+  routes from inside a run.
 ---
 
 # Updating the node you are running on
@@ -120,15 +122,16 @@ plan whose point never happened.
 
 ## What a fresh node must have
 
-Self-update is unavailable without both of these beside the binary, and a fresh install has been
-missing them before:
+Self-update is unavailable without these beside the binary, and a fresh install has been missing them
+before:
 
 | needed | why |
 | --- | --- |
 | `wa-sentinel.exe` | the only process that can stop or start this node |
 | `scripts/upgrade.sh` | what the sentinel resolves and runs for an `upgrade` step |
+| `scripts/deploy.sh` | what the sentinel resolves and runs for a `deploy` step - the one that installs a sentinel; `deploy.sh` ships it, so a node that has only ever had `upgrade` may lack it |
 
-If `request upgrade` is accepted and nothing changes, check those two first — the sentinel deliberately
+If `request upgrade` is accepted and nothing changes, check those first — the sentinel deliberately
 fails loudly now, and says which paths it tried.
 
 ## Recovering when a node does not come back
