@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "worker",
+  "description": "A bounded task that may read, edit files and run a shell. Operator-authorized; never a default.",
+  "operator_authorized": true,
+  "instructions": "Do exactly the bounded task you were given, verify it, then stop and report what changed. Do not start other subagents and do not broaden your own tools.",
+  "allowed_tools": ["read", "read_many", "grep", "ls", "diagnose", "write", "edit", "bash"],
+  "resources": {},
+  "limits": {
+    "max_depth": 0,
+    "timeout_seconds": 900,
+    "max_output_bytes": 131072,
+    "max_tokens": 400000
+  }
+}

@@ -42,6 +42,19 @@ M.shared = {
   schema("skill", "Load a skill: the full instructions for a specialized task listed in your context. Read the one that matches before starting that kind of work.", {
     name = { type = "string", description = "The skill's name, as listed in <available_skills>." } }, { "name" }),
   schema("capabilities", "List the tools available to this account (its capabilities).", {}),
+  schema("subagent", "Start and supervise a local child agent (a subagent) that works on a bounded task with its own fresh context, its own transcript and a restricted tool profile. `start` returns a durable receipt, not a result: the child runs in the background. Use `await` (one bounded wait, never repeated model polling) or `status`/`result` to collect it, and `cancel` to stop it. You may only inspect or cancel the subagents you started. A profile's tools can only narrow your own; they can never grant more than you have. Use `list` to see your subagents and `profiles` to see what is approved.", {
+    action = { type = "string", enum = { "start", "status", "list", "result", "await", "cancel", "profiles" } },
+    profile = { type = "string", description = "Approved profile id, e.g. explore. Defaults to explore (read-only)." },
+    prompt = { type = "string", description = "The bounded task for the child. Required for start." },
+    context = { type = "string", description = "Optional extra context; the parent transcript is never sent." },
+    id = { type = "string", description = "Subagent id, for status/result/await/cancel." },
+    wait_ms = { type = "integer", minimum = 1, maximum = 600000, description = "await: bounded wait in milliseconds." },
+    model = { type = "string", description = "Approved model override; inherits the caller's model when absent." },
+    reasoning = { type = "string", description = "Approved reasoning level override; inherits the caller's when absent." },
+    parent_run_id = { type = "string", description = "Run that owns this child; defaults to the current run." },
+    delivery_id = { type = "string", description = "Job delivery this child belongs to, when a job starts it." },
+    idempotency_key = { type = "string", description = "Repeat start with the same key collects the existing child instead of starting a second one." },
+  }, { "action" }),
   schema("sessions", "List your own past sessions (resumable threads), most recent first.", {
     limit = { type = "integer", minimum = 1, maximum = 100 } }),
   schema("session", "Read a session. Defaults to newest messages; pass next_before_seq back as before_seq to retrieve earlier evidence.", {
@@ -181,6 +194,7 @@ M.tier_of = {
   remember = "memory", recall = "memory", memories = "memory", forget = "memory",
   skill = "skills",
   capabilities = "capabilities",
+  subagent = "subagents",
   sessions = "sessions", session = "sessions", search_messages = "sessions",
   resume_session = "sessions", session_debug = "sessions", session_fixture = "sessions",
   bash = "environment", read = "environment", read_many = "environment", write = "environment",
@@ -195,7 +209,7 @@ M.tier_of = {
 }
 
 local TIER_ORDER = {
-  "memory", "sessions", "capabilities", "environment", "shell", "ledger",
+  "memory", "sessions", "capabilities", "subagents", "environment", "shell", "ledger",
   "client", "spells", "nodes", "plugins",
 }
 
@@ -250,6 +264,18 @@ function M.all(role)
   return list
 end
 
+-- Tool schemas restricted to an exact allowed set (a subagent profile). The
+-- schema list is one half of the boundary; `dispatch` re-checks the same set.
+function M.all_for(allowed, role)
+  local out = {}
+  for _, item in ipairs(M.all(role or "master")) do
+    local name = item["function"].name
+    if allowed and allowed[name] then out[#out + 1] = item end
+  end
+  table.sort(out, function(a, b) return tostring(a["function"].name) < tostring(b["function"].name) end)
+  return out
+end
+
 local function shell_quote(value)
   return "'" .. tostring(value or ""):gsub("'", "'\\''") .. "'"
 end
@@ -267,6 +293,14 @@ function M.dispatch(memory, name, args, role, ctx)
   role = role or "master"
   ctx = ctx or {}
   local user_id = ctx.user_id or "master"
+  -- A subagent runs only the exact tools its profile named. Checked here as well
+  -- as in the schema list it was offered: a model can ask for a tool it was not
+  -- offered, and a schema filter that is not re-checked is not a boundary.
+  if ctx.subagent then
+    local allowed = ctx.subagent.allowed or {}
+    if not allowed[name] then return { error = "capability_not_in_profile:" .. tostring(name) } end
+    if name == "subagent" then return { error = "subagent_recursion_forbidden" } end
+  end
   if not is_master(role) and admin_names()[name] then return { error = "forbidden_for_role:" .. role } end
   if name == "operation" then
     if not is_master(role) then return {error="forbidden_for_role:" .. role} end
@@ -309,6 +343,10 @@ function M.dispatch(memory, name, args, role, ctx)
     local list = {}
     for _,item in ipairs(M.all(role)) do list[#list+1]=item['function'].name end
     return { role = role, capabilities = list, note = "ask a master to unlock more" }
+  elseif name == "subagent" then
+    -- One Lua facade for the model and for the HTTP control route; the owner is
+    -- derived from `ctx` (server side), never from the arguments the model sent.
+    return dofile("lua/core/subagents.lua").control(args, ctx)
   elseif name == "search_ledger" then
     return memory.search_ledger(args.query or "", args.conversation_id, args.limit or 20)
   elseif name == "conversation" then

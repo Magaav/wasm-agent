@@ -472,20 +472,29 @@ function M.start_session(route_id, objective, opts)
   opts = opts or {}
   local id = opts.id or host.uuid()
   local now = host.now()
-  exec("INSERT INTO sessions(id,route_id,objective,started_at,user_id,node_id,title,mode,updated_at) " ..
-       "VALUES(?,?,?,?,?,?,?,?,?)",
+  -- `parent_session_id` is what makes a subagent's transcript independent but
+  -- linked: the child session is its own row, so the parent transcript is never
+  -- written by a child, while its owner can still find it.
+  exec("INSERT INTO sessions(id,route_id,objective,started_at,user_id,node_id,title,mode,updated_at,parent_session_id) " ..
+       "VALUES(?,?,?,?,?,?,?,?,?,?)",
        {id, route_id or "", objective or "", now, opts.user_id or "master",
-        opts.node_id or "", opts.title or objective or "", opts.mode or "default", now})
+        opts.node_id or "", opts.title or objective or "", opts.mode or "default", now,
+        -- An empty string, never nil: a nil makes the params table sparse, the JSON
+        -- encoder drops the last element, and the insert fails "got 9, needed 10".
+        opts.parent_session_id or ""})
   M.journal("session", id, M.session(id))
   return id
 end
 
 -- Reuse the newest open session for this (user, node) pair, or start one.
+-- Child (subagent) sessions are excluded: a normal turn must never land in a
+-- child's transcript just because it is the newest open row for the pair.
 function M.ensure_session(user_id, node_id, title)
   user_id = user_id or "master"
   node_id = node_id or ""
   local rows = query(
     "SELECT id FROM sessions WHERE user_id=? AND node_id=? AND ended_at IS NULL " ..
+    "AND parent_session_id IS NULL " ..
     "ORDER BY started_at DESC LIMIT 1", {user_id, node_id})
   if #rows > 0 then return rows[1].id end
   return M.start_session(node_id, title or "chat", { user_id = user_id, node_id = node_id, title = title or "chat" })
