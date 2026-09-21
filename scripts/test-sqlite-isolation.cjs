@@ -49,6 +49,17 @@ function wa_reply(body, session, node)
     tx_exec("COMMIT")
     return json.encode({saw_uncommitted=visible})
   end
+  if request.text=="fail-in-transaction" then
+    tx_exec("BEGIN IMMEDIATE")
+    tx_exec("INSERT INTO tx_probe(k) VALUES('C')")
+    error("intentional fixture transaction failure")
+  end
+  if request.text=="commit-after-error" then
+    tx_exec("BEGIN IMMEDIATE")
+    tx_exec("INSERT INTO tx_probe(k) VALUES('D')")
+    tx_exec("COMMIT")
+    return json.encode({rows=tx_query("SELECT k FROM tx_probe ORDER BY k")})
+  end
   if request.text=="read-final" then return json.encode({rows=tx_query("SELECT k FROM tx_probe ORDER BY k")}) end
   error("unknown fixture action")
 end
@@ -65,7 +76,7 @@ let child,log,checks=0;
  child.on('error',e=>console.error(e));const base='http://127.0.0.1:'+port;
  async function until(fn,label){const end=Date.now()+12000;while(Date.now()<end){if(await fn())return;await sleep(20);}throw Error('deadline: '+label);}
  await until(async()=>{try{return(await fetch(base+'/health',{signal:AbortSignal.timeout(500)})).ok;}catch{return false;}},'node ready');
- async function chat(thread,text){const r=await fetch(base+'/chat',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({thread,text}),signal:AbortSignal.timeout(12000)});const value=await r.json();assert.equal(r.status,200,JSON.stringify(value));assert.ok(!value.error,JSON.stringify(value));return value;}
+ async function chat(thread,text,allowError=false){const r=await fetch(base+'/chat',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({thread,text}),signal:AbortSignal.timeout(12000)});const value=await r.json();if(!allowError){assert.equal(r.status,200,JSON.stringify(value));assert.ok(!value.error,JSON.stringify(value));}return value;}
  await Promise.all([chat('tx-A','warm'),chat('tx-B','warm')]);checks++;
  const a=chat('tx-A','hold-and-rollback');
  await until(()=>fs.existsSync(path.join(root,'.wasm-agent/A-open')),'A transaction opened');
@@ -74,6 +85,8 @@ let child,log,checks=0;
  assert.equal(rb.saw_uncommitted,0,'another interpreter must NEVER see an uncommitted row');checks++;
  assert.equal(ra.rolled_back,true);checks++;
  const final=await chat('tx-B','read-final');assert.deepEqual(final.rows,[{k:'B'}],'A rollback must not erase B commit or retain A row');checks++;
+ const failed=await chat('tx-A','fail-in-transaction',true);assert.match(failed.error,/intentional fixture transaction failure/);checks++;
+ const after=await chat('tx-B','commit-after-error');assert.deepEqual(after.rows,[{k:'B'},{k:'D'}],'Lua error must rollback C and release its write lock');checks++;
  fs.writeFileSync(path.join(root,'verdict.json'),JSON.stringify({suite:'sqlite-worker-isolation',checks,failed:0,skipped:0,ok:true}));
  console.log(`sqlite worker isolation ok (${checks} checks, 0 skipped; real workers, no inference)\nevidence: ${root}`);
 }catch(error){fs.writeFileSync(path.join(root,'verdict.json'),JSON.stringify({suite:'sqlite-worker-isolation',checks,failed:1,skipped:0,ok:false,error:String(error)}));console.error(error.stack);console.error('evidence: '+root);process.exitCode=1;

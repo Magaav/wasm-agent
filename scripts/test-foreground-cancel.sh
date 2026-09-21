@@ -13,10 +13,29 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 BIN="${WA_BIN:-rust/target/release/wa}"
-PORT="${1:-9361}"
+PORT="${1:-$(node scripts/free-test-port-block.cjs 3)}"
 CLIENT_PORT=$((PORT + 1))
 MOCK_PORT=$((PORT + 2))
 WORK="$(mktemp -d /tmp/wa-fgcancel-XXXXXX)"
+# Safe standalone as well as under the gate: never inherit an operator home,
+# credentials, approved profiles, peer binding, or provider configuration.
+while IFS= read -r variable; do
+  case "$variable" in
+    WASM_AGENT_IN_TURN) ;;
+    WASM_AGENT_*|WA_*|OPENAI_*|OPENCODE_*|ANTHROPIC_*) unset "$variable" ;;
+  esac
+done < <(compgen -e)
+mkdir -p "$WORK/home"
+if command -v cygpath >/dev/null 2>&1; then
+  NATIVE_HOME="$(cygpath -w "$WORK/home")"
+  NATIVE_ROOT="$(cygpath -w "$ROOT")"
+  NATIVE_DB="$(cygpath -w "$WORK/cancel.db")"
+  NATIVE_UI="$(cygpath -w "$ROOT/ui")"
+else
+  NATIVE_HOME="$WORK/home" NATIVE_ROOT="$ROOT" NATIVE_DB="$WORK/cancel.db" NATIVE_UI="$ROOT/ui"
+fi
+export WASM_AGENT_RENDEZVOUS="" WASM_AGENT_RELAY="" WASM_AGENT_MANAGED=0
+export HTTP_PROXY="" HTTPS_PROXY="" ALL_PROXY="" NO_PROXY=127.0.0.1,localhost,::1
 
 PIDS=()
 fail() { echo "  FAIL: $*" >&2; exit 1; }
@@ -88,8 +107,9 @@ WASM_AGENT_LLM_BASE_URL="http://127.0.0.1:$MOCK_PORT" \
 WASM_AGENT_LLM_API_KEY=test-only \
 WASM_AGENT_LLM_MODEL=fixture \
 WASM_AGENT_WORKERS_MAX=4 \
-WASM_AGENT_LUA_ROOT="$ROOT" \
-  "$BIN" --db "$WORK/cancel.db" serve --port "$PORT" --client-port "$CLIENT_PORT" --ui "$ROOT/ui" > "$WORK/serve.log" 2>&1 &
+WASM_AGENT_HOME="$NATIVE_HOME" \
+WASM_AGENT_LUA_ROOT="$NATIVE_ROOT" \
+  "$BIN" --db "$NATIVE_DB" serve --port "$PORT" --client-port "$CLIENT_PORT" --ui "$NATIVE_UI" > "$WORK/serve.log" 2>&1 &
 PIDS+=("$!")
 for _ in $(seq 1 60); do
   code="$(curl -s -o /dev/null -m 2 -w '%{http_code}' "http://127.0.0.1:$PORT/health" 2>/dev/null)"

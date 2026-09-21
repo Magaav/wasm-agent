@@ -497,21 +497,27 @@ function M.remote_chat(selector, text)
   local node = M.find(selector)
   if not node then return { error = "unknown_node:" .. tostring(selector) } end
   if node.local_node then return { error = "not_remote" } end
-  local headers, problem = M.signed_headers("chat", text or "")
+  -- The intended target is inside the signed body, exactly as `/node/call` puts `to_node_id` there.
+  -- A relay (or anyone on the path) can change the envelope's `to`, but the receiver checks this
+  -- signed field against itself, so a valid chat for one node cannot be redirected to another node
+  -- or endpoint. The signature domain is `chat-v2`, which is also what stops a new request from
+  -- executing on an old receiver: the old verifier only knows `chat`, so it refuses `bad_signature`.
+  local body = json.encode({ to_node_id = node.node_id, text = text or "" })
+  local headers, problem = M.signed_headers("chat-v2", body)
   if not headers then return { error = problem } end
-  headers["Content-Type"] = "text/plain; charset=utf-8"
+  headers["Content-Type"] = "application/json; charset=utf-8"
   headers["Accept"] = "text/event-stream"
 
   local endpoint = M.endpoint(node)
   if endpoint then
     local result = json.decode(host.relay(endpoint:gsub("/+$", "") .. "/node/chat",
-      json.encode(headers), text or ""))
+      json.encode(headers), body))
     if result and tonumber(result.status) == 200 then
       return { ok = true, node = node.name, transport = "direct" }
     end
   end
 
-  local response = M.request(node, "/node/chat", text or "", headers)
+  local response = M.request(node, "/node/chat", body, headers)
   if response and tonumber(response.status) == 200 then
     for line in tostring(response.body):gmatch("data: ([^\n]+)") do
       host.stream(line)

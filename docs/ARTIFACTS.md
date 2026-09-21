@@ -107,7 +107,11 @@ is `inconsistent_artifact_scope`, refused rather than resolved in the artifact's
 guest-imported artifact:
 
 - may not set `requirements.elevation`;
-- may only name a profile in the guest-approved list (`job-deterministic`); and
+- may not be a `subagent`. The runtime executes a child as the local operator and does not yet enforce a
+guest principal at dispatch, so an `imported_by: guest` claim would not match execution; the import is
+refused (`guest_subagent_requires_principal_binding`). This applies even to the guest-named
+`job-deterministic` profile and to a guest-owned artifact imported by an operator - a profile name is not
+a principal binding. A local operator import of the same artifact remains allowed; and
 - may not be a `wake` (the operator's own conversation) or a `run` (operator-controlled shell).
 
 An artifact that says `owner: operator` therefore cannot hand a guest operator capabilities, and a guest

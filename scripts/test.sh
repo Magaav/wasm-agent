@@ -7,6 +7,27 @@ SKIPPED=0
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 
+# A scratch DB does not isolate profile/config/effect files. Fence the ENTIRE gate,
+# including new fixtures whose authors might otherwise forget to select a home.
+# Keep the explicit skip request and in-turn deploy guard; never inherit provider
+# accounts, a real instance registry, a job auth token, or the user's runtime paths.
+while IFS= read -r variable; do
+  case "$variable" in
+    WASM_AGENT_SKIP_UI_TESTS|WASM_AGENT_IN_TURN) ;;
+    WASM_AGENT_*|WA_*|OPENAI_*|OPENCODE_*|ANTHROPIC_*) unset "$variable" ;;
+  esac
+done < <(compgen -e)
+GATE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/wa-gate-home-XXXXXX")"
+if command -v cygpath >/dev/null 2>&1; then
+  export WASM_AGENT_HOME="$(cygpath -w "$GATE_HOME")"
+else
+  export WASM_AGENT_HOME="$GATE_HOME"
+fi
+export WASM_AGENT_RENDEZVOUS="" WASM_AGENT_RELAY="" WASM_AGENT_MANAGED=0
+export WASM_AGENT_LLM_BASE_URL=http://127.0.0.1:1 WASM_AGENT_LLM_API_KEY=fixture-only
+export HTTP_PROXY="" HTTPS_PROXY="" ALL_PROXY="" NO_PROXY=127.0.0.1,localhost,::1
+echo "gate isolated home: $WASM_AGENT_HOME (retained for diagnostics)"
+
 cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 # The execution and automation contracts have native, model-free adversarial tests.
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
@@ -906,6 +927,8 @@ WA_BIN="$BIN" bash scripts/test-run-isolation.sh "$ISOLATION_PORT" > "$DB.isolat
   echo "the run-isolation fixture failed; its output:"; tail -40 "$DB.isolation.log"; exit 1; }
 grep '^run isolation ok$' "$DB.isolation.log"
 node scripts/test-sqlite-isolation.cjs "$BIN"
+node scripts/test-peer-run-admission.cjs "$BIN"
+bash scripts/test-foreground-cancel.sh
 rm -f "$DB.window"*
 echo "recovery cli ok"
 
