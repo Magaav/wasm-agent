@@ -251,12 +251,19 @@ if [ -n "${WA_RUNTIME_WORKTREE:-}" ]; then
 fi
 WA_INSTALL_DIR="$INSTALL_DIR" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
   WA_UPGRADE_REASON="$REASON" WA_UPGRADE_VIA=deploy.sh \
-  bash "$UPGRADE" "$(cd "$(dirname "$NEW")" && pwd)/$(basename "$NEW")" 2>&1 | sed "s/^/  upgrade: /"
-UPGRADE_STATUS=${PIPESTATUS[0]}
+  # upgrade.sh writes to a *file*, not into a pipe. A deploy runs detached, and a detached process's stdout
+  # belongs to whoever spawned it - so when that parent went away, a write into the pipe raised SIGPIPE and
+  # upgrade.sh died with exit 141 before it could say what it was doing. That transcript is also the evidence
+  # that was missing: the failure was reported and nothing could say why.
+  bash "$UPGRADE" "$(cd "$(dirname "$NEW")" && pwd)/$(basename "$NEW")" > "$INSTALL_DIR/deploy-upgrade.log" 2>&1
+UPGRADE_STATUS=$?
+# Reporting must never fail the deploy: with stdout gone, `sed` dies of EPIPE and pipefail would then report
+# its status instead of upgrade.sh's.
+sed "s/^/  upgrade: /" "$INSTALL_DIR/deploy-upgrade.log" 2>/dev/null | tail -20 || true
 if [ "$UPGRADE_STATUS" = "3" ]; then
   fail "the node upgraded, but its script or install record failed (exit 3); inspect the live pid and installed.txt"
 fi
-[ "$UPGRADE_STATUS" = "0" ] || fail "upgrade.sh failed (exit $UPGRADE_STATUS); inspect its rollback output before assuming which binary is live"
+[ "$UPGRADE_STATUS" = "0" ] || fail "upgrade.sh failed (exit $UPGRADE_STATUS); its own output is in $INSTALL_DIR/deploy-upgrade.log"
 
 # 7. Verify that the node answering is *this* install: the listener's pid must be the pid the install
 #    recorded. Without this, a second node on the port answers /health and the deploy reports success for
