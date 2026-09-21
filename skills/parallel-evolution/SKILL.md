@@ -166,3 +166,26 @@ This procedure is generic. Map its words to the repository before relying on it:
 In wasm-agent specifically: work in a worktree, never in the `main` checkout; a node stays
 on the branch named after it and cuts `change/<name>` for each task; and a commit with no
 `Agent:` trailer is refused.
+
+### wasm-agent, concretely
+
+- **Your branch is your name.** `git symbolic-ref --short HEAD`; `main` is never a node's name.
+- **Work in your own worktree.** Never switch, commit in, or leave a branch in another checkout —
+  a live run did exactly that and left the human's `main` checkout sitting on its branch.
+- **One `change/<name>` per concern**, cut from `origin/main`, kept current, merged and deleted.
+  A node's own branch is its *home* (keep it current with `main`); each task is a short-lived
+  change branch off `main`.
+- **Before you start:** `git fetch origin && git merge origin/main`. A node that cannot see `main`
+  cannot see the rules — an agent read a doc that was on `main` while its branch was 21 commits
+  behind, correctly got `not_found`, and repeated the mistake the rule existed to prevent.
+- **Before you report done:** rebase onto `origin/main` and prove it with
+  `git merge-tree --write-tree origin/main HEAD`. A branch that conflicts is unfinished work.
+- **Commit before you stop.** An uncommitted edit is invisible, unattributable and lost the moment
+  anyone pulls; if you must pause, commit `wip(...)` and say what remains.
+- **Enable the hooks once per clone** (worktrees share the git dir):
+  `git config core.hooksPath .githooks`. The commit-msg hook refuses a commit on `main` and refuses
+  a commit with no trailer; the pre-commit hook refuses CRLF in the index, so `core.autocrlf` must
+  be `false`.
+- **The trailer:** `Agent: wasm-agent node=<node> session=<id>` or `Agent: pi session=<id>`.
+- **The board:** `bash scripts/worktrees.sh` prints every worktree with its drift, its uncommitted
+  files and whether it merges — run it before you start. The gate is `bash scripts/test.sh`.
