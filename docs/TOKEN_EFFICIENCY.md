@@ -50,6 +50,13 @@ The report includes:
   Neither proves provider retention or guarantees a cache hit.
 * Request/first-delta/run latency sample counts and p50/p95; average request
   component bytes, with reasoning/arguments labeled as source-byte subsets.
+* Completed tool elapsed time by built-in tool name (unknown/plugin names are
+  aggregated as `other`), including measured/unmeasured counts, failures,
+  clock source, total/mean/p50/p95/max and share of measured tool time. Run
+  decomposition reports inference, summary, tool, bash/shell and unclassified
+  elapsed time only when every child span is measured and consistent. These are
+  summed spans: concurrent runs can overlap, tool spans include dispatch and
+  output projection, and neither measure is process CPU or global wall-clock share.
 * Repeated tool argument hashes **within a run**, never labeled wasted work.
   The same read after an edit can be necessary.
 

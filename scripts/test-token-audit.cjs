@@ -72,10 +72,57 @@ assert.equal(r.usage.missing_usage,1);assert.equal(r.usage.recorded_calls_cost_u
 const summaryStart=event('s','summary','start',{}),summaryEnd=event('s','summary','end',b.payload);
 r=audit([a,b,summaryStart,summaryEnd]);assert.equal(r.usage.summaries,1);
 assert.equal(r.usage.recorded_calls_cost_usd,.02);assert.equal(r.prefix.comparisons,0);
-const tool=(span,run)=>event(span,'tool','start',{name:'read',arguments_hash:h('f')},'a',run);
+const tool=(span,run,name='read',session='a')=>event(span,'tool','start',{name,arguments_hash:h('f')},session,run);
+const toolEnd=(span,run,name,ms,ok=true,clock='monotonic',session='a')=>event(span,'tool','end',{name,ms,ok,clock},session,run);
 r=audit([tool('a','1'),tool('b','1'),tool('c','2')]);
 assert.equal(r.tools.repeated_arguments_within_run,1);assert.equal(r.tools.pending,3);
 assert.ok(r.limitations.includes('repeated_arguments_are_not_automatically_waste'));
+
+// Tool elapsed time is attributed without exposing arguments or private plugin names.
+const elapsedRows=[];
+elapsedRows.push(event('run-time','run','start',{},'a','timed'));
+elapsedRows.push(event('model-time','model_call','start',{},'a','timed'));
+elapsedRows.push(event('model-time','model_call','end',{ok:true,ms:1500,clock:'monotonic',normalized:{known:false}},'a','timed'));
+elapsedRows.push(tool('read-time','timed','read'),toolEnd('read-time','timed','read',100));
+elapsedRows.push(tool('bash-fast','timed','bash'),toolEnd('bash-fast','timed','bash',1000));
+elapsedRows.push(tool('bash-slow','timed','bash'),toolEnd('bash-slow','timed','bash',9000,false));
+elapsedRows.push(event('run-time','run','end',{ms:12000,clock:'monotonic'},'a','timed'));
+elapsedRows.push(tool('pending-bash','pending','bash'));
+elapsedRows.push(tool('private-tool','private','private_customer_plugin'),
+  toolEnd('private-tool','private','private_customer_plugin',25));
+r=audit(elapsedRows);
+assert.equal(r.tools.completed,4);assert.equal(r.tools.pending,1);assert.equal(r.tools.failed,1);
+assert.equal(r.tools.measured_elapsed,4);assert.equal(r.tools.unmeasured_elapsed,0);
+assert.equal(r.tools.elapsed.total_ms,10125);assert.equal(r.tools.elapsed.by_clock.monotonic.total_ms,10125);
+assert.equal(r.tools.by_name.bash.completed,2);assert.equal(r.tools.by_name.bash.elapsed.total_ms,10000);
+assert.equal(r.tools.by_name.bash.elapsed.p50_ms,1000);assert.equal(r.tools.by_name.bash.elapsed.p95_ms,9000);
+assert.equal(r.tools.by_name.bash.elapsed.failed_ms,9000);
+assert.equal(r.tools.by_name.bash.share_of_measured_tool_ms,10000/10125);
+assert.equal(r.tools.by_name.other.completed,1);
+assert.ok(!JSON.stringify(r).includes('private_customer_plugin'));
+assert.equal(r.run_timing.completed_runs,1);assert.equal(r.run_timing.decomposed_runs,1);
+assert.equal(r.run_timing.decomposed_run_ms,12000);assert.equal(r.run_timing.model_ms,1500);
+assert.equal(r.run_timing.tool_ms,10100);assert.equal(r.run_timing.bash_ms,10000);
+assert.equal(r.run_timing.unclassified_ms,400);
+assert.equal(r.run_timing.bash_share_of_decomposed_run_ms,10000/12000);
+assert.equal(r.run_timing.non_monotonic_clock_runs,0);
+assert.ok(r.limitations.includes('summed_span_time_is_not_global_wall_clock'));
+
+const missingMs=[tool('missing-ms','missing','bash'),toolEnd('missing-ms','missing','bash',undefined)];
+r=audit(missingMs);assert.equal(r.tools.unmeasured_elapsed,1);assert.equal(r.tools.elapsed.samples,0);
+const mismatchStart=tool('mismatch','mismatch','read'),mismatchEnd=toolEnd('mismatch','mismatch','bash',1);
+assert.throws(()=>audit([mismatchStart,mismatchEnd]),/inconsistent_tool_name/);
+r=audit([tool('wall-clock','wall','read'),toolEnd('wall-clock','wall','read',7,true,'wall-fallback')]);
+assert.equal(r.tools.elapsed.by_clock.wall_fallback.total_ms,7);
+const incompleteRun=[event('incomplete-run','run','start',{},'a','incomplete'),tool('unfinished','incomplete','bash'),
+  event('incomplete-run','run','end',{ms:20,clock:'monotonic'},'a','incomplete')];
+r=audit(incompleteRun);assert.equal(r.run_timing.incomplete_child_timing_runs,1);assert.equal(r.run_timing.decomposed_runs,0);
+const inconsistentRun=[event('short-run','run','start',{},'a','short'),tool('long-tool','short','bash'),
+  toolEnd('long-tool','short','bash',11),event('short-run','run','end',{ms:10,clock:'monotonic'},'a','short')];
+r=audit(inconsistentRun);assert.equal(r.run_timing.inconsistent_runs,1);assert.equal(r.run_timing.decomposed_runs,0);
+const hugeToolA=tool('huge-tool-a','huge-a','bash'),hugeToolAEnd=toolEnd('huge-tool-a','huge-a','bash',Number.MAX_SAFE_INTEGER);
+const hugeToolB=tool('huge-tool-b','huge-b','bash'),hugeToolBEnd=toolEnd('huge-tool-b','huge-b','bash',1);
+assert.throws(()=>audit([hugeToolA,hugeToolAEnd,hugeToolB,hugeToolBEnd]),/tool_time_total_exceeds_safe_integer/);
 const measured=start('measured',{prefix_audit_ms:2,prefix_audit:{schema_version:1,relation:'rewritten',first_changed_message:2,tools_changed:true,settings_changed:false,routing_changed:true}});
 r=audit([measured,end('measured')]);assert.equal(r.prepared_prefix.measured,1);
 assert.equal(r.timing.prefix_audit_ms.p50,2);assert.equal(r.prepared_prefix.rewritten,1);assert.equal(r.prepared_prefix.tools_changed,1);

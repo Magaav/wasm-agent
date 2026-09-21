@@ -25,6 +25,19 @@ remain local, not in Git. The 2,185-event snapshot covers
 * 524 completed tools, 20 failed; 368 bash, 89 edit, 18 read, three read_many,
   six operation calls. Repeated arguments within a run: two. Repetition is not
   automatically waste; failures are not automatically failed tasks.
+* A follow-up with the elapsed-time auditor found valid monotonic duration on all
+  524 completed tool spans: 6,875,581 ms summed, of which bash contributed
+  6,714,101 ms (**97.6514%**). Bash p50 was 292 ms, p95 88,211 ms and maximum
+  1,450,737 ms; its 11 failed calls consumed 606,601 ms. These spans include
+  dispatch and output projection and can overlap work in other runs; they are not
+  process CPU or global wall-clock time.
+* Only 17 runs in this time-bounded export had complete, internally consistent
+  parent/child timing. Within that separate population, summed run time was
+  8,863,196 ms: model calls 3,658,835 ms (**41.2812%**), all tools 5,118,904 ms
+  (**57.7546%**), bash/shell 4,957,605 ms (**55.9347%**) and unclassified work
+  85,457 ms. Per-run bash share had p50 **14.1772%** and p95 **80.4431%**. Do not
+  divide the all-tool population by this complete-run subset or present summed
+  concurrent runs as elapsed clock time.
 * Prepared-prefix measurements are absent. No verified task outcomes or independent
   acceptance checks are attached to this historical sample.
 

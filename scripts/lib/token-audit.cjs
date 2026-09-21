@@ -8,6 +8,18 @@ const canonical = v => Array.isArray(v) ? '[' + v.map(canonical).join(',') + ']'
 const digest = v => crypto.createHash('sha256').update(canonical(v)).digest('hex');
 const hash = s => typeof s === 'string' && /^[a-f0-9]{64}$/i.test(s);
 const percentile = (a, p) => a.length ? [...a].sort((x,y) => x-y)[Math.ceil(a.length*p)-1] : null;
+const total = values => values.reduce((sum,value) => sum + value, 0);
+const timingSummary = values => ({samples:values.length,total_ms:values.length?total(values):0,
+  mean_ms:values.length?total(values)/values.length:null,p50_ms:percentile(values,.5),
+  p95_ms:percentile(values,.95),max_ms:values.length?Math.max(...values):null});
+// Built-in names are public capabilities. Unknown/plugin names are aggregated so an
+// offline metadata report cannot disclose a private integration merely by naming it.
+const PUBLIC_TOOL_NAMES = new Set(['remember','recall','memories','skill','capabilities','sessions','session',
+  'search_messages','resume_session','search_ledger','conversation','list_conversations','forget','bash',
+  'operation','read','read_many','write','edit','ls','grep','diagnose','client','shell','spell_save','spell_run',
+  'spell_list','spell_get','spell_forget','spell_export','remote','nodes','session_debug','session_fixture','tool_result']);
+const publicToolName = name => typeof name === 'string' && PUBLIC_TOOL_NAMES.has(name) ? name : 'other';
+const runKey = event => event && event.run_id ? JSON.stringify([event.session_id,event.run_id]) : null;
 
 function audit(input) {
   const rows = Array.isArray(input) ? input : input?.events;
@@ -46,6 +58,25 @@ function audit(input) {
     observed_cache_write_tokens:0, observed_uncached_tokens:0, observed_priced_cost_usd:0};
   const timing = {model_ms:[],ttft_ms:[],run_ms:[],prefix_audit_ms:[]};
   const tools = {completed:0,failed:0,pending:0,repeated_arguments_within_run:0};
+  const toolBuckets = new Map(), toolTimes = [], toolTimesByClock = new Map();
+  const runParts = new Map(), completedRuns = [];
+  const bucketFor = name => {
+    name=publicToolName(name);
+    if(!toolBuckets.has(name)) toolBuckets.set(name,{completed:0,failed:0,pending:0,times:[],failedTimes:[],clocks:{}});
+    return toolBuckets.get(name);
+  };
+  const partsFor = event => {
+    const key=runKey(event); if(!key) return null;
+    if(!runParts.has(key)) runParts.set(key,{inference_ms:0,summary_ms:0,tool_ms:0,bash_ms:0,unmeasured:0,clocks:{}});
+    return runParts.get(key);
+  };
+  const addPart = (event,field,ms,clock) => {
+    const parts=partsFor(event); if(!parts) return;
+    if(!number(ms)) { parts.unmeasured++; return; }
+    parts[field]+=ms;
+    const clockName=clock==='monotonic'?'monotonic':clock==='wall-fallback'?'wall_fallback':'unknown';
+    parts.clocks[clockName]=(parts.clocks[clockName]||0)+1;
+  };
   let cachePrompt = 0, cacheCalls = 0, cacheHitCalls = 0;
   const usable = new Map();
   for (const [key,pair] of spans) {
@@ -53,17 +84,45 @@ function audit(input) {
     if (pair.start && pair.end && (pair.start.seq >= pair.end.seq || pair.start.run_id !== pair.end.run_id)) {
       throw Error('inconsistent_span_boundaries');
     }
-    if (pair.kind === 'run') { if (number(end?.ms)) timing.run_ms.push(end.ms); continue; }
-    if (pair.kind === 'tool') {
-      if (!end) tools.pending++;
-      else { tools.completed++; if (end.ok === false) tools.failed++; }
+    if (pair.kind === 'run') {
+      if (number(end?.ms)) timing.run_ms.push(end.ms);
+      if(end) completedRuns.push({event:pair.end,paired:!!pair.start,ms:end.ms,clock:end.clock});
       continue;
     }
-    if (!end) { usage.pending_calls++; continue; }
+    if (pair.kind === 'tool') {
+      const startName=pair.start?.payload?.name,endName=end?.name;
+      if(typeof startName==='string'&&typeof endName==='string'&&startName!==endName) throw Error('inconsistent_tool_name');
+      const name=startName||endName,bucket=bucketFor(name),event=pair.start||pair.end;
+      if (!end) {
+        tools.pending++;bucket.pending++;const parts=partsFor(event);if(parts) parts.unmeasured++;
+      } else {
+        tools.completed++;bucket.completed++;
+        if (end.ok === false) {tools.failed++;bucket.failed++;}
+        if(number(end.ms)&&pair.start) {
+          const clockName=end.clock==='monotonic'?'monotonic':end.clock==='wall-fallback'?'wall_fallback':'unknown';
+          toolTimes.push(end.ms);bucket.times.push(end.ms);bucket.clocks[clockName]=(bucket.clocks[clockName]||0)+1;
+          if(!toolTimesByClock.has(clockName)) toolTimesByClock.set(clockName,[]);
+          toolTimesByClock.get(clockName).push(end.ms);
+          if(end.ok===false) bucket.failedTimes.push(end.ms);
+          addPart(event,'tool_ms',end.ms,end.clock);
+          if(name==='bash'||name==='shell') addPart(event,'bash_ms',end.ms,end.clock);
+        } else {
+          const parts=partsFor(event);if(parts) parts.unmeasured++;
+        }
+      }
+      continue;
+    }
+    if (!end) {
+      usage.pending_calls++;
+      const parts=partsFor(pair.start);if(parts) parts.unmeasured++;
+      continue;
+    }
     usage.completed_calls++; if (pair.kind === 'summary') usage.summaries++;
     if (!pair.start) usage.unmatched_ends++;
     if (end.ok === false) usage.failed_calls++;
     if (number(end.ms)) timing.model_ms.push(end.ms);
+    if(pair.start) addPart(pair.start,pair.kind==='summary'?'summary_ms':'inference_ms',end.ms,end.clock);
+    else {const parts=partsFor(pair.end);if(parts) parts.unmeasured++;}
     if (number(end.ttft_ms)) timing.ttft_ms.push(end.ttft_ms);
     const u = end.normalized || {};
     const valid = u.known === true && count(u.prompt) && count(u.output)
@@ -145,14 +204,57 @@ function audit(input) {
     }
   }
   if (Object.values(shape).some(n=>!count(n))) throw Error('byte_total_exceeds_safe_integer');
+  const toolTotal=total(toolTimes);
+  if(!Number.isSafeInteger(toolTotal)) throw Error('tool_time_total_exceeds_safe_integer');
+  tools.measured_elapsed=toolTimes.length;
+  tools.unmeasured_elapsed=tools.completed-toolTimes.length;
+  tools.elapsed=timingSummary(toolTimes);
+  tools.elapsed.by_clock=Object.fromEntries([...toolTimesByClock].sort(([a],[b])=>a.localeCompare(b))
+    .map(([clock,values])=>[clock,timingSummary(values)]));
+  tools.by_name=Object.fromEntries([...toolBuckets].sort(([a],[b])=>a.localeCompare(b)).map(([name,bucket])=>{
+    const summary={completed:bucket.completed,failed:bucket.failed,pending:bucket.pending,
+      elapsed:{...timingSummary(bucket.times),failed_ms:total(bucket.failedTimes),clock_samples:bucket.clocks},
+      share_of_measured_tool_ms:toolTotal?total(bucket.times)/toolTotal:null};
+    return [name,summary];
+  }));
+
+  const runTiming={completed_runs:completedRuns.length,measured_runs:0,decomposed_runs:0,
+    unmeasured_runs:0,incomplete_child_timing_runs:0,inconsistent_runs:0,non_monotonic_clock_runs:0,
+    decomposed_run_ms:0,inference_ms:0,summary_ms:0,model_ms:0,tool_ms:0,bash_ms:0,unclassified_ms:0};
+  const perRunBashShares=[];
+  for(const run of completedRuns) {
+    if(!number(run.ms)||!run.paired) {runTiming.unmeasured_runs++;continue;}
+    runTiming.measured_runs++;
+    const parts=runParts.get(runKey(run.event))||{inference_ms:0,summary_ms:0,tool_ms:0,bash_ms:0,unmeasured:0,clocks:{}};
+    if(parts.unmeasured) {runTiming.incomplete_child_timing_runs++;continue;}
+    const child=parts.inference_ms+parts.summary_ms+parts.tool_ms;
+    if(child>run.ms) {runTiming.inconsistent_runs++;continue;}
+    runTiming.decomposed_runs++;
+    runTiming.decomposed_run_ms+=run.ms;runTiming.inference_ms+=parts.inference_ms;
+    runTiming.summary_ms+=parts.summary_ms;runTiming.tool_ms+=parts.tool_ms;runTiming.bash_ms+=parts.bash_ms;
+    runTiming.unclassified_ms+=run.ms-child;
+    if(run.clock!=='monotonic'||Object.keys(parts.clocks).some(clock=>clock!=='monotonic')) runTiming.non_monotonic_clock_runs++;
+    if(run.ms>0) perRunBashShares.push(parts.bash_ms/run.ms);
+  }
+  runTiming.model_ms=runTiming.inference_ms+runTiming.summary_ms;
+  for(const key of ['decomposed_run_ms','inference_ms','summary_ms','model_ms','tool_ms','bash_ms','unclassified_ms'])
+    if(!Number.isSafeInteger(runTiming[key])) throw Error('run_time_total_exceeds_safe_integer');
+  runTiming.model_share_of_decomposed_run_ms=runTiming.decomposed_run_ms?runTiming.model_ms/runTiming.decomposed_run_ms:null;
+  runTiming.tool_share_of_decomposed_run_ms=runTiming.decomposed_run_ms?runTiming.tool_ms/runTiming.decomposed_run_ms:null;
+  runTiming.bash_share_of_decomposed_run_ms=runTiming.decomposed_run_ms?runTiming.bash_ms/runTiming.decomposed_run_ms:null;
+  runTiming.per_run_bash_share={samples:perRunBashShares.length,p50:percentile(perRunBashShares,.5),p95:percentile(perRunBashShares,.95)};
+  runTiming.scope='summed completed-run spans; concurrent runs can overlap, so this is not global wall-clock share';
+
   return {schema:'wasm-agent.token-audit/v1',events:events.length,duplicate_events:duplicates,
-    usage,tools,prefix,prepared_prefix:prepared,
+    usage,tools,run_timing:runTiming,prefix,prepared_prefix:prepared,
     timing:Object.fromEntries(Object.entries(timing).map(([name,values])=>[name,
       {samples:values.length,p50:percentile(values,.5),p95:percentile(values,.95)}])),
     average_request_bytes:Object.fromEntries(Object.keys(shape).map(k=>[k,{mean:shape[k]/shapeSamples[k],samples:shapeSamples[k]}])),
     verified_task_efficiency:null,
     limitations:['metadata_only_not_exact_prefix_proof','cache_cause_not_inferred','prepared_prefix_is_not_proof_of_provider_acceptance_or_cache_retention',
       'reasoning_and_arguments_are_byte_subsets_not_additional_tokens','repeated_arguments_are_not_automatically_waste',
-      'observed_cost_is_not_an_invoice_or_complete_task_cost','task_quality_requires_independent_verification']};
+      'tool_elapsed_includes_dispatch_and_projection_not_process_cpu','summed_span_time_is_not_global_wall_clock',
+      'unknown_and_plugin_tool_names_are_aggregated_as_other','observed_cost_is_not_an_invoice_or_complete_task_cost',
+      'task_quality_requires_independent_verification']};
 }
 module.exports = {audit};
