@@ -700,6 +700,10 @@ assert(#memory.recall("session test fact", 5) > 0, "memory must not depend on th
 print("sessions ok")
 LUA
 WA_SCRIPT="$DB.sessions.lua" "$BIN" --db "$DB" | grep "sessions ok"
+# The ledger's order under concurrent writers: several processes appending to one session at once. A
+# single-process test cannot catch a `MAX(seq)+1` race. The check is mutation-tested: removing the
+# transaction in `append_turn` makes it fail with a duplicate seq.
+WA_BIN="$BIN" bash scripts/test-append-race.sh | grep "append race ok"
 rm -f "$DB.sessions.lua"
 
 # Session recovery. The contract - what an unfinished thread is, what is recorded
