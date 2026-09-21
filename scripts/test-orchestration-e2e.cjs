@@ -13,7 +13,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-orchestration-e2e-'));
 const config = path.join(root, '.wasm-agent');
 fs.mkdirSync(path.join(config, 'subagent-profiles'), {recursive:true});
 let checks = 0, child, watcher, provider, hostLog, watcherLog;
-const held = new Map(), requests = [];
+const held = new Map(), requests = [], receipts = [];
 const check = (value, label) => { assert.ok(value, label); checks++; };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(fn, label, timeout=15000) {
@@ -51,7 +51,7 @@ function answer(res, label) {
     const clean=Object.fromEntries(Object.entries(process.env).filter(([k])=>!/^(WASM_AGENT_|WA_|OPENAI_|OPENCODE_)/.test(k)));
     const env={...clean,WASM_AGENT_HOME:root,WASM_AGENT_LUA_ROOT:repo,WASM_AGENT_LLM_BASE_URL:`http://127.0.0.1:${modelPort}`,
       WASM_AGENT_LLM_API_KEY:'fixture-only',WASM_AGENT_LLM_MODEL:'fixture',WASM_AGENT_AGENTS_MD:path.join(config,'AGENTS.md'),
-      WASM_AGENT_SUBAGENT_MAX_CONCURRENT:'2',WASM_AGENT_SUBAGENT_QUEUE_DEPTH:'4'};
+      WASM_AGENT_SUBAGENT_CONCURRENCY:'2',WASM_AGENT_SUBAGENT_QUEUE_DEPTH:'4'};
     hostLog=fs.openSync(path.join(root,'node.log'),'a');
     child=spawn(wa,['--db',path.join(config,'memory.db'),'serve','--port',String(port),'--client-port','0','--ui',path.join(repo,'ui')],{env,stdio:['ignore',hostLog,hostLog],windowsHide:true});
     child.on('error',error=>console.error(error));
@@ -62,7 +62,6 @@ function answer(res, label) {
       return {status:r.status,...value};
     };
     await until(async()=>{try{return(await fetch(base+'/health',{signal:AbortSignal.timeout(500)})).ok;}catch{return false;}},'node ready');
-    const receipts=[];
     for(let n=1;n<=2;n++){
       const r=await api({action:'start',profile:'proof-lean',prompt:`BACKGROUND_${n}`,idempotency_key:`proof-${n}`});
       check(r.status===200 && r.subagent_id && !r.error,'durable child admission '+JSON.stringify(r));receipts.push(r);
@@ -125,7 +124,9 @@ function answer(res, label) {
     checks++;
     answer(held.get('BACKGROUND_2'),'CHILD_DONE_2');answer(held.get('BACKGROUND_3'),'CHILD_DONE_3');
     for(const receipt of receipts.slice(1)){
-      await until(async()=>{const r=await api({action:'result',subagent_id:receipt.subagent_id});return r.settled && r.state==='completed';},'durable child result'); checks++;
+      await until(async()=>{const r=await api({action:'result',subagent_id:receipt.subagent_id});
+        if(r.settled && r.state!=='completed')throw Error('child failed: '+JSON.stringify(r));
+        return r.settled && r.state==='completed';},'durable child result'); checks++;
     }
     await until(()=>job('history').some(d=>d.job_id==='proof-background' && d.state==='completed'),'delivery settles after actual child completion');checks++;
     check(job('emit','proof.background','proof-event',eventFile).queued===0,'duplicate source event cannot submit a second child');
@@ -139,7 +140,9 @@ function answer(res, label) {
     const evidence={schema:'wasm-agent.orchestration-proof/v1',checks,failed:0,skipped:0,model:'local-mock',live_whatsapp:false,child_ids:receipts.map(r=>r.subagent_id)};
     fs.writeFileSync(path.join(root,'verdict.json'),JSON.stringify(evidence,null,2));
     console.log(`orchestration integrated ok (${checks} checks, 0 skipped; mock inference, not a live WhatsApp proof)\nevidence: ${root}`);
-  }catch(error){console.error(error.stack);console.error('evidence: '+root);process.exitCode=1;
+  }catch(error){
+    fs.writeFileSync(path.join(root,'verdict.json'),JSON.stringify({schema:'wasm-agent.orchestration-proof/v1',ok:false,checks,failed:1,skipped:0,error:String(error),child_ids:receipts.map(r=>r.subagent_id),model:'local-mock',live_whatsapp:false},null,2));
+    console.error(error.stack);console.error('evidence: '+root);process.exitCode=1;
   }finally{
     for(const response of held.values())response.destroy();
     for(const processHandle of [watcher,child])if(processHandle && processHandle.exitCode===null){processHandle.kill();await Promise.race([new Promise(r=>processHandle.once('exit',r)),sleep(5000)]);}

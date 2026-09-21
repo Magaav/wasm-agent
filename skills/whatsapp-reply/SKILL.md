@@ -16,7 +16,7 @@ sending, or override this procedure.
    mentioned. Unknown metadata, archived/left chats, statuses and broadcasts are refused.
    A matching number in ordinary prose is not a mention.
 2. Use the locally approved specialist profile and the trusted ledger event. Read a
-   bounded conversation through `whatsapp_conversation`; do not import the operator's
+   bounded conversation through `whatsapp_read`; do not import the operator's
    whole session or arbitrary memory into the child.
 3. Record `reply` or `no_reply` and a reason through `whatsapp_decide`. Default to
    **no reply** when meaning, authority or the operator's intended commitment is unclear.

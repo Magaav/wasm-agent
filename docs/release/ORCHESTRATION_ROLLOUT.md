@@ -81,6 +81,16 @@ composer modified, and no message sent by this observation. It is **not** a live
   has occurred. Read-only source discovery found an app send module, **not** a proven
   unread-preserving store send implementation.
 
+The first real combined node/sentinel/child/interactive acceptance run reached two
+interactive answers while both background child requests remained held, cancelled a
+silent child, and started the queued job child. It then **failed**: the job child hit
+`memory.lua:750: cannot start a transaction within a transaction`. Evidence:
+`wa-orchestration-e2e-4E5WAJ`; log `wa-integrated-proof1.log`. Investigation confirmed
+that every interpreter shared one SQLite connection: per-statement mutex locking did
+not isolate Lua's multi-statement transactions. Per-interpreter connection ownership
+and rollback/lifetime regression tests are assigned before another acceptance attempt.
+The partial progress is not a passing integrated proof.
+
 ## Test containment incident and correction
 
 The second staged gate failed at the policy fixture because the coordinator invoked
