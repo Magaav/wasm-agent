@@ -153,6 +153,13 @@ Design points that matter:
   immediately when the target has not polled recently, instead of hanging.
 - **Authenticated end to end.** Every relay call carries `action|node_id|ts`
   signed by the node key; only registered nodes with role `master` may send.
+- **The target is bound inside the signed request.** A relayed `/node/chat` body
+  names its intended `to_node_id` inside the signed bytes, and the target checks
+  it against itself at admission, so an envelope redirected to another node is
+  refused `wrong_target`. A legacy plain-text body has no signed target and is
+  refused `legacy_peer_protocol`; upgrade both ends together (a new sender to a
+  legacy receiver would run the envelope as text). The transport signature is
+  unchanged, so the deployed rendezvous keeps working.
 - **Buffered streaming.** `/node/chat` is captured as an SSE body and replayed
   by the caller, so a relayed turn looks the same in the UI as a direct one.
 

@@ -127,21 +127,41 @@ nodes, a local rendezvous/relay and a local mock model - no cloud rendezvous, no
 
     node scripts/test-peer-run-admission.cjs [wa-binary]
 
-It runs a signed direct `POST /node/chat` and a signed relayed one, and asserts against the node's own
-`/health` that the run went *through admission*: the verified peer author owns the conversation, the
-authenticated body `thread` is the scheduling key, the peer run is `background` on a background worker
-(not one of the two interactive slots), a duplicate signed request is `replayed_request`, a body that
-does not match its signature and an unregistered master are refused before admission (no owner is
-created), a registered guest is `forbidden_role`, and the peer's transcript is not in the local
-operator's session list. A successful reply is itself the proof that the signature was verified
-exactly once: the run half does not re-verify, because a second verification of the same signed
-request would be refused as a replay.
+It runs a signed direct `POST /node/chat`, a signed relayed one, and one through the native Lua sender
+(`nodeslib.remote_chat`), and asserts against the node's own `/health` that the run went *through
+admission*: the verified peer author owns the conversation, the authenticated body `thread` is the
+scheduling key, the peer run is `background` on a background worker (not one of the two interactive
+slots), a duplicate signed request is `replayed_request`, a body that does not match its signature and
+an unregistered master are refused before admission (no owner is created), a registered guest is
+`forbidden_role`, and the peer's transcript is not in the destination operator's session list. A
+successful reply is itself the proof that the signature was verified exactly once: the run half does
+not re-verify, because a second verification of the same signed request would be refused as a replay.
 
-The guest-to-exact-master binding and the managed-guest refusals are the subject of
-`scripts/test-managed-network.cjs`; this fixture is the non-managed peer half.
+### The signed target binds the request
 
-Observation for the rendezvous owner: `/relay/send` verifies `relay-send|node_id|ts` and does not
-include the envelope body, so the `to`/`path` fields are not covered by the transport signature (the
-inner `/node/chat` headers still cover the prompt and the target re-verifies the peer author). The
-fixture asserts the current behaviour explicitly, so a change to that contract is visible rather than
-silent.
+A `/node/chat` body is an envelope whose `to_node_id` is inside the signed bytes:
+
+    {"to_node_id":"<target node id>","text":"<prompt>","thread":"<optional conversation>"}
+
+The signature is `chat|<from>|<ts>|<sha256(body)>`, so the target, the prompt and the thread are all
+authenticated. The receiver checks `to_node_id` against its own node id at admission, before any
+conversation, worker or model call. This is what stops a relay (or anyone on the path) from
+redirecting a valid chat: the relay envelope's outer `to`/`path` are not covered by the transport
+signature, but a chat signed for node A delivered to node B is refused `wrong_target`, a changed path
+is refused because the signature names the `chat` kind, and a changed body is refused `bad_signature`.
+The fixture proves this with two real destination nodes that both trust the same peer: A and B are
+both valid recipients, so only the signed target tells them apart.
+
+### Compatibility and migration
+
+There is no insecure legacy fallback. A `/node/chat` body that is not the target-bound envelope is
+refused with `legacy_peer_protocol` (direct: 400; relay: 403), and a request whose `to_node_id` names
+another node is refused `wrong_target`. Upgrade both ends together:
+
+- a new sender -> a new receiver works (the envelope);
+- a legacy sender -> a new receiver is refused with `legacy_peer_protocol` and must be upgraded;
+- a new sender -> a legacy receiver would run the envelope as the prompt text, so do not mix versions;
+  upgrade the peer before (or with) the sender.
+
+The transport (`relay-send|node_id|ts`) is unchanged, so the deployed rendezvous keeps working; the
+binding is in the inner request, which is the part the target verifies.

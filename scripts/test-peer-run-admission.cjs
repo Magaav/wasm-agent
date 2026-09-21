@@ -1,19 +1,21 @@
 // Real authorized peer-run admission: a signed direct POST /node/chat and a signed relayed one,
-// between two isolated nodes, against a local rendezvous/relay and a local mock model.
+// between two isolated destination nodes, against a local rendezvous/relay and a local mock model.
 //
 //   node scripts/test-peer-run-admission.cjs [wa-binary]
 //
 // This is the positive half of `scripts/test-run-isolation.sh`'s forged-peer case. That fixture
-// proves a forged signature is refused; this one proves the real path runs, and that it runs through
-// admission rather than around it:
+// proves a forged signature is refused; this one proves the real path runs, that it runs through
+// admission rather than around it, and that the target node is cryptographically bound:
 //
 //   * the verified peer author owns the conversation, not the credential or a header;
 //   * the body's authenticated `thread` is the scheduling key;
 //   * the signature is verified ONCE (a second verification of the same signed request is a replay,
 //     so a successful reply is the proof that the run half does not re-verify);
+//   * the signed body names `to_node_id`, so a legitimately signed chat for node A that a relay
+//     redirects to node B is refused by B before any conversation, admission or inference;
+//   * a modified target/path/body, a duplicate, a forged signature and an unregistered master are
+//     refused, and a legacy plain-text (unbound) body is refused with a migration error;
 //   * a peer run is forced background and cannot borrow the two interactive slots;
-//   * a duplicate is refused, and a body that does not match its signature is refused before
-//     admission (no owner is created);
 //   * the peer's transcript is filed under the peer author, not the local operator's.
 //
 // No cloud rendezvous, no paid account: the registry is `wa rendezvous` on loopback and the model is
@@ -75,6 +77,12 @@ function signedHeaders(node, action, body) {
     'x-wa-sig': signature(node, action + '|' + node.node_id + '|' + ts + suffix),
   };
 }
+/// The target-bound `/node/chat` body: the target node id is inside the signed bytes.
+function chatEnvelope(targetNodeId, text, thread) {
+  const envelope = { to_node_id: targetNodeId, text };
+  if (thread) envelope.thread = thread;
+  return JSON.stringify(envelope);
+}
 async function request(url, method = 'GET', body, headers = {}) {
   const response = await fetch(url, { method, headers, body, signal: AbortSignal.timeout(90000) });
   const text = await response.text();
@@ -108,15 +116,21 @@ function freePort() {
 }
 
 /// A local OpenAI-compatible streaming fixture. It echoes the last `RUN-MARKER-<word>` in the prompt;
-/// a marker containing `HOLD` is held so a peer run can be held while local chats run.
+/// a marker containing `HOLD` is held so a peer run can be held while local chats run. `/seen` lists
+/// every prompt it has been asked to infer, so "refused before inference" is observable.
 function startMock() {
+  const seen = [];
   const server = http.createServer((req, res) => {
-    if (req.method === 'GET') { res.end('ready'); return; }
+    if (req.method === 'GET') {
+      if (req.url === '/seen') { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(seen)); return; }
+      res.end('ready'); return;
+    }
     let body = '';
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', () => {
       const markers = body.match(/RUN-MARKER-[A-Za-z0-9-]+/g) || [];
       const marker = markers.length ? markers[markers.length - 1] : 'ok';
+      seen.push(marker);
       const hold = marker.includes('HOLD') ? 5000 : 150;
       setTimeout(() => {
         res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -136,7 +150,7 @@ function startMock() {
       }, hold);
     });
   });
-  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port })));
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port, seen })));
 }
 
 async function register(service, node, role = 'master') {
@@ -150,121 +164,153 @@ async function register(service, node, role = 'master') {
 function runIds(health) { return (health && health.run_ids) || []; }
 function runs(health) { return (health && health.runs) || []; }
 
-(async () => {
-  mock = await startMock();
-  const rendezvousPort = await freePort();
-  const service = 'http://127.0.0.1:' + rendezvousPort;
-
-  const primary = fixture('primary');
-  const peer = fixture('peer');
-  const guest = fixture('guest');
-  const stranger = fixture('stranger');
-
-  // Two real nodes with two real identities in two real homes. If this fails, the rest is meaningless.
-  check(primary.node_id !== peer.node_id, 'the two nodes have distinct identities');
-  const primaryKey = path.join(primary.home, '.wasm-agent', 'node.key');
-  const peerKey = path.join(peer.home, '.wasm-agent', 'node.key');
-  check(fs.existsSync(primaryKey) && fs.existsSync(peerKey), 'each node owns a node.key in its own home');
-  check(fs.readFileSync(primaryKey, 'utf8') !== fs.readFileSync(peerKey, 'utf8'), 'the two node keys differ');
-
-  // Local rendezvous/relay. The primary and the peer are the configured masters; the guest is not.
-  const registry = fixture('registry');
-  registry.args = ['rendezvous', '--port', String(rendezvousPort), '--db', path.join(registry.home, 'rendezvous.db')];
-  registry.child = child('registry', registry.args, {
-    ...registry.env,
-    WASM_AGENT_NETWORK_ADMINS: primary.node_id + ',' + peer.node_id,
-  });
-  await until(async () => (await request(service + '/health')).status === 200, 'local rendezvous');
-
-  check((await register(service, peer, 'master')).status === 200, 'the peer master registers with the local rendezvous');
-  check((await register(service, guest, 'master')).status === 200, 'the guest registers');
-  const guestLookup = await request(service + '/lookup?node_id=' + guest.node_id, 'GET', undefined, signedHeaders(peer, 'lookup'));
-  check(guestLookup.value.role === 'guest', 'a non-admin claiming master is stored as guest, not elevated');
-
-  // The node being called: a real serve process with its own home, a mock model, and relay enabled.
-  primary.port = await freePort();
-  primary.url = 'http://127.0.0.1:' + primary.port;
-  primary.child = child('primary', ['serve', '--port', String(primary.port), '--client-port', String(primary.port + 1), '--ui', path.join(root, 'ui')], {
-    ...primary.env,
+async function startDestination(node, service, mockPort) {
+  node.port = await freePort();
+  node.url = 'http://127.0.0.1:' + node.port;
+  node.child = child(node.name, ['serve', '--port', String(node.port), '--client-port', String(node.port + 1), '--ui', path.join(root, 'ui')], {
+    ...node.env,
     WASM_AGENT_RENDEZVOUS: service,
     WASM_AGENT_RELAY: service,
-    WASM_AGENT_LLM_BASE_URL: 'http://127.0.0.1:' + mock.port,
+    WASM_AGENT_ENDPOINT: '127.0.0.1:' + node.port,
+    WASM_AGENT_LLM_BASE_URL: 'http://127.0.0.1:' + mockPort,
     WASM_AGENT_LLM_API_KEY: 'test-only',
     WASM_AGENT_LLM_MODEL: 'fixture',
     WASM_AGENT_WORKERS_MAX: '4',
     WASM_AGENT_CONTROL_WORKERS: '1',
   });
-  await until(async () => (await request(primary.url + '/health')).status === 200, 'primary server');
+  await until(async () => (await request(node.url + '/health')).status === 200, node.name + ' server');
   await until(async () => {
-    const nodes = (await request(service + '/nodes', 'GET', undefined, signedHeaders(primary, 'nodes'))).value.nodes || [];
-    return nodes.some((node) => node.node_id === primary.node_id);
-  }, 'primary registration');
+    const nodes = (await request(service + '/nodes', 'GET', undefined, signedHeaders(node, 'nodes'))).value.nodes || [];
+    return nodes.some((row) => row.node_id === node.node_id);
+  }, node.name + ' registration');
+  return node;
+}
+
+(async () => {
+  mock = await startMock();
+  const rendezvousPort = await freePort();
+  const service = 'http://127.0.0.1:' + rendezvousPort;
+
+  const peer = fixture('peer');
+  const guest = fixture('guest');
+  const stranger = fixture('stranger');
+  const primary = fixture('primary');
+  const primaryB = fixture('primary-b');
+
+  const registry = fixture('registry');
+  registry.args = ['rendezvous', '--port', String(rendezvousPort), '--db', path.join(registry.home, 'rendezvous.db')];
+  registry.child = child('registry', registry.args, {
+    ...registry.env,
+    // The two destinations and the peer are the masters; the guest is not, so it is stored as guest.
+    WASM_AGENT_NETWORK_ADMINS: [peer.node_id, primary.node_id, primaryB.node_id].join(','),
+  });
+  await until(async () => (await request(service + '/health')).status === 200, 'local rendezvous');
+  check((await register(service, peer, 'master')).status === 200, 'the peer master registers with the local rendezvous');
+  check((await register(service, guest, 'master')).status === 200, 'the guest registers');
+  const guestLookup = await request(service + '/lookup?node_id=' + guest.node_id, 'GET', undefined, signedHeaders(peer, 'lookup'));
+  check(guestLookup.value.role === 'guest', 'a non-admin claiming master is stored as guest, not elevated');
+
+  // Two destination nodes, both real `wa serve` processes with their own homes and keys, both
+  // trusting the same peer. This is what makes the redirect test meaningful: A and B are both valid
+  // recipients for this peer, so only the signed target can tell them apart.
+  await startDestination(primary, service, mock.port);
+  await startDestination(primaryB, service, mock.port);
+  check(primary.node_id !== primaryB.node_id, 'the two destination nodes have distinct identities');
+  const primaryKey = path.join(primary.home, '.wasm-agent', 'node.key');
+  const primaryBKey = path.join(primaryB.home, '.wasm-agent', 'node.key');
+  check(fs.existsSync(primaryKey) && fs.existsSync(primaryBKey) && fs.readFileSync(primaryKey, 'utf8') !== fs.readFileSync(primaryBKey, 'utf8'), 'each destination node owns a distinct node.key in its own home');
 
   // ---- direct signed /node/chat -----------------------------------------------------------------
   const directThread = 'peer-direct';
-  const directBody = JSON.stringify({ text: 'answer with RUN-MARKER-PEER-DIRECT', thread: directThread });
-  const directHeaders = signedHeaders(peer, 'chat', directBody);
-  const direct = await request(primary.url + '/node/chat', 'POST', directBody, { ...directHeaders, accept: 'text/event-stream' });
+  const directBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-DIRECT', directThread);
+  const direct = await request(primary.url + '/node/chat', 'POST', directBody, { ...signedHeaders(peer, 'chat', directBody), accept: 'text/event-stream' });
   check(direct.status === 200 && /RUN-MARKER-PEER-DIRECT/.test(direct.text), 'a signed direct /node/chat runs and answers as the verified peer');
-  // The verified author owns the conversation: the local operator cannot see or cancel it.
   const operatorStatus = await request(primary.url + '/runs', 'POST', JSON.stringify({ action: 'status', thread: directThread }), { 'content-type': 'application/json' });
   check((operatorStatus.value.runs || []).length === 0, 'the peer conversation is owned by the verified peer, not the local operator');
-  // The body's authenticated thread is the scheduling key admission used.
   await until(async () => runIds((await request(primary.url + '/health')).value).some((row) => row.conversation === directThread), 'the direct run is keyed by its body thread');
   check(true, 'the authenticated body thread is preserved as the conversation key');
-  // With no thread, the key is the verified author (the peer node id), not the credential or a body
-  // marker: this is the "signed author resolves the conversation owner" case.
-  const noThreadBody = 'answer with RUN-MARKER-PEER-NOTHREAD';
+  const noThreadBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-NOTHREAD');
   const noThread = await request(primary.url + '/node/chat', 'POST', noThreadBody, { ...signedHeaders(peer, 'chat', noThreadBody), accept: 'text/event-stream' });
   check(noThread.status === 200 && /RUN-MARKER-PEER-NOTHREAD/.test(noThread.text), 'a peer run with no body thread still runs');
   await until(async () => runIds((await request(primary.url + '/health')).value).some((row) => row.conversation === 'peer:' + peer.node_id), 'the no-thread run is keyed by the verified author');
   check(true, 'a body with no thread is keyed by the verified peer node id, not the credential');
 
-  // ---- signature verified once (a successful reply is the proof) ---------------------------------
-  // If the run half re-verified the same signed request it would be refused as a replay, so the
-  // success above already proves single verification. Make it explicit and independent.
+  // ---- signature verified once -------------------------------------------------------------------
   const onceThread = 'peer-once';
-  const onceBody = JSON.stringify({ text: 'answer with RUN-MARKER-PEER-ONCE', thread: onceThread });
+  const onceBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-ONCE', onceThread);
   const once = await request(primary.url + '/node/chat', 'POST', onceBody, { ...signedHeaders(peer, 'chat', onceBody), accept: 'text/event-stream' });
   check(once.status === 200 && /RUN-MARKER-PEER-ONCE/.test(once.text) && !/replayed_request/.test(once.text), 'a peer run succeeds, so the signature was verified exactly once (no re-verify replay)');
 
   // ---- duplicate / replayed request refused ------------------------------------------------------
   const replayThread = 'peer-replay';
-  const replayBody = JSON.stringify({ text: 'answer with RUN-MARKER-PEER-REPLAY', thread: replayThread });
+  const replayBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-REPLAY', replayThread);
   const replayHeaders = signedHeaders(peer, 'chat', replayBody);
   const first = await request(primary.url + '/node/chat', 'POST', replayBody, { ...replayHeaders, accept: 'text/event-stream' });
   const second = await request(primary.url + '/node/chat', 'POST', replayBody, { ...replayHeaders, accept: 'text/event-stream' });
   check(first.status === 200 && /RUN-MARKER-PEER-REPLAY/.test(first.text), 'the first signed request runs');
   check(second.status === 403 && /replayed_request/.test(second.text), 'the identical signed request is refused as a replay');
 
-  // ---- forged author / unverified body refused before admission ----------------------------------
-  const forgedThread = 'peer-forged';
-  const forgedBody = JSON.stringify({ text: 'answer with RUN-MARKER-PEER-FORGED', thread: forgedThread });
-  const forgedHeaders = signedHeaders(peer, 'chat', forgedBody);
-  // The signature covers the body; changing it invalidates the signature.
-  const tampered = await request(primary.url + '/node/chat', 'POST', forgedBody + 'tampered', { ...forgedHeaders, accept: 'text/event-stream' });
-  check(tampered.status === 401 || tampered.status === 403, 'a body that does not match its signature is refused before admission');
-  check(!runIds((await request(primary.url + '/health')).value).some((row) => row.conversation === forgedThread), 'the forged request created no admission');
+  // ---- the signed target binds the request -------------------------------------------------------
+  // A chat legitimately signed for A, delivered to B. B is a valid recipient for this peer and
+  // trusts the same peer, so only the signed target distinguishes them. B must refuse before any
+  // conversation, admission or inference.
+  const redirectThread = 'peer-redirect';
+  const redirectBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-REDIRECT', redirectThread);
+  const redirectHeaders = signedHeaders(peer, 'chat', redirectBody);
+  const directRedirect = await request(primaryB.url + '/node/chat', 'POST', redirectBody, { ...redirectHeaders, accept: 'text/event-stream' });
+  check(directRedirect.status === 400 || directRedirect.status === 403, 'a chat signed for A and sent directly to B is refused by B');
+  check(/wrong_target/.test(directRedirect.text), 'B names the target mismatch: wrong_target');
+  check(!runIds((await request(primaryB.url + '/health')).value).some((row) => row.conversation === redirectThread), 'the redirected direct chat created no admission on B');
+  // The relay may transport the legacy unsigned outer envelope, but the target must reject a
+  // redirected EXECUTION: the outer `to` is B while the signed inner target is A.
+  const redirectRid = crypto.randomUUID();
+  const redirectEnvelope = JSON.stringify({ rid: redirectRid, to: primaryB.node_id, method: 'POST', path: '/node/chat', body: redirectBody, headers: redirectHeaders });
+  const relayRedirect = await request(service + '/relay/send', 'POST', redirectEnvelope, signedHeaders(peer, 'relay-send'));
+  check(relayRedirect.status === 200 && relayRedirect.value.status === 403 && /wrong_target/.test(relayRedirect.value.body || ''), 'a relay envelope whose outer target is B but whose signed target is A is refused by B');
+  check(!runIds((await request(primaryB.url + '/health')).value).some((row) => row.conversation === redirectThread), 'the redirected relay chat created no admission on B');
+  await sleep(300);
+  check(!mock.seen.includes('RUN-MARKER-PEER-REDIRECT'), 'the redirected chat never reached inference on either node');
 
-  // ---- the verified author, not a header or body marker ------------------------------------------
-  const strangerThread = 'peer-stranger';
-  const strangerBody = JSON.stringify({ text: 'answer with RUN-MARKER-PEER-STRANGER', thread: strangerThread });
+  // A modified target, path or body invalidates the signature or the request kind.
+  const modifiedTarget = JSON.stringify({ to_node_id: primaryB.node_id, text: 'answer with RUN-MARKER-PEER-MODIFIED', thread: 'peer-modified' });
+  const modifiedTargetRun = await request(primaryB.url + '/node/chat', 'POST', modifiedTarget, { ...signedHeaders(peer, 'chat', redirectBody), accept: 'text/event-stream' });
+  check(modifiedTargetRun.status === 401 || modifiedTargetRun.status === 403, 'changing the signed target invalidates the signature');
+  const modifiedBodyRun = await request(primary.url + '/node/chat', 'POST', redirectBody + 'tampered', { ...redirectHeaders, accept: 'text/event-stream' });
+  check(modifiedBodyRun.status === 401 || modifiedBodyRun.status === 403, 'changing the signed body invalidates the signature');
+  const pathBody = chatEnvelope(primaryB.node_id, 'answer with RUN-MARKER-PEER-PATH', 'peer-path');
+  const pathHeaders = signedHeaders(peer, 'chat', pathBody);
+  const wrongPathEnvelope = JSON.stringify({ rid: crypto.randomUUID(), to: primaryB.node_id, method: 'POST', path: '/node/call', body: pathBody, headers: pathHeaders });
+  const wrongPath = await request(service + '/relay/send', 'POST', wrongPathEnvelope, signedHeaders(peer, 'relay-send'));
+  const wrongPathBody = (wrongPath.value && wrongPath.value.body) || '';
+  check(wrongPath.status === 200 && /error/.test(wrongPathBody) && !/RUN-MARKER-PEER-PATH/.test(wrongPathBody), 'a relay envelope whose path is changed to /node/call is refused (the chat body is not a call, and the signature is for chat)');
+  await sleep(200);
+  check(!mock.seen.includes('RUN-MARKER-PEER-PATH'), 'the path-changed request never reached inference');
+  // A legacy plain-text body has no signed target and is refused with a visible migration error.
+  const legacyBody = 'answer with RUN-MARKER-PEER-LEGACY';
+  const legacy = await request(primary.url + '/node/chat', 'POST', legacyBody, { ...signedHeaders(peer, 'chat', legacyBody), accept: 'text/event-stream' });
+  check(legacy.status === 400 && /legacy_peer_protocol/.test(legacy.text), 'a legacy plain-text body is refused with a migration error, not run unbound');
+  check(!mock.seen.includes('RUN-MARKER-PEER-LEGACY'), 'the legacy body never reached inference');
+
+  // ---- forged / unregistered / guest -------------------------------------------------------------
+  const forgedBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-FORGED', 'peer-forged');
+  const tampered = await request(primary.url + '/node/chat', 'POST', forgedBody + 'tampered', { ...signedHeaders(peer, 'chat', forgedBody), accept: 'text/event-stream' });
+  check(tampered.status === 401 || tampered.status === 403, 'a body that does not match its signature is refused before admission');
+  check(!runIds((await request(primary.url + '/health')).value).some((row) => row.conversation === 'peer-forged'), 'the forged request created no admission');
+  const strangerBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-STRANGER', 'peer-stranger');
   const strangerRun = await request(primary.url + '/node/chat', 'POST', strangerBody, { ...signedHeaders(stranger, 'chat', strangerBody), accept: 'text/event-stream' });
   check(strangerRun.status === 403 && /unknown_caller/.test(strangerRun.text), 'an unregistered master is denied before admission');
-  const guestThread = 'peer-guest';
-  const guestBody = JSON.stringify({ text: 'answer with RUN-MARKER-PEER-GUEST', thread: guestThread });
+  const guestBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-GUEST', 'peer-guest');
   const guestRun = await request(primary.url + '/node/chat', 'POST', guestBody, { ...signedHeaders(guest, 'chat', guestBody), accept: 'text/event-stream' });
   check(guestRun.status === 403 && /forbidden_role/.test(guestRun.text), 'a registered guest cannot command a peer');
-  // A peer naming the operator's thread is still owned by the peer: the operator's status sees none.
   const spoofThread = 'operator-session';
-  const spoofBody = JSON.stringify({ text: 'answer with RUN-MARKER-PEER-SPOOF', thread: spoofThread });
+  const spoofBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-SPOOF', spoofThread);
   await request(primary.url + '/node/chat', 'POST', spoofBody, { ...signedHeaders(peer, 'chat', spoofBody), accept: 'text/event-stream' });
   const spoofStatus = await request(primary.url + '/runs', 'POST', JSON.stringify({ action: 'status', thread: spoofThread }), { 'content-type': 'application/json' });
   check((spoofStatus.value.runs || []).length === 0, 'a peer run naming another owner\'s thread is not owned by the local operator');
 
   // ---- peer forced background cannot borrow the two interactive slots ----------------------------
   const holdThread = 'peer-hold';
-  const holdBody = JSON.stringify({ text: 'answer with RUN-MARKER-PEER-HOLD', thread: holdThread });
+  const holdBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-HOLD', holdThread);
   const holdRun = request(primary.url + '/node/chat', 'POST', holdBody, { ...signedHeaders(peer, 'chat', holdBody), accept: 'text/event-stream' });
   await until(async () => {
     const health = (await request(primary.url + '/health')).value;
@@ -273,8 +319,6 @@ function runs(health) { return (health && health.runs) || []; }
   const holdHealth = (await request(primary.url + '/health')).value;
   const holdRow = runs(holdHealth).find((row) => row.conversation === holdThread);
   check(holdRow.worker >= 2, 'the peer background run occupies a background worker, not one of the two interactive slots');
-  check(true, 'the peer run is admitted into the background lane');
-  // Two ordinary interactive chats must both finish while the peer background run is still held.
   const chatA = request(primary.url + '/chat', 'POST', JSON.stringify({ text: 'answer with RUN-MARKER-A', thread: 'chat-a' }), { 'content-type': 'application/json', accept: 'text/event-stream' });
   const chatB = request(primary.url + '/chat', 'POST', JSON.stringify({ text: 'answer with RUN-MARKER-B', thread: 'chat-b' }), { 'content-type': 'application/json', accept: 'text/event-stream' });
   const [resultA, resultB] = await Promise.all([chatA, chatB]);
@@ -285,31 +329,32 @@ function runs(health) { return (health && health.runs) || []; }
 
   // ---- signed relay /node/chat -------------------------------------------------------------------
   const relayThread = 'peer-relay';
-  const relayBody = JSON.stringify({ text: 'answer with RUN-MARKER-PEER-RELAY', thread: relayThread });
+  const relayBody = chatEnvelope(primary.node_id, 'answer with RUN-MARKER-PEER-RELAY', relayThread);
   const rid = crypto.randomUUID();
   const envelope = JSON.stringify({ rid, to: primary.node_id, method: 'POST', path: '/node/chat', body: relayBody, headers: signedHeaders(peer, 'chat', relayBody) });
-  // The relay envelope's own signature is `relay-send|node_id|ts`: the rendezvous does not include the
-  // envelope body, so the sender identity is signed and the inner /node/chat headers sign the prompt.
   const relayAnswer = await request(service + '/relay/send', 'POST', envelope, signedHeaders(peer, 'relay-send'));
   check(relayAnswer.status === 200 && /RUN-MARKER-PEER-RELAY/.test(relayAnswer.value.body || ''), 'a signed relayed /node/chat runs and answers as the verified peer');
-  // OBSERVATION (reported, not fixed here): the rendezvous verifies `relay-send|node_id|ts` and does
-  // not include the envelope body, so one relay-send signature verifies for any envelope - the `to`
-  // and `path` fields are not covered by the transport signature (the inner /node/chat headers still
-  // cover the prompt, and the target re-verifies the peer author). A signature made for the first
-  // envelope is therefore accepted for a second one; this is a rendezvous-contract observation for
-  // the coordinator/runtime owner, not a change to unowned code.
-  const crossEnvelope = JSON.stringify({ rid: crypto.randomUUID(), to: primary.node_id, method: 'POST', path: '/node/chat', body: relayBody, headers: signedHeaders(peer, 'chat', relayBody) });
-  const crossAnswer = await request(service + '/relay/send', 'POST', crossEnvelope, signedHeaders(peer, 'relay-send'));
-  check(crossAnswer.status === 200, 'OBSERVATION: a relay-send signature is independent of the envelope body (to/path are not covered)');
   await until(async () => runIds((await request(primary.url + '/health')).value).some((row) => row.conversation === relayThread), 'the relayed run is keyed by its body thread');
   check(true, 'the relayed run shares the same admission and body-thread key as the direct run');
 
-  // ---- peer data is not the operator transcript --------------------------------------------------
-  const operatorSessions = ((await request(primary.url + '/sessions', 'GET')).value.sessions || []).map((session) => session.title || '');
-  check(!operatorSessions.some((title) => /RUN-MARKER-PEER-/.test(title)), 'no peer marker appears in the local operator\'s session list');
-  check(operatorSessions.some((title) => /RUN-MARKER-A|RUN-MARKER-B/.test(title)), 'the operator\'s own chats are the ones in its session list');
+  // The native Lua sender (`nodeslib.remote_chat`) is what a local run uses to reach a peer; it must
+  // produce the same target-bound envelope, so the real sender path is covered, not only the raw
+  // HTTP the fixture constructs. A targets B by its node id, so the run relays to B's endpoint.
+  const viaSenderBody = JSON.stringify({ text: 'answer with RUN-MARKER-PEER-VIA-SENDER', thread: 'peer-via-sender' });
+  const viaSender = await request(primary.url + '/chat?node=' + encodeURIComponent(primaryB.node_id), 'POST', viaSenderBody, { 'content-type': 'application/json', accept: 'text/event-stream' });
+  check(viaSender.status === 200 && /RUN-MARKER-PEER-VIA-SENDER/.test(viaSender.text), 'the native Lua sender reaches a peer with the target-bound envelope');
 
-  console.log('peer run admission ok (' + checks + ' checks, 0 skips; two isolated nodes, local rendezvous/relay, local mock model)');
+  // ---- peer data is not the operator transcript --------------------------------------------------
+  // The node that RECEIVED the peer run (B, via the native sender) files it under the peer author,
+  // not under its local operator.
+  const bSessions = ((await request(primaryB.url + '/sessions', 'GET')).value.sessions || []).map((session) => session.title || '');
+  check(!bSessions.some((title) => /RUN-MARKER-PEER-VIA-SENDER/.test(title)), 'the peer run is not in the destination operator\'s session list');
+  // The operator's own local chats on A are in A's list; the peer runs A received are not.
+  const aSessions = ((await request(primary.url + '/sessions', 'GET')).value.sessions || []).map((session) => session.title || '');
+  check(aSessions.some((title) => /RUN-MARKER-A|RUN-MARKER-B/.test(title)), 'the operator\'s own chats are in its session list');
+  check(!aSessions.some((title) => /RUN-MARKER-PEER-DIRECT|RUN-MARKER-PEER-ONCE|RUN-MARKER-PEER-HOLD|RUN-MARKER-PEER-RELAY/.test(title)), 'a peer run received by the node is not in its operator session list');
+
+  console.log('peer run admission ok (' + checks + ' checks, 0 skips; two isolated destinations, local rendezvous/relay, local mock model)');
 })().catch((error) => {
   console.error(error.stack);
   process.exitCode = 1;
