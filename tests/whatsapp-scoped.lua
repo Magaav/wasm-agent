@@ -17,12 +17,13 @@ local function base_profile()
     schema_version = 1,
     id = "whatsapp-responder",
     instructions = "Answer as the operator, in one conversation.",
-    allowed_tools = { "whatsapp_conversation", "whatsapp_decide", "whatsapp_send" },
+    allowed_tools = { "whatsapp_read", "whatsapp_decide", "whatsapp_send" },
     resources = {
       allowed_conversation = "5511888888888@c.us",
       allowed_conversations = { "5511888888888@c.us" },
+      actions = { "read", "send" },
       self_destination = "5511999999999@c.us",
-      account = "operator",
+      account = "5511999999999",
       browser_endpoint = "ws://[::1]:9222/devtools/page/FIXTURE",
       send_path = "ui",
       allow_mark_read = false,
@@ -90,6 +91,7 @@ end
 
 local function verified_result(conversation_id, body, message_id)
   return { ok = true, sent = true, verified = true, chat = { id = conversation_id }, body = body,
+    account = "5511999999999", browser_endpoint = "ws://[::1]:9222/devtools/page/FIXTURE",
     message = { id = message_id or "3EB0FIXTURE", ack = 3 } }
 end
 
@@ -113,7 +115,8 @@ end
 -- Schemas are what the registry advertises.
 local names = {}
 for _, item in ipairs(whatsapp.schemas()) do names[item["function"].name] = true end
-check(names["whatsapp_conversation"] and names["whatsapp_decide"] and names["whatsapp_send"], "schemas name the scoped tools")
+check(names["whatsapp_read"] and names["whatsapp_decide"] and names["whatsapp_send"], "schemas name the scoped tools")
+check(not names["whatsapp_conversation"], "the pre-rename name is not advertised")
 check(not names["bash"] and not names["edit"] and not names["operation"], "no shell/edit/deploy tool is exposed")
 
 local profile = base_profile()
@@ -123,13 +126,16 @@ local ctx = { profile = profile, event = event, effects = new_effects() }
 
 -- Conversation scope: the trusted event's conversation works; another is refused; a ledger row outside it
 -- is a scope mismatch.
-local read = whatsapp.dispatch(memory, "whatsapp_conversation", {}, ctx)
+local read = whatsapp.dispatch(memory, "whatsapp_read", {}, ctx)
 check(read.conversation_id == "5511888888888@c.us" and read.count == 1, "reads the event's conversation")
+check(whatsapp.dispatch(memory, "whatsapp_conversation", {}, ctx).count == 1, "the pre-rename alias still dispatches")
 local stray = { conversation = function() return { { conversation_id = "999@c.us" } } end }
-check(whatsapp.dispatch(stray, "whatsapp_conversation", {}, ctx).error == "ledger_scope_mismatch", "a ledger row outside the conversation is refused")
-check(whatsapp.dispatch(memory, "whatsapp_conversation", {}, { profile = profile }).error == "event_context_required", "a tool call needs the trusted event identity")
+check(whatsapp.dispatch(stray, "whatsapp_read", {}, ctx).error == "ledger_scope_mismatch", "a ledger row outside the conversation is refused")
+check(whatsapp.dispatch(memory, "whatsapp_read", {}, { profile = profile }).error == "event_context_required", "a tool call needs the trusted event identity")
 local foreign = { profile = profile, event = { conversation_id = "999@c.us", message_id = "M" }, effects = new_effects() }
-check(whatsapp.dispatch(memory, "whatsapp_conversation", {}, foreign).error == "conversation_not_in_profile", "another conversation is refused")
+check(whatsapp.dispatch(memory, "whatsapp_read", {}, foreign).error == "conversation_not_in_profile", "another conversation is refused")
+check(whatsapp.dispatch(memory, "whatsapp_read", { conversation_id = "999@c.us" }, ctx).error == "event_conversation_immutable", "a foreign conversation argument cannot steer a read")
+check(whatsapp.dispatch(memory, "whatsapp_send", { conversation_id = "999@c.us", body = "x", confirm = true }, send_ctx(profile, new_effects(), "FGN")).error == "event_conversation_immutable", "a foreign conversation argument cannot steer a send")
 
 -- A decision is durable, never sends, and never clobbers a pending send.
 local decided = whatsapp.dispatch(memory, "whatsapp_decide", { decision = "reply", reason = "waiting on them" }, ctx)
@@ -255,6 +261,47 @@ check(whatsapp.verify_send_result({ ok = true, sent = true, verified = true, cha
 check(whatsapp.validate_profile({ id = "x", allowed_tools = {}, resources = {} }) ~= nil, "a normalized profile without schema_version is accepted")
 check(whatsapp.validate_profile({ schema_version = 2, id = "x", allowed_tools = {}, resources = {} }) == nil, "a wrong schema_version is refused")
 check(whatsapp.dispatch(memory, "whatsapp_decide", { decision = "reply" }, { profile = { id = "x", allowed_tools = {} }, event = event }).error == "profile_resources_required", "a profile missing resources is refused")
+
+-- Capabilities are separate: `resources.actions` gates read and send independently.
+local readOnly = base_profile()
+readOnly.resources.actions = { "read" }
+readOnly.resources.send_approved = true
+readOnly.resources.send_path = "store"
+readOnly.resources.store_send_script = "C:/approved/store-send.mjs"
+check(whatsapp.dispatch(memory, "whatsapp_read", {}, { profile = readOnly, event = event, effects = new_effects() }).count == 1, "read is allowed when actions names read")
+check(whatsapp.dispatch(memory, "whatsapp_send", { body = "x", confirm = true }, send_ctx(readOnly, new_effects(), "A1")).error == "action_not_in_profile", "read does not imply send")
+local sendOnly = base_profile()
+sendOnly.resources.actions = { "send" }
+check(whatsapp.dispatch(memory, "whatsapp_read", {}, { profile = sendOnly, event = event, effects = new_effects() }).error == "action_not_in_profile", "send does not imply read")
+
+-- The route must prove the locally bound account and browser endpoint; an unproven or mismatched
+-- identity fails closed, so a raw script that ignores the binding cannot be trusted.
+local identity = base_profile()
+identity.resources.send_approved = true
+identity.resources.send_path = "store"
+identity.resources.store_send_script = "C:/approved/store-send.mjs"
+local wrongAccount = function(request)
+  local result = verified_result(request.conversation_id, request.body)
+  result.account = "5511000000000"
+  return result
+end
+check(whatsapp.dispatch(memory, "whatsapp_send", { body = "x", confirm = true }, send_ctx(identity, new_effects(), "ID1", wrongAccount)).error == "send_account_mismatch", "a different logged-in account is refused")
+local noAccount = function(request)
+  local result = verified_result(request.conversation_id, request.body)
+  result.account = nil
+  return result
+end
+check(whatsapp.dispatch(memory, "whatsapp_send", { body = "x", confirm = true }, send_ctx(identity, new_effects(), "ID2", noAccount)).error == "send_account_unproven", "an unproven account is refused")
+local wrongEndpoint = function(request)
+  local result = verified_result(request.conversation_id, request.body)
+  result.browser_endpoint = "ws://127.0.0.1:9222/devtools/page/OTHER"
+  return result
+end
+check(whatsapp.dispatch(memory, "whatsapp_send", { body = "x", confirm = true }, send_ctx(identity, new_effects(), "ID3", wrongEndpoint)).error == "send_endpoint_mismatch", "a different browser endpoint is refused")
+local idFlags = whatsapp.route_identity_flags(identity)
+check(#idFlags == 2 and idFlags[1][1] == "--expect-account" and idFlags[2][1] == "--expect-browser-endpoint", "identity flags come from the profile binding")
+check(whatsapp.account_matches("5511999999999", "5511999999999@s.whatsapp.net"), "account match normalizes the jid suffix")
+check(not whatsapp.account_matches("5511999999999", "5511999999998"), "a different number does not match")
 
 print("whatsapp scoped checks " .. checks)
 print("whatsapp scoped ok")

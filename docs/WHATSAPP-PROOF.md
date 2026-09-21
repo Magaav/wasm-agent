@@ -37,12 +37,13 @@ a **local approved** binding; none of it appears in a portable artifact.
   "schema_version": 1,
   "id": "whatsapp-responder",
   "instructions": "Answer one WhatsApp conversation as the operator. Read it, decide, and send at most one short reply.",
-  "allowed_tools": ["whatsapp_conversation", "whatsapp_decide", "whatsapp_send"],
+  "allowed_tools": ["whatsapp_read", "whatsapp_decide", "whatsapp_send"],
   "resources": {
-    "allowed_conversation": "<SELF_CHAT_ID>",
+    "conversation": "<SELF_CHAT_ID>",
     "allowed_conversations": ["<SELF_CHAT_ID>"],
+    "actions": ["read", "send"],
     "self_destination": "<SELF_CHAT_ID>",
-    "account": "operator",
+    "account": "<OWN_ACCOUNT_ID>",
     "browser_endpoint": "ws://[::1]:9222/devtools/page/<EXPLICIT_TARGET_ID>",
     "send_path": "ui",
     "allow_mark_read": false,
@@ -60,9 +61,11 @@ Bindings, and why each is required:
 
 | field | value |
 | --- | --- |
-| `allowed_conversation` / `allowed_conversations` | the notes-to-self chat id, from the store |
+| `conversation` / `allowed_conversations` | the notes-to-self chat id, from the store |
+| `actions` | `["read","send"]`; read does not imply send, so a draft-only binding is `["read"]` |
 | `self_destination` | the **same** id; this is what makes the UI route's unread consequence acceptable |
-| `browser_endpoint` | the explicit loopback DevTools page from `whatsapp-preflight.sh`. On the verified machine the store and hook are on **IPv6 `[::1]:9222`**; IPv4 `127.0.0.1:9222` answers 404 (not a browser) |
+| `account` | the operator's own account id. The raw script is passed `--expect-account` and refuses a session that is logged in as a different account |
+| `browser_endpoint` | the explicit loopback DevTools page from `whatsapp-preflight.sh`. On the verified machine the store and hook are on **IPv6 `[::1]:9222`**; IPv4 `127.0.0.1:9222` answers 404 (not a browser). Passed as `--expect-browser-endpoint`; a different page/port is refused |
 | `send_path` | `ui` (the only proven route); `store` is refused without a real `store_send_script` |
 | `allow_mark_read` | `false`; the self exemption applies, so it is not needed |
 | `send_approved` | `true` **only for the proof**; a decision never grants it |
@@ -71,24 +74,31 @@ Bindings, and why each is required:
 
 ## The commands
 
-1. **Resolve the self chat id, read-only.** `--lookup-only` reads the app's store and returns the target
-   and `self_id` without acquiring the send lock, opening a chat, typing or sending:
+1. **Resolve the self chat id, read-only.** `--lookup-only` reads the app's store and returns the target,
+   the account and `self_id` without acquiring the send lock, opening a chat, typing or sending:
 
    ```
    node <INSTALL>/scripts/whatsapp-reply.mjs --to-self --lookup-only
-   # {"ok":true,"lookup_only":true,"chat":{"id":"<SELF_CHAT_ID>",...},"self_id":"<SELF_CHAT_ID>",...}
+   # {"ok":true,"lookup_only":true,"chat":{"id":"<SELF_CHAT_ID>",...},"self_id":"<SELF_CHAT_ID>","account":"<OWN_ACCOUNT_ID>","is_me":true,...}
    ```
 
-   Put `chat.id` in `allowed_conversation`, `allowed_conversations` and `self_destination`. To read recent
-   context without opening anything either, use `node <INSTALL>/scripts/whatsapp-read.mjs` (the store
-   reader).
+   Self is **proven by the app**, never inferred: the resolver asks `WAWebUserPrefsMeUser`
+   (`isMeAccount`/`isSerializedWidMe` and the current PN/LID) and refuses
+   (`self_chat_unresolved`/`self_chat_ambiguous`) when it cannot identify exactly one self chat. Message
+   direction and display names are never evidence - an unanswered stranger has outgoing-only history too.
+
+   Put `chat.id` in `conversation`, `allowed_conversations` and `self_destination`, and `account` in
+   `account`. The lookup also returns the account (`account`) and the discovered endpoint
+   (`browser_endpoint`) so the binding can be copied exactly. To read recent context without opening
+   anything either, use `node <INSTALL>/scripts/whatsapp-read.mjs` (the store reader).
 
    A **rehearsal** (`--to-self --body "..."` without `--send`) is *not* read-only: it opens the chat,
    types the body, asserts the composer and clears its own text (opening clears the self chat's marker,
    which is empty anyway). Use it only when you intend to interact with the page.
 
 2. **Confirm the raw-script guard.** With the id bound, a non-self `--send` must be refused *before the
-   chat is opened*:
+   chat is opened*. The self exemption is the app's `isMeAccount` proof, not a string comparison against a
+   guessed id:
 
    ```
    node <INSTALL>/scripts/whatsapp-reply.mjs --chat <OTHER_CHAT_ID> --body "should not send" --send
