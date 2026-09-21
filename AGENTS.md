@@ -17,75 +17,18 @@ pull`. After editing: commit and push, then pull on the other side.
 Every tree authenticates with the `github-wasm-agent` SSH host alias:
 `git@github-wasm-agent:Magaav/wasm-agent.git`.
 
-### Which branch am I on? You never ask — you derive it
+### Evolving code in parallel
 
-**You are a node, and a node is bound to a worktree.** The branch of that
-worktree *is* your name, and git already knows it:
+**Before the first edit of a code-writing turn, load the `parallel-evolution` skill.** It is the
+per-turn loop (sync → small change → prove it merges → gate → end clean) and the
+convergence/escalation protocol. These rules hold whether or not it is loaded:
 
-```sh
-git symbolic-ref --short HEAD     # -> the node's name
-```
-
-That is the whole rule. Do not ask which branch to work on, do not invent a
-task name, and do not create a worktree per task: work on the branch you are
-already standing on, in the tree you are already in. `main` is not one of
-those branches — it is where all nodes converge, so a node that finds itself
-on `main` is in the wrong tree, and `main` is never a node's name.
-
-The same derivation exists in the agent's own core:
-`nodes.node_name()` (`lua/core/nodes.lua`) prefers a name someone set, then
-the branch, and `nodes.rename_branch()` moves the branch *first* — locally,
-then GitHub, and only then writes the name, or it fails with a reason and
-changes nothing. `main`/`master` are refused there rather than renamed.
-
-Blank state, the short version: *my branch is my name; I derive it with git; I
-never commit to main.*
-
-### If you are an agent in a node's worktree
-
-- Your worktree is a `git worktree` of this repo, on the branch named after the
-  node. That branch is your **home**: keep it current with `main`, because a node that cannot see `main`
-  cannot see the rules. Each **change** goes on its own short-lived branch (`change/<name>`), born from
-  current `main`, merged and deleted - a branch that lives a day cannot fall 21 commits behind.
-  Do not rewrite `main`, and do not push to `main` — hand the branch off or open
-  a PR, and let the human merge.
-- The last commit on your branch is the human's review surface. Keep commits
-  small and make each message say *why*, not just *what*.
-- Working-directory rule still applies: `git config core.autocrlf` must be
-  `false`. Worktrees inherit it from the shared git dir, so verify, don't assume.
-- **The commit-msg hook enforces the branch rule.** The refusal comes from
-  `.githooks/commit-msg` — a commit on `main` whose trailer is `Agent: wasm-agent ...`
-  is refused, and so is a commit with no trailer at all. (The `pre-commit` hook is a
-  different rule: it refuses **CRLF in the index**.) If you see the main refusal, you are
-  on the wrong branch — go back to the branch that carries your node's name
-  (`git symbolic-ref --short HEAD` is where you should be), rebase onto `origin/main`,
-  push — and it is the hook working, not a bug to work around.
-  Enable it in a checkout (once per clone; worktrees share the shared git dir):
-
-  ```sh
-  git config core.hooksPath .githooks
-  ```
-- **Merging cleanly is part of done.** Before you report a task finished, rebase onto
-  `origin/main` and prove the branch still merges:
-  `git rebase origin/main && git merge-tree --write-tree origin/main HEAD`.
-  A branch that conflicts is not finished work — it is a task you have handed to
-  someone else, and the longer it waits the more of main it would delete. The drift is
-  time, not skill: a task that runs for hours against an old base will meet whatever
-  landed while it ran.
-- **Commit before you stop.** Uncommitted work is invisible work: the branch reads
-  merged while the worktree reads in progress, and neither state can be reviewed.
-  If you are not going to finish it, commit it as `wip(...)` and say what remains.
-- `scripts/worktrees.sh` prints every worktree with its drift, its uncommitted files
-  and whether it merges. Run it before you start, so you know what you are landing on.
-- **Never move a tree you do not own.** If your shell's cwd is someone else's checkout -
-  a `main` checkout, another agent's worktree - do not switch its branch, commit in it,
-  or leave it on a branch of yours. A live run did exactly that: it committed its work
-  to its own branch and left the human's checkout sitting on it, so the human's next
-  `git add -A` would have landed on the agent's branch. Create your own worktree first
-  (`orca worktree create`), or ask.
-- **A skipped test is reported as skipped.** The suites count skips and say so in the
-  verdict; skipping is something you ask for, not something inferred from a missing tool.
-  A run that did not test something must not print the sentence a run that did prints.
+- **Your branch is your name** (`git symbolic-ref --short HEAD`); `main` is never a node's name,
+  and a commit to `main` is refused by the hook.
+- **One `change/<name>` per concern**, from current `origin/main`, merged and deleted.
+- **Never move a tree you do not own.**
+- **End every commit with its provenance trailer** (the hook prints the form when one is missing).
+- **Merging cleanly is part of done** — prove it with `git merge-tree --write-tree origin/main HEAD`.
 
 ### Never touch the old plugin
 
@@ -164,6 +107,8 @@ bash scripts/build-window.sh                  # -> target/windows-x64/.../wa-win
   the error and the step. `docs/MEMORY.md` explains the tracing model.
 - Verify before claiming: run the smoke test, and prefer a real two-node check
   over a single-process one.
+- A **skipped test is reported as skipped**: the suites count skips and say so in the
+  verdict. A run that did not test something must not print the sentence a run that did.
 
 ## Stopping the node
 
@@ -180,53 +125,8 @@ Stop-Process -Id (Get-Content "$env:LOCALAPPDATA\wasm-agent\serve.pid")
 An unfinished session is not lost: `wa chat --continue` resumes the thread with
 its transcript intact, and the window offers to continue it where it stopped.
 
-## Commit provenance
-
-The author *name* is the same for everything here - `wasm-agent` - because both
-harnesses and both trees share one configured identity. That is deliberate, and it is
-also why the name tells you nothing about who did the work.
-
-The author *email* is the operator's own address, verified on their GitHub account.
-GitHub attributes commits by email, so this is what puts the work on their
-contribution graph; the name stays shared, so the graph shows the project rather than
-pretending one person wrote every line. Commits made before this was set carry the old
-synthetic address (`agent@wasm-agent.local`) and are not attributed - rewriting them
-would mean rewriting `main`, which this file forbids.
-
-So say who you are in the message. End every commit you make with a trailer:
-
-```
-Agent: wasm-agent node=<this node's name> session=<the session id>
-Agent: pi session=<the pi session id>
-```
-
-The session id is the useful part: it maps the commit back to a transcript, and
-the transcript holds the tool calls, the diffs and the reasoning. Without it a
-commit is an orphan.
-
-And never leave a tree dirty without saying so. An uncommitted working-tree edit
-is invisible, unattributable and lost the moment anyone pulls — which is exactly
-what happened to a UI change found sitting in the cloud tree: no author, no date,
-no trace, and no way to tell whether it was even wanted.
-
 ## Restarting the node you are running on
 
 You cannot: the stop is the last command your run executes. Ask the sentinel - the procedure, and the
 reasons, are in `skills/self-update/SKILL.md`.
 
-## Keep your branch current with main
-
-A node works in its own worktree on its own branch, and that branch drifts: main moves, the node does
-not, and then the node cannot see the rules it is supposed to follow.
-
-That is not hypothetical. An agent read `docs/SENTINEL.md` and got `not_found`, correctly - the file was
-on main, and its branch was **21 commits behind**. It could not see the sentinel, its documentation, or
-the rule telling it to ask the sentinel instead of stopping the node. A node that cannot see main cannot
-see the rules, and it will keep making the mistake the rule exists to prevent.
-
-Before starting work:
-
-    git fetch origin && git merge origin/main
-
-And when your work is merged into main, main is merged back into your branch, so the next thing you read
-is the current thing.
