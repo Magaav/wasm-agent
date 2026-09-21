@@ -45,9 +45,9 @@ The report includes:
   not automatically defects: authorization, model and instruction changes may
   legitimately require a new prefix.
 * Zero-cache calls with stable **recorded components**, not a diagnosis of
-  provider eviction. The ledger has no per-message hashes or exact routing-key
-  values; this tool cannot prove append-only history, find the first different
-  message, or guarantee a provider cache hit. It does not invent that evidence.
+  provider eviction. Older exports lack per-message comparison evidence; those
+  remain unmeasured. New `prefix_audit` observations (below) are counted separately.
+  Neither proves provider retention or guarantees a cache hit.
 * Request/first-delta/run latency sample counts and p50/p95; average request
   component bytes, with reasoning/arguments labeled as source-byte subsets.
 * Repeated tool argument hashes **within a run**, never labeled wasted work.
@@ -124,7 +124,9 @@ versioned continuation. Independent ranges remain available without a prior rece
 
 Each call reads fresh file bytes. Only the deterministic line index is cached by
 content hash plus index-format/configuration version: at most 16 entries and an
-estimated 2 MiB of index storage per module instance. No file contents, file-exists
+estimated 2 MiB of index storage per module instance. Index construction also stops at that limit; oversized files
+use a range-only index while counting lines without retaining all line offsets.
+No file contents, file-exists
 results, test outcomes or external state are substituted by this cache. This saves
 re-indexing, not file I/O or hashing. The underlying read still loads the file;
 bounded pages/index cache are **not** a bound on whole-file memory or filesystem time.

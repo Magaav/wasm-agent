@@ -3,9 +3,9 @@ local json=dofile('lua/vendor/json.lua')
 local output=dofile('lua/core/tool_output.lua')
 local M={}
 local cache,order,weight={}, {},0
-local hits,builds=0,0
+local hits,builds,fallbacks=0,0,0
 local VERSION='line-index-v1:lf-preserve-cr'
-function M.cache_stats() return {entries=#order,index_bytes_estimate=weight,hits=hits,builds=builds,version=VERSION} end
+function M.cache_stats() return {entries=#order,index_bytes_estimate=weight,hits=hits,builds=builds,fallbacks=fallbacks,version=VERSION} end
 local function index(text,hash)
   local key=VERSION..':'..hash
   if cache[key] then hits=hits+1;return cache[key] end
@@ -13,7 +13,12 @@ local function index(text,hash)
   local starts={}
   if #text>0 then
     starts[1]=1
-    for at in text:gmatch('()\n') do if at<#text then starts[#starts+1]=at+1 end end
+    for at in text:gmatch('()\n') do
+      if at<#text then
+        if #starts>=131072 then return nil end -- Do not build an unbounded index before deciding not to cache it.
+        starts[#starts+1]=at+1
+      end
+    end
   end
   -- Bound both entries and approximate index storage. Never cache file contents or outcomes.
   local size=#starts*16
@@ -41,7 +46,21 @@ function M.read(args)
   local hash=host.sha256(text)
   if args.version and args.version~=hash then return {error='file_changed',path=args.path,version=hash} end
   local starts=index(text,hash)
-  if line>#starts+1 or (not starts[line] and column~=1) then return {error='read_range_out_of_bounds',version=hash} end
+  local total=starts and #starts or 0
+  if not starts then
+    fallbacks=fallbacks+1
+    starts={}
+    if #text>0 then
+      total=1;if line==1 then starts[1]=1 end
+      for at in text:gmatch('()\n') do
+        if at<#text then
+          total=total+1
+          if total>=line and total<=line+limit then starts[total]=at+1 end
+        end
+      end
+    end
+  end
+  if line>total+1 or (not starts[line] and column~=1) then return {error='read_range_out_of_bounds',version=hash} end
   local first=starts[line] or (#text+1)
   local finish=(starts[line+1] or (#text+1))-1
   if starts[line] and column>finish-first+1 then return {error='column_out_of_bounds',version=hash} end
@@ -54,11 +73,11 @@ function M.read(args)
   local function envelope()
     local next_line=line
     while starts[next_line+1] and starts[next_line+1]<=next_byte do next_line=next_line+1 end
-    if next_byte>#text then next_line=#starts+1 end
+    if next_byte>#text then next_line=total+1 end
     local next_column=next_byte-(starts[next_line] or (#text+1))+1
     return {path=args.path,content=part,version=hash,offset=line,column=column,
       next_offset=next_line,next_column=next_column,eof=next_byte>#text,
-      total_lines=#starts,bytes=#text,returned_bytes=#part,
+      total_lines=total,bytes=#text,returned_bytes=#part,
       end_offset=#part>0 and (next_column==1 and next_line-1 or next_line) or nil,
       note='Raw text, no synthetic line numbering. Continue with next_offset, next_column and version.'}
   end

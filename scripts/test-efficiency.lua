@@ -20,6 +20,9 @@ for i,text in ipairs({'','a\n','a\r\nb','é日本語\n'..string.rep('é',70000).
   until false
   check(table.concat(parts)==text,'projected pages recover exact bytes')
 end
+local dense=save('dense-lines',string.rep('\n',140000))
+local dense_page=files.read({path=dense,offset=139999,limit=2})
+check(files.cache_stats().fallbacks>0 and dense_page.total_lines==140000 and dense_page.content=='\n\n' and dense_page.eof,'oversized indexes fall back to bounded range indexing')
 local path=save('edits','one\ntwo\nthree\n');local before=files.read({path=path})
 local stats=files.cache_stats();files.read({path=path});check(files.cache_stats().hits>stats.hits,'immutable line index reused')
 host.write_file(path,'ONE\ntwo\nthree\n')
