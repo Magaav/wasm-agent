@@ -26,6 +26,18 @@ local function schema(name, description, properties, required)
     name = name, description = description, parameters = parameters } }
 end
 
+-- The foreground shell deadline, read from the host that enforces it
+-- (`host.exec_timeout`). Naming the number in the description is what lets a model
+-- plan a long command as an operation: the audit found `bash` calls that spent the
+-- whole 300s inside one command and lost it to a deadline they did not know about.
+local function exec_deadline_seconds()
+  if host and host.exec_timeout then
+    local ok, seconds = pcall(host.exec_timeout)
+    if ok and tonumber(seconds) then return math.floor(tonumber(seconds)) end
+  end
+  return 300
+end
+
 -- Available to everyone.
 M.shared = {
   schema("remember", "Store a fact the user asked you to remember, so it can be recalled later. Confirm in one short sentence; do not store your own reasoning. If a stored fact turns out to be wrong, call `forget` on it and then store the corrected version once - never append a correction entry, or the store accumulates contradictions that you will later have to guess between.", {
@@ -93,7 +105,7 @@ M.admin = {
     id = { type = "string" } }, { "id" }),
   -- The dialect is in the description because the model otherwise assumes POSIX
   -- and wastes its tool budget on commands this machine does not have.
-  schema("bash", "Run a foreground command on this machine using " .. platform.shell() .. ". Its entire process tree is owned and cleaned up; background descendants cannot outlive this call. Output and process exit are separate evidence. For a long-lived server/browser use operation start, keep its command foreground, then observe/cancel its handle.", {
+  schema("bash", "Run a foreground command on this machine using " .. platform.shell() .. ". It is killed at " .. exec_deadline_seconds() .. "s, the node's foreground execution deadline; for anything that may outlast that - a build, the full test gate, a server - use operation start with its own timeout_seconds (1-86400) and observe or await its handle. Its entire process tree is owned and cleaned up; background descendants cannot outlive this call. Output and process exit are separate evidence.", {
     command = { type = "string" }, cwd = { type = "string" } }, { "command" }),
   schema("operation", "Start, observe, read streamed output, wait briefly for, or cancel a supervised external operation. A launch receipt is not completion. Output read uses byte cursors; when text_lossy is true, decode content_base64 for exact bytes instead of concatenating content. Use await once to wait for settlement without repeated model polling (up to the operation deadline); wait is a short peek. Jobs are automation rules, not operations. No automatic replay after an unknown outcome.", {
     action = { type = "string", enum = {"start", "list", "status", "read", "wait", "await", "cancel"} },
