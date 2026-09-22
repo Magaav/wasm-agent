@@ -68,8 +68,11 @@ function jobFailure(env, ...args) {
 async function listen(server) { await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); }); return server.address().port; }
 async function freePort() { const server = http.createServer(); const port = await listen(server); await new Promise((resolve) => server.close(resolve)); return port; }
 
-// The mock model: drives the child's allowed and denied tool sequences. It is a local HTTP server and
-// nothing here is paid inference.
+// The mock model: drives the child's allowed and denied tool sequences, answers interactive turns with
+// isolated markers, and can hold child inference so the pool can be saturated while interactive runs
+// finish. It is a local HTTP server and nothing here is paid inference.
+let holdChildren = false;
+const held = [];
 function providerServer() {
   return http.createServer((req, res) => {
     let body = "";
@@ -82,37 +85,47 @@ function providerServer() {
       const system = String((messages.find((message) => message.role === "system") || {}).content || "");
       const childText = JSON.stringify(messages);
       const isChild = system.includes("You are a subagent");
-      const toolCall = (name, args) => ({ index: 0, id: "call-" + (++rpc), type: "function", function: { name, arguments: JSON.stringify(args || {}) } });
-      const finish = (payload) => {
+      const userText = messages.filter((message) => message.role === "user")
+        .map((message) => (typeof message.content === "string" ? message.content : JSON.stringify(message.content))).join("\n");
+      const usage = { prompt_tokens: 8, completion_tokens: 2, total_tokens: 10 };
+      const respond = (payload) => {
+        if (res.destroyed || res.writableEnded) return;
         res.writeHead(200, { "content-type": "text/event-stream" });
-        res.end("data: " + JSON.stringify({ id: "mock", choices: [payload], usage: { prompt_tokens: 8, completion_tokens: 2, total_tokens: 10 } }) + "\n\ndata: [DONE]\n\n");
+        res.end("data: " + JSON.stringify({ id: "mock", choices: [payload], usage }) + "\n\ndata: [DONE]\n\n");
       };
-      const text = (content) => finish({ delta: { content }, finish_reason: "stop" });
-      const call = (name, args) => finish({ delta: { tool_calls: [toolCall(name, args)] }, finish_reason: "tool_calls" });
-      if (!isChild) { text("parent-ack"); return; }
-      const toolResults = messages.filter((message) => message.role === "tool");
-      const steps = toolResults.length;
-      // The mode is in the approved job prompt (the runtime resolves the conversation from the ledger and
-      // forwards no raw event fields), so the sequence is driven by the step count.
-      if (childText.includes("MODE:crash")) {
-        if (steps === 0) { call("whatsapp_read", {}); return; }
-        if (steps === 1) { call("whatsapp_send", { body: "crash-body", confirm: true }); return; }
-        // Report what the durable reservation did: a refusal is `child-crash-refused`, a real send is not.
-        const sendResult = String((toolResults[1] && toolResults[1].content) || "");
-        text(/ambiguous|already_sent|"error"/.test(sendResult) ? "child-crash-refused" : "child-crash-sent");
-        return;
+      const text = (content) => ({ delta: { content }, finish_reason: "stop" });
+      let payload;
+      if (!isChild) {
+        const marker = userText.includes("INTERACTIVE_A") ? "ANSWER_A" : userText.includes("INTERACTIVE_B") ? "ANSWER_B" : "OPERATOR_ACK";
+        payload = text(marker);
+      } else if (!childText.includes("MODE:")) {
+        // A no-op child (no WhatsApp mode) used only to fill the child pool.
+        payload = text("noop-done");
+      } else {
+        const toolResults = messages.filter((message) => message.role === "tool");
+        const steps = toolResults.length;
+        const toolCall = (name, args) => ({ index: 0, id: "call-" + (++rpc), type: "function", function: { name, arguments: JSON.stringify(args || {}) } });
+        const call = (name, args) => ({ delta: { tool_calls: [toolCall(name, args)] }, finish_reason: "tool_calls" });
+        if (childText.includes("MODE:crash")) {
+          if (steps === 0) payload = call("whatsapp_read", {});
+          else if (steps === 1) payload = call("whatsapp_send", { body: "crash-body", confirm: true });
+          else {
+            const sendResult = String((toolResults[1] && toolResults[1].content) || "");
+            payload = text(/ambiguous|already_sent|"error"/.test(sendResult) ? "child-crash-refused" : "child-crash-sent");
+          }
+        } else if (childText.includes("MODE:deny")) {
+          if (steps === 0) payload = call("bash", { command: "echo pwned > " + path.join(root, "pwned.txt").replaceAll("\\", "/") });
+          else if (steps === 1) payload = call("whatsapp_send", { conversation_id: "9999999999@c.us", body: "foreign", confirm: true });
+          else payload = text("child-denied-done");
+        } else {
+          if (steps === 0) payload = call("whatsapp_read", {});
+          else if (steps === 1) payload = call("whatsapp_decide", { decision: "reply", reason: "waiting on them" });
+          else if (steps === 2) payload = call("whatsapp_send", { body: "yes, 3pm", confirm: true });
+          else payload = text("child-sent-done");
+        }
       }
-      if (childText.includes("MODE:deny")) {
-        if (steps === 0) { call("bash", { command: "echo pwned > " + path.join(root, "pwned.txt").replaceAll("\\", "/") }); return; }
-        if (steps === 1) { call("whatsapp_send", { conversation_id: "9999999999@c.us", body: "foreign", confirm: true }); return; }
-        text("child-denied-done");
-        return;
-      }
-      // MODE:allowed: read -> decide -> send.
-      if (steps === 0) { call("whatsapp_read", {}); return; }
-      if (steps === 1) { call("whatsapp_decide", { decision: "reply", reason: "waiting on them" }); return; }
-      if (steps === 2) { call("whatsapp_send", { body: "yes, 3pm", confirm: true }); return; }
-      text("child-sent-done");
+      if (isChild && holdChildren) { held.push({ res, deliver: () => respond(payload) }); return; }
+      respond(payload);
     });
   });
 }
@@ -188,6 +201,16 @@ function writeProfile() {
     },
     limits: { max_depth: 0, timeout_seconds: 60, max_output_bytes: 32768, max_tokens: 50000, sends_per_run: 1 },
   }, null, 2));
+  // A no-op child with no tools, used only to fill the second child-pool slot during the saturation proof.
+  fs.writeFileSync(path.join(config, "subagent-profiles", "proof-lean.json"), JSON.stringify({
+    schema_version: 1,
+    id: "proof-lean",
+    description: "no-op pool filler",
+    instructions: "Say done.",
+    allowed_tools: [],
+    resources: {},
+    limits: { max_depth: 0, timeout_seconds: 30, max_output_bytes: 4096, max_tokens: 8000 },
+  }, null, 2));
 }
 
 function nodeEnv(port, modelPort, mode) {
@@ -198,7 +221,7 @@ function nodeEnv(port, modelPort, mode) {
     WASM_AGENT_LLM_BASE_URL: `http://127.0.0.1:${modelPort}`,
     WASM_AGENT_LLM_API_KEY: "fixture-not-a-credential",
     WASM_AGENT_LLM_MODEL: "fixture",
-    WASM_AGENT_SUBAGENT_MAX_CONCURRENT: "2",
+    WASM_AGENT_SUBAGENT_CONCURRENCY: "2",
     WASM_AGENT_SUBAGENT_QUEUE_DEPTH: "4",
     WASM_AGENT_RELAY: "",
     WASM_AGENT_RENDEZVOUS: "",
@@ -318,8 +341,37 @@ async function main() {
     return job(jobEnv, "emit", topic, eventId, file);
   };
 
-  // ---- allowed run: read -> decide -> send, exactly one durable effect -----------------------------
+  // ---- allowed run under child saturation: hold child inference, prove two interactive /chat runs
+  // finish with isolated markers and exactly one done while the WhatsApp child (plus a pool-filling
+  // no-op child) are held, then release and let the real read/decide/send chain finish.
+  holdChildren = true;
   check(emit("wa.allowed", "allowed-1", { message_id: MSG_ALLOWED }).queued === 1, "allowed event enqueued");
+  await until(() => held.length >= 1, "the WhatsApp child's first model request is held");
+  const noop = await api(base, { action: "start", profile: "proof-lean", prompt: "noop", idempotency_key: "noop-1" });
+  check(noop.status === 200 && noop.value && noop.value.subagent_id && !noop.value.error, `a second child fills the second pool slot: ${JSON.stringify(noop.value)}`);
+  await until(() => held.length >= 2, "the second child's model request is held");
+  check((await fetch(base + "/health", { signal: AbortSignal.timeout(3000) })).ok, "health is responsive while both child slots are held");
+  const heldList = await api(base, { action: "list" });
+  check(heldList.status === 200 && heldList.value && (heldList.value.subagents || []).length >= 2, "the control plane lists the two held children while inference is saturated");
+  check(effectLines().every((line) => line.body !== "yes, 3pm"), "the WhatsApp effect is not sent while the child is held");
+  const chats = await Promise.all(["A", "B"].map(async (name) => {
+    const response = await fetch(base + "/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "text/event-stream" },
+      body: JSON.stringify({ thread: "wa-fixture-" + name, text: "INTERACTIVE_" + name }),
+      signal: AbortSignal.timeout(15000),
+    });
+    return { name, status: response.status, text: await response.text() };
+  }));
+  for (const chat of chats) {
+    check(chat.status === 200 && chat.text.includes("ANSWER_" + chat.name), `interactive ${chat.name} answered while both child slots are held`);
+    check(!chat.text.includes("ANSWER_" + (chat.name === "A" ? "B" : "A")), `interactive ${chat.name} has no other session's marker`);
+    check((chat.text.match(/"type"\s*:\s*"done"/g) || []).length === 1, `interactive ${chat.name} has exactly one terminal done`);
+  }
+  // Release the held children; the actual WhatsApp chain then runs to completion.
+  holdChildren = false;
+  for (const item of held) item.deliver();
+  held.length = 0;
   await until(() => effectLines().some((line) => line.body === "yes, 3pm"), "fake send invoked once");
   await until(() => job(jobEnv, "history").some((delivery) => delivery.job_id === "wa-allowed" && delivery.state === "completed"), "allowed delivery completed");
   const allowedEffects = effectLines().filter((line) => line.body === "yes, 3pm");
@@ -348,11 +400,13 @@ async function main() {
   await until(() => effectLines().filter((line) => line.body === "crash-body").length === 1, "crash send began and blocked", 20000);
   await sleep(1500);
   // The send is blocked before confirmation. Kill only the test-owned node and the blocked fake sender.
-  const pidFile = counter + ".pid";
-  if (fs.existsSync(pidFile)) { try { process.kill(Number(fs.readFileSync(pidFile, "utf8"))); } catch { /* already gone */ } }
   const crashChild = child;
   if (crashChild && crashChild.exitCode === null) crashChild.kill();
   await Promise.race([new Promise((resolve) => crashChild.once("exit", resolve)), sleep(5000)]);
+  // The node died WHILE the fake sender was still blocked after recording the effect: that is the crash
+  // window. Only now clean up the orphaned fake sender.
+  const pidFile = counter + ".pid";
+  if (fs.existsSync(pidFile)) { try { process.kill(Number(fs.readFileSync(pidFile, "utf8"))); } catch { /* already gone */ } }
   // Restart the same home and resubmit the same source message under a fresh delivery.
   child = startNode({ ...env, WA_FAKE_MODE: "ok" }, port);
   await until(async () => { try { return (await fetch(base + "/health", { signal: AbortSignal.timeout(500) })).ok; } catch { return false; } }, "node restarted for replay", 15000);
