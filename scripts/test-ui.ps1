@@ -452,7 +452,7 @@ $harness = @'
     "the WASM markdown renderer must be loaded for this case: " + (window.__rendererError || "no error recorded"));
   window.handleEvent({
     type: "reply",
-    text: "| tool | legacy | default |\n|---|--:|--:|\n| read | 4.0 | 3.0 |\n\n## Next\n\n- keep the payload\n- budget the context",
+    text: "| tool | legacy | default |\n|---|--:|--:|\n| read | 4.0 | 3.0 |\n\n## Next\n\n- keep the payload\n- budget the context\n\n```\nnpm run build\n```\n\nRun `npm ci` first.",
   });
   window.handleEvent({ type: "done" });
   var all = messages.querySelectorAll("wa-message.assistant");
@@ -466,6 +466,27 @@ $harness = @'
     "the table must have three body cells");
   check(!!md && !!md.querySelector("h2"), "a markdown heading must render as a heading");
   check(!!md && md.querySelectorAll("li").length === 2, "list items must render as list items");
+
+  // A fenced block gets a copy button; inline code does not. The check must be
+  // structural, because a button in the wrong place is a button that copies the wrong text.
+  var copyButton = md ? md.querySelector(".code-wrap .copy-code") : null;
+  check(!!copyButton, "a fenced block must carry a copy button inside its container");
+  check(!!md && md.querySelectorAll(".copy-code").length === 1,
+    "only the fenced block gets a copy button, saw " + (md ? md.querySelectorAll(".copy-code").length : -1));
+  var inlineCode = md ? Array.prototype.filter.call(md.querySelectorAll("code"), function (el) { return !el.closest("pre"); }) : [];
+  check(inlineCode.length === 1 && !inlineCode[0].closest(".code-wrap"),
+    "inline code must not get a copy button");
+  // The button copies the code TEXT, not its markup. Stub the clipboard so the
+  // assertion does not depend on the headless browser granting clipboard access.
+  try { Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+    writeText: function (t) { window.__copied = t; return Promise.resolve(); } } }); } catch (e) {}
+  window.__copied = null;
+  if (copyButton) copyButton.click();
+  for (var cb = 0; cb < 5; cb++) await tick();
+  check(window.__copied === "npm run build",
+    "the button must copy the fenced code text, got " + JSON.stringify(window.__copied));
+  check(!!copyButton && copyButton.textContent === "Copied",
+    "the click must be acknowledged, got " + (copyButton ? copyButton.textContent : "no button"));
 
   // A reasoning model thinks before it speaks, and a panel that shows nothing
   // during that time is indistinguishable from a hung one. The count is also the

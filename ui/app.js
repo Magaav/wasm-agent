@@ -177,6 +177,68 @@ function escapeHtml(text) {
     { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+// Every fenced block gets a copy control. The renderer emits "<pre><code>…</code></pre>"
+// for a fence and a bare "<code>" for inline code, so the <pre>-wrapped one is exactly a
+// fence; wrapping here, once, covers every place a reply is inserted.
+const CODE_FENCE = /<pre><code>([\s\S]*?)<\/code><\/pre>/g;
+
+function enhanceCodeBlocks(html) {
+  return String(html).replace(CODE_FENCE, function (_match, code) {
+    return '<div class="code-wrap">'
+      + '<button class="copy-code" type="button" aria-label="Copy code" title="Copy code">Copy</button>'
+      + '<pre><code>' + code + '</code></pre></div>';
+  });
+}
+
+// Copy the code TEXT, not its markup: `innerText` reflects what the reader sees, with the
+// entities decoded. The clipboard API needs a secure context, so fall back to the legacy
+// selection copy where it is unavailable.
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).catch(function () { return legacyCopy(text); });
+  }
+  return legacyCopy(text);
+}
+
+function legacyCopy(text) {
+  return new Promise(function (resolve, reject) {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.top = "-1000px";
+    document.body.appendChild(area);
+    area.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (error) { ok = false; }
+    document.body.removeChild(area);
+    if (ok) resolve(); else reject(new Error("copy failed"));
+  });
+}
+
+function acknowledgeCopy(button, failed) {
+  button.textContent = failed ? "Copy failed" : "Copied";
+  button.classList.toggle("copied", !failed);
+  button.classList.toggle("copy-failed", !!failed);
+  clearTimeout(button.__copyTimer);
+  button.__copyTimer = setTimeout(function () {
+    button.textContent = "Copy";
+    button.classList.remove("copied", "copy-failed");
+  }, 1200);
+}
+
+// Delegated: the button is built as HTML, so there is no per-block listener to wire.
+document.addEventListener("click", function (event) {
+  const button = event.target && event.target.closest ? event.target.closest(".copy-code") : null;
+  if (!button) return;
+  const wrap = button.closest(".code-wrap");
+  const pre = wrap ? wrap.querySelector("pre") : null;
+  if (!pre) return;
+  event.preventDefault();
+  copyText(pre.innerText).then(function () { acknowledgeCopy(button, false); },
+                               function () { acknowledgeCopy(button, true); });
+});
+
 function renderMarkdown(text) {
   if (renderer && renderer.memory) {
     try {
@@ -186,7 +248,7 @@ function renderMarkdown(text) {
       const packed = renderer.render(pointer, bytes.length);
       const outPointer = Number((packed >> 32n) & 0xffffffffn);
       const outLength = Number(packed & 0xffffffffn);
-      return new TextDecoder().decode(new Uint8Array(renderer.memory.buffer, outPointer, outLength));
+      return enhanceCodeBlocks(new TextDecoder().decode(new Uint8Array(renderer.memory.buffer, outPointer, outLength)));
     } catch (error) { /* fall through */ }
   }
   return escapeHtml(text).replace(/\n/g, "<br>");

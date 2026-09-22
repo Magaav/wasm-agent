@@ -717,6 +717,19 @@ body.node-offline .composer textarea::placeholder { color: #d29922; }
   overflow-x: auto;
 }
 .msg .body pre code { background: none; padding: 0; font-size: 12px; }
+/* A fenced block carries its own copy control: always visible (touch has no hover),
+   pinned top-right, with the first code line kept clear of it. */
+.msg .body .code-wrap { position: relative; }
+.msg .body .code-wrap pre { padding-top: calc(var(--space) + 24px); }
+.msg .body .copy-code {
+  position: absolute; top: var(--space); right: var(--space); z-index: 1;
+  font: inherit; font-size: 11px; line-height: 1; color: var(--muted); cursor: pointer;
+  background: #161b22; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: 4px 8px;
+}
+.msg .body .copy-code:hover { color: #c9d1e0; border-color: var(--accent); }
+.msg .body .copy-code.copied { color: var(--accent); border-color: var(--accent); }
+.msg .body .copy-code.copy-failed { color: #f85149; border-color: #f85149; }
 /* A table scrolls inside its own box, not by widening the transcript. */
 .md-table { margin: var(--space) 0; overflow-x: auto; max-width: 100%; }
 .md-table table { border-collapse: collapse; font-size: 12.5px; width: 100%; }
