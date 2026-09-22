@@ -133,3 +133,41 @@ This task performed none of the live steps above: no browser was opened and no m
   the runtime worker's registry and durable `ctx.effects` adapter land.
 - Never do: overwrite a human draft (the tool refuses a non-empty composer), open another chat, retry an
   ambiguous send, or send to anyone the operator did not bind.
+
+## The store send route (source, not live-proven)
+
+`scripts/whatsapp-store-send.mjs` is the store route: it calls the app's own
+`WAWebSendTextMsgChatAction.sendTextMsgToChat(chatModel, body, options)` and never opens the chat,
+focuses, types, or marks anything read. It is **self-only until the ordinary/group metadata contract is
+verified**: a non-self send is refused `ordinary_chat_unverified` and the limitation is reported, so it
+does not claim all-chat support.
+
+Rules the route enforces:
+
+- both identity bindings (`--expect-account`, `--expect-browser-endpoint`) are required for a send;
+- the browser endpoint must be an explicitly bound loopback WebSocket page endpoint - no discovery and
+  no fallback to a default port;
+- a target draft or link-preview state refuses the send before the action runs (the action clears
+  `urlText`/`urlNumber`), and unknown metadata fails closed;
+- the app action is called exactly once; a throw or a timeout is an ambiguous post-dispatch outcome and
+  is never retried;
+- a send is `sent`/`verified` only when a new message in the store has the exact recipient, body and
+  `fromMe`, and a server `ack >= 1`. A local optimistic insertion (ack 0) is not proof.
+
+The page expressions and the guards are pure (`scripts/whatsapp-store-core.mjs`) and are tested against
+adversarial fake app stores, plus the real CLI against a fake CDP server (`tests/whatsapp-store.js`). No
+live browser is opened by the fixture.
+
+### App metadata contract still to verify before widening the route
+
+The route reads these from the app; each is unverified against the live build, so the route fails closed
+until the coordinator confirms it:
+
+1. Is the per-chat draft exposed on the chat model (`chat.draft`), and under what name?
+2. Are `chat.urlText`/`chat.urlNumber` the link-preview fields the action clears?
+3. Does `sendTextMsgToChat` resolve to a value that carries the new message id/ack, or must the store be
+   polled for it?
+4. Which module exposes the active composer/selection (`WAWebComposerActions.getActiveComposer`?), or is
+   the active composer not observable from the store?
+5. For ordinary/group sends, which metadata proves the target kind and the account's own identity, so the
+   self-only limitation can be lifted?
