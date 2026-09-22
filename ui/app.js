@@ -713,12 +713,25 @@ function finishTrace() {
   trace = null;
 }
 
+// A byte count a reader can act on. Small values keep one decimal so "1.5 KiB" does not read as
+// "1 KiB"; large ones drop it.
+function formatBytes(count) {
+  const n = Number(count) || 0;
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KiB";
+  return (n / (1024 * 1024)).toFixed(1) + " MiB";
+}
+
 // While a tool call is in flight, show what the operation behind it is doing. A foreground
 // `bash` blocks its worker and returns nothing until it settles, so the window otherwise shows
 // only a clock - and a five-minute build is indistinguishable from a hang. The node already
 // publishes the running operation on /health (`operations[]`) and its output through
-// /operation; this reads both. `running` is the busy run for *this* window, and its worker is
-// the one the tool call blocks, so `owner == "worker:<id>"` is the match.
+// /operation; this reads both. `running` is the busy run for *this* window.
+//
+// The line always says the state and how much has been written, even when that is nothing: a
+// silent command is a fact, and `running · 0 B` is more honest than an empty line that looks
+// like the preview failed. Output bytes are not proof of useful progress (a quiet compiler is
+// healthy), so the newest line is appended when there is one, not invented when there is not.
 async function refreshOperationProgress(health, running) {
   if (!trace || !trace.pending || !running) return;
   // The owner is `run:<run_id>` - serve.rs sets it for the run before the interpreter starts,
@@ -731,20 +744,25 @@ async function refreshOperationProgress(health, running) {
   const operation = (health.operations || []).find((entry) => owners.indexOf(entry.owner) >= 0);
   if (!operation) return;
   const bytes = Number(operation.output_bytes) || 0;
-  if (bytes <= 0) { trace.setProgress(""); return; }
-  try {
-    const response = await fetch("operation", {
-      method: "POST",
-      headers: apiHeaders({ "content-type": "application/json" }),
-      body: JSON.stringify({ action: "read", id: operation.operation_id, stream: "stdout",
-        offset: Math.max(0, bytes - 2048), limit: 2048 }),
-    });
-    if (!response.ok) return;
-    const page = await response.json();
-    if (!page || typeof page.content !== "string") return;
-    const lines = page.content.split(/\r?\n/).filter((line) => line.trim());
-    trace.setProgress(lines.length ? lines[lines.length - 1].slice(0, 200) : "");
-  } catch (error) { /* a preview is never worth breaking the run over */ }
+  let tail = "";
+  if (bytes > 0) {
+    try {
+      const response = await fetch("operation", {
+        method: "POST",
+        headers: apiHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ action: "read", id: operation.operation_id, stream: "stdout",
+          offset: Math.max(0, bytes - 2048), limit: 2048 }),
+      });
+      if (response.ok) {
+        const page = await response.json();
+        if (page && typeof page.content === "string") {
+          const lines = page.content.split(/\r?\n/).filter((line) => line.trim());
+          tail = lines.length ? lines[lines.length - 1].slice(0, 200) : "";
+        }
+      }
+    } catch (error) { /* a preview is never worth breaking the run over */ }
+  }
+  trace.setProgress((operation.state || "running") + " · " + formatBytes(bytes) + (tail ? " · " + tail : ""));
 }
 
 // The answer is the point; the route is reference. On reply, everything the run

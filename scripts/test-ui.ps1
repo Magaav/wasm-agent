@@ -143,9 +143,16 @@ $harness = @'
     { run_id: 3 },
   );
   var progress = document.querySelector("wa-trace .tool-progress:not([hidden])");
-  check(!!progress && progress.textContent === "linking wa",
-    "a running tool must show the operation's newest output line, saw: " + (progress && progress.textContent));
-  check(!!progress, "the progress line must be visible while the call runs");
+  check(!!progress && progress.textContent === "running · 34 B · linking wa",
+    "a running tool must show the operation's state, bytes and newest output line, saw: " + (progress && progress.textContent));
+  // A silent command must still say something: the line is a liveness signal, not just a tail.
+  await window.__refreshOperationProgress(
+    { operations: [{ operation_id: "op-quiet", owner: "run:3", state: "running", output_bytes: 0 }] },
+    { run_id: 3 },
+  );
+  var quiet = document.querySelector("wa-trace .tool-progress:not([hidden])");
+  check(!!quiet && quiet.textContent === "running · 0 B",
+    "a silent running tool must still show its state and byte count, saw: " + (quiet && quiet.textContent));
   for (var i = 7; i < events.length; i++) window.handleEvent(events[i]);
   check(!document.querySelector("wa-trace .tool-progress:not([hidden])"),
     "the settled result must clear the running progress line");
