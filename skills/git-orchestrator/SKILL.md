@@ -45,13 +45,16 @@ done
 
 ```
 git -C <main-checkout> fetch origin
-git -C <main-checkout> merge --no-edit -m "merge(change/<name>): <what it brings>" origin/change/<name>
+git -C <main-checkout> merge --no-ff --no-edit -m "merge(change/<name>): <what it brings>" origin/change/<name>
 ```
 
-Merge into `main` in the main checkout. A merge is allowed where a direct commit is not, and its
-subject must name the branch it merged. **After each merge, re-check the next branch against the
-new `main`:** two branches that each merge clean against the old base can still collide with each
-other. If a merge stops on a conflict, `git merge --abort` and escalate that branch.
+Merge into `main` in the main checkout. `--no-ff` on purpose: a branch cut from the current
+`main` would otherwise fast-forward, and the integration would lose its named merge commit - the
+provenance this repository reads from the merge's second parent. A merge is allowed where a direct
+commit is not, and its subject must name the branch it merged. **After each merge, re-check the
+next branch against the new `main`:** two branches that each merge clean against the old base can
+still collide with each other. If a merge stops on a conflict, `git merge --abort` and escalate
+that branch.
 
 A branch may move while you work, and a new lane may appear. **Re-fetch and re-audit after the last
 merge**; if a tip advanced and still merges clean, merge the new tip too. Loop until the audit is
