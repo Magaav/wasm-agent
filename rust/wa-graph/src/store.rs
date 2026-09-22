@@ -6,6 +6,7 @@
 
 use crate::extract::{self, Extract};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -72,6 +73,17 @@ impl Store {
         let store = Self { conn };
         store.init()?;
         Ok(store)
+    }
+
+    /// Open an existing graph without creating or migrating it. A reader never takes the write
+    /// lock, so the node can query while the watcher reindexes.
+    pub fn open_readonly(path: impl AsRef<Path>) -> Result<Self> {
+        let conn = Connection::open_with_flags(
+            path.as_ref(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(Self { conn })
     }
 
     fn init(&self) -> Result<()> {
@@ -459,6 +471,58 @@ impl Store {
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
+
+    /// `explain` as a JSON value: one entry per matching definition.
+    pub fn explain_json(&self, name: &str) -> Result<Value> {
+        let rows = self.explain(name)?;
+        Ok(Value::Array(
+            rows.into_iter()
+                .map(|(node, outgoing, incoming)| {
+                    json!({
+                        "node": node.to_json(),
+                        "outgoing": outgoing.iter().map(EdgeRow::to_json).collect::<Vec<_>>(),
+                        "incoming": incoming.iter().map(EdgeRow::to_json).collect::<Vec<_>>(),
+                    })
+                })
+                .collect(),
+        ))
+    }
+
+    /// `path` as a JSON value: `{found, steps}` where each step carries the edge that reached it.
+    pub fn path_json(&self, from: &str, to: &str) -> Result<Value> {
+        Ok(match self.path(from, to)? {
+            Some(chain) => json!({
+                "found": true,
+                "steps": chain
+                    .into_iter()
+                    .map(|(node, via)| {
+                        let mut value = node.to_json();
+                        value["via"] = json!(via);
+                        value
+                    })
+                    .collect::<Vec<_>>(),
+            }),
+            None => json!({ "found": false, "steps": [] }),
+        })
+    }
+
+    pub fn caps_json(&self) -> Result<Value> {
+        Ok(Value::Array(
+            self.capabilities()?
+                .into_iter()
+                .map(|(capability, uses)| json!({"capability": capability, "uses": uses}))
+                .collect(),
+        ))
+    }
+
+    pub fn query_json(&self, text: &str, limit: i64) -> Result<Value> {
+        Ok(Value::Array(
+            self.query(text, limit)?
+                .iter()
+                .map(NodeRow::to_json)
+                .collect(),
+        ))
+    }
 }
 
 fn pick_candidate(
@@ -592,6 +656,53 @@ fn row_to_edge(r: &rusqlite::Row) -> rusqlite::Result<EdgeRow> {
         dst_path: r.get(6)?,
         dst_line: r.get(7)?,
     })
+}
+
+impl NodeRow {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "kind": self.kind,
+            "name": self.name,
+            "path": self.path,
+            "line": self.line,
+            "col": self.col,
+            "lang": self.lang,
+            "detail": self.detail,
+        })
+    }
+}
+
+impl EdgeRow {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "kind": self.kind,
+            "target": self.target,
+            "path": self.path,
+            "line": self.line,
+            "resolved": self.dst.is_some(),
+            "dst": self.dst_name,
+            "dst_path": self.dst_path,
+            "dst_line": self.dst_line,
+        })
+    }
+}
+
+impl Stats {
+    pub fn to_json(&self) -> Value {
+        let kinds: serde_json::Map<String, Value> = self
+            .by_kind
+            .iter()
+            .map(|(kind, count)| (kind.clone(), json!(count)))
+            .collect();
+        json!({
+            "files": self.files,
+            "nodes": self.nodes,
+            "edges": self.edges,
+            "resolved": self.resolved,
+            "unresolved": self.unresolved,
+            "byKind": Value::Object(kinds),
+        })
+    }
 }
 
 /// Recursively collect indexable files, skipping build artifacts and VCS internals.

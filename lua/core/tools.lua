@@ -127,6 +127,17 @@ M.admin = {
     ignore_case = {type="boolean"}, limit={type="integer",minimum=1,maximum=500},
     max_depth={type="integer",minimum=0,maximum=64}, extensions={type="array",items={type="string"}}
   }, { "pattern" }),
+  -- The code graph. This is the cheap first move for a navigation question: it returns
+  -- definitions, callers and capabilities directly, where grep returns candidate lines
+  -- that still need reading. The node keeps the graph fresh, so `index` is rarely needed.
+  schema("graph", "Navigate this codebase as a graph instead of grepping. Use it first when you need to find where something is defined, who calls it, or how two things connect. explain: what is X, what it uses and who uses it. query: find a name. path: how A reaches B. caps: the host.* capabilities and how often each is called. stats/index: graph size and a manual rebuild (normally unnecessary - the node watches the tree).", {
+    action = { type = "string", enum = { "explain", "query", "path", "caps", "stats", "index" } },
+    name = { type = "string", description = "explain/query: the identifier to look up." },
+    from = { type = "string", description = "path: start identifier." },
+    to = { type = "string", description = "path: end identifier." },
+    limit = { type = "integer", minimum = 1, maximum = 200 },
+    force = { type = "boolean", description = "index: reparse every file, even unchanged ones." },
+  }, { "action" }),
   schema("diagnose", "Execute up to eight predetermined read/grep steps once, in order. Stop on failure, incomplete evidence or an unmet expectation. No shell, repair, retry or effects.", {
     steps={type="array",minItems=1,maxItems=8,items={type="object",properties={
       tool={type="string",enum={"read","grep"}},args={type="object"},
@@ -199,7 +210,7 @@ M.tier_of = {
   resume_session = "sessions", session_debug = "sessions", session_fixture = "sessions",
   bash = "environment", read = "environment", read_many = "environment", write = "environment",
   diagnose = "environment", operation = "environment",
-  edit = "environment", ls = "environment", grep = "environment",
+  edit = "environment", ls = "environment", grep = "environment", graph = "environment",
   shell = "shell",
   search_ledger = "ledger", conversation = "ledger", list_conversations = "ledger",
   client = "client",
@@ -454,6 +465,20 @@ function M.dispatch(memory, name, args, role, ctx)
     local ok,result=pcall(host.grep,args.pattern,args.path or '.',json.encode(args))
     if not ok then return {error=tostring(result)} end
     return json.decode(result)
+  elseif name == "graph" then
+    local graph = dofile("lua/core/graph.lua")
+    if not graph.available() then return { error = "graph_unavailable" } end
+    local action = args.action or "explain"
+    local result, err
+    if action == "explain" then result, err = graph.explain(args.name)
+    elseif action == "query" then result, err = graph.query(args.name, { limit = args.limit })
+    elseif action == "path" then result, err = graph.path(args.from, args.to)
+    elseif action == "caps" then result, err = graph.caps()
+    elseif action == "stats" then result, err = graph.stats()
+    elseif action == "index" then result, err = graph.index({ force = args.force })
+    else return { error = "unknown_graph_action:" .. tostring(action) } end
+    if not result then return { error = err or "graph_error" } end
+    return result
   elseif name == "client" then
     local ok, raw = pcall(host.client, args.action or "", json.encode(args))
     if not ok then return { error = tostring(raw) } end

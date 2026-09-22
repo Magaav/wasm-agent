@@ -3,6 +3,7 @@
 //! The agent logic lives in Lua (`lua/`); this host only provides capabilities
 //! (sqlite, http, wasmtime, sha256, uuid, time, files). No Python anywhere.
 mod client_bridge;
+mod graph;
 mod host;
 mod file_search;
 mod http_transport;
@@ -38,6 +39,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/platform.lua", include_str!("../../../lua/core/platform.lua")),    ("lua/core/paths.lua", include_str!("../../../lua/core/paths.lua")),
     ("lua/core/memory.lua", include_str!("../../../lua/core/memory.lua")),
     ("lua/core/tools.lua", include_str!("../../../lua/core/tools.lua")),
+    ("lua/core/graph.lua", include_str!("../../../lua/core/graph.lua")),
     ("lua/core/users.lua", include_str!("../../../lua/core/users.lua")),
     ("lua/core/spells.lua", include_str!("../../../lua/core/spells.lua")),
     ("lua/core/nodes.lua", include_str!("../../../lua/core/nodes.lua")),
@@ -236,6 +238,19 @@ fn main() {
     resolved.insert("HOME".to_string(), home.clone());
     resolved.insert("WASM_AGENT_DB".to_string(), db.clone());
     host::set_env_overrides(resolved);
+    // The graph lives beside the ledger and indexes the runtime worktree (the node's cwd), which is
+    // the source this binary is actually running from. Both are overridable for tests and dev.
+    let graph_root = std::env::var("WA_GRAPH_ROOT")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let graph_db = std::env::var("WA_GRAPH_DB")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("{home}/.wasm-agent/graph.db")));
+    graph::configure(graph_root.clone(), graph_db.clone());
     if let Some(parent) = std::path::Path::new(&db).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -276,6 +291,13 @@ fn main() {
     lua.register("platform", host::platform);
     lua.register("grep", host::grep);
     lua.register("list_dir", host::list_dir);
+    lua.register("graph_index", graph::graph_index);
+    lua.register("graph_query", graph::graph_query);
+    lua.register("graph_explain", graph::graph_explain);
+    lua.register("graph_path", graph::graph_path);
+    lua.register("graph_caps", graph::graph_caps);
+    lua.register("graph_stats", graph::graph_stats);
+    lua.register("graph_status", graph::graph_status);
     lua.register("sha256", host::sha256);
     lua.register("uuid", host::uuid);
     lua.register("read_file", host::read_file);
@@ -409,6 +431,19 @@ fn main() {
         // pointer for the life of the process; a newtype with an unsafe Send would be the same claim with
         // more ceremony.
         let worker_for_serve = worker.clone();
+        // Keep the graph fresh for the life of the node. The watcher does the initial index on its
+        // own thread, so a large tree never delays the port coming up; `WA_GRAPH_WATCH=0` disables it.
+        let _graph_watch = if std::env::var("WA_GRAPH_WATCH").map(|value| value != "0").unwrap_or(true) {
+            match wa_graph::watch::spawn(graph_root.clone(), graph_db.clone()) {
+                Ok(handle) => Some(handle),
+                Err(error) => {
+                    eprintln!("graph_watch_unavailable: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         serve::run(lua, Box::new(move || worker_for_serve()), port, PathBuf::from(ui));
         return;
     }

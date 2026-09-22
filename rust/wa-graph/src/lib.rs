@@ -7,8 +7,10 @@
 
 pub mod extract;
 pub mod store;
+pub mod watch;
 
 #[cfg(test)]
 mod tests;
 
 pub use store::{IndexReport, NodeRow, Stats, Store};
+pub use watch::WatchHandle;

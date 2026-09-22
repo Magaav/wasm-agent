@@ -42,26 +42,39 @@ pub struct ImportAlias {
     pub module: String,
 }
 
-/// Which of our five grammars a path belongs to. Unknown extensions are not indexed.
+/// Which grammar a path belongs to. Unknown extensions are not indexed.
 pub fn language_for(path: &str) -> Option<&'static str> {
     let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
         "rs" => Some("rust"),
         "lua" => Some("lua"),
+        "sh" | "bash" => Some("bash"),
+        "ps1" | "psm1" => Some("powershell"),
         "md" | "markdown" => Some("markdown"),
         _ => None,
     }
 }
 
 pub fn parser_for(lang: &str) -> Option<Parser> {
-    let language = match lang {
-        "rust" => tree_sitter_rust::LANGUAGE.into(),
-        "lua" => tree_sitter_lua::LANGUAGE.into(),
+    let mut parser = Parser::new();
+    let loaded = match lang {
+        "rust" => parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .is_ok(),
+        "lua" => parser.set_language(&tree_sitter_lua::language()).is_ok(),
+        "bash" => parser
+            .set_language(&tree_sitter_bash::LANGUAGE.into())
+            .is_ok(),
+        "powershell" => parser
+            .set_language(&tree_sitter_powershell::language())
+            .is_ok(),
         _ => return None,
     };
-    let mut parser = Parser::new();
-    parser.set_language(&language).ok()?;
-    Some(parser)
+    if loaded {
+        Some(parser)
+    } else {
+        None
+    }
 }
 
 /// Extract every definition and reference from one source file.
@@ -85,7 +98,7 @@ pub fn extract(path: &str, lang: &str, source: &str) -> Extract {
     ctx.scope.push(0);
 
     match lang {
-        "rust" | "lua" => {
+        "rust" | "lua" | "bash" | "powershell" => {
             if let Some(mut parser) = parser_for(lang) {
                 if let Some(tree) = parser.parse(source, None) {
                     walk(&mut ctx, tree.root_node());
@@ -165,11 +178,109 @@ fn walk(ctx: &mut Ctx, node: Node) {
         }
     } else if ctx.lang == "lua" && walk_lua(ctx, node) {
         return;
+    } else if ctx.lang == "bash" && walk_bash(ctx, node) {
+        return;
+    } else if ctx.lang == "powershell" && walk_ps(ctx, node) {
+        return;
     }
     // Default: descend.
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         walk(ctx, child);
+    }
+}
+
+/// Bash: function definitions, `source`/`.` imports, and command invocations.
+fn walk_bash(ctx: &mut Ctx, node: Node) -> bool {
+    match node.kind() {
+        "function_definition" => {
+            let name = field_text(ctx, node, "name");
+            if name.is_empty() {
+                return false;
+            }
+            let idx = ctx.push_node("fn", name, node, None);
+            ctx.scope.push(idx);
+            recurse(ctx, node);
+            ctx.scope.pop();
+            true
+        }
+        "command" => {
+            let name = node
+                .child_by_field_name("name")
+                .map(|n| ctx.text(n).to_string())
+                .unwrap_or_default();
+            if name == "source" || name == "." {
+                if let Some(arg) = node.child_by_field_name("argument") {
+                    ctx.push_edge("imports", strip_quotes(ctx.text(arg)), node);
+                }
+            } else if !name.is_empty() {
+                ctx.push_edge("calls", name, node);
+            }
+            recurse(ctx, node);
+            true
+        }
+        "variable_assignment" => {
+            let name = field_text(ctx, node, "name");
+            if !name.is_empty() {
+                ctx.push_node("var", name, node, None);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// PowerShell: `function` statements, dot-sourcing / `Import-Module`, and command invocations.
+fn walk_ps(ctx: &mut Ctx, node: Node) -> bool {
+    match node.kind() {
+        "function_statement" => {
+            let name = find_child(node, "function_name")
+                .map(|n| ctx.text(n).to_string())
+                .unwrap_or_default();
+            if name.is_empty() {
+                return false;
+            }
+            let idx = ctx.push_node("fn", name, node, None);
+            ctx.scope.push(idx);
+            recurse(ctx, node);
+            ctx.scope.pop();
+            true
+        }
+        "command" => {
+            let dot_sourced = {
+                let mut cursor = node.walk();
+                let found = node
+                    .named_children(&mut cursor)
+                    .any(|c| c.kind() == "command_invokation_operator");
+                found
+            };
+            let name = node
+                .child_by_field_name("command_name")
+                .map(|n| ctx.text(n).to_string())
+                .unwrap_or_default();
+            if dot_sourced {
+                ctx.push_edge("imports", strip_quotes(&name), node);
+            } else if name.eq_ignore_ascii_case("Import-Module") {
+                if let Some(elements) = node.child_by_field_name("command_elements") {
+                    ctx.push_edge("imports", strip_quotes(ctx.text(elements)), node);
+                }
+            } else if !name.is_empty() {
+                ctx.push_edge("calls", name, node);
+            }
+            recurse(ctx, node);
+            true
+        }
+        "assignment_expression" => {
+            if let Some(var) = find_descendant(node, "variable") {
+                let name = ctx.text(var).trim_start_matches('$').to_string();
+                if !name.is_empty() {
+                    ctx.push_node("var", name, node, None);
+                }
+            }
+            recurse(ctx, node);
+            true
+        }
+        _ => false,
     }
 }
 
@@ -452,6 +563,26 @@ fn first_named(node: Node) -> Option<Node> {
     let mut cursor = node.walk();
     let found = node.named_children(&mut cursor).next();
     found
+}
+
+fn find_descendant<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
+    if node.kind() == kind {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(found) = find_descendant(child, kind) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn strip_quotes(raw: &str) -> String {
+    raw.trim()
+        .trim_matches(|c| c == '"' || c == '\'')
+        .trim()
+        .to_string()
 }
 
 fn find_child<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {

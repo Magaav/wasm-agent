@@ -162,6 +162,28 @@ while another holds a write transaction therefore does not replay the DDL and
 block on the lock. `:memory:` uses a shared-cache URI so every interpreter sees
 one database rather than a silent per-interpreter split.
 
+## The code graph
+
+`host.graph_index|query|explain|path|caps|stats|status` expose `wa-graph`'s SQLite
+index of the source tree to Lua. The graph lives beside the ledger
+(`<home>/.wasm-agent/graph.db`) and indexes the runtime worktree — the node's cwd —
+which is the source the binary is actually running from. `WA_GRAPH_ROOT` and
+`WA_GRAPH_DB` override both; `WA_GRAPH_WATCH=0` disables the watcher.
+
+Reads open the database **read-only**, so a query never takes the write lock the
+watcher needs, and a query before the first index completes returns an empty
+result rather than an error. `host.graph_index` is the write path and is
+incremental by content hash, so a repeat with nothing changed reparses nothing.
+
+Every verb returns a JSON string, and an error as `{"error": ...}` — the same
+shape as `host.sql_query`. On a node whose host predates the capability the
+globals are absent; `lua/core/graph.lua` tolerates that and reports
+`graph_unavailable`, and the `graph` tool checks for it before calling.
+
+The watcher is a `notify` thread started only for `serve`. It indexes once on
+startup (off the accept path, so a large tree never delays the port) and reindexes
+on change, debounced so one save's burst is one parse.
+
 ## Adding a capability
 
 `host.monotonic_ms()` measures elapsed time within a process. Use `host.now()` only

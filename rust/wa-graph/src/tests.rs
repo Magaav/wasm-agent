@@ -17,6 +17,68 @@ fn temp_dir(tag: &str) -> PathBuf {
 }
 
 #[test]
+fn bash_extraction_finds_functions_sources_and_calls() {
+    let src = "source ./lib.sh\ngreet() { echo hi; }\nfunction helper { echo x; }\ngreet world\n";
+    let ex = extract("scripts/run.sh", "bash", src);
+    let names: Vec<&str> = ex.nodes.iter().map(|n| n.name.as_str()).collect();
+    assert!(names.contains(&"greet"), "{names:?}");
+    assert!(names.contains(&"helper"), "{names:?}");
+    assert!(ex
+        .edges
+        .iter()
+        .any(|e| e.kind == "imports" && e.target == "./lib.sh"));
+    assert!(ex
+        .edges
+        .iter()
+        .any(|e| e.kind == "calls" && e.target == "greet"));
+}
+
+#[test]
+fn powershell_extraction_finds_functions_and_imports() {
+    let src = ". ./lib.ps1\nImport-Module Foo\nfunction Get-Thing { 1 }\nfunction helper { 2 }\nGet-Thing\n";
+    let ex = extract("scripts/run.ps1", "powershell", src);
+    let names: Vec<&str> = ex.nodes.iter().map(|n| n.name.as_str()).collect();
+    assert!(names.contains(&"Get-Thing"), "{names:?}");
+    assert!(names.contains(&"helper"), "{names:?}");
+    assert!(
+        ex.edges
+            .iter()
+            .any(|e| e.kind == "imports" && e.target == "./lib.ps1"),
+        "{:?}",
+        ex.edges
+    );
+    assert!(ex
+        .edges
+        .iter()
+        .any(|e| e.kind == "calls" && e.target == "Get-Thing"));
+}
+
+#[test]
+fn watch_indexes_initially_and_stops() {
+    let dir = temp_dir("watch");
+    std::fs::write(dir.join("a.rs"), "fn watched() {}\n").unwrap();
+    let db = dir.join("graph.db");
+    let handle = crate::watch::spawn(dir.clone(), db.clone()).unwrap();
+    let mut found = false;
+    for _ in 0..50 {
+        if let Ok(store) = Store::open_readonly(&db) {
+            if store
+                .query("watched", 5)
+                .map(|rows| !rows.is_empty())
+                .unwrap_or(false)
+            {
+                found = true;
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    drop(handle);
+    assert!(found, "the watcher indexed the root");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn names_normalize_to_their_last_segment() {
     assert_eq!(simple_name("M.append_turn"), "append_turn");
     assert_eq!(simple_name("std::env::var"), "var");
