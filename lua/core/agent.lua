@@ -405,6 +405,42 @@ local function user_message(message)
   return { role = "user", content = parts }
 end
 
+-- What a navigation-shaped tool *answered*, for the efficiency loop: which kind of
+-- question and whether it found anything. Enums, booleans and counts only - never the
+-- query, a name, a path or a result body. Without this a confidently wrong answer (an
+-- unsound `path`, a grep that matched nothing useful) is recorded as a plain success.
+local function navigation_outcome(name, args, output)
+  if type(output) ~= "table" then return nil end
+  if name == "graph" then
+    local action = type(args) == "table" and tostring(args.action or "") or ""
+    if action == "" then return nil end
+    if output.error then return { action = action, found = false } end
+    if action == "path" then
+      local steps = type(output.steps) == "table" and #output.steps or 0
+      return { action = action, found = output.found == true, count = steps }
+    elseif action == "query" then
+      local n = tonumber(output.count) or 0
+      return { action = action, found = n > 0, count = n }
+    elseif action == "explain" then
+      local n = type(output.definitions) == "table" and #output.definitions or 0
+      return { action = action, found = n > 0, count = n }
+    elseif action == "caps" then
+      return { action = action, found = #output > 0, count = #output }
+    elseif action == "stats" then
+      return { action = action, found = true, count = tonumber(output.nodes) or 0 }
+    elseif action == "index" then
+      return { action = action, found = output.ok ~= false, count = tonumber(output.indexed) or 0 }
+    end
+    return { action = action, found = true }
+  elseif name == "grep" then
+    local n = tonumber(output.count) or 0
+    return { action = "literal", found = n > 0, count = n }
+  elseif name == "read" or name == "read_many" then
+    return { action = "read", found = output.error == nil }
+  end
+  return nil
+end
+
 -- Rebuild the provider messages from the transcript: system (+AGENTS.md),
 -- the compaction summary, then every message after the watermark.
 function M:build_context()
@@ -1205,9 +1241,12 @@ function M:run_body(text, images)
         ok_tool=false
         self.emit({type="status",text="tool output storage failed; full result kept in transcript"})
       end
+      -- What a navigation call answered (action, found, count): a wrong answer must not be
+      -- recorded as a plain success. Enums/booleans/counts only.
+      local nav = navigation_outcome(function_.name, args, output)
       telemetry.finish(tool_span,{name=function_.name,ok=ok_tool,code=type(output)=="table" and output.code or nil,
         error=not projected and "tool_output_storage_failed" or type(output)=="table" and output.error or nil,
-        full_bytes=#json.encode(output),view_bytes=#content,storage_ok=projected,execution_timing=execution_timing})
+        full_bytes=#json.encode(output),view_bytes=#content,storage_ok=projected,execution_timing=execution_timing,nav=nav})
       trace[#trace + 1] = { kind = "tool", name = function_.name, ok = ok_tool, round = round,
         ms = math.floor((host.now() - tool_started) * 1000) }
       self.emit({ type = "tool_result", name = function_.name, result = output })

@@ -15,6 +15,7 @@ assert.equal(r.usage.observed_output_tokens,40); // Reasoning is not added twice
 assert.equal(r.usage.recorded_calls_cost_usd,.02);assert.equal(r.prefix.stable_recorded_components,1);
 assert.equal(r.average_request_bytes.reasoning_source_bytes.mean,300);
 assert.equal(r.verified_task_efficiency,null);
+assert.equal(r.navigation.calls,0);assert.equal(r.navigation.hit_rate,null);
 
 const changed=start('3',{schema_hash:h('c'),context:{summary_watermark:20}});
 r=audit([start('1'),end('1'),changed,end('3')]);
