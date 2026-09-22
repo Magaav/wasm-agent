@@ -154,6 +154,15 @@ git fetch -q origin 2>/dev/null || true
 if git rev-parse --verify -q origin/main >/dev/null; then
   BEHIND="$(git rev-list --count HEAD..origin/main 2>/dev/null || echo 0)"
   [ "$BEHIND" = "0" ] || fail "this tree is $BEHIND commit(s) behind origin/main; merge main first (a node that cannot see main cannot see its own fixes)"
+  # ... and a tree AHEAD of main is the other half of the same failure. An unmerged `change/`
+  # branch deploys fine, and then main lags the live binary, so the next main-side deploy is
+  # refused as a downgrade - measured twice in one day (8c13f19, 4d4753f). The live install
+  # must be a commit that is on main: merge the change first. A scratch WA_INSTALL_DIR is a
+  # test, not the operator's node, so it is exempt from this rule.
+  if [ -z "${WA_INSTALL_DIR:-}" ]; then
+    git merge-base --is-ancestor HEAD origin/main 2>/dev/null \
+      || fail "this tree's commit $(git rev-parse --short HEAD) is not on origin/main; merge it to main and deploy from there - an unmerged deploy leaves main behind the live node"
+  fi
 fi
 COMMIT="$(git rev-parse --short HEAD)"
 
