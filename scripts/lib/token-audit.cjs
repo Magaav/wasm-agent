@@ -17,7 +17,8 @@ const timingSummary = values => ({samples:values.length,total_ms:values.length?t
 const PUBLIC_TOOL_NAMES = new Set(['remember','recall','memories','skill','capabilities','sessions','session',
   'search_messages','resume_session','search_ledger','conversation','list_conversations','forget','bash',
   'operation','read','read_many','write','edit','ls','grep','diagnose','client','shell','spell_save','spell_run',
-  'spell_list','spell_get','spell_forget','spell_export','remote','nodes','session_debug','session_fixture','tool_result']);
+  'spell_list','spell_get','spell_forget','spell_export','remote','nodes','session_debug','session_fixture','tool_result',
+  'subagent','graph']);
 const publicToolName = name => typeof name === 'string' && PUBLIC_TOOL_NAMES.has(name) ? name : 'other';
 const OPERATION_PHASES=['setup_ms','accepted_record_ms','spawn_ms','execution_ms','drain_cleanup_ms','output_sync_ms'];
 const DURATION_BUCKETS=[['lt_1s',0,1000],['1s_to_10s',1000,10000],['10s_to_60s',10000,60000],['gte_60s',60000,Infinity]];
