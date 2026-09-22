@@ -281,7 +281,21 @@ local function conversation_tool(memory, args, profile, ctx)
       return fail("ledger_scope_mismatch")
     end
   end
-  return { conversation_id = event.conversation_id, messages = messages, count = #(messages or {}) }
+  -- The child must be able to name the conversation it is answering. It is given the ledger's own
+  -- title and kind for exactly that: a label inferred from message bodies is how a group was
+  -- reported as "futebol/bet" when its title was "A Casa Lar | 🏠". A missing record (or a memory
+  -- implementation without the accessor) yields empty strings rather than a guess.
+  local record = nil
+  if type(memory.conversation_record) == "function" then
+    record = memory.conversation_record(event.conversation_id)
+  end
+  return {
+    conversation_id = event.conversation_id,
+    title = tostring(record and record.title or ""),
+    kind = tostring(record and record.kind or ""),
+    messages = messages,
+    count = #(messages or {}),
+  }
 end
 
 local function decide_tool(args, profile, ctx)

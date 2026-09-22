@@ -450,6 +450,17 @@ function M.conversations(limit)
                "FROM conversations c ORDER BY c.updated_at DESC LIMIT ?", {limit})
 end
 
+-- One conversation record - its kind and its title - for a scoped tool that must name the
+-- conversation it is bound to instead of guessing a label from message content. A responder child
+-- that could only see message bodies reported a group as "futebol/bet" when its title was
+-- "A Casa Lar | 🏠", because nothing it was given carried the name.
+function M.conversation_record(conversation_id)
+  local id = tostring(conversation_id or "")
+  if id == "" then return nil end
+  local rows = query("SELECT * FROM conversations WHERE id=? LIMIT 1", {id})
+  return rows[1]
+end
+
 -- One ledger row by its message id, for resolving a trusted event. Returns nil
 -- when the id is absent OR names more than one conversation: an ambiguous id is
 -- not an identity, and picking one would let an event choose its own scope.
