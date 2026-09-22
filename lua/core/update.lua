@@ -44,7 +44,17 @@ local function read(path)
 end
 
 local function exists(path)
-  return read(path) ~= nil
+  if not path or path == "" then return false end
+  -- Answered WITHOUT reading the file. `read` goes through `host.read_file`, which is
+  -- `std::fs::read_to_string`: it decodes UTF-8, so reading a compiled binary always fails and returns
+  -- nil. This module asked "is anything built?" and "is the sentinel installed?" by reading exactly those
+  -- binaries, so it reported `nothing_built` while its own build sat in the tree, and no /update could
+  -- install anything on any machine. A shell test asks the same question and never looks at the bytes.
+  -- `host.exec` returns the operation wrapper as JSON, whose `code` says whether the command succeeded.
+  if not host.exec then return read(path) ~= nil end
+  local ok, raw = pcall(host.exec, "test -s \"" .. tostring(path) .. "\"", "")
+  if not ok or type(raw) ~= "string" then return read(path) ~= nil end
+  return raw:find('"code":0', 1, true) ~= nil
 end
 
 local function shell(command)
@@ -123,7 +133,7 @@ function M.facts(options)
   facts.tree, facts.tree_source = M.runtime_tree(install)
   if facts.tree then
     facts.candidate = facts.tree .. "/rust/target/release/" .. M.binary_name()
-    facts.candidate_bytes = read(facts.candidate) and #read(facts.candidate) or nil
+    facts.candidate_bytes = exists(facts.candidate) and 1 or nil
     local head = git(facts.tree, "rev-parse --short HEAD")
     facts.tree_commit = head and trim(head) or nil
     facts.dirty = lines(git(facts.tree, "status --porcelain")) or 0
