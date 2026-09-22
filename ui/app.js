@@ -1858,9 +1858,10 @@ const commandMenu = document.getElementById("command-menu");
 // at the one skill, so the procedure cannot drift even though the trigger is written twice.
 const ORCHESTRATOR_BRIEF = "Act as the git orchestrator for this repository. Audit every open branch, " +
   "merge the ones that merge clean into main one at a time, run the gate on the merged result, push, " +
-  "and sync the worktrees. Load skills/git-orchestrator for the procedure. The AGENTS.md hand-off " +
-  "rule is suspended by this command: you may merge to main and enter the other worktrees to converge " +
-  "them. Escalate a conflict; never force it.";
+  "sync the worktrees, and delete the merged change branches. Re-fetch and re-audit after the last " +
+  "merge so a late lane is caught in the same run. Load skills/git-orchestrator for the procedure. " +
+  "The AGENTS.md hand-off rule is suspended by this command: you may merge to main and enter the " +
+  "other worktrees to converge them. Escalate a conflict; never force it.";
 
 const COMMANDS = [
   {

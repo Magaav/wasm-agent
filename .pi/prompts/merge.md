@@ -8,5 +8,7 @@ For this command you may merge to `main`, and you may enter the main checkout an
 worktrees to converge them. Every other rule still holds.
 
 Load `skills/git-orchestrator/SKILL.md` and follow it: audit every branch, merge the ones that
-merge clean into `main` one at a time, run `bash scripts/test.sh` on the merged result, push, and
-sync the worktrees. Escalate anything that conflicts rather than forcing it. $@
+merge clean into `main` one at a time, run `bash scripts/test.sh` on the merged result, push, sync
+the worktrees, and delete the merged `change/*` branches. Re-fetch and re-audit after the last
+merge so a late lane is caught in the same run. Escalate anything that conflicts rather than
+forcing it. $@
