@@ -211,7 +211,9 @@ local function main()
   -- nothing at all - every run completed having handed on no messages, which is how a private message went
   -- unanswered while the job looked healthy.
   if (emit_on or json_events) and cursor > 0 and (message.sent_at or 0) > cursor and message.direction == "incoming" then
-      if json_events then
+      -- Eligibility first: a pipeline step must be handed only what the rule accepted, or the token rule
+      -- (a group message that does not name the operator) is bypassed by the very mode that saves tokens.
+      if json_events and eligible then
         events[#events + 1] = {
           message_id = message.message_id,
           conversation_id = message.conversation_id,
