@@ -1,8 +1,23 @@
 # Pipelines, spells and jobs — a proposal
 
-**Status: proposal. None of this is implemented.** It records a design the operator asked for: a job
-should be a *chain*, a spell should carry a node-side deterministic step, and the whole thing should be
-shareable as a portable artifact. It also records the two boundaries that must not move while we do it.
+**Status: slices 2 and 3 are implemented; slice 1 and artifact portability are not.** What landed:
+
+- a job action may be a **`pipeline`**: `run` (with `returns`), `subagent` and `foreach` steps, at most 32 of
+  them; a `foreach`'s inner step must be a `subagent` and a `wake` step is refused, because one budget is
+  spent in one place. `rust/wa-jobs` validates it and the sentinel runs the chain in one delivery, keeping
+  the four fan-out guarantees below.
+- the copilot is **one job** (`whatsapp-copilot`): its reader prints its eligible messages as JSON instead
+  of a one-line report, and the `foreach` starts one child per message.
+- `scripts/test-job-pipeline.cjs` is the seam's own test - a real sentinel, an isolated home, a mock store,
+  no model: a `returns` list reaches the `foreach`; a `returns` step that produced nothing **fails** the
+  delivery; a no-op run is distinguishable from a dropped result (`pipeline completed 1 step(s), handed on
+  0 item(s)`); and an item with no key is refused rather than started.
+
+Not implemented: the `spell` step and a spell's `run` step (slice 1), `wait`/`assert` steps, and exporting a
+pipeline as a portable artifact (`job export` refuses it by name: `pipeline_not_exportable_yet`). The rest of
+this file is the design all of it was built from.
+
+It also records the two boundaries that must not move while we do it.
 
 Today's contracts are in `docs/JOBS.md` (a job is one trigger + one action), `docs/SPELLS.md` (a spell is
 a parameterised chain of client actions with mandatory postconditions) and `docs/ARTIFACTS.md` (a portable
