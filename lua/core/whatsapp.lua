@@ -298,6 +298,19 @@ local function conversation_tool(memory, args, profile, ctx)
   }
 end
 
+-- The durable reason is a decision summary the operator reads, not the model's reasoning. A reason that
+-- runs long is truncated here, visibly, so a chain of thought - or a restatement of the conversation -
+-- cannot quietly become the record: a leaked justification is a second copy of the chat in the ledger.
+-- The bound is a profile limit, so an operator can raise it; the marker is what keeps it honest.
+local function bounded_reason(raw, profile)
+  local text = tostring(raw or "")
+  local maximum = tonumber(profile.limits and profile.limits.reason_bytes) or 320
+  if maximum > 0 and #text > maximum then
+    return text:sub(1, maximum) .. " [truncated at the reason bound]"
+  end
+  return text
+end
+
 local function decide_tool(args, profile, ctx)
   local event = M.trusted_event(ctx)
   if event.message_id == "" then return fail("event_context_required") end
@@ -309,7 +322,7 @@ local function decide_tool(args, profile, ctx)
     message_id = event.message_id,
     conversation_id = event.conversation_id,
     decision = args.decision,
-    reason = tostring(args.reason or ""),
+    reason = bounded_reason(args.reason, profile),
     at = host.now and host.now() or nil,
   }
   -- A decision is durable, and the adapter must store it without clobbering a send reservation.
