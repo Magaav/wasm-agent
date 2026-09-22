@@ -63,7 +63,9 @@ clean `host.<ident>`, and the Rust path never emits a capability edge. That make
 - **`store.rs`** — SQLite `files`/`nodes`/`edges`/`imports`. Incremental by content hash: a file
   whose bytes did not change is never reparsed. A resolve pass turns a referenced name into a node
   id (same file → same directory → globally unique), follows `require` aliases
-  (`memory.append_turn` → `M.append_turn`), and creates a capability node for `host.*`.
+  (`memory.append_turn` → `M.append_turn`), and creates a capability node for `host.*`. A whole
+  index run is one `BEGIN IMMEDIATE` transaction: a reader sees the old graph or the new one, never
+  a half-indexed file, and the watcher and a manual `index` cannot interleave.
 - **`watch.rs`** — a `notify` watcher (debounced) keeps the index fresh. It is what the node runs;
   the CLI indexes on demand.
 - **`main.rs`** — the CLI above, with `--json` on every read verb.
@@ -91,6 +93,7 @@ open the database **read-only**, so a query never takes the write lock the watch
 - reindex is **incremental**: unchanged bytes are not reparsed, a changed file replaces its old
   definitions, a removed file is dropped;
 - the watcher indexes the root on startup;
+- a reader never sees an uncommitted index write (the run is one `BEGIN IMMEDIATE` transaction);
 - `path a c` goes through `b` and **ignores doc mentions** (a mention is lookup, not traversal).
 
 The repository gate (`scripts/test.sh`) runs these alongside the rest, and the live node was verified

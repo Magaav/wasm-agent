@@ -114,7 +114,26 @@ impl Store {
     }
 
     /// Index a directory tree. Only changed files are reparsed; removed files are dropped.
+    ///
+    /// The whole run is one `BEGIN IMMEDIATE` transaction. A reader sees the old graph or the new
+    /// one, never a half-indexed file; taking the write lock up front stops the watcher and a manual
+    /// `host.graph_index` from interleaving, and stops two deferred writers deadlocking on the
+    /// upgrade. Readers are unaffected (WAL): they keep the previous snapshot until this commits.
     pub fn index(&mut self, root: &Path, force: bool) -> Result<IndexReport> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        match self.index_inner(root, force) {
+            Ok(report) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(report)
+            }
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    fn index_inner(&self, root: &Path, force: bool) -> Result<IndexReport> {
         let mut report = IndexReport::default();
         let mut seen: Vec<String> = Vec::new();
         let files = collect_files(root)?;
@@ -215,9 +234,8 @@ impl Store {
         size: i64,
     ) -> Result<()> {
         let now = now_secs();
-        let tx = self.conn.unchecked_transaction()?;
         {
-            let mut insert_node = tx.prepare(
+            let mut insert_node = self.conn.prepare(
                 "INSERT INTO nodes(kind,name,path,line,col,lang,detail) VALUES(?1,?2,?3,?4,?5,?6,?7)",
             )?;
             for n in &ex.nodes {
@@ -232,11 +250,13 @@ impl Store {
                 ])?;
             }
             let rowids: Vec<i64> = {
-                let mut stmt = tx.prepare("SELECT id FROM nodes WHERE path=?1 ORDER BY id")?;
+                let mut stmt = self
+                    .conn
+                    .prepare("SELECT id FROM nodes WHERE path=?1 ORDER BY id")?;
                 let rows = stmt.query_map(params![path], |r| r.get::<_, i64>(0))?;
                 rows.collect::<std::result::Result<_, _>>()?
             };
-            let mut insert_edge = tx.prepare(
+            let mut insert_edge = self.conn.prepare(
                 "INSERT INTO edges(src,kind,target,path,line,col,dst) VALUES(?1,?2,?3,?4,?5,?6,NULL)",
             )?;
             for e in &ex.edges {
@@ -253,17 +273,17 @@ impl Store {
                     e.col as i64
                 ])?;
             }
-            let mut insert_import =
-                tx.prepare("INSERT INTO imports(alias,module,path) VALUES(?1,?2,?3)")?;
+            let mut insert_import = self
+                .conn
+                .prepare("INSERT INTO imports(alias,module,path) VALUES(?1,?2,?3)")?;
             for imp in &ex.imports {
                 insert_import.execute(params![imp.alias, imp.module, path])?;
             }
-            tx.execute(
+            self.conn.execute(
                 "INSERT OR REPLACE INTO files(path,lang,hash,mtime,size,indexed_at) VALUES(?1,?2,?3,?4,?5,?6)",
                 params![path, lang, hash, mtime, size, now],
             )?;
         }
-        tx.commit()?;
         Ok(())
     }
 
@@ -278,29 +298,29 @@ impl Store {
             rows.collect::<std::result::Result<_, _>>()?
         };
         let mut resolved = 0usize;
-        let tx = self.conn.unchecked_transaction()?;
         for (edge_id, target, path, kind) in &pending {
             let simple = extract::simple_name(target);
-            let hit = pick_candidate(&tx, target, simple, path)?;
+            let hit = pick_candidate(&self.conn, target, simple, path)?;
             let dst = match hit {
                 Some(id) => Some(id),
                 None if kind == "capability" && extract::is_capability(target) => {
-                    Some(ensure_capability(&tx, target)?)
+                    Some(ensure_capability(&self.conn, target)?)
                 }
                 // `memory.append_turn` where `local memory = require('core.memory')` names the
                 // module's `M.append_turn`. Resolve through the require alias.
-                None if kind == "calls" => resolve_alias(&tx, target, path)?,
+                None if kind == "calls" => resolve_alias(&self.conn, target, path)?,
                 None => None,
             };
             if let Some(id) = dst {
-                tx.execute("UPDATE edges SET dst=?1 WHERE id=?2", params![id, edge_id])?;
+                self.conn
+                    .execute("UPDATE edges SET dst=?1 WHERE id=?2", params![id, edge_id])?;
                 resolved += 1;
             } else if kind == "mentions" {
                 // A doc mention that names no real definition is noise; keep the graph clean.
-                tx.execute("DELETE FROM edges WHERE id=?1", params![edge_id])?;
+                self.conn
+                    .execute("DELETE FROM edges WHERE id=?1", params![edge_id])?;
             }
         }
-        tx.commit()?;
         let unresolved: i64 =
             self.conn
                 .query_row("SELECT COUNT(*) FROM edges WHERE dst IS NULL", [], |r| {

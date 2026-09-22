@@ -54,6 +54,45 @@ fn powershell_extraction_finds_functions_and_imports() {
 }
 
 #[test]
+fn a_reader_never_sees_an_uncommitted_index_write() {
+    // The whole index run is one BEGIN IMMEDIATE transaction, so a reader sees the previous
+    // committed graph until it commits - never a half-indexed file.
+    let dir = temp_dir("atomic");
+    std::fs::write(dir.join("a.rs"), "fn alpha() {}\n").unwrap();
+    let db = dir.join("graph.db");
+    let mut store = Store::open(&db).unwrap();
+    store.index(&dir, false).unwrap();
+
+    // Simulate the middle of a reindex: an open write transaction has replaced a file's nodes.
+    let writer = rusqlite::Connection::open(&db).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    writer
+        .execute("DELETE FROM nodes WHERE path='a.rs'", [])
+        .unwrap();
+    writer
+        .execute(
+            "INSERT INTO nodes(kind,name,path,line,col,lang,detail) VALUES('fn','beta','a.rs',1,0,'rust',NULL)",
+            [],
+        )
+        .unwrap();
+
+    let reader = Store::open_readonly(&db).unwrap();
+    assert!(reader
+        .query("alpha", 5)
+        .unwrap()
+        .iter()
+        .any(|n| n.name == "alpha"));
+    assert!(!reader
+        .query("beta", 5)
+        .unwrap()
+        .iter()
+        .any(|n| n.name == "beta"));
+
+    writer.execute_batch("ROLLBACK").unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn watch_indexes_initially_and_stops() {
     let dir = temp_dir("watch");
     std::fs::write(dir.join("a.rs"), "fn watched() {}\n").unwrap();

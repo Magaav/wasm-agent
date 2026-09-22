@@ -174,6 +174,9 @@ Reads open the database **read-only**, so a query never takes the write lock the
 watcher needs, and a query before the first index completes returns an empty
 result rather than an error. `host.graph_index` is the write path and is
 incremental by content hash, so a repeat with nothing changed reparses nothing.
+A whole index run is one `BEGIN IMMEDIATE` transaction, so a reader sees the old
+graph or the new one - never a half-indexed file - and the watcher and a manual
+index cannot interleave.
 
 Every verb returns a JSON string, and an error as `{"error": ...}` — the same
 shape as `host.sql_query`. On a node whose host predates the capability the
