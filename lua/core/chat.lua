@@ -15,6 +15,9 @@ local updater = dofile("lua/core/update.lua")
 -- What a run looks like while it is running. The view owns the status line, the tool
 -- lines and the footer; this file owns the session, the commands and the prompt.
 local cli_view = dofile("lua/core/cli_view.lua")
+-- `/merge`: the git orchestrator brief. The node does not perform the merge (the worktrees live
+-- outside it); the command hands the agent the intent with the hand-off rule suspended.
+local merger = dofile("lua/core/merge.lua")
 
 local M = {}
 
@@ -38,6 +41,7 @@ commands:
   /conversation <id>   read a conversation
   /stats               database counts
   /update              install the newest build in this node's tree (the sentinel does it, once idle)
+  /merge               act as git orchestrator: merge every open branch into main, gate, push, sync
   /help                this help
   /exit                quit
 anything else is sent to the model.]]
@@ -226,6 +230,10 @@ function M.run(argv)
       local report = updater.run({ reason = "requested from the interactive chat" })
       print(redact.text(report.message or json.encode(report)))
       if report.next then print(redact.text("  next: " .. report.next)) end
+    elseif line == "/merge" then
+      -- Not a node operation: the merge runs outside this process, in the worktrees. The command
+      -- is the agent's brief, and it names the skill that holds the procedure.
+      turn(merger.brief)
     elseif line == "/memories" then
       each(memory.memories(nil, 50), memory_line)
     elseif line:sub(1, 10) == "/remember " then

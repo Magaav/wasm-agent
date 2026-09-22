@@ -1121,11 +1121,13 @@ $harness = @'
     type("/");
     check(menu.open, "commands: `/` must open the list");
     var items = Array.prototype.slice.call(menu.querySelectorAll(".menu-item"));
-    check(items.length === 2, "commands: `/` must offer both commands, got " + items.length);
+    check(items.length === 3, "commands: `/` must offer all three commands, got " + items.length);
     check(items[0] && items[0].textContent.indexOf("/new") >= 0,
       "commands: the list must offer /new first, got: " + (items[0] && items[0].textContent));
     check(items[1] && items[1].textContent.indexOf("/update") >= 0,
       "commands: the list must offer /update, got: " + (items[1] && items[1].textContent));
+    check(items[2] && items[2].textContent.indexOf("/merge") >= 0,
+      "commands: the list must offer /merge, got: " + (items[2] && items[2].textContent));
 
     // `/update` asks the node to install its own tree's build. The three answers it can give must
     // read as three different things: queued is *not* done, and a refusal is not a silence. The
@@ -1196,6 +1198,18 @@ $harness = @'
     check(payload.thread === now, "commands: the turn must name the new thread, got " + payload.thread);
     check(payload.text === "hello", "commands: the message itself must survive, got " + payload.text);
     check(payload.images === undefined, "commands: no pictures must be sent when none were attached");
+
+    // `/merge` is a brief for the agent, not a node operation: it must actually send the
+    // orchestrator brief as a turn, and name the skill that holds the procedure, or the command
+    // is a label with nothing behind it.
+    type("/merge");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    var merged = (window.__calls || []).filter(function (call) {
+      return String(call.url).indexOf("chat") >= 0 && call.method === "POST";
+    }).pop();
+    check(!!merged, "commands: running /merge must send a turn");
+    check(!!merged && String(merged.body).indexOf("git-orchestrator") >= 0,
+      "commands: the /merge brief must name the orchestrator skill, got: " + (merged && merged.body));
   })();
   // ---- in-flight tool age -------------------------------------------------
   //
