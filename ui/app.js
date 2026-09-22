@@ -713,6 +713,33 @@ function finishTrace() {
   trace = null;
 }
 
+// While a tool call is in flight, show what the operation behind it is doing. A foreground
+// `bash` blocks its worker and returns nothing until it settles, so the window otherwise shows
+// only a clock - and a five-minute build is indistinguishable from a hang. The node already
+// publishes the running operation on /health (`operations[]`) and its output through
+// /operation; this reads both. `running` is the busy run for *this* window, and its worker is
+// the one the tool call blocks, so `owner == "worker:<id>"` is the match.
+async function refreshOperationProgress(health, running) {
+  if (!trace || !trace.pending || !running || running.worker_id == null) return;
+  const operation = (health.operations || []).find((entry) => entry.owner === "worker:" + running.worker_id);
+  if (!operation) return;
+  const bytes = Number(operation.output_bytes) || 0;
+  if (bytes <= 0) { trace.setProgress(""); return; }
+  try {
+    const response = await fetch("operation", {
+      method: "POST",
+      headers: apiHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ action: "read", id: operation.operation_id, stream: "stdout",
+        offset: Math.max(0, bytes - 2048), limit: 2048 }),
+    });
+    if (!response.ok) return;
+    const page = await response.json();
+    if (!page || typeof page.content !== "string") return;
+    const lines = page.content.split(/\r?\n/).filter((line) => line.trim());
+    trace.setProgress(lines.length ? lines[lines.length - 1].slice(0, 200) : "");
+  } catch (error) { /* a preview is never worth breaking the run over */ }
+}
+
 // The answer is the point; the route is reference. On reply, everything the run
 // did before the answer moves into one collapsed run topic at the top of the
 // bubble, and the answer sits below it.
@@ -1086,6 +1113,7 @@ function startLiveness() {
     catch (error) { return; }   // the offline path owns that case and says its piece
     const running = activeRun(health);
     if (!running) { setLiveness(null); return; }
+    refreshOperationProgress(health, running);
 
     if (typeof health.exec_timeout_seconds === "number") execTimeoutSeconds = health.exec_timeout_seconds;
     const stalled = health.stalled_ms;
