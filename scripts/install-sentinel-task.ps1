@@ -41,6 +41,10 @@ $launcherText = @"
 set "WA_SENTINEL_SCRIPTS=$Install\scripts"
 set "WASM_AGENT_HOME=$env:USERPROFILE"
 set "WA_SENTINEL_WAKE_BUDGET=6"
+rem Reserved child capacity for job inference, so a job's child does not have to wait for an idle
+rem node. Unset, the inference lane is idle-gated and every child sits in the queue while a turn
+rem runs - which reads like the design and is really the fallback (docs/JOBS.md).
+set "WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY=1"
 "%~dp0wa-sentinel.exe" watch >> "$LogDir\sentinel.out" 2>&1
 "@
 Set-Content -Path $Launcher -Value $launcherText -Encoding ASCII

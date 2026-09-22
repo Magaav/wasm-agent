@@ -111,3 +111,19 @@ Two consequences worth writing into a job's design:
 A sentinel must already be running for jobs to execute. Never restart the desktop
 window. Diagnose a source error before changing thresholds or repeatedly waking
 an agent; observing the queue costs no model tokens.
+
+## Before you conclude a job child is stuck
+
+The two lanes are how a job stays out of a person's way: a deterministic `run` is claimed whether or not a
+turn is in progress, and an inference action (`wake`/`subagent`) is claimed when its own lane has capacity -
+**the subagent service's reserved child capacity, or, until that is configured, an idle node**.
+
+So a delivery sitting `queued` while a turn runs has two possible causes, and they are not the same thing:
+
+- the job is disabled or its revision changed - it will be cancelled and says so; or
+- `WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY` is unset, so the lane is idle-gated.
+
+The second is an operator setting, not a bug, and it is easy to mistake for "children only run when the
+node is idle" - which reads like a design and is really the fallback. Check it before building a story:
+`sentinel-task.cmd` in the install carries it, `scripts/install-sentinel-task.ps1` writes that file, and a
+`run` action (a script) is unaffected either way. Observing the queue costs no model tokens.
