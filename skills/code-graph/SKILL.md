@@ -61,5 +61,5 @@ call is a typed edge, not a string.
 - It indexes syntax, not semantics. A call through a differently-named module
   alias may resolve to the wrong `M.x`, and trait/generic identity is not
   modelled. If `explain` shows no caller you expected, confirm with `grep`.
-- Rust, Lua, Bash, PowerShell and Markdown are indexed. Other files are not.
+- Rust, Lua, JavaScript/TypeScript, Bash, PowerShell and Markdown are indexed. Other files are not.
 - It is a map, not the territory: always `read` the file before you edit it.
