@@ -181,7 +181,13 @@ profile and never carries one's authority.
 
 `rust/wa-jobs` enforces durable deduplication on (job, revision, event id), atomic
 claims and revision checks. The queue allows 128 pending deliveries globally and
-8 per job. Full queues fail visibly and do not acknowledge ingestion. Eight source observers (CDP/files
+8 per job. Full queues fail visibly and do not acknowledge ingestion: a **scheduled** tick whose queue is
+full is backpressure instead - the interval is skipped, `source_status` says so, and the job's `next_at`
+advances, because the deliveries already queued have not been consumed yet - while an external `emit`
+still errors, so a message is never silently dropped. A queue that is full *because* nothing is being
+claimed therefore no longer wedges the runner (live: the copilot's eight queued deliveries sat there,
+every tick failing at the schedule step before either lane ran, until the job was disabled and enabled by
+hand). Eight source observers (CDP/files
 combined) are the current limit; one delivery per job runs at once.
 
 **Two execution lanes, not one gate.** A deterministic `run` is claimed regardless of whether a person's

@@ -1228,7 +1228,7 @@ run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN
 run_proof_fixture whatsapp 27 node scripts/test-whatsapp-subagent-e2e.cjs
 # The pipeline seam: a `returns` list reaches the foreach, a step that produced nothing fails the
 # delivery, and a no-op run is distinguishable from a dropped result. Real sentinel, mock store, no model.
-run_proof_fixture pipeline 15 node scripts/test-job-pipeline.cjs
+run_proof_fixture pipeline 19 node scripts/test-job-pipeline.cjs
 
 # The UI tests are JS and run outside the embedded interpreter, so they need node
 # and they need the repo root as cwd (they read ui/app.js from disk). A test that does

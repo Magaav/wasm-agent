@@ -49,14 +49,16 @@ function child(exe, args, env, home) {
   return handle;
 }
 
-// `/health` (idle, so an inference delivery is claimed without a reservation) and `/subagents` (the
-// protocol fixture: a start is recorded and settles immediately).
+// `/health` (idle by default, so an inference delivery is claimed without a reservation - the last
+// section makes it busy, which is how the lane gets gated) and `/subagents` (the protocol fixture: a
+// start is recorded and settles immediately).
 async function nodeFixture() {
-  const state = { starts: [], seen: new Map() };
+  const state = { busy: false, starts: [], seen: new Map() };
   const server = http.createServer((req, res) => {
     if (req.url === "/health") {
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ ok: true, current: null, queue: 0, operation_overdue: false, workers: [{ state: "alive" }] }));
+      res.end(JSON.stringify({ ok: true, current: state.busy ? { label: "POST /chat" } : null, queue: 0,
+        operation_overdue: false, workers: [{ state: "alive" }] }));
       return;
     }
     if (req.url === "/subagents" && req.method === "POST") {
@@ -125,6 +127,23 @@ function job(home, env, id, steps) {
   return cli(env, "enable", id);
 }
 
+// A schedule-triggered pipeline: the trigger that can fill its own queue, which is how the deadlock below
+// is reached. An event-triggered job's queue can only fill from the outside.
+function scheduledJob(home, env, id, steps, everySeconds) {
+  const file = path.join(home, `${id}.json`);
+  fs.writeFileSync(file, JSON.stringify({
+    id, name: id, trigger: { kind: "schedule", every_seconds: everySeconds },
+    action: { kind: "pipeline", steps },
+  }));
+  cli(env, "put", file);
+  return cli(env, "enable", id);
+}
+
+function queuedFor(env, id) {
+  const row = cli(env, "list").find((entry) => entry.id === id);
+  return row ? row.queued : 0;
+}
+
 async function deliver(env, home, id, eventId) {
   const before = cli(env, "history").filter((row) => row.job_id === id).length;
   const file = path.join(home, `${eventId}.json`);
@@ -191,8 +210,30 @@ async function main() {
   check(noKey.state === "failed", `an item without the key fails the delivery (got ${noKey.state}: ${noKey.detail})`);
   check(/an item has no "message_id"/.test(noKey.detail || ""), `the failure names the missing key: ${noKey.detail}`);
   check(fixture.state.starts.length === 2, "the refused foreach started no child");
-  void withEmpty; void withNoKey; void watcher;
+  void withEmpty; void withNoKey;
 
+  // ---- a full queue must not stop the lanes --------------------------------------------------------
+  // `tick()` used to return at `schedule()?` before either lane ran, so once a job's queue was full
+  // nothing was ever claimed again - and it was full precisely because nothing was being claimed. Live,
+  // the copilot's eight queued deliveries never ran, every tick failing there first, until the job was
+  // disabled and enabled by hand. Here the queue is filled while the lane is idle-gated (busy node, no
+  // reserved capacity), then the lane is freed: the queued deliveries must be claimed and settle.
+  fixture.state.busy = true;
+  const queueJob = scheduledJob(home, env, "pipeline-queue", [{ kind: "run", script: list, returns: "events", timeout_seconds: 30 }, foreach()], 1);
+  const startsBefore = fixture.state.starts.length;
+  await until(() => queuedFor(env, "pipeline-queue") >= 8, "the schedule fills its own queue", 30000);
+  check(queuedFor(env, "pipeline-queue") >= 8, "a schedule-triggered job can fill its queue while the lane is gated");
+  await sleep(2000);
+  check(fixture.state.starts.length === startsBefore, "nothing was claimed while the lane was gated");
+  fixture.state.busy = false;
+  await until(() => queuedFor(env, "pipeline-queue") < 8, "the queued deliveries are claimed once the lane is free", 30000);
+  check(queuedFor(env, "pipeline-queue") < 8, "a full queue does not stop the lanes: the queued deliveries are claimed");
+  await until(() => fixture.state.starts.length > startsBefore, "the claimed deliveries reach the child service", 30000);
+  check(fixture.state.starts.length > startsBefore, "a delivery that was queued behind a full queue runs its child");
+  cli(env, "disable", "pipeline-queue");
+  void queueJob;
+
+  void watcher;
   console.log(`pipeline seam ok (${checked} checks, 0 failed, 0 skipped; real sentinel, mock store, no paid inference)`);
   console.log(`evidence: ${root}`);
   console.log("ALL PASS");
