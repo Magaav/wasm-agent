@@ -26,9 +26,13 @@ use std::path::{Path, PathBuf};
 ///
 /// Every entry is an action this process already performs under its own rules, with its own
 /// preconditions (`upgrade` proves the binary, `wait-idle` refuses a busy node). The spell chooses
-/// *which* and in what order; it cannot choose *how*. `run` is absent on purpose - a spell that
-/// could reach it would be a shell, and then the verb list would be decoration.
-const ALLOWED_STEPS: &[&str] = &["wait-idle", "upgrade", "restart", "wait-health"];
+/// *which* and in what order; it cannot choose *how*.
+///
+/// `run` executes a script, so it is the one entry that reaches arbitrary code - and it is bounded
+/// by the operator's own allow-list, `WA_SENTINEL_SCRIPTS`: the plan names a script and the operator
+/// names the directories that may execute. A path outside them is refused before any step runs, so
+/// the plan still chooses *which*, and the operator still decides *what may run*.
+const ALLOWED_STEPS: &[&str] = &["wait-idle", "upgrade", "restart", "wait-health", "run"];
 
 /// How long a single step may take before it is a failure rather than a wait. `upgrade` waits for
 /// idle internally and can legitimately take minutes; the rest are bounded.
@@ -37,6 +41,7 @@ const STEP_TIMEOUT_SECS: u64 = 900;
 struct Step {
     kind: String,
     binary: String,
+    script: String,
 }
 
 /// Read and validate a plan. Validation is total: an unreadable file, an unknown step, a step with
@@ -87,8 +92,9 @@ fn read_plan(path: &Path) -> Result<Vec<Step>> {
             );
         }
         let binary = value.get("binary").and_then(Value::as_str).unwrap_or("").to_string();
-        // `binary` is required only where it means something. Every other verb is refused a binary
-        // rather than ignoring one, so a plan cannot carry a value that is quietly dropped.
+        let script = value.get("script").and_then(Value::as_str).unwrap_or("").to_string();
+        // `binary`/`script` are required only where they mean something. Every other verb is refused
+        // one rather than ignoring it, so a plan cannot carry a value that is quietly dropped.
         match verb {
             "upgrade" => {
                 if binary.is_empty() {
@@ -99,14 +105,30 @@ fn read_plan(path: &Path) -> Result<Vec<Step>> {
                     // otherwise stop the node and then fail to start it.
                     bail!("step {number} names {binary}, which does not exist");
                 }
+                if !script.is_empty() {
+                    bail!("step {number} is `upgrade`, which takes no `script` - remove it rather than have it ignored");
+                }
+            }
+            "run" => {
+                if script.is_empty() {
+                    bail!("step {number} is `run` but names no `script`");
+                }
+                if !binary.is_empty() {
+                    bail!("step {number} is `run`, which takes no `binary` - remove it rather than have it ignored");
+                }
+                // The operator's allow-list, checked before any step runs. A plan cannot widen it.
+                crate::approved_script(&script)?;
             }
             _ => {
                 if !binary.is_empty() {
                     bail!("step {number} is {verb:?}, which takes no `binary` - remove it rather than have it ignored");
                 }
+                if !script.is_empty() {
+                    bail!("step {number} is {verb:?}, which takes no `script` - remove it rather than have it ignored");
+                }
             }
         }
-        steps.push(Step { kind: verb.to_string(), binary });
+        steps.push(Step { kind: verb.to_string(), binary, script });
     }
     Ok(steps)
 }
@@ -140,6 +162,7 @@ pub fn verb_spell(path: &str, reason: &str) -> Result<String> {
             "wait-health" => wait_health(),
             "restart" => crate::verb_restart(&format!("{reason} (spell {name})")),
             "upgrade" => crate::verb_upgrade(&step.binary, &format!("{reason} (spell {name})")),
+            "run" => crate::verb_run(&step.script, &format!("{reason} (spell {name})")),
             other => bail!("step {number} has kind {other:?}, which passed validation but is not implemented - this is a bug"),
         };
         let ok = outcome.is_ok();

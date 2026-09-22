@@ -53,7 +53,7 @@ script, so a spell gains:
 ```
 
 `expect` compares fields of the step's JSON result, exactly as the `run` action's contract is already
-defined, so there is one outcome shape rather than two. That makes a spell the crystallized deterministic
+defined, so there is one outcome shape rather than two. That makes a spell the deterministic
 half of a skill: prose for the judgement, a spell for the part that never needed a model.
 
 ## The two boundaries that must not move

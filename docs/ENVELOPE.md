@@ -68,13 +68,13 @@ UI terminal uses the same path
 already running. `evaluate` runs JS in the first page target and returns the
 value.
 
-**spells** — crystallized, deterministic macros (see `SPELLS.md`). Note the
-name is reserved for macros only; the tier that *lists* what you may do is
+**spells** — deterministic, verified executions (see `SPELLS.md`). Note the
+name is reserved for spells only; the tier that *lists* what you may do is
 `capabilities`, above.
 
 | Tool | Args | Does |
 | --- | --- | --- |
-| `spell_save` | `name`, `steps`, `post` (required), `params?`, `pre?`, `target?`, `description?` | crystallize a macro; **refused without `post`** |
+| `spell_save` | `name`, `steps`, `post` (required), `params?`, `pre?`, `target?`, `description?` | crystallize a deterministic execution; **refused without `post`** |
 | `spell_run` | `name`, `params?` | replay; fails loudly if a step or assertion fails |
 | `spell_list` | — | list with version and params |
 | `spell_get` | `name` | read one in full |

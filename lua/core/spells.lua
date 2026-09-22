@@ -136,7 +136,7 @@ end
 -- a verb added here alone fails loudly at the sentinel with the list printed, rather than silently
 -- doing nothing. A spell chooses which step, never how it runs - `run` is absent on purpose, because
 -- a plan that could reach it would be a shell.
-local SENTINEL_VERBS = { ["wait-idle"] = true, ["upgrade"] = true, ["restart"] = true, ["wait-health"] = true }
+local SENTINEL_VERBS = { ["wait-idle"] = true, ["upgrade"] = true, ["restart"] = true, ["wait-health"] = true, ["run"] = true }
 
 -- A `run` step: the node-side deterministic step a skill needs for the part that never required a
 -- model. Its outcome contract is the one the `run` job action already uses - exit 0 *and* a JSON
@@ -146,9 +146,11 @@ local SENTINEL_VERBS = { ["wait-idle"] = true, ["upgrade"] = true, ["restart"] =
 -- that reports success while the world says otherwise is the failure this module exists to prevent.
 -- Exported as `M.run_step` so it can be tested without a browser and without running a command.
 --
--- It cannot reach the sentinel: `M.export` refuses any step whose kind is not `sentinel`, and
--- `rust/wa-sentinel/src/spell.rs` refuses a plan containing one. A `run` step executes in the node's
--- worker, where a turn is already running - never in the process that can restart this node.
+-- A `run` *step kind* cannot reach the sentinel: `M.export` refuses any step whose kind is not
+-- `sentinel`, and `rust/wa-sentinel/src/spell.rs` refuses a plan containing one, because a `run`
+-- step executes in the node's worker, where a turn is already running. A supervisor-side script is a
+-- different thing with a different name: `{ kind="sentinel", verb="run", script=... }`, which the
+-- sentinel executes only from a directory the operator named in `WA_SENTINEL_SCRIPTS`.
 function M.run_step(step)
   local command = tostring(step.script or "")
   if command == "" then return false, "run_step_script_required" end
@@ -211,6 +213,9 @@ function M.validate(spec)
       if step.verb == "upgrade" and (type(step.binary) ~= "string" or step.binary == "") then
         return "step_" .. index .. "_sentinel_upgrade_needs_binary"
       end
+      if step.verb == "run" and (type(step.script) ~= "string" or step.script == "") then
+        return "step_" .. index .. "_sentinel_run_needs_script"
+      end
     end
     if (tonumber(step.retries) or 0) > 0 and kind ~= "assert" and step.idempotent ~= true then
       return "step_" .. index .. "_retries_require_idempotent"
@@ -271,6 +276,12 @@ function M.export(name, params, binary)
       if not chosen or chosen == "" then chosen = step.binary end
       if not chosen or chosen == "" then return nil, "upgrade_step_needs_binary" end
       entry.binary = chosen
+    elseif step.verb == "run" then
+      -- The sentinel executes this only from a directory the operator named in
+      -- WA_SENTINEL_SCRIPTS; the plan chooses which script, never how it runs.
+      if type(step.script) ~= "string" or step.script == "" then return nil, "run_step_needs_script" end
+      entry.script = step.script
+      if step.expect ~= nil then entry.expect = step.expect end
     end
     steps[#steps + 1] = entry
   end
