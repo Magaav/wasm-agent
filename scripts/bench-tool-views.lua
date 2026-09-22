@@ -33,6 +33,24 @@ repeat
   pieces[#pieces+1]=page.content;cursor=page.next_offset;pages=pages+1
 until page.eof
 assert(table.concat(pieces)==raw,'retained original is not byte-exact')
+-- A tool result is not always an object: `operation list` returns a JSON array, and a
+-- large one used to brick the session because the envelope cannot live on an array
+-- without making a mixed table json.encode refuses. Assert the array case is bounded
+-- and still retrievable byte for byte.
+local array={}
+for i=1,4000 do array[i]={index=i,detail='exact evidence; quotes " and unicode café 日本語'} end
+local array_raw=json.encode(array)
+local array_view=output.project('operation',array)
+assert(#array_view<=output.MAX_BYTES,'array view exceeds the production byte limit')
+local array_decoded=json.decode(array_view)
+assert(array_decoded.omitted==true and array_decoded.full_result,'an array view must reference its original')
+local array_pieces,array_cursor,array_pages={},1,0
+repeat
+  local page=output.read(array_decoded.full_result.sha256,array_cursor,8192)
+  assert(not page.error and page.next_offset>array_cursor,'array artifact retrieval failed or stopped advancing')
+  array_pieces[#array_pieces+1]=page.content;array_cursor=page.next_offset;array_pages=array_pages+1
+until page.eof
+assert(table.concat(array_pieces)==array_raw,'array original is not byte-exact')
 -- A negative control, NOT a claimed legacy runtime arm or a model-quality experiment.
 local lossy=text:sub(1,600)
 assert(not lossy:find(tail,1,true),'negative control must actually omit the target')
@@ -42,4 +60,5 @@ print(json.encode({schema='wasm-agent.tool-view-probe/v1',mode=mode,
   view_encoding=decoded.preview and 'json_excerpt' or 'text_field',
   head_visible=selected:find(head,1,true)~=nil,tail_visible=selected:find(tail,1,true)~=nil,
   synthetic_head600_loses_tail=true,model_calls=0,
+  array_view_bytes=#array_view,array_projection_bounded=true,array_original_roundtrip=true,array_artifact_pages=array_pages,
   scope='projection and retrieval contract only; not task quality, token counts or measured savings'}))

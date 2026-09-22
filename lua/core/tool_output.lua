@@ -108,6 +108,21 @@ function M.project(name, output)
   -- newline is not a 2001st line; re-truncating here would skip bytes on the next page.
   if name=='read' and output.version and output.next_column and type(output.content)=='string'
       and output.returned_bytes==#output.content and #encoded<=M.MAX_BYTES then return encoded end
+  -- A tool result can be a JSON *array*, not only an object. The envelope added below
+  -- (full_result/omitted/note) has nowhere to live on an array: copying it into `view`
+  -- and then setting those string keys builds a table with both numeric and string
+  -- keys, which json.encode refuses outright - so the whole context build fails and
+  -- the thread cannot move at all. An `operation` result that was a list did exactly
+  -- that. A large array therefore takes the bounded textual preview a non-object
+  -- result already gets, with the exact bytes kept in full_result; one that fits needs
+  -- no envelope and is returned as-is by the length check below.
+  local array = true
+  for key in pairs(output) do
+    if type(key) ~= "number" then array = false break end
+  end
+  if array and #encoded > M.MAX_BYTES then
+    return preview_view(name, output, encoded, M.store(encoded))
+  end
   local view = {}
   for key,value in pairs(output) do view[key]=value end
   local changed=false
