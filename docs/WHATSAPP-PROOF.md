@@ -63,11 +63,11 @@ Bindings, and why each is required:
 | --- | --- |
 | `conversation` / `allowed_conversations` | the notes-to-self chat id, from the store |
 | `actions` | `["read","send"]`; read does not imply send, so a draft-only binding is `["read"]` |
-| `self_destination` | the **same** id; this is what makes the UI route's unread consequence acceptable |
-| `account` | the operator's own account id. The raw script is passed `--expect-account` and refuses a session that is logged in as a different account |
-| `browser_endpoint` | the explicit loopback DevTools page from `whatsapp-preflight.sh`. On the verified machine the store and hook are on **IPv6 `[::1]:9222`**; IPv4 `127.0.0.1:9222` answers 404 (not a browser). Passed as `--expect-browser-endpoint`; a different page/port is refused |
+| `self_destination` | the notes-to-self chat id. It is a convenience binding, **not** an unread exemption: a self chat is still refused when its unread is nonzero or unproven |
+| `account` | the operator's own account id. Passed as `--expect-account`; a phone/PN compares by digits, while a `@lid` or a label compares exactly (so `operator1` never equals `other1`) |
+| `browser_endpoint` | the explicit loopback DevTools page from `whatsapp-preflight.sh`. On the verified machine the store and hook are on **IPv6 `[::1]:9222`**; IPv4 `127.0.0.1:9222` answers 404 (not a browser). Passed as `--expect-browser-endpoint`; protocol, port and page id must match exactly, and only genuine loopback aliases are interchangeable |
 | `send_path` | `ui` (the only proven route); `store` is refused without a real `store_send_script` |
-| `allow_mark_read` | `false`; the self exemption applies, so it is not needed |
+| `allow_mark_read` | `false`; opening any chat without a proven zero unread (the operator's own notes included) requires `true` |
 | `send_approved` | `true` **only for the proof**; a decision never grants it |
 | `reply_script` | the deterministic reply tool in the install |
 | `limits.sends_per_run` | `1` |
@@ -96,9 +96,10 @@ Bindings, and why each is required:
    types the body, asserts the composer and clears its own text (opening clears the self chat's marker,
    which is empty anyway). Use it only when you intend to interact with the page.
 
-2. **Confirm the raw-script guard.** With the id bound, a non-self `--send` must be refused *before the
-   chat is opened*. The self exemption is the app's `isMeAccount` proof, not a string comparison against a
-   guessed id:
+2. **Confirm the raw-script guard.** Opening the chat clears its unread marker, so a non-self target is
+   refused before it is opened, and a self target is refused unless its unread is a proven zero. Passing
+   `--allow-mark-read` explicitly accepts the marker being cleared; the script independently proves the
+   account through the app rather than a string comparison against a guessed id:
 
    ```
    node <INSTALL>/scripts/whatsapp-reply.mjs --chat <OTHER_CHAT_ID> --body "should not send" --send
