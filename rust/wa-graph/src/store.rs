@@ -300,16 +300,12 @@ impl Store {
         let mut resolved = 0usize;
         for (edge_id, target, path, kind) in &pending {
             let simple = extract::simple_name(target);
-            // A dotted call is `alias.member`. The alias is the precise signal, so try it before the
-            // name fallback: `provider.budget()` otherwise matched an unrelated local variable named
-            // `budget` in the caller's own file, and the edge then read as *resolved* while pointing
-            // at the wrong symbol - worse than unresolved. `self.emit`/`M.foo` have no import alias,
-            // so the fallback still handles them.
+            // A dotted call is `receiver.member`, and the receiver decides the resolution
+            // (`resolve_dotted`). The one thing it must never do is guess a bare local that
+            // shares `member`'s name: `provider.budget()` resolved to a local `budget` that way,
+            // and the edge read as *resolved* while pointing at the wrong symbol.
             let hit = if kind == "calls" && target.contains('.') {
-                match resolve_alias(&self.conn, target, path)? {
-                    Some(id) => Some(id),
-                    None => pick_candidate(&self.conn, target, simple, path)?,
-                }
+                resolve_dotted(&self.conn, target, simple, path)?
             } else {
                 pick_candidate(&self.conn, target, simple, path)?
             };
@@ -620,6 +616,50 @@ fn pick_candidate(
     Ok(None)
 }
 
+/// Resolve a dotted call `receiver.member`. The receiver decides:
+///
+/// * a bound module alias (`require`/`dofile`/`import`) resolves to that module's export, which
+///   is its precise meaning;
+/// * `self`/`this`/`M` resolve within the caller's own file (the module table or the enclosing
+///   class), because the receiver has no name of its own to match;
+/// * anything else - `response.text`, `fs.readFileSync`, `obj.budget` - must match the full name
+///   exactly. It must **not** fall back to a bare local that merely shares `member`'s name: that
+///   is how `provider.budget()` once landed on an unrelated local `budget`.
+fn resolve_dotted(conn: &Connection, target: &str, simple: &str, path: &str) -> Result<Option<i64>> {
+    if let Some(id) = resolve_alias(conn, target, path)? {
+        return Ok(Some(id));
+    }
+    let receiver = target.split('.').next().unwrap_or("");
+    if matches!(receiver, "self" | "this" | "M" | "cls") {
+        return scoped_member(conn, simple, path);
+    }
+    exact_node(conn, target)
+}
+
+/// A member of the caller's own file: `self.emit`, `this.render`, `M.append_turn`. A function or
+/// method is preferred over a field or variable that shares the name.
+fn scoped_member(conn: &Connection, simple: &str, path: &str) -> Result<Option<i64>> {
+    let hit = conn
+        .query_row(
+            "SELECT id FROM nodes WHERE path=?1 AND (name=?2 OR name LIKE ?3 OR name LIKE ?4)
+             ORDER BY (kind='fn' OR kind='method') DESC, (name=?2) DESC, line LIMIT 1",
+            params![path, simple, format!("%.{simple}"), format!("%:{simple}")],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(hit)
+}
+
+/// A node whose name is exactly `target` (a qualified name such as `Thing::new` or `Provider.foo`).
+fn exact_node(conn: &Connection, target: &str) -> Result<Option<i64>> {
+    let hit = conn
+        .query_row("SELECT id FROM nodes WHERE name=?1 LIMIT 1", params![target], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    Ok(hit)
+}
+
 /// Resolve `alias.member` through a `require` binding: `memory.append_turn` in a file whose
 /// `local memory = require('core.memory')` points at `lua/core/memory.lua`, where the definition
 /// is `M.append_turn` (the module table's name, not the alias's).
@@ -651,20 +691,27 @@ fn resolve_alias(conn: &Connection, target: &str, edge_path: &str) -> Result<Opt
         return Ok(None);
     };
     let simple = extract::simple_name(target);
-    // `require('core.memory')` names a dotted module; `dofile('lua/core/memory.lua')` names a path
-    // with the extension. Normalise both to `.../memory.lua`; without the trim a dofile alias built
-    // `lua/core/memory/lua.lua` and never matched a node.
-    let module = module.trim_end_matches(".lua");
-    let mod_path = format!("%{}.lua", module.replace('.', "/"));
+    // The binding may be a Lua dotted module (`require('core.memory')`), a Lua path
+    // (`dofile('lua/core/memory.lua')`) or a JS path (`require('./reply.mjs')`,
+    // `import * as x from '../lib/x.mjs'`). Build the path suffix each spelling needs; one rule
+    // built `lua/core/memory/lua.lua` for a dofile and `//reply/mjs.lua` for a JS import, and
+    // matched no node at all.
+    let raw = module.trim();
+    let trimmed = raw.strip_prefix("./").unwrap_or(raw);
+    let by_path = format!("%{trimmed}");
+    let by_lua = format!("%{}.lua", trimmed.trim_end_matches(".lua").replace('.', "/"));
+    let base = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    let by_base = format!("%{base}");
     let dot_suffix = format!("%.{simple}");
     // Prefer the module table's export (`M.budget`) over a bare `budget` declared inside it: the
     // alias names the module, so `provider.budget` is `M.budget`, not a local variable that
     // happens to share the name. Without this the edge resolved - to the wrong symbol.
     let hit: Option<i64> = conn
         .query_row(
-            "SELECT id FROM nodes WHERE path LIKE ?1 AND (name=?2 OR name LIKE ?3)
-             ORDER BY (name LIKE ?3) DESC, (kind='fn' OR kind='method') DESC, (name=?2) DESC, line LIMIT 1",
-            params![mod_path, simple, dot_suffix],
+            "SELECT id FROM nodes WHERE (path LIKE ?1 OR path LIKE ?2 OR path LIKE ?3)
+               AND (name=?4 OR name LIKE ?5)
+             ORDER BY (name LIKE ?5) DESC, (kind='fn' OR kind='method') DESC, (name=?4) DESC, line LIMIT 1",
+            params![by_path, by_lua, by_base, simple, dot_suffix],
             |r| r.get(0),
         )
         .optional()?;
