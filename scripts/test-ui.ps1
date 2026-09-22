@@ -139,8 +139,8 @@ $harness = @'
   window.handleEvent(events[6]);   // bash, still pending
   window.__fixtures.operation = { content: "compiling wa-host\nlinking wa\n", offset: 0, next_offset: 34, bytes: 34, eof: true };
   await window.__refreshOperationProgress(
-    { operations: [{ operation_id: "op-fixture", owner: "worker:0", state: "running", output_bytes: 34 }] },
-    { worker_id: 0 },
+    { operations: [{ operation_id: "op-fixture", owner: "run:3", state: "running", output_bytes: 34 }] },
+    { run_id: 3 },
   );
   var progress = document.querySelector("wa-trace .tool-progress:not([hidden])");
   check(!!progress && progress.textContent === "linking wa",

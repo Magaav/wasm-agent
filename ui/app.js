@@ -720,8 +720,15 @@ function finishTrace() {
 // /operation; this reads both. `running` is the busy run for *this* window, and its worker is
 // the one the tool call blocks, so `owner == "worker:<id>"` is the match.
 async function refreshOperationProgress(health, running) {
-  if (!trace || !trace.pending || !running || running.worker_id == null) return;
-  const operation = (health.operations || []).find((entry) => entry.owner === "worker:" + running.worker_id);
+  if (!trace || !trace.pending || !running) return;
+  // The owner is `run:<run_id>` - serve.rs sets it for the run before the interpreter starts,
+  // so an in-turn operation carries the run, not the worker. Older builds used the worker id;
+  // both are matched so the window works against whichever node it is attached to.
+  const owners = [];
+  if (running.run_id != null) owners.push("run:" + running.run_id);
+  const workerId = running.worker_id != null ? running.worker_id : running.id;
+  if (workerId != null) owners.push("worker:" + workerId);
+  const operation = (health.operations || []).find((entry) => owners.indexOf(entry.owner) >= 0);
   if (!operation) return;
   const bytes = Number(operation.output_bytes) || 0;
   if (bytes <= 0) { trace.setProgress(""); return; }
