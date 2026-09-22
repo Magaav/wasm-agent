@@ -133,6 +133,22 @@ ok "$(grep -q 'downgrade refused' <<<"$last_out" && echo 0 || echo 1)" "an unres
 ok "$(grep -q 'does not have' <<<"$last_out" && echo 1 || echo 0)" "it names the case (shallow clone, other repo, unfetched branch)" "$(grep -m1 'does not have' <<<"$last_out" | cut -c1-110)"
 ok "$(grep -q 'note: ' "$S/install/deploy.log" 2>/dev/null && echo 1 || echo 0)" "and it is recorded as a note, not as a refusal"
 
+# --- 5b. a tree ahead of main: refused on the live install, naming the rule -----------------------
+# An unmerged `change/` branch deploys fine and leaves main behind the live binary, so every
+# main-side deploy is then refused as a downgrade. The rule is checked before the build, so this
+# runs against the live install and must refuse without touching it. Only meaningful when the tree
+# is ahead of main; on main there is nothing to refuse.
+if git merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+  echo "  note: this tree is on main, so the ahead-of-main refusal has nothing to refuse"
+else
+  ( cd "$ROOT" && env -u WASM_AGENT_IN_TURN PATH="$(dirname "$(command -v git)"):/usr/bin:/bin" \
+      bash "$DEPLOY" --reason "guard test" ) >"$S/guard.txt" 2>&1
+  guard_exit=$?
+  ok "$([ "$guard_exit" != "0" ] && grep -q 'is not on origin/main' "$S/guard.txt" && echo 1 || echo 0)" \
+    "a tree ahead of main is refused on the live install, naming the rule" "exit $guard_exit"
+  ok "$(grep -q 'deploy: building' "$S/guard.txt" && echo 0 || echo 1)" "and it refused before the build"
+fi
+
 # --- 6. isolation: the real install was never the fixture's business -------------------------------
 if [ -x "$LIVE_INSTALL/wa.exe" ] || [ -f "$LIVE_INSTALL/installed.txt" ]; then
   ok "$([ "$(sha256sum < "$LIVE_INSTALL/wa.exe" 2>/dev/null | awk '{print $1}')" = "$LIVE_HASH_BEFORE" ] && echo 1 || echo 0)" \
