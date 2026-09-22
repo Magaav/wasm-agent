@@ -3,17 +3,21 @@
 Instructions for any agent (or human) editing this repo. This file is injected
 into wasm-agent's own context at runtime, so keep it short and operational.
 
-## One repo, three trees, all pushing to GitHub
+## One repo, a primary checkout and linked worktrees
 
 | Tree | Path | Role |
 | --- | --- | --- |
 | Cloud (authoritative runtime) | `openclaw.ohana:/local/projects/wasm-agent` | builds, runs, hosts the rendezvous + relay |
-| Windows trunk | `orca/workspaces/wasm-agent/loggerhead/foundation` | `main`. Editing, review, merges. A node never works here |
-| The node | `orca/workspaces/wasm-agent/node/foundation` | a node's own worktree, on the branch that carries its name |
+| Canonical checkout | `orca/projects/wasm-agent` | the primary worktree, on `main`. Review and merges land here |
+| The node | `orca/workspaces/wasm-agent/wasm_the_first` | the node's own worktree, on the branch that carries its name (`wasm_the_first`) |
+| Agent lanes | `orca/workspaces/wasm-agent/<name>` | `astra`, `codex`, `generalson` - each an actor's own worktree on a branch of the same name |
 
-All push to `github.com/Magaav/wasm-agent` (`origin`), which is the source of truth. Before
-editing: `git pull`; after: commit, push, then pull on the other side. Auth is the
-`github-wasm-agent` SSH host alias.
+Every row above is a **linked worktree of one repo**, whose git dir is
+`orca/projects/wasm-agent/.git`; all push to `github.com/Magaav/wasm-agent` (`origin`), which is
+the source of truth. Before editing: `git pull`; after: commit, push, then pull on the other
+side. Auth is the `github-wasm-agent` SSH host alias. Work happens on a short-lived
+`change/<name>` branch cut from `origin/main` and merged when done; the node's own branch is its
+name. A node never works in the canonical checkout.
 
 ### Evolving code in parallel
 

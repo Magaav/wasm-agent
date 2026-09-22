@@ -70,7 +70,7 @@ Two limits, stated here because a reader would otherwise misread them as a hang:
 ## The brief template
 
 ```
-From pi (the reviewer in loggerhead/). <one line of context, and what you already did.>
+From pi (the reviewer in the canonical checkout). <one line of context, and what you already did.>
 
 ## Where you are, and why
 You are in <worktree> on branch <branch>, cut from origin/main. This is deliberate: the
