@@ -325,3 +325,63 @@ fn path_walks_resolved_edges_and_ignores_doc_mentions() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn path_does_not_bridge_through_a_shared_callee() {
+    // Two functions that both call `shared` are not connected by it: a route through a caller, or
+    // through a shared leaf, is not a route. Before the fix `path a b` followed the incoming edge
+    // at `shared` and answered `a -> shared -> b` - a plausible wrong answer.
+    let dir = temp_dir("path-direction");
+    std::fs::write(
+        dir.join("x.rs"),
+        "fn shared() {}\nfn a() { shared(); }\nfn b() { shared(); }\n",
+    )
+    .unwrap();
+    let db = dir.join("graph.db");
+    let mut store = Store::open(&db).unwrap();
+    store.index(&dir, false).unwrap();
+
+    assert!(
+        store.path("a", "shared").unwrap().is_some(),
+        "a reaches the function it calls"
+    );
+    assert!(
+        store.path("a", "b").unwrap().is_none(),
+        "a must not reach b through a shared callee"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_dofile_alias_resolves_a_dotted_call() {
+    // `local provider = dofile('lua/core/provider.lua')` then `provider.budget()` must resolve to
+    // `M.budget` in that file. Only `require` aliases were recorded, and the path was built for a
+    // dotted module, so dofile calls stayed unresolved whenever the member name was ambiguous.
+    let dir = temp_dir("dofile-alias");
+    std::fs::create_dir_all(dir.join("lua/core")).unwrap();
+    std::fs::write(
+        dir.join("lua/core/provider.lua"),
+        "local M = {}\nfunction M.budget() return 1 end\nreturn M\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("lua/core/agent.lua"),
+        "local provider = dofile('lua/core/provider.lua')\nlocal function run()\n  return provider.budget()\nend\nreturn run\n",
+    )
+    .unwrap();
+    let db = dir.join("graph.db");
+    let mut store = Store::open(&db).unwrap();
+    store.index(&dir, false).unwrap();
+
+    let rows = store.explain("M.budget").unwrap();
+    let def = rows
+        .iter()
+        .find(|(n, _, _)| n.name == "M.budget")
+        .expect("M.budget is defined");
+    let callers: Vec<&str> = def.2.iter().map(|e| e.path.as_str()).collect();
+    assert!(
+        callers.iter().any(|p| p.ends_with("agent.lua")),
+        "a dofile-aliased dotted call must resolve: {callers:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

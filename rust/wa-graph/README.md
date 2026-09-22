@@ -6,7 +6,7 @@ grep → read → grep:
 
 ```
 wa-graph explain <name>     # what is it, what does it use, who uses it
-wa-graph path <from> <to>   # how are these two connected
+wa-graph path <from> <to>   # how does <from> reach <to> (direction of use)
 wa-graph query <text>       # where does this name appear
 wa-graph caps                # host.* capabilities, ranked by use
 wa-graph index | stats
@@ -94,7 +94,8 @@ open the database **read-only**, so a query never takes the write lock the watch
   definitions, a removed file is dropped;
 - the watcher indexes the root on startup;
 - a reader never sees an uncommitted index write (the run is one `BEGIN IMMEDIATE` transaction);
-- `path a c` goes through `b` and **ignores doc mentions** (a mention is lookup, not traversal).
+- `path a c` goes through `b`, follows edges in the **direction of use** (never back up to a
+  caller, never through a shared callee), and **ignores doc mentions** (a mention is lookup, not traversal).
 
 The repository gate (`scripts/test.sh`) runs these alongside the rest, and the live node was verified
 end to end: start → index, add a file → it appears, edit a file → the old definition is gone.

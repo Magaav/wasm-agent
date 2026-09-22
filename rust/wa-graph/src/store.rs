@@ -350,6 +350,23 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// Endpoints for `path`. An exact definition wins; the substring search is only a fallback,
+    /// because it made `path a b` seed `a` with every name containing `a` — and then the real goal,
+    /// being also a start, was skipped and the route dropped. `explain` keeps the substring search:
+    /// it wants every mention.
+    fn find_seeds(&self, name: &str) -> Result<Vec<NodeRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id,kind,name,path,line,col,lang,detail FROM nodes WHERE name=?1
+             ORDER BY path, line LIMIT 5",
+        )?;
+        let rows = stmt.query_map(params![name], row_to_node)?;
+        let exact: Vec<NodeRow> = rows.collect::<std::result::Result<_, _>>()?;
+        if !exact.is_empty() {
+            return Ok(exact);
+        }
+        self.find_nodes(name, 5)
+    }
+
     fn outgoing(&self, id: i64) -> Result<Vec<EdgeRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT e.kind, e.target, e.path, e.line, e.dst,
@@ -372,11 +389,12 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    /// Breadth-first path between two named nodes over resolved edges, in either direction.
+    /// Breadth-first path from one named node to another over resolved edges, followed in the
+    /// direction they point: `path a b` holds when a calls/uses/imports b.
     pub fn path(&self, from: &str, to: &str) -> Result<Option<Vec<(NodeRow, String)>>> {
-        let starts = self.find_nodes(from, 5)?;
+        let starts = self.find_seeds(from)?;
         let goals: std::collections::HashSet<i64> =
-            self.find_nodes(to, 5)?.into_iter().map(|n| n.id).collect();
+            self.find_seeds(to)?.into_iter().map(|n| n.id).collect();
         if starts.is_empty() || goals.is_empty() {
             return Ok(None);
         }
@@ -418,12 +436,15 @@ impl Store {
     }
 
     fn neighbors(&self, id: i64) -> Result<Vec<(i64, String)>> {
-        // Doc mentions are for lookup, not traversal: following them makes every `path` hop
-        // through prose and lands on a coincidence.
+        // Only outgoing edges are followed, because direction is the meaning: a route *through a
+        // caller* is not a route. Traversing incoming edges too turned every shared callee into a
+        // hub - `path build_context complete_with` answered
+        // `build_context -> emit -> json.encode -> complete_with`, and `host.sha256`, a leaf with
+        // ~42 callers, bridged two functions that never call each other. `not found` is the true
+        // answer there. Doc mentions are for lookup, not traversal: following them hops through
+        // prose onto a coincidence.
         let mut stmt = self.conn.prepare(
-            "SELECT dst, kind, target FROM edges WHERE src=?1 AND dst IS NOT NULL AND kind<>'mentions'
-             UNION
-             SELECT src, kind, target FROM edges WHERE dst=?1 AND kind<>'mentions'",
+            "SELECT dst, kind, target FROM edges WHERE src=?1 AND dst IS NOT NULL AND kind<>'mentions'",
         )?;
         let rows = stmt.query_map(params![id], |r| {
             let other: i64 = r.get(0)?;
@@ -621,6 +642,10 @@ fn resolve_alias(conn: &Connection, target: &str, edge_path: &str) -> Result<Opt
         return Ok(None);
     };
     let simple = extract::simple_name(target);
+    // `require('core.memory')` names a dotted module; `dofile('lua/core/memory.lua')` names a path
+    // with the extension. Normalise both to `.../memory.lua`; without the trim a dofile alias built
+    // `lua/core/memory/lua.lua` and never matched a node.
+    let module = module.trim_end_matches(".lua");
     let mod_path = format!("%{}.lua", module.replace('.', "/"));
     let dot_suffix = format!("%.{simple}");
     let hit: Option<i64> = conn

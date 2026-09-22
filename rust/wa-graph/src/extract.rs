@@ -471,7 +471,11 @@ fn handle_lua_assign(ctx: &mut Ctx, assign: Node) -> Option<usize> {
             let callee = v
                 .child_by_field_name("name")
                 .map(|n| ctx.text(n).to_string());
-            if callee.as_deref() == Some("require") {
+            // `require('core.memory')` and `dofile('lua/core/memory.lua')` both bind a module table
+            // to a local name. Only `require` was recorded, so a dotted call through a dofile alias
+            // (`provider.budget`, `windowlib.policy`) stayed unresolved whenever the member name was
+            // ambiguous. Both are imports; the resolver normalises the two spellings.
+            if matches!(callee.as_deref(), Some("require") | Some("dofile")) {
                 if let Some(arg) = v.child_by_field_name("arguments").and_then(first_named) {
                     let target = ctx
                         .text(arg)

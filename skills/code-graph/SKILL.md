@@ -24,7 +24,11 @@ its `kind`, `path:line`, the `uses` (calls, capabilities, macros) and the
 ```
 graph {action:"path", from:"choose_worker", to:"append_turn"}
 ```
-How A reaches B. `steps` is a chain; each step's `via` names the edge that
+How A reaches B, **in the direction of use**: a step exists when the previous
+node calls, uses or imports the next one. It does not walk back up to callers,
+so `path` from a callee to its caller is *not found* — ask `explain` for "who
+calls this", and do not read a shared callee as connecting two functions that
+merely both call it. `steps` is a chain; each step's `via` names the edge that
 reached it. Mentions in prose are deliberately ignored, so a hop is a real
 call/import, not a coincidence.
 

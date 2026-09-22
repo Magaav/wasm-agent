@@ -43,6 +43,9 @@ The `pre-commit` hook enforces it - that hook is the contract, this line is the 
   are Rust `host.*`. Read `docs/HOST.md` before adding a capability: a host function
   returns `nil` for missing values (never zero values), and paths come from
   `host.paths()`, never `$HOME` or a Linux-only path.
+- **Navigate before you grep.** For "where is X", "who calls it", "how does A reach
+  B" or "which `host.*` does this use", call the `graph` tool first
+  (`skills/code-graph`); `grep` and `read` are for the actual lines.
 - **Install only through the gate, and never run it from inside a run.** `scripts/deploy.sh` cannot
   become idle while the turn that asked waits, so from inside a run you *queue* it:
   `wa-sentinel request upgrade` for the node and UI, `wa-sentinel request deploy` when the change is in
