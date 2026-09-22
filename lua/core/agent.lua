@@ -258,6 +258,31 @@ end
 -- Exported so tests and diagnostics can assert what instructions a role runs with.
 M.system_prompt = system_prompt
 
+-- The schemas a child is offered, from its resolved profile snapshot.
+--
+-- The snapshot carries the same capability twice, in two shapes: `allowed` is a
+-- set keyed by tool name and `allowed_tools` is the list the profile declared
+-- (`lua/core/subagents.lua` builds both). `tools.all_for` filters by *set*, so
+-- handing it `allowed_tools` offered a child no schemas at all while the
+-- child's dispatch re-check - which reads the set - still passed. Every child
+-- therefore ran with no tools: the model, told in prose which tool to use,
+-- improvised the call as text markup instead of emitting a tool call, and the
+-- run ended having done nothing. Prefer the set; derive one from the list for a
+-- caller that only has the list.
+function M.subagent_tool_list(subagent, role)
+  subagent = subagent or {}
+  local allowed = subagent.allowed
+  if type(allowed) ~= "table" or next(allowed) == nil then
+    allowed = {}
+    for _, name in ipairs(subagent.allowed_tools or {}) do
+      if type(name) == "string" and name ~= "" then allowed[name] = true end
+    end
+    -- An explicitly empty profile means reasoning-only, never the role default.
+    if next(allowed) == nil then return {} end
+  end
+  return tools.all_for(allowed, role)
+end
+
 -- The lean prompt a subagent runs with: the mandatory boundary rules, the
 -- operator-approved profile instructions, the environment, the exact tool list
 -- and the declared budgets. No AGENTS.md, no skills block unless the profile
@@ -390,7 +415,7 @@ function M:build_context()
     -- rules name internal paths and the deploy shape, and a child is exactly the
     -- role they are hidden from. The mandatory boundary rules replace it.
     agents, agents_path = nil, nil
-    tool_list = tools.all_for(self.subagent.allowed_tools, self.role)
+    tool_list = M.subagent_tool_list(self.subagent, self.role)
   else
     agents, agents_path = M.agents_md(self.role)
     tool_list = tools.all(self.role)

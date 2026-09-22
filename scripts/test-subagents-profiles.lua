@@ -89,6 +89,18 @@ check(#filtered == 2, "all_for returns exactly the allowed tools, got " .. #filt
 for _, item in ipairs(filtered) do
   check(item["function"].name == "read" or item["function"].name == "grep", "unexpected tool " .. item["function"].name)
 end
+-- 5b. The production snapshot shape - the list the profile declared *and* the set
+--     the runtime derived from it - must reach the schemas a child is offered.
+--     Passing the list where a set was expected offered every child nothing.
+local from_both = agentlib.subagent_tool_list({ allowed = { read = true, grep = true },
+  allowed_tools = { "read", "grep" } }, "master")
+check(#from_both == 2, "a child must be offered its profile's schemas, got " .. #from_both)
+local from_list_only = agentlib.subagent_tool_list({ allowed_tools = { "read" } }, "master")
+check(#from_list_only == 1 and from_list_only[1]["function"].name == "read",
+  "a list-only snapshot must still offer the schemas")
+check(#agentlib.subagent_tool_list({ allowed = {}, allowed_tools = {} }, "master") == 0,
+  "an empty profile must still offer no schemas")
+check(#agentlib.subagent_tool_list(nil, "master") == 0, "a snapshot-less child offers no schemas")
 local denied = tools.dispatch(memory, "bash", { command = "echo hi" }, "master",
   { user_id = "alice", subagent = { allowed = { read = true } } })
 check(denied.error == "capability_not_in_profile:bash", "dispatch must refuse a tool outside the profile")
