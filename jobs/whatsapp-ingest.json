@@ -1,8 +1,11 @@
 {
   "id": "whatsapp-ingest",
-  "name": "Ingest WhatsApp into the ledger and emit one event per new message (deterministic, no model)",
+  "name": "WhatsApp Copilot - reader (free stage, no model, every 5 min)",
   "enabled": true,
-  "trigger": { "kind": "schedule", "every_seconds": 300 },
+  "trigger": {
+    "kind": "schedule",
+    "every_seconds": 300
+  },
   "action": {
     "kind": "run",
     "script": "PREPARED_BY_INSTALL/scripts/whatsapp-ingest-emit.sh",
