@@ -481,7 +481,13 @@ fn execute(store: &wa_jobs::Store, delivery: &Value) -> Result<String> {
                     "run" => {
                         let value = run_pipeline_step(store, id, rev, delivery, step, number)?;
                         if let Some(name) = step["returns"].as_str() {
-                            results.insert(name.to_string(), value);
+                            // `returns` names the field *inside* the step's result that is handed on: a step
+                            // that prints {"events":[…]}` and says returns:"events" hands on the array, not the
+                            // envelope. Handing on the whole object left `foreach` holding an object where it
+                            // wanted a list, so it iterated nothing - and a delivery with no work looks exactly
+                            // like a delivery with no messages, which is how this hid.
+                            let handed = value.get(name).cloned().unwrap_or(Value::Null);
+                            results.insert(name.to_string(), handed);
                         }
                     }
                     "subagent" => {
