@@ -553,6 +553,11 @@ fn run_pipeline_step(
         "WA_JOB_EVENT_FILE".into(),
         event_path.to_string_lossy().to_string(),
     ));
+    // The result goes where the runner says, not where it hopes: a step that writes nothing is then
+    // distinguishable from a step that found nothing, and the runner never has to guess a layout.
+    let result_path = sentinel_dir().join(format!("job-result-{}-{}.json", delivery["id"], number));
+    let _ = std::fs::remove_file(&result_path);
+    spec.env.push(("WA_JOB_RESULT_FILE".into(), result_path.to_string_lossy().to_string()));
     let manager = wa_operation::Manager::new(sentinel_dir().join("operations"));
     let operation = manager.start(spec)?;
     loop {
@@ -576,11 +581,22 @@ fn run_pipeline_step(
                 .as_str()
                 .or_else(|| state["stdout_file"].as_str())
                 .unwrap_or("");
-            let printed = std::fs::read_to_string(stdout_path).unwrap_or_default();
-            let trimmed = printed.trim();
-            if trimmed.is_empty() {
+            // Three places, in order of how much they are *ours*: the file the runner named, the
+            // operation's own stdout, then its conventional path. A step that promised a result and
+            // produced none is a failure, not an empty list - the ambiguity that hid this bug once.
+            let read = |path: &std::path::Path| {
+                std::fs::read_to_string(path).ok().filter(|text| !text.trim().is_empty())
+            };
+            let printed = read(&result_path)
+                .or_else(|| read(std::path::Path::new(stdout_path)))
+                .or_else(|| read(&sentinel_dir().join("operations").join(&operation).join("stdout")));
+            let Some(printed) = printed else {
+                if step.get("returns").is_some() {
+                    bail!("step {number} promised a result with `returns` and produced none; the delivery fails rather than reporting success for a step that handed on nothing");
+                }
                 return Ok(Value::Null);
-            }
+            };
+            let trimmed = printed.trim();
             return serde_json::from_str(trimmed).map_err(|e| {
                 anyhow::anyhow!("step {number} printed no JSON result, so it has nothing to hand on: {e}")
             });

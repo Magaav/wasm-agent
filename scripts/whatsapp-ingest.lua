@@ -192,6 +192,10 @@ local function main()
   -- them here, so they are reported to the operator instead of being handed to a child that would have
   -- to invent an answer - and no token is spent on them.
   local unanswerable = {}
+  -- The newest message this run actually *decided* about. The cursor moves to this and no further, so a
+  -- message nobody acted on stays newer than the cursor and is picked up by the next run. Advancing to
+  -- `newest` instead consumed messages silently - twice, before this rule existed.
+  local handled = 0
   local skipped_ineligible = 0
   for _, message in ipairs(payload.messages or {}) do
     memory.record_message({
@@ -217,6 +221,7 @@ local function main()
   if (emit_on or json_events) and cursor > 0 and (message.sent_at or 0) > cursor and message.direction == "incoming" then
       local media_kind = (message.media and message.media[1] and message.media[1].type) or "chat"
       if json_events and eligible and media_kind ~= "chat" then
+        handled = math.max(handled, message.sent_at or 0)
         unanswerable[#unanswerable + 1] = {
           message_id = message.message_id,
           conversation_id = message.conversation_id,
@@ -227,6 +232,7 @@ local function main()
       -- Eligibility first: a pipeline step must be handed only what the rule accepted, or the token rule
       -- (a group message that does not name the operator) is bypassed by the very mode that saves tokens.
       if json_events and eligible then
+        handled = math.max(handled, message.sent_at or 0)
         events[#events + 1] = {
           message_id = message.message_id,
           conversation_id = message.conversation_id,
@@ -238,6 +244,7 @@ local function main()
         }
       elseif not eligible then
         skipped_ineligible = skipped_ineligible + 1
+        handled = math.max(handled, message.sent_at or 0)
       elseif sentinel then
         local ok, why = emit_event(sentinel, "whatsapp.message", message.message_id, {
           conversation_id = message.conversation_id,
@@ -248,14 +255,21 @@ local function main()
           body = message.body,
           eligibility = verdict,
         })
-        if ok then emitted = emitted + 1 else emit_error = emit_error or why end
+        if ok then
+          emitted = emitted + 1
+          handled = math.max(handled, message.sent_at or 0)
+        else
+          emit_error = emit_error or why
+        end
       end
     end
   end
   local after = memory.stats().ledger_messages or 0
   local newest = tonumber(payload.newest) or 0
-  if newest > cursor then
-    memory.meta_set("whatsapp_cursor", math.floor(newest))
+  -- Only what was decided about. `newest` would consume a message whose emission failed, one a read-only
+  -- pass merely looked at, or one a pipeline step never acted on - the silent loss this rule prevents.
+  if handled > cursor then
+    memory.meta_set("whatsapp_cursor", math.floor(handled))
   end
   -- The dump has done its job; leaving it would leave a copy of the inbox in the temp directory.
   if host.exec then pcall(host.exec, "rm -f " .. quote(dump), "") end
@@ -266,7 +280,7 @@ local function main()
     -- One JSON object and nothing else on stdout: a pipeline step succeeds on exit 0 *and* a JSON
     -- object, and a stray report line would make the whole result unparseable.
     print(json.encode({ events = events, unanswerable = unanswerable,
-      cursor = math.floor(math.max(cursor, newest)) }))
+      cursor = math.floor(math.max(cursor, handled)) }))
     return
   end
   report(string.format(

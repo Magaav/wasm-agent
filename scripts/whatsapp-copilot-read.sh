@@ -38,4 +38,11 @@ if [ -n "$rows" ]; then
   done <<< "$rows"
 fi
 
+# The result, at the path the runner chose and passed in. A step that writes nothing where it was asked to
+# is indistinguishable from a step that found nothing - and that ambiguity is what hid the bug that left a
+# child unstarted while the delivery still said "completed".
+if [ -n "${WA_JOB_RESULT_FILE:-}" ]; then
+  printf '%s' "$read_out" > "$WA_JOB_RESULT_FILE" 2>/dev/null || true
+fi
+
 printf '%s' "$read_out"
