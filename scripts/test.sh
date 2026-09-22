@@ -258,6 +258,12 @@ assert(spec.description:find(deadline .. 's', 1, true),
   'the description must state the enforced foreground deadline in seconds, got: ' .. spec.description)
 assert(spec.description:find('operation', 1, true) and spec.description:find('timeout_seconds', 1, true),
   'the description must name the operation escape hatch for work that outlives the deadline')
+local timeout = spec.parameters.properties.timeout_seconds
+assert(timeout and timeout.minimum == 1 and timeout.maximum == 86400,
+  'the schema must offer a per-call timeout_seconds in the same 1-86400 range as operation')
+local refused = tools.dispatch(nil, 'bash', { command = 'echo hi', timeout_seconds = 0 }, 'master')
+assert(refused and refused.error == 'invalid_timeout_seconds',
+  'an out-of-range per-call timeout must be refused before it reaches the shell')
 print('bash schema ok')
 LUA
 WA_SCRIPT="$DB.bashschema.lua" "$BIN" --db "$DB" | grep "bash schema ok"

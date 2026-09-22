@@ -80,7 +80,9 @@ tell *which* key failed without being able to use it.
 
 ## Supervised execution and automation
 
-`host.exec` is the synchronous facade for an owned **operation**. `host.operation`
+`host.exec(command, cwd, timeout_seconds?)` is the synchronous facade for an owned
+**operation**; the optional third argument bounds it (1-86400 seconds, the configured
+default when omitted). `host.operation`
 exposes explicit launch receipts, status, cursor-based output, bounded waits and
 cancellation; `host.jobs` manages automation definitions/enable state, never executes
 a job itself. Both always return one JSON value, including failure. Do not add a

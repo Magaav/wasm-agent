@@ -105,8 +105,9 @@ M.admin = {
     id = { type = "string" } }, { "id" }),
   -- The dialect is in the description because the model otherwise assumes POSIX
   -- and wastes its tool budget on commands this machine does not have.
-  schema("bash", "Run a foreground command on this machine using " .. platform.shell() .. ". It is killed at " .. exec_deadline_seconds() .. "s, the node's foreground execution deadline; for anything that may outlast that - a build, the full test gate, a server - use operation start with its own timeout_seconds (1-86400) and observe or await its handle. Its entire process tree is owned and cleaned up; background descendants cannot outlive this call. Output and process exit are separate evidence.", {
-    command = { type = "string" }, cwd = { type = "string" } }, { "command" }),
+  schema("bash", "Run a foreground command on this machine using " .. platform.shell() .. ". It is killed at " .. exec_deadline_seconds() .. "s unless timeout_seconds says otherwise (1-86400); pass a larger timeout_seconds for anything that may outlast that - a build, the full test gate - or use operation start when you need to observe or cancel the work while it runs. Its entire process tree is owned and cleaned up; background descendants cannot outlive this call. Output and process exit are separate evidence.", {
+    command = { type = "string" }, cwd = { type = "string" },
+    timeout_seconds = { type = "integer", minimum = 1, maximum = 86400, description = "Kill the command after this many seconds. Defaults to the node's foreground deadline (" .. exec_deadline_seconds() .. "s); raise it for a build or a full test gate, lower it to fail fast." } }, { "command" }),
   schema("operation", "Start, observe, read streamed output, wait briefly for, or cancel a supervised external operation. A launch receipt is not completion. Output read uses byte cursors; when text_lossy is true, decode content_base64 for exact bytes instead of concatenating content. Use await once to wait for settlement without repeated model polling (up to the operation deadline); wait is a short peek. Jobs are automation rules, not operations. No automatic replay after an unknown outcome.", {
     action = { type = "string", enum = {"start", "list", "status", "read", "wait", "await", "cancel"} },
     id = { type = "string" }, command = { type = "string" }, cwd = { type = "string" },
@@ -319,8 +320,8 @@ local function shell_quote(value)
   return "'" .. tostring(value or ""):gsub("'", "'\\''") .. "'"
 end
 
-local function run(command)
-  local ok, raw = pcall(host.exec, command, "")
+local function run(command, timeout_seconds)
+  local ok, raw = pcall(host.exec, command, "", timeout_seconds)
   if not ok then return { error = tostring(raw) } end
   local decoded = json.decode(raw)
   if type(decoded) ~= "table" then return { error = tostring(raw) } end
@@ -409,7 +410,11 @@ function M.dispatch(memory, name, args, role, ctx)
     return memory.conversations(args.limit or 50)
   elseif name == "bash" then
     if not args.command or args.command == "" then return { error = "command_required" } end
-    local result = run(args.cwd and ("cd " .. shell_quote(args.cwd) .. " && " .. args.command) or args.command)
+    local timeout = args.timeout_seconds
+    if timeout ~= nil and (type(timeout) ~= "number" or timeout % 1 ~= 0 or timeout < 1 or timeout > 86400) then
+      return { error = "invalid_timeout_seconds" }
+    end
+    local result = run(args.cwd and ("cd " .. shell_quote(args.cwd) .. " && " .. args.command) or args.command, timeout)
     return result
   elseif name == "read" then
     return file_tools.read(args)

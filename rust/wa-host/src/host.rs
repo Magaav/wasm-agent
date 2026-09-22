@@ -3,7 +3,7 @@
 //! These are the only things the Lua agent cannot do by itself. Everything the
 //! agent *decides* lives in Lua; everything it *needs from the platform* lives
 //! here, so the same Lua can later run as a WASM component with these imports.
-use crate::lua::{arg_string, lua_pushlstring, lua_touserdata, upvalue_index, LuaState};
+use crate::lua::{arg_integer, arg_string, lua_pushlstring, lua_touserdata, upvalue_index, LuaState};
 use crate::plugins::PluginRegistry;
 use ring::rand::{SecureRandom, SystemRandom};
 use rusqlite::{params_from_iter, Connection};
@@ -622,11 +622,24 @@ pub(crate) fn exec_timeout_seconds() -> u64 {
 
 /// Compatibility facade over the supervised operation runtime. No pipes, reader threads or
 /// independent heartbeat live here; the lifecycle is owned by wa-operation (docs/OPERATIONS.md).
-fn run_bounded(program: &str, flag: &str, command: &str, cwd: &str) -> Result<Value, String> {
+fn run_bounded(
+    program: &str,
+    flag: &str,
+    command: &str,
+    cwd: &str,
+    requested_seconds: Option<u64>,
+) -> Result<Value, String> {
     // A child's shell call must not outlive the child: the operation timeout is the
     // smaller of the configured exec deadline and the child's remaining budget, and
     // a cancel stops the operation rather than leaving it running past settlement.
-    let mut seconds = exec_timeout_seconds();
+    // A caller may name its own budget (the `bash` tool's `timeout_seconds`), in the
+    // same 1-86400 range `operation start` accepts; an out-of-range value is refused,
+    // not clamped, so a caller never believes it got a bound it did not.
+    let mut seconds = match requested_seconds {
+        Some(value) if (1..=86_400).contains(&value) => value,
+        Some(_) => return Err("invalid_timeout_seconds".into()),
+        None => exec_timeout_seconds(),
+    };
     if let Some(remaining) = crate::subagents::remaining_budget() {
         seconds = seconds.min(remaining.as_secs().max(1));
     }
@@ -678,8 +691,9 @@ pub extern "C" fn subagent(l: *mut LuaState) -> c_int {
 pub extern "C" fn exec(l: *mut LuaState) -> c_int {
     let command = arg_string(l, 1).unwrap_or_default();
     let cwd = arg_string(l, 2).unwrap_or_default();
+    let requested = arg_integer(l, 3).and_then(|value| u64::try_from(value).ok());
     let (program, flag) = shell_config();
-    let outcome = run_bounded(program, flag, &command, &cwd);
+    let outcome = run_bounded(program, flag, &command, &cwd, requested);
     push_json(l, &outcome.unwrap_or_else(|error| json!({"error": error})));
     1
 }
@@ -1492,7 +1506,7 @@ mod heartbeat_tests {
             worst
         });
         let started = std::time::Instant::now();
-        let result = run_bounded("bash", "-c", "sleep 6", "");
+        let result = run_bounded("bash", "-c", "sleep 6", "", None);
         let elapsed = started.elapsed();
         let worst = sampler.join().unwrap();
         assert!(result.is_ok(), "the command should run: {result:?}");
@@ -1509,7 +1523,7 @@ mod heartbeat_tests {
     fn shell_child_inherits_only_the_turn_boolean() {
         crate::serve::test_mark_turn(true);
         let (program, flag) = shell_config();
-        let result = run_bounded(program, flag, "env | grep '^WASM_AGENT_IN_TURN='", "");
+        let result = run_bounded(program, flag, "env | grep '^WASM_AGENT_IN_TURN='", "", None);
         crate::serve::test_mark_turn(false);
         let output = result.expect("shell child should run");
         assert_eq!(output["stdout"], "WASM_AGENT_IN_TURN=1\n");
