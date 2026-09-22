@@ -387,14 +387,30 @@ impl Store {
                 continue;
             }
             if now >= next {
-                if self.enqueue(
+                match self.enqueue(
                     id,
                     rev,
                     &format!("schedule:{next}"),
                     &json!({"scheduled_at":next}),
                     now,
-                )? {
-                    count += 1;
+                ) {
+                    Ok(true) => count += 1,
+                    Ok(false) => {}
+                    // A scheduled tick is this store's *own* event, so a full queue is
+                    // backpressure, not a failure: the deliveries already queued have not been
+                    // consumed yet. Failing the whole tick logged `jobs-error tick
+                    // job_queue_full` every second and retried forever; skipping one interval
+                    // lets the queue drain and the next interval enqueue again. An external
+                    // `emit` is different - it must not be silently dropped, so it still errors
+                    // and its source backs off (cdp.rs).
+                    Err(error) if error.to_string().starts_with("job_queue_full") => {
+                        let _ = self.source_status(
+                            id,
+                            rev,
+                            "backpressure: delivery queue full; skipped this interval",
+                        );
+                    }
+                    Err(error) => return Err(error),
                 }
                 db.execute(
                     "UPDATE jobs SET next_at=? WHERE id=? AND revision=?",

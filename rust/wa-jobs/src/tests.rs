@@ -165,6 +165,38 @@ fn schedules_prime_without_storm_and_persist() {
     assert_eq!(reopened.schedule(500).unwrap(), 1);
 }
 #[test]
+fn a_full_queue_is_backpressure_for_a_scheduled_tick() {
+    // A scheduled tick is this store's own event, so a full queue skips one interval instead of
+    // failing: the deliveries already queued have not been consumed. Failing the whole tick logged
+    // `jobs-error tick job_queue_full` every second and retried forever.
+    let s = store();
+    let mut job = definition();
+    job["trigger"] = json!({"kind":"schedule","every_seconds":5});
+    s.put(&job).unwrap();
+    s.enable("messages", true).unwrap();
+    assert_eq!(s.schedule(10).unwrap(), 0); // primes: next_at = 15
+    // A schedule job has no event topic, so fill its queue directly: the per-job limit is 8.
+    let rev = s.get("messages").unwrap()["revision"].as_i64().unwrap();
+    for n in 0..8 {
+        s.enqueue("messages", rev, &format!("e{n}"), &json!({}), 10)
+            .unwrap();
+    }
+    // The tick cannot fit its delivery. It must not error, must say why, and must advance so the
+    // retry is the next interval, not the next tick.
+    assert_eq!(s.schedule(15).unwrap(), 0);
+    let (status, next): (String, i64) = s
+        .db()
+        .unwrap()
+        .query_row(
+            "SELECT source_status, next_at FROM jobs WHERE id='messages'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(status.contains("backpressure"), "expected backpressure, got {status}");
+    assert_eq!(next, 20, "the tick must advance to the next interval, not retry each tick");
+}
+#[test]
 fn rejects_ambient_authority_and_invalid_inputs() {
     let s = store();
     let mut job = definition();
