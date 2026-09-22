@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# The copilot pipeline's first step: read the store, diff it against the cursor, print the new eligible
-# messages as one JSON object. No model, no event, no children - the job's own foreach step starts those.
+# The copilot pipeline's first step: read the store, diff it against the cursor, and print one JSON object -
+# the new eligible *text* messages for a child to answer, and the ones nobody here can read (an image, a voice
+# note) reported to the operator's own inbox instead of being guessed at.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -13,7 +14,7 @@ for candidate in \
   [ -n "$candidate" ] && [ -x "$candidate" ] && WA="$candidate" && break
 done
 if [ -z "${WA:-}" ]; then
-  echo '{"events":[],"error":"no_binary"}'
+  echo '{"events":[],"unanswerable":[],"error":"no_binary"}'
   exit 0
 fi
 
@@ -22,5 +23,19 @@ if command -v cygpath >/dev/null 2>&1; then
   lua_script="$(cygpath -m "$lua_script")"
 fi
 
-# Nothing is printed here on purpose: the step succeeds on exit 0 and a JSON object on stdout.
-WA_WHATSAPP_JSON_EVENTS=1 WA_SCRIPT="$lua_script" "$WA" "$@"
+read_out="$(WA_WHATSAPP_JSON_EVENTS=1 WA_SCRIPT="$lua_script" "$WA" "$@")"
+
+# Report the unreadable ones to the operator, never to the sender. Bounded to three per run so a noisy run
+# cannot flood the chat, and every failure is ignored: a report must not break the step's contract, which is
+# exit 0 and one JSON object on stdout.
+rows="$(printf '%s' "$read_out" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);(j.unanswerable||[]).slice(0,3).forEach(u=>console.log(u.message_id+"|"+u.conversation_id+"|"+u.media))}catch(e){}})')"
+if [ -n "$rows" ]; then
+  while IFS='|' read -r mid conv kind; do
+    [ -z "$mid" ] && continue
+    node "$ROOT/scripts/whatsapp-reply.mjs" --to-self \
+      --body "wasm-agent: could not reply - the message in $conv is a $kind, not text (id $mid). Nothing was sent to the sender." \
+      --send >/dev/null 2>&1 || true
+  done <<< "$rows"
+fi
+
+printf '%s' "$read_out"

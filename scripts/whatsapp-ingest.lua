@@ -188,6 +188,10 @@ local function main()
   end
   local emitted, emit_error = 0, nil
   local events = {}
+  -- New eligible messages whose media is not text: an image, a voice note, a video. Nothing can read
+  -- them here, so they are reported to the operator instead of being handed to a child that would have
+  -- to invent an answer - and no token is spent on them.
+  local unanswerable = {}
   local skipped_ineligible = 0
   for _, message in ipairs(payload.messages or {}) do
     memory.record_message({
@@ -211,6 +215,14 @@ local function main()
   -- nothing at all - every run completed having handed on no messages, which is how a private message went
   -- unanswered while the job looked healthy.
   if (emit_on or json_events) and cursor > 0 and (message.sent_at or 0) > cursor and message.direction == "incoming" then
+      local media_kind = (message.media and message.media[1] and message.media[1].type) or "chat"
+      if json_events and eligible and media_kind ~= "chat" then
+        unanswerable[#unanswerable + 1] = {
+          message_id = message.message_id,
+          conversation_id = message.conversation_id,
+          media = media_kind,
+          sent_at = message.sent_at,
+        }
       -- Eligibility first: a pipeline step must be handed only what the rule accepted, or the token rule
       -- (a group message that does not name the operator) is bypassed by the very mode that saves tokens.
       if json_events and eligible then
@@ -252,7 +264,8 @@ local function main()
   if json_events then
     -- One JSON object and nothing else on stdout: a pipeline step succeeds on exit 0 *and* a JSON
     -- object, and a stray report line would make the whole result unparseable.
-    print(json.encode({ events = events, cursor = math.floor(math.max(cursor, newest)) }))
+    print(json.encode({ events = events, unanswerable = unanswerable,
+      cursor = math.floor(math.max(cursor, newest)) }))
     return
   end
   report(string.format(
