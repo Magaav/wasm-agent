@@ -206,7 +206,11 @@ local function main()
     -- all decided without a model, here. The reply job never wakes for a message a rule already excludes.
     local verdict = message.eligibility
     local eligible = type(verdict) == "table" and verdict.eligible == true
-    if emit_on and cursor > 0 and (message.sent_at or 0) > cursor and message.direction == "incoming" then
+    -- Either mode acts on a new message: `emit_on` hands it to an event consumer, `json_events` hands it to
+  -- the pipeline step that asked for the list. Requiring `emit_on` here meant the pipeline mode collected
+  -- nothing at all - every run completed having handed on no messages, which is how a private message went
+  -- unanswered while the job looked healthy.
+  if (emit_on or json_events) and cursor > 0 and (message.sent_at or 0) > cursor and message.direction == "incoming" then
       if json_events then
         events[#events + 1] = {
           message_id = message.message_id,
