@@ -80,8 +80,6 @@ pub fn register_active_socket(stream: &std::net::TcpStream) {
                 if let Ok(mut sockets) = context.sockets.lock() {
                     sockets.push(clone);
                 }
-            } else {
-                eprintln!("[dbg-sock] register with no task context");
             }
         });
     }
@@ -103,6 +101,9 @@ pub fn clear_active_socket() {
 pub fn shutdown_sockets(sockets: &SocketSlot) {
     if let Ok(sockets) = sockets.lock() {
         for stream in sockets.iter() {
+            // Best-effort immediate wake; where the platform honours it the read
+            // returns at once, and where it does not (Windows on a duplicated handle)
+            // the transport's cancellation poll still notices within 250ms.
             let _ = stream.shutdown(std::net::Shutdown::Both);
         }
     }

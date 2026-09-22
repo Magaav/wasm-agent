@@ -137,6 +137,33 @@ fn db_path(args: &[String]) -> String {
     })
 }
 
+/// Open one interpreter's own SQLite connection to the node's database.
+///
+/// A file-backed database is opened normally, so every interpreter sees the same
+/// WAL and only committed rows cross a transaction boundary. An in-memory database
+/// gets a SHARED-CACHE URI, because plain `:memory:` would silently give each
+/// interpreter its own empty database - a split ledger that looks correct from
+/// inside each interpreter.
+fn open_db(path: &str) -> Connection {
+    let in_memory = path.is_empty() || path == ":memory:" || path == "file::memory:" || path == "file::memory:?cache=shared";
+    let database = if in_memory {
+        format!("file:wa-memory-{}?mode=memory&cache=shared", std::process::id())
+    } else {
+        path.to_string()
+    };
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+        | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+        | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+    let connection = Connection::open_with_flags(&database, flags).expect("open database");
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;\
+             PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
+        )
+        .expect("pragma");
+    connection
+}
+
 /// Load KEY=VALUE pairs from ~/.wasm-agent/env without overwriting real env.
 /// Returns what it read so the Lua core can see the same values through
 /// `host.getenv` (see the note on ENV_OVERRIDES in host.rs).
@@ -212,32 +239,38 @@ fn main() {
     if let Some(parent) = std::path::Path::new(&db).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let connection = Connection::open(&db).expect("open database");
-    connection
-        .execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;\
-             PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
-        )
-        .expect("pragma");
+    // Every interpreter gets its OWN SQLite connection to the same WAL database.
+    // One shared connection made a transaction an interpreter held open visible to
+    // every other interpreter, and let a rollback there erase a peer's committed
+    // row. The plugin runtime and the client bridge are process-wide, so they are
+    // shared behind an Arc; only the database connection is per-interpreter.
     let plugin_registry = plugins::PluginRegistry::load(&plugins::plugin_dir());
+    let shared_plugins = std::sync::Arc::new(Mutex::new(plugin_registry));
     let bridge = std::sync::Arc::new(client_bridge::Bridge::new());
-    let host = Box::into_raw(Box::new(Host {
-        db: Mutex::new(connection),
-        plugins: Mutex::new(plugin_registry),
-        client: bridge.clone(),
-    }));
+    let shared_client = bridge.clone();
 
-    // One initialized interpreter. A node can run more than one (WASM_AGENT_WORKERS), and they all share
-    // this same `host` pointer - one SQLite connection behind a Mutex, one plugin registry, one client
-    // bridge - so a second interpreter adds no new way for the ledger to be written by two writers at
-    // once. Written as a closure rather than a function so the boot sequence stays in one place: a second
-    // copy of it is how the pool would drift from the single-interpreter path.
+    // One boot sequence, called once per interpreter. Each call opens its own
+    // connection and boxes a Host that the interpreter owns and drops with itself,
+    // so a retired worker leaves no connection and no open transaction behind.
     let boot_args = lua_args.clone();
-    let boot_state = move |host: *mut c_void| -> Lua {
-    let lua = Lua::new();
+    let db_for_boot = db.clone();
+    let boot_state = move || -> Lua {
+    let connection = open_db(&db_for_boot);
+    let host: Box<Host> = Box::new(Host {
+        db: Mutex::new(connection),
+        plugins: shared_plugins.clone(),
+        client: shared_client.clone(),
+    });
+    // A pointer into the box's allocation; moving the box into the interpreter does
+    // not move the Host, so every host function's upvalue stays valid for the
+    // interpreter's whole life.
+    let host_ptr = (&*host) as *const Host as *mut c_void;
+    let mut lua = Lua::new();
     lua.push_table();
-    lua.register_with_upvalue("sql_exec", host::sql_exec, host as *mut c_void);
-    lua.register_with_upvalue("sql_query", host::sql_query, host as *mut c_void);
+    lua.register_with_upvalue("sql_exec", host::sql_exec, host_ptr);
+    lua.register_with_upvalue("sql_query", host::sql_query, host_ptr);
+    lua.register("db_ready", host::db_ready);
+    lua.register("mark_db_ready", host::mark_db_ready);
     lua.register("getenv", host::getenv);
     lua.register("paths", host::paths);
     lua.register("platform", host::platform);
@@ -256,14 +289,14 @@ fn main() {
     lua.register("node_identity", host::node_identity);
     lua.register("sign", host::sign);
     lua.register("verify", host::verify);
-    lua.register_with_upvalue("client", host::client, host as *mut c_void);
-    lua.register_with_upvalue("client_status", host::client_status, host as *mut c_void);
+    lua.register_with_upvalue("client", host::client, host_ptr);
+    lua.register_with_upvalue("client_status", host::client_status, host_ptr);
     lua.register("http", host::http);
     lua.register("http_stream", host::http_stream);
     lua.register("beat", host::beat);
     lua.register("relay", host::relay);
-    lua.register_with_upvalue("plugins", host::plugins, host as *mut c_void);
-    lua.register_with_upvalue("invoke", host::invoke, host as *mut c_void);
+    lua.register_with_upvalue("plugins", host::plugins, host_ptr);
+    lua.register_with_upvalue("invoke", host::invoke, host_ptr);
     lua.register("stream", host::stream);
     lua.register("now", host::now);
     lua.register("monotonic_ms", host::monotonic_ms);
@@ -310,18 +343,18 @@ fn main() {
         eprintln!("lua error: {error}");
         std::process::exit(1);
     }
+        lua.own(host as Box<dyn std::any::Any + Send>);
         lua
     };
-    let lua = boot_state(host as *mut c_void);
+    let lua = boot_state();
 
     // A fresh, initialized interpreter: the boot sequence plus the modules an
     // interpreter needs to answer a request or run a subagent. Built once and
     // shared so `serve`, ordinary CLI runs and the subagent runtime cannot drift.
     // The factory is registered with the runtime here, before any command runs,
     // so a child is never left unable to build its own interpreter.
-    let host_address = host as usize;
     let worker: std::sync::Arc<dyn Fn() -> Lua + Send + Sync> = std::sync::Arc::new(move || {
-        let state = boot_state(host_address as *mut c_void);
+        let state = boot_state();
         // A pool worker or a child interpreter must never take the process down
         // with it: an interpreter that cannot load its module reports the failure
         // and runs on, so a spawned child settles as failed rather than killing
@@ -424,5 +457,67 @@ fn main() {
     if let Err(error) = lua.do_string(&core_source("lua/core/init.lua"), "lua/core/init.lua") {
         eprintln!("lua error: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+
+    /// Each interpreter owns its own connection to the same WAL file, so a
+    /// transaction one holds open is invisible to another; closing a connection
+    /// rolls back a transaction it left open; and repeated open/close is clean.
+    #[test]
+    fn per_interpreter_connections_are_isolated_and_drop_rolls_back() {
+        let dir = std::env::temp_dir().join(format!("wa-db-life-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("memory.db").to_string_lossy().to_string();
+        {
+            let setup = open_db(&path);
+            setup.execute_batch("CREATE TABLE IF NOT EXISTS t(k TEXT PRIMARY KEY)").unwrap();
+        }
+        // Repeated create/drop: the pool spawns and retires interpreters all day.
+        for _ in 0..8 {
+            let connection = open_db(&path);
+            let _: i64 = connection.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0)).unwrap();
+        }
+        let a = open_db(&path);
+        let b = open_db(&path);
+        a.execute_batch("BEGIN IMMEDIATE").unwrap();
+        a.execute("INSERT INTO t(k) VALUES('a')", []).unwrap();
+        let visible: i64 = b.query_row("SELECT COUNT(*) FROM t WHERE k='a'", [], |row| row.get(0)).unwrap();
+        assert_eq!(visible, 0, "an uncommitted row must not be visible on another interpreter's connection");
+        a.execute_batch("ROLLBACK").unwrap();
+        // A transaction left open is rolled back when the interpreter's connection closes.
+        a.execute_batch("BEGIN IMMEDIATE").unwrap();
+        a.execute("INSERT INTO t(k) VALUES('b')", []).unwrap();
+        drop(a);
+        let after: i64 = b.query_row("SELECT COUNT(*) FROM t WHERE k='b'", [], |row| row.get(0)).unwrap();
+        assert_eq!(after, 0, "closing a connection must roll back its open transaction");
+        // A statement error is RETURNED, not forced into a rollback: the caller can
+        // recover inside the transaction. BEGIN; INSERT A; a bad statement; INSERT B;
+        // explicit ROLLBACK must remove BOTH rows. A forced rollback here would have
+        // ended the transaction, made INSERT B autocommit, and left it behind.
+        b.execute_batch("BEGIN IMMEDIATE").unwrap();
+        b.execute("INSERT INTO t(k) VALUES('c')", []).unwrap();
+        let bad = b.execute("INSERT INTO no_such_table(k) VALUES('x')", []);
+        assert!(bad.is_err(), "a bad statement must return an error");
+        assert!(!b.is_autocommit(), "a returned statement error must not end the transaction");
+        b.execute("INSERT INTO t(k) VALUES('d')", []).unwrap();
+        b.execute_batch("ROLLBACK").unwrap();
+        let recovered: i64 = b.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0)).unwrap();
+        assert_eq!(recovered, 0, "an explicit rollback must remove both rows, not leave the second autocommitted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `:memory:` must be one shared database, not a silent per-interpreter split.
+    #[test]
+    fn an_in_memory_database_is_shared_not_split() {
+        let first = open_db(":memory:");
+        let second = open_db(":memory:");
+        first.execute_batch("CREATE TABLE IF NOT EXISTS mem(k TEXT PRIMARY KEY)").unwrap();
+        first.execute("INSERT INTO mem(k) VALUES('x')", []).unwrap();
+        let seen: i64 = second.query_row("SELECT COUNT(*) FROM mem", [], |row| row.get(0)).unwrap();
+        assert_eq!(seen, 1, "an in-memory database must be shared across interpreters");
     }
 }

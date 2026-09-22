@@ -92,6 +92,12 @@ unsafe impl Send for Lua {}
 
 pub struct Lua {
     pub l: *mut LuaState,
+    /// A value the interpreter owns and drops with itself. The per-interpreter
+    /// `Host` (its own SQLite connection) is stored here so it is freed exactly
+    /// when the interpreter is, with no leaked box and no connection outliving
+    /// the Lua that used it. The host functions hold a pointer into it; moving the
+    /// `Box` does not move the allocation, so the pointer stays valid.
+    owned: Option<Box<dyn std::any::Any + Send>>,
 }
 
 impl Lua {
@@ -100,7 +106,28 @@ impl Lua {
             let l = luaL_newstate();
             assert!(!l.is_null(), "luaL_newstate failed");
             luaL_openlibs(l);
-            Lua { l }
+            Lua { l, owned: None }
+        }
+    }
+
+    /// Attach a value whose lifetime is the interpreter's.
+    pub fn own(&mut self, value: Box<dyn std::any::Any + Send>) {
+        self.owned = Some(value);
+    }
+
+    /// Roll back any transaction this interpreter's own connection left open.
+    ///
+    /// A Lua error can abandon a `BEGIN` that no later statement closes; on a
+    /// persistent worker that transaction would hold the write lock until the
+    /// process exits, stalling every other interpreter. The caller invokes this
+    /// when a Lua call returned an error, so the failure cannot outlive the request.
+    pub fn rollback_if_open(&self) {
+        let Some(owned) = self.owned.as_ref() else { return };
+        let Some(host) = owned.downcast_ref::<crate::host::Host>() else { return };
+        if let Ok(connection) = host.db.lock() {
+            if !connection.is_autocommit() {
+                let _ = connection.execute_batch("ROLLBACK");
+            }
         }
     }
 
@@ -244,6 +271,8 @@ impl Default for Lua {
 
 impl Drop for Lua {
     fn drop(&mut self) {
+        // Close the interpreter first, then drop what it owned (its SQLite
+        // connection), which rolls back any transaction it left open.
         unsafe { lua_close(self.l) }
     }
 }
