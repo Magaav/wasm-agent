@@ -133,6 +133,35 @@ prove it is DevTools, the profile's own `DevToolsActivePort` is the authority fo
 which port Chrome chose, and a launch that hands off to an already-open profile is
 reported as itself instead of as a 35-second timeout.
 
+## The database capability
+
+Each interpreter owns its **own** SQLite connection to the node's one WAL
+database. Only the plugin runtime and the client bridge are shared. A shared
+connection made a transaction one interpreter held open visible to every other
+interpreter, and let a rollback there erase a peer's committed row. The
+connection lives inside the interpreter's owned `Host`, so it closes (and rolls
+back any open transaction) exactly when the interpreter does.
+
+`host.sql_exec`/`host.sql_query` return a statement error as `{error=...}`; they
+**never force a rollback**. SQLite permits the caller to recover inside its
+transaction, and a forced rollback would silently end it - a Lua caller that
+caught the error and wrote again would then autocommit that later write and break
+atomicity. A transaction is closed only when:
+
+- the caller runs `ROLLBACK` (or `COMMIT`) itself, or `memory.in_transaction`
+  rolls back a failed `fn`;
+- a Lua callback error is uncaught at the serve boundary, which calls
+  `Lua::rollback_if_open()`; or
+- the interpreter's connection drops with the VM, rolling back whatever it held.
+
+Migrations are process-wide and run **once**: `host.db_ready()` reports whether
+the schema has been migrated, and `host.mark_db_ready()` records that it has.
+Both return exactly one value (`nil` for the marker);
+`scripts/test-host-contract.lua` pins that arity. A second interpreter booting
+while another holds a write transaction therefore does not replay the DDL and
+block on the lock. `:memory:` uses a shared-cache URI so every interpreter sees
+one database rather than a silent per-interpreter split.
+
 ## Adding a capability
 
 `host.monotonic_ms()` measures elapsed time within a process. Use `host.now()` only

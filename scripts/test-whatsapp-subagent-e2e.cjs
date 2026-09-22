@@ -90,26 +90,28 @@ function providerServer() {
       const text = (content) => finish({ delta: { content }, finish_reason: "stop" });
       const call = (name, args) => finish({ delta: { tool_calls: [toolCall(name, args)] }, finish_reason: "tool_calls" });
       if (!isChild) { text("parent-ack"); return; }
-      const toolResults = messages.filter((message) => message.role === "tool").map((message) => String(message.content || ""));
-      const lastTool = toolResults.length ? toolResults[toolResults.length - 1] : "";
-      const seen = (name) => childText.includes(`"${name}"`);
-      if (childText.includes("mode:crash") || childText.includes('"mode":"crash"')) {
-        if (!toolResults.length) { call("whatsapp_read", {}); return; }
-        if (!lastTool.includes("conversation_id")) { call("whatsapp_read", {}); return; }
-        if (!seen("whatsapp_send")) { call("whatsapp_send", { body: "crash-body", confirm: true }); return; }
-        text("child-crash-done");
+      const toolResults = messages.filter((message) => message.role === "tool");
+      const steps = toolResults.length;
+      // The mode is in the approved job prompt (the runtime resolves the conversation from the ledger and
+      // forwards no raw event fields), so the sequence is driven by the step count.
+      if (childText.includes("MODE:crash")) {
+        if (steps === 0) { call("whatsapp_read", {}); return; }
+        if (steps === 1) { call("whatsapp_send", { body: "crash-body", confirm: true }); return; }
+        // Report what the durable reservation did: a refusal is `child-crash-refused`, a real send is not.
+        const sendResult = String((toolResults[1] && toolResults[1].content) || "");
+        text(/ambiguous|already_sent|"error"/.test(sendResult) ? "child-crash-refused" : "child-crash-sent");
         return;
       }
-      if (childText.includes("mode:deny") || childText.includes('"mode":"deny"')) {
-        if (!toolResults.length) { call("bash", { command: "echo pwned > " + path.join(root, "pwned.txt").replaceAll("\\", "/") }); return; }
-        if (!seen("whatsapp_send")) { call("whatsapp_send", { conversation_id: "9999999999@c.us", body: "foreign", confirm: true }); return; }
+      if (childText.includes("MODE:deny")) {
+        if (steps === 0) { call("bash", { command: "echo pwned > " + path.join(root, "pwned.txt").replaceAll("\\", "/") }); return; }
+        if (steps === 1) { call("whatsapp_send", { conversation_id: "9999999999@c.us", body: "foreign", confirm: true }); return; }
         text("child-denied-done");
         return;
       }
-      // Allowed: read -> decide -> send.
-      if (!toolResults.length) { call("whatsapp_read", {}); return; }
-      if (!childText.includes("whatsapp_decide")) { call("whatsapp_decide", { decision: "reply", reason: "waiting on them" }); return; }
-      if (!seen("whatsapp_send")) { call("whatsapp_send", { body: "yes, 3pm", confirm: true }); return; }
+      // MODE:allowed: read -> decide -> send.
+      if (steps === 0) { call("whatsapp_read", {}); return; }
+      if (steps === 1) { call("whatsapp_decide", { decision: "reply", reason: "waiting on them" }); return; }
+      if (steps === 2) { call("whatsapp_send", { body: "yes, 3pm", confirm: true }); return; }
       text("child-sent-done");
     });
   });
@@ -228,8 +230,8 @@ function sendEnv(port) {
   };
 }
 
-async function api(base, body) {
-  const response = await fetch(base + "/subagents", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(15000) });
+async function api(base, body, headers = {}) {
+  const response = await fetch(base + "/subagents", { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body), signal: AbortSignal.timeout(15000) });
   const text = await response.text();
   let value = null;
   try { value = JSON.parse(text); } catch { /* not JSON: a missing route serves HTML/plain */ }
@@ -285,63 +287,64 @@ async function main() {
   // Dependency 3: the child root respects WASM_AGENT_HOME (records must land under the isolated config).
   requireDependency(!process.env.WASM_AGENT_SUBAGENT_ROOT, "test must not override the child root");
 
-  // The real job pipeline: portable artifact import (disabled), enable, emit.
+  // The real job pipeline: one portable artifact per scenario, imported disabled, enabled, and driven by
+  // real emitted events. The event the sentinel forwards names only the message id; the runtime resolves
+  // the conversation from the ledger, so no raw event field can widen the scope.
   const jobEnv = sendEnv(port);
-  const jobFile = path.join(root, "responder.json");
-  fs.writeFileSync(jobFile, JSON.stringify({
-    id: "whatsapp-e2e", name: "Responder", trigger: { kind: "event", topic: "wa.e2e" },
-    action: { kind: "subagent", profile: "whatsapp-responder", prompt: "Follow the mode in the context.", timeout_seconds: 60 },
-  }));
-  job(jobEnv, "put", jobFile);
-  const artifactFile = path.join(root, "responder.artifact.json");
-  fs.writeFileSync(artifactFile, JSON.stringify(job(jobEnv, "export", "whatsapp-e2e")));
   const bindingsFile = path.join(root, "bindings.json");
   fs.writeFileSync(bindingsFile, "{}");
-  check(job(jobEnv, "import", artifactFile, "--bindings", bindingsFile, "--approve").job.enabled === false, "artifact import installs disabled");
-  const guestImport = jobFailure(jobEnv, "import", artifactFile, "--bindings", bindingsFile, "--approve", "--as-role", "guest");
-  check(guestImport.status !== 0 && guestImport.output.includes("guest_artifact_profile_not_permitted"), "guest cannot import the operator whatsapp profile");
-  job(jobEnv, "enable", "whatsapp-e2e");
+  for (const [id, topic, prompt] of [
+    ["wa-allowed", "wa.allowed", "MODE:allowed Read the conversation, decide, and send the reply."],
+    ["wa-deny", "wa.deny", "MODE:deny Follow the mode."],
+    ["wa-crash", "wa.crash", "MODE:crash Follow the mode."],
+  ]) {
+    const file = path.join(root, id + ".json");
+    fs.writeFileSync(file, JSON.stringify({ id, name: id, trigger: { kind: "event", topic }, action: { kind: "subagent", profile: "whatsapp-responder", prompt, timeout_seconds: 60 } }));
+    job(jobEnv, "put", file);
+    const artifactFile = path.join(root, id + ".artifact.json");
+    fs.writeFileSync(artifactFile, JSON.stringify(job(jobEnv, "export", id)));
+    check(job(jobEnv, "import", artifactFile, "--bindings", bindingsFile, "--approve").job.enabled === false, `${id}: artifact import installs disabled`);
+    const guestImport = jobFailure(jobEnv, "import", artifactFile, "--bindings", bindingsFile, "--approve", "--as-role", "guest");
+    check(guestImport.status !== 0 && guestImport.output.includes("guest_subagent_requires_principal_binding"), `${id}: a guest cannot import a subagent artifact`);
+    job(jobEnv, "enable", id);
+  }
   const watcherLog = fs.openSync(path.join(root, "sentinel.log"), "a");
   sentinelProcess = spawn(sentinel, ["watch"], { env: jobEnv, stdio: ["ignore", watcherLog, watcherLog], windowsHide: true });
   sentinelProcess.on("error", (error) => failureList.push("sentinel spawn: " + error.message));
 
-  const emit = (eventId, payload) => {
-    const file = path.join(root, eventId + ".json");
+  const emit = (topic, eventId, payload) => {
+    const file = path.join(root, `${topic.replaceAll(".", "-")}-${eventId}.json`);
     fs.writeFileSync(file, JSON.stringify(payload));
-    return job(jobEnv, "emit", "wa.e2e", eventId, file);
+    return job(jobEnv, "emit", topic, eventId, file);
   };
 
   // ---- allowed run: read -> decide -> send, exactly one durable effect -----------------------------
-  check(emit("allowed-1", { conversation_id: CONV, message_id: MSG_ALLOWED, mode: "allowed" }).queued === 1, "allowed event enqueued");
+  check(emit("wa.allowed", "allowed-1", { message_id: MSG_ALLOWED }).queued === 1, "allowed event enqueued");
   await until(() => effectLines().some((line) => line.body === "yes, 3pm"), "fake send invoked once");
-  await until(() => job(jobEnv, "history").some((delivery) => delivery.job_id === "whatsapp-e2e" && delivery.state === "completed"), "allowed delivery completed");
+  await until(() => job(jobEnv, "history").some((delivery) => delivery.job_id === "wa-allowed" && delivery.state === "completed"), "allowed delivery completed");
   const allowedEffects = effectLines().filter((line) => line.body === "yes, 3pm");
   check(allowedEffects.length === 1, `exactly one durable effect for the allowed message (got ${allowedEffects.length})`);
   check(allowedEffects[0] && allowedEffects[0].chat === CONV, "the fake send received the exact recipient");
   check(allowedEffects[0] && allowedEffects[0].account === ACCOUNT, "the fake send proved the bound account");
-  const allowedChild = fs.existsSync(path.join(config, "subagents"))
-    ? fs.readdirSync(path.join(config, "subagents"))
-    : [];
+  const allowedChild = fs.existsSync(path.join(config, "subagents")) ? fs.readdirSync(path.join(config, "subagents")) : [];
   requireDependency(allowedChild.length > 0, "child_root_uses_WASM_AGENT_HOME (no records under the isolated config)");
-  emit("allowed-1", { conversation_id: CONV, message_id: MSG_ALLOWED, mode: "allowed" });
+  emit("wa.allowed", "allowed-1", { message_id: MSG_ALLOWED });
   await sleep(800);
   check(effectLines().filter((line) => line.body === "yes, 3pm").length === 1, "a repeated delivery does not send a second effect");
 
   // ---- denied run: general bash and a foreign chat are refused by actual dispatch ------------------
-  check(emit("deny-1", { conversation_id: CONV, message_id: MSG_DENY, mode: "deny" }).queued === 1, "denial event enqueued");
-  await until(() => job(jobEnv, "history").some((delivery) => delivery.job_id === "whatsapp-e2e" && delivery.state !== "running" && delivery.id > 1), "denial delivery settled");
+  check(emit("wa.deny", "deny-1", { message_id: MSG_DENY }).queued === 1, "denial event enqueued");
+  await until(() => job(jobEnv, "history").some((delivery) => delivery.job_id === "wa-deny" && ["completed", "failed", "unknown", "cancelled"].includes(delivery.state)), "denial delivery settled");
   check(!fs.existsSync(path.join(root, "pwned.txt")), "the general shell was never executed");
   check(effectLines().every((line) => line.body !== "foreign"), "a foreign conversation was never sent to");
 
   // ---- restart ambiguity: a reservation persists across a node restart -----------------------------
-  const beforeCrash = effectLines().filter((line) => line.body === "crash-body").length;
-  check(beforeCrash === 0, "no crash effect before the scenario");
-  const crashEnv = { ...env, WA_FAKE_MODE: "block" };
+  check(effectLines().filter((line) => line.body === "crash-body").length === 0, "no crash effect before the scenario");
   if (child && child.exitCode === null) child.kill();
   await Promise.race([new Promise((resolve) => child.once("exit", resolve)), sleep(5000)]);
-  child = startNode(crashEnv, port);
+  child = startNode({ ...env, WA_FAKE_MODE: "block" }, port);
   await until(async () => { try { return (await fetch(base + "/health", { signal: AbortSignal.timeout(500) })).ok; } catch { return false; } }, "node restarted", 15000);
-  check(emit("crash-1", { conversation_id: CONV, message_id: MSG_CRASH, mode: "crash" }).queued === 1, "crash event enqueued after restart");
+  check(emit("wa.crash", "crash-1", { message_id: MSG_CRASH }).queued === 1, "crash event enqueued after restart");
   await until(() => effectLines().filter((line) => line.body === "crash-body").length === 1, "crash send began and blocked", 20000);
   await sleep(1500);
   // The send is blocked before confirmation. Kill only the test-owned node and the blocked fake sender.
@@ -353,13 +356,27 @@ async function main() {
   // Restart the same home and resubmit the same source message under a fresh delivery.
   child = startNode({ ...env, WA_FAKE_MODE: "ok" }, port);
   await until(async () => { try { return (await fetch(base + "/health", { signal: AbortSignal.timeout(500) })).ok; } catch { return false; } }, "node restarted for replay", 15000);
-  check(emit("crash-2", { conversation_id: CONV, message_id: MSG_CRASH, mode: "crash" }).queued === 1, "replay event enqueued with a fresh delivery");
-  await until(() => job(jobEnv, "history").some((delivery) => delivery.job_id === "whatsapp-e2e" && delivery.state !== "running" && String(delivery.detail || "").match(/ambiguous|unknown/)), "pending reservation reconciled/refused", 30000);
+  check(emit("wa.crash", "crash-2", { message_id: MSG_CRASH }).queued === 1, "replay event enqueued with a fresh delivery");
+  const findRecord = (key) => {
+    const records = fs.existsSync(path.join(config, "subagents")) ? fs.readdirSync(path.join(config, "subagents")) : [];
+    for (const name of records) {
+      try {
+        const record = JSON.parse(fs.readFileSync(path.join(config, "subagents", name, "record.json"), "utf8"));
+        if (record.idempotency_key === key || String(record.idempotency_key || "").endsWith(key)) return record;
+      } catch { /* not it */ }
+    }
+    return null;
+  };
+  await until(() => { const record = findRecord(":crash-2"); return record && record.result && record.result.reply; }, "replay child settled", 30000);
+  const replayRecord = findRecord(":crash-2");
+  check(replayRecord && String((replayRecord.result || {}).reply) === "child-crash-refused", "the replay refused the pending reservation instead of sending");
   check(effectLines().filter((line) => line.body === "crash-body").length === 1, "a pending reservation is never sent twice");
+  const killedRecord = findRecord(":crash-1");
+  check(killedRecord && killedRecord.state !== "completed", "the child killed mid-send is never reported completed");
 
-  // ---- guest cannot spawn the operator whatsapp profile --------------------------------------------
-  const guestProbe = await api(base, { action: "start", profile: "whatsapp-responder", prompt: "guest", idempotency_key: "guest-1" });
-  check(guestProbe.value && (guestProbe.value.error || guestProbe.status !== 200), "an unauthenticated/guest spawn of the operator profile is refused");
+  // ---- an unknown credential cannot spawn the operator whatsapp profile ----------------------------
+  const guestProbe = await api(base, { action: "start", profile: "whatsapp-responder", prompt: "guest", idempotency_key: "guest-1" }, { "x-wa-session": "definitely-not-a-credential" });
+  check(guestProbe.status !== 200 || (guestProbe.value && (guestProbe.value.error || !guestProbe.value.subagent_id)), "an unknown credential cannot spawn the operator profile");
 
   if (failures > 0) {
     writeVerdict("failed", { error: failureList.join(" | ") });

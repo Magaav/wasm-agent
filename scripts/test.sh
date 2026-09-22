@@ -89,6 +89,9 @@ fi
 # is the difference between testing the tree and testing a build artefact, and it went
 # missing in a merge without anyone noticing.
 export WASM_AGENT_LUA_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if command -v cygpath >/dev/null 2>&1; then
+  export WASM_AGENT_LUA_ROOT="$(cygpath -w "$WASM_AGENT_LUA_ROOT")"
+fi
 # This is a fixture, not the operator's deployment configuration.
 export WASM_AGENT_LLM_CONTEXT=128000
 DB="$(mktemp -u /tmp/wa-smoke-XXXXXX.db)"
@@ -104,6 +107,22 @@ QDB="$(mktemp -u /tmp/wa-resume-q-XXXXXX.db)"
 PLUGINS="$(mktemp -d)"
 trap 'rm -f "$DB" "$DB"-wal "$DB"-shm "$SDB" "$SDB"-wal "$SDB"-shm "$RDB" "$RDB"-wal "$RDB"-shm "$QDB" "$QDB"-wal "$QDB"-shm "$DB.title" "$DB.title"-wal "$DB.title"-shm "$DB.exec" "$DB.exec"-wal "$DB.exec"-shm; rm -rf "$PLUGINS" "$DB.home"' EXIT
 
+# Fresh retained output + process status + terminal count evidence for every new
+# integrated proof. A child that silently exits 0 or drops checks cannot pass.
+run_proof_fixture() {
+  local kind="$1" minimum="$2" status=0 nested_skipped
+  shift 2
+  local log="$DB.$kind-proof.log"
+  "$@" > "$log" 2>&1 || status=$?
+  if ! nested_skipped="$(node scripts/lib/proof-verdict.cjs "$kind" "$status" "$minimum" < "$log")"; then
+    echo "FAIL: $kind proof; retained output: $log" >&2
+    tail -40 "$log" >&2
+    exit 1
+  fi
+  SKIPPED=$((SKIPPED + nested_skipped))
+  tail -4 "$log"
+}
+
 "$BIN" --db "$DB" init >/dev/null
 
 # A dev-mode node must not write the operator's ledger. The dangerous combination is on-disk Lua,
@@ -111,13 +130,18 @@ trap 'rm -f "$DB" "$DB"-wal "$DB"-shm "$SDB" "$SDB"-wal "$SDB"-shm "$RDB" "$RDB"
 # candidate node. Asserted by the message, not by the exit code, so this cannot pass vacuously -
 # and both directions, because a guard that refuses everything is as wrong as one that refuses
 # nothing. The refusal runs before memory.setup(), so the first invocation touches no database.
-guard_out="$(WASM_AGENT_LUA_ROOT="$WASM_AGENT_LUA_ROOT" "$BIN" status 2>&1 || true)"
+# Simulate an unscoped home, never the real operator home. Otherwise the gate's
+# outer WASM_AGENT_HOME makes this negative case vacuous (and a broken guard could
+# write to the operator's real ledger). Test --db independently of the home override.
+GUARD_ENV=(env -u WASM_AGENT_HOME "HOME=$WASM_AGENT_HOME" "USERPROFILE=$WASM_AGENT_HOME"
+  "LOCALAPPDATA=$WASM_AGENT_HOME/LocalAppData" "APPDATA=$WASM_AGENT_HOME/AppData")
+guard_out="$("${GUARD_ENV[@]}" "$BIN" status 2>&1 || true)"
 case "$guard_out" in
   *"refusing on-disk Lua"*) ;;
   *) echo "FAIL: on-disk Lua against the operator's database must be refused, got:" >&2
      printf '%s\n' "$guard_out" | tail -3 >&2; exit 1 ;;
 esac
-if WASM_AGENT_LUA_ROOT="$WASM_AGENT_LUA_ROOT" "$BIN" --db "$DB" status 2>&1 | grep -q "refusing on-disk Lua"; then
+if "${GUARD_ENV[@]}" "$BIN" --db "$DB" status 2>&1 | grep -q "refusing on-disk Lua"; then
   echo "FAIL: a scratch ledger is a candidate node and must not be refused" >&2; exit 1
 fi
 mkdir -p "$DB.home"
@@ -926,9 +950,9 @@ ISOLATION_PORT=$(node scripts/free-test-port-block.cjs)
 WA_BIN="$BIN" bash scripts/test-run-isolation.sh "$ISOLATION_PORT" > "$DB.isolation.log" 2>&1 || {
   echo "the run-isolation fixture failed; its output:"; tail -40 "$DB.isolation.log"; exit 1; }
 grep '^run isolation ok$' "$DB.isolation.log"
-node scripts/test-sqlite-isolation.cjs "$BIN"
-node scripts/test-peer-run-admission.cjs "$BIN"
-bash scripts/test-foreground-cancel.sh
+run_proof_fixture sqlite 6 node scripts/test-sqlite-isolation.cjs "$BIN"
+run_proof_fixture peer 43 node scripts/test-peer-run-admission.cjs "$BIN"
+run_proof_fixture foreground 3 bash scripts/test-foreground-cancel.sh
 rm -f "$DB.window"*
 echo "recovery cli ok"
 
@@ -1140,6 +1164,7 @@ node scripts/test-execution-terminology.cjs
 node scripts/test-auth-sessions.cjs "$BIN"
 node scripts/test-fixture-verdict.cjs
 node scripts/test-suite-verdict.cjs
+node scripts/test-proof-verdict.cjs
 
 # The image-attachment tests, plus the helper tests that came with them. They were
 # written, they passed when run by hand, and nothing ran them - which is how a test
@@ -1162,11 +1187,11 @@ node scripts/test-operation-control.cjs "$BIN"
 node scripts/test-operation-control.cjs "$BIN" --await
 
 # Actual child runtime and real sentinel deliveries, never a /subagents route stub.
-node scripts/test-subagents-policy.cjs "$BIN"
-node scripts/test-subagents.cjs "$BIN"
-node scripts/test-job-subagents.cjs
-node scripts/test-orchestration-e2e.cjs "$BIN"
-node scripts/test-whatsapp-subagent-e2e.cjs
+run_proof_fixture policy 62 node scripts/test-subagents-policy.cjs "$BIN"
+run_proof_fixture children 17 node scripts/test-subagents.cjs "$BIN"
+run_proof_fixture jobs 33 node scripts/test-job-subagents.cjs
+run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN"
+run_proof_fixture whatsapp 27 node scripts/test-whatsapp-subagent-e2e.cjs
 
 # The UI tests are JS and run outside the embedded interpreter, so they need node
 # and they need the repo root as cwd (they read ui/app.js from disk). A test that does

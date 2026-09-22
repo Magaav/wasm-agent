@@ -38,6 +38,7 @@ export WASM_AGENT_RENDEZVOUS="" WASM_AGENT_RELAY="" WASM_AGENT_MANAGED=0
 export HTTP_PROXY="" HTTPS_PROXY="" ALL_PROXY="" NO_PROXY=127.0.0.1,localhost,::1
 
 PIDS=()
+CHECKS=0
 fail() { echo "  FAIL: $*" >&2; exit 1; }
 cleanup() {
   local status=$?
@@ -123,10 +124,11 @@ done
 #    seconds, while a second conversation completes normally.
 echo
 echo "foreground cancel: a silent header read is interrupted, not timed out"
+headers_before="$(kind_count headers)"
 chat "$WORK/headers.sse" "fg-headers" "RUN-MARKER-SILENT-HEADERS" &
 H=$!
 await_admission "fg-headers" || fail "the silent-headers run was never admitted"
-wait_for_kind headers 1 || fail "the silent-headers run never reached the provider"
+wait_for_kind headers "$((headers_before + 1))" || fail "the silent-headers run never reached the provider"
 # A healthy second conversation, with a long first-token pause, must still run.
 chat "$WORK/delayed.sse" "fg-delayed" "RUN-MARKER-DELAYED" &
 D=$!
@@ -144,16 +146,18 @@ runs_status "fg-headers" | grep -q '"state":"cancelled"' || fail "the run was no
 wait "$D"
 grep -q 'RUN-MARKER-DELAYED' "$WORK/delayed.sse" || fail "the healthy delayed run was cut short: $(head -c 300 "$WORK/delayed.sse")"
 [ "$(grep -c '"type":"done"' "$WORK/delayed.sse")" = "1" ] || fail "the healthy run must emit exactly one terminal event"
+CHECKS=$((CHECKS + 1))
 echo "  ok: silent headers cancelled in ${elapsed}ms; the other session completed with its marker"
 
 # ---------------------------------------------------------------------------
 # 2. A foreground run silently waiting for the response body is cancelled too.
 echo
 echo "foreground cancel: a silent body read is interrupted, not timed out"
+body_before="$(kind_count body)"
 chat "$WORK/body.sse" "fg-body" "RUN-MARKER-SILENT-BODY" &
 B=$!
 await_admission "fg-body" || fail "the silent-body run was never admitted"
-wait_for_kind body 1 || fail "the silent-body run never reached the provider"
+wait_for_kind body "$((body_before + 1))" || fail "the silent-body run never reached the provider"
 run_id="$(run_id_for fg-body)"
 [ -n "$run_id" ] || fail "no run id for the silent-body run"
 started="$(now_ms)"
@@ -164,6 +168,7 @@ elapsed=$(( $(now_ms) - started ))
 grep -q 'run_cancelled' "$WORK/body.sse" || fail "the silent-body run did not settle as run_cancelled: $(head -c 300 "$WORK/body.sse")"
 [ "$(grep -c '"type":"done"' "$WORK/body.sse")" = "1" ] || fail "the cancelled run must emit exactly one terminal event"
 runs_status "fg-body" | grep -q '"state":"cancelled"' || fail "the run was not reported cancelled after it stopped"
+CHECKS=$((CHECKS + 1))
 echo "  ok: silent body cancelled in ${elapsed}ms"
 
 # ---------------------------------------------------------------------------
@@ -171,10 +176,11 @@ echo "  ok: silent body cancelled in ${elapsed}ms"
 #    slot is the cancelled run's own, and the queued run then completes.
 echo
 echo "foreground cancel: a later queued run is not affected by the earlier cancel"
+queue_body_before="$(kind_count body)"
 chat "$WORK/q1.sse" "fg-queue" "RUN-MARKER-SILENT-BODY" &
 Q1=$!
 await_admission "fg-queue" || fail "the first queued run was never admitted"
-wait_for_kind body 1 || fail "the first queued run never reached the provider"
+wait_for_kind body "$((queue_body_before + 1))" || fail "the first queued run never reached the provider"
 chat "$WORK/q2.sse" "fg-queue" "RUN-MARKER-QUEUED-OK" &
 Q2=$!
 for _ in $(seq 1 40); do run_id_for fg-queue | grep -q '^[0-9]' && break; sleep 0.05; done
@@ -185,7 +191,8 @@ wait "$Q1"; wait "$Q2"
 grep -q 'run_cancelled' "$WORK/q1.sse" || fail "the running run did not settle as cancelled"
 grep -q 'RUN-MARKER-QUEUED-OK' "$WORK/q2.sse" || fail "the queued run's socket was closed by the earlier cancel: $(head -c 300 "$WORK/q2.sse")"
 [ "$(grep -c '"type":"done"' "$WORK/q2.sse")" = "1" ] || fail "the queued run must emit exactly one terminal event"
+CHECKS=$((CHECKS + 1))
 echo "  ok: the queued run completed after the earlier run's socket was shut down"
 
 echo
-echo "foreground cancel ok"
+echo "foreground cancel ok ($CHECKS checks, 0 skipped)"

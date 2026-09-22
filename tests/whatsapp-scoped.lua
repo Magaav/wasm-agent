@@ -156,12 +156,13 @@ profile.resources.send_path = "store"
 profile.resources.store_send_script = ""
 check(whatsapp.dispatch(memory, "whatsapp_send", { body = "yes", confirm = true }, send_ctx(profile, new_effects(), "S0")).error == "store_route_unbound", "store route without a store script is refused")
 check(#whatsapp.route_flags(profile, { name = "store", self_only = false }) == 0, "the store route takes no unread flag")
-profile.resources.send_path = "ui"
 check(#whatsapp.route_flags(profile, { name = "ui", self_only = false }) == 0, "an unapproved non-self UI send takes no flag")
+check(#whatsapp.route_flags(profile, { name = "ui", self_only = true }) == 0, "an unapproved self UI send takes no flag (the raw script enforces unread)")
+profile.resources.send_path = "ui"
 check(whatsapp.dispatch(memory, "whatsapp_send", { body = "yes", confirm = true }, send_ctx(profile, new_effects(), "S1")).error == "unread_would_be_broken", "an unapproved non-self UI send is refused")
 profile.resources.allow_mark_read = true
 check(whatsapp.route_flags(profile, { name = "ui", self_only = false })[1] == "--allow-mark-read", "an approved non-self UI send passes --allow-mark-read to the raw script")
-check(#whatsapp.route_flags(profile, { name = "ui", self_only = true }) == 0, "a notes-to-self send needs no flag")
+check(whatsapp.route_flags(profile, { name = "ui", self_only = true })[1] == "--allow-mark-read", "an approved self UI send also passes --allow-mark-read")
 
 -- A debug/event argument cannot supply the approved flag: route_flags reads the profile only.
 local forged = base_profile()
@@ -302,6 +303,9 @@ local idFlags = whatsapp.route_identity_flags(identity)
 check(#idFlags == 2 and idFlags[1][1] == "--expect-account" and idFlags[2][1] == "--expect-browser-endpoint", "identity flags come from the profile binding")
 check(whatsapp.account_matches("5511999999999", "5511999999999@s.whatsapp.net"), "account match normalizes the jid suffix")
 check(not whatsapp.account_matches("5511999999999", "5511999999998"), "a different number does not match")
+check(not whatsapp.account_matches("operator1", "other1"), "a labelled identity is not reduced to its digits")
+check(not whatsapp.account_matches("123@c.us", "123@lid"), "a PN and a LID with the same digits never match")
+check(whatsapp.account_matches("123@lid", "123@lid"), "an opaque identity matches exactly")
 
 print("whatsapp scoped checks " .. checks)
 print("whatsapp scoped ok")

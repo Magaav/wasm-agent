@@ -43,6 +43,9 @@ export function lookupExpression(chat, toSelf) {
       if (call('isSerializedWidMe', value) === true) return true;
       return meIds.indexOf(value) >= 0;
     };
+    // Metadata is tri-state: only a real boolean/number is known; anything else stays null (unknown) so a
+    // caller cannot coerce an absent field to false or 0 and treat it as verified.
+    const firstBool = (obj, keys) => { for (const key of keys) { if (typeof obj[key] === 'boolean') return obj[key]; } return null; };
     // Only chats the app itself identifies as the account are self. Message direction and display names
     // are never evidence: an unanswered stranger has outgoing-only history too.
     const selfChats = chats.filter((candidate) => isMe(String(candidate.id)));
@@ -61,7 +64,9 @@ export function lookupExpression(chat, toSelf) {
     return JSON.stringify({
       chat: { id: String(found.id), name: String(found.formattedTitle || found.name || '') },
       ...base, is_me: isMe(String(found.id)),
-      unread: found.unreadCount || 0, archived: !!(found.archive || found.isArchived),
+      // Only a real number is an unread count; absent or non-numeric stays unknown (null), never 0.
+      unread: typeof found.unreadCount === 'number' ? found.unreadCount : null,
+      archived: firstBool(found, ['archive', 'isArchived', 'archived']),
     });
   })()`;
 }
@@ -74,27 +79,54 @@ export function normalizeDigits(value) {
   return String(value || "").replace(/[^0-9]/g, "");
 }
 
-// The profile binds a local account identity; the route must prove it is acting as that identity. A
-// jid (`5511...@s.whatsapp.net`) and a bare number compare by digits.
+// A phone/PN identity is a bare/formatted phone, or a jid ending `@c.us` / `@s.whatsapp.net`. Anything
+// else - notably a `@lid`, or a label with letters - is opaque and compares exactly. Stripping *all*
+// non-digits made `operator1` equal `other1`, and a PN equal a LID with the same digits.
+function phoneDigits(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  const at = text.indexOf("@");
+  if (at >= 0) {
+    const domain = text.slice(at + 1).toLowerCase();
+    if (domain !== "c.us" && domain !== "s.whatsapp.net") return null;
+    const digits = text.slice(0, at).replace(/[^0-9]/g, "");
+    return digits || null;
+  }
+  if (/[A-Za-z]/.test(text)) return null;
+  const digits = text.replace(/[^0-9]/g, "");
+  return digits.length >= 7 ? digits : null;
+}
+
+// The profile binds a local account identity; the route must prove it is acting as that identity. Two
+// phone/PN shapes compare by digits; an opaque identity (LID, label) compares exactly.
 export function accountMatches(expected, actual) {
-  const want = normalizeDigits(expected), got = normalizeDigits(actual);
-  if (want && got) return want === got;
+  const want = phoneDigits(expected), got = phoneDigits(actual);
+  if (want !== null && got !== null) return want === got;
   return String(expected) === String(actual);
 }
 
-// Compare the explicit page target and port of two ws endpoints. Loopback host spellings differ
-// (`localhost` / `127.0.0.1` / `[::1]`); the page id and port are the binding.
+function loopbackHost(host) {
+  const value = String(host || "").toLowerCase();
+  return value === "localhost" || value === "127.0.0.1" || value === "::1" || value === "[::1]";
+}
+
+// Compare two DevTools websocket endpoints. Only genuine loopback aliases are interchangeable; any other
+// host, the protocol and the port must match exactly, as must the explicit page id. Comparing only
+// port+id let a binding admit a page on a different host or a `wss` endpoint.
 export function endpointMatches(expected, actual) {
   const parse = (value) => {
     try {
       const url = new URL(value);
       const id = (url.pathname.split("/devtools/page/")[1] || "").split("/")[0];
-      return { port: url.port || (url.protocol === "wss:" ? "443" : "80"), id };
+      return { protocol: url.protocol, host: url.hostname, port: url.port || (url.protocol === "wss:" ? "443" : "80"), id };
     } catch { return null; }
   };
   const a = parse(expected), b = parse(actual);
   if (!a || !b) return false;
-  return a.port === b.port && a.id !== "" && a.id === b.id;
+  if (a.id === "" || a.id !== b.id) return false;
+  if (a.protocol !== b.protocol || a.port !== b.port) return false;
+  if (a.host === b.host) return true;
+  return loopbackHost(a.host) && loopbackHost(b.host);
 }
 
 // Returns an error code when the route cannot prove the bound identity, null when it can. Only checks
@@ -111,18 +143,14 @@ export function identityGuard({ expectedAccount, expectedEndpoint, actualAccount
   return null;
 }
 
-// The raw reply script is reachable directly, not only through the profile-scoped Lua tool, so it must
-// refuse a non-self send by itself unless unread clearing was explicitly accepted. Returns an error code
-// when the send must not proceed, null when it may. A rehearsal (`send` false) always passes.
-//   - `isMe` is the app's own proof that the target chat is the operator's account. A string comparison
-//     against a guessed self id is NOT proof and no longer qualifies.
-//   - `allowMarkRead` is the explicit `--allow-mark-read` / env approval.
-//   - opening the chat is what clears the marker, so this must be decided *before* the chat is opened.
-export function sendGuard({ send, toSelf, isMe, allowMarkRead }) {
-  if (!send) return null;
-  if (toSelf) return null;
-  if (isMe === true) return null;
+// The UI route opens the chat, and opening a chat can clear a manually-set unread marker even on
+// notes-to-self. This guard is therefore about *opening*, not sending: it applies to a rehearsal too,
+// which types and opens the chat. `isMe` is not a bypass. Nonself keeps the stricter rule (always an
+// explicit approval); self may open without approval only when unread is a proven zero.
+export function sendGuard({ isMe, unread, allowMarkRead }) {
   if (allowMarkRead) return null;
+  if (!isMe) return "unread_would_be_broken";
+  if (unread === 0) return null;
   return "unread_would_be_broken";
 }
 

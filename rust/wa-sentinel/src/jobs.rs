@@ -365,11 +365,15 @@ fn execute(store: &wa_jobs::Store, delivery: &Value) -> Result<String> {
             let profile = action["profile"].as_str().unwrap();
             let event_id = delivery["event_id"].as_str().unwrap_or("");
             let idempotency_key = format!("{id}:{rev}:{event_id}");
+            // The runtime resolves the trusted event from the ledger: the start body may name ONLY the
+            // message id, and the conversation is read off the ledger row. The rest of the emitted event
+            // is untrusted and is never forwarded as context or as a script/path/endpoint.
+            let message_id = delivery["event"]["message_id"].as_str().unwrap_or("");
             let started = node_subagents(&json!({
                 "action":"start",
                 "profile":profile,
                 "prompt":action["prompt"],
-                "context":delivery["event"],
+                "event":{"message_id":message_id},
                 "delivery_id":delivery["id"],
                 "idempotency_key":idempotency_key,
             }))

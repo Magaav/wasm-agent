@@ -14,8 +14,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 pub struct Host {
+    /// This interpreter's OWN SQLite connection, to the same WAL database. Two
+    /// interpreters must not share one connection: a transaction one holds open
+    /// would otherwise be visible to the other, and a rollback there could erase a
+    /// peer's work. Each connection has its own busy timeout and rolls back on
+    /// close, so a dropped interpreter cannot leave a transaction behind.
     pub db: Mutex<Connection>,
-    pub plugins: Mutex<PluginRegistry>,
+    /// Shared, because there is one plugin runtime per process.
+    pub plugins: std::sync::Arc<Mutex<PluginRegistry>>,
+    /// The client bridge is a process-wide resource, so it is shared too.
     pub client: std::sync::Arc<crate::client_bridge::Bridge>,
 }
 
@@ -26,6 +33,28 @@ pub struct Host {
 // returning what the process was launched with. The effect was silent: the
 // entire config file was ignored and the agent ran with "no model configured".
 static ENV_OVERRIDES: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+/// Set once the process has run the schema migration. Every interpreter opens its
+/// own connection, so a second interpreter booting while another holds a write
+/// transaction must NOT replay the DDL - it would block on the write lock and fail.
+/// The first interpreter migrates; the rest assume the schema and use their own
+/// connection. Process-wide because the database is.
+static DB_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// host.db_ready() -> boolean: has this process already migrated the schema?
+pub extern "C" fn db_ready(l: *mut LuaState) -> c_int {
+    unsafe { crate::lua::lua_pushboolean(l, DB_READY.load(std::sync::atomic::Ordering::SeqCst) as c_int) };
+    1
+}
+
+/// host.mark_db_ready() -> nil: record that the schema migration has run.
+pub extern "C" fn mark_db_ready(l: *mut LuaState) -> c_int {
+    DB_READY.store(true, std::sync::atomic::Ordering::SeqCst);
+    // One explicit nil, never zero results: `select('#', host.mark_db_ready())`
+    // must be 1, or a caller that passes the result around gets nothing.
+    unsafe { crate::lua::lua_pushnil(l) };
+    1
+}
 
 pub fn set_env_overrides(values: HashMap<String, String>) {
     let _ = ENV_OVERRIDES.set(values);
@@ -380,6 +409,14 @@ fn params(values: &[Value]) -> Vec<Box<dyn rusqlite::ToSql>> {
 }
 
 /// host.sql_exec(sql, params_json) -> {ok, changes} | {error}
+///
+/// A statement error is RETURNED, never forced into a rollback: SQLite lets the
+/// caller recover inside its transaction (catch the error, compensate, commit or
+/// roll back explicitly). Forcing a rollback here would silently end the
+/// transaction, and a Lua caller that caught the error and wrote again would then
+/// autocommit the later write, breaking atomicity. A transaction is closed only at
+/// an uncaught callback error (`Lua::rollback_if_open`) or when the interpreter's
+/// connection drops.
 pub extern "C" fn sql_exec(l: *mut LuaState) -> c_int {
     let host = host_of(l);
     let sql = arg_string(l, 1).unwrap_or_default();
