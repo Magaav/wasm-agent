@@ -730,6 +730,17 @@ body.node-offline .composer textarea::placeholder { color: #d29922; }
 .msg .body .copy-code:hover { color: #c9d1e0; border-color: var(--accent); }
 .msg .body .copy-code.copied { color: var(--accent); border-color: var(--accent); }
 .msg .body .copy-code.copy-failed { color: #f85149; border-color: #f85149; }
+/* A subagent's receipt as a card, so the chat shows the child and links to its transcript. */
+.subagent-card {
+  display: flex; align-items: center; gap: var(--gap); flex-wrap: wrap;
+  margin: var(--space) 0; padding: 4px var(--pad);
+  background: #0d1117; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  font-size: 11.5px;
+}
+.subagent-title { color: #c9d1e0; font-weight: 600; }
+.subagent-meta { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.subagent-card button { margin-left: auto; }
+.session-parent { color: var(--muted); font-size: 11px; }
 /* A table scrolls inside its own box, not by widening the transcript. */
 .md-table { margin: var(--space) 0; overflow-x: auto; max-width: 100%; }
 .md-table table { border-collapse: collapse; font-size: 12.5px; width: 100%; }

@@ -762,8 +762,34 @@ function settleTool(result, name) {
   if (!trace) return;
   const outcome = toolOutcome(name || lastTool, result);
   trace.settle(outcome.text, toolDetail(result), outcome.failed);
+  if ((name || lastTool) === "subagent") renderSubagentCard(result);
   if (!trace.pending) stopToolTicker();
   pin();
+}
+
+// A subagent's work happens in its own session, so the parent transcript would otherwise show only
+// a JSON receipt. Surface the profile, the state and the child's session, and link to its
+// transcript - the receipt is a launch notice, not the work.
+function renderSubagentCard(result) {
+  let payload = result;
+  if (typeof payload === "string") { try { payload = JSON.parse(payload); } catch (error) { return; } }
+  if (!payload || typeof payload !== "object") return;
+  if (!payload.profile && !payload.session_id) return;
+  const card = document.createElement("div");
+  card.className = "subagent-card";
+  const title = document.createElement("span");
+  title.className = "subagent-title";
+  title.textContent = "subagent · " + (payload.profile || "unknown");
+  const meta = document.createElement("span");
+  meta.className = "subagent-meta";
+  const parts = [];
+  if (payload.state) parts.push(payload.state);
+  if (payload.settled === true) parts.push("settled");
+  if (payload.session_id) parts.push(String(payload.session_id).slice(0, 8));
+  meta.textContent = parts.join(" · ");
+  card.append(title, meta);
+  if (payload.session_id) card.append(nodeButton("open", () => openSession(payload.session_id)));
+  currentBubble().body.append(card);
 }
 
 function finishTrace() {
@@ -3393,6 +3419,10 @@ function renderSessions() {
       row.append(badge);
     }
     row.append(nodeButton("open", () => openSession(session.id)));
+    // A child session names the thread that spawned it; without this it is an orphan in the list.
+    if (session.parent_session_id) {
+      row.append(nodeButton("parent", () => openSession(session.parent_session_id)));
+    }
     // Only where there is something to recover, and named as what it does: the node's own words for
     // this are "continue where you stopped".
     if (session.state === "unfinished") {

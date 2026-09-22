@@ -488,6 +488,18 @@ $harness = @'
   check(!!copyButton && copyButton.textContent === "Copied",
     "the click must be acknowledged, got " + (copyButton ? copyButton.textContent : "no button"));
 
+  // A subagent's receipt must surface the child - profile, state and session - and link to its
+  // transcript, not sit in the chat as an opaque JSON blob.
+  window.handleEvent({ type: "tool", name: "subagent", arguments: { action: "start", profile: "explore" } });
+  window.handleEvent({ type: "tool_result", name: "subagent", result: {
+    profile: "explore", state: "completed", settled: true, session_id: "abcdef01-2345-6789-abcd-ef0123456789" } });
+  for (var sc = 0; sc < 5; sc++) await tick();
+  var sub = messages.querySelector(".subagent-card");
+  check(!!sub, "a subagent result must render a child card");
+  check(!!sub && /explore/.test(sub.textContent) && /abcdef01/.test(sub.textContent),
+    "the card must name the profile and the child session, saw " + (sub ? sub.textContent : "no card"));
+  check(!!sub && !!sub.querySelector("button"), "the child card must link to the child session");
+
   // A reasoning model thinks before it speaks, and a panel that shows nothing
   // during that time is indistinguishable from a hung one. The count is also the
   // number that explains where the output budget went when a turn ends with no
