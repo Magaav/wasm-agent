@@ -243,6 +243,31 @@ print('client schema ok')
 LUA
 WA_SCRIPT="$DB.clientschema.lua" "$BIN" --db "$DB" | grep "client schema ok"
 rm -f "$DB.clientschema.lua"
+# The shell deadline is invisible to a model that only meets it by being killed. The
+# description carries the number and the route for longer work, read from the host
+# that enforces the number, so a long command is planned instead of lost.
+cat > "$DB.bashschema.lua" <<'LUA'
+local tools = dofile('lua/core/tools.lua')
+local spec
+for _, tool in ipairs(tools.all('master')) do
+  if tool["function"] and tool["function"].name == 'bash' then spec = tool["function"] end
+end
+assert(spec, 'the bash tool must be in the schema')
+local deadline = math.floor(host.exec_timeout())
+assert(spec.description:find(deadline .. 's', 1, true),
+  'the description must state the enforced foreground deadline in seconds, got: ' .. spec.description)
+assert(spec.description:find('operation', 1, true) and spec.description:find('timeout_seconds', 1, true),
+  'the description must name the operation escape hatch for work that outlives the deadline')
+local timeout = spec.parameters.properties.timeout_seconds
+assert(timeout and timeout.minimum == 1 and timeout.maximum == 86400,
+  'the schema must offer a per-call timeout_seconds in the same 1-86400 range as operation')
+local refused = tools.dispatch(nil, 'bash', { command = 'echo hi', timeout_seconds = 0 }, 'master')
+assert(refused and refused.error == 'invalid_timeout_seconds',
+  'an out-of-range per-call timeout must be refused before it reaches the shell')
+print('bash schema ok')
+LUA
+WA_SCRIPT="$DB.bashschema.lua" "$BIN" --db "$DB" | grep "bash schema ok"
+rm -f "$DB.bashschema.lua"
 # `/update` decides whether there is anything to install and writes one request for the sentinel -
 # it never installs anything itself (the node is the process being replaced). The decision is a pure
 # function of the facts, so every case is checkable without a tree, a build or a sentinel; the one

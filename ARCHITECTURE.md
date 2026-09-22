@@ -239,7 +239,7 @@ journal's kinds, the model-facing tool list - is a different decision from renam
 recorded as one.
 
 **An asymmetry is written down.** Foreground shell operations have an execution deadline
-(`WASM_AGENT_EXEC_TIMEOUT_SECONDS`, 300s by default) plus an explicitly reported 1000ms forced-cleanup
+(`WASM_AGENT_EXEC_TIMEOUT_SECONDS`, 300s by default, or a per-call `timeout_seconds`) plus an explicitly reported 1000ms forced-cleanup
 budget; a run has no wall-clock deadline. Other tools do not inherit the shell's deadline merely
 because they are tool calls. `docs/OPERATIONS.md` names the actual mechanisms and their limits. Measured, not assumed: a single `bash` of 993 seconds in the ledger, and a run of 47
 steps that lasted 56 minutes. Neither number appears in `docs/` today, so the next reader learns it by watching

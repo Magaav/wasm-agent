@@ -26,6 +26,20 @@ local hello=json.decode(host.exec("echo hello"))
 ok(hello.ok and hello.code==0 and hello.stdout:find("hello",1,true), "normal command succeeds")
 local slow=json.decode(host.exec("sleep 1; echo done"))
 ok(slow.ok and slow.stdout:find("done",1,true), "quiet legitimate work succeeds")
+-- A caller may name its own bound: `bash`'s `timeout_seconds`. Below the default it
+-- kills sooner; above it, a command the default (2s here) would have killed is allowed
+-- to finish. The audit's tail runs into the wall - p99 was 250s against a 300s deadline
+-- - and this is what keeps a build or a full gate from being lost to it.
+local quick_started=host.monotonic_ms()
+local quick=json.decode(host.exec("sleep 30", "", 1))
+ok(quick.error=="deadline_exceeded", "a per-call timeout below the default is enforced")
+ok(host.monotonic_ms()-quick_started<2500, "the caller's bound, not the default, is what kills it")
+local raised_started=host.monotonic_ms()
+local raised=json.decode(host.exec("sleep 3; echo raised", "", 20))
+ok(raised.ok and raised.stdout:find("raised",1,true), "a per-call timeout above the default lets a longer command finish")
+ok(host.monotonic_ms()-raised_started>=2500, "the command really did outlive the default deadline")
+local refused=json.decode(host.exec("echo x", "", 0))
+ok(refused.error=="invalid_timeout_seconds", "a bound outside 1-86400 is refused, not clamped")
 local big=json.decode(host.exec("seq 1 20000 | wc -l"))
 ok(big.ok and big.stdout:find("20000",1,true), "output drains concurrently with execution")
 local launch=json.decode(host.operation("start",json.encode({command="echo ready; sleep 30",timeout_seconds=20})))
