@@ -911,6 +911,12 @@ WA_SCRIPT=scripts/test-memory-window.lua "$BIN" --db "$DB.window" | grep "memory
 # you cannot search for.
 WA_SCRIPT=scripts/test-session-title.lua "$BIN" --db "$DB.title" | grep "session title ok"
 
+# What a run looks like while it is running. The renderer is where the CLI's whole
+# readable output is decided - a tool call's line, a failed call's line, and whether a
+# captured transcript is free of escape sequences - so it is asserted without a model:
+# the view is handed the events agent.lua emits, with a clock the test controls.
+WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view" | grep "cli view ok"
+
 # A command must not be able to hold the interpreter forever: an agent curled the node's own port
 # from inside a turn, the request queued behind the turn that made it, and the worker waited on
 # itself. The deadline is set short here so the check takes seconds, not minutes.
