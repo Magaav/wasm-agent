@@ -385,3 +385,76 @@ fn a_dofile_alias_resolves_a_dotted_call() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn js_extraction_finds_functions_classes_imports_and_calls() {
+    // The WhatsApp pipeline is JavaScript; before this the graph could not see the files the
+    // agent actually edits (`.mjs`/`.cjs`/`.js` produced no nodes at all).
+    let src = r#"
+const fs = require('node:fs');
+import { helper } from './helper.mjs';
+import * as store from './store.mjs';
+export function greet(name) { return helper(name); }
+const build = (x) => format(x);
+class Reader { read() { store.load(fs.readFileSync('x')); } }
+module.exports = { greet };
+"#;
+    let ex = extract("scripts/whatsapp-read.mjs", "javascript", src);
+    let names: Vec<&str> = ex.nodes.iter().map(|n| n.name.as_str()).collect();
+    assert!(names.contains(&"greet"), "{names:?}");
+    assert!(names.contains(&"build"), "{names:?}");
+    assert!(names.contains(&"Reader"), "{names:?}");
+    assert!(names.contains(&"read"), "{names:?}");
+    assert!(
+        ex.imports.iter().any(|i| i.alias == "fs" && i.module == "node:fs"),
+        "{:?}",
+        ex.imports
+    );
+    assert!(
+        ex.imports.iter().any(|i| i.alias == "helper" && i.module == "./helper.mjs"),
+        "{:?}",
+        ex.imports
+    );
+    assert!(
+        ex.imports.iter().any(|i| i.alias == "store" && i.module == "./store.mjs"),
+        "{:?}",
+        ex.imports
+    );
+    assert!(ex.edges.iter().any(|e| e.kind == "imports" && e.target == "node:fs"));
+    assert!(ex.edges.iter().any(|e| e.kind == "calls" && e.target == "helper"));
+    assert!(ex.edges.iter().any(|e| e.kind == "calls" && e.target == "format"));
+    assert!(ex.edges.iter().any(|e| e.kind == "calls" && e.target == "store.load"));
+}
+
+#[test]
+fn a_js_namespace_import_resolves_a_dotted_call() {
+    // `import * as reply from './reply.mjs'` then `reply.buildReply()` must reach the definition
+    // in reply.mjs, the same way a Lua `require` alias does.
+    let dir = temp_dir("js-alias");
+    std::fs::create_dir_all(dir.join("scripts")).unwrap();
+    std::fs::write(
+        dir.join("scripts/reply.mjs"),
+        "export function buildReply() { return 1; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("scripts/run.mjs"),
+        "import * as reply from './reply.mjs';\nexport function main() { return reply.buildReply(); }\n",
+    )
+    .unwrap();
+    let db = dir.join("graph.db");
+    let mut store = Store::open(&db).unwrap();
+    store.index(&dir, false).unwrap();
+
+    let rows = store.explain("buildReply").unwrap();
+    let def = rows
+        .iter()
+        .find(|(n, _, _)| n.name == "buildReply")
+        .expect("buildReply is defined");
+    let callers: Vec<&str> = def.2.iter().map(|e| e.path.as_str()).collect();
+    assert!(
+        callers.iter().any(|p| p.ends_with("run.mjs")),
+        "a namespace-imported dotted call must resolve: {callers:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

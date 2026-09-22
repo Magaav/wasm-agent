@@ -87,7 +87,7 @@ open the database **read-only**, so a query never takes the write lock the watch
 
 `cargo test -p wa-graph` — 10 tests:
 
-- extraction for Rust, Lua, Bash and PowerShell (functions, imports, calls, capabilities);
+- extraction for Rust, Lua, JavaScript/TypeScript, Bash and PowerShell (functions, imports, calls, capabilities);
 - a Lua definition is emitted **once** (the `variable_declaration` → `assignment_statement` nesting);
 - `memory.append_turn` resolves through `local memory = require('core.memory')` to `M.append_turn`;
 - reindex is **incremental**: unchanged bytes are not reparsed, a changed file replaces its old

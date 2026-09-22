@@ -12,8 +12,9 @@ on the real tree is in the crate README: "who calls `append_turn`" goes from 102
 grep matches to one call, and "what resolves `deploy.sh`" from 45 matches to the
 resolver plus its candidate list.
 
-It is deliberately *not* a general code-intelligence engine. It indexes five
-grammars (Rust, Lua, Bash, PowerShell, Markdown), resolves references by name,
+It is deliberately *not* a general code-intelligence engine. It indexes seven
+grammars (Rust, Lua, JavaScript/TypeScript, Bash, PowerShell, Markdown), resolves
+references by name,
 and treats a `host.*` call as a typed edge to a capability — so the graph is also
 a control graph, not only a map.
 

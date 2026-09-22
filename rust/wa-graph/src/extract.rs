@@ -51,6 +51,8 @@ pub fn language_for(path: &str) -> Option<&'static str> {
         "sh" | "bash" => Some("bash"),
         "ps1" | "psm1" => Some("powershell"),
         "md" | "markdown" => Some("markdown"),
+        "js" | "mjs" | "cjs" | "jsx" => Some("javascript"),
+        "ts" | "mts" | "cts" | "tsx" => Some("typescript"),
         _ => None,
     }
 }
@@ -67,6 +69,12 @@ pub fn parser_for(lang: &str) -> Option<Parser> {
             .is_ok(),
         "powershell" => parser
             .set_language(&tree_sitter_powershell::language())
+            .is_ok(),
+        "javascript" => parser
+            .set_language(&tree_sitter_javascript::LANGUAGE.into())
+            .is_ok(),
+        "typescript" => parser
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
             .is_ok(),
         _ => return None,
     };
@@ -98,7 +106,7 @@ pub fn extract(path: &str, lang: &str, source: &str) -> Extract {
     ctx.scope.push(0);
 
     match lang {
-        "rust" | "lua" | "bash" | "powershell" => {
+        "rust" | "lua" | "bash" | "powershell" | "javascript" | "typescript" => {
             if let Some(mut parser) = parser_for(lang) {
                 if let Some(tree) = parser.parse(source, None) {
                     walk(&mut ctx, tree.root_node());
@@ -181,6 +189,8 @@ fn walk(ctx: &mut Ctx, node: Node) {
     } else if ctx.lang == "bash" && walk_bash(ctx, node) {
         return;
     } else if ctx.lang == "powershell" && walk_ps(ctx, node) {
+        return;
+    } else if (ctx.lang == "javascript" || ctx.lang == "typescript") && walk_js(ctx, node) {
         return;
     }
     // Default: descend.
@@ -281,6 +291,211 @@ fn walk_ps(ctx: &mut Ctx, node: Node) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+/// JavaScript/TypeScript: function/class/method declarations, arrow functions bound to a
+/// variable, `require`/`import` aliases and their bindings, and calls. The node kinds are the
+/// tree-sitter-javascript/-typescript ones the shared `walk` dispatch sees; `export` and
+/// `lexical_declaration` are not handled here, so the default descent reaches their declarations.
+fn walk_js(ctx: &mut Ctx, node: Node) -> bool {
+    match node.kind() {
+        "function_declaration" | "generator_function_declaration" | "function_signature" => {
+            let name = field_text(ctx, node, "name");
+            if name.is_empty() {
+                return false;
+            }
+            let idx = ctx.push_node("fn", name, node, None);
+            ctx.scope.push(idx);
+            recurse(ctx, node);
+            ctx.scope.pop();
+            true
+        }
+        "class_declaration" | "abstract_class_declaration" => {
+            let name = field_text(ctx, node, "name");
+            if name.is_empty() {
+                return false;
+            }
+            let idx = ctx.push_node("class", name, node, None);
+            ctx.scope.push(idx);
+            recurse(ctx, node);
+            ctx.scope.pop();
+            true
+        }
+        "interface_declaration" => {
+            let name = field_text(ctx, node, "name");
+            if name.is_empty() {
+                return false;
+            }
+            let idx = ctx.push_node("interface", name, node, None);
+            ctx.scope.push(idx);
+            recurse(ctx, node);
+            ctx.scope.pop();
+            true
+        }
+        "enum_declaration" => {
+            let name = field_text(ctx, node, "name");
+            if name.is_empty() {
+                return false;
+            }
+            let idx = ctx.push_node("enum", name, node, None);
+            ctx.scope.push(idx);
+            recurse(ctx, node);
+            ctx.scope.pop();
+            true
+        }
+        "type_alias_declaration" => {
+            let name = field_text(ctx, node, "name");
+            if name.is_empty() {
+                return false;
+            }
+            ctx.push_node("type", name, node, None);
+            recurse(ctx, node);
+            true
+        }
+        "method_definition" | "method_signature" => {
+            let name = field_text(ctx, node, "name");
+            if name.is_empty() {
+                return false;
+            }
+            let idx = ctx.push_node("method", name, node, None);
+            ctx.scope.push(idx);
+            recurse(ctx, node);
+            ctx.scope.pop();
+            true
+        }
+        "variable_declarator" => {
+            let name = field_text(ctx, node, "name");
+            let value = node.child_by_field_name("value");
+            if let Some(v) = value {
+                let is_fn = matches!(v.kind(), "arrow_function" | "function" | "function_expression");
+                if is_fn && !name.is_empty() {
+                    let idx = ctx.push_node("fn", name, node, None);
+                    ctx.scope.push(idx);
+                    recurse(ctx, node);
+                    ctx.scope.pop();
+                    return true;
+                }
+                if let Some(module) = js_required_module(ctx, v) {
+                    if !name.is_empty() {
+                        ctx.push_edge("imports", module.clone(), node);
+                        ctx.imports.push(ImportAlias { alias: name.clone(), module });
+                    }
+                }
+            }
+            // A destructuring pattern (`const { a } = ...`) names no single binding; skip it.
+            if !name.is_empty() && !name.contains(['{', ',', '[']) {
+                ctx.push_node("var", name, node, None);
+            }
+            if let Some(v) = value {
+                walk(ctx, v);
+            }
+            true
+        }
+        "assignment_expression" => {
+            // `exports.f = function () {}` / `module.exports.f = () => {}`: the left member
+            // expression names the export, and the value is its definition.
+            let left = node.child_by_field_name("left");
+            let right = node.child_by_field_name("right");
+            if let (Some(l), Some(r)) = (left, right) {
+                let is_fn = matches!(r.kind(), "arrow_function" | "function" | "function_expression");
+                if is_fn && l.kind() == "member_expression" {
+                    let name = ctx.text(l).to_string();
+                    if !name.is_empty() {
+                        let idx = ctx.push_node("fn", name, node, None);
+                        ctx.scope.push(idx);
+                        recurse(ctx, r);
+                        ctx.scope.pop();
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        "import_statement" => {
+            let module = node
+                .child_by_field_name("source")
+                .map(|n| strip_quotes(ctx.text(n)))
+                .unwrap_or_default();
+            if !module.is_empty() {
+                ctx.push_edge("imports", module.clone(), node);
+            }
+            if let Some(clause) = find_child(node, "import_clause") {
+                collect_js_imports(ctx, clause, &module);
+            }
+            true
+        }
+        "call_expression" => {
+            if let Some(f) = node.child_by_field_name("function") {
+                let target = ctx.text(f).to_string();
+                if !target.is_empty() && target != "require" && target != "import" {
+                    ctx.push_edge("calls", target, node);
+                }
+            }
+            recurse(ctx, node);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// `require('m')` or `require('m').x` names module `m`.
+fn js_required_module(ctx: &Ctx, value: Node) -> Option<String> {
+    let call = if value.kind() == "member_expression" {
+        value.child_by_field_name("object")?
+    } else {
+        value
+    };
+    if call.kind() != "call_expression" {
+        return None;
+    }
+    let f = call.child_by_field_name("function")?;
+    if ctx.text(f) != "require" {
+        return None;
+    }
+    let args = call.child_by_field_name("arguments")?;
+    let first = first_named(args)?;
+    if first.kind() != "string" {
+        return None;
+    }
+    Some(strip_quotes(ctx.text(first)))
+}
+
+/// The local names an `import` clause binds: default, `* as ns`, and `{ a, b as c }`.
+fn collect_js_imports(ctx: &mut Ctx, clause: Node, module: &str) {
+    let mut cursor = clause.walk();
+    for part in clause.named_children(&mut cursor) {
+        match part.kind() {
+            "identifier" => ctx.imports.push(ImportAlias {
+                alias: ctx.text(part).to_string(),
+                module: module.to_string(),
+            }),
+            "namespace_import" => {
+                let mut inner = part.walk();
+                for child in part.named_children(&mut inner) {
+                    if child.kind() == "identifier" {
+                        ctx.imports.push(ImportAlias {
+                            alias: ctx.text(child).to_string(),
+                            module: module.to_string(),
+                        });
+                    }
+                }
+            }
+            "named_imports" => {
+                let mut inner = part.walk();
+                for spec in part.named_children(&mut inner) {
+                    if spec.kind() != "import_specifier" {
+                        continue;
+                    }
+                    let alias = field_text(ctx, spec, "alias");
+                    let local = if alias.is_empty() { field_text(ctx, spec, "name") } else { alias };
+                    if !local.is_empty() {
+                        ctx.imports.push(ImportAlias { alias: local, module: module.to_string() });
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
 
