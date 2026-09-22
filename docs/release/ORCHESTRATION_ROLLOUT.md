@@ -139,9 +139,29 @@ Containment evidence (operator temp `wa-policy-containment-u4sxMK/containment.js
   interrupted tools and a real mid-run reload; `wa-staged-ui-stop.log`. This does
   not prove the pending socket-cancellation or Run-ID corrections.
 - Linux/aarch64 preparation uses only `/tmp/wa-orchestration-proof.JM0kdM`: an owned
-  clone and checksum-verified Node 24.21.0, because system Node is 18.19.1. A
-  single-job, low-priority native build is in progress. The authoritative cloud
-  checkout remains unchanged at `d596a34`; no live node has been replaced.
+  clone and checksum-verified Node 24.21.0, because system Node is 18.19.1. Host and
+  sentinel release builds at candidate `2f094b8` completed, exit 0, single-job and
+  low priority. This is compilation evidence, not a Linux test pass. The cloud's
+  authoritative checkout remains unchanged at `d596a34`; no live node was replaced.
+- Coordinator reruns: signed peer proof **43 checks, zero skips**, including wrong
+  destination and legacy signature-domain refusal (`wa-peer-target-coordinator.log`);
+  foreground silent-header/body cancellation, delayed healthy token and queued
+  successor proof **3 scenarios, zero skips** (`wa-foreground-cancel-counted.log`).
+- Coordinator actual node/sentinel/SQLite/fake-sender WhatsApp proof at `49659e7`:
+  **27 checks, zero failures/skips**, exit 0, `wa-whatsapp-e2e-W8oavO` and
+  `wa-whatsapp-e2e-coordinator.log`. This uses sequential children; combined
+  WhatsApp-plus-two-interactive proof and the SQLite correction are still pending.
+- All new integrated gate proofs now require process success, one terminal verdict
+  and a minimum check count; named skips propagate. `test-proof-verdict.cjs` passes
+  **18 mutation checks**. The dev guard's negative test now simulates an unscoped
+  **scratch** home rather than exposing the operator ledger: both refusal and
+  explicit-DB override checked, exit 0 (`wa-gate-guard-ksbVXP`).
+- Read-only WhatsApp metadata inspection (app `2.3000.1048024606`) found exactly one
+  verified self destination, unread 0, and an **existing 75-character draft**. No
+  draft text was inspected or changed. Store-action source was inspected without
+  calling it; a new conservative store-only route is being tested hermetically.
+  Live send proof is blocked until the draft is cleared by the user. No UI action,
+  send, or unread-marker change was performed.
 
 ## Stages and ownership
 

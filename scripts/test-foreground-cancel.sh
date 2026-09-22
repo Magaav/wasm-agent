@@ -38,6 +38,7 @@ export WASM_AGENT_RENDEZVOUS="" WASM_AGENT_RELAY="" WASM_AGENT_MANAGED=0
 export HTTP_PROXY="" HTTPS_PROXY="" ALL_PROXY="" NO_PROXY=127.0.0.1,localhost,::1
 
 PIDS=()
+CHECKS=0
 fail() { echo "  FAIL: $*" >&2; exit 1; }
 cleanup() {
   local status=$?
@@ -144,6 +145,7 @@ runs_status "fg-headers" | grep -q '"state":"cancelled"' || fail "the run was no
 wait "$D"
 grep -q 'RUN-MARKER-DELAYED' "$WORK/delayed.sse" || fail "the healthy delayed run was cut short: $(head -c 300 "$WORK/delayed.sse")"
 [ "$(grep -c '"type":"done"' "$WORK/delayed.sse")" = "1" ] || fail "the healthy run must emit exactly one terminal event"
+CHECKS=$((CHECKS + 1))
 echo "  ok: silent headers cancelled in ${elapsed}ms; the other session completed with its marker"
 
 # ---------------------------------------------------------------------------
@@ -164,6 +166,7 @@ elapsed=$(( $(now_ms) - started ))
 grep -q 'run_cancelled' "$WORK/body.sse" || fail "the silent-body run did not settle as run_cancelled: $(head -c 300 "$WORK/body.sse")"
 [ "$(grep -c '"type":"done"' "$WORK/body.sse")" = "1" ] || fail "the cancelled run must emit exactly one terminal event"
 runs_status "fg-body" | grep -q '"state":"cancelled"' || fail "the run was not reported cancelled after it stopped"
+CHECKS=$((CHECKS + 1))
 echo "  ok: silent body cancelled in ${elapsed}ms"
 
 # ---------------------------------------------------------------------------
@@ -185,7 +188,8 @@ wait "$Q1"; wait "$Q2"
 grep -q 'run_cancelled' "$WORK/q1.sse" || fail "the running run did not settle as cancelled"
 grep -q 'RUN-MARKER-QUEUED-OK' "$WORK/q2.sse" || fail "the queued run's socket was closed by the earlier cancel: $(head -c 300 "$WORK/q2.sse")"
 [ "$(grep -c '"type":"done"' "$WORK/q2.sse")" = "1" ] || fail "the queued run must emit exactly one terminal event"
+CHECKS=$((CHECKS + 1))
 echo "  ok: the queued run completed after the earlier run's socket was shut down"
 
 echo
-echo "foreground cancel ok"
+echo "foreground cancel ok ($CHECKS checks, 0 skipped)"
