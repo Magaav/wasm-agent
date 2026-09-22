@@ -657,10 +657,13 @@ fn resolve_alias(conn: &Connection, target: &str, edge_path: &str) -> Result<Opt
     let module = module.trim_end_matches(".lua");
     let mod_path = format!("%{}.lua", module.replace('.', "/"));
     let dot_suffix = format!("%.{simple}");
+    // Prefer the module table's export (`M.budget`) over a bare `budget` declared inside it: the
+    // alias names the module, so `provider.budget` is `M.budget`, not a local variable that
+    // happens to share the name. Without this the edge resolved - to the wrong symbol.
     let hit: Option<i64> = conn
         .query_row(
             "SELECT id FROM nodes WHERE path LIKE ?1 AND (name=?2 OR name LIKE ?3)
-             ORDER BY (name=?2) DESC, line LIMIT 1",
+             ORDER BY (name LIKE ?3) DESC, (kind='fn' OR kind='method') DESC, (name=?2) DESC, line LIMIT 1",
             params![mod_path, simple, dot_suffix],
             |r| r.get(0),
         )
