@@ -100,6 +100,9 @@ local function memory_for()
     conversation = function(id, limit)
       return { { role = "user", content = "are you coming?", conversation_id = id }, limit = limit }
     end,
+    conversation_record = function(id)
+      return { id = id, kind = "group", title = "A Casa Lar | 🏠" }
+    end,
   }
 end
 
@@ -128,6 +131,17 @@ local ctx = { profile = profile, event = event, effects = new_effects() }
 -- is a scope mismatch.
 local read = whatsapp.dispatch(memory, "whatsapp_read", {}, ctx)
 check(read.conversation_id == "5511888888888@c.us" and read.count == 1, "reads the event's conversation")
+-- The title comes from the ledger, so a child names the conversation it answered instead of inferring
+-- a label from message content (a group reported as "futebol/bet" whose title was "A Casa Lar | 🏠").
+check(read.title == "A Casa Lar | 🏠", "the read carries the conversation's own title")
+check(read.kind == "group", "the read carries the conversation's kind")
+local no_record = whatsapp.dispatch({ conversation = memory.conversation }, "whatsapp_read", {}, ctx)
+check(no_record.title == "" and no_record.kind == "" and no_record.count == 1,
+  "a memory without the accessor yields no title, never a guess")
+local unknown_record = whatsapp.dispatch(
+  { conversation = memory.conversation, conversation_record = function() return nil end },
+  "whatsapp_read", {}, ctx)
+check(unknown_record.title == "" and unknown_record.count == 1, "an unknown conversation has no title")
 check(whatsapp.dispatch(memory, "whatsapp_conversation", {}, ctx).count == 1, "the pre-rename alias still dispatches")
 local stray = { conversation = function() return { { conversation_id = "999@c.us" } } end }
 check(whatsapp.dispatch(stray, "whatsapp_read", {}, ctx).error == "ledger_scope_mismatch", "a ledger row outside the conversation is refused")
