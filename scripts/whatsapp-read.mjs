@@ -21,6 +21,7 @@ const DEFAULT_PORTS = [9222];
 const WHATSAPP_URL = "web.whatsapp.com";
 
 import { eligibility } from "./whatsapp-eligibility.mjs";
+import { deriveLeft } from "./whatsapp-read-core.mjs";
 // A message whose body is media is stored as base64 by the app; keeping that would put megabytes in
 // the ledger per photo, so the body is a marker and the caption only.
 const MAX_BODY = 4000;
@@ -95,6 +96,28 @@ function expression(since) {
         || (me && me.getMeUser && me.getMeUser());
       meId = String((candidate && ((candidate.id && candidate.id._serialized) || candidate._serialized)) || '');
     } catch (error) { meId = ''; }
+    // Membership, as this build exposes it. It has no isLeft/left/hasLeft/isExited, so left is
+    // derived in Node (deriveLeft, tested) from these two signals rather than staying unknown for
+    // every chat - which refused the whole inbox and emitted nothing.
+    const widOf = (value) => String((value && value.id && value.id._serialized) || (value && value._serialized) || value || '');
+    const sameUser = (a, b) => {
+      const x = widOf(a), y = widOf(b);
+      if (!x || !y) return false;
+      if (x === y) return true;
+      const domain = (v) => { const at = v.indexOf('@'); return at < 0 ? '' : v.slice(at + 1).toLowerCase(); };
+      const phone = (v) => domain(v) === 'c.us' || domain(v) === 's.whatsapp.net';
+      if (!phone(x) || !phone(y)) return false;
+      const dx = x.replace(/[^0-9]/g, ''), dy = y.replace(/[^0-9]/g, '');
+      return !!dx && dx === dy;
+    };
+    const memberOf = (chat) => {
+      try {
+        const list = chat.groupMetadata && chat.groupMetadata.participants;
+        const arr = list ? (list.getModelsArray ? list.getModelsArray() : (Array.isArray(list) ? list : null)) : null;
+        if (!arr || !meId) return null;
+        return arr.some((participant) => sameUser(participant, meId));
+      } catch (error) { return null; }
+    };
     const conversations = [];
     for (const chat of chats) {
       const id = String((chat.id && chat.id._serialized) || "");
@@ -112,6 +135,9 @@ function expression(since) {
         // Verified adapter metadata. null means this build did not expose the field: unknown, not false.
         archived: firstBool(chat, ['archive', 'isArchived', 'archived']),
         left: firstBool(chat, ['isLeft', 'left', 'hasLeft', 'isExited']),
+        // The signals deriveLeft needs when no explicit flag exists (on this build: always).
+        can_send: typeof chat.canSend === 'boolean' ? chat.canSend : null,
+        me_in_participants: memberOf(chat),
         // A real number is an unread count; absent or non-numeric stays unknown (null), never 0.
         unread: typeof chat.unreadCount === 'number' ? chat.unreadCount : null,
         updated_at: chat.t || null,
@@ -222,6 +248,9 @@ async function main() {
   const messages = payload.messages.slice(0, args.limit);
   // Deterministic eligibility, in Node, on the adapter's verified metadata. The reply job never spends a
   // model turn on a message that a rule already excludes, and an unverifiable chat fails closed here.
+  // `left` is derived first: the app exposes no explicit membership flag, and passing its null through
+  // refused every chat (`left_unknown`), which is what kept this pipeline silent.
+  payload.conversations = (payload.conversations || []).map((chat) => ({ ...chat, left: deriveLeft(chat) }));
   const chatById = new Map((payload.conversations || []).map((chat) => [String(chat.id), chat]));
   const operatorIds = String(args.operator || "").split(",").map((value) => value.trim()).filter(Boolean);
   const eligibilityOptions = { operator: { ids: operatorIds, phones: operatorIds } };
