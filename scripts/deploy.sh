@@ -411,12 +411,12 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
     fi
     if "$INSTALL_DIR/$SENTINEL_NAME" job put "$INSTALL_DIR/scripts/$JOB_NAME.job.json" >/dev/null 2>&1; then
       PIPELINE=$((PIPELINE + 1))
-      # The store is deliberately default-off: an import must not be able to start automation by itself
-      # (docs/JOBS.md). A deploy is the operator's own action, so it applies the state this tree declares
-      # for the job - without which every deploy would silently disable a pipeline that was running.
+      # The store disables a job whose definition changed, and that is deliberate: editing invalidates
+      # approval. So the deploy must not quietly re-enable it from the file - the operator's checkbox is the
+      # switch, and a deploy that flips it back is a deploy fighting the person. It says so instead.
       if grep -q '"enabled"[[:space:]]*:[[:space:]]*true' "$source"; then
-        "$INSTALL_DIR/$SENTINEL_NAME" job enable "$JOB_NAME" >/dev/null 2>&1 \
-          || echo "deploy: WARNING could not enable job $JOB_NAME"
+        echo "deploy: job $JOB_NAME changed; it is installed DISABLED (a changed definition needs re-approval)"
+        note "job $JOB_NAME changed and was installed disabled - enable it to run it"
       fi
       cp -f "$INSTALL_DIR/scripts/$JOB_NAME.job.json" "$INSTALL_DIR/scripts/$JOB_NAME.job.json.shipped" \
         || echo "deploy: WARNING could not record the shipped revision of job $JOB_NAME"
