@@ -138,6 +138,44 @@ end
 -- a plan that could reach it would be a shell.
 local SENTINEL_VERBS = { ["wait-idle"] = true, ["upgrade"] = true, ["restart"] = true, ["wait-health"] = true }
 
+-- A `run` step: the node-side deterministic step a skill needs for the part that never required a
+-- model. Its outcome contract is the one the `run` job action already uses - exit 0 *and* a JSON
+-- object on stdout - so the system has one outcome shape rather than two.
+--
+-- `expect` compares named fields of that object. A mismatch is a failed step, never a warning: a step
+-- that reports success while the world says otherwise is the failure this module exists to prevent.
+-- Exported as `M.run_step` so it can be tested without a browser and without running a command.
+--
+-- It cannot reach the sentinel: `M.export` refuses any step whose kind is not `sentinel`, and
+-- `rust/wa-sentinel/src/spell.rs` refuses a plan containing one. A `run` step executes in the node's
+-- worker, where a turn is already running - never in the process that can restart this node.
+function M.run_step(step)
+  local command = tostring(step.script or "")
+  if command == "" then return false, "run_step_script_required" end
+  local started_ok, raw = pcall(host.exec, command, "")
+  if not started_ok then return false, "run_step_exec_failed" end
+  local decoded_ok, wrapper = pcall(json.decode, raw or "")
+  if not decoded_ok or type(wrapper) ~= "table" then return false, "run_step_unreadable_result" end
+  if (tonumber(wrapper.code) or 1) ~= 0 then
+    return false, "run_step_exit_" .. tostring(wrapper.code)
+  end
+  local result_ok, result = pcall(json.decode, wrapper.stdout or "")
+  if not result_ok or type(result) ~= "table" then return false, "run_step_stdout_not_json" end
+  -- An *object* is the contract: `expect` names fields, and an array has none. The decoder maps both
+  -- to a Lua table, so a numeric key is what tells them apart.
+  for key in pairs(result) do
+    if type(key) == "number" then return false, "run_step_stdout_not_json" end
+  end
+  for field, expected in pairs(step.expect or {}) do
+    local actual = result[field]
+    if actual ~= expected then
+      return false, "run_step_expect_" .. tostring(field) .. ": " .. json.encode(actual)
+        .. " ~= " .. json.encode(expected)
+    end
+  end
+  return true, nil, result
+end
+
 function M.validate(spec)
   if type(spec) ~= "table" then return "spec_required" end
   if trim(spec.name) == "" then return "name_required" end
@@ -155,6 +193,16 @@ function M.validate(spec)
     end
     if kind == "assert" and type(step.script) ~= "string" then
       return "step_" .. index .. "_script_required"
+    end
+    if kind == "run" then
+      -- A deterministic node-side step: a command whose outcome is exit 0 *and* a JSON object on
+      -- stdout - the contract the `run` job action already has, so one outcome shape rather than two.
+      if type(step.script) ~= "string" or step.script == "" then
+        return "step_" .. index .. "_script_required"
+      end
+      if step.expect ~= nil and type(step.expect) ~= "table" then
+        return "step_" .. index .. "_expect_must_be_a_table"
+      end
     end
     if kind == "sentinel" then
       if type(step.verb) ~= "string" or not SENTINEL_VERBS[step.verb] then
@@ -401,6 +449,9 @@ function M.run(name, params)
       if kind == "wait" then
         host.sleep(tonumber(step.ms) or 250)
         ok, detail = true, nil
+      elseif kind == "run" then
+        local passed, failure = M.run_step(step)
+        ok, detail = passed, failure
       elseif kind == "assert" then
         local passed, error, value = check_assertion(step)
         ok, detail = passed, error or value

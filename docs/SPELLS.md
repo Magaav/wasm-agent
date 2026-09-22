@@ -55,8 +55,22 @@ are optional.
 | Kind | Shape | Notes |
 | --- | --- | --- |
 | `client` | `{action, ...}` where action ∈ `click move type key shell cdp frame` | `retries` needs `idempotent: true` |
+| `run` | `{script, expect?}` | a node-side deterministic command; success is exit 0 **and** a JSON object on stdout, and `expect` compares named fields of it. Never exportable as a sentinel plan (see below) |
 | `wait` | `{ms}` | bounded to 10s by `host.sleep` |
 | `assert` | `{script, <operator>}` | mid-run checkpoint |
+| `sentinel` | `{verb, binary?}` | a plan for the supervisor, executed outside the node |
+
+### Deterministic, or it is not a spell
+
+A spell may not contain inference. The moment a step calls a model the plan is a `wake`/`subagent`, and
+it has lost the two properties that make a spell worth having: no model in the loop, and a replay with no
+variance. A job's pipeline may mix deterministic and inference steps (`docs/PIPELINES.md`); a spell may
+not. `spell_save` refuses a step that is not deterministic.
+
+A `run` step executes in the node's worker, where a turn is already running - never in the process that
+can restart this node. That boundary needs no new code: `M.export` refuses any step whose kind is not
+`sentinel`, and `rust/wa-sentinel/src/spell.rs` refuses a plan containing one, so a step kind added today
+cannot reach the supervisor tomorrow.
 
 ### Assertion operators
 
