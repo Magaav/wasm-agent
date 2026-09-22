@@ -197,6 +197,19 @@ local function main()
   -- `newest` instead consumed messages silently - twice, before this rule existed.
   local handled = 0
   local skipped_ineligible = 0
+  local skipped_answered = 0
+  -- Who spoke last in each conversation. An incoming message the operator has already answered is not the
+  -- copilot's to answer: they took the lead, and a second reply would be an interruption. Deterministic,
+  -- so standing down costs no token at all - and the operator's own reply is the newest message in the
+  -- store by the time the next tick reads it, which is exactly why this can be decided here.
+  local newest_outgoing = {}
+  for _, message in ipairs(payload.messages or {}) do
+    if message.direction == "outgoing" then
+      local conversation = message.conversation_id
+      local at = message.sent_at or 0
+      if (newest_outgoing[conversation] or 0) < at then newest_outgoing[conversation] = at end
+    end
+  end
   for _, message in ipairs(payload.messages or {}) do
     memory.record_message({
       conversation_id = message.conversation_id,
@@ -220,7 +233,11 @@ local function main()
   -- unanswered while the job looked healthy.
   if (emit_on or json_events) and cursor > 0 and (message.sent_at or 0) > cursor and message.direction == "incoming" then
       local media_kind = (message.media and message.media[1] and message.media[1].type) or "chat"
-      if json_events and eligible and media_kind ~= "chat" then
+      local answered_by_operator = (newest_outgoing[message.conversation_id] or 0) > (message.sent_at or 0)
+      if answered_by_operator then
+        skipped_answered = skipped_answered + 1
+        handled = math.max(handled, message.sent_at or 0)
+      elseif json_events and eligible and media_kind ~= "chat" then
         handled = math.max(handled, message.sent_at or 0)
         unanswerable[#unanswerable + 1] = {
           message_id = message.message_id,
@@ -280,6 +297,7 @@ local function main()
     -- One JSON object and nothing else on stdout: a pipeline step succeeds on exit 0 *and* a JSON
     -- object, and a stray report line would make the whole result unparseable.
     print(json.encode({ events = events, unanswerable = unanswerable,
+      operator_answered = skipped_answered,
       cursor = math.floor(math.max(cursor, handled)) }))
     return
   end
