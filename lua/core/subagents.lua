@@ -38,9 +38,13 @@ local BUILTIN = {
     schema_version = 1,
     id = "explore",
     builtin = true,
-    description = "Read-only investigation: search, read and diagnose. Cannot write or run a shell.",
-    instructions = "Investigate the task read-only and report what you found with exact file paths and line references. Do not modify anything.",
-    allowed_tools = { "read", "read_many", "grep", "ls", "diagnose" },
+    description = "Read-only investigation: search, read, navigate the code graph and diagnose. Cannot write or run a shell.",
+    instructions = "Investigate the task read-only and report what you found with exact file paths and line references. For a navigation question - where is X defined, who calls it, how does A reach B - call `graph` first; use `grep`/`read` for the lines behind the answer. Do not modify anything.",
+    -- `graph` is read-only in effect: query/explain/path/caps/stats only read the index, and
+    -- `index` rebuilds the node's own local graph.db. It reaches no external state, so a
+    -- read-only investigator may use it. Without it, a child delegated code exploration is
+    -- blind to the navigation capability the parent already has.
+    allowed_tools = { "read", "read_many", "grep", "ls", "graph", "diagnose" },
     resources = {},
     limits = { max_depth = 0, timeout_seconds = 600, max_output_bytes = 65536, max_tokens = 200000 },
   },

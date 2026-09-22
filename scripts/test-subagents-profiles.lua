@@ -35,6 +35,8 @@ local explore, refusal = subagents.resolve("explore", ctx("alice"))
 check(explore, "explore resolves for a master: " .. tostring(refusal))
 check(#explore.allowed_tools > 0 and not explore.allowed.bash and not explore.allowed.write,
   "explore must not carry bash or write")
+check(explore.allowed.graph,
+  "explore must be able to navigate the code graph, or a delegated exploration is blind to it")
 local guest_profile, guest_refusal = subagents.resolve("guest", ctx("guest1", "guest"))
 check(guest_profile, "guest resolves for a guest: " .. tostring(guest_refusal))
 check(not guest_profile.allowed.bash and not guest_profile.allowed.read,
