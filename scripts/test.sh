@@ -1226,6 +1226,9 @@ run_proof_fixture children 17 node scripts/test-subagents.cjs "$BIN"
 run_proof_fixture jobs 33 node scripts/test-job-subagents.cjs
 run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN"
 run_proof_fixture whatsapp 27 node scripts/test-whatsapp-subagent-e2e.cjs
+# The reader's acted cursor: a message may be consumed only when a durable decision exists for it, the
+# attempt count is bounded, and media is reported instead of handed to a child. Mock store, real ingest.
+run_proof_fixture cursor 34 node scripts/test-whatsapp-cursor.cjs "$BIN"
 
 # The UI tests are JS and run outside the embedded interpreter, so they need node
 # and they need the repo root as cwd (they read ui/app.js from disk). A test that does

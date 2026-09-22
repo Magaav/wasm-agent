@@ -43,7 +43,30 @@ ever appears, a direct chat is never left, a group is decided by its participant
 `canSend` — and stays `null` (refused) when nothing is available.
 
 The cursor (`whatsapp_cursor`) means a restart does not replay the backlog: only messages newer than the
-last pass emit. The first pass after a long outage therefore imports without answering.
+last pass emit. The first pass after a long outage therefore imports without answering — it adopts the
+newest message as the cursor and hands nothing on, which in the pipeline mode is also the only thing that
+moves the cursor off zero.
+
+## The acted cursor: what may be consumed
+
+The cursor moves past a message only when a **durable decision** exists for it: a child's
+`effect_decisions` row, a deterministic eligibility refusal, the operator having answered that
+conversation first, or a media report. Handing a message *on* is not a decision — it used to be, and that
+is how a message nobody acted on was lost: a child that failed before deciding left a message the cursor
+had already passed.
+
+So the reader keeps a durable list (`meta.whatsapp_handoffs`, keyed by message id) of what it has handed
+on and how many times, and re-hands anything on that list without a decision — including messages *below*
+the cursor. The child's idempotency key (`job:revision:message_id`) makes that a reconcile, not a second
+child. The count is bounded (3), so a message that is never decided cannot pin the cursor for everything
+behind it: it is reported to the operator's own inbox once and then let go.
+
+Media is settled the same way: an eligible image or voice note is reported to the operator's own inbox
+and **not** appended to `events` (it used to be both, which would have asked a child to answer a voice
+note). No reply is ever sent to the sender for one.
+
+`scripts/test-whatsapp-cursor.cjs` proves each of these against a mock store, the real ingest script and a
+real ledger: no browser, no sentinel, no model.
 
 ## The paid stage: the child's envelope
 
