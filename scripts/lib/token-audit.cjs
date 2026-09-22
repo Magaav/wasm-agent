@@ -239,6 +239,21 @@ function audit(input) {
     }
   }
   if (Object.values(shape).some(n=>!count(n))) throw Error('byte_total_exceeds_safe_integer');
+  const navigation={calls:0,found:0,not_found:0,results:0,by_action:{}};
+  for (const row of events) {
+    if (row.kind !== 'tool' || row.phase !== 'end') continue;
+    const nav = row.payload && row.payload.nav;
+    if (!nav || typeof nav.action !== 'string') continue;
+    navigation.calls++;
+    const bucket = navigation.by_action[nav.action] || (navigation.by_action[nav.action]={calls:0,found:0,not_found:0,results:0});
+    bucket.calls++;
+    if (nav.found === true) { bucket.found++; navigation.found++; }
+    else if (nav.found === false) { bucket.not_found++; navigation.not_found++; }
+    if (count(nav.count)) { bucket.results += nav.count; navigation.results += nav.count; }
+  }
+  navigation.judged = navigation.found + navigation.not_found;
+  navigation.hit_rate = navigation.judged ? navigation.found/navigation.judged : null;
+  navigation.note = 'graph/grep/read outcomes only; hit_rate counts judged calls, and a hit is not a correctness verdict';
   const toolTotal=total(toolTimes);
   if(!Number.isSafeInteger(toolTotal)) throw Error('tool_time_total_exceeds_safe_integer');
   tools.measured_elapsed=toolTimes.length;
@@ -310,7 +325,7 @@ function audit(input) {
   runTiming.scope='summed completed-run spans; concurrent runs can overlap, so this is not global wall-clock share';
 
   return {schema:'wasm-agent.token-audit/v1',events:events.length,duplicate_events:duplicates,
-    usage,tools,run_timing:runTiming,prefix,prepared_prefix:prepared,
+    usage,tools,navigation,run_timing:runTiming,prefix,prepared_prefix:prepared,
     timing:Object.fromEntries(Object.entries(timing).map(([name,values])=>[name,
       {samples:values.length,p50:percentile(values,.5),p95:percentile(values,.95)}])),
     average_request_bytes:Object.fromEntries(Object.keys(shape).map(k=>[k,{mean:shape[k]/shapeSamples[k],samples:shapeSamples[k]}])),
@@ -319,6 +334,7 @@ function audit(input) {
       'reasoning_and_arguments_are_byte_subsets_not_additional_tokens','repeated_arguments_are_not_automatically_waste',
       'tool_elapsed_includes_dispatch_and_projection_not_process_cpu','summed_span_time_is_not_global_wall_clock',
       'unknown_and_plugin_tool_names_are_aggregated_as_other','observed_cost_is_not_an_invoice_or_complete_task_cost',
+      'navigation_hit_rate_is_a_signal_not_a_correctness_verdict',
       'task_quality_requires_independent_verification']};
 }
 module.exports = {audit};
