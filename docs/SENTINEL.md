@@ -40,6 +40,13 @@ the sentinel will not stop a listener it cannot prove it started. This is **appl
 isolation, not an OS sandbox**: instances run as the same operating-system account, so a guest
 process can still read what that account can read. See [INSTANCES.md](INSTANCES.md).
 
+A node restarted by the gate (`deploy.sh` -> `upgrade.sh`) is started outside the sentinel, which
+writes only `serve.pid`; the lifecycle record then names the previous pid. The next stop or
+restart re-adopts the live node when `serve.pid` names the listener and the identity proves out,
+rewriting the record - so a gate deploy no longer leaves `request restart` permanently refused. A
+stale record whose `serve.pid` does not name the listener is still refused: a port is not an
+identity, and a recycled pid is not this node.
+
 ### `deploy` is not `upgrade`, and the difference matters
 
 `upgrade` installs the node and the UI. It **cannot** install a *sentinel*: `upgrade.sh` copies the node

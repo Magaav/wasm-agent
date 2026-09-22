@@ -186,6 +186,13 @@ Stop-Process -Id (Get-Content "$env:LOCALAPPDATA\wasm-agent\serve.pid")
 An unfinished session is not lost: `wa chat --continue` resumes the thread with its transcript
 intact, and the window offers to continue it where it stopped.
 
+A **gate deploy** (`scripts/deploy.sh` -> `upgrade.sh`) restarts the node outside the sentinel and
+writes only `serve.pid`, so the sentinel's lifecycle record still names the previous pid. The next
+`wa-sentinel request restart` (or `instance stop`) re-adopts the live node when `serve.pid` names
+it and the identity proves out, and rewrites the record - the desync heals itself. Before that
+first re-adopt a restart would have been refused ("it is not the node this sentinel started"); if
+you cannot wait for it, stop by the pid in `serve.pid`.
+
 ## Never touch the window
 
 The window is a client: it reconnects on its own, it reloads when the UI hash changes, and restarting it is a

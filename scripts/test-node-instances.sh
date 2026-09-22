@@ -375,6 +375,21 @@ fi
 ok "$([ "$(node_id_of "$OP_PORT")" = "$OP_ID" ] && echo 1 || echo 0)" "the operator is still running after the stale marker"
 cp "$BASE/op-record.bak" "$OP_RECORD"
 
+# A stale record for a node this install really started - exactly what a gate deploy leaves
+# behind - is adopted when serve.pid names the live listener and the identity proves it.
+# Otherwise the first deploy would kill `request restart` forever (measured live: record pid
+# 2280 against a live 12236).
+cp "$BASE/op-record.bak" "$OP_RECORD"
+printf '%s\n' "$(pid_on_port "$OP_PORT")" > "$OP_INSTALL/serve.pid"
+node -e '
+const fs=require("fs"); const p=process.argv[1]; const d=JSON.parse(fs.readFileSync(p,"utf8"));
+d.pid=999999; fs.writeFileSync(p, JSON.stringify(d));
+' "$(winpath "$OP_RECORD")"
+"$SENTINEL" --instance op instance stop >/dev/null 2>&1
+ok "$([ -z "$(node_id_of "$OP_PORT")" ] && echo 1 || echo 0)" "a stale record with a matching serve.pid is adopted and stopped"
+"$SENTINEL" --instance op instance start >/dev/null 2>&1
+ok "$([ "$(node_id_of "$OP_PORT")" = "$OP_ID" ] && echo 1 || echo 0)" "the operator restarts with the same identity after stale-record adoption"
+
 # Positive legacy adoption: no record, the real serve.pid, and a live /sync/head.
 rm -f "$OP_RECORD"
 printf '%s\n' "$(pid_on_port "$OP_PORT")" > "$OP_INSTALL/serve.pid"

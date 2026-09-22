@@ -386,10 +386,20 @@ fn verify_target(port: u16, probe_identity: bool) -> Result<u32> {
     match instance::read_record() {
         Ok(Some(record)) => {
             if record.pid != listener {
-                bail!(
-                    "refusing to stop pid {listener} on port {port}: it is not the node this sentinel started (record pid {})",
-                    record.pid
-                );
+                // A gate deploy (`deploy.sh` -> `upgrade.sh`) restarts the node outside the
+                // sentinel and writes only `serve.pid`, so the record still names the previous
+                // pid. Refusing here made `request restart` permanently dead after the first
+                // deploy - measured: "record pid 2280" against a live 12236. If `serve.pid` names
+                // this listener and the live node proves its identity, adopt the new pid and
+                // rewrite the record; a stranger still fails the proof and is refused exactly as
+                // before (a stale record with no matching `serve.pid` cannot be adopted).
+                if !probe_identity {
+                    bail!(
+                        "refusing to stop pid {listener} on port {port}: it is not the node this sentinel started (record pid {})",
+                        record.pid
+                    );
+                }
+                return adopt_legacy(port, listener, &expected_home, &expected_binary);
             }
             if !instance::same_path(Path::new(&record.home), &expected_home) {
                 bail!(
