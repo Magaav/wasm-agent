@@ -458,3 +458,56 @@ fn a_js_namespace_import_resolves_a_dotted_call() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_dotted_call_on_an_unknown_receiver_does_not_land_on_a_local() {
+    // `response.text()` has no import alias and is not `self`/`this`/`M`, so there is no definition
+    // to reach and the edge stays unresolved - it must not resolve to the local `text`.
+    let dir = temp_dir("js-unknown-receiver");
+    std::fs::write(
+        dir.join("run.mjs"),
+        "const text = 1;\nexport function go() { return response.text(); }\n",
+    )
+    .unwrap();
+    let db = dir.join("graph.db");
+    let mut store = Store::open(&db).unwrap();
+    store.index(&dir, false).unwrap();
+
+    let rows = store.explain("text").unwrap();
+    let def = rows
+        .iter()
+        .find(|(n, _, _)| n.name == "text")
+        .expect("the local text exists");
+    let incoming: Vec<String> = def.2.iter().map(|e| e.target.clone()).collect();
+    assert!(
+        !incoming.iter().any(|t| t == "response.text"),
+        "response.text must not resolve to a local: {incoming:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn this_member_resolves_within_the_file() {
+    // `this.foo()` names the method in the same file; the receiver has no name of its own to match.
+    let dir = temp_dir("js-this");
+    std::fs::write(
+        dir.join("run.mjs"),
+        "export class C {\n  foo() { return 1; }\n  bar() { return this.foo(); }\n}\n",
+    )
+    .unwrap();
+    let db = dir.join("graph.db");
+    let mut store = Store::open(&db).unwrap();
+    store.index(&dir, false).unwrap();
+
+    let rows = store.explain("foo").unwrap();
+    let def = rows
+        .iter()
+        .find(|(n, _, _)| n.name == "foo")
+        .expect("method foo exists");
+    assert!(
+        def.2.iter().any(|e| e.path.ends_with("run.mjs")),
+        "this.foo must resolve to the method: {:?}",
+        def.2.iter().map(|e| e.target.clone()).collect::<Vec<_>>()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
