@@ -1,0 +1,32 @@
+# Line endings, stated once.
+#
+# This repository is consumed by Linux and by sh/lua, and the pre-commit hook requires LF in the *stored*
+# blob. Without this file the worktree on Windows is CRLF over an LF index, and that mismatch is a trap for
+# every editing tool: an `edit` anchor silently misses because it matches bytes, and the hook refuses a
+# legitimate change because `git add` stores the carriage returns it found on disk. It cost a run of fixes
+# on the whatsapp branch their diff topics, and two commits were refused before anyone worked out why.
+#
+# `eol=lf` states the intent, so the hook goes back to being a backstop instead of a minefield.
+* text=auto eol=lf
+
+# Windows scripts are the exception, and only for the worktree: the stored blob stays LF, which is what the
+# hook checks, while cmd.exe and PowerShell get the endings they expect on disk.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Binaries are never converted. `text=auto` detects most of them; these are named because a wrong guess
+# would corrupt them.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.exe binary
+*.dll binary
+*.zip binary
+*.db binary
+*.wasm binary
