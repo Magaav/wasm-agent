@@ -46,6 +46,11 @@ The `pre-commit` hook enforces it - that hook is the contract, this line is the 
 - **Navigate before you grep.** For "where is X", "who calls it", "how does A reach
   B" or "which `host.*` does this use", call the `graph` tool first
   (`skills/code-graph`); `grep` and `read` are for the actual lines.
+- **A spell is deterministic, verified execution**, not a "macro". A step is a shell
+  command or script, a client action, a wait, an assertion, or a supervisor verb, and
+  every spell declares a `post` that settles the effect. The model surface is
+  `spell_save`/`spell_run`; the contract is `docs/SPELLS.md`. A spell chooses *which*
+  step, never *how* it runs.
 - **Install only through the gate, and never run it from inside a run.** `scripts/deploy.sh` cannot
   become idle while the turn that asked waits, so from inside a run you *queue* it:
   `wa-sentinel request upgrade` for the node and UI, `wa-sentinel request deploy` when the change is in

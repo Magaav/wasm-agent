@@ -1,11 +1,13 @@
 # Spells — deterministic, verified automation
 
-A **spell** is a parameterised sequence of client actions with declared
-preconditions and mandatory postconditions. The agent *crystallizes* a task into
-a spell once it has worked it out, and replays it later **without the model in
-the loop**.
+A **spell** is a named, parameterised sequence of **deterministic** steps with
+declared preconditions and mandatory postconditions. A step is any deterministic
+execution - a shell command or script, a client action, a wait, an assertion, or a
+supervisor verb - and the agent *crystallizes* a task into a spell once it has
+worked it out, then replays it later **without the model in the loop**. A macro is
+one shape a spell can take, not what a spell is.
 
-> **Naming.** "Spells" always means these crystallized macros. The tool that
+> **Naming.** "Spells" always means these deterministic, verified executions. The tool that
 > lists what an account may call is **`capabilities`**, never `spells`. The two
 > used to share the name, which was a defect: it made the envelope read
 > `capabilities → spells` and `spells → spell_save`, two different things under

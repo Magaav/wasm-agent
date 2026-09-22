@@ -1,6 +1,6 @@
 -- Tools exposed to the head model. Access is gated by the caller's role:
 -- masters get everything; guests get on-demand memory plus a way to list
--- what they may do. "spells" means crystallized macros only (spells.lua).
+-- what they may do. "spells" means deterministic, verified executions only (spells.lua).
 local json = dofile("lua/vendor/json.lua")
 local platform = dofile("lua/core/platform.lua")
 local spellslib = dofile("lua/core/spells.lua")
@@ -181,7 +181,7 @@ M.admin = {
     command = { type = "string" },
     shell = { type = "string", enum = { "cmd", "powershell" }, description = "Default cmd." },
     cwd = { type = "string" } }, { "command" }),
-  schema("spell_save", "Crystallize a working sequence of client actions into a named, parameterised, VERIFIED spell. Requires at least one post assertion: a spell must settle its effect, so it can never report success while doing nothing.", {
+  schema("spell_save", "Crystallize a deterministic, verified execution into a named, parameterised spell: a shell command or script, a client action, a wait, an assertion, or a supervisor verb. No model in the loop. Requires at least one post assertion: a spell must settle its effect, so it can never report success while doing nothing.", {
     name = { type = "string" },
     description = { type = "string" },
     target = { type = "object", description = "{node, app, profile} the spell was recorded against." },

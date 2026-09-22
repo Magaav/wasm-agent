@@ -87,11 +87,9 @@ ok(mixed == nil, "a spell with a client step must not export as a sentinel plan"
 ok(type(mixed_why) == "string" and mixed_why:find("step_kind_not_exportable") ~= nil,
   "the refusal must name the reason, got " .. tostring(mixed_why))
 
--- The whitelist, at save time. `run` is the one that matters: it is the operator's escape hatch, and
--- a plan that could reach it would be a shell - which is exactly what SENTINEL.md forbids the agent
--- from talking the supervisor into.
+-- The whitelist, at save time. An unknown verb is refused here and again in the sentinel, so a plan
+-- edited on disk cannot reach a verb the two did not agree on.
 local escapes = {
-  { name = "t-run", steps = { { kind = "sentinel", verb = "run" } } },
   { name = "t-sh", steps = { { kind = "sentinel", verb = "shell" } } },
   { name = "t-arbitrary", steps = { { kind = "sentinel", verb = "delete-everything" } } },
 }
@@ -101,6 +99,36 @@ for _, spec in ipairs(escapes) do
   ok(result.error == "step_1_sentinel_verb_unknown",
     "verb for " .. spec.name .. " must be refused, got " .. json.encode(result.error))
 end
+
+-- `run` is allowed, and it is the one verb that reaches a script - so it must name one. The sentinel
+-- additionally executes it only from a directory the operator named in WA_SENTINEL_SCRIPTS
+-- (rust/wa-sentinel/src/spell.rs): the plan chooses which script, never how it runs.
+local run_no_script = spells.save({
+  name = "t-run-noscript",
+  steps = { { kind = "sentinel", verb = "run" } },
+  post = { { script = "1" } },
+})
+ok(run_no_script.error == "step_1_sentinel_run_needs_script",
+  "a run step must require a script, got " .. json.encode(run_no_script.error))
+
+local run_script = spells.save({
+  name = "t-run-script",
+  steps = { { kind = "sentinel", verb = "run", script = "{{script}}" } },
+  params = { script = { type = "string", default = "scripts/restart-watcher.sh" } },
+  post = { { script = "1" } },
+})
+ok(run_script.ok == true, "a run step with a script must save, got " .. json.encode(run_script))
+if run_script.ok then
+  local exported = spells.export("t-run-script")
+  ok(exported ~= nil, "a run step must export as a sentinel plan")
+  if exported then
+    ok(exported.steps[1].verb == "run", "the run verb must survive export")
+    ok(exported.steps[1].script == "scripts/restart-watcher.sh",
+      "the run script must survive export, got " .. tostring(exported.steps[1].script))
+  end
+  spells.remove("t-run-script")
+end
+spells.remove("t-run-noscript")
 
 -- `upgrade` names a binary, and a step that ignores an argument must be refused rather than accept it.
 local no_binary = spells.save({
