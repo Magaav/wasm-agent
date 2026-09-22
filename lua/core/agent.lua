@@ -1289,7 +1289,11 @@ function M:run_body(text, images)
   telemetry.event(self.session_id,self.run_id,"","step","end",{outcome=completed and "answered" or "runaway_guard",assistant_message_id=message_id})
   M.usage_total.runs = M.usage_total.runs + 1
   M.usage_total.last = message
-  self.emit({ type = "usage", total = M.usage_total, model = self.model })
+  -- `prompt` is the last model call's own count, which is the size of the context as it
+  -- stands - the totals above are the session's running sum and cannot answer "how full is
+  -- the window". A reader that shows the context budget (the CLI's footer) needs the one
+  -- number the provider actually measured, not an estimate.
+  self.emit({ type = "usage", total = M.usage_total, model = self.model, prompt = self.last_prompt_tokens })
 
   -- The diff goes with the reply: the topic belongs to this bubble, and the reader should
   -- not need a second request to learn what the message touched.

@@ -3,10 +3,18 @@ local json = dofile("lua/vendor/json.lua")
 local memory = dofile("lua/core/memory.lua")
 local provider = dofile("lua/core/provider.lua")
 local agentlib = dofile("lua/core/agent.lua")
+-- Where this chat is running, for the banner and the footer: `platform.cwd()` is the
+-- host's own working directory and `paths.home()` the home to abbreviate it against
+-- (never `$HOME` or a drive letter, per AGENTS.md and docs/HOST.md).
+local platform = dofile("lua/core/platform.lua")
+local paths = dofile("lua/core/paths.lua")
 -- Everything this REPL prints is captured by whatever launched it (a terminal,
 -- an orchestrator, a test), so it all goes out through the redactor.
 local redact = dofile("lua/core/redact.lua")
 local updater = dofile("lua/core/update.lua")
+-- What a run looks like while it is running. The view owns the status line, the tool
+-- lines and the footer; this file owns the session, the commands and the prompt.
+local cli_view = dofile("lua/core/cli_view.lua")
 
 local M = {}
 
@@ -48,31 +56,39 @@ end
 -- terminal), so output must appear as it is produced: a silent terminal looks
 -- hung, and an orchestrator waiting for the terminal to go idle cannot tell the
 -- difference between working and stuck.
-local function printer(state)
+--
+-- The events are handed to the view rather than formatted here, because the shape of a
+-- run's output is one decision, not two: `lua/core/cli_view.lua` renders the same
+-- events live in a terminal and plainly when this output is captured. The redactor
+-- still wraps everything that carries tool or provider text.
+local function printer(view)
   return function(event)
-    local kind = event.type
-    if kind == "delta" then
-      io.write(event.text or "")
-      io.flush()
-      state.streamed = state.streamed + 1
-    elseif kind == "tool" then
-      io.write("\n  · " .. tostring(event.name or "?") .. "\n")
-      io.flush()
-    elseif kind == "tool_result" then
-      -- Tool results are usually tables (bash returns {code, stdout, stderr});
-      -- tostring would print "table: 0x..." and say nothing.
+    local ready = event
+    if event.type == "tool_result" then
+      -- Tool results are usually tables (bash returns {code, stdout, stderr}); the view
+      -- reads the fields it knows and redacts whatever text it prints.
       local value = event.result
-      local text = (type(value) == "table") and json.encode(value) or tostring(value or "")
-      text = redact.text(text):gsub("%s+", " ")
-      io.write("    " .. text:sub(1, 120) .. (#text > 120 and "…" or "") .. "\n")
-      io.flush()
-    elseif kind == "error" then
-      io.write("\n  ! " .. redact.text(tostring(event.error or "error")) .. "\n")
-      io.flush()
+      if type(value) == "table" then
+        local clean = {}
+        for key, field in pairs(value) do
+          clean[key] = (type(field) == "string") and redact.text(field) or field
+        end
+        value = clean
+      elseif type(value) == "string" then
+        value = redact.text(value)
+      end
+      ready = { type = event.type, name = event.name, result = value }
     end
+    -- A rendering bug must not kill the run it is describing, and must not be silent
+    -- either: the view says so once and the run keeps going.
+    local handled, problem = pcall(view.event, view, ready)
+    if not handled then view:warn(redact.text(tostring(problem))) end
   end
 end
 
+-- Where this chat is running, and on which branch: pi shows both in front of the
+-- reader, and a chat in the wrong worktree is otherwise a mistake that costs an hour to
+-- notice. Both live in `cli_view` because both are what the banner prints.
 function M.run(argv)
   argv = argv or {}
   -- Session selection. A new thread is the default; `--continue` resumes the
@@ -125,36 +141,64 @@ function M.run(argv)
   local settings = provider.settings()
   local mode = provider.configured() and (settings.model .. " @ " .. settings.base_url)
     or "local mode (no model configured)"
-  local state = { streamed = 0 }
-  local agent = agentlib.new(session.id, printer(state), "master", USER, NODE)
+  -- Where this chat is, for the banner and the footer. `host.paths()` is the only
+  -- supported way to ask for the home directory (AGENTS.md): the environment lies on
+  -- Windows, and it does not answer for the working directory at all - that is
+  -- `host.runtime_info().cwd`, wrapped by `platform.lua`.
+  local cwd = platform.cwd()
+  local workspace = cli_view.workspace(cwd, paths.home())
+  local reasoning = (function()
+    local ok, value = pcall(provider.reasoning, settings.model)
+    if not ok or type(value) ~= "table" or not value.supported then return "" end
+    -- "provider" is what the node says when it has no level of its own to report: it
+    -- means "the endpoint decides", which is not a level a reader can act on.
+    local selected = value.selected or ""
+    return selected == "provider" and "" or selected
+  end)()
+  local view = cli_view.new({
+    -- The terminal title names the worktree, the way pi names the workspace it is
+    -- running in; while a run is in flight it carries the phase instead.
+    title = "wa - " .. (workspace:match("([^/]+)$") or "chat"),
+    workspace = workspace,
+    branch = cli_view.branch(cwd),
+    budget = tonumber(host.getenv("WASM_AGENT_LLM_CONTEXT")) or 0,
+    -- The terminal width when it says so, and otherwise the width every terminal has: a
+    -- status line that wraps is erased only on its last row, which leaves the row above it
+    -- behind as litter.
+    limit = tonumber(host.getenv("COLUMNS")) or 80,
+  })
+  local agent = agentlib.new(session.id, printer(view), "master", USER, NODE)
 
   print("")
-  print("  wasm-agent 0.1.0")
-  print("  model    " .. mode)
-  print("  memory   " .. (host.getenv("WASM_AGENT_DB") or "~/.wasm-agent/memory.db"))
-  print("  session  " .. agent.session_id .. (resume_last and "  (continued)" or ""))
-  -- The banner is the last place a user can be told before they type: a thread
-  -- that was cut off mid-answer looks like one that is simply quiet, and the
-  -- recovery below (the model is told in its context) is invisible from here.
-  local session_state = memory.session_state(agent.session_id)
-  if session_state and session_state.state == "unfinished" then
-    print("  !        unfinished " .. session_state.detail)
-    print("           recovering: wa resume --session " .. agent.session_id)
-  end
-  print("  /help for commands, /exit to quit")
+  print(cli_view.banner({
+    live = view.live,
+    version = "0.1.0",
+    model = mode .. (reasoning ~= "" and ("  \194\183  reasoning " .. reasoning) or ""),
+    database = host.getenv("WASM_AGENT_DB") or "~/.wasm-agent/memory.db",
+    session = agent.session_id,
+    continued = resume_last,
+    workspace = view.workspace,
+    branch = view.branch,
+    -- The banner is the last place a user can be told before they type: a thread
+    -- that was cut off mid-answer looks like one that is simply quiet, and the
+    -- recovery below (the model is told in its context) is invisible from here.
+    unfinished = (function()
+      local session_state = memory.session_state(agent.session_id)
+      if session_state and session_state.state == "unfinished" then return session_state.detail end
+      return nil
+    end)(),
+  }))
   print("")
 
   local function turn(line)
-    state.streamed = 0
+    view:run_started()
     local ok, reply = pcall(agent.run, agent, line)
     if not ok then
-      print("\n  error: " .. redact.text(tostring(reply)))
-    elseif state.streamed == 0 then
-      -- Nothing streamed (an error before the first token, or a provider
-      -- without streaming): print the reply so the turn is never silent.
-      print(reply)
+      view:failed(redact.text(tostring(reply)))
     else
-      print("")
+      -- The view prints the reply when nothing streamed (an error before the first
+      -- token, or a provider without streaming), so the turn is never silent.
+      view:answered(reply)
     end
   end
 

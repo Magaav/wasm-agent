@@ -131,7 +131,31 @@ $harness = @'
   var live = document.querySelector('wa-trace');
   check(!!live, 'a running decision must have a trace');
   check(!!live && live.hasAttribute('open'), 'a running trace must be open so its tool lines are visible');
-  for (var i = upto; i < events.length; i++) window.handleEvent(events[i]);
+  // A running tool line shows what the operation behind it is doing. The node already publishes
+  // the operation on /health and its output through /operation; a window that shows only a clock
+  // makes a five-minute build look like a hang - the failure this exists to prevent.
+  window.handleEvent(events[4]);   // round
+  window.handleEvent(events[5]);   // delta before the bash call
+  window.handleEvent(events[6]);   // bash, still pending
+  window.__fixtures.operation = { content: "compiling wa-host\nlinking wa\n", offset: 0, next_offset: 34, bytes: 34, eof: true };
+  await window.__refreshOperationProgress(
+    { operations: [{ operation_id: "op-fixture", owner: "run:3", state: "running", output_bytes: 34 }] },
+    { run_id: 3 },
+  );
+  var progress = document.querySelector("wa-trace .tool-progress:not([hidden])");
+  check(!!progress && progress.textContent === "running · 34 B · linking wa",
+    "a running tool must show the operation's state, bytes and newest output line, saw: " + (progress && progress.textContent));
+  // A silent command must still say something: the line is a liveness signal, not just a tail.
+  await window.__refreshOperationProgress(
+    { operations: [{ operation_id: "op-quiet", owner: "run:3", state: "running", output_bytes: 0 }] },
+    { run_id: 3 },
+  );
+  var quiet = document.querySelector("wa-trace .tool-progress:not([hidden])");
+  check(!!quiet && quiet.textContent === "running · 0 B",
+    "a silent running tool must still show its state and byte count, saw: " + (quiet && quiet.textContent));
+  for (var i = 7; i < events.length; i++) window.handleEvent(events[i]);
+  check(!document.querySelector("wa-trace .tool-progress:not([hidden])"),
+    "the settled result must clear the running progress line");
 
   var messages = document.getElementById("messages");
   var bubbles = messages.querySelectorAll("wa-message.assistant");
@@ -1237,7 +1261,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__cancelActiveRun = cancelActiveRun; window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker; window.__updateNotice = updateNotice;"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__cancelActiveRun = cancelActiveRun; window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker; window.__updateNotice = updateNotice; window.__refreshOperationProgress = refreshOperationProgress;"
 
 $server = $null
 $edge = @(

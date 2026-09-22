@@ -289,3 +289,16 @@ pub fn arg_string(l: *mut LuaState, idx: c_int) -> Option<String> {
         }
     }
 }
+
+/// Read an integer at `idx` (None for missing values or non-numbers).
+pub fn arg_integer(l: *mut LuaState, idx: c_int) -> Option<i64> {
+    unsafe {
+        let mut isnum: c_int = 0;
+        let value = lua_tointegerx(l, idx, &mut isnum);
+        if isnum == 0 {
+            None
+        } else {
+            Some(value)
+        }
+    }
+}

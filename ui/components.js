@@ -316,8 +316,14 @@ class WaTrace extends HTMLElement {
     output.hidden = true;
     if (detail) output.textContent = detail;
     line.append(output);
+    // The running operation's newest line, while the call is in flight. A clock alone cannot
+    // tell a build that is compiling from one that has hung, and the node already has the line.
+    const progress = document.createElement("div");
+    progress.className = "tool-progress";
+    progress.hidden = true;
+    line.append(progress);
     this._lines.set(name, line);
-    this._pending.push({ line, output, outcome, started: Date.now(), bound: bound || null });
+    this._pending.push({ line, output, progress, outcome, started: Date.now(), bound: bound || null });
     this._body.append(line);
     this._header.classList.add("running");
     this._refresh();
@@ -337,6 +343,15 @@ class WaTrace extends HTMLElement {
     target.outcome.textContent = limit ? `${text} of ${Math.floor(limit)}s` : text;
   }
 
+  // setProgress(text) paints the running operation's newest output line under the oldest
+  // pending tool call. The settled result clears it, because that is the fuller answer.
+  setProgress(text) {
+    const target = this._pending[0];
+    if (!target) return;
+    target.progress.textContent = text || "";
+    target.progress.hidden = !text;
+  }
+
   get pending() { return this._pending.length > 0; }
 
   // Tool calls in one decision execute in order; replay adds them all before their
@@ -344,6 +359,7 @@ class WaTrace extends HTMLElement {
   settle(outcome, detail, failed) {
     const target = this._pending.shift();
     if (!target) return;
+    target.progress.hidden = true;
     target.outcome.textContent = outcome || "";
     target.line.classList.remove("pending");
     target.line.classList.add(failed ? "err" : "ok");
@@ -361,6 +377,7 @@ class WaTrace extends HTMLElement {
   // Do not leave its clock running or claim that the tool succeeded/failed.
   unrecorded() {
     for (const target of this._pending) {
+      target.progress.hidden = true;
       target.outcome.textContent = "result not recorded";
       target.line.classList.remove("pending");
       target.line.classList.add("unrecorded");

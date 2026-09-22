@@ -116,6 +116,35 @@ orca computer get-app-state --app wa-window --window-id <id> --json   # includes
 - Two `wa-window.exe` processes means two windows: an older one outlives the node that
   spawned it. Look at the right one, and close stale ones by **pid**.
 
+## 3b. Seeing a terminal view
+
+The CLI's view (`wa chat`) cannot be checked through `bash` either, and for the same
+reason the default terminal read is not enough: a line rewritten in place (`\r` +
+erase-to-end) comes back as stacked fragments, so a status line that looks right on
+screen reads as garbage in the accumulated stream.
+
+Run it in a real terminal and read the **rendered frame**:
+
+```bash
+orca terminal create --worktree path:/path/to/tree --title "VIEW PROBE" \
+  --command "C:\\path\\to\\probe.cmd" --json          # returns a handle
+orca terminal read --terminal <handle> --screen --json  # what the terminal renders
+orca terminal list --json                               # the tab title, which a run sets
+orca terminal close --terminal <handle> --tab --json    # leave no trace
+```
+
+- Put the environment in the launcher: a `.cmd`/`.sh` file that sets a scratch home and
+database and a mock provider, then runs the command. A long `--command` string handed to
+the shell loses its quoting and its backslashes.
+- Read `--screen` **while the run is in flight** and again after it. A provider that
+  answers slowly (a few lines of node, outside the repository) is how you get a frame of
+  the middle of a run; both frames are the evidence.
+- The tab title is part of the view — `orca terminal list` is how you read it.
+- `--screen` and `--cursor` are mutually exclusive, and the default read is the one that
+  stacks repainted lines.
+- Do not pass `--focus`: the tab is yours, not the user's foreground, and close it when
+  you are done.
+
 ## 4. Leave the test behind
 
 If the thing you verified is worth keeping correct, make it a `check(...)` in
