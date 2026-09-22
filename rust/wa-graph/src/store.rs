@@ -300,15 +300,24 @@ impl Store {
         let mut resolved = 0usize;
         for (edge_id, target, path, kind) in &pending {
             let simple = extract::simple_name(target);
-            let hit = pick_candidate(&self.conn, target, simple, path)?;
+            // A dotted call is `alias.member`. The alias is the precise signal, so try it before the
+            // name fallback: `provider.budget()` otherwise matched an unrelated local variable named
+            // `budget` in the caller's own file, and the edge then read as *resolved* while pointing
+            // at the wrong symbol - worse than unresolved. `self.emit`/`M.foo` have no import alias,
+            // so the fallback still handles them.
+            let hit = if kind == "calls" && target.contains('.') {
+                match resolve_alias(&self.conn, target, path)? {
+                    Some(id) => Some(id),
+                    None => pick_candidate(&self.conn, target, simple, path)?,
+                }
+            } else {
+                pick_candidate(&self.conn, target, simple, path)?
+            };
             let dst = match hit {
                 Some(id) => Some(id),
                 None if kind == "capability" && extract::is_capability(target) => {
                     Some(ensure_capability(&self.conn, target)?)
                 }
-                // `memory.append_turn` where `local memory = require('core.memory')` names the
-                // module's `M.append_turn`. Resolve through the require alias.
-                None if kind == "calls" => resolve_alias(&self.conn, target, path)?,
                 None => None,
             };
             if let Some(id) = dst {

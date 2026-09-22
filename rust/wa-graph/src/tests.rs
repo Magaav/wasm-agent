@@ -366,7 +366,7 @@ fn a_dofile_alias_resolves_a_dotted_call() {
     .unwrap();
     std::fs::write(
         dir.join("lua/core/agent.lua"),
-        "local provider = dofile('lua/core/provider.lua')\nlocal function run()\n  return provider.budget()\nend\nreturn run\n",
+        "local provider = dofile('lua/core/provider.lua')\nlocal budget = 9\nlocal function run()\n  return provider.budget()\nend\nreturn run\n",
     )
     .unwrap();
     let db = dir.join("graph.db");
