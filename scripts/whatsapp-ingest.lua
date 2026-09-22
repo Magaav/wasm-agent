@@ -223,6 +223,7 @@ local function main()
           media = media_kind,
           sent_at = message.sent_at,
         }
+      end
       -- Eligibility first: a pipeline step must be handed only what the rule accepted, or the token rule
       -- (a group message that does not name the operator) is bypassed by the very mode that saves tokens.
       if json_events and eligible then
