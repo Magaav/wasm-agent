@@ -1,0 +1,24 @@
+[package]
+name = "wa-graph"
+version = "0.1.0"
+edition = "2021"
+description = "A wasm-agent-native code graph: tree-sitter defs/refs in SQLite, exposed to the agent."
+
+# Its own workspace, like wa-sentinel: a spike must not drag wasmtime into every build,
+# and it keeps its own lock so the graph indexer can move faster than the node.
+[workspace]
+
+[[bin]]
+name = "wa-graph"
+path = "src/main.rs"
+
+[dependencies]
+tree-sitter = "0.23"
+tree-sitter-rust = "=0.23.0"
+tree-sitter-lua = "=0.2.0"
+tree-sitter-bash = "=0.23.0"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3

@@ -49,3 +49,6 @@ tmp-*
 # A dev-mode node's own home (scripts/dev-agent.cmd): a candidate node must not write the
 # operator's ledger, and its database, identity and env copy are not source.
 .wasm-agent-dev/
+
+# wa-graph spike database (rust/wa-graph). A derived index, never source.
+.wa-graph/
