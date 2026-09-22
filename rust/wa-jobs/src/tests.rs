@@ -1,9 +1,20 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 static SEQ: AtomicUsize = AtomicUsize::new(0);
+/// A fresh store per test, in a path no other invocation can collide with.
+///
+/// The name used to be `(process id, per-process seq)` and the file was never removed. Process ids are
+/// reused, so a later run could open an *old* database - and then `put` of an identical definition is the
+/// documented no-op, leaving a job enabled that the test had just created and expected to be default-off.
+/// That failed the whole gate intermittently, which is worse than failing it honestly. A per-call
+/// timestamp makes the path unique across runs, not just across processes.
 fn store() -> Store {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
     Store::new(std::env::temp_dir().join(format!(
-        "wa-jobs-test-{}-{}.db",
+        "wa-jobs-test-{}-{stamp}-{}.db",
         std::process::id(),
         SEQ.fetch_add(1, Ordering::Relaxed)
     )))
