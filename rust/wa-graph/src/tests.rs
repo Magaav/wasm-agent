@@ -361,7 +361,7 @@ fn a_dofile_alias_resolves_a_dotted_call() {
     std::fs::create_dir_all(dir.join("lua/core")).unwrap();
     std::fs::write(
         dir.join("lua/core/provider.lua"),
-        "local M = {}\nfunction M.budget() return 1 end\nreturn M\n",
+        "local M = {}\nfunction M.budget()\n  local budget = 9\n  return budget\nend\nreturn M\n",
     )
     .unwrap();
     std::fs::write(
