@@ -531,7 +531,16 @@ fn execute(store: &wa_jobs::Store, delivery: &Value) -> Result<String> {
                 }
                 ran += 1;
             }
-            Ok(format!("pipeline completed {ran} step(s)"))
+            // What the run actually handed on, in the delivery's own detail. A delivery that found no
+            // messages and a delivery whose result was dropped by the runner used to look identical in
+            // `job history` - a 0-second "completed" - which is how a message nobody acted on stayed
+            // invisible for hours while every check I ran looked healthy. The count is derived from the
+            // results the steps actually handed on, so it cannot be reported without being true.
+            let handed: usize = results
+                .values()
+                .map(|value| value.as_array().map(|items| items.len()).unwrap_or(0))
+                .sum();
+            Ok(format!("pipeline completed {ran} step(s), handed on {handed} item(s)"))
         }
         _ => bail!("unsupported action"),
     }
