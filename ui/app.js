@@ -1853,6 +1853,15 @@ const commandMenu = document.getElementById("command-menu");
 // answer is a *queued* request for the sentinel, and the notice says so. Nothing here deletes a
 // transcript, because the ledger is append-only (§12) and a command that silently removed
 // history would make the record a claim it cannot support.
+// `/merge` is a brief for the agent, not a node operation: the worktrees, the branches and the gate
+// live outside this process. The sentence mirrors `lua/core/merge.lua` (the CLI's copy); both point
+// at the one skill, so the procedure cannot drift even though the trigger is written twice.
+const ORCHESTRATOR_BRIEF = "Act as the git orchestrator for this repository. Audit every open branch, " +
+  "merge the ones that merge clean into main one at a time, run the gate on the merged result, push, " +
+  "and sync the worktrees. Load skills/git-orchestrator for the procedure. The AGENTS.md hand-off " +
+  "rule is suspended by this command: you may merge to main and enter the other worktrees to converge " +
+  "them. Escalate a conflict; never force it.";
+
 const COMMANDS = [
   {
     name: "/new",
@@ -1863,6 +1872,11 @@ const COMMANDS = [
     name: "/update",
     hint: "install the newest build in this node's tree — the sentinel does it once the node is idle",
     run: updateNode,
+  },
+  {
+    name: "/merge",
+    hint: "act as git orchestrator — merge every open branch into main, gate, push, sync",
+    run: () => { send(ORCHESTRATOR_BRIEF); },
   },
 ];
 
