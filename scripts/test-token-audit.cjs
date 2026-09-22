@@ -112,6 +112,17 @@ assert.equal(r.tools.execution_phases.executor_overhead_ms,200);assert.equal(r.t
 assert.equal(r.tools.execution_phases.phase_timing.execution_ms.p50_ms,800);
 assert.equal(r.tools.execution_phases.execution_share,.8);assert.equal(r.tools.execution_phases.by_name.bash.samples,1);
 assert.equal(r.tools.by_name.other.completed,1);
+
+// A built-in tool must be named, not bucketed as `other`, or adoption is invisible; and a
+// navigation outcome must survive into the report.
+const navRows=[tool('graph-nav','nav','graph'),
+  event('graph-nav','tool','end',{name:'graph',ms:20,ok:true,clock:'monotonic',nav:{action:'path',found:false,count:0}},'a','nav')];
+const navAudit=audit(navRows);
+assert.equal(navAudit.tools.by_name.graph.completed,1);
+assert.equal(navAudit.tools.by_name.other,undefined);
+assert.equal(navAudit.navigation.calls,1);
+assert.equal(navAudit.navigation.by_action.path.not_found,1);
+assert.equal(navAudit.navigation.hit_rate,0);
 const incompleteTimingStart=tool('incomplete-timing','phase-errors','bash');
 const incompleteTimingEnd=toolEnd('incomplete-timing','phase-errors','bash',10);
 incompleteTimingEnd.payload.execution_timing={schema_version:1,clock:'monotonic',complete:false};
