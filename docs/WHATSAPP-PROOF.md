@@ -159,16 +159,27 @@ The page expressions and the guards are pure (`scripts/whatsapp-store-core.mjs`)
 adversarial fake app stores, plus the real CLI against a fake CDP server (`tests/whatsapp-store.js`). No
 live browser is opened by the fixture.
 
-### App metadata contract still to verify before widening the route
+### Verified app shape (read-only evidence, app 2.3000.1048024606)
 
-The route reads these from the app; each is unverified against the live build, so the route fails closed
-until the coordinator confirms it:
+The coordinator read these from the live app; the route and its fixture are built against them, not
+against guessed booleans:
 
-1. Is the per-chat draft exposed on the chat model (`chat.draft`), and under what name?
-2. Are `chat.urlText`/`chat.urlNumber` the link-preview fields the action clears?
-3. Does `sendTextMsgToChat` resolve to a value that carries the new message id/ack, or must the store be
-   polled for it?
-4. Which module exposes the active composer/selection (`WAWebComposerActions.getActiveComposer`?), or is
-   the active composer not observable from the store?
-5. For ordinary/group sends, which metadata proves the target kind and the account's own identity, so the
-   self-only limitation can be lifted?
+- `chat.id` is a Wid with pure `isUser()`/`isGroup()`/`isBot()` methods; `chat.isGroup` is **undefined**.
+  The route takes the kind from the Wid methods, with the id suffix only as a fallback.
+- The per-chat draft is **`chat.draftMessage`**, an object with a `text` string and a `timestamp`.
+  `chat.draft`/`draftText`/`composeContents` are undefined. The route uses `draftMessage` only to
+  decide whether a draft is present, and **never reads the text out**.
+- `chat.urlText`/`chat.urlNumber` are **undefined** on this build, so there is no link-preview state to
+  clear here; a present, non-empty value is still refused before the action.
+- `chat.unreadCount` is a number, `markedUnread` a boolean, `activeUnreadCount` a number;
+  `archive`/`isReadOnly` are booleans; `active` is a boolean; `typing`/`recording`/`isComposingPoll` are
+  booleans. The route refuses a read-only, archived or actively-composing target.
+
+The live self chat currently **has a draft** (`draftMessage.text` length 75). The live proof is therefore
+blocked until the operator clears it; the route refuses a present draft and never clears, overwrites or
+restores a draft automatically. The remaining open question is whether `sendTextMsgToChat` resolves to a
+value carrying the new message id/ack - the route does not depend on that, because it verifies from the
+store.
+
+Widening the route past self-only still needs the ordinary/group metadata contract (which metadata
+proves the target kind and the account's own identity); until then a non-self send is refused by name.

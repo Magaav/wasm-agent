@@ -148,22 +148,22 @@ export function routeGuard({ send, isMe }) {
   return "ordinary_chat_unverified";
 }
 
-// The pre-effect state guard. A send is refused when the target is known to hold a draft or a link
-// preview (the action clears `urlText`/`urlNumber`), and when the metadata needed to know that is
-// missing: unknown fails closed. A rehearsal is never blocked.
+// The pre-effect state guard, built against the actual verified chat shape (app 2.3000.1048024606):
+//   unreadCount number, archive/isReadOnly/markedUnread booleans, draftMessage object with a `text`
+//   string (never read out), urlText/urlNumber undefined on this build, active boolean, and
+//   typing/recording/isComposingPoll booleans. A send is refused when the target is read-only, archived,
+//   actively composing, or holds a draft (the action can clear link-preview state), and an unexpected
+//   draft shape fails closed. A rehearsal is never blocked.
 export function stateGuard({ send, target }) {
   if (!send) return null;
   if (!target || typeof target !== "object") return "target_unknown";
-  if (target.unread === null || target.unread === undefined) return "unread_unknown";
-  if (target.draft === null || target.draft === undefined) return "draft_unknown";
-  if (target.urlText === null || target.urlText === undefined) return "link_preview_unknown";
-  if (target.urlNumber === null || target.urlNumber === undefined) return "link_preview_unknown";
-  if (target.draft !== "") return "target_draft_present";
-  if (target.urlText !== "" || target.urlNumber !== "") return "link_preview_present";
-  // A known active composer on the target with content is a human's newer draft; never overwrite it.
-  if (target.activeChatId === target.id && typeof target.activeComposer === "string" && target.activeComposer !== "") {
-    return "target_composer_occupied";
-  }
+  if (target.isReadOnly === true) return "target_read_only";
+  if (target.archived === true) return "target_archived";
+  if (target.typing === true || target.recording === true || target.isComposing === true) return "target_composing";
+  if (target.draftPresent === null || target.draftPresent === undefined) return "draft_unknown";
+  if (target.draftPresent === true) return "target_draft_present";
+  const linkPreview = (value) => value !== undefined && value !== null && value !== "";
+  if (linkPreview(target.urlText) || linkPreview(target.urlNumber)) return "link_preview_present";
   return null;
 }
 
@@ -192,7 +192,10 @@ export function normalizeBody(body) {
 // template literal and breaks the file, so none appears below.
 
 // Read-only: resolve the target, the app's own self identity, the target's draft and link-preview
-// state, the active composer/selection, and whether the store action exists. It opens nothing.
+// state, the active chat, and whether the store action exists. It opens nothing. Built against the
+// verified shape: `chat.id` is a Wid with isUser/isGroup/isBot methods (chat.isGroup is undefined),
+// the draft is `chat.draftMessage` (its text is never read out), and urlText/urlNumber are undefined on
+// this build. The draft text is never returned.
 export function lookupExpression(chatId) {
   return `(() => {
     const grab = (name) => { try { return window.require(name); } catch (error) { return null; } };
@@ -200,11 +203,10 @@ export function lookupExpression(chatId) {
     if (!chatModule || !chatModule.ChatCollection) return JSON.stringify({ error: 'no_chat_collection' });
     const chats = chatModule.ChatCollection.getModelsArray() || [];
     const CHAT = ${JSON.stringify(chatId)};
-    const serialize = (value) => {
+    const idOf = (value) => {
       if (value === null || value === undefined) return '';
       if (typeof value === 'string') return value;
       if (value._serialized) return String(value._serialized);
-      if (value.id && value.id._serialized) return String(value.id._serialized);
       return String(value);
     };
     let me = null;
@@ -212,7 +214,7 @@ export function lookupExpression(chatId) {
     const call = (name, arg) => { try { return me && typeof me[name] === 'function' ? me[name](arg) : undefined; } catch (error) { return undefined; } };
     const meIds = [];
     for (const value of [call('getMaybeMePnUser'), call('getMaybeMeLidUser')]) {
-      const id = serialize(value);
+      const id = idOf(value);
       if (id && meIds.indexOf(id) < 0) meIds.push(id);
     }
     const accountKnown = meIds.length > 0 || typeof (me && me.isMeAccount) === 'function';
@@ -223,34 +225,43 @@ export function lookupExpression(chatId) {
       if (call('isSerializedWidMe', value) === true) return true;
       return meIds.indexOf(value) >= 0;
     };
-    const chat = chats.find((candidate) => String(candidate.id) === CHAT) || null;
+    const chat = chats.find((candidate) => idOf(candidate.id) === CHAT) || null;
     if (!chat) return JSON.stringify({ error: 'chat_not_found', account: meIds[0] || '', account_known: accountKnown });
-    const kind = CHAT.endsWith('@g.us') ? 'group' : CHAT.endsWith('@broadcast') ? 'broadcast'
+    const wid = chat.id;
+    const kind = (wid && typeof wid.isGroup === 'function' && wid.isGroup()) ? 'group'
+      : (wid && typeof wid.isBot === 'function' && wid.isBot()) ? 'bot'
+      : (wid && typeof wid.isUser === 'function' && wid.isUser()) ? 'direct'
+      : CHAT.endsWith('@g.us') ? 'group' : CHAT.endsWith('@broadcast') ? 'broadcast'
       : (CHAT.endsWith('@c.us') || CHAT.endsWith('@lid') || CHAT.endsWith('@s.whatsapp.net')) ? 'direct' : 'unknown';
     const maybe = (value) => value === undefined || value === null ? null : String(value);
-    let active = null;
-    try {
-      const composer = grab('WAWebComposerActions') || grab('WAWebComposeBoxActions');
-      if (composer && typeof composer.getActiveComposer === 'function') active = composer.getActiveComposer();
-    } catch (error) { active = null; }
-    const activeChatId = active ? String(active.chatId || (active.chat && active.chat.id) || '') : '';
-    const activeComposer = active ? String(active.text || '') : '';
-    const selection = active && active.selectionStart !== undefined && active.selectionStart !== null ? String(active.selectionStart) : null;
+    // The draft is the draftMessage field. Its text is used only to decide presence, never returned.
+    let draftPresent = false;
+    const draft = chat.draftMessage;
+    if (draft !== undefined && draft !== null) {
+      if (typeof draft !== 'object') draftPresent = null; // unexpected shape: unknown, fails closed
+      else draftPresent = String(draft.text === undefined || draft.text === null ? '' : draft.text).length > 0;
+    }
+    const activeChat = chats.find((candidate) => candidate.active === true) || null;
     const action = grab('WAWebSendTextMsgChatAction');
     return JSON.stringify({
       ok: true,
-      chat: { id: String(chat.id), name: String(chat.formattedTitle || chat.name || ''), kind },
-      is_me: isMe(String(chat.id)),
+      chat: { id: idOf(chat.id), name: String(chat.formattedTitle || chat.name || ''), kind: kind },
+      is_me: isMe(idOf(chat.id)),
       account: meIds[0] || '',
       account_ids: meIds,
       account_known: accountKnown,
       unread: Number(chat.unreadCount || 0),
-      draft: maybe(chat.draft),
+      marked_unread: chat.markedUnread === true,
+      archived: chat.archive === true,
+      is_read_only: chat.isReadOnly === true,
+      draft_present: draftPresent,
       url_text: maybe(chat.urlText),
       url_number: maybe(chat.urlNumber),
-      active_chat_id: activeChatId,
-      active_composer: activeComposer,
-      selection: selection,
+      active: chat.active === true,
+      active_chat_id: activeChat ? idOf(activeChat.id) : '',
+      typing: chat.typing === true,
+      recording: chat.recording === true,
+      is_composing: chat.isComposingPoll === true,
       action_available: !!(action && typeof action.sendTextMsgToChat === 'function'),
       chats: chats.length,
     });

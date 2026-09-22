@@ -111,12 +111,15 @@ async function main() {
   };
 
   if (!args.send) {
-    // A rehearsal inspects and reports; it opens nothing and calls no action.
+    // A rehearsal inspects and reports; it opens nothing and calls no action. The draft text is never
+    // read out - only whether a draft is present.
     return done({ ok: true, dry_run: true, ...base, action_available: target.action_available === true,
       target: {
-        unread: target.unread, draft: target.draft, url_text: target.url_text, url_number: target.url_number,
-        active_chat_id: target.active_chat_id, active_composer: target.active_composer, selection: target.selection,
-        is_me: target.is_me === true, account_known: target.account_known === true,
+        unread: target.unread, marked_unread: target.marked_unread === true, archived: target.archived === true,
+        is_read_only: target.is_read_only === true, draft_present: target.draft_present,
+        url_text: target.url_text, url_number: target.url_number, active: target.active === true,
+        active_chat_id: target.active_chat_id, typing: target.typing === true, recording: target.recording === true,
+        is_composing: target.is_composing === true, is_me: target.is_me === true, account_known: target.account_known === true,
       } }, 0);
   }
 
@@ -143,20 +146,25 @@ async function main() {
       observed: "the target is not proven to be the account's own chat" }, 5);
   }
 
-  // 4. The pre-effect state guard: refuse a known draft/link-preview state; unknown metadata fails closed.
+  // 4. The pre-effect state guard, built against the verified chat shape: read-only, archived, actively
+  //    composing, or a present draft refuses the send before the action runs; an unexpected draft shape
+  //    fails closed.
   const state = stateGuard({ send: true, target: {
     id: target.chat.id,
-    unread: target.unread,
-    draft: target.draft,
+    isReadOnly: target.is_read_only,
+    archived: target.archived,
+    typing: target.typing,
+    recording: target.recording,
+    isComposing: target.is_composing,
+    draftPresent: target.draft_present,
     urlText: target.url_text,
     urlNumber: target.url_number,
-    activeChatId: target.active_chat_id,
-    activeComposer: target.active_composer,
   } });
   if (state) {
     return done({ ok: false, error: state, ...base,
-      target: { unread: target.unread, draft: target.draft, url_text: target.url_text, url_number: target.url_number,
-        active_chat_id: target.active_chat_id, active_composer: target.active_composer, selection: target.selection },
+      target: { unread: target.unread, draft_present: target.draft_present, url_text: target.url_text,
+        url_number: target.url_number, is_read_only: target.is_read_only, archived: target.archived,
+        typing: target.typing, recording: target.recording, is_composing: target.is_composing },
       observed: "the target's pre-effect state is not safe to send from; nothing was dispatched" }, 5);
   }
 
