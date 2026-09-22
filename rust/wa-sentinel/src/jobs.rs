@@ -19,6 +19,13 @@ fn inference_action(kind: &str) -> bool {
     matches!(kind, "wake" | "subagent")
 }
 
+/// The lane a delivery belongs on, decided from the whole action rather than its kind name: a `pipeline`
+/// that starts a child is inference, and claiming it on the deterministic lane would let it push a
+/// person's turn aside - the one thing the two lanes exist to prevent.
+fn delivery_is_inference(action: &Value) -> bool {
+    wa_jobs::action_is_inference(action)
+}
+
 /// The inference lane is available when the subagent service reserves child capacity, or - legacy - when
 /// the node is idle. This is the seam the subagent service fills: with reserved capacity, a job wake no
 /// longer takes the interactive lane at all. Until that capacity is advertised, an inference delivery
@@ -273,7 +280,7 @@ impl Runner {
 /// a budget refusal is deferred (not failed), a panic and a timeout are `unknown` (never retried), and a
 /// recorded outcome failure is visible in the audit log.
 fn spawn_delivery(source: wa_jobs::Store, delivery: Value) {
-    let inference = inference_action(delivery["action"]["kind"].as_str().unwrap_or(""));
+    let inference = delivery_is_inference(&delivery["action"]);
     let counter: &'static AtomicUsize = if inference {
         &INFERENCE_ACTIVE
     } else {
@@ -454,7 +461,189 @@ fn execute(store: &wa_jobs::Store, delivery: &Value) -> Result<String> {
                 }
             }
         }
+        // A chain of steps in one delivery: deterministic and inference together. The per-item identity the
+        // event seam used to provide is kept here - a `foreach` item's key becomes its child's idempotency
+        // key, so a re-run reconciles instead of spawning a second child - and the revision is re-checked
+        // between steps, so stopping still means stopping.
+        "pipeline" => {
+            let steps = action["steps"].as_array().cloned().unwrap_or_default();
+            let mut results: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+            let mut ran = 0usize;
+            for (index, step) in steps.iter().enumerate() {
+                let number = index + 1;
+                if !store
+                    .current(id, rev)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?
+                {
+                    bail!("delivery cancelled: job {id} disabled or revised before step {number}");
+                }
+                match step["kind"].as_str().unwrap_or("") {
+                    "run" => {
+                        let value = run_pipeline_step(store, id, rev, delivery, step, number)?;
+                        if let Some(name) = step["returns"].as_str() {
+                            results.insert(name.to_string(), value);
+                        }
+                    }
+                    "subagent" => {
+                        let message_id = delivery["event"]["message_id"].as_str().unwrap_or("");
+                        start_and_await_child(
+                            store, id, rev, delivery, step, message_id,
+                            &format!("{id}:{rev}:step{number}"),
+                            step["timeout_seconds"].as_u64().unwrap_or(900),
+                        )?;
+                    }
+                    "foreach" => {
+                        let from = step["from"].as_str().unwrap_or("");
+                        let items = results.get(from).and_then(Value::as_array).cloned().unwrap_or_default();
+                        let key = step["key"].as_str().unwrap_or("");
+                        let max = step["max"].as_u64().unwrap_or(1) as usize;
+                        let inner = &step["step"];
+                        for item in items.iter().take(max) {
+                            let item_key = item.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+                            if item_key.is_empty() {
+                                bail!("step {number}: an item has no {key:?}, so it has no identity to dedupe on");
+                            }
+                            // The item's own id is the idempotency key, so the job store's own dedupe
+                            // applies to a child exactly as it did to an event delivery.
+                            start_and_await_child(
+                                store, id, rev, delivery, inner, &item_key,
+                                &format!("{id}:{rev}:{item_key}"),
+                                inner["timeout_seconds"].as_u64().unwrap_or(900),
+                            )?;
+                        }
+                        if items.len() > max {
+                            // Bounded, and said out loud: the rest wait for the next run rather than
+                            // being dropped silently.
+                            audit(
+                                "job-pipeline-bounded",
+                                id,
+                                &format!("step {number}: {} item(s) left for the next run", items.len() - max),
+                            );
+                        }
+                    }
+                    other => bail!("unsupported pipeline step kind {other:?}"),
+                }
+                ran += 1;
+            }
+            Ok(format!("pipeline completed {ran} step(s)"))
+        }
         _ => bail!("unsupported action"),
+    }
+}
+
+/// One `run` step of a pipeline. The step's result is what it printed: one JSON object on stdout, the
+/// same contract a `run` action and a spell's `run` step already use - so "a deterministic step succeeded"
+/// has one shape in this system rather than three.
+fn run_pipeline_step(
+    store: &wa_jobs::Store,
+    id: &str,
+    rev: i64,
+    delivery: &Value,
+    step: &Value,
+    number: usize,
+) -> Result<Value> {
+    let path = approved_script(step["script"].as_str().unwrap_or(""))?;
+    let (program, argument) = shell_for(&path);
+    let mut spec = wa_operation::Spec::command(program, vec![argument]);
+    spec.timeout = Duration::from_secs(step["timeout_seconds"].as_u64().unwrap_or(300));
+    spec.owner = format!("job:{id}:{}", delivery["id"]);
+    let event_path = sentinel_dir().join(format!("job-event-{}.json", delivery["id"]));
+    wa_operation::atomic_json(&event_path, &delivery["event"])?;
+    spec.env.push((
+        "WA_JOB_EVENT_FILE".into(),
+        event_path.to_string_lossy().to_string(),
+    ));
+    let manager = wa_operation::Manager::new(sentinel_dir().join("operations"));
+    let operation = manager.start(spec)?;
+    loop {
+        if !store
+            .current(id, rev)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?
+        {
+            manager.cancel(&operation)?;
+            bail!("delivery cancelled: job {id} disabled or revised during step {number}");
+        }
+        let state = manager.wait(&operation, Duration::from_millis(100))?;
+        if state["settled"] == true {
+            if state["ok"] != true {
+                bail!(
+                    "step {number}: operation {operation} code={} error={}; inspect its retained output",
+                    state["code"],
+                    state["error"]
+                );
+            }
+            let stdout_path = state["stdout_path"]
+                .as_str()
+                .or_else(|| state["stdout_file"].as_str())
+                .unwrap_or("");
+            let printed = std::fs::read_to_string(stdout_path).unwrap_or_default();
+            let trimmed = printed.trim();
+            if trimmed.is_empty() {
+                return Ok(Value::Null);
+            }
+            return serde_json::from_str(trimmed).map_err(|e| {
+                anyhow::anyhow!("step {number} printed no JSON result, so it has nothing to hand on: {e}")
+            });
+        }
+        if state["overdue"] == true {
+            manager.cancel(&operation)?;
+            bail!("step {number}: operation {operation} overdue; cleanup unknown");
+        }
+    }
+}
+
+/// Start one child and wait for it, bounded, with the same rules the `subagent` action uses: the
+/// admission is idempotent on its key, a disabled or revised job cancels the child, a deadline that
+/// expires is `unknown` and is never retried.
+fn start_and_await_child(
+    store: &wa_jobs::Store,
+    id: &str,
+    rev: i64,
+    delivery: &Value,
+    step: &Value,
+    message_id: &str,
+    idempotency_key: &str,
+    timeout_seconds: u64,
+) -> Result<String> {
+    let profile = step["profile"].as_str().unwrap_or("");
+    let started = node_subagents(&json!({
+        "action": "start",
+        "profile": profile,
+        "prompt": step["prompt"],
+        "event": { "message_id": message_id },
+        "delivery_id": delivery["id"],
+        "idempotency_key": idempotency_key,
+    }))
+    .map_err(|e| anyhow::anyhow!("subagent outcome unknown: admission failed: {e}"))?;
+    let subagent_id = started["subagent_id"]
+        .as_str()
+        .or_else(|| started["id"].as_str())
+        .ok_or_else(|| anyhow::anyhow!("subagent service did not return an id: {started}"))?
+        .to_string();
+    if settled_subagent(&started) {
+        return subagent_outcome(&subagent_id, &started);
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_seconds);
+    loop {
+        if !store
+            .current(id, rev)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?
+        {
+            let _ = node_subagents(&json!({"action":"cancel","subagent_id":subagent_id}));
+            bail!("delivery cancelled: job {id} disabled or revised during subagent; cancelled child {subagent_id}");
+        }
+        let awaited = node_subagents(&json!({
+            "action": "await",
+            "subagent_id": subagent_id,
+            "timeout_ms": 60000,
+        }))?;
+        if settled_subagent(&awaited) {
+            return subagent_outcome(&subagent_id, &awaited);
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!("subagent outcome unknown: {subagent_id} still {} after its deadline; not retried",
+                awaited["state"].as_str().unwrap_or("running"));
+        }
     }
 }
 

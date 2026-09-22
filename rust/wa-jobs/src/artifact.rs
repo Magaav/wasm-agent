@@ -383,6 +383,13 @@ pub fn export_artifact(job: &Value) -> super::Result<Value> {
         _ => {}
     }
     let action_kind = job["action"]["kind"].as_str().unwrap_or("");
+    if action_kind == "pipeline" {
+        // Refused rather than exported with its steps dropped. A pipeline's meaning *is* its steps, and its
+        // scripts are machine bindings: an artifact carrying only `{"kind":"pipeline"}` would look complete
+        // and do nothing - the same failure `docs/SPELLS.md` refuses for a sentinel plan, for the same
+        // reason. Per-step script slots are the next step, not a guess made here.
+        return fail("pipeline_not_exportable_yet");
+    }
     let action = copy_allowed(
         &job["action"],
         match action_kind {

@@ -18,6 +18,29 @@ fn fail<T>(why: &str) -> Result<T> {
 fn ident(s: &str) -> bool {
     ident_str(s)
 }
+/// Does this action need a model? `wake` and `subagent` do; `run` does not; a `pipeline` does when any of
+/// its steps does. The lanes are decided from the *action*, not from its kind name: a pipeline that starts
+/// a child must never be claimed on the deterministic lane, or it would push a person's turn aside - the
+/// property the two lanes exist to keep.
+pub fn action_is_inference(action: &Value) -> bool {
+    match action["kind"].as_str().unwrap_or("") {
+        "wake" | "subagent" => true,
+        "pipeline" => action["steps"]
+            .as_array()
+            .map(|steps| steps.iter().any(step_is_inference))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn step_is_inference(step: &Value) -> bool {
+    match step["kind"].as_str().unwrap_or("") {
+        "wake" | "subagent" => true,
+        "foreach" => step_is_inference(&step["step"]),
+        _ => false,
+    }
+}
+
 fn ident_str(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 100
@@ -64,7 +87,12 @@ pub fn validate(job: &Value) -> Result<()> {
         }
         _ => return fail("unknown_job_trigger"),
     }
-    let action = &job["action"];
+    validate_action(&job["action"])
+}
+
+/// One action, validated. Split out of `validate` because a `pipeline` validates each of its steps with
+/// exactly these rules: a nested step must not be able to be something the action level would refuse.
+pub fn validate_action(action: &Value) -> Result<()> {
     match action["kind"].as_str().unwrap_or("") {
         "wake" => {
             if action["session"].as_str().unwrap_or("").is_empty()
@@ -102,6 +130,56 @@ pub fn validate(job: &Value) -> Result<()> {
         "run" => {
             if !Path::new(action["script"].as_str().unwrap_or("")).is_absolute() {
                 return fail("run_needs_absolute_allowlisted_script");
+            }
+        }
+        // A chain of steps in one delivery: deterministic and inference steps together. A job is one
+        // trigger + one action, so this is what lets "read, decide, report" be a single job instead of two
+        // joined by an event - while keeping the per-step identity the event seam used to provide.
+        "pipeline" => {
+            let steps = match action["steps"].as_array() {
+                Some(steps) if !steps.is_empty() => steps,
+                _ => return fail("pipeline_needs_steps"),
+            };
+            if steps.len() > 32 {
+                return fail("pipeline_too_many_steps");
+            }
+            for (index, step) in steps.iter().enumerate() {
+                let number = index + 1;
+                match step["kind"].as_str().unwrap_or("") {
+                    "run" => {
+                        if !Path::new(step["script"].as_str().unwrap_or("")).is_absolute() {
+                            return fail(&format!("step_{number}_run_needs_absolute_script"));
+                        }
+                        if let Some(name) = step.get("returns") {
+                            if !name.as_str().map(ident_str).unwrap_or(false) {
+                                return fail(&format!("step_{number}_returns_must_be_a_name"));
+                            }
+                        }
+                    }
+                    "foreach" => {
+                        if !step["from"].as_str().map(ident_str).unwrap_or(false) {
+                            return fail(&format!("step_{number}_foreach_needs_from"));
+                        }
+                        if !step["key"].as_str().map(ident_str).unwrap_or(false) {
+                            return fail(&format!("step_{number}_foreach_needs_key"));
+                        }
+                        if !matches!(step["max"].as_u64(), Some(1..=64)) {
+                            return fail(&format!("step_{number}_foreach_max_out_of_range"));
+                        }
+                        let inner = &step["step"];
+                        // The inner step is what spends the money, so it must be a `subagent` - the child
+                        // service's capacity is what bounds it. A `wake` is refused: its allowance is
+                        // counted per hour in one place, and a loop is not that place.
+                        if inner["kind"].as_str() != Some("subagent") {
+                            return fail(&format!("step_{number}_foreach_step_must_be_a_subagent"));
+                        }
+                        validate_action(inner)?;
+                    }
+                    // A `wake` step is refused for the same reason: one budget, spent in one place.
+                    "subagent" => validate_action(step)?,
+                    "wake" => return fail(&format!("step_{number}_wake_not_allowed_in_pipeline")),
+                    _ => return fail(&format!("step_{number}_unknown_kind")),
+                }
             }
         }
         _ => return fail("job_action_must_be_wake_or_run"),
@@ -392,13 +470,21 @@ impl Store {
         drop(statement);
         for (id, job_id, revision, event_id, payload, definition) in rows {
             let job: Value = serde_json::from_str(&definition)?;
-            let action_kind = job["action"]["kind"].as_str().unwrap_or("");
+            let action = &job["action"];
+            // Classified from the action, not from its kind name: a pipeline that starts a child is
+            // inference, and must never be claimed on the lane that runs beside a person's turn.
+            let inference = action_is_inference(action);
             if let Some(kinds) = kinds {
-                if !kinds.contains(&action_kind) {
+                let wanted = if inference {
+                    kinds.iter().any(|kind| matches!(*kind, "wake" | "subagent"))
+                } else {
+                    kinds.contains(&"run")
+                };
+                if !wanted {
                     continue;
                 }
             }
-            if action_kind == "wake" {
+            if action["kind"].as_str() == Some("wake") {
                 let used: i64 = tx.query_row(
                     "SELECT count(*) FROM deliveries WHERE started_at>=? AND action_kind='wake'",
                     [now - 3600],

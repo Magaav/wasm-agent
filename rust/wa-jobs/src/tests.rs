@@ -286,3 +286,68 @@ fn artifact_import_installs_disabled_and_is_revision_safe() {
     assert!(changed["job"]["revision"].as_i64().unwrap() > revision, "an edit bumps the revision");
     assert_eq!(changed["job"]["enabled"], false);
 }
+
+/// A pipeline is a chain in one delivery: deterministic steps and the inference step that needs a model.
+/// Two properties are load-bearing and asserted here - that its steps are validated with the same rules
+/// the action level uses, and that a pipeline containing a child is classified as *inference*, so it can
+/// never be claimed on the lane that runs beside a person's turn.
+#[test]
+fn a_pipeline_validates_its_steps_and_lands_on_the_inference_lane() {
+    // A script path must be absolute *on this platform* - the rule the `run` action already enforces.
+    // `/tmp/x.sh` is not an absolute path on Windows, which is how this test first failed.
+    let dir = std::env::temp_dir();
+    let read = dir.join("pipeline-read.sh").to_string_lossy().to_string();
+    let report = dir.join("pipeline-report.sh").to_string_lossy().to_string();
+
+    let good = json!({
+        "id": "p", "name": "p",
+        "trigger": {"kind": "schedule", "every_seconds": 60},
+        "action": {"kind": "pipeline", "steps": [
+            {"kind": "run", "script": read, "returns": "events"},
+            {"kind": "foreach", "from": "events", "key": "message_id", "max": 8,
+             "step": {"kind": "subagent", "profile": "whatsapp-responder", "prompt": "decide"}},
+            {"kind": "run", "script": report}
+        ]}
+    });
+    assert!(validate(&good).is_ok(), "run/foreach/run must validate: {:?}", validate(&good).err());
+    assert!(action_is_inference(&good["action"]), "a pipeline that starts a child is inference");
+
+    let deterministic = json!({"kind": "pipeline", "steps": [{"kind": "run", "script": read}]});
+    assert!(!action_is_inference(&deterministic), "a pipeline of only run steps is deterministic");
+    assert!(!action_is_inference(&json!({"kind": "run", "script": read})));
+    assert!(action_is_inference(&json!({"kind": "subagent", "profile": "x", "prompt": "y"})));
+
+    let refusal = |action: Value| {
+        validate(&json!({"id": "p", "name": "p",
+            "trigger": {"kind": "schedule", "every_seconds": 60}, "action": action}))
+            .unwrap_err()
+            .to_string()
+    };
+    assert_eq!(refusal(json!({"kind": "pipeline", "steps": []})), "pipeline_needs_steps");
+    assert_eq!(
+        refusal(json!({"kind": "pipeline", "steps": [{"kind": "run", "script": "relative.sh"}]})),
+        "step_1_run_needs_absolute_script"
+    );
+    assert_eq!(
+        refusal(json!({"kind": "pipeline", "steps": [{"kind": "run", "script": read, "returns": "not a name"}]})),
+        "step_1_returns_must_be_a_name"
+    );
+    assert_eq!(
+        refusal(json!({"kind": "pipeline", "steps": [{"kind": "foreach", "from": "e", "key": "k", "max": 0,
+            "step": {"kind": "subagent", "profile": "x", "prompt": "y"}}]})),
+        "step_1_foreach_max_out_of_range"
+    );
+    assert_eq!(
+        refusal(json!({"kind": "pipeline", "steps": [{"kind": "foreach", "from": "e", "key": "k", "max": 2,
+            "step": {"kind": "run", "script": read}}]})),
+        "step_1_foreach_step_must_be_a_subagent"
+    );
+    assert_eq!(
+        refusal(json!({"kind": "pipeline", "steps": [{"kind": "wake", "session": "s", "prompt": "p"}]})),
+        "step_1_wake_not_allowed_in_pipeline"
+    );
+    assert_eq!(
+        refusal(json!({"kind": "pipeline", "steps": [{"kind": "assert"}]})),
+        "step_1_unknown_kind"
+    );
+}
