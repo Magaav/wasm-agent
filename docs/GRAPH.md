@@ -58,9 +58,15 @@ context to use it before `grep` and how to read the result — including that a
 
 ## Limits worth knowing before trusting a result
 
-- Resolution is by name. Trait/generic identity is not modelled, and a call
-  through a differently-named module alias can land on a same-named test stub.
-  If an expected caller is missing, confirm with `grep`.
+- Resolution is by name. `require` and `dofile` aliases resolve; a call through a
+  differently-named module alias can land on a same-named stub. Builtins and
+  externals (`print`, `dofile`, Rust `std::`) stay unresolved on purpose - they
+  have no definition in the tree, so they are not a gap to close. If an expected
+  caller is missing, confirm with `grep`.
+- `path` is directional: it follows A's calls/imports *down* to B, never back up to
+  A's callers, and it does not treat a shared callee as connecting two functions.
+  "How does A reach B" and "who calls B" are different questions; the second is
+  `explain`.
 - Markdown contributes `mentions` edges only when a backtick span names a real
   definition; `path` traversal ignores mentions entirely.
 - The graph is a map. Always read a file before editing it.
