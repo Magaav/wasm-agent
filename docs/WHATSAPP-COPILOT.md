@@ -1,0 +1,135 @@
+# WhatsApp Copilot
+
+One feature, two job records. It reads the operator's WhatsApp store, decides which messages are
+waiting on them, and answers those — or records, durably, why it did not.
+
+## Why two records and not one
+
+A job is exactly **one trigger + one action**, and this pipeline has two stages with different triggers:
+
+| record | trigger | action | what it is |
+| --- | --- | --- | --- |
+| `whatsapp-ingest` — "WhatsApp Copilot - reader (free stage, no model, every 5 min)" | `schedule`, 300 s | `run` → `scripts/whatsapp-ingest-emit.sh` | reads the store into the ledger and emits **one event per genuinely new eligible message** |
+| `whatsapp-message` — "WhatsApp Copilot" | `event`, topic `whatsapp.message` | `subagent`, profile `whatsapp-responder` | answers one message: read, decide, and at most one verified reply |
+
+Collapsing them is not possible without losing something real:
+
+- A single schedule-triggered child would spend a model turn every tick even when nothing arrived, and a
+  child's tools are bound to **one** message by a trusted event — it cannot answer several.
+- A single `run` script that started children itself would lose the per-message delivery: the
+  idempotency key (`job:revision:event_id`), the cancel-on-disable of a running child, the bounded
+  `await`, and `unknown`-never-replayed on timeout.
+
+So: **turn the feature on and off with `whatsapp-message`.** The reader is the free stage; leave it on
+while the copilot is on. With the copilot off, `emit` finds no enabled subscriber and enqueues nothing,
+so the paid stage stops cleanly.
+
+## The free stage: the token gate
+
+The rule lives in `scripts/whatsapp-eligibility.mjs` and runs in the ingest — a script, no model. A
+message becomes an event only if it passes:
+
+- **direct chats**: any new incoming message;
+- **groups**: only a **verified mention** of the operator's own ids. `WA_WHATSAPP_OPERATOR` is the local
+  binding that makes that check possible; without it no group mention can be verified and every group
+  message is refused (`group_without_operator_mention`). Measured on the live store: 439 group messages
+  refused, 1 mention eligible.
+- **refused outright**: not incoming, archived, `archived_unknown`, `left`, statuses, broadcasts, and any
+  chat whose metadata cannot be verified.
+
+`left` is **derived**, not read: this app build exposes no `isLeft/left/hasLeft/isExited`, so
+`scripts/whatsapp-read-core.mjs` decides it from what the build does expose — an explicit flag if one
+ever appears, a direct chat is never left, a group is decided by its participant list, else by its own
+`canSend` — and stays `null` (refused) when nothing is available.
+
+The cursor (`whatsapp_cursor`) means a restart does not replay the backlog: only messages newer than the
+last pass emit. The first pass after a long outage therefore imports without answering.
+
+## The paid stage: the child's envelope
+
+Everything below is structural, not prompt-level.
+
+| | |
+| --- | --- |
+| tools | `whatsapp_read`, `whatsapp_decide`, `whatsapp_send` — no bash, read, write, client, operation; `subagent` recursion is refused |
+| scope | the conversations in the profile; a call may act only on the conversation its trusted event names, and a foreign argument is refused (`event_conversation_immutable`) |
+| what it may see | the ledger conversation (messages **and its own title**), never the operator's other tools, memory or session |
+| limits | 20 context messages, 1024-byte body, 1 send per run, 600 s, 60k tokens |
+| model | `deepseek-v4.1-flash`, reasoning `low` — measured ≈ $0.000279 per decision (243 reasoning tokens vs 394 at `high`) |
+
+The child is started by the **sentinel**, not by the agent: it calls the node's `/subagents` with the
+profile, the prompt, `event: {message_id}` (the id only — the runtime resolves the conversation from the
+ledger row) and `idempotency_key: <job>:<revision>:<event_id>`. A re-run reconciles the existing child
+instead of spawning a second; a timeout is `unknown` and is never replayed; a job disabled or revised
+mid-child cancels it.
+
+**Durable effects.** A send is `reserve → send → confirm`. A crash between reserve and confirm leaves a
+pending row, which returns `ambiguous` and is refused or reconciled — never retried. Decisions live in
+their own table (`effect_decisions`), keyed by message id, so recording one can never erase a
+reservation.
+
+**Sending.** `send_path: ui` is the only route proven for a third-party chat, and it **opens the chat**,
+which clears that chat's unread marker — accepted explicitly by the operator (`allow_mark_read: true`).
+The route refuses to overwrite a draft, refuses a non-self send without that approval, and verifies the
+sent message in the app's store: a keystroke's acknowledgement is not evidence (it has reported
+`timeout: Input.dispatchKeyEvent` while the message verifiably delivered).
+
+## Operating it
+
+```
+wa-sentinel job list                 # ON: whatsapp-message (the copilot), whatsapp-ingest (the reader)
+wa-sentinel job enable|disable <id>  # the operator's switch; a changed definition needs re-approval
+wa-sentinel job history              # one row per delivery
+```
+
+- **The source** is Chrome on the agent profile (`%LOCALAPPDATA%\AgentBrowserChromeProfile`) with
+  `--remote-debugging-port=9222`; the reader and the reply script default to loopback `9222`
+  (`WA_CDP_PORT` overrides). `bash scripts/whatsapp-preflight.sh` answers "is the chain up" in one line.
+- **Do not start that Chrome as a node operation.** A running operation makes the sentinel read the node
+  as busy forever, which starves the inference lane — no child is ever claimed. Start it outside the node
+  (the wrapper `%LOCALAPPDATA%\wasm-agent\whatsapp-chrome.cmd`, or the operator's own browser).
+- **The sentinel must be running**, or no delivery executes at all (and its history will show the reader
+  "completing" while nothing is read).
+- **Children wait for idle.** The inference lane is only claimed when the node is idle, deliberately, so a
+  child never pushes a person's turn aside.
+
+## Failure modes this pipeline has already had
+
+Each of these was found live, with evidence, and fixed. They are the reason the checks above exist.
+
+1. **Every child was offered zero tool schemas.** `agent.lua` passed the profile's `allowed_tools`
+   *list* to `tools.all_for`, which filters by *set*; the child's dispatch re-check read the set and
+   passed. The model, told in prose which tool to use, emitted DeepSeek DSML markup as text, made no tool
+   call, and the run ended having done nothing. Fixed by one tested derivation
+   (`agent.subagent_tool_list`).
+2. **The eligibility rule refused every chat.** `left` was read from fields this build does not have, so
+   all 677 chats were `left_unknown`: `eligible=0`, zero events, a pipeline that was enabled and silent.
+   Fixed by deriving `left` (`scripts/whatsapp-read-core.mjs`); live result `eligible=0 → 267`.
+3. **A running operation starved the child lane** (see above) — the fix is not to create one.
+4. **A child could not name the conversation it answered.** `whatsapp_read` returned the id and the
+   messages and no title, so labels were inferred from content: a group was reported as
+   "futebol/bet" whose title is "A Casa Lar | 🏠", and "vizinhos" was really "Os Menezes". Fixed by
+   returning the ledger's own `title` and `kind`.
+5. **The reader's script must ship with the node.** `deploy.sh` ships `scripts/whatsapp-*` and
+   `jobs/whatsapp-*.json` into the install; a reader that exists only in a checkout is not deployed.
+
+## Retired
+
+Two job records are kept, **disabled**, labelled `(retired)` so the list is honest — the job CLI has no
+delete verb (`list|history|put|enable|disable|export|import|emit|requirements`):
+
+- **`whatsapp-events`** — a CDP page-event job (`wake` on a `wa_event` binding plus a document-start hook).
+  Rejected as the source: the store route opens nothing and marks nothing read, while a UI-driven route
+  clears unread markers, and the CDP hook drifts on every page reload (the preflight reports the pin as
+  stale). The store reader replaced it. `whatsapp-ingest` needs no page hook.
+- **`whatsapp-wake-selftest`** — a wake self-test on a `whatsapp.message` event, from the era when the
+  ingest emitted on the wrong topic (`app.message`), which is why the reply job had never once been woken.
+  The real pipeline supersedes it.
+
+## What is proven, and what is not
+
+- **Proven**: the reader reads the live store (`chats=677`) and eligibility passes; the scoped read
+  returns real titles and kinds; a child gets real tool schemas and completes; a child records a durable
+  decision (`effect_decisions`); the send route is store-verified end to end (notes-to-self); the gate is
+  green.
+- **Not proven**: a reply to a real third party. Nothing has been sent to anyone but the operator.
