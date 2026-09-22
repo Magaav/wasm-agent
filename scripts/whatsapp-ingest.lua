@@ -178,11 +178,16 @@ local function main()
   -- Emissions are opt-in (`--emit-events` on the shell script), because a wake is a turn and this run
   -- is not the one that decides when the reply job is allowed to cost anything.
   local emit_on = (host.getenv and host.getenv("WA_WHATSAPP_EMIT") or "") ~= ""
+  -- The pipeline mode: print the new eligible messages as JSON and let the job's own foreach step
+  -- start the children. Emitting here as well would start each one twice - once by event, once by the
+  -- loop - so the two modes are exclusive and this flag says which one this run is.
+  local json_events = (host.getenv and host.getenv("WA_WHATSAPP_JSON_EVENTS") or "") ~= ""
   local sentinel = emit_on and sentinel_binary() or nil
   if emit_on and not sentinel then
     report("whatsapp ingest note=emit_requested_but_no_sentinel")
   end
   local emitted, emit_error = 0, nil
+  local events = {}
   local skipped_ineligible = 0
   for _, message in ipairs(payload.messages or {}) do
     memory.record_message({
@@ -202,7 +207,17 @@ local function main()
     local verdict = message.eligibility
     local eligible = type(verdict) == "table" and verdict.eligible == true
     if emit_on and cursor > 0 and (message.sent_at or 0) > cursor and message.direction == "incoming" then
-      if not eligible then
+      if json_events then
+        events[#events + 1] = {
+          message_id = message.message_id,
+          conversation_id = message.conversation_id,
+          sender_id = message.sender_id,
+          sent_at = message.sent_at,
+          direction = message.direction,
+          body = message.body,
+          eligibility = verdict,
+        }
+      elseif not eligible then
         skipped_ineligible = skipped_ineligible + 1
       elseif sentinel then
         local ok, why = emit_event(sentinel, "whatsapp.message", message.message_id, {
@@ -228,6 +243,12 @@ local function main()
   local elapsed = host.monotonic_ms and (host.monotonic_ms() - started) or 0
   -- One line, greppable, with the numbers that say whether the diff is working: `read` is what the
   -- reader returned (the rescan window), `new` is what the ledger did not already have.
+  if json_events then
+    -- One JSON object and nothing else on stdout: a pipeline step succeeds on exit 0 *and* a JSON
+    -- object, and a stray report line would make the whole result unparseable.
+    print(json.encode({ events = events, cursor = math.floor(math.max(cursor, newest)) }))
+    return
+  end
   report(string.format(
     "whatsapp ingest ok db=%s read=%d new=%d conversations=%d eligible=%d ineligible=%d cursor=%d events=%d skipped=%d%s ms=%d",
     paths.data(), math.floor(#(payload.messages or {})), math.floor(after - before),
