@@ -292,6 +292,56 @@ fn redirected_background_descendant_is_not_silent_success() {
 }
 
 #[test]
+fn promoted_descendants_are_adopted_not_failed() {
+    let (m, root) = fixture();
+    std::fs::create_dir_all(&root).unwrap();
+    let mut spec = shell("(sleep 30; printf leaked > orphan-proof) & printf visible");
+    spec.cwd = root.to_string_lossy().to_string();
+    spec.promote_descendants = true;
+    spec.promoted_timeout = Duration::from_secs(30);
+    let id = m.start(spec).unwrap();
+    // The shell exits at once. Without promotion this is `background_descendants`; with
+    // it the operation is still running and says so, instead of reporting a failure.
+    std::thread::sleep(Duration::from_millis(400));
+    let live = m.snapshot(&id).unwrap();
+    assert_eq!(live["promoted"], true, "{live}");
+    assert_eq!(live["state"], "running", "{live}");
+    assert_eq!(live["settled"], false, "{live}");
+    // Adoption is not abandonment: the same job object still owns the tree, so cancel
+    // reaches the descendant and it never gets to write.
+    m.cancel(&id).unwrap();
+    let s = settled(&m, &id);
+    assert_eq!(s["promoted"], true, "{s}");
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(
+        !root.join("orphan-proof").exists(),
+        "a cancelled adopted descendant survived"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn adopted_tree_settles_when_it_exits_and_keeps_its_output() {
+    let (m, root) = fixture();
+    let mut spec = shell("(sleep 0.3; printf done) & printf visible");
+    spec.promote_descendants = true;
+    let id = m.start(spec).unwrap();
+    let s = settled(&m, &id);
+    assert_eq!(s["promoted"], true, "{s}");
+    assert_eq!(s["state"], "completed", "{s}");
+    assert_eq!(s["ok"], true, "{s}");
+    // Nothing was terminated; the adopted tree ended on its own.
+    assert_eq!(s["cleanup"], "self_exited", "{s}");
+    let out = s["stdout"].as_str().unwrap();
+    assert!(out.contains("visible"), "{s}");
+    assert!(
+        out.contains("done"),
+        "the adopted descendant's output must not be lost: {s}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn launch_failure_is_visible() {
     let (m, root) = fixture();
     let id = m
