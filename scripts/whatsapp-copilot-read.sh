@@ -27,11 +27,12 @@ fi
 read_out="$(WA_WHATSAPP_JSON_EVENTS=1 WA_SCRIPT="$lua_script" "$WA" "$@")"
 
 # Report to the operator, in their own inbox: what the copilot sent as them, the messages nobody here can
-# read, and the ones nobody managed to decide before the attempt bound. Never to the sender, and bounded to
-# three of each per run so a noisy run cannot flood the chat. Every failure is ignored: a report must not
-# break the step's contract, which is exit 0 and one JSON object on stdout - which is why the notices arrive
-# in this step rather than from the child (a child's send budget is one, and a note home is a second send).
-rows="$(printf '%s' "$read_out" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);(j.notices||[]).slice(0,3).forEach(n=>console.log("notice|"+n.message_id+"|"+n.conversation_id+"|"+n.detail));(j.unanswerable||[]).slice(0,3).forEach(u=>console.log("media|"+u.message_id+"|"+u.conversation_id+"|"+u.media));(j.exhausted||[]).slice(0,3).forEach(e=>console.log("exhausted|"+e.message_id+"|"+e.conversation_id+"|"+e.attempts))}catch(e){}})')"
+# read, the ones nobody managed to decide before the attempt bound, and the ones it declined to answer
+# because the operator had taken the conversation over. Never to the sender, and bounded to three of each
+# per run so a noisy run cannot flood the chat. Every failure is ignored: a report must not break the
+# step's contract, which is exit 0 and one JSON object on stdout - which is why the notices arrive in this
+# step rather than from the child (a child's send budget is one, and a note home is a second send).
+rows="$(printf '%s' "$read_out" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);(j.notices||[]).slice(0,3).forEach(n=>console.log("notice|"+n.message_id+"|"+n.conversation_id+"|"+n.detail));(j.unanswerable||[]).slice(0,3).forEach(u=>console.log("media|"+u.message_id+"|"+u.conversation_id+"|"+u.media));(j.exhausted||[]).slice(0,3).forEach(e=>console.log("exhausted|"+e.message_id+"|"+e.conversation_id+"|"+e.attempts));(j.stood_down||[]).slice(0,3).forEach(d=>console.log("stooddown|"+d.message_id+"|"+d.conversation_id+"|"+d.took_over_at))}catch(e){}})')"
 if [ -n "$rows" ]; then
   while IFS='|' read -r kind mid conv detail; do
     [ -z "$mid" ] && continue
@@ -39,6 +40,7 @@ if [ -n "$rows" ]; then
       notice) body="wasm-agent: $detail" ;;
       media) body="wasm-agent: could not reply - the message in $conv is a $detail, not text (id $mid). Nothing was sent to the sender." ;;
       exhausted) body="wasm-agent: gave up on the message in $conv (id $mid) after $detail attempts to decide it; nothing was sent to the sender. The reader will not hand it on again." ;;
+      stooddown) body="wasm-agent: did NOT answer the message in $conv (id $mid) - you took that conversation over yourself, so the copilot stood down and nothing was sent. Reply there yourself if it still needs one." ;;
       *) continue ;;
     esac
     node "$ROOT/scripts/whatsapp-reply.mjs" --to-self \

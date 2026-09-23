@@ -16,7 +16,9 @@
 //   * an undecided message is handed on again (the child's idempotency key makes that a reconcile), and
 //     the number of attempts is bounded, so one permanently failing message cannot pin the cursor;
 //   * an eligible image or voice note is reported as unanswerable and never handed to a child;
-//   * the operator answering first, and a deterministic eligibility refusal, are decisions too.
+//   * the operator answering first, and a deterministic eligibility refusal, are decisions too;
+//   * a message the copilot declined because the operator took over is reported to the operator's own
+//     inbox, once, so "the copilot chose not to answer" is never indistinguishable from "it never saw it".
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -199,6 +201,16 @@ function main() {
   check(precedence.parsed.events.length === 0, "a message the operator already answered is not handed on");
   check(precedence.parsed.operator_answered >= 1, "the reader reports the operator's precedence");
   check(precedence.parsed.cursor === 5000, "the cursor passes a conversation the operator took over");
+  // Standing down is invisible to the operator: they see no reply and cannot tell "the copilot decided not
+  // to" from "the copilot never saw it". Every stand-down is therefore reported, with the moment the
+  // operator took over, so silence is never ambiguous. Only `a5` is reported: `a1`-`a4` were settled in
+  // earlier passes and sit below the cursor, so a stand-down is said once and never repeated.
+  check(ids(precedence.parsed.stood_down) === "a5",
+    `every message the operator took over is reported once (got ${ids(precedence.parsed.stood_down)})`);
+  check((precedence.parsed.stood_down[0] || {}).took_over_at === 6000,
+    `the report carries the moment the operator took over (got ${JSON.stringify(precedence.parsed.stood_down[0])})`);
+  check(precedence.parsed.stood_down.every((entry) => entry.conversation_id === CONV),
+    "the report names the conversation, so the operator knows where to look");
 
   // ---- a deterministic refusal is a decision too ---------------------------------------------------
   store([message("a1", 1000), message("a2", 2000), message("a3", 3000),
@@ -210,6 +222,10 @@ function main() {
   check(refused.parsed.events.length === 0, "an ineligible message is never handed on");
   check(refused.parsed.cursor === 7000, "the cursor passes a message a rule refused");
   check(!refused.parsed.decisions_error, `the decision lookup succeeded: ${refused.parsed.decisions_error}`);
+  // Once is enough: the stand-down cleared the owed entry, so a later pass cannot report it again. Without
+  // this the operator would be told about the same message every 30 seconds, forever.
+  check((refused.parsed.stood_down || []).length === 0,
+    `a stand-down is reported once, not on every pass (got ${ids(refused.parsed.stood_down)})`);
 
   // ---- what the copilot sent as the operator is reported to their own inbox ------------------------
   // A reply that went out to somebody else is an effect on *their* conversation, and the operator reads
