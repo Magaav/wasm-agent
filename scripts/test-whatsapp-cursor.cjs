@@ -15,7 +15,7 @@
 //     child that fails to decide cannot consume a message;
 //   * an undecided message is handed on again (the child's idempotency key makes that a reconcile), and
 //     the number of attempts is bounded, so one permanently failing message cannot pin the cursor;
-//   * an eligible image or voice note is reported as unanswerable and never handed to a child;
+//   * images are reported; voice notes reach the model only after local transcription;
 //   * the operator answering first, and a deterministic eligibility refusal, are decisions too;
 //   * a message the copilot declined because the operator took over is reported to the operator's own
 //     inbox, once, so "the copilot chose not to answer" is never indistinguishable from "it never saw it".
@@ -47,6 +47,26 @@ console.log(JSON.stringify({ ok: true, out: value("--out"), conversations: paylo
   messages: messages.length, eligible: payload.eligible, ineligible: payload.ineligible, newest: payload.newest }));
 `;
 
+const FAKE_AUDIO = `import { appendFileSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const value = (flag) => args[args.indexOf(flag) + 1];
+appendFileSync(process.env.WA_FIXTURE_AUDIO_CALLS, value("--message-id") + "|" + value("--chat") + "\\n");
+if (value("--message-id") === process.env.WA_FIXTURE_AUDIO_REFUSE_ID) {
+  console.log(JSON.stringify({ok:false,error:"view_once_refused"}));
+  process.exitCode = 1;
+} else {
+writeFileSync(value("--out"), "fixture audio");
+console.log(JSON.stringify({ok:true}));
+}
+`;
+const FAKE_STT = `import { appendFileSync } from "node:fs";
+appendFileSync(process.env.WA_FIXTURE_STT_CALLS, "called\\n");
+if (process.env.WA_FIXTURE_STT_FAIL === "1") {
+  console.log(JSON.stringify({ok:false,error:"recognizer_unavailable"}));
+  process.exitCode = 1;
+} else console.log(JSON.stringify({ok:true,transcript:"Please call me tomorrow",local_only:true}));
+`;
+
 const repo = path.resolve(__dirname, "..");
 // The gate passes `rust/target/release/wa`, which on Windows is `wa.exe`; accept either, and either the
 // bare name or the platform suffix.
@@ -57,10 +77,20 @@ const scripts = path.join(root, "scripts");
 const db = path.join(root, ".wasm-agent", "memory.db");
 const storePath = path.join(root, "store.json");
 const argsPath = path.join(root, "reader-args.txt");
+const audioCalls = path.join(root, "audio-calls.txt");
+const sttCalls = path.join(root, "stt-calls.txt");
+const emittedPayload = path.join(root, "emitted.json");
+const sentinel = path.join(root, "sentinel.sh");
 fs.writeFileSync(argsPath, "");
+fs.writeFileSync(audioCalls, "");
+fs.writeFileSync(sttCalls, "");
 fs.mkdirSync(scripts, { recursive: true });
 fs.copyFileSync(path.join(repo, "scripts", "whatsapp-ingest.lua"), path.join(scripts, "whatsapp-ingest.lua"));
 fs.writeFileSync(path.join(scripts, "whatsapp-read.mjs"), FAKE_READER);
+fs.writeFileSync(path.join(scripts, "whatsapp-audio.mjs"), FAKE_AUDIO);
+fs.writeFileSync(path.join(scripts, "whatsapp-stt.mjs"), FAKE_STT);
+fs.writeFileSync(sentinel, '#!/usr/bin/env bash\n[ "$1" = job ] && [ "$2" = emit ] && [ "$3" = whatsapp.message ] || exit 2\ncp "$5" "$WA_FIXTURE_EMIT_PAYLOAD"\n');
+fs.chmodSync(sentinel, 0o755);
 
 const CONV = "5511888888888@c.us";
 const OTHER = "5511777777777@c.us";
@@ -83,19 +113,33 @@ function store(messages, newest) {
 }
 
 // One pass = one reader step.
-function pass() {
+function pass(sttFail = false, mode = "json") {
   const result = spawnSync(wa, ["--db", db], {
     env: {
       ...process.env, WASM_AGENT_HOME: root, WASM_AGENT_LUA_ROOT: repo,
-      WA_SCRIPT: path.join(scripts, "whatsapp-ingest.lua"), WA_WHATSAPP_JSON_EVENTS: "1",
+      WA_SCRIPT: path.join(scripts, "whatsapp-ingest.lua"),
+      WA_WHATSAPP_JSON_EVENTS: mode === "json" ? "1" : "", WA_WHATSAPP_EMIT: mode === "emit" ? "1" : "",
+      WA_SENTINEL: sentinel, WA_FIXTURE_EMIT_PAYLOAD: emittedPayload,
       WA_FIXTURE_STORE: storePath, WA_FIXTURE_ARGS: argsPath, WASM_AGENT_RENDEZVOUS: "", WASM_AGENT_RELAY: "", WASM_AGENT_MANAGED: "0",
+      WA_WHATSAPP_STT_PYTHON: "node", WA_WHATSAPP_STT_SCRIPT: path.join(scripts, "whatsapp-stt.mjs"),
+      WA_WHATSAPP_AUDIO_SCRIPT: path.join(scripts, "whatsapp-audio.mjs"),
+      WA_FIXTURE_AUDIO_CALLS: audioCalls, WA_FIXTURE_STT_CALLS: sttCalls,
+      WA_FIXTURE_AUDIO_REFUSE_ID: "v5",
+      WA_FIXTURE_STT_FAIL: sttFail ? "1" : "0",
     },
     encoding: "utf8", timeout: 60000, windowsHide: true,
   });
   const line = (result.stdout || "").trim().split(/\r?\n/).filter(Boolean).pop() || "";
   let parsed = null;
   try { parsed = JSON.parse(line); } catch { /* the caller asserts on `parsed` */ }
-  return { parsed, stdout: result.stdout || "", stderr: result.stderr || "" };
+  return { parsed, status: result.status, stdout: result.stdout || "", stderr: result.stderr || "" };
+}
+
+function ledgerBody(id) {
+  const database = new DatabaseSync(db, { readOnly: true });
+  const row = database.prepare("SELECT body, source FROM ledger_messages WHERE message_id=?").get(id);
+  database.close();
+  return row;
 }
 
 // A durable decision, exactly as a child records one.
@@ -185,16 +229,16 @@ function main() {
 
   // ---- media is reported to the operator, never handed to a child ---------------------------------
   store([message("a1", 1000), message("a2", 2000), message("a3", 3000),
-    message("a4", 4000, { media: [{ type: "voice" }], body: "[voice]" })], 4000);
+    message("a4", 4000, { media: [{ type: "image" }], body: "[image]" })], 4000);
   const media = pass();
-  check(media.parsed.events.length === 0, "an eligible voice note is not handed to a child");
-  check(ids(media.parsed.unanswerable) === "a4" && media.parsed.unanswerable[0].media === "voice",
-    "the voice note is reported as unanswerable instead");
+  check(media.parsed.events.length === 0, "an eligible image is not handed to a child");
+  check(ids(media.parsed.unanswerable) === "a4" && media.parsed.unanswerable[0].media === "image",
+    "the image is reported as unanswerable instead");
   check(media.parsed.cursor === 4000, "a reported media message is settled, so the cursor may pass it");
 
   // ---- the operator answering first is a decision too ---------------------------------------------
   store([message("a1", 1000), message("a2", 2000), message("a3", 3000),
-    message("a4", 4000, { media: [{ type: "voice" }] }), message("a5", 5000),
+    message("a4", 4000, { media: [{ type: "image" }] }), message("a5", 5000),
     { conversation_id: CONV, message_id: "o1", sender_id: "self", direction: "outgoing", sent_at: 6000,
       body: "operator reply", media: [{ type: "chat" }] }], 6000);
   const precedence = pass();
@@ -214,7 +258,7 @@ function main() {
 
   // ---- a deterministic refusal is a decision too ---------------------------------------------------
   store([message("a1", 1000), message("a2", 2000), message("a3", 3000),
-    message("a4", 4000, { media: [{ type: "voice" }] }), message("a5", 5000),
+    message("a4", 4000, { media: [{ type: "image" }] }), message("a5", 5000),
     { conversation_id: CONV, message_id: "o1", sender_id: "self", direction: "outgoing", sent_at: 6000,
       body: "operator reply", media: [{ type: "chat" }] },
     message("a6", 7000, { conversation_id: OTHER, eligibility: { eligible: false, reason: "group_without_operator_mention" } })], 7000);
@@ -253,7 +297,7 @@ function main() {
   // message, whatever the cursor says - and the mock returns everything, so the assertion is on the
   // window the reader *asks for*, which is the contract a real store honours.
   const tail = () => [message("a1", 1000), message("a2", 2000), message("a3", 3000),
-    message("a4", 4000, { media: [{ type: "voice" }] }), message("a5", 5000),
+    message("a4", 4000, { media: [{ type: "image" }] }), message("a5", 5000),
     { conversation_id: CONV, message_id: "o1", sender_id: "self", direction: "outgoing", sent_at: 6000,
       body: "operator reply", media: [{ type: "chat" }] },
     message("a6", 7000, { conversation_id: OTHER, eligibility: { eligible: false, reason: "group_without_operator_mention" } })];
@@ -276,6 +320,62 @@ function main() {
   check(pruned.parsed.still_owed === 0 && pruned.parsed.already_decided >= 1,
     `an owed message below the cursor is pruned once decided (still_owed=${pruned.parsed.still_owed})`);
   check(Object.keys(owedMap()).length === 0, `the owed map no longer holds it: ${JSON.stringify(owedMap())}`);
+
+  // ---- native local audio is written before the responder receives an event -----------------------
+  const voice = message("v1", 14000, { media: [{ type: "voice" }], body: "[voice]" });
+  store([...tail(), voice], 14000);
+  const transcribed = pass();
+  check(ids(transcribed.parsed.events) === "v1", "a transcribed voice note wakes the responder");
+  check(transcribed.parsed.events[0].body === "[Voice message transcript: Please call me tomorrow]",
+    "the event carries the transcript, not an audio placeholder");
+  check(ledgerBody("v1").body === transcribed.parsed.events[0].body && ledgerBody("v1").source === "whatsapp-cdp-stt",
+    "whatsapp_read can see the durable transcript before inference");
+  check(fs.readFileSync(audioCalls, "utf8").trim() === "v1|" + CONV,
+    "audio extraction is bound to the exact message and original chat");
+  decided("v1");
+  const rescanned = pass();
+  check(rescanned.parsed.events.length === 0 && ledgerBody("v1").body === transcribed.parsed.events[0].body,
+    "rescanning does not replace the transcript with the browser placeholder");
+  check(fs.readFileSync(sttCalls, "utf8").trim().split("\n").length === 1,
+    "rescanning does not transcribe the same voice note twice");
+
+  // A temporary STT failure stops the whole pass before a later text message can infer without audio.
+  const voice2 = message("v2", 15000, { media: [{ type: "audio" }], body: "[audio]" });
+  store([...tail(), voice, voice2, message("t2", 16000)], 16000);
+  const failed = pass(true);
+  check(failed.status !== 0 && failed.parsed.error === "audio_transcription_failed" && failed.parsed.message_id === "v2",
+    "native recognizer failure is visible and retryable");
+  check(!ledgerBody("v2") && !ledgerBody("t2"), "no incomplete context or later text reaches the ledger");
+  const retried = pass();
+  check(ids(retried.parsed.events) === "v2,t2" && ledgerBody("v2").source === "whatsapp-cdp-stt",
+    "the next pass transcribes first, then hands both messages to the responder");
+
+  // The installed two-job mode emits through the sentinel after committing the transcript to SQLite.
+  const voice3 = message("v3", 17000, { media: [{ type: "ptt" }], body: "[ptt]" });
+  store([...tail(), voice, voice2, message("t2", 16000), voice3], 17000);
+  const emitted = pass(false, "emit");
+  check(emitted.status === 0 && fs.existsSync(emittedPayload),
+    `the active reader emits the audio event through the sentinel: ${emitted.stdout} ${emitted.stderr}`);
+  const event = JSON.parse(fs.readFileSync(emittedPayload, "utf8"));
+  check(event.message_id === "v3" && event.body === ledgerBody("v3").body &&
+    ledgerBody("v3").source === "whatsapp-cdp-stt",
+    "the active responder receives an event only after the local transcript is durable");
+
+  decided("v3");
+  const advanced = pass();
+  check(advanced.parsed.cursor === 17000, "a decided voice note advances the second-resolution cursor");
+  const sameSecond = message("v4", 17000, { media: [{ type: "voice" }], body: "[voice]" });
+  store([...tail(), voice, voice2, message("t2", 16000), voice3, sameSecond], 17000);
+  const tied = pass();
+  check(ids(tied.parsed.events).split(",").includes("v4") && ledgerBody("v4").source === "whatsapp-cdp-stt",
+    "a newly arrived voice note at the cursor's exact second is still transcribed and handed on");
+  const viewOnce = message("v5", 18000, { media: [{ type: "voice" }], body: "[voice]" });
+  store([...tail(), voice, voice2, message("t2", 16000), voice3, sameSecond, viewOnce], 18000);
+  const refusedAudio = pass();
+  check(!ids(refusedAudio.parsed.events).split(",").includes("v5") &&
+    refusedAudio.parsed.unanswerable.some((entry) =>
+      entry.message_id === "v5" && entry.reason === "view_once_refused"),
+    "view-once audio is reported and never passed to the responder");
 
 
   console.log(`whatsapp cursor ok (${checks} checks, 0 failed, 0 skipped; mock store, real ingest, no browser)`);

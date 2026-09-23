@@ -3,7 +3,7 @@
   "name": "WhatsApp Copilot",
   "trigger": {
     "kind": "schedule",
-    "every_seconds": 300
+    "every_seconds": 30
   },
   "action": {
     "kind": "pipeline",
@@ -11,7 +11,7 @@
       {
         "kind": "run",
         "script": "PREPARED_BY_INSTALL/scripts/whatsapp-copilot-read.sh",
-        "timeout_seconds": 240,
+        "timeout_seconds": 300,
         "returns": "events"
       },
       {

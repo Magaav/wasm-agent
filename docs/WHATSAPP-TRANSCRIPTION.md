@@ -66,3 +66,8 @@ reservation, retry, and no-duplicate path with fake media and send adapters.
 `node scripts/test-whatsapp-audio.mjs` checks the browser-side media guards.
 A live WhatsApp audio exchange is still required to establish compatibility
 with the current WhatsApp Web build.
+
+The WhatsApp copilot reader uses the same native recognizer and model settings
+to put audio transcripts into `whatsapp_read` context before its responder runs.
+It does not send a standalone transcript reply. Keep the separate
+`whatsapp-transcribe` job disabled when using the copilot path.

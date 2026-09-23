@@ -9,7 +9,7 @@ A job is exactly **one trigger + one action**, and this pipeline has two stages 
 
 | record | trigger | action | what it is |
 | --- | --- | --- | --- |
-| `whatsapp-ingest` — "WhatsApp Copilot - reader (free stage, no model, every 5 min)" | `schedule`, 300 s | `run` → `scripts/whatsapp-ingest-emit.sh` | reads the store into the ledger and emits **one event per genuinely new eligible message** |
+| `whatsapp-ingest` — "WhatsApp Copilot - reader (local audio, every 30 sec)" | `schedule`, 30 s | `run` → `scripts/whatsapp-ingest-emit.sh` | reads the store, transcribes eligible audio locally, and emits an event only after its ledger row contains the transcript |
 | `whatsapp-message` — "WhatsApp Copilot" | `event`, topic `whatsapp.message` | `subagent`, profile `whatsapp-responder` | answers one message: read, decide, and at most one verified reply |
 
 Collapsing them is not possible without losing something real:
@@ -61,9 +61,16 @@ the cursor. The child's idempotency key (`job:revision:message_id`) makes that a
 child. The count is bounded (3), so a message that is never decided cannot pin the cursor for everything
 behind it: it is reported to the operator's own inbox once and then let go.
 
-Media is settled the same way: an eligible image or voice note is reported to the operator's own inbox
-and **not** appended to `events` (it used to be both, which would have asked a child to answer a voice
-note). No reply is ever sent to the sender for one.
+Eligible `voice`, `ptt`, and `audio` messages are decrypted and transcribed locally with the native
+`faster-whisper` engine before the reader records them or emits an event. `whatsapp_read` then supplies
+the transcript in the conversation context before the child decides whether to reply. The transcript
+is cached in the ledger so a rescan cannot replace it with `[voice]`. A temporary download or STT
+failure fails the entire reader pass with the message id and step; the next tick retries before any
+later message is handed to a responder. View-once audio, invalid media, and recordings with no speech
+are reported as unanswerable. Images and other unsupported media are also reported, with no responder
+event. See [local recognizer setup](WHATSAPP-TRANSCRIPTION.md) for the required Python environment and
+offline model cache. The standalone `whatsapp-transcribe` job additionally sends transcripts directly
+to source chats; leave it disabled when using the copilot's inference path to avoid duplicate replies.
 
 **Standing down is reported too.** When the operator has taken a conversation over themselves, the copilot
 does not answer — and that is a decision the operator cannot see: they observe no reply, and "the copilot
