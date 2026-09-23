@@ -1306,6 +1306,44 @@ $harness = @'
       "reasoning: it is the route, not the answer, and must stay outside the run topic");
     window.handleEvent({ type: "done" });
   })();
+  // ONE BUBBLE PER RUN, however many times the model speaks inside it.
+  // Measured live: a run whose model wrote a one-line preamble before each tool batch produced three
+  // assistant messages in one run, and the window drew THREE bubbles - because the `reply` handler
+  // closed the bubble (`runBubble = null`) on every reply event, contradicting flushDecision's own
+  // contract that "the bubble only closes when the run really ends". The run topic exists to fold the
+  // route away, and a topic cannot span bubbles, so a multi-step run read as several unrelated replies.
+  (function () {
+    var msgs = document.getElementById("messages");
+    var before = msgs.querySelectorAll("wa-message.assistant").length;
+    window.handleEvent({ type: "round", n: 1 });
+    window.handleEvent({ type: "delta", text: "Let me check the record." });
+    window.handleEvent({ type: "tool", name: "bash", arguments: { command: "cat a" } });
+    window.handleEvent({ type: "tool_result", name: "bash", result: { content: "a" } });
+    window.handleEvent({ type: "reply", text: "Let me check the record.", message_id: "message-multi-1" });
+    window.handleEvent({ type: "round", n: 2 });
+    window.handleEvent({ type: "delta", text: "Now the second probe." });
+    window.handleEvent({ type: "tool", name: "bash", arguments: { command: "cat b" } });
+    window.handleEvent({ type: "tool_result", name: "bash", result: { content: "b" } });
+    window.handleEvent({ type: "reply", text: "Now the second probe.", message_id: "message-multi-2" });
+    window.handleEvent({ type: "round", n: 3 });
+    window.handleEvent({ type: "delta", text: "The answer." });
+    window.handleEvent({ type: "reply", text: "The answer.", message_id: "message-multi-3" });
+    var after = msgs.querySelectorAll("wa-message.assistant").length;
+    check(after === before + 1,
+      "one run is one bubble however many times it speaks (was " + before + ", now " + after + ")");
+    var multi = msgs.querySelectorAll("wa-message.assistant")[after - 1];
+    var multiBody = multi ? multi.querySelector(".body") : null;
+    var multiShape = multiBody ? Array.prototype.map.call(multiBody.children, function (c) {
+      return c.tagName === "WA-RUN" ? "run" : (c.tagName === "WA-TRACE" ? "trace"
+        : (c.tagName === "WA-DIFF" ? "diff" : "text"));
+    }).join(",") : "";
+    check(multiShape === "run,text",
+      "a run that speaks three times folds into one topic above the answer, saw " + multiShape);
+    check(multiBody && multiBody.querySelectorAll("wa-run").length === 1,
+      "the run topic must not nest on the second reply, saw "
+      + (multiBody ? multiBody.querySelectorAll("wa-run").length : "no body"));
+    window.handleEvent({ type: "done" });
+  })();
   document.title = "stage: end";
 } catch (error) {
     // A throw must still produce a log: a reporter that swallows its own failure is worse
