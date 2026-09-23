@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Live check of POST /update against a scratch node whose install dir is a fixture.
 #
-# Cases: nothing built, already current (which must write *no* request), dirty (which queues and says
-# the gate would refuse it), a newer commit (which queues and reports the request the sentinel named),
-# and a sentinel that refuses (which must not read as success).
+# `/update` deploys now, so the cases are the gate's preconditions rather than a build's: an unbuilt
+# tree (which queues - the gate builds it), the tree already at the installed commit (which also
+# queues, because the commit does not describe the install), uncommitted work (which is refused,
+# because the gate refuses a dirty tree), a newer installed commit (which queues and reports the
+# request the sentinel named), and a sentinel that refuses (which must not read as success).
 #
 # The sentinel here is a stub shell script named wa-sentinel.exe - Git Bash runs a script whose exec
 # fails as a script. The operator's real sentinel is never invoked: a fixture that dropped a request
@@ -26,7 +28,7 @@ printf 'commit=%s\nsource_commit_hint=%s\n' "$COMMIT" "$COMMIT" > "$INST/install
 REQUESTS="$HOME/.wasm-agent/sentinel/requests"
 BEFORE="$(ls "$REQUESTS" 2>/dev/null | wc -l)"
 STUB="$INST/wa-sentinel.exe"
-printf '#!/bin/sh\necho "  requested upgrade: %s/requests/1789987058-0000.json"\necho "  the sentinel performs it - it is only a stub"\n' "$W" > "$STUB"
+printf '#!/bin/sh\necho "  requested deploy: %s/requests/1789987058-0000.json"\necho "  the sentinel performs it - it is only a stub"\n' "$W" > "$STUB"
 chmod +x "$STUB"
 
 echo "fixture: tree=$TREE commit=$COMMIT"
@@ -44,25 +46,25 @@ ask() { curl -s -m 30 -X POST -H 'content-type: application/json' -d '{}' "http:
 show() { echo "$1" | tr ',' '\n' | grep -E "\"$2\"" | head -"${3:-4}"; }
 
 echo "--- 1. a tree with nothing built in it ---"
-A="$(ask)"; show "$A" "status|error|next"
-case "$A" in *'"nothing_built"'*) echo "  ok: an unbuilt tree is refused, not queued" ;;
-  *) echo "  FAIL: expected nothing_built"; exit 1 ;; esac
+A="$(ask)"; show "$A" "status|queued|message"
+case "$A" in *'"queued":true'*) echo "  ok: an unbuilt tree queues - the gate builds it" ;;
+  *) echo "  FAIL: expected a queued deploy, got: $A"; exit 1 ;; esac
 
 echo "--- 2. the tree is clean and at the installed commit ---"
 echo placeholder > "$TREE/rust/target/release/wa.exe"
-B="$(ask)"; show "$B" "status|changed|commit"
-case "$B" in *'"already_current"'*) echo "  ok: it says there is nothing to do" ;;
-  *) echo "  FAIL: expected already_current, got: $B"; exit 1 ;; esac
-case "$B" in *'"queued"'*) echo "  FAIL: a no-op must not queue an install"; exit 1 ;;
-  *) echo "  ok: no request was written for the sentinel" ;; esac
+B="$(ask)"; show "$B" "status|queued|commit"
+case "$B" in *'"queued":true'*) echo "  ok: it still queues - the commit does not describe the install" ;;
+  *) echo "  FAIL: expected a queued deploy, got: $B"; exit 1 ;; esac
+case "$B" in *'"already_current"'*) echo "  FAIL: the commit alone must not answer nothing-to-do"; exit 1 ;;
+  *) echo "  ok: it does not claim there is nothing to do" ;; esac
 
-echo "--- 3. uncommitted work queues, and says the gate would refuse it ---"
+echo "--- 3. uncommitted work is refused, because the gate refuses a dirty tree ---"
 echo scratch > "$TREE/scratch.lua"
-C="$(ask)"; show "$C" "status|queued|warning|dirty"
-case "$C" in *'"queued":true'*) echo "  ok: a dirty tree still queues - that is what an uncommitted build is for" ;;
-  *) echo "  FAIL: a dirty tree must queue, got: $C"; exit 1 ;; esac
-case "$C" in *'would refuse it'*) echo "  ok: it says scripts/deploy.sh would refuse this tree" ;;
-  *) echo "  FAIL: a dirty tree must carry that warning: $C"; exit 1 ;; esac
+C="$(ask)"; show "$C" "status|error|next"
+case "$C" in *'"tree_dirty"'*) echo "  ok: a dirty tree is refused, not queued" ;;
+  *) echo "  FAIL: expected tree_dirty, got: $C"; exit 1 ;; esac
+case "$C" in *'"queued":true'*) echo "  FAIL: a request certain to fail must not be written"; exit 1 ;;
+  *) echo "  ok: no request was written for it" ;; esac
 rm -f "$TREE/scratch.lua"
 
 echo "--- 4. a newer installed commit is behind, so it queues ---"

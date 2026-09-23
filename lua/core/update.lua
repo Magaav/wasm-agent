@@ -1,10 +1,18 @@
--- `/update`: install the newest build of this node's own tree.
+-- `/update`: deploy this node's own tree through the gate.
 --
 -- The node cannot replace itself. The stop is the last command a run executes, and `deploy.sh` /
 -- `upgrade.sh` refuse to run inside a run for exactly that reason. So nothing here updates
--- anything: it answers three questions - is there a runtime tree, is anything *built* in it, is
--- that build newer than what is installed - and, when the answer is "install it", writes exactly
--- one request into the sentinel's drop-box. The sentinel performs it when the node is idle.
+-- anything: it answers whether there is a runtime tree, whether the sentinel that could perform the
+-- deploy is installed, and whether the tree is in a state the gate will accept - and, when the
+-- answer is "deploy it", writes exactly one request into the sentinel's drop-box. The sentinel
+-- performs it when the node is idle.
+--
+-- The request is a *deploy*, not an `upgrade --binary`, and that distinction is the whole of it: an
+-- upgrade installs the node and the UI, while a deploy builds, runs the full test suite, and installs
+-- the node, the UI, the sentinel, the scripts and the job templates, recording a commit it verified.
+-- `/update` used to write the upgrade form, and that left a mixed install behind - measured: a new
+-- binary with the scripts of an older install, one of them (`deploy.sh`) ten lines behind the tree,
+-- and a record whose commit was only a hint (`source_provenance=unverified-binary`).
 --
 -- Which is why the answer says `queued` and never `updated`. A queued request that never appears
 -- in the sentinel's `done/` did not happen, and a command that says "updated" before that is a
@@ -149,8 +157,23 @@ end
 
 -- ---- the decision -----------------------------------------------------------
 
--- Four answers and no others. Each carries `message` (one sentence for a human), `observed` (what
+-- Three answers and no others. Each carries `message` (one sentence for a human), `observed` (what
 -- was seen) and - where there is somewhere to go - `next`.
+--
+-- There is no `nothing_built` answer any more, and no `already_current` one. Both belonged to the
+-- older shape, where this module installed a build that already existed in the tree:
+--
+--   * a deploy *builds*, so "the tree has nothing built in it" is no longer a reason to refuse;
+--   * and "the tree is at the installed commit" is no longer a reason to do nothing, because the
+--     commit does not describe the install. Measured on this machine: `installed.txt` read
+--     `commit=unknown` while the shipped `scripts/deploy.sh` was ten lines behind the tree, so a
+--     short-circuit on the commit answered "nothing to do" about a node whose scripts were stale.
+--     A deploy of the same commit is idempotent, and it is how the install is made to match the tree.
+--
+-- A dirty tree is refused here rather than queued: the gate refuses one, so a request would be
+-- written only to fail. That is the one precondition this module checks, because it is the one it
+-- already knows; the rest belong to `deploy.sh`, and two implementations of the same precondition
+-- are two things to keep in step.
 function M.verdict(facts)
   if not facts.tree then
     return {
@@ -158,14 +181,6 @@ function M.verdict(facts)
       message = "there is no tree to update from: this node has no runtime-worktree.txt and its working directory is not a checkout.",
       observed = "looked for " .. (facts.install or "?") .. "/runtime-worktree.txt and for rust/Cargo.toml in the working directory",
       next = "install this node with scripts/deploy.sh, or start it from its checkout (WASM_AGENT_LUA_ROOT / scripts/dev-agent.cmd)",
-    }
-  end
-  if facts.candidate_bytes == nil then
-    return {
-      ok = false, status = "nothing_built", error = "nothing_built", tree = facts.tree,
-      message = "the tree has nothing built in it, so there is nothing to install: " .. facts.tree .. ".",
-      observed = "no binary at " .. tostring(facts.candidate),
-      next = "build it first: cd " .. facts.tree .. "/rust && cargo build --release --offline",
     }
   end
   if not facts.sentinel_present then
@@ -176,30 +191,23 @@ function M.verdict(facts)
       next = "a fresh install needs wa-sentinel beside wa (see skills/self-update); until then, run scripts/deploy.sh from outside the node",
     }
   end
-  if facts.tree_commit and facts.installed_commit
-     and facts.tree_commit == facts.installed_commit and (facts.dirty or 0) == 0 then
+  if (facts.dirty or 0) > 0 then
     return {
-      ok = true, changed = false, status = "already_current", tree = facts.tree,
-      commit = facts.tree_commit,
-      message = "nothing to do: this node already runs commit " .. facts.tree_commit ..
-                ", which is what its tree is at (and the tree is clean).",
-      observed = "installed records " .. tostring(facts.installed_commit) ..
-                 "; the tree is at " .. tostring(facts.tree_commit) .. " with nothing uncommitted",
-      next = "nothing. Edit the tree (or pull main) and ask again.",
+      ok = false, status = "tree_dirty", error = "tree_dirty", tree = facts.tree, dirty = facts.dirty,
+      message = "this tree has " .. facts.dirty .. " uncommitted change(s) and the gate refuses a dirty tree, " ..
+                "so a deploy would fail instead of installing.",
+      observed = "git status --porcelain reported " .. facts.dirty .. " path(s) in " .. tostring(facts.tree),
+      next = "commit or stash them, then ask again: a deploy installs a commit, not a working copy",
     }
   end
   return {
     ok = true, queued = true, status = "queue", tree = facts.tree,
     commit = facts.tree_commit or facts.installed_commit,
-    dirty = facts.dirty or 0,
-    message = "queued: the sentinel will install the build in this tree once the node is idle. " ..
-              "This is not done yet - its record is what settles it.",
-    -- A dirty tree is installable (that is what the sentinel records a hash for) but it is not
-    -- shippable by the gate, and saying so here is the difference between a reader knowing that and
-    -- finding out later from a binary that does not match any commit.
-    warning = ((facts.dirty or 0) > 0) and
-      ("the tree has " .. facts.dirty .. " uncommitted file(s): scripts/deploy.sh would refuse it, " ..
-       "and the hash the sentinel installs - not the commit - is what describes the binary") or nil,
+    dirty = 0,
+    message = "queued: the sentinel will deploy this tree through the gate once the node is idle - " ..
+              "build, the full test suite, then the node, UI, sentinel and scripts. This is not done yet.",
+    observed = "the tree is at " .. tostring(facts.tree_commit) .. " with nothing uncommitted; " ..
+               "the install records " .. tostring(facts.installed_commit),
   }
 end
 
@@ -207,20 +215,18 @@ end
 
 local function reason_for(facts)
   local where = facts.tree or "an unknown tree"
-  local suffix = ""
-  if (facts.dirty or 0) > 0 then
-    suffix = " (the tree has " .. facts.dirty .. " uncommitted file(s), so the binary is the truth, not the commit)"
-  end
-  return trim("/update: install the build in " .. where .. suffix)
+  return trim("/update: deploy " .. where .. " through the gate")
 end
 
 -- The exact command line handed to the shell for a queued install. Pure, so a test can read it:
 -- every path and the reason are single-quoted (this node runs commands through `bash -c`), and a
 -- quote inside a reason must not be able to end the quoting early.
 function M.request_command(facts, reason)
+  -- A deploy, not an `upgrade --binary`: the gate builds the tree itself, so there is no candidate
+  -- to name, and it is the only path that installs the sentinel, the scripts and the job templates
+  -- and records a commit it verified.
   return table.concat({
-    quote(facts.sentinel), "request", "upgrade",
-    "--binary", quote(facts.candidate),
+    quote(facts.sentinel), "request", "deploy",
     "--reason", quote(reason),
   }, " ")
 end
@@ -269,10 +275,10 @@ function M.run(options)
     verdict.warning = "the sentinel's stop file exists, so nothing will happen until it is started again (wa-sentinel start)"
   end
   verdict.next = "the sentinel performs it when this node is idle. The record lands in " ..
-                 slashes(paths.config()) .. "/sentinel/done/ or failed/, and installed.txt records the hash it installed."
+                 slashes(paths.config()) .. "/sentinel/done/ or failed/, and installed.txt records the commit it installed."
   verdict.reason = reason
-  verdict.message = "queued: the sentinel will install " .. tostring(verdict.commit or "the built binary") ..
-                    " once this node is idle. This is not done yet."
+  verdict.message = "queued: the sentinel will deploy " .. tostring(verdict.commit or "this tree") ..
+                    " through the gate once this node is idle. This is not done yet."
   return verdict
 end
 
