@@ -1,5 +1,5 @@
 // Required integration proofs need process success, one terminal verdict, and non-dropped counts.
-const prefixes={sqlite:'sqlite worker isolation ok',peer:'peer run admission ok',foreground:'foreground cancel ok',orchestration:'orchestration integrated ok',whatsapp:'whatsapp subagent e2e ok',children:'subagents integration ok',jobs:'subagent integration ok',policy:'isolated policy ok'};
+const prefixes={sqlite:'sqlite worker isolation ok',peer:'peer run admission ok',foreground:'foreground cancel ok',orchestration:'orchestration integrated ok',whatsapp:'whatsapp subagent e2e ok',cursor:'whatsapp cursor ok',children:'subagents integration ok',jobs:'subagent integration ok',policy:'isolated policy ok'};
 function validate(kind,status,output,minimum){
  if(!Object.hasOwn(prefixes,kind))throw Error('unknown proof');
  if(status!==0)throw Error('proof exit '+status);

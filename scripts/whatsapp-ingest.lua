@@ -165,6 +165,19 @@ local function main()
     unavailable("payload_unreadable", "kept " .. dump)
     return
   end
+  -- The first pass has nothing to compare against: adopt the newest message as the cursor and answer
+  -- nothing, which is the documented behaviour after a long outage. In the pipeline mode it is also the
+  -- only thing that ever moved the cursor off zero - `cursor > 0` was a precondition for acting at all, so
+  -- a fresh install handed on nothing and never advanced, and the reader job was the one that set this.
+  local newest = tonumber(payload.newest) or 0
+  for _, message in ipairs(payload.messages or {}) do
+    local at = tonumber(message.sent_at) or 0
+    if at > newest then newest = at end
+  end
+  if cursor <= 0 and newest > 0 then
+    cursor = newest
+    memory.meta_set("whatsapp_cursor", math.floor(cursor))
+  end
 
   local before = memory.stats().ledger_messages or 0
   for _, conversation in ipairs(payload.conversations or {}) do
@@ -192,12 +205,52 @@ local function main()
   -- them here, so they are reported to the operator instead of being handed to a child that would have
   -- to invent an answer - and no token is spent on them.
   local unanswerable = {}
-  -- The newest message this run actually *decided* about. The cursor moves to this and no further, so a
-  -- message nobody acted on stays newer than the cursor and is picked up by the next run. Advancing to
-  -- `newest` instead consumed messages silently - twice, before this rule existed.
+  -- Messages that were handed on as often as this reader is willing to try and are still undecided.
+  -- Reported to the operator once, then let go: a bounded attempt count is what stops one permanently
+  -- failing message from pinning the cursor for everything behind it.
+  local exhausted = {}
+  -- The newest message this run actually *decided* about - decided meaning a durable decision exists for
+  -- it (a child's `effect_decisions` row, an eligibility refusal, the operator having answered, a media
+  -- report). The cursor moves to this and no further, so a message nobody acted on stays newer than the
+  -- cursor and is picked up by the next run. Advancing to `newest` consumed messages silently - twice,
+  -- before this rule existed - and advancing when a message had merely been *handed on* consumed them
+  -- once more: a child that failed to decide left a message the cursor had already passed.
   local handled = 0
   local skipped_ineligible = 0
   local skipped_answered = 0
+  local skipped_decided = 0
+  -- How many times one message may be handed on before the reader stops trying.
+  local MAX_HANDOFFS = 3
+  -- Messages this reader has handed on, and how many times, keyed by message id. Durable, because the
+  -- process that hands a message on is not the one that gets to see it decided: a restart in between would
+  -- otherwise forget that anything is owed. This is also what lets a message *below* the cursor be handed
+  -- on again - the child's idempotency key makes that a reconcile, not a second child.
+  local handoffs = {}
+  do
+    local ok, stored = pcall(json.decode, memory.meta_get("whatsapp_handoffs") or "")
+    if ok and type(stored) == "table" then
+      for key, value in pairs(stored) do
+        local count = tonumber(value)
+        if count and count > 0 then handoffs[tostring(key)] = count end
+      end
+    end
+  end
+  local handoffs_changed = false
+  -- Every message that already has a durable decision, in one query: a lookup per message would be one
+  -- sqlite round trip per message per pass, and the whole point of this pass is that it is cheap. If the
+  -- query fails the reader says so and treats nothing as decided, which re-hands what it can (bounded)
+  -- rather than silently skipping a message nobody decided.
+  local decided, decisions_error = {}, nil
+  do
+    local ok, rows = pcall(json.decode, host.sql_query("SELECT message_id FROM effect_decisions", "[]") or "")
+    if not ok or type(rows) ~= "table" or rows.error then
+      decisions_error = tostring(ok and type(rows) == "table" and rows.error or "decisions_unreadable")
+    else
+      for _, row in ipairs(rows) do
+        if type(row) == "table" and row.message_id then decided[tostring(row.message_id)] = true end
+      end
+    end
+  end
   -- Who spoke last in each conversation. An incoming message the operator has already answered is not the
   -- copilot's to answer: they took the lead, and a second reply would be an interruption. Deterministic,
   -- so standing down costs no token at all - and the operator's own reply is the newest message in the
@@ -228,65 +281,110 @@ local function main()
     local verdict = message.eligibility
     local eligible = type(verdict) == "table" and verdict.eligible == true
     -- Either mode acts on a new message: `emit_on` hands it to an event consumer, `json_events` hands it to
-  -- the pipeline step that asked for the list. Requiring `emit_on` here meant the pipeline mode collected
-  -- nothing at all - every run completed having handed on no messages, which is how a private message went
-  -- unanswered while the job looked healthy.
-  if (emit_on or json_events) and cursor > 0 and (message.sent_at or 0) > cursor and message.direction == "incoming" then
+    -- the pipeline step that asked for the list. Requiring `emit_on` here meant the pipeline mode collected
+    -- nothing at all - every run completed having handed on no messages, which is how a private message went
+    -- unanswered while the job looked healthy.
+    local at = tonumber(message.sent_at) or 0
+    local message_id = tostring(message.message_id or "")
+    -- A candidate is a message that is new, or one this reader handed on before and that no decision has
+    -- been recorded for since. The second half is what makes a message below the cursor recoverable.
+    local pending = handoffs[message_id] ~= nil
+    if (emit_on or json_events) and message.direction == "incoming" and (at > cursor or pending) then
       local media_kind = (message.media and message.media[1] and message.media[1].type) or "chat"
-      local answered_by_operator = (newest_outgoing[message.conversation_id] or 0) > (message.sent_at or 0)
+      local answered_by_operator = (newest_outgoing[message.conversation_id] or 0) > at
       if answered_by_operator then
+        -- The operator took the lead in this conversation; standing down is a decision, and it costs no
+        -- token to make it here.
         skipped_answered = skipped_answered + 1
-        handled = math.max(handled, message.sent_at or 0)
-      elseif json_events and eligible and media_kind ~= "chat" then
-        handled = math.max(handled, message.sent_at or 0)
+        handled = math.max(handled, at)
+        if handoffs[message_id] then handoffs[message_id] = nil; handoffs_changed = true end
+      elseif not eligible then
+        -- A rule already excludes it: a group message that does not name the operator, an archived or left
+        -- chat, metadata that cannot be verified. The reply job never wakes for one of these.
+        skipped_ineligible = skipped_ineligible + 1
+        handled = math.max(handled, at)
+        if handoffs[message_id] then handoffs[message_id] = nil; handoffs_changed = true end
+      elseif decided[message_id] then
+        -- Somebody decided it durably. Only now may the cursor pass it - this is the whole fix: the cursor
+        -- used to move when the message was handed on, so a child that never decided lost it.
+        skipped_decided = skipped_decided + 1
+        handled = math.max(handled, at)
+        if handoffs[message_id] then handoffs[message_id] = nil; handoffs_changed = true end
+      elseif media_kind ~= "chat" then
+        -- Nothing here can read an image or a voice note, so it is reported to the operator's own inbox and
+        -- never handed to a child that would have to invent an answer. Deliberately *not* also appended to
+        -- `events`, which is what the old code did on its way past: an eligible voice note was both reported
+        -- and handed to a child.
+        handled = math.max(handled, at)
+        if handoffs[message_id] then handoffs[message_id] = nil; handoffs_changed = true end
         unanswerable[#unanswerable + 1] = {
           message_id = message.message_id,
           conversation_id = message.conversation_id,
           media = media_kind,
-          sent_at = message.sent_at,
+          sent_at = at,
         }
-      end
-      -- Eligibility first: a pipeline step must be handed only what the rule accepted, or the token rule
-      -- (a group message that does not name the operator) is bypassed by the very mode that saves tokens.
-      if json_events and eligible then
-        handled = math.max(handled, message.sent_at or 0)
-        events[#events + 1] = {
+      elseif (handoffs[message_id] or 0) >= MAX_HANDOFFS then
+        -- Handed on as often as this reader is willing to try, and still undecided. Bounded rather than
+        -- retried forever, and said out loud rather than dropped: the operator gets one line, and the
+        -- cursor is allowed to move past it.
+        exhausted[#exhausted + 1] = {
           message_id = message.message_id,
           conversation_id = message.conversation_id,
-          sender_id = message.sender_id,
-          sent_at = message.sent_at,
-          direction = message.direction,
-          body = message.body,
-          eligibility = verdict,
+          attempts = handoffs[message_id] or 0,
+          sent_at = at,
         }
-      elseif not eligible then
-        skipped_ineligible = skipped_ineligible + 1
-        handled = math.max(handled, message.sent_at or 0)
-      elseif sentinel then
-        local ok, why = emit_event(sentinel, "whatsapp.message", message.message_id, {
-          conversation_id = message.conversation_id,
-          message_id = message.message_id,
-          sender_id = message.sender_id,
-          sent_at = message.sent_at,
-          direction = message.direction,
-          body = message.body,
-          eligibility = verdict,
-        })
-        if ok then
-          emitted = emitted + 1
-          handled = math.max(handled, message.sent_at or 0)
-        else
-          emit_error = emit_error or why
+        handled = math.max(handled, at)
+        handoffs[message_id] = nil
+        handoffs_changed = true
+      else
+        -- Hand it on, and remember that we did. The cursor is deliberately NOT advanced: this message is
+        -- owed a decision, and the next pass hands it on again until one exists (the child's idempotency
+        -- key makes that a reconcile, not a second child) or the attempts run out.
+        handoffs[message_id] = (handoffs[message_id] or 0) + 1
+        handoffs_changed = true
+        if json_events then
+          events[#events + 1] = {
+            message_id = message.message_id,
+            conversation_id = message.conversation_id,
+            sender_id = message.sender_id,
+            sent_at = at,
+            direction = message.direction,
+            body = message.body,
+            eligibility = verdict,
+          }
+        elseif sentinel then
+          local ok, why = emit_event(sentinel, "whatsapp.message", message.message_id, {
+            conversation_id = message.conversation_id,
+            message_id = message.message_id,
+            sender_id = message.sender_id,
+            sent_at = at,
+            direction = message.direction,
+            body = message.body,
+            eligibility = verdict,
+          })
+          if ok then
+            emitted = emitted + 1
+          else
+            -- The event never reached the job store, so nothing is owed for it: forget the attempt and
+            -- leave the cursor where it is, so the next pass tries again.
+            emit_error = emit_error or why
+            handoffs[message_id] = nil
+            handoffs_changed = true
+          end
         end
       end
     end
   end
   local after = memory.stats().ledger_messages or 0
-  local newest = tonumber(payload.newest) or 0
   -- Only what was decided about. `newest` would consume a message whose emission failed, one a read-only
   -- pass merely looked at, or one a pipeline step never acted on - the silent loss this rule prevents.
   if handled > cursor then
-    memory.meta_set("whatsapp_cursor", math.floor(handled))
+    cursor = handled
+    memory.meta_set("whatsapp_cursor", math.floor(cursor))
+  end
+  -- What is still owed a decision, durably, so a restart between hand-on and decision does not forget it.
+  if handoffs_changed then
+    memory.meta_set("whatsapp_handoffs", json.encode(handoffs))
   end
   -- The dump has done its job; leaving it would leave a copy of the inbox in the temp directory.
   if host.exec then pcall(host.exec, "rm -f " .. quote(dump), "") end
@@ -296,17 +394,23 @@ local function main()
   if json_events then
     -- One JSON object and nothing else on stdout: a pipeline step succeeds on exit 0 *and* a JSON
     -- object, and a stray report line would make the whole result unparseable.
-    print(json.encode({ events = events, unanswerable = unanswerable,
-      operator_answered = skipped_answered,
-      cursor = math.floor(math.max(cursor, handled)) }))
+    local owed = 0
+    for _ in pairs(handoffs) do owed = owed + 1 end
+    print(json.encode({ events = events, unanswerable = unanswerable, exhausted = exhausted,
+      operator_answered = skipped_answered, already_decided = skipped_decided,
+      still_owed = owed, decisions_error = decisions_error,
+      cursor = math.floor(cursor) }))
     return
   end
+  local owed = 0
+  for _ in pairs(handoffs) do owed = owed + 1 end
   report(string.format(
-    "whatsapp ingest ok db=%s read=%d new=%d conversations=%d eligible=%d ineligible=%d cursor=%d events=%d skipped=%d%s ms=%d",
+    "whatsapp ingest ok db=%s read=%d new=%d conversations=%d eligible=%d ineligible=%d cursor=%d newest=%d events=%d skipped=%d decided=%d owed=%d unanswerable=%d exhausted=%d%s ms=%d",
     paths.data(), math.floor(#(payload.messages or {})), math.floor(after - before),
     math.floor(#(payload.conversations or {})), math.floor(tonumber(payload.eligible) or 0),
-    math.floor(tonumber(payload.ineligible) or 0), math.floor(math.max(cursor, newest)),
-    math.floor(emitted), math.floor(skipped_ineligible),
+    math.floor(tonumber(payload.ineligible) or 0), math.floor(cursor), math.floor(newest),
+    math.floor(emitted), math.floor(skipped_ineligible), math.floor(skipped_decided), math.floor(owed),
+    math.floor(#unanswerable), math.floor(#exhausted),
     emit_error and (" event_error=" .. tostring(emit_error)) or "",
     math.floor(elapsed)))
 end
