@@ -1,8 +1,27 @@
 -- Pi-style bounded model views with the complete output available as a file.
 -- Projection is done once when the result is produced, and persisted unchanged.
+--
+-- The budget is 16 KiB, down from 50 KiB. Results accumulate in the request - the 48h export
+-- shows 474 KB of tool results in the average request - so a per-result cap is paid once per
+-- remaining round. Measured on the navigation fixture with the arms *interleaved* (4 pairs,
+-- so a slow provider minute cannot favour one arm): 16 KiB used ~6% fewer tokens and ~11%
+-- fewer calls than 50 KiB, and every answer was correct. An earlier non-interleaved batch
+-- suggested 22%; that was the batch, not the budget. 8 KiB was no better and 4 KiB was worse
+-- (more calls, and one run over budget), so this is the knee.
+--
+-- Nothing is lost: the complete output is stored as an artifact either way, and `tool_result`
+-- reads it back by byte cursor. An operator may move the budget with WASM_AGENT_TOOL_OUTPUT_BYTES.
 local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
-local M = {MAX_BYTES=50*1024, MAX_LINES=2000}
+local M = {MAX_BYTES=16*1024, MAX_LINES=2000}
+-- An operator may tighten the per-result budget. The complete output is kept as an artifact
+-- either way, so a smaller view costs bytes and never data - but it can cost a *round*, and in
+-- a large session one extra round costs more than the bytes it saved. The default is therefore
+-- unchanged until an A/B says otherwise; this is the knob that measures it.
+local configured_bytes = tonumber(host.getenv("WASM_AGENT_TOOL_OUTPUT_BYTES"))
+if configured_bytes and configured_bytes >= 4096 and configured_bytes <= 4 * 1024 * 1024 then
+  M.MAX_BYTES = math.floor(configured_bytes)
+end
 local legacy_views,legacy_count={},0
 
 function M.slice(text, from, count)
@@ -49,7 +68,8 @@ function M.truncate(text, tail)
 end
 
 local function output_note()
-  return "The model view is bounded to 2000 lines / 50 KiB in total. Full original JSON is stored at full_result.path; use tool_result with its sha256 and byte offset to retrieve any part."
+  return "The model view is bounded to 2000 lines / " .. math.floor(M.MAX_BYTES / 1024) ..
+    " KiB in total. Full original JSON is stored at full_result.path; use tool_result with its sha256 and byte offset to retrieve any part."
 end
 
 local function preview_view(name, output, encoded, ref)
@@ -99,11 +119,17 @@ local function session_view(output, ref)
 end
 
 function M.project(name, output)
-  local encoded = json.encode(output)
+  -- Encode a non-table only through pcall: a decoded scalar can be `inf` (a numeric
+  -- literal too large for a float), and json.encode throws on that *before* the
+  -- non-table branch below could handle it. A stored result of 16 KB of digits is
+  -- enough to reach this, and the context build must not die on it.
   if type(output) ~= "table" then
+    local encodable, encoded = pcall(json.encode, output)
+    if not encodable then encoded = tostring(output) end
     if #encoded<=M.MAX_BYTES then return encoded end
     return preview_view(name,{},encoded,M.store(encoded))
   end
+  local encoded = json.encode(output)
   -- A native read page already obeys both limits and carries a byte-exact cursor. A trailing
   -- newline is not a 2001st line; re-truncating here would skip bytes on the next page.
   if name=='read' and output.version and output.next_column and type(output.content)=='string'
@@ -166,7 +192,10 @@ function M.context_view(name, content)
   if legacy_views[key] then return legacy_views[key] end
   local ok,decoded=pcall(json.decode,content)
   local view
-  if ok then
+  -- A tool result is not always JSON: a bare number too large for a float decodes to `inf`,
+  -- and a non-table is not a result that can be projected. Preview the original bytes
+  -- instead of handing a scalar to the projector.
+  if ok and type(decoded)=="table" then
     if type(decoded)=="table" and type(decoded.full_result)=="table" then
       local ref=decoded.full_result
       local id=ref.sha256

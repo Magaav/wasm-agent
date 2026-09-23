@@ -594,8 +594,10 @@ for _, message in ipairs(bot:build_context()) do
   if message.role == "tool" and message.name == "bash" then bash_view = message.content end
 end
 assert(#read_view > 600, "the read budget must be far larger than the old 600, got " .. #read_view)
-assert(read_view == big, "rebuild must preserve the stored view; projection happens once at execution")
-assert(read_view:sub(1, 20) == big:sub(1, 20), "read keeps the head, which identifies the file")
+-- The stored row keeps the whole result; only the *context* view is bounded, and an
+-- oversized view keeps the head and points at the artifact that holds the rest.
+assert(read_view:find(big:sub(1, 20), 1, true), "read keeps the head, which identifies the file")
+assert(read_view:find("full_result", 1, true), "an oversized view must point at its artifact")
 assert(bash_view:find("FATAL", 1, true), "bash keeps the tail, because the error lives there")
 print("tool evidence ok")
 LUA

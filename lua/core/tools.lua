@@ -532,8 +532,12 @@ function M.dispatch(memory, name, args, role, ctx)
       local row=memory.message(args.message_id)
       if not row or row.session_id~=args.session_id then return {error='unknown_message'} end
       if args.byte_offset~=nil then
-        local offset,limit=tonumber(args.byte_offset),tonumber(args.byte_limit) or 20000
-        if not offset or offset<1 or offset%1~=0 or limit<4 or limit>20000 or limit%1~=0 then return {error='invalid_message_range'} end
+        -- The page must fit the projector's envelope, or it comes back "omitted" and the
+        -- exact-byte contract this route exists for is lost. Derived from the one budget,
+        -- not hardcoded, so the two cannot drift apart again.
+        local page_limit=tool_output.MAX_BYTES-2048
+        local offset,limit=tonumber(args.byte_offset),tonumber(args.byte_limit) or page_limit
+        if not offset or offset<1 or offset%1~=0 or limit<4 or limit>page_limit or limit%1~=0 then return {error='invalid_message_range'} end
         local encoded=json.encode(row);local version=host.sha256(encoded)
         if offset>#encoded+1 then return {error='message_range_out_of_bounds'} end
         if offset<=#encoded and encoded:byte(offset)>=128 and encoded:byte(offset)<192 then return {error='offset_inside_utf8'} end
