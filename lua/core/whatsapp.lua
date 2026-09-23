@@ -5,6 +5,12 @@
 -- that can edit files, run commands or deploy. The restrictions are structural, not sentences in a
 -- prompt.
 --
+-- A reply always says what it is. The send tool prefixes the body with `REPLY_PREFIX` ("Copiloto: ") before
+-- it is reserved, sent or verified, so a message written by a model and sent as the operator cannot be
+-- mistaken for the operator's own words - and cannot be sent unmarked by forgetting an instruction, by a
+-- second route, or by a caller that hands a bare body to the tool. The wording lives here, as one
+-- constant: a profile knob would be a second way for the marker to be absent.
+--
 -- Trusted context. Everything the tools need beyond the profile arrives on `ctx`, never from the event
 -- body and never from the model's arguments:
 --
@@ -28,6 +34,10 @@ local paths = dofile("lua/core/paths.lua")
 
 local M = {}
 M.PROFILE_ID = "whatsapp-responder"
+-- Every reply carries this at the very beginning, so a person on the other side knows a copilot wrote it.
+-- It is applied in the send tool, before the body is reserved and verified, which is what makes it a
+-- guarantee rather than a hope. Keep it short: it is part of the message.
+M.REPLY_PREFIX = "Copiloto: "
 M.SCHEMA_VERSION = 1
 
 local function fail(code, extra)
@@ -403,6 +413,12 @@ local function send_tool(args, profile, ctx)
   end
   local body = tostring(args.body or "")
   if body == "" then return fail("body_required") end
+  -- Announce the copilot, here and not in a prompt: this is the one place every send passes through. A body
+  -- that already carries the prefix is left alone, so a run that prefixes its own text (or a retry of the
+  -- same body) is not doubled - "Copiloto: Copiloto: ..." would be the only thing sillier than a reply that
+  -- does not say what it is.
+  local prefix = tostring(M.REPLY_PREFIX or "")
+  if prefix ~= "" and body:sub(1, #prefix) ~= prefix then body = prefix .. body end
   local maximum = tonumber(profile.limits and profile.limits.body_bytes) or 4096
   if #body > maximum then return fail("body_too_long", { maximum = maximum }) end
 

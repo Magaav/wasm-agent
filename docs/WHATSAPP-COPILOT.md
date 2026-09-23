@@ -110,6 +110,13 @@ The route refuses to overwrite a draft, refuses a non-self send without that app
 sent message in the app's store: a keystroke's acknowledgement is not evidence (it has reported
 `timeout: Input.dispatchKeyEvent` while the message verifiably delivered).
 
+**Every reply announces itself.** The send tool puts `Copiloto: ` (`M.REPLY_PREFIX` in
+`lua/core/whatsapp.lua`) at the very beginning of the body *before* it is reserved, sent and verified, so
+the marker cannot be forgotten by a model, skipped by a route or dropped by a caller — and because the
+store check compares the prefixed text, an unmarked reply cannot pass verification either. A body that
+already carries the prefix is left alone, never doubled. The wording is one constant and deliberately not a
+profile field: a knob would be a second way for the marker to be absent.
+
 ## Operating it
 
 ```
