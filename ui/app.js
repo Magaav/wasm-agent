@@ -914,7 +914,15 @@ function collapseRun() {
   if (!existing && traces.length === 0) return;
   if (moves.length === 0) return;
   const run = existing || document.createElement("wa-run");
-  if (!existing) body.prepend(run);
+  if (!existing) {
+    body.prepend(run);
+    // While the run is still going the route stays OPEN: the reader is watching it happen, and a
+    // collapsed topic hides the very steps they are waiting on (measured: after the first answer the
+    // topic closed and took the thinking and the tool lines with it, so a long run read as a folded
+    // topic and a list of answers). It is set only when the topic is created, so a reader who closes it
+    // by hand is not overruled by the next round. A repaint is history, so there it starts closed.
+    run.open = !replayingMessages;
+  }
   for (const child of moves) {
     run.body.append(child);
     if (typeof child.reveal === "function") child.reveal();
@@ -948,7 +956,13 @@ function flushDecision(final = false) {
   }
   sealReasoning();
   finishTrace();
-  if (final) runBubble = null;
+  if (final) {
+    // The run is over: its route folds away, and the answer is what is left to read.
+    if (runBubble) {
+      for (const topic of runBubble.body.querySelectorAll(":scope > wa-run")) topic.open = false;
+    }
+    runBubble = null;
+  }
   pin();
 }
 

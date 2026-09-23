@@ -1395,6 +1395,30 @@ $harness = @'
     window.handleEvent({ type: "done" });
   })();
 
+  // ---- the route stays open while the run is going --------------------------------------------
+  // Measured with a probe on a two-round run: after the first answer the run topic CLOSED, and the
+  // thinking and the tool lines went with it - so a reader watching a long run saw a folded topic and
+  // a list of answers rather than the run happening. The principle is already the one a running
+  // *trace* follows ("open so its tool lines are visible"); this is the same rule one level up, and a
+  // repaint is history, so a reloaded transcript still starts closed.
+  (function () {
+    var vis = function (el) { if (!el) return false; var r = el.getBoundingClientRect(); return r.height > 0; };
+    var lastOf = function (sel) { var l = document.querySelectorAll(sel); return l[l.length - 1]; };
+    window.handleEvent({ type: "round", n: 1 });
+    window.handleEvent({ type: "reasoning", text: "first thought", chars: 13 });
+    window.handleEvent({ type: "tool", name: "bash", arguments: { command: "ls" } });
+    window.handleEvent({ type: "reply", text: "First answer." });
+    var topic = lastOf("wa-message wa-run");
+    check(!!topic && topic.open, "live route: the run topic must stay open while the run is going");
+    check(vis(lastOf("wa-message wa-reasoning")), "live route: the thinking must still be visible mid-run");
+    window.handleEvent({ type: "round", n: 2 });
+    window.handleEvent({ type: "reasoning", text: "second thought", chars: 14 });
+    window.handleEvent({ type: "tool", name: "bash", arguments: { command: "ls -la" } });
+    window.handleEvent({ type: "reply", text: "Second answer." });
+    check(!!topic && topic.open, "live route: it stays open across rounds");
+    window.handleEvent({ type: "done" });
+    check(!!topic && !topic.open, "live route: it folds away when the run ends");
+  })();
   // ---- a run this window did not open must be followed, not waited out ----------------------
   // The node streams a run only to the request that opened it, so a reload during a run (or a run a
   // wake or a job started) has no live channel. Measured live before this existed: the node executed
