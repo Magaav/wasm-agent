@@ -143,7 +143,6 @@ local function nearest_edit_hint(text, needle)
     text = table.concat(lines, "\n", best, last):sub(1, 400),
     note = "no region matches old_text; this is the closest. Quote it exactly, or re-read the range with read and copy the bytes." }
 end
-end
 
 function M.edit(args,record)
   if type(args.path)~='string' or args.path=='' then return {error='path_required'} end
