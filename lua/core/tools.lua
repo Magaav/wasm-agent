@@ -415,6 +415,23 @@ function M.dispatch(memory, name, args, role, ctx)
       return { error = "invalid_timeout_seconds" }
     end
     local result = run(args.cwd and ("cd " .. shell_quote(args.cwd) .. " && " .. args.command) or args.command, timeout)
+    -- The adopted-tree guidance is *policy*, and policy depends on what this caller may use:
+    -- a profile with `bash` but not `operation` cannot read or cancel the operation it has just
+    -- been handed, so telling it to would be the same dead end the old refusal was. The host
+    -- returns the facts; this decides what to say about them.
+    if type(result) == "table" and result.promoted == true then
+      local allowed = ctx.subagent and ctx.subagent.allowed or nil
+      local id = tostring(result.operation_id or "")
+      if allowed == nil or allowed["operation"] == true then
+        result.note = "the shell exited leaving live processes; they are adopted as operation " .. id ..
+          " and keep running. Read it with operation read; stop it with operation cancel."
+      else
+        result.note = "the shell exited leaving live processes; they are adopted as operation " .. id ..
+          " and keep running. This profile does not allow the `operation` tool, so you cannot read or " ..
+          "cancel it from here: it ends at its own deadline, or when the node exits. Start long-lived " ..
+          "work from a profile that allows `operation` when you need to watch or stop it."
+      end
+    end
     return result
   elseif name == "read" then
     return file_tools.read(args)

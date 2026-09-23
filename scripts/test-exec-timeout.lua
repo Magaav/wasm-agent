@@ -33,6 +33,25 @@ ok(adopted_status.promoted==true and adopted_status.settled==false, "the adopted
 json.decode(host.operation("cancel",json.encode({id=bg.operation_id})))
 local adopted_done=json.decode(host.operation("wait",json.encode({id=bg.operation_id,wait_ms=3000})))
 ok(adopted_done.settled==true, "cancelling the adopted operation settles it")
+
+-- The guidance that comes back with an adopted tree is policy, and it has to match what the
+-- caller can actually use. A profile with `bash` but not `operation` was being told to read and
+-- cancel an operation it cannot reach - the same dead end the old refusal was, reintroduced by
+-- the adoption. Drive the real dispatch with a restricted caller context.
+local tools=dofile("lua/core/tools.lua")
+local memory=dofile("lua/core/memory.lua");memory.setup()
+local restricted=tools.dispatch(memory,"bash",{command="sleep 60 & echo started"},"master",
+  {subagent={allowed={read=true,bash=true}}})
+ok(restricted.promoted==true, "a caller without `operation` still gets the adoption")
+ok(not tostring(restricted.note):find("operation read",1,true),
+  "but is not told to use a tool its profile does not allow")
+ok(tostring(restricted.note):find(tostring(restricted.operation_id),1,true)~=nil,
+  "and the note still names the operation it was handed")
+local allowed=tools.dispatch(memory,"bash",{command="sleep 60 & echo started"},"master",
+  {subagent={allowed={read=true,bash=true,operation=true}}})
+ok(allowed.promoted==true and tostring(allowed.note):find("operation read",1,true)~=nil,
+  "a caller that does allow `operation` is told to use it")
+json.decode(host.operation("cancel",json.encode({id=allowed.operation_id})))
 local hello=json.decode(host.exec("echo hello"))
 ok(hello.ok and hello.code==0 and hello.stdout:find("hello",1,true), "normal command succeeds")
 local slow=json.decode(host.exec("sleep 1; echo done"))
