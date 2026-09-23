@@ -357,6 +357,40 @@ function clearStatus() {
   statusLine = null;
 }
 
+// The model's own thinking, when the provider streams it in a field of its own instead of
+// leaking it into the answer. It is the route to the reply, not the reply, so it lives in a
+// collapsible block: open while the run is still thinking, folded away once the run moves on.
+// It is deliberately not swallowed by the run topic - a run whose content was all reasoning
+// must not read as a run that only called tools.
+let reasoningBlock = null;
+function appendReasoning(text) {
+  if (!text) return;
+  const bubble = currentBubble();
+  if (!reasoningBlock || reasoningBlock.parentNode !== bubble.body) {
+    reasoningBlock = document.createElement("details");
+    reasoningBlock.className = "reasoning";
+    reasoningBlock.open = !replayingMessages;
+    const head = document.createElement("summary");
+    head.className = "reasoning-head";
+    const body = document.createElement("div");
+    body.className = "reasoning-body";
+    reasoningBlock.append(head, body);
+    reasoningBlock.reasoningHead = head;
+    reasoningBlock.reasoningBody = body;
+    bubble.body.append(reasoningBlock);
+  }
+  reasoningBlock.reasoningBody.textContent += text;
+  reasoningBlock.reasoningHead.textContent =
+    "thinking · " + reasoningBlock.reasoningBody.textContent.length + " chars";
+  pin();
+}
+
+// A round is over: the thinking it produced is history, and the block folds away.
+function sealReasoning() {
+  if (reasoningBlock) reasoningBlock.open = false;
+  reasoningBlock = null;
+}
+
 // Tool lines are rendered the way pi renders them in its CLI: bold lowercase
 // tool name plus the argument that matters, never a JSON blob.
 //   read src/app.js (lines 10-40)   bash $ ls -la   grep /pattern/   edit path
@@ -862,7 +896,8 @@ function collapseRun() {
   const body = bubble.body;
   const answer = streamBody;
   const moves = Array.prototype.filter.call(body.children,
-    (c) => c !== answer && c.tagName !== "WA-DIFF");
+    (c) => c !== answer && c.tagName !== "WA-DIFF" &&
+      !(c.tagName === "DETAILS" && c.classList.contains("reasoning")));
   const traces = moves.filter((c) => c.tagName === "WA-TRACE");
   if (traces.length === 0) return;   // nothing ran: leave the plain answer alone
   let calls = 0;
@@ -896,6 +931,7 @@ function flushDecision(final = false) {
     streamBody = null;
     streamText = "";
   }
+  sealReasoning();
   finishTrace();
   if (final) runBubble = null;
   pin();
@@ -931,10 +967,11 @@ function handleEvent(event) {
     setStatus(note === "model" ? "thinking…" : "wasm-agent is " + note + "…");
   } else if (event.type === "reasoning") {
     // A reasoning model can think for a long time before it says anything, and a
-    // silent panel is indistinguishable from a hung one. The count also tells the
-    // reader where the output budget went when a run ends with no answer.
+    // silent panel is indistinguishable from a hung one. The text becomes a thinking
+    // block; the count still drives the status line, the live "not hung" signal.
     const chars = Number(event.chars) || 0;
-    setStatus("thinking… " + chars + " chars of reasoning");
+    appendReasoning(event.text || "");
+    if (!replayingMessages) setStatus("thinking… " + chars + " chars of reasoning");
   } else if (event.type === "tool") {
     // The bound travels with the tool event when the host enforces one (bash/shell); /health is the
     // fallback so an in-flight line still says "of 300s" instead of only "42s".
@@ -975,6 +1012,7 @@ function handleEvent(event) {
     // created after the run is collapsed, and collapseRun() also refuses to swallow a WA-DIFF,
     // so the two cannot get back into that order.
     collapseRun();
+    sealReasoning();
     const diff = renderDiff(currentBubble(), event.changes);
     if (diff) {
       diff.dataset.messageId = event.message_id || "";
@@ -1029,6 +1067,7 @@ function repaintMessages(rows) {
   runBubble = null;
   streamBody = null;
   streamText = "";
+  reasoningBlock = null;
   runStartedAt = 0;
   replayMessageEndedAt = 0;
   let rendered = 0;
@@ -1049,6 +1088,11 @@ function repaintMessages(rows) {
         // the topic, and the id is what the undo route is asked about. Dropping them here is why a
         // reloaded transcript showed no diff topics at all - the live path had them, the repaint did
         // not, and a window that has been reloaded is a repaint.
+        // The stored row keeps the thinking apart from the answer; replay it through the same
+        // path the live stream used, so a reloaded transcript shows it too.
+        if (message.reasoning) {
+          handleEvent({ type: "reasoning", text: message.reasoning, chars: message.reasoning.length });
+        }
         if (message.content) {
           replayMessageEndedAt = Number(message.created_at) > 0 ? Number(message.created_at) * 1000 : Date.now();
           handleEvent({ type: "reply", text: message.content, changes: message.changes, message_id: message.id });

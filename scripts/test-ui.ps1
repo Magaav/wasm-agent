@@ -53,6 +53,12 @@ $harness = @'
       "a repainted tool must not invent a new 300-second execution clock");
     check(restored.querySelectorAll("wa-trace .tool-line.unrecorded").length === 2,
       "a real reload must close historical as well as current missing tool calls");
+    var restoredReasoning = restored.querySelector(".reasoning");
+    check(!!restoredReasoning && restoredReasoning.textContent.indexOf("EARLIER-REASONING") >= 0,
+      "a reload must repaint the stored thinking, saw: " +
+      (restoredReasoning ? restoredReasoning.textContent : "nothing"));
+    check(!!restoredReasoning && restoredReasoning.open === false,
+      "and the repainted thinking must be folded away, not flooding the transcript");
     check(!restored.querySelector(".unfinished-notice button"),
       "an active turn must not offer a duplicate continuation");
     check(!window.__calls.some(function (call) { return call.url === "chat" && call.method === "POST"; }),
@@ -1271,6 +1277,33 @@ $harness = @'
     check(!!outcome && outcome.textContent.indexOf("exit 0") >= 0,
       "tool age: the settled line must show its outcome, not a frozen age, saw: " + (outcome ? outcome.textContent : "no outcome"));
     window.handleEvent({ type: "reply", text: "Slow check done." });
+    window.handleEvent({ type: "done" });
+  })();
+  // ---- reasoning ----------------------------------------------------------
+  //
+  // A reasoning model's thinking arrives in a field of its own, so a turn whose content was
+  // entirely thinking used to render as a turn that only called tools. The thinking is now a
+  // step of its own: it must appear with the text the node streamed, survive the run's
+  // collapse, and fold away when the run answers.
+  (function () {
+    window.handleEvent({ type: "round", n: 1 });
+    window.handleEvent({ type: "reasoning", text: "weighing the options", chars: 19 });
+    var blocks = document.querySelectorAll("wa-message .reasoning");
+    var block = blocks[blocks.length - 1];
+    check(!!block, "reasoning: a reasoning delta must render a thinking block");
+    check(!!block && block.textContent.indexOf("weighing the options") >= 0,
+      "reasoning: the block must carry the text the node streamed, saw: " +
+      (block ? block.textContent : "nothing"));
+    check(!!block && block.open === true, "reasoning: it must be open while the run is thinking");
+    window.handleEvent({ type: "tool", name: "bash", arguments: { command: "ls" } });
+    window.handleEvent({ type: "tool_result", result: { code: 0, stdout: "ok" } });
+    window.handleEvent({ type: "reply", text: "The options are weighed." });
+    var settled = document.querySelectorAll("wa-message .reasoning");
+    var folded = settled[settled.length - 1];
+    check(!!folded, "reasoning: collapsing the run must not swallow the thinking");
+    check(!!folded && folded.open === false, "reasoning: it must fold away once the run answers");
+    check(!!folded && folded.closest("wa-run") === null,
+      "reasoning: it is the route, not the answer, and must stay outside the run topic");
     window.handleEvent({ type: "done" });
   })();
   document.title = "stage: end";

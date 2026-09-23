@@ -151,7 +151,8 @@ if (sessionStorage.getItem("wa-ui-reload-stage") === "active") {
     state: { state: "unfinished", detail: "1 tool call(s) with no recorded result: bash" },
     messages: [
       { seq: 1, role: "user", content: "EARLIER-INTERRUPTED-QUESTION", tool_calls: [] },
-      { seq: 2, role: "assistant", content: "", tool_calls: [
+      { seq: 2, role: "assistant", content: "", reasoning: "EARLIER-REASONING",
+        tool_calls: [
         { id: "earlier-lost", type: "function", function: { name: "bash", arguments: "{\"command\":\"earlier check\"}" } },
       ] },
       { seq: 3, role: "user", content: "RELOAD-MID-RUN-QUESTION", tool_calls: [] },

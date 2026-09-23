@@ -109,6 +109,20 @@ wa-message.assistant { align-self: flex-start; background: var(--assistant); }
   border-top: 1px solid rgba(35, 41, 54, .8);
 }
 .run-body .seg { padding-left: var(--space); color: var(--muted); }
+
+/* The model's thinking, when the provider streams it separately from the answer. It is the
+   route to the reply, not the reply, so it folds away - but it stays a visible step, because a
+   turn whose content was all reasoning must not read as a turn that only called tools. */
+.reasoning { border: 1px solid var(--line); border-radius: var(--radius); background: rgba(15, 18, 25, .5); }
+.reasoning > summary.reasoning-head {
+  cursor: pointer; padding: 6px var(--space); color: var(--muted); font-size: 12px; list-style: none;
+}
+.reasoning > summary.reasoning-head::-webkit-details-marker { display: none; }
+.reasoning[open] > summary.reasoning-head { border-bottom: 1px solid var(--line); }
+.reasoning-body {
+  padding: var(--space); color: var(--muted); font-size: 12px; white-space: pre-wrap;
+  word-break: break-word; max-height: 320px; overflow: auto;
+}
 .run-body wa-trace { border: 0; border-left: 2px solid rgba(35, 41, 54, .8); border-radius: 0; background: none; }
 
 /* The diff topic: what the run changed on disk, collapsed *after* the answer.
