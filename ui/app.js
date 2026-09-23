@@ -360,8 +360,11 @@ function clearStatus() {
 // The model's own thinking, when the provider streams it in a field of its own instead of
 // leaking it into the answer. It is the route to the reply, not the reply, so it lives in a
 // collapsible block: open while the run is still thinking, folded away once the run moves on.
-// It is deliberately not swallowed by the run topic - a run whose content was all reasoning
-// must not read as a run that only called tools.
+// It is folded into the run topic along with the tool calls it belongs to - it *is* the route, and
+// leaving it outside left a wall of "thinking · N chars" rows between the reader and the answer
+// (measured live: 196 of them sitting outside the topics in one thread). The case that must not be
+// swallowed is a run that called no tool at all: no topic is created for one, so its thinking stays
+// visible instead of reading as a run that only called tools.
 let reasoningBlock = null;
 function appendReasoning(text) {
   if (!text) return;
@@ -900,8 +903,7 @@ function collapseRun() {
   // reader then opens topics to reach topics.
   const existing = Array.prototype.find.call(body.children, (c) => c.tagName === "WA-RUN");
   const moves = Array.prototype.filter.call(body.children,
-    (c) => c !== answer && c !== existing && c.tagName !== "WA-DIFF" &&
-      !(c.tagName === "DETAILS" && c.classList.contains("reasoning")));
+    (c) => c !== answer && c !== existing && c.tagName !== "WA-DIFF");
   const traces = moves.filter((c) => c.tagName === "WA-TRACE");
   // A run topic is only created once something actually ran - a run that never called a tool keeps
   // its plain answer. But once a topic exists, a later reply must still fold the previous answer into
@@ -1138,6 +1140,11 @@ function repaintMessages(rows) {
   }
   if (trace) finishTrace();
   replayingMessages = false;
+  // The transcript just drawn is history, so the bubble it ended on is closed. The `reply` handler
+  // used to close it, and when that stopped (one bubble per run) this became the place that must:
+  // without it the next thing that arrives is appended to the last repainted run's bubble, so a
+  // message sent after a reload lands inside the previous run's reply. Caught by the UI harness.
+  runBubble = null;
   pin(true);
   if (failed) {
     add("assistant", `repaint: ${rendered} of ${rows.length} messages drawn, ${failed} failed — first: ${firstFailure}`);
@@ -2786,6 +2793,32 @@ async function watch() {
 // of making the reader reload to see it.
 let sawTurnInFlight = false;
 let runPolling = false;
+// The thread's `last_seq` as of the last redraw, so a poll redraws only when the run moved.
+let followedSeq = null;
+
+// A run in flight that this window did NOT open - a reload during a run, or one a wake or a job
+// started - has no live channel: the node streams a run only to the request that opened it. The
+// ledger is a channel, and /session answers while the run is in flight (measured: 200 in ~500ms
+// against a running turn), so the window follows the run by re-reading it. Without this the
+// transcript sat frozen for the whole run and the reader reloaded to see anything - and the reload
+// showed the same frozen snapshot, because a reload does not reattach to a run either (measured:
+// 40s of node work, 0 bytes of page change).
+async function followRun() {
+  if (!chatSession) return;
+  // /sessions is small and carries the thread's `last_seq`; the 1.5 MB /session read happens only
+  // when there is something new. Redrawing an unchanged transcript would cost a megabyte every
+  // three seconds and fight the reader's scroll for nothing.
+  const list = await (await apiFetch("sessions", { headers: apiHeaders() })).json();
+  const mine = (list.sessions || []).find((entry) => entry.id === chatSession);
+  if (!mine) return;
+  const seq = Number(mine.last_seq) || 0;
+  if (seq === followedSeq) return;
+  followedSeq = seq;
+  rememberPlace();
+  await restoreSession();
+  restorePlace();
+}
+
 async function watchTurn() {
   // One at a time: a poll that has not answered yet is not a reason to start another, and on a
   // single-worker node that is the difference between asking and queueing.
@@ -2795,8 +2828,12 @@ async function watchTurn() {
     const response = await apiFetch("health");
     const health = await response.json();
     const current = activeRun(health);
-    if (current) { sawTurnInFlight = true; }
-    else if (sawTurnInFlight) {
+    if (current) {
+      sawTurnInFlight = true;
+      // Only when this window is not streaming the run itself: `busy` means its own stream is
+      // drawing it live, and a repaint under a live stream would fight it for the same bubble.
+      if (!busy) await followRun();
+    } else if (sawTurnInFlight) {
       sawTurnInFlight = false;
       if (chatSession) {
         rememberPlace();
