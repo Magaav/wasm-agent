@@ -56,9 +56,16 @@ cdp_answers() {
   case "$body" in *'"Browser"'*) return 0 ;; *) return 1 ;; esac
 }
 whatsapp_page() {
-  local body
-  body="$(curl -s --max-time 3 "http://$CDP/json/list" 2>/dev/null)"
-  case "$body" in *'web.whatsapp.com'*) return 0 ;; *) return 1 ;; esac
+  # A *page* target whose URL is WhatsApp, and nothing weaker. Grepping the whole target list for
+  # `web.whatsapp.com` was wrong and looked right: Chrome keeps a **service-worker** target for the app
+  # after its tab is closed, so a closed tab read as open and the keeper answered `already-up` while the
+  # copilot failed `no_whatsapp_tab` (measured). Chrome prints `"type"` before `"url"` in each target, so
+  # "the last type seen is page" is the whole parse.
+  curl -s --max-time 3 "http://$CDP/json/list" 2>/dev/null | tr -d '\r' | awk '
+    /"type": *"page"/ { page = 1; next }
+    /"type": *"/ { page = 0 }
+    /"url": *"[^"]*web\.whatsapp\.com/ { if (page) { found = 1 } }
+    END { exit(found ? 0 : 1) }'
 }
 listener_pid() {
   # The pid listening on our port, or empty. `netstat` is the only tool that answers this on Windows.
