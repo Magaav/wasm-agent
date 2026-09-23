@@ -6,6 +6,7 @@
 //!   alloc(len: i32) -> i32                  (guest allocates `len` bytes)
 //!   describe() -> i64                        (packed ptr<<32 | len, JSON)
 //!   call(ptr: i32, len: i32) -> i64          (packed ptr<<32 | len, JSON)
+//!   free(ptr: i32, len: i32)                 (optional, releases returned JSON)
 //!
 //! `describe` returns `{"name","description","parameters"}`; `call` receives the
 //! tool arguments as JSON and returns JSON. The Lua core sees plugins as tools,
@@ -26,6 +27,7 @@ struct Plugin {
     memory: Memory,
     alloc: TypedFunc<i32, i32>,
     call: TypedFunc<(i32, i32), i64>,
+    free: Option<TypedFunc<(i32, i32), ()>>,
 }
 
 pub struct PluginRegistry {
@@ -33,11 +35,19 @@ pub struct PluginRegistry {
     plugins: Vec<Plugin>,
 }
 
-fn read_packed(memory: &Memory, store: &mut Store<()>, packed: i64) -> Result<String> {
+fn read_packed(
+    memory: &Memory,
+    store: &mut Store<()>,
+    packed: i64,
+    free: Option<&TypedFunc<(i32, i32), ()>>,
+) -> Result<String> {
     let pointer = ((packed >> 32) & 0xffff_ffff) as u32 as usize;
     let length = (packed & 0xffff_ffff) as u32 as usize;
     let mut buffer = vec![0u8; length];
     memory.read(&*store, pointer, &mut buffer)?;
+    if let Some(free) = free {
+        free.call(store, (pointer as i32, length as i32))?;
+    }
     Ok(String::from_utf8_lossy(&buffer).to_string())
 }
 
@@ -71,18 +81,48 @@ impl PluginRegistry {
         let alloc = instance.get_typed_func::<i32, i32>(&mut store, "alloc")?;
         let describe = instance.get_typed_func::<(), i64>(&mut store, "describe")?;
         let call = instance.get_typed_func::<(i32, i32), i64>(&mut store, "call")?;
+        let free = if instance.get_func(&mut store, "free").is_some() {
+            Some(instance.get_typed_func::<(i32, i32), ()>(&mut store, "free")?)
+        } else {
+            None
+        };
         let packed = describe.call(&mut store, ())?;
-        let text = read_packed(&memory, &mut store, packed)?;
+        let text = read_packed(&memory, &mut store, packed, free.as_ref())?;
         let info: Value = serde_json::from_str(&text)?;
-        let name = info.get("name").and_then(Value::as_str).unwrap_or("plugin").to_string();
-        let description = info.get("description").and_then(Value::as_str).unwrap_or("").to_string();
-        let parameters = info.get("parameters").cloned().unwrap_or_else(|| json!({"type": "object"}));
-        let internal = match info.get("surface").and_then(Value::as_str).unwrap_or("tool") {
+        let name = info
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("plugin")
+            .to_string();
+        let description = info
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let parameters = info
+            .get("parameters")
+            .cloned()
+            .unwrap_or_else(|| json!({"type": "object"}));
+        let internal = match info
+            .get("surface")
+            .and_then(Value::as_str)
+            .unwrap_or("tool")
+        {
             "tool" => false,
             "internal" => true,
             other => return Err(anyhow!("invalid plugin surface: {other}")),
         };
-        Ok(Plugin { name, description, parameters, internal, store, memory, alloc, call })
+        Ok(Plugin {
+            name,
+            description,
+            parameters,
+            internal,
+            store,
+            memory,
+            alloc,
+            call,
+            free,
+        })
     }
 
     /// JSON `[{name, description, parameters}, ...]` for the model tool list.
@@ -91,11 +131,13 @@ impl PluginRegistry {
             self.plugins
                 .iter()
                 .filter(|plugin| !plugin.internal)
-                .map(|plugin| json!({
-                    "name": plugin.name,
-                    "description": plugin.description,
-                    "parameters": plugin.parameters,
-                }))
+                .map(|plugin| {
+                    json!({
+                        "name": plugin.name,
+                        "description": plugin.description,
+                        "parameters": plugin.parameters,
+                    })
+                })
                 .collect(),
         )
     }
@@ -112,9 +154,18 @@ impl PluginRegistry {
             .ok_or_else(|| anyhow!("plugin_not_found:{name}"))?;
         let bytes = arguments_json.as_bytes();
         let pointer = plugin.alloc.call(&mut plugin.store, bytes.len() as i32)?;
-        plugin.memory.write(&mut plugin.store, pointer as usize, bytes)?;
-        let packed = plugin.call.call(&mut plugin.store, (pointer, bytes.len() as i32))?;
-        read_packed(&plugin.memory, &mut plugin.store, packed)
+        plugin
+            .memory
+            .write(&mut plugin.store, pointer as usize, bytes)?;
+        let packed = plugin
+            .call
+            .call(&mut plugin.store, (pointer, bytes.len() as i32))?;
+        read_packed(
+            &plugin.memory,
+            &mut plugin.store,
+            packed,
+            plugin.free.as_ref(),
+        )
     }
 }
 
