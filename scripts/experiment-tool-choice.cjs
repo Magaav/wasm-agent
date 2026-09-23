@@ -128,6 +128,10 @@ async function startProvider() {
     WA_EXPERIMENT_N: String(runs), WA_EXPERIMENT_PROFILE: profile,
     WA_EXPERIMENT_DIR: home.replace(/\\/g, '/'),
     WA_EXPERIMENT_INDEX: arg('index', '0'),
+    // A/B a Lua-only change interleaved: point the node's dofile at a different copy of
+    // lua/. Without this, comparing two descriptions means comparing two points in time,
+    // and a slow provider minute reads as a difference between the arms.
+    ...(arg('lua-root', '') ? { WASM_AGENT_LUA_ROOT: path.resolve(arg('lua-root', '')) } : {}),
   };
   const child = spawn(wa, ['--db', path.join(home, 'memory.db')], { cwd: repo, env, windowsHide: true });
   let out = '';
