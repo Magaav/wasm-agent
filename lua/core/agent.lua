@@ -612,14 +612,21 @@ end
 function M:context_tokens(messages)
   messages=messages or self:build_context()
   local prefix=host.sha256(json.encode(messages[1] or {})..json.encode(self.tool_list or {}))
+  local estimated=telemetry.estimate_messages(messages)+estimate_tokens(json.encode(self.tool_list or {}))
   -- Pi uses the last measured usage plus the messages appended after it. A
   -- changed system prefix, compaction or restart falls back to an explicit estimate.
   if self.measured_prefix==prefix and self.measured_messages and #messages>=self.measured_messages then
     local tokens=self.measured_total or 0
     for i=self.measured_messages+1,#messages do tokens=tokens+telemetry.estimate_messages({messages[i]}) end
-    return tokens,"provider-plus-tail-estimate"
+    return math.max(tokens,estimated),"provider-plus-tail-estimate"
   end
-  return telemetry.estimate_messages(messages)+estimate_tokens(json.encode(self.tool_list or {})),"bytes/4-plus-image-estimate"
+  -- The measured count is a floor even when the prefix changed. The estimator undercounts -
+  -- a request measured at 894,056 tokens estimated at 811,985 - and a count that is too low is
+  -- what lets a request cross the provider's real limit before compaction fires.
+  if self.measured_total and self.measured_total>estimated then
+    return self.measured_total,"measured-floor"
+  end
+  return estimated,"bytes/4-plus-image-estimate"
 end
 
 -- Automatic compaction. Policy borrowed from pi: trigger only when the context

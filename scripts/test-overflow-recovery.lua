@@ -38,7 +38,25 @@ check(not provider.is_overflow_error('provider_http_429: rate limit, too many to
   'a throttling error is not an overflow')
 check(not provider.is_overflow_error('run_cancelled',900000,1000000),'a cancel is not an overflow')
 
--- 2. Recovery: the run compacts and retries once, then answers.
+-- 2. Headroom: a large window reserves proportionally, so the trigger lands *below* the
+-- provider's real ceiling instead of above it. This is the half that prevents the 400
+-- rather than recovering from it.
+local windowlib=dofile('lua/core/model_window.lua')
+check(windowlib.policy(1000000)>=100000,'a 1M window reserves at least ten percent')
+check(windowlib.policy(128000)==16384,'a small window keeps the fixed reserve')
+
+-- 3. The measured count is a floor even when the system prefix changed (a deploy), because
+-- the estimator undercounts and a too-low count is what lets a request cross the limit.
+local floor_sid=session('measured-floor')
+local floor_bot=agentlib.new(floor_sid,function() end,'master','master','')
+floor_bot.measured_prefix='a-prefix-that-no-longer-matches'
+floor_bot.measured_messages=10
+floor_bot.measured_total=900000
+floor_bot.tool_list={}
+local floor_tokens,floor_source=floor_bot:context_tokens({{role='system',content='x'},{role='user',content='y'}})
+check(floor_tokens>=900000 and floor_source=='measured-floor','the measured count is a floor when the prefix changed')
+
+-- 4. Recovery: the run compacts and retries once, then answers.
 local sid=session('overflow-retry')
 for i=1,40 do memory.append_turn(sid,{role=i%2==1 and 'user' or 'assistant',content='ROW_'..i..' '..string.rep('work ',100)}) end
 local bot=agentlib.new(sid,function() end,'master','master','')

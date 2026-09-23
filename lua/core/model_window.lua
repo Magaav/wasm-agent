@@ -60,6 +60,13 @@ M.WINDOWS = {
 -- pi's policy numbers, unchanged: reserve the reply, keep the recent work verbatim.
 M.RESERVE = 16384
 M.KEEP = 20000
+-- A large window also needs a proportional reserve. The catalogue's window is a *claim*, not a
+-- measurement: this deployment publishes 1,000,000 for deepseek-v4.1-flash and rejects a request
+-- at roughly 950,000. A fixed 16k reserve puts the compaction trigger (983,616) above the
+-- provider's real ceiling, so compaction never fires and the request is rejected instead. Ten
+-- percent keeps the trigger below the wall while staying far above the recent work; a small
+-- window is unchanged, because 16k already exceeds ten percent of it.
+M.RESERVE_FRACTION = 0.10
 
 -- The catalogue changes on the order of weeks, not runs. A day is generous and keeps the
 -- 4.7MB fetch off the hot path; `nodes.lua` uses 15s for the rendezvous, which is a
@@ -232,7 +239,7 @@ end
 -- The reserve and keep for a window, clamped so a small window cannot produce a negative
 -- trigger point. Same shape as the existing policy, now expressed per window.
 function M.policy(context)
-  local reserve = math.min(M.RESERVE, math.max(1000, math.floor(context / 4)))
+  local reserve = math.min(math.max(M.RESERVE, math.floor(context * M.RESERVE_FRACTION)), math.max(1000, math.floor(context / 4)))
   local keep = math.min(M.KEEP, math.max(1000, math.floor(context / 2)))
   return reserve, keep
 end
