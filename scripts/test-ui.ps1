@@ -1302,10 +1302,60 @@ $harness = @'
     var folded = settled[settled.length - 1];
     check(!!folded, "reasoning: collapsing the run must not swallow the thinking");
     check(!!folded && folded.open === false, "reasoning: it must fold away once the run answers");
-    check(!!folded && folded.closest("wa-run") === null,
-      "reasoning: it is the route, not the answer, and must stay outside the run topic");
+    // It belongs *inside* the topic: it is the route, not the answer, and a long run left a wall of
+    // "thinking · N chars" rows sitting outside the topics, between the reader and the answer
+    // (measured live: 196 of them outside the topics in one thread).
+    check(!!folded && folded.closest("wa-run") !== null,
+      "reasoning: it is the route, not the answer, and belongs inside the run topic");
     window.handleEvent({ type: "done" });
   })();
+
+  // ...but a run that called no tool must not be swallowed whole: no topic is created for one, so its
+  // thinking stays visible rather than the run reading as one that only called tools.
+  (function () {
+    window.handleEvent({ type: "round", n: 1 });
+    window.handleEvent({ type: "reasoning", text: "thinking, and nothing else", chars: 26 });
+    window.handleEvent({ type: "reply", text: "Thought it through and answered." });
+    var solo = document.querySelectorAll("wa-message .reasoning");
+    var soloBlock = solo[solo.length - 1];
+    check(!!soloBlock && soloBlock.closest("wa-run") === null,
+      "reasoning: a run that called no tool keeps its thinking visible, outside any topic");
+    check(!!soloBlock && soloBlock.open === false,
+      "reasoning: and it still folds away when that run answers");
+    window.handleEvent({ type: "done" });
+  })();
+
+  // ---- a run this window did not open must be followed, not waited out ----------------------
+  // The node streams a run only to the request that opened it, so a reload during a run (or a run a
+  // wake or a job started) has no live channel. Measured live before this existed: the node executed
+  // 40s of work in the thread and the page's transcript did not change by one byte. /session answers
+  // while the run is in flight, so the window follows the ledger instead of freezing until the run ends.
+  //
+  // Awaited in the harness's own body on purpose: an un-awaited IIFE left these checks running after
+  // the verdict was computed, and a check that never runs looks exactly like one that passes.
+  var followThread = window.__chatThread();
+  check(!!followThread, "follow: the window must know which thread it is in");
+  window.__fixtures.health.workers = [{ label: "POST /chat", busy_ms: 5000, session: followThread }];
+  window.__fixtures.health.current = { label: "POST /chat", ms: 5000, session: followThread };
+  window.__fixtures.sessions = { sessions: [{ id: followThread, title: "followed", user_id: "master",
+    mode: "chat", message_count: 3, last_seq: 4242, updated_at: Math.floor(Date.now() / 1000),
+    state: "unfinished", state_detail: "a run is in flight" }] };
+  window.__fixtures.session = {
+    session: { id: followThread, title: "followed" },
+    state: { state: "unfinished", detail: "a run is in flight" },
+    messages: [
+      { seq: 1, role: "user", content: "FOLLOWED-QUESTION", tool_calls: [] },
+      { seq: 2, role: "assistant", content: "FOLLOWED-PARTIAL", tool_calls: [] },
+    ],
+  };
+  await window.__watchTurn();
+  for (var followDrain = 0; followDrain < 30; followDrain++) await tick();
+  // The assertion is on the *text*, not on a bubble count: a count can grow because some other
+  // path repainted, so it passes against the broken code too - and a check that passes on broken
+  // code is not a check. FOLLOWED-PARTIAL exists only in the fixture above, so it can only appear
+  // if this poll redrew the thread from the ledger.
+  check(document.body.innerText.indexOf("FOLLOWED-PARTIAL") >= 0,
+    "follow: a run this window did not open must be followed without a reload");
   // ONE BUBBLE PER RUN, however many times the model speaks inside it.
   // Measured live: a run whose model wrote a one-line preamble before each tool batch produced three
   // assistant messages in one run, and the window drew THREE bubbles - because the `reply` handler
