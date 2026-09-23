@@ -57,6 +57,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/whatsapp.lua", include_str!("../../../lua/core/whatsapp.lua")),
     ("lua/core/subagents.lua", include_str!("../../../lua/core/subagents.lua")),
     ("lua/core/agent.lua", include_str!("../../../lua/core/agent.lua")),
+    ("lua/core/markdown.lua", include_str!("../../../lua/core/markdown.lua")),
     ("lua/core/cli_view.lua", include_str!("../../../lua/core/cli_view.lua")),
     ("lua/core/chat.lua", include_str!("../../../lua/core/chat.lua")),
     ("lua/core/server.lua", include_str!("../../../lua/core/server.lua")),

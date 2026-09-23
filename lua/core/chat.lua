@@ -40,6 +40,7 @@ commands:
   /search <query>      search the message ledger
   /conversation <id>   read a conversation
   /stats               database counts
+  /console             toggle the console: every event and a tool's whole output, unclipped
   /update              install the newest build in this node's tree (the sentinel does it, once idle)
   /merge               act as git orchestrator: merge every open branch into main, gate, push, sync
   /help                this help
@@ -82,6 +83,10 @@ local function printer(view)
         value = redact.text(value)
       end
       ready = { type = event.type, name = event.name, result = value }
+    elseif event.type == "reasoning" then
+      -- Reasoning is model output and goes through the redactor for the same reason a tool's
+      -- output does: it is text this process did not write and is about to print.
+      ready = { type = "reasoning", text = redact.text(tostring(event.text or "")) }
     end
     -- A rendering bug must not kill the run it is describing, and must not be silent
     -- either: the view says so once and the run keeps going.
@@ -227,6 +232,13 @@ function M.run(argv)
       print(agent.session_id)
     elseif line == "/stats" then
       print(json.encode(memory.stats()))
+    elseif line == "/console" then
+      -- The console is the raw view of the same run: every event as it arrived, and a tool's
+      -- output whole. It is a toggle rather than a flag on the launcher because the question
+      -- ("what is it actually doing?") arrives in the middle of a run, not before it.
+      local on = view:set_console(not view:console_on())
+      print(on and "  console on: every event, and a tool's output unclipped"
+        or "  console off: the formatted view")
     elseif line == "/update" then
       -- The same report the window gets from POST /update, and the same sentence: this node cannot
       -- replace itself, so the answer is what it decided and what it queued for the sentinel.

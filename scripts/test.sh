@@ -958,6 +958,12 @@ WA_SCRIPT=scripts/test-memory-window.lua "$BIN" --db "$DB.window" | grep "memory
 # you cannot search for.
 WA_SCRIPT=scripts/test-session-title.lua "$BIN" --db "$DB.title" | grep "session title ok"
 
+# The CLI's answer is markdown: the renderer decides what a heading, a bullet, a fence, a
+# link and a bare url become, and - the property that matters most - that nothing in the
+# reply is dropped on the way through. It is asserted without a model and without a terminal:
+# `paint` is passed in, so the test reads the roles the renderer chose.
+WA_SCRIPT=scripts/test-markdown.lua "$BIN" --db "$DB.markdown" | grep "markdown ok"
+
 # What a run looks like while it is running. The renderer is where the CLI's whole
 # readable output is decided - a tool call's line, a failed call's line, and whether a
 # captured transcript is free of escape sequences - so it is asserted without a model:
