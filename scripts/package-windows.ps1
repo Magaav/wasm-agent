@@ -13,6 +13,7 @@ $target = 'x86_64-pc-windows-msvc'
 $stage = $null
 $build = $null
 $published = $false
+$originalRustFlags = [Environment]::GetEnvironmentVariable('RUSTFLAGS', 'Process')
 
 function Git-Value([string[]]$Arguments) {
   $text = & git -C $root @Arguments
@@ -58,6 +59,9 @@ try {
     @{ name = 'sentinel'; manifest = 'rust/wa-sentinel/Cargo.toml'; binary = 'wa-sentinel.exe' },
     @{ name = 'window'; manifest = 'rust/wa-window/Cargo.toml'; binary = 'wa-window.exe' }
   )
+  # The public ZIP must start on a clean Windows installation without the
+  # separately installed Visual C++ runtime (VCRUNTIME140.dll).
+  $env:RUSTFLAGS = (($originalRustFlags, '-C target-feature=+crt-static' | Where-Object { $_ }) -join ' ').Trim()
   foreach ($crate in $crates) {
     $targetDir = Join-Path $build $crate.name
     & cargo build --release --locked --offline --target $target --target-dir $targetDir `
@@ -120,6 +124,7 @@ try {
   Write-Error ("package: " + $_.Exception.Message) -ErrorAction Continue
   exit 1
 } finally {
+  [Environment]::SetEnvironmentVariable('RUSTFLAGS', $originalRustFlags, 'Process')
   if ($stage -and (Test-Path -LiteralPath $stage)) { Remove-Item -LiteralPath $stage -Recurse -Force }
   if ($build -and (Test-Path -LiteralPath $build)) { Remove-Item -LiteralPath $build -Recurse -Force }
   # Only outputs this invocation created may be removed. Pre-existing output
