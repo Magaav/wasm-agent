@@ -452,6 +452,45 @@ function M.request_options(model, messages, opts)
   return fields,{reasoning=reasoning,output_limit=maximum,compatibility_source=cap.source}
 end
 
+-- Spellings providers use for "the request was too large". A list rather than one regex
+-- because there is no shared vocabulary; this is the half of the signal that is legible.
+local OVERFLOW_TEXT = {
+  "prompt is too long", "request_too_large", "input is too long for requested model",
+  "exceeds the context window", "maximum context length", "input token count",
+  "maximum prompt length", "reduce the length of the messages",
+  "context length exceeded", "context_length_exceeded", "too many tokens",
+  "token limit exceeded", "exceeds the maximum allowed input length",
+  "exceeds the available context size", "context window exceeds limit",
+  "exceeded model token limit", "prompt too long", "range of input length should be",
+}
+
+-- Does this provider error mean "the request was too large"?
+--
+-- The status is the reliable half; the body often is not. This deployment answers a
+-- too-large request with a bare `{"model":"deepseek-v4.1-flash"}` and no words at all,
+-- so a body-pattern list alone would never fire - and the thread would re-send the same
+-- oversized request on every later turn, never answering. The fallback is size: a 400 or
+-- 413 on a request that already fills most of the window is an overflow whatever it says.
+-- `context_tokens` is the caller's own count and `limit` the window it believes it has;
+-- the 3/4 threshold keeps a small malformed request from being mistaken for a large one.
+function M.is_overflow_error(problem, context_tokens, limit)
+  local text = tostring(problem or ""):lower()
+  -- A throttling error that happens to mention tokens is not an overflow.
+  if text:find("rate limit", 1, true) or text:find("too many requests", 1, true)
+      or text:find("throttl", 1, true) then
+    return false
+  end
+  for _, pattern in ipairs(OVERFLOW_TEXT) do
+    if text:find(pattern, 1, true) then return true end
+  end
+  local status = text:match("provider_http_(%d+)")
+  if (status == "400" or status == "413") and (limit or 0) > 0
+      and (context_tokens or 0) >= limit * 0.75 then
+    return true
+  end
+  return false
+end
+
 -- `stream` forwards content deltas to the UI and still returns the whole
 -- message (content + tool_calls + usage) so the tool loop can continue.
 function M.complete(messages, tools, stream, opts)

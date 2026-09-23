@@ -629,7 +629,7 @@ end
 -- provider's prefix cache from that point on; doing it rarely means paying that
 -- once instead of constantly. The transcript keeps everything regardless; only
 -- the context is windowed.
-function M:maybe_compact(messages)
+function M:maybe_compact(messages, force)
   -- A lean child does not compact: an automatic summary is unaccounted work
   -- outside its token budget, and a child that reaches the context limit should
   -- stop with that reason rather than silently spend more. The caller's
@@ -664,7 +664,7 @@ function M:maybe_compact(messages)
   if budget <= 0 then budget = limit - reserve end
   if budget<=0 then budget=limit-reserve end
   local trigger = math.min(limit - reserve, budget)
-  if before <= trigger then return false end
+  if not force and before <= trigger then return false end
 
   local session = memory.session(self.session_id) or {}
   local rows = memory.session_messages(self.session_id, {
@@ -891,6 +891,9 @@ end
 
 function M:run_body(text, images)
   self.model=provider.settings().model
+  -- One overflow recovery per run, not per session: a provider rejection is retried once
+  -- with a compacted context, and a second failure is surfaced rather than looped.
+  self.overflow_recovery_attempted = false
   self:note_interruption()
   self.emit({ type = "status", text = "thinking" })
   self.debug = (memory.session(self.session_id) or {}).mode == "debug"
@@ -1045,6 +1048,29 @@ function M:run_body(text, images)
        context={estimate_source=context_source,summary_watermark=(memory.session(self.session_id) or {}).summarized_until or 0}}
     for key, value in pairs(budget_opts or {}) do call_opts[key] = value end
     local ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
+    -- A provider 400/413 on a request at/near the window is a context overflow even when
+    -- the body says nothing - this deployment answers a too-large request with a bare
+    -- `{"model":"..."}`. Without this the thread re-sends the same oversized request on
+    -- every later turn and never answers. Compact once, then retry the call once; if the
+    -- retry also fails, the error is surfaced below exactly as before.
+    if not ok and not self.overflow_recovery_attempted
+        and provider.is_overflow_error(tostring(result), context_tokens, provider.budget(self.model).context or 0) then
+      self.overflow_recovery_attempted = true
+      local compacted = self:maybe_compact(messages, true)
+      self.emit({ type = "status", text = compacted
+        and "the provider rejected the request as too large - compacting and retrying once"
+        or "the provider rejected the request as too large and there is nothing left to summarise" })
+      telemetry.event(self.session_id,self.run_id,"","compact","recovery",
+        {ok=compacted,error=compacted and nil or "nothing_to_summarise",before=context_tokens})
+      if compacted then
+        messages = self:build_context()
+        context_tokens, context_source = self:context_tokens(messages)
+        call_opts.context_tokens = context_tokens
+        call_opts.context = {estimate_source=context_source,
+          summary_watermark=(memory.session(self.session_id) or {}).summarized_until or 0}
+        ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
+      end
+    end
     if not ok then
       -- A cancel can land *during* the provider call (the socket is shut down to wake a
       -- silent read). Report it as the cancellation it is, not as a provider fault.
