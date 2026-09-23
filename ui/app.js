@@ -255,13 +255,18 @@ function renderMarkdown(text) {
 }
 
 // Some models leak their reasoning into the message; drop it.
+//
+// Both ends are trimmed, and the tail matters as much as the head: these texts are rendered in
+// `white-space: pre-wrap` containers, so a trailing newline is a *blank line* on screen. A provider
+// ends a chunk with them, and three of them read as three paragraphs of nothing between the thinking
+// and the tool call that follows it. Interior breaks are content and are left alone.
 function stripThinking(text) {
   let out = String(text)
     .replace(/[\s\S]*?<\/think>/gi, "")
     .replace(/<\/?think\b[^>]*>/gi, "");
   const open = out.search(/<think\b[^>]*>/i);
   if (open >= 0) out = out.slice(0, open);
-  return out.replace(/^\s+/, "");
+  return out.replace(/^\s+/, "").replace(/\s+$/, "");
 }
 
 function atBottom(slack = 40) {
@@ -366,6 +371,7 @@ function clearStatus() {
 // swallowed is a run that called no tool at all: no topic is created for one, so its thinking stays
 // visible instead of reading as a run that only called tools.
 let reasoningBlock = null;
+let reasoningText = "";
 function appendReasoning(text) {
   if (!text) return;
   const bubble = currentBubble();
@@ -381,10 +387,13 @@ function appendReasoning(text) {
     reasoningBlock.reasoningHead = head;
     reasoningBlock.reasoningBody = body;
     bubble.body.append(reasoningBlock);
+    reasoningText = "";
   }
-  reasoningBlock.reasoningBody.textContent += text;
-  reasoningBlock.reasoningHead.textContent =
-    "thinking · " + reasoningBlock.reasoningBody.textContent.length + " chars";
+  reasoningText += text;
+  // The body is `pre-wrap`, so a trailing newline would render as a blank line - and a provider ends
+  // a chunk with them. The count is of what the model produced, not of what survives the trim.
+  reasoningBlock.reasoningBody.textContent = reasoningText.replace(/\s+$/, "");
+  reasoningBlock.reasoningHead.textContent = "thinking · " + reasoningText.length + " chars";
   pin();
 }
 
@@ -392,6 +401,7 @@ function appendReasoning(text) {
 function sealReasoning() {
   if (reasoningBlock) reasoningBlock.open = false;
   reasoningBlock = null;
+  reasoningText = "";
 }
 
 // Tool lines are rendered the way pi renders them in its CLI: bold lowercase

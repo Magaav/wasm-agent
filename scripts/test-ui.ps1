@@ -1325,6 +1325,46 @@ $harness = @'
     window.handleEvent({ type: "done" });
   })();
 
+  // ---- a trailing newline is a blank line, and must not render as one ----------------------
+  // Both containers are `white-space: pre-wrap`, so a provider's trailing newline draws an empty line.
+  // Measured in the live window: three of them sat between the thinking and the tool call that
+  // followed it, which reads as three paragraphs of nothing. Interior breaks are content and stay.
+  //
+  // Written without a single backslash on purpose: the probe is injected as text, and an escape
+  // sequence inside it becomes a real character - which turns a string literal into a syntax error and
+  // kills the whole block silently. That is how this check first "passed": it was never running.
+  (function () {
+    var NL = String.fromCharCode(10);
+    var CR = String.fromCharCode(13);
+    var SP = String.fromCharCode(32);
+    var TAB = String.fromCharCode(9);
+    function endsBlank(text) {
+      if (!text) return true;
+      var last = text.charAt(text.length - 1);
+      return last === NL || last === CR || last === SP || last === TAB;
+    }
+    window.handleEvent({ type: "round", n: 1 });
+    window.handleEvent({ type: "reasoning", text: "weighing it up" + NL + "and then" + NL + NL + NL, chars: 25 });
+    var blocks = document.querySelectorAll("wa-message .reasoning");
+    var block = blocks[blocks.length - 1];
+    var body = block ? block.querySelector(".reasoning-body") : null;
+    check(!!body, "trailing space: the reasoning body must exist");
+    check(!!body && !endsBlank(body.textContent),
+      "trailing space: the thinking must not end in a blank line, saw " +
+      JSON.stringify(body ? body.textContent.slice(-10) : "no body"));
+    check(!!body && body.textContent.indexOf("weighing it up" + NL + "and then") === 0,
+      "trailing space: an interior break is content and must stay, saw " +
+      JSON.stringify(body ? body.textContent : "no body"));
+    window.handleEvent({ type: "delta", text: "Checking the file" + NL + NL + NL });
+    var segs = document.querySelectorAll("wa-message .seg");
+    var lastSeg = segs[segs.length - 1];
+    check(!!lastSeg && !endsBlank(lastSeg.textContent),
+      "trailing space: a streamed step must not end in a blank line, saw " +
+      JSON.stringify(lastSeg ? lastSeg.textContent.slice(-10) : "no seg"));
+    window.handleEvent({ type: "reply", text: "Done." + NL + NL });
+    window.handleEvent({ type: "done" });
+  })();
+
   // ---- a run this window did not open must be followed, not waited out ----------------------
   // The node streams a run only to the request that opened it, so a reload during a run (or a run a
   // wake or a job started) has no live channel. Measured live before this existed: the node executed
