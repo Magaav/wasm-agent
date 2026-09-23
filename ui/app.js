@@ -895,22 +895,34 @@ function collapseRun() {
   if (!bubble) return;
   const body = bubble.body;
   const answer = streamBody;
+  // One run topic per bubble. A run that answers more than once - a preamble, then the answer -
+  // reuses the topic it already has: creating a second one nests the first inside it, and the
+  // reader then opens topics to reach topics.
+  const existing = Array.prototype.find.call(body.children, (c) => c.tagName === "WA-RUN");
   const moves = Array.prototype.filter.call(body.children,
-    (c) => c !== answer && c.tagName !== "WA-DIFF" &&
+    (c) => c !== answer && c !== existing && c.tagName !== "WA-DIFF" &&
       !(c.tagName === "DETAILS" && c.classList.contains("reasoning")));
   const traces = moves.filter((c) => c.tagName === "WA-TRACE");
-  if (traces.length === 0) return;   // nothing ran: leave the plain answer alone
-  let calls = 0;
-  let steps = 0;
-  for (const child of moves) {
-    if (child.tagName === "WA-TRACE") calls += child.count || 0;
-    else if (child.classList && child.classList.contains("seg")) steps += 1;
-  }
-  const run = document.createElement("wa-run");
-  body.prepend(run);
+  // A run topic is only created once something actually ran - a run that never called a tool keeps
+  // its plain answer. But once a topic exists, a later reply must still fold the previous answer into
+  // it even when that batch added no tool call: the guard is about *creating* the topic, not about
+  // folding into one that is already there. Getting this wrong left the preamble sitting outside as
+  // its own text segment, so the bubble read run,text,text instead of one run and one answer.
+  if (!existing && traces.length === 0) return;
+  if (moves.length === 0) return;
+  const run = existing || document.createElement("wa-run");
+  if (!existing) body.prepend(run);
   for (const child of moves) {
     run.body.append(child);
     if (typeof child.reveal === "function") child.reveal();
+  }
+  // Counted from the topic's own contents rather than accumulated from the moves, so a second
+  // collapse cannot double-count what the first one already folded in.
+  let calls = 0;
+  let steps = 0;
+  for (const child of run.body.children) {
+    if (child.tagName === "WA-TRACE") calls += child.count || 0;
+    else if (child.classList && child.classList.contains("seg")) steps += 1;
   }
   const endedAt = replayingMessages ? replayMessageEndedAt : Date.now();
   run.setSummary(steps, calls, Math.max(0, endedAt - (runStartedAt || endedAt)));
@@ -1020,7 +1032,10 @@ function handleEvent(event) {
     }
     streamBody = null;
     streamText = "";
-    runBubble = null;
+    // The bubble stays open for the rest of the run. A model that speaks between tool batches is
+    // still one run, and the run topic has to be able to span everything it did; closing the bubble
+    // here was the bug - one run drew one bubble per reply. flushDecision(true) closes it, on `done`
+    // or on the next user turn, which is the contract its own comment already stated.
   } else if (event.type === "usage") {    settings.usage = event.total || settings.usage;
     if (event.model) settings.model = event.model;
     updateChip();
