@@ -412,9 +412,13 @@ assert(deep.context == 1000000, "a known model keeps its own window, got " .. to
 assert(deep.context > 900000, "a known model must get its own window, got " .. tostring(deep.context))
 assert(type(deep.source) == "string" and deep.source ~= "" and deep.source ~= "unknown",
   "and must say where the number came from, got " .. tostring(deep.source))
--- The trigger must scale with the window. pi's reserve is 16384, so a 1M window triggers
--- near 983616 and a 262144 window near 245760 - not both at the same absolute point.
-assert(deep.context - deep.reserve > 900000, "a 1M window must not compact at 96k, trigger at " .. tostring(deep.context - deep.reserve))
+-- The trigger must scale with the window and keep real headroom below it. A large window
+-- reserves proportionally (ten percent), because the catalogue's window is a *claim* and the
+-- provider's real ceiling can sit below it - deepseek-v4.1-flash publishes 1,000,000 and
+-- rejects near 950,000, so pi's fixed 16384 put the trigger (983,616) above the wall and
+-- compaction never fired. A small window keeps the fixed reserve, which already exceeds ten
+-- percent of it. Either way the trigger is near the window, not the old global's 96k.
+assert(deep.context - deep.reserve > 850000, "a 1M window must not compact at 96k, trigger at " .. tostring(deep.context - deep.reserve))
 local small = windowlib.policy(20000)
 assert(small < 20000, "a small window must still reserve proportionally, got " .. tostring(small))
 print("budget ok")
