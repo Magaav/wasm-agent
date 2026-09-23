@@ -34,20 +34,24 @@ Two renderings, decided once, because a person and an orchestrator read the same
 differently:
 
 - **a terminal** (`TERM`, `COLORTERM`, `WT_SESSION`, `ORCA_TERMINAL_HANDLE`) gets the
-  status line rewritten in place, colour, and a spinner frame per event;
+  status line rewritten in place, colour, and a spinner that the host keeps turning between
+  events;
 - **anything else** — a pipe, a file, a captured transcript — gets one plain line per
   event and no escape sequences. `NO_COLOR` forces the plain rendering, and
   `WASM_AGENT_CLI_VIEW=live|plain` overrules the guess in either direction.
 
-Two limits, stated here because a reader would otherwise misread them as a hang:
+One limit is closed, and one is not:
 
-- the status line advances **when an event arrives, not on a timer**. The interpreter is
-  blocked inside the model call and inside a tool, so nothing in this process can repaint
-  while one is in flight; a slow model call shows a count that has stopped moving.
-- the answer is **not streamed** in the CLI: content deltas go to the node's SSE sink and
-  a CLI run has no sink, so the reply appears when the run ends. Both limits are the same
-  missing piece — the host calling back into Lua per chunk — and until it exists the view
-  says what it knows rather than what it hopes.
+- the status line **animates on a timer**, not only when an event arrives. The interpreter is
+  blocked inside the model call and inside a tool, so the timer lives in the host
+  (`host.ticker`, `rust/wa-host/src/host.rs`): the view hands it the line's layout with one
+  token for the mark and one for the clock, and takes the line back before it prints anything
+  else. A slow call shows the frame and the count still moving, which is what distinguishes
+  thinking from hung. `WASM_AGENT_CLI_TICKER=off` stops the motion.
+- the answer is still **not streamed** in the CLI: content deltas go to the node's SSE sink
+  and a CLI run has no sink, so the reply appears when the run ends. That is the remaining
+  missing piece — the host calling back into Lua per chunk — and the view says what it knows
+  rather than what it hopes.
 
 ## The four rules that came from getting it wrong
 

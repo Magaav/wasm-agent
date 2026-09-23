@@ -8,6 +8,7 @@
 -- No model is involved and no database is needed: the view is handed the same events
 -- the agent emits, with a clock the test controls.
 local view_lib = dofile("lua/core/cli_view.lua")
+local json = dofile("lua/vendor/json.lua")
 
 local failed = 0
 local checks = 0
@@ -79,6 +80,13 @@ ok(view_lib.tokens(940) == "940" and view_lib.tokens(1200) == "1.2k" and view_li
   "tokens are shown at a size a person reads")
 ok(view_lib.elapsed(200) == "200ms" and view_lib.elapsed(3400) == "3.4s", "a step's duration carries its unit")
 ok(view_lib.duration(9.5) == "9.5s" and view_lib.duration(74) == "1m14s", "a run's duration grows into minutes")
+-- The clock's rule, pinned here and again in rust/wa-host/src/host.rs (`ticker_duration`):
+-- the host draws the clock while this process is blocked, so the rule exists on both sides.
+-- The same three values are asserted in both suites, so changing one alone fails a test here
+-- instead of flickering a frame on a screen.
+ok(view_lib.duration(59.94) == "59.9s", "under a minute the clock counts tenths of a second")
+ok(view_lib.duration(60.0) == "1m00s", "at a minute it carries its seconds")
+ok(view_lib.duration(125.4) == "2m05s", "and keeps counting in minutes")
 
 -- ---- is this a terminal? --------------------------------------------------------
 
@@ -266,6 +274,87 @@ warn_view:warn("attempt to index a nil value")
 warn_view:warn("a second failure nobody needs to read")
 ok(select(2, warned.text():gsub("the run view failed", "")) == 1, "a view failure is reported once")
 ok(has(warned.text(), "attempt to index a nil value"), "and it says what went wrong")
+
+-- ---- the line keeps moving -------------------------------------------------------
+
+-- While this process is blocked the host draws the status line, so two things have to be
+-- true: what the host is handed is exactly the line this module would have printed, and it is
+-- never drawing that line while the module writes to it. The host is stubbed here - one line
+-- of decoration must not need a terminal to be testable - and the real timer is measured by
+-- `scripts/test-cli-ticker.lua`, through a captured child process.
+local handed = {}
+local real_ticker = host.ticker
+local ticker_out = recorder()
+host.ticker = function(spec)
+  handed[#handed + 1] = {
+    kind = spec == nil and "stop" or "start",
+    at = #ticker_out.text(),
+    spec = spec and json.decode(spec) or nil,
+  }
+  return spec ~= nil
+end
+local ticker_clock = { value = 100 }
+local animated = view_lib.new({
+  out = ticker_out.out, live = true, stdout = true, now = function() return ticker_clock.value end,
+  limit = 100,
+})
+animated:run_started()
+ok(#handed == 1 and handed[1].kind == "start", "a starting run hands its line to the host")
+local spec = handed[1].spec
+ok(type(spec) == "table" and type(spec.line) == "string", "and what it hands over is a line")
+ok(spec.line == animated:status_template(), "the layout, with its two tokens still in it")
+ok(spec.marks[1] == "\226\160\139 ", "this view's marks, in this view's order")
+ok(spec.started == animated.turn.started, "and the origin of the clock, so a redraw does not restart it")
+ok(not has(spec.line, view_lib.spinner(0)), "no frame is baked into the layout")
+
+-- The strongest statement available without a terminal: filling the layout by the host's own
+-- rules gives back the line this module prints for itself.
+local mark = spec.marks[(spec.frame % #spec.marks) + 1]
+local filled = spec.line:gsub("{m}", function() return mark end)
+filled = filled:gsub("{t}", function() return view_lib.duration(0) end)
+ok(filled == animated:status_text(true), "and the host's frame is word for word the view's own line")
+
+ticker_clock.value = 130
+animated:event({ type = "round", n = 1 })
+animated:event({ type = "tool", name = "bash", arguments = { command = "echo hi" } })
+ok(has(ticker_out.text(), "$ echo hi"), "the tool line is written while the host is not drawing")
+animated:event({ type = "tool_result", name = "bash", result = { code = 0, stdout = "hi\n" } })
+animated:answered("done: one command ran.")
+
+-- The invariant: nothing is written to that line between the moment the host is given it and
+-- the moment it is taken back (`at` is how much output existed at each call).
+local drift, holding = 0, nil
+for _, call in ipairs(handed) do
+  if holding ~= nil and holding ~= call.at then drift = drift + 1 end
+  holding = call.kind == "start" and call.at or nil
+end
+ok(drift == 0, "no writer touches the line while the host is holding it")
+ok(holding == nil and handed[#handed].kind == "stop",
+  "and the run ends with the line taken back, not left moving")
+
+-- A view whose output is not this process's stdout must leave the terminal alone: the host
+-- draws on stdout and nowhere else.
+local before = #handed
+local quiet = recorder()
+local not_mine = view_lib.new({ out = quiet.out, live = true, now = function() return 1 end, limit = 100 })
+not_mine:run_started()
+not_mine:event({ type = "round", n = 1 })
+ok(#handed == before, "a view that does not own stdout asks the host for nothing")
+local transcript = view_lib.new({ out = quiet.out, live = false, now = function() return 1 end })
+transcript:run_started()
+ok(#handed == before, "and a captured transcript never animates")
+
+-- A host older than this view has no ticker at all: decoration must degrade, not raise.
+host.ticker = nil
+local degraded = pcall(function()
+  local older = view_lib.new({ out = quiet.out, live = true, stdout = true, now = function() return 1 end })
+  older:run_started()
+  older:event({ type = "round", n = 1 })
+  older:answered("still answered")
+end)
+host.ticker = real_ticker
+ok(degraded == true and has(quiet.text(), "still answered"),
+  "a host without the ticker still finishes the run")
 
 if failed > 0 then
   print(string.format("cli view: %d failed of %d checks", failed, checks))

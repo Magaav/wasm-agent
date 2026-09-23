@@ -32,6 +32,10 @@ cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 # The execution and automation contracts have native, model-free adversarial tests.
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host file_search::tests
+# The ticker's clock is the twin of `cli_view.duration` on the Lua side: the elapsed time of a
+# call that has not finished can only be computed by the host, so both sides pin the same three
+# values and a one-sided change fails here rather than on a screen.
+cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host ticker_tests
 # The graph is a capability the agent navigates its own code with, so its extractor and
 # incremental reindex are part of the contract, not a side project.
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-graph
@@ -949,6 +953,25 @@ WA_SCRIPT=scripts/test-session-title.lua "$BIN" --db "$DB.title" | grep "session
 # captured transcript is free of escape sequences - so it is asserted without a model:
 # the view is handed the events agent.lua emits, with a clock the test controls.
 WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view" | grep "cli view ok"
+
+# The status line must keep moving while the interpreter is blocked, and the timer therefore
+# lives in the host. The evidence is the captured stdout of a child that does nothing but
+# sleep: it cannot repaint anything itself, so every frame and every tenth of a second in that
+# file is the host's own work. The clock reaching 0.5s or more is what proves a timer rather
+# than one frame drawn at the start.
+TICKER_OUT="$DB.ticker.out"
+WA_SCRIPT=scripts/test-cli-ticker.lua "$BIN" --db "$DB.ticker" > "$TICKER_OUT" 2>&1
+ticker_frames=$(tr '\r' '\n' < "$TICKER_OUT" | grep -c "Thinking" || true)
+ticker_clocks=$(tr '\r' '\n' < "$TICKER_OUT" | sed -n 's/.* \([0-9][0-9]*\.[0-9]s\)$/\1/p' | uniq | wc -l | tr -d ' ')
+ticker_marks=$(tr '\r' '\n' < "$TICKER_OUT" | grep "2K" | cut -b 7-9 | LC_ALL=C sort -u | wc -l | tr -d ' ')
+ticker_last=$(tr '\r' '\n' < "$TICKER_OUT" | sed -n 's/.* \([0-9][0-9]*\.[0-9]s\)$/\1/p' | tail -1 || true)
+if [ "$ticker_frames" -ge 8 ] && [ "$ticker_clocks" -ge 8 ] && [ "$ticker_marks" -ge 3 ] \
+  && [ "$ticker_last" != "0.0s" ] && [ -n "$ticker_last" ]; then
+  echo "cli ticker ok ($ticker_frames frames, $ticker_marks marks, clock reached $ticker_last)"
+else
+  echo "cli ticker FAILED: $ticker_frames frames, $ticker_clocks clocks, $ticker_marks marks, last \"$ticker_last\""
+  exit 1
+fi
 
 # A command must not be able to hold the interpreter forever: an agent curled the node's own port
 # from inside a turn, the request queued behind the turn that made it, and the worker waited on
