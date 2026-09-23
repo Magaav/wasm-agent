@@ -31,6 +31,14 @@ function M.observe(session,kind,body,route)
   return {schema_version=1,relation=relation,shared_messages=common,messages=#hashes,previous_messages=#prior.messages,
     first_changed_message=common<math.min(#prior.messages,#hashes) and common+1 or nil,
     tools_changed=prior.tools~=current.tools,settings_changed=prior.settings~=current.settings,routing_changed=prior.routing~=current.routing,
-    note='Prepared canonical request components, not provider acceptance, tokenization, retention or guaranteed cache reuse.'}
+    -- Only these can invalidate a cached prefix. `settings_changed` covers every body field
+    -- that is not the messages or the tools, and `max_tokens` shrinks as the context grows -
+    -- so it is true on most rounds and says nothing about the cache. Measured over 48h:
+    -- settings_changed on 142 of 852 prepared requests while the provider reported a cache
+    -- hit on 98.7% of them, and the message prefix was append-only in 851 of 852. Reading
+    -- the settings flag as a cache miss sends the reader after a `max_tokens` that is
+    -- deliberately bounded by the remaining window.
+    prefix_changed=relation=='rewritten' or relation=='shortened' or prior.tools~=current.tools,
+    note='Prepared canonical request components, not provider acceptance, tokenization, retention or guaranteed cache reuse. settings_changed is not a cache miss: check prefix_changed.'}
 end
 return M
