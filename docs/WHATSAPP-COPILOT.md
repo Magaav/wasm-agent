@@ -108,6 +108,12 @@ wa-sentinel job history              # one row per delivery
 - **The source** is Chrome on the agent profile (`%LOCALAPPDATA%\AgentBrowserChromeProfile`) with
   `--remote-debugging-port=9222`; the reader and the reply script default to loopback `9222`
   (`WA_CDP_PORT` overrides). `bash scripts/whatsapp-preflight.sh` answers "is the chain up" in one line.
+- **The source must be started by a task, not by a memory.** `scripts/install-whatsapp-chrome-task.ps1`
+  writes the wrapper (`<install>/whatsapp-chrome.cmd`) and registers `wasm-agent-whatsapp-chrome` at
+  logon; without it, a reboot leaves the job **enabled** (that flag is durable) while every delivery
+  fails `no_cdp_endpoint` - the reader has nothing to read, and `job history` fills with
+  `step 1 printed no JSON result` rather than with a reason. Run the installer once per machine, then
+  `schtasks /Run /TN wasm-agent-whatsapp-chrome` (the wrapper is a no-op when 9222 is already listening).
 - **Do not start that Chrome as a node operation.** A running operation makes the sentinel read the node
   as busy forever, which starves the inference lane — no child is ever claimed. Start it outside the node
   (the wrapper `%LOCALAPPDATA%\wasm-agent\whatsapp-chrome.cmd`, or the operator's own browser).
