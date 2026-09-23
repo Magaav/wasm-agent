@@ -1,8 +1,28 @@
 -- Pi-style bounded model views with the complete output available as a file.
 -- Projection is done once when the result is produced, and persisted unchanged.
+--
+-- The budget stays at 50 KiB, and that is a decision rather than an omission. 16 KiB was
+-- measured on the navigation fixture with the arms *interleaved* (4 pairs, so a slow provider
+-- minute cannot favour one arm): ~6% fewer tokens and ~11% fewer calls, every answer correct.
+-- That is a real saving, and it is not evidence that the task result never degrades - one
+-- fixture, four pairs, one model. A smaller view is less context for the model to reason with,
+-- so the default keeps the bytes and the knob is there for an operator who wants the trade:
+-- WASM_AGENT_TOOL_OUTPUT_BYTES. Prefer raw over compacted unless the loss is proven harmless.
+--
+-- What this change did keep is that the budget is now *one* number: the read page, the session
+-- byte page, the evidence pointer and this note all derive from it, where each previously
+-- hardcoded its own 50,000 or 20,000 and silently disagreed with the projector.
 local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
 local M = {MAX_BYTES=50*1024, MAX_LINES=2000}
+-- An operator may tighten the per-result budget. The complete output is kept as an artifact
+-- either way, so a smaller view costs bytes and never data - but it can cost a *round*, and in
+-- a large session one extra round costs more than the bytes it saved. The default is therefore
+-- unchanged until an A/B says otherwise; this is the knob that measures it.
+local configured_bytes = tonumber(host.getenv("WASM_AGENT_TOOL_OUTPUT_BYTES"))
+if configured_bytes and configured_bytes >= 4096 and configured_bytes <= 4 * 1024 * 1024 then
+  M.MAX_BYTES = math.floor(configured_bytes)
+end
 local legacy_views,legacy_count={},0
 
 function M.slice(text, from, count)
@@ -29,9 +49,21 @@ function M.read(id, offset, limit)
   local text = host.read_file(path)
   if not text then return {error="output_not_found"} end
   if host.sha256(text) ~= id:lower() then return {error="output_hash_mismatch"} end
-  local part, next_offset = M.slice(text, offset, math.max(4,math.min(tonumber(limit) or M.MAX_BYTES,M.MAX_BYTES)))
-  return {content=part,offset=tonumber(offset) or 1,next_offset=next_offset,bytes=#text,
-    eof=next_offset>#text,sha256=id:lower()}
+  -- Bound the *encoded view*, not the raw slice. The model sees the JSON of this table, and
+  -- escaping inflates it - a slice of `\"` roughly doubles - so a slice sized to the budget
+  -- produced a view over it, which the projector replaced with the omitted envelope. That lost
+  -- `next_offset`, which is the whole point of this route: the caller could no longer page. Same
+  -- discipline `file_tools.read` already uses for its pages.
+  local budget = M.MAX_BYTES
+  local want = math.max(4, math.min(tonumber(limit) or budget, budget))
+  while true do
+    local part, next_offset = M.slice(text, offset, want)
+    local page = {content=part,offset=tonumber(offset) or 1,next_offset=next_offset,bytes=#text,
+      eof=next_offset>#text,sha256=id:lower()}
+    if #json.encode(page) <= budget then return page end
+    if want <= 4 then return {error="output_page_exceeds_budget"} end
+    want = math.floor(want * 0.75)
+  end
 end
 
 function M.truncate(text, tail)
@@ -49,7 +81,8 @@ function M.truncate(text, tail)
 end
 
 local function output_note()
-  return "The model view is bounded to 2000 lines / 50 KiB in total. Full original JSON is stored at full_result.path; use tool_result with its sha256 and byte offset to retrieve any part."
+  return "The model view is bounded to 2000 lines / " .. math.floor(M.MAX_BYTES / 1024) ..
+    " KiB in total. Full original JSON is stored at full_result.path; use tool_result with its sha256 and byte offset to retrieve any part."
 end
 
 local function preview_view(name, output, encoded, ref)
@@ -99,11 +132,17 @@ local function session_view(output, ref)
 end
 
 function M.project(name, output)
-  local encoded = json.encode(output)
+  -- Encode a non-table only through pcall: a decoded scalar can be `inf` (a numeric
+  -- literal too large for a float), and json.encode throws on that *before* the
+  -- non-table branch below could handle it. A stored result of 16 KB of digits is
+  -- enough to reach this, and the context build must not die on it.
   if type(output) ~= "table" then
+    local encodable, encoded = pcall(json.encode, output)
+    if not encodable then encoded = tostring(output) end
     if #encoded<=M.MAX_BYTES then return encoded end
     return preview_view(name,{},encoded,M.store(encoded))
   end
+  local encoded = json.encode(output)
   -- A native read page already obeys both limits and carries a byte-exact cursor. A trailing
   -- newline is not a 2001st line; re-truncating here would skip bytes on the next page.
   if name=='read' and output.version and output.next_column and type(output.content)=='string'
@@ -166,7 +205,10 @@ function M.context_view(name, content)
   if legacy_views[key] then return legacy_views[key] end
   local ok,decoded=pcall(json.decode,content)
   local view
-  if ok then
+  -- A tool result is not always JSON: a bare number too large for a float decodes to `inf`,
+  -- and a non-table is not a result that can be projected. Preview the original bytes
+  -- instead of handing a scalar to the projector.
+  if ok and type(decoded)=="table" then
     if type(decoded)=="table" and type(decoded.full_result)=="table" then
       local ref=decoded.full_result
       local id=ref.sha256
