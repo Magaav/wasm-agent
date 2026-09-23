@@ -37,7 +37,15 @@ done
 ```
 
 - `ahead 0` -> already in `main`; nothing to merge, but it is still a branch to delete (step 6).
-- `CONFLICT` -> stop and escalate that branch; do not force it.
+- `CONFLICT` -> classify it before you touch it. An **additive-only** conflict (both sides are
+  independent additions - different keys, adjacent insertions, a line neither side is rewriting) may be
+  resolved by you as the **union**: keep both sides verbatim, and say in the merge message that you did.
+  Anything that touches a **shared value** - the same key, the same line's meaning, a schema, a wire
+  format, one side deleting what the other adds - is escalated, not resolved. Never force it.
+  Recency is not a tie-breaker: the newer side is usually the one that never saw the other's work, so
+  resolving by timestamp silently drops it (measured: an additive conflict resolved "latest wins" would
+  have unregistered another branch's fixture test, and the gate would still have been green, because
+  nothing cross-checks that every `scripts/test-*.cjs` is registered).
 - **Subsets:** if every commit of A is in B (`git merge-base --is-ancestor A B`), merge B only.
   Merging a branch that is a subset of another double-counts the same work.
 
@@ -53,8 +61,9 @@ Merge into `main` in the main checkout. `--no-ff` on purpose: a branch cut from 
 provenance this repository reads from the merge's second parent. A merge is allowed where a direct
 commit is not, and its subject must name the branch it merged. **After each merge, re-check the
 next branch against the new `main`:** two branches that each merge clean against the old base can
-still collide with each other. If a merge stops on a conflict, `git merge --abort` and escalate
-that branch.
+still collide with each other. If a merge stops on a conflict, classify it the same way: `git merge
+--abort` and escalate anything that touches a shared value; an additive-only conflict may be resolved
+in the merge itself, as the union, saying so in the merge message.
 
 A branch may move while you work, and a new lane may appear. **Re-fetch and re-audit after the last
 merge**; if a tip advanced and still merges clean, merge the new tip too. Loop until the audit is
@@ -104,8 +113,10 @@ removed here.
 ## 7. Report
 
 One line per branch - merged / already in / escalated - plus what was deleted, the gate verdict and
-the new `main` commit. Name anything you could not prove. Then say what moved since the last
-convergence, so the next run starts from the truth rather than from memory.
+the new `main` commit. For a conflict you resolved, name both sides and the union you applied, so the
+next reader sees a decision rather than a merge that quietly picked one. Name anything you could not
+prove. Then say what moved since the last convergence, so the next run starts from the truth rather
+than from memory.
 
 ## Done means
 
