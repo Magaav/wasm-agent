@@ -172,10 +172,11 @@ index of the source tree to Lua. The graph lives beside the ledger
 which is the source the binary is actually running from. `WA_GRAPH_ROOT` and
 `WA_GRAPH_DB` override both; `WA_GRAPH_WATCH=0` disables the watcher.
 
-Reads open the database **read-only**, so a query never takes the write lock the
-watcher needs, and a query before the first index completes returns an empty
-result rather than an error. `host.graph_index` is the write path and is
-incremental by content hash, so a repeat with nothing changed reparses nothing.
+Reads pin a read-only database snapshot and compare every in-scope file's exact
+bytes before and after answering. A stale or unbuilt graph is rebuilt
+synchronously, or returns an explicit error; it cannot appear as an empty answer.
+That refresh may take the write lock. `host.graph_index` is also a write path and
+is incremental by content hash, so a repeat with nothing changed reparses nothing.
 A whole index run is one `BEGIN IMMEDIATE` transaction, so a reader sees the old
 graph or the new one - never a half-indexed file - and the watcher and a manual
 index cannot interleave.
@@ -185,9 +186,11 @@ shape as `host.sql_query`. On a node whose host predates the capability the
 globals are absent; `lua/core/graph.lua` tolerates that and reports
 `graph_unavailable`, and the `graph` tool checks for it before calling.
 
-The watcher is a `notify` thread started only for `serve`. It indexes once on
+The watcher is a `notify` thread started only for `serve`. It registers before indexing once on
 startup (off the accept path, so a large tree never delays the port) and reindexes
-on change, debounced so one save's burst is one parse.
+on change, debounced so one save's burst is one parse. Watcher errors are logged;
+query-time verification is the correctness backstop. This verifies a source
+snapshot, not the version already loaded into a running Lua worker.
 
 ## Drawing while Lua is blocked
 

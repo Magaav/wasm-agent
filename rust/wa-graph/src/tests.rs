@@ -93,6 +93,50 @@ fn a_reader_never_sees_an_uncommitted_index_write() {
 }
 
 #[test]
+fn snapshot_verification_catches_changes_even_without_a_watcher_event() {
+    let dir = temp_dir("freshness");
+    let source = dir.join("a.rs");
+    std::fs::write(&source, "fn alpha() {}\n").unwrap();
+    let db = dir.join("graph.db");
+    let mut writer = Store::open(&db).unwrap();
+    writer.index(&dir, false).unwrap();
+    let reader = Store::open_readonly(&db).unwrap();
+    assert!(reader.verify_snapshot(&dir).unwrap());
+
+    // Same length, no event required: the exact bytes, not metadata, are compared.
+    std::fs::write(&source, "fn bravo() {}\n").unwrap();
+    assert!(!reader.verify_snapshot(&dir).unwrap());
+    writer.index(&dir, false).unwrap();
+    assert!(reader.verify_snapshot(&dir).unwrap());
+
+    let added = dir.join("new.lua");
+    std::fs::write(&added, "return 1\n").unwrap();
+    assert!(!reader.verify_snapshot(&dir).unwrap());
+    writer.index(&dir, false).unwrap();
+    assert!(reader.verify_snapshot(&dir).unwrap());
+
+    std::fs::remove_file(&added).unwrap();
+    assert!(!reader.verify_snapshot(&dir).unwrap());
+    writer.index(&dir, false).unwrap();
+    assert!(reader.verify_snapshot(&dir).unwrap());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn snapshot_verification_rejects_a_different_root() {
+    let first = temp_dir("root-first");
+    let second = temp_dir("root-second");
+    std::fs::write(first.join("a.rs"), "fn alpha() {}\n").unwrap();
+    std::fs::write(second.join("a.rs"), "fn alpha() {}\n").unwrap();
+    let db = first.join("graph.db");
+    let mut store = Store::open(&db).unwrap();
+    store.index(&first, false).unwrap();
+    assert!(!store.verify_snapshot(&second).unwrap());
+    std::fs::remove_dir_all(&first).ok();
+    std::fs::remove_dir_all(&second).ok();
+}
+
+#[test]
 fn watch_indexes_initially_and_stops() {
     let dir = temp_dir("watch");
     std::fs::write(dir.join("a.rs"), "fn watched() {}\n").unwrap();
