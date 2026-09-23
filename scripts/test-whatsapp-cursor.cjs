@@ -109,6 +109,15 @@ function cursor() {
 
 function ids(list) { return (list || []).map((item) => item.message_id).join(","); }
 
+// A durable send, exactly as a child records one through effects.reserve/confirm.
+function sent(messageId, conversationId, body, state, at) {
+  const database = new DatabaseSync(db);
+  database.prepare("INSERT INTO effect_sends(message_id,session_id,conversation_id,body,state,message,detail,created_at,updated_at) " +
+    "VALUES(?,?,?,?,?,'{}','',?,?) ON CONFLICT(message_id) DO UPDATE SET state=excluded.state, updated_at=excluded.updated_at")
+    .run(messageId, "fixture-session", conversationId, body, state, at, at);
+  database.close();
+}
+
 function main() {
   check(fs.existsSync(wa), `node binary exists: ${wa}`);
 
@@ -182,6 +191,24 @@ function main() {
   check(refused.parsed.events.length === 0, "an ineligible message is never handed on");
   check(refused.parsed.cursor === 7000, "the cursor passes a message a rule refused");
   check(!refused.parsed.decisions_error, `the decision lookup succeeded: ${refused.parsed.decisions_error}`);
+
+  // ---- what the copilot sent as the operator is reported to their own inbox ------------------------
+  // A reply that went out to somebody else is an effect on *their* conversation, and the operator reads
+  // their own inbox, not the ledger. The reader emits one line per send since its last report, and advances
+  // its report cursor so the same send is not announced twice.
+  sent("s1", CONV, "Ok, obrigado!", "sent", Math.floor(Date.now() / 1000) + 10);
+  const noticed = pass();
+  const notices = noticed.parsed.notices || [];
+  check(notices.length === 1, `a send is reported to the operator: ${JSON.stringify(notices)}`);
+  check(/replied for you to Fixture contact/.test(notices[0].detail || ""), `the notice names the conversation: ${notices[0] && notices[0].detail}`);
+  check(/Ok, obrigado!/.test(notices[0].detail || ""), "the notice carries what was said in the operator's name");
+  check(!/[\r\n|]/.test(notices[0].detail || ""), "the notice is one line with one field separator, so the shell cannot split it");
+  const noticedAgain = pass();
+  check((noticedAgain.parsed.notices || []).length === 0, "the same send is not reported twice: the report cursor moved");
+  sent("s2", CONV, "nao confirmado", "pending", Math.floor(Date.now() / 1000) + 20);
+  const unconfirmed = pass();
+  check((unconfirmed.parsed.notices || []).length === 1 && /NOT confirmed/.test(unconfirmed.parsed.notices[0].detail || ""),
+    `a send that did not confirm is reported as not sent: ${JSON.stringify(unconfirmed.parsed.notices)}`);
 
   console.log(`whatsapp cursor ok (${checks} checks, 0 failed, 0 skipped; mock store, real ingest, no browser)`);
   console.log(`evidence: ${root}`);

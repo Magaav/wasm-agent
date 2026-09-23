@@ -65,6 +65,19 @@ Media is settled the same way: an eligible image or voice note is reported to th
 and **not** appended to `events` (it used to be both, which would have asked a child to answer a voice
 note). No reply is ever sent to the sender for one.
 
+## What the operator is told
+
+A reply that goes out to somebody else is an effect on *their* conversation, and the operator reads their
+own inbox, not the ledger — so every send is reported back to them, in one line, by the deterministic
+step: `replied for you to <title> (id <message id>): "<what was said>"`. A send that did not confirm is
+reported as **not sent** rather than not at all, which is the case that must never be quiet. The report is
+bounded to three per pass, carries a **durable report cursor** (`meta.whatsapp_reported_at`) so the same
+send is never announced twice, and is best-effort: a failed note does not fail the step.
+
+It lives in the reader rather than in the child on purpose. A child's send budget is one, so a note home
+would be a second send it is refused; and "what did the copilot send as me" is decidable from the effect
+tables without a model. Child tokens are spent on judgement, never on bookkeeping.
+
 `scripts/test-whatsapp-cursor.cjs` proves each of these against a mock store, the real ingest script and a
 real ledger: no browser, no sentinel, no model.
 
