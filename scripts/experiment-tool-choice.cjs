@@ -57,14 +57,14 @@ const PROFILES = {
     description: 'Experiment arm: read-only investigation with the code graph.',
     instructions: 'Investigate read-only and report exact file paths and line references.',
     allowed_tools: [...READ_ONLY, 'graph'], resources: {},
-    limits: { max_depth: 0, timeout_seconds: 240, max_output_bytes: 65536, max_tokens: 60000 },
+    limits: { max_depth: 0, timeout_seconds: 600, max_output_bytes: 65536, max_tokens: 400000 },
   },
   'exp-explore-nograph': {
     schema_version: 1, id: 'exp-explore-nograph', operator_authorized: false,
     description: 'Experiment control: the same read-only investigation without the code graph.',
     instructions: 'Investigate read-only and report exact file paths and line references.',
     allowed_tools: [...READ_ONLY], resources: {},
-    limits: { max_depth: 0, timeout_seconds: 240, max_output_bytes: 65536, max_tokens: 60000 },
+    limits: { max_depth: 0, timeout_seconds: 600, max_output_bytes: 65536, max_tokens: 400000 },
   },
 };
 
@@ -173,7 +173,7 @@ async function startProvider() {
 
   const count = (row) => (row.tools || []).filter((call) => call.name === 'operation').length;
   console.log(`\n=== ${label} (arm=${arm} task=${task} profile=${profile} provider=${provider} n=${runs}) ===`);
-  console.log('run  state      first_tool   calls  operation  tokens  reasoning  alive  errors');
+  console.log('run  state      first_tool   calls  op  tokens   correct  errors');
   for (const row of rows) {
     const usage = row.usage || {};
     const tokens = Number(row.tokens_total || 0)
@@ -185,8 +185,7 @@ async function startProvider() {
       String((row.tools || []).length).padEnd(6),
       String(count(row)).padEnd(10),
       String(tokens).padEnd(7),
-      String(row.reasoning_chars || 0).padEnd(10),
-      String(row.alive_after_settle === undefined ? '-' : row.alive_after_settle).padEnd(6),
+      String(row.correct === undefined ? '-' : (row.correct ? 'yes' : 'NO')).padEnd(8),
       String((row.errors || []).length),
     ].join('  '));
   }
