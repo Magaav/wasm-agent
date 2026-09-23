@@ -246,6 +246,12 @@ local function main()
   -- Reported to the operator once, then let go: a bounded attempt count is what stops one permanently
   -- failing message from pinning the cursor for everything behind it.
   local exhausted = {}
+  -- Eligible messages the copilot did NOT answer because the operator took the conversation over
+  -- themselves. Standing down is the right call and it costs no token, but it is invisible: the operator
+  -- sees no reply and has no way to tell "the copilot decided not to" from "the copilot never saw it".
+  -- Reported to the operator's own inbox, once per message (the stand-down clears the owed entry, so a
+  -- later pass cannot report it again).
+  local stood_down = {}
   -- The newest message this run actually *decided* about - decided meaning a durable decision exists for
   -- it (a child's `effect_decisions` row, an eligibility refusal, the operator having answered, a media
   -- report). The cursor moves to this and no further, so a message nobody acted on stays newer than the
@@ -318,10 +324,19 @@ local function main()
       local answered_by_operator = (newest_outgoing[message.conversation_id] or 0) > at
       if answered_by_operator then
         -- The operator took the lead in this conversation; standing down is a decision, and it costs no
-        -- token to make it here.
+        -- token to make it here. Said out loud rather than done quietly: a message nobody answered must
+        -- never be indistinguishable from a message the copilot chose not to answer.
         skipped_answered = skipped_answered + 1
         handled = math.max(handled, at)
         if handoffs[message_id] then handoffs[message_id] = nil; handoffs_changed = true end
+        if json_events then
+          stood_down[#stood_down + 1] = {
+            message_id = message_id,
+            conversation_id = message.conversation_id,
+            sent_at = at,
+            took_over_at = newest_outgoing[message.conversation_id] or 0,
+          }
+        end
       elseif not eligible then
         -- A rule already excludes it: a group message that does not name the operator, an archived or left
         -- chat, metadata that cannot be verified. The reply job never wakes for one of these.
@@ -476,7 +491,7 @@ local function main()
     local owed = 0
     for _ in pairs(handoffs) do owed = owed + 1 end
     print(json.encode({ events = events, unanswerable = unanswerable, exhausted = exhausted,
-      notices = notices,
+      stood_down = stood_down, notices = notices,
       operator_answered = skipped_answered, already_decided = skipped_decided,
       still_owed = owed, decisions_error = decisions_error,
       cursor = math.floor(cursor) }))

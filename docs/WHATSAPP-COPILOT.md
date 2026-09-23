@@ -65,6 +65,14 @@ Media is settled the same way: an eligible image or voice note is reported to th
 and **not** appended to `events` (it used to be both, which would have asked a child to answer a voice
 note). No reply is ever sent to the sender for one.
 
+**Standing down is reported too.** When the operator has taken a conversation over themselves, the copilot
+does not answer — and that is a decision the operator cannot see: they observe no reply, and "the copilot
+chose not to answer" is indistinguishable from "the copilot never saw the message". So every stand-down is
+reported to the operator's own inbox, once per message (the stand-down clears the owed entry, so a later
+pass cannot repeat it), naming the conversation, the message id and the moment the operator took over:
+`did NOT answer the message in <conversation> (id <message id>) - you took that conversation over yourself`.
+Bounded to three per pass, like every other report, and never sent to the sender.
+
 ## What the operator is told
 
 A reply that goes out to somebody else is an effect on *their* conversation, and the operator reads their
