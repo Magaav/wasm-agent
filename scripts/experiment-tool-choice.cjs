@@ -57,14 +57,14 @@ const PROFILES = {
     description: 'Experiment arm: read-only investigation with the code graph.',
     instructions: 'Investigate read-only and report exact file paths and line references.',
     allowed_tools: [...READ_ONLY, 'graph'], resources: {},
-    limits: { max_depth: 0, timeout_seconds: 600, max_output_bytes: 65536, max_tokens: 400000 },
+    limits: { max_depth: 0, timeout_seconds: 240, max_output_bytes: 65536, max_tokens: 60000 },
   },
   'exp-explore-nograph': {
     schema_version: 1, id: 'exp-explore-nograph', operator_authorized: false,
     description: 'Experiment control: the same read-only investigation without the code graph.',
     instructions: 'Investigate read-only and report exact file paths and line references.',
     allowed_tools: [...READ_ONLY], resources: {},
-    limits: { max_depth: 0, timeout_seconds: 600, max_output_bytes: 65536, max_tokens: 400000 },
+    limits: { max_depth: 0, timeout_seconds: 240, max_output_bytes: 65536, max_tokens: 60000 },
   },
 };
 
@@ -128,12 +128,6 @@ async function startProvider() {
     WA_EXPERIMENT_N: String(runs), WA_EXPERIMENT_PROFILE: profile,
     WA_EXPERIMENT_DIR: home.replace(/\\/g, '/'),
     WA_EXPERIMENT_INDEX: arg('index', '0'),
-    // Lever 2: the per-result model-view budget, in bytes.
-    WASM_AGENT_TOOL_OUTPUT_BYTES: arg('cap', '51200'),
-    // A/B a Lua-only change interleaved: point the node's dofile at a different copy of
-    // lua/. Without this, comparing two descriptions means comparing two points in time,
-    // and a slow provider minute reads as a difference between the arms.
-    ...(arg('lua-root', '') ? { WASM_AGENT_LUA_ROOT: path.resolve(arg('lua-root', '')) } : {}),
   };
   const child = spawn(wa, ['--db', path.join(home, 'memory.db')], { cwd: repo, env, windowsHide: true });
   let out = '';
@@ -178,8 +172,13 @@ async function startProvider() {
   fs.writeFileSync(path.join(dir, 'ledger.json'), JSON.stringify(rows, null, 2));
 
   const count = (row) => (row.tools || []).filter((call) => call.name === 'operation').length;
+  const adopted = (row) => {
+    const list = row.adoption || [];
+    const live = list.filter((entry) => entry.still_running && entry.file_grew).length;
+    return list.length ? `${live}/${list.length}` : '-';
+  };
   console.log(`\n=== ${label} (arm=${arm} task=${task} profile=${profile} provider=${provider} n=${runs}) ===`);
-  console.log('run  state      first_tool   calls  op  tokens   correct  errors');
+  console.log('run  state      first_tool   calls  op  tokens   adopted  after-node  errors');
   for (const row of rows) {
     const usage = row.usage || {};
     const tokens = Number(row.tokens_total || 0)
@@ -189,9 +188,12 @@ async function startProvider() {
       String(row.state || row.error || '?').padEnd(10),
       String(row.first_tool || '-').padEnd(12),
       String((row.tools || []).length).padEnd(6),
-      String(count(row)).padEnd(10),
+      String(count(row)).padEnd(3),
       String(tokens).padEnd(7),
-      String(row.correct === undefined ? '-' : (row.correct ? 'yes' : 'NO')).padEnd(8),
+      String(adopted(row)).padEnd(8),
+      // `reaped` is the guarantee, not a failure: the node owns the adopted tree, so
+      // KILL_ON_JOB_CLOSE takes it when the node exits. `ALIVE` would be a leak.
+      String(row.alive_after_settle === undefined ? '-' : (row.alive_after_settle ? 'ALIVE' : 'reaped')).padEnd(10),
       String((row.errors || []).length),
     ].join('  '));
   }

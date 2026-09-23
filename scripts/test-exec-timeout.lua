@@ -18,10 +18,40 @@ ok(stuck.output_complete==true, "both pipes actually drained after termination")
 local before=host.monotonic_ms()
 local bg=json.decode(host.exec("sleep 60 & echo started"))
 ok(host.monotonic_ms()-before<1800, "shell exit cannot wait for background pipe EOF")
-ok(bg.process_exit_code==0 and bg.ok==false, "shell exit zero is not operation success")
-ok(tostring(bg.error):find("background_descendants",1,true), "unexpected background descendants are explicit")
+-- A shell that exits leaving a live descendant is no longer a failure: the descendant is
+-- adopted as a running operation, and the receipt names it. The shell's own exit code is
+-- still the truth about the shell; `output_complete` is false because the process runs on.
+ok(bg.promoted==true and bg.ok==true, "a backgrounded descendant is adopted, not failed")
+ok(bg.settled==false and bg.output_complete==false, "an adopted tree is running, not finished")
+ok(tostring(bg.operation_id):find("^op%-")~=nil, "the receipt names the adopted operation")
 ok(tostring(bg.stdout):find("started",1,true), "background case keeps its printed output")
-ok(not output.outcome("bash",bg), "Lua does not turn incomplete operation into success")
+-- Adoption is not abandonment: it is a real operation, readable and cancellable.
+local adopted_read=json.decode(host.operation("read",json.encode({id=bg.operation_id,stream="stdout",offset=0,limit=4096})))
+ok(tostring(adopted_read.content):find("started",1,true), "the adopted operation's output is readable")
+local adopted_status=json.decode(host.operation("status",json.encode({id=bg.operation_id})))
+ok(adopted_status.promoted==true and adopted_status.settled==false, "the adopted operation is still running")
+json.decode(host.operation("cancel",json.encode({id=bg.operation_id})))
+local adopted_done=json.decode(host.operation("wait",json.encode({id=bg.operation_id,wait_ms=3000})))
+ok(adopted_done.settled==true, "cancelling the adopted operation settles it")
+
+-- The guidance that comes back with an adopted tree is policy, and it has to match what the
+-- caller can actually use. A profile with `bash` but not `operation` was being told to read and
+-- cancel an operation it cannot reach - the same dead end the old refusal was, reintroduced by
+-- the adoption. Drive the real dispatch with a restricted caller context.
+local tools=dofile("lua/core/tools.lua")
+local memory=dofile("lua/core/memory.lua");memory.setup()
+local restricted=tools.dispatch(memory,"bash",{command="sleep 60 & echo started"},"master",
+  {subagent={allowed={read=true,bash=true}}})
+ok(restricted.promoted==true, "a caller without `operation` still gets the adoption")
+ok(not tostring(restricted.note):find("operation read",1,true),
+  "but is not told to use a tool its profile does not allow")
+ok(tostring(restricted.note):find(tostring(restricted.operation_id),1,true)~=nil,
+  "and the note still names the operation it was handed")
+local allowed=tools.dispatch(memory,"bash",{command="sleep 60 & echo started"},"master",
+  {subagent={allowed={read=true,bash=true,operation=true}}})
+ok(allowed.promoted==true and tostring(allowed.note):find("operation read",1,true)~=nil,
+  "a caller that does allow `operation` is told to use it")
+json.decode(host.operation("cancel",json.encode({id=allowed.operation_id})))
 local hello=json.decode(host.exec("echo hello"))
 ok(hello.ok and hello.code==0 and hello.stdout:find("hello",1,true), "normal command succeeds")
 local slow=json.decode(host.exec("sleep 1; echo done"))

@@ -28,6 +28,12 @@ pub struct Spec {
     pub timeout: Duration,
     pub output_limit: usize,
     pub owner: String,
+    /// When a foreground shell exits leaving live descendants, adopt them as a running
+    /// operation instead of failing. Off by default: a deliberately started operation is
+    /// already background, and only the `bash` tool wants this.
+    pub promote_descendants: bool,
+    /// The deadline an adopted tree gets, in place of the foreground timeout.
+    pub promoted_timeout: Duration,
 }
 impl Spec {
     pub fn command(program: impl Into<String>, args: Vec<String>) -> Self {
@@ -39,6 +45,8 @@ impl Spec {
             timeout: Duration::from_secs(300),
             output_limit: 8 * 1024 * 1024,
             owner: String::new(),
+            promote_descendants: false,
+            promoted_timeout: Duration::from_secs(3600),
         }
     }
 }
@@ -47,7 +55,9 @@ struct Entry {
     state: Mutex<Value>,
     settled: Condvar,
     started: Instant,
-    deadline: Duration,
+    /// Milliseconds. Mutable because adopting a descendant tree extends the deadline,
+    /// and `snapshot` must read it without taking the state lock.
+    deadline_ms: AtomicU64,
 }
 #[derive(Clone)]
 pub struct Manager {
@@ -180,7 +190,7 @@ impl Manager {
             state: Mutex::new(state),
             settled: Condvar::new(),
             started: Instant::now(),
-            deadline: spec.timeout,
+            deadline_ms: AtomicU64::new(spec.timeout.as_millis() as u64),
         });
         entries.insert(id.clone(), entry.clone());
         drop(entries);
@@ -254,7 +264,9 @@ impl Manager {
             }
             state["overdue"] = json!(
                 !state["settled"].as_bool().unwrap_or(false)
-                    && elapsed > entry.deadline + Duration::from_millis(CLEANUP_MS)
+                    && elapsed
+                        > Duration::from_millis(entry.deadline_ms.load(Ordering::Acquire))
+                            + Duration::from_millis(CLEANUP_MS)
             );
             return Ok(state);
         }
@@ -372,6 +384,8 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry) -> io::Result<()> {
     let mut stopped = None;
     let mut drain_started = None;
     let mut parent_exit = None;
+    // Set once when a foreground shell's descendants are adopted rather than failed.
+    let mut promoted = false;
     let mut buffer = [0u8; 8192];
     loop {
         // Bounded work per iteration: a noisy child cannot starve cancellation or its deadline.
@@ -414,7 +428,9 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry) -> io::Result<()> {
             if entry.cancel.load(Ordering::Acquire) {
                 reason.get_or_insert("cancelled".into());
             }
-            if entry.started.elapsed() >= spec.timeout {
+            if entry.started.elapsed()
+                >= Duration::from_millis(entry.deadline_ms.load(Ordering::Acquire))
+            {
                 reason.get_or_insert("deadline_exceeded".into());
             }
             // Launchers (notably Git's bin/bash.exe) may signal before their real shell finishes
@@ -426,19 +442,50 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry) -> io::Result<()> {
             if exited || reason.is_some() {
                 phase(entry, "execution_ms", execution_started.elapsed());
                 drain_started = Some(Instant::now());
-                if descendants {
-                    reason.get_or_insert("background_descendants: use an explicit operation and keep its shell waiting".into());
-                }
-                cleanup = Some(match process.terminate() {
-                    Ok(()) => "terminated",
-                    Err(e) => {
-                        reason.get_or_insert(format!("cleanup_failed:{e}"));
-                        "unknown"
+                // A shell that exits leaving live descendants is normally a failure: the result
+                // would no longer be the whole story of what the command did. When the caller
+                // asked to promote instead, the descendants are *adopted* - the job object still
+                // owns them, so they cannot outlive this node, and the operation stays running
+                // under a longer deadline. The caller gets a receipt that names the process
+                // instead of a result that hides it.
+                if descendants && spec.promote_descendants && reason.is_none() {
+                    if !promoted {
+                        promoted = true;
+                        entry.deadline_ms.store(
+                            spec.promoted_timeout.as_millis() as u64,
+                            Ordering::Release,
+                        );
+                        let mut state = entry.state.lock().unwrap();
+                        state["promoted"] = json!(true);
+                        state["state"] = json!("running");
+                        state["timeout_ms"] = json!(spec.promoted_timeout.as_millis() as u64);
                     }
-                });
-                stopped = Some(Instant::now());
-                entry.state.lock().unwrap()["state"] = json!("draining");
+                } else if promoted && reason.is_none() {
+                    // The adopted tree ended on its own. Nothing was terminated, so do not
+                    // report a cleanup that did not happen.
+                    cleanup = Some("self_exited");
+                    stopped = Some(Instant::now());
+                    entry.state.lock().unwrap()["state"] = json!("draining");
+                } else {
+                    if descendants {
+                        reason.get_or_insert("background_descendants: use an explicit operation and keep its shell waiting".into());
+                    }
+                    cleanup = Some(match process.terminate() {
+                        Ok(()) => "terminated",
+                        Err(e) => {
+                            reason.get_or_insert(format!("cleanup_failed:{e}"));
+                            "unknown"
+                        }
+                    });
+                    stopped = Some(Instant::now());
+                    entry.state.lock().unwrap()["state"] = json!("draining");
+                }
             }
+        }
+        // An adopted tree settles when it is finally gone: every pipe closed and nothing
+        // left in the job. Until then the operation is genuinely still running.
+        if promoted && stopped.is_none() && eof.iter().all(|v| *v) && !process.descendants()? {
+            break;
         }
         {
             let mut state = entry.state.lock().unwrap();
@@ -491,7 +538,10 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry) -> io::Result<()> {
     });
     state["process_exit_code"] = json!(code);
     state["output_complete"] = json!(complete);
-    state["cleanup"] = json!(cleanup.unwrap_or("unknown"));
+    // An adopted tree ended on its own; nothing was terminated, and saying "unknown"
+    // would read as a cleanup that did not happen.
+    state["cleanup"] = json!(cleanup.unwrap_or(if promoted { "self_exited" } else { "unknown" }));
+    state["promoted"] = json!(promoted);
     state["stdout"] = json!(String::from_utf8_lossy(&views[0]));
     state["stderr"] = json!(String::from_utf8_lossy(&views[1]));
     state["output_truncated"] = json!(bytes > views.iter().map(Vec::len).sum());
