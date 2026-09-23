@@ -30,6 +30,8 @@ const ENDPOINT = "ws://[::1]:9222/devtools/page/WAFIXTURE";
 const MSG_ALLOWED = "msg-allowed-1";
 const MSG_CRASH = "msg-crash-1";
 const MSG_DENY = "msg-deny-1";
+// What lua/core/whatsapp.lua puts at the front of every reply, so a person knows a copilot wrote it.
+const PREFIX = "Copiloto: ";
 
 let checks = 0, failures = 0, skipped = 0;
 const failureList = [];
@@ -108,7 +110,7 @@ function providerServer() {
         const call = (name, args) => ({ delta: { tool_calls: [toolCall(name, args)] }, finish_reason: "tool_calls" });
         if (childText.includes("MODE:crash")) {
           if (steps === 0) payload = call("whatsapp_read", {});
-          else if (steps === 1) payload = call("whatsapp_send", { body: "crash-body", confirm: true });
+          else if (steps === 1) payload = call("whatsapp_send", { body: PREFIX + "crash-body", confirm: true });
           else {
             const sendResult = String((toolResults[1] && toolResults[1].content) || "");
             payload = text(/ambiguous|already_sent|"error"/.test(sendResult) ? "child-crash-refused" : "child-crash-sent");
@@ -353,7 +355,7 @@ async function main() {
   check((await fetch(base + "/health", { signal: AbortSignal.timeout(3000) })).ok, "health is responsive while both child slots are held");
   const heldList = await api(base, { action: "list" });
   check(heldList.status === 200 && heldList.value && (heldList.value.subagents || []).length >= 2, "the control plane lists the two held children while inference is saturated");
-  check(effectLines().every((line) => line.body !== "yes, 3pm"), "the WhatsApp effect is not sent while the child is held");
+  check(effectLines().every((line) => line.body !== PREFIX + "yes, 3pm"), "the WhatsApp effect is not sent while the child is held");
   const chats = await Promise.all(["A", "B"].map(async (name) => {
     const response = await fetch(base + "/chat", {
       method: "POST",
@@ -372,17 +374,25 @@ async function main() {
   holdChildren = false;
   for (const item of held) item.deliver();
   held.length = 0;
-  await until(() => effectLines().some((line) => line.body === "yes, 3pm"), "fake send invoked once");
+  // Tolerant on purpose: the send has to *happen* before the marker can be asserted, so this waits for the
+  // child's text and leaves "does it announce the copilot?" to the checks below, where a failure names it.
+  await until(() => effectLines().some((line) => String(line.body).includes("yes, 3pm")), "fake send invoked once");
   await until(() => job(jobEnv, "history").some((delivery) => delivery.job_id === "wa-allowed" && delivery.state === "completed"), "allowed delivery completed");
-  const allowedEffects = effectLines().filter((line) => line.body === "yes, 3pm");
+  const allowedEffects = effectLines().filter((line) => line.body === PREFIX + "yes, 3pm");
   check(allowedEffects.length === 1, `exactly one durable effect for the allowed message (got ${allowedEffects.length})`);
   check(allowedEffects[0] && allowedEffects[0].chat === CONV, "the fake send received the exact recipient");
   check(allowedEffects[0] && allowedEffects[0].account === ACCOUNT, "the fake send proved the bound account");
+  // The reply announces the copilot, structurally: the child never asked for a prefix, and the send tool
+  // added one before reserving and verifying the body.
+  check(allowedEffects[0] && String(allowedEffects[0].body).startsWith(PREFIX),
+    `the reply announces what it is: ${JSON.stringify(allowedEffects[0] && allowedEffects[0].body)}`);
+  check(allowedEffects[0] && allowedEffects[0].body === PREFIX + "yes, 3pm",
+    `the prefix is added once, in front of exactly what the child wrote: ${JSON.stringify(allowedEffects[0] && allowedEffects[0].body)}`);
   const allowedChild = fs.existsSync(path.join(config, "subagents")) ? fs.readdirSync(path.join(config, "subagents")) : [];
   requireDependency(allowedChild.length > 0, "child_root_uses_WASM_AGENT_HOME (no records under the isolated config)");
   emit("wa.allowed", "allowed-1", { message_id: MSG_ALLOWED });
   await sleep(800);
-  check(effectLines().filter((line) => line.body === "yes, 3pm").length === 1, "a repeated delivery does not send a second effect");
+  check(effectLines().filter((line) => line.body === PREFIX + "yes, 3pm").length === 1, "a repeated delivery does not send a second effect");
 
   // ---- denied run: general bash and a foreign chat are refused by actual dispatch ------------------
   check(emit("wa.deny", "deny-1", { message_id: MSG_DENY }).queued === 1, "denial event enqueued");
@@ -391,13 +401,15 @@ async function main() {
   check(effectLines().every((line) => line.body !== "foreign"), "a foreign conversation was never sent to");
 
   // ---- restart ambiguity: a reservation persists across a node restart -----------------------------
-  check(effectLines().filter((line) => line.body === "crash-body").length === 0, "no crash effect before the scenario");
+  check(effectLines().filter((line) => line.body === PREFIX + "crash-body").length === 0, "no crash effect before the scenario");
   if (child && child.exitCode === null) child.kill();
   await Promise.race([new Promise((resolve) => child.once("exit", resolve)), sleep(5000)]);
   child = startNode({ ...env, WA_FAKE_MODE: "block" }, port);
   await until(async () => { try { return (await fetch(base + "/health", { signal: AbortSignal.timeout(500) })).ok; } catch { return false; } }, "node restarted", 15000);
   check(emit("wa.crash", "crash-1", { message_id: MSG_CRASH }).queued === 1, "crash event enqueued after restart");
-  await until(() => effectLines().filter((line) => line.body === "crash-body").length === 1, "crash send began and blocked", 20000);
+  await until(() => effectLines().filter((line) => line.body === PREFIX + "crash-body").length === 1, "crash send began and blocked", 20000);
+  // This child prefixed its own body. The marker is not doubled: the tool only adds it when it is absent.
+  check(effectLines().every((line) => !String(line.body).includes(PREFIX + PREFIX)), "a body that already announces the copilot is not prefixed twice");
   await sleep(1500);
   // The send is blocked before confirmation. Kill only the test-owned node and the blocked fake sender.
   const crashChild = child;
@@ -424,7 +436,7 @@ async function main() {
   await until(() => { const record = findRecord(":crash-2"); return record && record.result && record.result.reply; }, "replay child settled", 30000);
   const replayRecord = findRecord(":crash-2");
   check(replayRecord && String((replayRecord.result || {}).reply) === "child-crash-refused", "the replay refused the pending reservation instead of sending");
-  check(effectLines().filter((line) => line.body === "crash-body").length === 1, "a pending reservation is never sent twice");
+  check(effectLines().filter((line) => line.body === PREFIX + "crash-body").length === 1, "a pending reservation is never sent twice");
   const killedRecord = findRecord(":crash-1");
   check(killedRecord && killedRecord.state !== "completed", "the child killed mid-send is never reported completed");
 

@@ -192,7 +192,19 @@ local effects = new_effects()
 local sent_request = nil
 local sender = function(request) sent_request = request; return verified_result(request.conversation_id, request.body, "3EB0SENT") end
 local okay = whatsapp.dispatch(memory, "whatsapp_send", { body = "yes, 3pm", confirm = true }, send_ctx(profile, effects, "MSG2", sender))
-check(okay.ok == true and okay.verified == true and sent_request.body == "yes, 3pm", "an approved send reaches the route with the exact body")
+check(okay.ok == true and okay.verified == true and sent_request.body == whatsapp.REPLY_PREFIX .. "yes, 3pm",
+  "an approved send reaches the route with the marker in front of exactly what was written")
+check(sent_request.body:sub(1, #whatsapp.REPLY_PREFIX) == whatsapp.REPLY_PREFIX,
+  "the reply at the very beginning says a copilot wrote it")
+-- A caller that already announces the copilot is not announced twice. A fresh store, because the
+-- profile's send budget is one and this is a second send.
+local effects2 = new_effects()
+local marked_request = nil
+local marked_sender = function(request) marked_request = request; return verified_result(request.conversation_id, request.body, "3EB0MARKED") end
+local again = whatsapp.dispatch(memory, "whatsapp_send", { body = whatsapp.REPLY_PREFIX .. "ja marcado", confirm = true },
+  send_ctx(profile, effects2, "MSG2B", marked_sender))
+check(again.ok == true and marked_request.body == whatsapp.REPLY_PREFIX .. "ja marcado",
+  "a body that already carries the marker is not prefixed twice")
 check(effects.find("MSG2").state == "sent", "a verified send is confirmed durably")
 
 -- Idempotency: the same message id never sends twice, and no route is called.

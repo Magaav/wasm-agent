@@ -65,6 +65,19 @@ Media is settled the same way: an eligible image or voice note is reported to th
 and **not** appended to `events` (it used to be both, which would have asked a child to answer a voice
 note). No reply is ever sent to the sender for one.
 
+## What the operator is told
+
+A reply that goes out to somebody else is an effect on *their* conversation, and the operator reads their
+own inbox, not the ledger — so every send is reported back to them, in one line, by the deterministic
+step: `replied for you to <title> (id <message id>): "<what was said>"`. A send that did not confirm is
+reported as **not sent** rather than not at all, which is the case that must never be quiet. The report is
+bounded to three per pass, carries a **durable report cursor** (`meta.whatsapp_reported_at`) so the same
+send is never announced twice, and is best-effort: a failed note does not fail the step.
+
+It lives in the reader rather than in the child on purpose. A child's send budget is one, so a note home
+would be a second send it is refused; and "what did the copilot send as me" is decidable from the effect
+tables without a model. Child tokens are spent on judgement, never on bookkeeping.
+
 `scripts/test-whatsapp-cursor.cjs` proves each of these against a mock store, the real ingest script and a
 real ledger: no browser, no sentinel, no model.
 
@@ -97,6 +110,13 @@ The route refuses to overwrite a draft, refuses a non-self send without that app
 sent message in the app's store: a keystroke's acknowledgement is not evidence (it has reported
 `timeout: Input.dispatchKeyEvent` while the message verifiably delivered).
 
+**Every reply announces itself.** The send tool puts `Copiloto: ` (`M.REPLY_PREFIX` in
+`lua/core/whatsapp.lua`) at the very beginning of the body *before* it is reserved, sent and verified, so
+the marker cannot be forgotten by a model, skipped by a route or dropped by a caller — and because the
+store check compares the prefixed text, an unmarked reply cannot pass verification either. A body that
+already carries the prefix is left alone, never doubled. The wording is one constant and deliberately not a
+profile field: a knob would be a second way for the marker to be absent.
+
 ## Operating it
 
 ```
@@ -121,6 +141,35 @@ wa-sentinel job history              # one row per delivery
   "completing" while nothing is read).
 - **Children wait for idle.** The inference lane is only claimed when the node is idle, deliberately, so a
   child never pushes a person's turn aside.
+
+## The source keeps itself up (deterministic)
+
+`scripts/whatsapp-source-ensure.sh` starts the browser, and it starts it the only way that survives
+**through the logon task**, because a browser spawned by an operation dies with the operation. One JSON
+object on stdout (the `run` contract), human lines on stderr, exit 0 only when the chain answers by proof.
+Idempotent: with the source up it is a single HTTP probe (~0.2 s), so a 120-second keeper is free.
+
+| what is wrong | what it does | how it fails |
+| --- | --- | --- |
+| nothing on 9222 | starts the task, waits for DevTools | `cdp_never_answered` |
+| 9222 held, DevTools dead, holder is **our** Chrome | kills that pid (its command line names the agent profile), starts fresh | — |
+| 9222 held by anything else | refuses; the port is not ours to take | `port_held_by_other`, naming the pid |
+| DevTools up, no WhatsApp page | opens the page over CDP (`/json/new`) | `no_whatsapp_page` |
+| page up, store unreadable | waits, then reports | `store_unreadable_chats_zero` — needs a human: scan the QR once |
+| the logon task is missing | refuses | `task_not_registered`, printing the installer command |
+
+Nothing has to remember it. The **logon task** `wasm-agent-whatsapp-chrome` starts the wrapper at logon,
+and the keeper job `whatsapp-source` (schedule, 120 s, action `run`) re-runs this script on the
+**deterministic lane** — so a person's turn never delays it and it costs no tokens. The agent's own surface
+is the spell `whatsapp-source-up`: one `run` step with `expect {ok:true}` and a post-assertion that reads
+`location.hostname` in the page, so a replay ends with the page *observed* rather than assumed.
+
+Measured on this machine: with the source up, `already-up` in 0.18 s; after `taskkill` killed the browser,
+one replay of the spell restored it in **68 s** and its post-assertion read `web.whatsapp.com`; a foreign
+listener on 9222 was refused with its pid; a missing task was refused with the installer command; and the
+installed wrapper, with no Chrome under `%ProgramFiles%`, printed the missing path and started nothing.
+What is **not** covered by that matrix: a logged-out WhatsApp. It is detected and reported as such, but
+reviving it needs a human with a phone — which is why the report says so instead of retrying.
 
 ## Failure modes this pipeline has already had
 

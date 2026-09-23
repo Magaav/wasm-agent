@@ -26,6 +26,11 @@ $Wrapper  = Join-Path $Install 'whatsapp-chrome.cmd'
 if ($Remove) {
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+            Write-Host "FAILED: $TaskName is still registered after Unregister-ScheduledTask."
+            Write-Host "Remove it from an ELEVATED prompt:  schtasks /delete /tn $TaskName /f"
+            exit 1
+        }
         Write-Host "removed scheduled task $TaskName"
     } else {
         Write-Host "no scheduled task $TaskName"
@@ -68,6 +73,18 @@ $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" 
 
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings `
     -Principal $principal -Force | Out-Null
+# Verify what the machine actually has, because a refused registration is a *non-terminating* error: with
+# $ErrorActionPreference = 'Stop' it did not stop this script, so it printed "registered scheduled task"
+# while nothing was registered (measured: the node's token is refused with 0x80070005). A script that says
+# it installed something it did not is worse than one that fails: the operator reads "registered", logs
+# off, and the copilot comes back blind.
+if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
+    Write-Host "FAILED: $TaskName is NOT registered - this process was refused the task store."
+    Write-Host "The wrapper is in place; register the task from an ELEVATED prompt:"
+    Write-Host "  schtasks /create /tn $TaskName /tr `"$Wrapper`" /sc onlogon /rl LIMITED /f"
+    exit 1
+}
 Write-Host "registered scheduled task $TaskName (at logon, limited)"
+Write-Host "verified: Get-ScheduledTask returns it"
 Write-Host "start it now without logging off:  schtasks /Run /TN $TaskName"
 Write-Host "then check the chain with:         bash scripts/whatsapp-preflight.sh"
