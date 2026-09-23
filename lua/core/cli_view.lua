@@ -37,22 +37,73 @@
 -- sink.
 
 local json = dofile("lua/vendor/json.lua")
+-- The answer is markdown, and a terminal has to be told so: headings, bullets, fences and
+-- inline code all arrive as punctuation without it. The renderer is its own module because
+-- its wrapping rule - measure the plain text, paint last - is the whole of its design, and
+-- because that rule is worth a test that needs no terminal.
+local markdown = dofile("lua/core/markdown.lua")
 
 local M = {}
 
 -- ---- styling -------------------------------------------------------------------
 
+-- pi's dark theme, role for role. The names are pi's own
+-- (`@earendil-works/pi-coding-agent/dist/modes/interactive/theme/dark.json`), so a component
+-- here is coloured by what it *is* rather than by a literal at the call site: a tool that
+-- succeeded is `success` on both surfaces, and a reader who knows pi's colours already knows
+-- where to look in this one. The hex values are pi's, unchanged.
+--
+-- Truecolor is the point: these roles are 24-bit colours, and the terminals this runs in
+-- (Windows Terminal, Orca's terminal, xterm-256color) render them. A terminal that does not
+-- understand `38;2;r;g;b` ignores the sequence, so the degradation is uncoloured text -
+-- visible, and not a garbled line. `NO_COLOR` still wins over all of it, and
+-- `WASM_AGENT_CLI_VIEW=plain` turns colour off for a captured transcript.
 local RESET = "\27[0m"
-local STYLE = {
-  dim = "\27[2m", bold = "\27[1m", red = "\27[31m",
-  green = "\27[32m", yellow = "\27[33m", accent = "\27[36m",
+local PALETTE = {
+  accent = "8abeb7", border = "5f87ff", borderAccent = "00d7ff", borderMuted = "505050",
+  success = "b5bd68", error = "cc6666", warning = "ffff00", muted = "808080",
+  dim = "666666", text = "d4d4d4", thinkingText = "808080",
+  mdHeading = "f0c674", mdLink = "81a2be", mdLinkUrl = "666666", mdCode = "8abeb7",
+  mdCodeBlock = "b5bd68", mdCodeBlockBorder = "808080", mdQuote = "808080",
+  mdQuoteBorder = "808080", mdHr = "808080", mdListBullet = "8abeb7",
+  toolDiffAdded = "b5bd68", toolDiffRemoved = "cc6666", toolDiffContext = "808080",
+  syntaxComment = "6a9955", syntaxKeyword = "569cd6", syntaxFunction = "dcdcaa",
+  syntaxString = "ce9178", syntaxNumber = "b5cea8", syntaxType = "4ec9b0",
+  -- The reasoning ramp, darkest to brightest: how much thinking the model was asked for.
+  thinkingOff = "505050", thinkingMinimal = "6e6e6e", thinkingLow = "5f87af",
+  thinkingMedium = "81a2be", thinkingHigh = "b294bb", thinkingXhigh = "d183e8",
+  thinkingMax = "ff5fff",
 }
 
--- Colour is a rendering decision, never a fact: every caller passes `live`, and the
--- plain rendering is the same text without it.
+local function fg(hex)
+  return string.format("\27[38;2;%d;%d;%dm",
+    tonumber(hex:sub(1, 2), 16), tonumber(hex:sub(3, 4), 16), tonumber(hex:sub(5, 6), 16))
+end
+
+local STYLE = { bold = "\27[1m", italic = "\27[3m", faint = "\27[2m" }
+for role, hex in pairs(PALETTE) do STYLE[role] = fg(hex) end
+-- The names the earlier view used, kept because callers and tests use them: each is now a
+-- role rather than a literal, so `green` and `success` cannot drift apart.
+STYLE.red = STYLE.error
+STYLE.green = STYLE.success
+STYLE.yellow = STYLE.warning
+STYLE.cyan = STYLE.borderAccent
+M.PALETTE = PALETTE
+M.style = function(role) return STYLE[role] end
+
+-- Colour is a rendering decision, never a fact: every caller passes `live`, and the plain
+-- rendering is the same text without it. A style is one role or a list of them
+-- (`{ "bold", "mdHeading" }`), which is how a heading is both at once.
 local function paint(text, style, live)
   if not live or not style then return text end
-  return STYLE[style] .. text .. RESET
+  local codes = ""
+  if type(style) == "table" then
+    for _, name in ipairs(style) do codes = codes .. (STYLE[name] or "") end
+  else
+    codes = STYLE[style] or ""
+  end
+  if codes == "" then return text end
+  return codes .. text .. RESET
 end
 M.paint = paint
 
@@ -415,13 +466,25 @@ end
 -- itself, and `host.ticker` fills them on a timer while this process is blocked. The second
 -- value is when the timed thing started, which is what the clock counts from either way.
 function METHODS:status_template()
-  if self.pending then
-    local bound = self.pending.bound and (" of " .. M.duration(self.pending.bound)) or ""
-    return "  {m}" .. M.phase(self.pending.name) .. " \194\183 {t}" .. bound, self.pending.started
+  local phase = self.pending and M.phase(self.pending.name) or self.phase
+  local started = self.pending and self.pending.started or (self.turn and self.turn.started or nil)
+  local function compose(shown)
+    local line = "  {m}" .. shown
+    if self.pending then
+      local bound = self.pending.bound and (" of " .. M.duration(self.pending.bound)) or ""
+      return line .. " \194\183 {t}" .. bound
+    end
+    if not self.turn then return line end
+    local round = (self.round and self.round > 0) and (" \194\183 round " .. self.round) or ""
+    return line .. " \194\183 {t}" .. round
   end
-  local round = (self.round and self.round > 0) and (" \194\183 round " .. self.round) or ""
-  if not self.turn then return "  {m}" .. self.phase, nil end
-  return "  {m}" .. self.phase .. " \194\183 {t}" .. round, self.turn.started
+  local plain = compose(phase)
+  -- The phase word carries the colour and nothing else does: the host's ticker draws this
+  -- same line, and the mark and the clock are its own. A terminal too narrow for the plain
+  -- line gets the plain line, because `clip` counts columns and an escape sequence is not
+  -- one - a coloured line clipped by width loses its reset and bleeds into the next line.
+  if columns(plain) > math.min(self.limit, 100) then return plain, started end
+  return compose(paint(phase, "accent", self.live)), started
 end
 
 -- The status line, and the only thing on screen that is rewritten. `with_spinner` is
@@ -470,6 +533,9 @@ end
 -- only printed when the *phase* changes - a log line per spinner frame would be noise,
 -- and there is nothing here a reader could not get from the tool lines.
 function METHODS:paint(force)
+  -- The console draws every event as its own line, so a line rewritten in place has nothing
+  -- to say and would fight it for the cursor.
+  if self.console then return end
   self.frame = self.frame + 1
   local line = clip(self:status_text(self.live), math.min(self.limit, 100))
   if self.live then
@@ -569,6 +635,17 @@ function METHODS:answered(reply)
     -- what has to find it.
     if self.turn and (self.turn.tools or 0) > 0 then self:write("\n") end
     local text = tostring(reply)
+    -- Markdown, because that is what the model wrote: a heading is a heading, a fence is a
+    -- block, and the width is the terminal's rather than the line's.
+    local rendered = markdown.render(text, {
+      paint = function(plain, style) return paint(plain, style, self.live) end,
+      width = self.limit,
+      indent = "  ",
+    })
+    -- The renderer is the nicer rendering, never the only one: a reply it produces nothing
+    -- for is printed raw. A view that swallowed an answer because its parser did not
+    -- recognise it would be the worst bug in this file.
+    if rendered ~= "" then text = rendered end
     if text:sub(-1) ~= "\n" then text = text .. "\n" end
     self:write(text)
   end
@@ -591,8 +668,87 @@ function METHODS:warn(problem)
   self:line(paint("  ! the run view failed: " .. tostring(problem), "red", self.live))
 end
 
+-- What the model thought before it acted. A CLI run has no SSE sink, so nothing else in this
+-- process can show it: the reasoning is in the transcript, and until now it was only there.
+-- pi gives it its own colour and so does this.
+--
+-- It is not folded. The reason to show reasoning is to read it, and a view that summarised it
+-- would be the thing it exists to fix; `WASM_AGENT_CLI_THINKING=off` is how a reader who does
+-- not want it turns it off. Nothing else hides it, and nothing here shortens it.
+function METHODS:reasoning_block(text)
+  local body = tostring(text or "")
+  if body:gsub("%s", "") == "" then return end
+  if (host.getenv("WASM_AGENT_CLI_THINKING") or ""):lower() == "off" then return end
+  self:clear()
+  local mark = paint("\226\156\187 thinking", "thinkingText", self.live)
+  self:write("  " .. mark .. "\n")
+  self:write(markdown.wrap(body, {
+    paint = function(plain, style) return paint(plain, style, self.live) end,
+    width = self.limit,
+    indent = "      ",
+    style = "thinkingText",
+  }) .. "\n")
+  self:paint(true)
+end
+
+-- ---- the console ------------------------------------------------------------------
+
+-- Every event as it arrived, and a tool's output as it came back. The formatted view answers
+-- "what is it doing"; this answers "what actually happened", which is the question a one-line
+-- summary cannot. It is a toggle (`/console`) rather than the default because it is a
+-- firehose: nothing here is clipped, folded or summarised.
+function METHODS:set_console(on)
+  self.console = on and true or false
+  if self.console then self:unanimate() end
+  return self.console
+end
+
+function METHODS:console_on()
+  return self.console and true or false
+end
+
+function METHODS:console_event(event)
+  local kind = tostring(event.type or "?")
+  local since = self.turn and self.turn.started or self.now()
+  local head = "  " .. paint(M.duration(math.max(0, self.now() - since)), "dim", self.live)
+    .. " " .. paint(kind, "accent", self.live)
+  self:clear()
+  if kind == "tool_result" then
+    local result = type(event.result) == "table" and event.result or { value = event.result }
+    self:write(head .. " " .. tostring(event.name or "?") .. "\n")
+    local shown = false
+    -- The tool's own words, whole: this is the view a reader turns on precisely because the
+    -- two-line summary cut something off.
+    for _, key in ipairs({ "stdout", "stderr", "error" }) do
+      local text = result[key]
+      if type(text) == "string" and text ~= "" then
+        shown = true
+        for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+          self:write("      " .. line .. "\n")
+        end
+      end
+    end
+    if not shown then
+      for line in (json.encode(result) .. "\n"):gmatch("([^\n]*)\n") do
+        self:write("      " .. line .. "\n")
+      end
+    end
+  else
+    self:write(head .. " " .. json.encode(event) .. "\n")
+  end
+end
+
 function METHODS:event(event)
   local kind = event.type
+  if self.console then
+    -- The console is what draws, but the numbers are still kept: switching it off mid-run
+    -- must not leave the footer counting a run it never saw.
+    if kind == "usage" then
+      self.totals = event.total or self.totals
+      self.context = tonumber(event.prompt) or self.context
+    end
+    return self:console_event(event)
+  end
   if kind == "status" then
     local text = tostring(event.text or "")
     if text == "thinking" or text == "model" then
@@ -626,11 +782,18 @@ function METHODS:event(event)
     if ms then marks[#marks + 1] = M.elapsed(ms) end
     self:line("  " .. paint("\226\148\148", "dim", self.live) .. " " .. table.concat(marks, " \194\183 "))
     for _, text in ipairs(M.preview(name, event.result, 2)) do
-      self:write("      " .. paint(M.clip(text, self.limit - 6), "dim", self.live) .. "\n")
+      -- A diff line reads as a diff: added, removed, context - pi's three diff roles.
+      local style = "dim"
+      if text:sub(1, 1) == "+" then style = "toolDiffAdded"
+      elseif text:sub(1, 1) == "-" then style = "toolDiffRemoved"
+      elseif text:sub(1, 2) == "@@" then style = "toolDiffContext" end
+      self:write("      " .. paint(M.clip(text, self.limit - 6), style, self.live) .. "\n")
     end
     self.pending = nil
     self.phase = "Thinking"
     self:paint(true)
+  elseif kind == "reasoning" then
+    self:reasoning_block(event.text)
   elseif kind == "usage" then
     self.totals = event.total or self.totals
     -- The context in use is the last model call's prompt, measured by the provider;
@@ -656,16 +819,22 @@ end
 function M.banner(opts)
   opts = opts or {}
   local lines = {}
-  lines[#lines + 1] = string.format("  %s %s", paint("wasm-agent", "bold", opts.live), opts.version or "")
-  lines[#lines + 1] = string.format("  model      %s", opts.model or "local mode (no model configured)")
-  lines[#lines + 1] = string.format("  memory     %s", opts.database or "")
-  lines[#lines + 1] = string.format("  session    %s%s", opts.session or "", opts.continued and "  (continued)" or "")
+  lines[#lines + 1] = string.format("  %s %s",
+    paint("wasm-agent", { "bold", "accent" }, opts.live), opts.version or "")
+  lines[#lines + 1] = string.format("  %s %s",
+    paint("model     ", "muted", opts.live), opts.model or "local mode (no model configured)")
+  lines[#lines + 1] = string.format("  %s %s",
+    paint("memory    ", "muted", opts.live), opts.database or "")
+  lines[#lines + 1] = string.format("  %s %s%s",
+    paint("session   ", "muted", opts.live), opts.session or "",
+    opts.continued and "  (continued)" or "")
   if opts.workspace and opts.workspace ~= "" then
-    lines[#lines + 1] = string.format("  workspace  %s%s", opts.workspace,
+    lines[#lines + 1] = string.format("  %s %s%s", paint("workspace ", "muted", opts.live),
+      opts.workspace,
       opts.branch and opts.branch ~= "" and ("  (" .. opts.branch .. ")") or "")
   end
   if opts.unfinished then
-    lines[#lines + 1] = paint("  !          unfinished " .. opts.unfinished, "yellow", opts.live)
+    lines[#lines + 1] = paint("  !          unfinished " .. opts.unfinished, "warning", opts.live)
     lines[#lines + 1] = "             recovering: wa resume --session " .. tostring(opts.session or "")
   end
   lines[#lines + 1] = string.format("  %s", paint("the status line shows what a run is doing while it runs",

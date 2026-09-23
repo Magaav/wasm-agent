@@ -24,6 +24,14 @@ local function has(text, needle)
   return tostring(text):find(needle, 1, true) ~= nil
 end
 
+-- The visible text of a rendered line, with colour removed. The layout assertions are about
+-- what the reader sees, so they must not break when a role is recoloured - which is exactly
+-- what happened when this view moved from six literal colours to pi's roles. The colour
+-- assertions below name the role instead of the escape, so they still say which colour.
+local function visible(text)
+  return (tostring(text):gsub("\27%[[%d;]*m", ""):gsub("\27%]2;[^\7]*\7", ""))
+end
+
 -- ---- what a call is ------------------------------------------------------------
 
 ok(view_lib.phase("") == "Thinking", "a model call is 'Thinking'")
@@ -242,7 +250,7 @@ clock.value = 12
 live_view:event({ type = "round", n = 1 })
 ok(has(live.text(), "\r\27[2K"), "the status line is rewritten in place, not printed again")
 ok(has(live.text(), view_lib.spinner(0)), "the status line carries a spinner")
-ok(has(live.text(), "Thinking \194\183 12.0s"), "the status line says what and for how long")
+ok(has(visible(live.text()), "Thinking \194\183 12.0s"), "the status line says what and for how long")
 clock.value = 20
 live_view:event({ type = "tool", name = "bash", arguments = { command = "echo hi" }, timeout_ms = 300000 })
 ok(has(live.text(), "Running bash"), "a call in flight is named in the status line")
@@ -250,11 +258,11 @@ ok(has(live.text(), "of 5m00s"), "and the deadline it is running against is visi
 clock.value = 21
 live_view:event({ type = "tool_result", name = "bash", result = { code = 0, stdout = "hi\n" } })
 ok(has(live.text(), "1.0s"), "a step reports how long it took")
-ok(has(live.text(), "\27[32mok"), "success is marked as success")
+ok(has(live.text(), view_lib.style("success") .. "ok"), "success is marked as success")
 local before_answer = #live.text()
 live_view:event({ type = "tool", name = "read", arguments = { path = "ui/app.js" } })
 live_view:event({ type = "tool_result", name = "read", result = { error = "no such file" } })
-ok(has(live.text(), "\27[31mfailed"), "a failed call is marked as failed, with its reason")
+ok(has(live.text(), view_lib.style("error") .. "failed"), "a failed call is marked as failed, with its reason")
 ok(has(live.text(), "no such file"), "and the reason is shown")
 clock.value = 30
 live_view:event({ type = "usage", total = { prompt = 1200, completion = 800, cached = 1100, cost = 0.0021 },
@@ -264,7 +272,7 @@ local live_text = live.text()
 ok(#live_text > before_answer, "the run kept writing after the first call")
 ok(has(live_text, "done: one command ran."), "the answer is printed")
 ok(select(2, live_text:gsub("done: one command ran%.", "")) == 1, "and printed once")
-ok(has(live_text, "\27[2m"), "the footer is dimmed rather than shouted")
+ok(has(live_text, view_lib.style("dim")), "the footer is dimmed rather than shouted")
 ok(has(live_text:sub(-40), "wa - wasm_cli"), "the title returns to the workspace when the run ends")
 ok(not has(live_text:sub(-80), "Thinking"), "and the status line is gone when the run ends")
 
@@ -371,6 +379,87 @@ end)
 host.ticker = real_ticker
 ok(degraded == true and has(quiet.text(), "still answered"),
   "a host without the ticker still finishes the run")
+
+-- ---- pi's palette, per component -------------------------------------------------
+
+-- The roles are pi's own and the colours are pi's own
+-- (`dist/modes/interactive/theme/dark.json` in `@earendil-works/pi-coding-agent`). Asserting
+-- the exact sequence is the point: "coloured" is not the property, "coloured the way pi
+-- colours it" is, and a role renamed to a different colour would pass any weaker check.
+ok(view_lib.PALETTE.accent == "8abeb7", "the accent is pi's accent")
+ok(view_lib.PALETTE.success == "b5bd68" and view_lib.PALETTE.error == "cc6666",
+  "success and error are pi's green and red")
+ok(view_lib.style("success") == "\27[38;2;181;189;104m", "a role becomes its own 24-bit colour")
+ok(view_lib.style("red") == view_lib.style("error"),
+  "the old names are the same roles, not a second palette")
+ok(view_lib.style("mdHeading") == "\27[38;2;240;198;116m", "and the markdown roles are pi's too")
+
+-- The status line carries the colour, and the colour is a rendering decision: the same line
+-- is plain when the output is captured, and plain again on a terminal too narrow for it -
+-- `clip` counts columns, and a coloured line clipped by width loses its reset and bleeds.
+local status_out = recorder()
+local live_status = view_lib.new({ out = status_out.out, live = true, now = function() return 3 end, limit = 100 })
+live_status:run_started()
+ok(has(status_out.text(), view_lib.style("accent")), "the phase word on the status line is pi's accent")
+ok(has(status_out.text(), "Thinking"), "and the words are still there")
+local plain_status = recorder()
+local quiet_status = view_lib.new({ out = plain_status.out, live = false, now = function() return 3 end, limit = 100 })
+quiet_status:run_started()
+ok(not has(plain_status.text(), "\27"), "a captured status line carries no escape sequence")
+local narrow_status = recorder()
+local narrow_view = view_lib.new({ out = narrow_status.out, live = true, now = function() return 3 end, limit = 8 })
+narrow_view:run_started()
+ok(not has(narrow_status.text(), "\27[38;2;"),
+  "a terminal too narrow for the status line gets it plain rather than cut mid-colour")
+
+-- ---- the answer is markdown --------------------------------------------------------
+
+local answered = recorder()
+local answer_view = view_lib.new({ out = answered.out, live = true, now = function() return 5 end, limit = 80 })
+answer_view:run_started()
+answer_view:answered("# Done\n\n- one\n- two\n\n```lua\nlocal x = 1\n```\n\nplain words")
+local answer = answered.text()
+ok(has(answer, view_lib.style("mdHeading")), "a heading in the answer is coloured as a heading")
+ok(has(answer, view_lib.style("mdListBullet")), "a bullet is coloured as a bullet")
+ok(has(answer, view_lib.style("syntaxKeyword")), "and code in a fence is coloured as code")
+ok(not has(answer, "# Done"), "the markdown marks do not reach the screen")
+ok(has(answer, "plain words"), "and the words do")
+
+-- A reply the renderer produces nothing for is printed raw: a view that swallowed an answer
+-- because its parser did not recognise it would be the worst bug in the file.
+local odd = recorder()
+local odd_view = view_lib.new({ out = odd.out, live = false, now = function() return 5 end, limit = 80 })
+odd_view:run_started()
+odd_view:answered("   \n  \n")
+ok(has(odd.text(), "   ") or not has(odd.text(), "answered"), "an empty reply prints nothing rather than crashing")
+
+-- ---- the reasoning, as its own block -----------------------------------------------
+
+local thought = recorder()
+local think_view = view_lib.new({ out = thought.out, live = false, now = function() return 7 end, limit = 80 })
+think_view:run_started()
+think_view:event({ type = "reasoning", text = "the reader wants the view fixed, so I will read cli_view.lua first" })
+ok(has(thought.text(), "\226\156\187 thinking"), "the reasoning is announced as thinking")
+ok(has(thought.text(), "read cli_view.lua first"), "and printed in full rather than summarised")
+ok(view_lib.columns(thought.text():match("[^\n]*read[^\n]*") or "") <= 80, "and wrapped to the terminal")
+
+-- ---- the console -------------------------------------------------------------------
+
+local raw = recorder()
+local console_view = view_lib.new({ out = raw.out, live = true, now = function() return 9 end, limit = 40 })
+ok(console_view:set_console(true) == true, "the console can be turned on")
+console_view:run_started()
+console_view:event({ type = "tool", name = "bash", arguments = { command = "seq 1 60" } })
+local many = {}
+for line = 1, 60 do many[#many + 1] = "output line " .. line end
+console_view:event({ type = "tool_result", name = "bash", result = { code = 0, stdout = table.concat(many, "\n") } })
+local console_text = raw.text()
+ok(has(console_text, '"command":"seq 1 60"'), "the console shows the arguments the tool was given")
+ok(has(console_text, "output line 60"), "and a tool's output whole, not the two lines the view prints")
+ok(not has(console_text, "ok \194\183 exit 0"),
+  "and no formatted result line: the console is one line per event")
+ok(console_view:console_on() == true and console_view:set_console(false) == false,
+  "and it can be turned off again")
 
 if failed > 0 then
   print(string.format("cli view: %d failed of %d checks", failed, checks))

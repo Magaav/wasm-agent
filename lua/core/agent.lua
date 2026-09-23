@@ -1210,6 +1210,14 @@ function M:run_body(text, images)
     end
     if result.model and result.model ~= "" then self.model = result.model end
 
+    -- What the model thought before it acted, emitted per round so the view can show it beside
+    -- the calls it explains. A CLI run has no SSE sink (`rust/wa-host/src/host.rs`
+    -- `serve::write_event` writes deltas to the node's, and this process has none), so without
+    -- this event the reasoning exists only in the transcript and a terminal never shows it.
+    if (result.reasoning or "") ~= "" then
+      self.emit({ type = "reasoning", text = result.reasoning, round = round })
+    end
+
     local calls = result.tool_calls or {}
     local assistant = { role = "assistant", content = result.content or "" }
     if provider.reasoning(self.model).replay then assistant.reasoning_content=result.reasoning or "" end
