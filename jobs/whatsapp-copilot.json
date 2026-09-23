@@ -10,6 +10,16 @@
     "steps": [
       {
         "kind": "run",
+        "script": "PREPARED_BY_INSTALL/scripts/whatsapp-source-ensure.sh",
+        "timeout_seconds": 180
+      },
+      {
+        "kind": "run",
+        "script": "PREPARED_BY_INSTALL/scripts/whatsapp-transcribe.sh",
+        "timeout_seconds": 240
+      },
+      {
+        "kind": "run",
         "script": "PREPARED_BY_INSTALL/scripts/whatsapp-copilot-read.sh",
         "timeout_seconds": 300,
         "returns": "events"
