@@ -320,7 +320,7 @@ class WaTrace extends HTMLElement {
   // addTool(name, title, detail, bound) -> the line element, so the caller can fill the outcome.
   // `bound` is the call's deadline in seconds, when it has one: the line can then say how long it has
   // run *of* how long it may take, which is the question "bash" alone cannot answer.
-  addTool(name, title, detail, bound) {
+  addTool(name, title, detail, bound, callId) {
     if (!this._userToggled) this.open = true;   // live: show the lines, not a count
     this._count += 1;
     const line = document.createElement("li");
@@ -346,7 +346,7 @@ class WaTrace extends HTMLElement {
     progress.hidden = true;
     line.append(progress);
     this._lines.set(name, line);
-    this._pending.push({ line, output, progress, outcome, started: Date.now(), bound: bound || null });
+    this._pending.push({ line, output, progress, outcome, started: Date.now(), bound: bound || null, callId: callId || "" });
     this._body.append(line);
     this._header.classList.add("running");
     this._refresh();
@@ -376,6 +376,10 @@ class WaTrace extends HTMLElement {
   }
 
   get pending() { return this._pending.length > 0; }
+
+  hasPendingCall(callId) {
+    return this._pending.some((target) => target.callId === callId);
+  }
 
   // Tool calls in one decision execute in order; replay adds them all before their
   // result rows, so settle the oldest pending line, not the most recently added one.
