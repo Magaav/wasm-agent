@@ -196,6 +196,19 @@ check(okay.ok == true and okay.verified == true and sent_request.body == whatsap
   "an approved send reaches the route with the marker in front of exactly what was written")
 check(sent_request.body:sub(1, #whatsapp.REPLY_PREFIX) == whatsapp.REPLY_PREFIX,
   "the reply at the very beginning says a copilot wrote it")
+-- The marker's *shape* is part of the promise, not decoration: somebody on the other side has to see at a
+-- glance that a copilot wrote this. An icon, the word in WhatsApp's italic markup, then a newline - so it
+-- reads as a header above the message rather than as the first words of the sentence.
+check(sent_request.body:sub(1, #whatsapp.REPLY_ICON) == whatsapp.REPLY_ICON,
+  "the marker opens with the copilot icon")
+check(sent_request.body:find("_Copiloto_", 1, true) ~= nil,
+  "the word is in WhatsApp's italic markup, so it renders as a header rather than as prose")
+check(sent_request.body:sub(#whatsapp.REPLY_ICON + 1, #whatsapp.REPLY_ICON + 1) == " ",
+  "the icon is separated from the word by a space")
+check(sent_request.body:sub(#whatsapp.REPLY_PREFIX, #whatsapp.REPLY_PREFIX) == "\n",
+  "the marker ends with a newline, so the message starts on its own line")
+check(sent_request.body:sub(#whatsapp.REPLY_PREFIX + 1) == "yes, 3pm",
+  "and the message itself is untouched behind it")
 -- A caller that already announces the copilot is not announced twice. A fresh store, because the
 -- profile's send budget is one and this is a second send.
 local effects2 = new_effects()
