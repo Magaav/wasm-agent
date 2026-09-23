@@ -27,6 +27,22 @@ assert(received.reviewed[1] == path)
 local before_feedback = audit.report(48)
 assert(before_feedback.audits >= 1 and before_feedback.worthy == "unproven")
 assert(before_feedback.examples[1].session_id == "patch-audit-test")
+local step={id="assessment-step",source="native_changeset",lead_count=1,assessed=false}
+local context={session_id="patch-audit-test",run_id="patch-audit-run",audit_step=step}
+assert(audit.assess({grade=4,reason="this lead was relevant",critique="none observed"},context).error
+  =="invalid_usefulness_grade")
+assert(audit.assess({grade=2,reason="caller.lua:7 confirmed the changed behavior",
+  critique="The edge did not show whether a test covers this call",evidence="caller.lua:7"},context).recorded)
+assert(audit.assess({grade=2,reason="duplicate assessment",critique="none observed"},context).error
+  =="audit_step_already_assessed")
+local assessed=audit.report(48).self_assessment
+assert(assessed.recorded==1 and assessed.grades["2"]==1)
+assert(assessed.examples[1].self_report and assessed.examples[1].critique:find("test covers",1,true))
+assert(audit.report(48).worthy=="unproven")
+local telemetry=dofile("lua/core/telemetry.lua")
+telemetry.event("patch-audit-test","unassessed-run","","graph_patch_step","end",
+  {step_id="unassessed-step",lead_count=1,assessed=false})
+assert(audit.report(48).self_assessment.missing==1)
 assert(audit.feedback("missing-run","confirmed_catch").error == "run_has_no_graph_lead")
 assert(audit.feedback("patch-audit-run","confirmed_catch",nil,
   {session_id="patch-audit-test"}).ok)
@@ -71,6 +87,9 @@ host.graph_patch_audit = function()
     leads={{path="caller.lua",line=2}},gaps={}})
 end
 local tools = dofile("lua/core/tools.lua")
+assert(tools.dispatch({},"graph",{action="audit_assess",grade=3,
+  reason="no active audit step",critique="none observed"},"master",{}).error
+  =="no_active_audit_step")
 local context={commit_audits={},reviewed_paths={},session_id="patch-audit-test",run_id="precommit-run"}
 local first=tools.dispatch({},"bash",{command="git commit -m test"},"master",context)
 assert(first.error=="graph_patch_review_required" and committed==0)

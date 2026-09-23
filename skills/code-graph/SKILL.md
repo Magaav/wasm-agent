@@ -16,6 +16,9 @@ current staged-and-unstaged Git patch, including shell edits. `graph {action:"au
 hours:48}` summarizes the trial. `audit_feedback` records an operator-reviewed
 outcome for a run with leads; never label a catch yourself. See
 `docs/GRAPH-PATCH-AUDIT.md` for the limits and decision rule.
+After an audit follow-up step, use `audit_assess` to record your usefulness
+grade (0-3), concrete reason and critique. This is your opinion, not a confirmed
+catch; grade 3 only means the lead prompted a patch or test revision.
 
 The node keeps the index fresh as files change, so you almost never call
 `index` yourself.

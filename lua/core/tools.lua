@@ -142,14 +142,18 @@ M.admin = {
     max_depth={type="integer",minimum=0,maximum=64}, extensions={type="array",items={type="string"}}
   }, { "pattern" }),
   -- The graph is an impact-review lead generator and an optional relationship tool.
-  schema("graph", "Audit the current native write/edit patch for unread resolved callers with action=audit, or pass source=git for the current Git patch (including shell edits). Use audit_report after the 48-hour trial and audit_feedback only for an operator-reviewed outcome. The audit is not a correctness proof. For explicit dependency questions, explain/path/query/caps remain available; read source before acting on a graph lead. stats/index inspect or rebuild the index.", {
-    action = { type = "string", enum = { "explain", "query", "path", "caps", "stats", "index", "audit", "audit_report", "audit_feedback" } },
+  schema("graph", "Audit the current native write/edit patch for unread resolved callers with action=audit, or pass source=git for the current Git patch (including shell edits). After an audit follow-up step, call audit_assess with your usefulness grade, reason and critique; this is self-report, not proof. Use audit_report after the 48-hour trial and audit_feedback only for an operator-reviewed outcome. For explicit dependency questions, explain/path/query/caps remain available; read source before acting on a graph lead. stats/index inspect or rebuild the index.", {
+    action = { type = "string", enum = { "explain", "query", "path", "caps", "stats", "index", "audit", "audit_assess", "audit_report", "audit_feedback" } },
     name = { type = "string", description = "explain/query: the identifier to look up." },
     from = { type = "string", description = "path: start identifier." },
     to = { type = "string", description = "path: end identifier." },
     limit = { type = "integer", minimum = 1, maximum = 200 },
     force = { type = "boolean", description = "index: reparse every file, even unchanged ones." },
     hours = { type = "integer", minimum = 1, maximum = 720, description = "audit_report: telemetry window, default 48 hours." },
+    grade = { type = "integer", minimum = 0, maximum = 3, description = "audit_assess: 0 irrelevant/noisy; 1 related but no new information; 2 useful check/confirmation; 3 prompted a patch or test revision. This is your opinion, not a confirmed catch." },
+    reason = { type = "string", description = "audit_assess: concrete reason tied to what you inspected." },
+    critique = { type = "string", description = "audit_assess: specific graph limitation/noise, or say none observed." },
+    evidence = { type = "string", description = "audit_assess: optional path:line or test/patch evidence; never paste secrets." },
     run_id = { type = "string", description = "audit_feedback: run with an audit lead." },
     outcome = { type = "string", enum = { "confirmed_catch", "false_positive", "unresolved" }, description = "audit_feedback: operator-reviewed outcome; never self-certify a catch." },
     commit = { type = "string", description = "audit_feedback: optional commit hash for evidence." },
@@ -519,6 +523,8 @@ function M.dispatch(memory, name, args, role, ctx)
         {session_id=ctx.session_id,run_id=ctx.run_id})
     elseif action == "audit_report" then
       return patch_audit.report(args.hours)
+    elseif action == "audit_assess" then
+      return patch_audit.assess(args,ctx)
     elseif action == "audit_feedback" then
       return patch_audit.feedback(args.run_id,args.outcome,args.commit,ctx)
     end

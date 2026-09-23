@@ -5,7 +5,15 @@ certificate that a patch is correct. `WA_GRAPH_PATCH_AUDIT=1` enables an automat
 audit when an operator run with native `write`/`edit` changes or a shell-using run
 first attempts to finish. A resolved call from another file into a changed definition becomes a
 review lead if that file was not read with native `read`/`read_many` in this run.
-The agent gets one extra opportunity to inspect the lead and revise the patch.
+The agent gets an audit follow-up step to inspect the lead and revise the patch.
+It is asked to record `graph {action:"audit_assess",grade:0..3,reason:"...",
+critique:"...",evidence:"..."}` after that inspection. Grades mean 0 irrelevant/noisy,
+1 related but no new information, 2 useful check/confirmation, and 3 prompted a
+patch or test revision. The reason should cite what it inspected; the critique
+should name a limitation or say none was observed. This is a bounded model
+self-report, not operator verification, and it cannot set `worthy`.
+If the agent omits it, it gets one bounded reminder; a second omission is reported
+as missing rather than silently assigned a grade.
 The final answer says when leads, gaps, or audit errors remain.
 
 The native `graph {action:"audit"}` verb can run the same check on demand;
@@ -46,7 +54,10 @@ After enabling the flag on the deployed node, use `graph
 {action:"audit_report",hours:48}`. `ready_for_review` turns true 48 hours
 after the **first recorded audit**, not 48 hours after a code merge. The report
 shows audit count, leads, coverage gaps, audit milliseconds, maximum graph DB
-size, and any extra model time/tokens after a lead. An observed native read and
+size, and any extra model time/tokens after a lead. `self_assessment` gives the
+grade distribution, bounded reasons/critiques, and the number of follow-up steps
+with no assessment. Read those as the agent's qualitative experience, not proof
+of a prevented mistake. An observed native read and
 subsequent patch revision sets `patch_changed_after_lead`: it is a candidate for
 review, **not proof** the graph helped. A shell-based follow-up may be invisible.
 

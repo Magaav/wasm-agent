@@ -2,12 +2,13 @@
 local json = dofile("lua/vendor/json.lua")
 local changeset = dofile("lua/core/changeset.lua")
 local telemetry = dofile("lua/core/telemetry.lua")
+local redact = dofile("lua/core/redact.lua")
 local M = {}
 
 local function failure(context, source, reason)
   if context then telemetry.event(context.session_id,context.run_id,"",
     "graph_patch_audit","end",{ok=false,source=source,error=reason,ms=0}) end
-  return {error=reason,worthy="unproven"}
+  return {error=reason,source=source,worthy="unproven"}
 end
 
 function M.enabled()
@@ -33,6 +34,7 @@ local function run_request(request, reviewed, context, source)
   -- `worthy` is intentionally not inferred from a lead count. A useful lead must be
   -- confirmed by a subsequent inspection and a real patch/test outcome.
   result.worthy="unproven"
+  result.source=source
   if span then telemetry.finish(span, {ok=not result.error, verdict=result.verdict,
     lead_count=result.lead_count or 0, mapped_lines=result.mapped_lines or 0,
     changed_lines=result.changed_lines or 0, gap_count=result.gap_count or #(result.gaps or {}),
@@ -123,11 +125,40 @@ end
 function M.git_audit(cwd, reviewed, context)
   local patch, err=M.git_changes(cwd)
   if not patch then return failure(context,"git_worktree",err) end
-  if #patch.changes==0 then return {verdict="no_patch",lead_count=0,worthy="unproven"} end
+  if #patch.changes==0 then return {verdict="no_patch",lead_count=0,source="git_worktree",worthy="unproven"} end
   local report=run_request({changes=patch.changes},reviewed,context,"git_worktree")
   report.patch_fingerprint=patch.fingerprint
   report.patch_source="git_worktree_not_run_attributed"
   return report
+end
+
+-- A model's qualitative assessment is useful trial evidence, but cannot certify a catch.
+-- It belongs to the active audit step and is recorded once, separately from operator feedback.
+function M.assess(args, context)
+  local step=context and context.audit_step
+  if not step or not step.id then return {error="no_active_audit_step"} end
+  if step.assessed then return {error="audit_step_already_assessed"} end
+  args=args or {}
+  local grade=args.grade
+  if type(grade)~="number" or grade%1~=0 or grade<0 or grade>3 then
+    return {error="invalid_usefulness_grade"}
+  end
+  for _, key in ipairs({"reason","critique"}) do
+    local value=args[key]
+    if type(value)~="string" or #value<10 or #value>600 then
+      return {error="invalid_audit_"..key}
+    end
+  end
+  if args.evidence~=nil and (type(args.evidence)~="string" or #args.evidence>240) then
+    return {error="invalid_audit_evidence"}
+  end
+  telemetry.event(context.session_id,context.run_id,"","graph_patch_assessment","end",{
+    step_id=step.id,grade=grade,reason=redact.text(args.reason),
+    critique=redact.text(args.critique),evidence=redact.text(args.evidence or ""),
+    source=step.source,lead_count=step.lead_count,self_report=true})
+  step.assessed=true
+  step.grade=grade
+  return {recorded=true,grade=grade,self_report=true,worthy="unproven"}
 end
 
 -- The trial report is bounded by a time window, not by a background timer. Forty-eight hours
@@ -136,7 +167,7 @@ function M.report(hours)
   hours=math.max(1, math.min(720, tonumber(hours) or 48))
   telemetry.setup()
   local raw=host.sql_query(
-    "SELECT session_id,run_id,at,kind,payload FROM harness_events WHERE kind IN ('graph_patch_audit','graph_patch_value','graph_patch_feedback') AND phase='end' AND at>=? ORDER BY seq",
+    "SELECT session_id,run_id,at,kind,payload FROM harness_events WHERE kind IN ('graph_patch_audit','graph_patch_value','graph_patch_feedback','graph_patch_assessment','graph_patch_step') AND phase='end' AND at>=? ORDER BY seq",
     json.encode({host.now()-hours*3600}))
   local rows=type(raw)=="string" and json.decode(raw) or raw
   if type(rows)~="table" or rows.error then return {error=rows and rows.error or "audit_report_failed"} end
@@ -154,6 +185,7 @@ function M.report(hours)
     continuation_usage_unknown=0, max_db_bytes=0,
     no_native_followup_observed=0, confirmed_catches=0, false_positives=0,
     sources={native_changeset=0,git_worktree=0},
+    self_assessment={steps=0,recorded=0,missing=0,grades={["0"]=0,["1"]=0,["2"]=0,["3"]=0},examples={}},
     worthy="unproven", examples={}, trial_started_at=first_at,
     trial_elapsed_hours=first_at and math.max(0,(host.now()-first_at)/3600) or nil,
     ready_for_review=first_at and host.now()-first_at>=hours*3600 or false}
@@ -162,6 +194,19 @@ function M.report(hours)
     local payload=json.decode(row.payload or "{}")
     if row.kind=="graph_patch_feedback" then
       feedback[row.run_id]=payload.outcome
+    elseif row.kind=="graph_patch_assessment" then
+      local assessment=report.self_assessment
+      assessment.recorded=assessment.recorded+1
+      local grade=tostring(payload.grade)
+      if assessment.grades[grade]~=nil then assessment.grades[grade]=assessment.grades[grade]+1 end
+      if #assessment.examples<20 then assessment.examples[#assessment.examples+1]={
+        session_id=row.session_id,run_id=row.run_id,at=row.at,grade=payload.grade,
+        reason=payload.reason,critique=payload.critique,evidence=payload.evidence,
+        source=payload.source,self_report=true} end
+    elseif row.kind=="graph_patch_step" then
+      local assessment=report.self_assessment
+      assessment.steps=assessment.steps+1
+      if not payload.assessed then assessment.missing=assessment.missing+1 end
     elseif row.kind=="graph_patch_value" then
       report.continuation_ms=report.continuation_ms+(payload.continuation_ms or 0)
       report.continuation_tokens=report.continuation_tokens+(payload.continuation_tokens or 0)

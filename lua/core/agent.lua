@@ -415,7 +415,7 @@ local function navigation_outcome(name, args, output)
   if name == "graph" then
     local action = type(args) == "table" and tostring(args.action or "") or ""
     if action == "" then return nil end
-    if action == "audit" or action == "audit_report" or action == "audit_feedback" then return nil end
+    if action == "audit" or action == "audit_assess" or action == "audit_report" or action == "audit_feedback" then return nil end
     if output.error then return { action = action, found = false } end
     if action == "path" then
       local steps = type(output.steps) == "table" and #output.steps or 0
@@ -921,11 +921,26 @@ function M:run_body(text, images)
   self.changes = changeset.new()
   self.reviewed_paths = {}
   self.commit_audits = {}
+  self.audit_step = nil
   local audit_intervened = false
+  local audit_assessment_requested = false
   local shell_used, audit_prompt = false, nil
   local audit_lead_paths, audit_root, audit_before, audit_tokens_before, audit_unaccounted_before, audit_time_before
+  local function finish_audit_step()
+    local step=self.audit_step
+    if not step then return end
+    telemetry.event(self.session_id,self.run_id,"","graph_patch_step","end",{
+      step_id=step.id,source=step.source,lead_count=step.lead_count,
+      assessed=step.assessed,grade=step.grade,error=step.error})
+    self.audit_step=nil
+  end
   local function remember_audit_leads(audit)
-    if not audit or (audit.lead_count or 0)==0 then return end
+    if not audit or (audit.lead_count or 0)==0 and not audit.error then return end
+    finish_audit_step()
+    self.audit_step={id=host.uuid(),source=audit.source or "unknown",
+      lead_count=audit.lead_count or 0,error=audit.error,assessed=false}
+    audit_assessment_requested=false
+    if (audit.lead_count or 0)==0 then return end
     audit_lead_paths={}
     audit_root=tostring(audit.root or ""):gsub("\\","/"):lower():gsub("/$","")
     for _, lead in ipairs(audit.leads or {}) do
@@ -1232,10 +1247,20 @@ function M:run_body(text, images)
           compact.leads[#compact.leads+1]=lead
         end
         audit_prompt="Automated patch impact audit (not a correctness proof): "
-          ..json.encode(compact)..". Check any relevant unread callers/tests against the source "
-          .."and patch; say explicitly if a lead is irrelevant or the audit is unavailable."
+          ..json.encode(compact)..". Audit follow-up step: inspect relevant callers/tests "
+          .."against the source and patch. Then call graph audit_assess with grade 0-3, "
+          .."a concrete reason, and a critique (or 'none observed'). Grade 3 means the lead "
+          .."prompted a patch/test revision, not a confirmed catch. This is your opinion; "
+          .."only operator feedback can mark the graph worthy."
         messages[#messages+1]={role="user",content=audit_prompt}
         self.emit({type="status",text="checking patch impact leads"})
+        reply=""
+      elseif self.audit_step and not self.audit_step.assessed and not audit_assessment_requested then
+        audit_assessment_requested=true
+        audit_prompt="Before finishing the audit follow-up step, call graph audit_assess "
+          .."with a 0-3 usefulness grade, a concrete reason tied to what you inspected, "
+          .."and a critique of the graph result. This is self-report, not operator feedback."
+        messages[#messages+1]={role="user",content=audit_prompt}
         reply=""
       else
         if audit and (audit.error or (audit.lead_count or 0)>0 or #(audit.gaps or {})>0) then
@@ -1244,6 +1269,9 @@ function M:run_body(text, images)
               or (tostring(audit.lead_count or 0).." review lead(s), "
                 ..tostring(#(audit.gaps or {})).." coverage gap(s)"))
             .."; not a correctness verdict.]"
+        end
+        if self.audit_step and not self.audit_step.assessed then
+          reply=reply.."\n\n[Graph audit self-assessment missing; see audit report.]"
         end
         -- The final assistant message is recorded once, after the loop, with the
         -- message's trace. Recording it here as well would duplicate it in context.
@@ -1284,6 +1312,7 @@ function M:run_body(text, images)
           run_id = self.run_id, subagent = self.subagent, changes = self.changes,
           reviewed_paths = self.reviewed_paths,
           commit_audits = self.commit_audits,
+          audit_step = self.audit_step,
           -- The caller's actual model and reasoning, so a child inherits what this
           -- run is using rather than whatever is configured globally.
           model = self.model, reasoning = (provider.reasoning(self.model) or {}).selected }) end)
@@ -1291,6 +1320,9 @@ function M:run_body(text, images)
       if not handled then output = { error = tostring(output) } end
       if type(output)=="table" and output.error=="graph_patch_review_required" then
         remember_audit_leads(output.audit)
+      elseif function_.name=="graph" and args.action=="audit_assess"
+          and type(output)=="table" and output.recorded then
+        audit_prompt=nil
       end
       -- Native execution phase timing belongs in aggregate telemetry, not in the
       -- model-facing result where it would spend context on every shell call.
@@ -1368,6 +1400,7 @@ function M:run_body(text, images)
       continuation_usage_unknown=(totals.unaccounted or 0)>audit_unaccounted_before,
     })
   end
+  finish_audit_step()
   -- The message id is minted here rather than by append_turn, because the reply event has to
   -- name the message *before* the record exists: the UI's topic carries the id it will ask
   -- about, and append_turn uses the same one so the topic and the ledger agree.
