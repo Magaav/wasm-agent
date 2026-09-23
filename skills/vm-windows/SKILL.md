@@ -1,5 +1,5 @@
 ---
-name: windows-test-vm
+name: vm-windows
 description: Use when bootstrapping, starting, repairing, accessing by SSH, or testing wasm-agent in a disposable Windows Hyper-V VM on the operator's PC.
 ---
 
