@@ -19,7 +19,8 @@ graph {action:"explain", name:"append_turn"}
 ```
 What is it, what does it use, who calls it. `definitions` lists each match with
 its `kind`, definition `path:line`, the `uses` (calls, capabilities, macros) and
-the `callers` at their exact call-site `path:line`. Start here when you know a symbol.
+the `callers` at their exact call-site `path:line`. Exact names and member
+suffixes suppress unrelated substring matches. Start here when you know a symbol.
 
 ```
 graph {action:"path", from:"choose_worker", to:"append_turn"}
@@ -31,6 +32,8 @@ calls this", and do not read a shared callee as connecting two functions that
 merely both call it. `steps` is a chain; each step's `via` names the edge that
 reached it. Mentions in prose are deliberately ignored, so a hop is a real
 call/import, not a coincidence.
+Each `via` includes the call-site `path:line`; the step's own `path:line` is
+the destination definition. Cite the former for the hop.
 For a known start and end, try `path` before broad name queries. The graph
 follows literal Rust `lua.call_string("entrypoint", ...)` calls into Lua and
 statically named `pcall`/`xpcall` targets.
