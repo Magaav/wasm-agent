@@ -25,9 +25,12 @@ const { spawnSync } = require("node:child_process");
 const { DatabaseSync } = require("node:sqlite");
 
 const FAKE_READER = `// The mock store, in the exact shape scripts/whatsapp-read.mjs produces for the ingest.
-import { readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 const value = (flag) => { const at = args.indexOf(flag); return at === -1 ? "" : args[at + 1] || ""; };
+// What the reader asks for, kept because the *window* is the contract a real store honours: the mock
+// returns everything, so only the requested --since can show whether an owed message is reachable.
+if (process.env.WA_FIXTURE_ARGS) appendFileSync(process.env.WA_FIXTURE_ARGS, String(Number(value("--since")) || 0) + "\\n");
 const store = JSON.parse(readFileSync(process.env.WA_FIXTURE_STORE, "utf8"));
 const messages = store.messages || [];
 const payload = {
@@ -51,6 +54,8 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "wa-cursor-"));
 const scripts = path.join(root, "scripts");
 const db = path.join(root, ".wasm-agent", "memory.db");
 const storePath = path.join(root, "store.json");
+const argsPath = path.join(root, "reader-args.txt");
+fs.writeFileSync(argsPath, "");
 fs.mkdirSync(scripts, { recursive: true });
 fs.copyFileSync(path.join(repo, "scripts", "whatsapp-ingest.lua"), path.join(scripts, "whatsapp-ingest.lua"));
 fs.writeFileSync(path.join(scripts, "whatsapp-read.mjs"), FAKE_READER);
@@ -81,7 +86,7 @@ function pass() {
     env: {
       ...process.env, WASM_AGENT_HOME: root, WASM_AGENT_LUA_ROOT: repo,
       WA_SCRIPT: path.join(scripts, "whatsapp-ingest.lua"), WA_WHATSAPP_JSON_EVENTS: "1",
-      WA_FIXTURE_STORE: storePath, WASM_AGENT_RENDEZVOUS: "", WASM_AGENT_RELAY: "", WASM_AGENT_MANAGED: "0",
+      WA_FIXTURE_STORE: storePath, WA_FIXTURE_ARGS: argsPath, WASM_AGENT_RENDEZVOUS: "", WASM_AGENT_RELAY: "", WASM_AGENT_MANAGED: "0",
     },
     encoding: "utf8", timeout: 60000, windowsHide: true,
   });
@@ -105,6 +110,20 @@ function cursor() {
   const row = database.prepare("SELECT value FROM meta WHERE key='whatsapp_cursor'").get();
   database.close();
   return row ? Number(row.value) : 0;
+}
+
+// The window the last pass asked the store for.
+function lastSince() {
+  const lines = fs.readFileSync(argsPath, "utf8").split("\n").filter(Boolean);
+  return Number(lines[lines.length - 1]);
+}
+
+// What is still owed a decision, as the reader records it durably.
+function owedMap() {
+  const database = new DatabaseSync(db, { readOnly: true });
+  const row = database.prepare("SELECT value FROM meta WHERE key='whatsapp_handoffs'").get();
+  database.close();
+  return row ? JSON.parse(row.value) : {};
 }
 
 function ids(list) { return (list || []).map((item) => item.message_id).join(","); }
@@ -209,6 +228,39 @@ function main() {
   const unconfirmed = pass();
   check((unconfirmed.parsed.notices || []).length === 1 && /NOT confirmed/.test(unconfirmed.parsed.notices[0].detail || ""),
     `a send that did not confirm is reported as not sent: ${JSON.stringify(unconfirmed.parsed.notices)}`);
+
+  // ---- the window must reach a message that is still owed ------------------------------------------
+  // The cursor moves past *settled* messages, so a newer settled one can leave an owed message far below
+  // it - outside the ordinary `cursor - 3600` window. A real store then never returns that message again:
+  // it is neither re-handed nor pruned, and the owed map holds it forever (measured live: the map still
+  // held a message whose decision had arrived twenty minutes earlier). The floor must be the oldest owed
+  // message, whatever the cursor says - and the mock returns everything, so the assertion is on the
+  // window the reader *asks for*, which is the contract a real store honours.
+  const tail = () => [message("a1", 1000), message("a2", 2000), message("a3", 3000),
+    message("a4", 4000, { media: [{ type: "voice" }] }), message("a5", 5000),
+    { conversation_id: CONV, message_id: "o1", sender_id: "self", direction: "outgoing", sent_at: 6000,
+      body: "operator reply", media: [{ type: "chat" }] },
+    message("a6", 7000, { conversation_id: OTHER, eligibility: { eligible: false, reason: "group_without_operator_mention" } })];
+  store([...tail(), message("b1", 8000)], 8000);
+  const handedOn = pass();
+  check(ids(handedOn.parsed.events) === "b1", `a new message is handed on (got ${ids(handedOn.parsed.events)})`);
+  check(handedOn.parsed.still_owed === 1, `it is recorded as owed a decision (still_owed=${handedOn.parsed.still_owed})`);
+  // A newer message the deterministic rule settles pushes the cursor past it: 13000 - 3600 > 8000.
+  store([...tail(), message("b1", 8000),
+    message("settled", 13000, { conversation_id: OTHER, eligibility: { eligible: false, reason: "group_without_operator_mention" } })], 13000);
+  const pushed = pass();
+  check(pushed.parsed.cursor === 13000, `the cursor moves past the settled message (cursor=${pushed.parsed.cursor})`);
+  check(ids(pushed.parsed.events) === "b1", "the owed message is handed on again");
+  // The same window is what lets it prune: once a decision exists, the owed entry must disappear. This is
+  // also the first pass whose *starting* cursor is past the owed message, so it is the one whose window
+  // decides whether a real store would ever return the message again.
+  decided("b1");
+  const pruned = pass();
+  check(lastSince() <= 8000 - 1, `the reader asks for a window that reaches the owed message: --since=${lastSince()}`);
+  check(pruned.parsed.still_owed === 0 && pruned.parsed.already_decided >= 1,
+    `an owed message below the cursor is pruned once decided (still_owed=${pruned.parsed.still_owed})`);
+  check(Object.keys(owedMap()).length === 0, `the owed map no longer holds it: ${JSON.stringify(owedMap())}`);
+
 
   console.log(`whatsapp cursor ok (${checks} checks, 0 failed, 0 skipped; mock store, real ingest, no browser)`);
   console.log(`evidence: ${root}`);

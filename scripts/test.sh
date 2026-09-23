@@ -1229,7 +1229,7 @@ run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN
 run_proof_fixture whatsapp 27 node scripts/test-whatsapp-subagent-e2e.cjs
 # The reader's acted cursor: a message may be consumed only when a durable decision exists for it, the
 # attempt count is bounded, and media is reported instead of handed to a child. Mock store, real ingest.
-run_proof_fixture cursor 40 node scripts/test-whatsapp-cursor.cjs "$BIN"
+run_proof_fixture cursor 47 node scripts/test-whatsapp-cursor.cjs "$BIN"
 # The pipeline seam: a `returns` list reaches the foreach, a step that produced nothing fails the
 # delivery, and a no-op run is distinguishable from a dropped result. Real sentinel, mock store, no model.
 run_proof_fixture pipeline 19 node scripts/test-job-pipeline.cjs
