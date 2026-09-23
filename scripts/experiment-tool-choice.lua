@@ -46,6 +46,20 @@ local TASKS = {
     -- Tokens per *correct* answer is the metric: a cheaper wrong answer is not an improvement.
     expect = { "lua/core/tools.lua", "exec_deadline_seconds" },
   },
+  -- Replay's cost is proportional to the number of rounds: what is re-sent is the thinking
+  -- of every round before this one. A five-round task cannot show it, so this fixture asks
+  -- for twelve files - one read and one round each - and the answer must name all twelve.
+  ["wide"] = {
+    prompt = "For each of these files, report the name of the first function it defines. " ..
+      "Read each one. Report one line per file as `path: name`.\n" ..
+      "lua/core/agent.lua, lua/core/memory.lua, lua/core/provider.lua, lua/core/subagents.lua, " ..
+      "lua/core/tools.lua, lua/core/tool_output.lua, lua/core/graph.lua, lua/core/skills.lua, " ..
+      "lua/core/nodes.lua, lua/core/spells.lua, lua/core/platform.lua, lua/core/paths.lua",
+    expect = { "lua/core/agent.lua", "lua/core/memory.lua", "lua/core/provider.lua",
+      "lua/core/subagents.lua", "lua/core/tools.lua", "lua/core/tool_output.lua",
+      "lua/core/graph.lua", "lua/core/skills.lua", "lua/core/nodes.lua",
+      "lua/core/spells.lua", "lua/core/platform.lua", "lua/core/paths.lua" },
+  },
 }
 
 local selected = TASKS[task_id]
