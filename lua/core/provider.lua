@@ -405,9 +405,17 @@ function M.reasoning(model)
     selected="provider"
     for _, level in ipairs(levels) do if level=="high" then selected=level end end
   end
+  -- The store's flag is a claim about the provider, and a conservative one: the provider
+  -- accepts an assistant message that carries no reasoning_content at all, so replaying
+  -- every prior thought on every request is a choice, not a requirement. An operator can
+  -- turn it off; the model still sees its own answers and its own tool calls.
+  local replay = cap.compat.requiresReasoningContentOnAssistantMessages == true
+  local override = env("WASM_AGENT_REASONING_REPLAY")
+  if override == "0" or override == "false" then replay = false end
+  if override == "1" or override == "true" then replay = true end
   return {supported=#levels>0,levels=levels,selected=selected,source=cap.source,
     configured=read_state(reasoning_key(model)) or env("WASM_AGENT_REASONING"),
-    replay=cap.compat.requiresReasoningContentOnAssistantMessages==true}
+    replay=replay}
 end
 
 function M.set_reasoning(level)

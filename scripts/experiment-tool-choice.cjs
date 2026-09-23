@@ -57,14 +57,14 @@ const PROFILES = {
     description: 'Experiment arm: read-only investigation with the code graph.',
     instructions: 'Investigate read-only and report exact file paths and line references.',
     allowed_tools: [...READ_ONLY, 'graph'], resources: {},
-    limits: { max_depth: 0, timeout_seconds: 240, max_output_bytes: 65536, max_tokens: 60000 },
+    limits: { max_depth: 0, timeout_seconds: 600, max_output_bytes: 65536, max_tokens: 400000 },
   },
   'exp-explore-nograph': {
     schema_version: 1, id: 'exp-explore-nograph', operator_authorized: false,
     description: 'Experiment control: the same read-only investigation without the code graph.',
     instructions: 'Investigate read-only and report exact file paths and line references.',
     allowed_tools: [...READ_ONLY], resources: {},
-    limits: { max_depth: 0, timeout_seconds: 240, max_output_bytes: 65536, max_tokens: 60000 },
+    limits: { max_depth: 0, timeout_seconds: 600, max_output_bytes: 65536, max_tokens: 400000 },
   },
 };
 
