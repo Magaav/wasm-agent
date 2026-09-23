@@ -189,6 +189,36 @@ The watcher is a `notify` thread started only for `serve`. It indexes once on
 startup (off the accept path, so a large tree never delays the port) and reindexes
 on change, debounced so one save's burst is one parse.
 
+## Drawing while Lua is blocked
+
+`host.ticker(spec_json)` is the one capability that draws, and it exists for a single
+structural reason: the CLI keeps a status line on screen for as long as a run is in
+flight, and the interpreter spends most of that time blocked inside `host.http_stream`,
+so nothing on the Lua side can repaint it. A run that is thinking and a run that is hung
+looked identical - a frozen frame and a clock that had stopped.
+
+The host runs a timer thread and draws the same line the view would have drawn. The line
+stays Lua's: `spec.line` is that line with exactly two tokens left in it, `{m}` (one of
+`spec.marks`, a JSON array, cycled per tick) and `{t}` (the seconds since `spec.started`).
+The indent, the words, the separators and the round counter are the caller's text, so the
+animated line and the printed line cannot drift apart.
+
+- One ticker per process, drawn on that process's own stdout. The view only starts it when
+  its output *is* stdout, so a captured transcript never has a second writer.
+- Stopping is immediate - the thread waits on a condition variable, not on a sleep - and the
+  caller stops it before writing anything else: two writers on one line is how a line
+  becomes two half-lines.
+- The clock's shape (`59.9s`, `1m00s`, `2m05s`) is the twin of `cli_view.duration`, because
+  the elapsed time of a call that has not finished cannot be computed by the side that is
+  blocked. Both sides pin those three values in their own tests, so a one-sided change fails
+  a test rather than a frame on a screen.
+- `WASM_AGENT_CLI_TICKER=off` disables the motion for a caller that wants the sequences
+  without it.
+
+`scripts/test-cli-ticker.lua` measures the timer for real: it starts a ticker, then sleeps -
+so it cannot repaint anything itself - and the gate reads the frames and the clock out of
+its captured stdout.
+
 ## Adding a capability
 
 `host.monotonic_ms()` measures elapsed time within a process. Use `host.now()` only

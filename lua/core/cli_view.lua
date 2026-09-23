@@ -27,12 +27,16 @@
 --           capturing this output must stay readable, and a line rewritten in place is
 --           not a transcript.
 --
--- One honest limit, stated here rather than discovered later: the status line advances
--- when an event arrives, not on a timer. Lua is blocked inside the model call and
--- inside a tool, so nothing in this process can repaint while one is in flight; the
--- host would have to call back into Lua for that (the same missing hook that keeps the
--- answer from streaming). What the view guarantees is that the last thing on screen
--- says what is happening, and that it changes whenever anything happens.
+-- What keeps the line moving cannot live in this process: Lua is blocked inside the model
+-- call and inside a tool, so nothing here can repaint while one is in flight - a slow call
+-- showed a frozen frame and a clock that had stopped, which is exactly what a hung run looks
+-- like. The timer is therefore in the host (`host.ticker`, rust/wa-host/src/host.rs), which
+-- draws the same line between events: this module hands it the line and takes it back before
+-- printing anything else. One limit does remain, and it is a different one - the *answer* is
+-- not streamed here, because content deltas go to the node's SSE sink and a CLI run has no
+-- sink.
+
+local json = dofile("lua/vendor/json.lua")
 
 local M = {}
 
@@ -59,6 +63,15 @@ local SPINNER = { "\226\160\139", "\226\160\153", "\226\160\185", "\226\160\184"
 
 function M.spinner(frame)
   return SPINNER[(math.max(0, math.floor(frame or 0)) % #SPINNER) + 1]
+end
+
+-- The marks the animated line cycles, each carrying the space that separates it from the
+-- phase. They travel to the host rather than being rebuilt there, so the frames on screen are
+-- the same characters in the same order as the ones this module prints for itself.
+function M.marks()
+  local list = {}
+  for index = 1, #SPINNER do list[index] = SPINNER[index] .. " " end
+  return list
 end
 
 -- ---- text ----------------------------------------------------------------------
@@ -347,9 +360,17 @@ function M.new(opts)
   -- escape sequences in it.
   local live = opts.live
   if live == nil then live = M.wants_live(opts.getenv) end
+  -- The host's ticker draws on the process's own stdout and nowhere else, so a view whose
+  -- output goes somewhere else (a buffer, a captured transcript) must not have a second
+  -- writer appear on the terminal behind it. The default `out` *is* stdout, which is why this
+  -- is derived from it; `opts.stdout` overrules the guess, the way `opts.live` does.
+  local stdout = opts.stdout
+  if stdout == nil then stdout = (opts.out == nil) end
   local view = {
     out = opts.out or function(text) io.write(text); io.flush() end,
     live = live and true or false,
+    stdout = stdout and true or false,
+    animating = false,
     now = opts.now or function() return host.now() end,
     limit = opts.limit or 80,
     title = opts.title or "",
@@ -372,20 +393,60 @@ function METHODS:line(text)
   self:write(tostring(text or "") .. "\n")
 end
 
+-- The status line with its two moving parts left as tokens: `{m}` is the spinner mark and
+-- `{t}` the clock. One layout, two renderers - this module fills them for a line it prints
+-- itself, and `host.ticker` fills them on a timer while this process is blocked. The second
+-- value is when the timed thing started, which is what the clock counts from either way.
+function METHODS:status_template()
+  if self.pending then
+    local bound = self.pending.bound and (" of " .. M.duration(self.pending.bound)) or ""
+    return "  {m}" .. M.phase(self.pending.name) .. " \194\183 {t}" .. bound, self.pending.started
+  end
+  local round = (self.round and self.round > 0) and (" \194\183 round " .. self.round) or ""
+  if not self.turn then return "  {m}" .. self.phase, nil end
+  return "  {m}" .. self.phase .. " \194\183 {t}" .. round, self.turn.started
+end
+
 -- The status line, and the only thing on screen that is rewritten. `with_spinner` is
 -- false for the captured rendering: a spinner frame is a moving picture, and a
 -- transcript is not one.
 function METHODS:status_text(with_spinner)
+  local template, started = self:status_template()
   local mark = with_spinner and (M.spinner(self.frame) .. " ") or ""
-  if self.pending then
-    local bound = self.pending.bound and (" of " .. M.duration(self.pending.bound)) or ""
-    return string.format("  %s%s \194\183 %s%s",
-      mark, M.phase(self.pending.name),
-      M.duration((self.now() - self.pending.started)), bound)
+  -- Through a function, so a mark or a clock containing a `%` is inserted as itself.
+  local text = template:gsub("{m}", function() return mark end)
+  if started then
+    local elapsed = M.duration(self.now() - started)
+    text = text:gsub("{t}", function() return elapsed end)
   end
-  local round = (self.round and self.round > 0) and (" \194\183 round " .. self.round) or ""
-  local elapsed = self.turn and (" \194\183 " .. M.duration(self.now() - self.turn.started)) or ""
-  return string.format("  %s%s%s%s", mark, self.phase, elapsed, round)
+  return text
+end
+
+-- Hand the line to the host, which keeps drawing it while this process cannot.
+--
+-- `started` is when the timed thing began rather than "now": the clock has to be continuous
+-- across the events that redraw the line, and `frame` is where the mark cycle continues from,
+-- so a redraw does not send the spinner back to its first frame. A failure here is silent on
+-- purpose - it is one frame of decoration, and the run it describes must not die of it.
+function METHODS:animate()
+  if not self.live or not self.stdout then return end
+  if not (host and host.ticker) then return end
+  local template, started = self:status_template()
+  if not started then return end
+  local ok = pcall(host.ticker, json.encode({
+    line = template, marks = M.marks(), started = started, frame = self.frame,
+  }))
+  if not ok then return end
+  self.animating = true
+end
+
+-- Take the line back. Called before this module writes anything at all: two writers on one
+-- line is how a status line becomes two half-lines. Stopping is cheap and immediate - the
+-- host wakes its own thread rather than waiting out a tick.
+function METHODS:unanimate()
+  if not self.animating then return end
+  self.animating = false
+  if host and host.ticker then pcall(host.ticker, nil) end
 end
 
 -- Called on every event: a new frame, and a repaint. In the plain rendering the line is
@@ -395,10 +456,14 @@ function METHODS:paint(force)
   self.frame = self.frame + 1
   local line = clip(self:status_text(self.live), math.min(self.limit, 100))
   if self.live then
+    -- The host may be drawing this line at this instant: take it back before writing on it,
+    -- then hand it over again, because this process is about to block.
+    self:unanimate()
     if line ~= self.shown then
       self:write("\r\27[2K" .. line)
       self.shown = line
     end
+    self:animate()
     return
   end
   if force or self.phase ~= self.logged then
@@ -409,6 +474,8 @@ function METHODS:paint(force)
 end
 
 function METHODS:clear()
+  -- Never wipe a line the host is still drawing: stopping waits for its last frame to land.
+  self:unanimate()
   if self.live and self.shown then self:write("\r\27[2K") end
   self.shown = nil
 end

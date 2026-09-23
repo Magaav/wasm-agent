@@ -318,6 +318,9 @@ fn main() {
     lua.register("http", host::http);
     lua.register("http_stream", host::http_stream);
     lua.register("beat", host::beat);
+    // The one capability that draws: the CLI's status line keeps moving while the interpreter
+    // is blocked inside a call, which nothing on the Lua side can do for itself.
+    lua.register("ticker", host::ticker);
     lua.register("relay", host::relay);
     lua.register_with_upvalue("plugins", host::plugins, host_ptr);
     lua.register_with_upvalue("invoke", host::invoke, host_ptr);
