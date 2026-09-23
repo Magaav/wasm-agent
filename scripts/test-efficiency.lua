@@ -36,6 +36,14 @@ host.write_file(path,'abcdef')
 check(files.edit({path=path,edits={{old_text='abc',new_text='A'},{old_text='bc',new_text='B'}}}).error=='overlapping_edits','overlap refused')
 check(host.read_file(path)=='abcdef','failed batch leaves bytes untouched')
 check(files.edit({path=path,edits={{old_text='abc',new_text='A'},{old_text='missing',new_text='B'}}}).error=='old_text_not_found','validate whole batch before write')
+-- A miss that is only whitespace must point at the line that does match, so the correction
+-- is one step instead of a re-read of the whole file.
+local hinted=files.edit({path=path,edits={{old_text='   abc',new_text='A'}}})
+check(hinted.error=='old_text_not_found' and hinted.nearest and hinted.nearest.line==1 and hinted.nearest.text=='abcdef',
+  'a whitespace-only miss points at the line that does match')
+local unrelated=files.edit({path=path,edits={{old_text='nowhere',new_text='A'}}})
+check(unrelated.error=='old_text_not_found' and unrelated.nearest==nil,
+  'and a miss with no candidate invents none')
 check(host.read_file(path)=='abcdef','later mismatch leaves bytes untouched')
 host.write_file(path,'aaa');check(files.edit({path=path,old_text='aa',new_text='x'}).error=='old_text_ambiguous','overlapping occurrences ambiguous')
 for i=1,25 do save('cache','line '..i);files.read({path=root..'cache'}) end

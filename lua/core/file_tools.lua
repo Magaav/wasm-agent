@@ -88,6 +88,34 @@ function M.read(args)
   if #json.encode(result)>50000 or (#part==0 and next_byte<=#text) then return {error='read_envelope_exceeds_budget',version=hash} end
   return result
 end
+-- `old_text` is quoted from memory, and the usual reason it does not match is whitespace the
+-- model cannot see: different indentation, a trailing space, CRLF. Locate the closest line and
+-- hand back its exact bytes, so the correction is one step instead of a re-read of the file.
+-- Bounded work: one pass over the lines, normalized comparison, no fuzzy library.
+local function nearest_edit_hint(text, needle)
+  local first
+  for line in needle:gmatch("[^\r\n]+") do
+    if line:match("%S") then first = line break end
+  end
+  if not first then return nil end
+  local function norm(value)
+    return (value:gsub("%s+", " ")):gsub("^%s+", ""):gsub("%s+$", "")
+  end
+  local wanted = norm(first)
+  if wanted == "" then return nil end
+  local number = 0
+  for line in (text .. "\n"):gmatch("(.-)\n") do
+    number = number + 1
+    if number > 50000 then break end
+    local candidate = norm(line)
+    if candidate ~= "" and (candidate == wanted or candidate:find(wanted, 1, true)) then
+      return { line = number, text = line:sub(1, 200),
+        note = "whitespace differs from old_text; quote this line exactly, or re-read the range" }
+    end
+  end
+  return nil
+end
+
 function M.edit(args,record)
   if type(args.path)~='string' or args.path=='' then return {error='path_required'} end
   if args.edits and (args.old_text~=nil or args.new_text~=nil) then return {error='mixed_edit_forms'} end
@@ -111,7 +139,12 @@ function M.edit(args,record)
   local ranges={}
   for i,item in ipairs(edits) do
     local a,b=text:find(item.old_text,1,true)
-    if not a then return {error='old_text_not_found',edit=i} end
+    if not a then
+      local failure={error='old_text_not_found',edit=i,path=args.path}
+      local hint=nearest_edit_hint(text,item.old_text)
+      if hint then failure.nearest=hint end
+      return failure
+    end
     -- Overlapping occurrences are ambiguous too (e.g. 'aa' in 'aaa').
     if text:find(item.old_text,a+1,true) then return {error='old_text_ambiguous',edit=i} end
     ranges[#ranges+1]={a=a,b=b,text=item.new_text,index=i}
