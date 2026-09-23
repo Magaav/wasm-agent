@@ -287,20 +287,22 @@ ok(v.ok == false and v.error == 'no_runtime_tree', 'no tree must be a refusal, g
 ok(v.message and #v.message > 20, 'every answer must carry a sentence')
 ok(v.next and #v.next > 20, 'a refusal must say where to go')
 
--- A tree with nothing built in it: the common case right after an edit, and it must not queue.
-v = update.verdict({ install = '/i', tree = '/tree', candidate = '/tree/rust/target/release/wa.exe' })
-ok(v.error == 'nothing_built', 'an unbuilt tree must be a refusal, got ' .. tostring(v.error))
-ok(v.next:find('cargo build', 1, true), 'the refusal must name the build command: ' .. tostring(v.next))
+-- A tree with nothing built in it: a deploy *builds*, so this is no longer a reason to refuse.
+v = update.verdict({ install = '/i', tree = '/tree', candidate = '/tree/rust/target/release/wa.exe', sentinel_present = true })
+ok(v.queued == true, 'an unbuilt tree must still queue - the gate builds it, got ' .. tostring(v.status))
 
--- Built, but the only process that could install it is not there.
+-- Built, but the only process that could deploy it is not there.
 v = update.verdict({ install = '/i', tree = '/t', candidate = '/c', candidate_bytes = 10, sentinel_present = false })
 ok(v.error == 'no_sentinel', 'a missing sentinel must be a refusal, got ' .. tostring(v.error))
 
--- Already running exactly what the tree holds: nothing to queue, and no claim of work done.
+-- The same commit still queues. The commit does not describe the install - measured on this
+-- machine: `installed.txt` read commit=unknown while the shipped deploy.sh was ten lines behind the
+-- tree - so "you already run that" would be a claim about scripts and a sentinel it never looked at.
 v = update.verdict({ install = '/i', tree = '/t', candidate = '/c', candidate_bytes = 10,
   sentinel_present = true, tree_commit = 'abc1234', installed_commit = 'abc1234', dirty = 0 })
-ok(v.ok == true and v.changed == false and v.status == 'already_current', 'same commit must be a no-op')
-ok(not v.queued, 'already current must not queue a request')
+ok(v.queued == true and v.status == 'queue', 'the same commit must still deploy, got ' .. tostring(v.status))
+ok(v.message:find('sentinel and scripts', 1, true),
+  'the answer must say what a deploy installs: ' .. tostring(v.message))
 
 -- A different commit queues, and says queued rather than done.
 v = update.verdict({ install = '/i', tree = '/t', candidate = '/c', candidate_bytes = 10,
@@ -309,11 +311,12 @@ ok(v.queued == true and v.commit == 'def5678', 'a newer tree must queue')
 ok(v.message:find('queued', 1, true) and v.message:find('not done yet', 1, true),
   'queued must not read as done: ' .. tostring(v.message))
 
--- Uncommitted work queues even at the same commit: the commit does not describe the binary, so
--- "you already run that" would be a claim about code that was never built.
+-- Uncommitted work is refused here rather than queued: the gate refuses a dirty tree, so a request
+-- would be written only to fail.
 v = update.verdict({ install = '/i', tree = '/t', candidate = '/c', candidate_bytes = 10,
   sentinel_present = true, tree_commit = 'abc1234', installed_commit = 'abc1234', dirty = 3 })
-ok(v.queued == true, 'a dirty tree must still queue')
+ok(v.ok == false and v.error == 'tree_dirty', 'a dirty tree must be refused, got ' .. tostring(v.error))
+ok(v.next:find('commit or stash', 1, true), 'the refusal must say what to do: ' .. tostring(v.next))
 
 -- The path a recorded worktree comes back as is a Windows path with backslashes, which the shell
 -- this node runs commands in cannot use: a backslash inside a single-quoted word reaches a native
@@ -329,8 +332,8 @@ ok(source == 'runtime-worktree.txt', 'the source of the tree must be named, got 
 local command = update.request_command(
   { sentinel = 'C:/install/wa-sentinel.exe', candidate = 'C:/tree/rust/target/release/wa.exe' },
   "/update: it's mine")
-ok(command:find("'C:/install/wa%-sentinel%.exe' request upgrade"), 'the verb must be spelled out: ' .. command)
-ok(command:find("'C:/tree/rust/target/release/wa%.exe'", 1), 'the binary must be quoted: ' .. command)
+ok(command:find("'C:/install/wa%-sentinel%.exe' request deploy"), 'the verb must be deploy, spelled out: ' .. command)
+ok(not command:find('%-%-binary', 1), 'a deploy names no candidate binary: ' .. command)
 ok(not command:find("it's", 1, true) and command:find("it'\\''s", 1, true),
   'a quote in the reason must be escaped, not left to end the word: ' .. command)
 
