@@ -51,14 +51,19 @@ few places to look). It tolerates a host that predates the capability and report
 `graph_unavailable`.
 
 `explain` reports incoming callers at the exact call line, not the enclosing
-function's definition line. `query` ranks symbol-name matches before path and
+function's definition line. Exact names and qualified-member suffixes suppress
+unrelated substring definitions. `path` includes each hop's call-site line as well as its destination
+definition. `query` ranks symbol-name matches before path and
 detail matches and returns 12 compact rows by default, with `truncated` when
 more matches exist. Pass a larger `limit` only when those rows are insufficient.
+Runtime routes rank before test-only route literals.
 The Lua extractor also treats a statically named first argument to `pcall` or
 `xpcall` as a call edge, so a path can follow that common wrapper.
 Rust literal `lua.call_string("entrypoint", ...)` calls bridge to the exported
 Lua function, and literal HTTP paths are queryable as `route` nodes. An
 extractor-version stamp forces unchanged files to reindex after this upgrade.
+`host.*` edges always resolve to capability nodes, even when an unrelated
+source function has the same final name.
 
 ## How the model reaches it
 

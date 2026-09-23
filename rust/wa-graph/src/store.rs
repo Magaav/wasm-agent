@@ -14,7 +14,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 
 // Include extraction semantics in file stamps. A new binary must reparse unchanged
 // source after a graph upgrade; content-only stamps would leave old edges in place.
-const EXTRACT_VERSION: &str = "2";
+const EXTRACT_VERSION: &str = "4";
 
 pub struct Store {
     conn: Connection,
@@ -308,19 +308,14 @@ impl Store {
             // (`resolve_dotted`). The one thing it must never do is guess a bare local that
             // shares `member`'s name: `provider.budget()` resolved to a local `budget` that way,
             // and the edge read as *resolved* while pointing at the wrong symbol.
-            let hit = if kind == "calls" && target.contains('.') {
+            let hit = if kind == "capability" && extract::is_capability(target) {
+                Some(ensure_capability(&self.conn, target)?)
+            } else if kind == "calls" && target.contains('.') {
                 resolve_dotted(&self.conn, target, simple, path)?
             } else {
                 pick_candidate(&self.conn, target, simple, path)?
             };
-            let dst = match hit {
-                Some(id) => Some(id),
-                None if kind == "capability" && extract::is_capability(target) => {
-                    Some(ensure_capability(&self.conn, target)?)
-                }
-                None => None,
-            };
-            if let Some(id) = dst {
+            if let Some(id) = hit {
                 self.conn
                     .execute("UPDATE edges SET dst=?1 WHERE id=?2", params![id, edge_id])?;
                 resolved += 1;
@@ -351,11 +346,16 @@ impl Store {
 
     fn find_nodes(&self, name: &str, limit: i64) -> Result<Vec<NodeRow>> {
         let like = format!("%{name}%");
+        let member = format!("%.{name}");
+        let method = format!("%:{name}");
         let mut stmt = self.conn.prepare(
             "SELECT id,kind,name,path,line,col,lang,detail FROM nodes
-             WHERE name=?1 OR name LIKE ?2 ORDER BY (name=?1) DESC, path, line LIMIT ?3",
+             WHERE name=?1 OR name LIKE ?2 OR name LIKE ?3
+                OR (name LIKE ?4 AND NOT EXISTS
+                    (SELECT 1 FROM nodes WHERE name=?1 OR name LIKE ?2 OR name LIKE ?3))
+             ORDER BY (name=?1) DESC, path, line LIMIT ?5",
         )?;
-        let rows = stmt.query_map(params![name, like, limit], row_to_node)?;
+        let rows = stmt.query_map(params![name, member, method, like, limit], row_to_node)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
@@ -453,13 +453,16 @@ impl Store {
         // answer there. Doc mentions are for lookup, not traversal: following them hops through
         // prose onto a coincidence.
         let mut stmt = self.conn.prepare(
-            "SELECT dst, kind, target FROM edges WHERE src=?1 AND dst IS NOT NULL AND kind<>'mentions'",
+            "SELECT dst, kind, target, path, line FROM edges
+             WHERE src=?1 AND dst IS NOT NULL AND kind<>'mentions'",
         )?;
         let rows = stmt.query_map(params![id], |r| {
             let other: i64 = r.get(0)?;
             let kind: String = r.get(1)?;
             let target: String = r.get(2)?;
-            Ok((other, format!("{kind} {target}")))
+            let path: String = r.get(3)?;
+            let line: i64 = r.get(4)?;
+            Ok((other, format!("{kind} {target} at {path}:{line}")))
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
@@ -491,6 +494,8 @@ impl Store {
                 WHEN n.path LIKE ?1 THEN 3
                 WHEN n.detail LIKE ?1 THEN 4
                 ELSE 5 END,
+                CASE WHEN n.path LIKE 'tests/%' OR n.path LIKE 'scripts/test-%'
+                       OR n.path LIKE '%/tests.rs' THEN 1 ELSE 0 END,
                 CASE WHEN n.kind IN ('fn','method','struct','module') THEN 0
                      WHEN n.kind='file' THEN 1
                      WHEN n.kind='capability' THEN 2
@@ -648,6 +653,16 @@ fn resolve_dotted(conn: &Connection, target: &str, simple: &str, path: &str) -> 
     }
     let receiver = target.split('.').next().unwrap_or("");
     if matches!(receiver, "self" | "this" | "M" | "cls") {
+        let exact = conn
+            .query_row(
+                "SELECT id FROM nodes WHERE path=?1 AND name=?2 LIMIT 1",
+                params![path, target],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if exact.is_some() {
+            return Ok(exact);
+        }
         return scoped_member(conn, simple, path);
     }
     exact_node(conn, target)

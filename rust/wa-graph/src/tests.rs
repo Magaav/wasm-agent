@@ -259,6 +259,28 @@ fn index_resolves_callers_across_files_and_capabilities() {
 }
 
 #[test]
+fn host_capability_never_resolves_to_an_unrelated_function() {
+    let dir = temp_dir("capability-name-collision");
+    std::fs::write(
+        dir.join("run.lua"),
+        "function run() host.subagent('start', '{}') end\nfunction subagent() end\n",
+    )
+    .unwrap();
+    let db = dir.join("graph.db");
+    let mut store = Store::open(&db).unwrap();
+    store.index(&dir, false).unwrap();
+
+    let path = store
+        .path("run", "host.subagent")
+        .unwrap()
+        .expect("host call reaches capability");
+    assert_eq!(path.last().unwrap().0.kind, "capability");
+    assert_eq!(path.last().unwrap().0.path, "<capability>");
+    assert!(store.path("run", "subagent").unwrap().is_none());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn query_ranks_named_functions_before_path_matches() {
     let dir = temp_dir("query-rank");
     std::fs::create_dir_all(dir.join("lua/core")).unwrap();
@@ -302,6 +324,7 @@ fn lua_pcall_of_named_function_is_a_path_edge() {
 #[test]
 fn rust_route_reaches_string_named_lua_entrypoint() {
     let dir = temp_dir("rust-lua-route");
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
     std::fs::write(
         dir.join("serve.rs"),
         "fn dispatch(lua: &Lua, route: &str) { match route { \"/subagents\" => subagent_reply(lua), _ => () } }\nfn subagent_reply(lua: &Lua) { lua.call_string(\"wa_subagents\", &[]); }\nfn dynamic(lua: &Lua, name: &str) { lua.call_string(name, &[]); }\n",
@@ -309,17 +332,26 @@ fn rust_route_reaches_string_named_lua_entrypoint() {
     .unwrap();
     std::fs::write(
         dir.join("subagents.lua"),
-        "function wa_subagents() return pcall(M.control, {}) end\nfunction M.control() return M.start() end\nfunction M.start() end\n",
+        "function wa_subagents() return pcall(M.control, {}) end\nfunction M.control() return M.start() end\nfunction M.start() end\nfunction M.start_session() end\nfunction start() end\n",
     )
     .unwrap();
+    std::fs::write(dir.join("tests/route.rs"), "fn sample() { let p = \"/subagents\"; }\n").unwrap();
     let db = dir.join("graph.db");
     let mut store = Store::open(&db).unwrap();
     store.index(&dir, false).unwrap();
 
     let routes = store.query("/subagents", 10).unwrap();
-    assert!(routes
+    assert_eq!(routes[0].path, "serve.rs", "runtime route before test literals");
+    assert!(routes.iter().any(|node| node.path == "tests/route.rs"));
+    assert!(store
+        .explain("M.start")
+        .unwrap()
         .iter()
-        .any(|node| node.kind == "route" && node.name == "/subagents"));
+        .all(|(node, _, _)| node.name == "M.start"));
+    let bare = store.explain("start").unwrap();
+    assert!(bare.iter().any(|(node, _, _)| node.name == "M.start"));
+    assert!(bare.iter().any(|(node, _, _)| node.name == "start"));
+    assert!(!bare.iter().any(|(node, _, _)| node.name == "M.start_session"));
     let path = store
         .path("dispatch", "M.start")
         .unwrap()
@@ -335,6 +367,10 @@ fn rust_route_reaches_string_named_lua_entrypoint() {
             "M.start"
         ]
     );
+    assert!(path[1].1.contains("serve.rs:1"), "call-site in each path hop");
+    assert!(path[2].1.contains("serve.rs:2"));
+    assert!(path[3].1.contains("subagents.lua:1"));
+    assert!(path[4].1.contains("subagents.lua:2"));
     assert!(store.path("dynamic", "M.start").unwrap().is_none());
     std::fs::remove_dir_all(&dir).ok();
 }
