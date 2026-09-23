@@ -1,5 +1,6 @@
 -- An opt-in presentation, never a rewrite of stored history or the active conversation.
 local json=dofile('lua/vendor/json.lua')
+local output=dofile('lua/core/tool_output.lua')
 local M={}
 function M.message(row)
   local view={}
@@ -7,7 +8,9 @@ function M.message(row)
     view[key]=row[key]
   end
   view.evidence={tool='session',session_id=row.session_id,message_id=row.id,view='full'}
-  if #json.encode(row)>20000 then view.evidence.byte_offset=1 end
+  -- Point at the byte range whenever the row would not survive the model view, which is the
+  -- projector's budget and not a number of its own.
+  if #json.encode(row)>output.MAX_BYTES then view.evidence.byte_offset=1 end
   view.omitted_fields={'trace_details','tool_arguments','reasoning','images','changes','accounting'}
   local calls=row.tool_calls
   if type(calls)=='string' then local ok,decoded=pcall(json.decode,calls);calls=ok and decoded or {} end

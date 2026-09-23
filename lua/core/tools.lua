@@ -532,15 +532,30 @@ function M.dispatch(memory, name, args, role, ctx)
       local row=memory.message(args.message_id)
       if not row or row.session_id~=args.session_id then return {error='unknown_message'} end
       if args.byte_offset~=nil then
-        local offset,limit=tonumber(args.byte_offset),tonumber(args.byte_limit) or 20000
-        if not offset or offset<1 or offset%1~=0 or limit<4 or limit>20000 or limit%1~=0 then return {error='invalid_message_range'} end
+        -- The page must fit the projector's envelope, or it comes back "omitted" and the
+        -- exact-byte contract this route exists for is lost. Derived from the one budget,
+        -- not hardcoded, so the two cannot drift apart again.
+        local page_limit=tool_output.MAX_BYTES-2048
+        local offset,limit=tonumber(args.byte_offset),tonumber(args.byte_limit) or page_limit
+        if not offset or offset<1 or offset%1~=0 or limit<4 or limit>page_limit or limit%1~=0 then return {error='invalid_message_range'} end
         local encoded=json.encode(row);local version=host.sha256(encoded)
         if offset>#encoded+1 then return {error='message_range_out_of_bounds'} end
         if offset<=#encoded and encoded:byte(offset)>=128 and encoded:byte(offset)<192 then return {error='offset_inside_utf8'} end
         if args.message_version and args.message_version~=version then return {error='message_changed',message_version=version} end
         local content,next_offset=tool_output.slice(encoded,offset,limit)
-        return {content=content,encoding='exact_message_json',message_id=row.id,message_version=version,
+        local page={content=content,encoding='exact_message_json',message_id=row.id,message_version=version,
           next_offset=next_offset,bytes=#encoded,eof=next_offset>#encoded}
+        -- Bound the *encoded view*: the row is already JSON text, so its escapes are escaped
+        -- again here and an escape-heavy page can be nearly twice the slice it was sized from.
+        -- A view over the budget is replaced by the omitted envelope, which drops `next_offset`
+        -- and makes the page uncontinuable - the one thing this route exists to avoid.
+        while #json.encode(page)>tool_output.MAX_BYTES and limit>4 do
+          limit=math.floor(limit*0.75)
+          content,next_offset=tool_output.slice(encoded,offset,limit)
+          page={content=content,encoding='exact_message_json',message_id=row.id,message_version=version,
+            next_offset=next_offset,bytes=#encoded,eof=next_offset>#encoded}
+        end
+        return page
       end
       return {message=args.view=='compact' and evidence_view.message(row) or row}
     end

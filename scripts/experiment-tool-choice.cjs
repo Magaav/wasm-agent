@@ -128,6 +128,8 @@ async function startProvider() {
     WA_EXPERIMENT_N: String(runs), WA_EXPERIMENT_PROFILE: profile,
     WA_EXPERIMENT_DIR: home.replace(/\\/g, '/'),
     WA_EXPERIMENT_INDEX: arg('index', '0'),
+    // Lever 2: the per-result model-view budget, in bytes.
+    WASM_AGENT_TOOL_OUTPUT_BYTES: arg('cap', '51200'),
   };
   const child = spawn(wa, ['--db', path.join(home, 'memory.db')], { cwd: repo, env, windowsHide: true });
   let out = '';
@@ -173,7 +175,7 @@ async function startProvider() {
 
   const count = (row) => (row.tools || []).filter((call) => call.name === 'operation').length;
   console.log(`\n=== ${label} (arm=${arm} task=${task} profile=${profile} provider=${provider} n=${runs}) ===`);
-  console.log('run  state      first_tool   calls  operation  tokens  reasoning  alive  errors');
+  console.log('run  state      first_tool   calls  op  tokens   correct  errors');
   for (const row of rows) {
     const usage = row.usage || {};
     const tokens = Number(row.tokens_total || 0)
@@ -185,8 +187,7 @@ async function startProvider() {
       String((row.tools || []).length).padEnd(6),
       String(count(row)).padEnd(10),
       String(tokens).padEnd(7),
-      String(row.reasoning_chars || 0).padEnd(10),
-      String(row.alive_after_settle === undefined ? '-' : row.alive_after_settle).padEnd(6),
+      String(row.correct === undefined ? '-' : (row.correct ? 'yes' : 'NO')).padEnd(8),
       String((row.errors || []).length),
     ].join('  '));
   }

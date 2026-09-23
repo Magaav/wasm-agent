@@ -68,7 +68,12 @@ function M.read(args)
   if first<=#text and text:byte(first)>=128 and text:byte(first)<192 then return {error='column_inside_utf8',version=hash} end
   local last=(starts[line+limit] or (#text+1))-1
   -- JSON escaping, not just raw bytes, determines whether the outer tool view can retain the cursor.
-  local capacity=48000
+  -- One budget for the model view, shared with the projector. The read page has to fit
+  -- inside the same envelope `tool_output` enforces; otherwise an oversized page comes
+  -- back "omitted" and the model loses the exact-cursor contract that makes pagination
+  -- work at all. Deriving it here is what keeps the two from drifting apart again.
+  local view_budget=output.MAX_BYTES
+  local capacity=view_budget-2048
   local part,next_byte=output.slice(text:sub(1,last),first,capacity)
   local function envelope()
     local next_line=line
@@ -82,10 +87,10 @@ function M.read(args)
       note='Raw text, no synthetic line numbering. Continue with next_offset, next_column and version.'}
   end
   local result=envelope()
-  while #json.encode(result)>50000 and capacity>4 do
+  while #json.encode(result)>view_budget and capacity>4 do
     capacity=math.floor(capacity/2);part,next_byte=output.slice(text:sub(1,last),first,capacity);result=envelope()
   end
-  if #json.encode(result)>50000 or (#part==0 and next_byte<=#text) then return {error='read_envelope_exceeds_budget',version=hash} end
+  if #json.encode(result)>view_budget or (#part==0 and next_byte<=#text) then return {error='read_envelope_exceeds_budget',version=hash} end
   return result
 end
 function M.edit(args,record)
