@@ -376,24 +376,15 @@ function appendReasoning(text) {
   if (!text) return;
   const bubble = currentBubble();
   if (!reasoningBlock || reasoningBlock.parentNode !== bubble.body) {
-    reasoningBlock = document.createElement("details");
-    reasoningBlock.className = "reasoning";
+    // A topic like every other one: <wa-reasoning> builds the same header as the tool calls beside it,
+    // so the thinking reads as a step of the same kind rather than as a different thing.
+    reasoningBlock = document.createElement("wa-reasoning");
     reasoningBlock.open = !replayingMessages;
-    const head = document.createElement("summary");
-    head.className = "reasoning-head";
-    const body = document.createElement("div");
-    body.className = "reasoning-body";
-    reasoningBlock.append(head, body);
-    reasoningBlock.reasoningHead = head;
-    reasoningBlock.reasoningBody = body;
     bubble.body.append(reasoningBlock);
     reasoningText = "";
   }
   reasoningText += text;
-  // The body is `pre-wrap`, so a trailing newline would render as a blank line - and a provider ends
-  // a chunk with them. The count is of what the model produced, not of what survives the trim.
-  reasoningBlock.reasoningBody.textContent = reasoningText.replace(/\s+$/, "");
-  reasoningBlock.reasoningHead.textContent = "thinking · " + reasoningText.length + " chars";
+  reasoningBlock.setText(reasoningText);
   pin();
 }
 

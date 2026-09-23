@@ -1365,6 +1365,36 @@ $harness = @'
     window.handleEvent({ type: "done" });
   })();
 
+  // ---- one topic standard, and the thinking is a topic too -----------------------------------
+  // The thinking block used to be a bespoke <details> with its own header: taller than the tool-call
+  // topics beside it, no chevron, no glyph - so it read as a different kind of thing. It is now
+  // <wa-reasoning>, built by the same `topicParts` as <wa-trace>/<wa-run>/<wa-diff>. Asserted as the
+  // three things a reader sees: the same header parts in the same order, the same height, the chevron.
+  (function () {
+    window.handleEvent({ type: "round", n: 1 });
+    window.handleEvent({ type: "reasoning", text: "weighing the standard", chars: 22 });
+    window.handleEvent({ type: "tool", name: "bash", arguments: { command: "ls" } });
+    var topics = document.querySelectorAll("wa-message wa-reasoning");
+    var think = topics[topics.length - 1];
+    check(!!think, "topic standard: the thinking must be a <wa-reasoning> topic");
+    var head = think ? think.querySelector(":scope > .trace-head") : null;
+    var parts = head ? Array.prototype.map.call(head.children, function (c) { return c.className; }).join(",") : "";
+    check(parts === "trace-glyph,trace-label,trace-meta,trace-chevron",
+      "topic standard: the thinking header must hold glyph,label,meta,chevron like every other topic, saw: " + parts);
+    check(!!head && head.textContent.indexOf("thinking") >= 0,
+      "topic standard: its label says what it is, saw: " + (head ? head.textContent : "no head"));
+    check(!!head && !!head.querySelector(".trace-chevron"),
+      "topic standard: it carries the chevron that says it opens");
+    var traces = document.querySelectorAll("wa-message wa-trace");
+    var trace = traces[traces.length - 1];   // the one this block just made, so it is visible
+    var traceHead = trace ? trace.querySelector(":scope > .trace-head") : null;
+    var thinkH = head ? Math.round(head.getBoundingClientRect().height) : -1;
+    var traceH = traceHead ? Math.round(traceHead.getBoundingClientRect().height) : -2;
+    check(thinkH > 0 && thinkH === traceH,
+      "topic standard: the thinking header must be the same height as a tool-call header, saw " + thinkH + " vs " + traceH);
+    window.handleEvent({ type: "done" });
+  })();
+
   // ---- a run this window did not open must be followed, not waited out ----------------------
   // The node streams a run only to the request that opened it, so a reload during a run (or a run a
   // wake or a job started) has no live channel. Measured live before this existed: the node executed
