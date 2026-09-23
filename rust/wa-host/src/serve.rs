@@ -863,7 +863,7 @@ pub fn write_event(payload: &str) {
 /// Run `f` collecting any events it emits, and return them as an SSE body. Used for a run
 /// relayed to a peer: the events are captured in a buffer local to this call and cannot
 /// reach a live socket belonging to another run.
-fn capture_events<F: FnOnce()>(f: F) -> String {
+pub(crate) fn capture_events<F: FnOnce()>(f: F) -> String {
     let buffer = Rc::new(RefCell::new(String::new()));
     let _guard = SinkGuard::set(Sink::Buffer(buffer.clone()));
     f();

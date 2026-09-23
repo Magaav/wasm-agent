@@ -1254,10 +1254,12 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
                 if !text.is_empty() {
                     reasoning.push_str(text);
                     mark_delta("reasoning", elapsed_ms);
-                    // A long reasoning phase used to look like a hung run. The UI
-                    // can now say how much thinking has happened.
+                    // A long reasoning phase used to look like a hung run. The event carries
+                    // the delta itself, not only its size: a reader can now see the thinking,
+                    // and the count still drives the live "not hung" status line.
                     crate::serve::write_event(
-                        &json!({"type": "reasoning", "chars": reasoning.chars().count()}).to_string(),
+                        &json!({"type": "reasoning", "chars": reasoning.chars().count(), "text": text})
+                            .to_string(),
                     );
                 }
                 break;
@@ -1396,6 +1398,24 @@ mod stream_tests {
         assert_eq!(result["reasoning"], "thinking");
         assert_eq!(result["usage"]["prompt_tokens"], 100);
         assert!(result["ttft_ms"].is_number());
+    }
+
+    #[test]
+    fn reasoning_deltas_carry_their_text_to_the_client() {
+        // The count alone told the reader *how much* thinking happened but never what it was,
+        // so a turn whose content was entirely reasoning rendered as a turn that only called
+        // tools. The streamed event now carries the delta.
+        let result = std::cell::RefCell::new(Value::Null);
+        let events = crate::serve::capture_events(|| {
+            *result.borrow_mut() = fixture(concat!(
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n"));
+        });
+        assert_eq!(result.into_inner()["reasoning"], "thinking");
+        assert!(events.contains("\"type\":\"reasoning\""), "no reasoning event in: {events}");
+        assert!(events.contains("\"text\":\"thinking\""), "the event must carry the delta: {events}");
+        assert!(events.contains("\"chars\":8"), "the event must still carry the count: {events}");
     }
 
     #[test]
