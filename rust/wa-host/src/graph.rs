@@ -1,8 +1,8 @@
 //! `host.graph_*` — the code graph as a capability.
 //!
-//! The graph is built by the `wa-graph` crate and stored beside the ledger. Reads open the database
-//! read-only, so a query never takes the write lock the watcher needs. This is what turns the graph
-//! into something the agent can use on itself: a Lua run asks "who calls `append_turn`" without a
+//! The graph is built by the `wa-graph` crate and stored beside the ledger. Reads verify the
+//! complete source snapshot; a stale graph is synchronously refreshed or rejected. A Lua run can
+//! ask "who calls `append_turn`" without a
 //! grep-and-read round trip, and a `host.*` reference is a typed edge to a capability node.
 
 use crate::lua::{arg_string, lua_pushlstring, LuaState};
@@ -61,12 +61,31 @@ fn root_for(options: &Value) -> Result<PathBuf, String> {
 fn read(
     l: *mut LuaState,
     options_index: std::ffi::c_int,
-    body: impl FnOnce(&wa_graph::Store, &Value) -> Result<Value, String>,
+    body: impl Fn(&wa_graph::Store, &Value) -> Result<Value, String>,
 ) -> std::ffi::c_int {
     let options = json_arg(l, options_index);
     let outcome = (|| -> Result<Value, String> {
-        let store = wa_graph::Store::open_readonly(db_for(&options)?).map_err(|e| e.to_string())?;
-        body(&store, &options)
+        let root = root_for(&options)?;
+        let db = db_for(&options)?;
+        for _ in 0..3 {
+            if let Ok(store) = wa_graph::Store::open_readonly(&db) {
+                store.begin_read().map_err(|e| e.to_string())?;
+                let fresh = store.verify_snapshot(&root).map_err(|e| e.to_string())?;
+                if fresh {
+                    let answer = body(&store, &options)?;
+                    let still_fresh = store.verify_snapshot(&root).map_err(|e| e.to_string())?;
+                    store.end_read().map_err(|e| e.to_string())?;
+                    if still_fresh {
+                        return Ok(answer);
+                    }
+                }
+            }
+            let mut writer = wa_graph::Store::open(&db).map_err(|e| e.to_string())?;
+            // A stale or legacy snapshot may have missing source records. Rebuild all
+            // records rather than trusting the old incremental stamps to repair them.
+            writer.index(&root, true).map_err(|e| e.to_string())?;
+        }
+        Err("graph_source_unstable: use read/grep and retry later".into())
     })();
     push_json(
         l,
@@ -159,16 +178,22 @@ pub extern "C" fn graph_stats(l: *mut LuaState) -> std::ffi::c_int {
 
 /// host.graph_status(opts_json?) -> {root, db, ready} | {error}
 ///
-/// `ready` is whether the database exists yet, so a caller can tell "not built" from "empty".
+/// `ready` means the graph matches every indexed file's current bytes, not merely that a DB exists.
 pub extern "C" fn graph_status(l: *mut LuaState) -> std::ffi::c_int {
     let options = json_arg(l, 1);
     let outcome = (|| -> Result<Value, String> {
         let root = root_for(&options)?;
         let db = db_for(&options)?;
+        let ready = if db.exists() {
+            let store = wa_graph::Store::open_readonly(&db).map_err(|e| e.to_string())?;
+            store.verify_snapshot(&root).map_err(|e| e.to_string())?
+        } else {
+            false
+        };
         Ok(json!({
             "root": root.to_string_lossy(),
             "db": db.to_string_lossy(),
-            "ready": db.exists(),
+            "ready": ready,
         }))
     })();
     push_json(

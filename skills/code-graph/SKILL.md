@@ -9,8 +9,9 @@ The `graph` tool answers navigation questions directly from an index of the code
 so it costs one call where grep costs a search plus a read of every candidate.
 Reach for it first; fall back to `grep`/`read` when you need the actual lines.
 
-The node keeps the index fresh as files change, so you almost never call
-`index` yourself.
+The node refreshes the index as files change. Every answer verifies the indexed
+source bytes; if verification or refresh fails, the tool reports an error. Use
+`grep`/`read` in that case rather than treating an empty graph result as evidence.
 
 ## The four questions
 

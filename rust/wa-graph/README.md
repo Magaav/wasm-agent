@@ -60,14 +60,15 @@ clean `host.<ident>`, and the Rust path never emits a capability edge. That make
   `require`, `host.*` capabilities, table fields. Bash: functions, `source`/`.`, command calls.
   PowerShell: `function`, dot-sourcing, `Import-Module`, command calls. Markdown: a `mentions` edge
   only when a backtick span names a real definition.
-- **`store.rs`** — SQLite `files`/`nodes`/`edges`/`imports`. Incremental by content hash: a file
+- **`store.rs`** — SQLite `files`/`nodes`/`edges`/`imports` plus exact source snapshots. Incremental by content hash: a file
   whose bytes did not change is never reparsed. A resolve pass turns a referenced name into a node
   id (same file → same directory → globally unique), follows `require` aliases
   (`memory.append_turn` → `M.append_turn`), and creates a capability node for `host.*`. A whole
   index run is one `BEGIN IMMEDIATE` transaction: a reader sees the old graph or the new one, never
   a half-indexed file, and the watcher and a manual `index` cannot interleave.
-- **`watch.rs`** — a `notify` watcher (debounced) keeps the index fresh. It is what the node runs;
-  the CLI indexes on demand.
+- **`watch.rs`** — a `notify` watcher (debounced) refreshes the index. It registers before
+  its initial scan and logs errors. Host queries independently verify all in-scope source
+  bytes and rebuild or fail closed, so missed events do not silently serve old results.
 - **`main.rs`** — the CLI above, with `--json` on every read verb.
 
 ## Node integration
@@ -80,12 +81,15 @@ the graph fresh, so `index` is rarely needed.
 
 The database lives at `<home>/.wasm-agent/graph.db` and indexes the runtime worktree (the node's
 cwd). `WA_GRAPH_ROOT` / `WA_GRAPH_DB` override both; `WA_GRAPH_WATCH=0` disables the watcher. Reads
-open the database **read-only**, so a query never takes the write lock the watcher needs. See
+pin a read-only graph snapshot and verify source bytes; a stale query may rebuild and take the
+write lock. This is source-snapshot consistency, not an atomic freeze of concurrent external
+writers or of code already loaded in a worker. See
 `docs/GRAPH.md` and `docs/HOST.md`.
 
 ## Proven
 
-`cargo test -p wa-graph` — 10 tests:
+`cargo test -p wa-graph` covers extraction, resolution, atomic writes, watcher startup,
+and exact-byte freshness:
 
 - extraction for Rust, Lua, JavaScript/TypeScript, Bash and PowerShell (functions, imports, calls, capabilities);
 - a Lua definition is emitted **once** (the `variable_declaration` → `assignment_statement` nesting);

@@ -24,20 +24,28 @@ a control graph, not only a map.
 |---|---|
 | database | `<home>/.wasm-agent/graph.db` (beside the ledger) |
 | indexed root | the node's cwd — the runtime worktree it runs from |
-| freshness | a `notify` watcher reindexes on change, debounced |
+| freshness | watcher refreshes in the background; each answer checks exact source bytes before and after its read, synchronously rebuilding or failing if stale |
 | write path | one `BEGIN IMMEDIATE` transaction per index run — atomic, and it serializes writers |
-| read path | read-only SQLite connection, never the write lock |
+| read path | pinned read-only SQLite snapshot; stale queries may synchronously take the write lock to rebuild |
 | overrides | `WA_GRAPH_ROOT`, `WA_GRAPH_DB`; `WA_GRAPH_WATCH=0` disables the watcher |
 
-The watcher indexes once on startup, **off the accept path**, so a large tree
-never delays the port coming up. A query before the first index finishes returns
-an empty result, not an error. Reindexing is incremental by content hash, so an
-event that did not change bytes costs nothing.
+The watcher registers before its initial index, **off the accept path**. A query
+before that index finishes builds a verified snapshot itself; it never treats an
+unbuilt graph as an empty answer. Reindexing in the watcher is incremental by
+content hash. Query-time verification compares the complete target area to the
+exact bytes stored with the graph, so a missed event cannot silently return an
+old answer. Indexing or verification failures return an error; use `read`/`grep`.
 
 The whole reindex is one `BEGIN IMMEDIATE` transaction. A reader sees the old
 graph or the new one, never a half-indexed file, and the watcher and a manual
 `host.graph_index` cannot interleave. Readers are unaffected (WAL): they keep the
 previous snapshot until the index commits.
+
+This is a verified *source snapshot*, not a claim that a live filesystem or
+running Lua interpreter is frozen. An uncoordinated writer can change a file
+immediately after verification; absolute real-time guarantees require immutable
+revisions or coordinated writes. The graph still resolves syntax by name, so
+dynamic calls remain uncertain even when its source snapshot is current.
 
 ## The capability
 
@@ -81,3 +89,12 @@ context to use it before `grep` and how to read the result — including that a
 - Markdown contributes `mentions` edges only when a backtick span names a real
   definition; `path` traversal ignores mentions entirely.
 - The graph is a map. Always read a file before editing it.
+
+## Adoption check (2026-09-23)
+
+A two-run real-model navigation arm with `graph` available completed both tasks,
+but chose `grep` first in both runs and used `graph` only afterward. The same
+read-only task without `graph` completed once and exhausted its token budget
+once. This small, worker-profile experiment does not establish a speed or token
+advantage, and it does not measure the main agent. Keep `grep`/`read` available;
+measure main-agent outcomes before making graph mandatory or removing fallback.
