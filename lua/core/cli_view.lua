@@ -245,6 +245,23 @@ end
 
 -- ---- the footer -----------------------------------------------------------------
 
+-- The window the footer divides by is the *model's*, resolved where compaction and the
+-- window's balloon resolve it (`provider.budget`, over `model_window`) - never the global
+-- `WASM_AGENT_LLM_CONTEXT` read directly. The global is the last resort in that chain, and
+-- a footer that reads it shows a number no model has: this deployment's model has a
+-- 1,000,000-token window and the global says 128000, so the same context read as eight
+-- times fuller than it was.
+--
+-- `resolve` is passed in rather than required here, so the decision is testable without a
+-- model: a resolver that fails, or that answers "unknown", falls back to the global rather
+-- than printing a guess - unknown is visible, a guess is not.
+function M.window(model, resolve)
+  local ok, budget = pcall(resolve, model)
+  local context = ok and type(budget) == "table" and tonumber(budget.context) or nil
+  if context and context > 0 then return context end
+  return tonumber(host.getenv("WASM_AGENT_LLM_CONTEXT")) or 0
+end
+
 -- The run's own numbers, the way pi keeps them in its footer: what it cost, what it
 -- used, and how full the window is. The model and its reasoning level are in the banner
 -- instead - they do not change between runs, and a line that has to hold both is a line
