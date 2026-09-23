@@ -84,6 +84,18 @@ The `pre-commit` hook enforces it - that hook is the contract, this line is the 
   fall back to the operator file (`docs/MEMORY.md`).
 - Failures must be **visible**: no silent success, no silent data loss. Surface
   the error and the step. `docs/MEMORY.md` explains the tracing model.
+- **Raw over compacted, unless the loss is proven harmless.** Context is the agent's
+  awareness, so a step that is cheaper and makes the model less aware is a bad trade even
+  when the tokens fall. Compaction, truncation, elision and "summarise it instead" are
+  justified by evidence that the *task result* does not degrade - never by a token saving
+  alone - and the provider getting cheaper is the trend to bet on. Models are getting
+  cheaper faster than a smaller context saves.
+- **Know how you are risking.** Taking risks is how breakthroughs happen, so take them -
+  but name the risk in the patch, and prefer a knob plus the measurement that justifies
+  using it over a new default chosen from a small experiment. A risky change that does not
+  say what it is risking is one nobody can revisit. When a measurement is too weak to
+  settle a question (too few samples, one fixture, high variance), say so and do not let it
+  pick a default.
 - Verify before claiming: run the smoke test, and prefer a real two-node check
   over a single-process one.
 - A **skipped test is reported as skipped**: the suites count skips and say so in the
