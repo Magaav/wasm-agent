@@ -6,6 +6,7 @@
 //! proves the value before that wiring.
 
 pub mod extract;
+pub mod audit;
 pub mod store;
 pub mod watch;
 

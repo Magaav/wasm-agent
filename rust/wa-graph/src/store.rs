@@ -17,7 +17,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 const EXTRACT_VERSION: &str = "4";
 
 pub struct Store {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 #[derive(Debug, Clone)]

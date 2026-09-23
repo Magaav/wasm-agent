@@ -205,6 +205,58 @@ local function line_delta(before, after)
   return (#b - head - tail), (#a - head - tail)
 end
 
+-- Current-file line anchors for a patch audit. Deletions anchor to the nearest surviving
+-- line, so the syntax walker can still find their enclosing definition. A large replacement
+-- is deliberately not guessed: the audit must report an unmapped change instead.
+function M.changed_lines(file)
+  if not file or file.recorded == false then return nil, "not_recorded" end
+  local before, before_err = M.load(file.before)
+  if before == nil then return nil, before_err end
+  local after, after_err = M.load(file.after)
+  if after == nil then return nil, after_err end
+  if host.read_file and host.read_file(file.path) ~= after then return nil, "file_changed_since_record" end
+  local a, b = split_lines(before), split_lines(after)
+  local head = 0
+  while head < #a and head < #b and a[head + 1] == b[head + 1] do head = head + 1 end
+  local tail = 0
+  while tail < #a - head and tail < #b - head and a[#a - tail] == b[#b - tail] do tail = tail + 1 end
+  local n, m = #a - head - tail, #b - head - tail
+  if n * m > 250000 or n + m > 4096 then return nil, "changed_span_too_large" end
+  local lcs = {}
+  for i = 0, n do
+    lcs[i] = {}
+    for j = 0, m do lcs[i][j] = 0 end
+  end
+  for i = n - 1, 0, -1 do
+    for j = m - 1, 0, -1 do
+      if a[head + i + 1] == b[head + j + 1] then
+        lcs[i][j] = lcs[i + 1][j + 1] + 1
+      else
+        lcs[i][j] = math.max(lcs[i + 1][j], lcs[i][j + 1])
+      end
+    end
+  end
+  local marked, i, j = {}, 0, 0
+  local function mark(line)
+    marked[math.max(1, math.min(#b, line))] = true
+  end
+  while i < n or j < m do
+    if i < n and j < m and a[head + i + 1] == b[head + j + 1] then
+      i, j = i + 1, j + 1
+    elseif i < n and (j == m or lcs[i + 1][j] >= lcs[i][j + 1]) then
+      mark(head + j + 1)
+      i = i + 1
+    else
+      mark(head + j + 1)
+      j = j + 1
+    end
+  end
+  local lines = {}
+  for line in pairs(marked) do lines[#lines + 1] = line end
+  table.sort(lines)
+  return lines
+end
+
 function M.new()
   return { files = {}, added = 0, removed = 0 }
 end

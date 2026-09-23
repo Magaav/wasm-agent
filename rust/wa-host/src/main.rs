@@ -52,6 +52,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/provider.lua", include_str!("../../../lua/core/provider.lua")),
     ("lua/core/model_window.lua", include_str!("../../../lua/core/model_window.lua")),
     ("lua/core/changeset.lua", include_str!("../../../lua/core/changeset.lua")),
+    ("lua/core/patch_audit.lua", include_str!("../../../lua/core/patch_audit.lua")),
     ("lua/core/effects.lua", include_str!("../../../lua/core/effects.lua")),
     ("lua/core/whatsapp.lua", include_str!("../../../lua/core/whatsapp.lua")),
     ("lua/core/subagents.lua", include_str!("../../../lua/core/subagents.lua")),
@@ -300,6 +301,7 @@ fn main() {
     lua.register("graph_caps", graph::graph_caps);
     lua.register("graph_stats", graph::graph_stats);
     lua.register("graph_status", graph::graph_status);
+    lua.register("graph_patch_audit", graph::graph_patch_audit);
     lua.register("sha256", host::sha256);
     lua.register("uuid", host::uuid);
     lua.register("read_file", host::read_file);

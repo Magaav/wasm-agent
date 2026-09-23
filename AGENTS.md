@@ -47,9 +47,11 @@ The `pre-commit` hook enforces it - that hook is the contract, this line is the 
   are Rust `host.*`. Read `docs/HOST.md` before adding a capability: a host function
   returns `nil` for missing values (never zero values), and paths come from
   `host.paths()`, never `$HOME` or a Linux-only path.
-- **Navigate before you grep.** For "where is X", "who calls it", "how does A reach
-  B" or "which `host.*` does this use", call the `graph` tool first
-  (`skills/code-graph`); `grep` and `read` are for the actual lines.
+- **Use the graph to check impact, not to replace source inspection.** Grep/read are
+  normal navigation. Before finishing a code patch, the opt-in graph impact audit
+  (`WA_GRAPH_PATCH_AUDIT=1`) flags resolved callers not read in this run; a
+  standard `git commit` through `bash` gets a one-time review prompt first. It is a
+  review lead, never a correctness certificate; see `docs/GRAPH-PATCH-AUDIT.md`.
 - **A spell is deterministic, verified execution**, not a "macro". A step is a shell
   command or script, a client action, a wait, an assertion, or a supervisor verb, and
   every spell declares a `post` that settles the effect. The model surface is
@@ -110,4 +112,3 @@ recovery are in `skills/self-update/SKILL.md`.
 
 You cannot: the stop is the last command your run executes; ask the sentinel.
 `skills/self-update/SKILL.md` has the procedure.
-
