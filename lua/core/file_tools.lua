@@ -93,6 +93,58 @@ function M.read(args)
   if #json.encode(result)>view_budget or (#part==0 and next_byte<=#text) then return {error='read_envelope_exceeds_budget',version=hash} end
   return result
 end
+-- `old_text` is quoted from memory, and the measured cause of a miss is *not* whitespace: in
+-- 42 of 44 failures over 24h the anchor was in nothing the model had read, and in none of them
+-- was it a whitespace difference. A hint keyed on the first line is therefore useless when the
+-- first line is what was misremembered. Slide a window the size of the quoted block over the
+-- file, score each position by the leading characters it shares line by line, and return the
+-- best one with its exact bytes: the model re-quotes what is actually there and the edit lands
+-- on the second attempt instead of costing a fresh read of the whole file.
+local function nearest_edit_hint(text, needle)
+  local target = {}
+  for line in needle:gmatch("[^\r\n]+") do
+    if line:match("%S") then target[#target + 1] = line end
+  end
+  if #target == 0 then return nil end
+  local function norm(value)
+    return (value:gsub("%s+", " ")):gsub("^%s+", ""):gsub("%s+$", "")
+  end
+  for i = 1, #target do target[i] = norm(target[i]) end
+  local have = {}
+  for line in (text .. "\n"):gmatch("(.-)\n") do
+    have[#have + 1] = norm(line)
+    if #have >= 8000 then break end
+  end
+  local span, best, best_score = #target, nil, 0
+  for start = 1, math.max(1, #have - span + 1) do
+    local score = 0
+    for i = 1, span do
+      local a, b = target[i], have[start + i - 1] or ""
+      if a == "" then
+        score = score + 1
+      elseif a == b then
+        score = score + 1000 + #a
+      else
+        local shared, limit = 0, math.min(#a, #b, 40)
+        while shared < limit and a:sub(shared + 1, shared + 1) == b:sub(shared + 1, shared + 1) do
+          shared = shared + 1
+        end
+        score = score + shared
+      end
+    end
+    if score > best_score then best_score, best = score, start end
+  end
+  -- A blank-only overlap is not a candidate: a wrong hint is worse than silence.
+  if not best or best_score <= span then return nil end
+  local lines = {}
+  for line in (text .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  local last = math.min(#lines, best + span - 1)
+  return { line = best, last_line = last,
+    text = table.concat(lines, "\n", best, last):sub(1, 400),
+    note = "no region matches old_text; this is the closest. Quote it exactly, or re-read the range with read and copy the bytes." }
+end
+end
+
 function M.edit(args,record)
   if type(args.path)~='string' or args.path=='' then return {error='path_required'} end
   if args.edits and (args.old_text~=nil or args.new_text~=nil) then return {error='mixed_edit_forms'} end
@@ -116,7 +168,12 @@ function M.edit(args,record)
   local ranges={}
   for i,item in ipairs(edits) do
     local a,b=text:find(item.old_text,1,true)
-    if not a then return {error='old_text_not_found',edit=i} end
+    if not a then
+      local failure={error='old_text_not_found',edit=i,path=args.path}
+      local hint=nearest_edit_hint(text,item.old_text)
+      if hint then failure.nearest=hint end
+      return failure
+    end
     -- Overlapping occurrences are ambiguous too (e.g. 'aa' in 'aaa').
     if text:find(item.old_text,a+1,true) then return {error='old_text_ambiguous',edit=i} end
     ranges[#ranges+1]={a=a,b=b,text=item.new_text,index=i}
