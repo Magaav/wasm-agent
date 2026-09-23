@@ -36,12 +36,16 @@ host.write_file(path,'abcdef')
 check(files.edit({path=path,edits={{old_text='abc',new_text='A'},{old_text='bc',new_text='B'}}}).error=='overlapping_edits','overlap refused')
 check(host.read_file(path)=='abcdef','failed batch leaves bytes untouched')
 check(files.edit({path=path,edits={{old_text='abc',new_text='A'},{old_text='missing',new_text='B'}}}).error=='old_text_not_found','validate whole batch before write')
--- A miss that is only whitespace must point at the line that does match, so the correction
--- is one step instead of a re-read of the whole file.
-local hinted=files.edit({path=path,edits={{old_text='   abc',new_text='A'}}})
-check(hinted.error=='old_text_not_found' and hinted.nearest and hinted.nearest.line==1 and hinted.nearest.text=='abcdef',
-  'a whitespace-only miss points at the line that does match')
-local unrelated=files.edit({path=path,edits={{old_text='nowhere',new_text='A'}}})
+-- The measured cause of a miss is not whitespace: the model writes an anchor it never read,
+-- and in 42 of 44 failures over 24h it was in nothing the session had seen. So the hint has to
+-- locate the *region* the model meant even when it misremembered the first line as well.
+local region=save('region','function alpha(value)\n  return value + 1\nend\n')
+local paraphrased=files.edit({path=region,edits={{old_text='function alpha(value)\n  return value + 2\nend',new_text='X'}}})
+check(paraphrased.error=='old_text_not_found' and paraphrased.nearest~=nil
+  and paraphrased.nearest.line==1 and paraphrased.nearest.last_line==3
+  and paraphrased.nearest.text:find('return value + 1',1,true)~=nil,
+  'a paraphrased anchor points at the region that actually exists')
+local unrelated=files.edit({path=path,edits={{old_text='nothing like this is in the file at all',new_text='A'}}})
 check(unrelated.error=='old_text_not_found' and unrelated.nearest==nil,
   'and a miss with no candidate invents none')
 check(host.read_file(path)=='abcdef','later mismatch leaves bytes untouched')
