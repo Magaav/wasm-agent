@@ -115,12 +115,12 @@ M.admin = {
     stream = { type = "string", enum = {"stdout", "stderr"} }, offset = { type = "integer", minimum = 0 },
     limit = { type = "integer", minimum = 1, maximum = 24576 }, wait_ms = { type = "integer", minimum = 0, maximum = 10000 }
   }, {"action"}),
-  schema("read", "Read exact text with versioned line/byte-column continuation. Follow next_offset/next_column with version until eof; a long line may span pages.", {
+  schema("read", "Read exact text with versioned line/byte-column continuation. Ask for the range you need (offset/limit) rather than a whole file: a whole-file read fills the context budget and is usually not what the question needed, and a grep hit already gives the line number to start from. Follow next_offset/next_column with version until eof; a long line may span pages.", {
     path = { type = "string" },
     offset = { type = "integer", minimum = 1 },
     column = { type = "integer", minimum = 1 }, version = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 2000 } }, { "path" }),
-  schema("read_many", "Read several independent files or line ranges in one step. Results match individual read calls in request order; each item reports its own error.", {
+  schema("read_many", "Read several independent files or line ranges in one step. Prefer a line range per file: reading from a little before a known line is cheaper and more accurate than reading the file, and the whole-file read is what fills the budget. Results match individual read calls in request order; each item reports its own error.", {
     requests = { type = "array", minItems = 1, maxItems = 8, items = { type = "object",
       properties = { path = { type = "string" }, offset = { type = "integer", minimum = 1 },
         column = { type = "integer", minimum = 1 }, version = { type = "string" },
@@ -135,7 +135,7 @@ M.admin = {
       properties = { old_text = {type="string"}, new_text = {type="string"} }, required = {"old_text","new_text"} } }
   }, { "path" }),
   schema("ls", "List a directory (portable: works the same on every platform).", { path = { type = "string" } }),
-  schema("grep", "Literal substring search, not regex. Reports omitted files and clipped lines. Results use the supplied root; extensions are exact suffixes without dots.", {
+  schema("grep", "Literal substring search, not regex. Reports omitted files and clipped lines. Use a path to narrow the search, and read the matched range afterwards rather than whole files. Results use the supplied root; extensions are exact suffixes without dots.", {
     pattern = { type = "string" }, path = { type = "string" },
     ignore_case = {type="boolean"}, limit={type="integer",minimum=1,maximum=500},
     max_depth={type="integer",minimum=0,maximum=64}, extensions={type="array",items={type="string"}}
