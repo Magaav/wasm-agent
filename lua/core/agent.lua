@@ -19,6 +19,14 @@ local redact = dofile("lua/core/redact.lua")
 local M = {}
 M.__index = M
 
+-- A browser that reconnects can repaint durable rows first, then resume from this boundary. The host
+-- keeps only stream events after the latest checkpoint, which avoids duplicating transcript content.
+local function record_turn(self, turn)
+  local seq = memory.append_turn(self.session_id, turn)
+  self.emit({ type = "checkpoint", seq = seq })
+  return seq
+end
+
 local SYSTEM = table.concat({
   "You are wasm-agent, a concise, local-first assistant with durable memory.",
   "",
@@ -813,7 +821,7 @@ function M:maybe_compact(messages, force)
   local after = self:context_tokens()
   -- Record it in the transcript so a compaction (and the cache invalidation it
   -- causes) is visible in the session view instead of being invisible work.
-  memory.append_turn(self.session_id, {
+  record_turn(self, {
     role = "summary", content = merged, tokens = estimate_tokens(merged), debug = self.debug,
     ms = math.floor((host.now() - started) * 1000),
     trace = { {
@@ -907,14 +915,15 @@ function M:run_body(text, images)
   self.emit({ type = "status", text = "thinking" })
   self.debug = (memory.session(self.session_id) or {}).mode == "debug"
 
-  memory.append_turn(self.session_id, {
+  record_turn(self, {
     id=self.run_id,role = "user", content = text, images = images or {}, debug = self.debug,
   })
 
   if not provider.configured() then
     local reply = self:local_run(text)
-    memory.append_turn(self.session_id, { role = "assistant", content = reply, debug = self.debug })
-    self.emit({ type = "reply", text = reply })
+    local message_id = host.uuid()
+    record_turn(self, { id = message_id, role = "assistant", content = reply, debug = self.debug })
+    self.emit({ type = "reply", text = reply, message_id = message_id })
     telemetry.event(self.session_id,self.run_id,"","step","end",{outcome="local_fallback"})
     return reply
   end
@@ -1127,7 +1136,7 @@ function M:run_body(text, images)
       local problem = cancelled and "run_cancelled" or tostring(result)
       trace[#trace + 1] = { kind = "model_call", model = self.model, ok = false,
         ms = math.floor((host.now() - llm_started) * 1000), error = redact.text(problem):sub(1, 400) }
-      memory.append_turn(self.session_id, {
+      record_turn(self, {
         role = "assistant", content = "", ok = false, trace = trace, debug = self.debug,
         ms = math.floor((host.now() - run_started) * 1000),
       })
@@ -1230,7 +1239,7 @@ function M:run_body(text, images)
         failed_span.ok=false; failed_span.error=problem; failed_span.finish_reason=result.finish_reason
         failed_span.reasoning_bytes=#(result.reasoning or "")
       end
-      memory.append_turn(self.session_id,{role="assistant",content=result.content or "",reasoning=result.reasoning or "",ok=false,trace=trace})
+      record_turn(self,{role="assistant",content=result.content or "",reasoning=result.reasoning or "",ok=false,trace=trace})
       telemetry.event(self.session_id,self.run_id,"","step","end",{outcome=reason})
       error(problem)
     end
@@ -1257,7 +1266,7 @@ function M:run_body(text, images)
           -- budget, so a bounded head of it is kept where a reader can find it.
           span.reasoning_head = (result.reasoning or ""):sub(1, 2000)
         end
-        memory.append_turn(self.session_id, {
+        record_turn(self, {
           role = "assistant", content = "", reasoning=reply_reasoning, ok = false, trace = trace, debug = self.debug,
           ms = math.floor((host.now() - run_started) * 1000),
         })
@@ -1320,9 +1329,9 @@ function M:run_body(text, images)
         break
       end
     end
-      memory.append_turn(self.session_id, {
-      role = "assistant", content = result.content or "", tool_calls = calls, debug = self.debug,reasoning=result.reasoning or "",
-    })
+      record_turn(self, {
+        role = "assistant", content = result.content or "", tool_calls = calls, debug = self.debug,reasoning=result.reasoning or "",
+      })
 
     for _, call in ipairs(calls) do
       local function_ = call["function"] or {}
@@ -1338,7 +1347,7 @@ function M:run_body(text, images)
       -- inside one command - which used to appear only as a trace line that had not come back, and
       -- was then killed five minutes later. It reads as the agent being stuck rather than as a
       -- deadline that was always there, so the number is reported by the side that enforces it.
-      local emitted = { type = "tool", name = function_.name, arguments = args }
+      local emitted = { type = "tool", call_id = call.id, name = function_.name, arguments = args }
       if function_.name == "bash" or function_.name == "shell" then
         if host.exec_timeout then emitted.timeout_ms = math.floor(host.exec_timeout() * 1000) end
       end
@@ -1395,7 +1404,7 @@ function M:run_body(text, images)
         ms = math.floor((host.now() - tool_started) * 1000) }
       self.emit({ type = "tool_result", name = function_.name, result = output })
 
-      memory.append_turn(self.session_id, {
+      record_turn(self, {
         role = "tool", tool_call_id = call.id or "", tool_name = function_.name or "",
         content = content,
         ok = ok_tool, debug = self.debug,
@@ -1446,7 +1455,7 @@ function M:run_body(text, images)
   -- name the message *before* the record exists: the UI's topic carries the id it will ask
   -- about, and append_turn uses the same one so the topic and the ledger agree.
   local message_id = host.uuid()
-  memory.append_turn(self.session_id, {
+  record_turn(self, {
     id = message_id,ok=completed,
     role = "assistant", content = reply, reasoning=reply_reasoning, trace = trace, tokens = totals.total, debug = self.debug,
     ms = math.floor((host.now() - run_started) * 1000),

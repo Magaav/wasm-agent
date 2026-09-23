@@ -782,7 +782,12 @@ function currentTrace() {
 
 function addTool(name, args, options) {
   const boundMs = options && options.timeoutMs;
-  currentTrace().addTool(name, toolTitle(name, args), null, boundMs ? Math.round(boundMs / 1000) : null);
+  const callId = options && options.callId != null ? String(options.callId) : "";
+  if (callId && trace?.hasPendingCall(callId)) {
+    if (!replayingMessages) startToolTicker();
+    return;
+  }
+  currentTrace().addTool(name, toolTitle(name, args), null, boundMs ? Math.round(boundMs / 1000) : null, callId);
   lastTool = name;
   if (!replayingMessages) startToolTicker();
   pin();
@@ -1010,7 +1015,7 @@ function handleEvent(event) {
     // fallback so an in-flight line still says "of 300s" instead of only "42s".
     const boundMs = event.timeout_ms != null ? event.timeout_ms
       : (event.name === "bash" || event.name === "shell" ? execTimeoutSeconds * 1000 : null);
-    addTool(event.name, event.arguments, { timeoutMs: boundMs });
+    addTool(event.name, event.arguments, { timeoutMs: boundMs, callId: event.call_id });
   } else if (event.type === "tool_result") {
     settleTool(event.result, event.name);
   } else if (event.type === "delta") {
@@ -1024,7 +1029,17 @@ function handleEvent(event) {
     streamText += event.text || "";
     streamBody.textContent = stripThinking(streamText);
     pin();
-  } else if (event.type === "reply") {
+} else if (event.type === "reply") {
+    if (!replayingMessages && event.message_id && renderedMessageIds.has(String(event.message_id))) {
+      // The durable reply can be repainted before its trailing `reply` event is replayed.
+      // Keep the saved bubble and let `done` settle it without appending the answer twice.
+      clearStatus();
+      sealReasoning();
+      finishTrace();
+      streamBody = null;
+      streamText = "";
+      return;
+    }
     clearStatus();
     const finalText = stripThinking(event.text || streamText);
     if (streamBody) {
@@ -1053,6 +1068,7 @@ function handleEvent(event) {
     }
     streamBody = null;
     streamText = "";
+    if (event.message_id) renderedMessageIds.add(String(event.message_id));
     // The bubble stays open for the rest of the run. A model that speaks between tool batches is
     // still one run, and the run topic has to be able to span everything it did; closing the bubble
     // here was the bug - one run drew one bubble per reply. flushDecision(true) closes it, on `done`
@@ -1093,7 +1109,9 @@ function restoreDraft() {
 // that built it the first time, so the two cannot drift apart.
 let replayingMessages = false;
 let replayMessageEndedAt = 0;
-function repaintMessages(rows) {
+let replayKeepPending = false;
+let renderedMessageIds = new Set();
+function repaintMessages(rows, options = {}) {
   // A repaint is a view of durable rows, not a resumed event stream. In particular, an
   // assistant tool call without a result must never inherit a live timer from this page.
   stopToolTicker();
@@ -1106,6 +1124,8 @@ function repaintMessages(rows) {
   reasoningBlock = null;
   runStartedAt = 0;
   replayMessageEndedAt = 0;
+  replayKeepPending = options.keepPending === true;
+  renderedMessageIds = new Set();
   let rendered = 0;
   let failed = 0;
   let firstFailure = "";
@@ -1142,9 +1162,10 @@ function repaintMessages(rows) {
             const fn = raw.function || raw;
             let args = fn.arguments;
             if (typeof args === "string") { try { args = JSON.parse(args); } catch (error) { args = {}; } }
-            handleEvent({ type: "tool", name: fn.name, arguments: args || {} });
+            handleEvent({ type: "tool", call_id: raw.id, name: fn.name, arguments: args || {} });
           }
         }
+        if (message.id) renderedMessageIds.add(String(message.id));
       } else if (message.role === "tool") {
         handleEvent({ type: "tool_result", name: message.tool_name, result: { content: message.content } });
       }
@@ -1157,8 +1178,11 @@ function repaintMessages(rows) {
       }
     }
   }
-  if (trace) finishTrace();
+  const keepPending = replayKeepPending && trace?.pending;
+  if (trace && !keepPending) finishTrace();
   replayingMessages = false;
+  replayKeepPending = false;
+  if (keepPending) startToolTicker();
   // The transcript just drawn is history, so the bubble it ended on is closed. The `reply` handler
   // used to close it, and when that stopped (one bubble per run) this became the place that must:
   // without it the next thing that arrives is appended to the last repainted run's bubble, so a
@@ -1234,7 +1258,9 @@ async function restoreSessionOnce() {
         outcome = sessionOutcome(full);
       }
     }
-    if (full && Array.isArray(full.messages) && full.messages.length) repaintMessages(full.messages);
+    if (full && Array.isArray(full.messages) && full.messages.length) {
+      repaintMessages(full.messages, { keepPending: !!activeRun(health, wanted.id) });
+    }
     const unresolved = outcome.name === "failed" || outcome.name === "unfinished";
     if (unresolved) {
       const notice = document.createElement("div");
@@ -2858,16 +2884,18 @@ async function watch() {
 // of making the reader reload to see it.
 let sawTurnInFlight = false;
 let runPolling = false;
+let lastFollowAt = 0;
 // The thread's `last_seq` as of the last redraw, so a poll redraws only when the run moved.
 let followedSeq = null;
+let liveRunId = null;
+let liveEventSeq = 0;
+let liveCheckpointSeq = null;
+let liveRunPolling = false;
+let liveSyncFailed = false;
 
 // A run in flight that this window did NOT open - a reload during a run, or one a wake or a job
-// started - has no live channel: the node streams a run only to the request that opened it. The
-// ledger is a channel, and /session answers while the run is in flight (measured: 200 in ~500ms
-// against a running turn), so the window follows the run by re-reading it. Without this the
-// transcript sat frozen for the whole run and the reader reloaded to see anything - and the reload
-// showed the same frozen snapshot, because a reload does not reattach to a run either (measured:
-// 40s of node work, 0 bytes of page change).
+// started - lost its live socket. The window follows durable rows through /session and reconnects to
+// the node's bounded event tail for reasoning, tool steps and other output not saved yet.
 async function followRun() {
   if (!chatSession) return;
   // /sessions is small and carries the thread's `last_seq`; the 1.5 MB /session read happens only
@@ -2884,6 +2912,70 @@ async function followRun() {
   restorePlace();
 }
 
+// A page reload drops the original chat socket, but the node's run keeps going. The node retains only
+// events after the newest durable transcript checkpoint; repaint through that checkpoint before
+// applying the live tail, so saved tool calls/results are never duplicated.
+async function syncLiveRun(current) {
+  if (busy || !chatSession || !current || current.run_id == null || liveRunPolling) return;
+  liveRunPolling = true;
+  const id = Number(current.run_id);
+  if (liveRunId !== id) {
+    liveRunId = id;
+    liveEventSeq = 0;
+    liveCheckpointSeq = null;
+  }
+  try {
+    const response = await apiFetch("run-events", {
+      method: "POST",
+      headers: apiHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ thread: chatSession, run_id: id, after: liveEventSeq }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      if (response.status === 404) {
+        const latest = await nodeHealth();
+        if (!activeRun(latest)) {
+          await followRun();
+          liveRunId = null;
+          return;
+        }
+      }
+      throw new Error(payload.error || ("HTTP " + response.status));
+    }
+    if (liveSyncFailed) {
+      liveSyncFailed = false;
+      clearStatus();
+    }
+
+    if (liveCheckpointSeq !== payload.checkpoint_seq) {
+      // The checkpoint may have advanced after the preceding ledger poll. Read again before using
+      // its tail, and wait another cycle if the read worker has not exposed that row yet.
+      if (Number(payload.checkpoint_message_seq) > (Number(followedSeq) || 0)) await followRun();
+      if (Number(payload.checkpoint_message_seq) > (Number(followedSeq) || 0)) return;
+      liveCheckpointSeq = payload.checkpoint_seq;
+      liveEventSeq = Number(payload.checkpoint_seq) || 0;
+      if (payload.overflow) setStatus("live output exceeded the replay buffer; saved transcript is still syncing");
+      else clearStatus();
+    }
+    if (payload.overflow) {
+      liveEventSeq = Number(payload.next_seq) || liveEventSeq;
+      setStatus("live output exceeded the replay buffer; saved transcript is still syncing");
+      return;
+    }
+    for (const item of payload.events || []) {
+      const seq = Number(item.seq) || 0;
+      if (seq <= liveEventSeq) continue;
+      handleEvent(item.event);
+      liveEventSeq = seq;
+    }
+  } catch (error) {
+    liveSyncFailed = true;
+    setStatus("live sync retrying: " + String(error.message || error));
+  } finally {
+    liveRunPolling = false;
+  }
+}
+
 async function watchTurn() {
   // One at a time: a poll that has not answered yet is not a reason to start another, and on a
   // single-worker node that is the difference between asking and queueing.
@@ -2897,10 +2989,20 @@ async function watchTurn() {
       sawTurnInFlight = true;
       // Only when this window is not streaming the run itself: `busy` means its own stream is
       // drawing it live, and a repaint under a live stream would fight it for the same bubble.
-      if (!busy) await followRun();
+      if (!busy) {
+        if (!followedSeq || Date.now() - lastFollowAt >= 3000) {
+          lastFollowAt = Date.now();
+          await followRun();
+        }
+        await syncLiveRun(current);
+      }
     } else if (sawTurnInFlight) {
       sawTurnInFlight = false;
+      liveRunId = null;
+      liveEventSeq = 0;
+      liveCheckpointSeq = null;
       if (chatSession) {
+        clearStatus();
         rememberPlace();
         await restoreSession();
         restorePlace();
@@ -2908,7 +3010,7 @@ async function watchTurn() {
     }
   } catch (error) { /* the node is down; watchNode handles that */ }
   runPolling = false;
-  setTimeout(watchTurn, 3000);
+  setTimeout(watchTurn, 1000);
 }
 
 // ---- native companion window (wa-window / WebView2) ----------------------

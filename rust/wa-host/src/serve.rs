@@ -69,6 +69,64 @@ static UI_SEEN_MS: AtomicU64 = AtomicU64::new(0);
 /// that can say "the UI reported this at 12:04" is a node whose window can be diagnosed without a log dive.
 static UI_ERROR: Mutex<Option<(String, u64)>> = Mutex::new(None);
 
+/// Replay window for an active run after its browser connection goes away. Events through the latest
+/// transcript checkpoint are already recoverable from the session ledger, so only the unsaved tail is
+/// retained here. This is process memory and is discarded as soon as the run settles.
+const RUN_EVENT_REPLAY_BYTES: usize = 4 * 1024 * 1024;
+static RUN_EVENTS: OnceLock<Mutex<std::collections::HashMap<u64, RunEventLog>>> = OnceLock::new();
+
+#[derive(Default)]
+struct RunEventLog {
+    next_seq: u64,
+    checkpoint_seq: u64,
+    checkpoint_message_seq: u64,
+    events: Vec<(u64, serde_json::Value)>,
+    bytes: usize,
+    overflow: bool,
+}
+
+fn run_events() -> &'static Mutex<std::collections::HashMap<u64, RunEventLog>> {
+    RUN_EVENTS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn begin_run_events(run_id: u64) {
+    if let Ok(mut logs) = run_events().lock() {
+        logs.insert(run_id, RunEventLog::default());
+    }
+}
+
+fn finish_run_events(run_id: u64) {
+    if let Ok(mut logs) = run_events().lock() {
+        logs.remove(&run_id);
+    }
+}
+
+fn record_run_event(run_id: u64, payload: &str) {
+    let Ok(event) = serde_json::from_str::<serde_json::Value>(payload) else { return };
+    let Ok(mut logs) = run_events().lock() else { return };
+    let Some(log) = logs.get_mut(&run_id) else { return };
+    log.next_seq = log.next_seq.saturating_add(1);
+    let seq = log.next_seq;
+    if event.get("type").and_then(|value| value.as_str()) == Some("checkpoint") {
+        log.checkpoint_seq = seq;
+        log.checkpoint_message_seq = event.get("seq").and_then(|value| value.as_u64()).unwrap_or(0);
+        log.events.clear();
+        log.bytes = 0;
+        log.overflow = false;
+        return;
+    }
+    if log.overflow { return; }
+    let bytes = payload.len();
+    if log.bytes.saturating_add(bytes) > RUN_EVENT_REPLAY_BYTES {
+        log.events.clear();
+        log.bytes = 0;
+        log.overflow = true;
+        return;
+    }
+    log.bytes += bytes;
+    log.events.push((seq, event));
+}
+
 /// How many interpreters a node runs, and how it decides.
 ///
 /// Worker 0 is the run worker and always exists: it owns every route that changes something - runs,
@@ -802,7 +860,7 @@ fn health_body() -> Vec<u8> {
 /// conversation, or to nobody. A sink that lives with the run cannot be shared by mistake.
 enum Sink {
     /// A live SSE socket for the run that owns it.
-    Socket(TcpStream),
+    Socket { stream: TcpStream, run_id: u64 },
     /// A buffer, for a run relayed to a peer that cannot hold a live connection.
     Buffer(Rc<RefCell<String>>),
 }
@@ -857,9 +915,10 @@ pub fn write_event(payload: &str) {
                 buffer.push_str(payload);
                 buffer.push_str("\n\n");
             }
-            Some(Sink::Socket(socket)) => {
-                let _ = socket.write_all(format!("data: {payload}\n\n").as_bytes());
-                let _ = socket.flush();
+            Some(Sink::Socket { stream, run_id }) => {
+                record_run_event(*run_id, payload);
+                let _ = stream.write_all(format!("data: {payload}\n\n").as_bytes());
+                let _ = stream.flush();
             }
             None => {}
         }
@@ -1086,6 +1145,53 @@ fn handle_runs(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<Resol
     }
 }
 
+/// Return the active run's uncommitted stream tail to its owner. Durable transcript rows are marked
+/// with checkpoints in the event log, so a reconnect can repaint the ledger through that point and
+/// then apply only events that have not reached the ledger yet.
+fn handle_run_events(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<ResolveRequest>) -> Reply {
+    let parsed: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null);
+    let conversation = parsed.get("thread").and_then(|value| value.as_str()).unwrap_or_default();
+    let Some(run_id) = parsed.get("run_id").and_then(|value| value.as_u64()) else {
+        return (400, "application/json", b"{\"error\":\"run_id_required\"}".to_vec());
+    };
+    if conversation.is_empty() {
+        return (400, "application/json", b"{\"error\":\"conversation_required\"}".to_vec());
+    }
+    let owner = match resolve_identity(resolve_tx, &request.session) {
+        Ok(owner) => owner,
+        Err((status, error, hint)) => {
+            return (status, "application/json", serde_json::json!({"error": error, "hint": hint}).to_string().into_bytes());
+        }
+    };
+    let Some(scheduler) = scheduler::global() else {
+        return (503, "application/json", b"{\"error\":\"admission_unavailable\"}".to_vec());
+    };
+    if !scheduler.runs_for(&owner, conversation).iter().any(|run| run.run_id == run_id) {
+        return (404, "application/json", b"{\"error\":\"run_not_found\"}".to_vec());
+    }
+    let after = parsed.get("after").and_then(|value| value.as_u64()).unwrap_or(0);
+    let Ok(logs) = run_events().lock() else {
+        return (503, "application/json", b"{\"error\":\"run_event_lock_unavailable\"}".to_vec());
+    };
+    let Some(log) = logs.get(&run_id) else {
+        return (404, "application/json", b"{\"error\":\"run_stream_unavailable\"}".to_vec());
+    };
+    let events: Vec<serde_json::Value> = log.events.iter()
+        .filter(|(seq, _)| *seq > after.max(log.checkpoint_seq))
+        .map(|(seq, event)| serde_json::json!({"seq": seq, "event": event}))
+        .collect();
+    let body = serde_json::json!({
+        "ok": true,
+        "run_id": run_id,
+        "checkpoint_seq": log.checkpoint_seq,
+        "checkpoint_message_seq": log.checkpoint_message_seq,
+        "next_seq": log.next_seq,
+        "overflow": log.overflow,
+        "events": events,
+    }).to_string();
+    (200, "application/json", body.into_bytes())
+}
+
 /// Bound the HTTP `await` of a subagent control call. A caller may ask to wait minutes; the HTTP
 /// route holds a control slot, and a slot held for minutes is a slot `cancel` and `start` cannot
 /// use. The tool-level await may be longer because it runs inside a run, not on the control lane.
@@ -1244,7 +1350,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
             _ => continue,
         };
         if std::env::var("WASM_AGENT_MANAGED").as_deref() == Ok("1")
-            || matches!(split_path(&request.path).0.as_str(), "/jobs" | "/operations" | "/operation" | "/subagents" | "/runs") {
+            || matches!(split_path(&request.path).0.as_str(), "/jobs" | "/operations" | "/operation" | "/subagents" | "/runs" | "/run-events") {
             let host = header_of(&request.node_headers, "host").to_ascii_lowercase();
             let origin = header_of(&request.node_headers, "origin").to_ascii_lowercase();
             let port = stream.local_addr().map(|a| a.port()).unwrap_or(0);
@@ -1271,6 +1377,11 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
         // is bounded by the resolver thread.
         if split_path(&request.path).0 == "/runs" && request.method == "POST" {
             let (status, content_type, body) = handle_runs(&request, &resolve_tx);
+            let _ = respond(&mut stream, status, content_type, &body);
+            continue;
+        }
+        if split_path(&request.path).0 == "/run-events" && request.method == "POST" {
+            let (status, content_type, body) = handle_run_events(&request, &resolve_tx);
             let _ = respond(&mut stream, status, content_type, &body);
             continue;
         }
@@ -1518,11 +1629,18 @@ fn worker_loop(
                     set_current_run_io(request.run_cancel.clone(), request.run_sockets.clone(), format!("run:{}", request.run_id));
                     scheduler::mark_running(request.run_id);
                 }
+                let replay_run = is_run_route(&request) && request.accept_sse;
+                if replay_run && !run_cancel_requested() {
+                    begin_run_events(request.run_id);
+                }
                 if is_run_route(&request) && run_cancel_requested() {
                     // Cancelled while queued: settle its own stream exactly once and never execute.
                     let _ = settle_cancelled_run(&mut stream, &request);
                 } else {
                     let _ = handle(&lua, &agent_ui, &mut stream, &request);
+                }
+                if replay_run {
+                    finish_run_events(request.run_id);
                 }
                 if is_run_route(&request) {
                     set_current_run_io(None, None, String::new());
@@ -2014,7 +2132,10 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream, request: &Req
             // The sink belongs to this run for exactly as long as the call below runs.
             // `try_clone` gives the run its own handle; if it fails the run still executes
             // and simply has no stream, rather than writing into another run's socket.
-            let _sink = stream.try_clone().ok().map(|clone| SinkGuard::set(Sink::Socket(clone)));
+            let _sink = stream.try_clone().ok().map(|clone| SinkGuard::set(Sink::Socket {
+                stream: clone,
+                run_id: request.run_id,
+            }));
             let node = header_of(&node_headers, "x-wa-node");
             if let Err(error) = lua.call_string("wa_reply_stream", &[text.as_str(), session, node.as_str()]) {
                 lua.rollback_if_open();
@@ -2031,7 +2152,10 @@ fn handle(lua: &Lua, ui: &std::path::Path, stream: &mut TcpStream, request: &Req
               Connection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
         )?;
         stream.flush()?;
-        let _sink = stream.try_clone().ok().map(|clone| SinkGuard::set(Sink::Socket(clone)));
+        let _sink = stream.try_clone().ok().map(|clone| SinkGuard::set(Sink::Socket {
+            stream: clone,
+            run_id: request.run_id,
+        }));
         // A peer run whose signature was verified at admission uses the verified-author entry point
         // and does not re-verify (a second check of the same signed request is a replay). A direct
         // call that skipped admission still verifies here.
