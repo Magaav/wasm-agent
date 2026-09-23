@@ -28,6 +28,22 @@ local RESCAN_SECONDS = 3600
 
 local function trim(text) return (tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
 
+-- The oldest message this reader still owes a decision for, asked of the ledger rather than carried in the
+-- map: the map names the messages, and every one of them was recorded here when it was read, so one query
+-- answers "how far back must the window reach" - including for entries written before this existed.
+local function oldest_owed(handoffs)
+  local ids = {}
+  for id in pairs(handoffs) do ids[#ids + 1] = id end
+  if #ids == 0 then return nil end
+  local marks = {}
+  for index = 1, #ids do marks[index] = "?" end
+  local rows = json.decode(host.sql_query(
+    "SELECT MIN(sent_at) AS oldest FROM ledger_messages WHERE message_id IN (" ..
+    table.concat(marks, ",") .. ")", json.encode(ids)) or "")
+  if type(rows) == "table" and rows[1] then return tonumber(rows[1].oldest) end
+  return nil
+end
+
 local function quote(value) return "'" .. tostring(value or ""):gsub("'", "'\\''") .. "'" end
 
 -- `host.exec` hands back a JSON *string* (the host pushes one value), so everything below reads it
@@ -132,6 +148,27 @@ local function main()
   memory.setup()
   local cursor = tonumber(memory.meta_get("whatsapp_cursor") or 0) or 0
   local since = math.max(0, cursor - RESCAN_SECONDS)
+  -- Messages this reader has handed on, and how many times, keyed by message id. Durable, because the
+  -- process that hands a message on is not the one that gets to see it decided: a restart in between would
+  -- otherwise forget that anything is owed. This is also what lets a message *below* the cursor be handed
+  -- on again - the child's idempotency key makes that a reconcile, not a second child.
+  local handoffs = {}
+  do
+    local ok, stored = pcall(json.decode, memory.meta_get("whatsapp_handoffs") or "")
+    if ok and type(stored) == "table" then
+      for key, value in pairs(stored) do
+        local count = tonumber(value)
+        if count and count > 0 then handoffs[tostring(key)] = count end
+      end
+    end
+  end
+  -- The window must reach every message that is still owed a decision. The cursor moves past *settled*
+  -- messages, so a newer settled one can leave an owed message far below it - outside the ordinary window
+  -- above - and then the reader never returns that message again: it is neither re-handed nor pruned, and
+  -- this map holds it forever (measured live: the map still held a message whose decision had arrived
+  -- twenty minutes earlier). The floor is the oldest owed message, whatever the cursor says.
+  local oldest = oldest_owed(handoffs)
+  if oldest and (oldest - 1) < since then since = math.max(0, oldest - 1) end
 
   -- The reader writes its payload to a file because it does not fit in a pipe; this reads it back and
   -- removes it. A failure keeps it, because the one useful thing about a failed read is the bytes
@@ -221,20 +258,7 @@ local function main()
   local skipped_decided = 0
   -- How many times one message may be handed on before the reader stops trying.
   local MAX_HANDOFFS = 3
-  -- Messages this reader has handed on, and how many times, keyed by message id. Durable, because the
-  -- process that hands a message on is not the one that gets to see it decided: a restart in between would
-  -- otherwise forget that anything is owed. This is also what lets a message *below* the cursor be handed
-  -- on again - the child's idempotency key makes that a reconcile, not a second child.
-  local handoffs = {}
-  do
-    local ok, stored = pcall(json.decode, memory.meta_get("whatsapp_handoffs") or "")
-    if ok and type(stored) == "table" then
-      for key, value in pairs(stored) do
-        local count = tonumber(value)
-        if count and count > 0 then handoffs[tostring(key)] = count end
-      end
-    end
-  end
+  -- (The owed map itself is loaded before the read, because the read window depends on it.)
   local handoffs_changed = false
   -- Every message that already has a durable decision, in one query: a lookup per message would be one
   -- sqlite round trip per message per pass, and the whole point of this pass is that it is cheap. If the
@@ -389,6 +413,61 @@ local function main()
   -- The dump has done its job; leaving it would leave a copy of the inbox in the temp directory.
   if host.exec then pcall(host.exec, "rm -f " .. quote(dump), "") end
   local elapsed = host.monotonic_ms and (host.monotonic_ms() - started) or 0
+  -- What the copilot did *as the operator* since the last pass. A reply that went out to somebody else is an
+  -- effect on their conversation, and the operator has to see it in their own inbox: the ledger and the job
+  -- history are not where they read, and "the copilot answered someone for you" is the one thing they must
+  -- not have to go looking for. Deterministic (a query, no model), bounded, and one line per send: a reply
+  -- that did NOT confirm is reported as not sent rather than not at all.
+  --
+  -- It runs in the pipeline mode only, because the pipeline's shell script is what sends the notes; the
+  -- cursor advances with the notices, so the same send is never reported twice.
+  local REPORT_LIMIT = 3
+  local notices = {}
+  if json_events then
+    local reported_at = tonumber(memory.meta_get("whatsapp_reported_at") or 0) or 0
+    local reported_upto = reported_at
+    -- The first pass with this feature announces nothing and adopts "now": the alternative is a burst of
+    -- notices about sends that were already in the ledger before anybody asked to be told about them. Being
+    -- told starts with the next send, which is the one nobody has seen yet.
+    local rows = {}
+    if reported_at <= 0 then
+      memory.meta_set("whatsapp_reported_at", tostring(host.now()))
+    else
+      rows = json.decode(host.sql_query(
+        "SELECT s.message_id, s.conversation_id, s.state, s.body, s.updated_at, c.title " ..
+        "FROM effect_sends s LEFT JOIN conversations c ON c.id = s.conversation_id " ..
+        "WHERE s.updated_at > ? ORDER BY s.updated_at LIMIT ?",
+        json.encode({ reported_at, REPORT_LIMIT })) or "")
+    end
+    if type(rows) == "table" and not rows.error then
+      for _, row in ipairs(rows) do
+        local who = tostring(row.title or "")
+        if who == "" then who = tostring(row.conversation_id or "?") end
+        -- One line, one field: the shell parses these as `|`-separated, so a pipe or a newline in a reply
+        -- body would silently become another notice or another field.
+        local said = trim((tostring(row.body or ""):gsub("%s+", " ")):gsub("|", "/")):sub(1, 200)
+        local state = tostring(row.state or "")
+        local detail
+        if state == "sent" then
+          detail = string.format("replied for you to %s (id %s): \"%s\"", who, tostring(row.message_id), said)
+        else
+          detail = string.format("a reply for you to %s (id %s) is NOT confirmed as sent (state %s) - check it",
+            who, tostring(row.message_id), state)
+        end
+        notices[#notices + 1] = {
+          message_id = tostring(row.message_id),
+          conversation_id = tostring(row.conversation_id or ""),
+          state = state,
+          detail = detail,
+        }
+        local at = tonumber(row.updated_at) or 0
+        if at > reported_upto then reported_upto = at end
+      end
+    end
+    if reported_upto > reported_at then
+      memory.meta_set("whatsapp_reported_at", tostring(reported_upto))
+    end
+  end
   -- One line, greppable, with the numbers that say whether the diff is working: `read` is what the
   -- reader returned (the rescan window), `new` is what the ledger did not already have.
   if json_events then
@@ -397,6 +476,7 @@ local function main()
     local owed = 0
     for _ in pairs(handoffs) do owed = owed + 1 end
     print(json.encode({ events = events, unanswerable = unanswerable, exhausted = exhausted,
+      notices = notices,
       operator_answered = skipped_answered, already_decided = skipped_decided,
       still_owed = owed, decisions_error = decisions_error,
       cursor = math.floor(cursor) }))
