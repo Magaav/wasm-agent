@@ -252,10 +252,16 @@ fn is_read_route(request: &Request) -> bool {
         return false;
     }
     let (route, _) = split_path(&request.path);
+    // `/sync/head` is a pure read - the node's identity and its journal cursor - but the list
+    // named only `/sync`, so the sub-route fell through to worker 0 and queued behind whatever
+    // run was in flight. Measured live: with a run 457s into a turn, `/sync/head` returned no
+    // bytes at all within 5s while `/health` answered instantly, and the two-node suite reads
+    // its node id from exactly this route.
     matches!(
         route.as_str(),
         "/sessions" | "/session" | "/models" | "/me" | "/users" | "/nodes" | "/skills"
-            | "/memories" | "/status" | "/spells" | "/sync" | "/toolchain" | "/messages" | "/observability/events"
+            | "/memories" | "/status" | "/spells" | "/sync" | "/sync/head" | "/toolchain"
+            | "/messages" | "/observability/events"
     )
 }
 
