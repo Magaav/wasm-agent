@@ -242,6 +242,12 @@ fn index_resolves_callers_across_files_and_capabilities() {
         callers.iter().any(|p| p.ends_with("agent.lua")),
         "caller in agent.lua: {callers:?}"
     );
+    assert!(
+        def.2
+            .iter()
+            .any(|e| e.path == "lua/core/agent.lua" && e.line == 3),
+        "incoming edges must retain the call site, not only the enclosing function"
+    );
 
     // host.uuid became a capability node, not a call to nowhere.
     let caps = store.capabilities().unwrap();
@@ -249,6 +255,102 @@ fn index_resolves_callers_across_files_and_capabilities() {
         .iter()
         .any(|(name, uses)| name == "host.uuid" && *uses >= 1));
 
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn query_ranks_named_functions_before_path_matches() {
+    let dir = temp_dir("query-rank");
+    std::fs::create_dir_all(dir.join("lua/core")).unwrap();
+    std::fs::create_dir_all(dir.join("docs")).unwrap();
+    std::fs::write(
+        dir.join("lua/core/subagents.lua"),
+        "local x = 1\nfunction wa_subagents() return x end\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("docs/SUBAGENTS.md"), "# Subagents\n").unwrap();
+    let db = dir.join("graph.db");
+    let mut store = Store::open(&db).unwrap();
+    store.index(&dir, false).unwrap();
+
+    let top = store.query("subagents", 1).unwrap();
+    assert_eq!(top.len(), 1);
+    assert_eq!(top[0].name, "wa_subagents");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn lua_pcall_of_named_function_is_a_path_edge() {
+    let dir = temp_dir("lua-pcall");
+    std::fs::write(
+        dir.join("run.lua"),
+        "local M = {}\nfunction M.start() end\nfunction M.control() return M.start() end\nfunction wa_subagents() return pcall(M.control, {}) end\n",
+    ).unwrap();
+    let db = dir.join("graph.db");
+    let mut store = Store::open(&db).unwrap();
+    store.index(&dir, false).unwrap();
+
+    let path = store
+        .path("wa_subagents", "M.start")
+        .unwrap()
+        .expect("pcall invokes M.control");
+    let names: Vec<&str> = path.iter().map(|(node, _)| node.name.as_str()).collect();
+    assert_eq!(names, vec!["wa_subagents", "M.control", "M.start"]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn rust_route_reaches_string_named_lua_entrypoint() {
+    let dir = temp_dir("rust-lua-route");
+    std::fs::write(
+        dir.join("serve.rs"),
+        "fn dispatch(lua: &Lua, route: &str) { match route { \"/subagents\" => subagent_reply(lua), _ => () } }\nfn subagent_reply(lua: &Lua) { lua.call_string(\"wa_subagents\", &[]); }\nfn dynamic(lua: &Lua, name: &str) { lua.call_string(name, &[]); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("subagents.lua"),
+        "function wa_subagents() return pcall(M.control, {}) end\nfunction M.control() return M.start() end\nfunction M.start() end\n",
+    )
+    .unwrap();
+    let db = dir.join("graph.db");
+    let mut store = Store::open(&db).unwrap();
+    store.index(&dir, false).unwrap();
+
+    let routes = store.query("/subagents", 10).unwrap();
+    assert!(routes
+        .iter()
+        .any(|node| node.kind == "route" && node.name == "/subagents"));
+    let path = store
+        .path("dispatch", "M.start")
+        .unwrap()
+        .expect("cross-language path");
+    let names: Vec<&str> = path.iter().map(|(node, _)| node.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "dispatch",
+            "subagent_reply",
+            "wa_subagents",
+            "M.control",
+            "M.start"
+        ]
+    );
+    assert!(store.path("dynamic", "M.start").unwrap().is_none());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn old_content_only_stamps_are_reindexed_after_extractor_upgrade() {
+    let dir = temp_dir("extract-version");
+    std::fs::write(dir.join("run.lua"), "function run() end\n").unwrap();
+    let db = dir.join("graph.db");
+    let mut store = Store::open(&db).unwrap();
+    assert_eq!(store.index(&dir, false).unwrap().indexed, 1);
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute("UPDATE files SET hash=substr(hash,3)", [])
+        .unwrap();
+    assert_eq!(store.index(&dir, false).unwrap().indexed, 1);
+    assert_eq!(store.index(&dir, false).unwrap().unchanged, 1);
     std::fs::remove_dir_all(&dir).ok();
 }
 

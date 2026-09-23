@@ -50,6 +50,16 @@ function can have hundreds of callers; the model needs the shape and the first
 few places to look). It tolerates a host that predates the capability and reports
 `graph_unavailable`.
 
+`explain` reports incoming callers at the exact call line, not the enclosing
+function's definition line. `query` ranks symbol-name matches before path and
+detail matches and returns 12 compact rows by default, with `truncated` when
+more matches exist. Pass a larger `limit` only when those rows are insufficient.
+The Lua extractor also treats a statically named first argument to `pcall` or
+`xpcall` as a call edge, so a path can follow that common wrapper.
+Rust literal `lua.call_string("entrypoint", ...)` calls bridge to the exported
+Lua function, and literal HTTP paths are queryable as `route` nodes. An
+extractor-version stamp forces unchanged files to reindex after this upgrade.
+
 ## How the model reaches it
 
 The `graph` tool is the model surface (`explain`/`query`/`path`/`caps`/`stats`/

@@ -37,9 +37,18 @@ end
 
 function M.query(text, opts)
   if type(text) ~= "string" or text == "" then return nil, "query_required" end
-  local rows, err = call("graph_query", text, json.encode(opts or {}))
+  -- A broad name used to return 50 path matches before the useful symbol. Fetch one extra
+  -- row so the model can tell whether a compact answer omitted more candidates.
+  local limit = math.max(1, math.min(tonumber(opts and opts.limit) or 12, 200))
+  local rows, err = call("graph_query", text, json.encode({ limit = limit + 1 }))
   if not rows then return nil, err end
-  return { query = text, count = #rows, results = rows }
+  local truncated = #rows > limit
+  local results = {}
+  for i = 1, math.min(#rows, limit) do
+    local row = rows[i]
+    results[#results + 1] = { kind = row.kind, name = row.name, path = row.path, line = row.line }
+  end
+  return { query = text, count = #results, truncated = truncated, results = results }
 end
 
 local function edge_label(edge)
@@ -63,9 +72,12 @@ function M.explain(name, opts)
       if #uses >= 15 then break end
     end
     for _, edge in ipairs(entry.incoming or {}) do
-      local where = tostring(edge.dst_path or edge.path or "?") .. ":" .. tostring(edge.dst_line or edge.line or 0)
-      callers[#callers + 1] = where
-      if #callers >= 15 then break end
+      if edge.kind == "calls" or edge.kind == "capability" then
+        -- For an incoming edge, path:line is the call site. dst_path:dst_line is
+        -- the caller's definition and repeats for every call in that function.
+        callers[#callers + 1] = tostring(edge.path or "?") .. ":" .. tostring(edge.line or 0)
+        if #callers >= 15 then break end
+      end
     end
     out[#out + 1] = {
       kind = node.kind, name = node.name, path = node.path, line = node.line,

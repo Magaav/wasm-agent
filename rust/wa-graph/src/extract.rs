@@ -583,9 +583,44 @@ fn walk_rust(ctx: &mut Ctx, node: Node) -> bool {
             if let Some(f) = node.child_by_field_name("function") {
                 let target = ctx.text(f).to_string();
                 ctx.push_edge("calls", target, node);
+                // The host invokes exported Lua entrypoints by string. Preserve that
+                // cross-language call, but only when the name is a literal identifier.
+                if ctx.text(f).ends_with(".call_string") {
+                    if let Some(arguments) = node.child_by_field_name("arguments") {
+                        if let Some(first) = arguments.named_child(0) {
+                            if first.kind() == "string_literal" {
+                                let name = strip_quotes(ctx.text(first));
+                                if !name.is_empty()
+                                    && name
+                                        .chars()
+                                        .next()
+                                        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                                    && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                                {
+                                    ctx.push_edge("calls", name, node);
+                                }
+                            }
+                        }
+                    }
+                }
             }
             // arguments may contain further calls
             recurse(ctx, node);
+            true
+        }
+        "string_literal" => {
+            // HTTP route patterns are otherwise invisible to a symbol-only graph.
+            // Index literal paths, not arbitrary strings or interpolated expressions.
+            let route = strip_quotes(ctx.text(node));
+            if route.len() > 1
+                && route.len() <= 128
+                && route.starts_with('/')
+                && route.chars().skip(1).all(|c| {
+                    c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | ':' | '*' | '.')
+                })
+            {
+                ctx.push_node("route", route, node, None);
+            }
             true
         }
         "macro_invocation" => {
@@ -626,6 +661,31 @@ fn walk_lua(ctx: &mut Ctx, node: Node) -> bool {
                     "calls"
                 };
                 ctx.push_edge(edge_kind, target, node);
+                // `pcall(M.control, ...)` invokes its first argument even though that argument
+                // is not a syntactic function_call. Record only a plain named function here;
+                // closures and computed expressions cannot be resolved safely by name.
+                if matches!(ctx.text(f), "pcall" | "xpcall") {
+                    if let Some(arguments) = node.child_by_field_name("arguments") {
+                        let first = ctx
+                            .text(arguments)
+                            .trim_start_matches('(')
+                            .split(',')
+                            .next()
+                            .unwrap_or("")
+                            .trim();
+                        if !first.is_empty()
+                            && first
+                                .chars()
+                                .next()
+                                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                            && first
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':'))
+                        {
+                            ctx.push_edge("calls", first.to_string(), node);
+                        }
+                    }
+                }
             }
             recurse(ctx, node);
             true
