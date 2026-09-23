@@ -1,19 +1,20 @@
 -- Pi-style bounded model views with the complete output available as a file.
 -- Projection is done once when the result is produced, and persisted unchanged.
 --
--- The budget is 16 KiB, down from 50 KiB. Results accumulate in the request - the 48h export
--- shows 474 KB of tool results in the average request - so a per-result cap is paid once per
--- remaining round. Measured on the navigation fixture with the arms *interleaved* (4 pairs,
--- so a slow provider minute cannot favour one arm): 16 KiB used ~6% fewer tokens and ~11%
--- fewer calls than 50 KiB, and every answer was correct. An earlier non-interleaved batch
--- suggested 22%; that was the batch, not the budget. 8 KiB was no better and 4 KiB was worse
--- (more calls, and one run over budget), so this is the knee.
+-- The budget stays at 50 KiB, and that is a decision rather than an omission. 16 KiB was
+-- measured on the navigation fixture with the arms *interleaved* (4 pairs, so a slow provider
+-- minute cannot favour one arm): ~6% fewer tokens and ~11% fewer calls, every answer correct.
+-- That is a real saving, and it is not evidence that the task result never degrades - one
+-- fixture, four pairs, one model. A smaller view is less context for the model to reason with,
+-- so the default keeps the bytes and the knob is there for an operator who wants the trade:
+-- WASM_AGENT_TOOL_OUTPUT_BYTES. Prefer raw over compacted unless the loss is proven harmless.
 --
--- Nothing is lost: the complete output is stored as an artifact either way, and `tool_result`
--- reads it back by byte cursor. An operator may move the budget with WASM_AGENT_TOOL_OUTPUT_BYTES.
+-- What this change did keep is that the budget is now *one* number: the read page, the session
+-- byte page, the evidence pointer and this note all derive from it, where each previously
+-- hardcoded its own 50,000 or 20,000 and silently disagreed with the projector.
 local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
-local M = {MAX_BYTES=16*1024, MAX_LINES=2000}
+local M = {MAX_BYTES=50*1024, MAX_LINES=2000}
 -- An operator may tighten the per-result budget. The complete output is kept as an artifact
 -- either way, so a smaller view costs bytes and never data - but it can cost a *round*, and in
 -- a large session one extra round costs more than the bytes it saved. The default is therefore
