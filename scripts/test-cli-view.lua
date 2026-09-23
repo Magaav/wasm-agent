@@ -171,6 +171,22 @@ ok(view_lib.columns(plain_text:match("[^\n]*ctx[^\n]*")) <= 100, "and the footer
 local unmeasured = view_lib.footer({ rounds = 1, prompt = 100 }, { context = 0, budget = 128000 })
 ok(not has(unmeasured, "ctx"), "an unmeasured context is left out rather than shown as zero")
 
+-- The denominator is the *model's* window, resolved where compaction resolves it. This
+-- deployment's model has a 1,000,000-token window while the old global says 128000, so a
+-- footer that read the global reported the same context eight times fuller than it was.
+ok(view_lib.window("m", function() return { context = 1000000, source = "pi-model-store" } end) == 1000000,
+  "the footer divides by the model's window, not by the global")
+ok(has(view_lib.footer({ rounds = 1, prompt = 100 }, { context = 450000, budget = 1000000 }),
+  "ctx 45.0%/1.0M"), "and prints that window")
+ok(view_lib.window("m", function() return { context = 0, source = "unknown" } end)
+  == (tonumber(host.getenv("WASM_AGENT_LLM_CONTEXT")) or 0),
+  "an unknown window falls back to the global rather than guessing")
+ok(view_lib.window("m", function() error("no catalogue") end)
+  == (tonumber(host.getenv("WASM_AGENT_LLM_CONTEXT")) or 0),
+  "and a catalogue that fails does not take the banner down with it")
+ok(view_lib.window("m", nil) == (tonumber(host.getenv("WASM_AGENT_LLM_CONTEXT")) or 0),
+  "a missing resolver falls back too")
+
 -- The banner: where this chat is, and what it is running with. A chat in the wrong
 -- worktree is otherwise a mistake that costs an hour to notice.
 local banner = view_lib.banner({

@@ -27,7 +27,9 @@ Then watch the ledger rather than the process, and review the branch.
 `wa chat` keeps one line on screen for as long as a run is in flight: what it is doing,
 for how long, and which step. Each tool call gets a line that says what was run,
 whether it worked, how long it took, and what it printed, and the run ends with a footer
-carrying its own rounds, tools, tokens, cache hit rate and cost. The terminal title
+carrying its own rounds, tools, tokens, cache hit rate, cost and how full the model's
+context window is - the window resolved the way compaction resolves it, not from the
+global `WASM_AGENT_LLM_CONTEXT`, which cannot be right for every model. The terminal title
 carries the same phase, so a reader looking at another tab can still see it working.
 
 Two renderings, decided once, because a person and an orchestrator read the same process

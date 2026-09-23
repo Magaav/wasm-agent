@@ -165,7 +165,10 @@ function M.run(argv)
     title = "wa - " .. (workspace:match("([^/]+)$") or "chat"),
     workspace = workspace,
     branch = cli_view.branch(cwd),
-    budget = tonumber(host.getenv("WASM_AGENT_LLM_CONTEXT")) or 0,
+    -- The model's own window, the same one compaction uses; the env global is only a
+    -- fallback inside `cli_view.window`. Reading the global here reported a 1,000,000-token
+    -- model as 128.0k and made the footer's percentage eight times too high.
+    budget = cli_view.window(settings.model, function(model) return provider.budget(model) end),
     -- The terminal width when it says so, and otherwise the width every terminal has: a
     -- status line that wraps is erased only on its last row, which leaves the row above it
     -- behind as litter.
