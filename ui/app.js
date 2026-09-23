@@ -79,6 +79,10 @@ const controlText = document.getElementById("control-text");
 let renderer = null;
 let version = null;
 let busy = false;
+// Stop belongs to the request this window submitted. A conversation may have an older run
+// executing while this request waits behind it, so cancellation must carry this request's id.
+let activeRunId = null;
+let submittedRunIds = null;
 let statusLine = null;
 let streamBody = null;
 let streamText = "";
@@ -1307,6 +1311,7 @@ function startLiveness() {
     catch (error) { return; }   // the offline path owns that case and says its piece
     const running = activeRun(health);
     if (!running) { setLiveness(null); return; }
+    identifySubmittedRun(health);
     refreshOperationProgress(health, running);
 
     if (typeof health.exec_timeout_seconds === "number") execTimeoutSeconds = health.exec_timeout_seconds;
@@ -1322,6 +1327,7 @@ function startLiveness() {
     lastStalled = stalled;
     const working = stalled < 5000 || !climbingSince;
     const busyFor = running.busy_ms || running.ms || Date.now() - (runStartedAt || Date.now());
+    const ownState = (health.run_ids || []).find((run) => Number(run.run_id) === activeRunId)?.state;
     setLiveness({
       working,
       stalled,
@@ -1329,6 +1335,8 @@ function startLiveness() {
       climbing_ms: climbingSince ? Date.now() - climbingSince : 0,
       worker: health.worker || "alive",
       queue: health.queue || 0,
+      run_state: ownState,
+      current_run_id: running.run_id,
     });
   }, 1000);
 }
@@ -1352,14 +1360,28 @@ function setLiveness(info) {
   const seconds = (ms) => (ms / 1000).toFixed(0);
   if (info.working) {
     node.classList.remove("stuck");
-    node.textContent = "working — node beat " + info.stalled + " ms ago · this run "
-      + seconds(info.busy_ms) + "s" + (info.queue ? " · " + info.queue + " queued" : "");
+    if (info.run_state === "queued") {
+      node.textContent = "queued · this run has not started; waiting for run #"
+        + info.current_run_id + " · node beat " + info.stalled + " ms ago"
+        + (info.queue ? " · " + info.queue + " queued" : "");
+    } else {
+      node.textContent = "working — node beat " + info.stalled + " ms ago · this run "
+        + seconds(info.busy_ms) + "s" + (info.queue ? " · " + info.queue + " queued" : "");
+    }
   } else {
     node.classList.add("stuck");
     node.textContent = "possibly stuck — no node beat for " + seconds(info.climbing_ms) + "s"
       + " (worker: " + info.worker + ") · send to stop";
   }
   pin();
+}
+
+function identifySubmittedRun(health) {
+  if (activeRunId !== null || !submittedRunIds || !chatSession) return;
+  const candidates = (health?.run_ids || [])
+    .filter((run) => run.conversation === chatSession && !submittedRunIds.has(Number(run.run_id)))
+    .sort((a, b) => Number(a.run_id) - Number(b.run_id));
+  if (candidates.length) activeRunId = Number(candidates[candidates.length - 1].run_id);
 }
 
 function composedText(text) {
@@ -1443,6 +1465,8 @@ function clearStreamNotice() {
 }
 
 async function send(text, options = {}) {
+  activeRunId = null;
+  submittedRunIds = null;
   // The draft is going out, so what was stored is stale: a respawn must not put the sent prompt
   // back into the composer.
   clearDraft();
@@ -1465,6 +1489,16 @@ async function send(text, options = {}) {
   attachments.length = 0;
   renderAttachments();
   setStatus("wasm-agent is thinking…");
+  // /health is answered without waiting for a worker. Take the baseline before admitting this run
+  // so later polls can tell its queued id from an older run in the same conversation.
+  try {
+    const before = await (await apiFetch("health", { headers: apiHeaders() })).json();
+    submittedRunIds = new Set((before.run_ids || [])
+      .filter((run) => run.conversation === chatSession)
+      .map((run) => Number(run.run_id)));
+  } catch (error) {
+    submittedRunIds = new Set();
+  }
   // Declared out here, not inside the `try` below: the `finally` clears it, and a `const` inside the try
   // is not in scope there. It was inside, so every run ended by throwing `watchdog is not defined` from
   // the first line of the `finally` - which meant `clearInterval`, `setBusy(false)`, `controller = null`
@@ -1500,6 +1534,7 @@ async function send(text, options = {}) {
       asking = true;
       try {
         const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
+        identifySubmittedRun(health);
         // Asked and answered while the run was ending: say nothing. The run finished; there is
         // nothing to report and nothing to continue.
         if (turnFinished) { clearInterval(watchdog); asking = false; return; }
@@ -1928,11 +1963,26 @@ function syncUndoButtons() {}
 // node reports the settled state in the ledger and `/health`.
 function cancelActiveRun() {
   const thread = chatSession;
+  if (thread && activeRunId === null && submittedRunIds) {
+    // Admission and the next health poll can cross. Resolve the new id once more instead of
+    // falling back to the route's default, which would cancel the older running turn.
+    apiFetch("health", { headers: apiHeaders() }).then((response) => response.json()).then((health) => {
+      identifySubmittedRun(health);
+      if (activeRunId !== null) cancelRun(activeRunId);
+      else setStatus("this run is still being admitted — try stop again in a moment");
+    }).catch(() => setStatus("could not identify this run to stop it"));
+    return;
+  }
+  cancelRun(activeRunId);
+}
+
+function cancelRun(runId) {
+  const thread = chatSession;
   if (thread) {
     apiFetch("runs", {
       method: "POST",
       headers: apiHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ action: "cancel", thread }),
+      body: JSON.stringify({ action: "cancel", thread, ...(runId === null ? {} : { run_id: runId }) }),
     }).catch(() => { /* the abort below is what the reader sees; the node still gets the request */ });
   }
   controller?.abort();
