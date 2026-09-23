@@ -33,9 +33,10 @@ local workdir = os.getenv("WA_EXPERIMENT_DIR") or "/tmp"
 -- better" from being an opinion: F1 leaves observable evidence of a live process,
 -- F2 names a file and a function that either exist in the tree or do not.
 local TASKS = {
-  ["long-lived"] = "Start a process that appends one line to <FILE> every 2 seconds. " ..
-    "It must still be running when you finish - it has to outlive this task. " ..
-    "Prove it started by showing the file's contents once. Do not wait for it to end.",
+  ["long-lived"] = "Start a long-running background process, as a plain child process of your shell " ..
+    "(not a scheduled task, not a service, not a detached daemon). It must append one line to " ..
+    "<FILE> every 2 seconds and it must still be running when you finish - it has to outlive this " ..
+    "task. Prove it started by showing the file's contents once. Do not wait for it to end.",
   ["navigation"] = "Find where host.exec_timeout is read in this repository, and name the " ..
     "Lua file and the function that consumes it, with the line number. Do not modify anything.",
 }
@@ -92,6 +93,7 @@ for _, entry in ipairs(started) do
   local usage = result.usage or {}
 
   local tools, errors, reasoning_chars, first_tool, tokens_total = {}, {}, 0, "", 0
+  local adopted = {}
   local rows = memory.session_messages(receipt.session_id, { all = true })
   for _, row in ipairs(rows) do
     if row.role == "assistant" then
@@ -116,9 +118,47 @@ for _, entry in ipairs(started) do
       -- made a clean investigation look like a wall of refusals.
       local content = tostring(row.content or "")
       local decoded_ok, decoded = pcall(json.decode, content)
-      if decoded_ok and type(decoded) == "table" and (decoded.ok == false or decoded.error ~= nil) then
-        errors[#errors + 1] = tostring(decoded.error or content):sub(1, 200)
+      if decoded_ok and type(decoded) == "table" then
+        -- A promoted `bash` returns a receipt instead of a result; remember it so the
+        -- adoption can be checked after the child that started it has finished.
+        if decoded.promoted == true and decoded.operation_id then
+          adopted[#adopted + 1] = tostring(decoded.operation_id)
+        end
+        if decoded.ok == false or decoded.error ~= nil then
+          errors[#errors + 1] = tostring(decoded.error or content):sub(1, 200)
+        end
       end
+    end
+  end
+
+  -- Adoption is only real if the process is still running after the child that started
+  -- it has finished. The node is still alive here - it exits when this script ends, and
+  -- KILL_ON_JOB_CLOSE takes the job with it - so this is the only honest moment to look.
+  local adoption = {}
+  if #adopted > 0 then
+    -- The evidence of a live process is the file it was told to write, not the
+    -- operation's stdout: a backgrounded loop appends to its own log, so the shell's
+    -- stdout can stay empty while the process is healthy.
+    local function size_of(path)
+      local text = host.read_file and host.read_file(path)
+      return text and #text or -1
+    end
+    local before = {}
+    for _, op in ipairs(adopted) do
+      local view = json.decode(host.operation("status", json.encode({ id = op })) or "{}")
+      before[op] = { bytes = tonumber(view.output_bytes) or 0, file = size_of(entry.file) }
+    end
+    host.sleep(3000)
+    for _, op in ipairs(adopted) do
+      local view = json.decode(host.operation("status", json.encode({ id = op })) or "{}")
+      local after = { bytes = tonumber(view.output_bytes) or 0, file = size_of(entry.file) }
+      adoption[#adoption + 1] = {
+        operation_id = op, state = view.state, settled = view.settled, promoted = view.promoted,
+        stdout_bytes_before = before[op].bytes, stdout_bytes_after = after.bytes,
+        file_bytes_before = before[op].file, file_bytes_after = after.file,
+        still_running = view.settled ~= true,
+        file_grew = before[op].file >= 0 and after.file > before[op].file,
+      }
     end
   end
 
@@ -129,6 +169,7 @@ for _, entry in ipairs(started) do
     failure = final.error,
     first_tool = first_tool,
     tools = tools, errors = errors,
+    adoption = adoption,
     reasoning_chars = reasoning_chars,
     tokens_total = tokens_total,
     usage = usage,
