@@ -142,6 +142,35 @@ wa-sentinel job history              # one row per delivery
 - **Children wait for idle.** The inference lane is only claimed when the node is idle, deliberately, so a
   child never pushes a person's turn aside.
 
+## The source keeps itself up (deterministic)
+
+`scripts/whatsapp-source-ensure.sh` starts the browser, and it starts it the only way that survives
+**through the logon task**, because a browser spawned by an operation dies with the operation. One JSON
+object on stdout (the `run` contract), human lines on stderr, exit 0 only when the chain answers by proof.
+Idempotent: with the source up it is a single HTTP probe (~0.2 s), so a 120-second keeper is free.
+
+| what is wrong | what it does | how it fails |
+| --- | --- | --- |
+| nothing on 9222 | starts the task, waits for DevTools | `cdp_never_answered` |
+| 9222 held, DevTools dead, holder is **our** Chrome | kills that pid (its command line names the agent profile), starts fresh | — |
+| 9222 held by anything else | refuses; the port is not ours to take | `port_held_by_other`, naming the pid |
+| DevTools up, no WhatsApp page | opens the page over CDP (`/json/new`) | `no_whatsapp_page` |
+| page up, store unreadable | waits, then reports | `store_unreadable_chats_zero` — needs a human: scan the QR once |
+| the logon task is missing | refuses | `task_not_registered`, printing the installer command |
+
+Nothing has to remember it. The **logon task** `wasm-agent-whatsapp-chrome` starts the wrapper at logon,
+and the keeper job `whatsapp-source` (schedule, 120 s, action `run`) re-runs this script on the
+**deterministic lane** — so a person's turn never delays it and it costs no tokens. The agent's own surface
+is the spell `whatsapp-source-up`: one `run` step with `expect {ok:true}` and a post-assertion that reads
+`location.hostname` in the page, so a replay ends with the page *observed* rather than assumed.
+
+Measured on this machine: with the source up, `already-up` in 0.18 s; after `taskkill` killed the browser,
+one replay of the spell restored it in **68 s** and its post-assertion read `web.whatsapp.com`; a foreign
+listener on 9222 was refused with its pid; a missing task was refused with the installer command; and the
+installed wrapper, with no Chrome under `%ProgramFiles%`, printed the missing path and started nothing.
+What is **not** covered by that matrix: a logged-out WhatsApp. It is detected and reported as such, but
+reviving it needs a human with a phone — which is why the report says so instead of retrying.
+
 ## Failure modes this pipeline has already had
 
 Each of these was found live, with evidence, and fixed. They are the reason the checks above exist.

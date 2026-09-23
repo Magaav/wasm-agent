@@ -1233,6 +1233,10 @@ run_proof_fixture cursor 47 node scripts/test-whatsapp-cursor.cjs "$BIN"
 # The pipeline seam: a `returns` list reaches the foreach, a step that produced nothing fails the
 # delivery, and a no-op run is distinguishable from a dropped result. Real sentinel, mock store, no model.
 run_proof_fixture pipeline 19 node scripts/test-job-pipeline.cjs
+# The source keeper's categorical refusals, hermetically: a port held by something that is not the agent
+# browser is refused and left alone, and a missing logon task is named with the command that registers it.
+# Scratch ports and a task name that does not exist, so no browser and no real task is touched.
+node scripts/test-source-ensure.cjs
 
 # The UI tests are JS and run outside the embedded interpreter, so they need node
 # and they need the repo root as cwd (they read ui/app.js from disk). A test that does
