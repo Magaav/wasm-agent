@@ -12,6 +12,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+// Include extraction semantics in file stamps. A new binary must reparse unchanged
+// source after a graph upgrade; content-only stamps would leave old edges in place.
+const EXTRACT_VERSION: &str = "2";
+
 pub struct Store {
     conn: Connection,
 }
@@ -155,7 +159,7 @@ impl Store {
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
             let size = source.len() as i64;
-            let hash = fnv1a(source.as_bytes());
+            let hash = format!("{EXTRACT_VERSION}:{}", fnv1a(source.as_bytes()));
             seen.push(rel.clone());
 
             if !force {
@@ -474,13 +478,26 @@ impl Store {
 
     pub fn query(&self, text: &str, limit: i64) -> Result<Vec<NodeRow>> {
         let like = format!("%{text}%");
+        let member = format!("%.{text}");
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT n.id,n.kind,n.name,n.path,n.line,n.col,n.lang,n.detail
-             FROM nodes n LEFT JOIN edges e ON e.dst=n.id
-             WHERE n.name LIKE ?1 OR n.path LIKE ?1 OR n.detail LIKE ?1 OR e.target LIKE ?1
-             ORDER BY n.path, n.line LIMIT ?2",
+            "SELECT n.id,n.kind,n.name,n.path,n.line,n.col,n.lang,n.detail
+             FROM nodes n
+             WHERE n.name LIKE ?1 OR n.path LIKE ?1 OR n.detail LIKE ?1
+                OR EXISTS (SELECT 1 FROM edges e WHERE e.dst=n.id AND e.target LIKE ?1)
+             ORDER BY CASE
+                WHEN n.name=?2 THEN 0
+                WHEN n.name LIKE ?3 THEN 1
+                WHEN n.name LIKE ?1 THEN 2
+                WHEN n.path LIKE ?1 THEN 3
+                WHEN n.detail LIKE ?1 THEN 4
+                ELSE 5 END,
+                CASE WHEN n.kind IN ('fn','method','struct','module') THEN 0
+                     WHEN n.kind='file' THEN 1
+                     WHEN n.kind='capability' THEN 2
+                     WHEN n.kind='var' THEN 3 ELSE 4 END,
+                n.path,n.line LIMIT ?4",
         )?;
-        let rows = stmt.query_map(params![like, limit], row_to_node)?;
+        let rows = stmt.query_map(params![like, text, member, limit], row_to_node)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 

@@ -17,9 +17,9 @@ The node keeps the index fresh as files change, so you almost never call
 ```
 graph {action:"explain", name:"append_turn"}
 ```
-What is it, what does it use, who uses it. `definitions` lists each match with
-its `kind`, `path:line`, the `uses` (calls, capabilities, macros) and the
-`callers` (`path:line`). This is the one to start with.
+What is it, what does it use, who calls it. `definitions` lists each match with
+its `kind`, definition `path:line`, the `uses` (calls, capabilities, macros) and
+the `callers` at their exact call-site `path:line`. Start here when you know a symbol.
 
 ```
 graph {action:"path", from:"choose_worker", to:"append_turn"}
@@ -31,12 +31,18 @@ calls this", and do not read a shared callee as connecting two functions that
 merely both call it. `steps` is a chain; each step's `via` names the edge that
 reached it. Mentions in prose are deliberately ignored, so a hop is a real
 call/import, not a coincidence.
+For a known start and end, try `path` before broad name queries. The graph
+follows literal Rust `lua.call_string("entrypoint", ...)` calls into Lua and
+statically named `pcall`/`xpcall` targets.
 
 ```
 graph {action:"query", name:"routing_session"}
 ```
-Every definition or reference whose name matches. Use it when you know a word
-but not what it is.
+Ranked, compact symbol matches. Use it when you know a word but not the symbol.
+The default shows 12 results and `truncated` says whether more exist; pass
+`limit` to see more. Known symbols belong in `explain`, not broad `query` calls.
+Literal HTTP route patterns are indexed too: query `"/subagents"` to find the
+route line, then use its enclosing handler name as the start of `path`.
 
 ```
 graph {action:"caps"}

@@ -159,12 +159,7 @@ fn run() -> Result<(), String> {
                     if !inc.is_empty() {
                         println!("  ← used by:");
                         for e in inc {
-                            println!(
-                                "    {:9} {}:{}",
-                                e.kind,
-                                e.dst_path.as_deref().unwrap_or(&e.path),
-                                e.dst_line.unwrap_or(0)
-                            );
+                            println!("    {:9} {}:{}", e.kind, e.path, e.line);
                         }
                     }
                 }
@@ -191,7 +186,7 @@ fn run() -> Result<(), String> {
         "query" => {
             let text = args.positional.get(1).ok_or("query needs text")?;
             let store = Store::open(&db).map_err(|e| e.to_string())?;
-            let rows = store.query(text, 50).map_err(|e| e.to_string())?;
+            let rows = store.query(text, 12).map_err(|e| e.to_string())?;
             if args.json {
                 print!("[");
                 for (i, n) in rows.iter().enumerate() {

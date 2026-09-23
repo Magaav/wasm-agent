@@ -143,7 +143,7 @@ M.admin = {
   -- The code graph. This is the cheap first move for a navigation question: it returns
   -- definitions, callers and capabilities directly, where grep returns candidate lines
   -- that still need reading. The node keeps the graph fresh, so `index` is rarely needed.
-  schema("graph", "Navigate this codebase as a graph instead of grepping. Use it first when you need to find where something is defined, who calls it, or how two things connect. explain: what is X, what it uses and who uses it. query: find a name. path: how A reaches B (direction of use; not up to callers). caps: the host.* capabilities and how often each is called. stats/index: graph size and a manual rebuild (normally unnecessary - the node watches the tree).", {
+  schema("graph", "Find symbols and exact call sites with explain; trace known functions with path; use query to discover names or literal HTTP routes (e.g. /subagents). Use graph before grep for code navigation. For 'how A reaches B', call path(A,B) first, then read the returned lines; path crosses Rust call_string to Lua entrypoints. explain returns a definition, uses and exact caller lines. query ranks name matches first and returns 12 compact results by default; increase limit if truncated. caps lists host.* capabilities. stats/index inspect or rebuild the watched index.", {
     action = { type = "string", enum = { "explain", "query", "path", "caps", "stats", "index" } },
     name = { type = "string", description = "explain/query: the identifier to look up." },
     from = { type = "string", description = "path: start identifier." },
