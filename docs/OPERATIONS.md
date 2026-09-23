@@ -62,13 +62,28 @@ reconciliation, not automatic replay; lack of attachment is not proof of death. 
   previews; use cursor pages when exact output matters.
 * Tail truncation and incomplete capture are different facts. The former has
   artifact paths; the latter cannot be clean success. Disk/read failures are failures.
-* Normal completion reaps the shell and terminates descendants. A shell exiting
-  while background descendants survive is a failure, even if they redirected their
-  pipes: cleanup must not masquerade as success. The original process exit code and
-  already printed output are preserved.
-* Foreground/background is an explicit API choice. To keep a server running, use
-  `operation start` and leave the server foreground in that shell (or use `wait`).
-  `&`, `nohup`, or closing a pipe is not permission to escape ownership.
+* Normal completion reaps the shell and terminates descendants. For an operation
+  started deliberately, a shell exiting while background descendants survive is a
+  failure, even if they redirected their pipes: cleanup must not masquerade as
+  success. The original process exit code and already printed output are preserved.
+* A foreground `bash` that leaves live descendants **adopts** them instead: the
+  operation stays running under a longer deadline, the caller gets a receipt that
+  names it, and the job object still owns the tree - so the process cannot outlive
+  this node. Adoption is not abandonment: the same handle answers `read` and
+  `cancel`, and a cancelled adopted tree is terminated like any other. What the
+  runtime still refuses to do is report a *result* while a process it cannot
+  account for is running.
+  **The risk this takes, named:** an adopted tree has the lifetime of an `operation`,
+  not of the call that started it. A run *cancel* therefore no longer reaches it the
+  way it reaches a foreground command - only `operation cancel`, its own deadline, or
+  the node's exit does. That is the deliberate trade for letting the idiom the model
+  already uses work, and it is why `KILL_ON_JOB_CLOSE` is what makes the trade safe:
+  the tree still cannot outlive the node. If a future change removes the job object,
+  this becomes a leak and must be revisited.
+* Foreground/background is an explicit API choice. `operation start` launches
+  something you intend to supervise from the beginning; `bash` adopts a tree it
+  cannot wait for rather than failing the call. Neither `&` nor `nohup` is
+  permission to escape ownership.
   A permanent sentinel/node service must be started by its external installer or
   operator, not backgrounded from an agent-owned shell: its supervisor must live
   outside the runtime it supervises.

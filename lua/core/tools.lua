@@ -106,7 +106,7 @@ M.admin = {
     id = { type = "string" } }, { "id" }),
   -- The dialect is in the description because the model otherwise assumes POSIX
   -- and wastes its tool budget on commands this machine does not have.
-  schema("bash", "Run a foreground command on this machine using " .. platform.shell() .. ". It is killed at " .. exec_deadline_seconds() .. "s unless timeout_seconds says otherwise (1-86400); pass a larger timeout_seconds for anything that may outlast that - a build, the full test gate - or use operation start when you need to observe or cancel the work while it runs. Its entire process tree is owned and cleaned up; background descendants cannot outlive this call. Output and process exit are separate evidence.", {
+  schema("bash", "Run a foreground command on this machine using " .. platform.shell() .. ". It is killed at " .. exec_deadline_seconds() .. "s unless timeout_seconds says otherwise (1-86400); pass a larger timeout_seconds for anything that may outlast that - a build, the full test gate. If the command leaves a process running (a trailing `&`, or `nohup`), that process is adopted as a supervised operation and the call returns its operation id instead of a result: read it with operation read, stop it with operation cancel. Its entire process tree is owned either way, so nothing can outlive this node. Output and process exit are separate evidence.", {
     command = { type = "string" }, cwd = { type = "string" },
     timeout_seconds = { type = "integer", minimum = 1, maximum = 86400, description = "Kill the command after this many seconds. Defaults to the node's foreground deadline (" .. exec_deadline_seconds() .. "s); raise it for a build or a full test gate, lower it to fail fast." } }, { "command" }),
   schema("operation", "Start, observe, read streamed output, wait briefly for, or cancel a supervised external operation. A launch receipt is not completion. Output read uses byte cursors; when text_lossy is true, decode content_base64 for exact bytes instead of concatenating content. Use await once to wait for settlement without repeated model polling (up to the operation deadline); wait is a short peek. Jobs are automation rules, not operations. No automatic replay after an unknown outcome.", {
@@ -443,6 +443,23 @@ function M.dispatch(memory, name, args, role, ctx)
       end
     end
     local result = run(args.cwd and ("cd " .. shell_quote(args.cwd) .. " && " .. args.command) or args.command, timeout)
+    -- The adopted-tree guidance is *policy*, and policy depends on what this caller may use:
+    -- a profile with `bash` but not `operation` cannot read or cancel the operation it has just
+    -- been handed, so telling it to would be the same dead end the old refusal was. The host
+    -- returns the facts; this decides what to say about them.
+    if type(result) == "table" and result.promoted == true then
+      local allowed = ctx.subagent and ctx.subagent.allowed or nil
+      local id = tostring(result.operation_id or "")
+      if allowed == nil or allowed["operation"] == true then
+        result.note = "the shell exited leaving live processes; they are adopted as operation " .. id ..
+          " and keep running. Read it with operation read; stop it with operation cancel."
+      else
+        result.note = "the shell exited leaving live processes; they are adopted as operation " .. id ..
+          " and keep running. This profile does not allow the `operation` tool, so you cannot read or " ..
+          "cancel it from here: it ends at its own deadline, or when the node exits. Start long-lived " ..
+          "work from a profile that allows `operation` when you need to watch or stop it."
+      end
+    end
     return result
   elseif name == "read" then
     return file_tools.read(args)

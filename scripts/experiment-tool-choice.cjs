@@ -178,8 +178,13 @@ async function startProvider() {
   fs.writeFileSync(path.join(dir, 'ledger.json'), JSON.stringify(rows, null, 2));
 
   const count = (row) => (row.tools || []).filter((call) => call.name === 'operation').length;
+  const adopted = (row) => {
+    const list = row.adoption || [];
+    const live = list.filter((entry) => entry.still_running && entry.file_grew).length;
+    return list.length ? `${live}/${list.length}` : '-';
+  };
   console.log(`\n=== ${label} (arm=${arm} task=${task} profile=${profile} provider=${provider} n=${runs}) ===`);
-  console.log('run  state      first_tool   calls  op  tokens   correct  errors');
+  console.log('run  state      first_tool   calls  op  tokens   correct  adopted  after-node  errors');
   for (const row of rows) {
     const usage = row.usage || {};
     const tokens = Number(row.tokens_total || 0)
@@ -189,9 +194,13 @@ async function startProvider() {
       String(row.state || row.error || '?').padEnd(10),
       String(row.first_tool || '-').padEnd(12),
       String((row.tools || []).length).padEnd(6),
-      String(count(row)).padEnd(10),
+      String(count(row)).padEnd(3),
       String(tokens).padEnd(7),
       String(row.correct === undefined ? '-' : (row.correct ? 'yes' : 'NO')).padEnd(8),
+      String(adopted(row)).padEnd(8),
+      // `reaped` is the guarantee, not a failure: the node owns the adopted tree, so
+      // KILL_ON_JOB_CLOSE takes it when the node exits. `ALIVE` would be a leak.
+      String(row.alive_after_settle === undefined ? '-' : (row.alive_after_settle ? 'ALIVE' : 'reaped')).padEnd(10),
       String((row.errors || []).length),
     ].join('  '));
   }

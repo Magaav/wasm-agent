@@ -11,10 +11,13 @@ pub fn manager() -> &'static Manager {
         )
     })
 }
-fn spec(program: &str, flag: &str, command: &str, cwd: &str, seconds: u64, owner: String) -> Spec {
+fn spec(program: &str, flag: &str, command: &str, cwd: &str, seconds: u64, owner: String, promote: bool) -> Spec {
     let mut spec = Spec::command(program, vec![flag.into(), command.into()]);
     spec.cwd = cwd.into();
     spec.timeout = Duration::from_secs(seconds);
+    // A foreground `bash` adopts a descendant tree it cannot wait for; a deliberately
+    // started operation is already background and never needs to.
+    spec.promote_descendants = promote;
     // A child's operation is owned by the child session/run, not by whatever
     // interpreter slot happens to be on this thread, so settlement is attributable.
     spec.owner = crate::subagents::current_owner().unwrap_or(owner);
@@ -38,6 +41,7 @@ pub fn foreground(
             cwd,
             seconds,
             format!("worker:{}", crate::serve::worker_id()),
+            true,
         ))
         .map_err(|e| e.to_string())?;
     loop {
@@ -50,6 +54,26 @@ pub fn foreground(
                 state["stderr"]=json!(format!("{stderr}\nthe command did not finish within {seconds}s; its operation was terminated. A call to this node's own busy session cannot serve itself; use an independent route."));
             }
             return Ok(state);
+        }
+        // The shell exited leaving live descendants, so they were adopted rather than
+        // failed. Return the receipt now: the operation keeps running under the
+        // supervisor, and the caller is told which process it now owns.
+        if state["promoted"] == true {
+            let mut receipt = state;
+            // Output up to the moment the shell exited is real evidence; a receipt with
+            // none would read as a command that printed nothing.
+            if let Ok(page) = manager().read(&id, "stdout", 0, 24 * 1024) {
+                receipt["stdout"] = page["content"].clone();
+                receipt["stdout_truncated"] =
+                    json!(page["available_bytes"].as_u64().unwrap_or(0) > 24 * 1024);
+            }
+            if let Ok(page) = manager().read(&id, "stderr", 0, 8 * 1024) {
+                receipt["stderr"] = page["content"].clone();
+            }
+            receipt["ok"] = json!(true);
+            receipt["output_complete"] = json!(false);
+            receipt["note"] = json!("the shell exited leaving live processes; they are adopted as this operation and keep running. Read it with operation read; stop it with operation cancel.");
+            return Ok(receipt);
         }
         if state["overdue"] == true {
             let _ = manager().cancel(&id);
@@ -99,6 +123,7 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                     args["cwd"].as_str().unwrap_or(""),
                     seconds,
                     owner,
+                    false,
                 ))
                 .map_err(|e| e.to_string())?;
             return Ok(
