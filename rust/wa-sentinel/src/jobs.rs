@@ -26,15 +26,40 @@ fn delivery_is_inference(action: &Value) -> bool {
     wa_jobs::action_is_inference(action)
 }
 
+/// The durable name of the reserved child capacity, beside the rest of the sentinel's own state.
+///
+/// The value used to live only in the launcher (`sentinel-task.cmd`, written by
+/// `scripts/install-sentinel-task.ps1`), because a Windows scheduled task cannot set a child's
+/// environment. That made it a property of *the process that happened to start the watcher*: `deploy.sh`
+/// restarts a watching sentinel with `wa-sentinel restart`, a hand-run `wa-sentinel start` inherits the
+/// caller's shell, and both spawned a watcher whose inference lane was silently idle-gated again - the
+/// copilot's deliveries sat `queued` while a turn ran (observed: runs 470-472) and nothing said why.
+/// Reading it from a file makes it a property of the installation, so every start path agrees.
+pub const RESERVATION_FILE: &str = "child-capacity";
+
+/// Reserved child capacity and where the number came from (`WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY`,
+/// the file, or nothing). The environment wins when it is set *at all*, including `0`: an explicit
+/// value is a deliberate statement about this process, and the file is the default it falls back to.
+pub fn reserved_child_capacity() -> (usize, &'static str) {
+    if let Ok(raw) = std::env::var("WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY") {
+        if let Ok(value) = raw.trim().parse::<usize>() {
+            return (value, "env");
+        }
+    }
+    if let Ok(raw) = std::fs::read_to_string(crate::sentinel_dir().join(RESERVATION_FILE)) {
+        if let Ok(value) = raw.trim().parse::<usize>() {
+            return (value, "file");
+        }
+    }
+    (0, "unset")
+}
+
 /// The inference lane is available when the subagent service reserves child capacity, or - legacy - when
 /// the node is idle. This is the seam the subagent service fills: with reserved capacity, a job wake no
 /// longer takes the interactive lane at all. Until that capacity is advertised, an inference delivery
 /// waits in the durable queue instead of being claimed, which is what a queue is for.
 fn inference_lane_available() -> bool {
-    let reserved = std::env::var("WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(0);
+    let (reserved, _) = reserved_child_capacity();
     reserved > 0 || crate::node_is_idle()
 }
 pub fn store() -> wa_jobs::Store {

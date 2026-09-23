@@ -125,5 +125,7 @@ So a delivery sitting `queued` while a turn runs has two possible causes, and th
 
 The second is an operator setting, not a bug, and it is easy to mistake for "children only run when the
 node is idle" - which reads like a design and is really the fallback. Check it before building a story:
-`sentinel-task.cmd` in the install carries it, `scripts/install-sentinel-task.ps1` writes that file, and a
-`run` action (a script) is unaffected either way. Observing the queue costs no model tokens.
+`wa-sentinel status` prints the number and where it came from (`jobs: reserved child capacity 1 (file)`),
+`sentinel-task.cmd` in the install carries it in the environment, `scripts/install-sentinel-task.ps1`
+writes both that launcher and the durable `<sentinel>/child-capacity` file, and a `run` action (a script)
+is unaffected either way. Observing the queue costs no model tokens.

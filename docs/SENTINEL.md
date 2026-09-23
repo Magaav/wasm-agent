@@ -143,8 +143,8 @@ when you need it most.
 ## Operating
 
 ```
-wa-sentinel status   # the node, the watcher, the box, the wake budget, the last actions
-wa-sentinel start    # start watching (detached)
+wa-sentinel status   # the node, the watcher, the box, the wake budget, the job lanes' reservation, the last actions
+wa-sentinel start    # start watching (detached); passes the resolved child-capacity reservation on to it
 wa-sentinel stop     # ask it to stop
 wa-sentinel once     # handle the box once and exit - for tests and for cron
 ```

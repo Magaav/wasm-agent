@@ -189,11 +189,18 @@ turn is in progress, so a scheduled ingest never stops because somebody is chatt
 (`WA_SENTINEL_JOB_DETERMINISTIC_CONCURRENCY`, default 4). An inference action (`wake` or `subagent`) is
 claimed only when its own lane has capacity (`WA_SENTINEL_JOB_WAKE_CONCURRENCY`, default 1): the subagent
 service's reserved child capacity, or - until that is configured - an idle node, so a wake cannot queue a
-person's turn behind it. The reservation is `WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY`, and `scripts/install-sentinel-task.ps1`
-sets it to `1` in the launcher - a scheduled task cannot set a child's environment, so the launcher is
-the only place it can live. **An inference delivery sitting `queued` while a turn is running is an
-unconfigured reservation, not the design**: the lane is idle-gated only until the capacity is
-advertised. A wake without it waits in the durable queue and is never failed for it.
+person's turn behind it. The reservation is `WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY`: a scheduled task
+cannot set a child's environment, so `scripts/install-sentinel-task.ps1` sets it in the launcher, and it
+also writes it durably to `<sentinel>/child-capacity`, because the launcher is only how the value
+*arrives*. `deploy.sh` restarts a watching sentinel with `wa-sentinel restart` and a hand-run
+`wa-sentinel start` inherits the caller's shell; neither goes through the launcher, and a watcher that
+reads the reservation from its own environment alone comes up idle-gated with nothing to say so (the
+copilot's deliveries sat `queued` while a turn ran, runs 470-472). So the environment is consulted first
+and the file is the installation's default, `wa-sentinel start` passes the resolved number to the watcher
+it spawns, and `wa-sentinel status` prints it with its source (`jobs: reserved child capacity 1 (file)`).
+**An inference delivery sitting `queued` while a turn is running is an unconfigured reservation, not the
+design**: the lane is idle-gated only until the capacity is advertised. A wake without it waits in the
+durable queue and is never failed for it.
 
 Wake admission is budgeted (`WA_SENTINEL_WAKE_BUDGET`, default 6/hour). Claims
 reserve job budget; the common wake submission gate counts failed attempts too,

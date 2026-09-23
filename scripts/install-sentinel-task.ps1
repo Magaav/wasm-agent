@@ -50,6 +50,15 @@ set "WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY=1"
 Set-Content -Path $Launcher -Value $launcherText -Encoding ASCII
 Write-Host "wrote launcher $Launcher"
 
+# The same reservation, durably. A scheduled task cannot set a child's environment and `wa-sentinel
+# restart` - which is how deploy.sh replaces a watching sentinel - does not go through this launcher
+# either, so a value that lived only in the launcher vanished on every upgrade and the inference lane
+# went silently idle-gated. The launcher's environment is the signal; this file is what every start
+# path reads (rust/wa-sentinel jobs::reserved_child_capacity, docs/JOBS.md).
+$Reservation = Join-Path $LogDir 'child-capacity'
+Set-Content -Path $Reservation -Value '1' -Encoding ASCII
+Write-Host "wrote reserved child capacity $Reservation"
+
 $action  = New-ScheduledTaskAction -Execute $Launcher
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `

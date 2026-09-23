@@ -1223,7 +1223,7 @@ node scripts/test-operation-control.cjs "$BIN" --await
 # Actual child runtime and real sentinel deliveries, never a /subagents route stub.
 run_proof_fixture policy 62 node scripts/test-subagents-policy.cjs "$BIN"
 run_proof_fixture children 17 node scripts/test-subagents.cjs "$BIN"
-run_proof_fixture jobs 33 node scripts/test-job-subagents.cjs
+run_proof_fixture jobs 37 node scripts/test-job-subagents.cjs
 run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN"
 run_proof_fixture whatsapp 27 node scripts/test-whatsapp-subagent-e2e.cjs
 

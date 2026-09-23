@@ -12,6 +12,9 @@
 //   * a child that never settles becomes `unknown` and is never retried;
 //   * reserved child capacity runs a subagent while the node reports busy, and without it the delivery
 //     waits in the queue until the node is idle;
+//   * the reservation is a property of the installation, not of the process that started the watcher: a
+//     start that never saw the launcher's environment still reserves capacity, because the value is also
+//     recorded durably and an explicit environment value (including `0`) still wins;
 //   * a guest import is refused even when the artifact claims `owner: operator`;
 //   * the scoped WhatsApp tools deny reads/sends outside the profile's scope.
 //
@@ -57,6 +60,7 @@ function child(exe, args, env, home) {
   children.push(processHandle);
   return processHandle;
 }
+const alive = (processHandle) => processHandle.exitCode === null && processHandle.signalCode === null;
 
 // The node fixture: `/health` and the `/subagents` protocol. `mode` decides whether an await settles.
 async function nodeFixture() {
@@ -212,6 +216,7 @@ async function main() {
   check(start.event && start.event.message_id === "m1", "start names only the trusted event message id");
   check(!("context" in start), "the raw event is not forwarded as context");
   check(start.delivery_id !== undefined, "start carries the delivery id");
+  check(fs.readFileSync(path.join(homeA, ".wasm-agent", "sentinel", "child-capacity"), "utf8").trim() === "1", "a watcher started from the launcher's environment records the reservation durably");
   check(fixtureA.state.health.some((busy) => busy === true), "the node reported busy while the subagent ran (reserved capacity)");
   check(cli(envA, "history").find((d) => d.job_id === "responder").state === "running", "a non-settled child leaves the delivery running, not completed");
 
@@ -276,6 +281,43 @@ async function main() {
   await until(() => fixtureB.state.starts.length === 1, "the subagent starts once the node is idle");
   await until(() => cli(envB, "history").some((d) => d.job_id === "waiter" && d.state === "completed"), "the waiting delivery completes");
 
+  // ---- fixture C: the reservation survives a start that did not come from the launcher ----------------
+  // The launcher (`sentinel-task.cmd`) is the only place a scheduled task can set a child's *environment*,
+  // so a watcher started any other way - `deploy.sh`'s `wa-sentinel restart`, a hand-run `wa-sentinel
+  // start` - used to come up with no reservation at all and an idle-gated inference lane: the copilot's
+  // deliveries sat `queued` while a turn ran (runs 470-472) and nothing in the status said why. The durable
+  // file is what every start path now reads, and the environment still wins when it is set explicitly.
+  const homeC = path.join(root, "home-c");
+  fs.mkdirSync(path.join(homeC, ".wasm-agent", "sentinel"), { recursive: true });
+  fs.writeFileSync(path.join(homeC, ".wasm-agent", "sentinel", "child-capacity"), "1\n");
+  const fixtureC = await nodeFixture();
+  const envC = envFor(homeC, fixtureC.port); // deliberately without WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY
+  const statusC = spawnSync(sentinel, ["status"], { env: envC, encoding: "utf8", timeout: 15000, windowsHide: true });
+  check(`${statusC.stdout}${statusC.stderr}`.includes("reserved child capacity 1 (file)"), `status names the reservation and its source: ${statusC.stdout}`);
+  artifactFixture(homeC, envC, "file-capacity");
+  cli(envC, "enable", "file-capacity");
+  let watcherC = child(sentinel, ["watch"], envC, homeC);
+  const mc = path.join(homeC, "mc.json");
+  fs.writeFileSync(mc, JSON.stringify({ conversation_id: "c@c.us", message_id: "c1", eligibility: { eligible: true } }));
+  cli(envC, "emit", "fixture.message", "c1", mc);
+  await until(() => fixtureC.state.starts.length === 1, "a watcher started without the launcher still reserves child capacity (read from the file)");
+  check(fixtureC.state.health.some((busy) => busy === true), "the file's reservation ran the child while the node reported busy");
+  await until(() => cli(envC, "history").some((d) => d.job_id === "file-capacity" && d.state === "completed"), "the file-reserved delivery settles completed");
+  // An explicit environment value still wins, `0` included: the file is the installation's default, not an
+  // override of a process that was told otherwise (the same rule that makes fixture B meaningful).
+  watcherC.kill();
+  await until(() => !alive(watcherC), "the first fixture-C watcher released the runner lock", 10000);
+  const envC0 = envFor(homeC, fixtureC.port, { WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY: "0" });
+  watcherC = child(sentinel, ["watch"], envC0, homeC);
+  const startsBefore = fixtureC.state.starts.length;
+  const mc2 = path.join(homeC, "mc2.json");
+  fs.writeFileSync(mc2, JSON.stringify({ conversation_id: "c@c.us", message_id: "c2", eligibility: { eligible: true } }));
+  cli(envC0, "emit", "fixture.message", "c2", mc2);
+  await sleep(1800);
+  check(fixtureC.state.starts.length === startsBefore, "an explicit 0 overrides the file: the lane is idle-gated again");
+  fixtureC.state.busy = false;
+  await until(() => fixtureC.state.starts.length === startsBefore + 1, "the idle-gated delivery runs once the node is idle");
+
   // ---- scoped tools deny reads/sends outside the profile -----------------------------------------
   const scoped = spawnSync(wa, ["--db", path.join(root, "scoped.db")], {
     env: { ...envFor(homeA, fixtureA.port), WASM_AGENT_LUA_ROOT: repo, WA_SCRIPT: path.join(repo, "tests", "whatsapp-scoped.lua") },
@@ -285,7 +327,7 @@ async function main() {
   });
   check(scoped.stdout.includes("whatsapp scoped ok"), `scoped WhatsApp denial suite runs in the isolated home: ${scoped.stderr.slice(0, 200)}`);
 
-  void watcherA; void watcherB;
+  void watcherA; void watcherB; void watcherC;
   console.log(`subagent integration ok (${checked} checks; real sentinel, protocol fixture, no paid inference)`);
   console.log(`evidence: ${root}`);
   // The gate's fixture verdict requires a terminal `ALL PASS` line (scripts/lib/test-verdict.cjs).

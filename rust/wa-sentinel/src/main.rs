@@ -1417,6 +1417,22 @@ fn watch() -> Result<()> {
     let _ = std::fs::remove_file(stop_path());
     std::fs::write(pid_path(), std::process::id().to_string())?;
     audit("watch", &format!("pid {}", std::process::id()), "sentinel started");
+    // Record what this watcher was told, durably, so the *next* start reads it instead of guessing. The
+    // launcher carries the reservation in the environment and a deploy's `restart` inherits it, but a
+    // hand-run `start` inherits a shell that never had it - and a watcher whose inference lane is
+    // idle-gated looks healthy while a job's child sits in the queue. Writing it here is what makes the
+    // value a property of the installation rather than of the process that happened to start it.
+    {
+        let (reserved, source) = jobs::reserved_child_capacity();
+        let path = sentinel_dir().join(jobs::RESERVATION_FILE);
+        let recorded = std::fs::read_to_string(&path).map(|text| text.trim().to_string()).unwrap_or_default();
+        if source == "env" && recorded != reserved.to_string() {
+            match std::fs::write(&path, format!("{reserved}\n")) {
+                Ok(()) => say(&format!("reserved child capacity {reserved} recorded in {}", path.display())),
+                Err(error) => say(&format!("could not record the reserved child capacity in {}: {error}", path.display())),
+            }
+        }
+    }
     say(&format!("watching: node on port {}, requests in {}", node_port(), sentinel_dir().join("requests").display()));
     say(&format!("stop it with: wa-sentinel stop   (or create {})", stop_path().display()));
     let mut down_since: Option<Instant> = None;
@@ -1468,8 +1484,17 @@ fn start_self() -> Result<()> {
         }
     }
     let me = std::env::current_exe().context("find my own binary")?;
+    // The reservation is a property of the installation, not of whoever asked for this watcher: a
+    // deploy's `restart` and a hand-run `start` both spawn the watcher as *their* child, so a value that
+    // lived only in the launcher's environment vanished on every upgrade and the inference lane went
+    // silently idle-gated (jobs::reserved_child_capacity reads the durable file for exactly this).
+    // Handing the resolved number on explicitly also makes the child's own environment honest, which is
+    // what an operator checking the lane wants to see - "the launcher set it" is not a fact a child can
+    // check.
+    let (reserved, source) = jobs::reserved_child_capacity();
     if cfg!(windows) {
         std::process::Command::new("powershell")
+            .env("WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY", reserved.to_string())
             .args([
                 "-NoProfile", "-Command",
                 &format!("Start-Process -FilePath '{}' -ArgumentList @('watch') -WindowStyle Hidden", me.display()),
@@ -1478,12 +1503,13 @@ fn start_self() -> Result<()> {
     } else {
         std::process::Command::new(&me)
             .arg("watch")
+            .env("WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY", reserved.to_string())
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()?;
     }
-    say("started the sentinel");
+    say(&format!("started the sentinel (reserved child capacity {reserved}, from {source})"));
     Ok(())
 }
 
@@ -1539,6 +1565,11 @@ fn status() -> Result<()> {
     say(&format!("requests:  {pending} waiting, {done} done, {failed} failed"));
     say(&format!("wakes:     {}/{} this hour", wakes_last_hour(),
         std::env::var("WA_SENTINEL_WAKE_BUDGET").unwrap_or_else(|_| "6".into())));
+    // The one setting whose absence is invisible until a job's child sits in the queue: say it out loud,
+    // with where it came from, so "queued while a turn runs" has an answer here instead of a story.
+    let (reserved, source) = jobs::reserved_child_capacity();
+    say(&format!("jobs:      reserved child capacity {reserved} ({source}); inference lane {}",
+        if reserved > 0 { "open to job children" } else { "idle-gated - a job's child waits for an idle node" }));
     if let Ok(text) = std::fs::read_to_string(log_path()) {
         let lines: Vec<&str> = text.lines().collect();
         say("recent:");
