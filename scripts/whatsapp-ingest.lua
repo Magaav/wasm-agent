@@ -11,11 +11,12 @@
 --   1. `scripts/whatsapp-read.mjs` returns the conversations and the messages newer than a cursor
 --      (plus a one-hour rescan, so a message that arrives with an odd timestamp is not lost; the
 --      ledger's own `(conversation_id, message_id)` identity makes a rescan free of duplicates);
---   2. every row goes through `memory.record_message`, the same path any other observer uses, so the
---      full-text index and the body hash are maintained by the code that owns them;
+--   2. incoming audio is transcribed locally before eligible events are emitted; every row then goes
+--      through `memory.record_message`, which maintains the full-text index and body hash;
 --   3. the cursor moves to the newest message seen, in the database, beside the rows it describes.
 --
--- It always exits 0 and prints one line. A closed browser is a *reported* condition, not a failure:
+-- A temporary audio transcription failure exits nonzero so the job retries before inference. A closed
+-- browser is a *reported* condition, not a failure:
 -- a scheduled job that shouts when the window is shut is a job whose history means nothing.
 local json = dofile("lua/vendor/json.lua")
 local memory = dofile("lua/core/memory.lua")
@@ -49,8 +50,8 @@ local function quote(value) return "'" .. tostring(value or ""):gsub("'", "'\\''
 -- `host.exec` hands back a JSON *string* (the host pushes one value), so everything below reads it
 -- through here. Comparing fields on the raw string is how a working `node --version` reported itself
 -- as `node_missing`.
-local function shell(command)
-  local ok, raw = pcall(host.exec, command, "")
+local function shell(command, timeout)
+  local ok, raw = pcall(host.exec, command, "", timeout or 120)
   if not ok then return nil end
   local ok2, decoded = pcall(json.decode, raw)
   if not ok2 or type(decoded) ~= "table" then return nil end
@@ -67,16 +68,59 @@ end
 -- speak. Node is therefore a dependency of the *ingest*, and its absence is reported as such rather
 -- than as an empty inbox.
 local function node_binary()
-  local candidates = {
-    "node",
-    "C:/Program Files/nodejs/node.exe",
-    "/c/Program Files/nodejs/node.exe",
-  }
+  local explicit = host.getenv and host.getenv("WA_WHATSAPP_NODE") or nil
+  local candidates = {}
+  if explicit and explicit ~= "" then candidates[#candidates + 1] = explicit end
+  candidates[#candidates + 1] = "node"
+  candidates[#candidates + 1] = "C:/Program Files/nodejs/node.exe"
+  candidates[#candidates + 1] = "/c/Program Files/nodejs/node.exe"
   for _, candidate in ipairs(candidates) do
     local result = shell(quote(candidate) .. " --version 2>/dev/null")
     if result and (result.code or 1) == 0 and trim(result.stdout) ~= "" then return candidate end
   end
   return nil
+end
+
+local function audio_kind(message)
+  local media = message.media and message.media[1]
+  local kind = media and media.type or ""
+  return kind == "voice" or kind == "ptt" or kind == "audio"
+end
+
+local function process_json(command, timeout)
+  local result = shell(command, timeout)
+  if not result then return nil, "process_result_unreadable" end
+  local ok, answer = pcall(json.decode, result.stdout or "")
+  if not ok or type(answer) ~= "table" then
+    return nil, "process_output_unreadable:" .. trim(result.stderr):sub(1, 100)
+  end
+  if result.code ~= 0 or answer.ok ~= true then return nil, tostring(answer.error or "process_failed") end
+  return answer
+end
+
+local function transcribe_audio(directory, node, message)
+  local audio = paths.temp() .. "/wa-copilot-audio-" .. tostring(host.uuid()) .. ".ogg"
+  local fetch = host.getenv("WA_WHATSAPP_AUDIO_SCRIPT") or (directory .. "/whatsapp-audio.mjs")
+  local fetched, fetch_error = process_json(table.concat({quote(node), quote(fetch),
+    "--message-id", quote(message.message_id), "--chat", quote(message.conversation_id),
+    "--out", quote(audio)}, " "), 100)
+  if not fetched then
+    pcall(host.exec, "rm -f " .. quote(audio), "")
+    return nil, "download", fetch_error
+  end
+  local python = host.getenv("WA_WHATSAPP_STT_PYTHON") or "python3"
+  local script = host.getenv("WA_WHATSAPP_STT_SCRIPT") or (directory .. "/whatsapp-stt-local.py")
+  local models = host.getenv("WA_WHATSAPP_STT_MODELS") or (paths.cache() .. "/whisper")
+  local answer, stt_error = process_json("HF_HUB_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1 " ..
+    "WA_WHATSAPP_STT_MODELS=" .. quote(models) .. " " .. quote(python) .. " " ..
+    quote(script) .. " --input " .. quote(audio), 120)
+  pcall(host.exec, "rm -f " .. quote(audio), "")
+  if not answer then return nil, "transcribe", stt_error end
+  local transcript = trim(answer.transcript)
+  if transcript == "" or #transcript > 12000 or answer.local_only ~= true then
+    return nil, "transcribe", "invalid_local_transcript"
+  end
+  return "[Voice message transcript: " .. transcript .. "]"
 end
 
 local function report(line)
@@ -147,6 +191,7 @@ local function main()
 
   memory.setup()
   local cursor = tonumber(memory.meta_get("whatsapp_cursor") or 0) or 0
+  local had_cursor = cursor > 0
   local since = math.max(0, cursor - RESCAN_SECONDS)
   -- Messages this reader has handed on, and how many times, keyed by message id. Durable, because the
   -- process that hands a message on is not the one that gets to see it decided: a restart in between would
@@ -238,9 +283,7 @@ local function main()
   end
   local emitted, emit_error = 0, nil
   local events = {}
-  -- New eligible messages whose media is not text: an image, a voice note, a video. Nothing can read
-  -- them here, so they are reported to the operator instead of being handed to a child that would have
-  -- to invent an answer - and no token is spent on them.
+  -- Unsupported media and terminal audio refusals are reported instead of being handed to a child.
   local unanswerable = {}
   -- Messages that were handed on as often as this reader is willing to try and are still undecided.
   -- Reported to the operator once, then let go: a bounded attempt count is what stops one permanently
@@ -293,6 +336,57 @@ local function main()
       if (newest_outgoing[conversation] or 0) < at then newest_outgoing[conversation] = at end
     end
   end
+  -- An audio event may wake the responder only after its transcript is in the ledger. Do this before
+  -- recording or emitting *any* event, so a retryable recognition failure cannot let a later text
+  -- message infer against an incomplete conversation. A rescan reuses the durable transcript.
+  for _, message in ipairs(payload.messages or {}) do
+    local at = tonumber(message.sent_at) or 0
+    local id = tostring(message.message_id or "")
+    if audio_kind(message) then
+      local query_ok, rows = pcall(function()
+        return json.decode(host.sql_query(
+          "SELECT body, source FROM ledger_messages WHERE conversation_id=? AND message_id=?",
+          json.encode({message.conversation_id, id})) or "")
+      end)
+      if not query_ok or type(rows) ~= "table" or rows.error then
+        error("audio_transcript_cache_unreadable:" .. id)
+      end
+      -- The cursor is seconds, while two messages can arrive in the same second. A previously unseen
+      -- audio id is new even when its timestamp equals (or slightly trails) the cursor.
+      message.new_audio = had_cursor and rows[1] == nil
+      local verdict = message.eligibility
+      local eligible = type(verdict) == "table" and verdict.eligible == true
+      local candidate = (emit_on or json_events) and message.direction == "incoming" and
+        eligible and (at > cursor or handoffs[id] ~= nil or message.new_audio) and
+        (newest_outgoing[message.conversation_id] or 0) <= at and not decided[id]
+      if rows[1] and rows[1].source == "whatsapp-cdp-stt" then
+        message.body = rows[1].body
+        message.source = "whatsapp-cdp-stt"
+      elseif candidate then
+        local body, step, problem = transcribe_audio(directory, node, message)
+        if body then
+          message.body = body
+        else
+          local terminal = {view_once_refused=true, audio_too_large=true,
+            audio_size_invalid=true, audio_mime_invalid=true, not_audio=true,
+            message_identity_mismatch=true, no_speech_detected=true,
+            transcript_too_long=true}
+          if terminal[problem] then
+            message.transcription_refusal = problem
+          else
+            pcall(host.exec, "rm -f " .. quote(dump), "")
+            local failure = {events={}, error="audio_transcription_failed", step=step,
+              reason=problem, message_id=id, conversation_id=message.conversation_id,
+              retryable=true}
+            if json_events then print(json.encode(failure))
+            else report("whatsapp ingest failed " .. json.encode(failure)) end
+            os.exit(1)
+          end
+        end
+      end
+      if candidate and not message.transcription_refusal then message.source = "whatsapp-cdp-stt" end
+    end
+  end
   for _, message in ipairs(payload.messages or {}) do
     memory.record_message({
       conversation_id = message.conversation_id,
@@ -302,7 +396,7 @@ local function main()
       sent_at = message.sent_at,
       body = message.body,
       media = message.media,
-      source = "whatsapp-cdp",
+      source = message.source or "whatsapp-cdp",
       observed_at = host.now(),
     })
     -- Only what arrived after the previous read, only what somebody else sent, and only what the
@@ -319,7 +413,8 @@ local function main()
     -- A candidate is a message that is new, or one this reader handed on before and that no decision has
     -- been recorded for since. The second half is what makes a message below the cursor recoverable.
     local pending = handoffs[message_id] ~= nil
-    if (emit_on or json_events) and message.direction == "incoming" and (at > cursor or pending) then
+    if (emit_on or json_events) and message.direction == "incoming" and
+        (at > cursor or pending or message.new_audio) then
       local media_kind = (message.media and message.media[1] and message.media[1].type) or "chat"
       local answered_by_operator = (newest_outgoing[message.conversation_id] or 0) > at
       if answered_by_operator then
@@ -349,17 +444,15 @@ local function main()
         skipped_decided = skipped_decided + 1
         handled = math.max(handled, at)
         if handoffs[message_id] then handoffs[message_id] = nil; handoffs_changed = true end
-      elseif media_kind ~= "chat" then
-        -- Nothing here can read an image or a voice note, so it is reported to the operator's own inbox and
-        -- never handed to a child that would have to invent an answer. Deliberately *not* also appended to
-        -- `events`, which is what the old code did on its way past: an eligible voice note was both reported
-        -- and handed to a child.
+      elseif media_kind ~= "chat" and not (audio_kind(message) and message.source == "whatsapp-cdp-stt") then
+        -- Unsupported media and terminal audio refusals are reported without waking a responder.
         handled = math.max(handled, at)
         if handoffs[message_id] then handoffs[message_id] = nil; handoffs_changed = true end
         unanswerable[#unanswerable + 1] = {
           message_id = message.message_id,
           conversation_id = message.conversation_id,
           media = media_kind,
+          reason = message.transcription_refusal,
           sent_at = at,
         }
       elseif (handoffs[message_id] or 0) >= MAX_HANDOFFS then
@@ -499,13 +592,18 @@ local function main()
   end
   local owed = 0
   for _ in pairs(handoffs) do owed = owed + 1 end
+  local first_media = unanswerable[1]
+  local media_detail = first_media and (" media_detail=" ..
+    tostring(first_media.message_id) .. ":" .. tostring(first_media.media) .. ":" ..
+    tostring(first_media.reason or "unsupported")) or ""
   report(string.format(
-    "whatsapp ingest ok db=%s read=%d new=%d conversations=%d eligible=%d ineligible=%d cursor=%d newest=%d events=%d skipped=%d decided=%d owed=%d unanswerable=%d exhausted=%d%s ms=%d",
+    "whatsapp ingest ok db=%s read=%d new=%d conversations=%d eligible=%d ineligible=%d cursor=%d newest=%d events=%d skipped=%d decided=%d owed=%d unanswerable=%d exhausted=%d%s%s ms=%d",
     paths.data(), math.floor(#(payload.messages or {})), math.floor(after - before),
     math.floor(#(payload.conversations or {})), math.floor(tonumber(payload.eligible) or 0),
     math.floor(tonumber(payload.ineligible) or 0), math.floor(cursor), math.floor(newest),
     math.floor(emitted), math.floor(skipped_ineligible), math.floor(skipped_decided), math.floor(owed),
     math.floor(#unanswerable), math.floor(#exhausted),
+    media_detail,
     emit_error and (" event_error=" .. tostring(emit_error)) or "",
     math.floor(elapsed)))
 end

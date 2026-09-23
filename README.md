@@ -64,6 +64,7 @@ for the implementation boundary.
 | Multiple machines | Node keys, signed peer calls, rendezvous discovery and an outbound relay for NAT'd nodes. |
 | Guest execution | Managed guests pin operator keys, require expiring local consent, reject unrelated callers and support local revocation. The managed registry—not a node's claimed role—controls promotion. Public rollout remains gated. |
 | Reusable procedures | Skills for on-demand instructions; spells for repeatable procedures with postconditions; WASM tool plugins. |
+| WhatsApp audio | Opt-in local transcription sends recognized text to the source conversation through a verified send; see [setup and limits](docs/WHATSAPP-TRANSCRIPTION.md). |
 | Supervision | A separate sentinel handles requested restarts/upgrades and budgeted event-triggered wakes. |
 | Worker pool | On-demand interpreters keep reads responsive and route chat work across workers. Conversation ownership and overlapping streams still need release-level isolation verification. |
 

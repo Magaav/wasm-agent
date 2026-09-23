@@ -1,0 +1,13 @@
+{
+  "id": "whatsapp-transcribe",
+  "name": "WhatsApp voice transcription (local, replies to source chat)",
+  "trigger": {
+    "kind": "schedule",
+    "every_seconds": 30
+  },
+  "action": {
+    "kind": "run",
+    "script": "PREPARED_BY_INSTALL/scripts/whatsapp-transcribe.sh",
+    "timeout_seconds": 240
+  }
+}

@@ -1,0 +1,11 @@
+[package]
+name = "wa-candle-runner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wasmtime = { version = "37", default-features = false, features = ["cranelift", "runtime", "std"] }
+serde_json = "1"
+base64 = "0.22"
+
+[workspace]
