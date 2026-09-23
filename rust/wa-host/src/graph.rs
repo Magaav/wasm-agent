@@ -177,3 +177,26 @@ pub extern "C" fn graph_status(l: *mut LuaState) -> std::ffi::c_int {
     );
     1
 }
+
+/// host.graph_patch_audit(request_json) -> review leads or an explicit error.
+/// This refreshes synchronously: a background watcher event is not evidence that the patch
+/// and its dependency edges belong to the same source snapshot.
+pub extern "C" fn graph_patch_audit(l: *mut LuaState) -> std::ffi::c_int {
+    let request = json_arg(l, 1);
+    let outcome = (|| -> Result<Value, String> {
+        let root = root_for(&request)?;
+        let db = db_for(&request)?;
+        let mut store = wa_graph::Store::open(&db).map_err(|e| e.to_string())?;
+        store.index(&root, false).map_err(|e| e.to_string())?;
+        let mut report = store.audit_json(&root, &request).map_err(|e| e.to_string())?;
+        let after = store.index(&root, false).map_err(|e| e.to_string())?;
+        if after.indexed > 0 || after.removed > 0 {
+            return Err("graph_source_changed_during_audit".into());
+        }
+        report["root"] = json!(root.to_string_lossy());
+        report["db_bytes"] = json!(std::fs::metadata(&db).map_err(|e| e.to_string())?.len());
+        Ok(report)
+    })();
+    push_json(l, &outcome.unwrap_or_else(|error| json!({ "error": error })));
+    1
+}

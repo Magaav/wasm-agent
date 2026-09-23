@@ -1,13 +1,21 @@
 ---
 name: code-graph
-description: Navigate this codebase as a graph instead of grepping. Use before grep/read whenever you need to find where something is defined, who calls it, how two things connect, or which host.* capabilities the code uses.
+description: Use the graph for explicit dependency questions or to audit a code patch's possible missed callers. Grep/read remain normal navigation; graph leads require source verification.
 ---
 
-# Navigate before you grep
+# Dependency leads and patch impact
 
-The `graph` tool answers navigation questions directly from an index of the code,
-so it costs one call where grep costs a search plus a read of every candidate.
-Reach for it first; fall back to `grep`/`read` when you need the actual lines.
+The `graph` tool answers relationship questions from an index of the code. Use it
+when a dependency question is explicit; use `grep`/`read` for ordinary source
+navigation and to verify any graph lead. The opt-in patch audit uses the graph
+at the end of a native `write`/`edit` run, not as a mandatory first search.
+
+`graph {action:"audit"}` checks the current run's recorded patch against resolved
+callers not read through native `read`/`read_many`; use `source:"git"` for the
+current staged-and-unstaged Git patch, including shell edits. `graph {action:"audit_report",
+hours:48}` summarizes the trial. `audit_feedback` records an operator-reviewed
+outcome for a run with leads; never label a catch yourself. See
+`docs/GRAPH-PATCH-AUDIT.md` for the limits and decision rule.
 
 The node keeps the index fresh as files change, so you almost never call
 `index` yourself.
