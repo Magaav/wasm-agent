@@ -296,6 +296,34 @@ impl Store {
         tx.commit()?;
         self.get(id)
     }
+    /// Remove a job and everything the store keeps for it.
+    ///
+    /// `disable` leaves the row, and a row that is off on purpose is indistinguishable from one that is
+    /// off because its definition changed - so the board cannot say what is meant to run. Forgetting is
+    /// the deliberate act that makes it say only that, and it is the only way to remove a job whose
+    /// template is no longer shipped at all.
+    ///
+    /// Refuses while a delivery of it is queued or running: a child whose job no longer exists would
+    /// have nowhere to record its result, and that is not a decision the store may make for the operator.
+    pub fn forget(&self, id: &str) -> Result<Value> {
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let active: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM deliveries WHERE job_id=? AND state IN ('queued','running')",
+            params![id],
+            |r| r.get(0),
+        )?;
+        if active > 0 {
+            return fail("job_has_active_delivery");
+        }
+        if tx.execute("DELETE FROM jobs WHERE id=?", params![id])? != 1 {
+            return fail("job_not_found");
+        }
+        tx.execute("DELETE FROM deliveries WHERE job_id=?", params![id])?;
+        tx.execute("DELETE FROM source_cursors WHERE job_id=?", params![id])?;
+        tx.commit()?;
+        Ok(json!({"id": id, "forgotten": true}))
+    }
     pub fn enqueue(
         &self,
         id: &str,

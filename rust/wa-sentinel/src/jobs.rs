@@ -90,6 +90,10 @@ pub fn cli(args: &[String]) -> Result<()> {
             args.get(1).context("job enable|disable <id>")?,
             action == "enable",
         ),
+        // Removing a job is deliberate and irreversible from the store's side: the definition lives in
+        // the tree, so a forgotten job comes back by shipping its template again - or not at all, which
+        // is the point for a row whose template is gone.
+        "forget" => s.forget(args.get(1).context("job forget <id>")?),
         "export" => s.export_job(args.get(1).context("job export <id>")?),
         // Importing a portable artifact always installs it disabled. `--approve` authorises the *local
         // bindings*; it does not enable the job, because enabling is the deliberate act (docs/JOBS.md).

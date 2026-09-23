@@ -3,26 +3,32 @@
 One feature, two job records. It reads the operator's WhatsApp store, decides which messages are
 waiting on them, and answers those — or records, durably, why it did not.
 
-## Why two records and not one
+## One job, and why one
 
-A job is exactly **one trigger + one action**, and this pipeline has two stages with different triggers:
+A job is exactly **one trigger + one action**, and this pipeline is one `pipeline` action with four
+steps: the deterministic ones first, judgement last.
 
-| record | trigger | action | what it is |
+| # | step | kind | what it is |
 | --- | --- | --- | --- |
-| `whatsapp-ingest` — "WhatsApp Copilot - reader (local audio, every 30 sec)" | `schedule`, 30 s | `run` → `scripts/whatsapp-ingest-emit.sh` | reads the store, transcribes eligible audio locally, and emits an event only after its ledger row contains the transcript |
-| `whatsapp-message` — "WhatsApp Copilot" | `event`, topic `whatsapp.message` | `subagent`, profile `whatsapp-responder` | answers one message: read, decide, and at most one verified reply |
+| 1 | `scripts/whatsapp-source-ensure.sh` | `run` | keeps the source up: Chrome on the agent profile, DevTools on 9222, the WhatsApp page bound |
+| 2 | `scripts/whatsapp-transcribe.sh` | `run` | local speech-to-text for voice notes, sent back to the source chat (no model) |
+| 3 | `scripts/whatsapp-copilot-read.sh` | `run`, `returns: events` | reads the store, diffs it against the cursor, hands on the eligible messages |
+| 4 | `foreach` → `subagent` (`whatsapp-responder`) | judgement | answers one message: read, decide, and at most one verified reply |
 
-Collapsing them is not possible without losing something real:
+This is what the `pipeline` kind exists for, and it keeps the things a single `run` script that started
+its own children would lose:
 
-- A single schedule-triggered child would spend a model turn every tick even when nothing arrived, and a
-  child's tools are bound to **one** message by a trusted event — it cannot answer several.
-- A single `run` script that started children itself would lose the per-message delivery: the
-  idempotency key (`job:revision:event_id`), the cancel-on-disable of a running child, the bounded
-  `await`, and `unknown`-never-replayed on timeout.
+- **only judgement costs a turn.** A tick with nothing eligible spawns no child at all: the `foreach`
+  iterates the list step 3 handed on, and an empty list is no children.
+- **the per-message delivery is kept**: the idempotency key (`job:revision:message_id`), cancel-on-disable
+  of a running child, the bounded `await`, and `unknown`-never-replayed on timeout.
+- **the order is the order they must run in**: the source is up before anything reads it, and the
+  transcript exists before a child decides what a voice note is asking.
 
-So: **turn the feature on and off with `whatsapp-message`.** The reader is the free stage; leave it on
-while the copilot is on. With the copilot off, `emit` finds no enabled subscriber and enqueues nothing,
-so the paid stage stops cleanly.
+It was four records (`whatsapp-ingest`, `whatsapp-message`, `whatsapp-source`, `whatsapp-transcribe`)
+plus two retired rows. One trigger, one action, one place to look and to polish.
+
+**Turn the copilot on and off with `whatsapp-copilot`** — there is nothing else to switch.
 
 ## The free stage: the token gate
 
@@ -69,8 +75,10 @@ failure fails the entire reader pass with the message id and step; the next tick
 later message is handed to a responder. View-once audio, invalid media, and recordings with no speech
 are reported as unanswerable. Images and other unsupported media are also reported, with no responder
 event. See [local recognizer setup](WHATSAPP-TRANSCRIPTION.md) for the required Python environment and
-offline model cache. The standalone `whatsapp-transcribe` job additionally sends transcripts directly
-to source chats; leave it disabled when using the copilot's inference path to avoid duplicate replies.
+offline model cache. Step 2 of the same job (`whatsapp-transcribe.sh`) sends each transcript back into
+the source chat, deterministically and with no model. Because that reply is an outgoing message in that
+conversation, the reader's operator-precedence rule makes step 4 stand down on it — so a voice note gets
+the transcript rather than two messages.
 
 **Standing down is reported too.** When the operator has taken a conversation over themselves, the copilot
 does not answer — and that is a decision the operator cannot see: they observe no reply, and "the copilot
@@ -144,7 +152,7 @@ profile field: a knob would be a second way for the marker to be absent.
 ## Operating it
 
 ```
-wa-sentinel job list                 # ON: whatsapp-message (the copilot), whatsapp-ingest (the reader)
+wa-sentinel job list                 # one job: whatsapp-copilot (schedule, 30 s, pipeline)
 wa-sentinel job enable|disable <id>  # the operator's switch; a changed definition needs re-approval
 wa-sentinel job history              # one row per delivery
 ```
@@ -183,8 +191,8 @@ Idempotent: with the source up it is a single HTTP probe (~0.2 s), so a 120-seco
 | the logon task is missing | refuses | `task_not_registered`, printing the installer command |
 
 Nothing has to remember it. The **logon task** `wasm-agent-whatsapp-chrome` starts the wrapper at logon,
-and the keeper job `whatsapp-source` (schedule, 120 s, action `run`) re-runs this script on the
-**deterministic lane** — so a person's turn never delays it and it costs no tokens. The agent's own surface
+and step 1 of `whatsapp-copilot` re-runs this script on the **deterministic lane** on every tick — so a
+person's turn never delays it and it costs no tokens. The agent's own surface
 is the spell `whatsapp-source-up`: one `run` step with `expect {ok:true}` and a post-assertion that reads
 `location.hostname` in the page, so a replay ends with the page *observed* rather than assumed.
 
