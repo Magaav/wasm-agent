@@ -389,6 +389,61 @@ local function main()
   -- The dump has done its job; leaving it would leave a copy of the inbox in the temp directory.
   if host.exec then pcall(host.exec, "rm -f " .. quote(dump), "") end
   local elapsed = host.monotonic_ms and (host.monotonic_ms() - started) or 0
+  -- What the copilot did *as the operator* since the last pass. A reply that went out to somebody else is an
+  -- effect on their conversation, and the operator has to see it in their own inbox: the ledger and the job
+  -- history are not where they read, and "the copilot answered someone for you" is the one thing they must
+  -- not have to go looking for. Deterministic (a query, no model), bounded, and one line per send: a reply
+  -- that did NOT confirm is reported as not sent rather than not at all.
+  --
+  -- It runs in the pipeline mode only, because the pipeline's shell script is what sends the notes; the
+  -- cursor advances with the notices, so the same send is never reported twice.
+  local REPORT_LIMIT = 3
+  local notices = {}
+  if json_events then
+    local reported_at = tonumber(memory.meta_get("whatsapp_reported_at") or 0) or 0
+    local reported_upto = reported_at
+    -- The first pass with this feature announces nothing and adopts "now": the alternative is a burst of
+    -- notices about sends that were already in the ledger before anybody asked to be told about them. Being
+    -- told starts with the next send, which is the one nobody has seen yet.
+    local rows = {}
+    if reported_at <= 0 then
+      memory.meta_set("whatsapp_reported_at", tostring(host.now()))
+    else
+      rows = json.decode(host.sql_query(
+        "SELECT s.message_id, s.conversation_id, s.state, s.body, s.updated_at, c.title " ..
+        "FROM effect_sends s LEFT JOIN conversations c ON c.id = s.conversation_id " ..
+        "WHERE s.updated_at > ? ORDER BY s.updated_at LIMIT ?",
+        json.encode({ reported_at, REPORT_LIMIT })) or "")
+    end
+    if type(rows) == "table" and not rows.error then
+      for _, row in ipairs(rows) do
+        local who = tostring(row.title or "")
+        if who == "" then who = tostring(row.conversation_id or "?") end
+        -- One line, one field: the shell parses these as `|`-separated, so a pipe or a newline in a reply
+        -- body would silently become another notice or another field.
+        local said = trim((tostring(row.body or ""):gsub("%s+", " ")):gsub("|", "/")):sub(1, 200)
+        local state = tostring(row.state or "")
+        local detail
+        if state == "sent" then
+          detail = string.format("replied for you to %s (id %s): \"%s\"", who, tostring(row.message_id), said)
+        else
+          detail = string.format("a reply for you to %s (id %s) is NOT confirmed as sent (state %s) - check it",
+            who, tostring(row.message_id), state)
+        end
+        notices[#notices + 1] = {
+          message_id = tostring(row.message_id),
+          conversation_id = tostring(row.conversation_id or ""),
+          state = state,
+          detail = detail,
+        }
+        local at = tonumber(row.updated_at) or 0
+        if at > reported_upto then reported_upto = at end
+      end
+    end
+    if reported_upto > reported_at then
+      memory.meta_set("whatsapp_reported_at", tostring(reported_upto))
+    end
+  end
   -- One line, greppable, with the numbers that say whether the diff is working: `read` is what the
   -- reader returned (the rescan window), `new` is what the ledger did not already have.
   if json_events then
@@ -397,6 +452,7 @@ local function main()
     local owed = 0
     for _ in pairs(handoffs) do owed = owed + 1 end
     print(json.encode({ events = events, unanswerable = unanswerable, exhausted = exhausted,
+      notices = notices,
       operator_answered = skipped_answered, already_decided = skipped_decided,
       still_owed = owed, decisions_error = decisions_error,
       cursor = math.floor(cursor) }))
