@@ -1237,6 +1237,10 @@ run_proof_fixture whatsapp 40 node scripts/test-whatsapp-subagent-e2e.cjs
 # The reader's acted cursor: a message may be consumed only when a durable decision exists for it, the
 # attempt count is bounded, and media is reported instead of handed to a child. Mock store, real ingest.
 run_proof_fixture cursor 47 node scripts/test-whatsapp-cursor.cjs "$BIN"
+# Local audio bytes, WASM formatting, durable reservation, and exactly-once
+# verified sends. These use fake WhatsApp/STT adapters and no paid model.
+node scripts/test-whatsapp-audio.mjs
+node scripts/test-whatsapp-transcribe.cjs "$BIN" "$PLUGINS/whatsapp-transcript.wasm"
 # The pipeline seam: a `returns` list reaches the foreach, a step that produced nothing fails the
 # delivery, and a no-op run is distinguishable from a dropped result. Real sentinel, mock store, no model.
 run_proof_fixture pipeline 19 node scripts/test-job-pipeline.cjs

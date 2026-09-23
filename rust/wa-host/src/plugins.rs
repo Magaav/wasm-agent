@@ -10,6 +10,8 @@
 //! `describe` returns `{"name","description","parameters"}`; `call` receives the
 //! tool arguments as JSON and returns JSON. The Lua core sees plugins as tools,
 //! so a plugin is just another capability behind the same `host.*` surface.
+//! `"surface":"internal"` keeps a deterministic plugin callable by trusted Lua
+//! without advertising it as a model tool. The default remains `"tool"`.
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -19,6 +21,7 @@ struct Plugin {
     name: String,
     description: String,
     parameters: Value,
+    internal: bool,
     store: Store<()>,
     memory: Memory,
     alloc: TypedFunc<i32, i32>,
@@ -74,7 +77,12 @@ impl PluginRegistry {
         let name = info.get("name").and_then(Value::as_str).unwrap_or("plugin").to_string();
         let description = info.get("description").and_then(Value::as_str).unwrap_or("").to_string();
         let parameters = info.get("parameters").cloned().unwrap_or_else(|| json!({"type": "object"}));
-        Ok(Plugin { name, description, parameters, store, memory, alloc, call })
+        let internal = match info.get("surface").and_then(Value::as_str).unwrap_or("tool") {
+            "tool" => false,
+            "internal" => true,
+            other => return Err(anyhow!("invalid plugin surface: {other}")),
+        };
+        Ok(Plugin { name, description, parameters, internal, store, memory, alloc, call })
     }
 
     /// JSON `[{name, description, parameters}, ...]` for the model tool list.
@@ -82,6 +90,7 @@ impl PluginRegistry {
         Value::Array(
             self.plugins
                 .iter()
+                .filter(|plugin| !plugin.internal)
                 .map(|plugin| json!({
                     "name": plugin.name,
                     "description": plugin.description,
