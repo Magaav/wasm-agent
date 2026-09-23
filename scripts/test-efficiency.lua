@@ -118,6 +118,32 @@ repeat
 until page.eof
 check(table.concat(parts)==json.encode(memory.message(bigid)),'guest exact message roundtrip needs no operator artifact access')
 check(tools.dispatch(memory,'session',{session_id=sid,message_id=bigid,byte_offset=1,message_version='stale'},'guest',{user_id='efficiency-owner'}).error=='message_changed','stale message receipt refused')
+-- Escape-heavy pages. A session row is already JSON text, so its escapes are escaped again in
+-- the model view, and a page sized from the *raw* slice then overflows the budget and is
+-- replaced by the omitted envelope - which drops `next_offset` and makes the page
+-- uncontinuable. Measured before the fix: omitted=true, cursor=nil, at the default budget as
+-- well as a smaller one. Same for tool_result, whose slice is sized the same way.
+local esid=memory.start_session('','escapes',{user_id='master',node_id='',title='escapes'})
+memory.append_turn(esid,{role='user',content='x'})
+memory.append_turn(esid,{role='assistant',content=string.rep('\\"',4000)})
+local erow=memory.session_messages(esid,{limit=1})[1]
+local eoffset,every,eparts,epages=1,nil,{},0
+repeat
+  local page=json.decode(output.project('session',tools.dispatch(memory,'session',{session_id=esid,message_id=erow.id,byte_offset=eoffset,message_version=every},'master',{user_id='master'})))
+  check(not page.omitted and page.next_offset and page.next_offset>eoffset,'an escape-heavy session page keeps its cursor')
+  eparts[#eparts+1]=page.content;eoffset,every=page.next_offset,page.message_version;epages=epages+1
+  check(epages<200,'escape-heavy session cursor terminates')
+until page.eof
+check(table.concat(eparts)==json.encode(memory.message(erow.id)),'escape-heavy session pages recover exact bytes')
+local eref=output.store(string.rep('\\"',4000))
+local toffset,tparts,tpages=1,{},0
+repeat
+  local page=json.decode(output.project('tool_result',output.read(eref.sha256,toffset,51200)))
+  check(not page.omitted and page.next_offset and page.next_offset>toffset,'an escape-heavy tool_result page keeps its cursor')
+  tparts[#tparts+1]=page.content;toffset=page.next_offset;tpages=tpages+1
+  check(tpages<200,'escape-heavy tool_result cursor terminates')
+until toffset>eref.bytes
+check(table.concat(tparts)==string.rep('\\"',4000),'escape-heavy tool_result pages recover exact bytes')
 local plugins=host.plugins
 host.plugins=function()return json.encode({{name='z-fixture'},{name='a-fixture'}})end
 local ordering=json.encode(tools.all('master'))

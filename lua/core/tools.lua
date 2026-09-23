@@ -543,8 +543,19 @@ function M.dispatch(memory, name, args, role, ctx)
         if offset<=#encoded and encoded:byte(offset)>=128 and encoded:byte(offset)<192 then return {error='offset_inside_utf8'} end
         if args.message_version and args.message_version~=version then return {error='message_changed',message_version=version} end
         local content,next_offset=tool_output.slice(encoded,offset,limit)
-        return {content=content,encoding='exact_message_json',message_id=row.id,message_version=version,
+        local page={content=content,encoding='exact_message_json',message_id=row.id,message_version=version,
           next_offset=next_offset,bytes=#encoded,eof=next_offset>#encoded}
+        -- Bound the *encoded view*: the row is already JSON text, so its escapes are escaped
+        -- again here and an escape-heavy page can be nearly twice the slice it was sized from.
+        -- A view over the budget is replaced by the omitted envelope, which drops `next_offset`
+        -- and makes the page uncontinuable - the one thing this route exists to avoid.
+        while #json.encode(page)>tool_output.MAX_BYTES and limit>4 do
+          limit=math.floor(limit*0.75)
+          content,next_offset=tool_output.slice(encoded,offset,limit)
+          page={content=content,encoding='exact_message_json',message_id=row.id,message_version=version,
+            next_offset=next_offset,bytes=#encoded,eof=next_offset>#encoded}
+        end
+        return page
       end
       return {message=args.view=='compact' and evidence_view.message(row) or row}
     end

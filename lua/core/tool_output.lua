@@ -49,9 +49,21 @@ function M.read(id, offset, limit)
   local text = host.read_file(path)
   if not text then return {error="output_not_found"} end
   if host.sha256(text) ~= id:lower() then return {error="output_hash_mismatch"} end
-  local part, next_offset = M.slice(text, offset, math.max(4,math.min(tonumber(limit) or M.MAX_BYTES,M.MAX_BYTES)))
-  return {content=part,offset=tonumber(offset) or 1,next_offset=next_offset,bytes=#text,
-    eof=next_offset>#text,sha256=id:lower()}
+  -- Bound the *encoded view*, not the raw slice. The model sees the JSON of this table, and
+  -- escaping inflates it - a slice of `\"` roughly doubles - so a slice sized to the budget
+  -- produced a view over it, which the projector replaced with the omitted envelope. That lost
+  -- `next_offset`, which is the whole point of this route: the caller could no longer page. Same
+  -- discipline `file_tools.read` already uses for its pages.
+  local budget = M.MAX_BYTES
+  local want = math.max(4, math.min(tonumber(limit) or budget, budget))
+  while true do
+    local part, next_offset = M.slice(text, offset, want)
+    local page = {content=part,offset=tonumber(offset) or 1,next_offset=next_offset,bytes=#text,
+      eof=next_offset>#text,sha256=id:lower()}
+    if #json.encode(page) <= budget then return page end
+    if want <= 4 then return {error="output_page_exceeds_budget"} end
+    want = math.floor(want * 0.75)
+  end
 end
 
 function M.truncate(text, tail)
