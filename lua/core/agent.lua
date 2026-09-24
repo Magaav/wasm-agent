@@ -308,8 +308,15 @@ function M.subagent_system_prompt(self, tool_list)
     local lines = { "Your tools (and only these):" }
     for _, tool in ipairs(tool_list) do
       local function_ = tool["function"] or {}
-      local snippet = tostring(function_.description or ""):match("^[^.]*") or ""
-      lines[#lines + 1] = string.format("- %s: %s", tostring(function_.name or "?"), snippet:sub(1, 110))
+      -- The child index must follow the same switch as the parent's: the tool-choice
+      -- experiment runs children, and a treatment that changes only `system_prompt`
+      -- never reaches the request under test (WASM_AGENT_TOOL_SNIPPETS at agent.lua:235).
+      if host.getenv('WASM_AGENT_TOOL_SNIPPETS')=='names' then
+        lines[#lines+1]='- '..tostring(function_.name or '?')
+      else
+        local snippet = tostring(function_.description or ""):match("^[^.]*") or ""
+        lines[#lines + 1] = string.format("- %s: %s", tostring(function_.name or "?"), snippet:sub(1, 110))
+      end
     end
     parts[#parts + 1] = table.concat(lines, "\n")
   end

@@ -654,6 +654,10 @@ LUA
 WA_SCRIPT="$DB.evidence.lua" "$BIN" --db "$DB" | grep "tool evidence ok"
 rm -f "$DB.evidence.lua"
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB.observability" | grep 'observability ok'
+# The tool-choice experiment's verifier must reject a plausible-looking wrong answer, and
+# its treatment must reach the child prompt the rig runs. Both are what make the arm's
+# result mean anything, so they are tested without a model and before any paid run.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-experiment-verify.lua" "$BIN" --db "$DB.experiment-verify" | grep 'experiment verify ok'
 # A provider 400 on a too-large request must compact and retry once. Without it, one
 # oversized turn makes every later turn of the session fail and the thread never answers.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-overflow-recovery.lua" "$BIN" --db "$DB.overflow" | grep 'overflow recovery ok'
