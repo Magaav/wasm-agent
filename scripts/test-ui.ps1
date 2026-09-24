@@ -1246,17 +1246,6 @@ $harness = @'
     check(payload.text === "hello", "commands: the message itself must survive, got " + payload.text);
     check(payload.images === undefined, "commands: no pictures must be sent when none were attached");
 
-    // `/merge` is a brief for the agent, not a node operation: it must actually send the
-    // orchestrator brief as a turn, and name the skill that holds the procedure, or the command
-    // is a label with nothing behind it.
-    type("/merge");
-    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-    var merged = (window.__calls || []).filter(function (call) {
-      return String(call.url).indexOf("chat") >= 0 && call.method === "POST";
-    }).pop();
-    check(!!merged, "commands: running /merge must send a turn");
-    check(!!merged && String(merged.body).indexOf("git-orchestrator") >= 0,
-      "commands: the /merge brief must name the orchestrator skill, got: " + (merged && merged.body));
   })();
   // ---- in-flight tool age -------------------------------------------------
   //
@@ -1460,6 +1449,7 @@ $harness = @'
       { seq: 2, role: "assistant", content: "FOLLOWED-PARTIAL", tool_calls: [] },
     ],
   };
+  window.__resetFollow();
   await window.__watchTurn();
   for (var followDrain = 0; followDrain < 30; followDrain++) await tick();
   // The assertion is on the *text*, not on a bubble count: a count can grow because some other
@@ -1540,6 +1530,25 @@ $harness = @'
       "the footer must carry the run's time, saw: "
       + (footer ? footer.textContent : "nothing"));
   })();
+  // `/merge` is a brief for the agent, not a node operation: it must actually send the
+  // orchestrator brief as a turn, and name the skill that holds the procedure, or the command is a
+  // label with nothing behind it. Run last on purpose: it opens a real run, and a run left in the
+  // transcript is state the other checks would read.
+  await (async function () {
+    var mergeInput = window.__commandInput();
+    window.__typeCommand("/merge");
+    mergeInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    // `send()` awaits /health before it posts, so the request is not in __calls yet: the turn has
+    // to be drained before it is read. Reading it synchronously is how this check came to fail
+    // against a command that was working - the POST simply had not happened yet.
+    for (var mergeDrain = 0; mergeDrain < 20; mergeDrain += 1) await tick();
+    var merged = (window.__calls || []).filter(function (call) {
+      return String(call.url).indexOf("chat") >= 0 && call.method === "POST";
+    }).pop();
+    check(!!merged, "commands: running /merge must send a turn");
+    check(!!merged && String(merged.body).indexOf("git-orchestrator") >= 0,
+      "commands: the /merge brief must name the orchestrator skill, got: " + (merged && merged.body));
+  })();
   document.title = "stage: end";
 } catch (error) {
     // A throw must still produce a log: a reporter that swallows its own failure is worse
@@ -1576,6 +1585,8 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
 Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__cancelActiveRun = cancelActiveRun; window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker; window.__updateNotice = updateNotice; window.__refreshOperationProgress = refreshOperationProgress;"
+
+Add-Content -Path $app -Value "`nwindow.__resetFollow = () => { followedSeq = 0; lastFollowAt = 0; };"
 
 $server = $null
 $edge = @(
