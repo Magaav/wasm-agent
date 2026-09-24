@@ -25,27 +25,12 @@ local M = {}
 -- machine can keep separate threads per user.
 local USER, NODE = "master", ""
 
-local HELP = [[usage: wa chat [--continue | --session <id>] [prompt]
+-- The commands, their help and the flags that select a session are one registry
+-- (`lua/core/commands.lua`), so the list a reader is shown and the arms below cannot drift apart, and
+-- `scripts/test-command-parity.cjs` can fail when this REPL is missing a command the window offers.
+local commands = dofile("lua/core/commands.lua")
 
-sessions:
-  (default)            start a new session
-  --continue, -c       continue the most recent session
-  --session <id>       continue exactly that session (see: wa sessions)
-
-commands:
-  /session             print the session id (resume with --session)
-  /remember <text>     store a memory
-  /recall <query>      search memories
-  /memories            list recent memories
-  /search <query>      search the message ledger
-  /conversation <id>   read a conversation
-  /stats               database counts
-  /console             toggle the console: every event and a tool's whole output, unclipped
-  /update              install the newest build in this node's tree (the sentinel does it, once idle)
-  /merge               act as git orchestrator: merge every open branch into main, gate, push, sync
-  /help                this help
-  /exit                quit
-anything else is sent to the model.]]
+local HELP = commands.help()
 
 local function each(rows, render)
   if #rows == 0 then print("(empty)") return end
@@ -177,7 +162,10 @@ function M.run(argv)
     -- The terminal width when it says so, and otherwise the width every terminal has: a
     -- status line that wraps is erased only on its last row, which leaves the row above it
     -- behind as litter.
-    limit = tonumber(host.getenv("COLUMNS")) or 80,
+    -- The terminal's real width, asked of the console rather than assumed: `COLUMNS` is a shell
+    -- variable that is normally not exported, and a CLI that fell back to 80 wrapped its answers
+    -- into a third of a wide window. See `platform.columns`.
+    limit = platform.columns(host.getenv("COLUMNS")),
   })
   local agent = agentlib.new(session.id, printer(view), "master", USER, NODE)
 
@@ -230,6 +218,14 @@ function M.run(argv)
       print(HELP)
     elseif line == "/session" then
       print(agent.session_id)
+    elseif line == "/new" then
+      -- The window's `/new`, in the REPL. The session being left is not closed: `M:close` finishes a
+      -- session, and this thread is not finished, only left - `wa chat --session <id>` comes back to
+      -- it, and `wa sessions` still lists it.
+      local previous = agent.session_id
+      local id, notice = commands.new_session({ previous = previous, user = USER, node = NODE })
+      agent = agentlib.new(id, printer(view), "master", USER, NODE)
+      print(redact.text(notice))
     elseif line == "/stats" then
       print(json.encode(memory.stats()))
     elseif line == "/console" then

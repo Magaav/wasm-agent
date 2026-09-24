@@ -461,6 +461,27 @@ ok(not has(console_text, "ok \194\183 exit 0"),
 ok(console_view:console_on() == true and console_view:set_console(false) == false,
   "and it can be turned off again")
 
+-- ---- the width ---------------------------------------------------------------
+--
+-- The width a terminal *has* is not the width a child can know. `COLUMNS` is a shell variable on most
+-- machines and is not exported to children, so the only number this had was the 80 it fell back to -
+-- measured: a 120-column terminal, `COLUMNS` empty, answers wrapped at 78 columns. The console is
+-- asked first (`host.terminal_size`), the environment second, and 80 last.
+--
+-- Every case below is one that happens: the console answers, it answers zero because nothing is
+-- attached, an older binary has no `terminal_size` at all, or `COLUMNS` is stale or junk.
+local platform = dofile("lua/core/platform.lua")
+local says = function(columns) return function() return { columns = columns } end end
+ok(platform.columns(nil, says(120)) == 120, "the console's width is the width used")
+ok(platform.columns("90", says(120)) == 120, "and it wins over a stale COLUMNS")
+ok(platform.columns("100", function() return nil end) == 100, "without a console, COLUMNS is used")
+ok(platform.columns(nil, function() return nil end) == 80, "and 80 is the last resort")
+ok(platform.columns(nil, says(0)) == 80, "a console that answers zero is not a width of zero")
+ok(platform.columns("0", says(0)) == 80, "and neither is a zero in COLUMNS")
+ok(platform.columns("abc", function() return nil end) == 80, "nor junk in COLUMNS")
+ok(platform.columns(nil, function() return { columns = "120" } end) == 120,
+  "and a width that arrives as text (the shape JSON would give) is still a width")
+
 if failed > 0 then
   print(string.format("cli view: %d failed of %d checks", failed, checks))
   os.exit(1)

@@ -1584,6 +1584,135 @@ pub extern "C" fn runtime_info(l: *mut LuaState) -> c_int {
     1
 }
 
+/// `host.terminal_size()` -> `{columns, rows}` for the console this process draws on, or `nil`.
+///
+/// The width a terminal *has* is not the width a child *knows*. `COLUMNS` is a shell variable on most
+/// machines and is not exported to children, so a CLI that wraps to `COLUMNS or 80` renders in an
+/// 80-column column inside a 120-column window and leaves the rest of the screen empty. That is a
+/// measurement, not a guess: Orca's terminal reports `Columns: 120` while `COLUMNS` is empty in the
+/// environment the CLI is launched with.
+///
+/// `nil` - never a zero - when there is no console or it will not answer: a pipe, a file, a captured
+/// transcript, a CI log. A caller that cannot tell "unknown" from "80 wide" wraps to nothing, so the
+/// difference is the whole contract.
+#[cfg(windows)]
+fn console_size() -> Option<(i32, i32)> {
+    use std::ffi::c_void;
+    #[repr(C)]
+    #[derive(Default)]
+    struct Coord {
+        x: i16,
+        y: i16,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct SmallRect {
+        left: i16,
+        top: i16,
+        right: i16,
+        bottom: i16,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct ScreenBufferInfo {
+        size: Coord,
+        cursor: Coord,
+        attributes: u16,
+        window: SmallRect,
+        maximum: Coord,
+    }
+    extern "system" {
+        fn GetStdHandle(kind: u32) -> *mut c_void;
+        fn GetConsoleScreenBufferInfo(handle: *mut c_void, info: *mut ScreenBufferInfo) -> i32;
+    }
+    // STD_OUTPUT_HANDLE is -11 as a DWORD. Asking about *stdout* is deliberate: when stdout is a
+    // file or a pipe (a transcript, a log) this fails and the caller is told `nil` rather than
+    // being handed the size of whatever console happens to be attached.
+    const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5;
+    unsafe {
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        if handle.is_null() {
+            return None;
+        }
+        let mut info = ScreenBufferInfo::default();
+        if GetConsoleScreenBufferInfo(handle, &mut info) == 0 {
+            return None;
+        }
+        // The *window*, not the buffer: the buffer is usually wider (the scrollback) and taller,
+        // and wrapping to it puts text off the right edge of what is on screen.
+        usable_size(
+            (info.window.right - info.window.left + 1) as i32,
+            (info.window.bottom - info.window.top + 1) as i32,
+        )
+    }
+}
+
+#[cfg(unix)]
+fn console_size() -> Option<(i32, i32)> {
+    #[repr(C)]
+    #[derive(Default)]
+    struct WinSize {
+        rows: u16,
+        columns: u16,
+        x_pixels: u16,
+        y_pixels: u16,
+    }
+    #[cfg(target_os = "macos")]
+    const TIOCGWINSZ: u64 = 0x4008_7468;
+    #[cfg(not(target_os = "macos"))]
+    const TIOCGWINSZ: u64 = 0x5413;
+    extern "C" {
+        fn ioctl(fd: c_int, request: u64, ...) -> c_int;
+    }
+    let mut size = WinSize::default();
+    // fd 1 is stdout, for the same reason as the Windows branch above.
+    let answered = unsafe { ioctl(1, TIOCGWINSZ, &mut size as *mut WinSize) } == 0;
+    if !answered {
+        return None;
+    }
+    usable_size(size.columns as i32, size.rows as i32)
+}
+
+#[cfg(not(any(windows, unix)))]
+fn console_size() -> Option<(i32, i32)> {
+    None
+}
+
+/// A console that answers zero is not a console that is zero wide. An uninitialized or detached
+/// screen buffer reports all zeros, and a caller told `{columns: 0}` wraps every line to nothing -
+/// the failure would be a blank screen, which is worse than the 80-column fallback it replaced.
+fn usable_size(columns: i32, rows: i32) -> Option<(i32, i32)> {
+    if columns <= 0 || rows <= 0 {
+        return None;
+    }
+    Some((columns, rows))
+}
+
+pub extern "C" fn terminal_size(l: *mut LuaState) -> c_int {
+    match console_size() {
+        Some((columns, rows)) => push_json(l, &json!({"columns": columns, "rows": rows})),
+        None => unsafe { crate::lua::lua_pushnil(l) },
+    }
+    1
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::usable_size;
+
+    /// The rule that keeps a detached console from blanking the screen, and the values a real
+    /// terminal reports. Written as the three cases because the middle one is the whole point:
+    /// `ioctl` and `GetConsoleScreenBufferInfo` both answer "succeeded, zero by zero" rather than
+    /// failing when nothing is attached, and that answer must not become a width.
+    #[test]
+    fn a_zero_sized_console_is_not_a_width() {
+        assert_eq!(usable_size(120, 40), Some((120, 40)));
+        assert_eq!(usable_size(0, 0), None);
+        assert_eq!(usable_size(-1, 40), None);
+        assert_eq!(usable_size(120, 0), None);
+    }
+}
+
 /// Wall clock is for correlating events, never calculating durations.
 pub extern "C" fn now(l: *mut LuaState) -> c_int {
     let seconds = std::time::SystemTime::now()

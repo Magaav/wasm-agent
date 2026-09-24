@@ -222,6 +222,23 @@ animated line and the printed line cannot drift apart.
 so it cannot repaint anything itself - and the gate reads the frames and the clock out of
 its captured stdout.
 
+## The console's size
+
+`host.terminal_size()` returns `{columns, rows}` for the console this process draws on, or
+`nil` when there is none to ask. It exists because the width a terminal *has* is not the
+width a child *knows*: `COLUMNS` is a shell variable on most machines and is not exported
+to children, so a CLI that wrapped to `COLUMNS or 80` drew in an 80-column column inside a
+120-column window - measured, with `COLUMNS` empty, in the terminal the CLI actually runs
+in. `lua/core/platform.columns()` is the Lua side of it: the console first, `COLUMNS`
+second, 80 last.
+
+- `nil`, never a zero. A detached or uninitialized console answers *successfully* with
+  0x0 rather than failing, and a caller told "80 columns wide by 0 rows" would wrap every
+  line to nothing - a blank screen, which is worse than the fallback it replaced.
+- The console is asked about **stdout**, not stderr or stdin, because that is where the
+  caller draws. A redirected stdout (a transcript, a log) therefore gets `nil`, which is
+  the honest answer: there is no width to wrap to.
+
 ## Adding a capability
 
 `host.monotonic_ms()` measures elapsed time within a process. Use `host.now()` only
