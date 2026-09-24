@@ -293,12 +293,72 @@ local function admin_names()
   return names
 end
 
+-- The prompt index's per-tool line: a short, authored *discovery cue*, never a slice of the
+-- schema description. The two answer different questions - "is there a capability for
+-- this?" against "how do I call it, and within what limits?" - so they are separate
+-- artifacts. Deriving the cue with `description:match("^[^.]*")` duplicated the same text
+-- in the index and the schema, and the description's opening sentence (written to start an
+-- explanation) is a poor cue. A tool with no cue here (a plugin) is listed by name alone.
+-- scripts/test-tool-cues.lua guards that every built-in has one and that none is stale.
+local CUES = {
+  remember = "Store a fact the user asked you to keep",
+  recall = "Look up stored facts before answering about the user",
+  memories = "List stored facts, with their ids",
+  forget = "Delete a stored fact by id",
+  skill = "Load a skill's full instructions by name",
+  capabilities = "List the tools this account may use",
+  subagent = "Start and collect a child agent on a bounded task",
+  sessions = "List your past sessions",
+  session = "Read a session, paging earlier evidence",
+  search_messages = "Search your own past sessions for text",
+  resume_session = "Fold a past session into this one as context",
+  session_debug = "Set a session's recording mode (debug or default)",
+  session_fixture = "Export a session as a reproducible fixture",
+  search_ledger = "Search the message ledger (WhatsApp/chat)",
+  conversation = "Read one conversation's recent messages",
+  list_conversations = "List conversations in the ledger",
+  bash = "Run a shell command on this machine",
+  operation = "Run or collect a supervised long command",
+  read = "Read a file (text or image), paged",
+  read_many = "Read several files or ranges in one call",
+  write = "Create or overwrite a file",
+  edit = "Replace exact text in one file",
+  ls = "List a directory",
+  grep = "Find lines matching literal text",
+  graph = "Trace callers/relationships, or audit a patch's impact",
+  diagnose = "Run a fixed read/grep check sequence once",
+  client = "Act on the user's machine: screen, mouse, keyboard, browser",
+  shell = "Run a shell command on the client machine",
+  spell_save = "Save a verified command sequence as a reusable spell",
+  spell_run = "Replay a saved spell",
+  spell_list = "List saved spells",
+  spell_get = "Read one saved spell in full",
+  spell_forget = "Delete a saved spell",
+  spell_export = "Export a spell for the sentinel to run",
+  remote = "Run a capability on another node",
+  nodes = "List this node and its peers",
+  tool_result = "Read an exact byte range of a truncated tool result",
+  whatsapp_read = "Read the incoming conversation for this run",
+  whatsapp_decide = "Record reply/no_reply for this message",
+  whatsapp_send = "Send the verified reply in this conversation",
+}
+
+function M.snippet(name) return CUES[name] end
+
+function M.cue_names()
+  local names = {}
+  for name in pairs(CUES) do names[#names + 1] = name end
+  table.sort(names)
+  return names
+end
+
 -- Every schema a role may load or delegate, before prompt visibility. This is the
 -- *catalog*: what the principal can execute or hand to a child. Prompt visibility is a
 -- separate projection (`M.all`), because advertising a tool the principal cannot execute
 -- is not the same as authorizing it - and hiding one from the prompt must not revoke the
 -- authority to delegate it.
 function M.catalog(role)
+
   role = role or "admin"
   local list = {}
   for _, item in ipairs(M.shared) do list[#list + 1] = item end

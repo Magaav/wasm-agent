@@ -654,6 +654,9 @@ LUA
 WA_SCRIPT="$DB.evidence.lua" "$BIN" --db "$DB" | grep "tool evidence ok"
 rm -f "$DB.evidence.lua"
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB.observability" | grep 'observability ok'
+# The prompt index is an authored cue, not a slice of the schema description. Without this,
+# the same text is sent twice and nothing in the suite notices when the slicing returns.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-tool-cues.lua" "$BIN" --db "$DB.tool-cues" | grep 'tool cues ok'
 # A provider 400 on a too-large request must compact and retry once. Without it, one
 # oversized turn makes every later turn of the session fail and the thread never answers.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-overflow-recovery.lua" "$BIN" --db "$DB.overflow" | grep 'overflow recovery ok'
