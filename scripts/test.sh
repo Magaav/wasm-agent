@@ -174,6 +174,40 @@ for entry in chat paths status skills sessions resume; do
   echo "$HELP" | grep -q "$entry" || { echo "FAIL: wa help must list '$entry'" >&2; exit 1; }
 done
 echo "cli ok"
+# The REPL's `/` commands are the window's, and `/new` is the one that was missing: the window could
+# start a thread and the CLI could not, and nothing in the repo said so. This drives it the way a
+# reader does - typed into the real REPL - because a help line is not evidence that a command is
+# handled, and asserts the two halves of the promise: the REPL moved to another session, and the
+# session it left is still in the ledger (the ledger is append-only, so "unchanged" is a claim this
+# can check). Which commands the two surfaces share is `scripts/test-command-parity.cjs`'s half.
+"$BIN" --db "$DB" chat --help | grep -q '^  /new ' \
+  || { echo "FAIL: /help must offer /new" >&2; exit 1; }
+CLI_CMD_DB="$DB.cli-commands"
+CLI_CMD_STATUS=0
+CLI_CMD_OUT="$(printf '/new\n/session\n/exit\n' | "$BIN" --db "$CLI_CMD_DB" chat 2>&1 | tr -d '\r')" || CLI_CMD_STATUS=$?
+if [ "$CLI_CMD_STATUS" != 0 ]; then
+  echo "FAIL: wa chat exited $CLI_CMD_STATUS" >&2; printf '%s\n' "$CLI_CMD_OUT" >&2; exit 1
+fi
+printf '%s\n' "$CLI_CMD_OUT" | grep -q 'new session' \
+  || { echo "FAIL: /new must say which session the REPL moved to" >&2; exit 1; }
+UUID='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+# The banner's session id is the first id printed; `/session` answers on the line holding the prompt
+# the command was typed at, and the first id on such a line is the session the REPL is in now (the
+# `/new` notice names the same one). Both searches are for the full id, so a shortened one cannot pass.
+UUID='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+BEFORE="$(printf '%s\n' "$CLI_CMD_OUT" | grep -oE "$UUID" | head -1)"
+AFTER="$(printf '%s\n' "$CLI_CMD_OUT" | grep -E '^wa> ' | grep -oE "$UUID" | head -1)"
+if [ -z "$BEFORE" ] || [ -z "$AFTER" ] || [ "$BEFORE" = "$AFTER" ]; then
+  echo "FAIL: /new must move /session to a different session (before='$BEFORE' after='$AFTER')" >&2
+  printf '%s\n' "$CLI_CMD_OUT" >&2
+  exit 1
+fi
+printf '%s\n' "$CLI_CMD_OUT" | grep -q "$BEFORE" \
+  || { echo "FAIL: /new must name the session it left" >&2; exit 1; }
+"$BIN" --db "$CLI_CMD_DB" sessions | grep -q "$BEFORE" \
+  || { echo "FAIL: /new must leave the session it left in the ledger" >&2; exit 1; }
+rm -f "$CLI_CMD_DB"*
+echo "cli /new ok"
 # Actions that need the user's machine must fail immediately when nothing is
 # polling the client bridge, instead of blocking for the call timeout: an agent
 # spent rounds on a tool that looked half-working. There is never a client
@@ -1249,6 +1283,10 @@ fi
 bash scripts/check-naming.sh
 node scripts/test-naming-check.cjs
 node scripts/test-execution-terminology.cjs
+# The window and this CLI offer the same `/` commands, and `/new` was missing from the CLI for as long
+# as nothing checked it. The rule is the window's list against the REPL's, plus the one sentence that
+# is deliberately written twice (the `/merge` brief).
+node scripts/test-command-parity.cjs
 node scripts/test-auth-sessions.cjs "$BIN"
 node scripts/test-fixture-verdict.cjs
 node scripts/test-suite-verdict.cjs
