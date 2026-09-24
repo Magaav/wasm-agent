@@ -293,8 +293,12 @@ local function admin_names()
   return names
 end
 
--- Tool schemas for a role.
-function M.all(role)
+-- Every schema a role may load or delegate, before prompt visibility. This is the
+-- *catalog*: what the principal can execute or hand to a child. Prompt visibility is a
+-- separate projection (`M.all`), because advertising a tool the principal cannot execute
+-- is not the same as authorizing it - and hiding one from the prompt must not revoke the
+-- authority to delegate it.
+function M.catalog(role)
   role = role or "admin"
   local list = {}
   for _, item in ipairs(M.shared) do list[#list + 1] = item end
@@ -313,11 +317,29 @@ function M.all(role)
   return list
 end
 
+-- Tools the prompt must not offer, though the catalog keeps them executable. The scoped
+-- WhatsApp responder tools run only from an approved child: `dispatch` refuses them
+-- without `ctx.subagent`, so a parent that sees them can only ever get
+-- `whatsapp_requires_subagent`. Hiding them removes a dead choice and the schemas it
+-- costs; the child still receives them through `all_for`, which reads the catalog.
+local PROMPT_HIDDEN = WHATSAPP_TOOLS
+
+-- The schemas a role's prompt shows, and what `capabilities` reports.
+function M.all(role)
+  local shown = {}
+  for _, item in ipairs(M.catalog(role)) do
+    if not PROMPT_HIDDEN[item["function"].name] then shown[#shown + 1] = item end
+  end
+  return shown
+end
+
 -- Tool schemas restricted to an exact allowed set (a subagent profile). The
--- schema list is one half of the boundary; `dispatch` re-checks the same set.
+-- schema list is one half of the boundary; `dispatch` re-checks the same set. It reads the
+-- catalog, not the prompt projection, so a tool hidden from a parent can still be
+-- delegated to the child whose profile names it.
 function M.all_for(allowed, role)
   local out = {}
-  for _, item in ipairs(M.all(role or "master")) do
+  for _, item in ipairs(M.catalog(role or "master")) do
     local name = item["function"].name
     if allowed and allowed[name] then out[#out + 1] = item end
   end

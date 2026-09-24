@@ -260,6 +260,28 @@ local denied_wa = tools.dispatch(memory, "whatsapp_send", { body = "x", confirm 
 check(denied_wa.error == "capability_not_in_profile:whatsapp_send",
   "the ceiling must refuse an unlisted whatsapp tool: " .. json.encode(denied_wa))
 
+-- 16b. Visibility and authority are separate. The responder tools cannot be executed by a
+--      parent (dispatch needs a child ctx), so the prompt must not offer them - but the
+--      catalog keeps them delegable, or hiding a dead choice would revoke a real authority.
+local function name_set(list)
+  local set = {}
+  for _, item in ipairs(list) do set[item["function"].name] = true end
+  return set
+end
+local shown = name_set(tools.all("master"))
+local catalog = name_set(tools.catalog("master"))
+check(not shown.whatsapp_read and not shown.whatsapp_decide and not shown.whatsapp_send,
+  "a principal must not be advertised a tool it cannot execute")
+check(catalog.whatsapp_read and catalog.whatsapp_decide and catalog.whatsapp_send,
+  "the catalog must keep the responder tools the prompt hides")
+local delegated = tools.all_for({ whatsapp_read = true }, "master")
+check(#delegated == 1 and delegated[1]["function"].name == "whatsapp_read",
+  "a hidden tool must still be delegable to a child profile that names it")
+check(tools.all_for({ read = true }, "master")[1]["function"].name == "read",
+  "the ordinary child surface is unchanged")
+check(not name_set(tools.all("guest")).whatsapp_read and not name_set(tools.catalog("guest")).whatsapp_read,
+  "a guest never had the responder tools, in either projection")
+
 -- 17. Malformed, negative or unpriceable budgets are refused, not coerced.
 write_profile("bad-token-limit", { schema_version = 1, id = "bad-token-limit", allowed_tools = {}, limits = { max_tokens = -5 } })
 local bad, bad_why = subagents.resolve("bad-token-limit", ctx("alice"))

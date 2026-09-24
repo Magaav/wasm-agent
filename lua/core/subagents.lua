@@ -176,10 +176,11 @@ function M.resolve(id, ctx)
   local ceiling = ctx.ceiling
   if ceiling == nil then
     -- No server-built ceiling was supplied (a direct policy call): derive it from
-    -- the role's own schema list. An explicitly empty ceiling is NOT re-derived -
-    -- "this principal has no tools" must mean none, not the role default.
+    -- the role's *catalog* - what the principal may execute or delegate, which is
+    -- wider than what its prompt shows. An explicitly empty ceiling is NOT re-derived
+    -- - "this principal has no tools" must mean none, not the role default.
     ceiling = {}
-    for _, item in ipairs(tools.all(ctx.role or "master")) do
+    for _, item in ipairs(tools.catalog(ctx.role or "master")) do
       local name = item["function"] and item["function"].name
       if name then ceiling[name] = true end
     end
@@ -252,10 +253,11 @@ function M.resolve(id, ctx)
   }
 end
 
--- The caller's authorized tool names, from the same schema list they run with.
+-- The caller's authorized tool names, from its catalog - authority, not prompt visibility.
+-- A tool hidden from the parent's prompt is still delegable, so this must read the catalog.
 local function ceiling_for(role)
   local set = {}
-  for _, item in ipairs(tools.all(role or "master")) do
+  for _, item in ipairs(tools.catalog(role or "master")) do
     local name = item["function"] and item["function"].name
     if name then set[name] = true end
   end
