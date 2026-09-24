@@ -1506,6 +1506,40 @@ $harness = @'
       + (multiBody ? multiBody.querySelectorAll("wa-run").length : "no body"));
     window.handleEvent({ type: "done" });
   })();
+  // The status line belongs to the run, and then to the bubble, in that order. Mid-run it must be
+  // the last thing in the transcript: appended when it was created - before the run's bubble
+  // existed - it was overtaken by that bubble and drifted to the top of the bubble it describes.
+  // At the end it must be the bubble's last child: a footer under the answer carrying the run's
+  // time, not a child of the custom element, which has no place for it.
+  (function () {
+    window.handleEvent({ type: "status", text: "placement check: a run is in flight" });
+    window.handleEvent({ type: "round", n: 1 });
+    window.handleEvent({ type: "delta", text: "the answer is being written" });
+    var live = document.querySelectorAll(".chat-content-run-status:not(.finished)");
+    var placed = live[live.length - 1];
+    check(!!placed, "the placement check needs a live status line");
+    var tail = messages.children[messages.children.length - 1];
+    check(tail === placed,
+      "mid-run the status line must be the last thing in the transcript, saw: "
+      + (tail ? tail.tagName + "." + tail.className : "nothing"));
+    var bubbles = messages.querySelectorAll("wa-message.assistant");
+    var bubble = bubbles[bubbles.length - 1];
+    check(Array.prototype.indexOf.call(messages.children, bubble)
+      < Array.prototype.indexOf.call(messages.children, placed),
+      "the status line must sit below the run's bubble, not above it");
+    window.handleEvent({ type: "reply", text: "the answer." });
+    window.handleEvent({ type: "done" });
+    var body = bubble ? bubble.body : null;
+    var footer = body ? body.children[body.children.length - 1] : null;
+    check(!!footer && footer.classList.contains("chat-content-run-status"),
+      "after the run the status line must be inside the bubble's body, saw: "
+      + (footer ? footer.tagName + "." + footer.className : "nothing"));
+    check(!!footer && footer.classList.contains("finished"),
+      "and it must be the finished footer, under the answer");
+    check(!!footer && /\d+:\d\d/.test(footer.textContent),
+      "the footer must carry the run's time, saw: "
+      + (footer ? footer.textContent : "nothing"));
+  })();
   document.title = "stage: end";
 } catch (error) {
     // A throw must still produce a log: a reporter that swallows its own failure is worse

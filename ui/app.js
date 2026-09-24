@@ -339,6 +339,16 @@ jump.addEventListener("click", () => { setFollow(true); pin(true); });
 let runBubble = null;
 let runStartedAt = 0;
 
+// The status line belongs to the run in flight and must stay the *last* thing in the
+// transcript while that run is happening. Created before the run's bubble exists, it was
+// overtaken the moment the bubble was appended, so it drifted to the top of the bubble it
+// describes - the wrong place to read it from, and not where the sticky rule expects it.
+// Re-appending after anything new lands keeps it below; appending an existing child moves
+// it, so this is the whole of it.
+function keepStatusLast() {
+  if (statusLine) messages.append(statusLine);
+}
+
 function currentBubble() {
   if (!runBubble) {
     document.getElementById("empty")?.remove();
@@ -346,6 +356,7 @@ function currentBubble() {
     runBubble.setAttribute("role", "assistant");
     messages.append(runBubble);   // connecting is what builds .body
     runBubble.body.classList.add("steps");
+    keepStatusLast();
   }
   return runBubble;
 }
@@ -355,6 +366,7 @@ function add(role, text, asHtml = false) {
   const element = document.createElement("wa-message");
   element.setAttribute("role", role);
   messages.append(element);
+  keepStatusLast();
   const body = element.body;
   if (asHtml) body.innerHTML = text; else body.textContent = text;
   if (role === "assistant") lastAssistantBody = body;
@@ -403,12 +415,15 @@ function startRunStatusTicker() {
 
 function finishRunStatus(label = "completed") {
   if (!statusLine) return;
-  const bubble = runBubble || lastAssistantBody;
+  // The footer goes *inside the bubble's body*, after the answer, not on the custom element:
+  // the element's children are its body and nothing else, so appending to it left the line
+  // outside the message it belongs to.
+  const body = runBubble ? runBubble.body : lastAssistantBody;
   statusSpinner?.remove();
   statusLabel.textContent = label;
   updateRunElapsed();
   statusLine.classList.add("finished");
-  if (bubble) bubble.append(statusLine);
+  if (body) body.append(statusLine);
   else statusLine.remove();
   statusLine = null;
   statusLabel = null; statusElapsed = null; statusSpinner = null;
