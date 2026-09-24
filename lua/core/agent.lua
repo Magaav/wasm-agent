@@ -373,22 +373,17 @@ function M:summary_model()
   return host.getenv("WASM_AGENT_LLM_SUMMARY_MODEL") or provider.settings().model
 end
 
--- A stored user message as a provider message.
---
--- With no images this is a plain string, which is what every existing message is
--- and what non-vision providers expect. With images it becomes the
--- OpenAI-compatible parts array. A missing file is reported *inside* the text
--- part rather than dropped: a message that silently lost its picture would let the
--- model answer confidently about something it never saw.
-local function user_message(message)
-  local images = message.images
+-- Turn stored image references into one provider message. The ledger keeps only
+-- references; base64 is materialised here, at the boundary where it is required.
+-- A missing file is reported inside the text part rather than dropped: a message
+-- that silently lost its picture would let the model answer about something it
+-- never saw.
+local function image_message(images,text,missing_label)
   if type(images) ~= "table" or #images == 0 then
-    return { role = "user", content = message.content or "" }
+    return { role = "user", content = text or "" }
   end
   local parts = {}
-  if message.content and message.content ~= "" then
-    parts[#parts + 1] = { type = "text", text = message.content }
-  end
+  if text and text ~= "" then parts[#parts + 1] = { type = "text", text = text } end
   local lost = {}
   for _, reference in ipairs(images) do
     local image = memory.load_image(reference)
@@ -404,14 +399,71 @@ local function user_message(message)
   if #lost > 0 then
     parts[#parts + 1] = {
       type = "text",
-      text = "[image unavailable: " .. table.concat(lost, ", ") .. "]",
+      text = "[" .. (missing_label or "image unavailable") .. ": " .. table.concat(lost, ", ") .. "]",
     }
   end
-  -- An image-only message still needs a non-empty content array.
-  if #parts == 0 then
-    parts[1] = { type = "text", text = "(image)" }
-  end
+  if #parts == 0 then parts[1] = { type = "text", text = "(image)" } end
   return { role = "user", content = parts }
+end
+
+-- A stored user message as a provider message. With no images it remains a plain
+-- string, preserving compatibility with every existing text-only conversation.
+local function user_message(message)
+  return image_message(message.images,message.content or "","image unavailable")
+end
+
+local function tool_image_message(images)
+  local names = {}
+  for _, reference in ipairs(images or {}) do
+    names[#names + 1] = tostring(reference.name or reference.sha256 or "image")
+  end
+  local label = (#names == 1 and "Image" or "Images") ..
+    " returned by the preceding tool result" .. (#names > 0 and (": " .. table.concat(names, ", ")) or ".")
+  return image_message(images,label,"tool image unavailable")
+end
+
+-- Chat Completions permits image parts on user messages, not tool messages. Keep
+-- every tool result contiguous with its assistant tool_calls, then insert one
+-- provider-only user image message after the complete result block. `_images`
+-- never crosses the provider boundary and never appears in the textual result.
+local function materialize_tool_images(messages)
+  local index = 1
+  while index <= #messages do
+    if messages[index].role ~= "tool" then
+      index = index + 1
+    else
+      local after, images = index, {}
+      while after <= #messages and messages[after].role == "tool" do
+        for _, reference in ipairs(messages[after]._images or {}) do images[#images + 1] = reference end
+        messages[after]._images = nil
+        after = after + 1
+      end
+      if #images > 0 then
+        table.insert(messages,after,tool_image_message(images))
+        index = after + 1
+      else
+        index = after
+      end
+    end
+  end
+  return messages
+end
+
+-- Only built-in read results may promote an internal `_images` field into model
+-- input. A plugin result containing the same key is ordinary untrusted JSON.
+local function take_tool_images(name,output)
+  local images = {}
+  local function take(value)
+    if type(value) ~= "table" then return end
+    for _, reference in ipairs(value._images or {}) do images[#images + 1] = reference end
+    value._images = nil
+  end
+  if name == "read" then
+    take(output)
+  elseif name == "read_many" and type(output) == "table" then
+    for _, result in ipairs(output.results or {}) do take(result) end
+  end
+  return images
 end
 
 -- What a navigation-shaped tool *answered*, for the efficiency loop: which kind of
@@ -519,6 +571,7 @@ function M:build_context()
       messages[#messages + 1] = {
         role = "tool", tool_call_id = row.tool_call_id or "",
         name = row.tool_name or "", content = tool_output.context_view(row.tool_name, row.content),
+        _images = row.images,
       }
     end
   end
@@ -616,7 +669,7 @@ function M:build_context()
         dropped_calls, dropped_results, moved_results),
     })
   end
-  return messages
+  return materialize_tool_images(messages)
 end
 
 function M:context_tokens(messages)
@@ -1378,6 +1431,7 @@ function M:run_body(text, images)
       -- model-facing result where it would spend context on every shell call.
       local execution_timing=type(output)=="table" and output.timing or nil
       if function_.name=="bash" and execution_timing then output.timing=nil end
+      local tool_images=take_tool_images(function_.name,output)
       local ok_tool = tool_output.outcome(function_.name,output)
       if ok_tool and function_.name=="read" and type(args.path)=="string" then
         self.reviewed_paths[args.path]=true
@@ -1406,13 +1460,15 @@ function M:run_body(text, images)
 
       record_turn(self, {
         role = "tool", tool_call_id = call.id or "", tool_name = function_.name or "",
-        content = content,
+        content = content, images = tool_images,
         ok = ok_tool, debug = self.debug,
       })
       messages[#messages + 1] = {
         role = "tool", tool_call_id = call.id or "", name = function_.name or "", content = content,
+        _images = tool_images,
       }
     end
+    materialize_tool_images(messages)
 
     -- Mid-message compaction (pi's "split message"): everything so far is already in
     -- the transcript, so when the request approaches the window we summarise the

@@ -5,6 +5,7 @@
 //! here, so the same Lua can later run as a WASM component with these imports.
 use crate::lua::{arg_integer, arg_string, lua_pushlstring, lua_touserdata, upvalue_index, LuaState};
 use crate::plugins::PluginRegistry;
+use base64::Engine as _;
 use ring::rand::{SecureRandom, SystemRandom};
 use rusqlite::{params_from_iter, Connection};
 use serde_json::{json, Value};
@@ -534,6 +535,156 @@ pub extern "C" fn read_file(l: *mut LuaState) -> c_int {
             unsafe { crate::lua::lua_pushnil(l) };
             1
         }
+    }
+}
+
+/// Identify the image formats the provider path accepts from their bytes, never
+/// from an extension supplied by a file name.
+fn supported_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+fn read_image_value(path: &str, max_bytes: usize) -> Value {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return json!({"error": "not_found", "path": path});
+        }
+        Err(_) => return json!({"error": "read_failed", "path": path}),
+    };
+    let mut header = [0u8; 12];
+    let header_len = match file.read(&mut header) {
+        Ok(read) => read,
+        Err(_) => return json!({"error": "read_failed", "path": path}),
+    };
+    let mime = match supported_image_mime(&header[..header_len]) {
+        Some(mime) => mime,
+        None => {
+            if header[..header_len].starts_with(b"BM") {
+                return json!({"error": "unsupported_image_type", "mime": "image/bmp", "path": path});
+            }
+            return json!({"error": "not_image", "path": path});
+        }
+    };
+    let measured = file.metadata().ok().map(|metadata| metadata.len() as usize);
+    if measured.is_some_and(|bytes| bytes > max_bytes) {
+        return json!({"error": "image_too_large", "path": path, "bytes": measured, "max_bytes": max_bytes});
+    }
+    if file.seek(SeekFrom::Start(0)).is_err() {
+        return json!({"error": "read_failed", "path": path});
+    }
+    // The metadata check is an early refusal, not the bound: a file can grow
+    // between metadata and read. `take(max+1)` keeps that race bounded too.
+    let mut bytes = Vec::with_capacity(measured.unwrap_or(0).min(max_bytes));
+    if file.by_ref().take(max_bytes as u64 + 1).read_to_end(&mut bytes).is_err() {
+        return json!({"error": "read_failed", "path": path});
+    }
+    if bytes.len() > max_bytes {
+        return json!({"error": "image_too_large", "path": path,
+            "bytes_at_least": bytes.len(), "max_bytes": max_bytes});
+    }
+    if supported_image_mime(&bytes) != Some(mime) {
+        return json!({"error": "file_changed_during_read", "path": path});
+    }
+    json!({
+        "path": path,
+        "mime": mime,
+        "bytes": bytes.len(),
+        "base64": base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
+}
+
+/// host.read_image_base64(path, max_bytes) -> JSON
+///
+/// Probe by magic bytes and read a supported image with a hard allocation bound.
+/// `not_image` is an ordinary answer: Lua then uses the UTF-8 text reader. The
+/// base64 is transport across the Lua/WIT seam; it is not a model-facing result.
+pub extern "C" fn read_image_base64(l: *mut LuaState) -> c_int {
+    let path = arg_string(l, 1).unwrap_or_default();
+    let maximum = arg_integer(l, 2).unwrap_or(4_000_000);
+    let value = if path.is_empty() {
+        json!({"error": "path_required"})
+    } else if !(1..=64 * 1024 * 1024).contains(&maximum) {
+        json!({"error": "invalid_image_limit", "max_bytes": maximum})
+    } else {
+        read_image_value(&path, maximum as usize)
+    };
+    push_json(l, &value);
+    1
+}
+
+#[cfg(test)]
+mod image_file_tests {
+    use super::{read_image_value, supported_image_mime};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn temporary(name: &str) -> std::path::PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "wa-image-read-{}-{}-{name}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[test]
+    fn supported_images_are_sniffed_from_bytes() {
+        assert_eq!(
+            supported_image_mime(b"\x89PNG\r\n\x1a\nrest"),
+            Some("image/png")
+        );
+        assert_eq!(
+            supported_image_mime(b"\xff\xd8\xffrest"),
+            Some("image/jpeg")
+        );
+        assert_eq!(supported_image_mime(b"GIF89arest"), Some("image/gif"));
+        assert_eq!(supported_image_mime(b"RIFF1234WEBPrest"), Some("image/webp"));
+        assert_eq!(supported_image_mime(b"not an image"), None);
+    }
+
+    #[test]
+    fn image_reads_are_bounded_and_base64_encoded() {
+        let image = temporary("probe.bin");
+        std::fs::write(&image, b"\x89PNG\r\n\x1a\n").unwrap();
+        let read = read_image_value(image.to_str().unwrap(), 64);
+        assert_eq!(read["mime"], "image/png");
+        assert_eq!(read["bytes"], 8);
+        assert_eq!(read["base64"], "iVBORw0KGgo=");
+
+        let too_large = read_image_value(image.to_str().unwrap(), 7);
+        assert_eq!(too_large["error"], "image_too_large");
+        assert_eq!(too_large["max_bytes"], 7);
+        let _ = std::fs::remove_file(image);
+    }
+
+    #[test]
+    fn text_and_unsupported_images_are_explicit() {
+        let text = temporary("text.txt");
+        std::fs::write(&text, b"hello").unwrap();
+        assert_eq!(
+            read_image_value(text.to_str().unwrap(), 64)["error"],
+            "not_image"
+        );
+        let _ = std::fs::remove_file(text);
+
+        let bitmap = temporary("bitmap.dat");
+        std::fs::write(&bitmap, b"BMnot-really-a-bitmap").unwrap();
+        let refused = read_image_value(bitmap.to_str().unwrap(), 64);
+        assert_eq!(refused["error"], "unsupported_image_type");
+        assert_eq!(refused["mime"], "image/bmp");
+        let _ = std::fs::remove_file(bitmap);
     }
 }
 

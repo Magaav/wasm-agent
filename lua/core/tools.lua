@@ -17,6 +17,18 @@ local function is_master(role)
   return role == "master" or role == "admin"
 end
 
+-- Image references name files in this node's content-addressed store. Returning
+-- one through `remote` would look successful but point at the wrong machine; fail
+-- visibly until the node protocol has a bounded binary transfer.
+local function carries_local_images(result)
+  if type(result) ~= "table" then return false end
+  if type(result._images) == "table" and #result._images > 0 then return true end
+  for _, item in ipairs(result.results or {}) do
+    if type(item) == "table" and type(item._images) == "table" and #item._images > 0 then return true end
+  end
+  return false
+end
+
 local function schema(name, description, properties, required)
   -- An empty Lua table encodes as `[]`, which providers reject as a schema, so
   -- only emit `properties`/`required` when they actually have entries.
@@ -116,12 +128,12 @@ M.admin = {
     stream = { type = "string", enum = {"stdout", "stderr"} }, offset = { type = "integer", minimum = 0 },
     limit = { type = "integer", minimum = 1, maximum = 24576 }, wait_ms = { type = "integer", minimum = 0, maximum = 10000 }
   }, {"action"}),
-  schema("read", "Read exact text with versioned line/byte-column continuation. Ask for the range you need (offset/limit) rather than a whole file: a whole-file read fills the context budget and is usually not what the question needed, and a grep hit already gives the line number to start from. Follow next_offset/next_column with version until eof; a long line may span pages.", {
+  schema("read", "Read a PNG, JPEG, WebP or GIF up to 4 MB as visual input, or read exact text with versioned line/byte-column continuation. Image type is detected from its bytes; ranges apply only to text. For text, ask for the range you need rather than a whole file, and follow next_offset/next_column with version until eof.", {
     path = { type = "string" },
     offset = { type = "integer", minimum = 1 },
     column = { type = "integer", minimum = 1 }, version = { type = "string" },
     limit = { type = "integer", minimum = 1, maximum = 2000 } }, { "path" }),
-  schema("read_many", "Read several independent files or line ranges in one step. Prefer a line range per file: reading from a little before a known line is cheaper and more accurate than reading the file, and the whole-file read is what fills the budget. Results match individual read calls in request order; each item reports its own error.", {
+  schema("read_many", "Read several independent text ranges or images up to 4 MB each in one step. Prefer a line range for text; images are detected from their bytes and returned as visual input. Results match individual read calls in request order; each item reports its own error.", {
     requests = { type = "array", minItems = 1, maxItems = 8, items = { type = "object",
       properties = { path = { type = "string" }, offset = { type = "integer", minimum = 1 },
         column = { type = "integer", minimum = 1 }, version = { type = "string" },
@@ -209,7 +221,7 @@ M.admin = {
     params = { type = "object", description = "Values for the spell's declared parameters." },
     binary = { type = "string", description = "For an `upgrade` step: the wa binary to install. Defaults to the step's own value." },
     path = { type = "string", description = "Where to write the plan. Defaults to <state>/spell-plans/<name>.json." } }, { "name" }),
-  schema("remote", "Run a capability on another wasm-agent node (peer). Nodes are discovered by ed25519 key through the rendezvous, so the name or node_id is enough.", {
+  schema("remote", "Run a capability on another wasm-agent node (peer). Nodes are discovered by ed25519 key through the rendezvous, so the name or node_id is enough. Text reads work; image results are refused until the node protocol has bounded binary transfer.", {
     node = { type = "string", description = "Peer name or node_id (use the nodes panel for the list)." },
     capability = { type = "string", description = "Tool to run on that node, e.g. bash, read, client, shell." },
     args = { type = "object", description = "Arguments for that tool." } }, { "node", "capability" }),
@@ -462,7 +474,7 @@ function M.dispatch(memory, name, args, role, ctx)
     end
     return result
   elseif name == "read" then
-    return file_tools.read(args)
+    return file_tools.read(args,function(entry) return memory.store_image(entry) end)
   elseif name == "diagnose" then
     return diagnose.run(args.steps,function(tool,options)
       return M.dispatch(memory,tool,options,role,ctx)
@@ -476,7 +488,7 @@ function M.dispatch(memory, name, args, role, ctx)
       if type(request) ~= "table" or type(request.path) ~= "string" or request.path == "" then
         results[index] = { error = "path_required" }
       else
-        results[index] = file_tools.read(request)
+        results[index] = file_tools.read(request,function(entry) return memory.store_image(entry) end)
       end
       if results[index].error then failed = failed + 1 end
     end
@@ -683,10 +695,17 @@ function M.dispatch(memory, name, args, role, ctx)
     if args.capability == "remote" then return { error = "remote_cannot_recurse" } end
     local node = nodeslib.find(args.node)
     if not node then return { error = "unknown_node:" .. tostring(args.node) } end
+    local result
     if node.local_node then
-      return M.dispatch(memory, args.capability, args.args or {}, role)
+      result=M.dispatch(memory, args.capability, args.args or {}, role)
+    else
+      result=nodeslib.remote_call(args.node, args.capability, args.args or {})
     end
-    return nodeslib.remote_call(args.node, args.capability, args.args or {})
+    if carries_local_images(result) then
+      return {error="remote_image_transport_unsupported",capability=args.capability,
+        note="The image was not returned as text or as a path on the wrong machine."}
+    end
+    return result
   end
 
   -- Fall back to a WASM plugin (admin only; guests never see their schemas).

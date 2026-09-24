@@ -1,6 +1,7 @@
 -- Full round-trip against the REAL host (sqlite, sha256, file IO), driven by
 -- the real binary: store an image, append it to a real turn, read it back out
 -- of sqlite, and rebuild the provider context.
+local json = dofile("lua/vendor/json.lua")
 local memory = dofile("lua/core/memory.lua")
 local agentlib = dofile("lua/core/agent.lua")
 memory.setup()
@@ -80,6 +81,42 @@ if type(user.content) == "table" then
   end
   check(has_text, "the text part is present")
   check(has_image, "the image part is present")
+end
+
+-- A read tool result keeps its image reference on the tool row, but the provider
+-- gets the image in a following user-role parts message because Chat Completions
+-- tool messages accept text, not image_url parts.
+local call_id, sibling_id = "read-image-fixture", "grep-sibling-fixture"
+memory.append_turn(sid, { role = "assistant", content = "", tool_calls = {
+  { id = call_id, type = "function", ["function"] = { name = "read", arguments = '{"path":"probe.png"}' } },
+  { id = sibling_id, type = "function", ["function"] = { name = "grep", arguments = '{"pattern":"probe"}' } },
+} })
+memory.append_turn(sid, { role = "tool", tool_call_id = call_id, tool_name = "read",
+  content = json.encode({path="probe.png",type="image",mime="image/png",bytes=70,sha256=ref.sha256}),
+  images = { ref } })
+memory.append_turn(sid, { role = "tool", tool_call_id = sibling_id, tool_name = "grep",
+  content = json.encode({count=0,matches={}}) })
+local replay = bot:build_context()
+local tool_index,private_reference_leaked = nil,false
+for index, message in ipairs(replay) do
+  if message.role == "tool" and message.tool_call_id == call_id then tool_index = index end
+  if message._images ~= nil then private_reference_leaked = true end
+end
+check(not private_reference_leaked, "private image references do not cross the provider boundary")
+check(tool_index ~= nil, "the image read's textual tool result is replayed")
+if tool_index then
+  check(replay[tool_index - 1] and replay[tool_index - 1].role == "assistant", "tool result remains adjacent to its tool call")
+  check(replay[tool_index + 1] and replay[tool_index + 1].tool_call_id == sibling_id,
+    "all sibling tool results remain contiguous before the image")
+  local visual = replay[tool_index + 2]
+  check(visual and visual.role == "user" and type(visual.content) == "table", "provider receives a visual message after the complete tool block")
+  local saw_label, saw_tool_image = false, false
+  for _, part in ipairs((visual and visual.content) or {}) do
+    if part.type == "text" and part.text:find("probe.png", 1, true) then saw_label = true end
+    if part.type == "image_url" and part.image_url.url:sub(-#probe_b64) == probe_b64 then saw_tool_image = true end
+  end
+  check(saw_label, "the visual message names the image returned by read")
+  check(saw_tool_image, "the visual message carries the read image bytes")
 end
 
 -- Same bytes a second time must reuse the stored file (content addressing).

@@ -15,4 +15,11 @@ assert(host.mark_db_ready() == nil, "host.mark_db_ready must return nil")
 assert(select("#", host.db_ready()) == 1, "host.db_ready must return one value")
 assert(host.db_ready() == true, "host.db_ready must be true after mark_db_ready")
 
+local function capture(...) return select("#", ...), ... end
+local missing = host.paths().temp .. "/wa-missing-image-" .. host.uuid() .. ".png"
+local count, image = capture(host.read_image_base64(missing, 1024))
+assert(count == 1, "host.read_image_base64 must return exactly one JSON value")
+assert(type(image) == "string" and image:find('"error":"not_found"', 1, true),
+  "host.read_image_base64 must distinguish a missing path")
+
 print("host contract ok")

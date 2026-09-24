@@ -89,6 +89,20 @@ a job itself. Both always return one JSON value, including failure. Do not add a
 second shell runner with `Command::output`, `read_to_end` or detached reader threads.
 See [OPERATIONS.md](OPERATIONS.md) and [JOBS.md](JOBS.md) for contracts, platform
 limits, authority, recovery and the regression tests.
+## Bounded image reads
+
+`host.read_file` remains UTF-8 text only. `host.read_image_base64(path,max_bytes)` first
+sniffs PNG, JPEG, WebP and GIF magic bytes, then reads at most the caller's explicit
+bound and returns a JSON envelope with MIME, byte count and base64. `not_image` tells Lua
+to continue through the text reader; missing, unsupported and oversized inputs are
+separate visible errors. MIME is never trusted from the extension.
+
+The base64 exists only to cross the Lua/WIT seam. Lua stores the image through the
+content-addressed attachment path, removes its private reference from the textual tool
+result, and materialises bytes only while constructing a provider request. The `read`
+tool therefore stays one operation for text and images without putting base64 into the
+ledger.
+
 ## Portable file search
 
 `host.grep(pattern,path,options_json)` performs literal substring matching; Lua
