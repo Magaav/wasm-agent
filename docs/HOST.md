@@ -180,7 +180,7 @@ one database rather than a silent per-interpreter split.
 
 ## The code graph
 
-`host.graph_index|query|explain|path|caps|stats|status` expose `wa-graph`'s SQLite
+`host.graph_index|query|search|source|explain|path|caps|stats|status` expose `wa-graph`'s SQLite
 index of the source tree to Lua. The graph lives beside the ledger
 (`<home>/.wasm-agent/graph.db`) and indexes the runtime worktree — the node's cwd —
 which is the source the binary is actually running from. `WA_GRAPH_ROOT` and
@@ -199,6 +199,12 @@ Every verb returns a JSON string, and an error as `{"error": ...}` — the same
 shape as `host.sql_query`. On a node whose host predates the capability the
 globals are absent; `lua/core/graph.lua` tolerates that and reports
 `graph_unavailable`, and the `graph` tool checks for it before calling.
+
+`graph_search(text, opts)` ranks source definitions and returns selectors plus
+visible lexical confidence evidence. `graph_source(opts)` accepts one of those
+`path/name/line/kind` selectors and returns an exact, bounded source page from
+the verified snapshot; `next_byte_offset` continues a large definition. It
+cannot select a path absent from the graph snapshot.
 
 The watcher is a `notify` thread started only for `serve`. It registers before indexing once on
 startup (off the accept path, so a large tree never delays the port) and reindexes

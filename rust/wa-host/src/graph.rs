@@ -142,6 +142,56 @@ pub extern "C" fn graph_query(l: *mut LuaState) -> std::ffi::c_int {
     })
 }
 
+/// host.graph_search(text, opts_json?) -> ranked symbol selectors with confidence evidence.
+pub extern "C" fn graph_search(l: *mut LuaState) -> std::ffi::c_int {
+    let text = arg_string(l, 1).unwrap_or_default();
+    read(l, 2, |store, options| {
+        let limit = options
+            .get("limit")
+            .and_then(Value::as_i64)
+            .unwrap_or(12)
+            .clamp(1, 100);
+        store
+            .search_symbols_json(&text, limit)
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// host.graph_source(opts_json) -> an exact, bounded page of one indexed definition.
+pub extern "C" fn graph_source(l: *mut LuaState) -> std::ffi::c_int {
+    read(l, 1, |store, options| {
+        let path = options
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or("path_required")?;
+        let name = options
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or("name_required")?;
+        let line = options
+            .get("line")
+            .and_then(Value::as_i64)
+            .filter(|line| *line > 0)
+            .ok_or("line_required")?;
+        let kind = options
+            .get("kind")
+            .and_then(Value::as_str)
+            .filter(|kind| !kind.is_empty());
+        let offset = options
+            .get("byte_offset")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
+        let max_bytes = options
+            .get("max_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(20_000)
+            .clamp(256, 20_000) as usize;
+        store
+            .symbol_source_json(path, name, line, kind, offset, max_bytes)
+            .map_err(|e| e.to_string())
+    })
+}
+
 /// host.graph_explain(name, opts_json?) -> [ {node, outgoing, incoming} ] | {error}
 pub extern "C" fn graph_explain(l: *mut LuaState) -> std::ffi::c_int {
     let name = arg_string(l, 1).unwrap_or_default();

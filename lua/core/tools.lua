@@ -153,10 +153,16 @@ M.admin = {
     ignore_case = {type="boolean"}, limit={type="integer",minimum=1,maximum=500},
     max_depth={type="integer",minimum=0,maximum=64}, extensions={type="array",items={type="string"}}
   }, { "pattern" }),
-  -- The graph is an impact-review lead generator and an optional relationship tool.
-  schema("graph", "Audit the current native write/edit patch for unread resolved callers with action=audit, or pass source=git for the current Git patch (including shell edits). After an audit follow-up step, call audit_assess with your usefulness grade, reason and critique; this is self-report, not proof. Use audit_report after the 48-hour trial and audit_feedback only for an operator-reviewed outcome. For explicit dependency questions, explain/path/query/caps remain available; read source before acting on a graph lead. stats/index inspect or rebuild the index.", {
-    action = { type = "string", enum = { "explain", "query", "path", "caps", "stats", "index", "audit", "audit_assess", "audit_report", "audit_feedback" } },
-    name = { type = "string", description = "explain/query: the identifier to look up." },
+  -- Retrieval returns selected implementation text; relationship and audit actions remain
+  -- explicitly separate so their evidence can be evaluated independently.
+  schema("graph", "Find implementation source without broad file reads: use search_symbols with a name or concept, then symbol_source with the selected path/name/line/kind. Use grep when ranked results are absent or low-confidence, and inspect surrounding file context before editing. explain/path answer explicit relationship questions. audit checks the current patch for unread resolved callers; audit_assess records usefulness and audit_feedback is operator-reviewed. stats/index inspect or rebuild the index.", {
+    action = { type = "string", enum = { "search_symbols", "symbol_source", "explain", "query", "path", "caps", "stats", "index", "audit", "audit_assess", "audit_report", "audit_feedback" } },
+    name = { type = "string", description = "search_symbols: concept or identifier; symbol_source/explain/query: exact selected name." },
+    path = { type = "string", description = "symbol_source: path from a search_symbols result." },
+    line = { type = "integer", minimum = 1, description = "symbol_source: definition line from a search_symbols result." },
+    kind = { type = "string", description = "symbol_source: optional definition kind from the selected result." },
+    byte_offset = { type = "integer", minimum = 0, description = "symbol_source: continue a large definition at this returned byte offset." },
+    max_bytes = { type = "integer", minimum = 256, maximum = 20000, description = "symbol_source: source bytes per page; default 20000." },
     from = { type = "string", description = "path: start identifier." },
     to = { type = "string", description = "path: end identifier." },
     limit = { type = "integer", minimum = 1, maximum = 200 },
@@ -345,7 +351,7 @@ local CUES = {
   edit = "Replace exact text in one file",
   ls = "List a directory",
   grep = "Find lines matching literal text",
-  graph = "Trace callers/relationships, or audit a patch's impact",
+  graph = "Retrieve symbol source, trace relationships, or audit patch impact",
   diagnose = "Run a fixed read/grep check sequence once",
   client = "Act on the user's machine: screen, mouse, keyboard, browser",
   shell = "Run a shell command on the client machine",
@@ -688,7 +694,11 @@ function M.dispatch(memory, name, args, role, ctx)
     end
     if not graph.available() then return { error = "graph_unavailable" } end
     local result, err
-    if action == "explain" then result, err = graph.explain(args.name)
+    if action == "search_symbols" then result, err = graph.search_symbols(args.name, { limit = args.limit })
+    elseif action == "symbol_source" then result, err = graph.symbol_source({
+      path=args.path,name=args.name,line=args.line,kind=args.kind},
+      {byte_offset=args.byte_offset,max_bytes=args.max_bytes})
+    elseif action == "explain" then result, err = graph.explain(args.name)
     elseif action == "query" then result, err = graph.query(args.name, { limit = args.limit })
     elseif action == "path" then result, err = graph.path(args.from, args.to)
     elseif action == "caps" then result, err = graph.caps()

@@ -73,11 +73,12 @@ clean `host.<ident>`, and the Rust path never emits a capability edge. That make
 
 ## Node integration
 
-The node exposes the graph as `host.graph_index|query|explain|path|caps|stats|status`; a Lua run
+The node exposes the graph as `host.graph_index|query|search|source|explain|path|caps|stats|status`; a Lua run
 queries its own code. `lua/core/graph.lua` wraps them and degrades cleanly when the host is older.
-The model reaches it through the **`graph` tool** (`explain`/`query`/`path`/`caps`/`stats`/`index`),
-and `skills/code-graph/SKILL.md` teaches a fresh context to reach for it before grep. The node keeps
-the graph fresh, so `index` is rarely needed.
+The model reaches it through the **`graph` tool**. `search_symbols` ranks definitions using visible
+lexical and incoming-edge evidence; `symbol_source` returns the selected syntax definition from
+the exact stored snapshot, paging only when it exceeds the response budget. Relationship and audit
+verbs remain available. The node keeps the graph fresh, so `index` is rarely needed.
 
 The database lives at `<home>/.wasm-agent/graph.db` and indexes the runtime worktree (the node's
 cwd). `WA_GRAPH_ROOT` / `WA_GRAPH_DB` override both; `WA_GRAPH_WATCH=0` disables the watcher. Reads
@@ -112,4 +113,7 @@ end to end: start → index, add a file → it appears, edit a file → the old 
   "resolvable by name, same-file beats same-dir beats unique."
 - **Doc mentions are filtered hard.** A mention is kept only when it names a real node; an
   unresolved mention is deleted, not stored.
-- **It is a map, not the territory.** Read the file before editing it.
+- **Search ranking is lexical, not semantic.** Synonyms absent from names, signatures, and paths
+  can miss. Low-confidence and absent results require a grep fallback.
+- **A definition is not its whole context.** Source retrieval omits surrounding imports, sibling
+  attributes, and module state; inspect those before editing.

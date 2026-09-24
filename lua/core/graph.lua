@@ -51,6 +51,46 @@ function M.query(text, opts)
   return { query = text, count = #results, truncated = truncated, results = results }
 end
 
+-- Ranked discovery is separate from legacy `query`: callers can measure whether returning a
+-- source-ready selector actually replaces grep/read rather than silently changing old behavior.
+function M.search_symbols(text, opts)
+  if type(text) ~= "string" or text == "" then return nil, "query_required" end
+  if not capability("graph_search") then return nil, "graph_retrieval_unavailable" end
+  local limit = math.max(1, math.min(tonumber(opts and opts.limit) or 8, 50))
+  local rows, err = call("graph_search", text, json.encode({ limit = limit + 1 }))
+  if not rows then return nil, err end
+  local results = {}
+  for i = 1, math.min(#rows, limit) do
+    local row = rows[i]
+    results[#results + 1] = {
+      kind = row.kind, name = row.name, path = row.path, line = row.line,
+      language = row.language, signature = row.signature, score = row.score,
+      confidence = row.confidence, reason = row.reason, matched_terms = row.matched_terms,
+    }
+  end
+  return {
+    query = text, count = #results, truncated = #rows > limit,
+    verdict = #results > 0 and "ok" or "absent", results = results,
+    next = #results > 0 and "Call graph action=symbol_source with one result's path, name, line and kind." or nil,
+  }
+end
+
+function M.symbol_source(selector, opts)
+  if not capability("graph_source") then return nil, "graph_retrieval_unavailable" end
+  if type(selector) ~= "table" or type(selector.path) ~= "string" or selector.path == "" then
+    return nil, "path_required"
+  end
+  if type(selector.name) ~= "string" or selector.name == "" then return nil, "name_required" end
+  local line = tonumber(selector.line)
+  if not line or line < 1 or line % 1 ~= 0 then return nil, "line_required" end
+  opts = opts or {}
+  return call("graph_source", json.encode({
+    path = selector.path, name = selector.name, line = line, kind = selector.kind,
+    byte_offset = tonumber(opts.byte_offset) or 0,
+    max_bytes = tonumber(opts.max_bytes) or 20000,
+  }))
+end
+
 local function edge_label(edge)
   local label = tostring(edge.target or "?")
   if edge.dst_path then

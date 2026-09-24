@@ -15,6 +15,10 @@ pub struct DefNode {
     pub name: String,
     pub line: usize,
     pub col: usize,
+    /// Exact UTF-8 byte range of the syntax node in the indexed source snapshot.
+    /// Ranges are not persisted: source retrieval reparses only the selected file.
+    pub start_byte: usize,
+    pub end_byte: usize,
     pub detail: Option<String>,
 }
 
@@ -101,6 +105,8 @@ pub fn extract(path: &str, lang: &str, source: &str) -> Extract {
         name: path.replace('\\', "/"),
         line: 1,
         col: 0,
+        start_byte: 0,
+        end_byte: source.len(),
         detail: None,
     });
     ctx.scope.push(0);
@@ -154,6 +160,8 @@ impl<'a> Ctx<'a> {
             name,
             line: pos.row + 1,
             col: pos.column,
+            start_byte: node.start_byte(),
+            end_byte: node.end_byte(),
             detail,
         });
         self.nodes.len() - 1

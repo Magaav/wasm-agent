@@ -4,7 +4,9 @@ local changeset = dofile("lua/core/changeset.lua")
 local telemetry = dofile("lua/core/telemetry.lua")
 local redact = dofile("lua/core/redact.lua")
 local M = {}
-M.PHASE = "phase_2"
+-- Phase 3 begins with source-returning symbol retrieval. Phase 2 remains the locator-only
+-- baseline, so later reports cannot attribute a saved read to the older graph contract.
+M.PHASE = "phase_3"
 M.LEGACY_PHASE = "phase_1"
 
 local function failure(context, source, reason)

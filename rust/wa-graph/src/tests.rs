@@ -693,3 +693,49 @@ fn this_member_resolves_within_the_file() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn ranked_search_returns_a_source_ready_symbol_and_exact_definition() {
+    let dir = temp_dir("symbol-source");
+    let source = "fn helper() -> i32 { 1 }\n\nfn route_handler(request: &str) -> usize {\n    helper() as usize + request.len()\n}\n\nfn unrelated() {}\n";
+    std::fs::write(dir.join("router.rs"), source).unwrap();
+    let db = dir.join("graph.db");
+    let mut store = Store::open(&db).unwrap();
+    store.index(&dir, false).unwrap();
+
+    let hits = store.search_symbols("route handler", 5).unwrap();
+    assert!(!hits.is_empty());
+    assert_eq!(hits[0].node.name, "route_handler");
+    assert_eq!(hits[0].confidence, "high");
+    assert_eq!(hits[0].matched_terms, vec!["route", "handler"]);
+
+    let selected = &hits[0].node;
+    let value = store.symbol_source_json(
+        &selected.path, &selected.name, selected.line, Some(&selected.kind), 0, 24_000,
+    ).unwrap();
+    let returned = value["source"].as_str().unwrap();
+    assert!(returned.starts_with("fn route_handler"), "{returned}");
+    assert!(returned.contains("request.len()"), "{returned}");
+    assert!(!returned.contains("fn unrelated"), "{returned}");
+    assert_eq!(value["freshness"], "verified_snapshot");
+    assert_eq!(value["eof"], true);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn symbol_source_pages_large_utf8_definitions_without_splitting_characters() {
+    let dir = temp_dir("symbol-page");
+    std::fs::write(dir.join("text.lua"), "local function render()\n  return 'olá mundo'\nend\n").unwrap();
+    let db = dir.join("graph.db");
+    let mut store = Store::open(&db).unwrap();
+    store.index(&dir, false).unwrap();
+    let hit = store.search_symbols("render", 1).unwrap().remove(0).node;
+
+    let first = store.symbol_source_json(&hit.path, &hit.name, hit.line, Some(&hit.kind), 0, 35).unwrap();
+    let next = first["next_byte_offset"].as_u64().expect("first page continues") as usize;
+    let second = store.symbol_source_json(&hit.path, &hit.name, hit.line, Some(&hit.kind), next, 35).unwrap();
+    let joined = format!("{}{}", first["source"].as_str().unwrap(), second["source"].as_str().unwrap());
+    assert!(joined.contains("olá mundo"), "{joined}");
+    assert_eq!(second["eof"], true);
+    std::fs::remove_dir_all(&dir).ok();
+}

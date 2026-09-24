@@ -7,7 +7,9 @@ live in `rust/wa-graph/README.md`; this is the operator and integration view.
 
 ## What it is for
 
-`grep` returns candidate lines; the graph returns the answer. The measured shape
+`grep` returns candidate lines; `search_symbols` ranks definitions and
+`symbol_source` returns the selected implementation from the verified snapshot.
+Relationship actions answer callers and paths. The measured shape
 on the real tree is in the crate README: "who calls `append_turn`" goes from 102
 grep matches to one call, and "what resolves `deploy.sh`" from 45 matches to the
 resolver plus its candidate list.
@@ -49,7 +51,7 @@ dynamic calls remain uncertain even when its source snapshot is current.
 
 ## The capability
 
-`host.graph_index|query|explain|path|caps|stats|status`. Each returns a JSON
+`host.graph_index|query|search|source|explain|path|caps|stats|status`. Each returns a JSON
 string, and an error as `{"error": ...}` — the same shape as `host.sql_query`.
 `graph_status` reports the resolved root/db and whether the index exists yet.
 
@@ -57,6 +59,15 @@ string, and an error as `{"error": ...}` — the same shape as `host.sql_query`.
 function can have hundreds of callers; the model needs the shape and the first
 few places to look). It tolerates a host that predates the capability and reports
 `graph_unavailable`.
+
+`search` accepts a multi-term concept or identifier and returns source-ready
+`path/name/line/kind` selectors. Its score combines explainable name, signature,
+path, and incoming-edge evidence; `confidence`, `reason`, and `matched_terms`
+make the heuristic visible. It is lexical ranking, not semantic similarity.
+`source` reparses only the selected indexed file and returns the exact syntax
+definition. Definitions larger than the response budget continue from a byte
+offset. Both calls use the same before/after source verification as relationship
+actions.
 
 `explain` reports incoming callers at the exact call line, not the enclosing
 function's definition line. Exact names and qualified-member suffixes suppress
@@ -75,8 +86,9 @@ source function has the same final name.
 
 ## How the model reaches it
 
-The `graph` tool is the model surface (`explain`/`query`/`path`/`caps`/`stats`/
-`index`), in the `environment` tier. `skills/code-graph/SKILL.md` tells a fresh
+The `graph` tool is the model surface (`search_symbols`/`symbol_source` plus
+`explain`/`query`/`path`/`caps`/`stats`/`index`), in the `environment` tier.
+`skills/code-graph/SKILL.md` tells a fresh
 context to use it before `grep` and how to read the result — including that a
 `caller` without a `-> path:line` is an unresolved name, not a fact.
 
@@ -93,7 +105,10 @@ context to use it before `grep` and how to read the result — including that a
   `explain`.
 - Markdown contributes `mentions` edges only when a backtick span names a real
   definition; `path` traversal ignores mentions entirely.
-- The graph is a map. Always read a file before editing it.
+- Ranked retrieval is lexical. A synonym absent from names, signatures and paths
+  can miss; low-confidence or absent answers fall back to `grep`.
+- Definition source omits surrounding imports, sibling attributes and module
+  state. Inspect that context before editing.
 
 ## Adoption check (Phase 1, 2026-09-23 through 2026-09-24)
 
@@ -112,3 +127,7 @@ round. This evidence does not establish a speed, token, or correctness advantage
 Keep `grep`/`read` available and compare later phases before changing the default.
 The frozen baseline and its limitations are in
 [`release/GRAPH_TOOL_PHASE_1.md`](release/GRAPH_TOOL_PHASE_1.md).
+The locator-only Phase 2 contract is frozen in
+[`release/GRAPH_TOOL_PHASE_2.md`](release/GRAPH_TOOL_PHASE_2.md); source-returning
+retrieval begins Phase 3 under
+[`release/GRAPH_TOOL_PHASE_3.md`](release/GRAPH_TOOL_PHASE_3.md).

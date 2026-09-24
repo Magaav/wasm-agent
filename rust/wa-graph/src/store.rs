@@ -50,6 +50,15 @@ pub struct EdgeRow {
     pub dst_line: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub node: NodeRow,
+    pub score: i64,
+    pub confidence: &'static str,
+    pub reason: &'static str,
+    pub matched_terms: Vec<String>,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct Stats {
     pub files: i64,
@@ -610,6 +619,175 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// Ranked symbol discovery for retrieval, rather than the legacy location-oriented query.
+    /// The score is deliberately explainable lexical evidence plus a small incoming-edge boost;
+    /// it is not presented as semantic similarity.
+    pub fn search_symbols(&self, text: &str, limit: i64) -> Result<Vec<SearchHit>> {
+        let query = text.trim().to_ascii_lowercase();
+        let terms = lexical_terms(&query);
+        if query.is_empty() || terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let wants_test = terms.iter().any(|term| term == "test" || term == "tests");
+        let mut stmt = self.conn.prepare(
+            "SELECT n.id,n.kind,n.name,n.path,n.line,n.col,n.lang,n.detail,
+                    (SELECT COUNT(*) FROM edges e WHERE e.dst=n.id)
+             FROM nodes n WHERE n.kind NOT IN ('file','doc','capability')",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row_to_node(row)?, row.get::<_, i64>(8)?)))?;
+        let mut hits = Vec::new();
+        for row in rows {
+            let (node, incoming) = row?;
+            let name = node.name.to_ascii_lowercase();
+            let simple = extract::simple_name(&name).to_string();
+            let path = node.path.to_ascii_lowercase();
+            let detail = node.detail.as_deref().unwrap_or("").to_ascii_lowercase();
+            let name_terms = lexical_terms(&name);
+            let mut score = 0i64;
+            let mut matched = Vec::new();
+            let mut reason = "path";
+
+            if name == query {
+                score += 1_000;
+                reason = "exact_name";
+            } else if simple == query {
+                score += 950;
+                reason = "exact_member";
+            } else if name.contains(&query) {
+                score += 450;
+                reason = "name_phrase";
+            }
+            for term in &terms {
+                let mut term_hit = false;
+                if name_terms.iter().any(|part| part == term) {
+                    score += 160;
+                    term_hit = true;
+                    if reason == "path" {
+                        reason = "name_terms";
+                    }
+                } else if name.contains(term) {
+                    score += 90;
+                    term_hit = true;
+                    if reason == "path" {
+                        reason = "name_terms";
+                    }
+                }
+                if detail.contains(term) {
+                    score += 35;
+                    term_hit = true;
+                    if reason == "path" {
+                        reason = "signature";
+                    }
+                }
+                if path.contains(term) {
+                    score += 15;
+                    term_hit = true;
+                }
+                if term_hit {
+                    matched.push(term.clone());
+                }
+            }
+            if matched.is_empty() {
+                continue;
+            }
+            if matched.len() == terms.len() {
+                score += 120;
+                if reason != "exact_name" && reason != "exact_member" {
+                    reason = "all_terms";
+                }
+            }
+            score += incoming.min(20) * 2;
+            if matches!(node.kind.as_str(), "fn" | "method") {
+                score += 25;
+            } else if matches!(
+                node.kind.as_str(),
+                "struct" | "class" | "interface" | "enum" | "type"
+            ) {
+                score += 15;
+            }
+            if !wants_test && is_test_path(&path) {
+                score -= 30;
+            }
+            let confidence = if reason == "exact_name" || reason == "exact_member" {
+                "exact"
+            } else if matched.len() == terms.len() || score >= 400 {
+                "high"
+            } else if reason != "path" || matched.len() > 1 {
+                "medium"
+            } else {
+                "low"
+            };
+            hits.push(SearchHit {
+                node,
+                score,
+                confidence,
+                reason,
+                matched_terms: matched,
+            });
+        }
+        hits.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then_with(|| a.node.path.cmp(&b.node.path))
+                .then_with(|| a.node.line.cmp(&b.node.line))
+        });
+        hits.truncate(limit.max(1) as usize);
+        Ok(hits)
+    }
+
+    /// Return a byte-exact page of one definition from the same source snapshot the graph
+    /// verified. Selection uses the path/name/line tuple emitted by `search_symbols`, so this
+    /// cannot become an arbitrary file-read surface.
+    pub fn symbol_source_json(
+        &self,
+        path: &str,
+        name: &str,
+        line: i64,
+        kind: Option<&str>,
+        byte_offset: usize,
+        max_bytes: usize,
+    ) -> Result<Value> {
+        let (lang, bytes): (String, Vec<u8>) = self.conn.query_row(
+            "SELECT f.lang,s.source FROM files f JOIN graph_sources s USING(path) WHERE f.path=?1",
+            params![path],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?.ok_or("symbol_path_not_found")?;
+        let source = std::str::from_utf8(&bytes).map_err(|_| "graph_source_not_utf8")?;
+        let extracted = extract::extract(path, &lang, source);
+        let symbol = extracted
+            .nodes
+            .into_iter()
+            .find(|node| {
+                node.name == name
+                    && node.line as i64 == line
+                    && kind.map_or(true, |want| node.kind == want)
+            })
+            .ok_or("symbol_not_found_in_verified_source")?;
+        let exact = source
+            .get(symbol.start_byte..symbol.end_byte)
+            .ok_or("symbol_source_range_invalid")?;
+        if byte_offset > exact.len() || !exact.is_char_boundary(byte_offset) {
+            return Err("symbol_source_offset_invalid".into());
+        }
+        let mut end = (byte_offset + max_bytes).min(exact.len());
+        while end > byte_offset && !exact.is_char_boundary(end) {
+            end -= 1;
+        }
+        let chunk = &exact[byte_offset..end];
+        let eof = end == exact.len();
+        Ok(json!({
+            "symbol": {"kind": symbol.kind, "name": symbol.name, "path": path,
+                "line": symbol.line, "language": lang},
+            "source": chunk,
+            "bytes": exact.len(),
+            "byte_offset": byte_offset,
+            "returned_bytes": chunk.len(),
+            "next_byte_offset": if eof { Value::Null } else { json!(end) },
+            "eof": eof,
+            "freshness": "verified_snapshot",
+        }))
+    }
+
     pub fn stats(&self) -> Result<Stats> {
         let mut s = Stats::default();
         s.files = self
@@ -695,6 +873,47 @@ impl Store {
                 .collect(),
         ))
     }
+
+    pub fn search_symbols_json(&self, text: &str, limit: i64) -> Result<Value> {
+        Ok(Value::Array(
+            self.search_symbols(text, limit)?
+                .into_iter()
+                .map(|hit| {
+                    json!({
+                        "kind": hit.node.kind,
+                        "name": hit.node.name,
+                        "path": hit.node.path,
+                        "line": hit.node.line,
+                        "language": hit.node.lang,
+                        "signature": hit.node.detail,
+                        "score": hit.score,
+                        "confidence": hit.confidence,
+                        "reason": hit.reason,
+                        "matched_terms": hit.matched_terms,
+                    })
+                })
+                .collect(),
+        ))
+    }
+}
+
+fn lexical_terms(text: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    for term in text.split(|ch: char| !ch.is_alphanumeric()) {
+        let term = term.to_ascii_lowercase();
+        if !term.is_empty() && !terms.contains(&term) {
+            terms.push(term);
+        }
+    }
+    terms
+}
+
+fn is_test_path(path: &str) -> bool {
+    path.starts_with("tests/")
+        || path.contains("/tests/")
+        || path.contains("/test_")
+        || path.contains("/test-")
+        || path.ends_with("/tests.rs")
 }
 
 fn pick_candidate(

@@ -87,7 +87,7 @@ check(text:find('footer', 1, true) ~= nil, 'the footer of report links is render
 check(text:find('docs/OBSERVABILITY.md', 1, true) ~= nil, 'the footer points at the observability doc')
 check(text:find('reasoning is prefix-stable', 1, true) ~= nil,
   'the report says reasoning is stable, so an efficiency pass does not window it')
-check(text:find('graph / patch audit     phase_2', 1, true) ~= nil,
+check(text:find('graph / patch audit     phase_3', 1, true) ~= nil,
   'the report names the active graph trial phase')
 
 -- A prefix rewrite must be named, and the first changed message reported.

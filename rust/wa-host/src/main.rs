@@ -300,6 +300,8 @@ fn main() {
     lua.register("list_dir", host::list_dir);
     lua.register("graph_index", graph::graph_index);
     lua.register("graph_query", graph::graph_query);
+    lua.register("graph_search", graph::graph_search);
+    lua.register("graph_source", graph::graph_source);
     lua.register("graph_explain", graph::graph_explain);
     lua.register("graph_path", graph::graph_path);
     lua.register("graph_caps", graph::graph_caps);

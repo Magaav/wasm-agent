@@ -27,8 +27,8 @@ assert(received.reviewed[1] == path)
 local before_feedback = audit.report(48)
 assert(before_feedback.audits >= 1 and before_feedback.worthy == "unproven")
 assert(before_feedback.examples[1].session_id == "patch-audit-test")
-assert(before_feedback.current_phase == "phase_2")
-assert(before_feedback.phases.phase_2.audits >= 1)
+assert(before_feedback.current_phase == "phase_3")
+assert(before_feedback.phases.phase_3.audits >= 1)
 local step={id="assessment-step",source="native_changeset",lead_count=1,assessed=false}
 local context={session_id="patch-audit-test",run_id="patch-audit-run",audit_step=step}
 assert(audit.assess({grade=4,reason="this lead was relevant",critique="none observed"},context).error
