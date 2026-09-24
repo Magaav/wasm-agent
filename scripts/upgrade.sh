@@ -66,14 +66,7 @@ fi
 # The sentinel runs the copy beside the installed binary, so ROOT is the install
 # directory in that path. The candidate binary still points back to its source
 # checkout: use that checkout for UI assets and for a downgrade guard.
-# The sentinel hands a candidate over as a *Windows* path (`C:\...\wa.exe`), and `dirname` in this
-# shell does not split on backslashes, so it returned `.` - the install directory, which is not a git
-# work tree. SOURCE_ROOT was then empty, `commit=` was recorded as `unknown`, and the downgrade guard
-# below was skipped because it cannot compare against an unknown commit. Convert only for the git
-# lookup; the path itself is installed as given.
-NEW_FOR_GIT="$NEW"
-if command -v cygpath >/dev/null 2>&1; then NEW_FOR_GIT="$(cygpath -u "$NEW" 2>/dev/null || echo "$NEW")"; fi
-SOURCE_ROOT="$(git -C "$(dirname "$NEW_FOR_GIT")" rev-parse --show-toplevel 2>/dev/null || true)"
+SOURCE_ROOT="$(git -C "$(dirname "$NEW")" rev-parse --show-toplevel 2>/dev/null || true)"
 SOURCE_COMMIT=""
 if [ -n "$SOURCE_ROOT" ]; then
   SOURCE_COMMIT="$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)"

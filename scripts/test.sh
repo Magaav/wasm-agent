@@ -404,6 +404,9 @@ rm -f "$DB.update.lua"
 # stub: a live check that dropped a request into the operator's real request box could install a
 # placeholder over the node that is running. It also asserts that it did not.
 WA_BIN="$BIN" bash scripts/test-update.sh 8874 | grep "the real sentinel's request box is untouched"
+# The idle wait before an upgrade is bounded by *lack of progress*, not wall time. A legitimate
+# 40-minute turn must not make every queued upgrade wait, fail, and retry while the node stays busy.
+bash scripts/test-upgrade-idle.sh | grep 'upgrade idle-wait ok'
 # The ledger ingest path, on a scratch database. An observer (WhatsApp's own store, a mail sync, a
 # bot) is exactly the caller that has a message with no reply target and sometimes no send time, and
 # that caller used to crash inside the encoder: a nil in the SQL parameter list makes the JSON array
