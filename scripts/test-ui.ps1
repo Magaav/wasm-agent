@@ -1532,6 +1532,24 @@ $harness = @'
     check(!!footer && /\d+:\d\d/.test(footer.textContent),
       "the footer must carry the run's time, saw: "
       + (footer ? footer.textContent : "nothing"));
+
+    // A turn that changed files puts a diff topic below the answer, so the footer has to survive
+    // that too. This is the case the first version of this check did not cover, and the one reported
+    // from the running window as "not showing its status at the very bottom after the final answer".
+    window.handleEvent({ type: "status", text: "placement check: a turn with changes" });
+    window.handleEvent({ type: "round", n: 1 });
+    window.handleEvent({ type: "delta", text: "an answer that changed a file" });
+    window.handleEvent({ type: "reply", text: "an answer that changed a file.", message_id: "placement-with-diff",
+      changes: { added: 2, removed: 1, files: [{ path: "ui/app.js", added: 2, removed: 1, created: false, recorded: true }] } });
+    window.handleEvent({ type: "done" });
+    var changedBubbles = messages.querySelectorAll("wa-message.assistant");
+    var changedBubble = changedBubbles[changedBubbles.length - 1];
+    var changedKids = changedBubble.body.children;
+    var changedLast = changedKids[changedKids.length - 1];
+    check(!!changedLast && changedLast.classList.contains("chat-content-run-status")
+      && changedLast.classList.contains("finished"),
+      "with a diff in the turn the footer must still be the bubble's last child, saw: "
+      + Array.prototype.map.call(changedKids, function (c) { return c.tagName + "." + (c.className || ""); }).join(", "));
   })();
   // `/merge` is a brief for the agent, not a node operation: it must actually send the
   // orchestrator brief as a turn, and name the skill that holds the procedure, or the command is a
