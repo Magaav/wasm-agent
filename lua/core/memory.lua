@@ -174,6 +174,11 @@ end
 local function migrate()
   add_column("sessions", "user_id", "TEXT NOT NULL DEFAULT 'master'")
   add_column("sessions", "node_id", "TEXT NOT NULL DEFAULT ''")
+  -- The checkout this session's tools work in, or '' for "the node's own working directory".
+  -- The default is '' on purpose: a session that was never given a worktree keeps behaving
+  -- exactly as it did before sessions could own one, so this column changes nothing until a
+  -- session opts in. See docs/SESSION-FIRST.md.
+  add_column("sessions", "worktree", "TEXT NOT NULL DEFAULT ''")
   add_column("sessions", "title", "TEXT NOT NULL DEFAULT ''")
   add_column("sessions", "mode", "TEXT NOT NULL DEFAULT 'default'")
   add_column("sessions", "summary", "TEXT NOT NULL DEFAULT ''")
@@ -586,6 +591,22 @@ function M.list_sessions(user_id, limit, opts)
     end
   end
   return rows
+end
+
+-- The directory this session's tools run in. '' means the node's own cwd.
+function M.session_worktree(session_id)
+  if type(session_id) ~= "string" or session_id == "" then return "" end
+  local rows = query("SELECT worktree FROM sessions WHERE id=?", {session_id})
+  return (rows[1] and rows[1].worktree) or ""
+end
+
+-- Point a session at a checkout. Not a usage event, so `updated_at` is left alone: the session
+-- list is ordered by last use, and changing where the work happens is not using the thread.
+function M.set_session_worktree(session_id, path)
+  path = tostring(path or "")
+  exec("UPDATE sessions SET worktree=? WHERE id=?", {path, session_id})
+  M.journal("session", session_id, M.session(session_id))
+  return path
 end
 
 function M.set_session_mode(session_id, mode)
