@@ -349,6 +349,16 @@ fn worker_age_ms(index: usize) -> u64 {
     }
 }
 
+/// Has this worker gone quiet long enough that handing it work is a lie?
+///
+/// A wedged worker is not idle. Routing a fresh read to one is how a healthy node answered
+/// `503 worker_stalled` for a plain `/sessions` - the request inherited a stall that belonged to the
+/// dead worker the slot used to hold. Selection must treat a stalled slot as unavailable, so a request
+/// lands on a live worker or grows a new one instead of inheriting someone else's stall.
+fn worker_is_wedged(index: usize) -> bool {
+    worker_age_ms(index) >= stall_seconds() * 1000
+}
+
 fn live_worker_ids() -> Vec<usize> {
     match POOL.get().and_then(|pool| pool.slots.lock().ok().map(|slots| {
         slots
@@ -422,6 +432,24 @@ fn spawn_worker(slots: &mut Vec<Option<std::sync::mpsc::SyncSender<Work>>>, min_
     while slots.len() <= index {
         slots.push(None);
     }
+    // A retired worker's last beat, label and conversation survive in these slots, keyed by index. A
+    // replacement is spawned into the *same* index (the first empty slot), so without this reset it
+    // inherits the dead worker's age: the dispatcher reads a `stalled_ms` from before the new worker
+    // existed and answers `503 worker_stalled` for a worker that has simply not had time to beat yet.
+    // Reset every per-index fact before publishing the new sender, so nothing can observe the new worker
+    // through the old one's state.
+    if let Some(beats) = WORKER_BEATS.get() {
+        if let Some(slot) = beats.get(index) { slot.store(u64::MAX, Ordering::Relaxed); }
+    }
+    if let Some(busy) = WORKER_BUSY.get() {
+        if let Some(slot) = busy.get(index) { if let Ok(mut guard) = slot.lock() { *guard = None; } }
+    }
+    if let Some(sessions) = WORKER_SESSION.get() {
+        if let Some(slot) = sessions.get(index) { if let Ok(mut guard) = slot.lock() { *guard = None; } }
+    }
+    if let Some(runs) = WORKER_RUN.get() {
+        if let Some(slot) = runs.get(index) { if let Ok(mut guard) = slot.lock() { *guard = None; } }
+    }
     slots[index] = Some(sender);
     let worker_ui = pool.ui.clone();
     pool.spawned.fetch_add(1, Ordering::Relaxed);
@@ -473,7 +501,7 @@ fn pick_run_worker(class: scheduler::RunClass, claimed: &std::collections::HashS
     let beats = WORKER_BEATS.get()?;
     let mut idle: Vec<usize> = live_worker_ids()
         .into_iter()
-        .filter(|index| *index >= floor && *index <= ceiling && !claimed.contains(index) && worker_busy_label(*index).is_none())
+        .filter(|index| *index >= floor && *index <= ceiling && !claimed.contains(index) && worker_busy_label(*index).is_none() && !worker_is_wedged(*index))
         .filter(|index| {
             // A worker that has not beaten is as idle as one that never existed; a worker that has gone
             // quiet is not idle, whatever its label says.
@@ -504,7 +532,7 @@ fn pick_run_worker(class: scheduler::RunClass, claimed: &std::collections::HashS
     if background {
         let candidates: Vec<usize> = live_worker_ids()
             .into_iter()
-            .filter(|index| *index >= floor && *index <= ceiling)
+            .filter(|index| *index >= floor && *index <= ceiling && !worker_is_wedged(*index))
             .collect();
         if candidates.is_empty() {
             return None;
@@ -527,7 +555,7 @@ fn choose_worker(request: &Request) -> usize {
     if is_control_route(request) {
         let Ok(mut slots) = pool.slots.lock() else { return control_floor() };
         let live: Vec<usize> = (control_floor()..slots.len())
-            .filter(|index| slots[*index].is_some() && worker_busy_label(*index).is_none())
+            .filter(|index| slots[*index].is_some() && worker_busy_label(*index).is_none() && !worker_is_wedged(*index))
             .collect();
         if !live.is_empty() {
             let start = pool.next.fetch_add(1, Ordering::Relaxed);
@@ -556,7 +584,7 @@ fn choose_worker(request: &Request) -> usize {
     // Read workers live in the run lanes, below the control floor: a read must not occupy control
     // capacity, and a control worker must not be counted as a read worker.
     let live: Vec<usize> = (1..slots.len().min(run_capacity()))
-        .filter(|index| slots[*index].is_some())
+        .filter(|index| slots[*index].is_some() && !worker_is_wedged(*index))
         .collect();
     if !live.is_empty() {
         let start = pool.next.fetch_add(1, Ordering::Relaxed);
