@@ -4,9 +4,9 @@ local changeset = dofile("lua/core/changeset.lua")
 local telemetry = dofile("lua/core/telemetry.lua")
 local redact = dofile("lua/core/redact.lua")
 local M = {}
--- Phase 3 begins with source-returning symbol retrieval. Phase 2 remains the locator-only
--- baseline, so later reports cannot attribute a saved read to the older graph contract.
-M.PHASE = "phase_3"
+-- Phase 4 adds bounded orientation, patch reachability, and visible resolution
+-- provenance. Earlier phases remain frozen so telemetry cannot blur contracts.
+M.PHASE = "phase_4"
 M.LEGACY_PHASE = "phase_1"
 
 local function failure(context, source, reason)
@@ -51,13 +51,19 @@ local function run_request(request, reviewed, context, source)
 end
 
 function M.run(changes, reviewed, context)
-  if changeset.empty(changes) then return {error="no_recorded_patch"} end
+  local request, err=M.native_changes(changes)
+  if not request then return {error=err} end
+  return run_request(request,reviewed,context,"native_changeset")
+end
+
+function M.native_changes(changes)
+  if changeset.empty(changes) then return nil,"no_recorded_patch" end
   local request={changes={}}
   for _, file in ipairs(changes.files) do
     local lines, reason = changeset.changed_lines(file)
     request.changes[#request.changes + 1] = {path=file.path, lines=lines, gap=reason}
   end
-  return run_request(request,reviewed,context,"native_changeset")
+  return request
 end
 
 local function git(command, cwd)

@@ -306,6 +306,8 @@ fn main() {
     lua.register("graph_path", graph::graph_path);
     lua.register("graph_caps", graph::graph_caps);
     lua.register("graph_stats", graph::graph_stats);
+    lua.register("graph_overview", graph::graph_overview);
+    lua.register("graph_impact", graph::graph_impact);
     lua.register("graph_status", graph::graph_status);
     lua.register("graph_patch_audit", graph::graph_patch_audit);
     lua.register("sha256", host::sha256);

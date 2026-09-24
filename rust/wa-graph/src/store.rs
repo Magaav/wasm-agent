@@ -7,7 +7,7 @@
 use crate::extract::{self, Extract};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -20,7 +20,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 // `graph_sources` record of the exact bytes a generation was built from. A stamp written by either
 // binary must therefore be re-parsed rather than trusted, and keeping either value would leave the
 // other side's edges in place, which is the failure this constant exists to prevent.
-const EXTRACT_VERSION: &str = "5";
+const EXTRACT_VERSION: &str = "6";
 
 pub struct Store {
     pub(crate) conn: Connection,
@@ -48,6 +48,8 @@ pub struct EdgeRow {
     pub dst_name: Option<String>,
     pub dst_path: Option<String>,
     pub dst_line: Option<i64>,
+    pub resolution: String,
+    pub confidence: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +59,14 @@ pub struct SearchHit {
     pub confidence: &'static str,
     pub reason: &'static str,
     pub matched_terms: Vec<String>,
+    pub score_breakdown: BTreeMap<String, i64>,
+}
+
+#[derive(Debug, Clone)]
+struct Resolved {
+    id: i64,
+    strategy: &'static str,
+    confidence: i64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -187,7 +197,9 @@ impl Store {
             CREATE TABLE IF NOT EXISTS edges(
               id INTEGER PRIMARY KEY,
               src INTEGER NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL,
-              path TEXT NOT NULL, line INTEGER NOT NULL, col INTEGER NOT NULL, dst INTEGER);
+              path TEXT NOT NULL, line INTEGER NOT NULL, col INTEGER NOT NULL, dst INTEGER,
+              resolution TEXT NOT NULL DEFAULT 'unresolved',
+              confidence INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS imports(
               alias TEXT NOT NULL, module TEXT NOT NULL, path TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS graph_meta(
@@ -201,6 +213,18 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target);
             CREATE INDEX IF NOT EXISTS idx_edges_path ON edges(path);
             "#,
+        )?;
+        ensure_column(
+            &self.conn,
+            "edges",
+            "resolution",
+            "TEXT NOT NULL DEFAULT 'unresolved'",
+        )?;
+        ensure_column(
+            &self.conn,
+            "edges",
+            "confidence",
+            "INTEGER NOT NULL DEFAULT 0",
         )?;
         Ok(())
     }
@@ -283,13 +307,48 @@ impl Store {
         }
 
         let (resolved, unresolved) = self.resolve()?;
+        let generation = self.compute_generation()?;
         self.conn.execute(
             "INSERT OR REPLACE INTO graph_meta(key,value) VALUES('root',?1)",
             params![root.canonicalize()?.to_string_lossy().as_ref()],
         )?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO graph_meta(key,value) VALUES('generation',?1)",
+            params![generation],
+        )?;
         report.resolved = resolved;
         report.unresolved = unresolved;
         Ok(report)
+    }
+
+    fn compute_generation(&self) -> Result<String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path,hash FROM files ORDER BY path")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut bytes = Vec::new();
+        for row in rows {
+            let (path, hash) = row?;
+            bytes.extend_from_slice(path.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(hash.as_bytes());
+            bytes.push(b'\n');
+        }
+        Ok(fnv1a(&bytes))
+    }
+
+    pub fn generation(&self) -> Result<String> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM graph_meta WHERE key='generation'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| "unknown".to_string()))
     }
 
     fn file_stamp(&self, path: &str) -> Result<Option<(String, i64, i64, Vec<u8>)>> {
@@ -320,7 +379,8 @@ impl Store {
     fn remove_file(&self, path: &str) -> Result<()> {
         // Incoming edges to this file's nodes lose their target; they are re-resolved at the end.
         self.conn.execute(
-            "UPDATE edges SET dst=NULL WHERE dst IN (SELECT id FROM nodes WHERE path=?1)",
+            "UPDATE edges SET dst=NULL,resolution='unresolved',confidence=0
+             WHERE dst IN (SELECT id FROM nodes WHERE path=?1)",
             params![path],
         )?;
         self.conn
@@ -370,7 +430,8 @@ impl Store {
                 rows.collect::<std::result::Result<_, _>>()?
             };
             let mut insert_edge = self.conn.prepare(
-                "INSERT INTO edges(src,kind,target,path,line,col,dst) VALUES(?1,?2,?3,?4,?5,?6,NULL)",
+                "INSERT INTO edges(src,kind,target,path,line,col,dst,resolution,confidence)
+                 VALUES(?1,?2,?3,?4,?5,?6,NULL,'unresolved',0)",
             )?;
             for e in &ex.edges {
                 let src = rowids
@@ -422,15 +483,21 @@ impl Store {
             // shares `member`'s name: `provider.budget()` resolved to a local `budget` that way,
             // and the edge read as *resolved* while pointing at the wrong symbol.
             let hit = if kind == "capability" && extract::is_capability(target) {
-                Some(ensure_capability(&self.conn, target)?)
+                Some(Resolved {
+                    id: ensure_capability(&self.conn, target)?,
+                    strategy: "capability_exact",
+                    confidence: 100,
+                })
             } else if kind == "calls" && target.contains('.') {
                 resolve_dotted(&self.conn, target, simple, path)?
             } else {
                 pick_candidate(&self.conn, target, simple, path)?
             };
-            if let Some(id) = hit {
-                self.conn
-                    .execute("UPDATE edges SET dst=?1 WHERE id=?2", params![id, edge_id])?;
+            if let Some(hit) = hit {
+                self.conn.execute(
+                    "UPDATE edges SET dst=?1,resolution=?2,confidence=?3 WHERE id=?4",
+                    params![hit.id, hit.strategy, hit.confidence, edge_id],
+                )?;
                 resolved += 1;
             } else if kind == "mentions" {
                 // A doc mention that names no real definition is noise; keep the graph clean.
@@ -492,7 +559,7 @@ impl Store {
     fn outgoing(&self, id: i64) -> Result<Vec<EdgeRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT e.kind, e.target, e.path, e.line, e.dst,
-                    n.name, n.path, n.line
+                    n.name, n.path, n.line, e.resolution, e.confidence
              FROM edges e LEFT JOIN nodes n ON n.id = e.dst
              WHERE e.src=?1 ORDER BY e.line",
         )?;
@@ -503,7 +570,7 @@ impl Store {
     fn incoming(&self, id: i64) -> Result<Vec<EdgeRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT e.kind, e.target, e.path, e.line, e.src,
-                    s.name, s.path, s.line
+                    s.name, s.path, s.line, e.resolution, e.confidence
              FROM edges e JOIN nodes s ON s.id = e.src
              WHERE e.dst=?1 ORDER BY e.path, e.line",
         )?;
@@ -566,7 +633,7 @@ impl Store {
         // answer there. Doc mentions are for lookup, not traversal: following them hops through
         // prose onto a coincidence.
         let mut stmt = self.conn.prepare(
-            "SELECT dst, kind, target, path, line FROM edges
+            "SELECT dst, kind, target, path, line, resolution, confidence FROM edges
              WHERE src=?1 AND dst IS NOT NULL AND kind<>'mentions'",
         )?;
         let rows = stmt.query_map(params![id], |r| {
@@ -575,7 +642,12 @@ impl Store {
             let target: String = r.get(2)?;
             let path: String = r.get(3)?;
             let line: i64 = r.get(4)?;
-            Ok((other, format!("{kind} {target} at {path}:{line}")))
+            let resolution: String = r.get(5)?;
+            let confidence: i64 = r.get(6)?;
+            Ok((
+                other,
+                format!("{kind} {target} at {path}:{line} [{resolution} {confidence}]"),
+            ))
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
@@ -624,7 +696,7 @@ impl Store {
     /// it is not presented as semantic similarity.
     pub fn search_symbols(&self, text: &str, limit: i64) -> Result<Vec<SearchHit>> {
         let query = text.trim().to_ascii_lowercase();
-        let terms = lexical_terms(&query);
+        let terms = lexical_terms(text.trim());
         if query.is_empty() || terms.is_empty() {
             return Ok(Vec::new());
         }
@@ -635,78 +707,114 @@ impl Store {
              FROM nodes n WHERE n.kind NOT IN ('file','doc','capability')",
         )?;
         let rows = stmt.query_map([], |row| Ok((row_to_node(row)?, row.get::<_, i64>(8)?)))?;
-        let mut hits = Vec::new();
+        let mut documents = Vec::new();
         for row in rows {
             let (node, incoming) = row?;
+            let name_terms = lexical_terms(&node.name);
+            let detail_terms = lexical_terms(node.detail.as_deref().unwrap_or(""));
+            let path_terms = lexical_terms(&node.path);
+            documents.push((node, incoming, name_terms, detail_terms, path_terms));
+        }
+        let document_count = documents.len().max(1) as f64;
+        let average_length = documents
+            .iter()
+            .map(|(_, _, names, details, paths)| names.len() * 4 + details.len() * 2 + paths.len())
+            .sum::<usize>()
+            .max(1) as f64
+            / document_count;
+        let mut document_frequency: HashMap<String, usize> = HashMap::new();
+        for term in &terms {
+            let count = documents
+                .iter()
+                .filter(|(_, _, names, details, paths)| {
+                    names
+                        .iter()
+                        .chain(details)
+                        .chain(paths)
+                        .any(|token| token == term)
+                })
+                .count();
+            document_frequency.insert(term.clone(), count);
+        }
+        let mut hits = Vec::new();
+        for (node, incoming, name_terms, detail_terms, path_terms) in documents {
             let name = node.name.to_ascii_lowercase();
             let simple = extract::simple_name(&name).to_string();
             let path = node.path.to_ascii_lowercase();
             let detail = node.detail.as_deref().unwrap_or("").to_ascii_lowercase();
-            let name_terms = lexical_terms(&name);
             let mut score = 0i64;
             let mut matched = Vec::new();
             let mut reason = "path";
+            let mut score_breakdown = BTreeMap::new();
 
             if name == query {
                 score += 1_000;
+                score_breakdown.insert("exact".to_string(), 1_000);
                 reason = "exact_name";
             } else if simple == query {
                 score += 950;
+                score_breakdown.insert("exact".to_string(), 950);
                 reason = "exact_member";
             } else if name.contains(&query) {
                 score += 450;
+                score_breakdown.insert("phrase".to_string(), 450);
                 reason = "name_phrase";
             }
+            let weighted_length = name_terms.len() * 4 + detail_terms.len() * 2 + path_terms.len();
+            let mut lexical_score = 0i64;
             for term in &terms {
-                let mut term_hit = false;
-                if name_terms.iter().any(|part| part == term) {
-                    score += 160;
-                    term_hit = true;
-                    if reason == "path" {
+                let name_tf = name_terms.iter().filter(|token| *token == term).count() * 4;
+                let detail_tf = detail_terms.iter().filter(|token| *token == term).count() * 2;
+                let path_tf = path_terms.iter().filter(|token| *token == term).count();
+                let tf = name_tf + detail_tf + path_tf;
+                if tf > 0 {
+                    matched.push(term.clone());
+                    let df = *document_frequency.get(term).unwrap_or(&0) as f64;
+                    let idf = (1.0 + (document_count - df + 0.5) / (df + 0.5)).ln();
+                    let tf = tf as f64;
+                    let length_norm = weighted_length.max(1) as f64 / average_length;
+                    let bm25 = idf * (tf * 2.2) / (tf + 1.2 * (0.25 + 0.75 * length_norm));
+                    lexical_score += (bm25 * 100.0).round() as i64;
+                    if name_tf > 0 && reason == "path" {
                         reason = "name_terms";
-                    }
-                } else if name.contains(term) {
-                    score += 90;
-                    term_hit = true;
-                    if reason == "path" {
-                        reason = "name_terms";
-                    }
-                }
-                if detail.contains(term) {
-                    score += 35;
-                    term_hit = true;
-                    if reason == "path" {
+                    } else if detail_tf > 0 && reason == "path" {
                         reason = "signature";
                     }
-                }
-                if path.contains(term) {
-                    score += 15;
-                    term_hit = true;
-                }
-                if term_hit {
+                } else if name.contains(term) || detail.contains(term) || path.contains(term) {
+                    // Preserve substring recall for identifiers that the tokenizer cannot split.
                     matched.push(term.clone());
+                    lexical_score += 25;
                 }
             }
             if matched.is_empty() {
                 continue;
             }
+            score += lexical_score;
+            score_breakdown.insert("bm25".to_string(), lexical_score);
             if matched.len() == terms.len() {
                 score += 120;
+                score_breakdown.insert("all_terms".to_string(), 120);
                 if reason != "exact_name" && reason != "exact_member" {
                     reason = "all_terms";
                 }
             }
-            score += incoming.min(20) * 2;
+            let graph_score = incoming.min(20) * 2;
+            score += graph_score;
+            score_breakdown.insert("incoming_edges".to_string(), graph_score);
+            let mut kind_score = 0;
             if matches!(node.kind.as_str(), "fn" | "method") {
-                score += 25;
+                kind_score = 25;
             } else if matches!(
                 node.kind.as_str(),
                 "struct" | "class" | "interface" | "enum" | "type"
             ) {
-                score += 15;
+                kind_score = 15;
             }
+            score += kind_score;
+            score_breakdown.insert("symbol_kind".to_string(), kind_score);
             if !wants_test && is_test_path(&path) {
                 score -= 30;
+                score_breakdown.insert("test_penalty".to_string(), -30);
             }
             let confidence = if reason == "exact_name" || reason == "exact_member" {
                 "exact"
@@ -723,6 +831,7 @@ impl Store {
                 confidence,
                 reason,
                 matched_terms: matched,
+                score_breakdown,
             });
         }
         hits.sort_by(|a, b| {
@@ -786,6 +895,159 @@ impl Store {
             "eof": eof,
             "freshness": "verified_snapshot",
         }))
+    }
+
+    /// A bounded, on-demand orientation bundle. Each section carries its total and truncation
+    /// state so a small response is never presented as the whole graph.
+    pub fn architecture_json(&self, aspects: &[String], limit: usize) -> Result<Value> {
+        let limit = limit.clamp(1, 50);
+        let wants = |name: &str| {
+            aspects.is_empty()
+                || aspects
+                    .iter()
+                    .any(|aspect| aspect == "overview" || aspect == "all" || aspect == name)
+        };
+        let stats = self.stats()?;
+        let mut root = serde_json::Map::new();
+        root.insert("generation".into(), json!(self.generation()?));
+        root.insert("freshness".into(), json!("verified_snapshot"));
+        root.insert("counts".into(), stats.to_json());
+
+        if wants("languages") {
+            let mut stmt = self.conn.prepare(
+                "SELECT lang,COUNT(*) FROM files GROUP BY lang ORDER BY COUNT(*) DESC,lang",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(json!({"language":row.get::<_, String>(0)?,"files":row.get::<_, i64>(1)?}))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            root.insert("languages".into(), bounded_section(rows, limit));
+        }
+        if wants("modules") {
+            let mut modules: BTreeMap<String, i64> = BTreeMap::new();
+            for path in self.all_file_paths()? {
+                *modules.entry(top_component(&path).to_string()).or_default() += 1;
+            }
+            let mut rows: Vec<Value> = modules
+                .into_iter()
+                .map(|(module, files)| json!({"module":module,"files":files}))
+                .collect();
+            rows.sort_by(|a, b| {
+                b["files"]
+                    .as_i64()
+                    .cmp(&a["files"].as_i64())
+                    .then_with(|| a["module"].as_str().cmp(&b["module"].as_str()))
+            });
+            root.insert("modules".into(), bounded_section(rows, limit));
+        }
+        if wants("entry_points") {
+            let mut stmt = self.conn.prepare(
+                "SELECT n.id,n.kind,n.name,n.path,n.line,n.col,n.lang,n.detail,
+                        (SELECT COUNT(*) FROM edges e WHERE e.dst=n.id),
+                        (SELECT COUNT(*) FROM edges e WHERE e.src=n.id AND e.dst IS NOT NULL)
+                 FROM nodes n WHERE n.kind IN ('fn','method') AND
+                   (n.name IN ('main','run','serve','dispatch') OR n.name LIKE 'wa_%')
+                 ORDER BY CASE n.name WHEN 'main' THEN 0 WHEN 'serve' THEN 1 WHEN 'run' THEN 2 ELSE 3 END,
+                          n.path,n.line",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    let node = row_to_node(row)?;
+                    Ok(
+                        json!({"kind":node.kind,"name":node.name,"path":node.path,"line":node.line,
+                    "incoming":row.get::<_, i64>(8)?,"outgoing":row.get::<_, i64>(9)?}),
+                    )
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            root.insert("entry_points".into(), bounded_section(rows, limit));
+        }
+        if wants("routes") {
+            let mut stmt = self.conn.prepare(
+                "SELECT id,kind,name,path,line,col,lang,detail FROM nodes WHERE kind='route'
+                 ORDER BY path,line",
+            )?;
+            let rows = stmt
+                .query_map([], |row| Ok(row_to_node(row)?.to_json()))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            root.insert("routes".into(), bounded_section(rows, limit));
+        }
+        if wants("capabilities") {
+            let rows = self
+                .capabilities()?
+                .into_iter()
+                .map(|(name, uses)| json!({"capability":name,"uses":uses}))
+                .collect();
+            root.insert("capabilities".into(), bounded_section(rows, limit));
+        }
+        if wants("hotspots") {
+            let mut stmt = self.conn.prepare(
+                "SELECT n.id,n.kind,n.name,n.path,n.line,n.col,n.lang,n.detail,
+                        (SELECT COUNT(*) FROM edges e WHERE e.dst=n.id),
+                        (SELECT COUNT(*) FROM edges e WHERE e.src=n.id AND e.dst IS NOT NULL)
+                 FROM nodes n WHERE n.kind NOT IN ('file','doc','capability','route')
+                 ORDER BY ((SELECT COUNT(*) FROM edges e WHERE e.dst=n.id) +
+                           (SELECT COUNT(*) FROM edges e WHERE e.src=n.id AND e.dst IS NOT NULL)) DESC,
+                          n.path,n.line",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    let node = row_to_node(row)?;
+                    Ok(
+                        json!({"kind":node.kind,"name":node.name,"path":node.path,"line":node.line,
+                    "incoming":row.get::<_, i64>(8)?,"outgoing":row.get::<_, i64>(9)?}),
+                    )
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            root.insert("hotspots".into(), bounded_section(rows, limit));
+        }
+        if wants("boundaries") {
+            let mut stmt = self.conn.prepare(
+                "SELECT s.path,d.path,e.kind FROM edges e JOIN nodes s ON s.id=e.src
+                 JOIN nodes d ON d.id=e.dst WHERE e.dst IS NOT NULL AND e.kind<>'mentions'",
+            )?;
+            let edges = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            let mut boundaries: BTreeMap<(String, String, String), i64> = BTreeMap::new();
+            for edge in edges {
+                let (from_path, to_path, kind) = edge?;
+                let from = top_component(&from_path);
+                let to = top_component(&to_path);
+                if from != to {
+                    *boundaries
+                        .entry((from.to_string(), to.to_string(), kind))
+                        .or_default() += 1;
+                }
+            }
+            let mut rows: Vec<Value> = boundaries.into_iter().map(|((from,to,kind), edges)|
+                json!({"from":from,"to":to,"kind":kind,"edges":edges})).collect();
+            rows.sort_by(|a, b| {
+                b["edges"]
+                    .as_i64()
+                    .cmp(&a["edges"].as_i64())
+                    .then_with(|| a["from"].as_str().cmp(&b["from"].as_str()))
+            });
+            root.insert("boundaries".into(), bounded_section(rows, limit));
+        }
+        if wants("resolution") {
+            let mut stmt = self.conn.prepare(
+                "SELECT resolution,confidence,COUNT(*) FROM edges GROUP BY resolution,confidence
+                 ORDER BY COUNT(*) DESC,resolution",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(json!({"strategy":row.get::<_, String>(0)?,
+                "confidence":row.get::<_, i64>(1)?,"edges":row.get::<_, i64>(2)?}))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            root.insert("resolution".into(), bounded_section(rows, limit));
+        }
+        Ok(Value::Object(root))
     }
 
     pub fn stats(&self) -> Result<Stats> {
@@ -890,6 +1152,7 @@ impl Store {
                         "confidence": hit.confidence,
                         "reason": hit.reason,
                         "matched_terms": hit.matched_terms,
+                        "score_breakdown": hit.score_breakdown,
                     })
                 })
                 .collect(),
@@ -899,13 +1162,44 @@ impl Store {
 
 fn lexical_terms(text: &str) -> Vec<String> {
     let mut terms = Vec::new();
-    for term in text.split(|ch: char| !ch.is_alphanumeric()) {
-        let term = term.to_ascii_lowercase();
-        if !term.is_empty() && !terms.contains(&term) {
-            terms.push(term);
+    let mut current = String::new();
+    let mut previous_lower_or_digit = false;
+    for ch in text.chars() {
+        if !ch.is_alphanumeric() {
+            push_term(&mut terms, &mut current);
+            previous_lower_or_digit = false;
+            continue;
+        }
+        if ch.is_uppercase() && previous_lower_or_digit {
+            push_term(&mut terms, &mut current);
+        }
+        current.extend(ch.to_lowercase());
+        previous_lower_or_digit = ch.is_lowercase() || ch.is_ascii_digit();
+    }
+    push_term(&mut terms, &mut current);
+    terms
+}
+
+fn push_term(terms: &mut Vec<String>, current: &mut String) {
+    if !current.is_empty() && !terms.contains(current) {
+        terms.push(std::mem::take(current));
+    } else {
+        current.clear();
+    }
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, declaration: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for row in rows {
+        if row? == column {
+            return Ok(());
         }
     }
-    terms
+    conn.execute_batch(&format!(
+        "ALTER TABLE {table} ADD COLUMN {column} {declaration}"
+    ))?;
+    Ok(())
 }
 
 fn is_test_path(path: &str) -> bool {
@@ -916,12 +1210,25 @@ fn is_test_path(path: &str) -> bool {
         || path.ends_with("/tests.rs")
 }
 
+fn top_component(path: &str) -> &str {
+    path.split('/')
+        .next()
+        .filter(|part| !part.is_empty())
+        .unwrap_or(".")
+}
+
+fn bounded_section(mut rows: Vec<Value>, limit: usize) -> Value {
+    let total = rows.len();
+    rows.truncate(limit);
+    json!({"total":total,"returned":rows.len(),"truncated":total > rows.len(),"rows":rows})
+}
+
 fn pick_candidate(
     conn: &Connection,
     target: &str,
     simple: &str,
     edge_path: &str,
-) -> Result<Option<i64>> {
+) -> Result<Option<Resolved>> {
     // A dotted Lua definition keeps its table in the name (`M.append_turn`), so try the exact
     // target before falling back to the last segment (`append_turn`).
     for name in [target, simple] {
@@ -932,8 +1239,12 @@ fn pick_candidate(
                 |r| r.get(0),
             )
             .optional()?;
-        if same_file.is_some() {
-            return Ok(same_file);
+        if let Some(id) = same_file {
+            return Ok(Some(Resolved {
+                id,
+                strategy: "same_file",
+                confidence: 95,
+            }));
         }
     }
     let dir = edge_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
@@ -945,8 +1256,12 @@ fn pick_candidate(
                 |r| r.get(0),
             )
             .optional()?;
-        if same_dir.is_some() {
-            return Ok(same_dir);
+        if let Some(id) = same_dir {
+            return Ok(Some(Resolved {
+                id,
+                strategy: "same_directory",
+                confidence: 85,
+            }));
         }
     }
     for name in [target, simple] {
@@ -955,7 +1270,11 @@ fn pick_candidate(
         let first = rows.next()?.map(|r| r.get::<_, i64>(0)).transpose()?;
         let second = rows.next()?.map(|r| r.get::<_, i64>(0)).transpose()?;
         if first.is_some() && second.is_none() {
-            return Ok(first);
+            return Ok(first.map(|id| Resolved {
+                id,
+                strategy: "unique_name",
+                confidence: 75,
+            }));
         }
     }
     Ok(None)
@@ -970,9 +1289,18 @@ fn pick_candidate(
 /// * anything else - `response.text`, `fs.readFileSync`, `obj.budget` - must match the full name
 ///   exactly. It must **not** fall back to a bare local that merely shares `member`'s name: that
 ///   is how `provider.budget()` once landed on an unrelated local `budget`.
-fn resolve_dotted(conn: &Connection, target: &str, simple: &str, path: &str) -> Result<Option<i64>> {
+fn resolve_dotted(
+    conn: &Connection,
+    target: &str,
+    simple: &str,
+    path: &str,
+) -> Result<Option<Resolved>> {
     if let Some(id) = resolve_alias(conn, target, path)? {
-        return Ok(Some(id));
+        return Ok(Some(Resolved {
+            id,
+            strategy: "import_exact",
+            confidence: 98,
+        }));
     }
     let receiver = target.split('.').next().unwrap_or("");
     if matches!(receiver, "self" | "this" | "M" | "cls") {
@@ -984,11 +1312,23 @@ fn resolve_dotted(conn: &Connection, target: &str, simple: &str, path: &str) -> 
             )
             .optional()?;
         if exact.is_some() {
-            return Ok(exact);
+            return Ok(exact.map(|id| Resolved {
+                id,
+                strategy: "same_file_qualified",
+                confidence: 97,
+            }));
         }
-        return scoped_member(conn, simple, path);
+        return Ok(scoped_member(conn, simple, path)?.map(|id| Resolved {
+            id,
+            strategy: "same_file_member",
+            confidence: 92,
+        }));
     }
-    exact_node(conn, target)
+    Ok(exact_node(conn, target)?.map(|id| Resolved {
+        id,
+        strategy: "qualified_unique",
+        confidence: 88,
+    }))
 }
 
 /// A member of the caller's own file: `self.emit`, `this.render`, `M.append_turn`. A function or
@@ -1007,12 +1347,15 @@ fn scoped_member(conn: &Connection, simple: &str, path: &str) -> Result<Option<i
 
 /// A node whose name is exactly `target` (a qualified name such as `Thing::new` or `Provider.foo`).
 fn exact_node(conn: &Connection, target: &str) -> Result<Option<i64>> {
-    let hit = conn
-        .query_row("SELECT id FROM nodes WHERE name=?1 LIMIT 1", params![target], |r| {
-            r.get(0)
-        })
-        .optional()?;
-    Ok(hit)
+    let mut stmt = conn.prepare("SELECT id FROM nodes WHERE name=?1 LIMIT 2")?;
+    let mut rows = stmt.query(params![target])?;
+    let first = rows.next()?.map(|r| r.get::<_, i64>(0)).transpose()?;
+    let second = rows.next()?.map(|r| r.get::<_, i64>(0)).transpose()?;
+    Ok(if first.is_some() && second.is_none() {
+        first
+    } else {
+        None
+    })
 }
 
 /// Resolve `alias.member` through a `require` binding: `memory.append_turn` in a file whose
@@ -1054,7 +1397,10 @@ fn resolve_alias(conn: &Connection, target: &str, edge_path: &str) -> Result<Opt
     let raw = module.trim();
     let trimmed = raw.strip_prefix("./").unwrap_or(raw);
     let by_path = format!("%{trimmed}");
-    let by_lua = format!("%{}.lua", trimmed.trim_end_matches(".lua").replace('.', "/"));
+    let by_lua = format!(
+        "%{}.lua",
+        trimmed.trim_end_matches(".lua").replace('.', "/")
+    );
     let base = trimmed.rsplit('/').next().unwrap_or(trimmed);
     let by_base = format!("%{base}");
     let dot_suffix = format!("%.{simple}");
@@ -1114,6 +1460,8 @@ fn row_to_edge(r: &rusqlite::Row) -> rusqlite::Result<EdgeRow> {
         dst_name: r.get(5)?,
         dst_path: r.get(6)?,
         dst_line: r.get(7)?,
+        resolution: r.get(8)?,
+        confidence: r.get(9)?,
     })
 }
 
@@ -1142,6 +1490,8 @@ impl EdgeRow {
             "dst": self.dst_name,
             "dst_path": self.dst_path,
             "dst_line": self.dst_line,
+            "resolution": self.resolution,
+            "confidence": self.confidence,
         })
     }
 }

@@ -73,12 +73,20 @@ clean `host.<ident>`, and the Rust path never emits a capability edge. That make
 
 ## Node integration
 
-The node exposes the graph as `host.graph_index|query|search|source|explain|path|caps|stats|status`; a Lua run
+The node exposes the graph as `host.graph_index|query|search|source|overview|impact|explain|path|caps|stats|status`; a Lua run
 queries its own code. `lua/core/graph.lua` wraps them and degrades cleanly when the host is older.
 The model reaches it through the **`graph` tool**. `search_symbols` ranks definitions using visible
 lexical and incoming-edge evidence; `symbol_source` returns the selected syntax definition from
 the exact stored snapshot, paging only when it exceeds the response budget. Relationship and audit
 verbs remain available. The node keeps the graph fresh, so `index` is rarely needed.
+
+`overview` returns bounded repository orientation with exact section totals.
+`impact` maps changed lines to symbols and walks resolved callers and dependencies
+with call-site and resolver evidence. Its cursor is bound to both the request and
+graph generation. The output states its incomplete dynamic-call scope and does
+not manufacture a risk score. Search uses deterministic BM25-like field weights,
+identifier tokenization, and a visible score breakdown; it does not require an
+embedding service or model download.
 
 The database lives at `<home>/.wasm-agent/graph.db` and indexes the runtime worktree (the node's
 cwd). `WA_GRAPH_ROOT` / `WA_GRAPH_DB` override both; `WA_GRAPH_WATCH=0` disables the watcher. Reads
@@ -101,6 +109,10 @@ and exact-byte freshness:
 - a reader never sees an uncommitted index write (the run is one `BEGIN IMMEDIATE` transaction);
 - `path a c` goes through `b`, follows edges in the **direction of use** (never back up to a
   caller, never through a shared callee), and **ignores doc mentions** (a mention is lookup, not traversal).
+- resolution provenance survives storage and is exposed with each resolved edge;
+- architecture sections are bounded without losing exact totals;
+- patch impact follows callers and tests transitively, pages deterministically,
+  and rejects a cursor after the source generation changes.
 
 The repository gate (`scripts/test.sh`) runs these alongside the rest, and the live node was verified
 end to end: start → index, add a file → it appears, edit a file → the old definition is gone.

@@ -33,4 +33,15 @@ assert(#decode(host.graph_search("alpha", opts)) == 0)
 
 assert(host.write_file(root .. "/b.lua", "local function beta() end\n"))
 assert(has(decode(host.graph_query("beta", opts)), "beta"))
+assert(host.write_file(root .. "/c.lua", "local function caller() beta() end\n"))
+assert(has(decode(host.graph_query("caller", opts)), "caller"))
+local overview = decode(host.graph_overview(json.encode({root=root,db=db,
+  aspects={"languages","entry_points","resolution"},limit=4,max_bytes=12000})))
+assert(overview.freshness == "verified_snapshot")
+assert(overview.languages.total >= 2 and overview.resolution.total >= 1)
+local impact = decode(host.graph_impact(json.encode({root=root,db=db,
+  changes={{path="b.lua",lines={1}}},direction="inbound",depth=1,limit=10,max_bytes=12000})))
+assert(impact.changed_symbols.total == 1)
+assert(impact.impact.total >= 1 and impact.impact.rows[1].name == "caller")
+assert(impact.impact.rows[1].via.resolution ~= nil)
 print("graph freshness ok")

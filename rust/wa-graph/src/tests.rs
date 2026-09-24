@@ -3,6 +3,7 @@
 
 use crate::extract::{extract, is_capability, simple_name};
 use crate::store::Store;
+use serde_json::json;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -379,13 +380,20 @@ fn rust_route_reaches_string_named_lua_entrypoint() {
         "function wa_subagents() return pcall(M.control, {}) end\nfunction M.control() return M.start() end\nfunction M.start() end\nfunction M.start_session() end\nfunction start() end\n",
     )
     .unwrap();
-    std::fs::write(dir.join("tests/route.rs"), "fn sample() { let p = \"/subagents\"; }\n").unwrap();
+    std::fs::write(
+        dir.join("tests/route.rs"),
+        "fn sample() { let p = \"/subagents\"; }\n",
+    )
+    .unwrap();
     let db = dir.join("graph.db");
     let mut store = Store::open(&db).unwrap();
     store.index(&dir, false).unwrap();
 
     let routes = store.query("/subagents", 10).unwrap();
-    assert_eq!(routes[0].path, "serve.rs", "runtime route before test literals");
+    assert_eq!(
+        routes[0].path, "serve.rs",
+        "runtime route before test literals"
+    );
     assert!(routes.iter().any(|node| node.path == "tests/route.rs"));
     assert!(store
         .explain("M.start")
@@ -395,7 +403,9 @@ fn rust_route_reaches_string_named_lua_entrypoint() {
     let bare = store.explain("start").unwrap();
     assert!(bare.iter().any(|(node, _, _)| node.name == "M.start"));
     assert!(bare.iter().any(|(node, _, _)| node.name == "start"));
-    assert!(!bare.iter().any(|(node, _, _)| node.name == "M.start_session"));
+    assert!(!bare
+        .iter()
+        .any(|(node, _, _)| node.name == "M.start_session"));
     let path = store
         .path("dispatch", "M.start")
         .unwrap()
@@ -411,7 +421,10 @@ fn rust_route_reaches_string_named_lua_entrypoint() {
             "M.start"
         ]
     );
-    assert!(path[1].1.contains("serve.rs:1"), "call-site in each path hop");
+    assert!(
+        path[1].1.contains("serve.rs:1"),
+        "call-site in each path hop"
+    );
     assert!(path[2].1.contains("serve.rs:2"));
     assert!(path[3].1.contains("subagents.lua:1"));
     assert!(path[4].1.contains("subagents.lua:2"));
@@ -588,24 +601,42 @@ module.exports = { greet };
     assert!(names.contains(&"Reader"), "{names:?}");
     assert!(names.contains(&"read"), "{names:?}");
     assert!(
-        ex.imports.iter().any(|i| i.alias == "fs" && i.module == "node:fs"),
+        ex.imports
+            .iter()
+            .any(|i| i.alias == "fs" && i.module == "node:fs"),
         "{:?}",
         ex.imports
     );
     assert!(
-        ex.imports.iter().any(|i| i.alias == "helper" && i.module == "./helper.mjs"),
+        ex.imports
+            .iter()
+            .any(|i| i.alias == "helper" && i.module == "./helper.mjs"),
         "{:?}",
         ex.imports
     );
     assert!(
-        ex.imports.iter().any(|i| i.alias == "store" && i.module == "./store.mjs"),
+        ex.imports
+            .iter()
+            .any(|i| i.alias == "store" && i.module == "./store.mjs"),
         "{:?}",
         ex.imports
     );
-    assert!(ex.edges.iter().any(|e| e.kind == "imports" && e.target == "node:fs"));
-    assert!(ex.edges.iter().any(|e| e.kind == "calls" && e.target == "helper"));
-    assert!(ex.edges.iter().any(|e| e.kind == "calls" && e.target == "format"));
-    assert!(ex.edges.iter().any(|e| e.kind == "calls" && e.target == "store.load"));
+    assert!(ex
+        .edges
+        .iter()
+        .any(|e| e.kind == "imports" && e.target == "node:fs"));
+    assert!(ex
+        .edges
+        .iter()
+        .any(|e| e.kind == "calls" && e.target == "helper"));
+    assert!(ex
+        .edges
+        .iter()
+        .any(|e| e.kind == "calls" && e.target == "format"));
+    assert!(ex
+        .edges
+        .iter()
+        .any(|e| e.kind == "calls" && e.target == "store.load"));
 }
 
 #[test]
@@ -710,9 +741,16 @@ fn ranked_search_returns_a_source_ready_symbol_and_exact_definition() {
     assert_eq!(hits[0].matched_terms, vec!["route", "handler"]);
 
     let selected = &hits[0].node;
-    let value = store.symbol_source_json(
-        &selected.path, &selected.name, selected.line, Some(&selected.kind), 0, 24_000,
-    ).unwrap();
+    let value = store
+        .symbol_source_json(
+            &selected.path,
+            &selected.name,
+            selected.line,
+            Some(&selected.kind),
+            0,
+            24_000,
+        )
+        .unwrap();
     let returned = value["source"].as_str().unwrap();
     assert!(returned.starts_with("fn route_handler"), "{returned}");
     assert!(returned.contains("request.len()"), "{returned}");
@@ -725,17 +763,194 @@ fn ranked_search_returns_a_source_ready_symbol_and_exact_definition() {
 #[test]
 fn symbol_source_pages_large_utf8_definitions_without_splitting_characters() {
     let dir = temp_dir("symbol-page");
-    std::fs::write(dir.join("text.lua"), "local function render()\n  return 'olá mundo'\nend\n").unwrap();
+    std::fs::write(
+        dir.join("text.lua"),
+        "local function render()\n  return 'olá mundo'\nend\n",
+    )
+    .unwrap();
     let db = dir.join("graph.db");
     let mut store = Store::open(&db).unwrap();
     store.index(&dir, false).unwrap();
     let hit = store.search_symbols("render", 1).unwrap().remove(0).node;
 
-    let first = store.symbol_source_json(&hit.path, &hit.name, hit.line, Some(&hit.kind), 0, 35).unwrap();
-    let next = first["next_byte_offset"].as_u64().expect("first page continues") as usize;
-    let second = store.symbol_source_json(&hit.path, &hit.name, hit.line, Some(&hit.kind), next, 35).unwrap();
-    let joined = format!("{}{}", first["source"].as_str().unwrap(), second["source"].as_str().unwrap());
+    let first = store
+        .symbol_source_json(&hit.path, &hit.name, hit.line, Some(&hit.kind), 0, 35)
+        .unwrap();
+    let next = first["next_byte_offset"]
+        .as_u64()
+        .expect("first page continues") as usize;
+    let second = store
+        .symbol_source_json(&hit.path, &hit.name, hit.line, Some(&hit.kind), next, 35)
+        .unwrap();
+    let joined = format!(
+        "{}{}",
+        first["source"].as_str().unwrap(),
+        second["source"].as_str().unwrap()
+    );
     assert!(joined.contains("olá mundo"), "{joined}");
     assert_eq!(second["eof"], true);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn resolver_provenance_and_camel_case_ranking_are_visible() {
+    let dir = temp_dir("resolver-provenance");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("src/router.mjs"),
+        "export function sessionRouter(value) { return value; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.mjs"),
+        "import * as router from './router.mjs';\nexport function main() { return router.sessionRouter(1); }\n",
+    ).unwrap();
+    let db = dir.join("graph.db");
+    let mut store = Store::open(&db).unwrap();
+    store.index(&dir, false).unwrap();
+
+    let hit = store.search_symbols("session router", 1).unwrap().remove(0);
+    assert_eq!(hit.node.name, "sessionRouter");
+    assert_eq!(hit.matched_terms, vec!["session", "router"]);
+    assert!(hit.score_breakdown["bm25"] > 0, "{:?}", hit.score_breakdown);
+    let explained = store.explain("sessionRouter").unwrap();
+    let incoming = &explained[0].2;
+    assert_eq!(incoming[0].resolution, "import_exact");
+    assert_eq!(incoming[0].confidence, 98);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn architecture_overview_is_bounded_and_reports_totals() {
+    let dir = temp_dir("architecture");
+    std::fs::create_dir_all(dir.join("lua/core")).unwrap();
+    std::fs::create_dir_all(dir.join("scripts")).unwrap();
+    std::fs::write(
+        dir.join("lua/core/a.lua"),
+        "function main() return host.uuid() end\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("lua/core/b.lua"),
+        "function run() return main() end\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("scripts/a.mjs"),
+        "export function serve() { return 1; }\n",
+    )
+    .unwrap();
+    let db = dir.join("graph.db");
+    let mut store = Store::open(&db).unwrap();
+    store.index(&dir, false).unwrap();
+
+    let overview = store.architecture_json(&["overview".into()], 1).unwrap();
+    assert_eq!(overview["freshness"], "verified_snapshot");
+    assert!(overview["languages"]["total"].as_u64().unwrap() >= 2);
+    assert_eq!(overview["languages"]["returned"], 1);
+    assert_eq!(overview["languages"]["truncated"], true);
+    assert!(overview["entry_points"]["total"].as_u64().unwrap() >= 3);
+    assert!(overview["resolution"]["total"].as_u64().unwrap() >= 1);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn impact_maps_changed_symbols_to_callers_tests_and_snapshot_cursor() {
+    let dir = temp_dir("impact");
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    std::fs::write(
+        dir.join("source.lua"),
+        "local M = {}\nfunction M.changed()\n  return 2\nend\nreturn M\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("caller.lua"),
+        "local S = require('source')\nlocal M = {}\nfunction M.use_changed() return S.changed() end\nreturn M\n").unwrap();
+    std::fs::write(
+        dir.join("top.lua"),
+        "local C = require('caller')\nfunction top() return C.use_changed() end\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("tests/check.lua"),
+        "local S = require('source')\nfunction check() return S.changed() end\n",
+    )
+    .unwrap();
+    let db = dir.join("graph.db");
+    let mut store = Store::open(&db).unwrap();
+    store.index(&dir, false).unwrap();
+    let request = json!({"changes":[{"path":"source.lua","lines":[3]}],
+        "direction":"inbound","depth":2,"limit":1,"max_bytes":12000});
+    let first = store.impact_json(&dir, &request).unwrap();
+    assert_eq!(first["changed_symbols"]["rows"][0]["name"], "M.changed");
+    assert!(first["impact"]["total"].as_u64().unwrap() >= 3, "{first}");
+    assert_eq!(first["impact"]["returned"], 1);
+    let cursor = first["impact"]["next_cursor"].as_str().expect("cursor");
+    let mut continued = request.clone();
+    continued["cursor"] = json!(cursor);
+    let second = store.impact_json(&dir, &continued).unwrap();
+    assert_eq!(second["impact"]["offset"], 1);
+
+    let all = store
+        .impact_json(
+            &dir,
+            &json!({"changes":[{"path":"source.lua","lines":[3]}],
+        "direction":"inbound","depth":2,"limit":20}),
+        )
+        .unwrap();
+    let rows = all["impact"]["rows"].as_array().unwrap();
+    assert!(rows
+        .iter()
+        .any(|row| row["path"] == "tests/check.lua" && row["test"] == true));
+    assert!(rows
+        .iter()
+        .any(|row| row["name"] == "top" && row["hop"] == 2));
+    assert!(rows
+        .iter()
+        .all(|row| row["via"]["resolution"].as_str().is_some()));
+
+    std::fs::write(dir.join("new.lua"), "function unrelated() end\n").unwrap();
+    store.index(&dir, false).unwrap();
+    assert!(store
+        .impact_json(&dir, &continued)
+        .unwrap_err()
+        .to_string()
+        .contains("stale_or_mismatched_impact_cursor"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn opening_an_existing_database_adds_resolution_provenance_columns() {
+    let dir = temp_dir("edge-schema-upgrade");
+    let db = dir.join("graph.db");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE edges(
+               id INTEGER PRIMARY KEY,
+               src INTEGER NOT NULL,
+               kind TEXT NOT NULL,
+               target TEXT NOT NULL,
+               path TEXT NOT NULL,
+               line INTEGER NOT NULL,
+               col INTEGER NOT NULL,
+               dst INTEGER
+             );
+             INSERT INTO edges(src,kind,target,path,line,col,dst)
+             VALUES(1,'calls','old','old.lua',1,1,NULL);",
+        )
+        .unwrap();
+    }
+
+    let store = Store::open(&db).unwrap();
+    let upgraded: (String, i64) = store
+        .conn
+        .query_row(
+            "SELECT resolution,confidence FROM edges WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(upgraded, ("unresolved".into(), 0));
+    drop(store);
     std::fs::remove_dir_all(&dir).ok();
 }

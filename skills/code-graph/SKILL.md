@@ -12,14 +12,25 @@ implementation with `symbol_source`. Use `grep` when results are absent or low
 confidence. Read surrounding file context before editing. The opt-in patch audit
 uses the graph at the end of a native `write`/`edit` run.
 
+For an unfamiliar repository area, start with a bounded overview rather than a
+chain of broad directory and symbol queries:
+
+```
+graph {action:"overview", aspects:["modules","entry_points","boundaries"], limit:8}
+```
+
+Each section reports exact `total`, `returned`, and `truncated` counts. Ask for a
+specific section or a larger limit only when the clipped rows hide a needed lead.
+
 ## Retrieve implementation source
 
 ```
 graph {action:"search_symbols", name:"session routing", limit:8}
 ```
 
-Results are ranked by explainable lexical evidence plus a small graph-centrality
-boost. `score`, `confidence`, `reason`, and `matched_terms` expose why a result
+Results are ranked by explainable BM25-like lexical evidence plus a small
+graph-centrality boost. camelCase and snake_case identifiers are tokenized.
+`score`, `score_breakdown`, `confidence`, `reason`, and `matched_terms` expose why a result
 ranked. This is lexical retrieval, not semantic proof. Select a result rather
 than broadening immediately when confidence is useful.
 
@@ -48,6 +59,17 @@ source bytes; if verification or refresh fails, the tool reports an error. Use
 `grep`/`read` in that case rather than treating an empty graph result as evidence.
 
 ## Relationship questions
+
+```
+graph {action:"impact", source:"git", direction:"both", depth:2, limit:50}
+```
+
+Use `impact` after a patch when you need the changed symbols plus resolved
+callers, dependencies, and test leads in one bounded result. Every impact row
+includes hop direction and the call-site edge that reached it, including the
+resolver strategy and confidence. Continue with `next_cursor`; a cursor fails if
+the graph generation or request changed. This is factual static reachability. It
+does not estimate risk and cannot see dynamic calls.
 
 ```
 graph {action:"explain", name:"append_turn"}
@@ -93,7 +115,8 @@ call is a typed edge, not a string.
 
 - `kind` is `fn`, `method`, `struct`, `module`, `field`, `var`, `capability`,
   `doc`, and so on. `method` means it lives in an `impl`.
-- A `caller`/`use` with `-> path:line` was resolved to a definition. One without
+- A `caller`/`use` with `-> path:line` was resolved to a definition. Structured
+  evidence also includes its `resolution` strategy and numeric `confidence`. One without
   it is a name the index could not pin down (an external call, or a name that is
   ambiguous across files) — treat it as a lead, not a fact.
 - `host.<name>` entries are capabilities. If you need to know whether a

@@ -22,6 +22,12 @@ a control graph, not only a map.
 
 ## Where it lives, and how fresh it is
 
+The model has two bounded whole-repository views in addition to symbol lookup.
+`overview` answers orientation questions with exact totals and clipped sections.
+`impact` maps the current patch to changed symbols, then follows resolved callers
+and dependencies to likely review and test locations. Impact is reachability
+evidence, not a risk score or a correctness certificate.
+
 | | |
 |---|---|
 | database | `<home>/.wasm-agent/graph.db` (beside the ledger) |
@@ -51,7 +57,7 @@ dynamic calls remain uncertain even when its source snapshot is current.
 
 ## The capability
 
-`host.graph_index|query|search|source|explain|path|caps|stats|status`. Each returns a JSON
+`host.graph_index|query|search|source|overview|impact|explain|path|caps|stats|status`. Each returns a JSON
 string, and an error as `{"error": ...}` — the same shape as `host.sql_query`.
 `graph_status` reports the resolved root/db and whether the index exists yet.
 
@@ -62,8 +68,10 @@ few places to look). It tolerates a host that predates the capability and report
 
 `search` accepts a multi-term concept or identifier and returns source-ready
 `path/name/line/kind` selectors. Its score combines explainable name, signature,
-path, and incoming-edge evidence; `confidence`, `reason`, and `matched_terms`
-make the heuristic visible. It is lexical ranking, not semantic similarity.
+path, and incoming-edge evidence using a deterministic BM25-like lexical score;
+`confidence`, `reason`, `matched_terms`, and `score_breakdown` make the heuristic
+visible. Identifiers are split across camelCase and snake_case boundaries. It is
+lexical ranking, not embedding similarity.
 `source` reparses only the selected indexed file and returns the exact syntax
 definition. Definitions larger than the response budget continue from a byte
 offset. Both calls use the same before/after source verification as relationship
@@ -84,10 +92,24 @@ extractor-version stamp forces unchanged files to reindex after this upgrade.
 `host.*` edges always resolve to capability nodes, even when an unrelated
 source function has the same final name.
 
+Every resolved edge records how it was selected and a confidence value. Exact
+capabilities and import aliases rank above same-file and globally unique-name
+fallbacks. `explain`, `path`, and `impact` expose that provenance so a caller can
+distinguish strong evidence from a name-based lead.
+
+`overview` accepts optional aspects and a per-section limit. Its response has a
+stable graph generation, snapshot freshness, exact totals, and per-section
+`total`/`returned`/`truncated` metadata. `impact` accepts a native or Git
+changeset, direction, and depth. It maps changed lines to enclosing symbols and
+walks resolved non-document edges, returning each hop with its call site,
+resolution strategy, and confidence. Paging uses a cursor bound to the request
+and graph generation; stale cursors fail instead of mixing snapshots.
+
 ## How the model reaches it
 
-The `graph` tool is the model surface (`search_symbols`/`symbol_source` plus
-`explain`/`query`/`path`/`caps`/`stats`/`index`), in the `environment` tier.
+The `graph` tool is the model surface (`search_symbols`/`symbol_source`,
+`overview`/`impact`, plus `explain`/`query`/`path`/`caps`/`stats`/`index`), in the
+`environment` tier.
 `skills/code-graph/SKILL.md` tells a fresh
 context to use it before `grep` and how to read the result — including that a
 `caller` without a `-> path:line` is an unresolved name, not a fact.
@@ -131,3 +153,6 @@ The locator-only Phase 2 contract is frozen in
 [`release/GRAPH_TOOL_PHASE_2.md`](release/GRAPH_TOOL_PHASE_2.md); source-returning
 retrieval begins Phase 3 under
 [`release/GRAPH_TOOL_PHASE_3.md`](release/GRAPH_TOOL_PHASE_3.md).
+Bounded orientation, patch reachability, resolver provenance, and the hybrid
+lexical ranker begin Phase 4 under
+[`release/GRAPH_TOOL_PHASE_4.md`](release/GRAPH_TOOL_PHASE_4.md).
