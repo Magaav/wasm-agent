@@ -204,6 +204,20 @@ What invalidates it: **compaction** (rewrites the middle), **editing AGENTS.md**
   shard; `WASM_AGENT_PROMPT_CACHE_KEY=auto|on|off` controls it, and
   `WASM_AGENT_PROMPT_CACHE_RETENTION` asks for extended retention.
 
+Reasoning replay is **prefix-stable by design, and that is a cost rule, not a taste.**
+Reasoning is ~half of an average long request, which makes it look like the first place to
+cut. It is not. A thought is sent in full during its own turn; any policy that later
+replaces it with an empty field changes a message that was already sent, so the provider's
+longest-common-prefix ends there and every message after it is recomputed at the full input
+rate. Measured with the provider's own `prefix_audit`: full replay and consistent omission
+are `append_only` across turns, while emptying a sent thought is `rewritten` (diverging at
+the first prior thought). Input bills at ~50x the cache-read rate and the recomputed suffix
+contains the dropped reasoning, so a partial replay costs far more than the cached read it
+saves. The replay decision is therefore **all-or-nothing**: `WASM_AGENT_REASONING_REPLAY=0`
+omits the field on every message (also append-only, proven against this provider), and there
+is deliberately no "window". The lever that does reduce reasoning without breaking the
+prefix is `WASM_AGENT_REASONING` (produce less of it).
+
 A shard can also be chosen by *header*, and then the header belongs to the
 conversation exactly as the key does. OpenCode Go documents one — "Send a stable
 session ID in `x-opencode-session` for each conversation so we can optimize
