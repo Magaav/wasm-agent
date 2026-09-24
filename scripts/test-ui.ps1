@@ -1324,6 +1324,33 @@ $harness = @'
       check(panel.textContent.indexOf("session fixture") >= 0,
         "commands: /efficiency_report must show the node's answer, got: " + panel.textContent.slice(0, 60));
     }
+    // The report is columns, not prose. A wrapped row reads as two rows and the numbers stop
+    // lining up with their labels - and the node's report cannot know the window's width, so the
+    // panel is the only place this can be kept true. Asserted on the rendered boxes rather than on
+    // the CSS, because it is the rendered result the reader sees.
+    if (panel) {
+      var reportStyle = getComputedStyle(panel);
+      check(reportStyle.whiteSpace === "pre",
+        "commands: the report must keep its columns rather than wrap them, got white-space: " +
+        reportStyle.whiteSpace);
+      var reportText = panel.textContent.replace(/\n+$/, "");
+      var reportLines = reportText.split(String.fromCharCode(10)).filter(function (line) {
+        return line.trim() !== "";
+      }).length;
+      var reportRange = document.createRange();
+      reportRange.selectNodeContents(panel);
+      // Counted by distinct line tops, not by rects: the browser reports a line wider than the
+      // panel as two rects (the visible fragment and the overflowing one), and a long line is
+      // exactly the case this check is about.
+      var reportTops = {};
+      Array.prototype.forEach.call(reportRange.getClientRects(), function (box) {
+        if (box.width > 0) reportTops[Math.round(box.top)] = true;
+      });
+      var reportRows = Object.keys(reportTops).length;
+      check(reportRows === reportLines,
+        "commands: every non-empty report line must render as exactly one line, saw " + reportRows +
+        " rows for " + reportLines + " lines");
+    }
 
     // And the turn must name that thread, or the transcript is new and the ledger is not.
     var body = window.__composed("hello");
