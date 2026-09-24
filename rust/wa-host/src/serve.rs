@@ -307,13 +307,13 @@ fn is_read_route(request: &Request) -> bool {
     // not queue its own cancellation or the operator's disable behind itself.
     if matches!(split_path(&request.path).0.as_str(), "/jobs" | "/operations" | "/operation") {return true;}
     // A GET is a read, by default. This was an allow-list, and that was backwards: a route nobody
-    // remembered to add fell through to worker 0 and queued behind whatever run held it. It cost two
-    // incidents - `/sync/head`, then `/tools` - and each looked like the node being wedged: with a
-    // run in flight, `/health` answered in 2ms while `GET /tools` returned no bytes within 6s, the
-    // page's fetches filled the browser's connection pool, its own heartbeat could not get through,
-    // and the window reloaded it in a loop. A rule that cannot rot is the HTTP one: a GET does not
-    // change state, so worker 0's one-writer guarantee does not apply to it and a read worker may
-    // always answer. A new read route is therefore correct without anyone adding it here.
+    // remembered to add fell through to worker 0 and queued behind whatever run held it. It cost
+    // several incidents - `/sync/head`, `/tools`, and `/efficiency` - and each looked like the node
+    // being wedged: with a run in flight, `/health` answered in 2ms while `GET /tools` returned no
+    // bytes within 6s, the page's fetches filled the browser's connection pool, its own heartbeat
+    // could not get through, and the window reloaded it in a loop. A rule that cannot rot is the
+    // HTTP one: a GET does not change state, so worker 0's one-writer guarantee does not apply to it
+    // and a read worker may always answer. A new read route is correct without anyone adding it here.
     request.method == "GET"
 }
 
