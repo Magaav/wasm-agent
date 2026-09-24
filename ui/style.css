@@ -183,7 +183,17 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
 }
 .hints button:hover { border-color: var(--accent); }
 
-.status { align-self: flex-start; display: flex; align-items: center; gap: var(--gap); color: var(--muted); font-size: 13px; padding: var(--space); }
+.chat-content-run-status {
+  position: sticky; bottom: 0; z-index: 2; align-self: stretch; display: flex; align-items: center;
+  gap: var(--gap); color: var(--muted); font-size: 13px; padding: var(--space);
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.chat-content-run-label { min-width: 0; }
+.chat-content-run-elapsed { margin-left: auto; flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.chat-content-run-status.finished {
+  position: static; z-index: auto; width: 100%; margin-top: var(--space); padding: var(--space) 0 0;
+  border: 0; border-top: 1px solid var(--line); border-radius: 0; background: none; font-size: 11px;
+}
 .spinner { width: 10px; height: 10px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; display: inline-block; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .tool {
