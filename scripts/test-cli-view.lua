@@ -482,6 +482,43 @@ ok(platform.columns("abc", function() return nil end) == 80, "nor junk in COLUMN
 ok(platform.columns(nil, function() return { columns = "120" } end) == 120,
   "and a width that arrives as text (the shape JSON would give) is still a width")
 
+-- ---- the prompt's row ---------------------------------------------------------
+--
+-- The prompt used to be written at the cursor, which after a short reply is the middle of the
+-- screen, above the reader's own typing - reported as "the text area is not always in the far
+-- bottom". It is now drawn on the last row of the console, which needs the height and nothing else.
+-- Two things are worth pinning: that it does move on a live terminal, and that it does *not* on a
+-- transcript - a log with cursor movement in it is not a transcript.
+local function capture(options)
+  local written = {}
+  options = options or {}
+  options.out = function(text) written[#written + 1] = text end
+  return view_lib.new(options), written
+end
+
+local live_view, live_written = capture({ live = true, limit = 100, rows = function() return 40 end })
+live_view:prompt("wa> ")
+local drawn = table.concat(live_written)
+ok(has(drawn, "\27[999B"), "a live prompt moves down as far as the console allows")
+ok(has(drawn, "\27[2Kwa> "), "erases that row first, then writes the prompt")
+ok(drawn:sub(-4) == "wa> ", "so the prompt ends where the reader's typing will land")
+
+local plain_view, plain_written = capture({ live = false, limit = 100 })
+plain_view:prompt("wa> ")
+ok(table.concat(plain_written) == "wa> ", "a transcript gets the bare prompt, with no escapes")
+
+-- A live console that cannot answer for its height: the prompt is still written, plainly, rather
+-- than dropped - the same rule as a missing width.
+local blind_view, blind_written = capture({ live = true, limit = 100, rows = function() return nil end })
+blind_view:prompt("wa> ")
+ok(table.concat(blind_written) == "wa> ", "a live prompt with no height is written plainly")
+
+ok(view_lib.rows(function() return 40 end) == 40, "the console's height is the height used")
+ok(view_lib.rows(function() return 0 end) == nil, "a console that answers zero is not a height")
+ok(view_lib.rows(function() return nil end) == nil, "nor is a console that will not answer")
+ok(view_lib.rows(function() return "24" end) == 24,
+  "and a height that arrives as text (the shape JSON would give) is still a height")
+
 if failed > 0 then
   print(string.format("cli view: %d failed of %d checks", failed, checks))
   os.exit(1)

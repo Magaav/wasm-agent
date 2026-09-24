@@ -1696,6 +1696,172 @@ pub extern "C" fn terminal_size(l: *mut LuaState) -> c_int {
     1
 }
 
+// ---- input that arrives while the interpreter is blocked --------------------------------
+
+/// What the reader has typed and nobody has read yet.
+///
+/// The CLI's input used to be `io.read("*l")` in the REPL, and that is a read that only ever
+/// happens *between* turns: while a run was in flight nothing read stdin at all, so a reader
+/// typing their next message typed into nothing. The terminal echoed the characters and the line
+/// was then read - or not - by a REPL that was not looking, which is why "you cannot write to me
+/// while I work" was true here and is not true of pi or codex.
+///
+/// So stdin gets a reader of its own, for the life of the process, and Lua takes what arrived when
+/// Lua next runs. The console stays in the terminal's own mode: this puts nothing into raw mode
+/// and echoes nothing itself, so line editing, the echo and Enter are still the terminal's, as
+/// they are for a shell. What changes is who reads the line, and that a line typed during a run is
+/// still there when the run ends.
+#[derive(Default)]
+struct ConsoleInput {
+    lines: Vec<String>,
+    eof: bool,
+    stop: bool,
+    running: bool,
+}
+
+static CONSOLE_INPUT: OnceLock<(Mutex<ConsoleInput>, std::sync::Condvar)> = OnceLock::new();
+
+fn console_input() -> &'static (Mutex<ConsoleInput>, std::sync::Condvar) {
+    CONSOLE_INPUT.get_or_init(|| (Mutex::new(ConsoleInput::default()), std::sync::Condvar::new()))
+}
+
+/// Read lines forever, waking anyone waiting each time one lands.
+///
+/// One reader per process: a second would split the reader's typing between two queues and
+/// neither caller would see the whole of it. The stdin lock is taken once, for the same reason.
+fn console_reader() {
+    use std::io::BufRead;
+    let stdin = std::io::stdin();
+    let mut handle = stdin.lock();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = handle.read_line(&mut line);
+        let (lock, wake) = console_input();
+        let mut state = match lock.lock() {
+            Ok(state) => state,
+            Err(_) => return,
+        };
+        match read {
+            // End of input - a closed pipe, a redirected file that ran out, or the reader
+            // sending the terminal's own end-of-file. The REPL ends on it, exactly as it ended
+            // when `io.read` answered `nil`.
+            Ok(0) => {
+                state.eof = true;
+                state.running = false;
+                wake.notify_all();
+                return;
+            }
+            Ok(_) => {
+                if state.stop {
+                    state.running = false;
+                    wake.notify_all();
+                    return;
+                }
+                state.lines.push(line.trim_end_matches(['\n', '\r']).to_string());
+                wake.notify_all();
+            }
+            // A read error is the end of input rather than a lost line: the reader cannot be
+            // asked to type it again, and a REPL that keeps prompting for a stream it cannot
+            // read is worse than one that stops.
+            Err(_) => {
+                state.eof = true;
+                state.running = false;
+                wake.notify_all();
+                return;
+            }
+        }
+    }
+}
+
+/// `host.input_start()` -> `{started:true}`, or `nil` if the reader cannot be asked.
+///
+/// Idempotent: a caller that starts twice gets one reader and one `true`, so nothing has to
+/// remember whether it already did.
+pub extern "C" fn input_start(l: *mut LuaState) -> c_int {
+    let (lock, _) = console_input();
+    match lock.lock() {
+        Ok(mut state) => {
+            if state.running {
+                push_json(l, &json!({"started": true}));
+                return 1;
+            }
+            state.running = true;
+            state.stop = false;
+        }
+        Err(_) => {
+            unsafe { crate::lua::lua_pushnil(l) };
+            return 1;
+        }
+    }
+    std::thread::spawn(console_reader);
+    push_json(l, &json!({"started": true}));
+    1
+}
+
+/// Wait for a line, the stop flag or the end of input, and hand the lock back.
+///
+/// A function rather than a loop in `input_take` because the wait consumes the guard and returns
+/// it: keeping that in one place is what makes the poisoned-lock path one line instead of a
+/// branch that a later `state` read could disagree with.
+fn wait_for_input(
+    wake: &'static std::sync::Condvar,
+    mut state: std::sync::MutexGuard<'static, ConsoleInput>,
+    deadline: std::time::Instant,
+) -> std::sync::MutexGuard<'static, ConsoleInput> {
+    while state.lines.is_empty() && !state.eof && !state.stop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        state = match wake.wait_timeout(state, left) {
+            Ok((state, _)) => state,
+            // A poisoned lock is still a lock, and the lines in it are what the reader typed.
+            Err(poisoned) => poisoned.into_inner().0,
+        };
+    }
+    state
+}
+
+/// `host.input_take(timeout_ms)` -> `{lines, eof, running}`.
+///
+/// Waits up to `timeout_ms` for at least one line, and answers immediately with whatever is
+/// already buffered - which is what makes a line typed during a run arrive the moment the run
+/// ends, with no polling and no lost keystrokes. `timeout_ms` of 0 means "take what is there
+/// now", for a caller draining a queue. An empty answer is an array and not a missing value:
+/// "nothing typed yet" is not "no console".
+pub extern "C" fn input_take(l: *mut LuaState) -> c_int {
+    let timeout_ms = arg_integer(l, 1).unwrap_or(0).max(0) as u64;
+    let (lock, wake) = console_input();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let state = match lock.lock() {
+        Ok(state) => state,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let mut state = wait_for_input(wake, state, deadline);
+    let lines: Vec<String> = state.lines.drain(..).collect();
+    let (eof, running) = (state.eof, state.running);
+    drop(state);
+    push_json(l, &json!({"lines": lines, "eof": eof, "running": running}));
+    1
+}
+
+/// `host.input_stop()` -> `{stopped:true}`.
+///
+/// The reader is told to stop and is not joined: it is blocked in a read that no portable call can
+/// interrupt, and making the process exit wait for a reader to type one more line is a worse
+/// answer than leaving one thread to die with the process it belongs to. A caller that stops and
+/// starts again gets its lines, never a second reader.
+pub extern "C" fn input_stop(l: *mut LuaState) -> c_int {
+    let (lock, wake) = console_input();
+    if let Ok(mut state) = lock.lock() {
+        state.stop = true;
+        wake.notify_all();
+    }
+    push_json(l, &json!({"stopped": true}));
+    1
+}
+
 #[cfg(test)]
 mod terminal_tests {
     use super::usable_size;

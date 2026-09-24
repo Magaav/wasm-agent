@@ -222,6 +222,44 @@ animated line and the printed line cannot drift apart.
 so it cannot repaint anything itself - and the gate reads the frames and the clock out of
 its captured stdout.
 
+## Input that arrives while Lua is blocked
+
+`host.input_start()`, `host.input_take(timeout_ms)` and `host.input_stop()` are the ticker's
+mirror image. The status line exists because the interpreter cannot repaint while it is blocked;
+this exists because the interpreter cannot *read* while it is blocked. `wa chat` used to call
+`io.read("*l")` between turns, so while a run was in flight nothing read stdin at all: a reader
+typing their next message typed into a stream nobody was looking at, and the line was lost. pi and
+codex do not lock input, and a reader compared them to this, correctly.
+
+So a thread of the host reads stdin for the life of the process, and Lua takes what arrived when
+it next runs.
+
+- `input_start()` starts it, once per process; a second call is still `true` and does not add a
+  second reader - two readers would split the reader's typing between two queues and neither
+  caller would see the whole of it.
+- `input_take(timeout_ms)` waits up to that long for at least one line and answers
+  `{lines, eof, running}`. **`lines` is an array and never a missing value**: "nothing typed yet"
+  is not "no console", and a caller that cannot tell the two apart stops on a keystroke that has
+  simply not happened yet. `timeout_ms` of 0 is "take what is there now".
+- `input_stop()` asks the thread to stop and does **not** join it: it is blocked in a read that no
+  portable call can interrupt, and making the process exit wait for the reader to type one more
+  line is a worse answer than one thread dying with the process.
+- The console is left in the terminal's own mode. This puts nothing into raw mode and echoes
+  nothing itself, so line editing, the echo and Enter stay the terminal's, as for any shell. What
+  changes is who reads the line, and that a line typed during a run is still there when it ends.
+- `lua/core/cli_input.lua` is the Lua side, and tolerates the capability being absent (an older
+  binary) by falling back to the blocking read it replaced.
+
+What this does **not** do, deliberately: raw-mode input, per-key editing, an interrupt key, and
+multi-line input all need the terminal handed over (raw mode plus a frame the CLI owns), which is a
+larger change than reading the reader's lines.
+
+`scripts/test-cli-input.lua` is observed through a real child process, like the ticker's test and
+for the same reason: the reader is a thread, so the only honest evidence is that process's own
+behaviour. Its producer on stdin writes the second line **while the script is asleep**, which is
+the one arrangement that distinguishes a reader thread from a read in the REPL: with `io.read`
+that line would have arrived to nobody.
+
 ## The console's size
 
 `host.terminal_size()` returns `{columns, rows}` for the console this process draws on, or

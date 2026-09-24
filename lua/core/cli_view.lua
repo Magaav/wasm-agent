@@ -356,6 +356,23 @@ end
 -- There is no tty check in the host (`host.*` exposes no isatty), so this is a
 -- heuristic, and it is stated as one: every terminal this runs in sets one of these,
 -- and a pipe, a file or a test does not. NO_COLOR always wins, and the explicit
+-- The console's height, asked the way the width is: `host.terminal_size`, nil when there is no
+-- console or it will not answer. The prompt is the only caller, and it needs this and nothing else
+-- - see `METHODS:prompt`.
+function M.rows(probe)
+  probe = probe or function()
+    local ok, raw = pcall(host.terminal_size)
+    if not ok or type(raw) ~= "string" then return nil end
+    local decoded
+    if not pcall(function() decoded = json.decode(raw) end) then return nil end
+    if type(decoded) ~= "table" then return nil end
+    return tonumber(decoded.rows)
+  end
+  local rows = tonumber(probe())
+  if not rows or rows <= 0 then return nil end
+  return math.floor(rows)
+end
+
 -- override exists because a guess needs a way to be overruled.
 function M.wants_live(getenv)
   getenv = getenv or function(name) return host.getenv(name) end
@@ -441,6 +458,10 @@ function M.new(opts)
     animating = false,
     now = opts.now or function() return host.now() end,
     limit = opts.limit or 80,
+    -- The console's height. One thing needs it: the prompt is drawn on the last row, which needs
+    -- the height and no idea at all of where the cursor is. Injectable, because the rule is worth
+    -- a test and a test has no terminal.
+    rows = opts.rows or M.rows,
     title = opts.title or "",
     workspace = opts.workspace or "",
     branch = opts.branch or "",
@@ -561,6 +582,32 @@ function METHODS:clear()
   self:unanimate()
   if self.live and self.shown then self:write("\r\27[2K") end
   self.shown = nil
+end
+
+-- The input line, drawn where a reader looks for it: on the last row of the terminal.
+--
+-- A prompt written at the cursor is wherever the last reply happened to end, so after a short
+-- answer it sits in the middle of the screen, above the reader's own typing - and the complaint
+-- that produced this was exactly that: "the text area is not always in the far bottom". pi and
+-- codex pin the input to the bottom of the screen, and the difference is not cosmetic: it is the
+-- row a reader's eye and their fingers already went to.
+--
+-- CUD 999 (`\27[999B`) moves the cursor down as far as the screen allows and clamps, so this needs
+-- the console's height - which `host.terminal_size` answers - and nothing else: no cursor save, no
+-- scroll region, no assumption about which row we were on. The typed echo then lands on that row,
+-- which is where the reader is looking.
+--
+-- Only in the live rendering. A captured transcript is a log, and a log with cursor movement in it
+-- is not a transcript: the plain path writes the same prompt it always did, byte for byte.
+function METHODS:prompt(text)
+  text = text or "wa> "
+  if not self.live then return self:write(text) end
+  local rows = self.rows and self.rows()
+  if not rows or rows <= 0 then return self:write(text) end
+  -- Take the status line back first: the ticker draws on the row the cursor is on, and the cursor
+  -- is about to leave it.
+  self:clear()
+  self:write("\27[999B\r\27[2K" .. text)
 end
 
 -- The terminal title carries the same word as the status line, which is how a reader
