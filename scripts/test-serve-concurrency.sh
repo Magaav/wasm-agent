@@ -228,6 +228,10 @@ sleep 2
 
 before_health="$(curl -s -m 3 "http://127.0.0.1:$POOL_PORT/health" 2>/dev/null)"
 read_code="$(curl -s -m 5 -o "$WORK/pool-read.json" -w '%{http_code}' "http://127.0.0.1:$POOL_PORT/sessions" 2>/dev/null)"
+# `/tools` is a read too, and it was not on the read-route list: with a run holding worker 0 it
+# returned no bytes, which is how the engine's tool panel hung behind a turn. A missing entry here is
+# a performance bug, so it is measured rather than assumed.
+tools_code="$(curl -s -m 5 -o "$WORK/pool-tools.json" -w '%{http_code}' "http://127.0.0.1:$POOL_PORT/tools" 2>/dev/null)"
 write_code="$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{}' "http://127.0.0.1:$POOL_PORT/diff" 2>/dev/null)"
 grown_health="$(curl -s -m 3 "http://127.0.0.1:$POOL_PORT/health" 2>/dev/null)"
 # Now leave it alone: the worker that answered that read has nothing to do, and must go away again.
@@ -253,6 +257,10 @@ esac
 case "$read_code" in
   200) echo "  ok: a read is answered while a turn holds worker 0" ;;
   *) echo "  FAIL: the read queued behind the turn (got ${read_code:-none})"; exit 1 ;;
+esac
+case "$tools_code" in
+  200) echo "  ok: /tools is answered while a turn holds worker 0" ;;
+  *) echo "  FAIL: /tools queued behind the turn (got ${tools_code:-none}) - it is a read"; exit 1 ;;
 esac
 case "$write_code" in
   503) echo "  ok: a request that needs the stalled worker is refused, not left hanging" ;;
