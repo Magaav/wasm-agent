@@ -45,8 +45,21 @@ class El {
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
   removeEventListener() {}
   remove() {}
-  append(...nodes) { this.children.push(...nodes); }
-  replaceChildren() { this.children = []; }
+  append(...nodes) { this.children.push(...nodes); this._html = undefined; }
+  replaceChildren() { this.children = []; this._html = undefined; }
+  // innerHTML is how the real DOM serializes a subtree, and the assertions below read it to
+  // see what the user would see. As a plain field it made a *structured* status line
+  // invisible: the text lives in a child, so innerHTML stayed undefined and a refusal that
+  // was on screen looked absent. Serialize the children, and treat a direct assignment the
+  // way the DOM does - it replaces them.
+  get innerHTML() {
+    if (this._html !== undefined) return this._html;
+    return this.children.map((child) => {
+      const tag = String(child.tagName || "div").toLowerCase();
+      return `<${tag} class="${child.className || ""}">${child.textContent || ""}</${tag}>`;
+    }).join("");
+  }
+  set innerHTML(value) { this._html = String(value); this.children = []; }
   setAttribute() {}
   getAttribute() { return null; }
   querySelector() { return null; }
