@@ -1528,6 +1528,16 @@ $harness = @'
     check(tail === placed,
       "mid-run the status line must be the last thing in the transcript, saw: "
       + (tail ? tail.tagName + "." + tail.className : "nothing"));
+    // "Sticked" is half the behaviour and it is invisible to a structure check: the line is pinned
+    // to the bottom of the transcript while the run is in flight, and only becomes the bubble's
+    // footer when the run ends. A line that never pins and a line that never moves look identical
+    // in a screenshot, so the computed position is asserted on both sides of that move.
+    var livePosition = getComputedStyle(placed).position;
+    check(livePosition === "sticky",
+      "mid-run the status line must be sticky at the bottom of the transcript, saw position: " + livePosition);
+    check(placed.parentNode === messages,
+      "mid-run the status line must live in the transcript, not inside the bubble, saw parent: "
+      + (placed.parentNode ? placed.parentNode.tagName : "none"));
     var bubbles = messages.querySelectorAll("wa-message.assistant");
     var bubble = bubbles[bubbles.length - 1];
     check(Array.prototype.indexOf.call(messages.children, bubble)
@@ -1542,6 +1552,12 @@ $harness = @'
       + (footer ? footer.tagName + "." + footer.className : "nothing"));
     check(!!footer && footer.classList.contains("finished"),
       "and it must be the finished footer, under the answer");
+    var footerPosition = footer ? getComputedStyle(footer).position : "none";
+    check(footerPosition === "static",
+      "once the run ends the footer must stop being sticky and sit in the bubble, saw position: " + footerPosition);
+    check(!!footer && footer.parentNode === body,
+      "the footer must be a child of the bubble's body, saw parent: "
+      + (footer && footer.parentNode ? footer.parentNode.tagName + "." + (footer.parentNode.className || "") : "none"));
     check(!!footer && /\d+:\d\d/.test(footer.textContent),
       "the footer must carry the run's time, saw: "
       + (footer ? footer.textContent : "nothing"));
