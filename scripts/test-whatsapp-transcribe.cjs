@@ -133,5 +133,30 @@ const visibility = spawnSync(wa, ["--db", db], { encoding: "utf8", windowsHide: 
   env: { ...process.env, WASM_AGENT_HOME: root, WASM_AGENT_LUA_ROOT: repo, WASM_AGENT_PLUGINS: plugins, WA_SCRIPT: probe } });
 assert.equal(visibility.status, 0, visibility.stderr);
 assert.match(visibility.stdout, /plugin visibility ok/);
-console.log("whatsapp transcription ok (local adapter, WASM formatter, durable send; 0 skipped)");
+// The real STT script must emit UTF-8 whatever the locale says. A transcript is read
+// by a UTF-8 reader, and on Windows a piped stdout defaults to the ANSI code page,
+// where each accented character becomes one byte the reader replaces with U+FFFD -
+// the text is lost, not merely garbled. PYTHONIOENCODING=cp1252 reproduces that
+// default on any platform, so this check means the same thing on Linux and Windows.
+// The fake adapter above is UTF-8 and would never have caught it.
+let encoding = "skipped: no usable python";
+for (const python of [process.env.WA_WHATSAPP_STT_PYTHON, "python3", "python"]) {
+  if (!python) continue;
+  const snippet = [
+    "import importlib.util, json, sys",
+    `spec = importlib.util.spec_from_file_location('stt', ${JSON.stringify(path.join(repo, "scripts/whatsapp-stt-local.py"))})`,
+    "mod = importlib.util.module_from_spec(spec)",
+    "spec.loader.exec_module(mod)",
+    "sys.stdout.write(json.dumps({'transcript': '\\u00c1rea de sa\\u00fade'}, ensure_ascii=False))",
+  ].join("\n");
+  const run = spawnSync(python, ["-c", snippet], { encoding: "buffer", windowsHide: true,
+    env: { ...process.env, PYTHONIOENCODING: "cp1252" } });
+  if (run.error || run.status !== 0) continue;
+  const text = run.stdout.toString("utf8");
+  assert.ok(!text.includes("\ufffd"), `STT output is not valid UTF-8: ${text}`);
+  assert.match(text, /\u00c1rea de sa\u00fade/, "the transcript survived the round trip");
+  encoding = "checked";
+  break;
+}
+console.log(`whatsapp transcription ok (local adapter, WASM formatter, durable send, output encoding ${encoding}; ${encoding === "checked" ? 0 : 1} skipped)`);
 console.log("evidence: " + root);
