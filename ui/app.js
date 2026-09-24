@@ -405,7 +405,11 @@ function runDuration(ms) {
 
 function updateRunElapsed() {
   if (!statusElapsed) return;
-  statusElapsed.textContent = runDuration(Date.now() - (runStartedAt || Date.now()));
+  // A repaint has no clock of its own: the run ended when its stored row says it did. Using
+  // Date.now() there would print days on a footer for a turn that took four seconds - the same
+  // mistake the run topic's own summary avoids by reading replayMessageEndedAt.
+  const endedAt = replayingMessages && replayMessageEndedAt ? replayMessageEndedAt : Date.now();
+  statusElapsed.textContent = runDuration(endedAt - (runStartedAt || endedAt));
 }
 
 function startRunStatusTicker() {
@@ -1180,6 +1184,9 @@ function restoreDraft() {
 // that built it the first time, so the two cannot drift apart.
 let replayingMessages = false;
 let replayMessageEndedAt = 0;
+// Whether the run being replayed got as far as answering. A run that is still unfinished - the
+// reload fixture's is - must keep its in-progress notice, not a "completed" footer.
+let replayRunAnswered = false;
 let renderedMessageIds = new Set();
 function repaintMessages(rows, options = {}) {
   // A repaint is a view of durable rows, not a resumed event stream. In particular, an
@@ -1207,6 +1214,7 @@ function repaintMessages(rows, options = {}) {
       if (message.role === "user") {
         flushDecision(true);
         runStartedAt = Number(message.created_at) > 0 ? Number(message.created_at) * 1000 : Date.now();
+        replayRunAnswered = false;
         add("user", message.content || "");
       } else if (message.role === "assistant") {
         // The stored message carries its changes summary and its id, and both are needed: the summary is
@@ -1220,6 +1228,7 @@ function repaintMessages(rows, options = {}) {
         }
         if (message.content) {
           replayMessageEndedAt = Number(message.created_at) > 0 ? Number(message.created_at) * 1000 : Date.now();
+          replayRunAnswered = true;
           handleEvent({ type: "reply", text: message.content, changes: message.changes, message_id: message.id });
         }
         const calls = message.tool_calls || [];
@@ -1251,6 +1260,11 @@ function repaintMessages(rows, options = {}) {
   // a tool call with no recorded result is history, not work this page can watch. Keeping its
   // line pending and starting a ticker invented a clock for a call nobody was timing, and the
   // reader could not tell it from a live one. Every replayed decision closes as unrecorded.
+  // The repaint draws history, and history still has a footer: the run's own duration, taken from
+  // the stored row that runStartedAt already carries. The live path gets this from the stream's
+  // `done`; a replay emits no done at all, so nothing ever created a status line and
+  // finishRunStatus returned early - which is why a reloaded transcript had no footers.
+  if (replayingMessages && replayRunAnswered && !statusLine && runBubble) { setStatus("completed"); finishRunStatus(); }
   if (trace) finishTrace();
   replayingMessages = false;
   // The transcript just drawn is history, so the bubble it ended on is closed. The `reply` handler

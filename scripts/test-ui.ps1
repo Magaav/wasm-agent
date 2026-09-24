@@ -66,6 +66,16 @@ $harness = @'
       "an active turn must not offer a duplicate continuation");
     check(!window.__calls.some(function (call) { return call.url === "chat" && call.method === "POST"; }),
       "a page reload must never post another turn");
+    // The reload redraws the transcript from stored rows, and a repainted run must still show its
+    // footer - the same information the live stream produced. A replay emits no `done`, so this is
+    // the path where no status line was ever created and finishRunStatus returned early.
+    var repaintedBubbles = restored.querySelectorAll("wa-message.assistant");
+    var repaintedBubble = repaintedBubbles[repaintedBubbles.length - 1];
+    var repaintedKids = repaintedBubble ? repaintedBubble.body.children : [];
+    var repaintedLast = repaintedKids[repaintedKids.length - 1];
+    check(!!repaintedLast && repaintedLast.classList.contains("chat-content-run-status"),
+      "a repainted bubble must show its run's footer, saw: "
+      + (repaintedLast ? repaintedLast.tagName + "." + (repaintedLast.className || "") : "nothing"));
 
     // The stream belongs to the old page, so the new page must notice the worker become idle
     // and repaint the answer from the durable ledger, not open the engine's session view.
@@ -1123,7 +1133,11 @@ $harness = @'
   // its old name and the window has to say so rather than showing a name the node does not have.
   window.__renameNode("refused");
   for (var rf = 0; rf < 30; rf++) { await tick(); }
-  var refusedNote = document.querySelector(".status");
+  // `.status` is shared: setStatus draws transient notices *and* the run status line, so a bare
+  // selector returns whichever came first in the document - which is now a repainted run's footer.
+  // The notice is the most recent one.
+  var refusedNotes = document.querySelectorAll(".status");
+  var refusedNote = refusedNotes[refusedNotes.length - 1];
   check(!/refused/.test(nodeButton.textContent),
     "a refused rename must not stick in the control, saw: " + nodeButton.textContent);
   check(!!refusedNote && /could not rename/.test(refusedNote.textContent),
