@@ -9,6 +9,9 @@ pub fn manager() -> &'static Manager {
             std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
                 .join(".wasm-agent/operations"),
         )
+        // A command the agent runs can print the node's own key; the operation's stdout is
+        // written as it arrives, so redact before the write, not only in the transcript.
+        .with_env_secrets()
     })
 }
 fn spec(program: &str, flag: &str, command: &str, cwd: &str, seconds: u64, owner: String, promote: bool) -> Spec {

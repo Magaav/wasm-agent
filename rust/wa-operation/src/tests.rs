@@ -363,3 +363,47 @@ fn launch_failure_is_visible() {
     assert_eq!(restored["error"],s["error"]);
     fs::remove_dir_all(root).unwrap();
 }
+
+/// A command can print the node's own key. The transcript has its own redactor; this proves
+/// the *operation's* output - the file on disk and the in-memory view - is redacted too,
+/// because a promoted process outlives the turn that started it.
+#[test]
+fn a_secret_in_operation_output_is_redacted_on_disk_and_in_the_view() {
+    let root = std::env::temp_dir().join(format!(
+        "wa-operation-redact-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let secret = "sk-live-SECRETVALUE-0123456789abcdef";
+    let m = Manager::new(&root).with_secrets(vec![secret.into()]);
+    let id = m.start(shell("printf 'key=sk-live-SECRETVALUE-0123456789abcdef'")).unwrap();
+    let s = settled(&m, &id);
+    assert_eq!(s["stdout"], "key=<redacted>", "{s}");
+    let on_disk = fs::read_to_string(root.join(&id).join("stdout")).unwrap();
+    assert!(!on_disk.contains("SECRETVALUE"), "the file holds the secret: {on_disk}");
+    assert!(on_disk.contains("<redacted>"), "{on_disk}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The 8 KiB read boundary can fall inside the key. Filler before it forces that split, and
+/// neither the file nor the view may hold the value.
+#[test]
+fn a_secret_split_across_the_read_buffer_is_redacted() {
+    let root = std::env::temp_dir().join(format!(
+        "wa-operation-redact-split-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let secret = "sk-live-SECRETVALUE-0123456789abcdef";
+    let m = Manager::new(&root).with_secrets(vec![secret.into()]);
+    // 8186 filler bytes put "key=<secret>" across the 8192 read boundary.
+    let command = format!("printf '%*s' 8186 '' | tr ' ' x; printf 'key={secret}'");
+    let id = m.start(shell(&command)).unwrap();
+    let s = settled(&m, &id);
+    let stdout = s["stdout"].as_str().unwrap_or("");
+    assert!(!stdout.contains("SECRETVALUE"), "the split secret leaked into the view");
+    assert!(stdout.contains("<redacted>"), "{stdout}");
+    let on_disk = fs::read_to_string(root.join(&id).join("stdout")).unwrap();
+    assert!(!on_disk.contains("SECRETVALUE"), "the split secret is on disk");
+    fs::remove_dir_all(root).unwrap();
+}

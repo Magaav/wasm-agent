@@ -73,38 +73,66 @@ local SECRET_ENV = {
   "WASM_AGENT_LLM_API_KEY", "OPENAI_API_KEY", "OPENCODE_GO_API_KEY", "WASM_AGENT_PROMPT_CACHE_KEY",
 }
 
+local function escape_pattern(text)
+  return (tostring(text):gsub("([^%w])", "%%%1"))
+end
+
 function M.secret_values()
   local values = {}
   if host and host.getenv then
     for _, name in ipairs(SECRET_ENV) do
       local value = host.getenv(name)
-      if type(value) == "string" and #value >= 8 then values[#values + 1] = value end
+      if type(value) == "string" and #value >= 8 then
+        values[#values + 1] = { name = name, escape = escape_pattern(value), value = value }
+      end
     end
   end
   return values
 end
 
-local function escape_pattern(text)
-  return (tostring(text):gsub("([^%w])", "%%%1"))
+-- Where the node's own secret values appear in a string: `{NAME = count, ...}`. Never the
+-- value. This is the detection half - a caller can report that it saw a secret even when it
+-- is about to redact it, and an operator can be told before a turn is stored or sent.
+function M.scan(text)
+  local found = {}
+  text = tostring(text or "")
+  for _, secret in ipairs(M.secret_values()) do
+    local _, count = text:gsub(secret.escape, "")
+    if count > 0 then found[secret.name] = (found[secret.name] or 0) + count end
+  end
+  return found
 end
 
--- Redact the node's own secret values from a string, exactly.
+-- Redact the node's own secret values from a string, exactly. Returns the text and
+-- `{NAME = count, ...}` for whatever it replaced.
 function M.secrets(value)
-  local text = tostring(value or "")
+  local text, hits = tostring(value or ""), {}
   for _, secret in ipairs(M.secret_values()) do
-    text = text:gsub(escape_pattern(secret), "<redacted>")
+    local replaced, count = text:gsub(secret.escape, "<redacted>")
+    if count > 0 then
+      text = replaced
+      hits[secret.name] = (hits[secret.name] or 0) + count
+    end
   end
-  return text
+  return text, hits
 end
 
 -- Redact every string in a tool result, tables included, so the value is gone before the
 -- result is projected, stored, journalled or sent to the provider - not only before it is
--- displayed. Tables are copied; the caller's table is left alone.
+-- displayed. Tables are copied; the caller's table is left alone. Returns the copy and the
+-- aggregated `{NAME = count, ...}` of what was found.
 function M.value(v)
   local secrets = M.secret_values()
+  local hits = {}
   local function walk(x)
     if type(x) == "string" then
-      for _, secret in ipairs(secrets) do x = x:gsub(escape_pattern(secret), "<redacted>") end
+      for _, secret in ipairs(secrets) do
+        local replaced, count = x:gsub(secret.escape, "<redacted>")
+        if count > 0 then
+          x = replaced
+          hits[secret.name] = (hits[secret.name] or 0) + count
+        end
+      end
       return x
     elseif type(x) == "table" then
       local out = {}
@@ -113,7 +141,7 @@ function M.value(v)
     end
     return x
   end
-  return walk(v)
+  return walk(v), hits
 end
 
 return M
