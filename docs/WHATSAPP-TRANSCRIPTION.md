@@ -11,7 +11,13 @@ No audio or transcript goes to an STT provider. The Python runner uses
 `local_files_only=True` and the job sets `HF_HUB_OFFLINE=1`. Download the model
 **before** enabling the job. The model is multilingual `small` by default and
 runs on the CPU with int8 quantization. A different locally cached model can be
-selected with `WA_WHATSAPP_STT_MODEL`.
+selected with `WA_WHATSAPP_STT_MODEL`. Recognition defaults to Portuguese
+(`WA_WHATSAPP_STT_LANGUAGE=pt`) and uses beam size 5. Set the language to `auto`
+to let Whisper detect the language, or to another Whisper language code such as
+`en` for a different primary language. Beam size 5 may take longer than the old
+beam size 1, trading some CPU time for better decoding on short clips. VAD keeps
+short silence gaps within a spoken message; it is not a remedy for clipped or
+noisy audio.
 
 ## Install the local recognizer
 
@@ -39,7 +45,9 @@ The first tick adopts the current store without replying to old messages.
 The existing core-module ABI (`memory`, `alloc`, `describe`, `call`) remains the
 same. A plugin may now declare `"surface":"internal"` in `describe()`. Such a
 plugin can be called by trusted Lua through `host.invoke` but is absent from
-the model's tool list. The `whatsapp_transcript` plugin receives only the
+the model's tool list. A standalone transcript is sent as `🎙️ _Copiloto-Transcritor_`,
+followed by a newline and the recognized text; numbered parts retain their
+part counter after the same header. The `whatsapp_transcript` plugin receives only the
 recognized text and returns `{ "bodies": ["..."] }`; it has no filesystem,
 browser, network, or send imports. The host owns those effects and the durable
 reservation. This keeps the STT engine native and permits deterministic reply

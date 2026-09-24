@@ -89,7 +89,7 @@ const first = pass();
 assert.equal(first.code, 0, JSON.stringify(first));
 assert.equal(first.value.state, "sent");
 assert.equal(effect("voice1:transcript:1").state, "sent");
-assert.deepEqual(sent(), [{ body: "Transcrição do áudio:\nOlá mundo", chat }]);
+assert.deepEqual(sent(), [{ body: "🎙️ _Copiloto-Transcritor_\nOlá mundo", chat }]);
 assert.equal(pass().value.processed, 0);
 assert.equal(sent().length, 1, "confirmed send is never replayed");
 
@@ -128,7 +128,7 @@ assert.equal(sent().filter((row) => row.body.includes("(3/3)")).length, 1);
 assert.equal(pass().value.processed, 0, "all parts were settled once");
 
 const probe = path.join(scripts, "plugin-probe.lua");
-fs.writeFileSync(probe, `assert(not host.plugins():find('whatsapp_transcript'), 'internal plugin in model tools')\nassert(host.invoke('whatsapp_transcript','{"transcript":"hello"}'):find('Transcrição'), 'plugin not callable')\nprint('plugin visibility ok')\n`);
+fs.writeFileSync(probe, `assert(not host.plugins():find('whatsapp_transcript'), 'internal plugin in model tools')\nassert(host.invoke('whatsapp_transcript','{"transcript":"hello"}'):find('Copiloto%-Transcritor'), 'plugin not callable')\nprint('plugin visibility ok')\n`);
 const visibility = spawnSync(wa, ["--db", db], { encoding: "utf8", windowsHide: true,
   env: { ...process.env, WASM_AGENT_HOME: root, WASM_AGENT_LUA_ROOT: repo, WASM_AGENT_PLUGINS: plugins, WA_SCRIPT: probe } });
 assert.equal(visibility.status, 0, visibility.stderr);
