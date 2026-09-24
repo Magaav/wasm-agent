@@ -37,7 +37,7 @@ function windowCommands(text) {
   const end = text.indexOf('\n];', start);
   assert.notEqual(end, -1, 'ui/app.js: the COMMANDS array is not closed');
   const names = [];
-  for (const match of text.slice(start, end).matchAll(/name:\s*"(\/[a-z-]+)"/g)) names.push(match[1]);
+  for (const match of text.slice(start, end).matchAll(/name:\s*"(\/[a-z_-]+)"/g)) names.push(match[1]);
   return names;
 }
 
@@ -46,8 +46,8 @@ function windowCommands(text) {
 function cliCommands(text) {
   const names = [];
   const aliases = [];
-  for (const row of text.matchAll(/\{\s*name\s*=\s*"(\/[a-z-]+)"/g)) names.push(row[1]);
-  for (const alias of text.matchAll(/alias\s*=\s*\{\s*"(\/[a-z-]+)"/g)) aliases.push(alias[1]);
+  for (const row of text.matchAll(/\{\s*name\s*=\s*"(\/[a-z_-]+)"/g)) names.push(row[1]);
+  for (const alias of text.matchAll(/alias\s*=\s*\{\s*"(\/[a-z_-]+)"/g)) aliases.push(alias[1]);
   return { names, aliases };
 }
 

@@ -230,6 +230,25 @@ if (Test-Path $recoveryFile) {
   Bad "scripts/test-recovery.lua is missing"
 }
 
+# The efficiency report is deterministic and spends no model call. Its own database: it
+# seeds harness events and writes a prefix artifact, and the shared db's fixtures would
+# show up in the report it renders.
+$efficiencyFile = Join-Path $root "scripts/test-efficiency-report.lua"
+if (Test-Path $efficiencyFile) {
+  $efficiencyDb = "$db.efficiency"
+  $previous = $env:WA_SCRIPT
+  $env:WA_SCRIPT = $efficiencyFile
+  try { $out = $null | & $WaExe --db $efficiencyDb 2>&1 | Out-String }
+  finally {
+    if ($null -eq $previous) { Remove-Item Env:\WA_SCRIPT -ErrorAction SilentlyContinue }
+    else { $env:WA_SCRIPT = $previous }
+  }
+  if ($out -match "efficiency report ok") { Ok "efficiency report: domination, KV cache cost, prefix artifact" }
+  else { Bad "the efficiency report test failed"; Note ($out -replace "\s+", " ") }
+} else {
+  Bad "scripts/test-efficiency-report.lua is missing"
+}
+
 if (-not $SkipModel) {
   # The end-to-end: seed a thread cut off mid-answer, then continue it for real.
   # A verified resume says so before the user types, tells the model what was
