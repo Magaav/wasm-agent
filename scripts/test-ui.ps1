@@ -175,9 +175,10 @@ $harness = @'
   // sits above the answer so the reader lands on the answer - and the diff topic sits
   // *below* it, as a sibling of the answer rather than inside the run.
   var shape = body ? Array.prototype.map.call(body.children, function (c) {
+    if (c.classList.contains("chat-content-run-status")) return "status";
     return c.tagName === "WA-RUN" ? "run" : (c.tagName === "WA-TRACE" ? "trace"
       : (c.tagName === "WA-DIFF" ? "diff" : "text"));
-  }).join(",") : "";
+  }).filter(function (item) { return item !== "status"; }).join(",") : "";
   check(shape === "run,text,diff",
     "expected run,text,diff in the bubble after the reply, saw " + shape);
 
@@ -402,7 +403,8 @@ $harness = @'
   check(window.__applyUiVersion(live + "-third") === "deferred",
     "a change during a turn must be deferred, not applied under it");
   check(reloads === 1, "a deferred change must not reload yet, saw " + reloads);
-  var updateNote = document.querySelector(".status");
+  var updateNotes = document.querySelectorAll(".chat-content-run-status:not(.finished)");
+  var updateNote = updateNotes[updateNotes.length - 1];
   check(!!updateNote && /update ready/.test(updateNote.textContent),
     "and it must say so, saw: " + (updateNote ? updateNote.textContent : "no status"));
   window.__setBusy(false);
@@ -511,7 +513,8 @@ $harness = @'
   // number that explains where the output budget went when a turn ends with no
   // answer at all.
   window.handleEvent({ type: "reasoning", chars: 4096 });
-  var reasoningStatus = document.querySelector(".status");
+  var reasoningStatuses = document.querySelectorAll(".chat-content-run-status:not(.finished)");
+  var reasoningStatus = reasoningStatuses[reasoningStatuses.length - 1];
   check(!!reasoningStatus && /4096/.test(reasoningStatus.textContent),
     "reasoning must be visible while it happens, saw: " +
     (reasoningStatus ? reasoningStatus.textContent : "no status line"));
@@ -523,7 +526,8 @@ $harness = @'
     text: "recovering an unfinished thread: stopped after a tool result with no next decision" });
   // The status line is at its longest here, and it is the one element that exists
   // only during a run - which is why a scrollbar could come and go with it.
-  var statusLine = document.querySelector(".status");
+  var activeStatuses = document.querySelectorAll(".chat-content-run-status:not(.finished)");
+  var statusLine = activeStatuses[activeStatuses.length - 1];
   check(!!statusLine, "a run must show its status line");
   var statusOverflow = messages.scrollWidth - messages.clientWidth;
   check(statusOverflow <= 1,
@@ -842,21 +846,25 @@ $harness = @'
   check(!!diffTopic && !!(diffTopic.dataset.messageId || diffTopic.messageId),
     "and the message id the undo route is asked about, saw: " + (diffTopic ? JSON.stringify(diffTopic.dataset.messageId) : "no topic"));
 
-  // Opening a topic while a turn runs must not look like a broken UI. The node's worker is inside the
-  // turn, so a Lua read queues and the client's deadline abandons it - which showed as
-  // "AbortError: signal is aborted without reason" on a node that was working perfectly.
+  // Read-only topics use host read workers, so they must remain available while the run worker is
+  // occupied. Topics that still need the run worker must queue clearly and load after the run.
   window.__setBusy(true);
   window.__loadTopic("sessions-box");
   for (var tb = 0; tb < 5; tb++) { await tick(); }
   var busyBox = document.getElementById("sessions-box");
-  check(/busy with a run/.test(busyBox.textContent),
-    "a topic opened during a turn must say the node is busy, saw: " + busyBox.textContent.slice(0, 70));
+  check(!/busy with a run/.test(busyBox.textContent) && !!busyBox.querySelector(".session-title"),
+    "sessions must load from the read worker during a run, saw: " + busyBox.textContent.slice(0, 70));
   check(!/AbortError/.test(busyBox.textContent), "and must not report an abort as if the UI were broken");
+  window.__loadTopic("spells-box");
+  for (var tw = 0; tw < 5; tw++) { await tick(); }
+  var waitingBox = document.getElementById("spells-box");
+  check(/busy with a run/.test(waitingBox.textContent),
+    "a topic that needs the run worker must say it is queued, saw: " + waitingBox.textContent.slice(0, 70));
   // And it must load by itself when the turn ends - nobody should have to reopen it.
   window.__setBusy(false);
   for (var tc = 0; tc < 40; tc++) { await tick(); }
-  check(!/busy with a run/.test(busyBox.textContent),
-    "and it must load when the turn finishes, saw: " + busyBox.textContent.slice(0, 70));
+  check(!/busy with a run/.test(waitingBox.textContent),
+    "the queued topic must load when the turn finishes, saw: " + waitingBox.textContent.slice(0, 70));
 
   // The sessions topic is a way to *find* a thread, not just a list: named after its opening
   // message, most recent first, and searchable. A list you have to read top to bottom is not a way
@@ -1291,6 +1299,12 @@ $harness = @'
     var blocks = document.querySelectorAll("wa-message .reasoning");
     var block = blocks[blocks.length - 1];
     check(!!block, "reasoning: a reasoning delta must render a thinking block");
+    var runStatuses = document.querySelectorAll(".chat-content-run-status:not(.finished)");
+    var runStatus = runStatuses[runStatuses.length - 1];
+    check(!!runStatus && getComputedStyle(runStatus).position === "sticky",
+      "run status: the live status must stay pinned to the chat viewport bottom");
+    check(!!runStatus && !!runStatus.querySelector(".chat-content-run-elapsed"),
+      "run status: elapsed time has its own right-aligned field");
     check(!!block && block.textContent.indexOf("weighing the options") >= 0,
       "reasoning: the block must carry the text the node streamed, saw: " +
       (block ? block.textContent : "nothing"));
@@ -1308,6 +1322,10 @@ $harness = @'
     check(!!folded && folded.closest("wa-run") !== null,
       "reasoning: it is the route, not the answer, and belongs inside the run topic");
     window.handleEvent({ type: "done" });
+    check(!!runStatus && runStatus.classList.contains("finished") && runStatus.closest("wa-message"),
+      "run status: on completion, the same status becomes the assistant bubble footer");
+    check(!!runStatus && /^\d+:\d{2}$/.test(runStatus.querySelector(".chat-content-run-elapsed").textContent),
+      "run status: the completed footer keeps the run duration");
   })();
 
   // ...but a run that called no tool must not be swallowed whole: no topic is created for one, so its
