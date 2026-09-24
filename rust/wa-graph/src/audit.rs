@@ -15,6 +15,12 @@ struct Scope {
     end: u32,
 }
 
+#[derive(Clone, Copy)]
+struct ByteRange {
+    start: usize,
+    end: usize,
+}
+
 fn is_definition(kind: &str) -> bool {
     matches!(
         kind,
@@ -54,6 +60,51 @@ fn collect_scopes(node: Node<'_>, out: &mut Vec<Scope>) {
     for child in node.named_children(&mut cursor) {
         collect_scopes(child, out);
     }
+}
+
+fn collect_comment_ranges(node: Node<'_>, out: &mut Vec<ByteRange>) {
+    if node.kind().contains("comment") {
+        out.push(ByteRange {
+            start: node.start_byte(),
+            end: node.end_byte(),
+        });
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_comment_ranges(child, out);
+    }
+}
+
+// Blank and comment-only lines carry no executable or declarative syntax. Keeping them in
+// `changed_lines` preserves the patch size, while excluding them from graph coverage avoids
+// presenting a license/header edit as an unresolved dependency risk. A line containing any code
+// remains semantic, including a top-level assignment followed by a trailing comment.
+fn source_lines(source: &str) -> Vec<(usize, &str)> {
+    let mut offset = 0usize;
+    source
+        .split('\n')
+        .map(|raw| {
+            let start = offset;
+            offset += raw.len() + 1;
+            (start, raw)
+        })
+        .collect()
+}
+
+fn nonsemantic_line(lines: &[(usize, &str)], comments: &[ByteRange], line: u32) -> bool {
+    let Some((line_start, raw)) = lines.get(line.saturating_sub(1) as usize).copied() else {
+        return false;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let content_start = line_start + raw.find(trimmed).unwrap_or(0);
+    let content_end = content_start + trimmed.len();
+    comments
+        .iter()
+        .any(|range| range.start <= content_start && content_end <= range.end)
 }
 
 fn relative_path(root: &Path, raw: &str) -> std::result::Result<String, String> {
@@ -116,6 +167,7 @@ impl Store {
 
         let mut total_lines = 0usize;
         let mut mapped_lines = 0usize;
+        let mut ignored_lines = 0usize;
         let mut leads = BTreeMap::new();
         for (path, change) in normalized {
             let Some(lines) = change.get("lines").and_then(Value::as_array) else {
@@ -144,6 +196,9 @@ impl Store {
             };
             let mut scopes = Vec::new();
             collect_scopes(tree.root_node(), &mut scopes);
+            let mut comments = Vec::new();
+            collect_comment_ranges(tree.root_node(), &mut comments);
+            let source_lines = source_lines(&source);
             let mut definitions = Vec::new();
             let mut stmt = self.conn.prepare(
                 "SELECT id,name,line FROM nodes WHERE path=?1 AND kind IN
@@ -166,6 +221,10 @@ impl Store {
                     continue;
                 };
                 total_lines += 1;
+                if nonsemantic_line(&source_lines, &comments, line) {
+                    ignored_lines += 1;
+                    continue;
+                }
                 let chosen = definitions
                     .iter()
                     .filter_map(|(id, name, def_line)| {
@@ -224,6 +283,7 @@ impl Store {
             "verdict": if !gaps.is_empty() { "incomplete" } else if lead_count > 0 { "leads" } else { "no_leads" },
             "leads": lead_rows, "lead_count": lead_count, "truncated": lead_count > 20,
             "changed_lines": total_lines, "mapped_lines": mapped_lines,
+            "ignored_lines": ignored_lines,
             "gap_count": gap_count, "gaps": gaps.into_iter().take(20).collect::<Vec<_>>(),
             "scope": "resolved_calls_only_not_a_correctness_proof",
         }))
@@ -315,6 +375,40 @@ mod tests {
             .unwrap();
         assert_eq!(report["verdict"], "incomplete");
         assert_eq!(report["mapped_lines"], 0);
+        assert_eq!(report["gaps"][0]["reason"], "no_enclosing_definition");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn blank_and_comment_only_lines_are_not_coverage_gaps() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "wa-graph-audit-comments-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("source.lua"),
+            "-- module header\n\nlocal setting = 2 -- semantic\n--[[\nmore notes\n]]\n",
+        )
+        .unwrap();
+        let mut store = Store::open(dir.join("graph.db")).unwrap();
+        store.index(&dir, false).unwrap();
+        let report = store
+            .audit_json(
+                &dir,
+                &json!({
+                    "changes":[{"path":"source.lua","lines":[1,2,3,4,5,6]}],"reviewed":[]
+                }),
+            )
+            .unwrap();
+        assert_eq!(report["changed_lines"], 6);
+        assert_eq!(report["ignored_lines"], 5);
+        assert_eq!(report["gap_count"], 1, "{report}");
+        assert_eq!(report["gaps"][0]["line"], 3);
         assert_eq!(report["gaps"][0]["reason"], "no_enclosing_definition");
         std::fs::remove_dir_all(&dir).ok();
     }

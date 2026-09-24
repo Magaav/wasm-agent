@@ -4,10 +4,13 @@ local changeset = dofile("lua/core/changeset.lua")
 local telemetry = dofile("lua/core/telemetry.lua")
 local redact = dofile("lua/core/redact.lua")
 local M = {}
+M.PHASE = "phase_2"
+M.LEGACY_PHASE = "phase_1"
 
 local function failure(context, source, reason)
   if context then telemetry.event(context.session_id,context.run_id,"",
-    "graph_patch_audit","end",{ok=false,source=source,error=reason,ms=0}) end
+    "graph_patch_audit","end",{ok=false,source=source,error=reason,ms=0,
+      trial_phase=M.PHASE}) end
   return {error=reason,source=source,worthy="unproven"}
 end
 
@@ -23,7 +26,8 @@ local function run_request(request, reviewed, context, source)
   end
   table.sort(request.reviewed)
   local span = context and telemetry.start(context, "graph_patch_audit", {
-    changed_files=#request.changes, reviewed_files=#request.reviewed, source=source})
+    changed_files=#request.changes, reviewed_files=#request.reviewed, source=source,
+    trial_phase=M.PHASE})
   local ok, raw = pcall(host.graph_patch_audit, json.encode(request))
   local result
   if not ok then result={error=tostring(raw)}
@@ -37,8 +41,9 @@ local function run_request(request, reviewed, context, source)
   result.source=source
   if span then telemetry.finish(span, {ok=not result.error, verdict=result.verdict,
     lead_count=result.lead_count or 0, mapped_lines=result.mapped_lines or 0,
+    ignored_lines=result.ignored_lines or 0,
     changed_lines=result.changed_lines or 0, gap_count=result.gap_count or #(result.gaps or {}),
-    db_bytes=result.db_bytes, source=source,
+    db_bytes=result.db_bytes, source=source, trial_phase=M.PHASE,
     error=result.error}) end
   return result
 end
@@ -155,7 +160,7 @@ function M.assess(args, context)
   telemetry.event(context.session_id,context.run_id,"","graph_patch_assessment","end",{
     step_id=step.id,grade=grade,reason=redact.text(args.reason),
     critique=redact.text(args.critique),evidence=redact.text(args.evidence or ""),
-    source=step.source,lead_count=step.lead_count,self_report=true})
+    source=step.source,lead_count=step.lead_count,self_report=true,trial_phase=M.PHASE})
   step.assessed=true
   step.grade=grade
   return {recorded=true,grade=grade,self_report=true,worthy="unproven"}
@@ -172,15 +177,22 @@ function M.report(hours)
   local rows=type(raw)=="string" and json.decode(raw) or raw
   if type(rows)~="table" or rows.error then return {error=rows and rows.error or "audit_report_failed"} end
   local first_raw=host.sql_query(
-    "SELECT MIN(at) AS first_at FROM harness_events WHERE kind='graph_patch_audit' AND phase='end'",
+    "SELECT at,payload FROM harness_events WHERE kind='graph_patch_audit' AND phase='end' ORDER BY at",
     "[]")
   local first_rows=type(first_raw)=="string" and json.decode(first_raw) or first_raw
   if type(first_rows)~="table" or first_rows.error then
     return {error=first_rows and first_rows.error or "audit_start_lookup_failed"}
   end
-  local first_at=first_rows[1] and tonumber(first_rows[1].first_at)
+  local first_at=first_rows[1] and tonumber(first_rows[1].at)
+  local phase_starts={}
+  for _, row in ipairs(first_rows) do
+    local payload=json.decode(row.payload or "{}")
+    local name=type(payload.trial_phase)=="string" and payload.trial_phase or M.LEGACY_PHASE
+    local at=tonumber(row.at)
+    if at and (not phase_starts[name] or at<phase_starts[name]) then phase_starts[name]=at end
+  end
   local report={hours=hours, audits=0, errors=0, leads=0, lead_runs=0, gaps=0,
-    mapped_lines=0, changed_lines=0, audit_ms=0, continuation_ms=0,
+    mapped_lines=0, ignored_lines=0, changed_lines=0, audit_ms=0, continuation_ms=0,
     continuation_tokens=0, lead_reviewed=0, patch_changed_after_lead=0,
     continuation_usage_unknown=0, max_db_bytes=0,
     no_native_followup_observed=0, confirmed_catches=0, false_positives=0,
@@ -188,17 +200,43 @@ function M.report(hours)
     self_assessment={steps=0,recorded=0,missing=0,grades={["0"]=0,["1"]=0,["2"]=0,["3"]=0},examples={}},
     worthy="unproven", examples={}, trial_started_at=first_at,
     trial_elapsed_hours=first_at and math.max(0,(host.now()-first_at)/3600) or nil,
-    ready_for_review=first_at and host.now()-first_at>=hours*3600 or false}
+    current_phase=M.PHASE, phases={}, ready_for_review=false}
+  local function phase_summary()
+    return {audits=0,errors=0,leads=0,lead_runs=0,gaps=0,mapped_lines=0,
+      ignored_lines=0,changed_lines=0,audit_ms=0,continuation_ms=0,
+      continuation_tokens=0,continuation_usage_unknown=0,lead_reviewed=0,
+      patch_changed_after_lead=0,no_native_followup_observed=0,
+      confirmed_catches=0,false_positives=0,max_db_bytes=0,
+      sources={native_changeset=0,git_worktree=0},
+      self_assessment={steps=0,recorded=0,missing=0,
+        grades={["0"]=0,["1"]=0,["2"]=0,["3"]=0}},worthy="unproven"}
+  end
+  report.phases[M.LEGACY_PHASE]=phase_summary()
+  report.phases[M.PHASE]=phase_summary()
+  for name, at in pairs(phase_starts) do
+    if not report.phases[name] then report.phases[name]=phase_summary() end
+    report.phases[name].started_at=at
+  end
+  local function phase_for(payload)
+    local name=type(payload.trial_phase)=="string" and payload.trial_phase or M.LEGACY_PHASE
+    if not report.phases[name] then report.phases[name]=phase_summary() end
+    return report.phases[name],name
+  end
   local feedback={}
   for _, row in ipairs(rows) do
     local payload=json.decode(row.payload or "{}")
+    local phase,phase_name=phase_for(payload)
     if row.kind=="graph_patch_feedback" then
-      feedback[row.run_id]=payload.outcome
+      feedback[row.run_id]={outcome=payload.outcome,phase=phase_name}
     elseif row.kind=="graph_patch_assessment" then
       local assessment=report.self_assessment
       assessment.recorded=assessment.recorded+1
+      phase.self_assessment.recorded=phase.self_assessment.recorded+1
       local grade=tostring(payload.grade)
       if assessment.grades[grade]~=nil then assessment.grades[grade]=assessment.grades[grade]+1 end
+      if phase.self_assessment.grades[grade]~=nil then
+        phase.self_assessment.grades[grade]=phase.self_assessment.grades[grade]+1
+      end
       if #assessment.examples<20 then assessment.examples[#assessment.examples+1]={
         session_id=row.session_id,run_id=row.run_id,at=row.at,grade=payload.grade,
         reason=payload.reason,critique=payload.critique,evidence=payload.evidence,
@@ -206,34 +244,74 @@ function M.report(hours)
     elseif row.kind=="graph_patch_step" then
       local assessment=report.self_assessment
       assessment.steps=assessment.steps+1
-      if not payload.assessed then assessment.missing=assessment.missing+1 end
+      phase.self_assessment.steps=phase.self_assessment.steps+1
+      if not payload.assessed then
+        assessment.missing=assessment.missing+1
+        phase.self_assessment.missing=phase.self_assessment.missing+1
+      end
     elseif row.kind=="graph_patch_value" then
       report.continuation_ms=report.continuation_ms+(payload.continuation_ms or 0)
       report.continuation_tokens=report.continuation_tokens+(payload.continuation_tokens or 0)
-      if payload.continuation_usage_unknown then report.continuation_usage_unknown=report.continuation_usage_unknown+1 end
+      phase.continuation_ms=phase.continuation_ms+(payload.continuation_ms or 0)
+      phase.continuation_tokens=phase.continuation_tokens+(payload.continuation_tokens or 0)
+      if payload.continuation_usage_unknown then
+        report.continuation_usage_unknown=report.continuation_usage_unknown+1
+        phase.continuation_usage_unknown=phase.continuation_usage_unknown+1
+      end
       if report[payload.flag]~=nil then report[payload.flag]=report[payload.flag]+1 end
+      if phase[payload.flag]~=nil then phase[payload.flag]=phase[payload.flag]+1 end
     else
       report.audits=report.audits+1
+      phase.audits=phase.audits+1
+      phase.started_at=phase.started_at and math.min(phase.started_at,row.at) or row.at
       if report.sources[payload.source]~=nil then report.sources[payload.source]=report.sources[payload.source]+1 end
-      if payload.ok==false then report.errors=report.errors+1 end
+      if phase.sources[payload.source]~=nil then phase.sources[payload.source]=phase.sources[payload.source]+1 end
+      if payload.ok==false then
+        report.errors=report.errors+1
+        phase.errors=phase.errors+1
+      end
       report.leads=report.leads+(payload.lead_count or 0)
+      phase.leads=phase.leads+(payload.lead_count or 0)
       report.gaps=report.gaps+(payload.gap_count or 0)
+      phase.gaps=phase.gaps+(payload.gap_count or 0)
       report.mapped_lines=report.mapped_lines+(payload.mapped_lines or 0)
+      phase.mapped_lines=phase.mapped_lines+(payload.mapped_lines or 0)
+      report.ignored_lines=report.ignored_lines+(payload.ignored_lines or 0)
+      phase.ignored_lines=phase.ignored_lines+(payload.ignored_lines or 0)
       report.changed_lines=report.changed_lines+(payload.changed_lines or 0)
+      phase.changed_lines=phase.changed_lines+(payload.changed_lines or 0)
       report.audit_ms=report.audit_ms+(payload.ms or 0)
+      phase.audit_ms=phase.audit_ms+(payload.ms or 0)
       report.max_db_bytes=math.max(report.max_db_bytes,payload.db_bytes or 0)
+      phase.max_db_bytes=math.max(phase.max_db_bytes,payload.db_bytes or 0)
       if (payload.lead_count or 0)>0 then
         report.lead_runs=report.lead_runs+1
+        phase.lead_runs=phase.lead_runs+1
         if #report.examples<20 then report.examples[#report.examples+1]={
           session_id=row.session_id,run_id=row.run_id,at=row.at,leads=payload.lead_count} end
       end
     end
   end
-  for _, outcome in pairs(feedback) do
-    if outcome=="confirmed_catch" then report.confirmed_catches=report.confirmed_catches+1 end
-    if outcome=="false_positive" then report.false_positives=report.false_positives+1 end
+  for _, item in pairs(feedback) do
+    local phase=report.phases[item.phase]
+    if item.outcome=="confirmed_catch" then
+      report.confirmed_catches=report.confirmed_catches+1
+      phase.confirmed_catches=phase.confirmed_catches+1
+    end
+    if item.outcome=="false_positive" then
+      report.false_positives=report.false_positives+1
+      phase.false_positives=phase.false_positives+1
+    end
   end
   if report.confirmed_catches>0 then report.worthy="confirmed_catch" end
+  for _, phase in pairs(report.phases) do
+    if phase.confirmed_catches>0 then phase.worthy="confirmed_catch" end
+    phase.elapsed_hours=phase.started_at and math.max(0,(host.now()-phase.started_at)/3600) or nil
+  end
+  local current=report.phases[M.PHASE]
+  report.current_phase_started_at=current.started_at
+  report.current_phase_elapsed_hours=current.elapsed_hours
+  report.ready_for_review=current.started_at and host.now()-current.started_at>=hours*3600 or false
   return report
 end
 
@@ -252,13 +330,18 @@ function M.feedback(run_id, outcome, commit, context)
   local rows=type(raw)=="string" and json.decode(raw) or raw
   if type(rows)~="table" or rows.error then return {error=rows and rows.error or "audit_lookup_failed"} end
   local had_lead=false
+  local audit_phase=M.LEGACY_PHASE
   for _, row in ipairs(rows) do
     local payload=json.decode(row.payload or "{}")
-    if (payload.lead_count or 0)>0 then had_lead=true break end
+    if (payload.lead_count or 0)>0 then
+      had_lead=true
+      audit_phase=type(payload.trial_phase)=="string" and payload.trial_phase or M.LEGACY_PHASE
+      break
+    end
   end
   if not had_lead then return {error="run_has_no_graph_lead"} end
   telemetry.event(context and context.session_id or "graph-audit",run_id,"",
-    "graph_patch_feedback","end",{outcome=outcome,commit=commit})
+    "graph_patch_feedback","end",{outcome=outcome,commit=commit,trial_phase=audit_phase})
   return {ok=true,run_id=run_id,outcome=outcome}
 end
 
