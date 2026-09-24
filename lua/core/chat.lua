@@ -15,6 +15,10 @@ local updater = dofile("lua/core/update.lua")
 -- What a run looks like while it is running. The view owns the status line, the tool
 -- lines and the footer; this file owns the session, the commands and the prompt.
 local cli_view = dofile("lua/core/cli_view.lua")
+-- The reader's input. It is the host that reads it, on a thread of its own, because this
+-- interpreter spends the run blocked inside the model call - see that module for why
+-- `io.read("*l")` here was the reason nothing could be typed while a run was in flight.
+local cli_input = dofile("lua/core/cli_input.lua")
 -- `/merge`: the git orchestrator brief. The node does not perform the merge (the worktrees live
 -- outside it); the command hands the agent the intent with the hand-off rule suspended.
 local merger = dofile("lua/core/merge.lua")
@@ -204,10 +208,26 @@ function M.run(argv)
 
   if prompt ~= "" then turn(prompt) end
 
+  -- The input, and where the prompt is drawn. Both matter to the same thing: a reader who can see
+  -- where they are typing, and who is not locked out while the agent works. The prompt is drawn
+  -- once per wait rather than in a loop, because the prompt and the reader's typing share a row -
+  -- a redraw on a timeout would erase what they have typed so far.
+  local input = cli_input.new()
+
+  local function read_line()
+    view:prompt("wa> ")
+    while true do
+      local line, eof = input:poll(cli_input.WAIT_MS)
+      if line ~= nil then return line end
+      -- The input ended: a closed pipe, or the terminal's own end-of-file. Nothing left to wait
+      -- for, and a REPL that keeps prompting for a stream it cannot read is worse than one that
+      -- stops, so the loop ends.
+      if eof then return nil end
+    end
+  end
+
   while true do
-    io.write("wa> ")
-    io.flush()
-    local line = io.read("*l")
+    local line = read_line()
     if line == nil then break end
     line = line:gsub("^%s+", ""):gsub("%s+$", "")
     if line == "" then
@@ -264,6 +284,9 @@ function M.run(argv)
     end
   end
   agent:close()
+  -- Tell the host to stop reading stdin. Not required for correctness - the thread dies with the
+  -- process - but this is the one place that knows the REPL is finished rather than blocked.
+  input:stop()
   return 0
 end
 

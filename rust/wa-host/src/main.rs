@@ -59,6 +59,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/agent.lua", include_str!("../../../lua/core/agent.lua")),
     ("lua/core/markdown.lua", include_str!("../../../lua/core/markdown.lua")),
     ("lua/core/cli_view.lua", include_str!("../../../lua/core/cli_view.lua")),
+    ("lua/core/cli_input.lua", include_str!("../../../lua/core/cli_input.lua")),
     ("lua/core/commands.lua", include_str!("../../../lua/core/commands.lua")),
     ("lua/core/chat.lua", include_str!("../../../lua/core/chat.lua")),
     ("lua/core/server.lua", include_str!("../../../lua/core/server.lua")),
@@ -336,6 +337,11 @@ fn main() {
     // The console's own size: `COLUMNS` is a shell variable and usually absent, so the width a
     // terminal has is not something the Lua side can learn for itself.
     lua.register("terminal_size", host::terminal_size);
+    // The reader's own input: it is read on a thread, so a line typed while a run is in flight is
+    // still there when the run ends instead of being echoed into nothing.
+    lua.register("input_start", host::input_start);
+    lua.register("input_take", host::input_take);
+    lua.register("input_stop", host::input_stop);
     lua.register("exec_timeout", host::exec_timeout);
     lua.register("log", host::log);
     lua.set_global("host");

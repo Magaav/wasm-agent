@@ -1026,6 +1026,22 @@ else
   exit 1
 fi
 
+# Input typed while the interpreter is blocked must not be lost. It used to be broken by
+# construction: the REPL read its line with `io.read` between turns, so nothing read stdin while a
+# run was in flight and the reader's typing went nowhere. The evidence is a real child process
+# whose stdin producer writes the second line *while the script sleeps* - which is the one
+# arrangement that tells a reader thread apart from a read in the REPL, because with `io.read` that
+# line would have arrived to nobody and no assertion in the script could have passed.
+INPUT_OUT="$DB.input.out"
+( printf 'first\n'; sleep 2; printf 'typed while blocked\n' ) \
+  | WA_SCRIPT=scripts/test-cli-input.lua "$BIN" --db "$DB.input" > "$INPUT_OUT" 2>&1
+if grep -q "cli input ok" "$INPUT_OUT"; then
+  echo "cli input ok (a line typed during a blocked turn is not lost)"
+else
+  echo "cli input FAILED: $(tail -4 "$INPUT_OUT" | tr '\n' '|')"
+  exit 1
+fi
+
 # A command must not be able to hold the interpreter forever: an agent curled the node's own port
 # from inside a turn, the request queued behind the turn that made it, and the worker waited on
 # itself. The deadline is set short here so the check takes seconds, not minutes.
