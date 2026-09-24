@@ -518,6 +518,17 @@ body.term .terminal { display: flex; }
 }
 .composer textarea:focus { border-color: var(--accent); }
 
+/* The composer's own scroll is a detail, not a control: the default bar is wide and opaque and
+   sits against the text being written. Keep it thin and quiet, and let it appear only when the
+   text really overflows - the textarea grows to 180px first. */
+.composer textarea { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.composer textarea::-webkit-scrollbar { width: 8px; height: 8px; }
+.composer textarea::-webkit-scrollbar-track { background: transparent; }
+.composer textarea::-webkit-scrollbar-thumb {
+  background: var(--line); border-radius: 4px; border: 2px solid transparent; background-clip: content-box;
+}
+.composer textarea::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: content-box; }
+
 .send {
   flex: none; width: 45px; height: 45px; border-radius: 50%; border: none;
   background: var(--accent); color: white; cursor: pointer;
