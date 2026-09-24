@@ -1047,8 +1047,10 @@ fi
 # itself. The deadline is set short here so the check takes seconds, not minutes.
 WASM_AGENT_EXEC_TIMEOUT_SECONDS=2 WA_SCRIPT=scripts/test-exec-timeout.lua "$BIN" --db "$DB.exec" | grep "exec timeout ok"
 
-# Reasoning replay is a choice, and it is ~36% of the average request. The switch has to
-# reach the request, so the same script runs both ways and inspects the body it builds.
+# Reasoning replay is prefix-stable, and that is the property under test: a thought sent in
+# full during its turn must never be emptied later, or the provider recomputes the suffix at
+# the full input rate (see provider.reasoning). The switch has to reach the request, so the
+# same script runs both ways and asserts every request after the first is append-only.
 WASM_AGENT_LLM_MODEL=deepseek-v4.1-flash WASM_AGENT_REASONING_REPLAY=1 \
   WA_SCRIPT=scripts/test-reasoning-replay.lua "$BIN" --db "$DB.replay1" | grep "reasoning replay ok"
 WASM_AGENT_LLM_MODEL=deepseek-v4.1-flash WASM_AGENT_REASONING_REPLAY=0 \

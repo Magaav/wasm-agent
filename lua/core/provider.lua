@@ -405,10 +405,23 @@ function M.reasoning(model)
     selected="provider"
     for _, level in ipairs(levels) do if level=="high" then selected=level end end
   end
-  -- The store's flag is a claim about the provider, and a conservative one: the provider
-  -- accepts an assistant message that carries no reasoning_content at all, so replaying
-  -- every prior thought on every request is a choice, not a requirement. An operator can
-  -- turn it off; the model still sees its own answers and its own tool calls.
+  -- The store's flag is a claim about the provider, and a conservative one: this provider
+  -- accepts an assistant message that carries no reasoning_content at all (measured: both
+  -- shapes answered 200), so replaying every prior thought on every request is a choice,
+  -- not a requirement. An operator can turn it off; the model still sees its own answers
+  -- and its own tool calls.
+  --
+  -- The choice must stay all-or-nothing, and that is a cache rule, not a taste. A thought
+  -- is sent in full during its own turn; a policy that later replaces it with an empty
+  -- field changes a message that was already sent, so the provider's longest-common-prefix
+  -- ends there and every message after it is recomputed at the full input rate. Measured
+  -- with the provider's own prefix_audit: full replay and consistent omission are
+  -- `append_only` across turns, while emptying a sent thought is `rewritten`. Input bills
+  -- at ~50x the cache-read rate, and the recomputed suffix contains the dropped reasoning,
+  -- so a partial replay costs far more than the cached read it saves. Do not add a
+  -- "window", "keep the last N thoughts", or any other partial replay: it is a net loss
+  -- and it breaks the prefix the cache depends on. The real lever is to produce less
+  -- reasoning (`WASM_AGENT_REASONING`), which stays append-only.
   local replay = cap.compat.requiresReasoningContentOnAssistantMessages == true
   local override = env("WASM_AGENT_REASONING_REPLAY")
   if override == "0" or override == "false" then replay = false end

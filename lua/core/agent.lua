@@ -562,6 +562,8 @@ function M:build_context()
     elseif row.role == "assistant" then
       started = true
       local message = { role = "assistant", content = row.content or "" }
+      -- Full text or nothing. `provider.reasoning` documents why a partial replay (a
+      -- "window") is a cache-hostile change to a message already sent, not an option.
       if replay_reasoning then message.reasoning_content = row.reasoning or "" end
       if type(row.tool_calls) == "table" and #row.tool_calls > 0 then
         message.tool_calls = row.tool_calls
