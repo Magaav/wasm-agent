@@ -33,6 +33,9 @@ checks.
 
 - The audit maps changed **current-file lines** to enclosing syntax definitions,
   then follows only resolved incoming `calls` edges. It cites the exact call site.
+  Parser-proven blank and comment-only lines remain in `changed_lines` but are
+  reported separately as `ignored_lines`; they are not dependency coverage gaps.
+  A line containing code plus a trailing comment remains semantic.
 - A top-level edit, unsupported file, unrecorded/large patch, deleted file, or
   line with no matching definition is an explicit coverage gap. Dynamic calls,
   reflective dispatch, unresolved edges, and behavior changes with no call edge
@@ -73,6 +76,12 @@ At 48 hours, keep the graph only if confirmed catches justify its audit and
 continuation cost. If too few code patches were audited, extend the window
 (`hours` accepts up to 720). If leads are noisy or no corrections are confirmed
 after an adequate sample, remove the runtime graph and preserve the trial data.
+
+Reports are phase-aware. Events from the original trial have no explicit tag and
+are classified as `phase_1`; the current runtime emits `phase_2`. The report's
+top-level counts cover the requested window, while `phases` splits the same
+events and `current_phase_started_at` begins with the first Phase 2 audit. The
+48-hour `ready_for_review` clock applies to the current phase.
 
 The always-on watcher is a potential waste: it scans and hashes the indexed
 source tree after source change events even when no agent queries the graph.

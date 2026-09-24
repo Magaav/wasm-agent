@@ -240,20 +240,30 @@ function audit(input) {
     }
   }
   if (Object.values(shape).some(n=>!count(n))) throw Error('byte_total_exceeds_safe_integer');
-  const navigation={calls:0,found:0,not_found:0,results:0,by_action:{}};
+  const navigation={calls:0,found:0,not_found:0,results:0,by_action:{},by_phase:{}};
+  const addNavigation=(target,nav)=>{
+    target.calls++;
+    const bucket = target.by_action[nav.action] || (target.by_action[nav.action]={calls:0,found:0,not_found:0,results:0});
+    bucket.calls++;
+    if (nav.found === true) { bucket.found++; target.found++; }
+    else if (nav.found === false) { bucket.not_found++; target.not_found++; }
+    if (count(nav.count)) { bucket.results += nav.count; target.results += nav.count; }
+  };
   for (const row of events) {
     if (row.kind !== 'tool' || row.phase !== 'end') continue;
     const nav = row.payload && row.payload.nav;
     if (!nav || typeof nav.action !== 'string') continue;
-    navigation.calls++;
-    const bucket = navigation.by_action[nav.action] || (navigation.by_action[nav.action]={calls:0,found:0,not_found:0,results:0});
-    bucket.calls++;
-    if (nav.found === true) { bucket.found++; navigation.found++; }
-    else if (nav.found === false) { bucket.not_found++; navigation.not_found++; }
-    if (count(nav.count)) { bucket.results += nav.count; navigation.results += nav.count; }
+    addNavigation(navigation,nav);
+    const phaseName=typeof nav.trial_phase === 'string' && nav.trial_phase ? nav.trial_phase : 'phase_1';
+    const phase=navigation.by_phase[phaseName] || (navigation.by_phase[phaseName]={calls:0,found:0,not_found:0,results:0,by_action:{}});
+    addNavigation(phase,nav);
   }
-  navigation.judged = navigation.found + navigation.not_found;
-  navigation.hit_rate = navigation.judged ? navigation.found/navigation.judged : null;
+  const finishNavigation=target=>{
+    target.judged = target.found + target.not_found;
+    target.hit_rate = target.judged ? target.found/target.judged : null;
+  };
+  finishNavigation(navigation);
+  for (const phase of Object.values(navigation.by_phase)) finishNavigation(phase);
   navigation.note = 'graph/grep/read outcomes only; hit_rate counts judged calls, and a hit is not a correctness verdict';
   const toolTotal=total(toolTimes);
   if(!Number.isSafeInteger(toolTotal)) throw Error('tool_time_total_exceeds_safe_integer');

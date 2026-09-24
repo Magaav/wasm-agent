@@ -123,6 +123,14 @@ assert.equal(navAudit.tools.by_name.other,undefined);
 assert.equal(navAudit.navigation.calls,1);
 assert.equal(navAudit.navigation.by_action.path.not_found,1);
 assert.equal(navAudit.navigation.hit_rate,0);
+assert.equal(navAudit.navigation.by_phase.phase_1.calls,1);
+const phaseTwoRows=[tool('grep-nav','phase-nav','grep'),
+  event('grep-nav','tool','end',{name:'grep',ms:10,ok:true,clock:'monotonic',
+    nav:{action:'literal',found:true,count:2,trial_phase:'phase_2'}},'a','phase-nav')];
+const phaseAudit=audit(navRows.concat(phaseTwoRows));
+assert.equal(phaseAudit.navigation.by_phase.phase_1.calls,1);
+assert.equal(phaseAudit.navigation.by_phase.phase_2.calls,1);
+assert.equal(phaseAudit.navigation.by_phase.phase_2.hit_rate,1);
 const incompleteTimingStart=tool('incomplete-timing','phase-errors','bash');
 const incompleteTimingEnd=toolEnd('incomplete-timing','phase-errors','bash',10);
 incompleteTimingEnd.payload.execution_timing={schema_version:1,clock:'monotonic',complete:false};

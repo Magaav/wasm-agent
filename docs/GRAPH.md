@@ -95,11 +95,20 @@ context to use it before `grep` and how to read the result — including that a
   definition; `path` traversal ignores mentions entirely.
 - The graph is a map. Always read a file before editing it.
 
-## Adoption check (2026-09-23)
+## Adoption check (Phase 1, 2026-09-23 through 2026-09-24)
 
-A two-run real-model navigation arm with `graph` available completed both tasks,
-but chose `grep` first in both runs and used `graph` only afterward. The same
-read-only task without `graph` completed once and exhausted its token budget
-once. This small, worker-profile experiment does not establish a speed or token
-advantage, and it does not measure the main agent. Keep `grep`/`read` available;
-measure main-agent outcomes before making graph mandatory or removing fallback.
+The post-fix real-model navigation artifact contains three graph-arm runs and
+three controls. Graph-arm runs completed 3/3, chose `grep` first 3/3 times, and
+averaged 28,465 tokens and 6 tool calls. Controls completed 2/3, averaged 29,084
+tokens and 5 tool calls among the completed runs, and had one token-budget
+failure whose artifact incorrectly recorded zero tokens. The artifact did not
+persist an independently verified correctness field, so completion is not a
+correctness result.
+
+Durable telemetry contained 26 graph calls in ten sessions: 23 navigation, two
+patch audits, and one assessment attempt. Twenty of the 23 navigation calls came
+from synthetic benchmark runs; the three organic calls did not show a saved
+round. This evidence does not establish a speed, token, or correctness advantage.
+Keep `grep`/`read` available and compare later phases before changing the default.
+The frozen baseline and its limitations are in
+[`release/GRAPH_TOOL_PHASE_1.md`](release/GRAPH_TOOL_PHASE_1.md).
