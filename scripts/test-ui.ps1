@@ -980,7 +980,7 @@ $harness = @'
   for (var c = 0; c < rows.length; c += 1) {
     if (/control/.test(rows[c].textContent)) controlButtons += 1;
   }
-  check(controlButtons === 1, "the control view must still be reachable, saw " + controlButtons + " control button(s)");
+  check(controlButtons === 2, "local and remote desktops must each offer control, saw " + controlButtons + " button(s)");
   // Keep it: the engine re-renders when its topics change, and the nodes rows are gone by the
   // time the control view is opened further down.
   var controlButton = null;
@@ -1025,6 +1025,19 @@ $harness = @'
     "and leaving it must not call a shell that is not there, saw: " + window.__maximizeCalls.join(","));
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
   check(controlSection.hidden === true, "and a second Escape closes the view");
+  window.__openControl("openclaw");
+  for (var remoteFrame = 0; remoteFrame < 10; remoteFrame++) { await tick(); }
+  var frameCalls = window.__calls.filter(function (call) { return call.url === "frame"; });
+  check(frameCalls.length > 0 && frameCalls[frameCalls.length - 1].headers["X-WA-Node"] === "openclaw",
+    "the remote control view must request frames from its own node");
+  var controlText = document.getElementById("control-text");
+  controlText.value = "remote input";
+  document.getElementById("control-keys").dispatchEvent(new Event("submit", { cancelable: true }));
+  for (var remoteInput = 0; remoteInput < 5; remoteInput++) { await tick(); }
+  var clientCalls = window.__calls.filter(function (call) { return call.url === "client"; });
+  check(clientCalls.length > 0 && clientCalls[clientCalls.length - 1].headers["X-WA-Node"] === "openclaw",
+    "remote keyboard input must go to the same node as the frame");
+  document.getElementById("control-close").click();
   var nodesText = document.getElementById("nodes-box").textContent;
   check(/foundation/.test(nodesText) && /openclaw/.test(nodesText),
     "both nodes must be listed, saw: " + nodesText.slice(0, 120));

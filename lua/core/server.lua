@@ -578,17 +578,28 @@ function wa_node_chat_verified(from, role, name, body)
   return ""
 end
 
+-- A control view names its desktop explicitly. Unknown names fail closed: a stale
+-- remote selector must never turn a click into an action on the operator's desktop.
+local function control_client(args, role, node)
+  if node and node ~= "" and node ~= "local" and node ~= "client" then
+    local target = nodeslib.find(node)
+    if not target then return { error = "unknown_node:" .. tostring(node) } end
+    if not target.local_node then return nodeslib.remote_call(node, "client", args) end
+  end
+  return toolslib.dispatch(memory, "client", args, role)
+end
+
 -- Generic client action from the UI (control view: click/type/key).
-function wa_client(payload, session)
+function wa_client(payload, session, node)
   local user = require_master(session)
   if not user then return json.encode({ error = "forbidden" }) end
   local ok, args = pcall(json.decode, payload)
   if not ok or type(args) ~= "table" then return json.encode({ error = "bad_args" }) end
-  return json.encode(toolslib.dispatch(memory, "client", args, user.role))
+  return json.encode(control_client(args, user.role, node))
 end
 
 -- One downscaled screen frame from the client, for the control view.
-function wa_frame(request, session)
+function wa_frame(request, session, node)
   local user = require_master(session)
   if not user then return json.encode({ error = "forbidden" }) end
   local args = { action = "frame", max_width = 800, full = false }
@@ -601,7 +612,7 @@ function wa_frame(request, session)
   else
     args.max_width = tonumber(request) or args.max_width
   end
-  return json.encode(toolslib.dispatch(memory, "client", args, user.role))
+  return json.encode(control_client(args, user.role, node))
 end
 
 -- The exact envelope sent to the model, at full depth. Tiers are NOT included:
