@@ -105,6 +105,32 @@ local function nearest_edit_hint(text, needle)
   for line in needle:gmatch("[^\r\n]+") do
     if line:match("%S") then target[#target + 1] = line end
   end
+  -- A miss is not always a misquote. The same bytes with the other line ending do not match, and
+  -- the file may be CRLF while the anchor was written with LF. Silently, that reads as "your
+  -- anchor is not in the file", which sends the reader off to re-derive anchors that were right
+  -- apart from the ending - measured here: four rounds lost to exactly that in one session. So
+  -- normalise both sides once and, when that matches, say which ending the file uses. Normalising
+  -- the *file* instead would rewrite the endings of every line the edit touched, which is a
+  -- different change from the one that was asked for.
+  local function as(value, eol) return (value:gsub("\r\n", "\n"):gsub("\n", eol)) end
+  if not text:find(needle, 1, true) then
+    for _, eol in ipairs({ "\r\n", "\n" }) do
+      local alt = as(needle, eol)
+      if alt ~= needle then
+        local at = text:find(alt, 1, true)
+        if at then
+          local line = 1
+          for _ in text:sub(1, at):gmatch("\n") do line = line + 1 end
+          local last = line + select(2, alt:gsub("\n", ""))
+          return { line = line, last_line = last, text = alt:sub(1, 400),
+            note = "old_text is absent byte-for-byte, but the same text with " ..
+              (eol == "\r\n" and "CRLF" or "LF") .. " line endings is present: this file's lines " ..
+              "end that way. Re-send the edit with " .. (eol == "\r\n" and "\\r\\n" or "\\n") ..
+              " line endings, or copy the bytes from read." }
+        end
+      end
+    end
+  end
   if #target == 0 then return nil end
   local function norm(value)
     return (value:gsub("%s+", " ")):gsub("^%s+", ""):gsub("%s+$", "")

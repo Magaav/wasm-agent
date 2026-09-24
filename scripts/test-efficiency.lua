@@ -45,6 +45,17 @@ check(paraphrased.error=='old_text_not_found' and paraphrased.nearest~=nil
   and paraphrased.nearest.line==1 and paraphrased.nearest.last_line==3
   and paraphrased.nearest.text:find('return value + 1',1,true)~=nil,
   'a paraphrased anchor points at the region that actually exists')
+-- The other line ending is a *different* miss from a misquote, and it must be named: the same
+-- bytes with LF where the file has CRLF used to read as "your anchor is not in the file", which
+-- cost four rounds of re-deriving anchors before anyone measured the bytes.
+local crlf=path..'.crlf'
+host.write_file(crlf,'alpha\r\nbeta\r\ngamma\r\n')
+local ending=files.edit({path=crlf,edits={{old_text='alpha\nbeta\ngamma',new_text='X'}}})
+check(ending.error=='old_text_not_found' and ending.nearest~=nil
+  and ending.nearest.note~=nil and ending.nearest.note:find('CRLF',1,true)~=nil
+  and ending.nearest.line==1 and ending.nearest.last_line==3,
+  'an LF anchor against a CRLF file must say so, got: '..tostring(ending.nearest and ending.nearest.note))
+
 local unrelated=files.edit({path=path,edits={{old_text='nothing like this is in the file at all',new_text='A'}}})
 check(unrelated.error=='old_text_not_found' and unrelated.nearest==nil,
   'and a miss with no candidate invents none')
