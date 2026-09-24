@@ -51,7 +51,7 @@ pub fn foreground(
         if state["settled"] == true {
             if state["error"] == "deadline_exceeded" {
                 let stderr = state["stderr"].as_str().unwrap_or("");
-                state["stderr"]=json!(format!("{stderr}\nthe command did not finish within {seconds}s; its operation was terminated. A call to this node's own busy session cannot serve itself; use an independent route."));
+                state["stderr"] = json!(format!("{stderr}\n{}", deadline_note(seconds, &state)));
             }
             return Ok(state);
         }
@@ -163,4 +163,82 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
 pub fn health() -> Value {
     let entries = manager().list();
     json!(entries.as_array().unwrap().iter().filter(|s|s["settled"]!=true).map(|s|json!({"operation_id":s["operation_id"],"owner":s["owner"],"state":s["state"],"elapsed_ms":s["elapsed_ms"],"timeout_ms":s["timeout_ms"],"cleanup_budget_ms":s["cleanup_budget_ms"],"overdue":s["overdue"],"output_bytes":s["output_bytes"]})).collect::<Vec<_>>())
+}
+
+/// What a deadline can honestly say.
+///
+/// This message used to assert a cause - "a call to this node's own busy session cannot serve
+/// itself; use an independent route" - which the record cannot support: everything that outlives
+/// its bound lands here, including a read-only `grep` that never addressed this node at all. A
+/// printed cause is a fact-shaped thing, so it was quoted onward as a finding; a false one costs
+/// the round twice. What the operation *does* know is where its time went - `timing` is measured
+/// in phases - so the note reports exactly that, and nothing it did not measure.
+fn deadline_note(seconds: u64, state: &Value) -> String {
+    let phase = |name: &str| state["timing"][name].as_u64();
+    let mut phases = Vec::new();
+    for (name, label) in [
+        ("setup_ms", "setup"),
+        ("spawn_ms", "spawn"),
+        ("execution_ms", "executing"),
+        ("drain_cleanup_ms", "cleanup"),
+    ] {
+        if let Some(ms) = phase(name) {
+            phases.push(format!("{label} {ms}ms"));
+        }
+    }
+    let account = if phases.is_empty() {
+        "no phase breakdown was recorded".to_string()
+    } else {
+        phases.join(", ")
+    };
+    match state["elapsed_ms"].as_u64() {
+        Some(total) => format!(
+            "the command did not finish within {seconds}s; its operation was terminated after {total}ms ({account})."
+        ),
+        None => format!(
+            "the command did not finish within {seconds}s; its operation was terminated ({account})."
+        ),
+    }
+}
+
+#[cfg(test)]
+mod deadline_note_tests {
+    use super::deadline_note;
+    use serde_json::json;
+
+    // What the reader gets is the measurement, in the order the operation spends it.
+    #[test]
+    fn the_note_reports_the_measured_phases() {
+        let state = json!({
+            "elapsed_ms": 61005,
+            "timing": {"setup_ms": 8712, "spawn_ms": 10, "execution_ms": 51182, "drain_cleanup_ms": 1000}
+        });
+        assert_eq!(
+            deadline_note(60, &state),
+            "the command did not finish within 60s; its operation was terminated after 61005ms \
+             (setup 8712ms, spawn 10ms, executing 51182ms, cleanup 1000ms)."
+        );
+    }
+
+    // The sentence this replaced was printed for *every* deadline and read onward as a
+    // diagnosis. It must not come back in any form.
+    #[test]
+    fn the_note_never_names_a_cause() {
+        let state = json!({"elapsed_ms": 300006, "timing": {"execution_ms": 299000}});
+        let note = deadline_note(300, &state);
+        assert!(!note.contains("busy session"), "{note}");
+        assert!(!note.contains("independent route"), "{note}");
+        assert!(note.contains("executing 299000ms"), "{note}");
+    }
+
+    // An operation killed before a phase was measured says what is known rather than inventing.
+    #[test]
+    fn a_missing_breakdown_is_stated_not_invented() {
+        let state = json!({"elapsed_ms": 5000});
+        assert_eq!(
+            deadline_note(4, &state),
+            "the command did not finish within 4s; its operation was terminated after 5000ms \
+             (no phase breakdown was recorded)."
+        );
+    }
 }
