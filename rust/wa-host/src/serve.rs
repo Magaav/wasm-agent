@@ -2269,8 +2269,8 @@ fn dispatch(
         // A run's changed files: "can it be undone?" and "do it", one route so the answer
         // the toggle shows and the handler's behaviour cannot disagree.
         "/diff" if method == "POST" => (200, "application/json", call("wa_diff", &[body.trim(), session]).into_bytes()),
-        "/client" if method == "POST" => (200, "application/json", call("wa_client", &[body, session]).into_bytes()),
-        "/frame" if method == "POST" => (200, "application/json", call("wa_frame", &[body.trim(), session]).into_bytes()),
+        "/client" if method == "POST" => (200, "application/json", call("wa_client", &[body, session, node.as_str()]).into_bytes()),
+        "/frame" if method == "POST" => (200, "application/json", call("wa_frame", &[body.trim(), session, node.as_str()]).into_bytes()),
         "/spells" => (200, "application/json", call("wa_spells", &[session]).into_bytes()),
         // Export a spell as a portable plan for the sentinel. A separate route from /spell because
         // it writes nothing to the node's behaviour and reads nothing about a run - it produces a

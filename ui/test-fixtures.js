@@ -104,6 +104,9 @@ window.__fixtures = {
       },
     ],
   },
+  frame: { ok: true, full: true, width: 2, height: 2, screen_width: 20,
+    screen_height: 20, origin_x: -10, origin_y: 0, tiles: [] },
+  client: { ok: true },
   // There is deliberately no "node/name" fixture: a static stub for it would shadow the
   // handler below, and the point of the test is that the rename is a write with a
   // consequence. The write is modelled where the write is handled.
@@ -180,6 +183,7 @@ window.fetch = function (input, init) {
     url,
     method: (init && init.method) || "GET",
     body: (init && init.body) || "",
+    headers: (init && init.headers) || {},
   });
   // Match the path, not a substring of it: url.includes("me") matched "node/name", so a
   // rename POST was answered with the account payload and the write never reached its

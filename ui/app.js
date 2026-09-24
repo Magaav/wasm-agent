@@ -3131,8 +3131,13 @@ wireDrag(dragbar);
 // ---- nodes + remote control ---------------------------------------------
 let controlTimer = null;
 let controlPending = false;
+let controlNode = "client";
 let controlCanvasSize = { w: 0, h: 0 };
-let controlScreen = { w: 0, h: 0 };
+let controlScreen = { w: 0, h: 0, x: 0, y: 0 };
+
+function controlHeaders(extra) {
+  return Object.assign(apiHeaders(extra), { "X-WA-Node": controlNode });
+}
 
 function b64ToBytes(base64) {
   const binary = atob(base64);
@@ -3144,10 +3149,12 @@ function b64ToBytes(base64) {
 async function clientAction(payload) {
   const response = await apiFetch("client", {
     method: "POST",
-    headers: apiHeaders({ "Content-Type": "application/json" }),
+    headers: controlHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
   });
-  return response.json();
+  const result = await response.json();
+  if (result.error) controlHint.textContent = result.error;
+  return result;
 }
 
 function nodeButton(label, handler) {
@@ -3296,6 +3303,9 @@ async function refreshNodes() {
       caps.textContent = (node.capabilities || []).join(" ");
       row.append(dot, name, kind, caps);
       row.append(nodeButton("talk", () => { balloon.close(); input.focus(); }));
+      if (node.kind === "peer" && node.online && me.role === "master") {
+        row.append(nodeButton("control", () => openControl(node.name)));
+      }
       if (node.kind === "host") hostRow = row;
       nodesBox.append(row);
     }
@@ -3332,14 +3342,15 @@ async function fetchFrame(full) {
   try {
     const payload = await (await apiFetch("frame", {
       method: "POST",
-      headers: apiHeaders({ "Content-Type": "application/json" }),
+      headers: controlHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ max_width: 800, full: !!full }),
     })).json();
     if (payload.error) {
       controlHint.textContent = payload.error;
       return;
     }
-    controlScreen = { w: payload.screen_width, h: payload.screen_height };
+    controlScreen = { w: payload.screen_width, h: payload.screen_height,
+      x: payload.origin_x || 0, y: payload.origin_y || 0 };
     if (payload.full || controlCanvasSize.w !== payload.width || controlCanvasSize.h !== payload.height) {
       controlCanvas.width = payload.width;
       controlCanvas.height = payload.height;
@@ -3447,6 +3458,7 @@ function openControl(name) {
     native.openView(view, viewUrl(view));
     return;
   }
+  controlNode = name || "client";
   document.body.classList.add("control");
   control.hidden = false;
   controlTitle.textContent = "control · " + (name || "this node");
@@ -3485,8 +3497,8 @@ function closeControl() {
 controlCanvas.addEventListener("click", (event) => {
   const rect = controlCanvas.getBoundingClientRect();
   if (!rect.width || !controlScreen.w) return;
-  const x = Math.round(((event.clientX - rect.left) / rect.width) * controlScreen.w);
-  const y = Math.round(((event.clientY - rect.top) / rect.height) * controlScreen.h);
+  const x = controlScreen.x + Math.round(((event.clientX - rect.left) / rect.width) * controlScreen.w);
+  const y = controlScreen.y + Math.round(((event.clientY - rect.top) / rect.height) * controlScreen.h);
   clientAction({ action: "click", x, y });
 });
 controlKeys.addEventListener("submit", (event) => {
