@@ -48,6 +48,11 @@ M.commands = {
   { name = "/conversation", usage = "/conversation <id>", hint = "read a conversation" },
   { name = "/stats", usage = "/stats", hint = "database counts" },
   { name = "/console", usage = "/console", hint = "toggle the console: every event and a tool's whole output, unclipped" },
+  {
+    name = "/efficiency_report",
+    usage = "/efficiency_report",
+    hint = "deterministic cost/context report: token domination, KV cache, USD, and a readable prefix artifact",
+  },
   { name = "/update", usage = "/update", hint = "install the newest build in this node's tree (the sentinel does it, once idle)" },
   { name = "/merge", usage = "/merge", hint = "act as git orchestrator: merge every open branch into main, gate, push, sync" },
   { name = "/help", usage = "/help", hint = "this help" },

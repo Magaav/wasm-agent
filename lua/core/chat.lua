@@ -22,6 +22,10 @@ local cli_input = dofile("lua/core/cli_input.lua")
 -- `/merge`: the git orchestrator brief. The node does not perform the merge (the worktrees live
 -- outside it); the command hands the agent the intent with the hand-off rule suspended.
 local merger = dofile("lua/core/merge.lua")
+-- `/efficiency_report`: a deterministic read of the harness ledger and the transcript - what the
+-- last call sent, what it cost, and which part did not come from the provider's prefix cache. No
+-- model call, so it can be run mid-session without spending anything or changing the thread.
+local efficiency = dofile("lua/core/efficiency.lua")
 
 local M = {}
 
@@ -265,6 +269,11 @@ function M.run(argv)
       -- Not a node operation: the merge runs outside this process, in the worktrees. The command
       -- is the agent's brief, and it names the skill that holds the procedure.
       turn(merger.brief)
+    elseif line == "/efficiency_report" then
+      -- Deterministic: it reads the ledger and the transcript, writes the prefix artifact, and
+      -- prints. It is not sent to the model, so it cannot spend a token or change the thread.
+      local text = efficiency.report({ session_id = agent.session_id, agent = agent, hours = 48 })
+      print(redact.text(text))
     elseif line == "/memories" then
       each(memory.memories(nil, 50), memory_line)
     elseif line:sub(1, 10) == "/remember " then

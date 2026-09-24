@@ -232,11 +232,16 @@ local function system_prompt(role, agents, agents_path, tool_list)
     local lines = { "Available tools:" }
     for _, tool in ipairs(tool_list) do
       local function_ = tool["function"] or {}
-      local snippet = tostring(function_.description or ""):match("^[^.]*") or ""
-      if host.getenv('WASM_AGENT_TOOL_SNIPPETS')=='names' then
-        lines[#lines+1]='- '..tostring(function_.name or '?')
+      local name = tostring(function_.name or "?")
+      -- An authored discovery cue (tools.snippet), not a truncation of the schema
+      -- description: the description is already in the schema, and deriving the cue from it
+      -- put the same text in the request twice. A tool with no cue is listed by name alone.
+      local cue
+      if host.getenv('WASM_AGENT_TOOL_SNIPPETS') ~= 'names' then cue = tools.snippet(name) end
+      if cue then
+        lines[#lines + 1] = string.format("- %s: %s", name, cue)
       else
-        lines[#lines + 1] = string.format("- %s: %s", tostring(function_.name or "?"), snippet:sub(1, 110))
+        lines[#lines + 1] = "- " .. name
       end
     end
     parts[#parts + 1] = table.concat(lines, "\n")
@@ -308,14 +313,15 @@ function M.subagent_system_prompt(self, tool_list)
     local lines = { "Your tools (and only these):" }
     for _, tool in ipairs(tool_list) do
       local function_ = tool["function"] or {}
-      -- The child index must follow the same switch as the parent's: the tool-choice
-      -- experiment runs children, and a treatment that changes only `system_prompt`
-      -- never reaches the request under test (WASM_AGENT_TOOL_SNIPPETS at agent.lua:235).
-      if host.getenv('WASM_AGENT_TOOL_SNIPPETS')=='names' then
-        lines[#lines+1]='- '..tostring(function_.name or '?')
+      local name = tostring(function_.name or "?")
+      -- The same authored cue as the parent index (agent.system_prompt, tools.snippet),
+      -- never a slice of the description, and the same names-only switch applies.
+      local cue
+      if host.getenv('WASM_AGENT_TOOL_SNIPPETS') ~= 'names' then cue = tools.snippet(name) end
+      if cue then
+        lines[#lines + 1] = string.format("- %s: %s", name, cue)
       else
-        local snippet = tostring(function_.description or ""):match("^[^.]*") or ""
-        lines[#lines + 1] = string.format("- %s: %s", tostring(function_.name or "?"), snippet:sub(1, 110))
+        lines[#lines + 1] = "- " .. name
       end
     end
     parts[#parts + 1] = table.concat(lines, "\n")
