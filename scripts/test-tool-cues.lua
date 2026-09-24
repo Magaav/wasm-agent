@@ -25,9 +25,12 @@ for name in pairs(builtin) do
   ok(tools.snippet(name) ~= nil, "every built-in tool needs a cue: " .. name)
 end
 
--- No stale cue: every cue names a tool a master can actually receive.
+-- No stale cue: every cue names a tool the registry knows. The catalog, not the prompt
+-- projection: a cue may belong to a tool a child gets while the parent prompt hides it (the
+-- WhatsApp responder), so `all` alone would call those cues stale.
+local catalog = tools.catalog or tools.all
 local available = {}
-for _, item in ipairs(tools.all("master")) do available[item["function"].name] = true end
+for _, item in ipairs(catalog("master")) do available[item["function"].name] = true end
 for _, name in ipairs(tools.cue_names()) do
   ok(available[name] == true, "a cue must name a real tool: " .. name)
 end

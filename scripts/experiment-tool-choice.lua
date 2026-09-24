@@ -19,6 +19,8 @@ local json = dofile("lua/vendor/json.lua")
 local memory = dofile("lua/core/memory.lua")
 memory.setup()
 local subagents = dofile("lua/core/subagents.lua")
+local telemetry = dofile("lua/core/telemetry.lua")
+local verify = dofile("scripts/lib/experiment-verify.lua")
 
 local arm = os.getenv("WA_EXPERIMENT_ARM") or "control"
 local task_id = os.getenv("WA_EXPERIMENT_TASK") or "long-lived"
@@ -38,8 +40,10 @@ local TASKS = {
       "(not a scheduled task, not a service, not a detached daemon). It must append one line to " ..
       "<FILE> every 2 seconds and it must still be running when you finish - it has to outlive this " ..
       "task. Prove it started by showing the file's contents once. Do not wait for it to end.",
-    -- The outcome here is a live process, checked after the run; there is no text to match.
+    -- The outcome here is a live process, checked after the run; there is no text to match,
+    -- so success is the observed process, never the empty fact list.
     expect = {},
+    outcome = "live_process",
   },
   ["navigation"] = {
     prompt = "Find where host.exec_timeout is read in this repository, and name the " ..
@@ -56,10 +60,23 @@ local TASKS = {
       "lua/core/agent.lua, lua/core/memory.lua, lua/core/provider.lua, lua/core/subagents.lua, " ..
       "lua/core/tools.lua, lua/core/tool_output.lua, lua/core/graph.lua, lua/core/skills.lua, " ..
       "lua/core/nodes.lua, lua/core/spells.lua, lua/core/platform.lua, lua/core/paths.lua",
-    expect = { "lua/core/agent.lua", "lua/core/memory.lua", "lua/core/provider.lua",
-      "lua/core/subagents.lua", "lua/core/tools.lua", "lua/core/tool_output.lua",
-      "lua/core/graph.lua", "lua/core/skills.lua", "lua/core/nodes.lua",
-      "lua/core/spells.lua", "lua/core/platform.lua", "lua/core/paths.lua" },
+    -- The requested fact is the *function*, not the path. A path-only reply is wrong, and
+    -- scripts/lib/experiment-verify.lua is what says so. The names are the first function
+    -- each file defines; scripts/test-experiment-verify.lua asserts they still match source.
+    expect = {
+      { path = "lua/core/agent.lua", name = "record_turn" },
+      { path = "lua/core/memory.lua", name = "decode" },
+      { path = "lua/core/provider.lua", name = "env" },
+      { path = "lua/core/subagents.lua", name = "profile_dir" },
+      { path = "lua/core/tools.lua", name = "is_master" },
+      { path = "lua/core/tool_output.lua", name = "slice" },
+      { path = "lua/core/graph.lua", name = "capability" },
+      { path = "lua/core/skills.lua", name = "read" },
+      { path = "lua/core/nodes.lua", name = "rendezvous_url" },
+      { path = "lua/core/spells.lua", name = "path" },
+      { path = "lua/core/platform.lua", name = "info" },
+      { path = "lua/core/paths.lua", name = "all" },
+    },
   },
 }
 
@@ -156,11 +173,23 @@ for _, entry in ipairs(started) do
   end
 
   local reply = tostring(result.reply or "")
-  -- Correct only if it names every expected fact. A cheap wrong answer is not an
-  -- improvement, so the headline metric is tokens per correct answer.
-  local missing = {}
-  for _, needle in ipairs(expect) do
-    if not reply:find(needle, 1, true) then missing[#missing + 1] = needle end
+
+  -- What the child's first request actually carried: the hashes, sizes and identity the
+  -- provider was given, not what the arm intended. A treatment that never reached the
+  -- request is invisible here, which is the point - the ledger shows what was sent.
+  local effective = {}
+  for _, event in ipairs(telemetry.events(receipt.session_id, 0, 200).events) do
+    if event.kind == "model_call" and event.phase == "start" then
+      local p = event.payload or {}
+      effective = {
+        model = p.model, settings = p.settings, attribution = p.attribution,
+        system_hash = p.system_hash, schema_hash = p.schema_hash,
+        system_tokens = p.system_tokens_estimate, schema_tokens = p.schema_tokens_estimate,
+        tools = p.tools, messages = p.messages, request_bytes = p.request_bytes,
+        prefix_audit = p.prefix_audit, runtime = p.runtime, agents_md = p.agents_md,
+      }
+      break
+    end
   end
   -- Adoption is only real if the process is still running after the child that started
   -- it has finished. The node is still alive here - it exits when this script ends, and
@@ -193,19 +222,28 @@ for _, entry in ipairs(started) do
     end
   end
 
+  -- Success combines the parsed facts with the observed outcome. `long-lived` has no facts
+  -- to match, so an empty fact list must not read as a pass: the live process is the result.
+  local verdict = verify.success(selected, reply, adoption)
+  local missing, wrong = verdict.missing, verdict.wrong
+
   print("LEDGER " .. json.encode({
     arm = arm, task = task_id, run = entry.index, profile = profile,
     child = receipt.subagent_id, session = receipt.session_id, file = entry.file,
     state = final.state, settled = final.settled,
     failure = final.error,
     first_tool = first_tool,
-    correct = #missing == 0,
+    correct = verdict.complete,
     missing = missing,
+    wrong = wrong,
+    conflicts = verdict.conflicts,
+    observed_outcome = verdict.observed_outcome,
     tools = tools, errors = errors,
     adoption = adoption,
     reasoning_chars = reasoning_chars,
     tokens_total = tokens_total,
     usage = usage,
+    effective = effective,
     reply = reply:sub(1, 800),
   }))
 end
