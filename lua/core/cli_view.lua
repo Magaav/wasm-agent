@@ -386,6 +386,33 @@ function M.wants_live(getenv)
     or (getenv("WT_SESSION") or "") ~= "" or (getenv("ORCA_TERMINAL_HANDLE") or "") ~= ""
 end
 
+-- The console's height, asked the way the width is: `host.terminal_size`, nil when there is no
+-- console or it will not answer. The frame is the only caller, and it needs this and nothing else.
+function M.rows(probe)
+  probe = probe or function()
+    local ok, raw = pcall(host.terminal_size)
+    if not ok or type(raw) ~= "string" then return nil end
+    local decoded
+    if not pcall(function() decoded = json.decode(raw) end) then return nil end
+    if type(decoded) ~= "table" then return nil end
+    return tonumber(decoded.rows)
+  end
+  local rows = tonumber(probe())
+  if not rows or rows <= 0 then return nil end
+  return math.floor(rows)
+end
+
+-- The rows a screen owns, from a height: the output region scrolls, and the two rows below it are
+-- the status line and the reader's input row. `nil` when the console is too short to hold one - an
+-- output row is not optional - and the caller then draws the way it did before this existed.
+local function screen_rows(rows)
+  rows = tonumber(rows)
+  if not rows or rows < 4 then return nil end
+  rows = math.floor(rows)
+  return { top = 1, bottom = rows - 2, status = rows - 1, input = rows }
+end
+M.screen_rows = screen_rows
+
 -- ---- where this is running -----------------------------------------------------
 
 -- The workspace as a reader recognises it: the home directory abbreviated, the rest
@@ -458,6 +485,11 @@ function M.new(opts)
     animating = false,
     now = opts.now or function() return host.now() end,
     limit = opts.limit or 80,
+    -- The console's height, and the rows it makes possible: injectable, because a test has no
+    -- console and the height is the whole of what the screen needs - see `METHODS:screen_on`.
+    rows = opts.rows or M.rows,
+    -- The environment, for the one knob that turns the screen off.
+    getenv = opts.getenv or function(name) return host.getenv(name) end,
     title = opts.title or "",
     workspace = opts.workspace or "",
     branch = opts.branch or "",
@@ -465,13 +497,29 @@ function M.new(opts)
     context = 0,
     frame = 0, phase = "", round = 0, pending = nil,
     -- `shown_cols` is how many columns of the terminal the status line currently holds: the
-    -- bound every in-place write is kept inside - see `METHODS:status_draw`.
-    shown = nil, shown_cols = 0, logged = "", turn = nil, totals = nil, deltas = 0, warned = nil,
+    -- bound every in-place write is kept inside - see `METHODS:status_draw`. `screen` is the rows
+    -- the view owns once it knows the console's height - see `METHODS:screen_on`.
+    shown = nil, shown_cols = 0, screen = nil, logged = "", turn = nil, totals = nil, deltas = 0, warned = nil,
   }
   return setmetatable(view, METHODS)
 end
 
 function METHODS:write(text)
+  -- Output - the transcript, a tool line, an answer - belongs in the region above the status and
+  -- input rows, and this is the one place that knows where that region is. Every caller of the
+  -- plain writer keeps working unchanged, and the reader's cursor comes back to the row they were
+  -- typing on: a write that left the cursor in the output region would send their next keystroke
+  -- into the middle of the transcript.
+  if self.screen then
+    self.out(CURSOR_SAVE .. "\27[" .. self.screen.bottom .. ";1H" .. text .. CURSOR_RESTORE)
+    return
+  end
+  self.out(text)
+end
+
+-- A write that is not output: cursor movement this view owns. Never framed - the frame's own
+-- sequences wrapped in the frame's sequences is how a cursor ends up somewhere nobody planned.
+function METHODS:control(text)
   self.out(text)
 end
 
@@ -534,6 +582,9 @@ function METHODS:animate()
   if not started then return end
   local ok = pcall(host.ticker, json.encode({
     line = template, marks = M.marks(), started = started, frame = self.frame,
+    -- A row of its own while there is a screen: the ticker draws on the status row and hands the
+    -- cursor back, which is what lets the reader keep typing on the input row at the same time.
+    row = self.screen and self.screen.status or nil,
   }))
   if not ok then return end
   self.animating = true
@@ -572,13 +623,23 @@ function METHODS:status_draw(text)
   -- Live only: a captured transcript is a log, and a log with cursor movement in it is not one.
   if not self.live then return end
   local cols = visible_columns(text)
+  local pad = self.shown_cols > cols and (self.shown_cols - cols) or 0
+  if self.screen then
+    -- A row of its own: the reader's cursor stays on the input row, so this neither commits a line
+    -- nor is bounded by what the reader may have typed - the row belongs to the status line and
+    -- nothing else writes on it.
+    self:control(CURSOR_SAVE .. "\27[" .. self.screen.status .. ";1H" .. text
+      .. string.rep(" ", pad) .. CURSOR_RESTORE)
+    self.shown_cols = math.max(self.shown_cols, cols)
+    return
+  end
   if self.shown_cols > 0 and cols > self.shown_cols then
     -- Needs more room than it drew: start a fresh row rather than take the reader's columns.
-    self:write("\r\n")
+    self:control("\r\n")
     self.shown_cols = 0
+    pad = 0
   end
-  local pad = self.shown_cols > cols and (self.shown_cols - cols) or 0
-  self:write(CURSOR_SAVE .. "\r" .. text .. string.rep(" ", pad) .. CURSOR_RESTORE)
+  self:control(CURSOR_SAVE .. "\r" .. text .. string.rep(" ", pad) .. CURSOR_RESTORE)
   self.shown_cols = math.max(self.shown_cols, cols)
 end
 
@@ -619,11 +680,69 @@ end
 function METHODS:clear()
   -- Never wipe a line the host is still drawing: stopping waits for its last frame to land.
   self:unanimate()
+  if self.screen then
+    -- Its own row, erased: nothing else is on it, so there is no bound to keep.
+    self:control(CURSOR_SAVE .. "\27[" .. self.screen.status .. ";1H\27[2K" .. CURSOR_RESTORE)
+    self.shown_cols = 0
+    self.shown = nil
+    return
+  end
   if self.live and self.shown_cols > 0 then
-    self:write("\r" .. string.rep(" ", self.shown_cols) .. "\r")
+    self:control("\r" .. string.rep(" ", self.shown_cols) .. "\r")
     self.shown_cols = 0
   end
   self.shown = nil
+end
+
+-- The rows this view owns, once the console's height is known.
+--
+--   rows 1..R-2   output, inside a scroll region of its own
+--   row  R-1      the status line
+--   row  R        the reader's input row
+--
+-- Why a screen and not a cursor trick: the reader types while a run is in flight, the terminal
+-- echoes what they type *at the cursor*, and the cursor therefore has to be on their row - while
+-- the status line and the output both have somewhere else to be. A scroll region is the one
+-- mechanism that keeps output out of rows it does not own: everything written inside it scrolls
+-- inside it, so an answer of any length never reaches the two rows below.
+--
+-- The terminal keeps its own line editing, its echo and Ctrl+C: this is a screen, not raw mode.
+-- Per-key editing (arrows, a multi-line prompt) would need the terminal handed over, which is a
+-- different change and not this one.
+--
+-- `WASM_AGENT_CLI_FRAME=off` refuses it, and so does a console too short to hold one; both fall
+-- back to the prompt written at the cursor, which is what this CLI did before the screen existed.
+--
+-- One race is worth naming: a keystroke that arrives between a write's move into the region and its
+-- restore echoes into the region once. It is rare and cosmetic, and the line itself is unaffected -
+-- the host reads it from stdin, never from the screen.
+function METHODS:screen_on()
+  if self.screen then return self.screen end
+  if not self.live then return nil end
+  if (self.getenv("WASM_AGENT_CLI_FRAME") or "") == "off" then return nil end
+  local screen = screen_rows(self.rows and self.rows())
+  if not screen then return nil end
+  self.screen = screen
+  -- The region first, then one newline inside it: the region's last row may hold output from
+  -- before the screen existed, and every write below assumes the row it writes into is free.
+  self:control("\27[1;" .. screen.bottom .. "r")
+  self:control("\27[" .. screen.bottom .. ";1H\n")
+  self:control("\27[" .. screen.status .. ";1H\27[2K")
+  self:control("\27[" .. screen.input .. ";1H\27[2K")
+  return screen
+end
+
+-- Give the screen back. The scroll region outlives this process if it is not reset, and a shell
+-- whose output scrolls only the top 22 rows of a 24-row window is a bug the next reader gets to
+-- explain.
+function METHODS:screen_off()
+  local screen = self.screen
+  self.screen = nil
+  if not screen then return end
+  self:control("\27[" .. screen.status .. ";1H\27[2K")
+  self:control("\27[" .. screen.input .. ";1H\27[2K")
+  self:control("\27[r")
+  self:control("\27[" .. screen.input .. ";1H\n")
 end
 
 -- The input line, written where the last output ended.
@@ -649,9 +768,25 @@ end
 -- byte for byte.
 function METHODS:prompt(text)
   text = text or "wa> "
-  if not self.live then return self:write(text) end
-  self:clear()
-  self:write(text)
+  local screen = self:screen_on()
+  if not screen then
+    self:clear()
+    return self:control(text)
+  end
+  -- The input row is this CLI's, and the cursor is left on it: that is where the terminal's own
+  -- echo puts the reader's typing, which is the whole point of keeping the row for them.
+  self:control("\27[" .. screen.input .. ";1H\27[2K" .. text)
+end
+
+-- The reader's line, moved into the transcript.
+--
+-- The input row is about to be reused, and the terminal's echo of what they typed lives only on
+-- that row: without this, pressing Enter would leave them unable to check what they sent. Written
+-- as a `wa> ` line into the output region, the shape pi and codex use for the same reason.
+function METHODS:accepted(text)
+  text = tostring(text or "")
+  if text == "" or not self.screen then return end
+  self:write(paint("wa> " .. clip(text, math.max(10, self.limit - 4)), "accent", self.live) .. "\n")
 end
 
 -- The terminal title carries the same word as the status line, which is how a reader
@@ -665,7 +800,7 @@ end
 
 function METHODS:set_title()
   if not self.live then return end
-  self:write("\27]2;" .. self:title_text() .. "\7")
+  self:control("\27]2;" .. self:title_text() .. "\7")
 end
 
 -- ---- the events ----------------------------------------------------------------

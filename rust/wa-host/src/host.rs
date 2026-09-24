@@ -1248,6 +1248,10 @@ struct TickerSpec {
     marks: Vec<String>,
     started: f64,
     frame: usize,
+    /// The row to draw on, 1-based from the top of the window, when the caller keeps a frame and
+    /// the status line owns a row of its own. `None` means "the row the cursor is on", which is
+    /// what a caller with no frame has - and the row the reader may be typing on.
+    row: Option<u16>,
 }
 
 struct Ticker {
@@ -1353,15 +1357,22 @@ fn visible_width(text: &str) -> usize {
 /// end of the frame: that garbles the display of a line typed during a run and loses nothing - the
 /// line is read from the reader thread, never from the screen. `cli_view.status_draw` obeys the same
 /// rule on the Lua side, because the view writes this line too.
-fn ticker_frame(text: &str, drawn: usize) -> (String, usize) {
+fn ticker_frame(text: &str, drawn: usize, row: Option<u16>) -> (String, usize) {
     let cols = visible_width(text);
     let mut drawn = drawn;
     let mut frame = String::new();
-    if drawn > 0 && cols > drawn {
+    // With a row of its own the line is not sharing the reader's cursor row, so it needs no commit
+    // and the cursor goes to that row instead of to the column the frame started in.
+    let row = row.filter(|row| *row > 0);
+    if row.is_none() && drawn > 0 && cols > drawn {
         frame.push_str("\r\n");
         drawn = 0;
     }
-    frame.push_str("\u{1b}7\r");
+    frame.push_str("\u{1b}7");
+    match row {
+        Some(row) => frame.push_str(&format!("\u{1b}[{row};1H")),
+        None => frame.push('\r'),
+    }
     frame.push_str(text);
     for _ in cols..drawn {
         frame.push(' ');
@@ -1420,11 +1431,11 @@ fn start_ticker(spec: TickerSpec) -> bool {
             // this is the only state the motion needs - see `ticker_frame`.
             let mut drawn = 0usize;
             loop {
-                let text = {
+                let (text, spec_row) = {
                     let guard = spec.lock().unwrap_or_else(|error| error.into_inner());
-                    ticker_render(&guard, ticks)
+                    (ticker_render(&guard, ticks), guard.row)
                 };
-                let (frame, cols) = ticker_frame(&text, drawn);
+                let (frame, cols) = ticker_frame(&text, drawn, spec_row);
                 drawn = cols;
                 // Never erase to the end of the row: the reader's own typing starts one column
                 // after this line ends, and erasing from the cursor to the right takes it with it.
@@ -1473,6 +1484,13 @@ fn start_ticker(spec: TickerSpec) -> bool {
 /// cannot drift apart. `frame` is where the mark cycle continues from, so an event that
 /// redraws the line does not make the spinner jump back to its first frame.
 ///
+/// `row` (1-based from the top of the window) names the row to draw on, for a caller that keeps a
+/// frame: a view with a scroll region for its output, a status row, and the reader's input row below
+/// it. The ticker places the cursor on that row for each frame and hands it back, so the terminal's
+/// cursor can stay on the row the reader types on. Without `row` the line is drawn at the cursor,
+/// which is that same row - and then the line is bounded to the columns it drew, because the reader
+/// is typing there.
+///
 /// No argument, or `nil`, stops it: the ticker stops drawing and leaves the line as the
 /// caller's to erase, which is what the view does before it prints anything else. Returns
 /// `true` while a ticker is running, and `nil` when none is (no argument, a spec that does
@@ -1505,7 +1523,9 @@ fn parse_ticker_spec(text: &str) -> Option<TickerSpec> {
         .unwrap_or_default();
     let started = value.get("started").and_then(Value::as_f64).unwrap_or_else(ticker_seconds);
     let frame = value.get("frame").and_then(Value::as_u64).unwrap_or(0) as usize;
-    Some(TickerSpec { line, marks, started, frame })
+    // A row is 1-based and positive; anything else is "no row", not row zero.
+    let row = value.get("row").and_then(Value::as_u64).filter(|row| *row > 0).map(|row| row as u16);
+    Some(TickerSpec { line, marks, started, frame, row })
 }
 
 #[cfg(test)]
@@ -1513,7 +1533,11 @@ mod ticker_tests {
     use super::*;
 
     fn spec(line: &str, frame: usize) -> TickerSpec {
-        TickerSpec { line: line.to_string(), marks: vec!["one ".to_string(), "two ".to_string()], started: ticker_seconds(), frame }
+        TickerSpec { line: line.to_string(), marks: vec!["one ".to_string(), "two ".to_string()], started: ticker_seconds(), frame, row: None }
+    }
+
+    fn rowed(line: &str, row: u16) -> TickerSpec {
+        TickerSpec { line: line.to_string(), marks: vec!["one ".to_string()], started: ticker_seconds(), frame: 0, row: Some(row) }
     }
 
     /// The same three values `scripts/test-cli-view.lua` pins for `cli_view.duration`:
@@ -1570,26 +1594,51 @@ mod ticker_tests {
     fn a_frame_never_erases_and_never_takes_the_readers_columns() {
         // The defect this replaced: erase-to-end-of-line wipes the reader's half-typed message,
         // which sits one column after the line.
-        let (frame, cols) = ticker_frame("  {m}Thinking - {t}", 0);
+        let (frame, cols) = ticker_frame("  {m}Thinking - {t}", 0, None);
         assert!(!frame.contains("\u{1b}[2K"), "erase-to-end-of-line is gone: {frame:?}");
         assert!(frame.starts_with("\u{1b}7\r"), "the cursor is saved before the write: {frame:?}");
         assert!(frame.ends_with("\u{1b}8"), "and restored after it: {frame:?}");
         assert_eq!(cols, visible_width("  {m}Thinking - {t}"));
 
         // A shorter line pads the columns it drew, so no tail of the last frame is left behind.
-        let (shorter, cols) = ticker_frame("  short", 12);
+        let (shorter, cols) = ticker_frame("  short", 12, None);
         assert!(shorter.contains("  short     "), "a shorter line is padded: {shorter:?}");
         assert_eq!(cols, 12, "and the high-water mark stands, so the pad is not drawn again");
 
         // A longer line commits the row instead of writing over columns that may hold the
         // reader's text.
-        let (longer, cols) = ticker_frame("  a longer line than before", 12);
+        let (longer, cols) = ticker_frame("  a longer line than before", 12, None);
         assert!(longer.starts_with("\r\n"), "growth starts a fresh row: {longer:?}");
         assert_eq!(cols, visible_width("  a longer line than before"));
 
         // The first frame has nothing to commit: it starts on the row the cursor is already on.
-        let (first, _) = ticker_frame("  {m}", 0);
+        let (first, _) = ticker_frame("  {m}", 0, None);
         assert!(!first.starts_with("\r\n"), "the first frame does not add a line: {first:?}");
+    }
+
+    /// With a row of its own the line is not sharing the reader's row, so it neither commits nor
+    /// returns to the column it started in: it is placed, drawn, and the cursor goes back to
+    /// wherever the reader left it.
+    #[test]
+    fn a_rowed_frame_is_placed_instead_of_returned_to() {
+        let (frame, cols) = ticker_frame("  {m}Thinking", 0, Some(23));
+        assert!(frame.starts_with("\u{1b}7\u{1b}[23;1H"), "the row is placed, not the cursor: {frame:?}");
+        assert!(frame.ends_with("\u{1b}8"), "and the reader's cursor comes back: {frame:?}");
+        assert!(!frame.starts_with("\r\n"), "a rowed frame has nothing to commit: {frame:?}");
+        assert!(!frame.contains("\u{1b}[2K"), "and erases nothing: {frame:?}");
+        assert_eq!(cols, visible_width("  {m}Thinking"));
+
+        // Growing across a rowed frame must not commit a line either: it is not the reader's row.
+        let (grown, cols) = ticker_frame("  a longer status line", 4, Some(23));
+        assert!(!grown.contains("\r\n"), "no commit on growth: {grown:?}");
+        assert!(grown.contains("  a longer status line"), "the line is drawn whole: {grown:?}");
+        assert_eq!(cols, visible_width("  a longer status line"));
+
+        // A spec carries the row through: `row` is 1-based, and zero is not a row.
+        let parsed = parse_ticker_spec("{\"line\":\"x\",\"row\":23}").expect("parses");
+        assert_eq!(parsed.row, Some(23));
+        assert_eq!(parse_ticker_spec("{\"line\":\"x\"}").expect("parses").row, None);
+        assert_eq!(parse_ticker_spec("{\"line\":\"x\",\"row\":0}").expect("parses").row, None);
     }
 
     /// Colour is an instruction, not columns: the pad is measured against what a terminal shows.
