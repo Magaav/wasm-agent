@@ -41,7 +41,8 @@ if host.ticker(nil) ~= nil then
   os.exit(1)
 end
 -- Stopping leaves the line to the caller: the ticker is not the one that decides the line is
--- finished. This is what the view's `clear` does before it prints anything else, and doing it
--- here is what keeps the rest of this capture readable.
-io.write("\r\27[2K")
+-- finished. This is what the view's `clear` does before it prints anything else - blank its own
+-- columns, never erase to the end of the row, which is where a reader's typing would be - and doing
+-- it here is what keeps the rest of this capture readable.
+io.write("\r" .. string.rep(" ", 60) .. "\r")
 print("ticker ran")
