@@ -338,6 +338,16 @@ body.drift .drift { display: flex; }
 }
 .session-state.interrupted { border-color: #d29922; color: #d29922; }
 .session-state.failed { border-color: #f85149; color: #f85149; }
+/* A thread the node is working on right now. The spinner is the point: "running" is a claim about
+   this moment, and a static word is indistinguishable from a badge left behind after the run ended. */
+.session-state.running { border-color: var(--accent); color: var(--accent); }
+.session-state .spinner {
+  width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid currentColor;
+  border-top-color: transparent; display: inline-block; margin-right: 3px;
+  animation: session-spin .8s linear infinite;
+}
+.session-row.running .session-title { color: var(--accent); }
+@keyframes session-spin { to { transform: rotate(360deg); } }
 .session-bar { display: flex; gap: var(--gap); margin-bottom: var(--pad); }
 .session-bar button { border: 1px solid var(--line); background: var(--panel-2); color: var(--text); border-radius: var(--radius-sm); padding: 2px var(--space); cursor: pointer; font-size: 11px; }
 .session-bar button:hover { border-color: var(--accent); }

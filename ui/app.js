@@ -3054,6 +3054,9 @@ async function watchTurn() {
   try {
     const response = await apiFetch("health");
     const health = await response.json();
+    // Keep the session list's live badges in step with the run this loop is already watching, with
+    // no extra request: a thread turns "running" the moment a run is admitted and back when it ends.
+    if (document.body.classList.contains("engine")) applySessionHealth(health);
     const current = activeRun(health);
     if (current) {
       sawTurnInFlight = true;
@@ -3688,6 +3691,12 @@ async function refreshTools() {
 // and a list you have to read top to bottom is not a way to find anything.
 let sessionQuery = "";
 let sessionList = [];
+// The last /health read, so a row can say it is running without one request per row, and the running
+// set from that read so a poll repaints only when *which* sessions are live changes. Repainting on
+// every poll would pull the cursor out of the search box while someone is typing in it.
+let sessionHealth = null;
+let sessionRunningKey = null;
+let sessionLoaded = false;
 
 // "3m ago" rather than a locale timestamp: in a list of threads, how long ago is the question, and
 // the exact second is never the answer.
@@ -3707,6 +3716,28 @@ function sessionMatches(session, query) {
   return query.toLowerCase().split(/\s+/).every((word) => haystack.includes(word));
 }
 
+// Which conversations the node is working on right now. /health carries an active owner per
+// conversation (`runs`), the conversation each worker holds, and the run in `current` - any of the
+// three means the thread is live, and reading it needs no worker of its own.
+function runningSessions(health) {
+  const ids = new Set();
+  for (const run of health?.runs || []) if (run.conversation) ids.add(run.conversation);
+  for (const worker of health?.workers || []) if (worker.session) ids.add(worker.session);
+  if (health?.current?.session) ids.add(health.current.session);
+  return ids;
+}
+
+// Fold one /health read into the already-rendered list without rebuilding it, so a session turns
+// live the moment a run starts and turns back when it ends.
+function applySessionHealth(health) {
+  sessionHealth = health;
+  if (!sessionLoaded) return;
+  const key = Array.from(runningSessions(health)).sort().join(",");
+  if (key === sessionRunningKey) return;
+  sessionRunningKey = key;
+  renderSessions();
+}
+
 // Continue a thread the node left unfinished.
 //
 // The node records what was lost and prints the command; it does not act on its own, because a
@@ -3721,6 +3752,7 @@ function resumeSession(id) {
 
 function renderSessions() {
   const shown = sessionList.filter((session) => sessionMatches(session, sessionQuery));
+  const running = runningSessions(sessionHealth);
   sessionsNote.textContent = sessionQuery
     ? `${shown.length} of ${sessionList.length} sessions`
     : `${sessionList.length} sessions · most recent first`;
@@ -3739,9 +3771,16 @@ function renderSessions() {
     sessionsBox.append(empty);
     return;
   }
-  for (const session of shown) {
+  // The route already orders by last use; sorting here too keeps that true if a cached list is ever
+  // merged with live state, and makes "the last used is at the top" a property of the view rather
+  // than a promise about the node.
+  const ordered = shown.slice().sort((a, b) =>
+    (Number(b.updated_at) || Number(b.started_at) || 0) - (Number(a.updated_at) || Number(a.started_at) || 0));
+  for (const session of ordered) {
+    const live = running.has(session.id);
     const row = document.createElement("div");
-    row.className = "session-row";
+    row.className = "session-row" + (live ? " running" : "");
+    row.dataset.session = session.id;
     const title = document.createElement("span");
     title.className = "session-title";
     // The id is the fallback, not the name: a thread whose first message could not name it is still
@@ -3753,10 +3792,19 @@ function renderSessions() {
     const when = ago((Date.now() / 1000) - (session.updated_at || session.started_at || 0));
     meta.textContent = `${session.message_count} runs · ${when}`;
     row.append(title, meta);
-    // Only when there is something to recover: a badge on every row would be noise, and "answered"
-    // is the case that needs no attention. The reason is the API's own words, so the UI cannot
-    // invent a different story.
-    if (session.state && session.state !== "answered" && session.state !== "empty") {
+    if (live) {
+      // A run in flight is not an unfinished turn: its last recorded message is the prompt it is
+      // answering, so "unfinished" would be true of the ledger and false of the node. The badge is
+      // derived from /health, not from the ledger, for exactly that reason.
+      const badge = document.createElement("span");
+      badge.className = "session-state running";
+      badge.innerHTML = '<span class="spinner" aria-hidden="true"></span>running';
+      badge.title = "a run is in progress on this node";
+      row.append(badge);
+    } else if (session.state && session.state !== "answered" && session.state !== "empty") {
+      // Only when there is something to recover: a badge on every row would be noise, and "answered"
+      // is the case that needs no attention. The reason is the API's own words, so the UI cannot
+      // invent a different story.
       const badge = document.createElement("span");
       badge.className = "session-state " + session.state;
       badge.textContent = session.state;
@@ -3769,8 +3817,8 @@ function renderSessions() {
       row.append(nodeButton("parent", () => openSession(session.parent_session_id)));
     }
     // Only where there is something to recover, and named as what it does: the node's own words for
-    // this are "continue where you stopped".
-    if (session.state === "unfinished") {
+    // this are "continue where you stopped". A running turn has nothing to recover yet.
+    if (!live && session.state === "unfinished") {
       row.append(nodeButton("continue", () => resumeSession(session.id)));
     }
     sessionsBox.append(row);
@@ -3779,8 +3827,18 @@ function renderSessions() {
 
 async function refreshSessions() {
   try {
-    const payload = await (await apiFetch("sessions", { headers: apiHeaders() })).json();
+    // Sessions and health together: the list says what this node has been doing, and health says
+    // which of those threads is being worked on right now. /health needs no worker, so this stays
+    // answerable while a run holds the run worker.
+    const [listResponse, health] = await Promise.all([
+      apiFetch("sessions", { headers: apiHeaders() }),
+      apiFetch("health", { headers: apiHeaders() }).then((response) => response.json()).catch(() => null),
+    ]);
+    const payload = await listResponse.json();
     sessionList = payload.sessions || [];
+    sessionLoaded = true;
+    sessionHealth = health;
+    sessionRunningKey = Array.from(runningSessions(health)).sort().join(",");
     renderSessions();
   } catch (error) {
     sessionsNote.textContent = "unavailable";
@@ -3954,7 +4012,11 @@ function setEngine(open) {
   engineView.hidden = !open;
   engineBtn.classList.toggle("active", open);
   if (open) {
-    engineSub.textContent = `${me.role} · ${me.tools.length} tools`;
+    // The session list is the node's front door: opening the engine lists what this node has been
+    // doing whether or not the topic is expanded, and whether or not a run is in flight. It runs
+    // first because the label below is decoration - a missing `tools` must not blank the list.
+    refreshSessions();
+    engineSub.textContent = `${me.role} · ${(me.tools || []).length} tools`;
   }
 }
 
