@@ -84,7 +84,6 @@ let busy = false;
 let activeRunId = null;
 let submittedRunIds = null;
 let statusLine = null;
-let runStatusTicker = null;
 let streamBody = null;
 let streamText = "";
 let controller = null;
@@ -355,55 +354,16 @@ function setStatus(text) {
   document.getElementById("empty")?.remove();
   if (!statusLine) {
     statusLine = document.createElement("div");
-    statusLine.className = "status chat-content-run-status";
-    statusLine.innerHTML = '<span class="spinner"></span><span class="chat-content-run-label"></span><span class="chat-content-run-elapsed"></span>';
-    if (busy && !replayingMessages) startRunStatusTicker();
+    statusLine.className = "status";
+    messages.append(statusLine);
   }
-  statusLine.querySelector(".chat-content-run-label").textContent = text;
-  if (statusLine.parentNode !== messages) messages.append(statusLine);
-  if (busy) updateRunElapsed();
-  else statusLine.querySelector(".chat-content-run-elapsed").textContent = "";
-  pin();
-}
-
-function runDuration(ms) {
-  const total = Math.max(0, Math.floor(ms / 1000));
-  const seconds = String(total % 60).padStart(2, "0");
-  const minutes = Math.floor(total / 60);
-  if (minutes >= 60) return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}:${seconds}`;
-  return `${minutes}:${seconds}`;
-}
-
-function updateRunElapsed() {
-  if (!statusLine) return;
-  const elapsed = statusLine.querySelector(".chat-content-run-elapsed");
-  if (elapsed) elapsed.textContent = runDuration(Date.now() - (runStartedAt || Date.now()));
-}
-
-function startRunStatusTicker() {
-  if (runStatusTicker) clearInterval(runStatusTicker);
-  runStatusTicker = setInterval(updateRunElapsed, 1000);
-}
-
-function finishRunStatus(label = "completed") {
-  if (!statusLine) return;
-  const bubbles = messages.querySelectorAll("wa-message.assistant");
-  const bubble = runBubble || bubbles[bubbles.length - 1];
-  statusLine.querySelector(".spinner")?.remove();
-  statusLine.querySelector(".chat-content-run-label").textContent = label;
-  updateRunElapsed();
-  statusLine.classList.add("finished");
-  if (bubble) bubble.body.append(statusLine);
-  else statusLine.remove();
-  statusLine = null;
-  if (runStatusTicker) { clearInterval(runStatusTicker); runStatusTicker = null; }
+  statusLine.innerHTML = `<span class="spinner"></span>${escapeHtml(text)}`;
   pin();
 }
 
 function clearStatus() {
   statusLine?.remove();
   statusLine = null;
-  if (runStatusTicker) { clearInterval(runStatusTicker); runStatusTicker = null; }
 }
 
 // The model's own thinking, when the provider streams it in a field of its own instead of
@@ -1059,7 +1019,7 @@ function handleEvent(event) {
   } else if (event.type === "tool_result") {
     settleTool(event.result, event.name);
   } else if (event.type === "delta") {
-    if (statusLine) statusLine.querySelector(".chat-content-run-label").textContent = "responding…";
+    clearStatus();
     // A new segment per step, inside the same bubble.
     if (!streamBody) {
       streamBody = document.createElement("div");
@@ -1069,17 +1029,18 @@ function handleEvent(event) {
     streamText += event.text || "";
     streamBody.textContent = stripThinking(streamText);
     pin();
-  } else if (event.type === "reply") {
-    if (statusLine) statusLine.querySelector(".chat-content-run-label").textContent = "finishing…";
+} else if (event.type === "reply") {
     if (!replayingMessages && event.message_id && renderedMessageIds.has(String(event.message_id))) {
       // The durable reply can be repainted before its trailing `reply` event is replayed.
       // Keep the saved bubble and let `done` settle it without appending the answer twice.
+      clearStatus();
       sealReasoning();
       finishTrace();
       streamBody = null;
       streamText = "";
       return;
     }
+    clearStatus();
     const finalText = stripThinking(event.text || streamText);
     if (streamBody) {
       streamBody.innerHTML = renderMarkdown(finalText);
@@ -1117,12 +1078,12 @@ function handleEvent(event) {
     updateChip();
     if (balloon.open) { renderUsage(); renderModels(); }
   } else if (event.type === "error") {
+    clearStatus();
     add("assistant", "error: " + (event.error || "unknown"));
-    finishRunStatus("failed");
     finishTrace();
     runBubble = null;
   } else if (event.type === "done") {
-    finishRunStatus();
+    clearStatus();
     flushDecision(true);
   }
 }
@@ -3837,11 +3798,11 @@ async function openSessionById(id) {
   }
 }
 
-// Topics that still need the run worker wait for the run to finish. Read-only topics such as nodes,
-// sessions, and skills use the host's read workers and can be inspected during a run.
+// Topics waiting for the node to be free. The engine's reads are Lua, so on a single-worker node they
+// queue behind a run - and the client's deadline is shorter than a run, so opening one while the node
+// was working showed "AbortError: signal is aborted without reason". That reads as the UI being broken
+// when the node is simply busy, which is the opposite of what a status line is for.
 const pendingTopics = new Set();
-
-const runWorkerTopics = new Set(['spells-box', 'tools-box']);
 
 async function refreshJobs() {
   const box = document.getElementById('jobs-box');
@@ -3871,9 +3832,9 @@ document.getElementById('jobs-box').addEventListener('job-toggle', async (event)
 
 function loadTopic(id) {
   const box = document.getElementById(id);
-  if (busy && runWorkerTopics.has(id)) {
-    // These topics still use a route on the run worker. Do not issue a request that would time out;
-    // keep them queued and load them as soon as that worker is free.
+  if (busy && id !== 'jobs-box') {
+    // Do not even ask: the worker is inside a run, so the request would queue and then be abandoned by
+    // the deadline. Say what is true and come back to it when the run ends.
     pendingTopics.add(id);
     if (box) box.textContent = "the node is busy with a run — this loads when it finishes";
     return;
