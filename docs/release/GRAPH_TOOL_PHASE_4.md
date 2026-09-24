@@ -25,11 +25,11 @@ change instead of combining generations.
 
 ## Start measurement
 
-A Windows debug end-to-end run against this worktree force-indexed 316 files,
-13,485 nodes, and 41,807 edges in 23.6 seconds. The default eight-row overview
-returned 5,197 bytes in 267 ms. A two-hop, both-direction impact query for a
-changed `graph.lua` function found 244 reachable symbols in 109 ms and returned
-the first 50 in 12,689 bytes with an explicit continuation cursor. These calls
+A Windows debug end-to-end run against this worktree force-indexed 315 files,
+13,473 nodes, and 41,791 edges in 21.5 seconds. The default eight-row overview
+returned 5,197 bytes in 234 ms. A two-hop, both-direction impact query for a
+changed `graph.lua` function found 242 reachable symbols in 95 ms and returned
+the first 50 in 12,635 bytes with an explicit continuation cursor. These calls
 include full source-snapshot verification. This is one local sample and measures
 response shape, not task quality or a production latency distribution.
 
