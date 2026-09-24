@@ -216,6 +216,11 @@ fi
 say "waiting for the running node to finish what it is doing"
 waited=0
 FINE_TICKS=0
+# When the node was last seen making progress. The deadline below is measured from here, not from the
+# start, so a long turn that is still alive is waited on and only a worker that has stopped reporting
+# fails. `WA_IDLE_MAX_SECONDS` (default 0 = no cap) is an operator's hard wall-clock bound.
+progress_at=0
+IDLE_MAX="${WA_IDLE_MAX_SECONDS:-0}"
 while :; do
   state="$(health)"
   case "$state" in
@@ -225,11 +230,22 @@ while :; do
       if ! printf '%s' "$state" | grep -q '"label":"POST /chat' && printf '%s' "$state" | grep -q '"queue":0'; then break; fi ;;
     "") say "the node is not answering - nothing to wait for"; break ;;
   esac
-  if [ "$waited" -ge "$IDLE_TIMEOUT" ]; then
-    say "still busy after ${IDLE_TIMEOUT}s; not upgrading under a running turn"
+  # A long turn is not a wedged one. Waiting is bounded by *lack of progress*, not by wall time: a run
+  # whose worker is still reporting is doing work, and interrupting it because fifteen minutes passed
+  # is how a legitimate 40-minute turn made every queued upgrade wait 900s, fail, and be retried while
+  # the node stayed busy. Only a worker that has stopped reporting counts toward the deadline.
+  case "$state" in
+    *'"worker":"alive"'*) progress_at=$waited ;;
+  esac
+  if [ "$((waited - progress_at))" -ge "$IDLE_TIMEOUT" ]; then
+    say "the worker has not reported progress for ${IDLE_TIMEOUT}s; not upgrading under a stalled turn"
     exit 1
   fi
-  [ $((waited % 30)) -eq 0 ] && say "  busy: $state"
+  if [ "$IDLE_MAX" -gt 0 ] && [ "$waited" -ge "$IDLE_MAX" ]; then
+    say "still busy after ${IDLE_MAX}s (WA_IDLE_MAX_SECONDS); not upgrading"
+    exit 1
+  fi
+  [ $((waited % 30)) -eq 0 ] && say "  busy after ${waited}s; waiting for the turn to finish"
   # Two cadences, because the two situations are different. A long turn should not be polled 50 times a
   # minute - that is noise in the log and in the node's queue. But the *last* moment, when the turn has
   # just ended, is exactly when a fixed 5s tick costs 5s of outage for nothing: the swap cannot start

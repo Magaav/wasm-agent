@@ -2974,14 +2974,20 @@ async function reconcile() {
 }
 
 async function watch() {
+  // Tell the shell this page's loop is alive, *before* asking the node anything. This is the only
+  // per-window proof: the node's page-age counter is global, and WebView2 reports a failed navigation
+  // as "finished", so a shell cannot tell an error page from a good one by the load alone. A page
+  // stuck on an error page cannot send this, which is exactly what the shell watches for.
+  //
+  // It must not depend on the node answering. It used to be sent only after `/version` returned, so
+  // when a run filled the browser's connection pool with pending reads, `/version` never completed,
+  // no heartbeat was sent, and the shell reloaded a page that was alive and would have recovered -
+  // the reload re-issued the same requests and re-saturated, so a busy node looked like a dead
+  // window and the window looped.
+  if (native && typeof native.heartbeat === "function") native.heartbeat();
   try {
     const response = await apiFetch("version");
     const payload = await response.json();
-    // Tell the shell this page's loop is alive. It is the only per-window proof: the node's page-age
-    // counter is global, and WebView2 reports a failed navigation as "finished", so a shell cannot tell
-    // an error page from a good one by the load alone. A page stuck on an error page cannot send this,
-    // which is exactly what the shell watches for.
-    if (native && typeof native.heartbeat === "function") native.heartbeat();
     applyUiVersion(payload.version);
     // The node answered, so finish the first sync if it never finished. This loop always runs.
     if (!synced) sync("watch");

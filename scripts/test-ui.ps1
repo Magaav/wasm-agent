@@ -644,6 +644,19 @@ $harness = @'
   check(continuable.length === 1,
     "only the unfinished thread should offer to continue, saw " + continuable.length);
 
+  // The shell heartbeat proves this page's JavaScript is running, so it must be sent before (and
+  // independently of) asking the node. It used to be sent only after `/version` returned; when a run
+  // filled the browser's connection pool, `/version` never completed, no heartbeat was sent, and the
+  // shell reloaded a live page - which re-issued the same requests and looped.
+  var beats = 0;
+  window.__setShell({ heartbeat: function () { beats += 1; } });
+  window.__failVersion = true;
+  window.__watch();
+  for (var hb = 0; hb < 5; hb++) { await tick(); }
+  check(beats >= 1, 'the shell heartbeat must be sent even when the node does not answer');
+  window.__failVersion = false;
+  window.__setShell(null);
+
   // The update lock. A reload is invisible until it happens, and it used to happen at a moment the
   // reader did not choose, with no word about why - so it looked like the window flickering and
   // losing their place. The reload is replaced with a spy here: a real one would take the harness
@@ -1716,7 +1729,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__cancelActiveRun = cancelActiveRun; window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker; window.__updateNotice = updateNotice; window.__refreshOperationProgress = refreshOperationProgress;"
+Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__cancelActiveRun = cancelActiveRun; window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker; window.__updateNotice = updateNotice; window.__refreshOperationProgress = refreshOperationProgress; window.__watch = watch;"
 
 Add-Content -Path $app -Value "`nwindow.__resetFollow = () => { followedSeq = 0; lastFollowAt = 0; };"
 
