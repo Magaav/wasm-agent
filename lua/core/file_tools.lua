@@ -35,12 +35,62 @@ local function integer(n,default,maximum)
   if type(n)~='number' or n<1 or n%1~=0 or n>maximum then return nil end
   return n
 end
-function M.read(args)
+
+-- Match the node's existing request-body ceiling. This is a refusal boundary, not
+-- an excuse to silently resize or recompress an image the model was asked to inspect.
+local IMAGE_MAX_BYTES=4*1000*1000
+
+-- `nil` means the path is not a supported image and the caller should continue
+-- through the exact-text path. Every other return is a complete read outcome.
+local function read_image(args,store_image)
+  if not host.read_image_base64 then return nil end
+  local called,raw=pcall(host.read_image_base64,args.path,IMAGE_MAX_BYTES)
+  if not called then return {error='image_read_failed',path=args.path} end
+  local decoded_ok,value=pcall(json.decode,tostring(raw or ''))
+  if not decoded_ok or type(value)~='table' then
+    return {error='invalid_image_read_response',path=args.path}
+  end
+  -- A Lua test shim or future virtual filesystem may satisfy `read_file` even
+  -- when the native path does not exist, so missing joins not-image on the text
+  -- fallback. If that also misses, the caller still returns `not_found`.
+  if value.error=='not_image' or value.error=='not_found' then return nil end
+  if value.error then
+    value.path=value.path or args.path
+    return value
+  end
+  if type(value.base64)~='string' or type(value.mime)~='string' then
+    return {error='invalid_image_read_response',path=args.path}
+  end
+  if type(store_image)~='function' then
+    return {error='image_storage_unavailable',path=args.path}
+  end
+  local name=args.path:match('[^/\\]+$') or args.path
+  local stored_ok,reference,problem=pcall(store_image,{
+    name=name,mime=value.mime,b64=value.base64,
+  })
+  if not stored_ok then return {error='image_store_failed',path=args.path} end
+  if not reference then return {error=problem or 'image_store_failed',path=args.path} end
+  if args.version and args.version~=reference.sha256 then
+    return {error='file_changed',path=args.path,version=reference.sha256}
+  end
+  return {
+    path=args.path,type='image',mime=reference.mime,bytes=reference.bytes,
+    sha256=reference.sha256,version=reference.sha256,
+    note='Image content is attached to this tool result.',
+    -- Agent-only transport. It is removed before projection and persisted in the
+    -- turn's images column, so base64 never enters the JSON tool result.
+    _images={reference},
+  }
+end
+
+function M.read(args,store_image)
   if type(args.path)~='string' or args.path=='' then return {error='path_required'} end
   local line=integer(args.offset,1,2147483647)
   local column=integer(args.column,1,2147483647)
   local limit=integer(args.limit,2000,2000)
   if not line or not column or not limit then return {error='invalid_read_range'} end
+  local image=read_image(args,store_image)
+  if image then return image end
   local text=host.read_file(args.path)
   if not text then return {error='not_found',path=args.path} end
   local hash=host.sha256(text)

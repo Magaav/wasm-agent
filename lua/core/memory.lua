@@ -627,8 +627,8 @@ function M.journal(kind, entity_id, payload)
 end
 
 -- -------------------------------------------------------------------- images
--- Attached images live on disk, content-addressed by sha256, and are referenced
--- from a turn by identity. Three reasons it is a file and not a column:
+-- User attachments and images returned by `read` live on disk, content-addressed
+-- by sha256, and are referenced from a turn by identity. Three reasons it is a file and not a column:
 --   1. `messages.content` is FTS-indexed; base64 there would poison every search.
 --   2. The same screenshot pasted twice is stored once.
 --   3. The path is stable, so replays and fixtures can resolve it.
@@ -694,8 +694,9 @@ function M.image_mime_supported(mime)
 end
 
 -- Store an image and return the reference recorded on the turn.
--- A data URL or bare base64 is accepted; the sha256 is taken over the *decoded*
--- bytes so that the same picture in two encodings has one identity.
+-- A data URL or bare base64 is accepted. Decode/re-encode canonicalises equivalent
+-- inputs; the digest is then taken over that canonical base64 because host.sha256's
+-- current Lua argument reader is not binary-safe.
 function M.store_image(entry)
   local raw = tostring(entry.data or entry.b64 or "")
   local mime = tostring(entry.mime or ""):lower()

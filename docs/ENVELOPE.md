@@ -28,7 +28,7 @@ that surface. The live version is rendered in the UI under **engine → tools**
 | Tool | Args | Does |
 | --- | --- | --- |
 | `bash` | `command`, `cwd?` | run a shell command |
-| `read` | `path`, `offset?`, `limit?` | read a text file / line range |
+| `read` | `path`, `offset?`, `limit?` | read a PNG/JPEG/WebP/GIF as visual input, or an exact text range |
 | `write` | `path`, `content` | create or overwrite a file |
 | `edit` | `path`, `old_text`, `new_text` | first exact replacement |
 | `ls` | `path?` | list a directory |
@@ -98,6 +98,11 @@ role, so a hallucinated tool name cannot escalate.
 
 ## Result shapes
 
-Tools return JSON. Errors are explicit (`{"error": "..."}`), never silent
+Tools return JSON. An image returned by `read` is persisted as a reference on the tool
+turn, while the provider receives a following user-role image part after the complete
+tool-result block. This preserves Chat Completions tool-call ordering without storing
+base64 in the result. Missing, unsupported and oversized images are explicit errors.
+
+Errors are explicit (`{"error": "..."}`), never silent
 success — the model is told when something was refused (`forbidden_for_role`,
 `bad_signature`, `unknown_caller`, `stale_request`, `postcondition_failed`).

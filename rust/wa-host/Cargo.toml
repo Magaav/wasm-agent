@@ -12,6 +12,7 @@ wa-operation = { path = "../wa-operation" }
 wa-jobs = { path = "../wa-jobs" }
 wa-graph = { path = "../wa-graph" }
 anyhow = "1"
+base64 = "0.23"
 ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde_json = "1"
