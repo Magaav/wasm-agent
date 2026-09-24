@@ -1,7 +1,9 @@
 //! An operation owns execution, output, cancellation and settlement. A job is an automation rule,
 //! not a process. See docs/OPERATIONS.md. No model, Lua state, HTTP or UI is needed to supervise it.
 mod process;
+mod redact;
 use process::Process;
+use redact::Redactor;
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -63,6 +65,9 @@ struct Entry {
 pub struct Manager {
     root: PathBuf,
     entries: Arc<Mutex<HashMap<String, Arc<Entry>>>>,
+    /// The node's own secret values, redacted from every operation's output before it is
+    /// written or returned. Empty unless a caller opts in with `with_env_secrets`.
+    secrets: Arc<Vec<Vec<u8>>>,
 }
 fn error(message: impl ToString) -> io::Error {
     io::Error::other(message.to_string())
@@ -144,7 +149,20 @@ impl Manager {
         Self {
             root: root.into(),
             entries: Arc::new(Mutex::new(HashMap::new())),
+            secrets: Arc::new(Vec::new()),
         }
+    }
+    /// Redact the node's own secret values from every operation's output. The values come
+    /// from the process environment, which the host resolved from the config file, so this
+    /// sees the same names `lua/core/redact.lua` redacts at the transcript boundary.
+    pub fn with_env_secrets(mut self) -> Self {
+        self.secrets = Arc::new(redact::env_secrets());
+        self
+    }
+    /// An explicit secret list, for tests and callers that resolve their own values.
+    pub fn with_secrets(mut self, secrets: Vec<String>) -> Self {
+        self.secrets = Arc::new(secrets.into_iter().map(String::into_bytes).collect());
+        self
     }
     pub fn start(&self, spec: Spec) -> io::Result<String> {
         if spec.timeout.is_zero()
@@ -194,6 +212,7 @@ impl Manager {
         });
         entries.insert(id.clone(), entry.clone());
         drop(entries);
+        let secrets = self.secrets.clone();
         let result = std::thread::Builder::new()
             .name("operation".into())
             .spawn(move || {
@@ -215,7 +234,7 @@ impl Manager {
                     if entry.started.elapsed() >= spec.timeout {
                         return Err(error("deadline_exceeded"));
                     }
-                    execute(&spec, &dir, &entry)
+                    execute(&spec, &dir, &entry, &secrets)
                 }));
                 let failure = match outcome {
                     Ok(Ok(())) => None,
@@ -355,11 +374,13 @@ fn tail(buffer: &mut Vec<u8>, data: &[u8]) {
         buffer.drain(..buffer.len() - VIEW_BYTES);
     }
 }
-fn execute(spec: &Spec, dir: &Path, entry: &Entry) -> io::Result<()> {
+fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::Result<()> {
     let mut files = [
         File::create(dir.join("stdout"))?,
         File::create(dir.join("stderr"))?,
     ];
+    // One redactor per stream: the carry buffer is per-stream state.
+    let mut redactors = [Redactor::new(secrets), Redactor::new(secrets)];
     let accepted_record_ms = entry.state.lock().unwrap()["timing"]["accepted_record_ms"]
         .as_u64()
         .unwrap_or(0);
@@ -396,13 +417,22 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry) -> io::Result<()> {
                 }
                 match process.read(index == 1, &mut buffer) {
                     Ok(Some(0)) => {
+                        // End of stream: flush what was held back for a possible split secret.
+                        let flushed = redactors[index].finish();
+                        if !flushed.is_empty() {
+                            files[index].write_all(&flushed)?;
+                            tail(&mut views[index], &flushed);
+                        }
                         eof[index] = true;
                         break;
                     }
                     Ok(Some(n)) => {
                         let keep = n.min(spec.output_limit.saturating_sub(bytes));
-                        files[index].write_all(&buffer[..keep])?;
-                        tail(&mut views[index], &buffer[..keep]);
+                        // Redact before the write: the file and the in-memory view hold no
+                        // secret, and there is no raw window on disk at all.
+                        let clean = redactors[index].push(&buffer[..keep]);
+                        files[index].write_all(&clean)?;
+                        tail(&mut views[index], &clean);
                         bytes += keep;
                         if keep < n {
                             reason.get_or_insert("output_limit_exceeded".to_string());
@@ -506,6 +536,18 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry) -> io::Result<()> {
             }
         }
         std::thread::sleep(Duration::from_millis(5));
+    }
+    // Flush whatever a stream still held back for a possible split secret. A stream that did
+    // not reach EOF - cancelled, deadline, or the drain allowance - still gets its tail
+    // written, and end of stream means no match can extend further. `finish` is idempotent,
+    // so a stream already flushed at EOF contributes nothing here.
+    for (index, redactor) in redactors.iter_mut().enumerate() {
+        let flushed = redactor.finish();
+        if !flushed.is_empty() {
+            files[index].write_all(&flushed)?;
+            tail(&mut views[index], &flushed);
+            bytes += flushed.len();
+        }
     }
     if let Some(started) = drain_started {
         phase(entry, "drain_cleanup_ms", started.elapsed());

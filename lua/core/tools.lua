@@ -231,6 +231,12 @@ M.admin = {
     mode = { type = "string", enum = { "default", "debug" } } }, { "mode" }),
   schema("session_fixture", "Export a session (messages, tool calls, traces) as a reproducible fixture for regression tests.", {
     session_id = { type = "string", description = "Defaults to the current session." } }),
+  -- Master only: it changes where a session's shell and file tools point, so it can move a
+  -- guest's tools outside the tree a guest was scoped to.
+  schema("session_worktree", "Point a session's file and shell tools at their own checkout, so parallel sessions on one node do not overwrite each other. `status` reports the current one; `set` points at an existing directory (usually a git worktree); `clear` returns the session to the node's working directory. After `set`, relative paths in read/write/edit/ls/grep/bash resolve inside it.", {
+    action = { type = "string", enum = { "status", "set", "clear" } },
+    path = { type = "string", description = "set: an existing directory, usually a git worktree." },
+    session_id = { type = "string", description = "Defaults to the current session." } }, { "action" }),
 }
 
 -- Which capability tier each tool belongs to (DESIGN.md §8). Anything not
@@ -242,6 +248,7 @@ M.tier_of = {
   subagent = "subagents",
   sessions = "sessions", session = "sessions", search_messages = "sessions",
   resume_session = "sessions", session_debug = "sessions", session_fixture = "sessions",
+  session_worktree = "sessions",
   bash = "environment", read = "environment", read_many = "environment", write = "environment",
   diagnose = "environment", operation = "environment",
   edit = "environment", ls = "environment", grep = "environment", graph = "environment",
@@ -326,6 +333,7 @@ local CUES = {
   resume_session = "Fold a past session into this one as context",
   session_debug = "Set a session's recording mode (debug or default)",
   session_fixture = "Export a session as a reproducible fixture",
+  session_worktree = "Point this session's tools at their own checkout",
   search_ledger = "Search the message ledger (WhatsApp/chat)",
   conversation = "Read one conversation's recent messages",
   list_conversations = "List conversations in the ledger",
@@ -423,7 +431,37 @@ local function shell_quote(value)
   return "'" .. tostring(value or ""):gsub("'", "'\\''") .. "'"
 end
 
-local function run(command, timeout_seconds)
+-- The directory this session's tools operate in. "" is the node's own working directory - the
+-- behavior every session had before a session could own a worktree - so an untouched session is
+-- unchanged. `memory` may be nil (a schema-only dispatch), which is why this is guarded.
+local function session_cwd(memory, ctx)
+  if not memory or not ctx or not ctx.session_id or not memory.session_worktree then return "" end
+  local ok, path = pcall(memory.session_worktree, ctx.session_id)
+  if not ok or type(path) ~= "string" then return "" end
+  return path
+end
+
+-- Resolve a tool path against the session's directory. An absolute path is left alone; a relative
+-- path joins the session's worktree, so `read foo.lua` reads the session's copy, not the node's.
+-- With no session worktree the path is unchanged and the host resolves it against the node cwd.
+local function resolve_path(memory, ctx, path)
+  if type(path) ~= "string" or path == "" then return path end
+  local first = path:sub(1, 1)
+  if first == "/" or first == "~" or path:match("^%a:[/\\]") or path:sub(1, 2) == "\\\\" then
+    return path
+  end
+  local base = session_cwd(memory, ctx)
+  if base == "" then return path end
+  return (base:gsub("[/\\]+$", "")) .. "/" .. path
+end
+
+local function run(command, timeout_seconds, cwd)
+  -- `cwd` is applied in the shell rather than through host.exec's second argument, because that is
+  -- how a caller-supplied `args.cwd` already worked: one code path, so a session cwd and an explicit
+  -- one cannot behave differently.
+  if cwd and cwd ~= "" then
+    command = "cd " .. shell_quote(cwd) .. " && " .. command
+  end
   local ok, raw = pcall(host.exec, command, "", timeout_seconds)
   if not ok then return { error = tostring(raw) } end
   local decoded = json.decode(raw)
@@ -517,6 +555,10 @@ function M.dispatch(memory, name, args, role, ctx)
     if timeout ~= nil and (type(timeout) ~= "number" or timeout % 1 ~= 0 or timeout < 1 or timeout > 86400) then
       return { error = "invalid_timeout_seconds" }
     end
+    -- An explicit `args.cwd` still wins; a session's worktree is the default, and "" keeps the
+    -- node's own cwd.
+    local cwd = args.cwd
+    if cwd == nil or cwd == "" then cwd = session_cwd(memory, ctx) end
     -- A common `git commit` path gets a bounded, opt-in pre-commit review. The first
     -- attempt with unread leads returns them without executing the command. A repeated
     -- attempt on the same patch is allowed so a false positive cannot trap the agent;
@@ -524,7 +566,7 @@ function M.dispatch(memory, name, args, role, ctx)
     -- commits hidden inside scripts or other tools are outside this interception.
     if patch_audit.enabled() and not ctx.subagent and ctx.commit_audits
         and args.command:match("%f[%w]git%s+commit%f[%W]") then
-      local audit=patch_audit.git_audit(args.cwd,ctx.reviewed_paths,
+      local audit=patch_audit.git_audit(cwd,ctx.reviewed_paths,
         {session_id=ctx.session_id,run_id=ctx.run_id})
       if audit.error then return {error="graph_patch_audit_failed",audit=audit} end
       if (audit.lead_count or 0)>0 then
@@ -536,7 +578,7 @@ function M.dispatch(memory, name, args, role, ctx)
         end
       end
     end
-    local result = run(args.cwd and ("cd " .. shell_quote(args.cwd) .. " && " .. args.command) or args.command, timeout)
+    local result = run(args.command, timeout, cwd)
     -- The adopted-tree guidance is *policy*, and policy depends on what this caller may use:
     -- a profile with `bash` but not `operation` cannot read or cancel the operation it has just
     -- been handed, so telling it to would be the same dead end the old refusal was. The host
@@ -556,6 +598,7 @@ function M.dispatch(memory, name, args, role, ctx)
     end
     return result
   elseif name == "read" then
+    args.path = resolve_path(memory, ctx, args.path)
     return file_tools.read(args,function(entry) return memory.store_image(entry) end)
   elseif name == "diagnose" then
     return diagnose.run(args.steps,function(tool,options)
@@ -570,6 +613,7 @@ function M.dispatch(memory, name, args, role, ctx)
       if type(request) ~= "table" or type(request.path) ~= "string" or request.path == "" then
         results[index] = { error = "path_required" }
       else
+        request.path = resolve_path(memory, ctx, request.path)
         results[index] = file_tools.read(request,function(entry) return memory.store_image(entry) end)
       end
       if results[index].error then failed = failed + 1 end
@@ -578,29 +622,32 @@ function M.dispatch(memory, name, args, role, ctx)
   elseif name == "write" then
     if not args.path then return { error = "path_required" } end
     if type(args.content)~="string" then return {error="content_required"} end
-    local before = (host.read_file and host.read_file(args.path)) or ""
-    local ok = host.write_file and host.write_file(args.path, args.content or "")
+    local path = resolve_path(memory, ctx, args.path)
+    local before = (host.read_file and host.read_file(path)) or ""
+    local ok = host.write_file and host.write_file(path, args.content or "")
     -- Record what changed while the previous text is still in hand: this is what the diff
     -- topic shows and what its undo replays. A failed write records nothing.
     if ok and ctx and ctx.changes then
-      changeset.record(ctx.changes, args.path, before, args.content or "")
+      changeset.record(ctx.changes, path, before, args.content or "")
     end
-    return { ok = ok and true or false, path = args.path, error=not ok and "write_failed" or nil }
+    return { ok = ok and true or false, path = path, error=not ok and "write_failed" or nil }
   elseif name == "edit" then
+    args.path = resolve_path(memory, ctx, args.path)
     return file_tools.edit(args,ctx.changes and function(path,before,after)
       changeset.record(ctx.changes,path,before,after)
     end or nil)
   elseif name == "ls" then
     -- Native listing: `ls -la` does not exist on Windows, and the description
     -- promises portability.
+    local listed = resolve_path(memory, ctx, args.path) or "."
     if host.list_dir then
-      local ok, result = pcall(host.list_dir, args.path or ".")
+      local ok, result = pcall(host.list_dir, listed)
       if ok and result then return json.decode(result) end
     end
     if platform.os() == "windows" then
-      return run("dir /b " .. shell_quote(args.path or "."))
+      return run("dir /b " .. shell_quote(listed))
     end
-    return run("ls -la -- " .. shell_quote(args.path or "."))
+    return run("ls -la -- " .. shell_quote(listed))
   elseif name == "grep" then
     local allowed={pattern=true,path=true,ignore_case=true,limit=true,max_depth=true,extensions=true}
     for key in pairs(args) do if not allowed[key] then return {error='unsupported_search_option',option=key} end end
@@ -618,7 +665,7 @@ function M.dispatch(memory, name, args, role, ctx)
       end
     end
     if not host.grep then return {error='native_search_unavailable'} end
-    local ok,result=pcall(host.grep,args.pattern,args.path or '.',json.encode(args))
+    local ok,result=pcall(host.grep,args.pattern,resolve_path(memory,ctx,args.path) or '.',json.encode(args))
     if not ok then return {error=tostring(result)} end
     return json.decode(result)
   elseif name == "graph" then
@@ -627,7 +674,7 @@ function M.dispatch(memory, name, args, role, ctx)
     if action == "audit" then
       if args.source=="git" then
         if ctx.subagent then return {error="git_audit_forbidden_for_subagent"} end
-        return patch_audit.git_audit(args.cwd,ctx.reviewed_paths,
+        return patch_audit.git_audit(args.cwd or session_cwd(memory,ctx),ctx.reviewed_paths,
           {session_id=ctx.session_id,run_id=ctx.run_id})
       end
       return patch_audit.run(ctx.changes, ctx.reviewed_paths,
@@ -763,6 +810,30 @@ function M.dispatch(memory, name, args, role, ctx)
     local fixture = memory.session_fixture(args.session_id or ctx.session_id)
     if not fixture then return { error = "unknown_session" } end
     return fixture
+  elseif name == "session_worktree" then
+    local id = args.session_id or ctx.session_id
+    if not id or id == "" then return { error = "session_id_required" } end
+    local action = args.action or "status"
+    if action == "status" then
+      return { session_id = id, worktree = memory.session_worktree(id) }
+    elseif action == "set" then
+      if type(args.path) ~= "string" or args.path == "" then return { error = "path_required" } end
+      -- The directory must exist: a typo that silently pointed every tool at a missing tree
+      -- would look like the whole project vanished, which is worse than a refusal. `host.list_dir`
+      -- reports failure as `{error=...}`, not nil, so the JSON has to be read rather than trusted
+      -- for truthiness - a bare pcall check accepted every path.
+      if host.list_dir then
+        local ok, raw = pcall(host.list_dir, args.path)
+        local decoded = ok and json.decode(raw) or nil
+        if type(decoded) ~= "table" or decoded.error then
+          return { error = "worktree_not_a_directory", path = args.path }
+        end
+      end
+      return { ok = true, session_id = id, worktree = memory.set_session_worktree(id, args.path) }
+    elseif action == "clear" then
+      return { ok = true, session_id = id, worktree = memory.set_session_worktree(id, "") }
+    end
+    return { error = "unknown_action", action = action }
   elseif name == "nodes" then
     local list = {}
     for _, node in ipairs(nodeslib.list()) do

@@ -15,6 +15,31 @@ ok(stuck.ok==false and stuck.code~=0, "timeout is failure")
 ok(stuck.error=="deadline_exceeded", "typed timeout reason")
 ok(stuck.stdout=="before", "partial output survives cancellation")
 ok(stuck.output_complete==true, "both pipes actually drained after termination")
+-- A deadline is not evidence of a cause, and the message used to name one anyway - "a call to
+-- this node's own busy session cannot serve itself" - for every timeout, including a local
+-- command that never addressed this node. It reads as a diagnosis, so it was carried onward as
+-- one. The message carries what was measured; the result keeps the breakdown, because a killed
+-- operation is the case where the phases are the explanation rather than decoration.
+ok(type(stuck.timing)=="table" and tonumber(stuck.timing.execution_ms)~=nil,
+  "a terminated operation reports its phases")
+ok(tostring(stuck.stderr):find("did not finish within ",1,true)~=nil, "the note says what happened")
+ok(tostring(stuck.stderr):find("executing ",1,true)~=nil
+   and tostring(stuck.stderr):find("setup ",1,true)~=nil, "and names the measured phases")
+ok(tostring(stuck.stderr):find("busy session",1,true)==nil
+   and tostring(stuck.stderr):find("independent route",1,true)==nil,
+  "and never invents a cause it cannot know")
+-- The model-facing half of the same rule: phases on a killed call, not on one that settled.
+local killed=output.execution_timing("bash",{ok=false,error="deadline_exceeded",timing={execution_ms=5}})
+ok(type(killed)=="table" and killed.execution_ms==5, "a killed call keeps its phases in the result")
+local settled={ok=true,timing={execution_ms=5}}
+local reported=output.execution_timing("bash",settled)
+ok(settled.timing==nil and type(reported)=="table", "a settled shell call keeps them out of the model view")
+local failed={ok=false,code=1,timing={execution_ms=5}}
+output.execution_timing("bash",failed)
+ok(failed.timing==nil, "a command that exited non-zero needs no phase breakdown")
+local other={timing={execution_ms=5}}
+output.execution_timing("operation",other)
+ok(type(other.timing)=="table", "a tool that reports phases itself is left alone")
 local before=host.monotonic_ms()
 local bg=json.decode(host.exec("sleep 60 & echo started"))
 ok(host.monotonic_ms()-before<1800, "shell exit cannot wait for background pipe EOF")

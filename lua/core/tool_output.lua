@@ -228,6 +228,28 @@ function M.context_view(name, content)
   return view
 end
 
+-- Native execution phase timing is aggregate telemetry on a call that settled on its own: it
+-- would spend context on every shell line, and the same numbers are reported by the tool span.
+-- A call that was *killed by its bound* is the exception. There the phases are the whole account
+-- of where the time went, and dropping them is what left a reader with a sentence it could not
+-- check - an agent read a deadline, found no breakdown anywhere in the result, and carried the
+-- error message's invented cause onward as a finding. So: report the timing either way, and take
+-- it out of the model-facing result only when the call was not terminated.
+local BOUND_ERRORS = {
+  deadline_exceeded = true, operation_supervisor_overdue = true,
+  cleanup_incomplete = true, output_incomplete = true, output_limit_exceeded = true,
+}
+
+function M.execution_timing(name, output)
+  if type(output) ~= "table" then return nil end
+  local timing = output.timing
+  if type(timing) ~= "table" then return nil end
+  if name ~= "bash" and name ~= "shell" then return timing end
+  if output.overdue == true or BOUND_ERRORS[output.error] then return timing end
+  output.timing = nil
+  return timing
+end
+
 function M.outcome(name, output)
   if type(output) ~= "table" then return true end
   if output.error ~= nil or output.ok == false then return false end
