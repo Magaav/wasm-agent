@@ -1180,7 +1180,6 @@ function restoreDraft() {
 // that built it the first time, so the two cannot drift apart.
 let replayingMessages = false;
 let replayMessageEndedAt = 0;
-let replayKeepPending = false;
 let renderedMessageIds = new Set();
 function repaintMessages(rows, options = {}) {
   // A repaint is a view of durable rows, not a resumed event stream. In particular, an
@@ -1195,7 +1194,6 @@ function repaintMessages(rows, options = {}) {
   reasoningBlock = null;
   runStartedAt = 0;
   replayMessageEndedAt = 0;
-  replayKeepPending = options.keepPending === true;
   renderedMessageIds = new Set();
   let rendered = 0;
   let failed = 0;
@@ -1249,11 +1247,12 @@ function repaintMessages(rows, options = {}) {
       }
     }
   }
-  const keepPending = replayKeepPending && trace?.pending;
-  if (trace && !keepPending) finishTrace();
+  // A repaint is a view of durable rows, and this page holds no stream for the run it draws:
+  // a tool call with no recorded result is history, not work this page can watch. Keeping its
+  // line pending and starting a ticker invented a clock for a call nobody was timing, and the
+  // reader could not tell it from a live one. Every replayed decision closes as unrecorded.
+  if (trace) finishTrace();
   replayingMessages = false;
-  replayKeepPending = false;
-  if (keepPending) startToolTicker();
   // The transcript just drawn is history, so the bubble it ended on is closed. The `reply` handler
   // used to close it, and when that stopped (one bubble per run) this became the place that must:
   // without it the next thing that arrives is appended to the last repainted run's bubble, so a
@@ -1330,7 +1329,7 @@ async function restoreSessionOnce() {
       }
     }
     if (full && Array.isArray(full.messages) && full.messages.length) {
-      repaintMessages(full.messages, { keepPending: !!activeRun(health, wanted.id) });
+      repaintMessages(full.messages);
     }
     const unresolved = outcome.name === "failed" || outcome.name === "unfinished";
     if (unresolved) {
