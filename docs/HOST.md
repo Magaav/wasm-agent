@@ -222,6 +222,15 @@ animated line and the printed line cannot drift apart.
 
 - One ticker per process, drawn on that process's own stdout. The view only starts it when
   its output *is* stdout, so a captured transcript never has a second writer.
+- **The row it draws on is the reader's row.** A run is exactly when a reader types, the terminal
+  echoes at the cursor, and the cursor sits at the end of this line. So a frame rewrites only the
+  columns it drew (a shorter line is padded with spaces, never `\27[2K`, which would erase the
+  message they are halfway through typing), commits the row with a newline when it needs more room
+  rather than writing over columns that may now hold their text, and saves and restores the cursor
+  (`ESC 7` / `ESC 8`) around the write. `cli_view.status_draw` obeys the same rule on the Lua side,
+  because the view writes this line too. A terminal that ignores `ESC 7`/`ESC 8` garbles the
+  *display* of a line typed during a run and loses nothing: the line is read from the reader thread,
+  never from the screen.
 - Stopping is immediate - the thread waits on a condition variable, not on a sleep - and the
   caller stops it before writing anything else: two writers on one line is how a line
   becomes two half-lines.

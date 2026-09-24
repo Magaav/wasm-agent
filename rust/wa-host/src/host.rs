@@ -1301,6 +1301,75 @@ fn ticker_render(spec: &TickerSpec, ticks: usize) -> String {
     spec.line.replace("{m}", mark).replace("{t}", &clock)
 }
 
+/// The columns a line occupies on screen: an escape sequence is an instruction, not characters.
+///
+/// The status line is padded to the width it last drew, so this has to count what a terminal shows -
+/// `\u{1b}[33m` is five bytes and no columns. The count is characters rather than east-asian widths,
+/// which is what `cli_view.columns` does on the Lua side: the two numbers are compared with each
+/// other (the view pads its own frames, the ticker pads its own), so they have to agree with each
+/// other and not to be exactly right.
+fn visible_width(text: &str) -> usize {
+    let mut cols = 0usize;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            cols += 1;
+            continue;
+        }
+        match chars.peek() {
+            // CSI: parameters, then a final byte in `0x40..=0x7e`.
+            Some('[') => {
+                for c in chars.by_ref().skip(1) {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC: runs to BEL (or ST, which the callers here do not emit).
+            Some(']') => {
+                for c in chars.by_ref().skip(1) {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    cols
+}
+
+/// One in-place frame of the status line, bounded to the columns the previous frame drew.
+///
+/// The row this draws on is the row the reader types on: a run is exactly when they type, the
+/// terminal echoes at the cursor, and the cursor sits at the end of this line. So the frame
+/// rewrites the columns it drew (padding a shorter line with spaces instead of erasing to the end
+/// of the row, which erases the message the reader is halfway through typing) and, when it needs
+/// more room than it drew, commits the row with a newline and starts again below rather than writing
+/// over columns that may hold their text.
+///
+/// The cursor is saved and restored around the frame (`ESC 7` / `ESC 8`), because the cursor is also
+/// where the reader's next keystroke lands. A terminal that ignores those leaves the cursor at the
+/// end of the frame: that garbles the display of a line typed during a run and loses nothing - the
+/// line is read from the reader thread, never from the screen. `cli_view.status_draw` obeys the same
+/// rule on the Lua side, because the view writes this line too.
+fn ticker_frame(text: &str, drawn: usize) -> (String, usize) {
+    let cols = visible_width(text);
+    let mut drawn = drawn;
+    let mut frame = String::new();
+    if drawn > 0 && cols > drawn {
+        frame.push_str("\r\n");
+        drawn = 0;
+    }
+    frame.push_str("\u{1b}7\r");
+    frame.push_str(text);
+    for _ in cols..drawn {
+        frame.push(' ');
+    }
+    frame.push_str("\u{1b}8");
+    (frame, drawn.max(cols))
+}
+
 /// `WASM_AGENT_CLI_TICKER=off` leaves the caller's escape sequences alone and stops the
 /// motion, which is what a capture that wants a byte-exact transcript needs.
 fn ticker_enabled() -> bool {
@@ -1347,16 +1416,21 @@ fn start_ticker(spec: TickerSpec) -> bool {
         std::thread::spawn(move || {
             let (flag, signal) = &*stop;
             let mut ticks = 0usize;
+            // How many columns the last frame drew. A frame may rewrite those and no others, so
+            // this is the only state the motion needs - see `ticker_frame`.
+            let mut drawn = 0usize;
             loop {
                 let text = {
                     let guard = spec.lock().unwrap_or_else(|error| error.into_inner());
                     ticker_render(&guard, ticks)
                 };
-                // Carriage return and erase-line: the same two sequences the view writes for
-                // itself, so the frame the ticker leaves and the frame the view writes next
-                // are the same shape. Flushed every time: this text has no newline to flush it.
+                let (frame, cols) = ticker_frame(&text, drawn);
+                drawn = cols;
+                // Never erase to the end of the row: the reader's own typing starts one column
+                // after this line ends, and erasing from the cursor to the right takes it with it.
+                // Flushed every time: this text has no newline to flush it.
                 let mut out = std::io::stdout();
-                let _ = write!(out, "\r\u{1b}[2K{text}");
+                let _ = write!(out, "{frame}");
                 let _ = out.flush();
                 ticks = ticks.wrapping_add(1);
                 let guard = flag.lock().unwrap_or_else(|error| error.into_inner());
@@ -1488,6 +1562,45 @@ mod ticker_tests {
         assert!(parse_ticker_spec("not json").is_none());
         // A missing `started` is "now": a line with no clock in it is still a line.
         assert!(parse_ticker_spec("{\"line\":\"{t}\"}").is_some());
+    }
+
+    /// The reader types on the row this frame is drawn on, so the frame is bounded twice: it may
+    /// only write columns it drew, and it may only need more room by committing the row.
+    #[test]
+    fn a_frame_never_erases_and_never_takes_the_readers_columns() {
+        // The defect this replaced: erase-to-end-of-line wipes the reader's half-typed message,
+        // which sits one column after the line.
+        let (frame, cols) = ticker_frame("  {m}Thinking - {t}", 0);
+        assert!(!frame.contains("\u{1b}[2K"), "erase-to-end-of-line is gone: {frame:?}");
+        assert!(frame.starts_with("\u{1b}7\r"), "the cursor is saved before the write: {frame:?}");
+        assert!(frame.ends_with("\u{1b}8"), "and restored after it: {frame:?}");
+        assert_eq!(cols, visible_width("  {m}Thinking - {t}"));
+
+        // A shorter line pads the columns it drew, so no tail of the last frame is left behind.
+        let (shorter, cols) = ticker_frame("  short", 12);
+        assert!(shorter.contains("  short     "), "a shorter line is padded: {shorter:?}");
+        assert_eq!(cols, 12, "and the high-water mark stands, so the pad is not drawn again");
+
+        // A longer line commits the row instead of writing over columns that may hold the
+        // reader's text.
+        let (longer, cols) = ticker_frame("  a longer line than before", 12);
+        assert!(longer.starts_with("\r\n"), "growth starts a fresh row: {longer:?}");
+        assert_eq!(cols, visible_width("  a longer line than before"));
+
+        // The first frame has nothing to commit: it starts on the row the cursor is already on.
+        let (first, _) = ticker_frame("  {m}", 0);
+        assert!(!first.starts_with("\r\n"), "the first frame does not add a line: {first:?}");
+    }
+
+    /// Colour is an instruction, not columns: the pad is measured against what a terminal shows.
+    #[test]
+    fn a_columns_count_is_what_the_terminal_shows() {
+        assert_eq!(visible_width("abc"), 3);
+        assert_eq!(visible_width("\u{1b}[33mabc\u{1b}[0m"), 3);
+        assert_eq!(visible_width("\u{1b}]2;title\u{7}ab"), 2);
+        assert_eq!(visible_width("\u{1b}[1;2H"), 0);
+        // A multi-byte character is one column here, as it is in `cli_view.columns`.
+        assert_eq!(visible_width("\u{280b}"), 1);
     }
 }
 

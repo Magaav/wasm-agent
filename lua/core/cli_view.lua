@@ -142,6 +142,23 @@ local function columns(text)
 end
 M.columns = columns
 
+-- The same count over text that carries escape sequences: what a terminal actually shows. The
+-- status line is padded to the width it last drew, and a pad counted over the *bytes* of
+-- `\27[33m` would be a pad of the wrong size on screen - with the reader's own typing, which
+-- starts one column after that line ends, taking the difference.
+local function visible_columns(text)
+  local plain = tostring(text or ""):gsub("\27%[[%d;]*m", ""):gsub("\27%]2;[^\7]*\7", "")
+  return columns(plain)
+end
+M.visible_columns = visible_columns
+
+-- DECSC / DECRC: the cursor as the terminal sees it, saved and put back. The status line is written
+-- in place on the row the reader types on, so the write has to leave their cursor where it was -
+-- `ESC 7` and `ESC 8` are the pair every VT terminal this runs in understands, and the alternative
+-- (raw mode, an input row this CLI owns) is a larger change. See `METHODS:status_draw` for what a
+-- terminal that ignores them costs.
+local CURSOR_SAVE, CURSOR_RESTORE = "\27" .. "7", "\27" .. "8"
+
 local function clip(text, limit)
   text = tostring(text or ""):gsub("%s+", " ")
   if not limit or limit <= 0 or columns(text) <= limit then return text end
@@ -356,23 +373,6 @@ end
 -- There is no tty check in the host (`host.*` exposes no isatty), so this is a
 -- heuristic, and it is stated as one: every terminal this runs in sets one of these,
 -- and a pipe, a file or a test does not. NO_COLOR always wins, and the explicit
--- The console's height, asked the way the width is: `host.terminal_size`, nil when there is no
--- console or it will not answer. The prompt is the only caller, and it needs this and nothing else
--- - see `METHODS:prompt`.
-function M.rows(probe)
-  probe = probe or function()
-    local ok, raw = pcall(host.terminal_size)
-    if not ok or type(raw) ~= "string" then return nil end
-    local decoded
-    if not pcall(function() decoded = json.decode(raw) end) then return nil end
-    if type(decoded) ~= "table" then return nil end
-    return tonumber(decoded.rows)
-  end
-  local rows = tonumber(probe())
-  if not rows or rows <= 0 then return nil end
-  return math.floor(rows)
-end
-
 -- override exists because a guess needs a way to be overruled.
 function M.wants_live(getenv)
   getenv = getenv or function(name) return host.getenv(name) end
@@ -458,17 +458,15 @@ function M.new(opts)
     animating = false,
     now = opts.now or function() return host.now() end,
     limit = opts.limit or 80,
-    -- The console's height. One thing needs it: the prompt is drawn on the last row, which needs
-    -- the height and no idea at all of where the cursor is. Injectable, because the rule is worth
-    -- a test and a test has no terminal.
-    rows = opts.rows or M.rows,
     title = opts.title or "",
     workspace = opts.workspace or "",
     branch = opts.branch or "",
     budget = opts.budget or 0,
     context = 0,
     frame = 0, phase = "", round = 0, pending = nil,
-    shown = nil, logged = "", turn = nil, totals = nil, deltas = 0, warned = nil,
+    -- `shown_cols` is how many columns of the terminal the status line currently holds: the
+    -- bound every in-place write is kept inside - see `METHODS:status_draw`.
+    shown = nil, shown_cols = 0, logged = "", turn = nil, totals = nil, deltas = 0, warned = nil,
   }
   return setmetatable(view, METHODS)
 end
@@ -550,6 +548,40 @@ function METHODS:unanimate()
   if host and host.ticker then pcall(host.ticker, nil) end
 end
 
+-- One in-place frame of the status line, bounded to the columns the last frame drew.
+--
+-- This row is the row the reader types on: a run is exactly when they type, the terminal echoes at
+-- the cursor, and the cursor sits at the end of this line. So the frame
+--
+--   * rewrites only the columns it drew itself, padding a shorter line with spaces rather than
+--     erasing to the end of the row. `\27[2K` erases from the cursor to the right - which is the
+--     reader's half-typed message, and erasing it is what they reported;
+--   * commits the row (a newline) when it needs more room than it drew, instead of writing over
+--     columns that may now hold their text. A status line is not worth a reader's message; the
+--     cost is one line in the scrollback, when the clock or a token count grows;
+--   * saves and restores the cursor around the write (`ESC 7` / `ESC 8`), because the cursor is
+--     also where the reader's *next* keystroke lands. Leaving it at the end of the frame would
+--     make their next character overwrite the line they had already typed.
+--
+-- Risk, named: a terminal that ignores `ESC 7`/`ESC 8` leaves the cursor at the end of the frame,
+-- and continued typing then lands a few columns away from the reader's text. That garbles the
+-- *display* of a line typed during a run and loses nothing: the line is read from the host's
+-- reader, never from the screen. The alternatives are the erase this replaces, or owning the input
+-- row with raw mode, which is a larger change than this one.
+function METHODS:status_draw(text)
+  -- Live only: a captured transcript is a log, and a log with cursor movement in it is not one.
+  if not self.live then return end
+  local cols = visible_columns(text)
+  if self.shown_cols > 0 and cols > self.shown_cols then
+    -- Needs more room than it drew: start a fresh row rather than take the reader's columns.
+    self:write("\r\n")
+    self.shown_cols = 0
+  end
+  local pad = self.shown_cols > cols and (self.shown_cols - cols) or 0
+  self:write(CURSOR_SAVE .. "\r" .. text .. string.rep(" ", pad) .. CURSOR_RESTORE)
+  self.shown_cols = math.max(self.shown_cols, cols)
+end
+
 -- Called on every event: a new frame, and a repaint. In the plain rendering the line is
 -- only printed when the *phase* changes - a log line per spinner frame would be noise,
 -- and there is nothing here a reader could not get from the tool lines.
@@ -564,7 +596,7 @@ function METHODS:paint(force)
     -- then hand it over again, because this process is about to block.
     self:unanimate()
     if line ~= self.shown then
-      self:write("\r\27[2K" .. line)
+      self:status_draw(line)
       self.shown = line
     end
     self:animate()
@@ -577,37 +609,49 @@ function METHODS:paint(force)
   end
 end
 
+-- Take the status line back. Called before this module writes anything at all: two writers on
+-- one line is how a status line becomes two half-lines.
+--
+-- What it leaves behind is its own columns blanked and nothing of the reader's touched: this row
+-- is the row they type on, so clearing it is as bounded as drawing on it. The cursor ends at
+-- column zero of that row, where the next line of output starts - the layout this view has always
+-- had, and which keeps a reply from being indented by the width of a status line.
 function METHODS:clear()
   -- Never wipe a line the host is still drawing: stopping waits for its last frame to land.
   self:unanimate()
-  if self.live and self.shown then self:write("\r\27[2K") end
+  if self.live and self.shown_cols > 0 then
+    self:write("\r" .. string.rep(" ", self.shown_cols) .. "\r")
+    self.shown_cols = 0
+  end
   self.shown = nil
 end
 
--- The input line, drawn where a reader looks for it: on the last row of the terminal.
+-- The input line, written where the last output ended.
 --
--- A prompt written at the cursor is wherever the last reply happened to end, so after a short
--- answer it sits in the middle of the screen, above the reader's own typing - and the complaint
--- that produced this was exactly that: "the text area is not always in the far bottom". pi and
--- codex pin the input to the bottom of the screen, and the difference is not cosmetic: it is the
--- row a reader's eye and their fingers already went to.
+-- It used to be pinned to the console's last row - CUD 999 (`\27[999B`) moves down as far as the
+-- screen allows and clamps - and that row was erased first (`\27[2K`). Two things are wrong with
+-- that, and together they are why it is gone:
 --
--- CUD 999 (`\27[999B`) moves the cursor down as far as the screen allows and clamps, so this needs
--- the console's height - which `host.terminal_size` answers - and nothing else: no cursor save, no
--- scroll region, no assumption about which row we were on. The typed echo then lands on that row,
--- which is where the reader is looking.
+--   * the erase takes a *line of output* with it. CUD 999 clamps to the bottom row, and once the
+--     transcript has reached the bottom of the screen, that row holds the last line the reader was
+--     sent: the prompt deleted it.
+--   * a row reached by clamping is a row whose contents are unknown, so nothing can be said about
+--     what the cursor lands on - and there is no way to ask, because the reader thread owns stdin
+--     and the terminal's own answer to `\27[6n` would arrive as if the reader had typed it.
 --
--- Only in the live rendering. A captured transcript is a log, and a log with cursor movement in it
--- is not a transcript: the plain path writes the same prompt it always did, byte for byte.
+-- Pinning the input to the bottom of the screen is what pi and codex do, and the difference is not
+-- cosmetic: it is the row a reader's eye and fingers already went to. They can pin it because they
+-- own the input row - raw mode, a frame the CLI redraws. Until this CLI owns one, the honest prompt
+-- is a shell's: at the cursor, on the line the output ended, erasing nothing.
+--
+-- Only the live rendering has anything to take back. A captured transcript is a log, and a log with
+-- cursor movement in it is not a transcript: the plain path writes the same prompt it always did,
+-- byte for byte.
 function METHODS:prompt(text)
   text = text or "wa> "
   if not self.live then return self:write(text) end
-  local rows = self.rows and self.rows()
-  if not rows or rows <= 0 then return self:write(text) end
-  -- Take the status line back first: the ticker draws on the row the cursor is on, and the cursor
-  -- is about to leave it.
   self:clear()
-  self:write("\27[999B\r\27[2K" .. text)
+  self:write(text)
 end
 
 -- The terminal title carries the same word as the status line, which is how a reader
