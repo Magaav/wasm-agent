@@ -220,6 +220,13 @@ local function nearest_edit_hint(text, needle)
     note = "no region matches old_text; this is the closest. Quote it exactly, or re-read the range with read and copy the bytes." }
 end
 
+-- The file's own line ending, and the same text written in it. A worktree form is not always the
+-- form a file was written in: .gitattributes gives *.cmd/*.bat/*.ps1 CRLF on disk over an LF blob,
+-- so an anchor quoted from the stored bytes misses by one carriage return per line. Reading the
+-- file's ending here is what keeps that from being the caller's problem.
+local function file_eol(text) return text:find("\r\n",1,true) and "\r\n" or "\n" end
+local function in_eol(value, eol) return (value:gsub("\r\n","\n"):gsub("\n",eol)) end
+
 function M.edit(args,record)
   if type(args.path)~='string' or args.path=='' then return {error='path_required'} end
   if args.edits and (args.old_text~=nil or args.new_text~=nil) then return {error='mixed_edit_forms'} end
@@ -243,6 +250,23 @@ function M.edit(args,record)
   local ranges={}
   for i,item in ipairs(edits) do
     local a,b=text:find(item.old_text,1,true)
+    local ending_note=nil
+    if not a then
+      -- The same text with the file's own line endings is not a misquote, and refusing it made
+      -- every patcher re-derive the ending by hand - which is how one file in this repository
+      -- cost four rounds of anchors in a single session. Normalise both sides, and only accept a
+      -- match that is unique, so an anchor that is genuinely wrong still fails.
+      local eol=file_eol(text)
+      local alt=in_eol(item.old_text,eol)
+      if alt~=item.old_text then
+        a,b=text:find(alt,1,true)
+        if a then
+          ending_note = eol=="\r\n" and "matched with this file's CRLF line endings"
+            or "matched with this file's LF line endings"
+          item={ old_text=alt, new_text=in_eol(item.new_text,eol), }
+        end
+      end
+    end
     if not a then
       local failure={error='old_text_not_found',edit=i,path=args.path}
       local hint=nearest_edit_hint(text,item.old_text)

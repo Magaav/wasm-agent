@@ -50,11 +50,13 @@ check(paraphrased.error=='old_text_not_found' and paraphrased.nearest~=nil
 -- cost four rounds of re-deriving anchors before anyone measured the bytes.
 local crlf=path..'.crlf'
 host.write_file(crlf,'alpha\r\nbeta\r\ngamma\r\n')
-local ending=files.edit({path=crlf,edits={{old_text='alpha\nbeta\ngamma',new_text='X'}}})
-check(ending.error=='old_text_not_found' and ending.nearest~=nil
-  and ending.nearest.note~=nil and ending.nearest.note:find('CRLF',1,true)~=nil
-  and ending.nearest.line==1 and ending.nearest.last_line==3,
-  'an LF anchor against a CRLF file must say so, got: '..tostring(ending.nearest and ending.nearest.note))
+local ending=files.edit({path=crlf,edits={{old_text='alpha\nbeta\ngamma',new_text='alpha\nBETA\ngamma'}}})
+check(ending.ok==true, 'an LF anchor against a CRLF file must apply, got: '..tostring(ending.error))
+local kept=host.read_file(crlf)
+check(kept:find('\r\n',1,true)~=nil and kept:find('alpha\r\nBETA\r\ngamma',1,true)~=nil,
+  'and the file must keep its own endings, got: '..tostring(kept))
+local absent=files.edit({path=crlf,edits={{old_text='nothing like this is here at all',new_text='X'}}})
+check(absent.error=='old_text_not_found', 'a genuinely absent anchor must still fail')
 
 local unrelated=files.edit({path=path,edits={{old_text='nothing like this is in the file at all',new_text='A'}}})
 check(unrelated.error=='old_text_not_found' and unrelated.nearest==nil,
