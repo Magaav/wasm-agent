@@ -61,7 +61,7 @@ fn root_for(options: &Value) -> Result<PathBuf, String> {
 fn read(
     l: *mut LuaState,
     options_index: std::ffi::c_int,
-    body: impl Fn(&wa_graph::Store, &Value) -> Result<Value, String>,
+    body: impl Fn(&wa_graph::Store, &Value, &std::path::Path) -> Result<Value, String>,
 ) -> std::ffi::c_int {
     let options = json_arg(l, options_index);
     let outcome = (|| -> Result<Value, String> {
@@ -72,7 +72,7 @@ fn read(
                 store.begin_read().map_err(|e| e.to_string())?;
                 let fresh = store.verify_snapshot(&root).map_err(|e| e.to_string())?;
                 if fresh {
-                    let answer = body(&store, &options)?;
+                    let answer = body(&store, &options, &root)?;
                     let still_fresh = store.verify_snapshot(&root).map_err(|e| e.to_string())?;
                     store.end_read().map_err(|e| e.to_string())?;
                     if still_fresh {
@@ -132,7 +132,7 @@ pub extern "C" fn graph_index(l: *mut LuaState) -> std::ffi::c_int {
 /// host.graph_query(text, opts_json?) -> [ {kind,name,path,line,detail} ] | {error}
 pub extern "C" fn graph_query(l: *mut LuaState) -> std::ffi::c_int {
     let text = arg_string(l, 1).unwrap_or_default();
-    read(l, 2, |store, options| {
+    read(l, 2, |store, options, _| {
         let limit = options
             .get("limit")
             .and_then(Value::as_i64)
@@ -142,10 +142,60 @@ pub extern "C" fn graph_query(l: *mut LuaState) -> std::ffi::c_int {
     })
 }
 
+/// host.graph_search(text, opts_json?) -> ranked symbol selectors with confidence evidence.
+pub extern "C" fn graph_search(l: *mut LuaState) -> std::ffi::c_int {
+    let text = arg_string(l, 1).unwrap_or_default();
+    read(l, 2, |store, options, _| {
+        let limit = options
+            .get("limit")
+            .and_then(Value::as_i64)
+            .unwrap_or(12)
+            .clamp(1, 100);
+        store
+            .search_symbols_json(&text, limit)
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// host.graph_source(opts_json) -> an exact, bounded page of one indexed definition.
+pub extern "C" fn graph_source(l: *mut LuaState) -> std::ffi::c_int {
+    read(l, 1, |store, options, _| {
+        let path = options
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or("path_required")?;
+        let name = options
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or("name_required")?;
+        let line = options
+            .get("line")
+            .and_then(Value::as_i64)
+            .filter(|line| *line > 0)
+            .ok_or("line_required")?;
+        let kind = options
+            .get("kind")
+            .and_then(Value::as_str)
+            .filter(|kind| !kind.is_empty());
+        let offset = options
+            .get("byte_offset")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
+        let max_bytes = options
+            .get("max_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(20_000)
+            .clamp(256, 20_000) as usize;
+        store
+            .symbol_source_json(path, name, line, kind, offset, max_bytes)
+            .map_err(|e| e.to_string())
+    })
+}
+
 /// host.graph_explain(name, opts_json?) -> [ {node, outgoing, incoming} ] | {error}
 pub extern "C" fn graph_explain(l: *mut LuaState) -> std::ffi::c_int {
     let name = arg_string(l, 1).unwrap_or_default();
-    read(l, 2, |store, _| {
+    read(l, 2, |store, _, _| {
         store.explain_json(&name).map_err(|e| e.to_string())
     })
 }
@@ -154,25 +204,71 @@ pub extern "C" fn graph_explain(l: *mut LuaState) -> std::ffi::c_int {
 pub extern "C" fn graph_path(l: *mut LuaState) -> std::ffi::c_int {
     let from = arg_string(l, 1).unwrap_or_default();
     let to = arg_string(l, 2).unwrap_or_default();
-    read(l, 3, |store, _| {
+    read(l, 3, |store, _, _| {
         store.path_json(&from, &to).map_err(|e| e.to_string())
     })
 }
 
 /// host.graph_caps(opts_json?) -> [ {capability, uses} ] | {error}
 pub extern "C" fn graph_caps(l: *mut LuaState) -> std::ffi::c_int {
-    read(l, 1, |store, _| {
+    read(l, 1, |store, _, _| {
         store.caps_json().map_err(|e| e.to_string())
     })
 }
 
 /// host.graph_stats(opts_json?) -> {files,nodes,edges,resolved,unresolved,byKind} | {error}
 pub extern "C" fn graph_stats(l: *mut LuaState) -> std::ffi::c_int {
-    read(l, 1, |store, _| {
+    read(l, 1, |store, _, _| {
         store
             .stats()
             .map(|stats| stats.to_json())
             .map_err(|e| e.to_string())
+    })
+}
+
+/// host.graph_overview(opts_json?) -> bounded architecture sections with exact totals.
+pub extern "C" fn graph_overview(l: *mut LuaState) -> std::ffi::c_int {
+    read(l, 1, |store, options, _| {
+        let aspects = options
+            .get("aspects")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_else(Vec::new);
+        let mut limit = options
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(8)
+            .clamp(1, 50);
+        let max_bytes = options
+            .get("max_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(24_000)
+            .clamp(2_048, 200_000) as usize;
+        loop {
+            let value = store
+                .architecture_json(&aspects, limit as usize)
+                .map_err(|e| e.to_string())?;
+            if serde_json::to_vec(&value).map_err(|e| e.to_string())?.len() <= max_bytes {
+                return Ok(value);
+            }
+            if limit == 1 {
+                return Err("overview_budget_too_small".into());
+            }
+            limit -= 1;
+        }
+    })
+}
+
+/// host.graph_impact(request_json) -> changed definitions and bounded transitive impact evidence.
+pub extern "C" fn graph_impact(l: *mut LuaState) -> std::ffi::c_int {
+    read(l, 1, |store, request, root| {
+        store.impact_json(root, request).map_err(|e| e.to_string())
     })
 }
 
@@ -213,7 +309,9 @@ pub extern "C" fn graph_patch_audit(l: *mut LuaState) -> std::ffi::c_int {
         let db = db_for(&request)?;
         let mut store = wa_graph::Store::open(&db).map_err(|e| e.to_string())?;
         store.index(&root, false).map_err(|e| e.to_string())?;
-        let mut report = store.audit_json(&root, &request).map_err(|e| e.to_string())?;
+        let mut report = store
+            .audit_json(&root, &request)
+            .map_err(|e| e.to_string())?;
         let after = store.index(&root, false).map_err(|e| e.to_string())?;
         if after.indexed > 0 || after.removed > 0 {
             return Err("graph_source_changed_during_audit".into());
@@ -222,6 +320,9 @@ pub extern "C" fn graph_patch_audit(l: *mut LuaState) -> std::ffi::c_int {
         report["db_bytes"] = json!(std::fs::metadata(&db).map_err(|e| e.to_string())?.len());
         Ok(report)
     })();
-    push_json(l, &outcome.unwrap_or_else(|error| json!({ "error": error })));
+    push_json(
+        l,
+        &outcome.unwrap_or_else(|error| json!({ "error": error })),
+    );
     1
 }

@@ -493,9 +493,11 @@ local function navigation_outcome(name, args, output)
     if action == "path" then
       local steps = type(output.steps) == "table" and #output.steps or 0
       return { action = action, found = output.found == true, count = steps }
-    elseif action == "query" then
+    elseif action == "query" or action == "search_symbols" then
       local n = tonumber(output.count) or 0
       return { action = action, found = n > 0, count = n }
+    elseif action == "symbol_source" then
+      return { action = action, found = type(output.source) == "string", count = output.eof == true and 1 or 0 }
     elseif action == "explain" then
       local n = type(output.definitions) == "table" and #output.definitions or 0
       return { action = action, found = n > 0, count = n }

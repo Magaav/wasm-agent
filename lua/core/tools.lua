@@ -153,10 +153,21 @@ M.admin = {
     ignore_case = {type="boolean"}, limit={type="integer",minimum=1,maximum=500},
     max_depth={type="integer",minimum=0,maximum=64}, extensions={type="array",items={type="string"}}
   }, { "pattern" }),
-  -- The graph is an impact-review lead generator and an optional relationship tool.
-  schema("graph", "Audit the current native write/edit patch for unread resolved callers with action=audit, or pass source=git for the current Git patch (including shell edits). After an audit follow-up step, call audit_assess with your usefulness grade, reason and critique; this is self-report, not proof. Use audit_report after the 48-hour trial and audit_feedback only for an operator-reviewed outcome. For explicit dependency questions, explain/path/query/caps remain available; read source before acting on a graph lead. stats/index inspect or rebuild the index.", {
-    action = { type = "string", enum = { "explain", "query", "path", "caps", "stats", "index", "audit", "audit_assess", "audit_report", "audit_feedback" } },
-    name = { type = "string", description = "explain/query: the identifier to look up." },
+  -- Retrieval returns selected implementation text; relationship and audit actions remain
+  -- explicitly separate so their evidence can be evaluated independently.
+  schema("graph", "Retrieve implementation source, get a bounded architecture overview, or map the current patch to resolved callers, dependencies and tests. search_symbols/symbol_source handle discovery; overview handles orientation; impact handles factual patch reachability without claiming risk. Use grep for absent, low-confidence or incomplete graph evidence.", {
+    action = { type = "string", enum = { "search_symbols", "symbol_source", "overview", "impact", "explain", "query", "path", "caps", "stats", "index", "audit", "audit_assess", "audit_report", "audit_feedback" } },
+    name = { type = "string", description = "search_symbols: concept or identifier; symbol_source/explain/query: exact selected name." },
+    path = { type = "string", description = "symbol_source: path from a search_symbols result." },
+    line = { type = "integer", minimum = 1, description = "symbol_source: definition line from a search_symbols result." },
+    kind = { type = "string", description = "symbol_source: optional definition kind from the selected result." },
+    byte_offset = { type = "integer", minimum = 0, description = "symbol_source: continue a large definition at this returned byte offset." },
+    max_bytes = { type = "integer", minimum = 256, maximum = 200000, description = "symbol_source: source bytes/page (clamped to 20000); overview/impact: whole-response budget (default 24000)." },
+    aspects = { type = "array", maxItems = 8, items = {type="string", enum={"overview","languages","modules","entry_points","routes","capabilities","hotspots","boundaries","resolution"}}, description = "overview: optional sections; omitted returns the bounded overview." },
+    direction = { type = "string", enum = {"inbound","outbound","both"}, description = "impact: callers, dependencies, or both; default both." },
+    depth = { type = "integer", minimum = 1, maximum = 4, description = "impact: resolved edge depth; default 2." },
+    offset = { type = "integer", minimum = 0, description = "impact: initial live offset; prefer the returned cursor for continuation." },
+    cursor = { type = "string", description = "impact: snapshot-bound continuation token; keep direction/depth unchanged." },
     from = { type = "string", description = "path: start identifier." },
     to = { type = "string", description = "path: end identifier." },
     limit = { type = "integer", minimum = 1, maximum = 200 },
@@ -169,8 +180,8 @@ M.admin = {
     run_id = { type = "string", description = "audit_feedback: run with an audit lead." },
     outcome = { type = "string", enum = { "confirmed_catch", "false_positive", "unresolved" }, description = "audit_feedback: operator-reviewed outcome; never self-certify a catch." },
     commit = { type = "string", description = "audit_feedback: optional commit hash for evidence." },
-    source = { type = "string", enum = { "native", "git" }, description = "audit: native changeset (default) or current Git working-tree patch." },
-    cwd = { type = "string", description = "audit source=git: repository working directory; defaults to the node's cwd." },
+    source = { type = "string", enum = { "native", "git" }, description = "audit/impact: native changeset or current Git working-tree patch; impact defaults to git." },
+    cwd = { type = "string", description = "audit/impact source=git: repository working directory; defaults to the session cwd." },
   }, { "action" }),
   schema("diagnose", "Execute up to eight predetermined read/grep steps once, in order. Stop on failure, incomplete evidence or an unmet expectation. No shell, repair, retry or effects.", {
     steps={type="array",minItems=1,maxItems=8,items={type="object",properties={
@@ -345,7 +356,7 @@ local CUES = {
   edit = "Replace exact text in one file",
   ls = "List a directory",
   grep = "Find lines matching literal text",
-  graph = "Trace callers/relationships, or audit a patch's impact",
+  graph = "Retrieve symbol source, trace relationships, or audit patch impact",
   diagnose = "Run a fixed read/grep check sequence once",
   client = "Act on the user's machine: screen, mouse, keyboard, browser",
   shell = "Run a shell command on the client machine",
@@ -688,7 +699,21 @@ function M.dispatch(memory, name, args, role, ctx)
     end
     if not graph.available() then return { error = "graph_unavailable" } end
     local result, err
-    if action == "explain" then result, err = graph.explain(args.name)
+    if action == "search_symbols" then result, err = graph.search_symbols(args.name, { limit = args.limit })
+    elseif action == "symbol_source" then result, err = graph.symbol_source({
+      path=args.path,name=args.name,line=args.line,kind=args.kind},
+      {byte_offset=args.byte_offset,max_bytes=args.max_bytes})
+    elseif action == "overview" then result, err = graph.overview({aspects=args.aspects,limit=args.limit,max_bytes=args.max_bytes})
+    elseif action == "impact" then
+      local patch, patch_err
+      local source=args.source or "git"
+      if source=="native" then patch,patch_err=patch_audit.native_changes(ctx.changes)
+      else patch,patch_err=patch_audit.git_changes(args.cwd or session_cwd(memory,ctx)) end
+      if not patch then return {error=patch_err or "impact_patch_unavailable",source=source} end
+      result,err=graph.impact(patch,{direction=args.direction,depth=args.depth,limit=args.limit,
+        offset=args.offset,cursor=args.cursor,max_bytes=args.max_bytes})
+      if result then result.source=source; result.patch_fingerprint=patch.fingerprint end
+    elseif action == "explain" then result, err = graph.explain(args.name)
     elseif action == "query" then result, err = graph.query(args.name, { limit = args.limit })
     elseif action == "path" then result, err = graph.path(args.from, args.to)
     elseif action == "caps" then result, err = graph.caps()

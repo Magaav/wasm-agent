@@ -1,14 +1,48 @@
 ---
 name: code-graph
-description: Use the graph for explicit dependency questions or to audit a code patch's possible missed callers. Grep/read remain normal navigation; graph leads require source verification.
+description: Retrieve a ranked code symbol and its exact implementation, answer explicit dependency questions, or audit a patch's possible missed callers. Use for concept-to-code discovery where broad file reads would be wasteful; grep remains the fallback for absent or low-confidence results.
 ---
 
-# Dependency leads and patch impact
+# Symbol retrieval, dependency leads and patch impact
 
-The `graph` tool answers relationship questions from an index of the code. Use it
-when a dependency question is explicit; use `grep`/`read` for ordinary source
-navigation and to verify any graph lead. The opt-in patch audit uses the graph
-at the end of a native `write`/`edit` run, not as a mandatory first search.
+The `graph` tool retrieves exact definitions from a verified source snapshot and
+answers relationship questions from the same index. For concept-to-code discovery,
+try `search_symbols` before broad grep/file reads, then retrieve the selected
+implementation with `symbol_source`. Use `grep` when results are absent or low
+confidence. Read surrounding file context before editing. The opt-in patch audit
+uses the graph at the end of a native `write`/`edit` run.
+
+For an unfamiliar repository area, start with a bounded overview rather than a
+chain of broad directory and symbol queries:
+
+```
+graph {action:"overview", aspects:["modules","entry_points","boundaries"], limit:8}
+```
+
+Each section reports exact `total`, `returned`, and `truncated` counts. Ask for a
+specific section or a larger limit only when the clipped rows hide a needed lead.
+
+## Retrieve implementation source
+
+```
+graph {action:"search_symbols", name:"session routing", limit:8}
+```
+
+Results are ranked by explainable BM25-like lexical evidence plus a small
+graph-centrality boost. camelCase and snake_case identifiers are tokenized.
+`score`, `score_breakdown`, `confidence`, `reason`, and `matched_terms` expose why a result
+ranked. This is lexical retrieval, not semantic proof. Select a result rather
+than broadening immediately when confidence is useful.
+
+```
+graph {action:"symbol_source", path:"lua/core/agent.lua", name:"choose_worker", line:123, kind:"fn"}
+```
+
+Copy the selector fields from one search result. The source is the exact syntax
+definition from the graph's verified snapshot. Large definitions are paged;
+continue with the returned `next_byte_offset`. A selector cannot read arbitrary
+files. Source retrieval replaces the first broad read, but inspect imports and
+nearby state before changing code.
 
 `graph {action:"audit"}` checks the current run's recorded patch against resolved
 callers not read through native `read`/`read_many`; use `source:"git"` for the
@@ -24,7 +58,18 @@ The node refreshes the index as files change. Every answer verifies the indexed
 source bytes; if verification or refresh fails, the tool reports an error. Use
 `grep`/`read` in that case rather than treating an empty graph result as evidence.
 
-## The four questions
+## Relationship questions
+
+```
+graph {action:"impact", source:"git", direction:"both", depth:2, limit:50}
+```
+
+Use `impact` after a patch when you need the changed symbols plus resolved
+callers, dependencies, and test leads in one bounded result. Every impact row
+includes hop direction and the call-site edge that reached it, including the
+resolver strategy and confidence. Continue with `next_cursor`; a cursor fails if
+the graph generation or request changed. This is factual static reachability. It
+does not estimate risk and cannot see dynamic calls.
 
 ```
 graph {action:"explain", name:"append_turn"}
@@ -70,7 +115,8 @@ call is a typed edge, not a string.
 
 - `kind` is `fn`, `method`, `struct`, `module`, `field`, `var`, `capability`,
   `doc`, and so on. `method` means it lives in an `impl`.
-- A `caller`/`use` with `-> path:line` was resolved to a definition. One without
+- A `caller`/`use` with `-> path:line` was resolved to a definition. Structured
+  evidence also includes its `resolution` strategy and numeric `confidence`. One without
   it is a name the index could not pin down (an external call, or a name that is
   ambiguous across files) — treat it as a lead, not a fact.
 - `host.<name>` entries are capabilities. If you need to know whether a
@@ -83,4 +129,7 @@ call is a typed edge, not a string.
   alias may resolve to the wrong `M.x`, and trait/generic identity is not
   modelled. If `explain` shows no caller you expected, confirm with `grep`.
 - Rust, Lua, JavaScript/TypeScript, Bash, PowerShell and Markdown are indexed. Other files are not.
-- It is a map, not the territory: always `read` the file before you edit it.
+- Ranking is lexical. Synonyms that do not occur in a name, signature, or path can
+  return `absent`; use `grep` rather than treating absence as proof.
+- `symbol_source` returns the syntax node itself. Leading comments, sibling
+  attributes, imports, and nearby module state may require a surrounding `read`.

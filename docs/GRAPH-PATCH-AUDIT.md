@@ -78,9 +78,10 @@ continuation cost. If too few code patches were audited, extend the window
 after an adequate sample, remove the runtime graph and preserve the trial data.
 
 Reports are phase-aware. Events from the original trial have no explicit tag and
-are classified as `phase_1`; the current runtime emits `phase_2`. The report's
+are classified as `phase_1`; the locator-only runtime emitted `phase_2`, and the
+Phase 4 graph runtime emits `phase_4`. The report's
 top-level counts cover the requested window, while `phases` splits the same
-events and `current_phase_started_at` begins with the first Phase 2 audit. The
+events and `current_phase_started_at` begins with the first Phase 4 audit. The
 48-hour `ready_for_review` clock applies to the current phase.
 
 The always-on watcher is a potential waste: it scans and hashes the indexed
