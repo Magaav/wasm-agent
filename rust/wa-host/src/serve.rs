@@ -2293,6 +2293,7 @@ fn dispatch(
         "/sessions" => (200, "application/json", call("wa_sessions", &[session]).into_bytes()),
         "/session" => (200, "application/json", call("wa_session", &[query_value(&query, "id").as_str(), session]).into_bytes()),
         "/session/mode" if method == "POST" => (200, "application/json", call("wa_session_mode", &[body, session]).into_bytes()),
+        "/session/worktree" if method == "POST" => (200, "application/json", call("wa_session_worktree", &[body, session]).into_bytes()),
         "/session/fixture" => (200, "application/json", call("wa_session_fixture", &[query_value(&query, "id").as_str(), session]).into_bytes()),
         // A run's changed files: "can it be undone?" and "do it", one route so the answer
         // the toggle shows and the handler's behaviour cannot disagree.

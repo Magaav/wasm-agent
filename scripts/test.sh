@@ -657,6 +657,10 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB
 # The prompt index is an authored cue, not a slice of the schema description. Without this,
 # the same text is sent twice and nothing in the suite notices when the slicing returns.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-tool-cues.lua" "$BIN" --db "$DB.tool-cues" | grep 'tool cues ok'
+# A session can own a checkout so parallel sessions on one node do not overwrite each other. The
+# default is the contract: a session with no worktree must resolve relative paths exactly as before,
+# or this feature would silently relocate every existing session's files.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-worktree.lua" "$BIN" --db "$DB.session-worktree" | grep 'session worktree ok'
 # The tool-choice experiment's verifier must reject a plausible-looking wrong answer, and
 # its treatment must reach the child prompt the rig runs. Both are what make the arm's
 # result mean anything, so they are tested without a model and before any paid run.

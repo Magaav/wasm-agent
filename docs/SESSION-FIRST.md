@@ -4,6 +4,13 @@ This is a **proposal**, not a description of the running system. It exists so th
 "work in parallel sessions from one node" is a contract to build against rather than a slogan, and
 so the node-scoped assumptions it removes are named where a reader can check them.
 
+**Status.** Steps 1 and the cwd half of step 2 are implemented: a session carries a `worktree`
+(`memory.set_session_worktree`), and `read`/`read_many`/`write`/`edit`/`ls`/`grep`/`bash` and the
+patch audit resolve through it (`lua/core/tools.lua`). Allocation is **explicit** for now — the
+master-only `session_worktree` tool points a session at an existing directory, and `clear` returns
+it to the node cwd; lazy creation of `change/<session>` trees (step 3) is not built yet. The
+default is `""`, so nothing changes for a session that has not opted in.
+
 Read [CONCURRENCY.md](CONCURRENCY.md) for what is already true. This file is only about what is
 still keyed by the *node* and should be keyed by the *session*.
 
