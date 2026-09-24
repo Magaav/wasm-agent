@@ -49,10 +49,13 @@ $harness = @'
       "the running-turn transcript should restore promptly, not wait for the turn to finish");
     check(!!restored.querySelector(".unfinished-notice") && /A run is in progress/.test(restored.textContent),
       "a reload during a turn must say the ledger is pending and the node is active");
-    check(!restored.querySelector("wa-trace .pending") && !window.__toolTickerActive(),
-      "a repainted tool must not invent a new 300-second execution clock");
-    check(restored.querySelectorAll("wa-trace .tool-line.unrecorded").length === 2,
-      "a real reload must close historical as well as current missing tool calls");
+    var stalePending = restored.querySelectorAll("wa-trace .pending").length;
+    check(stalePending === 0 && !window.__toolTickerActive(),
+      "a repainted tool must not invent a new 300-second execution clock, saw " + stalePending +
+      " pending line(s) and ticker=" + window.__toolTickerActive());
+    var unrecordedCount = restored.querySelectorAll("wa-trace .tool-line.unrecorded").length;
+    check(unrecordedCount === 2,
+      "a real reload must close historical as well as current missing tool calls, saw " + unrecordedCount);
     var restoredReasoning = restored.querySelector(".reasoning");
     check(!!restoredReasoning && restoredReasoning.textContent.indexOf("EARLIER-REASONING") >= 0,
       "a reload must repaint the stored thinking, saw: " +

@@ -1357,6 +1357,28 @@ else
   echo "ui tests SKIPPED - node not on PATH"
   SKIPPED=$((SKIPPED + 1))
 fi
+# The window's own harness drives a real headless browser, so it needs PowerShell and Edge or
+# Chrome. It is the only check that sees the page as rendered - and it used to sit outside this
+# gate, so a green gate could say "ui tests ok" while it was failing. A machine that cannot run
+# it says so and counts the skip, rather than reporting a pass it did not earn.
+if [ "${WASM_AGENT_SKIP_UI_BROWSER:-}" = "1" ]; then
+  echo "ui browser harness skipped by request (WASM_AGENT_SKIP_UI_BROWSER=1)"
+  SKIPPED=$((SKIPPED + 1))
+elif command -v powershell >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  if ui_out=$(powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-ui.ps1 2>&1); then
+    printf '%s\n' "$ui_out" | tail -1
+  elif printf '%s' "$ui_out" | grep -q "no Edge or Chrome found"; then
+    echo "ui browser harness SKIPPED - no Edge or Chrome on this machine"
+    SKIPPED=$((SKIPPED + 1))
+  else
+    echo "FAIL scripts/test-ui.ps1"
+    printf '%s\n' "$ui_out" | tail -6
+    exit 1
+  fi
+else
+  echo "ui browser harness SKIPPED - powershell or node not on PATH"
+  SKIPPED=$((SKIPPED + 1))
+fi
 if [ "$SKIPPED" -gt 0 ]; then
   echo "smoke ok ($SKIPPED skipped)"
 else
