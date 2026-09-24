@@ -40,8 +40,10 @@ local TASKS = {
       "(not a scheduled task, not a service, not a detached daemon). It must append one line to " ..
       "<FILE> every 2 seconds and it must still be running when you finish - it has to outlive this " ..
       "task. Prove it started by showing the file's contents once. Do not wait for it to end.",
-    -- The outcome here is a live process, checked after the run; there is no text to match.
+    -- The outcome here is a live process, checked after the run; there is no text to match,
+    -- so success is the observed process, never the empty fact list.
     expect = {},
+    outcome = "live_process",
   },
   ["navigation"] = {
     prompt = "Find where host.exec_timeout is read in this repository, and name the " ..
@@ -171,12 +173,6 @@ for _, entry in ipairs(started) do
   end
 
   local reply = tostring(result.reply or "")
-  -- Correct only if every requested fact is answered. The old check searched the whole
-  -- reply for the path strings, so a reply naming the paths and none of the functions
-  -- passed; `verify` checks the fact in the line that names its path and reports a
-  -- contradicted fact as wrong rather than missing.
-  local verdict = verify.verify(expect, reply)
-  local missing, wrong = verdict.missing, verdict.wrong
 
   -- What the child's first request actually carried: the hashes, sizes and identity the
   -- provider was given, not what the arm intended. A treatment that never reached the
@@ -226,6 +222,11 @@ for _, entry in ipairs(started) do
     end
   end
 
+  -- Success combines the parsed facts with the observed outcome. `long-lived` has no facts
+  -- to match, so an empty fact list must not read as a pass: the live process is the result.
+  local verdict = verify.success(selected, reply, adoption)
+  local missing, wrong = verdict.missing, verdict.wrong
+
   print("LEDGER " .. json.encode({
     arm = arm, task = task_id, run = entry.index, profile = profile,
     child = receipt.subagent_id, session = receipt.session_id, file = entry.file,
@@ -235,6 +236,8 @@ for _, entry in ipairs(started) do
     correct = verdict.complete,
     missing = missing,
     wrong = wrong,
+    conflicts = verdict.conflicts,
+    observed_outcome = verdict.observed_outcome,
     tools = tools, errors = errors,
     adoption = adoption,
     reasoning_chars = reasoning_chars,

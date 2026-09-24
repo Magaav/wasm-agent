@@ -3,8 +3,12 @@
 -- Two claims have to hold before any tool-surface result means anything:
 --   1. the verifier rejects a plausible-looking wrong answer. The `wide` task asks for each
 --      file's *first function*; the old substring check passed a reply naming the twelve
---      paths and no functions. This test constructs exactly that reply and requires failure.
---   2. the treatment reaches the prompt the experiment actually runs. The rig runs children;
+--      paths and no functions. This test constructs exactly that reply and requires failure,
+--      along with the case where the right function is mentioned in prose beside a wrong
+--      answer, and the case where an introductory sentence names the path first.
+--   2. a task whose outcome is not text cannot pass on an empty fact list. `long-lived` has
+--      no facts; success is the live process, so an empty list with no process must fail.
+--   3. the treatment reaches the prompt the experiment actually runs. The rig runs children;
 --      if `WASM_AGENT_TOOL_SNIPPETS` only changed `system_prompt`, the arm would differ in
 --      nothing the model sees. This test builds the child prompt both ways and requires them
 --      to differ, with the names-only form smaller.
@@ -75,23 +79,52 @@ local paths_only = lines({
 })
 local path_verdict = verify.verify(EXPECT, paths_only)
 ok(not path_verdict.complete, "paths without the functions must fail")
-ok(#path_verdict.wrong == #EXPECT, "each path is reported as wrong, not merely missing")
+ok(#path_verdict.missing == #EXPECT, "an unanswered path is missing")
+
+-- A wrong answer that mentions the right name in prose is still wrong.
+local prose_wrong = verify.verify(EXPECT,
+  correct:gsub("lua/core/skills%.lua: read", "lua/core/skills.lua: write (calls read later)"))
+ok(not prose_wrong.complete, "a wrong answer mentioning the right name must fail")
+ok(#prose_wrong.wrong == 1 and #prose_wrong.missing == 0, "the wrong answer is flagged as wrong")
+
+-- An introductory sentence that names a path must not break a correct answer on a later line.
+local intro = "I inspected lua/core/skills.lua and found its first function.\nlua/core/skills.lua: read"
+ok(verify.verify({ { path = "lua/core/skills.lua", name = "read" } }, intro).complete,
+  "prose mentioning the path must not invalidate the answer line")
+
+-- Two different answers for one file is a conflict, not a pass.
+local conflict = verify.verify({ { path = "lua/core/skills.lua", name = "read" } },
+  "lua/core/skills.lua: read\nlua/core/skills.lua: write")
+ok(not conflict.complete and #conflict.conflicts == 1, "conflicting answers must be reported")
 
 -- A wrong function name is wrong, not missing, and only the wrong fact is flagged.
-local one_wrong = correct:gsub("record_turn", "record")
-local wrong_verdict = verify.verify(EXPECT, one_wrong)
-ok(not wrong_verdict.complete, "a wrong function name must fail")
-ok(#wrong_verdict.wrong == 1 and #wrong_verdict.missing == 0, "only the wrong fact is flagged")
+local one_wrong = verify.verify(EXPECT, correct:gsub("record_turn", "record"))
+ok(not one_wrong.complete, "a wrong function name must fail")
+ok(#one_wrong.wrong == 1 and #one_wrong.missing == 0, "only the wrong fact is flagged")
 
 -- A short name must not match a longer word: `read` is not `readText`.
 ok(not verify.verify({ { path = "lua/core/skills.lua", name = "read" } },
-  "lua/core/skills.lua: readText").complete, "a name must match as a whole word")
+  "lua/core/skills.lua: readText").complete, "a name is parsed, not substring-matched")
 
 -- Plain facts still work (the navigation fixture).
 ok(verify.verify({ "lua/core/tools.lua", "exec_deadline_seconds" },
   "It is read in lua/core/tools.lua, in exec_deadline_seconds.").complete, "plain facts must pass")
 ok(not verify.verify({ "exec_deadline_seconds" }, "not found").complete,
   "a missing plain fact must fail")
+
+-- A task whose outcome is not text must not pass on an empty fact list.
+local live = { expect = {}, outcome = "live_process" }
+ok(not verify.success(live, "MOCK: the task is done.", {}).complete,
+  "an empty fact list with no process must fail")
+ok(verify.success(live, "", { { still_running = true } }).complete,
+  "a process still running must pass")
+ok(verify.success(live, "", { { still_running = false, file_grew = true } }).complete,
+  "a process still writing must pass")
+ok(not verify.success(live, "", { { still_running = false, file_grew = false } }).complete,
+  "a process that stopped without writing must fail")
+-- A text task is unaffected by the outcome rule.
+ok(verify.success({ expect = { "lua/core/tools.lua" } }, "see lua/core/tools.lua", {}).complete,
+  "a text task still passes on its facts")
 
 -- The treatment must reach the child prompt. The rig runs children, so this is the
 -- prompt the arm under test actually sends.
