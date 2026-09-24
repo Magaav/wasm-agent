@@ -319,7 +319,7 @@ fn is_read_route(request: &Request) -> bool {
         route.as_str(),
         "/sessions" | "/session" | "/models" | "/me" | "/users" | "/nodes" | "/skills"
             | "/memories" | "/status" | "/spells" | "/sync" | "/sync/head" | "/toolchain"
-            | "/messages" | "/observability/events"
+            | "/messages" | "/observability/events" | "/efficiency"
     )
 }
 
@@ -2292,6 +2292,9 @@ fn dispatch(
         "/node/name" if method == "POST" => (200, "application/json", call("wa_set_node_name", &[body, session]).into_bytes()),
         "/sessions" => (200, "application/json", call("wa_sessions", &[session]).into_bytes()),
         "/session" => (200, "application/json", call("wa_session", &[query_value(&query, "id").as_str(), session]).into_bytes()),
+        // The window's `/efficiency_report`: the same deterministic report the CLI prints, read
+        // for one session. No model call, so it is a plain read route.
+        "/efficiency" => (200, "application/json", call("wa_efficiency", &[query_value(&query, "session_id").as_str(), session]).into_bytes()),
         "/session/mode" if method == "POST" => (200, "application/json", call("wa_session_mode", &[body, session]).into_bytes()),
         "/session/fixture" => (200, "application/json", call("wa_session_fixture", &[query_value(&query, "id").as_str(), session]).into_bytes()),
         // A run's changed files: "can it be undone?" and "do it", one route so the answer

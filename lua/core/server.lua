@@ -681,6 +681,30 @@ function wa_session(session_id, session)
   })
 end
 
+-- The efficiency report for the window: the same deterministic, model-free view the
+-- `/efficiency_report` command prints. The window has no Lua, so it asks here. The agent is
+-- built only so the prefix artifact can be rebuilt from the transcript; no model call is made.
+function wa_efficiency(session_id, session)
+  local user = users.current(session)
+  -- A named session that does not exist is refused; only an absent name falls back to the
+  -- latest thread. `unknown or latest` would answer a typo with another session's report.
+  local record
+  if session_id and session_id ~= "" then
+    record = memory.session(session_id)
+  else
+    record = memory.latest_session(user.id, "")
+  end
+  if not record then return json.encode({ error = "unknown_session" }) end
+  if record.user_id ~= user.id and not users.is_master(user.role) then
+    return json.encode({ error = "forbidden" })
+  end
+  local efficiency = dofile("lua/core/efficiency.lua")
+  local agent = agentlib.new(record.id, nil, users.normalize(user.role), user.id, "")
+  local ok, text = pcall(efficiency.report, { session_id = record.id, agent = agent, hours = 48 })
+  if not ok then return json.encode({ error = "report_failed", detail = redact.text(tostring(text)) }) end
+  return json.encode({ session_id = record.id, text = text })
+end
+
 -- A message's file changes: "can this still be undone?" and "do it".
 --
 -- The check and the action are the same route on purpose. Asking whether a patch can be

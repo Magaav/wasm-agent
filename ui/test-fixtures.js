@@ -34,6 +34,13 @@ window.__fixtures = {
     message: "queued: the sentinel will install abc1234 once this node is idle. This is not done yet.",
     next: "the sentinel performs it when this node is idle.",
   },
+  // The `/efficiency` read behind the window's `/efficiency_report`. Preformatted text, shaped
+  // like the node's answer (lua/core/efficiency.lua) - the window shows the node's own report
+  // rather than building one, so a fixture with its own wording would let the two drift.
+  efficiency: {
+    session_id: "session-fixture-1",
+    text: "efficiency report - session fixture\n  last call\n    prompt 1,000 tok   cache read 900 (90.0%)\n  session totals (3 inference calls)\n",
+  },
   models: {
     model: "fixture-model", provider: "fixture", configured: true,
     context_limit: 128000, database: "/tmp/fixture.db",

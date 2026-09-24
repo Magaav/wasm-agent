@@ -1216,7 +1216,7 @@ $harness = @'
   // gets, not what a function returns. The list, the choice and the effect are all asserted, and the
   // last one is the point: a menu that clears the transcript while the turn still goes to the old
   // thread would look exactly like a new session and be a lie.
-  (function () {
+  await (async function () {
     document.title = "stage: commands";
     var input = window.__commandInput();
     var menu = window.__commandMenu();
@@ -1225,13 +1225,15 @@ $harness = @'
     type("/");
     check(menu.open, "commands: `/` must open the list");
     var items = Array.prototype.slice.call(menu.querySelectorAll(".menu-item"));
-    check(items.length === 3, "commands: `/` must offer all three commands, got " + items.length);
+    check(items.length === 4, "commands: `/` must offer all four commands, got " + items.length);
     check(items[0] && items[0].textContent.indexOf("/new") >= 0,
       "commands: the list must offer /new first, got: " + (items[0] && items[0].textContent));
     check(items[1] && items[1].textContent.indexOf("/update") >= 0,
       "commands: the list must offer /update, got: " + (items[1] && items[1].textContent));
     check(items[2] && items[2].textContent.indexOf("/merge") >= 0,
       "commands: the list must offer /merge, got: " + (items[2] && items[2].textContent));
+    check(items[3] && items[3].textContent.indexOf("/efficiency_report") >= 0,
+      "commands: the window must offer /efficiency_report, got: " + (items[3] && items[3].textContent));
 
     // `/update` asks the node to install its own tree's build. The three answers it can give must
     // read as three different things: queued is *not* done, and a refusal is not a silence. The
@@ -1293,6 +1295,22 @@ $harness = @'
     check(asked, "commands: running /update must POST to the node's update route");
     check(messages.lastElementChild && messages.lastElementChild.classList.contains("thread-notice"),
       "commands: /update must leave its answer in the transcript");
+
+    // Running `/efficiency_report` must ask the node. The window has no ledger to read, so a
+    // panel with no request behind it would be an invented report - the request is the evidence.
+    type("/efficiency_report");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    var reportAsked = (window.__calls || []).some(function (call) {
+      return String(call.url).indexOf("efficiency") >= 0;
+    });
+    check(reportAsked, "commands: running /efficiency_report must ask the node's efficiency route");
+    var panel = messages.querySelector(".efficiency-report");
+    check(!!panel, "commands: /efficiency_report must leave its report in the transcript");
+    if (panel) {
+      for (var reportTick = 0; reportTick < 20 && panel.textContent.indexOf("session fixture") < 0; reportTick += 1) await tick();
+      check(panel.textContent.indexOf("session fixture") >= 0,
+        "commands: /efficiency_report must show the node's answer, got: " + panel.textContent.slice(0, 60));
+    }
 
     // And the turn must name that thread, or the transcript is new and the ledger is not.
     var body = window.__composed("hello");

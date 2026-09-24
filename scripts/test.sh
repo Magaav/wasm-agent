@@ -878,6 +878,9 @@ WA_SCRIPT=scripts/test-recovery.lua "$BIN" --db "$DB" | grep "recovery ok"
 WA_SCRIPT=scripts/test-changeset.lua "$BIN" --db "$DB" | grep "changeset ok"
 WA_SCRIPT=scripts/test-changes-roundtrip.lua "$BIN" --db "$DB" | grep "changes round trip ok"
 WA_SCRIPT=scripts/test-diff-route.lua "$BIN" --db "$DB" | grep "diff route ok"
+# The window's `/efficiency_report` reads this route; the UI test stubs it, so the route itself
+# is proved here against a real session - otherwise the window could render a fixture forever.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-efficiency-route.lua" "$BIN" --db "$DB.efficiency-route" | grep "efficiency route ok"
 
 # An empty assistant message is not an answer. A reasoning model that spends its
 # whole output budget thinking returns content "", a reasoning field, and
