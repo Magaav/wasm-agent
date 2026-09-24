@@ -2208,6 +2208,11 @@ const COMMANDS = [
     hint: "act as git orchestrator — merge every open branch into main, gate, push, sync",
     run: () => { send(ORCHESTRATOR_BRIEF); },
   },
+  {
+    name: "/efficiency_report",
+    hint: "what the last call sent and cost — tokens, KV cache, USD, and the prefix to inspect",
+    run: efficiencyReport,
+  },
 ];
 
 // A thread is named by whoever starts it. The id is made here rather than asked for, so the name
@@ -2259,6 +2264,34 @@ function updateNotice(payload) {
   if (message) return "/update — " + message + tail;
   if (payload.queued) return "/update — queued: the sentinel will install it once this node is idle." + tail;
   return "/update — refused: " + (payload.observed || payload.error || "no reason given") + tail;
+}
+
+// `/efficiency_report`: what the last model call sent and cost, read from the harness ledger.
+//
+// The window has no Lua, so it cannot build the report itself: it asks the node's read route,
+// which runs the same deterministic report the CLI's `/efficiency_report` prints. No model call
+// is spent. The answer is preformatted, so it goes in a <pre> rather than a one-line notice.
+async function efficiencyReport() {
+  const panel = document.createElement("pre");
+  panel.className = "efficiency-report";
+  panel.textContent = "/efficiency_report — reading the harness ledger…";
+  messages.append(panel);
+  pin();
+  try {
+    const response = await apiFetch("efficiency?session_id=" + encodeURIComponent(session), { headers: apiHeaders() });
+    const payload = await response.json();
+    if (payload && payload.error) {
+      panel.textContent = "/efficiency_report: " + payload.error;
+      panel.dataset.state = "refused";
+    } else {
+      panel.textContent = (payload && payload.text) || "(empty report)";
+      panel.dataset.state = "current";
+    }
+  } catch (error) {
+    panel.textContent = "/efficiency_report could not be read: " + String(error);
+    panel.dataset.state = "refused";
+  }
+  pin();
 }
 
 // Start a thread with nothing in it.

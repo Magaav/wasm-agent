@@ -324,7 +324,7 @@ fn is_read_route(request: &Request) -> bool {
         "/sessions" | "/session" | "/session/fixture" | "/models" | "/me" | "/users"
             | "/nodes" | "/skills" | "/memories" | "/status" | "/spells" | "/sync"
             | "/sync/head" | "/toolchain" | "/tools" | "/envelope" | "/messages"
-            | "/observability/events"
+            | "/observability/events" | "/efficiency"
     )
 }
 

@@ -658,6 +658,21 @@ body.view-only .panel { display: none; }
   border-top: 1px solid var(--line); margin-top: var(--gap);
 }
 
+/* `/efficiency_report`: the report is preformatted tables, not prose, so it keeps its own
+   whitespace and alignment and can scroll sideways on a narrow window rather than wrap into
+   columns that no longer line up. */
+.efficiency-report {
+  margin: var(--gap) 0;
+  padding: var(--space) var(--gap);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--muted);
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
 /* Working, or stuck? A running run showed only a spinner and an unfinished tool line, so a
    command that was legitimately long and one that would never return looked the same - and the
    difference arrived 300 seconds later, when the second was killed. This reports the node's own
