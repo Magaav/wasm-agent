@@ -63,6 +63,8 @@ end
 near(total_percent, 100, 0.001, 'the non-subset shares add up to 100 percent')
 check(report.domination.rows[5].subset and report.domination.rows[5].percent == nil,
   'reasoning is a marked subset, not a second share of the whole')
+check(report.domination.rows[5].stable == true,
+  'reasoning is marked stable: it is prefix-stable and must not be offered as a target')
 
 near(report.cache.hit_percent, 90, 0.001, 'cache read share is read over prompt')
 check(report.cache.uncached == 1000, 'uncached input is prompt minus read and write')
@@ -83,6 +85,8 @@ check(text:find('efficiency report', 1, true) ~= nil, 'the rendered report names
 check(text:find('where the request bytes go', 1, true) ~= nil, 'the domination table is rendered')
 check(text:find('footer', 1, true) ~= nil, 'the footer of report links is rendered')
 check(text:find('docs/OBSERVABILITY.md', 1, true) ~= nil, 'the footer points at the observability doc')
+check(text:find('reasoning is prefix-stable', 1, true) ~= nil,
+  'the report says reasoning is stable, so an efficiency pass does not window it')
 
 -- A prefix rewrite must be named, and the first changed message reported.
 local broken = session('efficiency-rewritten')

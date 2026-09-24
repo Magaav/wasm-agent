@@ -200,14 +200,17 @@ function M.build(opts)
 
   -- Where the request bytes go. The subsets (reasoning, tool arguments) are
   -- already inside the assistant row, so they are marked and excluded from the
-  -- percentage column's total.
+  -- percentage column's total. `stable` marks a component that must not be
+  -- reduced by rewriting already-sent messages: reasoning replay is prefix-stable
+  -- (see `provider.reasoning` and docs/MEMORY.md), so the report names it rather
+  -- than offering it as a target.
   local whole = (tonumber(shape.total_message_bytes) or 0) + (tonumber(shape.schema_bytes) or 0)
   local rows = {
     { label = "tools (schemas)", bytes = shape.schema_bytes },
     { label = "system", bytes = shape.system_bytes },
     { label = "user", bytes = shape.user_bytes },
     { label = "assistant", bytes = shape.assistant_bytes },
-    { label = "  reasoning", bytes = shape.reasoning_source_bytes, subset = true },
+    { label = "  reasoning", bytes = shape.reasoning_source_bytes, subset = true, stable = true },
     { label = "  tool args", bytes = shape.tool_arguments_source_bytes, subset = true },
     { label = "tool results", bytes = shape.tool_result_bytes },
     { label = "other", bytes = shape.other_bytes },
@@ -410,9 +413,11 @@ function M.render(report)
     commas(report.domination.whole_bytes), commas(report.domination.messages))
   for _, row in ipairs(report.domination.rows) do
     local shown = row.percent and string.format("%.1f%%", row.percent) or "(subset)"
+    if row.stable then shown = shown .. "  stable" end
     lines[#lines + 1] = table_row(row.label, commas(row.bytes) .. " B", shown)
   end
   lines[#lines + 1] = "    (subset rows are inside assistant; percentages are of the whole request)"
+  lines[#lines + 1] = "    (reasoning is prefix-stable: keep it whole or omit it, never window it - docs/MEMORY.md)"
 
   local session = report.session
   lines[#lines + 1] = ""
@@ -481,6 +486,7 @@ function M.render(report)
       tostring(report.runtime.lua_mode), tostring(report.runtime.source_hash))
   end
   lines[#lines + 1] = "  docs                    docs/OBSERVABILITY.md  docs/TOKEN_EFFICIENCY.md  docs/GRAPH-PATCH-AUDIT.md"
+  lines[#lines + 1] = "  reasoning replay        prefix-stable, all-or-nothing: do not window it (docs/MEMORY.md)"
   lines[#lines + 1] = "  artifacts               data/tool-results/ (original oversized tool output)  data/efficiency/ (prefixes)"
   return table.concat(lines, "\n")
 end

@@ -145,7 +145,11 @@ call will send, and the report says which.
 
 The footer gathers the other surfaces (harness events, the graph/patch-audit
 trial report, the offline token audit, the runtime fingerprint, the docs) so one
-command is enough to start an efficiency investigation. The signals it prints are
+command is enough to start an efficiency investigation. The reasoning row is
+marked **stable**: reasoning replay is prefix-stable, so the report names it as a
+fact and never as a reduction target - emptying a sent thought rewrites the
+prefix and costs more than the cached read it saves (`docs/MEMORY.md`, and the
+`provider.reasoning` comment). The signals it prints are
 facts, not verdicts: "worthy", "waste" and "at the limit" are the reader's
 conclusions, not the report's. `scripts/test-efficiency-report.lua` proves the
 arithmetic, the prefix-break naming and the unmeasured-stays-unmeasured rule
