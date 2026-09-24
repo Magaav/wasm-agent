@@ -9,6 +9,19 @@ import json
 import os
 import sys
 
+# A transcript is read by a UTF-8 reader, so it must be written as UTF-8.
+# Python picks the *locale* encoding for a piped stdout: on Windows that is the
+# ANSI code page, so `ensure_ascii=False` put a single cp1252 byte on the wire for
+# each accent and the reader, decoding UTF-8, replaced every one of them with
+# U+FFFD - "Area" became "<?>rea" and the text was lost, not merely garbled.
+# Set the encoding here, once, for stdout and stderr alike, rather than trusting
+# whatever locale the scheduler happened to hand us.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
 
 def main():
     parser = argparse.ArgumentParser()
