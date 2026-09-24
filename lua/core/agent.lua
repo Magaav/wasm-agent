@@ -1439,8 +1439,16 @@ function M:run_body(text, images)
       -- The node's own secrets must not enter the transcript through a tool result. A `bash`
       -- call once dumped the config file and its API key was stored, journalled and sent; the
       -- redactor covered logs and errors but not tool results. Exact-value replacement, before
-      -- projection, storage and the provider view.
-      output = redact.value(output)
+      -- projection, storage and the provider view - and the hit is named, so the operator hears
+      -- about it even though the value itself is gone.
+      local redacted_output, secret_hits = redact.value(output)
+      if next(secret_hits) ~= nil then
+        telemetry.event(self.session_id, self.run_id, tool_span and tool_span.id or "",
+          "secret_redacted", "redacted", { tool = function_.name, names = secret_hits })
+        self.emit({ type = "status", text = "a configured secret was found in " ..
+          tostring(function_.name) .. " output and redacted" })
+      end
+      output = redacted_output
       if type(output)=="table" and output.error=="graph_patch_review_required" then
         remember_audit_leads(output.audit)
       elseif function_.name=="graph" and args.action=="audit_assess"
