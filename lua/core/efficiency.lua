@@ -475,10 +475,12 @@ function M.render(report)
   if graph.error then
     lines[#lines + 1] = "  graph / patch audit     unavailable: " .. tostring(graph.error)
   else
+    local phase = graph.phases and graph.phases[graph.current_phase] or graph
     lines[#lines + 1] = string.format(
-      "  graph / patch audit     audits=%s leads=%s confirmed=%s false=%s worthy=%s (last %sh)",
-      commas(graph.audits or 0), commas(graph.leads or 0), commas(graph.confirmed_catches or 0),
-      commas(graph.false_positives or 0), tostring(graph.worthy or "unproven"), commas(report.hours))
+      "  graph / patch audit     %s audits=%s leads=%s gaps=%s ignored=%s confirmed=%s worthy=%s (last %sh)",
+      tostring(graph.current_phase or "all"), commas(phase.audits or 0), commas(phase.leads or 0),
+      commas(phase.gaps or 0), commas(phase.ignored_lines or 0),
+      commas(phase.confirmed_catches or 0), tostring(phase.worthy or "unproven"), commas(report.hours))
   end
   lines[#lines + 1] = "  token audit (offline)   node scripts/audit-tokens.cjs <export.json>"
   if report.runtime then
