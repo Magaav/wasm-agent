@@ -545,6 +545,92 @@ ok(not has(cleared, "\27[2K"), "and never erases to the end of the row")
 ok(view_lib.visible_columns("\27[33mab\27[0m") == 2, "an escape sequence is not a column")
 ok(view_lib.visible_columns("\27]2;title\7ab") == 2, "nor is a title")
 
+-- ---- the screen: output, the status line, and the reader's row -------------------
+--
+-- The prompt cannot be pinned to the bottom row from an unknown cursor position (see above), so the
+-- honest way to own the bottom is to own the rows: a scroll region for the output, a status row, and
+-- an input row the terminal keeps echoing into. What is pinned here is the byte discipline. Whether
+-- a given terminal renders it is not testable from here, which is why the knob exists.
+local screen_view, screen_out = capture({ live = true, limit = 100, rows = function() return 12 end })
+screen_view:prompt("wa> ")
+local opened = table.concat(screen_out)
+ok(has(opened, "\27[1;10r"), "the screen scrolls the output in a region above its own rows")
+ok(has(opened, "\27[11;1H\27[2K"), "the status row is its own")
+ok(has(opened, "\27[12;1H\27[2Kwa> "), "and the prompt is written on the last row, where typing goes")
+ok(opened:sub(-4) == "wa> ", "leaving the cursor there")
+
+-- Output goes inside the region, never on the two rows below it, and the reader's cursor comes back.
+local function since(written, from)
+  return table.concat(written, "", from)
+end
+local mark = #screen_out + 1
+screen_view:line("hello")
+local line_out = since(screen_out, mark)
+ok(has(line_out, "\27[10;1Hhello"), "an output line is written inside the region")
+ok(line_out:sub(1, 2) == "\27" .. "7" and line_out:sub(-2) == "\27" .. "8",
+  "with the reader's cursor saved and restored around it")
+
+-- The status line has a row of its own, and the ticker is told which: that is what lets it draw
+-- there while the terminal's cursor stays on the input row.
+mark = #screen_out + 1
+screen_view:run_started()
+screen_view:event({ type = "status", text = "thinking" })
+ok(has(since(screen_out, mark), "\27[11;1H"), "the status line is drawn on the status row")
+
+-- The reader's line is moved into the transcript before the input row is reused.
+mark = #screen_out + 1
+screen_view:accepted("is this lost?")
+ok(has(visible(since(screen_out, mark)), "wa> is this lost?"),
+  "an accepted line is committed to the transcript")
+
+-- Leaving gives the screen back: a scroll region outlives the process that set it.
+mark = #screen_out + 1
+screen_view:screen_off()
+ok(has(since(screen_out, mark), "\27[r"), "the scroll region is reset on the way out")
+ok(screen_view.screen == nil, "and the screen is forgotten")
+
+-- A resized window: the rows move with it, so the old screen is given back and a new one is laid out
+-- on the height the console now reports. Without this, a window made smaller leaves output scrolling
+-- over the status and input rows for the rest of the chat.
+local height = { rows = 12 }
+local resize_view, resize_out = capture({ live = true, limit = 100, rows = function() return height.rows end })
+resize_view:prompt("wa> ")
+mark = #resize_out + 1
+height.rows = 6
+resize_view:prompt("wa> ")
+local resized = since(resize_out, mark)
+ok(has(resized, "\27[r"), "a resized window gives the old scroll region back")
+ok(has(resized, "\27[1;4r"), "and lays the screen out on the new height")
+ok(has(resized, "\27[6;1H\27[2Kwa> "), "with the prompt on the row that is last now")
+ok(#resize_out > mark and not has(since(resize_out, mark), "\27[1;10r"),
+  "and never both regions at once")
+
+-- A console too short for one output row, and a reader who refuses the screen: both fall back to the
+-- prompt at the cursor rather than to a broken one.
+local short_view, short_out = capture({ live = true, limit = 100, rows = function() return 3 end })
+short_view:prompt("wa> ")
+ok(short_view.screen == nil, "no screen on a console too short for output, status and input")
+ok(not has(table.concat(short_out), "\27[1;"), "and no region is claimed")
+ok(table.concat(short_out):sub(-4) == "wa> ", "the prompt is still written")
+
+local off_view, off_out = capture({ live = true, limit = 100, rows = function() return 30 end,
+  getenv = function(name) return name == "WASM_AGENT_CLI_FRAME" and "off" or nil end })
+off_view:prompt("wa> ")
+ok(off_view.screen == nil and not has(table.concat(off_out), "\27[1;28r"),
+  "WASM_AGENT_CLI_FRAME=off refuses the screen")
+
+-- The rows themselves, from a height - with the same rule as the width: a console that answers zero
+-- or nothing is not a height.
+ok(view_lib.rows(function() return 24 end) == 24, "the console's height is the height used")
+ok(view_lib.rows(function() return 0 end) == nil, "a console that answers zero is not a height")
+ok(view_lib.rows(function() return nil end) == nil, "nor is a console that will not answer")
+ok(view_lib.rows(function() return "24" end) == 24,
+  "and a height that arrives as text (the shape JSON would give) is still a height")
+ok(view_lib.screen_rows(24).input == 24 and view_lib.screen_rows(24).status == 23
+  and view_lib.screen_rows(24).bottom == 22, "a 24-row console gives the screen its three zones")
+ok(view_lib.screen_rows(3) == nil, "a 3-row console gives it none")
+ok(view_lib.screen_rows(nil) == nil, "an unknown height gives it none")
+
 if failed > 0 then
   print(string.format("cli view: %d failed of %d checks", failed, checks))
   os.exit(1)

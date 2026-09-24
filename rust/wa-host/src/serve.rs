@@ -315,11 +315,16 @@ fn is_read_route(request: &Request) -> bool {
     // run was in flight. Measured live: with a run 457s into a turn, `/sync/head` returned no
     // bytes at all within 5s while `/health` answered instantly, and the two-node suite reads
     // its node id from exactly this route.
+    // `/tools` was missing, and it is the same failure as `/sync/head`: a plain read queued behind
+    // whatever run held worker 0. Measured live on 2026-09-24: with a run in flight, GET /health
+    // answered in 2ms while GET /tools returned no bytes within 6s. `/envelope` and
+    // `/session/fixture` are the same kind of read and were missing for the same reason.
     matches!(
         route.as_str(),
-        "/sessions" | "/session" | "/models" | "/me" | "/users" | "/nodes" | "/skills"
-            | "/memories" | "/status" | "/spells" | "/sync" | "/sync/head" | "/toolchain"
-            | "/messages" | "/observability/events" | "/efficiency"
+        "/sessions" | "/session" | "/session/fixture" | "/models" | "/me" | "/users"
+            | "/nodes" | "/skills" | "/memories" | "/status" | "/spells" | "/sync"
+            | "/sync/head" | "/toolchain" | "/tools" | "/envelope" | "/messages"
+            | "/observability/events" | "/efficiency"
     )
 }
 
