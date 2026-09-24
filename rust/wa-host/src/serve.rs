@@ -299,33 +299,22 @@ pub(crate) fn worker_id() -> usize {
     WORKER_ID.with(|cell| cell.get())
 }
 
-/// Routes that only read. A GET on one of these is served by a read worker when the node has one.
-/// Not in this list means worker 0 - the safe default, and the reason a missing entry is a performance
-/// question rather than a correctness one.
+/// Is this a route that only reads, and may therefore be served by a read worker instead of worker
+/// 0? A GET always is; the controls named below are POSTs answered by runtimes that hold no agent
+/// state. The rest of the method space is a write and stays pinned to worker 0.
 fn is_read_route(request: &Request) -> bool {
     // These controls use independent synchronized runtimes, never agent state. A blocked run must
     // not queue its own cancellation or the operator's disable behind itself.
     if matches!(split_path(&request.path).0.as_str(), "/jobs" | "/operations" | "/operation") {return true;}
-    if request.method != "GET" {
-        return false;
-    }
-    let (route, _) = split_path(&request.path);
-    // `/sync/head` is a pure read - the node's identity and its journal cursor - but the list
-    // named only `/sync`, so the sub-route fell through to worker 0 and queued behind whatever
-    // run was in flight. Measured live: with a run 457s into a turn, `/sync/head` returned no
-    // bytes at all within 5s while `/health` answered instantly, and the two-node suite reads
-    // its node id from exactly this route.
-    // `/tools` was missing, and it is the same failure as `/sync/head`: a plain read queued behind
-    // whatever run held worker 0. Measured live on 2026-09-24: with a run in flight, GET /health
-    // answered in 2ms while GET /tools returned no bytes within 6s. `/envelope` and
-    // `/session/fixture` are the same kind of read and were missing for the same reason.
-    matches!(
-        route.as_str(),
-        "/sessions" | "/session" | "/session/fixture" | "/models" | "/me" | "/users"
-            | "/nodes" | "/skills" | "/memories" | "/status" | "/spells" | "/sync"
-            | "/sync/head" | "/toolchain" | "/tools" | "/envelope" | "/messages"
-            | "/observability/events"
-    )
+    // A GET is a read, by default. This was an allow-list, and that was backwards: a route nobody
+    // remembered to add fell through to worker 0 and queued behind whatever run held it. It cost two
+    // incidents - `/sync/head`, then `/tools` - and each looked like the node being wedged: with a
+    // run in flight, `/health` answered in 2ms while `GET /tools` returned no bytes within 6s, the
+    // page's fetches filled the browser's connection pool, its own heartbeat could not get through,
+    // and the window reloaded it in a loop. A rule that cannot rot is the HTTP one: a GET does not
+    // change state, so worker 0's one-writer guarantee does not apply to it and a read worker may
+    // always answer. A new read route is therefore correct without anyone adding it here.
+    request.method == "GET"
 }
 
 /// Milliseconds since a particular worker last reported progress. A worker that has never beaten is as
@@ -2457,6 +2446,49 @@ mod ui_version_tests {
         std::fs::write(&asset, b"<html>two</html>").expect("change");
         assert_ne!(ui_version(&dir), first, "changed content must change the version");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod read_route_tests {
+    use super::{is_read_route, Request};
+
+    fn request(method: &str, path: &str) -> Request {
+        Request {
+            method: method.into(),
+            path: path.into(),
+            session: String::new(),
+            routing_session: String::new(),
+            run_class: super::scheduler::RunClass::Interactive,
+            run_id: 0,
+            owner: String::new(),
+            run_cancel: None,
+            peer_verified: None,
+            run_sockets: None,
+            node_headers: Vec::new(),
+            body: Vec::new(),
+            accept_sse: false,
+        }
+    }
+
+    /// The regression that cost two incidents: a read route not on the hand-maintained list was
+    /// pinned to worker 0, and queued behind a run. A GET must be a read without anyone remembering.
+    #[test]
+    fn a_get_is_a_read_without_being_listed() {
+        assert!(is_read_route(&request("GET", "/a-route-invented-after-this-test")));
+        assert!(is_read_route(&request("GET", "/tools")));
+        assert!(is_read_route(&request("GET", "/sync/head")));
+        assert!(!is_read_route(&request("POST", "/a-write")));
+        assert!(!is_read_route(&request("DELETE", "/a-delete")));
+    }
+
+    /// The controls answered by independent runtimes are reads too. They are POSTs, so the method
+    /// rule alone would pin them to worker 0 - where a run could block its own cancellation.
+    #[test]
+    fn a_control_post_is_a_read() {
+        assert!(is_read_route(&request("POST", "/operation")));
+        assert!(is_read_route(&request("POST", "/operations")));
+        assert!(is_read_route(&request("POST", "/jobs")));
     }
 }
 

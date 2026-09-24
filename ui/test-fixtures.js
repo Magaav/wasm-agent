@@ -207,6 +207,12 @@ window.fetch = function (input, init) {
     if (job) job.enabled = request.action === 'enable';
     return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve(job || {error:'not_found'})});
   }
+  // `/version` is the page's once-a-second liveness loop. `__failVersion` makes it fail so a test can
+  // prove the shell heartbeat does not depend on the node answering.
+  if (path === 'version') {
+    if (window.__failVersion) return Promise.reject(new Error('fixture: version unavailable'));
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ version: 'fixture' }) });
+  }
   const key = Object.keys(window.__fixtures).find((name) => path === name);
   if (key) {
     const payload = window.__fixtures[key];
