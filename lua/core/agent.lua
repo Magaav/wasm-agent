@@ -1018,7 +1018,8 @@ function M:run_body(text, images)
     if not step then return end
     telemetry.event(self.session_id,self.run_id,"","graph_patch_step","end",{
       step_id=step.id,source=step.source,lead_count=step.lead_count,
-      assessed=step.assessed,grade=step.grade,error=step.error})
+      assessed=step.assessed,grade=step.grade,error=step.error,
+      trial_phase=patch_audit.PHASE})
     self.audit_step=nil
   end
   local function remember_audit_leads(audit)
@@ -1480,6 +1481,7 @@ function M:run_body(text, images)
       -- What a navigation call answered (action, found, count): a wrong answer must not be
       -- recorded as a plain success. Enums/booleans/counts only.
       local nav = navigation_outcome(function_.name, args, output)
+      if nav then nav.trial_phase=patch_audit.PHASE end
       telemetry.finish(tool_span,{name=function_.name,ok=ok_tool,code=type(output)=="table" and output.code or nil,
         error=not projected and "tool_output_storage_failed" or type(output)=="table" and output.error or nil,
         full_bytes=#json.encode(output),view_bytes=#content,storage_ok=projected,execution_timing=execution_timing,nav=nav})
@@ -1533,6 +1535,7 @@ function M:run_body(text, images)
       continuation_ms=math.max(0,telemetry.clock()-audit_time_before),
       continuation_tokens=math.max(0,(totals.total or 0)-(audit_tokens_before or 0)),
       continuation_usage_unknown=(totals.unaccounted or 0)>audit_unaccounted_before,
+      trial_phase=patch_audit.PHASE,
     })
   end
   finish_audit_step()
