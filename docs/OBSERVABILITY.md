@@ -124,6 +124,33 @@ prompt text or per-message hashes enter the ledger. This is not proof of provide
 acceptance or cache retention. Byte reduction, cache share and retained originals
 alone do not prove equal task quality.
 
+## Live efficiency report
+
+`/efficiency_report` in `wa chat` is the live counterpart to the offline audit.
+It is deterministic: it reads the durable ledger and the transcript, spends no
+model call, and writes nothing to the thread. It reports, for the last call and
+the session, the byte domination of the request (tools, system, user, assistant,
+reasoning, tool results, as a percentage of the whole request), the provider's own
+disjoint cache categories (uncached input, cache read, cache write), the cache hit
+rate, and the call cost at the configured rates with the cache share of that cost.
+It names the part that did **not** hit the cache: the appended suffix, or the
+prefix break (`rewritten`/`shortened`, a changed tool set, model or routing).
+
+It also writes the exact prefix to `data/efficiency/<session>-prefix.{json,md}`
+and prints `file://` links. The `.md` is the readable one - system prompt whole,
+tools ranked by schema size, transcript as a byte-sized outline; the `.json` is
+the bytes. When the session ran in debug mode the artifact is the last call's
+request; otherwise it is `build_context()`, the deterministic assembly the next
+call will send, and the report says which.
+
+The footer gathers the other surfaces (harness events, the graph/patch-audit
+trial report, the offline token audit, the runtime fingerprint, the docs) so one
+command is enough to start an efficiency investigation. The signals it prints are
+facts, not verdicts: "worthy", "waste" and "at the limit" are the reader's
+conclusions, not the report's. `scripts/test-efficiency-report.lua` proves the
+arithmetic, the prefix-break naming and the unmeasured-stays-unmeasured rule
+without a model.
+
 ## Verification
 
 `scripts/test-observability.lua` runs through the actual Lua agent/provider with

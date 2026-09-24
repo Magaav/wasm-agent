@@ -654,6 +654,10 @@ LUA
 WA_SCRIPT="$DB.evidence.lua" "$BIN" --db "$DB" | grep "tool evidence ok"
 rm -f "$DB.evidence.lua"
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB.observability" | grep 'observability ok'
+# The efficiency report is deterministic and spends no model call. It must price the
+# provider's own cache categories, name a prefix break, and keep an unmeasured call
+# unmeasured - the fields a reader would otherwise trust to be right.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-efficiency-report.lua" "$BIN" --db "$DB.efficiency-report" | grep 'efficiency report ok'
 # A provider 400 on a too-large request must compact and retry once. Without it, one
 # oversized turn makes every later turn of the session fail and the thread never answers.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-overflow-recovery.lua" "$BIN" --db "$DB.overflow" | grep 'overflow recovery ok'
