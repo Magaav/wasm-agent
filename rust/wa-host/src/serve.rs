@@ -2286,6 +2286,13 @@ fn dispatch(
         "/node/name" if method == "POST" => (200, "application/json", call("wa_set_node_name", &[body, session]).into_bytes()),
         "/sessions" => (200, "application/json", call("wa_sessions", &[session]).into_bytes()),
         "/session" => (200, "application/json", call("wa_session", &[query_value(&query, "id").as_str(), session]).into_bytes()),
+        // The window's `/efficiency_report`: the same deterministic report the CLI prints, read for one
+        // session. No model call, so it is a plain read route. This line was dropped by a merge that
+        // applied cleanly and recorded its branch as a parent while bringing none of its content - the
+        // gate stayed green because nothing asserted the route. `scripts/test-serve-concurrency.sh`
+        // now fetches it while worker 0 is wedged, which catches both a missing handler (404) and a
+        // handler that is not a read.
+        "/efficiency" => (200, "application/json", call("wa_efficiency", &[query_value(&query, "session_id").as_str(), session]).into_bytes()),
         "/session/mode" if method == "POST" => (200, "application/json", call("wa_session_mode", &[body, session]).into_bytes()),
         "/session/worktree" if method == "POST" => (200, "application/json", call("wa_session_worktree", &[body, session]).into_bytes()),
         "/session/fixture" => (200, "application/json", call("wa_session_fixture", &[query_value(&query, "id").as_str(), session]).into_bytes()),
