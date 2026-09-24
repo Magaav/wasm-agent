@@ -222,7 +222,13 @@ function M.run(argv)
     view:prompt("wa> ")
     while true do
       local line, eof = input:poll(cli_input.WAIT_MS)
-      if line ~= nil then return line end
+      if line ~= nil then
+        -- The reader's own line, into the transcript, before the input row is reused: the echo of
+        -- it lives only on that row, and a message that vanishes when it is sent is one its author
+        -- cannot check. See `cli_view.accepted`.
+        view:accepted(line)
+        return line
+      end
       -- The input ended: a closed pipe, or the terminal's own end-of-file. Nothing left to wait
       -- for, and a REPL that keeps prompting for a stream it cannot read is worse than one that
       -- stops, so the loop ends.
@@ -293,6 +299,9 @@ function M.run(argv)
     end
   end
   agent:close()
+  -- The screen's scroll region is not this process's to leave set: a shell whose output scrolls only
+  -- the top rows of the window is a bug the next reader gets to explain.
+  view:screen_off()
   -- Tell the host to stop reading stdin. Not required for correctness - the thread dies with the
   -- process - but this is the one place that knows the REPL is finished rather than blocked.
   input:stop()

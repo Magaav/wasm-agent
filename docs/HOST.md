@@ -222,6 +222,13 @@ animated line and the printed line cannot drift apart.
 
 - One ticker per process, drawn on that process's own stdout. The view only starts it when
   its output *is* stdout, so a captured transcript never has a second writer.
+- `spec.row` (1-based from the top of the window) is the row to draw on, for a view that keeps a
+  frame: output in a scroll region, a status row, and the reader's input row below it. The ticker
+  places the cursor there for each frame and hands it back (save, `CUP(row,1)`, the line, restore),
+  which is what lets it draw while the terminal's cursor stays on the row the reader types on. A
+  frame with no row would put the status line on exactly that row. Without `row` the line is drawn
+  at the cursor and, because the reader may be typing at the cursor, a line that needs more room
+  than the last one commits the row instead of taking their columns.
 - **The row it draws on is the reader's row.** A run is exactly when a reader types, the terminal
   echoes at the cursor, and the cursor sits at the end of this line. So a frame rewrites only the
   columns it drew (a shorter line is padded with spaces, never `\27[2K`, which would erase the
