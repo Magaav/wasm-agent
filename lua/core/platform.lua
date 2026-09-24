@@ -4,6 +4,8 @@
 -- to be told which dialect it is in. Without this it guesses POSIX, runs `pwd`,
 -- `ls` and `grep`, and spends its tool budget on "not recognized as an internal
 -- or external command".
+local json = dofile("lua/vendor/json.lua")
+
 local M = {}
 
 local cached = nil
@@ -22,6 +24,32 @@ end
 function M.os() return M.info().os end
 function M.shell() return M.info().shell end
 function M.cwd() return M.info().cwd or "." end
+
+-- The terminal's width in columns: the console's own answer, then `$COLUMNS`, then 80.
+--
+-- The order is the point. `COLUMNS` is a *shell* variable on most machines and is not exported to
+-- children, so it is absent in exactly the place the CLI runs - measured: a 120-column terminal with
+-- `COLUMNS` empty - and when it is present it can be stale after a resize. The console knows; the
+-- environment is the fallback for a caller that has one and no console.
+--
+-- `host.terminal_size` may be missing (an older binary), and it returns nil when it cannot ask, so
+-- both absences fall through to the same answer rather than to a width of zero.
+--
+-- `environment` and `probe` are injectable: the rule is worth a test, and a test has no terminal.
+function M.columns(environment, probe)
+  probe = probe or function()
+    local ok, raw = pcall(host.terminal_size)
+    if not ok or type(raw) ~= "string" then return nil end
+    local decoded
+    local read = pcall(function() decoded = json.decode(raw) end)
+    if not read or type(decoded) ~= "table" then return nil end
+    return decoded
+  end
+  local size = probe() or {}
+  local columns = tonumber(size.columns) or tonumber(environment) or 0
+  if columns <= 0 then return 80 end
+  return math.floor(columns)
+end
 
 -- One line for the system prompt, and a short form for tool descriptions.
 function M.describe()

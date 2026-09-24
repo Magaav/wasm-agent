@@ -483,7 +483,7 @@ function METHODS:status_template()
   -- same line, and the mark and the clock are its own. A terminal too narrow for the plain
   -- line gets the plain line, because `clip` counts columns and an escape sequence is not
   -- one - a coloured line clipped by width loses its reset and bleeds into the next line.
-  if columns(plain) > math.min(self.limit, 100) then return plain, started end
+  if columns(plain) > self.limit then return plain, started end
   return compose(paint(phase, "accent", self.live)), started
 end
 
@@ -537,7 +537,7 @@ function METHODS:paint(force)
   -- to say and would fight it for the cursor.
   if self.console then return end
   self.frame = self.frame + 1
-  local line = clip(self:status_text(self.live), math.min(self.limit, 100))
+  local line = clip(self:status_text(self.live), self.limit)
   if self.live then
     -- The host may be drawing this line at this instant: take it back before writing on it,
     -- then hand it over again, because this process is about to block.

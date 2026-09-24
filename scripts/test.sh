@@ -36,6 +36,9 @@ cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host file_s
 # call that has not finished can only be computed by the host, so both sides pin the same three
 # values and a one-sided change fails here rather than on a screen.
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host ticker_tests
+# The console size is the one number the CLI cannot learn for itself, and the only thing standing
+# between a detached console (which reports 0x0, not failure) and a screen wrapped to nothing.
+cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host terminal_tests
 # The graph is a capability the agent navigates its own code with, so its extractor and
 # incremental reindex are part of the contract, not a side project.
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-graph

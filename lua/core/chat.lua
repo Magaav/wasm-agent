@@ -162,7 +162,10 @@ function M.run(argv)
     -- The terminal width when it says so, and otherwise the width every terminal has: a
     -- status line that wraps is erased only on its last row, which leaves the row above it
     -- behind as litter.
-    limit = tonumber(host.getenv("COLUMNS")) or 80,
+    -- The terminal's real width, asked of the console rather than assumed: `COLUMNS` is a shell
+    -- variable that is normally not exported, and a CLI that fell back to 80 wrapped its answers
+    -- into a third of a wide window. See `platform.columns`.
+    limit = platform.columns(host.getenv("COLUMNS")),
   })
   local agent = agentlib.new(session.id, printer(view), "master", USER, NODE)
 
