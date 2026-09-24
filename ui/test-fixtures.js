@@ -162,6 +162,11 @@ if (sessionStorage.getItem("wa-ui-reload-stage") === "active") {
       { seq: 4, role: "assistant", content: "", tool_calls: [
         { id: "reload-tool", type: "function", function: { name: "bash", arguments: "{\"command\":\"slow check\"}" } },
       ] },
+      // A finished run, so a repainted transcript has something that *should* carry a footer. The two
+      // above are both mid-run (tool calls with no result), and a repaint of those must keep the
+      // in-progress notice rather than claim they completed.
+      { seq: 5, role: "user", content: "FINISHED-QUESTION", created_at: 1790000000, tool_calls: [] },
+      { seq: 6, role: "assistant", content: "FINISHED-ANSWER", created_at: 1790000004, tool_calls: [] },
     ],
   };
   window.__fixtures.health = {
