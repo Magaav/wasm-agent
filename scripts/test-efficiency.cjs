@@ -17,6 +17,17 @@ for(const mode of ['disk','embedded']) {
   console.log(mode+': '+(result.stdout||''));
   if(result.status!==0||!(result.stdout||'').includes('efficiency ok (')) {
     console.error(result.stderr||result.error?.message||'missing completion receipt');
+    // The embedded half reads the Lua baked into the binary at build time, and it runs *after*
+    // the disk half has already passed with the same script. So a failure here is the binary's
+    // copy, not the change - and saying so is the difference between a rebuild and an hour spent
+    // re-reading a diff that was right.
+    if (mode === 'embedded') {
+      let built = 'unknown';
+      try { built = fs.statSync(bin).mtime.toISOString(); } catch { /* the message is worth less than the failure */ }
+      console.error('the embedded Lua is baked into ' + bin + ' at build time; this binary is from ' + built + '.');
+      console.error('the disk half passed with the same script, so this is the binary\'s copy of the Lua,');
+      console.error('not the change: rebuild with cargo build --release --offline --manifest-path rust/Cargo.toml');
+    }
     console.error('efficiency failure evidence: '+root);process.exitCode=1;break;
   }
 }
