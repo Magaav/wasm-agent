@@ -589,6 +589,22 @@ screen_view:screen_off()
 ok(has(since(screen_out, mark), "\27[r"), "the scroll region is reset on the way out")
 ok(screen_view.screen == nil, "and the screen is forgotten")
 
+-- A resized window: the rows move with it, so the old screen is given back and a new one is laid out
+-- on the height the console now reports. Without this, a window made smaller leaves output scrolling
+-- over the status and input rows for the rest of the chat.
+local height = { rows = 12 }
+local resize_view, resize_out = capture({ live = true, limit = 100, rows = function() return height.rows end })
+resize_view:prompt("wa> ")
+mark = #resize_out + 1
+height.rows = 6
+resize_view:prompt("wa> ")
+local resized = since(resize_out, mark)
+ok(has(resized, "\27[r"), "a resized window gives the old scroll region back")
+ok(has(resized, "\27[1;4r"), "and lays the screen out on the new height")
+ok(has(resized, "\27[6;1H\27[2Kwa> "), "with the prompt on the row that is last now")
+ok(#resize_out > mark and not has(since(resize_out, mark), "\27[1;10r"),
+  "and never both regions at once")
+
 -- A console too short for one output row, and a reader who refuses the screen: both fall back to the
 -- prompt at the cursor rather than to a broken one.
 local short_view, short_out = capture({ live = true, limit = 100, rows = function() return 3 end })

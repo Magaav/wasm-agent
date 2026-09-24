@@ -717,11 +717,17 @@ end
 -- restore echoes into the region once. It is rare and cosmetic, and the line itself is unaffected -
 -- the host reads it from stdin, never from the screen.
 function METHODS:screen_on()
-  if self.screen then return self.screen end
   if not self.live then return nil end
   if (self.getenv("WASM_AGENT_CLI_FRAME") or "") == "off" then return nil end
   local screen = screen_rows(self.rows and self.rows())
+  -- A console that cannot report a height keeps whatever screen it already had: the caller falls
+  -- back to the prompt at the cursor, which is on the input row anyway.
   if not screen then return nil end
+  -- A resized window moves the rows with it. The old screen is given back (its scroll region with
+  -- it) and a new one is laid out on the height the console now reports; without this, a window
+  -- made smaller leaves output scrolling over the status and input rows for the life of the chat.
+  if self.screen and self.screen.input == screen.input then return self.screen end
+  if self.screen then self:screen_off() end
   self.screen = screen
   -- The region first, then one newline inside it: the region's last row may hold output from
   -- before the screen existed, and every write below assumes the row it writes into is free.
