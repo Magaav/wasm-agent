@@ -248,7 +248,8 @@ clock.value = 3
 live_view:event({ type = "status", text = "thinking" })
 clock.value = 12
 live_view:event({ type = "round", n = 1 })
-ok(has(live.text(), "\r\27[2K"), "the status line is rewritten in place, not printed again")
+ok(has(live.text(), "\27" .. "7\r"), "the status line is rewritten in place, not printed again")
+ok(not has(live.text(), "\27[2K"), "and never erases to the end of the row the reader types on")
 ok(has(live.text(), view_lib.spinner(0)), "the status line carries a spinner")
 ok(has(visible(live.text()), "Thinking \194\183 12.0s"), "the status line says what and for how long")
 clock.value = 20
@@ -482,13 +483,14 @@ ok(platform.columns("abc", function() return nil end) == 80, "nor junk in COLUMN
 ok(platform.columns(nil, function() return { columns = "120" } end) == 120,
   "and a width that arrives as text (the shape JSON would give) is still a width")
 
--- ---- the prompt's row ---------------------------------------------------------
+-- ---- the prompt, and the row the reader types on ---------------------------------
 --
--- The prompt used to be written at the cursor, which after a short reply is the middle of the
--- screen, above the reader's own typing - reported as "the text area is not always in the far
--- bottom". It is now drawn on the last row of the console, which needs the height and nothing else.
--- Two things are worth pinning: that it does move on a live terminal, and that it does *not* on a
--- transcript - a log with cursor movement in it is not a transcript.
+-- The prompt used to be pinned to the console's last row (CUD 999) with that row erased first
+-- (`\27[2K`). Both halves were wrong on the row a reader types on: once the transcript has reached
+-- the bottom of the screen that row holds a line of output, and the erase takes the reader's own
+-- half-typed message with it. The status line is written in place on that same row, so what is
+-- pinned here is the bound - only the columns this view drew, never an erase to the right of them,
+-- a newline when the line needs more room than it drew - and that a transcript gets none of it.
 local function capture(options)
   local written = {}
   options = options or {}
@@ -496,28 +498,52 @@ local function capture(options)
   return view_lib.new(options), written
 end
 
-local live_view, live_written = capture({ live = true, limit = 100, rows = function() return 40 end })
+local live_view, live_written = capture({ live = true, limit = 100 })
 live_view:prompt("wa> ")
 local drawn = table.concat(live_written)
-ok(has(drawn, "\27[999B"), "a live prompt moves down as far as the console allows")
-ok(has(drawn, "\27[2Kwa> "), "erases that row first, then writes the prompt")
-ok(drawn:sub(-4) == "wa> ", "so the prompt ends where the reader's typing will land")
+ok(not has(drawn, "\27[999B"), "a live prompt does not jump down to the console's last row")
+ok(not has(drawn, "\27[2K"), "and erases nothing on the way there")
+ok(drawn:sub(-4) == "wa> ", "so the prompt lands where the output ended, where the typing goes")
 
 local plain_view, plain_written = capture({ live = false, limit = 100 })
 plain_view:prompt("wa> ")
 ok(table.concat(plain_written) == "wa> ", "a transcript gets the bare prompt, with no escapes")
 
--- A live console that cannot answer for its height: the prompt is still written, plainly, rather
--- than dropped - the same rule as a missing width.
-local blind_view, blind_written = capture({ live = true, limit = 100, rows = function() return nil end })
-blind_view:prompt("wa> ")
-ok(table.concat(blind_written) == "wa> ", "a live prompt with no height is written plainly")
+-- The reader may be typing on the row the status line is rewritten on: a run is exactly when they
+-- type, and the terminal's echo lands at the end of that line.
+local typed_view, typed_out = capture({ live = true, limit = 100 })
+typed_view:run_started()
+typed_view:event({ type = "status", text = "thinking" })
+local repaint = table.concat(typed_out)
+ok(not has(repaint, "\27[2K"), "a live status line never erases to the end of that row")
+ok(has(repaint, "\27" .. "7\r") and repaint:sub(-2) == "\27" .. "8",
+  "it saves and restores the cursor, which is also where the reader's next keystroke lands")
 
-ok(view_lib.rows(function() return 40 end) == 40, "the console's height is the height used")
-ok(view_lib.rows(function() return 0 end) == nil, "a console that answers zero is not a height")
-ok(view_lib.rows(function() return nil end) == nil, "nor is a console that will not answer")
-ok(view_lib.rows(function() return "24" end) == 24,
-  "and a height that arrives as text (the shape JSON would give) is still a height")
+-- A shorter line: the columns it drew are padded, or the tail of the last frame stays on screen.
+local pad_view, pad_out = capture({ live = true, limit = 100 })
+pad_view:status_draw("  twelve chars")
+pad_view:status_draw("  four")
+ok(has(table.concat(pad_out), "  four" .. string.rep(" ", 8)),
+  "a shorter status line pads the columns it drew, so no tail of the last frame stays")
+
+-- A longer line: five columns that may hold the reader's text are not this view's to take.
+local grow_view, grow_out = capture({ live = true, limit = 100 })
+grow_view:status_draw("  four")
+grow_view:status_draw("  a much longer status line")
+ok(has(table.concat(grow_out), "\r\n"),
+  "a longer status line commits the row instead of writing over the reader's columns")
+
+-- Taking the line back is the same bound: its own columns blanked, the cursor at the row's start.
+local clear_view, clear_out = capture({ live = true, limit = 100 })
+clear_view:status_draw("  working")
+clear_view:clear()
+local cleared = table.concat(clear_out)
+ok(has(cleared, "\r" .. string.rep(" ", 9) .. "\r"), "a clear blanks its own columns and no more")
+ok(not has(cleared, "\27[2K"), "and never erases to the end of the row")
+
+-- Colour is an instruction, not columns: the pad is measured against what a terminal shows.
+ok(view_lib.visible_columns("\27[33mab\27[0m") == 2, "an escape sequence is not a column")
+ok(view_lib.visible_columns("\27]2;title\7ab") == 2, "nor is a title")
 
 if failed > 0 then
   print(string.format("cli view: %d failed of %d checks", failed, checks))

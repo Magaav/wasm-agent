@@ -233,6 +233,11 @@ grown_health="$(curl -s -m 3 "http://127.0.0.1:$POOL_PORT/health" 2>/dev/null)"
 # Now leave it alone: the worker that answered that read has nothing to do, and must go away again.
 sleep 6
 shrunk_health="$(curl -s -m 3 "http://127.0.0.1:$POOL_PORT/health" 2>/dev/null)"
+# The worker that just retired is replaced by a *new* interpreter in the same index. It must not
+# inherit the dead worker's last beat: selection would read that stale age, call the fresh worker
+# wedged, and answer a plain read `503 worker_stalled`. This is the pool's whole promise - a read is
+# served without waiting - so a respawn must start the replacement's liveness clock at zero.
+respawn_code="$(curl -s -m 5 -o "$WORK/pool-respawn.json" -w '%{http_code}' "http://127.0.0.1:$POOL_PORT/sessions" 2>/dev/null)"
 kill "$POOL" 2>/dev/null
 
 echo
@@ -265,6 +270,11 @@ esac
 case "$shrunk_health" in
   *'"workers_retired":1'*) echo "  ok: and the retirement is visible, not silent" ;;
   *) echo "  FAIL: the retirement was not reported, got: $shrunk_health"; exit 1 ;;
+esac
+echo "  pool: a read after that worker retired -> $respawn_code"
+case "$respawn_code" in
+  200) echo "  ok: the replacement did not inherit the retired worker's stall" ;;
+  *) echo "  FAIL: a fresh read worker was mistaken for the dead one it replaced (got ${respawn_code:-none})"; exit 1 ;;
 esac
 echo "  ok: the pool grows on demand and shrinks when the load is gone"
 

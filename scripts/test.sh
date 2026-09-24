@@ -1025,13 +1025,16 @@ WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view" | grep "cli view ok"
 # lives in the host. The evidence is the captured stdout of a child that does nothing but
 # sleep: it cannot repaint anything itself, so every frame and every tenth of a second in that
 # file is the host's own work. The clock reaching 0.5s or more is what proves a timer rather
-# than one frame drawn at the start.
+# than one frame drawn at the start. Each frame is written in place (`\r`, the line, the cursor put
+# back), so the frames are what a split on `\r` gives: the mark is counted from the start of its
+# segment, and the clock from anywhere in it, because a frame ends with the cursor restore rather
+# than with the clock.
 TICKER_OUT="$DB.ticker.out"
 WA_SCRIPT=scripts/test-cli-ticker.lua "$BIN" --db "$DB.ticker" > "$TICKER_OUT" 2>&1
 ticker_frames=$(tr '\r' '\n' < "$TICKER_OUT" | grep -c "Thinking" || true)
-ticker_clocks=$(tr '\r' '\n' < "$TICKER_OUT" | sed -n 's/.* \([0-9][0-9]*\.[0-9]s\)$/\1/p' | uniq | wc -l | tr -d ' ')
-ticker_marks=$(tr '\r' '\n' < "$TICKER_OUT" | grep "2K" | cut -b 7-9 | LC_ALL=C sort -u | wc -l | tr -d ' ')
-ticker_last=$(tr '\r' '\n' < "$TICKER_OUT" | sed -n 's/.* \([0-9][0-9]*\.[0-9]s\)$/\1/p' | tail -1 || true)
+ticker_clocks=$(tr '\r' '\n' < "$TICKER_OUT" | sed -n 's/.* \([0-9][0-9]*\.[0-9]s\).*/\1/p' | uniq | wc -l | tr -d ' ')
+ticker_marks=$(tr '\r' '\n' < "$TICKER_OUT" | grep "Thinking" | cut -b 1-5 | LC_ALL=C sort -u | wc -l | tr -d ' ')
+ticker_last=$(tr '\r' '\n' < "$TICKER_OUT" | sed -n 's/.* \([0-9][0-9]*\.[0-9]s\).*/\1/p' | tail -1 || true)
 if [ "$ticker_frames" -ge 8 ] && [ "$ticker_clocks" -ge 8 ] && [ "$ticker_marks" -ge 3 ] \
   && [ "$ticker_last" != "0.0s" ] && [ -n "$ticker_last" ]; then
   echo "cli ticker ok ($ticker_frames frames, $ticker_marks marks, clock reached $ticker_last)"

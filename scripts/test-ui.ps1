@@ -596,8 +596,14 @@ $harness = @'
   // wait is promise ticks only - which is also why the panel must render
   // synchronously after its fetch resolves.
   document.getElementById('engine-btn').click();
-  // The sessions view is a topic inside the engine: opening the engine alone
-  // does not fetch it, so click the way a reader would.
+  // The session list is the node's front door: opening the engine lists this node's threads without
+  // a second click, and clicking the topic reloads them the way a reader would.
+  for (var eo = 0; eo < 200; eo++) {
+    if (document.querySelectorAll('.session-row').length === 2) break;
+    await tick();
+  }
+  check(document.querySelectorAll('.session-row').length === 2,
+    'opening the engine must list this node\'s sessions, saw ' + document.querySelectorAll('.session-row').length);
   document.querySelector('[data-target="sessions-box"]').click();
   for (var t = 0; t < 20; t++) { await tick(); }
   var rows = document.querySelectorAll('.session-row');
@@ -610,6 +616,27 @@ $harness = @'
   }
   check(document.querySelectorAll('.session-state').length === 1,
     'only the thread that needs attention should be badged');
+  // A thread the node is running must look live, and must not also read as unfinished: during a run
+  // the ledger's last message is the prompt being answered, so "unfinished" would be true of the
+  // ledger and false of the node. The badge comes from /health, which names the live conversation.
+  window.__fixtures.health.runs = [{ conversation: "aaaaaaaa-0000-0000-0000-000000000001", pending: 1 }];
+  window.__loadTopic('sessions-box');
+  for (var lr = 0; lr < 200; lr++) {
+    if (document.querySelector('.session-row.running .session-state.running')) break;
+    await tick();
+  }
+  var liveBadge = document.querySelector('.session-row.running .session-state.running');
+  check(!!liveBadge && /running/.test(liveBadge.textContent),
+    'a session the node is running must show a running badge, saw ' + (liveBadge ? liveBadge.textContent : 'none'));
+  check(document.querySelectorAll('.session-state').length === 1 &&
+    !/unfinished/.test(document.querySelector('.session-state').textContent),
+    'a running session must show running instead of unfinished');
+  window.__fixtures.health.runs = [];
+  window.__loadTopic('sessions-box');
+  for (var rr = 0; rr < 200; rr++) {
+    if (!document.querySelector('.session-row.running')) break;
+    await tick();
+  }
   // Detection is automatic; acting is one click. A node that resumes turns by itself would be
   // spending money on its own judgement, and the resume path deliberately only reports.
   var continuable = Array.prototype.filter.call(document.querySelectorAll(".session-row"),
