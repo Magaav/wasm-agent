@@ -1179,6 +1179,17 @@ fn finish_request(claim: &Path, request: &Value) {
     say(&format!("{}: {detail}",if ok {"ok"}else{"failed"}));
 }
 
+/// The newest `upgrade` request in a sorted request box, if any. Only it is performed: an upgrade
+/// installs one binary, so every older upgrade is moot. Superseding them is what stops several
+/// agents' upgrades from running in turn - each stopping and starting the node - while a long turn
+/// keeps the node busy.
+fn newest_upgrade_in(entries: &[PathBuf]) -> Option<PathBuf> {
+    entries.iter()
+        .filter(|p| std::fs::read(p).ok().and_then(|b|serde_json::from_slice::<Value>(&b).ok())
+            .map(|v| v["verb"]=="upgrade").unwrap_or(false))
+        .max().cloned()
+}
+
 fn process_requests(background: bool) -> Result<u32> {
     let dir = sentinel_dir().join("requests");
     let mut handled = 0;
@@ -1189,9 +1200,28 @@ fn process_requests(background: bool) -> Result<u32> {
         .collect();
     // Oldest first: a queue that runs backwards is a queue nobody can reason about.
     entries.sort();
+    // The newest upgrade in the box, if any. Only it is performed; every older one is superseded.
+    let newest_upgrade = newest_upgrade_in(&entries);
     for path in entries {
         use std::sync::atomic::Ordering;
         let preview:Value=std::fs::read(&path).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+        // Only the newest upgrade matters. An upgrade installs one binary, so an older request for an
+        // older build is superseded, not queued behind it: without this, several agents' upgrades ran
+        // in turn - each stopping and starting the node, each able to fail and be retried while a long
+        // turn kept the node busy. `deploy` is not coalesced: it carries a session to wake and a reason
+        // that differ per request, so each one is a distinct intent.
+        if preview["verb"]=="upgrade" && newest_upgrade.as_deref()!=Some(path.as_path()) {
+            let claim=sentinel_dir().join("claimed").join(path.file_name().unwrap_or_default());
+            if std::fs::rename(&path,&claim).is_ok() {
+                let record=json!({"request":preview,"ok":true,
+                    "detail":"superseded by a newer upgrade request","at":now_epoch()});
+                let target=sentinel_dir().join("done").join(claim.file_name().unwrap_or_default());
+                if wa_operation::atomic_json(&target,&record).is_ok() {let _=std::fs::remove_file(&claim);}
+                audit("upgrade-superseded",&path.display().to_string(),"a newer upgrade request exists");
+                handled+=1;
+            }
+            continue;
+        }
         let capacity=if preview["verb"]=="recover" {5}else{4};
         if background && REQUEST_ACTIVE.load(Ordering::Acquire)>=capacity {continue;}
         let management=is_management_verb(preview["verb"].as_str().unwrap_or(""));
@@ -1731,6 +1761,28 @@ mod self_update_tests {
         for verb in ["wake", "run"] {
             assert!(!waits_for_idle(verb), "{verb} must not wait for idle");
         }
+    }
+
+    /// Only the newest upgrade is performed. Superseding the older ones is what turns several
+    /// agents' upgrades from a queue that stops and starts the node once each - and can fail and
+    /// retry - into one swap. A `deploy` is not coalesced: its session and reason are per-request.
+    #[test]
+    fn only_the_newest_upgrade_survives_the_queue() {
+        let dir = std::env::temp_dir().join(format!("wa-coalesce-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let mut entries = Vec::new();
+        for (name, verb) in [("100-a.json", "upgrade"), ("200-b.json", "deploy"), ("300-c.json", "upgrade")] {
+            let path = dir.join(name);
+            std::fs::write(&path, serde_json::to_vec(&json!({"verb": verb})).expect("encode")).expect("write");
+            entries.push(path);
+        }
+        entries.sort();
+        assert_eq!(newest_upgrade_in(&entries), Some(dir.join("300-c.json")),
+            "the newest upgrade is the one performed");
+        assert_eq!(newest_upgrade_in(&[dir.join("200-b.json")]), None,
+            "a box with no upgrade has nothing to coalesce");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A deploy request reaches a script and returns without blocking: the script is detached, because

@@ -66,7 +66,14 @@ fi
 # The sentinel runs the copy beside the installed binary, so ROOT is the install
 # directory in that path. The candidate binary still points back to its source
 # checkout: use that checkout for UI assets and for a downgrade guard.
-SOURCE_ROOT="$(git -C "$(dirname "$NEW")" rev-parse --show-toplevel 2>/dev/null || true)"
+# The sentinel hands a candidate over as a *Windows* path (`C:\...\wa.exe`), and `dirname` in this
+# shell does not split on backslashes, so it returned `.` - the install directory, which is not a git
+# work tree. SOURCE_ROOT was then empty, `commit=` was recorded as `unknown`, and the downgrade guard
+# below was skipped because it cannot compare against an unknown commit. Convert only for the git
+# lookup; the path itself is installed as given.
+NEW_FOR_GIT="$NEW"
+if command -v cygpath >/dev/null 2>&1; then NEW_FOR_GIT="$(cygpath -u "$NEW" 2>/dev/null || echo "$NEW")"; fi
+SOURCE_ROOT="$(git -C "$(dirname "$NEW_FOR_GIT")" rev-parse --show-toplevel 2>/dev/null || true)"
 SOURCE_COMMIT=""
 if [ -n "$SOURCE_ROOT" ]; then
   SOURCE_COMMIT="$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)"
@@ -216,6 +223,11 @@ fi
 say "waiting for the running node to finish what it is doing"
 waited=0
 FINE_TICKS=0
+# When the node was last seen making progress. The deadline below is measured from here, not from the
+# start, so a long turn that is still alive is waited on and only a worker that has stopped reporting
+# fails. `WA_IDLE_MAX_SECONDS` (default 0 = no cap) is an operator's hard wall-clock bound.
+progress_at=0
+IDLE_MAX="${WA_IDLE_MAX_SECONDS:-0}"
 while :; do
   state="$(health)"
   case "$state" in
@@ -225,11 +237,22 @@ while :; do
       if ! printf '%s' "$state" | grep -q '"label":"POST /chat' && printf '%s' "$state" | grep -q '"queue":0'; then break; fi ;;
     "") say "the node is not answering - nothing to wait for"; break ;;
   esac
-  if [ "$waited" -ge "$IDLE_TIMEOUT" ]; then
-    say "still busy after ${IDLE_TIMEOUT}s; not upgrading under a running turn"
+  # A long turn is not a wedged one. Waiting is bounded by *lack of progress*, not by wall time: a run
+  # whose worker is still reporting is doing work, and interrupting it because fifteen minutes passed
+  # is how a legitimate 40-minute turn made every queued upgrade wait 900s, fail, and be retried while
+  # the node stayed busy. Only a worker that has stopped reporting counts toward the deadline.
+  case "$state" in
+    *'"worker":"alive"'*) progress_at=$waited ;;
+  esac
+  if [ "$((waited - progress_at))" -ge "$IDLE_TIMEOUT" ]; then
+    say "the worker has not reported progress for ${IDLE_TIMEOUT}s; not upgrading under a stalled turn"
     exit 1
   fi
-  [ $((waited % 30)) -eq 0 ] && say "  busy: $state"
+  if [ "$IDLE_MAX" -gt 0 ] && [ "$waited" -ge "$IDLE_MAX" ]; then
+    say "still busy after ${IDLE_MAX}s (WA_IDLE_MAX_SECONDS); not upgrading"
+    exit 1
+  fi
+  [ $((waited % 30)) -eq 0 ] && say "  busy after ${waited}s; waiting for the turn to finish"
   # Two cadences, because the two situations are different. A long turn should not be polled 50 times a
   # minute - that is noise in the log and in the node's queue. But the *last* moment, when the turn has
   # just ended, is exactly when a fixed 5s tick costs 5s of outage for nothing: the swap cannot start
