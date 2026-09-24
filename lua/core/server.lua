@@ -774,6 +774,31 @@ function wa_session_mode(payload, session)
   return json.encode({ session_id = id, mode = memory.set_session_mode(id, request.mode) })
 end
 
+-- Point a session's tools at their own checkout. The same capability the `session_worktree` tool
+-- exposes, reached without a model, so the engine - and a test - can set it directly. Master only:
+-- it changes where a guest's tools point.
+function wa_session_worktree(payload, session)
+  local user = require_master(session)
+  if not user then return json.encode({ error = "forbidden" }) end
+  local ok, request = pcall(json.decode, payload)
+  if not ok or type(request) ~= "table" then return json.encode({ error = "bad_request" }) end
+  local id = request.session_id
+  if not id or id == "" then return json.encode({ error = "session_id_required" }) end
+  -- No `path` is a read; a string sets it ("" clears it). The directory must exist, or a typo would
+  -- silently point every tool at a missing tree.
+  if request.path == nil then return json.encode({ session_id = id, worktree = memory.session_worktree(id) }) end
+  local path = tostring(request.path)
+  if path ~= "" then
+    -- `host.list_dir` reports failure as `{error=...}`, not nil, so the JSON must be read.
+    local list_ok, raw = pcall(host.list_dir, path)
+    local listing = list_ok and json.decode(raw) or nil
+    if type(listing) ~= "table" or listing.error then
+      return json.encode({ error = "worktree_not_a_directory", path = path })
+    end
+  end
+  return json.encode({ session_id = id, worktree = memory.set_session_worktree(id, path) })
+end
+
 function wa_session_fixture(session_id, session)
   local user = require_master(session)
   if not user then return json.encode({ error = "forbidden" }) end

@@ -819,10 +819,15 @@ function M.dispatch(memory, name, args, role, ctx)
     elseif action == "set" then
       if type(args.path) ~= "string" or args.path == "" then return { error = "path_required" } end
       -- The directory must exist: a typo that silently pointed every tool at a missing tree
-      -- would look like the whole project vanished, which is worse than a refusal.
+      -- would look like the whole project vanished, which is worse than a refusal. `host.list_dir`
+      -- reports failure as `{error=...}`, not nil, so the JSON has to be read rather than trusted
+      -- for truthiness - a bare pcall check accepted every path.
       if host.list_dir then
-        local ok, listing = pcall(host.list_dir, args.path)
-        if not ok or not listing then return { error = "worktree_not_a_directory", path = args.path } end
+        local ok, raw = pcall(host.list_dir, args.path)
+        local decoded = ok and json.decode(raw) or nil
+        if type(decoded) ~= "table" or decoded.error then
+          return { error = "worktree_not_a_directory", path = args.path }
+        end
       end
       return { ok = true, session_id = id, worktree = memory.set_session_worktree(id, args.path) }
     elseif action == "clear" then

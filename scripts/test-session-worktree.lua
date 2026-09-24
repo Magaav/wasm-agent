@@ -72,6 +72,12 @@ ok(explicit.code == 0, "the explicit-cwd probe must run, got " .. json.encode(ex
 ok(host.read_file(base .. "/sub/.wa-cwd-probe") ~= nil,
   "an explicit cwd must win over the session worktree")
 
+-- A path that is not a directory is refused: a typo must not silently point every tool at a
+-- missing tree. `host.list_dir` reports failure as `{error=...}`, not nil, so this is what catches a
+-- guard that trusted the pcall result for truthiness instead of reading it.
+local bad = tools.dispatch(memory, "session_worktree", { action = "set", path = base .. "/does-not-exist" }, "master", ctx)
+ok(bad.error == "worktree_not_a_directory", "a missing directory must be refused, got " .. json.encode(bad))
+
 -- A guest must not be able to move a session's tools outside the tree it was scoped to.
 local refused = tools.dispatch(memory, "session_worktree", { action = "set", path = base }, "guest", ctx)
 ok(refused.error ~= nil and refused.error:find("forbidden_for_role", 1, true) ~= nil,
