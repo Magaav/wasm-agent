@@ -65,9 +65,9 @@ pub extern "C" fn call(pointer: i32, length: i32) -> i64 {
     let count = parts.len();
     let bodies: Vec<String> = parts.into_iter().enumerate().map(|(index, part)| {
         if count == 1 {
-            format!("Transcrição do áudio:\n{part}")
+            format!("🎙️ _Copiloto-Transcritor_\n{part}")
         } else {
-            format!("Transcrição do áudio ({}/{}):\n{part}", index + 1, count)
+            format!("🎙️ _Copiloto-Transcritor_ ({}/{}):\n{part}", index + 1, count)
         }
     }).collect();
     reply(serde_json::json!({"bodies": bodies}))

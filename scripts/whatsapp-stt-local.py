@@ -31,6 +31,11 @@ def main():
     if not args.check and not args.input:
         raise ValueError("input_required")
     model_name = os.environ.get("WA_WHATSAPP_STT_MODEL", "small")
+    language = os.environ.get("WA_WHATSAPP_STT_LANGUAGE", "pt").strip().lower()
+    if language == "auto":
+        language = None
+    elif language and (len(language) not in (2, 3) or not language.isalpha()):
+        raise ValueError("invalid_WA_WHATSAPP_STT_LANGUAGE")
     cache = os.environ.get("WA_WHATSAPP_STT_MODELS")
     if not cache:
         raise ValueError("WA_WHATSAPP_STT_MODELS_required")
@@ -45,7 +50,14 @@ def main():
         return
     if os.path.getsize(args.input) > 20 * 1024 * 1024:
         raise ValueError("audio_too_large")
-    segments, info = model.transcribe(args.input, beam_size=1, vad_filter=True)
+    segments, info = model.transcribe(
+        args.input,
+        language=language,
+        beam_size=5,
+        vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": 300},
+        condition_on_previous_text=False,
+    )
     parts = []
     for segment in segments:
         parts.append(segment.text.strip())
