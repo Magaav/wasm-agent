@@ -39,7 +39,7 @@ window.__fixtures = {
   // rather than building one, so a fixture with its own wording would let the two drift.
   efficiency: {
     session_id: "session-fixture-1",
-    text: "efficiency report - session fixture\n  last call\n    prompt 1,000 tok   cache read 900 (90.0%)\n  session totals (3 inference calls)\n",
+    text: "efficiency report - session fixture\n  last call\n    prompt 1,000 tok   cache read 900 (90.0%)   uncached input 100   cache write 0   prefix append_only (12 appended, 40 shared)\n  session totals (3 inference calls)\n",
   },
   models: {
     model: "fixture-model", provider: "fixture", configured: true,

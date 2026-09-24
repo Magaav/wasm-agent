@@ -663,13 +663,13 @@ body.view-only .panel { display: none; }
    columns that no longer line up. */
 .efficiency-report {
   margin: var(--gap) 0;
-  padding: var(--space) var(--gap);
+  padding: var(--pad);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: var(--panel);
-  color: var(--muted);
+  background: #0a0c11;
+  color: #c9d1e0;
   font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  white-space: pre-wrap;
+  white-space: pre;
   overflow-x: auto;
 }
 
