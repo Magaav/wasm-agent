@@ -1456,9 +1456,10 @@ function M:run_body(text, images)
         audit_prompt=nil
       end
       -- Native execution phase timing belongs in aggregate telemetry, not in the
-      -- model-facing result where it would spend context on every shell call.
-      local execution_timing=type(output)=="table" and output.timing or nil
-      if function_.name=="bash" and execution_timing then output.timing=nil end
+      -- model-facing result where it would spend context on every shell call - except
+      -- when the call was killed by its bound, where the phases *are* the explanation.
+      -- The rule and the reasons live in `tool_output.execution_timing`.
+      local execution_timing=tool_output.execution_timing(function_.name,output)
       local tool_images=take_tool_images(function_.name,output)
       local ok_tool = tool_output.outcome(function_.name,output)
       if ok_tool and function_.name=="read" and type(args.path)=="string" then

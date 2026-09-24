@@ -47,6 +47,10 @@ cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-graph
 # than mtime (a `cp -f` of identical files must not force every open page to reload).
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host serve::
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host subagents::
+# What an operation says about itself when its bound kills it: the measured phases, and never a
+# cause it cannot know. A pure function of the operation record, so it is tested as one - the
+# sentence it replaced was quoted onward as a diagnosis of a read-only `grep`.
+cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host deadline_note_tests
 cargo test --release --offline --manifest-path rust/wa-sentinel/Cargo.toml
 # The named-instance lifecycle, against two real co-located nodes: separate homes, keys, databases
 # and ports; a refused wrong listener; and a stop/restart of one that cannot reach the other. No
