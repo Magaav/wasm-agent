@@ -63,4 +63,57 @@ function M.pair(name, value)
   return tostring(name) .. "=" .. mask(value)
 end
 
+-- The node's own configured secrets, by name. The shape patterns above catch credentials by
+-- their look; these catch the node's *own* key, which a tool can reach by reading its config
+-- file. Measured: a `bash` call dumped the config file into the transcript, and the shape
+-- patterns missed the value because it has no `sk-` prefix - `M.text` was never applied to
+-- tool results at all. This is exact-value replacement, so unlike the shape patterns it
+-- cannot mangle ordinary text (`task-runner` contains `sk-`).
+local SECRET_ENV = {
+  "WASM_AGENT_LLM_API_KEY", "OPENAI_API_KEY", "OPENCODE_GO_API_KEY", "WASM_AGENT_PROMPT_CACHE_KEY",
+}
+
+function M.secret_values()
+  local values = {}
+  if host and host.getenv then
+    for _, name in ipairs(SECRET_ENV) do
+      local value = host.getenv(name)
+      if type(value) == "string" and #value >= 8 then values[#values + 1] = value end
+    end
+  end
+  return values
+end
+
+local function escape_pattern(text)
+  return (tostring(text):gsub("([^%w])", "%%%1"))
+end
+
+-- Redact the node's own secret values from a string, exactly.
+function M.secrets(value)
+  local text = tostring(value or "")
+  for _, secret in ipairs(M.secret_values()) do
+    text = text:gsub(escape_pattern(secret), "<redacted>")
+  end
+  return text
+end
+
+-- Redact every string in a tool result, tables included, so the value is gone before the
+-- result is projected, stored, journalled or sent to the provider - not only before it is
+-- displayed. Tables are copied; the caller's table is left alone.
+function M.value(v)
+  local secrets = M.secret_values()
+  local function walk(x)
+    if type(x) == "string" then
+      for _, secret in ipairs(secrets) do x = x:gsub(escape_pattern(secret), "<redacted>") end
+      return x
+    elseif type(x) == "table" then
+      local out = {}
+      for key, item in pairs(x) do out[key] = walk(item) end
+      return out
+    end
+    return x
+  end
+  return walk(v)
+end
+
 return M

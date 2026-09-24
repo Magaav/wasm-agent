@@ -830,6 +830,9 @@ print("redact ok")
 LUA
 WA_SCRIPT="$DB.redact.lua" "$BIN" --db "$DB" | grep "redact ok"
 rm -f "$DB.redact.lua"
+# The node's own secret must not reach the transcript through a tool result. Measured on the
+# live ledger: a bash call dumped the config file and its API key was stored and journalled.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-redact-secrets.lua" "$BIN" --db "$DB.redact-secrets" | grep 'redact secrets ok'
 
 # Session selection: a new thread is the default, --continue finds the latest,
 # --session must reject an unknown id instead of silently starting a new thread.
