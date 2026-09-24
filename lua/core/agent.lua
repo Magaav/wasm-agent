@@ -1436,6 +1436,11 @@ function M:run_body(text, images)
           model = self.model, reasoning = (provider.reasoning(self.model) or {}).selected }) end)
       host.beat()
       if not handled then output = { error = tostring(output) } end
+      -- The node's own secrets must not enter the transcript through a tool result. A `bash`
+      -- call once dumped the config file and its API key was stored, journalled and sent; the
+      -- redactor covered logs and errors but not tool results. Exact-value replacement, before
+      -- projection, storage and the provider view.
+      output = redact.value(output)
       if type(output)=="table" and output.error=="graph_patch_review_required" then
         remember_audit_leads(output.audit)
       elseif function_.name=="graph" and args.action=="audit_assess"
