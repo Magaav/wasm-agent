@@ -84,6 +84,16 @@ let busy = false;
 let activeRunId = null;
 let submittedRunIds = null;
 let statusLine = null;
+// The status line's parts, held by reference. Reaching back into the DOM for them on every
+// streamed chunk would make the line depend on a parser that a stub document does not have,
+// and three references are cheaper than three queries anyway.
+let statusLabel = null;
+let statusElapsed = null;
+let statusSpinner = null;
+// The body of the newest assistant bubble, tracked as it is created: the run status is
+// attached to it when a run finishes, and finding it by querying the transcript would be
+// the same dependency in another place.
+let lastAssistantBody = null;
 let runStatusTicker = null;
 let streamBody = null;
 let streamText = "";
@@ -347,6 +357,7 @@ function add(role, text, asHtml = false) {
   messages.append(element);
   const body = element.body;
   if (asHtml) body.innerHTML = text; else body.textContent = text;
+  if (role === "assistant") lastAssistantBody = body;
   pin();
   return body;
 }
@@ -356,13 +367,19 @@ function setStatus(text) {
   if (!statusLine) {
     statusLine = document.createElement("div");
     statusLine.className = "status chat-content-run-status";
-    statusLine.innerHTML = '<span class="spinner"></span><span class="chat-content-run-label"></span><span class="chat-content-run-elapsed"></span>';
+    statusSpinner = document.createElement("span");
+    statusSpinner.className = "spinner";
+    statusLabel = document.createElement("span");
+    statusLabel.className = "chat-content-run-label";
+    statusElapsed = document.createElement("span");
+    statusElapsed.className = "chat-content-run-elapsed";
+    statusLine.append(statusSpinner, statusLabel, statusElapsed);
     if (busy && !replayingMessages) startRunStatusTicker();
   }
-  statusLine.querySelector(".chat-content-run-label").textContent = text;
+  statusLabel.textContent = text;
   if (statusLine.parentNode !== messages) messages.append(statusLine);
   if (busy) updateRunElapsed();
-  else statusLine.querySelector(".chat-content-run-elapsed").textContent = "";
+  else statusElapsed.textContent = "";
   pin();
 }
 
@@ -375,9 +392,8 @@ function runDuration(ms) {
 }
 
 function updateRunElapsed() {
-  if (!statusLine) return;
-  const elapsed = statusLine.querySelector(".chat-content-run-elapsed");
-  if (elapsed) elapsed.textContent = runDuration(Date.now() - (runStartedAt || Date.now()));
+  if (!statusElapsed) return;
+  statusElapsed.textContent = runDuration(Date.now() - (runStartedAt || Date.now()));
 }
 
 function startRunStatusTicker() {
@@ -387,15 +403,15 @@ function startRunStatusTicker() {
 
 function finishRunStatus(label = "completed") {
   if (!statusLine) return;
-  const bubbles = messages.querySelectorAll("wa-message.assistant");
-  const bubble = runBubble || bubbles[bubbles.length - 1];
-  statusLine.querySelector(".spinner")?.remove();
-  statusLine.querySelector(".chat-content-run-label").textContent = label;
+  const bubble = runBubble || lastAssistantBody;
+  statusSpinner?.remove();
+  statusLabel.textContent = label;
   updateRunElapsed();
   statusLine.classList.add("finished");
-  if (bubble) bubble.body.append(statusLine);
+  if (bubble) bubble.append(statusLine);
   else statusLine.remove();
   statusLine = null;
+  statusLabel = null; statusElapsed = null; statusSpinner = null;
   if (runStatusTicker) { clearInterval(runStatusTicker); runStatusTicker = null; }
   pin();
 }
@@ -403,6 +419,7 @@ function finishRunStatus(label = "completed") {
 function clearStatus() {
   statusLine?.remove();
   statusLine = null;
+  statusLabel = null; statusElapsed = null; statusSpinner = null;
   if (runStatusTicker) { clearInterval(runStatusTicker); runStatusTicker = null; }
 }
 
@@ -1059,7 +1076,7 @@ function handleEvent(event) {
   } else if (event.type === "tool_result") {
     settleTool(event.result, event.name);
   } else if (event.type === "delta") {
-    if (statusLine) statusLine.querySelector(".chat-content-run-label").textContent = "responding…";
+    if (statusLabel) statusLabel.textContent = "responding…";
     // A new segment per step, inside the same bubble.
     if (!streamBody) {
       streamBody = document.createElement("div");
@@ -1070,7 +1087,7 @@ function handleEvent(event) {
     streamBody.textContent = stripThinking(streamText);
     pin();
   } else if (event.type === "reply") {
-    if (statusLine) statusLine.querySelector(".chat-content-run-label").textContent = "finishing…";
+    if (statusLabel) statusLabel.textContent = "finishing…";
     if (!replayingMessages && event.message_id && renderedMessageIds.has(String(event.message_id))) {
       // The durable reply can be repainted before its trailing `reply` event is replayed.
       // Keep the saved bubble and let `done` settle it without appending the answer twice.
