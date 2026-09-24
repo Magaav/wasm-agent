@@ -30,8 +30,9 @@ const ENDPOINT = "ws://[::1]:9222/devtools/page/WAFIXTURE";
 const MSG_ALLOWED = "msg-allowed-1";
 const MSG_CRASH = "msg-crash-1";
 const MSG_DENY = "msg-deny-1";
-// What lua/core/whatsapp.lua puts at the front of every reply, so a person knows a copilot wrote it.
-const PREFIX = "Copiloto: ";
+// What lua/core/whatsapp.lua puts at the front of every reply, so a person knows a copilot wrote it:
+// an icon, the word in WhatsApp's italic markup, and a newline before the message itself.
+const PREFIX = "🤖 _Copiloto_\n";
 
 let checks = 0, failures = 0, skipped = 0;
 const failureList = [];

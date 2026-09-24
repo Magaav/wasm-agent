@@ -52,11 +52,14 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/provider.lua", include_str!("../../../lua/core/provider.lua")),
     ("lua/core/model_window.lua", include_str!("../../../lua/core/model_window.lua")),
     ("lua/core/changeset.lua", include_str!("../../../lua/core/changeset.lua")),
+    ("lua/core/patch_audit.lua", include_str!("../../../lua/core/patch_audit.lua")),
     ("lua/core/effects.lua", include_str!("../../../lua/core/effects.lua")),
     ("lua/core/whatsapp.lua", include_str!("../../../lua/core/whatsapp.lua")),
     ("lua/core/subagents.lua", include_str!("../../../lua/core/subagents.lua")),
     ("lua/core/agent.lua", include_str!("../../../lua/core/agent.lua")),
+    ("lua/core/markdown.lua", include_str!("../../../lua/core/markdown.lua")),
     ("lua/core/cli_view.lua", include_str!("../../../lua/core/cli_view.lua")),
+    ("lua/core/commands.lua", include_str!("../../../lua/core/commands.lua")),
     ("lua/core/chat.lua", include_str!("../../../lua/core/chat.lua")),
     ("lua/core/server.lua", include_str!("../../../lua/core/server.lua")),
     ("lua/core/init.lua", include_str!("../../../lua/core/init.lua")),
@@ -300,6 +303,7 @@ fn main() {
     lua.register("graph_caps", graph::graph_caps);
     lua.register("graph_stats", graph::graph_stats);
     lua.register("graph_status", graph::graph_status);
+    lua.register("graph_patch_audit", graph::graph_patch_audit);
     lua.register("sha256", host::sha256);
     lua.register("uuid", host::uuid);
     lua.register("read_file", host::read_file);
@@ -318,6 +322,9 @@ fn main() {
     lua.register("http", host::http);
     lua.register("http_stream", host::http_stream);
     lua.register("beat", host::beat);
+    // The one capability that draws: the CLI's status line keeps moving while the interpreter
+    // is blocked inside a call, which nothing on the Lua side can do for itself.
+    lua.register("ticker", host::ticker);
     lua.register("relay", host::relay);
     lua.register_with_upvalue("plugins", host::plugins, host_ptr);
     lua.register_with_upvalue("invoke", host::invoke, host_ptr);
@@ -325,6 +332,9 @@ fn main() {
     lua.register("now", host::now);
     lua.register("monotonic_ms", host::monotonic_ms);
     lua.register("runtime_info", host::runtime_info);
+    // The console's own size: `COLUMNS` is a shell variable and usually absent, so the width a
+    // terminal has is not something the Lua side can learn for itself.
+    lua.register("terminal_size", host::terminal_size);
     lua.register("exec_timeout", host::exec_timeout);
     lua.register("log", host::log);
     lua.set_global("host");

@@ -175,9 +175,10 @@ $harness = @'
   // sits above the answer so the reader lands on the answer - and the diff topic sits
   // *below* it, as a sibling of the answer rather than inside the run.
   var shape = body ? Array.prototype.map.call(body.children, function (c) {
+    if (c.classList.contains("chat-content-run-status")) return "status";
     return c.tagName === "WA-RUN" ? "run" : (c.tagName === "WA-TRACE" ? "trace"
       : (c.tagName === "WA-DIFF" ? "diff" : "text"));
-  }).join(",") : "";
+  }).filter(function (item) { return item !== "status"; }).join(",") : "";
   check(shape === "run,text,diff",
     "expected run,text,diff in the bubble after the reply, saw " + shape);
 
@@ -402,7 +403,8 @@ $harness = @'
   check(window.__applyUiVersion(live + "-third") === "deferred",
     "a change during a turn must be deferred, not applied under it");
   check(reloads === 1, "a deferred change must not reload yet, saw " + reloads);
-  var updateNote = document.querySelector(".status");
+  var updateNotes = document.querySelectorAll(".chat-content-run-status:not(.finished)");
+  var updateNote = updateNotes[updateNotes.length - 1];
   check(!!updateNote && /update ready/.test(updateNote.textContent),
     "and it must say so, saw: " + (updateNote ? updateNote.textContent : "no status"));
   window.__setBusy(false);
@@ -511,7 +513,8 @@ $harness = @'
   // number that explains where the output budget went when a turn ends with no
   // answer at all.
   window.handleEvent({ type: "reasoning", chars: 4096 });
-  var reasoningStatus = document.querySelector(".status");
+  var reasoningStatuses = document.querySelectorAll(".chat-content-run-status:not(.finished)");
+  var reasoningStatus = reasoningStatuses[reasoningStatuses.length - 1];
   check(!!reasoningStatus && /4096/.test(reasoningStatus.textContent),
     "reasoning must be visible while it happens, saw: " +
     (reasoningStatus ? reasoningStatus.textContent : "no status line"));
@@ -523,7 +526,8 @@ $harness = @'
     text: "recovering an unfinished thread: stopped after a tool result with no next decision" });
   // The status line is at its longest here, and it is the one element that exists
   // only during a run - which is why a scrollbar could come and go with it.
-  var statusLine = document.querySelector(".status");
+  var activeStatuses = document.querySelectorAll(".chat-content-run-status:not(.finished)");
+  var statusLine = activeStatuses[activeStatuses.length - 1];
   check(!!statusLine, "a run must show its status line");
   var statusOverflow = messages.scrollWidth - messages.clientWidth;
   check(statusOverflow <= 1,
@@ -842,21 +846,25 @@ $harness = @'
   check(!!diffTopic && !!(diffTopic.dataset.messageId || diffTopic.messageId),
     "and the message id the undo route is asked about, saw: " + (diffTopic ? JSON.stringify(diffTopic.dataset.messageId) : "no topic"));
 
-  // Opening a topic while a turn runs must not look like a broken UI. The node's worker is inside the
-  // turn, so a Lua read queues and the client's deadline abandons it - which showed as
-  // "AbortError: signal is aborted without reason" on a node that was working perfectly.
+  // Read-only topics use host read workers, so they must remain available while the run worker is
+  // occupied. Topics that still need the run worker must queue clearly and load after the run.
   window.__setBusy(true);
   window.__loadTopic("sessions-box");
   for (var tb = 0; tb < 5; tb++) { await tick(); }
   var busyBox = document.getElementById("sessions-box");
-  check(/busy with a run/.test(busyBox.textContent),
-    "a topic opened during a turn must say the node is busy, saw: " + busyBox.textContent.slice(0, 70));
+  check(!/busy with a run/.test(busyBox.textContent) && !!busyBox.querySelector(".session-title"),
+    "sessions must load from the read worker during a run, saw: " + busyBox.textContent.slice(0, 70));
   check(!/AbortError/.test(busyBox.textContent), "and must not report an abort as if the UI were broken");
+  window.__loadTopic("spells-box");
+  for (var tw = 0; tw < 5; tw++) { await tick(); }
+  var waitingBox = document.getElementById("spells-box");
+  check(/busy with a run/.test(waitingBox.textContent),
+    "a topic that needs the run worker must say it is queued, saw: " + waitingBox.textContent.slice(0, 70));
   // And it must load by itself when the turn ends - nobody should have to reopen it.
   window.__setBusy(false);
   for (var tc = 0; tc < 40; tc++) { await tick(); }
-  check(!/busy with a run/.test(busyBox.textContent),
-    "and it must load when the turn finishes, saw: " + busyBox.textContent.slice(0, 70));
+  check(!/busy with a run/.test(waitingBox.textContent),
+    "the queued topic must load when the turn finishes, saw: " + waitingBox.textContent.slice(0, 70));
 
   // The sessions topic is a way to *find* a thread, not just a list: named after its opening
   // message, most recent first, and searchable. A list you have to read top to bottom is not a way
@@ -1291,6 +1299,12 @@ $harness = @'
     var blocks = document.querySelectorAll("wa-message .reasoning");
     var block = blocks[blocks.length - 1];
     check(!!block, "reasoning: a reasoning delta must render a thinking block");
+    var runStatuses = document.querySelectorAll(".chat-content-run-status:not(.finished)");
+    var runStatus = runStatuses[runStatuses.length - 1];
+    check(!!runStatus && getComputedStyle(runStatus).position === "sticky",
+      "run status: the live status must stay pinned to the chat viewport bottom");
+    check(!!runStatus && !!runStatus.querySelector(".chat-content-run-elapsed"),
+      "run status: elapsed time has its own right-aligned field");
     check(!!block && block.textContent.indexOf("weighing the options") >= 0,
       "reasoning: the block must carry the text the node streamed, saw: " +
       (block ? block.textContent : "nothing"));
@@ -1302,8 +1316,194 @@ $harness = @'
     var folded = settled[settled.length - 1];
     check(!!folded, "reasoning: collapsing the run must not swallow the thinking");
     check(!!folded && folded.open === false, "reasoning: it must fold away once the run answers");
-    check(!!folded && folded.closest("wa-run") === null,
-      "reasoning: it is the route, not the answer, and must stay outside the run topic");
+    // It belongs *inside* the topic: it is the route, not the answer, and a long run left a wall of
+    // "thinking · N chars" rows sitting outside the topics, between the reader and the answer
+    // (measured live: 196 of them outside the topics in one thread).
+    check(!!folded && folded.closest("wa-run") !== null,
+      "reasoning: it is the route, not the answer, and belongs inside the run topic");
+    window.handleEvent({ type: "done" });
+    check(!!runStatus && runStatus.classList.contains("finished") && runStatus.closest("wa-message"),
+      "run status: on completion, the same status becomes the assistant bubble footer");
+    check(!!runStatus && /^\d+:\d{2}$/.test(runStatus.querySelector(".chat-content-run-elapsed").textContent),
+      "run status: the completed footer keeps the run duration");
+  })();
+
+  // ...but a run that called no tool must not be swallowed whole: no topic is created for one, so its
+  // thinking stays visible rather than the run reading as one that only called tools.
+  (function () {
+    window.handleEvent({ type: "round", n: 1 });
+    window.handleEvent({ type: "reasoning", text: "thinking, and nothing else", chars: 26 });
+    window.handleEvent({ type: "reply", text: "Thought it through and answered." });
+    var solo = document.querySelectorAll("wa-message .reasoning");
+    var soloBlock = solo[solo.length - 1];
+    check(!!soloBlock && soloBlock.closest("wa-run") === null,
+      "reasoning: a run that called no tool keeps its thinking visible, outside any topic");
+    check(!!soloBlock && soloBlock.open === false,
+      "reasoning: and it still folds away when that run answers");
+    window.handleEvent({ type: "done" });
+  })();
+
+  // ---- a trailing newline is a blank line, and must not render as one ----------------------
+  // Both containers are `white-space: pre-wrap`, so a provider's trailing newline draws an empty line.
+  // Measured in the live window: three of them sat between the thinking and the tool call that
+  // followed it, which reads as three paragraphs of nothing. Interior breaks are content and stay.
+  //
+  // Written without a single backslash on purpose: the probe is injected as text, and an escape
+  // sequence inside it becomes a real character - which turns a string literal into a syntax error and
+  // kills the whole block silently. That is how this check first "passed": it was never running.
+  (function () {
+    var NL = String.fromCharCode(10);
+    var CR = String.fromCharCode(13);
+    var SP = String.fromCharCode(32);
+    var TAB = String.fromCharCode(9);
+    function endsBlank(text) {
+      if (!text) return true;
+      var last = text.charAt(text.length - 1);
+      return last === NL || last === CR || last === SP || last === TAB;
+    }
+    window.handleEvent({ type: "round", n: 1 });
+    window.handleEvent({ type: "reasoning", text: "weighing it up" + NL + "and then" + NL + NL + NL, chars: 25 });
+    var blocks = document.querySelectorAll("wa-message .reasoning");
+    var block = blocks[blocks.length - 1];
+    var body = block ? block.querySelector(".reasoning-body") : null;
+    check(!!body, "trailing space: the reasoning body must exist");
+    check(!!body && !endsBlank(body.textContent),
+      "trailing space: the thinking must not end in a blank line, saw " +
+      JSON.stringify(body ? body.textContent.slice(-10) : "no body"));
+    check(!!body && body.textContent.indexOf("weighing it up" + NL + "and then") === 0,
+      "trailing space: an interior break is content and must stay, saw " +
+      JSON.stringify(body ? body.textContent : "no body"));
+    window.handleEvent({ type: "delta", text: "Checking the file" + NL + NL + NL });
+    var segs = document.querySelectorAll("wa-message .seg");
+    var lastSeg = segs[segs.length - 1];
+    check(!!lastSeg && !endsBlank(lastSeg.textContent),
+      "trailing space: a streamed step must not end in a blank line, saw " +
+      JSON.stringify(lastSeg ? lastSeg.textContent.slice(-10) : "no seg"));
+    window.handleEvent({ type: "reply", text: "Done." + NL + NL });
+    window.handleEvent({ type: "done" });
+  })();
+
+  // ---- one topic standard, and the thinking is a topic too -----------------------------------
+  // The thinking block used to be a bespoke <details> with its own header: taller than the tool-call
+  // topics beside it, no chevron, no glyph - so it read as a different kind of thing. It is now
+  // <wa-reasoning>, built by the same `topicParts` as <wa-trace>/<wa-run>/<wa-diff>. Asserted as the
+  // three things a reader sees: the same header parts in the same order, the same height, the chevron.
+  (function () {
+    window.handleEvent({ type: "round", n: 1 });
+    window.handleEvent({ type: "reasoning", text: "weighing the standard", chars: 22 });
+    window.handleEvent({ type: "tool", name: "bash", arguments: { command: "ls" } });
+    var topics = document.querySelectorAll("wa-message wa-reasoning");
+    var think = topics[topics.length - 1];
+    check(!!think, "topic standard: the thinking must be a <wa-reasoning> topic");
+    var head = think ? think.querySelector(":scope > .trace-head") : null;
+    var parts = head ? Array.prototype.map.call(head.children, function (c) { return c.className; }).join(",") : "";
+    check(parts === "trace-glyph,trace-label,trace-meta,trace-chevron",
+      "topic standard: the thinking header must hold glyph,label,meta,chevron like every other topic, saw: " + parts);
+    check(!!head && head.textContent.indexOf("thinking") >= 0,
+      "topic standard: its label says what it is, saw: " + (head ? head.textContent : "no head"));
+    check(!!head && !!head.querySelector(".trace-chevron"),
+      "topic standard: it carries the chevron that says it opens");
+    var traces = document.querySelectorAll("wa-message wa-trace");
+    var trace = traces[traces.length - 1];   // the one this block just made, so it is visible
+    var traceHead = trace ? trace.querySelector(":scope > .trace-head") : null;
+    var thinkH = head ? Math.round(head.getBoundingClientRect().height) : -1;
+    var traceH = traceHead ? Math.round(traceHead.getBoundingClientRect().height) : -2;
+    check(thinkH > 0 && thinkH === traceH,
+      "topic standard: the thinking header must be the same height as a tool-call header, saw " + thinkH + " vs " + traceH);
+    window.handleEvent({ type: "done" });
+  })();
+
+  // ---- the route stays open while the run is going --------------------------------------------
+  // Measured with a probe on a two-round run: after the first answer the run topic CLOSED, and the
+  // thinking and the tool lines went with it - so a reader watching a long run saw a folded topic and
+  // a list of answers rather than the run happening. The principle is already the one a running
+  // *trace* follows ("open so its tool lines are visible"); this is the same rule one level up, and a
+  // repaint is history, so a reloaded transcript still starts closed.
+  (function () {
+    var vis = function (el) { if (!el) return false; var r = el.getBoundingClientRect(); return r.height > 0; };
+    var lastOf = function (sel) { var l = document.querySelectorAll(sel); return l[l.length - 1]; };
+    window.handleEvent({ type: "round", n: 1 });
+    window.handleEvent({ type: "reasoning", text: "first thought", chars: 13 });
+    window.handleEvent({ type: "tool", name: "bash", arguments: { command: "ls" } });
+    window.handleEvent({ type: "reply", text: "First answer." });
+    var topic = lastOf("wa-message wa-run");
+    check(!!topic && topic.open, "live route: the run topic must stay open while the run is going");
+    check(vis(lastOf("wa-message wa-reasoning")), "live route: the thinking must still be visible mid-run");
+    window.handleEvent({ type: "round", n: 2 });
+    window.handleEvent({ type: "reasoning", text: "second thought", chars: 14 });
+    window.handleEvent({ type: "tool", name: "bash", arguments: { command: "ls -la" } });
+    window.handleEvent({ type: "reply", text: "Second answer." });
+    check(!!topic && topic.open, "live route: it stays open across rounds");
+    window.handleEvent({ type: "done" });
+    check(!!topic && !topic.open, "live route: it folds away when the run ends");
+  })();
+  // ---- a run this window did not open must be followed, not waited out ----------------------
+  // The node streams a run only to the request that opened it, so a reload during a run (or a run a
+  // wake or a job started) has no live channel. Measured live before this existed: the node executed
+  // 40s of work in the thread and the page's transcript did not change by one byte. /session answers
+  // while the run is in flight, so the window follows the ledger instead of freezing until the run ends.
+  //
+  // Awaited in the harness's own body on purpose: an un-awaited IIFE left these checks running after
+  // the verdict was computed, and a check that never runs looks exactly like one that passes.
+  var followThread = window.__chatThread();
+  check(!!followThread, "follow: the window must know which thread it is in");
+  window.__fixtures.health.workers = [{ label: "POST /chat", busy_ms: 5000, session: followThread }];
+  window.__fixtures.health.current = { label: "POST /chat", ms: 5000, session: followThread };
+  window.__fixtures.sessions = { sessions: [{ id: followThread, title: "followed", user_id: "master",
+    mode: "chat", message_count: 3, last_seq: 4242, updated_at: Math.floor(Date.now() / 1000),
+    state: "unfinished", state_detail: "a run is in flight" }] };
+  window.__fixtures.session = {
+    session: { id: followThread, title: "followed" },
+    state: { state: "unfinished", detail: "a run is in flight" },
+    messages: [
+      { seq: 1, role: "user", content: "FOLLOWED-QUESTION", tool_calls: [] },
+      { seq: 2, role: "assistant", content: "FOLLOWED-PARTIAL", tool_calls: [] },
+    ],
+  };
+  await window.__watchTurn();
+  for (var followDrain = 0; followDrain < 30; followDrain++) await tick();
+  // The assertion is on the *text*, not on a bubble count: a count can grow because some other
+  // path repainted, so it passes against the broken code too - and a check that passes on broken
+  // code is not a check. FOLLOWED-PARTIAL exists only in the fixture above, so it can only appear
+  // if this poll redrew the thread from the ledger.
+  check(document.body.innerText.indexOf("FOLLOWED-PARTIAL") >= 0,
+    "follow: a run this window did not open must be followed without a reload");
+  // ONE BUBBLE PER RUN, however many times the model speaks inside it.
+  // Measured live: a run whose model wrote a one-line preamble before each tool batch produced three
+  // assistant messages in one run, and the window drew THREE bubbles - because the `reply` handler
+  // closed the bubble (`runBubble = null`) on every reply event, contradicting flushDecision's own
+  // contract that "the bubble only closes when the run really ends". The run topic exists to fold the
+  // route away, and a topic cannot span bubbles, so a multi-step run read as several unrelated replies.
+  (function () {
+    var msgs = document.getElementById("messages");
+    var before = msgs.querySelectorAll("wa-message.assistant").length;
+    window.handleEvent({ type: "round", n: 1 });
+    window.handleEvent({ type: "delta", text: "Let me check the record." });
+    window.handleEvent({ type: "tool", name: "bash", arguments: { command: "cat a" } });
+    window.handleEvent({ type: "tool_result", name: "bash", result: { content: "a" } });
+    window.handleEvent({ type: "reply", text: "Let me check the record.", message_id: "message-multi-1" });
+    window.handleEvent({ type: "round", n: 2 });
+    window.handleEvent({ type: "delta", text: "Now the second probe." });
+    window.handleEvent({ type: "tool", name: "bash", arguments: { command: "cat b" } });
+    window.handleEvent({ type: "tool_result", name: "bash", result: { content: "b" } });
+    window.handleEvent({ type: "reply", text: "Now the second probe.", message_id: "message-multi-2" });
+    window.handleEvent({ type: "round", n: 3 });
+    window.handleEvent({ type: "delta", text: "The answer." });
+    window.handleEvent({ type: "reply", text: "The answer.", message_id: "message-multi-3" });
+    var after = msgs.querySelectorAll("wa-message.assistant").length;
+    check(after === before + 1,
+      "one run is one bubble however many times it speaks (was " + before + ", now " + after + ")");
+    var multi = msgs.querySelectorAll("wa-message.assistant")[after - 1];
+    var multiBody = multi ? multi.querySelector(".body") : null;
+    var multiShape = multiBody ? Array.prototype.map.call(multiBody.children, function (c) {
+      return c.tagName === "WA-RUN" ? "run" : (c.tagName === "WA-TRACE" ? "trace"
+        : (c.tagName === "WA-DIFF" ? "diff" : "text"));
+    }).join(",") : "";
+    check(multiShape === "run,text",
+      "a run that speaks three times folds into one topic above the answer, saw " + multiShape);
+    check(multiBody && multiBody.querySelectorAll("wa-run").length === 1,
+      "the run topic must not nest on the second reply, saw "
+      + (multiBody ? multiBody.querySelectorAll("wa-run").length : "no body"));
     window.handleEvent({ type: "done" });
   })();
   document.title = "stage: end";

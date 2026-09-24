@@ -98,7 +98,7 @@ wa-message.assistant { align-self: flex-start; background: var(--assistant); }
    border between each step and reads as unrelated messages. */
 .msg .body.steps { display: flex; flex-direction: column; gap: var(--gap); }
 .msg .body.steps .seg { white-space: pre-wrap; }
-.msg .body.steps wa-trace { width: 100%; max-width: none; }
+.msg .body.steps wa-trace, .msg .body.steps wa-reasoning { width: 100%; max-width: none; }
 
 /* The run topic: the whole run's path, collapsed above the answer. */
 .msg .body.steps wa-run { width: 100%; max-width: none; }
@@ -112,18 +112,18 @@ wa-message.assistant { align-self: flex-start; background: var(--assistant); }
 
 /* The model's thinking, when the provider streams it separately from the answer. It is the
    route to the reply, not the reply, so it folds away - but it stays a visible step, because a
-   turn whose content was all reasoning must not read as a turn that only called tools. */
-.reasoning { border: 1px solid var(--line); border-radius: var(--radius); background: rgba(15, 18, 25, .5); }
-.reasoning > summary.reasoning-head {
-  cursor: pointer; padding: 6px var(--space); color: var(--muted); font-size: 12px; list-style: none;
-}
-.reasoning > summary.reasoning-head::-webkit-details-marker { display: none; }
-.reasoning[open] > summary.reasoning-head { border-bottom: 1px solid var(--line); }
+   turn whose content was all reasoning must not read as a turn that only called tools.
+   It is a topic like the tool calls beside it: the same `trace-head` header (glyph, label, meta,
+   chevron) and the same border and background as <wa-trace>, so nothing about it reads as a
+   different kind of thing. Its own part is the body: pre-wrap prose, capped and scrollable. */
+wa-reasoning { display: block; align-self: flex-start; max-width: 760px; width: 100%; }
+.reasoning { border: 1px solid var(--line); border-radius: var(--radius); background: rgba(15, 18, 25, .6); overflow: hidden; }
 .reasoning-body {
-  padding: var(--space); color: var(--muted); font-size: 12px; white-space: pre-wrap;
+  padding: var(--space); border-top: 1px solid rgba(35, 41, 54, .8);
+  color: var(--muted); font-size: 12px; white-space: pre-wrap;
   word-break: break-word; max-height: 320px; overflow: auto;
 }
-.run-body wa-trace { border: 0; border-left: 2px solid rgba(35, 41, 54, .8); border-radius: 0; background: none; }
+.run-body wa-trace, .run-body wa-reasoning { border: 0; border-left: 2px solid rgba(35, 41, 54, .8); border-radius: 0; background: none; }
 
 /* The diff topic: what the run changed on disk, collapsed *after* the answer.
    It uses the same `trace-head` header as <wa-run>/<wa-trace> - a topic is a topic, and a
@@ -183,7 +183,17 @@ wa-diff { display: block; align-self: flex-start; max-width: 760px; width: 100%;
 }
 .hints button:hover { border-color: var(--accent); }
 
-.status { align-self: flex-start; display: flex; align-items: center; gap: var(--gap); color: var(--muted); font-size: 13px; padding: var(--space); }
+.chat-content-run-status {
+  position: sticky; bottom: 0; z-index: 2; align-self: stretch; display: flex; align-items: center;
+  gap: var(--gap); color: var(--muted); font-size: 13px; padding: var(--space);
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.chat-content-run-label { min-width: 0; }
+.chat-content-run-elapsed { margin-left: auto; flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.chat-content-run-status.finished {
+  position: static; z-index: auto; width: 100%; margin-top: var(--space); padding: var(--space) 0 0;
+  border: 0; border-top: 1px solid var(--line); border-radius: 0; background: none; font-size: 11px;
+}
 .spinner { width: 10px; height: 10px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; display: inline-block; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .tool {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The copilot pipeline's first step: read the store, diff it against the cursor, and print one JSON object -
-# the new eligible *text* messages for a child to answer, the ones nobody here can read (an image, a voice
-# note) reported to the operator's own inbox instead of being guessed at, and the ones that were handed on
+# the new eligible text and locally transcribed audio messages for a child to answer, unsupported media
+# reported to the operator's own inbox instead of being guessed at, and the ones that were handed on
 # as often as the reader is willing to try without anybody deciding them.
 set -uo pipefail
 
@@ -25,6 +25,7 @@ if command -v cygpath >/dev/null 2>&1; then
 fi
 
 read_out="$(WA_WHATSAPP_JSON_EVENTS=1 WA_SCRIPT="$lua_script" "$WA" "$@")"
+read_status=$?
 
 # Report to the operator, in their own inbox: what the copilot sent as them, the messages nobody here can
 # read, the ones nobody managed to decide before the attempt bound, and the ones it declined to answer
@@ -57,3 +58,4 @@ if [ -n "${WA_JOB_RESULT_FILE:-}" ]; then
 fi
 
 printf '%s' "$read_out"
+exit "$read_status"

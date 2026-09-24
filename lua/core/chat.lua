@@ -25,26 +25,12 @@ local M = {}
 -- machine can keep separate threads per user.
 local USER, NODE = "master", ""
 
-local HELP = [[usage: wa chat [--continue | --session <id>] [prompt]
+-- The commands, their help and the flags that select a session are one registry
+-- (`lua/core/commands.lua`), so the list a reader is shown and the arms below cannot drift apart, and
+-- `scripts/test-command-parity.cjs` can fail when this REPL is missing a command the window offers.
+local commands = dofile("lua/core/commands.lua")
 
-sessions:
-  (default)            start a new session
-  --continue, -c       continue the most recent session
-  --session <id>       continue exactly that session (see: wa sessions)
-
-commands:
-  /session             print the session id (resume with --session)
-  /remember <text>     store a memory
-  /recall <query>      search memories
-  /memories            list recent memories
-  /search <query>      search the message ledger
-  /conversation <id>   read a conversation
-  /stats               database counts
-  /update              install the newest build in this node's tree (the sentinel does it, once idle)
-  /merge               act as git orchestrator: merge every open branch into main, gate, push, sync
-  /help                this help
-  /exit                quit
-anything else is sent to the model.]]
+local HELP = commands.help()
 
 local function each(rows, render)
   if #rows == 0 then print("(empty)") return end
@@ -82,6 +68,10 @@ local function printer(view)
         value = redact.text(value)
       end
       ready = { type = event.type, name = event.name, result = value }
+    elseif event.type == "reasoning" then
+      -- Reasoning is model output and goes through the redactor for the same reason a tool's
+      -- output does: it is text this process did not write and is about to print.
+      ready = { type = "reasoning", text = redact.text(tostring(event.text or "")) }
     end
     -- A rendering bug must not kill the run it is describing, and must not be silent
     -- either: the view says so once and the run keeps going.
@@ -165,11 +155,17 @@ function M.run(argv)
     title = "wa - " .. (workspace:match("([^/]+)$") or "chat"),
     workspace = workspace,
     branch = cli_view.branch(cwd),
-    budget = tonumber(host.getenv("WASM_AGENT_LLM_CONTEXT")) or 0,
+    -- The model's own window, the same one compaction uses; the env global is only a
+    -- fallback inside `cli_view.window`. Reading the global here reported a 1,000,000-token
+    -- model as 128.0k and made the footer's percentage eight times too high.
+    budget = cli_view.window(settings.model, function(model) return provider.budget(model) end),
     -- The terminal width when it says so, and otherwise the width every terminal has: a
     -- status line that wraps is erased only on its last row, which leaves the row above it
     -- behind as litter.
-    limit = tonumber(host.getenv("COLUMNS")) or 80,
+    -- The terminal's real width, asked of the console rather than assumed: `COLUMNS` is a shell
+    -- variable that is normally not exported, and a CLI that fell back to 80 wrapped its answers
+    -- into a third of a wide window. See `platform.columns`.
+    limit = platform.columns(host.getenv("COLUMNS")),
   })
   local agent = agentlib.new(session.id, printer(view), "master", USER, NODE)
 
@@ -222,8 +218,23 @@ function M.run(argv)
       print(HELP)
     elseif line == "/session" then
       print(agent.session_id)
+    elseif line == "/new" then
+      -- The window's `/new`, in the REPL. The session being left is not closed: `M:close` finishes a
+      -- session, and this thread is not finished, only left - `wa chat --session <id>` comes back to
+      -- it, and `wa sessions` still lists it.
+      local previous = agent.session_id
+      local id, notice = commands.new_session({ previous = previous, user = USER, node = NODE })
+      agent = agentlib.new(id, printer(view), "master", USER, NODE)
+      print(redact.text(notice))
     elseif line == "/stats" then
       print(json.encode(memory.stats()))
+    elseif line == "/console" then
+      -- The console is the raw view of the same run: every event as it arrived, and a tool's
+      -- output whole. It is a toggle rather than a flag on the launcher because the question
+      -- ("what is it actually doing?") arrives in the middle of a run, not before it.
+      local on = view:set_console(not view:console_on())
+      print(on and "  console on: every event, and a tool's output unclipped"
+        or "  console off: the formatted view")
     elseif line == "/update" then
       -- The same report the window gets from POST /update, and the same sentence: this node cannot
       -- replace itself, so the answer is what it decided and what it queued for the sentinel.

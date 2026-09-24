@@ -33,15 +33,39 @@ local workdir = os.getenv("WA_EXPERIMENT_DIR") or "/tmp"
 -- better" from being an opinion: F1 leaves observable evidence of a live process,
 -- F2 names a file and a function that either exist in the tree or do not.
 local TASKS = {
-  ["long-lived"] = "Start a long-running background process, as a plain child process of your shell " ..
-    "(not a scheduled task, not a service, not a detached daemon). It must append one line to " ..
-    "<FILE> every 2 seconds and it must still be running when you finish - it has to outlive this " ..
-    "task. Prove it started by showing the file's contents once. Do not wait for it to end.",
-  ["navigation"] = "Find where host.exec_timeout is read in this repository, and name the " ..
-    "Lua file and the function that consumes it, with the line number. Do not modify anything.",
+  ["long-lived"] = {
+    prompt = "Start a long-running background process, as a plain child process of your shell " ..
+      "(not a scheduled task, not a service, not a detached daemon). It must append one line to " ..
+      "<FILE> every 2 seconds and it must still be running when you finish - it has to outlive this " ..
+      "task. Prove it started by showing the file's contents once. Do not wait for it to end.",
+    -- The outcome here is a live process, checked after the run; there is no text to match.
+    expect = {},
+  },
+  ["navigation"] = {
+    prompt = "Find where host.exec_timeout is read in this repository, and name the " ..
+      "Lua file and the function that consumes it, with the line number. Do not modify anything.",
+    -- Tokens per *correct* answer is the metric: a cheaper wrong answer is not an improvement.
+    expect = { "lua/core/tools.lua", "exec_deadline_seconds" },
+  },
+  -- Replay's cost is proportional to the number of rounds: what is re-sent is the thinking
+  -- of every round before this one. A five-round task cannot show it, so this fixture asks
+  -- for twelve files - one read and one round each - and the answer must name all twelve.
+  ["wide"] = {
+    prompt = "For each of these files, report the name of the first function it defines. " ..
+      "Read each one. Report one line per file as `path: name`.\n" ..
+      "lua/core/agent.lua, lua/core/memory.lua, lua/core/provider.lua, lua/core/subagents.lua, " ..
+      "lua/core/tools.lua, lua/core/tool_output.lua, lua/core/graph.lua, lua/core/skills.lua, " ..
+      "lua/core/nodes.lua, lua/core/spells.lua, lua/core/platform.lua, lua/core/paths.lua",
+    expect = { "lua/core/agent.lua", "lua/core/memory.lua", "lua/core/provider.lua",
+      "lua/core/subagents.lua", "lua/core/tools.lua", "lua/core/tool_output.lua",
+      "lua/core/graph.lua", "lua/core/skills.lua", "lua/core/nodes.lua",
+      "lua/core/spells.lua", "lua/core/platform.lua", "lua/core/paths.lua" },
+  },
 }
 
-local base_prompt = TASKS[task_id]
+local selected = TASKS[task_id]
+local base_prompt = selected and selected.prompt
+local expect = (selected and selected.expect) or {}
 if not base_prompt then
   print("LEDGER " .. json.encode({ arm = arm, task = task_id, fatal = "unknown task" }))
   print("EXPERIMENT_DONE " .. arm .. " " .. task_id)
@@ -131,6 +155,13 @@ for _, entry in ipairs(started) do
     end
   end
 
+  local reply = tostring(result.reply or "")
+  -- Correct only if it names every expected fact. A cheap wrong answer is not an
+  -- improvement, so the headline metric is tokens per correct answer.
+  local missing = {}
+  for _, needle in ipairs(expect) do
+    if not reply:find(needle, 1, true) then missing[#missing + 1] = needle end
+  end
   -- Adoption is only real if the process is still running after the child that started
   -- it has finished. The node is still alive here - it exits when this script ends, and
   -- KILL_ON_JOB_CLOSE takes the job with it - so this is the only honest moment to look.
@@ -168,12 +199,14 @@ for _, entry in ipairs(started) do
     state = final.state, settled = final.settled,
     failure = final.error,
     first_tool = first_tool,
+    correct = #missing == 0,
+    missing = missing,
     tools = tools, errors = errors,
     adoption = adoption,
     reasoning_chars = reasoning_chars,
     tokens_total = tokens_total,
     usage = usage,
-    reply = tostring(result.reply or ""):sub(1, 800),
+    reply = reply:sub(1, 800),
   }))
 end
 

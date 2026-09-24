@@ -95,6 +95,16 @@ signature without changing `host.rs`; the signature is deliberately unchanged. T
 and restores the previous sink on drop; a relayed run installs a buffer local to that call.
 There is deliberately no process-wide fallback.
 
+When a browser reloads during a local SSE run, the old socket cannot be transferred to the new page. The node
+keeps the active run's unsaved event tail in memory and serves it through owner-scoped `POST /run-events`.
+`record_turn` emits a checkpoint after each durable message; events before it are already represented by the
+transcript, so the refreshed page reloads through that message and then applies only the newer events. Tool-call
+ids let the page attach a replayed live call to its already-painted pending row, and message ids prevent a saved
+final reply from appearing twice. The replay tail is capped at 4 MiB per run and discarded when the run settles.
+If it fills before another checkpoint, the endpoint reports overflow and the UI says live replay is waiting for
+the next saved step. A process restart does not preserve the tail; the durable transcript remains the recovery
+source.
+
 ## Subagents are a control call
 
 `POST /subagents` calls the runtime's global `wa_subagents(body, session)`. It is served by
@@ -102,8 +112,8 @@ the **control lane**, never a run slot, and is never admitted as a run: `start` 
 native background child, so the route itself is a control call. An invalid credential is
 refused `401` at the boundary. The HTTP `await` is capped
 (`WASM_AGENT_SUBAGENT_AWAIT_MS`, default 10000) so one control slot cannot be held
-indefinitely; `POST /runs` and `/health` are answered without a worker, so cancel and
-health stay prompt even while every control slot is awaiting.
+indefinitely; `POST /runs`, `POST /run-events` and `/health` are answered without a worker,
+so cancellation, live replay and health stay prompt even while every control slot is awaiting.
 
 ## What this does not cover
 

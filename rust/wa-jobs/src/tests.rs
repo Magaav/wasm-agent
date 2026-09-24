@@ -383,3 +383,92 @@ fn a_pipeline_validates_its_steps_and_lands_on_the_inference_lane() {
         "step_1_unknown_kind"
     );
 }
+
+/// Every template in `jobs/` must validate and install.
+///
+/// Those files are what `deploy.sh` puts, and a put that fails is only a WARNING there - so a template
+/// that the store refuses would never install and nobody would be told. This is the check the gate can
+/// make and the deploy cannot, and it is the whole reason one template is trustworthy: the file in the
+/// tree is the thing the store accepts, or the gate says so by name.
+#[test]
+fn every_shipped_job_template_installs() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../jobs");
+    // deploy.sh substitutes this placeholder with the install directory, forward-slashed, and the
+    // validator requires the script path to be absolute - so the fixture has to be an absolute path on
+    // this platform too, not a rooted one like "/install".
+    let install = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let entries = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+    let mut seen = 0;
+    for entry in entries {
+        let path = entry.expect("readable entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("readable template");
+        let definition: Value = serde_json::from_str(&text.replace("PREPARED_BY_INSTALL", &install))
+            .unwrap_or_else(|e| panic!("{} is not JSON: {e}", path.display()));
+        validate(&definition)
+            .unwrap_or_else(|e| panic!("{} does not validate: {e}", path.display()));
+        let installed = store()
+            .put(&definition)
+            .unwrap_or_else(|e| panic!("{} does not install: {e}", path.display()));
+        assert_eq!(
+            installed["enabled"],
+            json!(false),
+            "{} installed enabled; a new definition is installed disabled so a person approves it",
+            path.display()
+        );
+        assert_eq!(installed["revision"], json!(1));
+        assert_eq!(installed["id"], definition["id"]);
+        seen += 1;
+    }
+    assert!(seen > 0, "no job templates found in {}", dir.display());
+}
+
+/// A job can be removed, and removing one leaves nothing of it behind.
+///
+/// This is what lets the board say only what is meant to run: `disable` leaves a row, and a row that is
+/// off on purpose reads exactly like one whose definition changed.
+#[test]
+fn forget_removes_the_job_and_its_rows() {
+    let s = store();
+    let job = json!({"id":"gone","name":"a job","trigger":{"kind":"schedule","every_seconds":60},
+        "action":{"kind":"run","script":std::env::temp_dir().join("gone.sh")}});
+    s.put(&job).unwrap();
+    assert_eq!(s.list().unwrap().as_array().unwrap().len(), 1);
+
+    assert_eq!(s.forget("gone").unwrap()["forgotten"], json!(true));
+    assert_eq!(s.list().unwrap().as_array().unwrap().len(), 0, "the row must be gone");
+    // A refusal is an Err, like every other store refusal - not an Ok carrying an "error" key.
+    assert_eq!(s.forget("gone").unwrap_err().to_string(), "job_not_found");
+}
+
+/// A job with work in flight is not the store's to remove.
+///
+/// The job has to be *enabled* before it can hold work: `enqueue` inserts nothing for a disabled job, so
+/// a fixture that skipped `enable` would prove the guard by having nothing to guard.
+#[test]
+fn forget_refuses_while_a_delivery_is_active() {
+    let s = store();
+    let job = json!({"id":"busy","name":"a job","trigger":{"kind":"schedule","every_seconds":60},
+        "action":{"kind":"run","script":std::env::temp_dir().join("busy.sh")}});
+    s.put(&job).unwrap();
+    s.enable("busy", true).unwrap();
+    let revision = s.get("busy").unwrap()["revision"].as_i64().unwrap();
+    s.enqueue("busy", revision, "e1", &json!({}), 0).unwrap();
+    assert!(
+        !s.history().unwrap().as_array().unwrap().is_empty(),
+        "the fixture must have a delivery for the guard to refuse"
+    );
+
+    assert_eq!(
+        s.forget("busy").unwrap_err().to_string(),
+        "job_has_active_delivery",
+        "a queued delivery is work in flight"
+    );
+    assert_eq!(s.list().unwrap().as_array().unwrap().len(), 1, "a refusal must not remove the row");
+}

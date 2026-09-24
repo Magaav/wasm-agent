@@ -6,6 +6,7 @@ local platform = dofile("lua/core/platform.lua")
 local spellslib = dofile("lua/core/spells.lua")
 local nodeslib = dofile("lua/core/nodes.lua")
 local changeset = dofile("lua/core/changeset.lua")
+local patch_audit = dofile("lua/core/patch_audit.lua")
 local tool_output = dofile("lua/core/tool_output.lua")
 local file_tools = dofile("lua/core/file_tools.lua")
 local evidence_view = dofile("lua/core/evidence_view.lua")
@@ -140,16 +141,24 @@ M.admin = {
     ignore_case = {type="boolean"}, limit={type="integer",minimum=1,maximum=500},
     max_depth={type="integer",minimum=0,maximum=64}, extensions={type="array",items={type="string"}}
   }, { "pattern" }),
-  -- The code graph. This is the cheap first move for a navigation question: it returns
-  -- definitions, callers and capabilities directly, where grep returns candidate lines
-  -- that still need reading. The node keeps the graph fresh, so `index` is rarely needed.
-  schema("graph", "Find symbols and exact call sites with explain; trace known functions with path; use query to discover names or literal HTTP routes (e.g. /subagents). Use graph before grep for code navigation. For 'how A reaches B', call path(A,B) first, then read the returned lines; path crosses Rust call_string to Lua entrypoints. explain returns a definition, uses and exact caller lines. query ranks name matches first and returns 12 compact results by default; increase limit if truncated. caps lists host.* capabilities. stats/index inspect or rebuild the watched index.", {
-    action = { type = "string", enum = { "explain", "query", "path", "caps", "stats", "index" } },
+  -- The graph is an impact-review lead generator and an optional relationship tool.
+  schema("graph", "Audit the current native write/edit patch for unread resolved callers with action=audit, or pass source=git for the current Git patch (including shell edits). After an audit follow-up step, call audit_assess with your usefulness grade, reason and critique; this is self-report, not proof. Use audit_report after the 48-hour trial and audit_feedback only for an operator-reviewed outcome. For explicit dependency questions, explain/path/query/caps remain available; read source before acting on a graph lead. stats/index inspect or rebuild the index.", {
+    action = { type = "string", enum = { "explain", "query", "path", "caps", "stats", "index", "audit", "audit_assess", "audit_report", "audit_feedback" } },
     name = { type = "string", description = "explain/query: the identifier to look up." },
     from = { type = "string", description = "path: start identifier." },
     to = { type = "string", description = "path: end identifier." },
     limit = { type = "integer", minimum = 1, maximum = 200 },
     force = { type = "boolean", description = "index: reparse every file, even unchanged ones." },
+    hours = { type = "integer", minimum = 1, maximum = 720, description = "audit_report: telemetry window, default 48 hours." },
+    grade = { type = "integer", minimum = 0, maximum = 3, description = "audit_assess: 0 irrelevant/noisy; 1 related but no new information; 2 useful check/confirmation; 3 prompted a patch or test revision. This is your opinion, not a confirmed catch." },
+    reason = { type = "string", description = "audit_assess: concrete reason tied to what you inspected." },
+    critique = { type = "string", description = "audit_assess: specific graph limitation/noise, or say none observed." },
+    evidence = { type = "string", description = "audit_assess: optional path:line or test/patch evidence; never paste secrets." },
+    run_id = { type = "string", description = "audit_feedback: run with an audit lead." },
+    outcome = { type = "string", enum = { "confirmed_catch", "false_positive", "unresolved" }, description = "audit_feedback: operator-reviewed outcome; never self-certify a catch." },
+    commit = { type = "string", description = "audit_feedback: optional commit hash for evidence." },
+    source = { type = "string", enum = { "native", "git" }, description = "audit: native changeset (default) or current Git working-tree patch." },
+    cwd = { type = "string", description = "audit source=git: repository working directory; defaults to the node's cwd." },
   }, { "action" }),
   schema("diagnose", "Execute up to eight predetermined read/grep steps once, in order. Stop on failure, incomplete evidence or an unmet expectation. No shell, repair, retry or effects.", {
     steps={type="array",minItems=1,maxItems=8,items={type="object",properties={
@@ -414,6 +423,25 @@ function M.dispatch(memory, name, args, role, ctx)
     if timeout ~= nil and (type(timeout) ~= "number" or timeout % 1 ~= 0 or timeout < 1 or timeout > 86400) then
       return { error = "invalid_timeout_seconds" }
     end
+    -- A common `git commit` path gets a bounded, opt-in pre-commit review. The first
+    -- attempt with unread leads returns them without executing the command. A repeated
+    -- attempt on the same patch is allowed so a false positive cannot trap the agent;
+    -- the final answer still reports unresolved leads. This is not a universal hook:
+    -- commits hidden inside scripts or other tools are outside this interception.
+    if patch_audit.enabled() and not ctx.subagent and ctx.commit_audits
+        and args.command:match("%f[%w]git%s+commit%f[%W]") then
+      local audit=patch_audit.git_audit(args.cwd,ctx.reviewed_paths,
+        {session_id=ctx.session_id,run_id=ctx.run_id})
+      if audit.error then return {error="graph_patch_audit_failed",audit=audit} end
+      if (audit.lead_count or 0)>0 then
+        local fingerprint=audit.patch_fingerprint or "unknown_patch"
+        if not ctx.commit_audits[fingerprint] then
+          ctx.commit_audits[fingerprint]=true
+          return {error="graph_patch_review_required",audit=audit,
+            note="commit not executed; inspect the cited callers or retry to acknowledge a false positive"}
+        end
+      end
+    end
     local result = run(args.cwd and ("cd " .. shell_quote(args.cwd) .. " && " .. args.command) or args.command, timeout)
     -- The adopted-tree guidance is *policy*, and policy depends on what this caller may use:
     -- a profile with `bash` but not `operation` cannot read or cancel the operation it has just
@@ -501,8 +529,23 @@ function M.dispatch(memory, name, args, role, ctx)
     return json.decode(result)
   elseif name == "graph" then
     local graph = dofile("lua/core/graph.lua")
-    if not graph.available() then return { error = "graph_unavailable" } end
     local action = args.action or "explain"
+    if action == "audit" then
+      if args.source=="git" then
+        if ctx.subagent then return {error="git_audit_forbidden_for_subagent"} end
+        return patch_audit.git_audit(args.cwd,ctx.reviewed_paths,
+          {session_id=ctx.session_id,run_id=ctx.run_id})
+      end
+      return patch_audit.run(ctx.changes, ctx.reviewed_paths,
+        {session_id=ctx.session_id,run_id=ctx.run_id})
+    elseif action == "audit_report" then
+      return patch_audit.report(args.hours)
+    elseif action == "audit_assess" then
+      return patch_audit.assess(args,ctx)
+    elseif action == "audit_feedback" then
+      return patch_audit.feedback(args.run_id,args.outcome,args.commit,ctx)
+    end
+    if not graph.available() then return { error = "graph_unavailable" } end
     local result, err
     if action == "explain" then result, err = graph.explain(args.name)
     elseif action == "query" then result, err = graph.query(args.name, { limit = args.limit })

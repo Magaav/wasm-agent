@@ -7,6 +7,7 @@
 local json = dofile("lua/vendor/json.lua")
 local tools = dofile("lua/core/tools.lua")
 local changeset = dofile("lua/core/changeset.lua")
+local patch_audit = dofile("lua/core/patch_audit.lua")
 local provider = dofile("lua/core/provider.lua")
 local memory = dofile("lua/core/memory.lua")
 local telemetry = dofile("lua/core/telemetry.lua")
@@ -17,6 +18,14 @@ local redact = dofile("lua/core/redact.lua")
 
 local M = {}
 M.__index = M
+
+-- A browser that reconnects can repaint durable rows first, then resume from this boundary. The host
+-- keeps only stream events after the latest checkpoint, which avoids duplicating transcript content.
+local function record_turn(self, turn)
+  local seq = memory.append_turn(self.session_id, turn)
+  self.emit({ type = "checkpoint", seq = seq })
+  return seq
+end
 
 local SYSTEM = table.concat({
   "You are wasm-agent, a concise, local-first assistant with durable memory.",
@@ -414,6 +423,7 @@ local function navigation_outcome(name, args, output)
   if name == "graph" then
     local action = type(args) == "table" and tostring(args.action or "") or ""
     if action == "" then return nil end
+    if action == "audit" or action == "audit_assess" or action == "audit_report" or action == "audit_feedback" then return nil end
     if output.error then return { action = action, found = false } end
     if action == "path" then
       local steps = type(output.steps) == "table" and #output.steps or 0
@@ -811,7 +821,7 @@ function M:maybe_compact(messages, force)
   local after = self:context_tokens()
   -- Record it in the transcript so a compaction (and the cache invalidation it
   -- causes) is visible in the session view instead of being invisible work.
-  memory.append_turn(self.session_id, {
+  record_turn(self, {
     role = "summary", content = merged, tokens = estimate_tokens(merged), debug = self.debug,
     ms = math.floor((host.now() - started) * 1000),
     trace = { {
@@ -905,14 +915,15 @@ function M:run_body(text, images)
   self.emit({ type = "status", text = "thinking" })
   self.debug = (memory.session(self.session_id) or {}).mode == "debug"
 
-  memory.append_turn(self.session_id, {
+  record_turn(self, {
     id=self.run_id,role = "user", content = text, images = images or {}, debug = self.debug,
   })
 
   if not provider.configured() then
     local reply = self:local_run(text)
-    memory.append_turn(self.session_id, { role = "assistant", content = reply, debug = self.debug })
-    self.emit({ type = "reply", text = reply })
+    local message_id = host.uuid()
+    record_turn(self, { id = message_id, role = "assistant", content = reply, debug = self.debug })
+    self.emit({ type = "reply", text = reply, message_id = message_id })
     telemetry.event(self.session_id,self.run_id,"","step","end",{outcome="local_fallback"})
     return reply
   end
@@ -927,6 +938,38 @@ function M:run_body(text, images)
   -- message, so the diff topic belongs to the message that caused it and undo can reach the
   -- previous text long after the message ended.
   self.changes = changeset.new()
+  self.reviewed_paths = {}
+  self.commit_audits = {}
+  self.audit_step = nil
+  local audit_intervened = false
+  local audit_assessment_requested = false
+  local shell_used, audit_prompt = false, nil
+  local audit_lead_paths, audit_root, audit_before, audit_tokens_before, audit_unaccounted_before, audit_time_before
+  local function finish_audit_step()
+    local step=self.audit_step
+    if not step then return end
+    telemetry.event(self.session_id,self.run_id,"","graph_patch_step","end",{
+      step_id=step.id,source=step.source,lead_count=step.lead_count,
+      assessed=step.assessed,grade=step.grade,error=step.error})
+    self.audit_step=nil
+  end
+  local function remember_audit_leads(audit)
+    if not audit or (audit.lead_count or 0)==0 and not audit.error then return end
+    finish_audit_step()
+    self.audit_step={id=host.uuid(),source=audit.source or "unknown",
+      lead_count=audit.lead_count or 0,error=audit.error,assessed=false}
+    audit_assessment_requested=false
+    if (audit.lead_count or 0)==0 then return end
+    audit_lead_paths={}
+    audit_root=tostring(audit.root or ""):gsub("\\","/"):lower():gsub("/$","")
+    for _, lead in ipairs(audit.leads or {}) do
+      audit_lead_paths[tostring(lead.path):gsub("\\","/"):lower()]=true
+    end
+    audit_before=host.sha256(json.encode(changeset.summary(self.changes)))
+    audit_tokens_before=totals.total
+    audit_unaccounted_before=totals.unaccounted or 0
+    audit_time_before=telemetry.clock()
+  end
   local tool_list = self.tool_list or tools.all(self.role)
   -- Fingerprint of the *stable* prefix (system + AGENTS.md + tool schemas).
   -- Identical across runs unless instructions or tools change, which is what a
@@ -1016,6 +1059,7 @@ function M:run_body(text, images)
     if child_state and child_state.cancelled then error("subagent_cancelled") end
     while self:maybe_compact(messages) do
       messages=self:build_context()
+      if audit_prompt then messages[#messages+1]={role="user",content=audit_prompt} end
       -- A long imported backlog may need several bounded summaries. Ordinary
       -- compaction stops here; every additional pass must cover a new prefix.
       if self:context_tokens(messages)<(provider.budget(self.model).context or 0) then break end
@@ -1092,7 +1136,7 @@ function M:run_body(text, images)
       local problem = cancelled and "run_cancelled" or tostring(result)
       trace[#trace + 1] = { kind = "model_call", model = self.model, ok = false,
         ms = math.floor((host.now() - llm_started) * 1000), error = redact.text(problem):sub(1, 400) }
-      memory.append_turn(self.session_id, {
+      record_turn(self, {
         role = "assistant", content = "", ok = false, trace = trace, debug = self.debug,
         ms = math.floor((host.now() - run_started) * 1000),
       })
@@ -1175,6 +1219,14 @@ function M:run_body(text, images)
     end
     if result.model and result.model ~= "" then self.model = result.model end
 
+    -- What the model thought before it acted, emitted per round so the view can show it beside
+    -- the calls it explains. A CLI run has no SSE sink (`rust/wa-host/src/host.rs`
+    -- `serve::write_event` writes deltas to the node's, and this process has none), so without
+    -- this event the reasoning exists only in the transcript and a terminal never shows it.
+    if (result.reasoning or "") ~= "" then
+      self.emit({ type = "reasoning", text = result.reasoning, round = round })
+    end
+
     local calls = result.tool_calls or {}
     local assistant = { role = "assistant", content = result.content or "" }
     if provider.reasoning(self.model).replay then assistant.reasoning_content=result.reasoning or "" end
@@ -1187,7 +1239,7 @@ function M:run_body(text, images)
         failed_span.ok=false; failed_span.error=problem; failed_span.finish_reason=result.finish_reason
         failed_span.reasoning_bytes=#(result.reasoning or "")
       end
-      memory.append_turn(self.session_id,{role="assistant",content=result.content or "",reasoning=result.reasoning or "",ok=false,trace=trace})
+      record_turn(self,{role="assistant",content=result.content or "",reasoning=result.reasoning or "",ok=false,trace=trace})
       telemetry.event(self.session_id,self.run_id,"","step","end",{outcome=reason})
       error(problem)
     end
@@ -1214,24 +1266,76 @@ function M:run_body(text, images)
           -- budget, so a bounded head of it is kept where a reader can find it.
           span.reasoning_head = (result.reasoning or ""):sub(1, 2000)
         end
-        memory.append_turn(self.session_id, {
+        record_turn(self, {
           role = "assistant", content = "", reasoning=reply_reasoning, ok = false, trace = trace, debug = self.debug,
           ms = math.floor((host.now() - run_started) * 1000),
         })
         telemetry.event(self.session_id,self.run_id,"","step","end",{outcome="empty_reply"})
         error(reason)
       end
-      -- The final assistant message is recorded once, after the loop, with the
-      -- message's trace. Recording it here as well would duplicate it in context.
-      completed=true
-      break
+      local audit
+      if patch_audit.enabled() and not self.subagent then
+        if shell_used then
+          audit=patch_audit.git_audit(nil,self.reviewed_paths,
+            {session_id=self.session_id,run_id=self.run_id})
+          if audit.verdict=="no_patch" and not changeset.empty(self.changes) then
+            audit=patch_audit.run(self.changes,self.reviewed_paths,
+              {session_id=self.session_id,run_id=self.run_id})
+          end
+        elseif not changeset.empty(self.changes) then
+          audit=patch_audit.run(self.changes,self.reviewed_paths,
+            {session_id=self.session_id,run_id=self.run_id})
+        end
+      end
+      if audit and not audit_intervened and (audit.error or (audit.lead_count or 0)>0) then
+        audit_intervened=true
+        remember_audit_leads(audit)
+        local compact={verdict=audit.verdict,leads={},gaps=audit.gaps,error=audit.error,
+          lead_count=audit.lead_count,truncated=audit.truncated}
+        for i,lead in ipairs(audit.leads or {}) do
+          if i>8 then break end
+          compact.leads[#compact.leads+1]=lead
+        end
+        audit_prompt="Automated patch impact audit (not a correctness proof): "
+          ..json.encode(compact)..". Audit follow-up step: inspect relevant callers/tests "
+          .."against the source and patch. Then call graph audit_assess with grade 0-3, "
+          .."a concrete reason, and a critique (or 'none observed'). Grade 3 means the lead "
+          .."prompted a patch/test revision, not a confirmed catch. This is your opinion; "
+          .."only operator feedback can mark the graph worthy."
+        messages[#messages+1]={role="user",content=audit_prompt}
+        self.emit({type="status",text="checking patch impact leads"})
+        reply=""
+      elseif self.audit_step and not self.audit_step.assessed and not audit_assessment_requested then
+        audit_assessment_requested=true
+        audit_prompt="Before finishing the audit follow-up step, call graph audit_assess "
+          .."with a 0-3 usefulness grade, a concrete reason tied to what you inspected, "
+          .."and a critique of the graph result. This is self-report, not operator feedback."
+        messages[#messages+1]={role="user",content=audit_prompt}
+        reply=""
+      else
+        if audit and (audit.error or (audit.lead_count or 0)>0 or #(audit.gaps or {})>0) then
+          reply=reply.."\n\n[Patch impact audit: "
+            ..(audit.error and ("unavailable ("..tostring(audit.error)..")")
+              or (tostring(audit.lead_count or 0).." review lead(s), "
+                ..tostring(#(audit.gaps or {})).." coverage gap(s)"))
+            .."; not a correctness verdict.]"
+        end
+        if self.audit_step and not self.audit_step.assessed then
+          reply=reply.."\n\n[Graph audit self-assessment missing; see audit report.]"
+        end
+        -- The final assistant message is recorded once, after the loop, with the
+        -- message's trace. Recording it here as well would duplicate it in context.
+        completed=true
+        break
+      end
     end
-      memory.append_turn(self.session_id, {
-      role = "assistant", content = result.content or "", tool_calls = calls, debug = self.debug,reasoning=result.reasoning or "",
-    })
+      record_turn(self, {
+        role = "assistant", content = result.content or "", tool_calls = calls, debug = self.debug,reasoning=result.reasoning or "",
+      })
 
     for _, call in ipairs(calls) do
       local function_ = call["function"] or {}
+      if function_.name=="bash" then shell_used=true end
       local args,argument_error = {},nil
       if function_.arguments and function_.arguments ~= "" then
         local decoded_ok, decoded = pcall(json.decode, function_.arguments)
@@ -1243,7 +1347,7 @@ function M:run_body(text, images)
       -- inside one command - which used to appear only as a trace line that had not come back, and
       -- was then killed five minutes later. It reads as the agent being stuck rather than as a
       -- deadline that was always there, so the number is reported by the side that enforces it.
-      local emitted = { type = "tool", name = function_.name, arguments = args }
+      local emitted = { type = "tool", call_id = call.id, name = function_.name, arguments = args }
       if function_.name == "bash" or function_.name == "shell" then
         if host.exec_timeout then emitted.timeout_ms = math.floor(host.exec_timeout() * 1000) end
       end
@@ -1256,16 +1360,32 @@ function M:run_body(text, images)
         return tools.dispatch(memory, function_.name, args, self.role,
         { session_id = self.session_id, user_id = self.user, node_id = self.node,
           run_id = self.run_id, subagent = self.subagent, changes = self.changes,
+          reviewed_paths = self.reviewed_paths,
+          commit_audits = self.commit_audits,
+          audit_step = self.audit_step,
           -- The caller's actual model and reasoning, so a child inherits what this
           -- run is using rather than whatever is configured globally.
           model = self.model, reasoning = (provider.reasoning(self.model) or {}).selected }) end)
       host.beat()
       if not handled then output = { error = tostring(output) } end
+      if type(output)=="table" and output.error=="graph_patch_review_required" then
+        remember_audit_leads(output.audit)
+      elseif function_.name=="graph" and args.action=="audit_assess"
+          and type(output)=="table" and output.recorded then
+        audit_prompt=nil
+      end
       -- Native execution phase timing belongs in aggregate telemetry, not in the
       -- model-facing result where it would spend context on every shell call.
       local execution_timing=type(output)=="table" and output.timing or nil
       if function_.name=="bash" and execution_timing then output.timing=nil end
       local ok_tool = tool_output.outcome(function_.name,output)
+      if ok_tool and function_.name=="read" and type(args.path)=="string" then
+        self.reviewed_paths[args.path]=true
+      elseif ok_tool and function_.name=="read_many" then
+        for _, request in ipairs(args.requests or {}) do
+          if type(request.path)=="string" then self.reviewed_paths[request.path]=true end
+        end
+      end
       local projected,content=pcall(tool_output.project,function_.name,output)
       if not projected then
         -- A failed artifact write must not discard the original output. Keep it
@@ -1284,7 +1404,7 @@ function M:run_body(text, images)
         ms = math.floor((host.now() - tool_started) * 1000) }
       self.emit({ type = "tool_result", name = function_.name, result = output })
 
-      memory.append_turn(self.session_id, {
+      record_turn(self, {
         role = "tool", tool_call_id = call.id or "", tool_name = function_.name or "",
         content = content,
         ok = ok_tool, debug = self.debug,
@@ -1308,11 +1428,34 @@ function M:run_body(text, images)
   -- ledger like everything else: a reload, a resume or another reader all see the same
   -- changes, and undo has the previous text to restore.
   local changes = changeset.summary(self.changes)
+  if audit_lead_paths then
+    local followed_up=false
+    for path in pairs(audit_lead_paths) do
+      for reviewed in pairs(self.reviewed_paths) do
+        local key=tostring(reviewed):gsub("\\","/"):lower()
+        if audit_root~="" and key:sub(1,#audit_root+1)==audit_root.."/" then
+          key=key:sub(#audit_root+2)
+        end
+        if key==path then followed_up=true break end
+      end
+      if followed_up then break end
+    end
+    local patch_revised=host.sha256(json.encode(changes))~=audit_before
+    telemetry.event(self.session_id,self.run_id,"","graph_patch_value","end",{
+      flag=followed_up and patch_revised and "patch_changed_after_lead"
+        or followed_up and "lead_reviewed" or "no_native_followup_observed",
+      followed_up=followed_up,patch_revised=patch_revised,
+      continuation_ms=math.max(0,telemetry.clock()-audit_time_before),
+      continuation_tokens=math.max(0,(totals.total or 0)-(audit_tokens_before or 0)),
+      continuation_usage_unknown=(totals.unaccounted or 0)>audit_unaccounted_before,
+    })
+  end
+  finish_audit_step()
   -- The message id is minted here rather than by append_turn, because the reply event has to
   -- name the message *before* the record exists: the UI's topic carries the id it will ask
   -- about, and append_turn uses the same one so the topic and the ledger agree.
   local message_id = host.uuid()
-  memory.append_turn(self.session_id, {
+  record_turn(self, {
     id = message_id,ok=completed,
     role = "assistant", content = reply, reasoning=reply_reasoning, trace = trace, tokens = totals.total, debug = self.debug,
     ms = math.floor((host.now() - run_started) * 1000),

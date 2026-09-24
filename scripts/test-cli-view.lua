@@ -8,6 +8,7 @@
 -- No model is involved and no database is needed: the view is handed the same events
 -- the agent emits, with a clock the test controls.
 local view_lib = dofile("lua/core/cli_view.lua")
+local json = dofile("lua/vendor/json.lua")
 
 local failed = 0
 local checks = 0
@@ -21,6 +22,14 @@ end
 
 local function has(text, needle)
   return tostring(text):find(needle, 1, true) ~= nil
+end
+
+-- The visible text of a rendered line, with colour removed. The layout assertions are about
+-- what the reader sees, so they must not break when a role is recoloured - which is exactly
+-- what happened when this view moved from six literal colours to pi's roles. The colour
+-- assertions below name the role instead of the escape, so they still say which colour.
+local function visible(text)
+  return (tostring(text):gsub("\27%[[%d;]*m", ""):gsub("\27%]2;[^\7]*\7", ""))
 end
 
 -- ---- what a call is ------------------------------------------------------------
@@ -79,6 +88,13 @@ ok(view_lib.tokens(940) == "940" and view_lib.tokens(1200) == "1.2k" and view_li
   "tokens are shown at a size a person reads")
 ok(view_lib.elapsed(200) == "200ms" and view_lib.elapsed(3400) == "3.4s", "a step's duration carries its unit")
 ok(view_lib.duration(9.5) == "9.5s" and view_lib.duration(74) == "1m14s", "a run's duration grows into minutes")
+-- The clock's rule, pinned here and again in rust/wa-host/src/host.rs (`ticker_duration`):
+-- the host draws the clock while this process is blocked, so the rule exists on both sides.
+-- The same three values are asserted in both suites, so changing one alone fails a test here
+-- instead of flickering a frame on a screen.
+ok(view_lib.duration(59.94) == "59.9s", "under a minute the clock counts tenths of a second")
+ok(view_lib.duration(60.0) == "1m00s", "at a minute it carries its seconds")
+ok(view_lib.duration(125.4) == "2m05s", "and keeps counting in minutes")
 
 -- ---- is this a terminal? --------------------------------------------------------
 
@@ -163,6 +179,22 @@ ok(view_lib.columns(plain_text:match("[^\n]*ctx[^\n]*")) <= 100, "and the footer
 local unmeasured = view_lib.footer({ rounds = 1, prompt = 100 }, { context = 0, budget = 128000 })
 ok(not has(unmeasured, "ctx"), "an unmeasured context is left out rather than shown as zero")
 
+-- The denominator is the *model's* window, resolved where compaction resolves it. This
+-- deployment's model has a 1,000,000-token window while the old global says 128000, so a
+-- footer that read the global reported the same context eight times fuller than it was.
+ok(view_lib.window("m", function() return { context = 1000000, source = "pi-model-store" } end) == 1000000,
+  "the footer divides by the model's window, not by the global")
+ok(has(view_lib.footer({ rounds = 1, prompt = 100 }, { context = 450000, budget = 1000000 }),
+  "ctx 45.0%/1.0M"), "and prints that window")
+ok(view_lib.window("m", function() return { context = 0, source = "unknown" } end)
+  == (tonumber(host.getenv("WASM_AGENT_LLM_CONTEXT")) or 0),
+  "an unknown window falls back to the global rather than guessing")
+ok(view_lib.window("m", function() error("no catalogue") end)
+  == (tonumber(host.getenv("WASM_AGENT_LLM_CONTEXT")) or 0),
+  "and a catalogue that fails does not take the banner down with it")
+ok(view_lib.window("m", nil) == (tonumber(host.getenv("WASM_AGENT_LLM_CONTEXT")) or 0),
+  "a missing resolver falls back too")
+
 -- The banner: where this chat is, and what it is running with. A chat in the wrong
 -- worktree is otherwise a mistake that costs an hour to notice.
 local banner = view_lib.banner({
@@ -218,7 +250,7 @@ clock.value = 12
 live_view:event({ type = "round", n = 1 })
 ok(has(live.text(), "\r\27[2K"), "the status line is rewritten in place, not printed again")
 ok(has(live.text(), view_lib.spinner(0)), "the status line carries a spinner")
-ok(has(live.text(), "Thinking \194\183 12.0s"), "the status line says what and for how long")
+ok(has(visible(live.text()), "Thinking \194\183 12.0s"), "the status line says what and for how long")
 clock.value = 20
 live_view:event({ type = "tool", name = "bash", arguments = { command = "echo hi" }, timeout_ms = 300000 })
 ok(has(live.text(), "Running bash"), "a call in flight is named in the status line")
@@ -226,11 +258,11 @@ ok(has(live.text(), "of 5m00s"), "and the deadline it is running against is visi
 clock.value = 21
 live_view:event({ type = "tool_result", name = "bash", result = { code = 0, stdout = "hi\n" } })
 ok(has(live.text(), "1.0s"), "a step reports how long it took")
-ok(has(live.text(), "\27[32mok"), "success is marked as success")
+ok(has(live.text(), view_lib.style("success") .. "ok"), "success is marked as success")
 local before_answer = #live.text()
 live_view:event({ type = "tool", name = "read", arguments = { path = "ui/app.js" } })
 live_view:event({ type = "tool_result", name = "read", result = { error = "no such file" } })
-ok(has(live.text(), "\27[31mfailed"), "a failed call is marked as failed, with its reason")
+ok(has(live.text(), view_lib.style("error") .. "failed"), "a failed call is marked as failed, with its reason")
 ok(has(live.text(), "no such file"), "and the reason is shown")
 clock.value = 30
 live_view:event({ type = "usage", total = { prompt = 1200, completion = 800, cached = 1100, cost = 0.0021 },
@@ -240,7 +272,7 @@ local live_text = live.text()
 ok(#live_text > before_answer, "the run kept writing after the first call")
 ok(has(live_text, "done: one command ran."), "the answer is printed")
 ok(select(2, live_text:gsub("done: one command ran%.", "")) == 1, "and printed once")
-ok(has(live_text, "\27[2m"), "the footer is dimmed rather than shouted")
+ok(has(live_text, view_lib.style("dim")), "the footer is dimmed rather than shouted")
 ok(has(live_text:sub(-40), "wa - wasm_cli"), "the title returns to the workspace when the run ends")
 ok(not has(live_text:sub(-80), "Thinking"), "and the status line is gone when the run ends")
 
@@ -266,6 +298,189 @@ warn_view:warn("attempt to index a nil value")
 warn_view:warn("a second failure nobody needs to read")
 ok(select(2, warned.text():gsub("the run view failed", "")) == 1, "a view failure is reported once")
 ok(has(warned.text(), "attempt to index a nil value"), "and it says what went wrong")
+
+-- ---- the line keeps moving -------------------------------------------------------
+
+-- While this process is blocked the host draws the status line, so two things have to be
+-- true: what the host is handed is exactly the line this module would have printed, and it is
+-- never drawing that line while the module writes to it. The host is stubbed here - one line
+-- of decoration must not need a terminal to be testable - and the real timer is measured by
+-- `scripts/test-cli-ticker.lua`, through a captured child process.
+local handed = {}
+local real_ticker = host.ticker
+local ticker_out = recorder()
+host.ticker = function(spec)
+  handed[#handed + 1] = {
+    kind = spec == nil and "stop" or "start",
+    at = #ticker_out.text(),
+    spec = spec and json.decode(spec) or nil,
+  }
+  return spec ~= nil
+end
+local ticker_clock = { value = 100 }
+local animated = view_lib.new({
+  out = ticker_out.out, live = true, stdout = true, now = function() return ticker_clock.value end,
+  limit = 100,
+})
+animated:run_started()
+ok(#handed == 1 and handed[1].kind == "start", "a starting run hands its line to the host")
+local spec = handed[1].spec
+ok(type(spec) == "table" and type(spec.line) == "string", "and what it hands over is a line")
+ok(spec.line == animated:status_template(), "the layout, with its two tokens still in it")
+ok(spec.marks[1] == "\226\160\139 ", "this view's marks, in this view's order")
+ok(spec.started == animated.turn.started, "and the origin of the clock, so a redraw does not restart it")
+ok(not has(spec.line, view_lib.spinner(0)), "no frame is baked into the layout")
+
+-- The strongest statement available without a terminal: filling the layout by the host's own
+-- rules gives back the line this module prints for itself.
+local mark = spec.marks[(spec.frame % #spec.marks) + 1]
+local filled = spec.line:gsub("{m}", function() return mark end)
+filled = filled:gsub("{t}", function() return view_lib.duration(0) end)
+ok(filled == animated:status_text(true), "and the host's frame is word for word the view's own line")
+
+ticker_clock.value = 130
+animated:event({ type = "round", n = 1 })
+animated:event({ type = "tool", name = "bash", arguments = { command = "echo hi" } })
+ok(has(ticker_out.text(), "$ echo hi"), "the tool line is written while the host is not drawing")
+animated:event({ type = "tool_result", name = "bash", result = { code = 0, stdout = "hi\n" } })
+animated:answered("done: one command ran.")
+
+-- The invariant: nothing is written to that line between the moment the host is given it and
+-- the moment it is taken back (`at` is how much output existed at each call).
+local drift, holding = 0, nil
+for _, call in ipairs(handed) do
+  if holding ~= nil and holding ~= call.at then drift = drift + 1 end
+  holding = call.kind == "start" and call.at or nil
+end
+ok(drift == 0, "no writer touches the line while the host is holding it")
+ok(holding == nil and handed[#handed].kind == "stop",
+  "and the run ends with the line taken back, not left moving")
+
+-- A view whose output is not this process's stdout must leave the terminal alone: the host
+-- draws on stdout and nowhere else.
+local before = #handed
+local quiet = recorder()
+local not_mine = view_lib.new({ out = quiet.out, live = true, now = function() return 1 end, limit = 100 })
+not_mine:run_started()
+not_mine:event({ type = "round", n = 1 })
+ok(#handed == before, "a view that does not own stdout asks the host for nothing")
+local transcript = view_lib.new({ out = quiet.out, live = false, now = function() return 1 end })
+transcript:run_started()
+ok(#handed == before, "and a captured transcript never animates")
+
+-- A host older than this view has no ticker at all: decoration must degrade, not raise.
+host.ticker = nil
+local degraded = pcall(function()
+  local older = view_lib.new({ out = quiet.out, live = true, stdout = true, now = function() return 1 end })
+  older:run_started()
+  older:event({ type = "round", n = 1 })
+  older:answered("still answered")
+end)
+host.ticker = real_ticker
+ok(degraded == true and has(quiet.text(), "still answered"),
+  "a host without the ticker still finishes the run")
+
+-- ---- pi's palette, per component -------------------------------------------------
+
+-- The roles are pi's own and the colours are pi's own
+-- (`dist/modes/interactive/theme/dark.json` in `@earendil-works/pi-coding-agent`). Asserting
+-- the exact sequence is the point: "coloured" is not the property, "coloured the way pi
+-- colours it" is, and a role renamed to a different colour would pass any weaker check.
+ok(view_lib.PALETTE.accent == "8abeb7", "the accent is pi's accent")
+ok(view_lib.PALETTE.success == "b5bd68" and view_lib.PALETTE.error == "cc6666",
+  "success and error are pi's green and red")
+ok(view_lib.style("success") == "\27[38;2;181;189;104m", "a role becomes its own 24-bit colour")
+ok(view_lib.style("red") == view_lib.style("error"),
+  "the old names are the same roles, not a second palette")
+ok(view_lib.style("mdHeading") == "\27[38;2;240;198;116m", "and the markdown roles are pi's too")
+
+-- The status line carries the colour, and the colour is a rendering decision: the same line
+-- is plain when the output is captured, and plain again on a terminal too narrow for it -
+-- `clip` counts columns, and a coloured line clipped by width loses its reset and bleeds.
+local status_out = recorder()
+local live_status = view_lib.new({ out = status_out.out, live = true, now = function() return 3 end, limit = 100 })
+live_status:run_started()
+ok(has(status_out.text(), view_lib.style("accent")), "the phase word on the status line is pi's accent")
+ok(has(status_out.text(), "Thinking"), "and the words are still there")
+local plain_status = recorder()
+local quiet_status = view_lib.new({ out = plain_status.out, live = false, now = function() return 3 end, limit = 100 })
+quiet_status:run_started()
+ok(not has(plain_status.text(), "\27"), "a captured status line carries no escape sequence")
+local narrow_status = recorder()
+local narrow_view = view_lib.new({ out = narrow_status.out, live = true, now = function() return 3 end, limit = 8 })
+narrow_view:run_started()
+ok(not has(narrow_status.text(), "\27[38;2;"),
+  "a terminal too narrow for the status line gets it plain rather than cut mid-colour")
+
+-- ---- the answer is markdown --------------------------------------------------------
+
+local answered = recorder()
+local answer_view = view_lib.new({ out = answered.out, live = true, now = function() return 5 end, limit = 80 })
+answer_view:run_started()
+answer_view:answered("# Done\n\n- one\n- two\n\n```lua\nlocal x = 1\n```\n\nplain words")
+local answer = answered.text()
+ok(has(answer, view_lib.style("mdHeading")), "a heading in the answer is coloured as a heading")
+ok(has(answer, view_lib.style("mdListBullet")), "a bullet is coloured as a bullet")
+ok(has(answer, view_lib.style("syntaxKeyword")), "and code in a fence is coloured as code")
+ok(not has(answer, "# Done"), "the markdown marks do not reach the screen")
+ok(has(answer, "plain words"), "and the words do")
+
+-- A reply the renderer produces nothing for is printed raw: a view that swallowed an answer
+-- because its parser did not recognise it would be the worst bug in the file.
+local odd = recorder()
+local odd_view = view_lib.new({ out = odd.out, live = false, now = function() return 5 end, limit = 80 })
+odd_view:run_started()
+odd_view:answered("   \n  \n")
+ok(has(odd.text(), "   ") or not has(odd.text(), "answered"), "an empty reply prints nothing rather than crashing")
+
+-- ---- the reasoning, as its own block -----------------------------------------------
+
+local thought = recorder()
+local think_view = view_lib.new({ out = thought.out, live = false, now = function() return 7 end, limit = 80 })
+think_view:run_started()
+think_view:event({ type = "reasoning", text = "the reader wants the view fixed, so I will read cli_view.lua first" })
+ok(has(thought.text(), "\226\156\187 thinking"), "the reasoning is announced as thinking")
+ok(has(thought.text(), "read cli_view.lua first"), "and printed in full rather than summarised")
+ok(view_lib.columns(thought.text():match("[^\n]*read[^\n]*") or "") <= 80, "and wrapped to the terminal")
+
+-- ---- the console -------------------------------------------------------------------
+
+local raw = recorder()
+local console_view = view_lib.new({ out = raw.out, live = true, now = function() return 9 end, limit = 40 })
+ok(console_view:set_console(true) == true, "the console can be turned on")
+console_view:run_started()
+console_view:event({ type = "tool", name = "bash", arguments = { command = "seq 1 60" } })
+local many = {}
+for line = 1, 60 do many[#many + 1] = "output line " .. line end
+console_view:event({ type = "tool_result", name = "bash", result = { code = 0, stdout = table.concat(many, "\n") } })
+local console_text = raw.text()
+ok(has(console_text, '"command":"seq 1 60"'), "the console shows the arguments the tool was given")
+ok(has(console_text, "output line 60"), "and a tool's output whole, not the two lines the view prints")
+ok(not has(console_text, "ok \194\183 exit 0"),
+  "and no formatted result line: the console is one line per event")
+ok(console_view:console_on() == true and console_view:set_console(false) == false,
+  "and it can be turned off again")
+
+-- ---- the width ---------------------------------------------------------------
+--
+-- The width a terminal *has* is not the width a child can know. `COLUMNS` is a shell variable on most
+-- machines and is not exported to children, so the only number this had was the 80 it fell back to -
+-- measured: a 120-column terminal, `COLUMNS` empty, answers wrapped at 78 columns. The console is
+-- asked first (`host.terminal_size`), the environment second, and 80 last.
+--
+-- Every case below is one that happens: the console answers, it answers zero because nothing is
+-- attached, an older binary has no `terminal_size` at all, or `COLUMNS` is stale or junk.
+local platform = dofile("lua/core/platform.lua")
+local says = function(columns) return function() return { columns = columns } end end
+ok(platform.columns(nil, says(120)) == 120, "the console's width is the width used")
+ok(platform.columns("90", says(120)) == 120, "and it wins over a stale COLUMNS")
+ok(platform.columns("100", function() return nil end) == 100, "without a console, COLUMNS is used")
+ok(platform.columns(nil, function() return nil end) == 80, "and 80 is the last resort")
+ok(platform.columns(nil, says(0)) == 80, "a console that answers zero is not a width of zero")
+ok(platform.columns("0", says(0)) == 80, "and neither is a zero in COLUMNS")
+ok(platform.columns("abc", function() return nil end) == 80, "nor junk in COLUMNS")
+ok(platform.columns(nil, function() return { columns = "120" } end) == 120,
+  "and a width that arrives as text (the shape JSON would give) is still a width")
 
 if failed > 0 then
   print(string.format("cli view: %d failed of %d checks", failed, checks))

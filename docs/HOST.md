@@ -172,10 +172,11 @@ index of the source tree to Lua. The graph lives beside the ledger
 which is the source the binary is actually running from. `WA_GRAPH_ROOT` and
 `WA_GRAPH_DB` override both; `WA_GRAPH_WATCH=0` disables the watcher.
 
-Reads open the database **read-only**, so a query never takes the write lock the
-watcher needs, and a query before the first index completes returns an empty
-result rather than an error. `host.graph_index` is the write path and is
-incremental by content hash, so a repeat with nothing changed reparses nothing.
+Reads pin a read-only database snapshot and compare every in-scope file's exact
+bytes before and after answering. A stale or unbuilt graph is rebuilt
+synchronously, or returns an explicit error; it cannot appear as an empty answer.
+That refresh may take the write lock. `host.graph_index` is also a write path and
+is incremental by content hash, so a repeat with nothing changed reparses nothing.
 A whole index run is one `BEGIN IMMEDIATE` transaction, so a reader sees the old
 graph or the new one - never a half-indexed file - and the watcher and a manual
 index cannot interleave.
@@ -185,9 +186,58 @@ shape as `host.sql_query`. On a node whose host predates the capability the
 globals are absent; `lua/core/graph.lua` tolerates that and reports
 `graph_unavailable`, and the `graph` tool checks for it before calling.
 
-The watcher is a `notify` thread started only for `serve`. It indexes once on
+The watcher is a `notify` thread started only for `serve`. It registers before indexing once on
 startup (off the accept path, so a large tree never delays the port) and reindexes
-on change, debounced so one save's burst is one parse.
+on change, debounced so one save's burst is one parse. Watcher errors are logged;
+query-time verification is the correctness backstop. This verifies a source
+snapshot, not the version already loaded into a running Lua worker.
+
+## Drawing while Lua is blocked
+
+`host.ticker(spec_json)` is the one capability that draws, and it exists for a single
+structural reason: the CLI keeps a status line on screen for as long as a run is in
+flight, and the interpreter spends most of that time blocked inside `host.http_stream`,
+so nothing on the Lua side can repaint it. A run that is thinking and a run that is hung
+looked identical - a frozen frame and a clock that had stopped.
+
+The host runs a timer thread and draws the same line the view would have drawn. The line
+stays Lua's: `spec.line` is that line with exactly two tokens left in it, `{m}` (one of
+`spec.marks`, a JSON array, cycled per tick) and `{t}` (the seconds since `spec.started`).
+The indent, the words, the separators and the round counter are the caller's text, so the
+animated line and the printed line cannot drift apart.
+
+- One ticker per process, drawn on that process's own stdout. The view only starts it when
+  its output *is* stdout, so a captured transcript never has a second writer.
+- Stopping is immediate - the thread waits on a condition variable, not on a sleep - and the
+  caller stops it before writing anything else: two writers on one line is how a line
+  becomes two half-lines.
+- The clock's shape (`59.9s`, `1m00s`, `2m05s`) is the twin of `cli_view.duration`, because
+  the elapsed time of a call that has not finished cannot be computed by the side that is
+  blocked. Both sides pin those three values in their own tests, so a one-sided change fails
+  a test rather than a frame on a screen.
+- `WASM_AGENT_CLI_TICKER=off` disables the motion for a caller that wants the sequences
+  without it.
+
+`scripts/test-cli-ticker.lua` measures the timer for real: it starts a ticker, then sleeps -
+so it cannot repaint anything itself - and the gate reads the frames and the clock out of
+its captured stdout.
+
+## The console's size
+
+`host.terminal_size()` returns `{columns, rows}` for the console this process draws on, or
+`nil` when there is none to ask. It exists because the width a terminal *has* is not the
+width a child *knows*: `COLUMNS` is a shell variable on most machines and is not exported
+to children, so a CLI that wrapped to `COLUMNS or 80` drew in an 80-column column inside a
+120-column window - measured, with `COLUMNS` empty, in the terminal the CLI actually runs
+in. `lua/core/platform.columns()` is the Lua side of it: the console first, `COLUMNS`
+second, 80 last.
+
+- `nil`, never a zero. A detached or uninitialized console answers *successfully* with
+  0x0 rather than failing, and a caller told "80 columns wide by 0 rows" would wrap every
+  line to nothing - a blank screen, which is worse than the fallback it replaced.
+- The console is asked about **stdout**, not stderr or stdin, because that is where the
+  caller draws. A redirected stdout (a transcript, a log) therefore gets `nil`, which is
+  the honest answer: there is no width to wrap to.
 
 ## Adding a capability
 

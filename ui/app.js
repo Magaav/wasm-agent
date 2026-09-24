@@ -79,7 +79,22 @@ const controlText = document.getElementById("control-text");
 let renderer = null;
 let version = null;
 let busy = false;
+// Stop belongs to the request this window submitted. A conversation may have an older run
+// executing while this request waits behind it, so cancellation must carry this request's id.
+let activeRunId = null;
+let submittedRunIds = null;
 let statusLine = null;
+// The status line's parts, held by reference. Reaching back into the DOM for them on every
+// streamed chunk would make the line depend on a parser that a stub document does not have,
+// and three references are cheaper than three queries anyway.
+let statusLabel = null;
+let statusElapsed = null;
+let statusSpinner = null;
+// The body of the newest assistant bubble, tracked as it is created: the run status is
+// attached to it when a run finishes, and finding it by querying the transcript would be
+// the same dependency in another place.
+let lastAssistantBody = null;
+let runStatusTicker = null;
 let streamBody = null;
 let streamText = "";
 let controller = null;
@@ -255,13 +270,18 @@ function renderMarkdown(text) {
 }
 
 // Some models leak their reasoning into the message; drop it.
+//
+// Both ends are trimmed, and the tail matters as much as the head: these texts are rendered in
+// `white-space: pre-wrap` containers, so a trailing newline is a *blank line* on screen. A provider
+// ends a chunk with them, and three of them read as three paragraphs of nothing between the thinking
+// and the tool call that follows it. Interior breaks are content and are left alone.
 function stripThinking(text) {
   let out = String(text)
     .replace(/[\s\S]*?<\/think>/gi, "")
     .replace(/<\/?think\b[^>]*>/gi, "");
   const open = out.search(/<think\b[^>]*>/i);
   if (open >= 0) out = out.slice(0, open);
-  return out.replace(/^\s+/, "");
+  return out.replace(/^\s+/, "").replace(/\s+$/, "");
 }
 
 function atBottom(slack = 40) {
@@ -337,6 +357,7 @@ function add(role, text, asHtml = false) {
   messages.append(element);
   const body = element.body;
   if (asHtml) body.innerHTML = text; else body.textContent = text;
+  if (role === "assistant") lastAssistantBody = body;
   pin();
   return body;
 }
@@ -345,43 +366,86 @@ function setStatus(text) {
   document.getElementById("empty")?.remove();
   if (!statusLine) {
     statusLine = document.createElement("div");
-    statusLine.className = "status";
-    messages.append(statusLine);
+    statusLine.className = "status chat-content-run-status";
+    statusSpinner = document.createElement("span");
+    statusSpinner.className = "spinner";
+    statusLabel = document.createElement("span");
+    statusLabel.className = "chat-content-run-label";
+    statusElapsed = document.createElement("span");
+    statusElapsed.className = "chat-content-run-elapsed";
+    statusLine.append(statusSpinner, statusLabel, statusElapsed);
+    if (busy && !replayingMessages) startRunStatusTicker();
   }
-  statusLine.innerHTML = `<span class="spinner"></span>${escapeHtml(text)}`;
+  statusLabel.textContent = text;
+  if (statusLine.parentNode !== messages) messages.append(statusLine);
+  if (busy) updateRunElapsed();
+  else statusElapsed.textContent = "";
+  pin();
+}
+
+function runDuration(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const seconds = String(total % 60).padStart(2, "0");
+  const minutes = Math.floor(total / 60);
+  if (minutes >= 60) return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}:${seconds}`;
+  return `${minutes}:${seconds}`;
+}
+
+function updateRunElapsed() {
+  if (!statusElapsed) return;
+  statusElapsed.textContent = runDuration(Date.now() - (runStartedAt || Date.now()));
+}
+
+function startRunStatusTicker() {
+  if (runStatusTicker) clearInterval(runStatusTicker);
+  runStatusTicker = setInterval(updateRunElapsed, 1000);
+}
+
+function finishRunStatus(label = "completed") {
+  if (!statusLine) return;
+  const bubble = runBubble || lastAssistantBody;
+  statusSpinner?.remove();
+  statusLabel.textContent = label;
+  updateRunElapsed();
+  statusLine.classList.add("finished");
+  if (bubble) bubble.append(statusLine);
+  else statusLine.remove();
+  statusLine = null;
+  statusLabel = null; statusElapsed = null; statusSpinner = null;
+  if (runStatusTicker) { clearInterval(runStatusTicker); runStatusTicker = null; }
   pin();
 }
 
 function clearStatus() {
   statusLine?.remove();
   statusLine = null;
+  statusLabel = null; statusElapsed = null; statusSpinner = null;
+  if (runStatusTicker) { clearInterval(runStatusTicker); runStatusTicker = null; }
 }
 
 // The model's own thinking, when the provider streams it in a field of its own instead of
 // leaking it into the answer. It is the route to the reply, not the reply, so it lives in a
 // collapsible block: open while the run is still thinking, folded away once the run moves on.
-// It is deliberately not swallowed by the run topic - a run whose content was all reasoning
-// must not read as a run that only called tools.
+// It is folded into the run topic along with the tool calls it belongs to - it *is* the route, and
+// leaving it outside left a wall of "thinking · N chars" rows between the reader and the answer
+// (measured live: 196 of them sitting outside the topics in one thread). The case that must not be
+// swallowed is a run that called no tool at all: no topic is created for one, so its thinking stays
+// visible instead of reading as a run that only called tools.
 let reasoningBlock = null;
+let reasoningText = "";
 function appendReasoning(text) {
   if (!text) return;
   const bubble = currentBubble();
   if (!reasoningBlock || reasoningBlock.parentNode !== bubble.body) {
-    reasoningBlock = document.createElement("details");
-    reasoningBlock.className = "reasoning";
+    // A topic like every other one: <wa-reasoning> builds the same header as the tool calls beside it,
+    // so the thinking reads as a step of the same kind rather than as a different thing.
+    reasoningBlock = document.createElement("wa-reasoning");
     reasoningBlock.open = !replayingMessages;
-    const head = document.createElement("summary");
-    head.className = "reasoning-head";
-    const body = document.createElement("div");
-    body.className = "reasoning-body";
-    reasoningBlock.append(head, body);
-    reasoningBlock.reasoningHead = head;
-    reasoningBlock.reasoningBody = body;
     bubble.body.append(reasoningBlock);
+    reasoningText = "";
   }
-  reasoningBlock.reasoningBody.textContent += text;
-  reasoningBlock.reasoningHead.textContent =
-    "thinking · " + reasoningBlock.reasoningBody.textContent.length + " chars";
+  reasoningText += text;
+  reasoningBlock.setText(reasoningText);
   pin();
 }
 
@@ -389,6 +453,7 @@ function appendReasoning(text) {
 function sealReasoning() {
   if (reasoningBlock) reasoningBlock.open = false;
   reasoningBlock = null;
+  reasoningText = "";
 }
 
 // Tool lines are rendered the way pi renders them in its CLI: bold lowercase
@@ -774,7 +839,12 @@ function currentTrace() {
 
 function addTool(name, args, options) {
   const boundMs = options && options.timeoutMs;
-  currentTrace().addTool(name, toolTitle(name, args), null, boundMs ? Math.round(boundMs / 1000) : null);
+  const callId = options && options.callId != null ? String(options.callId) : "";
+  if (callId && trace?.hasPendingCall(callId)) {
+    if (!replayingMessages) startToolTicker();
+    return;
+  }
+  currentTrace().addTool(name, toolTitle(name, args), null, boundMs ? Math.round(boundMs / 1000) : null, callId);
   lastTool = name;
   if (!replayingMessages) startToolTicker();
   pin();
@@ -895,22 +965,41 @@ function collapseRun() {
   if (!bubble) return;
   const body = bubble.body;
   const answer = streamBody;
+  // One run topic per bubble. A run that answers more than once - a preamble, then the answer -
+  // reuses the topic it already has: creating a second one nests the first inside it, and the
+  // reader then opens topics to reach topics.
+  const existing = Array.prototype.find.call(body.children, (c) => c.tagName === "WA-RUN");
   const moves = Array.prototype.filter.call(body.children,
-    (c) => c !== answer && c.tagName !== "WA-DIFF" &&
-      !(c.tagName === "DETAILS" && c.classList.contains("reasoning")));
+    (c) => c !== answer && c !== existing && c.tagName !== "WA-DIFF");
   const traces = moves.filter((c) => c.tagName === "WA-TRACE");
-  if (traces.length === 0) return;   // nothing ran: leave the plain answer alone
-  let calls = 0;
-  let steps = 0;
-  for (const child of moves) {
-    if (child.tagName === "WA-TRACE") calls += child.count || 0;
-    else if (child.classList && child.classList.contains("seg")) steps += 1;
+  // A run topic is only created once something actually ran - a run that never called a tool keeps
+  // its plain answer. But once a topic exists, a later reply must still fold the previous answer into
+  // it even when that batch added no tool call: the guard is about *creating* the topic, not about
+  // folding into one that is already there. Getting this wrong left the preamble sitting outside as
+  // its own text segment, so the bubble read run,text,text instead of one run and one answer.
+  if (!existing && traces.length === 0) return;
+  if (moves.length === 0) return;
+  const run = existing || document.createElement("wa-run");
+  if (!existing) {
+    body.prepend(run);
+    // While the run is still going the route stays OPEN: the reader is watching it happen, and a
+    // collapsed topic hides the very steps they are waiting on (measured: after the first answer the
+    // topic closed and took the thinking and the tool lines with it, so a long run read as a folded
+    // topic and a list of answers). It is set only when the topic is created, so a reader who closes it
+    // by hand is not overruled by the next round. A repaint is history, so there it starts closed.
+    run.open = !replayingMessages;
   }
-  const run = document.createElement("wa-run");
-  body.prepend(run);
   for (const child of moves) {
     run.body.append(child);
     if (typeof child.reveal === "function") child.reveal();
+  }
+  // Counted from the topic's own contents rather than accumulated from the moves, so a second
+  // collapse cannot double-count what the first one already folded in.
+  let calls = 0;
+  let steps = 0;
+  for (const child of run.body.children) {
+    if (child.tagName === "WA-TRACE") calls += child.count || 0;
+    else if (child.classList && child.classList.contains("seg")) steps += 1;
   }
   const endedAt = replayingMessages ? replayMessageEndedAt : Date.now();
   run.setSummary(steps, calls, Math.max(0, endedAt - (runStartedAt || endedAt)));
@@ -933,7 +1022,13 @@ function flushDecision(final = false) {
   }
   sealReasoning();
   finishTrace();
-  if (final) runBubble = null;
+  if (final) {
+    // The run is over: its route folds away, and the answer is what is left to read.
+    if (runBubble) {
+      for (const topic of runBubble.body.querySelectorAll(":scope > wa-run")) topic.open = false;
+    }
+    runBubble = null;
+  }
   pin();
 }
 
@@ -977,11 +1072,11 @@ function handleEvent(event) {
     // fallback so an in-flight line still says "of 300s" instead of only "42s".
     const boundMs = event.timeout_ms != null ? event.timeout_ms
       : (event.name === "bash" || event.name === "shell" ? execTimeoutSeconds * 1000 : null);
-    addTool(event.name, event.arguments, { timeoutMs: boundMs });
+    addTool(event.name, event.arguments, { timeoutMs: boundMs, callId: event.call_id });
   } else if (event.type === "tool_result") {
     settleTool(event.result, event.name);
   } else if (event.type === "delta") {
-    clearStatus();
+    if (statusLabel) statusLabel.textContent = "responding…";
     // A new segment per step, inside the same bubble.
     if (!streamBody) {
       streamBody = document.createElement("div");
@@ -992,7 +1087,16 @@ function handleEvent(event) {
     streamBody.textContent = stripThinking(streamText);
     pin();
   } else if (event.type === "reply") {
-    clearStatus();
+    if (statusLabel) statusLabel.textContent = "finishing…";
+    if (!replayingMessages && event.message_id && renderedMessageIds.has(String(event.message_id))) {
+      // The durable reply can be repainted before its trailing `reply` event is replayed.
+      // Keep the saved bubble and let `done` settle it without appending the answer twice.
+      sealReasoning();
+      finishTrace();
+      streamBody = null;
+      streamText = "";
+      return;
+    }
     const finalText = stripThinking(event.text || streamText);
     if (streamBody) {
       streamBody.innerHTML = renderMarkdown(finalText);
@@ -1020,18 +1124,22 @@ function handleEvent(event) {
     }
     streamBody = null;
     streamText = "";
-    runBubble = null;
+    if (event.message_id) renderedMessageIds.add(String(event.message_id));
+    // The bubble stays open for the rest of the run. A model that speaks between tool batches is
+    // still one run, and the run topic has to be able to span everything it did; closing the bubble
+    // here was the bug - one run drew one bubble per reply. flushDecision(true) closes it, on `done`
+    // or on the next user turn, which is the contract its own comment already stated.
   } else if (event.type === "usage") {    settings.usage = event.total || settings.usage;
     if (event.model) settings.model = event.model;
     updateChip();
     if (balloon.open) { renderUsage(); renderModels(); }
   } else if (event.type === "error") {
-    clearStatus();
     add("assistant", "error: " + (event.error || "unknown"));
+    finishRunStatus("failed");
     finishTrace();
     runBubble = null;
   } else if (event.type === "done") {
-    clearStatus();
+    finishRunStatus();
     flushDecision(true);
   }
 }
@@ -1057,7 +1165,9 @@ function restoreDraft() {
 // that built it the first time, so the two cannot drift apart.
 let replayingMessages = false;
 let replayMessageEndedAt = 0;
-function repaintMessages(rows) {
+let replayKeepPending = false;
+let renderedMessageIds = new Set();
+function repaintMessages(rows, options = {}) {
   // A repaint is a view of durable rows, not a resumed event stream. In particular, an
   // assistant tool call without a result must never inherit a live timer from this page.
   stopToolTicker();
@@ -1070,6 +1180,8 @@ function repaintMessages(rows) {
   reasoningBlock = null;
   runStartedAt = 0;
   replayMessageEndedAt = 0;
+  replayKeepPending = options.keepPending === true;
+  renderedMessageIds = new Set();
   let rendered = 0;
   let failed = 0;
   let firstFailure = "";
@@ -1106,9 +1218,10 @@ function repaintMessages(rows) {
             const fn = raw.function || raw;
             let args = fn.arguments;
             if (typeof args === "string") { try { args = JSON.parse(args); } catch (error) { args = {}; } }
-            handleEvent({ type: "tool", name: fn.name, arguments: args || {} });
+            handleEvent({ type: "tool", call_id: raw.id, name: fn.name, arguments: args || {} });
           }
         }
+        if (message.id) renderedMessageIds.add(String(message.id));
       } else if (message.role === "tool") {
         handleEvent({ type: "tool_result", name: message.tool_name, result: { content: message.content } });
       }
@@ -1121,8 +1234,16 @@ function repaintMessages(rows) {
       }
     }
   }
-  if (trace) finishTrace();
+  const keepPending = replayKeepPending && trace?.pending;
+  if (trace && !keepPending) finishTrace();
   replayingMessages = false;
+  replayKeepPending = false;
+  if (keepPending) startToolTicker();
+  // The transcript just drawn is history, so the bubble it ended on is closed. The `reply` handler
+  // used to close it, and when that stopped (one bubble per run) this became the place that must:
+  // without it the next thing that arrives is appended to the last repainted run's bubble, so a
+  // message sent after a reload lands inside the previous run's reply. Caught by the UI harness.
+  runBubble = null;
   pin(true);
   if (failed) {
     add("assistant", `repaint: ${rendered} of ${rows.length} messages drawn, ${failed} failed — first: ${firstFailure}`);
@@ -1193,7 +1314,9 @@ async function restoreSessionOnce() {
         outcome = sessionOutcome(full);
       }
     }
-    if (full && Array.isArray(full.messages) && full.messages.length) repaintMessages(full.messages);
+    if (full && Array.isArray(full.messages) && full.messages.length) {
+      repaintMessages(full.messages, { keepPending: !!activeRun(health, wanted.id) });
+    }
     const unresolved = outcome.name === "failed" || outcome.name === "unfinished";
     if (unresolved) {
       const notice = document.createElement("div");
@@ -1270,6 +1393,7 @@ function startLiveness() {
     catch (error) { return; }   // the offline path owns that case and says its piece
     const running = activeRun(health);
     if (!running) { setLiveness(null); return; }
+    identifySubmittedRun(health);
     refreshOperationProgress(health, running);
 
     if (typeof health.exec_timeout_seconds === "number") execTimeoutSeconds = health.exec_timeout_seconds;
@@ -1285,6 +1409,7 @@ function startLiveness() {
     lastStalled = stalled;
     const working = stalled < 5000 || !climbingSince;
     const busyFor = running.busy_ms || running.ms || Date.now() - (runStartedAt || Date.now());
+    const ownState = (health.run_ids || []).find((run) => Number(run.run_id) === activeRunId)?.state;
     setLiveness({
       working,
       stalled,
@@ -1292,6 +1417,8 @@ function startLiveness() {
       climbing_ms: climbingSince ? Date.now() - climbingSince : 0,
       worker: health.worker || "alive",
       queue: health.queue || 0,
+      run_state: ownState,
+      current_run_id: running.run_id,
     });
   }, 1000);
 }
@@ -1315,14 +1442,28 @@ function setLiveness(info) {
   const seconds = (ms) => (ms / 1000).toFixed(0);
   if (info.working) {
     node.classList.remove("stuck");
-    node.textContent = "working — node beat " + info.stalled + " ms ago · this run "
-      + seconds(info.busy_ms) + "s" + (info.queue ? " · " + info.queue + " queued" : "");
+    if (info.run_state === "queued") {
+      node.textContent = "queued · this run has not started; waiting for run #"
+        + info.current_run_id + " · node beat " + info.stalled + " ms ago"
+        + (info.queue ? " · " + info.queue + " queued" : "");
+    } else {
+      node.textContent = "working — node beat " + info.stalled + " ms ago · this run "
+        + seconds(info.busy_ms) + "s" + (info.queue ? " · " + info.queue + " queued" : "");
+    }
   } else {
     node.classList.add("stuck");
     node.textContent = "possibly stuck — no node beat for " + seconds(info.climbing_ms) + "s"
       + " (worker: " + info.worker + ") · send to stop";
   }
   pin();
+}
+
+function identifySubmittedRun(health) {
+  if (activeRunId !== null || !submittedRunIds || !chatSession) return;
+  const candidates = (health?.run_ids || [])
+    .filter((run) => run.conversation === chatSession && !submittedRunIds.has(Number(run.run_id)))
+    .sort((a, b) => Number(a.run_id) - Number(b.run_id));
+  if (candidates.length) activeRunId = Number(candidates[candidates.length - 1].run_id);
 }
 
 function composedText(text) {
@@ -1406,6 +1547,8 @@ function clearStreamNotice() {
 }
 
 async function send(text, options = {}) {
+  activeRunId = null;
+  submittedRunIds = null;
   // The draft is going out, so what was stored is stale: a respawn must not put the sent prompt
   // back into the composer.
   clearDraft();
@@ -1428,6 +1571,16 @@ async function send(text, options = {}) {
   attachments.length = 0;
   renderAttachments();
   setStatus("wasm-agent is thinking…");
+  // /health is answered without waiting for a worker. Take the baseline before admitting this run
+  // so later polls can tell its queued id from an older run in the same conversation.
+  try {
+    const before = await (await apiFetch("health", { headers: apiHeaders() })).json();
+    submittedRunIds = new Set((before.run_ids || [])
+      .filter((run) => run.conversation === chatSession)
+      .map((run) => Number(run.run_id)));
+  } catch (error) {
+    submittedRunIds = new Set();
+  }
   // Declared out here, not inside the `try` below: the `finally` clears it, and a `const` inside the try
   // is not in scope there. It was inside, so every run ended by throwing `watchdog is not defined` from
   // the first line of the `finally` - which meant `clearInterval`, `setBusy(false)`, `controller = null`
@@ -1463,6 +1616,7 @@ async function send(text, options = {}) {
       asking = true;
       try {
         const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
+        identifySubmittedRun(health);
         // Asked and answered while the run was ending: say nothing. The run finished; there is
         // nothing to report and nothing to continue.
         if (turnFinished) { clearInterval(watchdog); asking = false; return; }
@@ -1891,11 +2045,26 @@ function syncUndoButtons() {}
 // node reports the settled state in the ledger and `/health`.
 function cancelActiveRun() {
   const thread = chatSession;
+  if (thread && activeRunId === null && submittedRunIds) {
+    // Admission and the next health poll can cross. Resolve the new id once more instead of
+    // falling back to the route's default, which would cancel the older running turn.
+    apiFetch("health", { headers: apiHeaders() }).then((response) => response.json()).then((health) => {
+      identifySubmittedRun(health);
+      if (activeRunId !== null) cancelRun(activeRunId);
+      else setStatus("this run is still being admitted — try stop again in a moment");
+    }).catch(() => setStatus("could not identify this run to stop it"));
+    return;
+  }
+  cancelRun(activeRunId);
+}
+
+function cancelRun(runId) {
+  const thread = chatSession;
   if (thread) {
     apiFetch("runs", {
       method: "POST",
       headers: apiHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ action: "cancel", thread }),
+      body: JSON.stringify({ action: "cancel", thread, ...(runId === null ? {} : { run_id: runId }) }),
     }).catch(() => { /* the abort below is what the reader sees; the node still gets the request */ });
   }
   controller?.abort();
@@ -2771,6 +2940,98 @@ async function watch() {
 // of making the reader reload to see it.
 let sawTurnInFlight = false;
 let runPolling = false;
+let lastFollowAt = 0;
+// The thread's `last_seq` as of the last redraw, so a poll redraws only when the run moved.
+let followedSeq = null;
+let liveRunId = null;
+let liveEventSeq = 0;
+let liveCheckpointSeq = null;
+let liveRunPolling = false;
+let liveSyncFailed = false;
+
+// A run in flight that this window did NOT open - a reload during a run, or one a wake or a job
+// started - lost its live socket. The window follows durable rows through /session and reconnects to
+// the node's bounded event tail for reasoning, tool steps and other output not saved yet.
+async function followRun() {
+  if (!chatSession) return;
+  // /sessions is small and carries the thread's `last_seq`; the 1.5 MB /session read happens only
+  // when there is something new. Redrawing an unchanged transcript would cost a megabyte every
+  // three seconds and fight the reader's scroll for nothing.
+  const list = await (await apiFetch("sessions", { headers: apiHeaders() })).json();
+  const mine = (list.sessions || []).find((entry) => entry.id === chatSession);
+  if (!mine) return;
+  const seq = Number(mine.last_seq) || 0;
+  if (seq === followedSeq) return;
+  followedSeq = seq;
+  rememberPlace();
+  await restoreSession();
+  restorePlace();
+}
+
+// A page reload drops the original chat socket, but the node's run keeps going. The node retains only
+// events after the newest durable transcript checkpoint; repaint through that checkpoint before
+// applying the live tail, so saved tool calls/results are never duplicated.
+async function syncLiveRun(current) {
+  if (busy || !chatSession || !current || current.run_id == null || liveRunPolling) return;
+  liveRunPolling = true;
+  const id = Number(current.run_id);
+  if (liveRunId !== id) {
+    liveRunId = id;
+    liveEventSeq = 0;
+    liveCheckpointSeq = null;
+  }
+  try {
+    const response = await apiFetch("run-events", {
+      method: "POST",
+      headers: apiHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ thread: chatSession, run_id: id, after: liveEventSeq }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      if (response.status === 404) {
+        const latest = await nodeHealth();
+        if (!activeRun(latest)) {
+          await followRun();
+          liveRunId = null;
+          return;
+        }
+      }
+      throw new Error(payload.error || ("HTTP " + response.status));
+    }
+    if (liveSyncFailed) {
+      liveSyncFailed = false;
+      clearStatus();
+    }
+
+    if (liveCheckpointSeq !== payload.checkpoint_seq) {
+      // The checkpoint may have advanced after the preceding ledger poll. Read again before using
+      // its tail, and wait another cycle if the read worker has not exposed that row yet.
+      if (Number(payload.checkpoint_message_seq) > (Number(followedSeq) || 0)) await followRun();
+      if (Number(payload.checkpoint_message_seq) > (Number(followedSeq) || 0)) return;
+      liveCheckpointSeq = payload.checkpoint_seq;
+      liveEventSeq = Number(payload.checkpoint_seq) || 0;
+      if (payload.overflow) setStatus("live output exceeded the replay buffer; saved transcript is still syncing");
+      else clearStatus();
+    }
+    if (payload.overflow) {
+      liveEventSeq = Number(payload.next_seq) || liveEventSeq;
+      setStatus("live output exceeded the replay buffer; saved transcript is still syncing");
+      return;
+    }
+    for (const item of payload.events || []) {
+      const seq = Number(item.seq) || 0;
+      if (seq <= liveEventSeq) continue;
+      handleEvent(item.event);
+      liveEventSeq = seq;
+    }
+  } catch (error) {
+    liveSyncFailed = true;
+    setStatus("live sync retrying: " + String(error.message || error));
+  } finally {
+    liveRunPolling = false;
+  }
+}
+
 async function watchTurn() {
   // One at a time: a poll that has not answered yet is not a reason to start another, and on a
   // single-worker node that is the difference between asking and queueing.
@@ -2780,10 +3041,24 @@ async function watchTurn() {
     const response = await apiFetch("health");
     const health = await response.json();
     const current = activeRun(health);
-    if (current) { sawTurnInFlight = true; }
-    else if (sawTurnInFlight) {
+    if (current) {
+      sawTurnInFlight = true;
+      // Only when this window is not streaming the run itself: `busy` means its own stream is
+      // drawing it live, and a repaint under a live stream would fight it for the same bubble.
+      if (!busy) {
+        if (!followedSeq || Date.now() - lastFollowAt >= 3000) {
+          lastFollowAt = Date.now();
+          await followRun();
+        }
+        await syncLiveRun(current);
+      }
+    } else if (sawTurnInFlight) {
       sawTurnInFlight = false;
+      liveRunId = null;
+      liveEventSeq = 0;
+      liveCheckpointSeq = null;
       if (chatSession) {
+        clearStatus();
         rememberPlace();
         await restoreSession();
         restorePlace();
@@ -2791,7 +3066,7 @@ async function watchTurn() {
     }
   } catch (error) { /* the node is down; watchNode handles that */ }
   runPolling = false;
-  setTimeout(watchTurn, 3000);
+  setTimeout(watchTurn, 1000);
 }
 
 // ---- native companion window (wa-window / WebView2) ----------------------
@@ -3579,11 +3854,11 @@ async function openSessionById(id) {
   }
 }
 
-// Topics waiting for the node to be free. The engine's reads are Lua, so on a single-worker node they
-// queue behind a run - and the client's deadline is shorter than a run, so opening one while the node
-// was working showed "AbortError: signal is aborted without reason". That reads as the UI being broken
-// when the node is simply busy, which is the opposite of what a status line is for.
+// Topics that still need the run worker wait for the run to finish. Read-only topics such as nodes,
+// sessions, and skills use the host's read workers and can be inspected during a run.
 const pendingTopics = new Set();
+
+const runWorkerTopics = new Set(['spells-box', 'tools-box']);
 
 async function refreshJobs() {
   const box = document.getElementById('jobs-box');
@@ -3613,9 +3888,9 @@ document.getElementById('jobs-box').addEventListener('job-toggle', async (event)
 
 function loadTopic(id) {
   const box = document.getElementById(id);
-  if (busy && id !== 'jobs-box') {
-    // Do not even ask: the worker is inside a run, so the request would queue and then be abandoned by
-    // the deadline. Say what is true and come back to it when the run ends.
+  if (busy && runWorkerTopics.has(id)) {
+    // These topics still use a route on the run worker. Do not issue a request that would time out;
+    // keep them queued and load them as soon as that worker is free.
     pendingTopics.add(id);
     if (box) box.textContent = "the node is busy with a run — this loads when it finishes";
     return;

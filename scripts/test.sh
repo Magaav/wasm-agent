@@ -32,6 +32,13 @@ cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 # The execution and automation contracts have native, model-free adversarial tests.
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host file_search::tests
+# The ticker's clock is the twin of `cli_view.duration` on the Lua side: the elapsed time of a
+# call that has not finished can only be computed by the host, so both sides pin the same three
+# values and a one-sided change fails here rather than on a screen.
+cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host ticker_tests
+# The console size is the one number the CLI cannot learn for itself, and the only thing standing
+# between a detached console (which reports 0x0, not failure) and a screen wrapped to nothing.
+cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host terminal_tests
 # The graph is a capability the agent navigates its own code with, so its extractor and
 # incremental reindex are part of the contract, not a side project.
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-graph
@@ -170,6 +177,40 @@ for entry in chat paths status skills sessions resume; do
   echo "$HELP" | grep -q "$entry" || { echo "FAIL: wa help must list '$entry'" >&2; exit 1; }
 done
 echo "cli ok"
+# The REPL's `/` commands are the window's, and `/new` is the one that was missing: the window could
+# start a thread and the CLI could not, and nothing in the repo said so. This drives it the way a
+# reader does - typed into the real REPL - because a help line is not evidence that a command is
+# handled, and asserts the two halves of the promise: the REPL moved to another session, and the
+# session it left is still in the ledger (the ledger is append-only, so "unchanged" is a claim this
+# can check). Which commands the two surfaces share is `scripts/test-command-parity.cjs`'s half.
+"$BIN" --db "$DB" chat --help | grep -q '^  /new ' \
+  || { echo "FAIL: /help must offer /new" >&2; exit 1; }
+CLI_CMD_DB="$DB.cli-commands"
+CLI_CMD_STATUS=0
+CLI_CMD_OUT="$(printf '/new\n/session\n/exit\n' | "$BIN" --db "$CLI_CMD_DB" chat 2>&1 | tr -d '\r')" || CLI_CMD_STATUS=$?
+if [ "$CLI_CMD_STATUS" != 0 ]; then
+  echo "FAIL: wa chat exited $CLI_CMD_STATUS" >&2; printf '%s\n' "$CLI_CMD_OUT" >&2; exit 1
+fi
+printf '%s\n' "$CLI_CMD_OUT" | grep -q 'new session' \
+  || { echo "FAIL: /new must say which session the REPL moved to" >&2; exit 1; }
+UUID='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+# The banner's session id is the first id printed; `/session` answers on the line holding the prompt
+# the command was typed at, and the first id on such a line is the session the REPL is in now (the
+# `/new` notice names the same one). Both searches are for the full id, so a shortened one cannot pass.
+UUID='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+BEFORE="$(printf '%s\n' "$CLI_CMD_OUT" | grep -oE "$UUID" | head -1)"
+AFTER="$(printf '%s\n' "$CLI_CMD_OUT" | grep -E '^wa> ' | grep -oE "$UUID" | head -1)"
+if [ -z "$BEFORE" ] || [ -z "$AFTER" ] || [ "$BEFORE" = "$AFTER" ]; then
+  echo "FAIL: /new must move /session to a different session (before='$BEFORE' after='$AFTER')" >&2
+  printf '%s\n' "$CLI_CMD_OUT" >&2
+  exit 1
+fi
+printf '%s\n' "$CLI_CMD_OUT" | grep -q "$BEFORE" \
+  || { echo "FAIL: /new must name the session it left" >&2; exit 1; }
+"$BIN" --db "$CLI_CMD_DB" sessions | grep -q "$BEFORE" \
+  || { echo "FAIL: /new must leave the session it left in the ledger" >&2; exit 1; }
+rm -f "$CLI_CMD_DB"*
+echo "cli /new ok"
 # Actions that need the user's machine must fail immediately when nothing is
 # polling the client bridge, instead of blocking for the call timeout: an agent
 # spent rounds on a tool that looked half-working. There is never a client
@@ -283,20 +324,22 @@ ok(v.ok == false and v.error == 'no_runtime_tree', 'no tree must be a refusal, g
 ok(v.message and #v.message > 20, 'every answer must carry a sentence')
 ok(v.next and #v.next > 20, 'a refusal must say where to go')
 
--- A tree with nothing built in it: the common case right after an edit, and it must not queue.
-v = update.verdict({ install = '/i', tree = '/tree', candidate = '/tree/rust/target/release/wa.exe' })
-ok(v.error == 'nothing_built', 'an unbuilt tree must be a refusal, got ' .. tostring(v.error))
-ok(v.next:find('cargo build', 1, true), 'the refusal must name the build command: ' .. tostring(v.next))
+-- A tree with nothing built in it: a deploy *builds*, so this is no longer a reason to refuse.
+v = update.verdict({ install = '/i', tree = '/tree', candidate = '/tree/rust/target/release/wa.exe', sentinel_present = true })
+ok(v.queued == true, 'an unbuilt tree must still queue - the gate builds it, got ' .. tostring(v.status))
 
--- Built, but the only process that could install it is not there.
+-- Built, but the only process that could deploy it is not there.
 v = update.verdict({ install = '/i', tree = '/t', candidate = '/c', candidate_bytes = 10, sentinel_present = false })
 ok(v.error == 'no_sentinel', 'a missing sentinel must be a refusal, got ' .. tostring(v.error))
 
--- Already running exactly what the tree holds: nothing to queue, and no claim of work done.
+-- The same commit still queues. The commit does not describe the install - measured on this
+-- machine: `installed.txt` read commit=unknown while the shipped deploy.sh was ten lines behind the
+-- tree - so "you already run that" would be a claim about scripts and a sentinel it never looked at.
 v = update.verdict({ install = '/i', tree = '/t', candidate = '/c', candidate_bytes = 10,
   sentinel_present = true, tree_commit = 'abc1234', installed_commit = 'abc1234', dirty = 0 })
-ok(v.ok == true and v.changed == false and v.status == 'already_current', 'same commit must be a no-op')
-ok(not v.queued, 'already current must not queue a request')
+ok(v.queued == true and v.status == 'queue', 'the same commit must still deploy, got ' .. tostring(v.status))
+ok(v.message:find('sentinel and scripts', 1, true),
+  'the answer must say what a deploy installs: ' .. tostring(v.message))
 
 -- A different commit queues, and says queued rather than done.
 v = update.verdict({ install = '/i', tree = '/t', candidate = '/c', candidate_bytes = 10,
@@ -305,11 +348,12 @@ ok(v.queued == true and v.commit == 'def5678', 'a newer tree must queue')
 ok(v.message:find('queued', 1, true) and v.message:find('not done yet', 1, true),
   'queued must not read as done: ' .. tostring(v.message))
 
--- Uncommitted work queues even at the same commit: the commit does not describe the binary, so
--- "you already run that" would be a claim about code that was never built.
+-- Uncommitted work is refused here rather than queued: the gate refuses a dirty tree, so a request
+-- would be written only to fail.
 v = update.verdict({ install = '/i', tree = '/t', candidate = '/c', candidate_bytes = 10,
   sentinel_present = true, tree_commit = 'abc1234', installed_commit = 'abc1234', dirty = 3 })
-ok(v.queued == true, 'a dirty tree must still queue')
+ok(v.ok == false and v.error == 'tree_dirty', 'a dirty tree must be refused, got ' .. tostring(v.error))
+ok(v.next:find('commit or stash', 1, true), 'the refusal must say what to do: ' .. tostring(v.next))
 
 -- The path a recorded worktree comes back as is a Windows path with backslashes, which the shell
 -- this node runs commands in cannot use: a backslash inside a single-quoted word reaches a native
@@ -325,8 +369,8 @@ ok(source == 'runtime-worktree.txt', 'the source of the tree must be named, got 
 local command = update.request_command(
   { sentinel = 'C:/install/wa-sentinel.exe', candidate = 'C:/tree/rust/target/release/wa.exe' },
   "/update: it's mine")
-ok(command:find("'C:/install/wa%-sentinel%.exe' request upgrade"), 'the verb must be spelled out: ' .. command)
-ok(command:find("'C:/tree/rust/target/release/wa%.exe'", 1), 'the binary must be quoted: ' .. command)
+ok(command:find("'C:/install/wa%-sentinel%.exe' request deploy"), 'the verb must be deploy, spelled out: ' .. command)
+ok(not command:find('%-%-binary', 1), 'a deploy names no candidate binary: ' .. command)
 ok(not command:find("it's", 1, true) and command:find("it'\\''s", 1, true),
   'a quote in the reason must be escaped, not left to end the word: ' .. command)
 
@@ -614,9 +658,12 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB
 # oversized turn makes every later turn of the session fail and the thread never answers.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-overflow-recovery.lua" "$BIN" --db "$DB.overflow" | grep 'overflow recovery ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-tool.lua" "$BIN" --db "$DB.graph-tool" | grep 'graph tool ok'
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-freshness.lua" "$BIN" --db "$DB.graph-freshness" | grep 'graph freshness ok'
 # Offline accounting must run even when UI tests are explicitly skipped.
 node scripts/test-token-audit.cjs
 WA_BIN="$BIN" node scripts/test-efficiency.cjs
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-patch-audit.lua" "$BIN" --db "$DB.patch-audit" | grep 'patch audit ok'
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-patch-audit-agent.lua" "$BIN" --db "$DB.patch-audit-agent" | grep 'patch audit agent ok'
 # Real projector, isolated home, exact artifact recovery. No paid model or ignored A/B switch.
 WA_BIN="$BIN" bash scripts/bench-tool-budget.sh
 WA_BIN="$BIN" bash scripts/bench-tool-tail.sh
@@ -948,11 +995,36 @@ WA_SCRIPT=scripts/test-memory-window.lua "$BIN" --db "$DB.window" | grep "memory
 # you cannot search for.
 WA_SCRIPT=scripts/test-session-title.lua "$BIN" --db "$DB.title" | grep "session title ok"
 
+# The CLI's answer is markdown: the renderer decides what a heading, a bullet, a fence, a
+# link and a bare url become, and - the property that matters most - that nothing in the
+# reply is dropped on the way through. It is asserted without a model and without a terminal:
+# `paint` is passed in, so the test reads the roles the renderer chose.
+WA_SCRIPT=scripts/test-markdown.lua "$BIN" --db "$DB.markdown" | grep "markdown ok"
+
 # What a run looks like while it is running. The renderer is where the CLI's whole
 # readable output is decided - a tool call's line, a failed call's line, and whether a
 # captured transcript is free of escape sequences - so it is asserted without a model:
 # the view is handed the events agent.lua emits, with a clock the test controls.
 WA_SCRIPT=scripts/test-cli-view.lua "$BIN" --db "$DB.view" | grep "cli view ok"
+
+# The status line must keep moving while the interpreter is blocked, and the timer therefore
+# lives in the host. The evidence is the captured stdout of a child that does nothing but
+# sleep: it cannot repaint anything itself, so every frame and every tenth of a second in that
+# file is the host's own work. The clock reaching 0.5s or more is what proves a timer rather
+# than one frame drawn at the start.
+TICKER_OUT="$DB.ticker.out"
+WA_SCRIPT=scripts/test-cli-ticker.lua "$BIN" --db "$DB.ticker" > "$TICKER_OUT" 2>&1
+ticker_frames=$(tr '\r' '\n' < "$TICKER_OUT" | grep -c "Thinking" || true)
+ticker_clocks=$(tr '\r' '\n' < "$TICKER_OUT" | sed -n 's/.* \([0-9][0-9]*\.[0-9]s\)$/\1/p' | uniq | wc -l | tr -d ' ')
+ticker_marks=$(tr '\r' '\n' < "$TICKER_OUT" | grep "2K" | cut -b 7-9 | LC_ALL=C sort -u | wc -l | tr -d ' ')
+ticker_last=$(tr '\r' '\n' < "$TICKER_OUT" | sed -n 's/.* \([0-9][0-9]*\.[0-9]s\)$/\1/p' | tail -1 || true)
+if [ "$ticker_frames" -ge 8 ] && [ "$ticker_clocks" -ge 8 ] && [ "$ticker_marks" -ge 3 ] \
+  && [ "$ticker_last" != "0.0s" ] && [ -n "$ticker_last" ]; then
+  echo "cli ticker ok ($ticker_frames frames, $ticker_marks marks, clock reached $ticker_last)"
+else
+  echo "cli ticker FAILED: $ticker_frames frames, $ticker_clocks clocks, $ticker_marks marks, last \"$ticker_last\""
+  exit 1
+fi
 
 # A command must not be able to hold the interpreter forever: an agent curled the node's own port
 # from inside a turn, the request queued behind the turn that made it, and the worker waited on
@@ -1214,6 +1286,10 @@ fi
 bash scripts/check-naming.sh
 node scripts/test-naming-check.cjs
 node scripts/test-execution-terminology.cjs
+# The window and this CLI offer the same `/` commands, and `/new` was missing from the CLI for as long
+# as nothing checked it. The rule is the window's list against the REPL's, plus the one sentence that
+# is deliberately written twice (the `/merge` brief).
+node scripts/test-command-parity.cjs
 node scripts/test-auth-sessions.cjs "$BIN"
 node scripts/test-fixture-verdict.cjs
 node scripts/test-suite-verdict.cjs
@@ -1248,6 +1324,10 @@ run_proof_fixture whatsapp 40 node scripts/test-whatsapp-subagent-e2e.cjs
 # The reader's acted cursor: a message may be consumed only when a durable decision exists for it, the
 # attempt count is bounded, and media is reported instead of handed to a child. Mock store, real ingest.
 run_proof_fixture cursor 47 node scripts/test-whatsapp-cursor.cjs "$BIN"
+# Local audio bytes, WASM formatting, durable reservation, and exactly-once
+# verified sends. These use fake WhatsApp/STT adapters and no paid model.
+node scripts/test-whatsapp-audio.mjs
+node scripts/test-whatsapp-transcribe.cjs "$BIN" "$PLUGINS/whatsapp-transcript.wasm"
 # The pipeline seam: a `returns` list reaches the foreach, a step that produced nothing fails the
 # delivery, and a no-op run is distinguishable from a dropped result. Real sentinel, mock store, no model.
 run_proof_fixture pipeline 19 node scripts/test-job-pipeline.cjs

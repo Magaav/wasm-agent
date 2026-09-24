@@ -225,6 +225,44 @@ customElements.define("wa-message", WaMessage);
 // holds the sequential tool lines, hidden until the reader opens it. Failures are
 // the exception - an error opens the topic, because a silent failure is worse
 // than a noisy transcript (DESIGN.md).
+// One topic header, in one place.
+//
+// <wa-trace>, <wa-run>, <wa-diff> and <wa-reasoning> are the same thing: a glyph, a label, a meta, a
+// chevron that says it opens, and a body that starts hidden. Three of them built that by hand and the
+// fourth - the thinking block - built a different one: taller, with its own padding, no chevron and no
+// glyph, so it read as a different kind of thing rather than as another topic. The header *is* the
+// standard, so it lives here and every topic asks for it.
+function topicParts(host, options) {
+  const { className, glyph, label, bodyTag = "div", bodyClass } = options;
+  host.classList.add(className);
+  const header = document.createElement("button");
+  header.type = "button";
+  header.className = "trace-head";
+  header.setAttribute("aria-expanded", "false");
+  const glyphEl = document.createElement("span");
+  glyphEl.className = "trace-glyph";
+  glyphEl.textContent = glyph;
+  const labelEl = document.createElement("span");
+  labelEl.className = "trace-label";
+  labelEl.textContent = label;
+  const metaEl = document.createElement("span");
+  metaEl.className = "trace-meta";
+  const chevron = document.createElement("span");
+  chevron.className = "trace-chevron";
+  chevron.textContent = "\u203a";
+  header.append(glyphEl, labelEl, metaEl, chevron);
+  const body = document.createElement(bodyTag);
+  body.className = bodyClass;
+  body.hidden = true;
+  header.addEventListener("click", () => host.toggle());
+  return { header, glyph: glyphEl, label: labelEl, meta: metaEl, chevron, body };
+}
+
+// The chevron is the whole of "this opens": it points right when closed and down when open.
+function topicChevron(chevron, open) {
+  if (chevron) chevron.textContent = open ? "\u2304" : "\u203a";
+}
+
 class WaTrace extends HTMLElement {
   static get observedAttributes() { return ["open"]; }
 
@@ -240,30 +278,15 @@ class WaTrace extends HTMLElement {
   connectedCallback() {
     if (this._built) return;
     this._built = true;
-    this.classList.add("trace");
-
-    this._header = document.createElement("button");
-    this._header.type = "button";
-    this._header.className = "trace-head";
-    this._header.setAttribute("aria-expanded", "false");
-    this._glyph = document.createElement("span");
-    this._glyph.className = "trace-glyph";
-    this._glyph.textContent = "\u2699";
-    this._label = document.createElement("span");
-    this._label.className = "trace-label";
-    this._label.textContent = "working…";
-    this._meta = document.createElement("span");
-    this._meta.className = "trace-meta";
-    this._chevron = document.createElement("span");
-    this._chevron.className = "trace-chevron";
-    this._chevron.textContent = "\u203a";
-    this._header.append(this._glyph, this._label, this._meta, this._chevron);
-
-    this._body = document.createElement("ol");
-    this._body.className = "trace-body";
-    this._body.hidden = true;
-
-    this._header.addEventListener("click", () => this.toggle());
+    const parts = topicParts(this, {
+      className: "trace", glyph: "\u2699", label: "working\u2026", bodyTag: "ol", bodyClass: "trace-body",
+    });
+    this._header = parts.header;
+    this._glyph = parts.glyph;
+    this._label = parts.label;
+    this._meta = parts.meta;
+    this._chevron = parts.chevron;
+    this._body = parts.body;
     this.append(this._header, this._body);
   }
 
@@ -297,7 +320,7 @@ class WaTrace extends HTMLElement {
   // addTool(name, title, detail, bound) -> the line element, so the caller can fill the outcome.
   // `bound` is the call's deadline in seconds, when it has one: the line can then say how long it has
   // run *of* how long it may take, which is the question "bash" alone cannot answer.
-  addTool(name, title, detail, bound) {
+  addTool(name, title, detail, bound, callId) {
     if (!this._userToggled) this.open = true;   // live: show the lines, not a count
     this._count += 1;
     const line = document.createElement("li");
@@ -323,7 +346,7 @@ class WaTrace extends HTMLElement {
     progress.hidden = true;
     line.append(progress);
     this._lines.set(name, line);
-    this._pending.push({ line, output, progress, outcome, started: Date.now(), bound: bound || null });
+    this._pending.push({ line, output, progress, outcome, started: Date.now(), bound: bound || null, callId: callId || "" });
     this._body.append(line);
     this._header.classList.add("running");
     this._refresh();
@@ -353,6 +376,10 @@ class WaTrace extends HTMLElement {
   }
 
   get pending() { return this._pending.length > 0; }
+
+  hasPendingCall(callId) {
+    return this._pending.some((target) => target.callId === callId);
+  }
 
   // Tool calls in one decision execute in order; replay adds them all before their
   // result rows, so settle the oldest pending line, not the most recently added one.
@@ -423,26 +450,15 @@ class WaRun extends HTMLElement {
 
   _build() {
     if (this._body) return;
-    this.classList.add("run");
-    this._header = document.createElement("button");
-    this._header.type = "button";
-    this._header.className = "trace-head";
-    this._glyph = document.createElement("span");
-    this._glyph.className = "trace-glyph";
-    this._glyph.textContent = "\u2699";
-    this._label = document.createElement("span");
-    this._label.className = "trace-label";
-    this._label.textContent = "run";
-    this._meta = document.createElement("span");
-    this._meta.className = "trace-meta";
-    this._chevron = document.createElement("span");
-    this._chevron.className = "trace-chevron";
-    this._chevron.textContent = "\u203a";
-    this._header.append(this._glyph, this._label, this._meta, this._chevron);
-    this._body = document.createElement("div");
-    this._body.className = "run-body";
-    this._body.hidden = true;
-    this._header.addEventListener("click", () => this.toggle());
+    const parts = topicParts(this, {
+      className: "run", glyph: "\u2699", label: "run", bodyClass: "run-body",
+    });
+    this._header = parts.header;
+    this._glyph = parts.glyph;
+    this._label = parts.label;
+    this._meta = parts.meta;
+    this._chevron = parts.chevron;
+    this._body = parts.body;
     this.append(this._header, this._body);
   }
 
@@ -457,7 +473,7 @@ class WaRun extends HTMLElement {
     this._build();
     this._body.hidden = !this.open;
     this._header.setAttribute("aria-expanded", String(this.open));
-    this._chevron.textContent = this.open ? "\u2304" : "\u203a";
+    topicChevron(this._chevron, this.open);
   }
 
   toggle() { this.open = !this.open; }
@@ -473,6 +489,59 @@ class WaRun extends HTMLElement {
   }
 }
 customElements.define("wa-run", WaRun);
+
+// <wa-reasoning> — the model's own thinking, as a topic like every other one.
+//
+// It is the route to the reply, not the reply, so it folds away once the run moves on - but it stays a
+// visible step, because a turn whose content was all reasoning must not read as a turn that only
+// called tools. It used to be a bespoke <details> with its own header: taller than the tool-call topics
+// beside it, with no chevron and no glyph. Now it is the same topic as the rest.
+class WaReasoning extends HTMLElement {
+  static get observedAttributes() { return ["open"]; }
+  connectedCallback() { this._build(); }
+
+  _build() {
+    if (this._body) return;
+    const parts = topicParts(this, {
+      className: "reasoning", glyph: "\u2733", label: "thinking", bodyClass: "reasoning-body",
+    });
+    this._header = parts.header;
+    this._label = parts.label;
+    this._meta = parts.meta;
+    this._chevron = parts.chevron;
+    this._body = parts.body;
+    this.append(this._header, this._body);
+    this._sync();
+  }
+
+  get body() { this._build(); return this._body; }
+  get open() { return this.hasAttribute("open"); }
+  set open(value) {
+    if (value) this.setAttribute("open", "");
+    else this.removeAttribute("open");
+  }
+
+  attributeChangedCallback() { this._build(); this._sync(); }
+
+  _sync() {
+    if (!this._body) return;
+    this._body.hidden = !this.open;
+    this._header.setAttribute("aria-expanded", String(this.open));
+    topicChevron(this._chevron, this.open);
+  }
+
+  toggle() { this.open = !this.open; }
+
+  // The body is `pre-wrap`, so a trailing newline would draw an empty line and a provider ends a chunk
+  // with them. The meta counts what the model produced, not what survives the trim.
+  setText(text) {
+    this._build();
+    const raw = String(text || "");
+    this._body.textContent = raw.replace(/\s+$/, "");
+    this._meta.textContent = raw.length + " chars";
+  }
+}
+customElements.define("wa-reasoning", WaReasoning);
 
 // <wa-tool> — a tool-activity chip. `name` sets the label; `.detail` is writable.
 class WaTool extends HTMLElement {
@@ -529,28 +598,20 @@ class WaDiff extends HTMLElement {
 
   _build() {
     if (this._body) return;
-    this.classList.add("diff");
 
     this._row = document.createElement("div");
     this._row.className = "diff-row";
 
-    // The header is the real topic header: one button, exactly as <wa-run> builds it.
-    this._header = document.createElement("button");
-    this._header.type = "button";
-    this._header.className = "trace-head";
-    this._header.setAttribute("aria-expanded", "false");
-    this._glyph = document.createElement("span");
-    this._glyph.className = "trace-glyph";
-    this._glyph.textContent = "\u0394";
-    this._label = document.createElement("span");
-    this._label.className = "trace-label";
-    this._label.textContent = "changes";
-    this._meta = document.createElement("span");
-    this._meta.className = "trace-meta";
-    this._chevron = document.createElement("span");
-    this._chevron.className = "trace-chevron";
-    this._chevron.textContent = "\u203a";
-    this._header.append(this._glyph, this._label, this._meta, this._chevron);
+    // The header is the real topic header, from the one place that builds them.
+    const parts = topicParts(this, {
+      className: "diff", glyph: "\u0394", label: "changes", bodyTag: "ul", bodyClass: "diff-body",
+    });
+    this._header = parts.header;
+    this._glyph = parts.glyph;
+    this._label = parts.label;
+    this._meta = parts.meta;
+    this._chevron = parts.chevron;
+    this._body = parts.body;
 
     this._toggle = document.createElement("button");
     this._toggle.type = "button";
@@ -559,11 +620,6 @@ class WaDiff extends HTMLElement {
 
     this._row.append(this._header, this._toggle);
 
-    this._body = document.createElement("ul");
-    this._body.className = "diff-body";
-    this._body.hidden = true;
-
-    this._header.addEventListener("click", () => this.toggle());
     this._toggle.addEventListener("click", () => this._act());
 
     this.append(this._row, this._body);
@@ -582,7 +638,7 @@ class WaDiff extends HTMLElement {
     if (!this._body) return;
     this._body.hidden = !this.open;
     this._header.setAttribute("aria-expanded", String(this.open));
-    this._chevron.textContent = this.open ? "\u2304" : "\u203a";
+    topicChevron(this._chevron, this.open);
   }
 
   toggle() { this.open = !this.open; }

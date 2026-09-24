@@ -1089,6 +1089,257 @@ pub extern "C" fn beat(_l: *mut LuaState) -> c_int {
     0
 }
 
+// ---- the one line that keeps moving ----------------------------------------------
+
+/// The line the CLI's ticker is drawing, and where its cycle is.
+struct TickerSpec {
+    line: String,
+    marks: Vec<String>,
+    started: f64,
+    frame: usize,
+}
+
+struct Ticker {
+    spec: std::sync::Arc<Mutex<TickerSpec>>,
+    /// Set once, and every waiter is woken: the caller that stops the ticker is about to
+    /// write on the same line, so it must not have to wait out a tick to do it.
+    stop: std::sync::Arc<(Mutex<bool>, std::sync::Condvar)>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+/// One ticker per process: it draws on the process's own terminal, and the only caller is
+/// the interactive CLI, which has exactly one status line. A second caller gets the first
+/// one's line updated rather than a second writer.
+static TICKER: Mutex<Option<Ticker>> = Mutex::new(None);
+
+/// pi redraws its status line about this often; the clock moves in tenths, so anything
+/// slower than this reads as a stutter rather than as motion.
+const TICKER_INTERVAL_MS: u64 = 90;
+
+fn ticker_seconds() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// The clock the ticker draws, and the twin of `cli_view.duration` in Lua.
+///
+/// Two implementations is one more than ideal - the same trade `redact` above makes - but
+/// the alternative is worse: the elapsed time of a call that has not finished yet cannot be
+/// computed by the side that is blocked, so this rule has to exist here or not at all.
+/// Both sides pin the same three values (`59.9s`, `1m00s`, `2m05s`) in their own tests, so a
+/// change to one that is not made to the other fails a test rather than a frame of video.
+fn ticker_duration(seconds: f64) -> String {
+    let value = if seconds.is_finite() && seconds > 0.0 { seconds } else { 0.0 };
+    if value < 60.0 {
+        format!("{:.1}s", value)
+    } else {
+        format!("{}m{:02}s", (value / 60.0).floor() as u64, (value % 60.0).floor() as u64)
+    }
+}
+
+/// One frame of the animated line: `{m}` becomes the next mark, `{t}` the clock.
+fn ticker_render(spec: &TickerSpec, ticks: usize) -> String {
+    let mark = if spec.marks.is_empty() {
+        ""
+    } else {
+        spec.marks[(spec.frame.wrapping_add(ticks)) % spec.marks.len()].as_str()
+    };
+    let clock = ticker_duration(ticker_seconds() - spec.started);
+    spec.line.replace("{m}", mark).replace("{t}", &clock)
+}
+
+/// `WASM_AGENT_CLI_TICKER=off` leaves the caller's escape sequences alone and stops the
+/// motion, which is what a capture that wants a byte-exact transcript needs.
+fn ticker_enabled() -> bool {
+    !matches!(
+        std::env::var("WASM_AGENT_CLI_TICKER").unwrap_or_default().to_ascii_lowercase().as_str(),
+        "off" | "0" | "false" | "no"
+    )
+}
+
+/// Stop the ticker and wait for its last frame to land: the caller is about to write to the
+/// same line, and two writers is how a status line turns into two half-lines.
+fn stop_ticker() -> bool {
+    let running = {
+        let mut slot = TICKER.lock().unwrap_or_else(|error| error.into_inner());
+        slot.take()
+    };
+    match running {
+        None => false,
+        Some(ticker) => {
+            {
+                let (flag, signal) = &*ticker.stop;
+                *flag.lock().unwrap_or_else(|error| error.into_inner()) = true;
+                signal.notify_all();
+            }
+            let _ = ticker.thread.join();
+            true
+        }
+    }
+}
+
+fn start_ticker(spec: TickerSpec) -> bool {
+    use std::io::Write;
+    let mut slot = TICKER.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(running) = slot.as_ref() {
+        // Already ticking (the same run, a new phase): move the line rather than restart it.
+        *running.spec.lock().unwrap_or_else(|error| error.into_inner()) = spec;
+        return true;
+    }
+    let spec = std::sync::Arc::new(Mutex::new(spec));
+    let stop = std::sync::Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let thread = {
+        let spec = std::sync::Arc::clone(&spec);
+        let stop = std::sync::Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let (flag, signal) = &*stop;
+            let mut ticks = 0usize;
+            loop {
+                let text = {
+                    let guard = spec.lock().unwrap_or_else(|error| error.into_inner());
+                    ticker_render(&guard, ticks)
+                };
+                // Carriage return and erase-line: the same two sequences the view writes for
+                // itself, so the frame the ticker leaves and the frame the view writes next
+                // are the same shape. Flushed every time: this text has no newline to flush it.
+                let mut out = std::io::stdout();
+                let _ = write!(out, "\r\u{1b}[2K{text}");
+                let _ = out.flush();
+                ticks = ticks.wrapping_add(1);
+                let guard = flag.lock().unwrap_or_else(|error| error.into_inner());
+                if *guard {
+                    break;
+                }
+                let (guard, _) = signal
+                    .wait_timeout(guard, std::time::Duration::from_millis(TICKER_INTERVAL_MS))
+                    .unwrap_or_else(|error| error.into_inner());
+                if *guard {
+                    break;
+                }
+            }
+        })
+    };
+    *slot = Some(Ticker { spec, stop, thread });
+    true
+}
+
+/// host.ticker(spec_json) -> true | nil
+///
+/// `wa chat` keeps one status line on screen for as long as a run is in flight, and until
+/// this existed that line only moved when an event arrived. The reason is structural, not
+/// cosmetic: the whole model call happens inside `host.http_stream`, so the interpreter is
+/// blocked for its duration and nothing on the Lua side can repaint - a slow call showed a
+/// frozen spinner frame and a clock that had stopped, which is exactly what a hung run looks
+/// like. pi has no such problem because its UI is an event loop that redraws on a timer; the
+/// equivalent here is a timer on the *host* side, which is what this is.
+///
+/// The contract leaves the line to Lua. `line` is the line to draw with exactly two tokens
+/// left in it, and the host fills only those:
+///
+/// ```text
+/// {m}  one of `marks` (a JSON array of strings), cycled once per tick
+/// {t}  the seconds since `started`, in the shape `cli_view.duration` uses
+/// ```
+///
+/// Every other character - the indent, the words, the separators, the round counter - is
+/// the caller's text, so the line the host animates and the line the view prints for itself
+/// cannot drift apart. `frame` is where the mark cycle continues from, so an event that
+/// redraws the line does not make the spinner jump back to its first frame.
+///
+/// No argument, or `nil`, stops it: the ticker stops drawing and leaves the line as the
+/// caller's to erase, which is what the view does before it prints anything else. Returns
+/// `true` while a ticker is running, and `nil` when none is (no argument, a spec that does
+/// not parse, or `WASM_AGENT_CLI_TICKER=off`).
+pub extern "C" fn ticker(l: *mut LuaState) -> c_int {
+    let running = match arg_string(l, 1).and_then(|text| parse_ticker_spec(&text)) {
+        // No argument is a stop, not a no-op: the caller is about to draw on that line
+        // itself, and a ticker still running would fight it for the cursor.
+        None => {
+            stop_ticker();
+            false
+        }
+        Some(spec) => ticker_enabled() && start_ticker(spec),
+    };
+    if running {
+        unsafe { crate::lua::lua_pushboolean(l, 1) };
+    } else {
+        unsafe { crate::lua::lua_pushnil(l) };
+    }
+    1
+}
+
+fn parse_ticker_spec(text: &str) -> Option<TickerSpec> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    let line = value.get("line")?.as_str()?.to_string();
+    let marks = value
+        .get("marks")
+        .and_then(|marks| marks.as_array())
+        .map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let started = value.get("started").and_then(Value::as_f64).unwrap_or_else(ticker_seconds);
+    let frame = value.get("frame").and_then(Value::as_u64).unwrap_or(0) as usize;
+    Some(TickerSpec { line, marks, started, frame })
+}
+
+#[cfg(test)]
+mod ticker_tests {
+    use super::*;
+
+    fn spec(line: &str, frame: usize) -> TickerSpec {
+        TickerSpec { line: line.to_string(), marks: vec!["one ".to_string(), "two ".to_string()], started: ticker_seconds(), frame }
+    }
+
+    /// The same three values `scripts/test-cli-view.lua` pins for `cli_view.duration`:
+    /// the rule may not change on one side only, so a change that forgets the other fails
+    /// here rather than on a screen.
+    #[test]
+    fn the_clock_is_the_views_clock() {
+        assert_eq!(ticker_duration(0.0), "0.0s");
+        assert_eq!(ticker_duration(59.94), "59.9s");
+        assert_eq!(ticker_duration(60.0), "1m00s");
+        assert_eq!(ticker_duration(125.4), "2m05s");
+        // A clock is not allowed to read backwards, whatever it is handed.
+        assert_eq!(ticker_duration(-4.0), "0.0s");
+        assert_eq!(ticker_duration(f64::NAN), "0.0s");
+    }
+
+    #[test]
+    fn a_frame_fills_both_tokens_and_leaves_none() {
+        let line = ticker_render(&spec("  {m}Thinking - {t}", 0), 0);
+        assert!(line.starts_with("  one Thinking"), "the mark and the words are the caller's: {line}");
+        assert!(!line.contains("{m}") && !line.contains("{t}"), "no token survives: {line}");
+        // The cycle continues from `frame`: an event that redraws the line must not send the
+        // spinner back to its first frame.
+        let started_at = ticker_render(&spec("  {m}{t}", 1), 0);
+        assert!(started_at.starts_with("  two "), "a frame offset is where the cycle starts: {started_at}");
+        let cycled = ticker_render(&spec("  {m}{t}", 0), 2);
+        assert!(cycled.starts_with("  one "), "ticks wrap around the marks: {cycled}");
+    }
+
+    #[test]
+    fn a_spec_is_read_or_refused_never_guessed() {
+        // Built rather than pasted: the marks are real braille in the source, so no escape
+        // has to survive both Rust and JSON.
+        let spec_json = format!(
+            "{{\"line\":\"  {{m}}Thinking - {{t}}\",\"marks\":[\"{mark} \",\"{next} \"],\"started\":120.5,\"frame\":7}}",
+            mark = '\u{280b}',
+            next = '\u{2819}'
+        );
+        let parsed = parse_ticker_spec(&spec_json).expect("a well-formed spec parses");
+        assert_eq!(parsed.marks.len(), 2);
+        assert_eq!(parsed.marks[0], format!("{} ", '\u{280b}'));
+        assert_eq!(parsed.started, 120.5);
+        assert_eq!(parsed.frame, 7);
+        // No line is no line to draw: refused, rather than drawn empty or drawn wrong.
+        assert!(parse_ticker_spec("{\"marks\":[\"x \"]}").is_none());
+        assert!(parse_ticker_spec("not json").is_none());
+        // A missing `started` is "now": a line with no clock in it is still a line.
+        assert!(parse_ticker_spec("{\"line\":\"{t}\"}").is_some());
+    }
+}
+
 /// host.http_stream(method, url, headers_json, body) -> aggregated completion.
 ///
 /// Reads an OpenAI-compatible SSE stream, forwards each content delta to the UI
@@ -1331,6 +1582,135 @@ pub extern "C" fn runtime_info(l: *mut LuaState) -> c_int {
     });
     push_json(l, identity);
     1
+}
+
+/// `host.terminal_size()` -> `{columns, rows}` for the console this process draws on, or `nil`.
+///
+/// The width a terminal *has* is not the width a child *knows*. `COLUMNS` is a shell variable on most
+/// machines and is not exported to children, so a CLI that wraps to `COLUMNS or 80` renders in an
+/// 80-column column inside a 120-column window and leaves the rest of the screen empty. That is a
+/// measurement, not a guess: Orca's terminal reports `Columns: 120` while `COLUMNS` is empty in the
+/// environment the CLI is launched with.
+///
+/// `nil` - never a zero - when there is no console or it will not answer: a pipe, a file, a captured
+/// transcript, a CI log. A caller that cannot tell "unknown" from "80 wide" wraps to nothing, so the
+/// difference is the whole contract.
+#[cfg(windows)]
+fn console_size() -> Option<(i32, i32)> {
+    use std::ffi::c_void;
+    #[repr(C)]
+    #[derive(Default)]
+    struct Coord {
+        x: i16,
+        y: i16,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct SmallRect {
+        left: i16,
+        top: i16,
+        right: i16,
+        bottom: i16,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct ScreenBufferInfo {
+        size: Coord,
+        cursor: Coord,
+        attributes: u16,
+        window: SmallRect,
+        maximum: Coord,
+    }
+    extern "system" {
+        fn GetStdHandle(kind: u32) -> *mut c_void;
+        fn GetConsoleScreenBufferInfo(handle: *mut c_void, info: *mut ScreenBufferInfo) -> i32;
+    }
+    // STD_OUTPUT_HANDLE is -11 as a DWORD. Asking about *stdout* is deliberate: when stdout is a
+    // file or a pipe (a transcript, a log) this fails and the caller is told `nil` rather than
+    // being handed the size of whatever console happens to be attached.
+    const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5;
+    unsafe {
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        if handle.is_null() {
+            return None;
+        }
+        let mut info = ScreenBufferInfo::default();
+        if GetConsoleScreenBufferInfo(handle, &mut info) == 0 {
+            return None;
+        }
+        // The *window*, not the buffer: the buffer is usually wider (the scrollback) and taller,
+        // and wrapping to it puts text off the right edge of what is on screen.
+        usable_size(
+            (info.window.right - info.window.left + 1) as i32,
+            (info.window.bottom - info.window.top + 1) as i32,
+        )
+    }
+}
+
+#[cfg(unix)]
+fn console_size() -> Option<(i32, i32)> {
+    #[repr(C)]
+    #[derive(Default)]
+    struct WinSize {
+        rows: u16,
+        columns: u16,
+        x_pixels: u16,
+        y_pixels: u16,
+    }
+    #[cfg(target_os = "macos")]
+    const TIOCGWINSZ: u64 = 0x4008_7468;
+    #[cfg(not(target_os = "macos"))]
+    const TIOCGWINSZ: u64 = 0x5413;
+    extern "C" {
+        fn ioctl(fd: c_int, request: u64, ...) -> c_int;
+    }
+    let mut size = WinSize::default();
+    // fd 1 is stdout, for the same reason as the Windows branch above.
+    let answered = unsafe { ioctl(1, TIOCGWINSZ, &mut size as *mut WinSize) } == 0;
+    if !answered {
+        return None;
+    }
+    usable_size(size.columns as i32, size.rows as i32)
+}
+
+#[cfg(not(any(windows, unix)))]
+fn console_size() -> Option<(i32, i32)> {
+    None
+}
+
+/// A console that answers zero is not a console that is zero wide. An uninitialized or detached
+/// screen buffer reports all zeros, and a caller told `{columns: 0}` wraps every line to nothing -
+/// the failure would be a blank screen, which is worse than the 80-column fallback it replaced.
+fn usable_size(columns: i32, rows: i32) -> Option<(i32, i32)> {
+    if columns <= 0 || rows <= 0 {
+        return None;
+    }
+    Some((columns, rows))
+}
+
+pub extern "C" fn terminal_size(l: *mut LuaState) -> c_int {
+    match console_size() {
+        Some((columns, rows)) => push_json(l, &json!({"columns": columns, "rows": rows})),
+        None => unsafe { crate::lua::lua_pushnil(l) },
+    }
+    1
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::usable_size;
+
+    /// The rule that keeps a detached console from blanking the screen, and the values a real
+    /// terminal reports. Written as the three cases because the middle one is the whole point:
+    /// `ioctl` and `GetConsoleScreenBufferInfo` both answer "succeeded, zero by zero" rather than
+    /// failing when nothing is attached, and that answer must not become a width.
+    #[test]
+    fn a_zero_sized_console_is_not_a_width() {
+        assert_eq!(usable_size(120, 40), Some((120, 40)));
+        assert_eq!(usable_size(0, 0), None);
+        assert_eq!(usable_size(-1, 40), None);
+        assert_eq!(usable_size(120, 0), None);
+    }
 }
 
 /// Wall clock is for correlating events, never calculating durations.

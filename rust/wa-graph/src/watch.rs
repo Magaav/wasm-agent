@@ -37,17 +37,22 @@ pub fn spawn(root: PathBuf, db: PathBuf) -> std::io::Result<WatchHandle> {
     std::thread::Builder::new()
         .name("wa-graph-watch".into())
         .spawn(move || {
-            index_once(&root, &db);
             let (tx, rx) = channel();
             let mut watcher = match notify::recommended_watcher(move |res| {
                 let _ = tx.send(res);
             }) {
                 Ok(watcher) => watcher,
-                Err(_) => return,
+                Err(error) => {
+                    eprintln!("graph_watch_create_failed: {error}");
+                    return;
+                }
             };
-            if watcher.watch(&root, RecursiveMode::Recursive).is_err() {
+            if let Err(error) = watcher.watch(&root, RecursiveMode::Recursive) {
+                eprintln!("graph_watch_register_failed: {error}");
                 return;
             }
+            // Register first: an edit during the initial scan must leave an event to replay.
+            index_once(&root, &db);
             while !stop_thread.load(Ordering::SeqCst) {
                 match rx.recv_timeout(Duration::from_millis(500)) {
                     Ok(Ok(event)) => {
@@ -55,10 +60,19 @@ pub fn spawn(root: PathBuf, db: PathBuf) -> std::io::Result<WatchHandle> {
                             continue;
                         }
                         // Debounce: drain the rest of the burst, then reindex once.
-                        while let Ok(Ok(_)) = rx.recv_timeout(Duration::from_millis(250)) {}
+                        loop {
+                            match rx.recv_timeout(Duration::from_millis(250)) {
+                                Ok(Ok(_)) => {}
+                                Ok(Err(error)) => eprintln!("graph_watch_event_failed: {error}"),
+                                Err(_) => break,
+                            }
+                        }
                         index_once(&root, &db);
                     }
-                    Ok(Err(_)) => {}
+                    Ok(Err(error)) => {
+                        eprintln!("graph_watch_event_failed: {error}");
+                        index_once(&root, &db);
+                    }
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => break,
                 }
@@ -81,7 +95,8 @@ fn ignored(event: &notify::Event) -> bool {
 }
 
 fn index_once(root: &Path, db: &Path) {
-    if let Ok(mut store) = Store::open(db) {
-        let _ = store.index(root, false);
+    match Store::open(db).and_then(|mut store| store.index(root, false)) {
+        Ok(_) => {}
+        Err(error) => eprintln!("graph_watch_index_failed: {error}"),
     }
 }
