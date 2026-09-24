@@ -1579,6 +1579,29 @@ $harness = @'
       && changedLast.classList.contains("finished"),
       "with a diff in the turn the footer must still be the bubble's last child, saw: "
       + Array.prototype.map.call(changedKids, function (c) { return c.tagName + "." + (c.className || ""); }).join(", "));
+    // The live node replies twice in one run: a preamble, then the answer that carries the diff
+    // (agent.lua emits a plain reply, then one with changes). The diff is appended on that second
+    // reply, so this is the order a reader actually sees - the case reported from the window as
+    // "I only see file changed at the very bottom of the bubble".
+    window.handleEvent({ type: "status", text: "placement check: two replies, diff on the second" });
+    window.handleEvent({ type: "round", n: 1 });
+    window.handleEvent({ type: "delta", text: "a preamble" });
+    window.handleEvent({ type: "reply", text: "a preamble.", message_id: "two-reply-1" });
+    window.handleEvent({ type: "delta", text: " and then the answer" });
+    window.handleEvent({ type: "reply", text: " and then the answer.", message_id: "two-reply-2",
+      changes: { added: 3, removed: 1, files: [{ path: "lua/core/agent.lua", added: 3, removed: 1, created: false, recorded: true }] } });
+    window.handleEvent({ type: "done" });
+    var twoBubbles = messages.querySelectorAll("wa-message.assistant");
+    var twoBubble = twoBubbles[twoBubbles.length - 1];
+    var twoKids = twoBubble.body.children;
+    var twoLast = twoKids[twoKids.length - 1];
+    check(!!twoLast && twoLast.classList.contains("chat-content-run-status"),
+      "with two replies and a diff, the footer must still be last in the bubble, saw: "
+      + Array.prototype.map.call(twoKids, function (c) { return c.tagName + "." + (c.className || ""); }).join(", "));
+    check(!!twoLast && getComputedStyle(twoLast).position === "static",
+      "and it must have stopped being sticky, saw: " + (twoLast ? getComputedStyle(twoLast).position : "none"));
+    check(twoBubble.querySelectorAll("wa-diff").length === 1,
+      "the diff must be one topic in that bubble, saw: " + twoBubble.querySelectorAll("wa-diff").length);
   })();
   // `/merge` is a brief for the agent, not a node operation: it must actually send the
   // orchestrator brief as a turn, and name the skill that holds the procedure, or the command is a
