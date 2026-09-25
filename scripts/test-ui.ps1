@@ -66,16 +66,11 @@ $harness = @'
       "an active turn must not offer a duplicate continuation");
     check(!window.__calls.some(function (call) { return call.url === "chat" && call.method === "POST"; }),
       "a page reload must never post another turn");
-    // The reload redraws the transcript from stored rows, and a repainted run must still show its
-    // footer - the same information the live stream produced. A replay emits no `done`, so this is
-    // the path where no status line was ever created and finishRunStatus returned early.
+    // The active run cannot yet have a final duration. Earlier settled and interrupted runs can.
     var repaintedBubbles = restored.querySelectorAll("wa-message.assistant");
     var repaintedBubble = repaintedBubbles[repaintedBubbles.length - 1];
-    var repaintedKids = repaintedBubble ? repaintedBubble.body.children : [];
-    var repaintedLast = repaintedKids[repaintedKids.length - 1];
-    check(!!repaintedLast && repaintedLast.classList.contains("chat-content-run-status"),
-      "a repainted bubble must show its run's footer, saw: "
-      + (repaintedLast ? repaintedLast.tagName + "." + (repaintedLast.className || "") : "nothing"));
+    check(!repaintedBubble?.body.querySelector(":scope > .chat-content-run-status.finished"),
+      "a running replay must not claim its duration is final");
     var earlierAnswer = Array.from(repaintedBubbles).find(function (bubble) {
       return bubble.textContent.includes("EARLIER-FINISHED-ANSWER");
     });
@@ -83,6 +78,20 @@ $harness = @'
     check(!!earlierFooter && earlierFooter.textContent.includes("0:05"),
       "every answered run must keep its duration after reload, saw: "
       + (earlierFooter ? earlierFooter.textContent : "no footer"));
+    var interrupted = Array.from(repaintedBubbles).find(function (bubble) {
+      return bubble.textContent.includes("EARLIER-REASONING");
+    });
+    var interruptedFooter = interrupted?.body.querySelector(":scope > .chat-content-run-status.finished");
+    check(!!interruptedFooter && /unfinished/.test(interruptedFooter.textContent) &&
+      interruptedFooter.textContent.includes("0:03"),
+      "an interrupted historical bubble must show its recorded duration without claiming completion");
+    var finished = Array.from(repaintedBubbles).find(function (bubble) {
+      return bubble.textContent.includes("FINISHED-ANSWER") &&
+        !bubble.textContent.includes("EARLIER-FINISHED-ANSWER");
+    });
+    check(!!finished?.body.querySelector(":scope > .chat-content-run-status.finished") &&
+      finished.body.textContent.includes("0:04"),
+      "the later answered run must retain its own four-second footer");
 
     // The stream belongs to the old page, so the new page must notice the worker become idle
     // and repaint the answer from the durable ledger, not open the engine's session view.
@@ -92,8 +101,8 @@ $harness = @'
     // defines. A stage that throws asserted nothing - and reported itself as `FAIL the harness threw`
     // for every later run, which is how a dead assertion hides.
     window.__fixtures.session.messages.push(
-      { seq: 5, role: "tool", tool_name: "bash", content: "done", tool_calls: [] },
-      { seq: 6, role: "assistant", content: "RELOAD-MID-RUN-ANSWER", tool_calls: [] });
+      { seq: 7, role: "tool", tool_name: "bash", content: "done", created_at: 1790000013, tool_calls: [] },
+      { seq: 8, role: "assistant", content: "RELOAD-MID-RUN-ANSWER", created_at: 1790000014, tool_calls: [] });
     window.__fixtures.health.current = null;
     window.__fixtures.health.workers = [];
     await window.__watchTurn();
@@ -104,6 +113,22 @@ $harness = @'
       "the pending notice and tool state must disappear after settlement");
     check(!document.getElementById("sessions-box").textContent.includes("RELOAD-MID-RUN-ANSWER"),
       "the answer belongs in chat, not in a switched engine view");
+    var finalAnswer = Array.from(restored.querySelectorAll("wa-message.assistant")).find(function (bubble) {
+      return bubble.textContent.includes("RELOAD-MID-RUN-ANSWER");
+    });
+    check(!!finalAnswer?.body.querySelector(":scope > .chat-content-run-status.finished") &&
+      /completed/.test(finalAnswer.body.textContent) && finalAnswer.body.textContent.includes("0:04"),
+      "the settled final run must show its duration and completed state");
+    // A saved interim answer followed by a tool result is still unfinished if the node says so.
+    // The live DeepSeek run exposed the contradiction: its bubble said completed above a stopped notice.
+    window.__fixtures.session.messages.pop();
+    window.__fixtures.session.state = { state: "unfinished", at: 1790000013, detail: "stopped after a tool result" };
+    await window.__restoreSession();
+    var stopped = Array.from(restored.querySelectorAll("wa-message.assistant")).slice(-1)[0];
+    var stoppedFooter = stopped?.body.querySelector(":scope > .chat-content-run-status.finished");
+    check(!!stoppedFooter && /unfinished/.test(stoppedFooter.textContent) &&
+      stoppedFooter.textContent.includes("0:03") && !/completed/.test(stoppedFooter.textContent),
+      "a stopped final run must show its recorded duration without a false completed claim");
     var reloadLog = document.createElement("pre");
     reloadLog.id = "harness-log";
     reloadLog.textContent = problems.length ? ("UI FAIL: " + problems.join(" ;; ")) : "UI PASS (real mid-run reload)";
