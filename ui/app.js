@@ -4235,7 +4235,23 @@ document.getElementById('jobs-box').addEventListener('job-toggle', async (event)
     failure.textContent = `Job was not changed: ${error}`;
   }
 });
-
+// A control is the same route with the numbers, and the same rule as the toggle: the store's answer is
+// what gets displayed. A refusal is the store's own words rather than a smoothed-over old value, because
+// a number the operator believes they set and did not is worse than a sentence they have to read.
+document.getElementById('jobs-box').addEventListener('job-controls', async (event) => {
+  const {id, control, controls} = event.detail;
+  try {
+    const response = await apiFetch('jobs', {method: 'POST', headers: {...apiHeaders(), 'Content-Type': 'application/json'}, body: JSON.stringify({id, action: 'controls', controls})});
+    const payload = await response.json();
+    if (!response.ok || payload.error) throw new Error(payload.error || `HTTP ${response.status}`);
+    await refreshJobs();
+  } catch (error) {
+    control.disabled = false;
+    let failure = document.getElementById('jobs-box').querySelector('.job-error');
+    if (!failure) { failure = document.createElement('p'); failure.className = 'job-error'; document.getElementById('jobs-box').append(failure); }
+    failure.textContent = `Controls were not changed: ${error}`;
+  }
+});
 function loadTopic(id) {
   const box = document.getElementById(id);
   if (busy && runWorkerTopics.has(id)) {

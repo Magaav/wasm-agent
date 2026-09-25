@@ -22,7 +22,13 @@ window.__fixtures = {
   version: { version: "test" },
   jobs: {jobs: [{id:'fixture-job', name:'<img src=x onerror=alert(1)>', enabled:false, revision:1,
     trigger:{kind:'event',topic:'fixture.message'}, action:{kind:'wake',session:'fixture',prompt:'review only'},
-    queued:0, source_status:'waiting for explicit event ingress'}]},
+    queued:0, source_status:'waiting for explicit event ingress'},
+  // A deterministic job that carries controls: the shape the Engine shows as fields. It is enabled and
+  // revision 4 so a control change has something visibly to move.
+  {id:'fixture-copilot', name:'Fixture copilot', enabled:true, revision:4,
+    controls:{grace_seconds:300, max_age_seconds:600},
+    trigger:{kind:'schedule',every_seconds:30}, action:{kind:'run',script:'fixture-read.sh',timeout_seconds:60},
+    queued:0, source_status:'scheduled'}]},
   // The `/update` report. Shaped like the node's answer (lua/core/update.lua), because the window
   // shows the node's own sentence rather than inventing one: a fixture that invents its own wording
   // would let the two drift and still pass.
@@ -220,6 +226,14 @@ window.fetch = function (input, init) {
     const request = JSON.parse(init.body);
     if (window.__fixtures.jobsRefuse) return Promise.resolve({ok:false,status:403,json:()=>Promise.resolve({error:'fixture_job_refused'})});
     const job = window.__fixtures.jobs.jobs.find(j=>j.id===request.id);
+    // A control change is an edit, and the fixture answers like the store does - revision moves, the job is
+    // left disabled - because a window asserted against a fixture that keeps the job enabled would be
+    // asserting something the real store never does.
+    if (job && request.action === 'controls') {
+      if (window.__fixtures.controlsRefuse) return Promise.resolve({ok:false,status:400,json:()=>Promise.resolve({error:'job_control_grace_exceeds_max_age_seconds'})});
+      job.controls = request.controls; job.revision = (job.revision || 1) + 1; job.enabled = false;
+      return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve(job)});
+    }
     if (job) job.enabled = request.action === 'enable';
     return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve(job || {error:'not_found'})});
   }

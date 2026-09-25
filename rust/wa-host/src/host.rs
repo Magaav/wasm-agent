@@ -818,6 +818,9 @@ pub extern "C" fn jobs(l: *mut LuaState) -> c_int {
         "history"=>store.history(),
         "enable"=>store.enable(args["id"].as_str().unwrap_or(""),true),
         "disable"=>store.enable(args["id"].as_str().unwrap_or(""),false),
+        // The numbers a job carries, moved from the surface that shows them. The store decides what a
+        // control may be and what an edit costs; this route only names the job and the values.
+        "controls"=>store.set_controls(args["id"].as_str().unwrap_or(""),&args["controls"]),
         _=>Err("unknown_job_action".into()),
     };
     push_json(l,&result.unwrap_or_else(|e|json!({"error":e.to_string()})));1
