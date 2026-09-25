@@ -130,7 +130,9 @@ There is no measured task-quality or financial improvement claim in this stage.
 
 `read`/`read_many` return raw UTF-8 text (no synthetic line-number prefixes), a
 whole-file SHA-256 `version`, actual starting/ending line, byte column, `eof`, and
-`next_offset`/`next_column`. Pass both next coordinates **and version** to continue.
+`next_offset`/`next_column`. A complete whole-line page also returns a `selection`
+bound to its path, version and exclusive byte range. Pass both next coordinates
+**and version** to continue.
 Long lines can span pages. CRLF, trailing newlines and UTF-8 boundaries are retained.
 Pages account for JSON escaping before returning a cursor; the generic projector
 must not truncate them again and silently skip bytes. An intervening edit rejects
@@ -145,14 +147,25 @@ results, test outcomes or external state are substituted by this cache. This sav
 re-indexing, not file I/O or hashing. The underlying read still loads the file;
 bounded pages/index cache are **not** a bound on whole-file memory or filesystem time.
 
-`edit` accepts either the original `old_text`/`new_text` pair or up to 64 `edits`
-pairs. Every unique match is resolved against one original snapshot; ambiguity
-(including overlapping occurrences), overlapping edits and invalid later edits
-reject the whole batch before writing. An optional `version` rejects stale reads;
-a second read detects intervening changes before the write. Successful changes
-retain the existing changeset record. A recording failure after writing explicitly
-says the edit was applied; a failed write has an unknown outcome requiring inspection.
-No-op replacements do not rewrite the file.
+The model-facing `edit` accepts up to 64 `range_edits`, each carrying a `selection`
+copied unchanged from `read` and `replacement_lines` whose elements contain no CR/LF.
+Line structure is therefore typed separately from source text: the model never has
+to re-encode a multi-line anchor or its newline bytes. The selected range's one EOL
+form and trailing-newline state are preserved; a mixed-EOL selection is refused
+rather than silently normalised. Selections are path- and version-bound, and every
+range is resolved against one original snapshot. Overlap or any invalid later range
+rejects the whole batch before writing.
+
+The runtime still accepts the former `old_text` forms for direct callers and
+mixed-version peer nodes. Calls originating in the model are marked by trusted agent
+context and cannot use or remotely tunnel that compatibility form; this enforcement
+is independent of the advisory provider schema and old tool calls in a transcript.
+No literal `\\r\\n`/`\\n` retry or unescaping heuristic exists.
+
+A second read detects intervening changes before the write. Successful changes retain
+the existing changeset record. A recording failure after writing explicitly says the
+edit was applied; a failed write has an unknown outcome requiring inspection. No-op
+replacements do not rewrite the file.
 
 This is a **single-file validation boundary, not an OS-wide compare-and-swap**:
 arbitrary editors can still race the final check/write. It is not a multi-file
