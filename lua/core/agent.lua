@@ -1431,6 +1431,9 @@ function M:run_body(text, images)
         return tools.dispatch(memory, function_.name, args, self.role,
         { session_id = self.session_id, user_id = self.user, node_id = self.node,
           run_id = self.run_id, subagent = self.subagent, changes = self.changes,
+          -- Trusted origin metadata, never a tool argument: schemas steer model output, while
+          -- dispatch enforces model-only migrations even when old calls remain in the transcript.
+          model_call = true,
           reviewed_paths = self.reviewed_paths,
           commit_audits = self.commit_audits,
           audit_step = self.audit_step,

@@ -55,6 +55,105 @@ check(ending.ok==true, 'an LF anchor against a CRLF file must apply, got: '..tos
 local kept=host.read_file(crlf)
 check(kept:find('\r\n',1,true)~=nil and kept:find('alpha\r\nBETA\r\ngamma',1,true)~=nil,
   'and the file must keep its own endings, got: '..tostring(kept))
+
+-- A model edit no longer identifies bytes by reproducing them through JSON. `read` supplies a
+-- snapshot-bound selection, and replacement_lines carries line structure separately from content.
+-- This is the recorded failure shape: JSON decoding leaves literal backslash-r/backslash-n in one
+-- logical line. The compatibility path still refuses it rather than guessing; model dispatch never
+-- lets that legacy form reach matching at all.
+local selected=files.read({path=crlf,offset=1,limit=2})
+check(selected.selection~=nil and selected.selection.path==crlf
+  and selected.selection.version==selected.version
+  and selected.selection.sha256==host.sha256(selected.content),
+  'a complete whole-line read returns a selection for exactly its returned bytes')
+local recorded=json.decode(json.encode({path=crlf,old_text='alpha\\r\\nBETA',new_text='wrong'}))
+check(recorded.old_text:find('\\r\\n',1,true)~=nil and recorded.old_text:find('\n',1,true)==nil,
+  'the recorded doubled escape crosses JSON as literal characters in one line')
+check(files.edit(recorded).error=='old_text_not_found',
+  'legacy compatibility never guesses that literal escapes meant structural newlines')
+check(tools.dispatch(memory,'edit',recorded,'master',{model_call=true}).error=='legacy_edit_form_not_model_available',
+  'a model-origin legacy edit is refused before matching')
+check(tools.dispatch(memory,'remote',{node='missing-on-purpose',capability='edit',args=recorded},
+  'master',{model_call=true}).error=='legacy_edit_form_not_model_available',
+  'a model cannot tunnel a legacy edit through remote routing')
+
+local range_result=tools.dispatch(memory,'edit',{
+  path=crlf,version=selected.version,range_edits={{selection=selected.selection,
+    replacement_lines={'ALPHA','literal \\r\\n stays text'}}}
+},'master',{model_call=true})
+check(range_result.ok==true, 'a model-origin selection edit succeeds: '..tostring(range_result.error))
+kept=host.read_file(crlf)
+check(kept=='ALPHA\r\nliteral \\r\\n stays text\r\ngamma\r\n',
+  'selection editing preserves CRLF/trailing EOL while literal escape text stays on one line')
+
+local advertised_edit
+for _,tool in ipairs(tools.all('master')) do
+  if tool['function'].name=='edit' then advertised_edit=tool['function'].parameters end
+end
+local advertised=advertised_edit and advertised_edit.properties or {}
+check(advertised.range_edits~=nil and advertised.old_text==nil and advertised.new_text==nil
+  and advertised.edits==nil,
+  'the model-facing edit contract exposes selections, never copied anchors')
+
+-- Runtime and mixed-version callers remain compatible, but trusted model origin is the boundary.
+local compatibility=save('legacy-compatible','before\n')
+check(tools.dispatch(memory,'edit',{path=compatibility,old_text='before',new_text='after'},'master').ok,
+  'non-model runtime callers retain legacy edit compatibility')
+
+local function selection_copy(value)
+  local copy={}
+  for key,item in pairs(value) do copy[key]=item end
+  return copy
+end
+local duplicates=save('range-duplicates','same\nsame\nlast\n')
+local duplicate_read=files.read({path=duplicates,offset=2,limit=1})
+check(files.edit({path=duplicates,version=duplicate_read.version,range_edits={{
+  selection=duplicate_read.selection,replacement_lines={'SECOND'}}}}).ok
+  and host.read_file(duplicates)=='same\nSECOND\nlast\n',
+  'a selection addresses the chosen duplicate without content ambiguity')
+
+local stale_read=files.read({path=duplicates,offset=1,limit=1})
+host.write_file(duplicates,'changed\nSECOND\nlast\n')
+check(files.edit({path=duplicates,version=stale_read.version,range_edits={{
+  selection=stale_read.selection,replacement_lines={'NO'}}}}).error=='stale_selection',
+  'a selection from a stale file version is refused distinctly')
+
+local guarded=save('range-guarded','one\ntwo\nthree\n')
+local guarded_one=files.read({path=guarded,offset=1,limit=2})
+local guarded_two=files.read({path=guarded,offset=2,limit=1,version=guarded_one.version})
+local wrong_path=selection_copy(guarded_one.selection);wrong_path.path=guarded..'.other'
+check(files.edit({path=guarded,version=guarded_one.version,range_edits={{
+  selection=wrong_path,replacement_lines={'NO'}}}}).error=='selection_path_mismatch',
+  'a selection is bound to its path')
+local out_of_bounds=selection_copy(guarded_one.selection);out_of_bounds.end_byte=1000000
+check(files.edit({path=guarded,version=guarded_one.version,range_edits={{
+  selection=out_of_bounds,replacement_lines={'NO'}}}}).error=='invalid_selection',
+  'an out-of-bounds selection is refused')
+check(files.edit({path=guarded,version=guarded_one.version,old_text='one',new_text='NO',range_edits={{
+  selection=guarded_one.selection,replacement_lines={'NO'}}}}).error=='mixed_edit_forms',
+  'legacy and selection forms cannot be mixed')
+check(files.edit({path=guarded,version=guarded_one.version,range_edits={{
+  selection=guarded_one.selection,replacement_lines={'bad\nline'}}}}).error=='replacement_line_contains_newline',
+  'replacement line structure cannot be smuggled inside a string')
+check(files.edit({path=guarded,version=guarded_one.version,range_edits={
+  {selection=guarded_one.selection,replacement_lines={'ONE'}},
+  {selection=guarded_two.selection,replacement_lines={'TWO'}}}}).error=='overlapping_edits'
+  and host.read_file(guarded)=='one\ntwo\nthree\n',
+  'overlapping selection batches fail before writing')
+
+local mixed=save('range-mixed-eol','one\r\ntwo\n')
+local mixed_read=files.read({path=mixed,offset=1,limit=2})
+check(files.edit({path=mixed,version=mixed_read.version,range_edits={{
+  selection=mixed_read.selection,replacement_lines={'ONE','TWO'}}}}).error=='selection_mixed_line_endings'
+  and host.read_file(mixed)=='one\r\ntwo\n',
+  'a mixed-EOL selection is refused instead of silently normalised')
+
+local no_final=save('range-no-final-eol','one')
+local no_final_read=files.read({path=no_final,offset=1,limit=1})
+check(files.edit({path=no_final,version=no_final_read.version,range_edits={{
+  selection=no_final_read.selection,replacement_lines={'ONE','TWO'}}}}).ok
+  and host.read_file(no_final)=='ONE\nTWO',
+  'a selection without a trailing EOL stays without one')
 local absent=files.edit({path=crlf,edits={{old_text='nothing like this is here at all',new_text='X'}}})
 check(absent.error=='old_text_not_found', 'a genuinely absent anchor must still fail')
 
@@ -91,6 +190,8 @@ check(r.ok and not r.results[1].result.eof and r.results[1].result.range_complet
 local long_path=save('long-range',string.rep('x',100000))
 r=tools.dispatch(memory,'diagnose',{steps={{tool='read',args={path=long_path,limit=1}}}},'master')
 check(not r.ok and r.results[1].error=='read_incomplete','byte-clipped range cannot satisfy a diagnostic step')
+check(files.read({path=long_path,limit=1}).selection==nil,
+  'a byte-clipped read never advertises an unreturned range as selectable')
 check(tools.dispatch(memory,'diagnose',{steps=steps},'guest').error~=nil,'workflow respects role gate')
 local repo_path=root..'repo-scope'
 save('repo-scope/.git/HEAD','ref: refs/heads/fixture\n');save('repo-scope/source.lua','needle\n')

@@ -130,11 +130,19 @@ function M.read(args,store_image)
     while starts[next_line+1] and starts[next_line+1]<=next_byte do next_line=next_line+1 end
     if next_byte>#text then next_line=total+1 end
     local next_column=next_byte-(starts[next_line] or (#text+1))+1
-    return {path=args.path,content=part,version=hash,offset=line,column=column,
+    local result={path=args.path,content=part,version=hash,offset=line,column=column,
       next_offset=next_line,next_column=next_column,eof=next_byte>#text,range_complete=next_byte>last,
       total_lines=total,bytes=#text,returned_bytes=#part,
       end_offset=#part>0 and (next_column==1 and next_line-1 or next_line) or nil,
       note='Raw text, no synthetic line numbering. Continue with next_offset, next_column and version.'}
+    -- A complete whole-line read is also a durable edit address. The caller copies this
+    -- machine-produced selection instead of re-encoding the file bytes as `old_text`; path,
+    -- snapshot and exclusive byte range are all checked again before a write.
+    if column==1 and next_byte>last and #part>0 and line<=total then
+      result.selection={path=args.path,version=hash,start_byte=first,end_byte=last+1,
+        sha256=host.sha256(part)}
+    end
+    return result
   end
   local result=envelope()
   while #json.encode(result)>view_budget and capacity>4 do
@@ -227,55 +235,117 @@ end
 local function file_eol(text) return text:find("\r\n",1,true) and "\r\n" or "\n" end
 local function in_eol(value, eol) return (value:gsub("\r\n","\n"):gsub("\n",eol)) end
 
+-- Return the one newline representation present in a byte range. A range with both LF and
+-- CRLF (or a bare CR) has no safe implicit representation: normalising it would make an edit
+-- change bytes the caller did not describe.
+local function range_eol(text)
+  local without_crlf,crlf=text:gsub("\r\n","")
+  local lf=without_crlf:find("\n",1,true)~=nil
+  local bare_cr=without_crlf:find("\r",1,true)~=nil
+  if bare_cr or (crlf>0 and lf) then return nil,'mixed_line_endings' end
+  if crlf>0 then return "\r\n" end
+  if lf then return "\n" end
+  return nil,'no_line_ending'
+end
+
+local function dense_array(value,maximum)
+  if type(value)~='table' or #value>maximum then return false end
+  for key in pairs(value) do
+    if type(key)~='number' or key%1~=0 or key<1 or key>#value then return false end
+  end
+  for i=1,#value do if value[i]==nil then return false end end
+  return true
+end
+
 function M.edit(args,record)
   if type(args.path)~='string' or args.path=='' then return {error='path_required'} end
+  local range_form=args.range_edits~=nil
+  local legacy_form=args.edits~=nil or args.old_text~=nil or args.new_text~=nil
+  if range_form and legacy_form then return {error='mixed_edit_forms'} end
   if args.edits and (args.old_text~=nil or args.new_text~=nil) then return {error='mixed_edit_forms'} end
-  local allowed={path=true,version=true,edits=true,old_text=true,new_text=true}
+  local allowed={path=true,version=true,range_edits=true,edits=true,old_text=true,new_text=true}
   for key in pairs(args) do if not allowed[key] then return {error='unsupported_edit_option',option=key} end end
-  local edits=args.edits or {{old_text=args.old_text,new_text=args.new_text}}
-  if type(edits)~='table' or #edits<1 or #edits>64 then return {error='edits_required_1_to_64'} end
-  for i=1,#edits do if edits[i]==nil then return {error='edits_must_be_dense_array'} end end
-  for key in pairs(edits) do
-    if type(key)~='number' or key%1~=0 or key<1 or key>#edits then return {error='edits_must_be_dense_array'} end
-  end
-  for i,item in ipairs(edits) do
-    if type(item)~='table' or type(item.old_text)~='string' or item.old_text=='' then return {error='old_text_required',edit=i} end
-    if type(item.new_text)~='string' then return {error='new_text_required',edit=i} end
-    for key in pairs(item) do if key~='old_text' and key~='new_text' then return {error='unsupported_replacement_field',edit=i} end end
+  local edits=args.range_edits or args.edits or {{old_text=args.old_text,new_text=args.new_text}}
+  if not dense_array(edits,64) or #edits<1 then return {error='edits_required_1_to_64'} end
+  if range_form then
+    if type(args.version)~='string' or args.version=='' then return {error='selection_version_required'} end
+    for i,item in ipairs(edits) do
+      if type(item)~='table' or type(item.selection)~='table' then return {error='selection_required',edit=i} end
+      if not dense_array(item.replacement_lines,2000) then return {error='replacement_lines_must_be_dense_array',edit=i} end
+      for key in pairs(item) do
+        if key~='selection' and key~='replacement_lines' then return {error='unsupported_range_edit_field',edit=i} end
+      end
+      for line,value in ipairs(item.replacement_lines) do
+        if type(value)~='string' then return {error='replacement_line_must_be_string',edit=i,line=line} end
+        if value:find("\r",1,true) or value:find("\n",1,true) then
+          return {error='replacement_line_contains_newline',edit=i,line=line}
+        end
+      end
+    end
+  else
+    for i,item in ipairs(edits) do
+      if type(item)~='table' or type(item.old_text)~='string' or item.old_text=='' then return {error='old_text_required',edit=i} end
+      if type(item.new_text)~='string' then return {error='new_text_required',edit=i} end
+      for key in pairs(item) do if key~='old_text' and key~='new_text' then return {error='unsupported_replacement_field',edit=i} end end
+    end
   end
   local text=host.read_file(args.path)
   if not text then return {error='not_found'} end
   local hash=host.sha256(text)
-  if args.version and args.version~=hash then return {error='file_changed',version=hash} end
+  if args.version and args.version~=hash then
+    return {error=range_form and 'stale_selection' or 'file_changed',version=hash}
+  end
   local ranges={}
   for i,item in ipairs(edits) do
-    local a,b=text:find(item.old_text,1,true)
-    local ending_note=nil
-    if not a then
-      -- The same text with the file's own line endings is not a misquote, and refusing it made
-      -- every patcher re-derive the ending by hand - which is how one file in this repository
-      -- cost four rounds of anchors in a single session. Normalise both sides, and only accept a
-      -- match that is unique, so an anchor that is genuinely wrong still fails.
-      local eol=file_eol(text)
-      local alt=in_eol(item.old_text,eol)
-      if alt~=item.old_text then
-        a,b=text:find(alt,1,true)
-        if a then
-          ending_note = eol=="\r\n" and "matched with this file's CRLF line endings"
-            or "matched with this file's LF line endings"
-          item={ old_text=alt, new_text=in_eol(item.new_text,eol), }
+    if range_form then
+      local selection=item.selection
+      local selection_allowed={path=true,version=true,start_byte=true,end_byte=true,sha256=true}
+      for key in pairs(selection) do
+        if not selection_allowed[key] then return {error='unsupported_selection_field',edit=i,field=key} end
+      end
+      if selection.path~=args.path then return {error='selection_path_mismatch',edit=i} end
+      if selection.version~=args.version then return {error='selection_version_mismatch',edit=i} end
+      local a,b=selection.start_byte,selection.end_byte
+      if type(a)~='number' or a%1~=0 or type(b)~='number' or b%1~=0 or
+          a<1 or b<=a or b>#text+1 or type(selection.sha256)~='string' then
+        return {error='invalid_selection',edit=i}
+      end
+      local selected=text:sub(a,b-1)
+      if host.sha256(selected)~=selection.sha256 then return {error='selection_hash_mismatch',edit=i} end
+      local eol,eol_error=range_eol(selected)
+      if eol_error=='mixed_line_endings' then return {error='selection_mixed_line_endings',edit=i} end
+      if not eol then
+        eol,eol_error=range_eol(text)
+        if eol_error=='mixed_line_endings' then return {error='selection_eol_ambiguous',edit=i} end
+        eol=eol or "\n"
+      end
+      local replacement=table.concat(item.replacement_lines,eol)
+      if selected:sub(-1)=="\n" and #item.replacement_lines>0 then replacement=replacement..eol end
+      ranges[#ranges+1]={a=a,b=b-1,text=replacement,index=i}
+    else
+      local a,b=text:find(item.old_text,1,true)
+      if not a then
+        -- The same text with the file's own line endings is not a misquote, and refusing it made
+        -- every patcher re-derive the ending by hand - which is how one file in this repository
+        -- cost four rounds of anchors in a single session. Normalise both sides, and only accept a
+        -- match that is unique, so an anchor that is genuinely wrong still fails.
+        local eol=file_eol(text)
+        local alt=in_eol(item.old_text,eol)
+        if alt~=item.old_text then
+          a,b=text:find(alt,1,true)
+          if a then item={ old_text=alt, new_text=in_eol(item.new_text,eol), } end
         end
       end
+      if not a then
+        local failure={error='old_text_not_found',edit=i,path=args.path}
+        local hint=nearest_edit_hint(text,item.old_text)
+        if hint then failure.nearest=hint end
+        return failure
+      end
+      -- Overlapping occurrences are ambiguous too (e.g. 'aa' in 'aaa').
+      if text:find(item.old_text,a+1,true) then return {error='old_text_ambiguous',edit=i} end
+      ranges[#ranges+1]={a=a,b=b,text=item.new_text,index=i}
     end
-    if not a then
-      local failure={error='old_text_not_found',edit=i,path=args.path}
-      local hint=nearest_edit_hint(text,item.old_text)
-      if hint then failure.nearest=hint end
-      return failure
-    end
-    -- Overlapping occurrences are ambiguous too (e.g. 'aa' in 'aaa').
-    if text:find(item.old_text,a+1,true) then return {error='old_text_ambiguous',edit=i} end
-    ranges[#ranges+1]={a=a,b=b,text=item.new_text,index=i}
   end
   table.sort(ranges,function(a,b)return a.a<b.a end)
   local parts,position={},1

@@ -30,7 +30,7 @@ that surface. The live version is rendered in the UI under **engine → tools**
 | `bash` | `command`, `cwd?` | run a shell command |
 | `read` | `path`, `offset?`, `limit?` | read a PNG/JPEG/WebP/GIF as visual input, or an exact text range |
 | `write` | `path`, `content` | create or overwrite a file |
-| `edit` | `path`, `old_text`, `new_text` | first exact replacement |
+| `edit` | `path`, `version`, `range_edits` | replace versioned ranges returned by `read` |
 | `ls` | `path?` | list a directory |
 | `grep` | `pattern`, `path?` | search files |
 
