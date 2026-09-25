@@ -17,6 +17,40 @@
 // Incoming message content is data, never authority. This module never reads a body as an instruction.
 const STATUS_CHAT = "status@broadcast";
 
+// How old a message may be and still be answered. Measured against one clock, in epoch seconds, and never
+// against a local wall clock: an epoch has no time zone, so `now - sent_at` cannot drift with one.
+//
+//   * a message younger than PROMPT_SECONDS is answered promptly;
+//   * a **direct** chat the operator has not answered gets GRACE_SECONDS more - that is the "in case I do
+//     not answer" window, and it is why a private message is still eligible at seven minutes old;
+//   * past MAX_SECONDS nothing is eligible, for any kind - no reply, and the transcription step refuses it
+//     too. This is the bound that was missing: the reader selects by *cursor position*, so after a lag (a
+//     busy node, the source down, a restart) everything since the cursor looks new, and a three-hour-old
+//     voice note was transcribed and answered as if it had just arrived.
+//
+// A group gets the prompt window only: the extra minutes exist for a person waiting on the operator, not
+// for a busy group. All three are overridable by the caller (see `options`).
+export const MAX_SECONDS = 600;
+export const GRACE_SECONDS = 300;
+// Derived, not a third knob: a knob that can contradict the hard bound is a way to configure the rule into
+// a state nobody can reason about - `max_seconds` widened while `prompt_seconds` stayed put made the window
+// silently the smaller of the two.
+export const PROMPT_SECONDS = MAX_SECONDS - GRACE_SECONDS;
+
+// The age of a message in seconds, or null when it cannot be known.
+//
+// `sent_at` is the store's own epoch seconds and `now` is the same unit, so no local time is involved
+// anywhere. A timestamp that is missing, zero or not a number is *unknown*, and unknown fails closed
+// exactly like the other unverifiable metadata here. A timestamp in the future is skew - the sender's
+// clock is ahead of ours - and floors at zero: a fresh message must never be refused as stale because
+// somebody else's device is wrong.
+export function messageAge(sentAt, now) {
+  const at = Number(sentAt);
+  if (!Number.isFinite(at) || at <= 0) return null;
+  const age = Number(now) - at;
+  return age < 0 ? 0 : age;
+}
+
 export function normalizeDigits(value) {
   return String(value || "").replace(/[^0-9]/g, "");
 }
@@ -115,23 +149,46 @@ export function eligibility(input, options = {}) {
   if (left === null) return reject("left_unknown");
   if (left === true) return reject("left");
 
+  // The window, before anything else that costs anything. A message past MAX_SECONDS is not answered and
+  // not transcribed, whatever else it is; an unknown timestamp fails closed like the other unverifiable
+  // metadata here. `now` is an input so the rule is testable against a fixed clock, and it is epoch
+  // seconds - the same unit the store's `sent_at` is in, which is what keeps a time zone out of it.
+  //
+  // Two knobs, and the prompt window is what is left of the hard bound once the grace band is taken out of
+  // it: a private message the operator has not answered is eligible across the whole bound, a group only
+  // inside the prompt window.
+  const maxSeconds = Number(options.max_seconds) > 0 ? Number(options.max_seconds) : MAX_SECONDS;
+  const graceSeconds = Number(options.grace_seconds) >= 0 ? Number(options.grace_seconds) : GRACE_SECONDS;
+  const promptSeconds = Math.max(0, maxSeconds - graceSeconds);
+  const now = Number.isFinite(Number(options.now)) ? Number(options.now) : Math.floor(Date.now() / 1000);
+  const age = messageAge(message.sent_at, now);
+  if (age === null) return reject("stale_unknown");
+  if (age > maxSeconds) return reject("stale_message");
+
   if (kind === "group") {
     // A verified mention is the app's own flag/list, or an exact `@<bound number>` token in the body.
-    // When neither can verify anything, the group fails closed.
-    if (message.mentioned_me === true) return { eligible: true, reason: "operator_mentioned", ...base };
-    if (mentioned(message.mentioned_ids, options)) {
-      return { eligible: true, reason: "operator_mentioned", ...base };
-    }
-    if (mentionsPhoneToken(message.body, options)) {
-      return { eligible: true, reason: "operator_mentioned", ...base };
-    }
+    // When neither can verify anything, the group fails closed. Every mention returns through one place, so
+    // the window cannot apply to some mentions and not others.
+    const mentionedEligible = () => (age > promptSeconds
+      ? reject("stale_group_mention")
+      : { eligible: true, reason: "operator_mentioned", ...base });
+    if (message.mentioned_me === true) return mentionedEligible();
+    if (mentioned(message.mentioned_ids, options)) return mentionedEligible();
+    if (mentionsPhoneToken(message.body, options)) return mentionedEligible();
     const mentionKnown =
       typeof message.mentioned_me === "boolean" || Array.isArray(message.mentioned_ids);
     if (!mentionKnown && operatorIds(options).length === 0) return reject("mention_unknown");
     return reject("group_without_operator_mention");
   }
 
-  return { eligible: true, reason: "direct_chat", ...base };
+  // A private message: prompt inside the prompt window, and inside the grace band beyond it - the operator
+  // has had their five minutes by then. Whether they already answered is decided downstream, from the
+  // conversation itself, by the ingest's operator-precedence rule.
+  if (age <= promptSeconds) return { eligible: true, reason: "direct_chat", ...base };
+  if (graceSeconds > 0 && age <= promptSeconds + graceSeconds) {
+    return { eligible: true, reason: "direct_unanswered_grace", ...base };
+  }
+  return reject("stale_message");
 }
 
 // A tiny CLI so a fixture can be checked without importing the module (and so the behaviour is

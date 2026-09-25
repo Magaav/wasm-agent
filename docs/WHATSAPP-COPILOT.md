@@ -48,14 +48,37 @@ message becomes an event only if it passes:
 ever appears, a direct chat is never left, a group is decided by its participant list, else by its own
 `canSend` — and stays `null` (refused) when nothing is available.
 
-The cursor (`whatsapp_cursor`) means a restart does not replay the backlog: only messages newer than the
-last pass emit. The first pass after a long outage therefore imports without answering — it adopts the
-newest message as the cursor and hands nothing on, which in the pipeline mode is also the only thing that
-moves the cursor off zero.
+## The window: how old a message may be
+
+A cursor says *position*, not *age*, and that is the whole of this rule's reason to exist. After a lag - a busy
+node, the source down, the job off, a restart - everything since the cursor looks new, so a three-hour-old
+voice note was decrypted, transcribed and answered as if it had just arrived. Measured live: the reply cursor
+was 50 minutes behind and the transcribe cursor hours behind, and the copilot transcribed four group voice
+notes in one tick whose messages were sent three hours earlier.
+
+So the deterministic rule carries an age bound, in `scripts/whatsapp-eligibility.mjs`, measured on **epoch
+seconds against one clock** - the store's own `sent_at` and the process's `Date.now()`/`os.time()`. Nothing in
+this path converts to a local wall clock, which is what makes the verdict identical in every time zone (the
+suite proves that with two child processes in two zones, not by inspection).
+
+| age of the message | direct chat | group mention |
+| --- | --- | --- |
+| ≤ 300 s | `direct_chat` — answered promptly | `operator_mentioned` |
+| 300–600 s | `direct_unanswered_grace` — the operator has had their five minutes | `stale_group_mention` — refused |
+| > 600 s | `stale_message` — refused, and not transcribed either | `stale_message` |
+
+The two knobs are `WA_WHATSAPP_MAX_AGE_SECONDS` (600) and `WA_WHATSAPP_GRACE_SECONDS` (300), read by the
+reader; the prompt window is what is left of the bound once the grace band is taken out of it, deliberately
+derived rather than a third knob that could contradict the hard bound. `scripts/whatsapp-transcribe.lua`
+applies the same bound (`WA_WHATSAPP_TRANSCRIBE_MAX_AGE_SECONDS`, 600): audio past it is refused with a
+durable `transcription_refused reason=stale_audio`, including notes queued in an earlier pass that have gone
+stale since, and a refusal is what settles the message so the next pass cannot queue it again.
+
+An unknown timestamp fails closed (`stale_unknown`), and a timestamp in the future is **skew**, not the
+future: the sender's clock is ahead of ours, so the age floors at zero and a fresh message is never refused
+because somebody else's phone is wrong. Both halves are asserted in `tests/whatsapp-eligibility.js`.
 
 ## The acted cursor: what may be consumed
-
-The cursor moves past a message only when a **durable decision** exists for it: a child's
 `effect_decisions` row, a deterministic eligibility refusal, the operator having answered that
 conversation first, or a media report. Handing a message *on* is not a decision — it used to be, and that
 is how a message nobody acted on was lost: a child that failed before deciding left a message the cursor
@@ -213,15 +236,12 @@ Each of these was found live, with evidence, and fixed. They are the reason the 
    call, and the run ended having done nothing. Fixed by one tested derivation
    (`agent.subagent_tool_list`).
 2. **The eligibility rule refused every chat.** `left` was read from fields this build does not have, so
-   all 677 chats were `left_unknown`: `eligible=0`, zero events, a pipeline that was enabled and silent.
-   Fixed by deriving `left` (`scripts/whatsapp-read-core.mjs`); live result `eligible=0 → 267`.
-3. **A running operation starved the child lane** (see above) — the fix is not to create one.
-4. **A child could not name the conversation it answered.** `whatsapp_read` returned the id and the
-   messages and no title, so labels were inferred from content: a group was reported as
-   "futebol/bet" whose title is "A Casa Lar | 🏠", and "vizinhos" was really "Os Menezes". Fixed by
-   returning the ledger's own `title` and `kind`.
 5. **The reader's script must ship with the node.** `deploy.sh` ships `scripts/whatsapp-*` and
    `jobs/whatsapp-*.json` into the install; a reader that exists only in a checkout is not deployed.
+6. **Old audio was transcribed and answered.** Nothing bounded the *age* of a message: the reader selects by
+   cursor position, so a lag turned the backlog into "new", and the copilot transcribed four group voice
+   notes in one tick whose messages were three hours old (the transcribe cursor was hours behind, the reply
+   cursor 50 minutes behind). Fixed by the window above, applied to the reply rule and to the transcriber.
 
 ## Retired
 

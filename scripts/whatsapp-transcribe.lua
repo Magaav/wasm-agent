@@ -56,10 +56,30 @@ end
 local function part_id(id, index) return id .. ":transcript:" .. tostring(index) end
 
 memory.setup()
+-- The window, on this process's own clock. `os.time()` is epoch seconds - the same unit the store's
+-- `sent_at` is in - so no time zone can shift this, and it is the same bound the reader applies to a
+-- reply: audio older than this is not transcribed, and not answered either.
+local now = os.time()
+local MAX_AGE = tonumber(host.getenv("WA_WHATSAPP_TRANSCRIBE_MAX_AGE_SECONDS") or "") or 600
 local cursor = tonumber(memory.meta_get("whatsapp_transcribe_cursor") or 0) or 0
 local primed = memory.meta_get("whatsapp_transcribe_primed") == "true"
 local cursor_ids = decode(memory.meta_get("whatsapp_transcribe_cursor_ids")) or {}
 local pending = decode(memory.meta_get("whatsapp_transcribe_pending")) or {}
+-- A note queued in an earlier pass can have gone stale since - the node was busy, the source was down,
+-- the job was off. Refused and dropped here rather than transcribed late, and the durable refusal is
+-- what settles it so a later pass does not queue it again.
+local stale_pending = {}
+for id, value in pairs(pending) do
+  local at = type(value) == "table" and tonumber(value.sent_at) or nil
+  if at and at < now - MAX_AGE then stale_pending[#stale_pending + 1] = tostring(id) end
+end
+for _, id in ipairs(stale_pending) do
+  local detail = pending[id] or {}
+  pending[id] = nil
+  effects.new("wa-transcript:" .. id).record({message_id=id, conversation_id=tostring(detail.conversation_id or ""),
+    decision="transcription_refused", reason="stale_audio"})
+end
+if #stale_pending > 0 then memory.meta_set("whatsapp_transcribe_pending", json.encode(pending)) end
 local floor = math.max(0, cursor - 3600)
 for _, value in pairs(pending) do
   if type(value) == "table" and tonumber(value.sent_at) then
@@ -121,6 +141,12 @@ for _, message in ipairs(payload.messages or {}) do
     if not chat then reason = "conversation_not_found"
     elseif chat.kind ~= "direct" and chat.kind ~= "group" then reason = "unsupported_chat"
     elseif chat.left ~= false then reason = "membership_unverified" end
+    -- The window, after the structural reasons and before anything is queued: audio past the bound is
+    -- refused here, so it is never downloaded, never sent to the recognizer, and never sent into the chat.
+    -- A missing timestamp fails closed, like every other unverifiable thing in this lane.
+    if not reason and (at <= 0 or at < now - MAX_AGE) then
+      reason = at <= 0 and "stale_unknown" or "stale_audio"
+    end
     if reason then
       local effect = effects.new("wa-transcript:" .. id)
       effect.record({message_id=id,conversation_id=tostring(message.conversation_id),

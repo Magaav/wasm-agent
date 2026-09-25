@@ -253,7 +253,22 @@ async function main() {
   payload.conversations = (payload.conversations || []).map((chat) => ({ ...chat, left: deriveLeft(chat) }));
   const chatById = new Map((payload.conversations || []).map((chat) => [String(chat.id), chat]));
   const operatorIds = String(args.operator || "").split(",").map((value) => value.trim()).filter(Boolean);
-  const eligibilityOptions = { operator: { ids: operatorIds, phones: operatorIds } };
+  // The window, measured against one clock: epoch seconds from this process, which is the same unit the
+  // store's `sent_at` is in. Never a local wall clock - an epoch has no zone, so no time zone can shift
+  // the verdict in either direction. The defaults live in the rule; the environment can widen or tighten
+  // them, which is how an operator tunes this without a code change (and what the test drives).
+  const envSeconds = (name) => {
+    const value = Number(process.env[name]);
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  };
+  const eligibilityOptions = {
+    operator: { ids: operatorIds, phones: operatorIds },
+    now: Math.floor(Date.now() / 1000),
+  };
+  const maxAge = envSeconds("WA_WHATSAPP_MAX_AGE_SECONDS");
+  if (maxAge !== null) eligibilityOptions.max_seconds = maxAge;
+  const grace = envSeconds("WA_WHATSAPP_GRACE_SECONDS");
+  if (grace !== null) eligibilityOptions.grace_seconds = grace;
   let eligible = 0;
   let ineligible = 0;
   for (const message of messages) {

@@ -53,9 +53,14 @@ else console.log(JSON.stringify({ok:true,sent:true,verified:true,message:{id:'se
 
 const chat = "5511888888888@c.us";
 const conversations = [{ id: chat, title: "Sender", kind: "direct", left: false, archived: false }];
-const message = (id, sent_at, kind = "chat") => ({
+// The ticks below are synthetic (1000, 2000, ...) and the transcriber now refuses audio past its age bound,
+// so a tick is placed relative to *now*: these fixtures are live messages, which is what makes them the
+// subject of the checks instead of the window's refusal. One tick is one second, so the spacing the cursor
+// arithmetic depends on - and the same-second pair - is preserved.
+const NOW = Math.floor(Date.now() / 1000);
+const message = (id, tick, kind = "chat") => ({
   conversation_id: chat, message_id: id, sender_id: "sender", direction: "incoming",
-  sent_at, body: `[${kind}]`, media: [{ type: kind }],
+  sent_at: NOW - 60 + Math.floor((tick - 1000) / 1000), body: `[${kind}]`, media: [{ type: kind }],
 });
 function setStore(messages) {
   fs.writeFileSync(store, JSON.stringify({ ok: true, conversations, messages, newest: Math.max(...messages.map((m) => m.sent_at)) }));
@@ -91,8 +96,35 @@ assert.equal(first.value.state, "sent");
 assert.equal(effect("voice1:transcript:1").state, "sent");
 assert.deepEqual(sent(), [{ body: "🎙️ _Copiloto-Transcritor_\nOlá mundo", chat }]);
 assert.equal(pass().value.processed, 0);
-assert.equal(sent().length, 1, "confirmed send is never replayed");
 
+// The window, on the transcriber's own clock: audio past the bound is refused, never downloaded and never
+// sent into the chat. This is the failure that made the copilot transcribe voice notes hours old - the
+// cursor was behind, so the backlog looked new, and the reader handed it over as if it had just arrived.
+// The cursor is put two hours back here, which is the only way the note is inside the reader's window at all
+// (that lag is the whole point of the case), and the note itself is two hours old. The three cursor keys are
+// saved and restored around it, because the cases below are about cursor arithmetic and this one moves the
+// cursor on purpose.
+const metaDb = new DatabaseSync(db);
+const cursorKeys = ["whatsapp_transcribe_cursor", "whatsapp_transcribe_cursor_ids", "whatsapp_transcribe_pending"];
+const savedCursor = Object.fromEntries(cursorKeys.map((key) => {
+  const row = metaDb.prepare("SELECT value FROM meta WHERE key=?").get(key);
+  return [key, row ? row.value : undefined];
+}));
+metaDb.prepare("UPDATE meta SET value=? WHERE key='whatsapp_transcribe_cursor'").run(String(NOW - 10800));
+metaDb.close();
+setStore([{ conversation_id: chat, message_id: "stale_voice", sender_id: "sender",
+  direction: "incoming", sent_at: NOW - 7200, body: "[ptt]", media: [{ type: "ptt" }] }]);
+const staleRun = pass();
+assert.equal(staleRun.value.processed, 0, "audio past the window is not transcribed");
+assert.equal(effect("stale_voice:transcript:1"), undefined, "no send is ever reserved for stale audio");
+assert.equal(sent().length, 1, "and nothing is sent into the chat for it");
+const restoreDb = new DatabaseSync(db);
+for (const [key, value] of Object.entries(savedCursor)) {
+  if (value === undefined) continue;
+  restoreDb.prepare("UPDATE meta SET value=? WHERE key=?").run(String(value), key);
+}
+restoreDb.close();
+assert.equal(sent().length, 1, "confirmed send is never replayed");
 setStore([message("old", 1000), message("voice1", 2000, "ptt"), message("same_second", 2000, "ptt")]);
 assert.equal(pass().value.state, "sent", "new audio in the cursor's second is processed");
 assert.equal(effect("same_second:transcript:1").state, "sent");

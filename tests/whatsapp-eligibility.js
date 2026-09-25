@@ -12,12 +12,20 @@ const operator = { ids: ["5511999999999@s.whatsapp.net"], phones: ["551199999999
 function conversation(overrides) {
   return { id: "5511888888888@c.us", title: "Someone", archived: false, left: false, ...overrides };
 }
+// Every fixture here is a *live* message unless it says otherwise. The rule has a window now, so a message
+// with no timestamp is refused (`stale_unknown`) - a fixture that forgot one would be testing the refusal
+// instead of the branch it names, which is how a suite quietly stops covering anything.
+const NOW = Math.floor(Date.now() / 1000);
 function message(overrides) {
-  return { direction: "incoming", body: "hello?", mentioned_ids: null, mentioned_me: null, ...overrides };
+  return { direction: "incoming", body: "hello?", mentioned_ids: null, mentioned_me: null, sent_at: NOW - 30, ...overrides };
 }
 
 (async () => {
-  const { eligibility, chatKind } = await import("../scripts/whatsapp-eligibility.mjs");
+  const mod = await import("../scripts/whatsapp-eligibility.mjs");
+  const { chatKind, messageAge } = mod;
+  // One clock and one operator binding for every check, so each keeps its own subject. The window is
+  // measured against NOW, never against a local wall clock.
+  const eligibility = (input, options = { operator }) => mod.eligibility(input, { now: NOW, ...options });
 
   // The kind comes from the id suffix, never from a title: this build reports isGroup false for @g.us,
   // and a contact can legitimately be named "Team Group".
@@ -95,6 +103,49 @@ function message(overrides) {
   check(eligibility({ conversation: group, message: message({ mentioned_me: "true", mentioned_ids: [] }) }, { operator }).reason === "group_without_operator_mention", "a string mentioned_me is not a verified mention");
   check(eligibility({ conversation: group, message: message({ mentioned_ids: "5511999999999@s.whatsapp.net" }) }, { operator }).reason === "group_without_operator_mention", "a non-array mentioned_ids is not verified");
 
+  // ---- the window ------------------------------------------------------------------------------
+  // A message is answered only while it is recent, and transcribed only inside the hard bound. This is the
+  // bound that was missing: the reader selects by cursor *position*, so after a lag - a busy node, the
+  // source down, a restart - everything since the cursor looks new, and a three-hour-old voice note was
+  // transcribed and answered as if it had just arrived.
+  const chat = conversation();
+  const at = (seconds) => message({ sent_at: NOW - seconds });
+  check(eligibility({ conversation: chat, message: at(0) }, { operator }).reason === "direct_chat", "a message that just arrived is answered promptly");
+  check(eligibility({ conversation: chat, message: at(299) }, { operator }).reason === "direct_chat", "a private message inside the prompt window is answered promptly");
+  const grace = eligibility({ conversation: chat, message: at(400) }, { operator });
+  check(grace.eligible === true && grace.reason === "direct_unanswered_grace", "a private message past the prompt window is still eligible inside the grace band");
+  check(eligibility({ conversation: chat, message: at(601) }, { operator }).reason === "stale_message", "past the hard bound a private message is refused");
+  check(eligibility({ conversation: chat, message: at(10800) }, { operator }).reason === "stale_message", "a three-hour-old message is refused, whatever else it is");
+  check(eligibility({ conversation: group, message: message({ mentioned_me: true, sent_at: NOW - 400 }) }, { operator }).reason === "stale_group_mention", "a group mention past the prompt window is refused: the grace band is for a person waiting, not a busy group");
+  check(eligibility({ conversation: group, message: message({ mentioned_me: true, sent_at: NOW - 60 }) }, { operator }).eligible === true, "a fresh group mention is still eligible");
+
+  // The bound is measured on epoch seconds, so a local wall clock cannot move it. A time-zone bug here would
+  // refuse on-time messages, which is the failure the operator named - so it is asserted, not assumed.
+  check(messageAge(NOW - 100, NOW) === 100, "age is now minus sent_at");
+  check(messageAge(NOW + 900, NOW) === 0, "a sender's clock ahead of ours is skew, not the future");
+  check(messageAge(0, NOW) === null && messageAge(null, NOW) === null && messageAge("nope", NOW) === null, "a timestamp that is missing, zero or not a number is unknown");
+  check(eligibility({ conversation: chat, message: message({ sent_at: 0 }) }, { operator }).reason === "stale_unknown", "an unknown timestamp fails closed");
+  check(eligibility({ conversation: chat, message: message({ sent_at: NOW + 900 }) }, { operator }).eligible === true, "a skewed future timestamp is not refused as stale");
+
+  // The knobs: the grace band can be closed and the bound widened, and the prompt window follows the bound
+  // rather than being a third knob that could contradict it.
+  check(eligibility({ conversation: chat, message: at(400) }, { operator, grace_seconds: 0 }).eligible === true, "with no grace band the whole bound is the prompt window");
+  check(eligibility({ conversation: chat, message: at(1800) }, { operator, max_seconds: 3600 }).eligible === true, "a widened bound widens the prompt window with it");
+  check(eligibility({ conversation: group, message: message({ mentioned_me: true, sent_at: NOW - 1800 }) }, { operator, max_seconds: 3600 }).eligible === true, "and the group window follows the same bound");
+
+  // Two real child processes, two zones, one verdict - the alignment asserted rather than assumed. With a
+  // local clock anywhere in the rule these two would disagree.
+  const { spawnSync } = await import("node:child_process");
+  const { pathToFileURL } = await import("node:url");
+  const nodePath = await import("node:path");
+  const moduleUrl = pathToFileURL(nodePath.resolve(__dirname, "..", "scripts", "whatsapp-eligibility.mjs")).href;
+  const probe = "import(" + JSON.stringify(moduleUrl) + ").then((m) => { const now = 1790323400; const c = { id: '5511@c.us', title: 't', archived: false, left: false }; const at = (s) => ({ direction: 'incoming', body: 'x', sent_at: now - s }); console.log(JSON.stringify([m.eligibility({ conversation: c, message: at(290) }, { operator: {}, now }).reason, m.eligibility({ conversation: c, message: at(400) }, { operator: {}, now }).reason, m.eligibility({ conversation: c, message: at(700) }, { operator: {}, now }).reason])); });";
+  const zones = ["UTC", "Pacific/Kiritimati"];
+  const verdicts = zones.map((zone) => {
+    const run = spawnSync(process.execPath, ["--input-type=module", "-e", probe], { env: { ...process.env, TZ: zone }, encoding: "utf8" });
+    return String(run.stdout || "").trim();
+  });
+  check(verdicts[0].length > 0 && verdicts[0].indexOf("direct_chat") >= 0, "the zone probe really ran: " + verdicts[0]);
   console.log("ALL PASS");
   void checked;
 })().catch((error) => {
