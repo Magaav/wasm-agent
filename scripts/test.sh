@@ -672,6 +672,11 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-worktree.lua" "$BIN" --db "
 # its treatment must reach the child prompt the rig runs. Both are what make the arm's
 # result mean anything, so they are tested without a model and before any paid run.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-experiment-verify.lua" "$BIN" --db "$DB.experiment-verify" | grep 'experiment verify ok'
+# The paid edit-workflow experiment is never run by the gate, but its coordinator and
+# independent verifier must at least remain executable JavaScript. Behavioral proof uses
+# --provider mock explicitly; real inference requires --confirm-paid yes.
+node --check "$WASM_AGENT_LUA_ROOT/scripts/experiment-edit-workflow.cjs"
+node --check "$WASM_AGENT_LUA_ROOT/scripts/lib/experiment-edit-verify.cjs"
 # The efficiency report is deterministic and spends no model call. It must price the
 # provider's own cache categories, name a prefix break, and keep an unmeasured call
 # unmeasured - the fields a reader would otherwise trust to be right.

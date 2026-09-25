@@ -125,6 +125,9 @@ ok(not verify.success(live, "", { { still_running = false, file_grew = false } }
 -- A text task is unaffected by the outcome rule.
 ok(verify.success({ expect = { "lua/core/tools.lua" } }, "see lua/core/tools.lua", {}).complete,
   "a text task still passes on its facts")
+local external = verify.success({ expect = {}, outcome = "external_patch" }, "looks good", {})
+ok(external.complete == nil and external.external_verification_required == true,
+  "a code patch stays unadjudicated until the independent verifier runs")
 
 -- The treatment must reach the child prompt. The rig runs children, so this is the
 -- prompt the arm under test actually sends.

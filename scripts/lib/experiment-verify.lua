@@ -81,6 +81,12 @@ function M.success(fixture, reply, adoption)
     end
     verdict.observed_outcome = alive
     verdict.complete = verdict.complete and alive
+  elseif fixture and fixture.outcome == "external_patch" then
+    -- A reply cannot prove a code patch. The outer fixture owns an isolated checkout and
+    -- runs an independent verifier after the child settles; keep this explicitly
+    -- unadjudicated rather than letting an empty fact list become a pass.
+    verdict.complete = nil
+    verdict.external_verification_required = true
   end
   return verdict
 end
