@@ -12,6 +12,7 @@ USAGE:
   wa-graph explain <name> [--db FILE] [--json]
   wa-graph path <from> <to> [--db FILE] [--json]
   wa-graph query <text> [--db FILE] [--json]
+  wa-graph search <concept> [--db FILE] [--json] [--prefer-implementations]
   wa-graph caps [--db FILE]
   wa-graph stats [--db FILE]
 
@@ -25,6 +26,7 @@ struct Args {
     db: Option<PathBuf>,
     force: bool,
     json: bool,
+    prefer_implementations: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -33,12 +35,14 @@ fn parse_args() -> Result<Args, String> {
     let mut db = None;
     let mut force = false;
     let mut json = false;
+    let mut prefer_implementations = false;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--root" => root = PathBuf::from(it.next().ok_or("--root needs a value")?),
             "--db" => db = Some(PathBuf::from(it.next().ok_or("--db needs a value")?)),
             "--force" => force = true,
+            "--prefer-implementations" => prefer_implementations = true,
             "--json" => json = true,
             "-h" | "--help" => {
                 print!("{USAGE}");
@@ -53,6 +57,7 @@ fn parse_args() -> Result<Args, String> {
         db,
         force,
         json,
+        prefer_implementations,
     })
 }
 
@@ -199,6 +204,25 @@ fn run() -> Result<(), String> {
             } else {
                 for n in rows {
                     println!("{} {}  {}:{}", n.kind, n.name, n.path, n.line);
+                }
+            }
+        }
+        "search" => {
+            let text = args.positional.get(1).ok_or("search needs a concept")?;
+            let store = Store::open(&db).map_err(|e| e.to_string())?;
+            let rows = store.search_symbols_json_with_preference(
+                text, 12, args.prefer_implementations,
+            ).map_err(|e| e.to_string())?;
+            if args.json {
+                println!("{rows}");
+            } else if let Some(hits) = rows.as_array() {
+                for hit in hits {
+                    let name = hit["name"].as_str().unwrap_or("?");
+                    let kind = hit["kind"].as_str().unwrap_or("?");
+                    let path = hit["path"].as_str().unwrap_or("?");
+                    let line = hit["line"].as_i64().unwrap_or(0);
+                    let confidence = hit["confidence"].as_str().unwrap_or("?");
+                    println!("{confidence:6} {kind:8} {name}  {path}:{line}");
                 }
             }
         }

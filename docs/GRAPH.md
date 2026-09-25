@@ -69,8 +69,19 @@ few places to look). It tolerates a host that predates the capability and report
 `search` accepts a multi-term concept or identifier and returns source-ready
 `path/name/line/kind` selectors. Its score combines explainable name, signature,
 path, and incoming-edge evidence using a deterministic BM25-like lexical score;
-`confidence`, `reason`, `matched_terms`, and `score_breakdown` make the heuristic
-visible. Identifiers are split across camelCase and snake_case boundaries. It is
+`confidence`, `reason`, `matched_terms`, `unmatched_terms`,
+`unmatched_definition_terms`, and `score_breakdown` make the heuristic visible.
+`high` requires all query terms in the definition name or signature; path-only
+matches are `low`. The Lua wrapper returns `partial` when the top definition
+misses terms and suggests a bounded source check. For a multiword query, a
+local variable matching only some words receives an explicit score penalty only
+with `prefer_implementations:true`,
+because retrieving its tiny definition often hides the enclosing implementation.
+This penalty risks demoting a relevant data binding, so `score_breakdown` shows it
+and the variable remains in the result list. The ranking preference remains
+off by default: one historical UI fixture does not establish a task-performance
+gain. Identifiers are split across
+camelCase and snake_case boundaries. It is
 lexical ranking, not embedding similarity.
 `source` reparses only the selected indexed file and returns the exact syntax
 definition. Definitions larger than the response budget continue from a byte

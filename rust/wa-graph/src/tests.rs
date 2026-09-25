@@ -761,6 +761,46 @@ fn ranked_search_returns_a_source_ready_symbol_and_exact_definition() {
 }
 
 #[test]
+fn concept_search_does_not_present_a_partial_local_variable_as_the_implementation() {
+    let dir = temp_dir("partial-concept");
+    std::fs::write(
+        dir.join("components.js"),
+        "export class WaDiff extends HTMLElement {\n  render() {\n    const topic = document.createElement('wa-diff');\n    return topic;\n  }\n}\n",
+    )
+    .unwrap();
+    let db = dir.join("graph.db");
+    let mut store = Store::open(&db).unwrap();
+    store.index(&dir, false).unwrap();
+
+    let baseline = store.search_symbols("diff topic", 8).unwrap();
+    assert!(!baseline.iter().any(|hit| hit.score_breakdown.contains_key("partial_variable")));
+    let hits = store.search_symbols_with_preference("diff topic", 8, true).unwrap();
+    assert!(!hits.is_empty());
+    assert_ne!(hits[0].node.name, "topic", "{:?}", hits);
+    let topic = hits.iter().find(|hit| hit.node.name == "topic").unwrap();
+    assert_eq!(topic.confidence, "medium");
+    assert_eq!(topic.unmatched_terms, vec!["diff"]);
+    assert_eq!(topic.unmatched_definition_terms, vec!["diff"]);
+    assert_eq!(topic.score_breakdown["partial_variable"], -240);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn path_words_alone_do_not_claim_definition_confidence() {
+    let dir = temp_dir("path-only-concept");
+    std::fs::write(dir.join("diff_topic.js"), "export function unrelated() {}\n").unwrap();
+    let db = dir.join("graph.db");
+    let mut store = Store::open(&db).unwrap();
+    store.index(&dir, false).unwrap();
+
+    let hit = store.search_symbols("diff topic", 1).unwrap().remove(0);
+    assert_eq!(hit.confidence, "low");
+    assert!(hit.unmatched_terms.is_empty());
+    assert_eq!(hit.unmatched_definition_terms, vec!["diff", "topic"]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn symbol_source_pages_large_utf8_definitions_without_splitting_characters() {
     let dir = temp_dir("symbol-page");
     std::fs::write(

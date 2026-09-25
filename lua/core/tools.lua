@@ -164,9 +164,10 @@ M.admin = {
   }, { "pattern" }),
   -- Retrieval returns selected implementation text; relationship and audit actions remain
   -- explicitly separate so their evidence can be evaluated independently.
-  schema("graph", "Retrieve implementation source, get a bounded architecture overview, or map the current patch to resolved callers, dependencies and tests. search_symbols/symbol_source handle discovery; overview handles orientation; impact handles factual patch reachability without claiming risk. Use grep for absent, low-confidence or incomplete graph evidence.", {
+  schema("graph", "Retrieve implementation source, get a bounded architecture overview, or map the current patch to resolved callers, dependencies and tests. search_symbols/symbol_source handle discovery; inspect unmatched_definition_terms and use bounded grep for partial or absent evidence. overview handles orientation; impact handles factual patch reachability without claiming risk.", {
     action = { type = "string", enum = { "search_symbols", "symbol_source", "overview", "impact", "explain", "query", "path", "caps", "stats", "index", "audit", "audit_assess", "audit_report", "audit_feedback" } },
     name = { type = "string", description = "search_symbols: concept or identifier; symbol_source/explain/query: exact selected name." },
+    prefer_implementations = { type = "boolean", description = "search_symbols: opt-in ranking that demotes partial local-variable matches; useful when looking for a component/function implementation, not a state binding." },
     path = { type = "string", description = "symbol_source: path from a search_symbols result." },
     line = { type = "integer", minimum = 1, description = "symbol_source: definition line from a search_symbols result." },
     kind = { type = "string", description = "symbol_source: optional definition kind from the selected result." },
@@ -708,7 +709,8 @@ function M.dispatch(memory, name, args, role, ctx)
     end
     if not graph.available() then return { error = "graph_unavailable" } end
     local result, err
-    if action == "search_symbols" then result, err = graph.search_symbols(args.name, { limit = args.limit })
+    if action == "search_symbols" then result, err = graph.search_symbols(args.name,
+      { limit = args.limit, prefer_implementations = args.prefer_implementations })
     elseif action == "symbol_source" then result, err = graph.symbol_source({
       path=args.path,name=args.name,line=args.line,kind=args.kind},
       {byte_offset=args.byte_offset,max_bytes=args.max_bytes})
