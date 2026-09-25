@@ -14,7 +14,9 @@ else:
     row = cursor.fetchone()
     result = dict(row) if row is not None else None
 connection.close()
-print(json.dumps(result, ensure_ascii=False))
+# Keep the subprocess protocol independent of the Windows ANSI code page. JSON.parse
+# restores escaped Unicode, while raw Unicode output can fail before Node receives it.
+print(json.dumps(result))
 `;
 
 let selectedPython;
