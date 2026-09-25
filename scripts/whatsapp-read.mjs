@@ -22,6 +22,7 @@ const WHATSAPP_URL = "web.whatsapp.com";
 
 import { eligibility } from "./whatsapp-eligibility.mjs";
 import { deriveLeft } from "./whatsapp-read-core.mjs";
+import { WebSocket } from "./lib/websocket-runtime.mjs";
 // A message whose body is media is stored as base64 by the app; keeping that would put megabytes in
 // the ledger per photo, so the body is a marker and the caption only.
 const MAX_BODY = 4000;

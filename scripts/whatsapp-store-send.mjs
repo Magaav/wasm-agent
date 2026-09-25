@@ -25,6 +25,7 @@
 import { readFileSync } from "node:fs";
 
 import { acquire as acquireSendLock, defaultLockPath } from "./whatsapp-sendlock.mjs";
+import { WebSocket } from "./lib/websocket-runtime.mjs";
 import {
   parseStoreArgs, parseEndpoint, isLoopbackEndpoint, endpointMatches,
   storeIdentityGuard, routeGuard, stateGuard, classifyStoreAttempt, normalizeBody,

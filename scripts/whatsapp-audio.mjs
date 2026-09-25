@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { WebSocket } from "./lib/websocket-runtime.mjs";
 
 const MAX_AUDIO_BYTES = 20 * 1024 * 1024;
 const args = process.argv.slice(2);
