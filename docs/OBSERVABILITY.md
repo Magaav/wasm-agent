@@ -116,8 +116,11 @@ are emitted—never hashes or command text.
 
 [Token efficiency](TOKEN_EFFICIENCY.md) documents the opt-in metadata-export
 reporter and the model-free replacements for the ineffective tool-budget A/B
-scripts. Those offline tools do not change runtime policy. Subsequent runtime
-work adds prepared-prefix comparison metadata without changing the provider body:
+scripts. Those offline tools do not change runtime policy. The opt-in paid-model edit-workflow
+experiment is documented separately in [EDIT-WORKFLOW-BENCHMARK.md](EDIT-WORKFLOW-BENCHMARK.md):
+it uses isolated checkouts, equal tool surfaces, external verification and fresh read-only
+shadows, and one fixture cannot choose a default. Subsequent runtime work adds
+prepared-prefix comparison metadata without changing the provider body:
 worker-local message hashes locate the first changed message, and tools/settings/
 known routing are compared separately. Missing baselines remain unmeasured; no
 prompt text or per-message hashes enter the ledger. This is not proof of provider

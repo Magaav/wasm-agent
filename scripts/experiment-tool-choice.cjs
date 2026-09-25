@@ -16,14 +16,18 @@ const path = require('node:path');
 const http = require('node:http');
 const { spawn } = require('node:child_process');
 
-const repo = path.resolve(__dirname, '..');
-const wa = path.resolve(process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2]
-  : path.join(repo, 'rust/target/release', process.platform === 'win32' ? 'wa.exe' : 'wa'));
-
 function arg(name, fallback) {
   const at = process.argv.indexOf('--' + name);
   return at >= 0 && process.argv[at + 1] ? process.argv[at + 1] : fallback;
 }
+
+// The harness code and the repository the child edits may differ. A code-writing
+// experiment runs this driver from the reviewed harness branch while `--repo-root`
+// points each arm at its own checkout of one frozen fixture revision.
+const harnessRoot = path.resolve(__dirname, '..');
+const repo = path.resolve(arg('repo-root', harnessRoot));
+const wa = path.resolve(process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2]
+  : path.join(harnessRoot, 'rust/target/release', process.platform === 'win32' ? 'wa.exe' : 'wa'));
 
 const arm = arg('arm', 'control');
 const task = arg('task', 'long-lived');
@@ -32,6 +36,7 @@ const profile = arg('profile', arm === 'op' ? 'exp-op' : 'exp-control');
 const provider = arg('provider', 'mock');
 const model = arg('model', 'deepseek-v4.1-flash');
 const label = arg('label', `${arm}-${task}`);
+const outputPath = arg('output', '');
 
 // The profiles are the controlled variable. `exp-control` mirrors the shipped `worker`
 // profile exactly (bash, no operation); `exp-op` differs by one tool, which is the
@@ -65,6 +70,41 @@ const PROFILES = {
     instructions: 'Investigate read-only and report exact file paths and line references.',
     allowed_tools: [...READ_ONLY], resources: {},
     limits: { max_depth: 0, timeout_seconds: 600, max_output_bytes: 65536, max_tokens: 400000 },
+  },
+  'exp-edit-control': {
+    schema_version: 1, id: 'exp-edit-control', operator_authorized: true,
+    description: 'Code-writing benchmark control with the same complete tool surface as both treatments.',
+    instructions: 'Do exactly the bounded task, preserve repository rules, and stop when the requested patch is ready.',
+    allowed_tools: [...READ_ONLY, 'graph', 'write', 'edit', 'bash', 'operation'], resources: {},
+    limits: { max_depth: 0, timeout_seconds: 1200, max_output_bytes: 131072, max_tokens: 30000000 },
+  },
+  'exp-edit-source-first': {
+    schema_version: 1, id: 'exp-edit-source-first', operator_authorized: true,
+    description: 'Code-writing treatment that makes editable source observations native and versioned.',
+    instructions: 'Do exactly the bounded task. For source content you may edit, use read/read_many rather than cat, sed, head, tail, or Get-Content: shell output has no edit selection. Use graph for relationships or impact, not as a substitute for the exact source you change.',
+    allowed_tools: [...READ_ONLY, 'graph', 'write', 'edit', 'bash', 'operation'], resources: {},
+    limits: { max_depth: 0, timeout_seconds: 1200, max_output_bytes: 131072, max_tokens: 30000000 },
+  },
+  'exp-edit-graph-first': {
+    schema_version: 1, id: 'exp-edit-graph-first', operator_authorized: true,
+    description: 'Code-writing treatment that requires graph orientation before ordinary source discovery.',
+    instructions: 'Do exactly the bounded task. Before grep, read, or shell source discovery, call graph overview once, then use graph search_symbols and symbol_source for the relevant implementation. Fall back to grep/read when graph evidence is absent, low-confidence, incomplete, or the file is data rather than a symbol. Use graph impact before finishing, and use native read/read_many for the exact source you edit.',
+    allowed_tools: [...READ_ONLY, 'graph', 'write', 'edit', 'bash', 'operation'], resources: {},
+    limits: { max_depth: 0, timeout_seconds: 1200, max_output_bytes: 131072, max_tokens: 30000000 },
+  },
+  'exp-review-source': {
+    schema_version: 1, id: 'exp-review-source', operator_authorized: false,
+    description: 'Fresh read-only patch reviewer using exact source inspection.',
+    instructions: 'Review independently. Inspect the changed source with read/read_many, use graph only for relationships and impact, and report blockers without editing.',
+    allowed_tools: [...READ_ONLY, 'graph'], resources: {},
+    limits: { max_depth: 0, timeout_seconds: 600, max_output_bytes: 65536, max_tokens: 5000000 },
+  },
+  'exp-review-graph': {
+    schema_version: 1, id: 'exp-review-graph', operator_authorized: false,
+    description: 'Fresh read-only patch reviewer required to orient through the graph first.',
+    instructions: 'Review independently. Call graph overview and impact first, follow relevant symbol source, then confirm gaps with read/grep. Report blockers without editing.',
+    allowed_tools: [...READ_ONLY, 'graph'], resources: {},
+    limits: { max_depth: 0, timeout_seconds: 600, max_output_bytes: 65536, max_tokens: 5000000 },
   },
 };
 
@@ -116,24 +156,24 @@ async function startProvider() {
     ...process.env,
     WASM_AGENT_HOME: home,
     WASM_AGENT_ALLOW_DEV_HOME: '1',
-    WASM_AGENT_LUA_ROOT: repo,
     WASM_AGENT_LLM_BASE_URL: upstream.base_url,
     WASM_AGENT_LLM_API_KEY: upstream.key,
     WASM_AGENT_LLM_MODEL: model,
     WASM_AGENT_RELAY: '',
     WASM_AGENT_RENDEZVOUS: '',
     WASM_AGENT_SUBAGENT_CONCURRENCY: '8',
-    WA_SCRIPT: path.join(repo, 'scripts/experiment-tool-choice.lua'),
+    WA_SCRIPT: path.join(harnessRoot, 'scripts/experiment-tool-choice.lua'),
     WA_EXPERIMENT_ARM: arm, WA_EXPERIMENT_TASK: task,
     WA_EXPERIMENT_N: String(runs), WA_EXPERIMENT_PROFILE: profile,
     WA_EXPERIMENT_DIR: home.replace(/\\/g, '/'),
     WA_EXPERIMENT_INDEX: arg('index', '0'),
+    WA_EXPERIMENT_AWAIT_MS: arg('await_ms', '1300000'),
     // Lever 2: the per-result model-view budget, in bytes.
     WASM_AGENT_TOOL_OUTPUT_BYTES: arg('cap', '51200'),
     // A/B a Lua-only change interleaved: point the node's dofile at a different copy of
     // lua/. Without this, comparing two descriptions means comparing two points in time,
     // and a slow provider minute reads as a difference between the arms.
-    ...(arg('lua-root', '') ? { WASM_AGENT_LUA_ROOT: path.resolve(arg('lua-root', '')) } : {}),
+    WASM_AGENT_LUA_ROOT: path.resolve(arg('lua-root', repo)),
   };
   const child = spawn(wa, ['--db', path.join(home, 'memory.db')], { cwd: repo, env, windowsHide: true });
   let out = '';
@@ -176,6 +216,10 @@ async function startProvider() {
   const dir = path.join(home, 'experiments', label);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'ledger.json'), JSON.stringify(rows, null, 2));
+  if (outputPath) {
+    fs.mkdirSync(path.dirname(path.resolve(outputPath)), { recursive: true });
+    fs.writeFileSync(path.resolve(outputPath), JSON.stringify(rows, null, 2));
+  }
 
   const count = (row) => (row.tools || []).filter((call) => call.name === 'operation').length;
   const adopted = (row) => {
