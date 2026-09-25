@@ -67,9 +67,18 @@ suite proves that with two child processes in two zones, not by inspection).
 | 300–600 s | `direct_unanswered_grace` — the operator has had their five minutes | `stale_group_mention` — refused |
 | > 600 s | `stale_message` — refused, and not transcribed either | `stale_message` |
 
-The two knobs are `WA_WHATSAPP_MAX_AGE_SECONDS` (600) and `WA_WHATSAPP_GRACE_SECONDS` (300), read by the
-reader; the prompt window is what is left of the bound once the grace band is taken out of it, deliberately
-derived rather than a third knob that could contradict the hard bound. `scripts/whatsapp-transcribe.lua`
+The two knobs are the job's own **controls** - `grace_seconds` (300) and `max_age_seconds` (600) - carried
+in `jobs/whatsapp-copilot.json` and validated when the definition is installed
+([JOBS.md](JOBS.md), "Controls"). The sentinel passes each of them to the pipeline's `run` steps as
+`WA_JOB_CONTROL_GRACE_SECONDS` / `WA_JOB_CONTROL_MAX_AGE_SECONDS`; the reader resolves those first, then
+the node's environment (`WA_WHATSAPP_GRACE_SECONDS` / `WA_WHATSAPP_MAX_AGE_SECONDS`, a machine-wide
+override), then the constants in `scripts/whatsapp-eligibility.mjs`. The job record wins, because that is
+the thing the operator edited and approved. The read step reports the window it applied and where each
+number came from (the `window` field of its result, and one line on stderr), so which controls were in
+force is read rather than inferred from a verdict - and a value that is not whole seconds is discarded in
+favour of the next source instead of becoming a zero-second window. The prompt window is what is left of
+the bound once the grace band is taken out of it, deliberately derived rather than a third knob that could
+contradict the hard bound.
 applies the same bound (`WA_WHATSAPP_TRANSCRIBE_MAX_AGE_SECONDS`, 600): audio past it is refused with a
 durable `transcription_refused reason=stale_audio`, including notes queued in an earlier pass that have gone
 stale since, and a refusal is what settles the message so the next pass cannot queue it again.
@@ -236,8 +245,14 @@ Each of these was found live, with evidence, and fixed. They are the reason the 
    call, and the run ended having done nothing. Fixed by one tested derivation
    (`agent.subagent_tool_list`).
 2. **The eligibility rule refused every chat.** `left` was read from fields this build does not have, so
-5. **The reader's script must ship with the node.** `deploy.sh` ships `scripts/whatsapp-*` and
-   `jobs/whatsapp-*.json` into the install; a reader that exists only in a checkout is not deployed.
+5. **The reader's script must ship with the node - and so must what it imports.** `deploy.sh` ships
+   `scripts/whatsapp-*` and `jobs/whatsapp-*.json` into the install; a reader that exists only in a
+   checkout is not deployed. The second half of that sentence was paid for: `5cc38d1` moved the WebSocket
+   runtime into `scripts/lib/websocket-runtime.mjs`, the install received the new `whatsapp-read.mjs` and
+   no `lib/`, and every delivery then died at step 3 with `ERR_MODULE_NOT_FOUND` - 26 in a row, one per
+   30 s tick - while `job history` was the only place that said so. The ship list now derives the modules
+   from the shipped scripts' own imports, checks the install is import-closed, and refuses by name when it
+   is not; `scripts/test-deploy-ship.sh` runs that block on a scratch tree, including both refusals.
 6. **Old audio was transcribed and answered.** Nothing bounded the *age* of a message: the reader selects by
    cursor position, so a lag turned the backlog into "new", and the copilot transcribed four group voice
    notes in one tick whose messages were three hours old (the transcribe cursor was hours behind, the reply

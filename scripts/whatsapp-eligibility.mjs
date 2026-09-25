@@ -36,6 +36,63 @@ export const GRACE_SECONDS = 300;
 // a state nobody can reason about - `max_seconds` widened while `prompt_seconds` stayed put made the window
 // silently the smaller of the two.
 export const PROMPT_SECONDS = MAX_SECONDS - GRACE_SECONDS;
+// The two knobs a job may carry, as the *job controls* `grace_seconds` and `max_age_seconds`, and the
+// environment each one can arrive in.
+//
+// The job record comes first because it is the most specific thing the operator can see and edit: the
+// sentinel passes every validated control of the job to its deterministic steps as
+// `WA_JOB_CONTROL_<NAME>` (see `rust/wa-jobs`, `control_env`), and the reader applies it. The node's
+// environment is the second source, for a machine-wide override set outside the job store, and the
+// constant in this module is the third. One knob, one name: `max_age_seconds` in the job record and
+// `max_seconds` in the rule's own options are the same number, and the job's name is the one an operator
+// types.
+export const WINDOW_CONTROLS = [
+  { control: "max_age_seconds", option: "max_seconds", floor: 1, job_env: "WA_JOB_CONTROL_MAX_AGE_SECONDS", node_env: "WA_WHATSAPP_MAX_AGE_SECONDS" },
+  { control: "grace_seconds", option: "grace_seconds", floor: 0, job_env: "WA_JOB_CONTROL_GRACE_SECONDS", node_env: "WA_WHATSAPP_GRACE_SECONDS" },
+];
+
+// A whole number of seconds from a named environment variable, or null.
+//
+// `Number("")` is 0 and `Number("  ")` is 0 too, so a variable that is present but empty would silently
+// become a zero-second window - which for the grace band means "no grace" and for the bound means "refuse
+// everything". Only digits are accepted, which is exactly what the sentinel writes and what an operator
+// means; anything else (empty, negative, fractional, a word, an unset variable) is *not* a window and
+// leaves the next source, and finally the constant, to decide. Validation here is the last line: the job
+// record's own controls are validated when the definition is installed (`wa_jobs::validate_controls`).
+export function envSeconds(env, name, floor = 0) {
+  const raw = env ? env[name] : undefined;
+  if (typeof raw !== "string" && typeof raw !== "number") return null;
+  const text = String(raw).trim();
+  if (!/^[0-9]+$/.test(text)) return null;
+  const seconds = Number(text);
+  return Number.isSafeInteger(seconds) && seconds >= floor ? seconds : null;
+}
+
+// The window this process applies, and where each number came from - so a reader's own output says which
+// controls were in force, instead of leaving that to be inferred from a verdict.
+export function windowFromEnv(env = process.env) {
+  const resolved = { max_seconds: MAX_SECONDS, grace_seconds: GRACE_SECONDS };
+  const source = {};
+  for (const knob of WINDOW_CONTROLS) {
+    const fromJob = envSeconds(env, knob.job_env, knob.floor);
+    if (fromJob !== null) {
+      resolved[knob.option] = fromJob;
+      source[knob.control] = "job_control";
+      continue;
+    }
+    const fromNode = envSeconds(env, knob.node_env, knob.floor);
+    if (fromNode !== null) {
+      resolved[knob.option] = fromNode;
+      source[knob.control] = "node_env";
+      continue;
+    }
+    source[knob.control] = "default";
+  }
+  // The prompt window is what is left of the bound once the grace band is taken out of it, so a grace
+  // band wider than the bound is a zero-length prompt window rather than a contradiction: it is derived,
+  // never a third stored knob.
+  return { ...resolved, prompt_seconds: Math.max(0, resolved.max_seconds - resolved.grace_seconds), source };
+}
 
 // The age of a message in seconds, or null when it cannot be known.
 //

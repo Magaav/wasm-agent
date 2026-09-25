@@ -146,6 +146,54 @@ function message(overrides) {
     return String(run.stdout || "").trim();
   });
   check(verdicts[0].length > 0 && verdicts[0].indexOf("direct_chat") >= 0, "the zone probe really ran: " + verdicts[0]);
+
+  // The window as the *job* controls it: the sentinel passes `WA_JOB_CONTROL_<NAME>` to every
+  // deterministic step of a job that carries the control, and that is what the reader resolves. The job's
+  // own control wins over the node's environment, because the job record is the thing the operator edited
+  // and approved.
+  const { windowFromEnv } = mod;
+  const defaults = windowFromEnv({});
+  check(defaults.max_seconds === 600 && defaults.grace_seconds === 300 && defaults.prompt_seconds === 300,
+    "with nothing set the window is the rule's own default");
+  check(defaults.source.max_age_seconds === "default" && defaults.source.grace_seconds === "default",
+    "and it says so, per control");
+  const nodeEnv = windowFromEnv({ WA_WHATSAPP_MAX_AGE_SECONDS: "900", WA_WHATSAPP_GRACE_SECONDS: "60" });
+  check(nodeEnv.max_seconds === 900 && nodeEnv.grace_seconds === 60 && nodeEnv.source.grace_seconds === "node_env",
+    "the node's environment is the second source");
+  const jobControls = windowFromEnv({ WA_JOB_CONTROL_GRACE_SECONDS: "60", WA_JOB_CONTROL_MAX_AGE_SECONDS: "120",
+    WA_WHATSAPP_GRACE_SECONDS: "300", WA_WHATSAPP_MAX_AGE_SECONDS: "600" });
+  check(jobControls.max_seconds === 120 && jobControls.grace_seconds === 60,
+    "a job control wins over the node's environment for the same knob");
+  check(jobControls.source.max_age_seconds === "job_control" && jobControls.source.grace_seconds === "job_control",
+    "and the report names the job, not the environment");
+  // Validation: a value that is not whole seconds is not a window. `Number("")` is 0, so an empty
+  // variable would otherwise be a zero-second bound - every message refused by accident, and the verdict
+  // would look like a policy instead of a typo.
+  for (const bad of ["", "   ", "abc", "-5", "1.5", "300s", undefined]) {
+    const resolved = windowFromEnv({ WA_JOB_CONTROL_MAX_AGE_SECONDS: bad, WA_JOB_CONTROL_GRACE_SECONDS: bad });
+    check(resolved.max_seconds === 600 && resolved.grace_seconds === 300,
+      "not a window, so the default stands: " + JSON.stringify(bad));
+  }
+  const zeroGrace = windowFromEnv({ WA_JOB_CONTROL_GRACE_SECONDS: "0" });
+  check(zeroGrace.grace_seconds === 0 && zeroGrace.source.grace_seconds === "job_control",
+    "zero is a real control value - closing the grace band is a choice, not a missing value");
+  // And the resolved window is the window a verdict uses: the same message is eligible or refused
+  // depending only on the controls, never on which script asked.
+  const justPast = { conversation: chat, message: at(400) };
+  check(eligibility(justPast, { operator, max_seconds: defaults.max_seconds, grace_seconds: defaults.grace_seconds }).eligible === true,
+    "400 s old is inside the default grace band");
+  check(eligibility(justPast, { operator, max_seconds: 300, grace_seconds: 60 }).reason === "stale_message",
+    "and refused once the job's bound is tightened below its age");
+
+  // The installed job carries the two controls and their documented defaults: `deploy.sh` ships this file
+  // as the definition the operator sees and approves, so a drift between it and the rule would be a
+  // control that changes nothing.
+  const { readFileSync } = await import("node:fs");
+  const job = JSON.parse(readFileSync(nodePath.resolve(__dirname, "..", "jobs", "whatsapp-copilot.json"), "utf8"));
+  check(JSON.stringify(job.controls) === JSON.stringify({ grace_seconds: 300, max_age_seconds: 600 }),
+    "the shipped job controls are grace_seconds 300 and max_age_seconds 600");
+  check(Object.keys(job.controls).every((name) => ["grace_seconds", "max_age_seconds"].includes(name)),
+    "and they are the only two controls the job exposes");
   console.log("ALL PASS");
   void checked;
 })().catch((error) => {
