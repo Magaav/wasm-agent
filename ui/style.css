@@ -322,13 +322,18 @@ body.drift .drift { display: flex; }
 .session-meta { color: var(--muted); font-size: 11px; flex: 1; }
 /* The thread's name is what is being read, so it takes the room and truncates; the search row is the
    topic's only control and belongs to it rather than to the panel. */
-.session-search { padding: 0 0 var(--space) 0; }
+.session-search { display: flex; gap: var(--gap); padding: 0 0 var(--space) 0; }
 .session-search input {
-  width: 100%; background: var(--panel-2); border: 1px solid var(--line);
+  flex: 1; min-width: 0; background: var(--panel-2); border: 1px solid var(--line);
   border-radius: var(--radius-sm); color: var(--text); font: inherit; font-size: 12px;
   padding: var(--space) var(--pad); outline: none;
 }
 .session-search input:focus { border-color: var(--accent); }
+.session-search button, .session-row button {
+  flex: none; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+  border-radius: var(--radius-sm); padding: 2px var(--space); cursor: pointer; font-size: 11px;
+}
+.session-search button:hover, .session-row button:hover { border-color: var(--accent); }
 .session-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A thread that needs attention says so where the thread is listed. */
 .session-state {

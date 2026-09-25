@@ -111,14 +111,31 @@ let activeNode = localStorage.getItem("wa-node") || "";
 // draft is the reader's own text - attachments are deliberately not kept, since a picture
 // silently reappearing in a composer is worse than one that does not come back.
 const SESSION_KEY = "wa-chat-session";
+const NEW_SESSION_KEY = "wa-new-session";
 const DRAFT_KEY = "wa-draft";
 let chatSession = "";
 try { chatSession = localStorage.getItem(SESSION_KEY) || ""; } catch (error) { chatSession = ""; }
+let blankSession = "";
+try { blankSession = localStorage.getItem(NEW_SESSION_KEY) || ""; } catch (error) { blankSession = ""; }
+// Async reads and streams belong to the conversation that started them. A session switch increments
+// this value so a late response from the old thread cannot repaint the new one.
+let conversationEpoch = 0;
 
 function rememberSession(id) {
-  if (!id || id === chatSession) return;
+  if (!id || id === chatSession) return false;
   chatSession = id;
+  conversationEpoch += 1;
+  resetConversationFollowState();
   try { localStorage.setItem(SESSION_KEY, id); } catch (error) { /* private mode */ }
+  return true;
+}
+
+function rememberBlankSession(id) {
+  blankSession = id || "";
+  try {
+    if (blankSession) localStorage.setItem(NEW_SESSION_KEY, blankSession);
+    else localStorage.removeItem(NEW_SESSION_KEY);
+  } catch (error) { /* private mode */ }
 }
 
 function saveDraft() {
@@ -1307,27 +1324,49 @@ function sessionOutcome(full) {
 
 let restoringSession = null;
 let transcriptReady = false;
-async function restoreSession() {
-  if (restoringSession) return restoringSession;
-  restoringSession = restoreSessionOnce();
-  try { return await restoringSession; }
-  finally { restoringSession = null; }
+async function restoreSession(target = chatSession) {
+  const epoch = conversationEpoch;
+  if (restoringSession && restoringSession.target === target && restoringSession.epoch === epoch) {
+    return restoringSession.promise;
+  }
+  const pending = { target, epoch, promise: restoreSessionOnce(target, epoch) };
+  restoringSession = pending;
+  try { return await pending.promise; }
+  finally { if (restoringSession === pending) restoringSession = null; }
 }
 
-async function restoreSessionOnce() {
+async function restoreSessionOnce(target, epoch) {
   try {
     const payload = await (await apiFetch("sessions", { headers: apiHeaders() })).json();
     const sessions = payload.sessions || [];
     if (payload.error) throw new Error(payload.error);
+    if (chatSession !== target || conversationEpoch !== epoch) return false;
     if (!sessions.length) { transcriptReady = true; return true; }
     const mine = sessions.filter((s) => !me.user || !s.user_id || s.user_id === me.user.id);
-    const wanted = sessions.find((s) => s.id === chatSession) || mine[0] || sessions[0];
-    rememberSession(wanted.id);
+    let wanted = target ? sessions.find((s) => s.id === target) : (mine[0] || sessions[0]);
+    // A client-chosen id has no ledger row until its first message is sent. It is still a deliberate
+    // empty session: replacing it with the newest old row makes `/new` fail across a reload.
+    if (target && !wanted && blankSession === target) {
+      repaintMessages([]);
+      showNewThreadNotice();
+      transcriptReady = true;
+      followedSeq = 0;
+      return true;
+    }
+    if (!wanted) wanted = mine[0] || sessions[0];
+    if (!wanted) { transcriptReady = true; return true; }
+    if (!target || wanted.id !== target) {
+      rememberSession(wanted.id);
+      target = wanted.id;
+      epoch = conversationEpoch;
+    }
+    if (blankSession === wanted.id) rememberBlankSession("");
     const route = "session?id=" + encodeURIComponent(wanted.id);
     let [full, health] = await Promise.all([
       apiFetch(route, { headers: apiHeaders() }).then((response) => response.json()),
       nodeHealth(),
     ]);
+    if (chatSession !== target || conversationEpoch !== epoch) return false;
     if (!full || full.error || !Array.isArray(full.messages)) {
       throw new Error(full?.error || "invalid session response");
     }
@@ -1344,6 +1383,8 @@ async function restoreSessionOnce() {
     }
     if (full && Array.isArray(full.messages) && full.messages.length) {
       repaintMessages(full.messages);
+    } else {
+      repaintMessages([]);
     }
     const unresolved = outcome.name === "failed" || outcome.name === "unfinished";
     if (unresolved) {
@@ -1369,9 +1410,11 @@ async function restoreSessionOnce() {
       }
       messages.append(notice);
     }
+    followedSeq = Number(wanted.last_seq) || (full.messages || []).reduce((last, row) => Math.max(last, Number(row.seq) || 0), 0);
     transcriptReady = true;
     return true;
   } catch (error) {
+    if (chatSession !== target || conversationEpoch !== epoch) return false;
     transcriptReady = false;
     setStatus("transcript not loaded - retrying (" + String(error) + ")");
     return false;
@@ -1575,6 +1618,9 @@ function clearStreamNotice() {
 }
 
 async function send(text, options = {}) {
+  const runThread = options.session || chatSession;
+  const runEpoch = conversationEpoch;
+  const stillViewingRun = () => chatSession === runThread && conversationEpoch === runEpoch;
   activeRunId = null;
   submittedRunIds = null;
   // The draft is going out, so what was stored is stale: a respawn must not put the sent prompt
@@ -1587,7 +1633,8 @@ async function send(text, options = {}) {
   pin(true);
   runBubble = null;   // the reply gets its own bubble
   runStartedAt = Date.now();
-  controller = new AbortController();
+  const runController = new AbortController();
+  controller = runController;
   streamBody = null;
   streamText = "";
   const names = attachments.map((file) => file.name).join(", ");
@@ -1604,7 +1651,7 @@ async function send(text, options = {}) {
   try {
     const before = await (await apiFetch("health", { headers: apiHeaders() })).json();
     submittedRunIds = new Set((before.run_ids || [])
-      .filter((run) => run.conversation === chatSession)
+      .filter((run) => run.conversation === runThread)
       .map((run) => Number(run.run_id)));
   } catch (error) {
     submittedRunIds = new Set();
@@ -1640,6 +1687,9 @@ async function send(text, options = {}) {
     let turnFinished = false;
     const watchdogTick = async () => {
       if (turnFinished) { clearInterval(watchdog); return; }
+      // The reader chose another conversation. The node still owns this run and the stream is still
+      // drained below, but its watchdog and notices no longer belong to the visible thread.
+      if (!stillViewingRun()) { clearInterval(watchdog); return; }
       if (asking || Date.now() - lastEvent < 30000) return;
       asking = true;
       try {
@@ -1648,7 +1698,7 @@ async function send(text, options = {}) {
         // Asked and answered while the run was ending: say nothing. The run finished; there is
         // nothing to report and nothing to continue.
         if (turnFinished) { clearInterval(watchdog); asking = false; return; }
-        const running = activeRun(health);
+        const running = activeRun(health, runThread);
         if (running && health.worker !== "stalled") {
           // Working, and quiet because the work is quiet. Keep waiting, and start counting again.
           lastEvent = Date.now();
@@ -1661,13 +1711,13 @@ async function send(text, options = {}) {
         streamNotice = add("assistant", "the node is no longer running this run (" + (health.worker || "no worker") +
           "). It is recorded as unfinished - the sessions topic offers to continue it.");
         watchNode();
-        controller?.abort();
+        runController.abort();
       } catch (error) {
         // Unreachable: the node is gone, which is a different message and the one that fits.
         clearInterval(watchdog);
         streamNotice = add("assistant", connectionMessage());
         watchNode();
-        controller?.abort();
+        runController.abort();
       }
       asking = false;
     };
@@ -1678,7 +1728,7 @@ async function send(text, options = {}) {
       method: "POST",
       headers: apiHeaders(headers),
       body: outgoing.body,
-      signal: controller.signal,
+      signal: runController.signal,
     });
     if (!response.body) {
       const payload = await response.json();
@@ -1697,31 +1747,39 @@ async function send(text, options = {}) {
         for (const part of parts) {
           const line = part.split("\n").find((l) => l.startsWith("data: "));
           if (!line) continue;
-          try { handleEvent(JSON.parse(line.slice(6))); lastEvent = Date.now(); } catch (error) { /* ignore */ }
+          try {
+            const event = JSON.parse(line.slice(6));
+            if (stillViewingRun()) handleEvent(event);
+            lastEvent = Date.now();
+          } catch (error) { /* ignore */ }
           // A run that says it is done, or has answered, or has failed, is finished: whatever the
           // watchdog asks next, this run is not unfinished, and any notice it put up is stale.
           const kind = (() => { try { return JSON.parse(line.slice(6)).type; } catch (error) { return ""; } })();
           if (kind === "done" || kind === "reply" || kind === "error") {
             turnFinished = true;
-            clearStreamNotice();
+            if (stillViewingRun()) clearStreamNotice();
           }
         }
       }
     }
   } catch (error) {
-    clearStatus();
-    if (error.name === "AbortError") add("assistant", "stopped.");
-    else if (isConnectionLoss(error)) { add("assistant", connectionMessage()); watchNode(); }
-    else add("assistant", "error: " + error);
+    if (stillViewingRun()) {
+      clearStatus();
+      if (error.name === "AbortError") add("assistant", "stopped.");
+      else if (isConnectionLoss(error)) { add("assistant", connectionMessage()); watchNode(); }
+      else add("assistant", "error: " + error);
+    }
   } finally {
     clearInterval(watchdog);
-    setBusy(false);
-    controller = null;
-    refreshMeta();
+    if (stillViewingRun()) {
+      setBusy(false);
+      refreshMeta();
+    }
+    if (controller === runController) controller = null;
     // Learn which thread this run went into, but only until we know one: after that the window
     // keeps the thread it is in, rather than following whatever happens to be newest.
     if (!chatSession) learnSession();
-    if (!native) input.focus();
+    if (stillViewingRun() && !native) input.focus();
   }
 }
 
@@ -2299,15 +2357,23 @@ async function efficiencyReport() {
 // Nothing is deleted. The thread being left behind is still in the ledger and still listed in the
 // engine view, which is why the notice says so: an empty transcript with no explanation reads as
 // "the work is gone", and it is not.
-function newThread() {
-  rememberSession(newId());
-  repaintMessages([]);
-  clearStatus();
+function showNewThreadNotice() {
   const notice = document.createElement("div");
   notice.className = "thread-notice";
   notice.textContent = "new session — nothing from the previous thread carries over here. " +
     "That thread is unchanged and still listed in the engine view.";
   messages.append(notice);
+}
+
+function newThread() {
+  detachConversationView();
+  rememberSession(newId());
+  rememberBlankSession(chatSession);
+  repaintMessages([]);
+  clearStatus();
+  showNewThreadNotice();
+  setEngine(false);
+  refreshMeta();
   pin();
 }
 
@@ -2734,11 +2800,16 @@ function openUserMenu() {
 }
 
 async function refreshMeta() {
+  const target = chatSession;
+  const epoch = conversationEpoch;
   try {
-    const query=new URLSearchParams({session_id:chatSession});
+    const query=new URLSearchParams({session_id:target});
     if (activeNode) query.set('node',activeNode);
     const response = await apiFetch("models?"+query, { headers: apiHeaders() });
     const payload = await response.json();
+    // A slower response for the thread we just left must not replace the selected thread's usage
+    // and observability metadata. The new selection starts its own refresh.
+    if (chatSession !== target || conversationEpoch !== epoch) return true;
     settings = { ...settings, ...payload };
     updateNodeLabel(settings.node_name, settings.node_worktree);
     // The account tooltip names the node, so it follows the same payload.
@@ -2903,8 +2974,9 @@ async function sync(reason) {
   if (synced || syncRunning) return;
   syncRunning = true;
   syncAttempts += 1;
-  const meOk = await refreshMe();
-  const metaOk = await refreshMeta();
+  // These reads are independent. Serializing them made every reload pay both latencies, while the
+  // boot path also issued an unobserved duplicate of each request.
+  const [meOk, metaOk] = await Promise.all([refreshMe(), refreshMeta()]);
   syncRunning = false;
   if (!meOk || !metaOk) {
     // Why it failed decides what to say. A reload during a run used to show "connecting…" and then
@@ -3013,26 +3085,52 @@ let followedSeq = null;
 let liveRunId = null;
 let liveEventSeq = 0;
 let liveCheckpointSeq = null;
-let liveRunPolling = false;
+let liveRunPolling = null;
 let liveSyncFailed = false;
+
+function resetConversationFollowState() {
+  transcriptReady = false;
+  sawTurnInFlight = false;
+  followedSeq = null;
+  lastFollowAt = 0;
+  liveRunId = null;
+  liveEventSeq = 0;
+  liveCheckpointSeq = null;
+  liveRunPolling = null;
+  liveSyncFailed = false;
+}
+
+// Leave the old request running on the node, but stop treating its stream as the view we are in.
+// The local reader continues to drain it; its epoch prevents late events and cleanup from touching
+// the newly selected conversation.
+function detachConversationView() {
+  if (busy) setBusy(false);
+  controller = null;
+  clearStreamNotice();
+}
 
 // A run in flight that this window did NOT open - a reload during a run, or one a wake or a job
 // started - lost its live socket. The window follows durable rows through /session and reconnects to
 // the node's bounded event tail for reasoning, tool steps and other output not saved yet.
 async function followRun() {
-  if (!chatSession) return;
+  const target = chatSession;
+  const epoch = conversationEpoch;
+  if (!target) return;
   // /sessions is small and carries the thread's `last_seq`; the 1.5 MB /session read happens only
   // when there is something new. Redrawing an unchanged transcript would cost a megabyte every
   // three seconds and fight the reader's scroll for nothing.
   const list = await (await apiFetch("sessions", { headers: apiHeaders() })).json();
-  const mine = (list.sessions || []).find((entry) => entry.id === chatSession);
+  if (chatSession !== target || conversationEpoch !== epoch) return;
+  const mine = (list.sessions || []).find((entry) => entry.id === target);
   if (!mine) return;
   const seq = Number(mine.last_seq) || 0;
   if (seq === followedSeq) return;
-  followedSeq = seq;
   rememberPlace();
-  await restoreSession();
-  restorePlace();
+  if (await restoreSession(target)) {
+    if (chatSession !== target || conversationEpoch !== epoch) return;
+    followedSeq = seq;
+    restorePlace();
+  }
 }
 
 // A page reload drops the original chat socket, but the node's run keeps going. The node retains only
@@ -3040,7 +3138,11 @@ async function followRun() {
 // applying the live tail, so saved tool calls/results are never duplicated.
 async function syncLiveRun(current) {
   if (busy || !chatSession || !current || current.run_id == null || liveRunPolling) return;
-  liveRunPolling = true;
+  const target = chatSession;
+  const epoch = conversationEpoch;
+  if (current.session && current.session !== target) return;
+  const poll = { target, epoch };
+  liveRunPolling = poll;
   const id = Number(current.run_id);
   if (liveRunId !== id) {
     liveRunId = id;
@@ -3051,9 +3153,10 @@ async function syncLiveRun(current) {
     const response = await apiFetch("run-events", {
       method: "POST",
       headers: apiHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ thread: chatSession, run_id: id, after: liveEventSeq }),
+      body: JSON.stringify({ thread: target, run_id: id, after: liveEventSeq }),
     });
     const payload = await response.json();
+    if (chatSession !== target || conversationEpoch !== epoch) return;
     if (!response.ok) {
       if (response.status === 404) {
         const latest = await nodeHealth();
@@ -3092,10 +3195,11 @@ async function syncLiveRun(current) {
       liveEventSeq = seq;
     }
   } catch (error) {
+    if (chatSession !== target || conversationEpoch !== epoch) return;
     liveSyncFailed = true;
     setStatus("live sync retrying: " + String(error.message || error));
   } finally {
-    liveRunPolling = false;
+    if (liveRunPolling === poll) liveRunPolling = null;
   }
 }
 
@@ -3865,6 +3969,7 @@ function renderSessions() {
       row.append(badge);
     }
     row.append(nodeButton("open", () => openSession(session.id)));
+    row.append(nodeButton("inspect", () => openSessionById(session.id)));
     // A child session names the thread that spawned it; without this it is an orphan in the list.
     if (session.parent_session_id) {
       row.append(nodeButton("parent", () => openSession(session.parent_session_id)));
@@ -3911,15 +4016,32 @@ function sessionSearch() {
   input.autocomplete = "off";
   input.value = sessionQuery;
   input.addEventListener("input", () => { sessionQuery = input.value.trim(); renderSessions(); });
-  row.append(input);
+  const create = nodeButton("new session", newThread);
+  create.className = "session-new";
+  row.append(input, create);
   return row;
 }
 
 async function openSession(id) {
   // Opening a thread is also choosing it: from here on this window is *in* that conversation, so a
   // later respawn comes back to it instead of guessing.
+  if (!id) return false;
+  if (id === chatSession) {
+    setEngine(false);
+    return true;
+  }
+  detachConversationView();
+  rememberBlankSession("");
   rememberSession(id);
-  return openSessionById(id);
+  repaintMessages([]);
+  setStatus("opening session…");
+  setEngine(false);
+  const opened = await restoreSession(id);
+  if (opened && chatSession === id) {
+    clearStatus();
+    refreshMeta();
+  }
+  return opened;
 }
 
 async function openSessionById(id) {
@@ -3941,7 +4063,7 @@ async function openSessionById(id) {
       headers: apiHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ session_id: id, mode: next }),
     });
-    openSession(id);
+    openSessionById(id);
   }));
   bar.append(nodeButton("export fixture", async () => {
     const fixture = await (await apiFetch("session/fixture?id=" + encodeURIComponent(id), { headers: apiHeaders() })).json();
@@ -4360,8 +4482,6 @@ document.addEventListener("contextmenu", (event) => {
 // is what the UI test does instead of guessing at ticks.
 window.rendererLoaded = loadRenderer().then(() => {
   setupVoice();
-  refreshMe();
-  refreshMeta();
   // The draft first, because it is instant and it is the reader's own text; the conversation after
   // /me has answered, because the session list is filtered by user. The second input listener is the
   // draft's - the first belongs to the undo stack, and they answer different questions.

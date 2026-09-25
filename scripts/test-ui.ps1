@@ -1573,6 +1573,17 @@ $harness = @'
   // if this poll redrew the thread from the ledger.
   check(document.body.innerText.indexOf("FOLLOWED-PARTIAL") >= 0,
     "follow: a run this window did not open must be followed without a reload");
+  // Seeing a new sequence is not the same as repainting it. A transient failure after the list read
+  // used to advance `followedSeq` anyway, so the same sequence was never retried and the page stayed
+  // stale for the entire next tool call.
+  window.__fixtures.sessions.sessions[0].last_seq = 4243;
+  window.__fixtures.session.messages.push(
+    { seq: 3, role: "assistant", content: "FOLLOW-RETRY-PROOF", tool_calls: [] });
+  window.__failSessionReads = 1;
+  await window.__followRun();
+  await window.__followRun();
+  check(document.body.innerText.indexOf("FOLLOW-RETRY-PROOF") >= 0,
+    "follow: a failed transcript read must retry the same ledger sequence");
   // ONE BUBBLE PER RUN, however many times the model speaks inside it.
   // Measured live: a run whose model wrote a one-line preamble before each tool batch produced three
   // assistant messages in one run, and the window drew THREE bubbles - because the `reply` handler
@@ -1721,6 +1732,56 @@ $harness = @'
     check(!!merged && String(merged.body).indexOf("git-orchestrator") >= 0,
       "commands: the /merge brief must name the orchestrator skill, got: " + (merged && merged.body));
   })();
+
+  // ---- choosing and creating sessions in the engine ------------------------------------------
+  // `open` is a conversation switch, not an inspector that merely changes localStorage. Before
+  // this check existed the screen kept showing thread A while the next send silently went to B;
+  // reloading happened to repaint B and made the control look intermittent.
+  var switchSessions = window.__fixtures.sessions;
+  var switchSession = window.__fixtures.session;
+  var switchId = "bbbbbbbb-0000-0000-0000-000000000002";
+  window.__fixtures.sessions = { sessions: [
+    { id: switchId, title: "settled thread", user_id: "master", mode: "chat", message_count: 2,
+      last_seq: 2, updated_at: Math.floor(Date.now() / 1000), state: "answered" },
+  ] };
+  window.__fixtures.session = {
+    session: { id: switchId, title: "settled thread", mode: "chat" },
+    state: { state: "answered", detail: "the last message is a reply" },
+    messages: [
+      { seq: 1, role: "user", content: "SWITCHED-SESSION-QUESTION", tool_calls: [] },
+      { seq: 2, role: "assistant", content: "SWITCHED-SESSION-ANSWER", tool_calls: [] },
+    ],
+  };
+  if (!document.body.classList.contains("engine")) document.getElementById("engine-btn").click();
+  await window.__loadTopic("sessions-box");
+  for (var switchTick = 0; switchTick < 20 && !document.querySelector(".session-row button"); switchTick++) await tick();
+  var openThread = Array.from(document.querySelectorAll(".session-row button"))
+    .find(function (button) { return button.textContent.trim() === "open"; });
+  if (openThread) openThread.click();
+  for (var openTick = 0; openTick < 200 &&
+      document.getElementById("messages").textContent.indexOf("SWITCHED-SESSION-ANSWER") < 0; openTick++) await tick();
+  check(window.__chatThread() === switchId && !document.body.classList.contains("engine") &&
+      document.getElementById("messages").textContent.indexOf("SWITCHED-SESSION-ANSWER") >= 0,
+    "sessions: open must switch and repaint the chat immediately (thread=" + window.__chatThread() +
+      ", engine=" + document.body.classList.contains("engine") + ", opened=" + !!openThread +
+      ", text=" + document.getElementById("messages").textContent.slice(0, 80) + ")");
+
+  // A blank session is a real choice even before its first message creates a ledger row. Restoring
+  // must not snap it back to the newest old thread, which is what made `/new` fail across reloads.
+  document.getElementById("engine-btn").click();
+  await window.__loadTopic("sessions-box");
+  for (var newTick = 0; newTick < 20 && !document.querySelector(".session-new"); newTick++) await tick();
+  var beforeNew = window.__chatThread();
+  document.querySelector(".session-new")?.click();
+  var blankThread = window.__chatThread();
+  check(!!blankThread && blankThread !== beforeNew && !document.body.classList.contains("engine") &&
+      /new session/.test(document.getElementById("messages").textContent),
+    "sessions: the engine must offer a new blank session and return to chat");
+  await window.__restoreSession();
+  check(window.__chatThread() === blankThread && /new session/.test(document.getElementById("messages").textContent),
+    "sessions: restoring an unsent blank session must not replace it with an older thread");
+  window.__fixtures.sessions = switchSessions;
+  window.__fixtures.session = switchSession;
   document.title = "stage: end";
 } catch (error) {
     // A throw must still produce a log: a reporter that swallows its own failure is worse
@@ -1758,7 +1819,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 $app = Join-Path $tmp "app.js"
 Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__cancelActiveRun = cancelActiveRun; window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker; window.__updateNotice = updateNotice; window.__refreshOperationProgress = refreshOperationProgress; window.__watch = watch;"
 
-Add-Content -Path $app -Value "`nwindow.__resetFollow = () => { followedSeq = 0; lastFollowAt = 0; };"
+Add-Content -Path $app -Value "`nwindow.__resetFollow = () => { followedSeq = 0; lastFollowAt = 0; }; window.__followRun = followRun;"
 
 $server = $null
 $edge = @(

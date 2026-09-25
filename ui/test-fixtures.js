@@ -220,6 +220,12 @@ window.fetch = function (input, init) {
     if (window.__failVersion) return Promise.reject(new Error('fixture: version unavailable'));
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ version: 'fixture' }) });
   }
+  // A transcript read can fail after `/sessions` has already advertised its new sequence. The
+  // follower must retry that same sequence rather than marking it seen and waiting for another row.
+  if (path === 'session' && Number(window.__failSessionReads) > 0) {
+    window.__failSessionReads -= 1;
+    return Promise.reject(new Error('fixture: transient session read failure'));
+  }
   const key = Object.keys(window.__fixtures).find((name) => path === name);
   if (key) {
     const payload = window.__fixtures[key];
