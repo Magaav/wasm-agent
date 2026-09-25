@@ -422,6 +422,10 @@ function runDuration(ms) {
 
 function updateRunElapsed() {
   if (!statusElapsed) return;
+  if (replayingMessages && (!runStartedAt || !replayMessageEndedAt)) {
+    statusElapsed.textContent = "duration unknown";
+    return;
+  }
   // A repaint has no clock of its own: the run ended when its stored row says it did. Using
   // Date.now() there would print days on a footer for a turn that took four seconds - the same
   // mistake the run topic's own summary avoids by reading replayMessageEndedAt.
@@ -1201,17 +1205,27 @@ function restoreDraft() {
 // that built it the first time, so the two cannot drift apart.
 let replayingMessages = false;
 let replayMessageEndedAt = 0;
-// Whether the run being replayed got as far as answering. A run that is still unfinished - the
-// reload fixture's is - must keep its in-progress notice, not a "completed" footer.
-let replayRunAnswered = false;
+let replayRunLastMessage = null;
 let renderedMessageIds = new Set();
-function finishReplayedRun() {
-  if (replayRunAnswered && runBubble) {
-    if (!statusLine) setStatus("completed");
-    finishRunStatus();
-  } else {
-    clearStatus();
+function finishReplayedRun(isLast = false, options = {}) {
+  // The last run's ledger state is authoritative. A saved interim answer may be followed by a
+  // tool call and a stopped run; its bubble must not say "completed" above an unfinished notice.
+  // An active run has no final duration yet. Earlier runs have no stored terminal state, so only
+  // a final assistant answer (content and no tool calls) supports "completed" for them.
+  if (!runBubble || (isLast && options.active)) { clearStatus(); return; }
+  const finalAnswer = replayRunLastMessage?.role === "assistant" &&
+    !!replayRunLastMessage.content && !(replayRunLastMessage.tool_calls || []).length;
+  let label = finalAnswer ? "completed" : "unfinished";
+  if (isLast && options.state === "failed") label = "failed";
+  else if (isLast && options.state === "unfinished") label = "unfinished";
+  else if (isLast && options.state === "answered") label = "completed";
+  const settledAt = Number(options.stateAt);
+  if (isLast && Number.isFinite(settledAt) && settledAt > 0 &&
+      label !== "completed" && settledAt * 1000 > replayMessageEndedAt) {
+    replayMessageEndedAt = settledAt * 1000;
   }
+  if (!statusLine) setStatus(label);
+  finishRunStatus(label);
 }
 function repaintMessages(rows, options = {}) {
   // A repaint is a view of durable rows, not a resumed event stream. In particular, an
@@ -1227,6 +1241,7 @@ function repaintMessages(rows, options = {}) {
   reasoningBlock = null;
   runStartedAt = 0;
   replayMessageEndedAt = 0;
+  replayRunLastMessage = null;
   renderedMessageIds = new Set();
   let rendered = 0;
   let failed = 0;
@@ -1240,11 +1255,13 @@ function repaintMessages(rows, options = {}) {
       if (message.role === "user") {
         finishReplayedRun();
         flushDecision(true);
-        runStartedAt = Number(message.created_at) > 0 ? Number(message.created_at) * 1000 : Date.now();
+        runStartedAt = Number(message.created_at) > 0 ? Number(message.created_at) * 1000 : 0;
         replayMessageEndedAt = 0;
-        replayRunAnswered = false;
+        replayRunLastMessage = null;
         add("user", message.content || "");
       } else if (message.role === "assistant") {
+        replayRunLastMessage = message;
+        if (Number(message.created_at) > 0) replayMessageEndedAt = Number(message.created_at) * 1000;
         // The stored message carries its changes summary and its id, and both are needed: the summary is
         // the topic, and the id is what the undo route is asked about. Dropping them here is why a
         // reloaded transcript showed no diff topics at all - the live path had them, the repaint did
@@ -1255,8 +1272,6 @@ function repaintMessages(rows, options = {}) {
           handleEvent({ type: "reasoning", text: message.reasoning, chars: message.reasoning.length });
         }
         if (message.content) {
-          replayMessageEndedAt = Number(message.created_at) > 0 ? Number(message.created_at) * 1000 : Date.now();
-          replayRunAnswered = true;
           handleEvent({ type: "reply", text: message.content, changes: message.changes, message_id: message.id });
         }
         const calls = message.tool_calls || [];
@@ -1273,6 +1288,8 @@ function repaintMessages(rows, options = {}) {
         }
         if (message.id) renderedMessageIds.add(String(message.id));
       } else if (message.role === "tool") {
+        replayRunLastMessage = message;
+        if (Number(message.created_at) > 0) replayMessageEndedAt = Number(message.created_at) * 1000;
         handleEvent({ type: "tool_result", name: message.tool_name, result: { content: message.content } });
       }
       rendered += 1;
@@ -1288,9 +1305,9 @@ function repaintMessages(rows, options = {}) {
   // a tool call with no recorded result is history, not work this page can watch. Keeping its
   // line pending and starting a ticker invented a clock for a call nobody was timing, and the
   // reader could not tell it from a live one. Every replayed decision closes as unrecorded.
-  // Replay has no `done` event. Close each answered run at its next user boundary and the last
-  // one here; closing only here gave the final answer a footer and lost every earlier duration.
-  finishReplayedRun();
+  // Replay has no `done` event. Close each historical run at its next user boundary, then use
+  // the ledger's current state for the final run. An active run remains open until it settles.
+  finishReplayedRun(true, options);
   if (trace) finishTrace();
   replayingMessages = false;
   // The transcript just drawn is history, so the bubble it ended on is closed. The `reply` handler
@@ -1391,7 +1408,8 @@ async function restoreSessionOnce(target, epoch) {
       }
     }
     if (full && Array.isArray(full.messages) && full.messages.length) {
-      repaintMessages(full.messages);
+      repaintMessages(full.messages, { state: outcome.name, stateAt: full.state?.at,
+        active: !!activeRun(health, wanted.id) });
     } else {
       repaintMessages([]);
     }

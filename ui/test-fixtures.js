@@ -162,20 +162,17 @@ if (sessionStorage.getItem("wa-ui-reload-stage") === "active") {
     messages: [
       { seq: -1, role: "user", content: "EARLIER-FINISHED-QUESTION", created_at: 1789999980, tool_calls: [] },
       { seq: 0, role: "assistant", content: "EARLIER-FINISHED-ANSWER", created_at: 1789999985, tool_calls: [] },
-      { seq: 1, role: "user", content: "EARLIER-INTERRUPTED-QUESTION", tool_calls: [] },
-      { seq: 2, role: "assistant", content: "", reasoning: "EARLIER-REASONING",
+      { seq: 1, role: "user", content: "EARLIER-INTERRUPTED-QUESTION", created_at: 1789999990, tool_calls: [] },
+      { seq: 2, role: "assistant", content: "", created_at: 1789999993, reasoning: "EARLIER-REASONING",
         tool_calls: [
         { id: "earlier-lost", type: "function", function: { name: "bash", arguments: "{\"command\":\"earlier check\"}" } },
       ] },
-      { seq: 3, role: "user", content: "RELOAD-MID-RUN-QUESTION", tool_calls: [] },
-      { seq: 4, role: "assistant", content: "", tool_calls: [
+      { seq: 3, role: "user", content: "FINISHED-QUESTION", created_at: 1790000000, tool_calls: [] },
+      { seq: 4, role: "assistant", content: "FINISHED-ANSWER", created_at: 1790000004, tool_calls: [] },
+      { seq: 5, role: "user", content: "RELOAD-MID-RUN-QUESTION", created_at: 1790000010, tool_calls: [] },
+      { seq: 6, role: "assistant", content: "", created_at: 1790000012, tool_calls: [
         { id: "reload-tool", type: "function", function: { name: "bash", arguments: "{\"command\":\"slow check\"}" } },
       ] },
-      // A finished run, so a repainted transcript has something that *should* carry a footer. The two
-      // above are both mid-run (tool calls with no result), and a repaint of those must keep the
-      // in-progress notice rather than claim they completed.
-      { seq: 5, role: "user", content: "FINISHED-QUESTION", created_at: 1790000000, tool_calls: [] },
-      { seq: 6, role: "assistant", content: "FINISHED-ANSWER", created_at: 1790000004, tool_calls: [] },
     ],
   };
   window.__fixtures.health = {
