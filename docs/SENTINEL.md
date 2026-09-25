@@ -112,14 +112,13 @@ tree". It is the same box and the same verb:
 /update          # the window (POST /update) and the CLI both run lua/core/update.lua
 ```
 
-That module asks three questions and answers them honestly: is there a runtime tree
-(`runtime-worktree.txt`), is anything built in it (`rust/target/release/wa`), and is that build
-newer than what is installed (tree commit against `installed.txt`). Then it writes one request
-through this binary and reports **queued** — never "updated", because the record that settles it is
-in `sentinel/done/` or `failed/`. A refusal is also an answer: `nothing_built` names the build
-command, `no_runtime_tree` names what it looked for, `no_sentinel` says which path is missing, and a
-tree with uncommitted files installs but warns that `deploy.sh` would have refused it. The node never
-installs anything itself, and the request it writes is the same one a human would type.
+That module verifies there is a clean runtime tree (`runtime-worktree.txt`) and an installed sentinel,
+then writes one gated deploy request and reports **queued** — never "updated", because the record that
+settles it is in `sentinel/done/` or `failed/`. A refusal is also an answer: `no_runtime_tree` names
+what it looked for, `no_sentinel` says which path is missing, and `tree_dirty` explains why the gate
+would refuse the checkout. The node never installs anything itself. When `/update` comes from a chat,
+the request carries that session and a fixed continuation prompt; the sentinel wakes it only after
+replacement settles, so reconnecting the window is not the update's continuation protocol.
 
 The box is `<config>/sentinel/requests/*.json` — `~/.wasm-agent/sentinel/requests` by default. A file
 survives the death of whoever wrote it, needs no socket, and works **when the node is down**, which is

@@ -319,6 +319,12 @@ $started = $false
 $serverProcess = $null
 if (-not (Test-Health $Port)) {
   $uiDir = Join-Path (Split-Path $WaExe) "ui"
+  # An installed node keeps ui/ beside wa.exe; a development build lives under rust/target/release.
+  # Fall back to this checkout's UI so testing the binary we just built does not turn into a 404 test
+  # of a directory layout no development build claims to have.
+  if (-not (Test-Path -LiteralPath (Join-Path $uiDir "index.html"))) {
+    $uiDir = Join-Path (Split-Path $PSScriptRoot -Parent) "ui"
+  }
   # PassThru: this run owns the server, so it stops it again at the end. The
   # suite must be safe to run repeatedly, and a server left behind also keeps
   # this console open, which looks like a hang.

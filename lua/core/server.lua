@@ -366,7 +366,11 @@ function wa_update(payload, session)
   local request = {}
   local ok, decoded = pcall(json.decode, payload or "{}")
   if ok and type(decoded) == "table" then request = decoded end
-  local report = updater.run({ reason = request.reason })
+  -- The account session authenticates the request; `thread` is the durable conversation to wake
+  -- after replacement. The continuation prompt itself is fixed in update.lua, so a browser cannot
+  -- turn the maintenance route into an arbitrary delayed prompt.
+  local thread = type(request.thread) == "string" and request.thread or ""
+  local report = updater.run({ reason = request.reason, session_id = thread })
   return json.encode(report)
 end
 
