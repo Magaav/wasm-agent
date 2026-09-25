@@ -130,9 +130,9 @@ There is no measured task-quality or financial improvement claim in this stage.
 
 `read`/`read_many` return raw UTF-8 text (no synthetic line-number prefixes), a
 whole-file SHA-256 `version`, actual starting/ending line, byte column, `eof`, and
-`next_offset`/`next_column`. A complete whole-line page also returns a `selection`
-bound to its path, version and exclusive byte range. Pass both next coordinates
-**and version** to continue.
+`next_offset`/`next_column`. A complete whole-line page also returns an opaque
+`selection` receipt bound to its path, version, source lines and exclusive byte
+range. Pass both next coordinates **and version** to continue.
 Long lines can span pages. CRLF, trailing newlines and UTF-8 boundaries are retained.
 Pages account for JSON escaping before returning a cursor; the generic projector
 must not truncate them again and silently skip bytes. An intervening edit rejects
@@ -148,19 +148,23 @@ re-indexing, not file I/O or hashing. The underlying read still loads the file;
 bounded pages/index cache are **not** a bound on whole-file memory or filesystem time.
 
 The model-facing `edit` accepts up to 64 `range_edits`, each carrying a `selection`
-copied unchanged from `read` and `replacement_lines` whose elements contain no CR/LF.
-Line structure is therefore typed separately from source text: the model never has
-to re-encode a multi-line anchor or its newline bytes. The selected range's one EOL
-form and trailing-newline state are preserved; a mixed-EOL selection is refused
-rather than silently normalised. Selections are path- and version-bound, and every
-range is resolved against one original snapshot. Overlap or any invalid later range
-rejects the whole batch before writing.
+receipt copied unchanged from `read` and `replacement_lines` whose elements contain
+no CR/LF. The receipt supplies its version; there is no duplicate top-level version.
+Optional inclusive `start_line`/`end_line` fields select a whole-line subset inside
+the receipt without changing its byte coordinates or digest. Line structure is
+therefore typed separately from source text: the model never has to re-encode a
+multi-line anchor or its newline bytes. The target range's one EOL form and
+trailing-newline state are preserved; a mixed-EOL target is refused rather than
+silently normalised. Receipts are path- and version-bound, and every range is
+resolved against one original snapshot. Overlap or any invalid later range rejects
+the whole batch before writing.
 
-The runtime still accepts the former `old_text` forms for direct callers and
-mixed-version peer nodes. Calls originating in the model are marked by trusted agent
-context and cannot use or remotely tunnel that compatibility form; this enforcement
-is independent of the advisory provider schema and old tool calls in a transcript.
-No literal `\\r\\n`/`\\n` retry or unescaping heuristic exists.
+The runtime still accepts the former object selections, duplicate top-level version
+and `old_text` forms for calls already stored in active transcripts and for
+mixed-version peer nodes. They are compatibility inputs, not advertised model
+schema. Legacy anchors retain exact matching and never guess that literal `\\r\\n`
+or `\\n` text meant structural newlines. This keeps a schema rollout from causing a
+known first-call failure without weakening the new receipt path.
 
 A second read detects intervening changes before the write. Successful changes retain
 the existing changeset record. A recording failure after writing explicitly says the
