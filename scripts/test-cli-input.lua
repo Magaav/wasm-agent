@@ -59,6 +59,22 @@ local blank = cli_input.new({ deps = {
 local kept, closed = blank:poll(0)
 ok(kept == "" and closed == false, "an empty line is a line, not the end of input")
 
+-- A running model only takes complete ordinary lines. Commands remain for the
+-- REPL, and nothing behind a command is allowed to jump ahead of it.
+local supplied = 0
+local steering = cli_input.new({ deps = {
+  start = function() return '{"started":true}' end,
+  take = function()
+    supplied = supplied + 1
+    if supplied == 1 then return '{"lines":["first note","  ","/new","after command"],"eof":false,"running":true}' end
+    return '{"lines":[],"eof":false,"running":true}'
+  end,
+} })
+local notes = steering:take_steering()
+ok(#notes == 1 and notes[1] == "first note", "a waiting message steers the next model round")
+ok(steering:poll(0) == "/new" and steering:poll(0) == "after command",
+  "commands and later text stay ordered for the REPL")
+
 -- An older binary: no capability, no reader thread, and the blocking read this replaced. The
 -- condition is not an error, and it must not hang waiting for something that will never answer.
 -- The stub runs out of lines the way a real stdin does, so the end of input is asserted too.

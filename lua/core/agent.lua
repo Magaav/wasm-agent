@@ -1127,6 +1127,15 @@ function M:run_body(text, images)
   -- WASM_AGENT_MAX_TOOL_ROUNDS therefore only guards against a runaway loop, not
   -- against a long task: it should never fire in practice.
   for round = 1, MAX_TOOL_ROUNDS do
+    -- A CLI reader can collect complete messages while a model/tool call blocks Lua.
+    -- Deliver them before the next request, as durable user turns, not transient
+    -- system instructions. No callback on node/peer runs; they retain their protocol.
+    if self.steer and round > 1 then
+      for _, text in ipairs(self.steer() or {}) do
+        record_turn(self, { id = host.uuid(), role = "user", content = text, debug = self.debug })
+        messages[#messages + 1] = { role = "user", content = text }
+      end
+    end
     -- Unified cancellation: a foreground run's scoped cancel and a supervised
     -- child's cancel both answer here, so the loop checks one name.
     if host.run_cancelled then
