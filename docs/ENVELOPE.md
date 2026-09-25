@@ -28,9 +28,9 @@ that surface. The live version is rendered in the UI under **engine → tools**
 | Tool | Args | Does |
 | --- | --- | --- |
 | `bash` | `command`, `cwd?` | run a shell command |
-| `read` | `path`, `offset?`, `limit?` | read a PNG/JPEG/WebP/GIF as visual input, or an exact text range |
+| `read` | `path`, `offset?`, `limit?` | read a PNG/JPEG/WebP/GIF as visual input, or an exact text range, naming the line frame an edit may address |
 | `write` | `path`, `content` | create or overwrite a file |
-| `edit` | `path`, `range_edits` | replace opaque versioned selections returned by `read`, optionally sliced by source lines |
+| `edit` | `path`, `edits?`, `range_edits?` | replace quoted bytes, or an opaque versioned selection from `read` sliced by the line frame `read` names; the result echoes what was replaced |
 | `ls` | `path?` | list a directory |
 | `grep` | `pattern`, `path?` | search files |
 
