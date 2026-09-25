@@ -149,7 +149,10 @@ window.__fixtures = {
 
 // The UI test reloads the actual browser page halfway through a recorded tool call.
 // Install the second-load fixture before app.js starts its boot requests.
-if (sessionStorage.getItem("wa-ui-reload-stage") === "active") {
+if (sessionStorage.getItem("wa-ui-reload-stage") === "active" ||
+    sessionStorage.getItem("wa-ui-startup-stage") === "active") {
+  // A model-catalogue failure must not keep a reload from restoring its chat.
+  window.__failModels = true;
   const id = "eeeeeeee-0000-0000-0000-000000000005";
   window.__fixtures.sessions = { sessions: [{
     id, title: "running reload proof", user_id: "master", mode: "chat", message_count: 2,
@@ -184,6 +187,13 @@ if (sessionStorage.getItem("wa-ui-reload-stage") === "active") {
     workers: [{ label: "POST /chat", busy_ms: 15000, session: id }], ok: true, queue: 0,
     stalled_ms: 20, worker: "alive", exec_timeout_seconds: 300,
   };
+  if (sessionStorage.getItem("wa-ui-startup-stage") === "active") {
+    window.__fixtures.health.current = null;
+    window.__fixtures.health.workers = [];
+    window.__failSessionReads = 1;
+    window.__stallRenderer = true;
+    window.__failVersion = true;
+  }
 }
 
 const realFetch = window.fetch ? window.fetch.bind(window) : null;
@@ -218,6 +228,13 @@ window.fetch = function (input, init) {
   if (path === 'version') {
     if (window.__failVersion) return Promise.reject(new Error('fixture: version unavailable'));
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ version: 'fixture' }) });
+  }
+  if (path === 'models' && window.__failModels) {
+    window.__modelsRejected = (window.__modelsRejected || 0) + 1;
+    return Promise.reject(new Error('fixture: model catalogue unavailable'));
+  }
+  if (path === 'render.wasm' && window.__stallRenderer) {
+    return new Promise(() => {});
   }
   // A transcript read can fail after `/sessions` has already advertised its new sequence. The
   // follower must retry that same sequence rather than marking it seen and waiting for another row.

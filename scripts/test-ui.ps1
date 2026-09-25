@@ -35,12 +35,43 @@ $harness = @'
   try {
   var tick = function () { return Promise.resolve(); };
   function check(ok, label) { if (!ok) problems.push(label); }
+  if (sessionStorage.getItem("wa-ui-startup-stage") === "active") {
+    sessionStorage.removeItem("wa-ui-startup-stage");
+    for (var initial = 0; initial < 200 && window.__failSessionReads > 0; initial++) await tick();
+    check(window.__failSessionReads === 0, "startup must begin transcript restore without renderer or version");
+    window.__failVersion = false;
+    await window.__watch();
+    for (var attempt = 0; attempt < 200 && !document.getElementById("messages").textContent.includes("RELOAD-MID-RUN-QUESTION"); attempt++) await tick();
+    check(window.__modelsRejected > 0, "startup fixture must fail the model catalogue");
+    check(document.getElementById("messages").textContent.includes("RELOAD-MID-RUN-QUESTION"),
+      "an idle startup must retry its transcript even when /models fails");
+    window.__failModels = false;
+    await window.__ensureMeta();
+    check(!document.getElementById("chip-model").textContent.includes("retrying"),
+      "model metadata must recover after a transient startup failure");
+    var recovered = null;
+    try {
+      recovered = window.__repaintMessages([
+        { seq: 1, role: "assistant", content: "", tool_calls: [null] },
+        { seq: 2, role: "user", content: "AFTER-BAD-ROW" }
+      ]);
+    } catch (error) { /* a broken per-row catch is what this assertion detects */ }
+    check(recovered?.failed === 1 && document.getElementById("messages").textContent.includes("AFTER-BAD-ROW"),
+      "one malformed ledger row must not stop the rest of startup repaint");
+    var startupLog = document.createElement("pre");
+    startupLog.id = "harness-log";
+    startupLog.textContent = problems.length ? ("UI FAIL: " + problems.join(" ;; ")) : "UI PASS (reload and startup recovery)";
+    document.body.append(startupLog);
+    return;
+  }
   if (sessionStorage.getItem("wa-ui-reload-stage") === "active") {
     // This is a real second navigation, not a second call to restoreSession in the old page.
     // The fixture was installed before app.js loaded, just as a live /session response is.
     sessionStorage.removeItem("wa-ui-reload-stage");
     var loadedAt = performance.now();
     await window.rendererLoaded;
+    check(window.__failModels === true && window.__modelsRejected > 0,
+      "reload fixture must fail a real model catalogue request");
     for (var retry = 0; retry < 200 && !document.getElementById("messages").textContent.includes("RELOAD-MID-RUN-QUESTION"); retry++) await tick();
     var restored = document.getElementById("messages");
     check(restored.textContent.includes("RELOAD-MID-RUN-QUESTION"),
@@ -129,10 +160,15 @@ $harness = @'
     check(!!stoppedFooter && /unfinished/.test(stoppedFooter.textContent) &&
       stoppedFooter.textContent.includes("0:03") && !/completed/.test(stoppedFooter.textContent),
       "a stopped final run must show its recorded duration without a false completed claim");
-    var reloadLog = document.createElement("pre");
-    reloadLog.id = "harness-log";
-    reloadLog.textContent = problems.length ? ("UI FAIL: " + problems.join(" ;; ")) : "UI PASS (real mid-run reload)";
-    document.body.append(reloadLog);
+    if (problems.length) {
+      var reloadLog = document.createElement("pre");
+      reloadLog.id = "harness-log";
+      reloadLog.textContent = "UI FAIL: " + problems.join(" ;; ");
+      document.body.append(reloadLog);
+      return;
+    }
+    sessionStorage.setItem("wa-ui-startup-stage", "active");
+    location.reload();
     return;
   }
   // Managed jobs are rules, after tools, and never optimistically reported enabled.
@@ -1851,7 +1887,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 $app = Join-Path $tmp "app.js"
 Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__cancelActiveRun = cancelActiveRun; window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker; window.__updateNotice = updateNotice; window.__refreshOperationProgress = refreshOperationProgress; window.__watch = watch;"
 
-Add-Content -Path $app -Value "`nwindow.__resetFollow = () => { followedSeq = 0; lastFollowAt = 0; }; window.__followRun = followRun;"
+Add-Content -Path $app -Value "`nwindow.__resetFollow = () => { followedSeq = 0; lastFollowAt = 0; }; window.__followRun = followRun; window.__repaintMessages = repaintMessages; window.__ensureMeta = ensureMeta;"
 
 $server = $null
 $edge = @(
@@ -1907,8 +1943,8 @@ try {
     exit 1
   }
   $result = $match.Groups[1].Value.Trim()
-  if ($result -eq "UI PASS (real mid-run reload)") {
-    Write-Host "  ok   UI structure, interrupted tools, and a real mid-run page reload" -ForegroundColor Green
+  if ($result -eq "UI PASS (reload and startup recovery)") {
+    Write-Host "  ok   UI structure, mid-run reload, and startup recovery" -ForegroundColor Green
   } else {
     Write-Host "  FAIL $result" -ForegroundColor Red
     exit 1

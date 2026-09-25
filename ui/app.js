@@ -1297,7 +1297,7 @@ function repaintMessages(rows, options = {}) {
       failed += 1;
       if (!firstFailure) {
         firstFailure = `${message.role} seq ${message.seq}: ${error}`;
-        console.error("repaint failed", run, error);
+        console.error("repaint failed", message.role, message.seq, error);
       }
     }
   }
@@ -2856,7 +2856,10 @@ async function refreshMeta() {
     meta.textContent = `${where} · ${label} · ${payload.model}`;
     return true;
   } catch (error) {
-    meta.textContent = "offline";
+    // The chat may still be healthy. A catalogue failure must describe only
+    // this read, and the watch loop retries it without blocking the transcript.
+    meta.textContent = "model info unavailable · retrying";
+    chipModel.textContent = "model info unavailable · retrying";
     return false;
   }
 }
@@ -2977,6 +2980,15 @@ function applyUiVersion(next) {
 let synced = false;
 let syncRunning = false;
 let syncAttempts = 0;
+let metaReady = false;
+let metaRunning = false;
+
+async function ensureMeta() {
+  if (metaReady || metaRunning) return;
+  metaRunning = true;
+  try { metaReady = await refreshMeta(); }
+  finally { metaRunning = false; }
+}
 
 function setConnecting(label) {
   // Say what is true and that it is being worked on. "connecting…" forever reads as broken, and
@@ -3001,11 +3013,13 @@ async function sync(reason) {
   if (synced || syncRunning) return;
   syncRunning = true;
   syncAttempts += 1;
-  // These reads are independent. Serializing them made every reload pay both latencies, while the
-  // boot path also issued an unobserved duplicate of each request.
-  const [meOk, metaOk] = await Promise.all([refreshMe(), refreshMeta()]);
+  // Model metadata is useful, but it is not a prerequisite for reading this
+  // user's transcript. A failed /models request used to strand an idle window
+  // on "connecting" even while /me, /sessions and /session all worked.
+  void ensureMeta();
+  const meOk = await refreshMe();
   syncRunning = false;
-  if (!meOk || !metaOk) {
+  if (!meOk) {
     // Why it failed decides what to say. A reload during a run used to show "connecting…" and then
     // "node offline — retrying" on a node that was working perfectly, and the transcript stayed empty
     // because the restore never ran. It cannot run while the run holds the interpreter - that is
@@ -3090,11 +3104,14 @@ async function watch() {
     applyUiVersion(payload.version);
     // The node answered, so finish the first sync if it never finished. This loop always runs.
     if (!synced) sync("watch");
-    else if (!transcriptReady) restoreSession();
-    // A live stream or update lock needs reconciliation. A durable unfinished notice does not:
-    // polling and repainting an interrupted transcript forever would waste reads and restart its view.
-    else if (busy || document.getElementById("update-lock") || trace?.pending) {
-      if (Date.now() - reconciledAt > 5000) { reconciledAt = Date.now(); reconcile(); }
+    else {
+      if (!metaReady) void ensureMeta();
+      if (!transcriptReady) restoreSession();
+      // A live stream or update lock needs reconciliation. A durable unfinished notice does not:
+      // polling and repainting an interrupted transcript forever would waste reads and restart its view.
+      else if (busy || document.getElementById("update-lock") || trace?.pending) {
+        if (Date.now() - reconciledAt > 5000) { reconciledAt = Date.now(); reconcile(); }
+      }
     }
   } catch (error) { /* keep polling: the deadline is what keeps this loop alive */ }
   setTimeout(watch, 1000);
@@ -4504,26 +4521,23 @@ document.addEventListener("contextmenu", (event) => {
   contextMenu.openAt(event.clientX, event.clientY);
 });
 
-// Rendering is a round trip to fetch render.wasm. Anything that needs to know the
-// real renderer - rather than the escape-and-<br> fallback - can await this, which
-// is what the UI test does instead of guessing at ticks.
+// The draft and transcript do not depend on the Markdown renderer. Waiting for
+// render.wasm before booting chat made a stalled asset leave an otherwise healthy
+// page on "connecting" indefinitely, even when /version was also unavailable.
+setupVoice();
+restoreDraft();
+input.addEventListener("input", saveDraft);
+const openingView = !!viewMode();
+if (!openingView) {
+  sync("boot");
+  setTimeout(openFromQuery, 400);
+}
+// Views can wait for the renderer. Chat first draws readable fallback text;
+// later transcript updates use Markdown once the renderer is ready.
 window.rendererLoaded = loadRenderer().then(() => {
-  setupVoice();
-  // The draft first, because it is instant and it is the reader's own text; the conversation after
-  // /me has answered, because the session list is filtered by user. The second input listener is the
-  // draft's - the first belongs to the undo stack, and they answer different questions.
-  restoreDraft();
-  input.addEventListener("input", saveDraft);
-  // A view window renders one component and stops: it is not a conversation, and restoring a
-  // transcript into it would be showing the chat inside the thing the chat opened.
-  if (!applyViewMode()) {
-    // One entry point for "become live", and it retries itself until the node answers - so a node
-    // that is briefly away at load no longer leaves the page half-born.
-    sync("boot");
-    setTimeout(openFromQuery, 400);
-  }
-  window.addEventListener("online", () => sync("online"));
+  if (openingView) applyViewMode();
 });
+window.addEventListener("online", () => sync("online"));
 watch();
 watchTurn();
 if (!native) input.focus();
