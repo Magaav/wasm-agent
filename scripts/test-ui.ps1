@@ -1411,6 +1411,12 @@ $harness = @'
       return String(call.url).indexOf("efficiency") >= 0;
     });
     check(reportAsked, "commands: running /efficiency_report must ask the node's efficiency route");
+    var reportCall = (window.__calls || []).filter(function (call) {
+      return String(call.url).startsWith("efficiency?session_id=");
+    }).slice(-1)[0];
+    var reportThread = reportCall ? new URLSearchParams(reportCall.url.split("?")[1]).get("session_id") : "";
+    check(reportThread === now,
+      "commands: /efficiency_report must measure the selected chat, not the login token");
     var panel = messages.querySelector(".efficiency-report");
     check(!!panel, "commands: /efficiency_report must leave its report in the transcript");
     if (panel) {
