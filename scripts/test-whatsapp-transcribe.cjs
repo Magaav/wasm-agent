@@ -5,7 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
-const { queryOne } = require("./lib/sqlite-python.cjs");
+const { execute, queryOne } = require("./lib/sqlite-python.cjs");
 
 const repo = path.resolve(__dirname, "..");
 const requestedWa = path.resolve(process.argv[2] || path.join(repo, "rust/target/release/wa"));
@@ -101,26 +101,22 @@ assert.equal(pass().value.processed, 0);
 // (that lag is the whole point of the case), and the note itself is two hours old. The three cursor keys are
 // saved and restored around it, because the cases below are about cursor arithmetic and this one moves the
 // cursor on purpose.
-const metaDb = new DatabaseSync(db);
 const cursorKeys = ["whatsapp_transcribe_cursor", "whatsapp_transcribe_cursor_ids", "whatsapp_transcribe_pending"];
 const savedCursor = Object.fromEntries(cursorKeys.map((key) => {
-  const row = metaDb.prepare("SELECT value FROM meta WHERE key=?").get(key);
+  const row = queryOne(db, "SELECT value FROM meta WHERE key=?", [key]);
   return [key, row ? row.value : undefined];
 }));
-metaDb.prepare("UPDATE meta SET value=? WHERE key='whatsapp_transcribe_cursor'").run(String(NOW - 10800));
-metaDb.close();
+execute(db, "UPDATE meta SET value=? WHERE key='whatsapp_transcribe_cursor'", [String(NOW - 10800)]);
 setStore([{ conversation_id: chat, message_id: "stale_voice", sender_id: "sender",
   direction: "incoming", sent_at: NOW - 7200, body: "[ptt]", media: [{ type: "ptt" }] }]);
 const staleRun = pass();
 assert.equal(staleRun.value.processed, 0, "audio past the window is not transcribed");
 assert.equal(effect("stale_voice:transcript:1"), undefined, "no send is ever reserved for stale audio");
 assert.equal(sent().length, 1, "and nothing is sent into the chat for it");
-const restoreDb = new DatabaseSync(db);
 for (const [key, value] of Object.entries(savedCursor)) {
   if (value === undefined) continue;
-  restoreDb.prepare("UPDATE meta SET value=? WHERE key=?").run(String(value), key);
+  execute(db, "UPDATE meta SET value=? WHERE key=?", [String(value), key]);
 }
-restoreDb.close();
 assert.equal(sent().length, 1, "confirmed send is never replayed");
 setStore([message("old", 1000), message("voice1", 2000, "ptt"), message("same_second", 2000, "ptt")]);
 assert.equal(pass().value.state, "sent", "new audio in the cursor's second is processed");
