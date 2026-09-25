@@ -67,6 +67,35 @@ suite proves that with two child processes in two zones, not by inspection).
 | 300–600 s | `direct_unanswered_grace` — the operator has had their five minutes | `stale_group_mention` — refused |
 | > 600 s | `stale_message` — refused, and not transcribed either | `stale_message` |
 
+### The hold: how *young* a message may be
+
+Age alone was not enough. A message inside the prompt window used to be answered on sight, and measured
+live that meant a reply 30–60 s after somebody spoke — while the operator was still typing theirs, which is
+the operator's own words for the complaint: "copilot is answering within 60 seconds". So a direct message
+is **held** before it is handed to a child, and the hold is the operator's own control rather than a second
+knob: `grace_seconds` is them saying how long they want to answer first, capped at 60 s per move (the job
+ticks every 30 s, and a longer first move would spend the bound rather than buy anything).
+
+| `grace_seconds` | hold |
+| --- | --- |
+| 0 | none — "answer immediately" is a decision, not a missing value, and it is the only value that closes the hold |
+| 1–60 | that many seconds |
+| > 60 | 60 s per move |
+
+`WA_WHATSAPP_HOLD_SECONDS` is the machine-wide override, resolved before the job control, and the read step
+reports the number in force and where it came from (`hold_seconds` / `hold_source` in its window, and the
+same on stderr) — so waiting on purpose is read rather than inferred from a timestamp. The hold is enforced
+in the ingest, against the ledger's own `observed_at` for the message (the arrival this node recorded, with
+the sender's `sent_at` as the fallback), because a `sent_at` alone cannot distinguish a fresh message from a
+rescan of an old one.
+
+A held message is **not decided**: the cursor does not move past it, so the next tick returns it and it
+leaves the hold as soon as it is old enough. The wait is durable (`meta.whatsapp_holds`), because a hold can
+outlast the tick that started it — recomputed afresh each pass, the release would look like a message that
+had never waited. It is reported twice and once each: `holding` while it waits, and `released` at the one
+moment it becomes a child's, with the seconds it waited. A message the operator answers during the hold is
+stood down by the rule below, and is reported as the stand-down it is.
+
 The two knobs are the job's own **controls** - `grace_seconds` (300) and `max_age_seconds` (600) - carried
 in `jobs/whatsapp-copilot.json` and validated when the definition is installed
 ([JOBS.md](JOBS.md), "Controls"). The sentinel passes each of them to the pipeline's `run` steps as
@@ -122,6 +151,28 @@ reported to the operator's own inbox, once per message (the stand-down clears th
 pass cannot repeat it), naming the conversation, the message id and the moment the operator took over:
 `did NOT answer the message in <conversation> (id <message id>) - you took that conversation over yourself`.
 Bounded to three per pass, like every other report, and never sent to the sender.
+
+### The same question, asked again at send time
+
+Read time refuses a message the operator has already answered — but the child then reads, reasons and sends
+seconds-to-minutes later, and the operator may answer in *that* gap. Measured live, that is exactly what
+happened: the copilot replied over the operator in the same minute they did, which is the one thing this
+pipeline must never do. So the same determination is repeated in `whatsapp_send` immediately before the
+reservation — an external effect is justified at the moment it happens, not by a decision taken earlier.
+
+- **The clock is the ledger's own.** The comparison is the operator's newest outgoing message in that
+  conversation (from `memory.newest_outgoing_after`) against the trigger's `observed_at` — the arrival this
+  node recorded — with `sent_at` as the fallback. Both sides then come from one ledger, so neither the
+  sender's clock nor a second time zone can decide whose turn it is.
+- **No proof is refusal.** An event carrying neither clock returns `trigger_time_unknown`, and a memory
+  implementation without the direct accessor is answered from the bounded history — but a memory that
+  answers *nothing* is `ledger_unreadable`. A send that cannot show the operator has stayed quiet does not
+  happen: reading an unprovable silence as permission is how a model writes over a person.
+- **It is refused, not warned.** `operator_took_over` comes back before the reservation, so the refusal
+  costs no send budget and never opens the browser, and no reply is sent.
+
+The ledger handle reaches the tool through `tools.lua`'s scoped dispatch and nothing else: the child's own
+tools still cannot reach the ledger, and the check is one yes/no question asked at the moment of the effect.
 
 ## What the operator is told
 
@@ -262,6 +313,12 @@ Each of these was found live, with evidence, and fixed. They are the reason the 
    cursor position, so a lag turned the backlog into "new", and the copilot transcribed four group voice
    notes in one tick whose messages were three hours old (the transcribe cursor was hours behind, the reply
    cursor 50 minutes behind). Fixed by the window above, applied to the reply rule and to the transcriber.
+7. **The copilot answered while the operator was still typing, and answered over them.** Two halves of one
+   missing idea. Nothing bounded how *young* a message could be, so a message inside the prompt window was
+   answered on sight — measured live as a reply 30-60 s after somebody spoke. And operator precedence was
+   decided only at read time, so a child that decided before the operator replied still sent afterwards: the
+   copilot replied over the operator in the same minute they did. Fixed by the hold, and by asking the
+   operator-precedence question again immediately before the reservation (both above).
 
 ## Retired
 

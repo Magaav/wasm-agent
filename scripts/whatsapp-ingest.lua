@@ -132,6 +132,28 @@ local function unavailable(reason, detail)
     detail and (" detail=" .. detail) or ""))
 end
 
+-- How long a message is *held* before this reader may hand it on, and where the number came from.
+--
+-- `grace_seconds` is the operator saying how long they want to answer first, so the hold is that number,
+-- capped at a minute: the job ticks every 30 s, and a longer first move would eat the bound instead of
+-- buying anything. `grace_seconds: 0` is the operator saying "answer immediately", and it is the only
+-- value that closes the hold - 0 is a decision, not a mistake. The default and the cap are the same one
+-- constant per side; the reader reports the number it resolved for the same reason it reports the window.
+local DEFAULT_HOLD_SECONDS = 60
+local function resolve_hold()
+  local explicit = host.getenv and host.getenv("WA_WHATSAPP_HOLD_SECONDS") or nil
+  if explicit and explicit:match("^%d+$") then
+    return tonumber(explicit), "node_env"
+  end
+  local raw = host.getenv and host.getenv("WA_JOB_CONTROL_GRACE_SECONDS") or nil
+  if raw and raw:match("^%d+$") then
+    local grace = tonumber(raw)
+    if grace == 0 then return 0, "grace_seconds" end
+    return math.min(DEFAULT_HOLD_SECONDS, grace), "grace_seconds"
+  end
+  return DEFAULT_HOLD_SECONDS, "default"
+end
+
 -- Emitting, not waking: the ingest knows exactly which messages are new, so it is the only thing that
 -- has to *say* so. An event per new incoming message (topic `whatsapp.message`, the message id as the
 -- stable event id) means the job store dedupes a repeated emission by itself - `UNIQUE(job_id,
@@ -324,6 +346,68 @@ local function main()
       end
     end
   end
+  -- When each candidate message was first *observed*, in one query, for the hold below. `sent_at` alone is
+  -- not the arrival clock - a message can be recorded by a reader that already sees it as seconds old, and a
+  -- rescan re-reads old messages whose `sent_at` is hours behind while their arrival was this minute. The
+  -- ledger's own `observed_at` is the arrival this machine can prove; the other column is the sender's claim
+  -- about it. Both are carried, and the hold is measured against whichever proves *younger*, so the hold
+  -- never keeps a message that has in fact been waiting long enough.
+  --
+  -- Bounded to the conversations this read actually returned: this runs every 30 s on the deterministic
+  -- lane, and the live ledger is thousands of rows (measured: 6,298 on this machine), so scanning all of it
+  -- would put the whole table in every tick to answer a question about the handful of chats that just spoke.
+  local arrived_at = {}
+  do
+    local conversations, seen = {}, {}
+    for _, message in ipairs(payload.messages or {}) do
+      local id = tostring(message.conversation_id or "")
+      if id ~= "" and not seen[id] then seen[id] = true; conversations[#conversations + 1] = id end
+    end
+    if #conversations > 0 then
+      local marks = {}
+      for index = 1, #conversations do marks[index] = "?" end
+      local ok, rows = pcall(json.decode, host.sql_query(
+        "SELECT message_id, sent_at, observed_at FROM ledger_messages WHERE conversation_id IN (" ..
+        table.concat(marks, ",") .. ")", json.encode(conversations)) or "")
+      if ok and type(rows) == "table" and not rows.error then
+        for _, row in ipairs(rows) do
+          if type(row) == "table" and row.message_id then
+            local id = tostring(row.message_id)
+            for _, column in ipairs({ row.observed_at, row.sent_at }) do
+              local at = tonumber(column)
+              if at and at > 0 and (arrived_at[id] == nil or at < arrived_at[id]) then arrived_at[id] = at end
+            end
+          end
+        end
+      end
+    end
+  end
+  -- Eligible messages that are younger than the operator's own answer window, so the copilot is waiting on
+  -- purpose rather than answering over them. Reported, not silent: "the copilot has not answered yet" and
+  -- "the copilot never saw it" must not read the same, and the number in force is what makes waiting on
+  -- purpose checkable rather than guessed from a timestamp in a log.
+  local held = {}
+  local held_count = 0
+  -- The messages currently inside the hold, and how long they had waited when the hold began: durable for
+  -- the same reason the owed map is. The hold outlives the tick that started it, so "this one waited" is a
+  -- fact that has to survive a restart - computed afresh each pass it would be reset by the very next
+  -- tick, and then the release would look like a message that had never waited at all.
+  local holds = {}
+  do
+    local ok, stored = pcall(json.decode, memory.meta_get("whatsapp_holds") or "")
+    if ok and type(stored) == "table" then
+      for key, value in pairs(stored) do
+        local seconds = tonumber(value)
+        if seconds and seconds >= 0 then holds[tostring(key)] = seconds end
+      end
+    end
+  end
+  local holds_changed = false
+  -- Messages released from the hold this pass, and the ones waiting in it: reported, not silent, for the
+  -- same reason a stand-down is. Each is one entry per message per transition, never per tick.
+  local released = {}
+  local await_hold = {}
+  local hold_seconds, hold_source = resolve_hold()
   -- Who spoke last in each conversation. An incoming message the operator has already answered is not the
   -- copilot's to answer: they took the lead, and a second reply would be an interruption. Deterministic,
   -- so standing down costs no token at all - and the operator's own reply is the newest message in the
@@ -416,14 +500,52 @@ local function main()
     if (emit_on or json_events) and message.direction == "incoming" and
         (at > cursor or pending or message.new_audio) then
       local media_kind = (message.media and message.media[1] and message.media[1].type) or "chat"
-      local answered_by_operator = (newest_outgoing[message.conversation_id] or 0) > at
-      if answered_by_operator then
+      -- The hold: a message that passed every rule but is younger than the operator's own answer window is
+      -- not handed on yet. It is not decided, so the cursor does not move past it and the next tick returns
+      -- it again - handing it on is what the hold delays, and the deferral is visible as `held` in the
+      -- result rather than as a silence. The first pass of a *candidate* to reach this point has no arrival
+      -- time only if the query above failed, and a missing arrival fails closed onto the age from `sent_at`.
+      local arrival = arrived_at[message_id]
+      local seen_for = arrival and (host.now() - arrival) or math.huge
+      local held_for = math.min(seen_for, host.now() - at)
+      if hold_seconds > 0 and held_for < hold_seconds then
+        -- Held on purpose: every rule passed, but the message is younger than the operator's own answer
+        -- window. Not handed on, and *not* decided - the cursor does not move past it, so the next tick
+        -- returns it and it leaves the hold as soon as it is old enough. The first moment inside the hold
+        -- is remembered durably, because the hold can outlast the tick that started it: without that, the
+        -- message would be released afterwards as if it had never waited, and the operator would never see
+        -- that the copilot stood off. `WA_WHATSAPP_HOLD_SECONDS` is the explicit override; otherwise the
+        -- hold is the operator's own `grace_seconds` capped at a minute, and a missing arrival time falls
+        -- back to the age from `sent_at` rather than to no hold at all.
+        held_count = held_count + 1
+        held[#held + 1] = {
+          message_id = message_id,
+          conversation_id = message.conversation_id,
+          sent_at = at,
+          held_seconds = math.floor(held_for),
+        }
+        if holds[message_id] == nil then
+          holds[message_id] = math.floor(held_for)
+          holds_changed = true
+        end
+        if handoffs[message_id] then handoffs[message_id] = nil; handoffs_changed = true end
+        if json_events then
+          await_hold[#await_hold + 1] = {
+            message_id = message_id,
+            conversation_id = message.conversation_id,
+            sent_at = at,
+            hold_seconds = hold_seconds,
+            waited_seconds = math.floor(held_for),
+          }
+        end
+      elseif (newest_outgoing[message.conversation_id] or 0) > at then
         -- The operator took the lead in this conversation; standing down is a decision, and it costs no
         -- token to make it here. Said out loud rather than done quietly: a message nobody answered must
         -- never be indistinguishable from a message the copilot chose not to answer.
         skipped_answered = skipped_answered + 1
         handled = math.max(handled, at)
         if handoffs[message_id] then handoffs[message_id] = nil; handoffs_changed = true end
+        if holds[message_id] then holds[message_id] = nil; holds_changed = true end
         if json_events then
           stood_down[#stood_down + 1] = {
             message_id = message_id,
@@ -438,16 +560,19 @@ local function main()
         skipped_ineligible = skipped_ineligible + 1
         handled = math.max(handled, at)
         if handoffs[message_id] then handoffs[message_id] = nil; handoffs_changed = true end
+        if holds[message_id] then holds[message_id] = nil; holds_changed = true end
       elseif decided[message_id] then
         -- Somebody decided it durably. Only now may the cursor pass it - this is the whole fix: the cursor
         -- used to move when the message was handed on, so a child that never decided lost it.
         skipped_decided = skipped_decided + 1
         handled = math.max(handled, at)
         if handoffs[message_id] then handoffs[message_id] = nil; handoffs_changed = true end
+        if holds[message_id] then holds[message_id] = nil; holds_changed = true end
       elseif media_kind ~= "chat" and not (audio_kind(message) and message.source == "whatsapp-cdp-stt") then
         -- Unsupported media and terminal audio refusals are reported without waking a responder.
         handled = math.max(handled, at)
         if handoffs[message_id] then handoffs[message_id] = nil; handoffs_changed = true end
+        if holds[message_id] then holds[message_id] = nil; holds_changed = true end
         unanswerable[#unanswerable + 1] = {
           message_id = message.message_id,
           conversation_id = message.conversation_id,
@@ -468,12 +593,30 @@ local function main()
         handled = math.max(handled, at)
         handoffs[message_id] = nil
         handoffs_changed = true
+        if holds[message_id] then holds[message_id] = nil; holds_changed = true end
       else
         -- Hand it on, and remember that we did. The cursor is deliberately NOT advanced: this message is
         -- owed a decision, and the next pass hands it on again until one exists (the child's idempotency
         -- key makes that a reconcile, not a second child) or the attempts run out.
         handoffs[message_id] = (handoffs[message_id] or 0) + 1
         handoffs_changed = true
+        -- This is the release from a hold, and it is the one moment the operator is told about it: the
+        -- message is now a child's, and it waited first. Reported once, because the hold's own entry is
+        -- cleared here - a message handed on without having waited says nothing.
+        local waited = holds[message_id]
+        if waited then
+          holds[message_id] = nil
+          holds_changed = true
+          if json_events then
+            released[#released + 1] = {
+              message_id = message_id,
+              conversation_id = message.conversation_id,
+              sent_at = at,
+              waited_seconds = waited,
+              held_seconds = hold_seconds,
+            }
+          end
+        end
         if json_events then
           events[#events + 1] = {
             message_id = message.message_id,
@@ -517,6 +660,12 @@ local function main()
   -- What is still owed a decision, durably, so a restart between hand-on and decision does not forget it.
   if handoffs_changed then
     memory.meta_set("whatsapp_handoffs", json.encode(handoffs))
+  end
+  -- What is still inside the hold. Written for the same reason, and pruned the same way: a hold whose
+  -- message has since been decided, excluded or answered has already been cleared above, so this map only
+  -- ever holds messages that are still waiting.
+  if holds_changed then
+    memory.meta_set("whatsapp_holds", json.encode(holds))
   end
   -- The dump has done its job; leaving it would leave a copy of the inbox in the temp directory.
   if host.exec then pcall(host.exec, "rm -f " .. quote(dump), "") end
@@ -584,9 +733,11 @@ local function main()
     local owed = 0
     for _ in pairs(handoffs) do owed = owed + 1 end
     print(json.encode({ events = events, unanswerable = unanswerable, exhausted = exhausted,
-      stood_down = stood_down, notices = notices,
+      stood_down = stood_down, notices = notices, held = held,
+      released = released, holding = await_hold,
       operator_answered = skipped_answered, already_decided = skipped_decided,
       still_owed = owed, decisions_error = decisions_error,
+      hold_seconds = hold_seconds, hold_source = hold_source, held_count = held_count,
       cursor = math.floor(cursor) }))
     return
   end
@@ -597,12 +748,13 @@ local function main()
     tostring(first_media.message_id) .. ":" .. tostring(first_media.media) .. ":" ..
     tostring(first_media.reason or "unsupported")) or ""
   report(string.format(
-    "whatsapp ingest ok db=%s read=%d new=%d conversations=%d eligible=%d ineligible=%d cursor=%d newest=%d events=%d skipped=%d decided=%d owed=%d unanswerable=%d exhausted=%d%s%s ms=%d",
+    "whatsapp ingest ok db=%s read=%d new=%d conversations=%d eligible=%d ineligible=%d cursor=%d newest=%d events=%d skipped=%d decided=%d owed=%d unanswerable=%d exhausted=%d held=%d hold_seconds=%d%s%s ms=%d",
     paths.data(), math.floor(#(payload.messages or {})), math.floor(after - before),
     math.floor(#(payload.conversations or {})), math.floor(tonumber(payload.eligible) or 0),
     math.floor(tonumber(payload.ineligible) or 0), math.floor(cursor), math.floor(newest),
     math.floor(emitted), math.floor(skipped_ineligible), math.floor(skipped_decided), math.floor(owed),
     math.floor(#unanswerable), math.floor(#exhausted),
+    math.floor(held_count), math.floor(hold_seconds),
     media_detail,
     emit_error and (" event_error=" .. tostring(emit_error)) or "",
     math.floor(elapsed)))

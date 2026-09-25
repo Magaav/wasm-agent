@@ -16,6 +16,16 @@ local tools = dofile("lua/core/tools.lua")
 local agentlib = dofile("lua/core/agent.lua")
 memory.setup()
 
+-- The trusted event a responder is woken with, built the way the runtime builds it: from the ledger row. The
+-- send tool compares the operator's newest reply against the trigger's own arrival, so an event without that
+-- arrival cannot justify a send - and a fixture that invented a timestamp would be testing a comparison the
+-- runtime never makes.
+local function wa_event(message_id, conversation_id)
+  local row = memory.ledger_message(message_id) or {}
+  return { conversation_id = conversation_id or row.conversation_id or "", message_id = message_id,
+    sent_at = tonumber(row.sent_at) or 0, observed_at = tonumber(row.observed_at) or 0 }
+end
+
 local subagents = dofile("lua/core/subagents.lua")
 local checks = 0
 local function check(value, label)
@@ -194,8 +204,8 @@ check(unknown_store.find("m-3").state == "unknown", "an ambiguous outcome must b
 
 -- 14. The WhatsApp responder reaches only the conversation of the trusted event,
 --     and a verified send is confirmed durably with the profile's budget.
-memory.record_message({ conversation_id = "c-wa", message_id = "m-wa", body = "hello", kind = "direct", title = "Direct" })
-memory.record_message({ conversation_id = "c-other", message_id = "m-other", body = "elsewhere", kind = "direct", title = "Other" })
+memory.record_message({ conversation_id = "c-wa", message_id = "m-wa", body = "hello", kind = "direct", title = "Direct", sent_at = 1000 })
+memory.record_message({ conversation_id = "c-other", message_id = "m-other", body = "elsewhere", kind = "direct", title = "Other", sent_at = 1001 })
 local whatsapp = dofile("lua/core/whatsapp.lua")
 local wa_profile = {
   schema_version = 1, id = "whatsapp-responder",
@@ -206,7 +216,7 @@ local wa_profile = {
   limits = { context_messages = 20, body_bytes = 4096, sends_per_run = 1 },
 }
 local wa_store = effects.new("wa-session-1")
-local wa_ctx = { profile = wa_profile, event = { conversation_id = "c-wa", message_id = "m-wa" },
+local wa_ctx = { profile = wa_profile, event = wa_event("m-wa", "c-wa"),
   effects = wa_store, sends = { count = 0, limit = 1 } }
 local conversation = whatsapp.dispatch(memory, "whatsapp_read", { limit = 10 }, wa_ctx)
 check(conversation.conversation_id == "c-wa" and #conversation.messages >= 1,
@@ -217,7 +227,8 @@ check(wrong_scope.error == "conversation_not_in_profile", "a conversation outsid
 check(whatsapp.dispatch(memory, "whatsapp_decide", { decision = "reply", reason = "r" }, wa_ctx).recorded == true,
   "the decision must be recorded")
 local verified = whatsapp.dispatch(memory, "whatsapp_send", { body = "hi there", confirm = true }, {
-  profile = wa_profile, event = { conversation_id = "c-wa", message_id = "m-wa" }, effects = wa_store,
+  profile = wa_profile, event = wa_event("m-wa", "c-wa"), effects = wa_store,
+  memory = memory,
   send = function(request)
     return { ok = true, sent = true, verified = true, chat = { id = request.conversation_id },
       body = request.body, message = { id = "sent-1" } }
@@ -226,10 +237,43 @@ local verified = whatsapp.dispatch(memory, "whatsapp_send", { body = "hi there",
 check(verified.ok == true, "a verified send must succeed: " .. json.encode(verified))
 check(wa_store.find("m-wa").state == "sent", "a verified send must be confirmed durably")
 local wa_replay = whatsapp.dispatch(memory, "whatsapp_send", { body = "hi there", confirm = true }, {
-  profile = wa_profile, event = { conversation_id = "c-wa", message_id = "m-wa" }, effects = wa_store,
+  profile = wa_profile, event = wa_event("m-wa", "c-wa"), effects = wa_store,
+  memory = memory,
   send = function(request) return { ok = true, sent = true, verified = true, chat = { id = request.conversation_id }, body = request.body, message = { id = "sent-2" } } end,
 })
 check(wa_replay.already_sent == true, "a replay must return the sent record, not send again")
+
+-- 14b. The same send, one operator reply later: the copilot must not answer over them. Read time refuses a
+--      message the operator has already answered, but the child reads, reasons and sends later - and the
+--      operator may answer in that gap. Measured live, that is what happened. So the question is asked again
+--      immediately before the reservation, against the ledger's own clocks. It gets its own conversation,
+--      or the reply that must block *this* send would block every later one in `c-wa` too.
+memory.record_message({ conversation_id = "c-taken", message_id = "m-taken", body = "are you there?",
+  kind = "direct", title = "Taken", sent_at = 1000 })
+memory.record_message({ conversation_id = "c-taken", message_id = "m-reply", body = "i got this",
+  direction = "outgoing", kind = "direct", title = "Taken", sent_at = 2000 })
+local taken_profile = {
+  schema_version = 1, id = "whatsapp-responder",
+  allowed_tools = { "whatsapp_read", "whatsapp_decide", "whatsapp_send" },
+  instructions = "",
+  resources = { conversation = "c-taken", send_approved = true, send_path = "ui",
+    reply_script = "reply.js", self_destination = "c-taken" },
+  limits = { context_messages = 20, body_bytes = 4096, sends_per_run = 1 },
+}
+local took_over_store = effects.new("wa-session-late")
+local took_over_calls = 0
+local took_over = whatsapp.dispatch(memory, "whatsapp_send", { body = "on my way", confirm = true }, {
+  profile = taken_profile, event = wa_event("m-taken", "c-taken"), effects = took_over_store, memory = memory,
+  send = function(request) took_over_calls = took_over_calls + 1
+    return { ok = true, sent = true, verified = true, chat = { id = request.conversation_id },
+      body = request.body, message = { id = "sent-3" } } end,
+})
+check(took_over.error == "operator_took_over",
+  "a reply the operator sent after the trigger must refuse the send: " .. json.encode(took_over))
+check(took_over_calls == 0, "a refused send must never reach the route")
+-- A refusal before the reservation spends no budget: this store has never seen this message, so a spent
+-- budget or a reserved row here would mean the guard ran too late.
+check(took_over_store.find("m-taken") == nil, "a refusal before the reservation must spend no send budget")
 
 -- 15. The trusted event is resolved from the ledger, and a scoped profile refuses
 --     a message outside its conversation before any child is admitted.
@@ -248,13 +292,13 @@ check(no_event.error == "event_context_required", "a scoped profile needs a trus
 --     and the profile ceiling refuses one it does not list.
 local wa_registry = tools.dispatch(memory, "whatsapp_read", { limit = 5 }, "master", {
   user_id = "alice",
-  subagent = { profile = wa_profile, event = { conversation_id = "c-wa", message_id = "m-wa" },
+  subagent = { profile = wa_profile, event = wa_event("m-wa", "c-wa"),
     effects = wa_store, sends = { count = 0 }, allowed = { whatsapp_read = true } },
 })
 check(wa_registry.conversation_id == "c-wa", "the registry must route whatsapp_read: " .. json.encode(wa_registry))
 local denied_wa = tools.dispatch(memory, "whatsapp_send", { body = "x", confirm = true }, "master", {
   user_id = "alice",
-  subagent = { profile = wa_profile, event = { conversation_id = "c-wa", message_id = "m-wa" },
+  subagent = { profile = wa_profile, event = wa_event("m-wa", "c-wa"),
     effects = wa_store, sends = { count = 0 }, allowed = { whatsapp_read = true } },
 })
 check(denied_wa.error == "capability_not_in_profile:whatsapp_send",

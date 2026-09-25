@@ -455,6 +455,24 @@ function M.conversations(limit)
                "FROM conversations c ORDER BY c.updated_at DESC LIMIT ?", {limit})
 end
 
+-- The newest message the operator sent in one conversation *after* a given moment, or nil.
+--
+-- It exists so a responder can ask the one question the ledger alone can answer: "has the operator already
+-- taken this conversation over?" - asked all the way through the run, not only at the moment the message was
+-- picked up. Bounded to one row and one index seek, so asking it again before an external effect costs
+-- nothing next to the effect itself. An unreadable ledger answers nil exactly like an unanswered
+-- conversation does, which is why the caller must treat "no proof" and "no answer" together (fail closed)
+-- rather than reading nil as permission.
+function M.newest_outgoing_after(conversation_id, since)
+  local id = tostring(conversation_id or "")
+  local at = tonumber(since)
+  if id == "" or not at or at <= 0 then return nil end
+  local rows = query("SELECT message_id, body, sent_at, observed_at FROM ledger_messages " ..
+                     "WHERE conversation_id=? AND direction='outgoing' AND COALESCE(sent_at,observed_at) > ? " ..
+                     "ORDER BY COALESCE(sent_at,observed_at) DESC LIMIT 1", {id, at})
+  return rows[1]
+end
+
 -- One conversation record - its kind and its title - for a scoped tool that must name the
 -- conversation it is bound to instead of guessing a label from message content. A responder child
 -- that could only see message bodies reported a group as "futebol/bet" when its title was
