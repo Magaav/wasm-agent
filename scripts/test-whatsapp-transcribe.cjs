@@ -111,6 +111,8 @@ setStore([{ conversation_id: chat, message_id: "stale_voice", sender_id: "sender
   direction: "incoming", sent_at: NOW - 7200, body: "[ptt]", media: [{ type: "ptt" }] }]);
 const staleRun = pass();
 assert.equal(staleRun.value.processed, 0, "audio past the window is not transcribed");
+assert.ok((staleRun.value.refused || []).some((entry) => entry.reason === "stale_audio"),
+  `the refusal names the window: ${JSON.stringify(staleRun.value.refused)}`);
 assert.equal(effect("stale_voice:transcript:1"), undefined, "no send is ever reserved for stale audio");
 assert.equal(sent().length, 1, "and nothing is sent into the chat for it");
 for (const [key, value] of Object.entries(savedCursor)) {
