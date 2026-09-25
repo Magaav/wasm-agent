@@ -24,7 +24,7 @@ const os = require("node:os");
 const path = require("node:path");
 const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
-const { DatabaseSync } = require("node:sqlite");
+const { execute, queryOne } = require("./lib/sqlite-python.cjs");
 
 const FAKE_READER = `// The mock store, in the exact shape scripts/whatsapp-read.mjs produces for the ingest.
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
@@ -136,25 +136,18 @@ function pass(sttFail = false, mode = "json") {
 }
 
 function ledgerBody(id) {
-  const database = new DatabaseSync(db, { readOnly: true });
-  const row = database.prepare("SELECT body, source FROM ledger_messages WHERE message_id=?").get(id);
-  database.close();
-  return row;
+  return queryOne(db, "SELECT body, source FROM ledger_messages WHERE message_id=?", [id]);
 }
 
 // A durable decision, exactly as a child records one.
 function decided(messageId) {
-  const database = new DatabaseSync(db);
-  database.prepare("INSERT INTO effect_decisions(message_id,session_id,conversation_id,decision,reason,created_at,updated_at) " +
-    "VALUES(?,?,?,?,?,?,?) ON CONFLICT(message_id) DO NOTHING")
-    .run(messageId, "fixture-session", CONV, "no_reply", "fixture decision", 1, 1);
-  database.close();
+  execute(db, "INSERT INTO effect_decisions(message_id,session_id,conversation_id,decision,reason,created_at,updated_at) " +
+    "VALUES(?,?,?,?,?,?,?) ON CONFLICT(message_id) DO NOTHING",
+  [messageId, "fixture-session", CONV, "no_reply", "fixture decision", 1, 1]);
 }
 
 function cursor() {
-  const database = new DatabaseSync(db, { readOnly: true });
-  const row = database.prepare("SELECT value FROM meta WHERE key='whatsapp_cursor'").get();
-  database.close();
+  const row = queryOne(db, "SELECT value FROM meta WHERE key='whatsapp_cursor'");
   return row ? Number(row.value) : 0;
 }
 
@@ -166,9 +159,7 @@ function lastSince() {
 
 // What is still owed a decision, as the reader records it durably.
 function owedMap() {
-  const database = new DatabaseSync(db, { readOnly: true });
-  const row = database.prepare("SELECT value FROM meta WHERE key='whatsapp_handoffs'").get();
-  database.close();
+  const row = queryOne(db, "SELECT value FROM meta WHERE key='whatsapp_handoffs'");
   return row ? JSON.parse(row.value) : {};
 }
 
@@ -176,11 +167,9 @@ function ids(list) { return (list || []).map((item) => item.message_id).join(","
 
 // A durable send, exactly as a child records one through effects.reserve/confirm.
 function sent(messageId, conversationId, body, state, at) {
-  const database = new DatabaseSync(db);
-  database.prepare("INSERT INTO effect_sends(message_id,session_id,conversation_id,body,state,message,detail,created_at,updated_at) " +
-    "VALUES(?,?,?,?,?,'{}','',?,?) ON CONFLICT(message_id) DO UPDATE SET state=excluded.state, updated_at=excluded.updated_at")
-    .run(messageId, "fixture-session", conversationId, body, state, at, at);
-  database.close();
+  execute(db, "INSERT INTO effect_sends(message_id,session_id,conversation_id,body,state,message,detail,created_at,updated_at) " +
+    "VALUES(?,?,?,?,?,'{}','',?,?) ON CONFLICT(message_id) DO UPDATE SET state=excluded.state, updated_at=excluded.updated_at",
+  [messageId, "fixture-session", conversationId, body, state, at, at]);
 }
 
 function main() {

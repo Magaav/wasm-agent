@@ -1,0 +1,54 @@
+const { spawnSync } = require("node:child_process");
+
+const PROGRAM = String.raw`
+import json, sqlite3, sys
+
+database_path, mode, statement, encoded_params = sys.argv[1:]
+connection = sqlite3.connect(database_path)
+connection.row_factory = sqlite3.Row
+cursor = connection.execute(statement, json.loads(encoded_params))
+if mode == "execute":
+    connection.commit()
+    result = {"changes": cursor.rowcount}
+else:
+    row = cursor.fetchone()
+    result = dict(row) if row is not None else None
+connection.close()
+print(json.dumps(result, ensure_ascii=False))
+`;
+
+let selectedPython;
+
+function python() {
+  if (selectedPython) return selectedPython;
+  const candidates = [process.env.WA_TEST_SQLITE_PYTHON, "python3", "python"].filter(Boolean);
+  for (const candidate of candidates) {
+    const probe = spawnSync(candidate, ["-c", "import sqlite3"], { encoding: "utf8", windowsHide: true });
+    if (!probe.error && probe.status === 0) {
+      selectedPython = candidate;
+      return selectedPython;
+    }
+  }
+  throw new Error("Python with sqlite3 is required for this test");
+}
+
+function invoke(mode, databasePath, statement, params) {
+  const result = spawnSync(python(), ["-c", PROGRAM, databasePath, mode, statement, JSON.stringify(params)], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error(`sqlite fixture failed: ${result.error || result.stderr || `exit ${result.status}`}`);
+  }
+  return JSON.parse(result.stdout);
+}
+
+function queryOne(databasePath, statement, params = []) {
+  return invoke("query_one", databasePath, statement, params) ?? undefined;
+}
+
+function execute(databasePath, statement, params = []) {
+  return invoke("execute", databasePath, statement, params);
+}
+
+module.exports = { execute, queryOne };

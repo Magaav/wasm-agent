@@ -5,7 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
-const { DatabaseSync } = require("node:sqlite");
+const { queryOne } = require("./lib/sqlite-python.cjs");
 
 const repo = path.resolve(__dirname, "..");
 const requestedWa = path.resolve(process.argv[2] || path.join(repo, "rust/target/release/wa"));
@@ -75,10 +75,7 @@ function pass(extra = {}) {
 }
 function sent() { return fs.existsSync(sends) ? fs.readFileSync(sends, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) : []; }
 function effect(id) {
-  const database = new DatabaseSync(db, { readOnly: true });
-  const row = database.prepare("SELECT state, body FROM effect_sends WHERE message_id=?").get(id);
-  database.close();
-  return row;
+  return queryOne(db, "SELECT state, body FROM effect_sends WHERE message_id=?", [id]);
 }
 
 assert.ok(fs.existsSync(wa) && fs.existsSync(wasm));
