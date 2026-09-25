@@ -160,6 +160,8 @@ if (sessionStorage.getItem("wa-ui-reload-stage") === "active") {
     session: { id, title: "running reload proof" },
     state: { state: "unfinished", detail: "1 tool call(s) with no recorded result: bash" },
     messages: [
+      { seq: -1, role: "user", content: "EARLIER-FINISHED-QUESTION", created_at: 1789999980, tool_calls: [] },
+      { seq: 0, role: "assistant", content: "EARLIER-FINISHED-ANSWER", created_at: 1789999985, tool_calls: [] },
       { seq: 1, role: "user", content: "EARLIER-INTERRUPTED-QUESTION", tool_calls: [] },
       { seq: 2, role: "assistant", content: "", reasoning: "EARLIER-REASONING",
         tool_calls: [
@@ -219,6 +221,12 @@ window.fetch = function (input, init) {
   if (path === 'version') {
     if (window.__failVersion) return Promise.reject(new Error('fixture: version unavailable'));
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ version: 'fixture' }) });
+  }
+  // A transcript read can fail after `/sessions` has already advertised its new sequence. The
+  // follower must retry that same sequence rather than marking it seen and waiting for another row.
+  if (path === 'session' && Number(window.__failSessionReads) > 0) {
+    window.__failSessionReads -= 1;
+    return Promise.reject(new Error('fixture: transient session read failure'));
   }
   const key = Object.keys(window.__fixtures).find((name) => path === name);
   if (key) {
