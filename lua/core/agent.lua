@@ -187,6 +187,10 @@ end
 -- which tools actually exist, and project-supplied ones from
 -- WASM_AGENT_GUIDELINES (one per line - pi's `promptGuidelines`). Deduplicated,
 -- because a repeated instruction is noise.
+local SHELL_SEARCH_GUIDELINE = "For shell text search or file discovery, prefer ripgrep "
+  .. "(`rg` and `rg --files`) over `grep`/`find`; fall back when `rg` is unavailable. "
+  .. "Keep the portable `grep` tool for bounded literal searches"
+
 local function guidelines_for(tool_list)
   local have = {}
   for _, tool in ipairs(tool_list or {}) do
@@ -207,6 +211,9 @@ local function guidelines_for(tool_list)
   end
   if have.bash and not (have.grep or have.ls) then
     add("Use bash for file operations like listing and searching")
+  end
+  if have.bash then
+    add(SHELL_SEARCH_GUIDELINE)
   end
   if have.read_many then
     add("When several known file reads are independent, request them together with read_many; "
@@ -309,11 +316,13 @@ function M.subagent_system_prompt(self, tool_list)
     parts[#parts + 1] = "Profile instructions:\n" .. instructions
   end
   parts[#parts + 1] = "Running on: " .. ENVIRONMENT
+  local have_bash = false
   if tool_list and #tool_list > 0 then
     local lines = { "Your tools (and only these):" }
     for _, tool in ipairs(tool_list) do
       local function_ = tool["function"] or {}
       local name = tostring(function_.name or "?")
+      if name == "bash" then have_bash = true end
       -- The same authored cue as the parent index (agent.system_prompt, tools.snippet),
       -- never a slice of the description, and the same names-only switch applies.
       local cue
@@ -326,6 +335,7 @@ function M.subagent_system_prompt(self, tool_list)
     end
     parts[#parts + 1] = table.concat(lines, "\n")
   end
+  if have_bash then parts[#parts + 1] = "Guidelines:\n- " .. SHELL_SEARCH_GUIDELINE end
   local limits = profile.limits or {}
   local budget_lines = {}
   if limits.max_tokens then budget_lines[#budget_lines + 1] = "model tokens (a hard stop; report what you have when it approaches)" end

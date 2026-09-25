@@ -200,6 +200,11 @@ scope; do not describe this pilot as a general repository-debugging accelerator.
 Changing that conservative completeness policy requires a separate reviewed
 contract, not silently accepting omissions to improve a benchmark.
 
+When a task needs shell regex search or file discovery instead, the system guidance
+prefers ripgrep (`rg` and `rg --files`) over recursive `grep`/`find`, with a fallback
+when `rg` is unavailable. This is a search-choice default, not a runtime dependency;
+the native `grep` tool remains the portable bounded literal search above.
+
 ### Event-driven operation settlement
 
 Native operation waits now use settlement notifications rather than 5 ms status
