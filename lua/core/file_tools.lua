@@ -36,6 +36,37 @@ local function integer(n,default,maximum)
   return n
 end
 
+-- A read selection is a stateless receipt, not a set of coordinates for the model to edit.
+-- The binding catches a changed field before it can become a different source range; the file
+-- version and selected-content digest are checked again against fresh bytes at edit time.
+local RECEIPT_TAG='sel1'
+local function selection_receipt(path,version,start_byte,end_byte,start_line,end_line,content_sha)
+  local fields=table.concat({RECEIPT_TAG,host.sha256(path),version,tostring(start_byte),
+    tostring(end_byte),tostring(start_line),tostring(end_line),content_sha},':')
+  return fields..':'..host.sha256(fields..'\0'..path)
+end
+
+local function parse_selection_receipt(receipt,path)
+  local tag,path_sha,version,start_byte,end_byte,start_line,end_line,content_sha,binding=
+    receipt:match('^([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+)$')
+  local function digest(value) return type(value)=='string' and #value==64 and not value:find('[^0-9a-f]') end
+  if tag~=RECEIPT_TAG or not digest(path_sha) or not digest(version) or not digest(content_sha)
+      or not digest(binding) then
+    return nil,'selection_receipt_invalid'
+  end
+  if path_sha~=host.sha256(path) then return nil,'selection_path_mismatch' end
+  local fields=table.concat({tag,path_sha,version,start_byte,end_byte,start_line,end_line,content_sha},':')
+  if binding~=host.sha256(fields..'\0'..path) then return nil,'selection_receipt_modified' end
+  start_byte,end_byte,start_line,end_line=tonumber(start_byte),tonumber(end_byte),tonumber(start_line),tonumber(end_line)
+  if not start_byte or start_byte%1~=0 or not end_byte or end_byte%1~=0 or
+      not start_line or start_line%1~=0 or not end_line or end_line%1~=0 or
+      start_byte<1 or end_byte<=start_byte or start_line<1 or end_line<start_line then
+    return nil,'selection_receipt_invalid'
+  end
+  return {path=path,version=version,start_byte=start_byte,end_byte=end_byte,
+    start_line=start_line,end_line=end_line,sha256=content_sha}
+end
+
 -- Match the node's existing request-body ceiling. This is a refusal boundary, not
 -- an excuse to silently resize or recompress an image the model was asked to inspect.
 local IMAGE_MAX_BYTES=4*1000*1000
@@ -135,12 +166,11 @@ function M.read(args,store_image)
       total_lines=total,bytes=#text,returned_bytes=#part,
       end_offset=#part>0 and (next_column==1 and next_line-1 or next_line) or nil,
       note='Raw text, no synthetic line numbering. Continue with next_offset, next_column and version.'}
-    -- A complete whole-line read is also a durable edit address. The caller copies this
-    -- machine-produced selection instead of re-encoding the file bytes as `old_text`; path,
-    -- snapshot and exclusive byte range are all checked again before a write.
+    -- A complete whole-line read is also a durable edit address. It is opaque so the model
+    -- cannot accidentally trim byte coordinates while retaining the digest for the wider page.
     if column==1 and next_byte>last and #part>0 and line<=total then
-      result.selection={path=args.path,version=hash,start_byte=first,end_byte=last+1,
-        sha256=host.sha256(part)}
+      result.selection=selection_receipt(args.path,hash,first,last+1,line,result.end_offset,host.sha256(part))
+      result.note=result.note..' Copy selection unchanged into edit; use start_line/end_line there to replace only part of it.'
     end
     return result
   end
@@ -268,12 +298,19 @@ function M.edit(args,record)
   local edits=args.range_edits or args.edits or {{old_text=args.old_text,new_text=args.new_text}}
   if not dense_array(edits,64) or #edits<1 then return {error='edits_required_1_to_64'} end
   if range_form then
-    if type(args.version)~='string' or args.version=='' then return {error='selection_version_required'} end
     for i,item in ipairs(edits) do
-      if type(item)~='table' or type(item.selection)~='table' then return {error='selection_required',edit=i} end
+      if type(item)~='table' or (type(item.selection)~='string' and type(item.selection)~='table') then
+        return {error='selection_required',edit=i}
+      end
       if not dense_array(item.replacement_lines,2000) then return {error='replacement_lines_must_be_dense_array',edit=i} end
+      if (item.start_line==nil)~=(item.end_line==nil) then return {error='selection_line_range_requires_both',edit=i} end
+      if item.start_line~=nil and (not integer(item.start_line,nil,2147483647) or not integer(item.end_line,nil,2147483647)) then
+        return {error='invalid_selection_line_range',edit=i}
+      end
       for key in pairs(item) do
-        if key~='selection' and key~='replacement_lines' then return {error='unsupported_range_edit_field',edit=i} end
+        if key~='selection' and key~='replacement_lines' and key~='start_line' and key~='end_line' then
+          return {error='unsupported_range_edit_field',edit=i}
+        end
       end
       for line,value in ipairs(item.replacement_lines) do
         if type(value)~='string' then return {error='replacement_line_must_be_string',edit=i,line=line} end
@@ -298,21 +335,61 @@ function M.edit(args,record)
   local ranges={}
   for i,item in ipairs(edits) do
     if range_form then
-      local selection=item.selection
-      local selection_allowed={path=true,version=true,start_byte=true,end_byte=true,sha256=true}
-      for key in pairs(selection) do
-        if not selection_allowed[key] then return {error='unsupported_selection_field',edit=i,field=key} end
+      local selection
+      if type(item.selection)=='string' then
+        local problem
+        selection,problem=parse_selection_receipt(item.selection,args.path)
+        if not selection then
+          return {error=problem,edit=i,note='Copy read.selection unchanged. Use start_line/end_line to target a subset; never edit the receipt.'}
+        end
+      else
+        -- Compatibility for calls already present in transcripts and mixed-version peers. New
+        -- model schemas expose only opaque string receipts, but a rollout must not strand a live
+        -- session merely because it learned the preceding object form.
+        selection=item.selection
+        local selection_allowed={path=true,version=true,start_byte=true,end_byte=true,sha256=true}
+        for key in pairs(selection) do
+          if not selection_allowed[key] then return {error='unsupported_selection_field',edit=i,field=key} end
+        end
+        if selection.path~=args.path then return {error='selection_path_mismatch',edit=i} end
       end
-      if selection.path~=args.path then return {error='selection_path_mismatch',edit=i} end
-      if selection.version~=args.version then return {error='selection_version_mismatch',edit=i} end
+      if type(selection.version)~='string' or selection.version=='' then return {error='selection_version_required',edit=i} end
+      if args.version and selection.version~=args.version then return {error='selection_version_mismatch',edit=i} end
+      if selection.version~=hash then return {error='stale_selection',edit=i,version=hash} end
       local a,b=selection.start_byte,selection.end_byte
       if type(a)~='number' or a%1~=0 or type(b)~='number' or b%1~=0 or
           a<1 or b<=a or b>#text+1 or type(selection.sha256)~='string' then
         return {error='invalid_selection',edit=i}
       end
       local selected=text:sub(a,b-1)
-      if host.sha256(selected)~=selection.sha256 then return {error='selection_hash_mismatch',edit=i} end
-      local eol,eol_error=range_eol(selected)
+      if host.sha256(selected)~=selection.sha256 then
+        return {error='selection_hash_mismatch',edit=i,
+          note='The selection coordinates were changed without a matching receipt. Copy read.selection unchanged and use start_line/end_line for a subset.'}
+      end
+      if not selection.start_line then
+        local first_line=1
+        for _ in text:sub(1,a-1):gmatch('\n') do first_line=first_line+1 end
+        local count=1
+        for at in selected:gmatch('()\n') do if at<#selected then count=count+1 end end
+        selection.start_line,selection.end_line=first_line,first_line+count-1
+      end
+      local target=selected
+      if item.start_line~=nil then
+        if item.start_line>item.end_line or item.start_line<selection.start_line or item.end_line>selection.end_line then
+          return {error='selection_line_range_out_of_bounds',edit=i,
+            selection_start_line=selection.start_line,selection_end_line=selection.end_line}
+        end
+        local starts={1}
+        for at in selected:gmatch('()\n') do if at<#selected then starts[#starts+1]=at+1 end end
+        if #starts~=selection.end_line-selection.start_line+1 then return {error='selection_receipt_invalid',edit=i} end
+        local first=item.start_line-selection.start_line+1
+        local last=item.end_line-selection.start_line+1
+        local relative_a=starts[first]
+        local relative_b=starts[last+1] or (#selected+1)
+        a=a+relative_a-1;b=selection.start_byte+relative_b-1
+        target=text:sub(a,b-1)
+      end
+      local eol,eol_error=range_eol(target)
       if eol_error=='mixed_line_endings' then return {error='selection_mixed_line_endings',edit=i} end
       if not eol then
         eol,eol_error=range_eol(text)
@@ -320,7 +397,7 @@ function M.edit(args,record)
         eol=eol or "\n"
       end
       local replacement=table.concat(item.replacement_lines,eol)
-      if selected:sub(-1)=="\n" and #item.replacement_lines>0 then replacement=replacement..eol end
+      if target:sub(-1)=="\n" and #item.replacement_lines>0 then replacement=replacement..eol end
       ranges[#ranges+1]={a=a,b=b-1,text=replacement,index=i}
     else
       local a,b=text:find(item.old_text,1,true)

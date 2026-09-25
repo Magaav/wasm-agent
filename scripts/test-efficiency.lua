@@ -56,32 +56,32 @@ local kept=host.read_file(crlf)
 check(kept:find('\r\n',1,true)~=nil and kept:find('alpha\r\nBETA\r\ngamma',1,true)~=nil,
   'and the file must keep its own endings, got: '..tostring(kept))
 
--- A model edit no longer identifies bytes by reproducing them through JSON. `read` supplies a
--- snapshot-bound selection, and replacement_lines carries line structure separately from content.
--- This is the recorded failure shape: JSON decoding leaves literal backslash-r/backslash-n in one
--- logical line. The compatibility path still refuses it rather than guessing; model dispatch never
--- lets that legacy form reach matching at all.
+-- A model edit no longer identifies bytes by reproducing them through JSON. `read` supplies an
+-- opaque, snapshot-bound receipt and replacement_lines carries line structure separately. The
+-- receipt is copied, never reconstructed; the edit derives its version from it.
 local selected=files.read({path=crlf,offset=1,limit=2})
-check(selected.selection~=nil and selected.selection.path==crlf
-  and selected.selection.version==selected.version
-  and selected.selection.sha256==host.sha256(selected.content),
-  'a complete whole-line read returns a selection for exactly its returned bytes')
+check(type(selected.selection)=='string' and selected.selection:find('^sel1:')~=nil,
+  'a complete whole-line read returns an opaque selection receipt')
 local recorded=json.decode(json.encode({path=crlf,old_text='alpha\\r\\nBETA',new_text='wrong'}))
 check(recorded.old_text:find('\\r\\n',1,true)~=nil and recorded.old_text:find('\n',1,true)==nil,
   'the recorded doubled escape crosses JSON as literal characters in one line')
 check(files.edit(recorded).error=='old_text_not_found',
   'legacy compatibility never guesses that literal escapes meant structural newlines')
-check(tools.dispatch(memory,'edit',recorded,'master',{model_call=true}).error=='legacy_edit_form_not_model_available',
-  'a model-origin legacy edit is refused before matching')
-check(tools.dispatch(memory,'remote',{node='missing-on-purpose',capability='edit',args=recorded},
-  'master',{model_call=true}).error=='legacy_edit_form_not_model_available',
-  'a model cannot tunnel a legacy edit through remote routing')
+
+-- A schema rollout must not strand a live session. Old model calls still reach the exact legacy
+-- matcher, while the new advertised schema supplies only receipts.
+local compatibility=save('legacy-compatible','before\n')
+check(tools.dispatch(memory,'edit',{path=compatibility,old_text='before',new_text='after'},
+  'master',{model_call=true}).ok,
+  'a valid legacy call already in a model transcript remains compatible during rollout')
+check(tools.dispatch(memory,'edit',recorded,'master',{model_call=true}).error=='old_text_not_found',
+  'a legacy model call is compatible without weakening exact matching')
 
 local range_result=tools.dispatch(memory,'edit',{
-  path=crlf,version=selected.version,range_edits={{selection=selected.selection,
+  path=crlf,range_edits={{selection=selected.selection,
     replacement_lines={'ALPHA','literal \\r\\n stays text'}}}
 },'master',{model_call=true})
-check(range_result.ok==true, 'a model-origin selection edit succeeds: '..tostring(range_result.error))
+check(range_result.ok==true, 'a receipt supplies its version without a duplicate top-level field: '..tostring(range_result.error))
 kept=host.read_file(crlf)
 check(kept=='ALPHA\r\nliteral \\r\\n stays text\r\ngamma\r\n',
   'selection editing preserves CRLF/trailing EOL while literal escape text stays on one line')
@@ -91,14 +91,12 @@ for _,tool in ipairs(tools.all('master')) do
   if tool['function'].name=='edit' then advertised_edit=tool['function'].parameters end
 end
 local advertised=advertised_edit and advertised_edit.properties or {}
-check(advertised.range_edits~=nil and advertised.old_text==nil and advertised.new_text==nil
-  and advertised.edits==nil,
-  'the model-facing edit contract exposes selections, never copied anchors')
-
--- Runtime and mixed-version callers remain compatible, but trusted model origin is the boundary.
-local compatibility=save('legacy-compatible','before\n')
-check(tools.dispatch(memory,'edit',{path=compatibility,old_text='before',new_text='after'},'master').ok,
-  'non-model runtime callers retain legacy edit compatibility')
+local advertised_range=advertised.range_edits and advertised.range_edits.items.properties or {}
+check(advertised.range_edits~=nil and advertised.version==nil and advertised.old_text==nil
+  and advertised.new_text==nil and advertised.edits==nil
+  and advertised_range.selection and advertised_range.selection.type=='string'
+  and advertised_range.start_line and advertised_range.end_line,
+  'the model-facing contract exposes one opaque receipt, optional line slicing, and no duplicate version')
 
 local function selection_copy(value)
   local copy={}
@@ -107,50 +105,84 @@ local function selection_copy(value)
 end
 local duplicates=save('range-duplicates','same\nsame\nlast\n')
 local duplicate_read=files.read({path=duplicates,offset=2,limit=1})
-check(files.edit({path=duplicates,version=duplicate_read.version,range_edits={{
+check(files.edit({path=duplicates,range_edits={{
   selection=duplicate_read.selection,replacement_lines={'SECOND'}}}}).ok
   and host.read_file(duplicates)=='same\nSECOND\nlast\n',
-  'a selection addresses the chosen duplicate without content ambiguity')
+  'an opaque selection addresses the chosen duplicate without content ambiguity')
 
 local stale_read=files.read({path=duplicates,offset=1,limit=1})
 host.write_file(duplicates,'changed\nSECOND\nlast\n')
-check(files.edit({path=duplicates,version=stale_read.version,range_edits={{
+check(files.edit({path=duplicates,range_edits={{
   selection=stale_read.selection,replacement_lines={'NO'}}}}).error=='stale_selection',
-  'a selection from a stale file version is refused distinctly')
+  'a receipt from a stale file version is refused distinctly')
 
+-- This is the measured model behaviour from the live run: it read a wider page, wanted a smaller
+-- range, and changed end_byte while retaining the page digest. Line slicing makes that intent an
+-- explicit operation while the receipt itself remains unchanged.
 local guarded=save('range-guarded','one\ntwo\nthree\n')
-local guarded_one=files.read({path=guarded,offset=1,limit=2})
-local guarded_two=files.read({path=guarded,offset=2,limit=1,version=guarded_one.version})
-local wrong_path=selection_copy(guarded_one.selection);wrong_path.path=guarded..'.other'
-check(files.edit({path=guarded,version=guarded_one.version,range_edits={{
-  selection=wrong_path,replacement_lines={'NO'}}}}).error=='selection_path_mismatch',
-  'a selection is bound to its path')
-local out_of_bounds=selection_copy(guarded_one.selection);out_of_bounds.end_byte=1000000
-check(files.edit({path=guarded,version=guarded_one.version,range_edits={{
-  selection=out_of_bounds,replacement_lines={'NO'}}}}).error=='invalid_selection',
-  'an out-of-bounds selection is refused')
-check(files.edit({path=guarded,version=guarded_one.version,old_text='one',new_text='NO',range_edits={{
-  selection=guarded_one.selection,replacement_lines={'NO'}}}}).error=='mixed_edit_forms',
-  'legacy and selection forms cannot be mixed')
-check(files.edit({path=guarded,version=guarded_one.version,range_edits={{
-  selection=guarded_one.selection,replacement_lines={'bad\nline'}}}}).error=='replacement_line_contains_newline',
+local guarded_page=files.read({path=guarded,offset=1,limit=3})
+check(files.edit({path=guarded,range_edits={{selection=guarded_page.selection,
+  start_line=2,end_line=2,replacement_lines={'TWO'}}}}).ok
+  and host.read_file(guarded)=='one\nTWO\nthree\n',
+  'an unchanged receipt can replace an inclusive source-line subset')
+
+local current_page=files.read({path=guarded,offset=1,limit=3})
+local current_two=files.read({path=guarded,offset=2,limit=1,version=current_page.version})
+local last=current_page.selection:sub(-1)
+local tampered=current_page.selection:sub(1,-2)..(last=='0' and '1' or '0')
+local tamper_result=files.edit({path=guarded,range_edits={{selection=tampered,replacement_lines={'NO'}}}})
+check(tamper_result.error=='selection_receipt_modified' and tamper_result.note:find('Copy read.selection unchanged',1,true),
+  'a modified receipt is refused with the exact recovery action')
+local other=save('range-other-path','other\n')
+check(files.edit({path=other,range_edits={{selection=current_page.selection,replacement_lines={'NO'}}}}).error=='selection_path_mismatch',
+  'a receipt is bound to its path')
+check(files.edit({path=guarded,range_edits={{selection=current_page.selection,
+  start_line=2,replacement_lines={'NO'}}}}).error=='selection_line_range_requires_both',
+  'a partial line slice is refused before mutation')
+check(files.edit({path=guarded,range_edits={{selection=current_page.selection,
+  start_line=2,end_line=20,replacement_lines={'NO'}}}}).error=='selection_line_range_out_of_bounds',
+  'a line slice must remain inside the returned selection')
+check(files.edit({path=guarded,old_text='one',new_text='NO',range_edits={{
+  selection=current_page.selection,replacement_lines={'NO'}}}}).error=='mixed_edit_forms',
+  'legacy and receipt forms cannot be mixed')
+check(files.edit({path=guarded,range_edits={{
+  selection=current_page.selection,replacement_lines={'bad\nline'}}}}).error=='replacement_line_contains_newline',
   'replacement line structure cannot be smuggled inside a string')
-check(files.edit({path=guarded,version=guarded_one.version,range_edits={
-  {selection=guarded_one.selection,replacement_lines={'ONE'}},
-  {selection=guarded_two.selection,replacement_lines={'TWO'}}}}).error=='overlapping_edits'
-  and host.read_file(guarded)=='one\ntwo\nthree\n',
-  'overlapping selection batches fail before writing')
+check(files.edit({path=guarded,range_edits={
+  {selection=current_page.selection,start_line=1,end_line=2,replacement_lines={'ONE','TWO'}},
+  {selection=current_two.selection,replacement_lines={'two'}}}}).error=='overlapping_edits'
+  and host.read_file(guarded)=='one\nTWO\nthree\n',
+  'overlapping receipt batches fail before writing')
+
+-- Object selections and a duplicate top-level version remain accepted for calls already in old
+-- transcripts and mixed-version peers, but they are no longer advertised to new model calls.
+local legacy_range=save('legacy-range','one\ntwo\n')
+local legacy_text=host.read_file(legacy_range)
+local legacy_version=host.sha256(legacy_text)
+local legacy_selection={path=legacy_range,version=legacy_version,start_byte=1,
+  end_byte=#legacy_text+1,sha256=host.sha256(legacy_text)}
+check(files.edit({path=legacy_range,range_edits={{selection=legacy_selection,
+  replacement_lines={'ONE','TWO'}}}}).ok,
+  'an object selection no longer needs the redundant top-level version')
+legacy_text=host.read_file(legacy_range);legacy_version=host.sha256(legacy_text)
+legacy_selection={path=legacy_range,version=legacy_version,start_byte=1,
+  end_byte=#legacy_text+1,sha256=host.sha256(legacy_text)}
+local shortened=selection_copy(legacy_selection);shortened.end_byte=5
+local mismatch=files.edit({path=legacy_range,version=legacy_version,range_edits={{
+  selection=shortened,replacement_lines={'NO'}}}})
+check(mismatch.error=='selection_hash_mismatch' and mismatch.note:find('start_line/end_line',1,true),
+  'an old object with changed coordinates gets actionable subset guidance')
 
 local mixed=save('range-mixed-eol','one\r\ntwo\n')
 local mixed_read=files.read({path=mixed,offset=1,limit=2})
-check(files.edit({path=mixed,version=mixed_read.version,range_edits={{
+check(files.edit({path=mixed,range_edits={{
   selection=mixed_read.selection,replacement_lines={'ONE','TWO'}}}}).error=='selection_mixed_line_endings'
   and host.read_file(mixed)=='one\r\ntwo\n',
   'a mixed-EOL selection is refused instead of silently normalised')
 
 local no_final=save('range-no-final-eol','one')
 local no_final_read=files.read({path=no_final,offset=1,limit=1})
-check(files.edit({path=no_final,version=no_final_read.version,range_edits={{
+check(files.edit({path=no_final,range_edits={{
   selection=no_final_read.selection,replacement_lines={'ONE','TWO'}}}}).ok
   and host.read_file(no_final)=='ONE\nTWO',
   'a selection without a trailing EOL stays without one')

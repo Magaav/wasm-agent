@@ -141,18 +141,16 @@ M.admin = {
   }, { "requests" }),
   schema("write", "Create or overwrite a text file with the given content.", {
     path = { type = "string" }, content = { type = "string" } }, { "path", "content" }),
-  schema("edit", "Replace complete text ranges returned as read.selection. Copy each selection unchanged and provide replacement_lines without CR/LF characters; the file's selected line ending and trailing-newline state are preserved. All ranges are versioned, validated against one snapshot and applied atomically. Re-read for a selection when read did not return one. No multi-file transaction.", {
-    path = { type = "string" }, version = { type = "string" },
+  schema("edit", "Replace ranges from read.selection. Copy the opaque selection string unchanged. To replace only part of a read, add both start_line and end_line as inclusive source line numbers inside that selection; never alter the selection itself. Provide replacement_lines without CR/LF characters. The receipt supplies path-bound version safety, so no separate version is needed. All ranges are validated against one snapshot and applied atomically. No multi-file transaction.", {
+    path = { type = "string" },
     range_edits = { type = "array", minItems = 1, maxItems = 64, items = { type = "object",
       properties = {
-        selection = { type = "object", properties = {
-          path = {type="string"}, version = {type="string"},
-          start_byte = {type="integer",minimum=1}, end_byte = {type="integer",minimum=2},
-          sha256 = {type="string"}
-        }, required = {"path","version","start_byte","end_byte","sha256"} },
+        selection = { type = "string", description = "Opaque receipt returned by read.selection. Copy it unchanged." },
+        start_line = {type="integer",minimum=1,description="Optional inclusive source line; provide together with end_line to edit a subset of the selection."},
+        end_line = {type="integer",minimum=1,description="Optional inclusive source line; provide together with start_line to edit a subset of the selection."},
         replacement_lines = {type="array",maxItems=2000,items={type="string"}}
       }, required = {"selection","replacement_lines"} } }
-  }, { "path", "version", "range_edits" }),
+  }, { "path", "range_edits" }),
   schema("ls", "List a directory (portable: works the same on every platform).", { path = { type = "string" } }),
   schema("grep", "Literal substring search, not regex. Reports omitted files and clipped lines. Use a path to narrow the search, and read the matched range afterwards rather than whole files. Results use the supplied root; extensions are exact suffixes without dots.", {
     pattern = { type = "string" }, path = { type = "string" },
@@ -486,23 +484,6 @@ local function run(command, timeout_seconds, cwd)
   return decoded
 end
 
--- Tool schemas steer the provider but are not a trust boundary: provider calls are decoded and
--- dispatched directly, and old transcript rows can still contain obsolete argument shapes. Keep
--- compatibility for direct/runtime and mixed-version node callers, while enforcing the current
--- contract for calls that came from a model in agent.lua. The check also closes the remote tunnel.
-local function model_call_contract(name,args,ctx)
-  if not ctx.model_call then return nil end
-  local function legacy_edit(value)
-    return type(value)=='table' and
-      (value.old_text~=nil or value.new_text~=nil or value.edits~=nil)
-  end
-  if name=='edit' and legacy_edit(args) then return {error='legacy_edit_form_not_model_available'} end
-  if name=='remote' and args.capability=='edit' and legacy_edit(args.args) then
-    return {error='legacy_edit_form_not_model_available',capability='edit'}
-  end
-  return nil
-end
-
 function M.dispatch(memory, name, args, role, ctx)
   args = args or {}
   role = role or "master"
@@ -517,8 +498,6 @@ function M.dispatch(memory, name, args, role, ctx)
     if name == "subagent" then return { error = "subagent_recursion_forbidden" } end
   end
   if not is_master(role) and admin_names()[name] then return { error = "forbidden_for_role:" .. role } end
-  local contract_error=model_call_contract(name,args,ctx)
-  if contract_error then return contract_error end
   if name == "operation" then
     if not is_master(role) then return {error="forbidden_for_role:" .. role} end
     args.owner = ctx.session_id or user_id
