@@ -75,6 +75,32 @@ ok(thread2 == "abc", "and the thread it names is returned")
 local text3, _, _, thread3 = wa_parse_run_body("just words")
 ok(text3 == "just words" and thread3 == nil, "a plain body is unchanged")
 
+-- Automatic recovery carries the exact tail it read. A second window's queued
+-- continuation must not run after the first has already advanced the ledger.
+local recovery = fresh()
+memory.start_session("", "chat", { id = recovery, user_id = "master", node_id = "", title = "recovery" })
+memory.append_turn(recovery, { role = "user", content = "run it" })
+memory.append_turn(recovery, { role = "assistant", content = "", tool_calls = {
+  { id = "call-one", type = "function", ["function"] = { name = "bash", arguments = "{}" } },
+} })
+local unfinished_seq = memory.session_state(recovery).seq
+ok(not wa_resume_guard(recovery, unfinished_seq), "a missing tool result cannot auto-resume")
+memory.append_turn(recovery, { role = "tool", tool_call_id = "call-one", tool_name = "bash", content = "done" })
+local recorded_seq = memory.session_state(recovery).seq
+local parsed, _, _, parsed_thread, parsed_seq = wa_parse_run_body(
+  '{"text":"continue where you stopped","thread":"' .. recovery .. '","resume_seq":' .. recorded_seq .. '}')
+ok(parsed == "continue where you stopped" and parsed_thread == recovery and parsed_seq == recorded_seq,
+  "a guarded continuation must carry its thread and observed sequence")
+ok(wa_resume_guard(recovery, recorded_seq), "a fully recorded tool batch may auto-resume")
+ok(not wa_resume_guard(recovery, recorded_seq - 1), "a stale sequence must not resume")
+ok(not wa_resume_guard(recovery, "bad"), "an invalid sequence must be refused")
+memory.append_turn(recovery, { role = "user", content = "continue where you stopped" })
+ok(not wa_resume_guard(recovery, recorded_seq), "the same recovery must not run twice")
+local stale = dofile("lua/vendor/json.lua").decode(wa_reply(
+  '{"text":"continue where you stopped","thread":"' .. recovery .. '","resume_seq":' .. recorded_seq .. '}', "", ""))
+ok(stale.error == "resume_tail_changed", "the chat route must reject a stale continuation before inference")
+ok(wa_resume_guard(recovery, nil), "ordinary requested turns remain unchanged")
+
 -- 6. A foreign thread is refused, and the refusal is the safety boundary.
 --
 -- The login must go through `wa_login`, not `users.login`: `dofile` re-executes a module,
