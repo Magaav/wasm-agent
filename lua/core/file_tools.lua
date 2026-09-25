@@ -67,6 +67,21 @@ local function parse_selection_receipt(receipt,path)
     start_line=start_line,end_line=end_line,sha256=content_sha}
 end
 
+-- The line a byte sits on, counting from 1. `edit` uses it to say which lines it actually replaced:
+-- a caller that addressed a range by line number has no other way to see that it hit the lines it
+-- meant, and a wrong-but-in-bounds range is otherwise indistinguishable from a right one.
+local function line_of(text,byte)
+  local line=1
+  for _ in text:sub(1,math.max(byte-1,0)):gmatch('\n') do line=line+1 end
+  return line
+end
+
+-- One recognisable line of what a range held: whitespace collapsed, bounded, never a newline. The
+-- echo exists to be *seen*, so it has to survive the tool envelope on one line.
+local function snippet(value)
+  return (value:gsub('%s+',' '):gsub('^ ','')):sub(1,120)
+end
+
 -- Match the node's existing request-body ceiling. This is a refusal boundary, not
 -- an excuse to silently resize or recompress an image the model was asked to inspect.
 local IMAGE_MAX_BYTES=4*1000*1000
@@ -170,7 +185,11 @@ function M.read(args,store_image)
     -- cannot accidentally trim byte coordinates while retaining the digest for the wider page.
     if column==1 and next_byte>last and #part>0 and line<=total then
       result.selection=selection_receipt(args.path,hash,first,last+1,line,result.end_offset,host.sha256(part))
-      result.note=result.note..' Copy selection unchanged into edit; use start_line/end_line there to replace only part of it.'
+      -- The frame the receipt addresses, in the open. An edit inside a receipt is addressed by these
+      -- numbers, the page is deliberately unnumbered, and counting them by eye is how a caller lands
+      -- on the wrong lines. These are the same two numbers the receipt carries.
+      result.edit_lines={start_line=line,end_line=result.end_offset}
+      result.note=result.note..' Copy selection unchanged into edit; start_line/end_line are inclusive lines inside edit_lines.'
     end
     return result
   end
@@ -398,7 +417,7 @@ function M.edit(args,record)
       end
       local replacement=table.concat(item.replacement_lines,eol)
       if target:sub(-1)=="\n" and #item.replacement_lines>0 then replacement=replacement..eol end
-      ranges[#ranges+1]={a=a,b=b-1,text=replacement,index=i}
+      ranges[#ranges+1]={a=a,b=b-1,text=replacement,index=i,target=target}
     else
       local a,b=text:find(item.old_text,1,true)
       if not a then
@@ -421,7 +440,7 @@ function M.edit(args,record)
       end
       -- Overlapping occurrences are ambiguous too (e.g. 'aa' in 'aaa').
       if text:find(item.old_text,a+1,true) then return {error='old_text_ambiguous',edit=i} end
-      ranges[#ranges+1]={a=a,b=b,text=item.new_text,index=i}
+      ranges[#ranges+1]={a=a,b=b,text=item.new_text,index=i,target=text:sub(a,b)}
     end
   end
   table.sort(ranges,function(a,b)return a.a<b.a end)
@@ -432,14 +451,27 @@ function M.edit(args,record)
   end
   parts[#parts+1]=text:sub(position)
   local updated=table.concat(parts)
+  -- What each range actually replaced, so the caller can see the address it hit instead of assuming it.
+  -- A slice inside a receipt is in-bounds or refused and never diagnosed: the receipt proves the page,
+  -- not the part of it the caller meant. No refusal can catch a wrong-but-in-bounds slice, so this echo
+  -- is the evidence, and reading it is part of using the form.
+  local replaced={}
+  for _,r in ipairs(ranges) do
+    local first_line=line_of(text,r.a)
+    local last_line=line_of(text,r.b)
+    local body=r.target:sub(-1)=='\n' and r.target:sub(1,-2) or r.target
+    replaced[#replaced+1]={edit=r.index,first_line=first_line,last_line=last_line,
+      lines=last_line-first_line+1,bytes=#r.target,sha256=host.sha256(r.target),
+      first=snippet(body:match('^[^\r\n]*') or ''),last=snippet(body:match('[^\r\n]*$') or '')}
+  end
   -- Detect intervening changes before writing. Not an OS-wide CAS against arbitrary editors.
   if host.read_file(args.path)~=text then return {error='file_changed_before_write'} end
-  if updated==text then return {ok=true,path=args.path,edits=#ranges,version=hash,previous_version=hash,no_change=true} end
+  if updated==text then return {ok=true,path=args.path,edits=#ranges,version=hash,previous_version=hash,no_change=true,replaced=replaced} end
   if not host.write_file(args.path,updated) then return {ok=false,error='write_failed',path=args.path,outcome='unknown',note='Inspect the file before retrying.'} end
   if record then
     local ok=pcall(record,args.path,text,updated)
     if not ok then return {ok=false,error='edit_applied_but_record_failed',path=args.path,version=host.sha256(updated)} end
   end
-  return {ok=true,path=args.path,edits=#ranges,previous_version=hash,version=host.sha256(updated)}
+  return {ok=true,path=args.path,edits=#ranges,previous_version=hash,version=host.sha256(updated),replaced=replaced}
 end
 return M

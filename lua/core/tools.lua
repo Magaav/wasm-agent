@@ -128,7 +128,7 @@ M.admin = {
     stream = { type = "string", enum = {"stdout", "stderr"} }, offset = { type = "integer", minimum = 0 },
     limit = { type = "integer", minimum = 1, maximum = 24576 }, wait_ms = { type = "integer", minimum = 0, maximum = 10000 }
   }, {"action"}),
-  schema("read", "Read a PNG, JPEG, WebP or GIF up to 4 MB as visual input, or read exact text with versioned line/byte-column continuation. Image type is detected from its bytes; ranges apply only to text. For text, ask for the range you need rather than a whole file, and follow next_offset/next_column with version until eof.", {
+  schema("read", "Read a PNG, JPEG, WebP or GIF up to 4 MB as visual input, or read exact text with versioned line/byte-column continuation. Image type is detected from its bytes; ranges apply only to text. For text, ask for the range you need rather than a whole file, and follow next_offset/next_column with version until eof. A whole-line page also carries `selection`, its opaque edit address, and `edit_lines`, the inclusive line frame an edit inside it may name - so a line range is copied rather than counted.", {
     path = { type = "string" },
     offset = { type = "integer", minimum = 1 },
     column = { type = "integer", minimum = 1 }, version = { type = "string" },
@@ -141,16 +141,21 @@ M.admin = {
   }, { "requests" }),
   schema("write", "Create or overwrite a text file with the given content.", {
     path = { type = "string" }, content = { type = "string" } }, { "path", "content" }),
-  schema("edit", "Replace ranges from read.selection. Copy the opaque selection string unchanged. To replace only part of a read, add both start_line and end_line as inclusive source line numbers inside that selection; never alter the selection itself. Provide replacement_lines without CR/LF characters. The receipt supplies path-bound version safety, so no separate version is needed. All ranges are validated against one snapshot and applied atomically. No multi-file transaction.", {
+  schema("edit", "Replace text in one file, in one of two addressing forms, never both. `edits` quotes the exact bytes you can see (old_text/new_text): it must occur exactly once, a miss is refused with the nearest region rather than guessed, and it needs no receipt - this is the form that cannot hit the wrong place. `range_edits` copies a read receipt (selection, unchanged) with replacement_lines and is for replacing structure whose line endings matter, or text that is not quotable; its optional start_line/end_line are inclusive lines inside the receipt's edit_lines frame. Every range is validated against one snapshot and applied atomically, and the result names what each range actually replaced (first_line, last_line, lines, bytes, sha256, first, last) - read that echo, because a slice that stays inside its receipt is never diagnosed for you. No multi-file transaction.", {
     path = { type = "string" },
+    edits = { type = "array", minItems = 1, maxItems = 64, items = { type = "object",
+      properties = {
+        old_text = { type = "string", description = "Exact bytes to replace, copied from a read; must occur exactly once in the file." },
+        new_text = { type = "string", description = "Replacement bytes; empty deletes the quoted text." }
+      }, required = {"old_text","new_text"} } },
     range_edits = { type = "array", minItems = 1, maxItems = 64, items = { type = "object",
       properties = {
         selection = { type = "string", description = "Opaque receipt returned by read.selection. Copy it unchanged." },
-        start_line = {type="integer",minimum=1,description="Optional inclusive source line; provide together with end_line to edit a subset of the selection."},
-        end_line = {type="integer",minimum=1,description="Optional inclusive source line; provide together with start_line to edit a subset of the selection."},
+        start_line = {type="integer",minimum=1,description="Optional inclusive source line inside the receipt's edit_lines frame; provide together with end_line."},
+        end_line = {type="integer",minimum=1,description="Optional inclusive source line inside the receipt's edit_lines frame; provide together with start_line."},
         replacement_lines = {type="array",maxItems=2000,items={type="string"}}
       }, required = {"selection","replacement_lines"} } }
-  }, { "path", "range_edits" }),
+  }, { "path" }),
   schema("ls", "List a directory (portable: works the same on every platform).", { path = { type = "string" } }),
   schema("grep", "Literal substring search, not regex. Reports omitted files and clipped lines. Use a path to narrow the search, and read the matched range afterwards rather than whole files. Results use the supplied root; extensions are exact suffixes without dots.", {
     pattern = { type = "string" }, path = { type = "string" },

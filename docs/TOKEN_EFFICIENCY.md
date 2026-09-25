@@ -147,24 +147,42 @@ results, test outcomes or external state are substituted by this cache. This sav
 re-indexing, not file I/O or hashing. The underlying read still loads the file;
 bounded pages/index cache are **not** a bound on whole-file memory or filesystem time.
 
-The model-facing `edit` accepts up to 64 `range_edits`, each carrying a `selection`
-receipt copied unchanged from `read` and `replacement_lines` whose elements contain
-no CR/LF. The receipt supplies its version; there is no duplicate top-level version.
-Optional inclusive `start_line`/`end_line` fields select a whole-line subset inside
-the receipt without changing its byte coordinates or digest. Line structure is
-therefore typed separately from source text: the model never has to re-encode a
-multi-line anchor or its newline bytes. The target range's one EOL form and
-trailing-newline state are preserved; a mixed-EOL target is refused rather than
-silently normalised. Receipts are path- and version-bound, and every range is
-resolved against one original snapshot. Overlap or any invalid later range rejects
-the whole batch before writing.
+The model-facing `edit` has two addressing forms, and the address is evidence.
+
+`edits` quotes the exact bytes to replace (`old_text`/`new_text`). It is the form to
+reach for when the text is quotable, because it cannot hit the wrong place: the
+anchor must occur exactly once, and a miss is refused with the nearest region
+instead of being guessed at. Its cost is the failure mode the ledger already
+measures - an anchor that was never in anything the session read.
+
+`range_edits` copies a `selection` receipt from `read`, up to 64 of them, each with
+`replacement_lines` whose elements contain no CR/LF. Use it for structure whose
+newline bytes matter, or text that is not quotable: line structure is typed
+separately from source text, so a multi-line replacement never re-encodes an
+anchor's newlines. The read that produced the receipt also names the frame it
+addresses in `edit_lines`, and optional inclusive `start_line`/`end_line` select a
+whole-line subset inside it without changing the receipt's byte coordinates or
+digest - so a slice is copied rather than counted. The receipt supplies its version;
+there is no duplicate top-level version. Path- and version-bound, and every range is
+resolved against one original snapshot: overlap or any invalid later range rejects
+the whole batch before writing. The target's one EOL form and trailing-newline state
+are preserved, and a mixed-EOL target is refused rather than silently normalised.
+
+**A slice inside a receipt is in-bounds or refused, never diagnosed.** The receipt
+proves the page, not the part of it the caller meant, so a wrong-but-in-bounds slice
+is accepted: four in one session took unrelated lines with a replacement, left a
+stray closer behind, and deleted a match arm - every one returned `ok: true`. The
+result therefore names what each range actually replaced (`first_line`, `last_line`,
+`lines`, `bytes`, `sha256`, and the first and last line as text), and reading that
+echo is part of using the form. No refusal can catch this case; the echo is what
+makes it visible in the same round.
 
 The runtime still accepts the former object selections, duplicate top-level version
 and `old_text` forms for calls already stored in active transcripts and for
-mixed-version peer nodes. They are compatibility inputs, not advertised model
-schema. Legacy anchors retain exact matching and never guess that literal `\\r\\n`
-or `\\n` text meant structural newlines. This keeps a schema rollout from causing a
-known first-call failure without weakening the new receipt path.
+mixed-version peers, and quoted anchors are advertised again beside receipts -
+the form that cannot hit the wrong place. Anchors keep exact matching and never guess that a doubled escape meant a structural
+newline: that miss is refused, with the nearest region named. A schema rollout can
+neither strand a live session nor hide a misquote.
 
 A second read detects intervening changes before the write. Successful changes retain
 the existing changeset record. A recording failure after writing explicitly says the

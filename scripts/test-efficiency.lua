@@ -92,11 +92,17 @@ for _,tool in ipairs(tools.all('master')) do
 end
 local advertised=advertised_edit and advertised_edit.properties or {}
 local advertised_range=advertised.range_edits and advertised.range_edits.items.properties or {}
-check(advertised.range_edits~=nil and advertised.version==nil and advertised.old_text==nil
-  and advertised.new_text==nil and advertised.edits==nil
+-- Reversed deliberately. Anchors are advertised again beside receipts: a quoted anchor cannot hit the
+-- wrong place (it matches once or is refused with the nearest region), while the ledger shows the
+-- coordinate form failing silently - four wrong-but-in-bounds slices in one session, every one of them
+-- ok:true. Receipts stay advertised for structure whose line endings matter, which is what they fixed.
+local advertised_anchor=advertised.edits and advertised.edits.items.properties or {}
+check(advertised.range_edits~=nil and advertised.edits~=nil and advertised.version==nil
+  and advertised.old_text==nil and advertised.new_text==nil
   and advertised_range.selection and advertised_range.selection.type=='string'
-  and advertised_range.start_line and advertised_range.end_line,
-  'the model-facing contract exposes one opaque receipt, optional line slicing, and no duplicate version')
+  and advertised_range.start_line and advertised_range.end_line
+  and advertised_anchor.old_text and advertised_anchor.new_text,
+  'both addressing forms are advertised: a self-verifying anchor, and a receipt with optional line slicing')
 
 local function selection_copy(value)
   local copy={}
@@ -186,6 +192,38 @@ check(files.edit({path=no_final,range_edits={{
   selection=no_final_read.selection,replacement_lines={'ONE','TWO'}}}}).ok
   and host.read_file(no_final)=='ONE\nTWO',
   'a selection without a trailing EOL stays without one')
+-- An address has to be *visible*, not merely processed. A line slice inside a receipt is in-bounds or
+-- refused and never diagnosed, so a slice that took the wrong lines is only caught by reading the
+-- result - which is why the result now carries what each range actually replaced.
+local frame=save('frame','one\ntwo\nthree\nfour\n')
+local frame_page=files.read({path=frame,offset=2,limit=2})
+check(frame_page.edit_lines and frame_page.edit_lines.start_line==2 and frame_page.edit_lines.end_line==3
+  and frame_page.selection:find(':2:3:',1,true)~=nil,
+  'a whole-line read names the inclusive line frame an edit inside it may address')
+local copied=files.edit({path=frame,range_edits={{selection=frame_page.selection,
+  start_line=frame_page.edit_lines.start_line+1,end_line=frame_page.edit_lines.end_line,
+  replacement_lines={'THREE'}}}})
+check(copied.ok and host.read_file(frame)=='one\ntwo\nTHREE\nfour\n',
+  'a slice can be copied from that frame instead of counted: '..tostring(copied.error))
+check(copied.replaced and #copied.replaced==1 and copied.replaced[1].first_line==3
+  and copied.replaced[1].last_line==3 and copied.replaced[1].lines==1
+  and copied.replaced[1].first=='three' and copied.replaced[1].last=='three'
+  and copied.replaced[1].bytes==6 and copied.replaced[1].sha256==host.sha256('three\n'),
+  'and the result names the lines it replaced, with the bytes hashed')
+local mistook=save('mistook','alpha\nbeta\ngamma\ndelta\n')
+local mistook_page=files.read({path=mistook,offset=1,limit=4})
+local wrong=files.edit({path=mistook,range_edits={{selection=mistook_page.selection,
+  start_line=2,end_line=3,replacement_lines={'BETA'}}}})
+check(wrong.ok and wrong.replaced[1].first_line==2 and wrong.replaced[1].last_line==3
+  and wrong.replaced[1].lines==2 and wrong.replaced[1].first=='beta' and wrong.replaced[1].last=='gamma'
+  and wrong.replaced[1].sha256==host.sha256('beta\ngamma\n'),
+  'an in-bounds slice reports the lines it took, so a mis-addressed edit is visible in the same round')
+local anchored=save('anchored','alpha\nbeta\ngamma\ndelta\n')
+local echoed=files.edit({path=anchored,edits={{old_text='gamma',new_text='GAMMA'}}})
+check(echoed.ok and echoed.replaced[1].first_line==3 and echoed.replaced[1].last_line==3
+  and echoed.replaced[1].lines==1 and echoed.replaced[1].first=='gamma' and echoed.replaced[1].last=='gamma'
+  and echoed.replaced[1].sha256==host.sha256('gamma'),
+  'a quoted anchor reports the same address, so both forms are checkable after the fact')
 local absent=files.edit({path=crlf,edits={{old_text='nothing like this is here at all',new_text='X'}}})
 check(absent.error=='old_text_not_found', 'a genuinely absent anchor must still fail')
 
