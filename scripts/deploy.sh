@@ -411,6 +411,39 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
     cp -f "$source" "$INSTALL_DIR/scripts/" || fail "node installed, but could not ship $(basename "$source")"
     PIPELINE=$((PIPELINE + 1))
   done
+  # ...and the modules those scripts import, *derived from the imports* rather than listed by hand.
+  #
+  # The glob above ships `scripts/whatsapp-*` and nothing else, and that is how the install came to hold a
+  # reader whose own import was absent: `5cc38d1` moved the WebSocket runtime into
+  # `scripts/lib/websocket-runtime.mjs`, the install got the new `whatsapp-read.mjs` and no `lib/`, and every
+  # delivery then died at step 3 with ERR_MODULE_NOT_FOUND - 26 in a row, one per tick - while the deploy
+  # reported success. A pipeline that cannot start is not a deployed pipeline, and a hand-written list would
+  # have been wrong in exactly the same way one commit later. So the list is the imports.
+  MODULES=""
+  for source in "$ROOT"/scripts/whatsapp-*; do
+    [ -f "$source" ] || continue
+    MODULES="$MODULES$(grep -o '\./lib/[A-Za-z0-9._-]*' "$source" 2>/dev/null | sed 's|^\./lib/||')
+"
+  done
+  MODULES="$(printf '%s' "$MODULES" | sed '/^$/d' | sort -u)"
+  for module in $MODULES; do
+    [ -f "$ROOT/scripts/lib/$module" ] \
+      || fail "a shipped script imports scripts/lib/$module, which is not in this tree"
+    mkdir -p "$INSTALL_DIR/scripts/lib" || fail "node installed, but could not create $INSTALL_DIR/scripts/lib"
+    cp -f "$ROOT/scripts/lib/$module" "$INSTALL_DIR/scripts/lib/" \
+      || fail "node installed, but could not ship scripts/lib/$module"
+    PIPELINE=$((PIPELINE + 1))
+  done
+  # And prove the install is import-closed, so a script that cannot load is a refused deploy instead of a
+  # silent run of failing deliveries: every relative import of a shipped script must resolve inside
+  # <install>/scripts, next to the script that names it.
+  for source in "$INSTALL_DIR"/scripts/whatsapp-*; do
+    [ -f "$source" ] || continue
+    for relative in $(grep -o '\./[A-Za-z0-9._/-]*' "$source" 2>/dev/null | sort -u); do
+      [ -f "$INSTALL_DIR/scripts/${relative#./}" ] \
+        || fail "$(basename "$source") imports $relative, which this deploy did not install"
+    done
+  done
   INSTALL_MIXED="$(cygpath -m "$INSTALL_DIR" 2>/dev/null || printf '%s' "$INSTALL_DIR")"
   for source in "$ROOT"/jobs/whatsapp-*.json; do
     [ -f "$source" ] || continue

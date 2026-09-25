@@ -1386,7 +1386,13 @@ node scripts/test-whatsapp-transcribe.cjs "$BIN" "$PLUGINS/whatsapp-transcript.w
 run_proof_fixture pipeline 19 node scripts/test-job-pipeline.cjs
 # The source keeper's categorical refusals, hermetically: a port held by something that is not the agent
 # browser is refused and left alone, and a missing logon task is named with the command that registers it.
-# Scratch ports and a task name that does not exist, so no browser and no real task is touched.
+node scripts/test-source-ensure.cjs
+# The deploy's own ship list, run for real on a scratch tree: the modules a shipped script imports must
+# be installed beside it, and both a missing module and an import this deploy cannot satisfy must be
+# refused by name. The block under test is read out of deploy.sh, so this cannot pass while the real
+# code is wrong - and it must not be a check that cannot fail (the live failure was a deploy that
+# reported success over a reader whose import was absent).
+bash scripts/test-deploy-ship.sh
 node scripts/test-source-ensure.cjs
 
 # The UI tests are JS and run outside the embedded interpreter, so they need node
