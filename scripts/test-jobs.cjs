@@ -21,7 +21,7 @@ async function main(){
   if(req.url==='/chat'){let body='';for await(const c of req)body+=c;requests.push(JSON.parse(body));res.writeHead(200,{'Content-Type':'text/event-stream'});res.end(simulateLostReply?'data: {"type":"delta","text":"partial"}\n\n':'data: {"type":"reply","text":"fixture"}\n\ndata: {"type":"done"}\n\n');return;}
   res.writeHead(404);res.end();
  });receiver=server;await new Promise(r=>server.listen(0,'127.0.0.1',r));const port=server.address().port;
- const env={...process.env,WASM_AGENT_HOME:root,WASM_AGENT_PORT:String(port),WA_SENTINEL_WAKE_BUDGET:'6',WA_SENTINEL_SCRIPTS:root,WASM_AGENT_RELAY:'',WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_MANAGED:'0'};delete env.WA_SCRIPT;delete env.WASM_AGENT_LUA_ROOT;
+ const env={...process.env,WASM_AGENT_HOME:root,WASM_AGENT_PORT:String(port),WA_SENTINEL_WAKE_BUDGET:'6',WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY:'1',WA_SENTINEL_SCRIPTS:root,WASM_AGENT_RELAY:'',WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_MANAGED:'0'};delete env.WA_SCRIPT;delete env.WASM_AGENT_LUA_ROOT;
  const action={kind:'wake',session:'fixture-conversation',skill:'review-fixture',prompt:'Draft only, never send.'};
  check(put(env,'inbox',{kind:'event',topic:'fixture.message'},action).enabled===false,'definitions default off');
  check(emit(env,'fixture.message','disabled',{text:'no wake'}).queued===0,'disabled job ignores events');
@@ -29,6 +29,7 @@ async function main(){
  const watcher=child(sentinel,['watch'],env);
  await until(()=>requests.length===1,'queued wake delivered');
  check(requests[0].thread==='fixture-conversation','wake uses conversation body, not authentication header');
+ check(requests[0].text.startsWith('[Sentinel notice]\n')&&requests[0].text.includes('not a human request or approval'),'wake provenance reaches the transcript before event text');
  check(requests[0].text.includes('review-fixture')&&requests[0].text.includes('UNTRUSTED EVENT DATA'),'skill and untrusted event boundary reach agent');
  await until(()=>cli(env,'history').some(d=>d.job_id==='inbox'&&d.state==='completed'),'wake settled only on done');
  simulateLostReply=true;emit(env,'fixture.message','m2',{text:'ambiguous'});await until(()=>requests.length===2,'second wake');await sleep(2500);

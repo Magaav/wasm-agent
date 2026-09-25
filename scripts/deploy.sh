@@ -91,7 +91,7 @@ fail() {
     [ -x "$FAIL_SENTINEL" ] || FAIL_SENTINEL="${INSTALL_DIR:-}/wa-sentinel"
     if [ -x "$FAIL_SENTINEL" ]; then
       if "$FAIL_SENTINEL" request wake --session "$SESSION" \
-        --prompt "The deploy you requested failed: $*  Nothing is claimed here about what is installed - $INSTALL_DIR/installed.txt and $INSTALL_DIR/deploy.log are the evidence. Fix the cause, then request deploy again." \
+        --prompt "Deploy failed: $*  This report does not establish what is installed. Evidence: $INSTALL_DIR/installed.txt and $INSTALL_DIR/deploy.log." \
         --reason "deploy failed: $*" >/dev/null 2>&1; then
         echo "deploy: failure reported to $SESSION" >&2
       else
