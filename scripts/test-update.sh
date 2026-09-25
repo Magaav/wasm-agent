@@ -7,8 +7,8 @@
 # because the gate refuses a dirty tree), a newer installed commit (which queues and reports the
 # request the sentinel named), and a sentinel that refuses (which must not read as success).
 #
-# The sentinel here is a stub shell script named wa-sentinel.exe - Git Bash runs a script whose exec
-# fails as a script. The operator's real sentinel is never invoked: a fixture that dropped a request
+# The sentinel here is a stub shell script with the platform's sentinel name. The operator's real
+# sentinel is never invoked: a fixture that dropped a request
 # into the real request box could install a placeholder over a running node.
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -17,22 +17,27 @@ PORT="${1:-8941}"
 W="$(mktemp -d /tmp/wa-upd-XXXXXX)"
 INST="$W/install"
 TREE="$W/tree"
+native_path() { command -v cygpath >/dev/null 2>&1 && cygpath -w "$1" || printf '%s' "$1"; }
+case "$(uname -s 2>/dev/null)" in
+  CYGWIN*|MINGW*|MSYS*) WA_NAME=wa.exe; SENTINEL_NAME=wa-sentinel.exe ;;
+  *) WA_NAME=wa; SENTINEL_NAME=wa-sentinel ;;
+esac
 mkdir -p "$INST" "$TREE/rust/target/release"
 printf 'rust/target/\n' > "$TREE/.gitignore"
 ( cd "$TREE" && echo fixture > file.txt && git init -q . && git add file.txt .gitignore \
   && git -c user.email=fixture@local -c user.name=fixture commit -qm 'fixture' )
 COMMIT="$(git -C "$TREE" rev-parse --short HEAD)"
-# Windows form, because that is what runtime-worktree.txt holds on this machine.
-printf '%s\n' "$(cygpath -w "$TREE")" > "$INST/runtime-worktree.txt"
+# Native form, because runtime-worktree.txt is consumed by a native git process.
+printf '%s\n' "$(native_path "$TREE")" > "$INST/runtime-worktree.txt"
 printf 'commit=%s\nsource_commit_hint=%s\n' "$COMMIT" "$COMMIT" > "$INST/installed.txt"
 REQUESTS="$HOME/.wasm-agent/sentinel/requests"
 BEFORE="$(ls "$REQUESTS" 2>/dev/null | wc -l)"
-STUB="$INST/wa-sentinel.exe"
+STUB="$INST/$SENTINEL_NAME"
 printf '#!/bin/sh\necho "  requested deploy: %s/requests/1789987058-0000.json"\necho "  the sentinel performs it - it is only a stub"\n' "$W" > "$STUB"
 chmod +x "$STUB"
 
 echo "fixture: tree=$TREE commit=$COMMIT"
-WA_INSTALL_DIR="$(cygpath -w "$INST")" "$BIN" --db "$W/node.db" serve --port "$PORT" \
+WA_INSTALL_DIR="$(native_path "$INST")" "$BIN" --db "$W/node.db" serve --port "$PORT" \
   --client-port $((PORT + 1)) --ui "$ROOT/ui" > "$W/node.log" 2>&1 &
 NODE=$!
 trap 'kill $NODE 2>/dev/null; sleep 0.3; rm -rf "$W"' EXIT
@@ -51,7 +56,7 @@ case "$A" in *'"queued":true'*) echo "  ok: an unbuilt tree queues - the gate bu
   *) echo "  FAIL: expected a queued deploy, got: $A"; exit 1 ;; esac
 
 echo "--- 2. the tree is clean and at the installed commit ---"
-echo placeholder > "$TREE/rust/target/release/wa.exe"
+echo placeholder > "$TREE/rust/target/release/$WA_NAME"
 B="$(ask)"; show "$B" "status|queued|commit"
 case "$B" in *'"queued":true'*) echo "  ok: it still queues - the commit does not describe the install" ;;
   *) echo "  FAIL: expected a queued deploy, got: $B"; exit 1 ;; esac
