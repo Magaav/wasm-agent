@@ -40,9 +40,10 @@ local commands = dofile("lua/core/commands.lua")
 
 local HELP = commands.help()
 
-local function each(rows, render)
-  if #rows == 0 then print("(empty)") return end
-  for _, row in ipairs(rows) do print(render(row)) end
+local function each(rows, render, output)
+  output = output or print
+  if #rows == 0 then output("(empty)") return end
+  for _, row in ipairs(rows) do output(render(row)) end
 end
 
 local function memory_line(row)
@@ -175,11 +176,18 @@ function M.run(argv)
     -- into a third of a wide window. See `platform.columns`.
     limit = platform.columns(host.getenv("COLUMNS")),
   })
+  -- Commands must use the view's scroll region, not Lua's global print at the
+  -- hardware cursor (which now belongs to the native editor). The view writer is
+  -- serialized with the input thread and the ticker by host.terminal_write.
+  local function print(text) view:line(text or "") end
   local agent = agentlib.new(session.id, printer(view), "master", USER, NODE)
   -- The host reads complete lines while the interpreter is in a provider/tool call.
   -- Give the next model round any waiting messages; slash commands still belong to
   -- the REPL and remain queued for after the run.
-  local input = cli_input.new()
+  local height = view.rows()
+  local input = cli_input.new({ editor = view.live and view.stdout and height and height >= 7
+    and host.getenv("WASM_AGENT_CLI_FRAME") ~= "off" })
+  view.editor = input.editor
   agent.steer = function()
     local lines = input:take_steering()
     for _, line in ipairs(lines) do view:accepted(line) end
@@ -296,19 +304,19 @@ function M.run(argv)
       local text = efficiency.report({ session_id = agent.session_id, agent = agent, hours = 48 })
       print(redact.text(text))
     elseif line == "/memories" then
-      each(memory.memories(nil, 50), memory_line)
+      each(memory.memories(nil, 50), memory_line, print)
     elseif line:sub(1, 10) == "/remember " then
       print(memory.remember(line:sub(11)))
     elseif line:sub(1, 8) == "/recall " then
-      each(memory.recall(line:sub(9), 10), memory_line)
+      each(memory.recall(line:sub(9), 10), memory_line, print)
     elseif line:sub(1, 8) == "/search " then
       each(memory.search_ledger(line:sub(9), nil, 20), function(row)
         return string.format("%s  %s  %s", row.conversation_id, row.sender_id or "-", row.body)
-      end)
+      end, print)
     elseif line:sub(1, 14) == "/conversation " then
       each(memory.conversation(line:sub(15), 50), function(row)
         return string.format("%s  %s  %s", row.conversation_id, row.sender_id or "-", row.body)
-      end)
+      end, print)
     else
       turn(line)
     end
@@ -316,10 +324,10 @@ function M.run(argv)
   agent:close()
   -- The screen's scroll region is not this process's to leave set: a shell whose output scrolls only
   -- the top rows of the window is a bug the next reader gets to explain.
+  input:stop() -- restore terminal echo before returning the screen to the shell
   view:screen_off()
   -- Tell the host to stop reading stdin. Not required for correctness - the thread dies with the
   -- process - but this is the one place that knows the REPL is finished rather than blocked.
-  input:stop()
   return 0
 end
 

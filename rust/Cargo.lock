@@ -1399,6 +1399,7 @@ dependencies = [
  "anyhow",
  "base64",
  "cc",
+ "libc",
  "ring",
  "rusqlite",
  "serde_json",

@@ -19,5 +19,8 @@ serde_json = "1"
 ureq = { version = "3", features = ["json"] }
 wasmtime = { version = "37", default-features = false, features = ["cranelift", "runtime", "std"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [build-dependencies]
 cc = "1"

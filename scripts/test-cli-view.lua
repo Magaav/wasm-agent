@@ -596,6 +596,24 @@ screen_view:event({ type = "round", n = 1 })
 ok(has(visible(table.concat(screen_out)), "run 2 \194\183 step 2"),
   "the live ticker counts runs and steps across turns")
 
+-- With a raw editor the host owns and redraws the input row while Lua is blocked.
+-- The view must not overwrite it with a canonical prompt or clear it after Enter.
+local real_editor = host.input_editor
+local editor_calls = {}
+host.input_editor = function(row, width, height) editor_calls[#editor_calls + 1] = {row, width, height}; return true end
+local editor_view, editor_out = capture({ live = true, limit = 80, rows = function() return 12 end })
+editor_view.editor = true
+editor_view:prompt("wa> ")
+ok(#editor_calls == 1 and editor_calls[1][1] == 12 and editor_calls[1][2] == 80
+  and editor_calls[1][3] == 3, "the live view gives the editor three rows and its width")
+ok(has(table.concat(editor_out), "\27[1;8r") and has(table.concat(editor_out), "\27[9;1H"),
+  "the ticker and editor do not share the output scroll region")
+local before_submit = #editor_out
+editor_view:submitted()
+ok(#editor_out == before_submit, "the submitted draft was already cleared by the editor")
+editor_view:screen_off()
+host.input_editor = real_editor
+
 -- Leaving gives the screen back: a scroll region outlives the process that set it.
 mark = #screen_out + 1
 screen_view:screen_off()
@@ -641,6 +659,10 @@ ok(view_lib.rows(function() return "24" end) == 24,
   "and a height that arrives as text (the shape JSON would give) is still a height")
 ok(view_lib.screen_rows(24).input == 24 and view_lib.screen_rows(24).status == 23
   and view_lib.screen_rows(24).bottom == 22, "a 24-row console gives the screen its three zones")
+ok(view_lib.screen_rows(12, true).bottom == 8 and view_lib.screen_rows(12, true).status == 9
+  and view_lib.screen_rows(12, true).input_top == 10,
+  "a live editor reserves three rows below the status row")
+ok(view_lib.screen_rows(6, true) == nil, "a short console cannot host a three-row editor")
 ok(view_lib.screen_rows(3) == nil, "a 3-row console gives it none")
 ok(view_lib.screen_rows(nil) == nil, "an unknown height gives it none")
 

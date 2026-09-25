@@ -15,6 +15,7 @@ mod rendezvous;
 mod plugins;
 mod subagents;
 mod serve;
+mod terminal_editor;
 
 use host::Host;
 use lua::Lua;
@@ -345,6 +346,8 @@ fn main() {
     // The reader's own input: it is read on a thread, so a line typed while a run is in flight is
     // still there when the run ends instead of being echoed into nothing.
     lua.register("input_start", host::input_start);
+    lua.register("input_editor", host::input_editor);
+    lua.register("terminal_write", host::terminal_write);
     lua.register("input_take", host::input_take);
     lua.register("input_stop", host::input_stop);
     lua.register("exec_timeout", host::exec_timeout);
@@ -420,9 +423,11 @@ fn main() {
     if let Ok(script) = std::env::var("WA_SCRIPT") {
         let source = std::fs::read_to_string(&script).unwrap_or_else(|e| panic!("read {script}: {e}"));
         if let Err(error) = lua.do_string(&source, &script) {
+            host::restore_input();
             eprintln!("lua error: {error}");
             std::process::exit(1);
         }
+        host::restore_input();
         return;
     }
 
@@ -514,9 +519,11 @@ fn main() {
         std::process::exit(1);
     }
     if let Err(error) = lua.do_string(&core_source("lua/core/init.lua"), "lua/core/init.lua") {
+        host::restore_input();
         eprintln!("lua error: {error}");
         std::process::exit(1);
     }
+    host::restore_input();
 }
 
 #[cfg(test)]

@@ -405,10 +405,13 @@ end
 -- The rows a screen owns, from a height: the output region scrolls, and the two rows below it are
 -- the status line and the reader's input row. `nil` when the console is too short to hold one - an
 -- output row is not optional - and the caller then draws the way it did before this existed.
-local function screen_rows(rows)
+local function screen_rows(rows, editor)
   rows = tonumber(rows)
-  if not rows or rows < 4 then return nil end
+  if not rows or rows < (editor and 7 or 4) then return nil end
   rows = math.floor(rows)
+  if editor then
+    return { top = 1, bottom = rows - 4, status = rows - 3, input_top = rows - 2, input = rows }
+  end
   return { top = 1, bottom = rows - 2, status = rows - 1, input = rows }
 end
 M.screen_rows = screen_rows
@@ -479,7 +482,13 @@ function M.new(opts)
   local stdout = opts.stdout
   if stdout == nil then stdout = (opts.out == nil) end
   local view = {
-    out = opts.out or function(text) io.write(text); io.flush() end,
+    out = opts.out or function(text)
+      if host and host.terminal_write then
+        assert(host.terminal_write(text), "terminal write failed")
+      else
+        io.write(text); io.flush()
+      end
+    end,
     live = live and true or false,
     stdout = stdout and true or false,
     animating = false,
@@ -693,30 +702,16 @@ end
 
 -- The rows this view owns, once the console's height is known.
 --
---   rows 1..R-2   output, inside a scroll region of its own
---   row  R-1      the status line
---   row  R        the reader's input row
---
--- Why a screen and not a cursor trick: the reader types while a run is in flight, the terminal
--- echoes what they type *at the cursor*, and the cursor therefore has to be on their row - while
--- the status line and the output both have somewhere else to be. A scroll region is the one
--- mechanism that keeps output out of rows it does not own: everything written inside it scrolls
--- inside it, so an answer of any length never reaches the two rows below.
---
--- The terminal keeps its own line editing, its echo and Ctrl+C: this is a screen, not raw mode.
--- Per-key editing (arrows, a multi-line prompt) would need the terminal handed over, which is a
--- different change and not this one.
---
--- `WASM_AGENT_CLI_FRAME=off` refuses it, and so does a console too short to hold one; both fall
--- back to the prompt written at the cursor, which is what this CLI did before the screen existed.
---
--- One race is worth naming: a keystroke that arrives between a write's move into the region and its
--- restore echoes into the region once. It is rare and cosmetic, and the line itself is unaffected -
--- the host reads it from stdin, never from the screen.
+-- Canonical fallback: output through R-2, status R-1, input R.
+-- Native editor: output through R-4, status R-3, three input rows R-2..R.
+-- A reserved scroll region keeps output from scrolling over the draft. The raw
+-- editor owns the bottom rows and handles echo/Enter itself while Lua is blocked.
+-- `WASM_AGENT_CLI_FRAME=off` or a console too short for the regions falls back
+-- to a shell-style prompt at the output cursor.
 function METHODS:screen_on()
   if not self.live then return nil end
   if (self.getenv("WASM_AGENT_CLI_FRAME") or "") == "off" then return nil end
-  local screen = screen_rows(self.rows and self.rows())
+  local screen = screen_rows(self.rows and self.rows(), self.editor)
   -- A console that cannot report a height keeps whatever screen it already had: the caller falls
   -- back to the prompt at the cursor, which is on the input row anyway.
   if not screen then return nil end
@@ -731,7 +726,9 @@ function METHODS:screen_on()
   self:control("\27[1;" .. screen.bottom .. "r")
   self:control("\27[" .. screen.bottom .. ";1H\n")
   self:control("\27[" .. screen.status .. ";1H\27[2K")
-  self:control("\27[" .. screen.input .. ";1H\27[2K")
+  for row = screen.input_top or screen.input, screen.input do
+    self:control("\27[" .. row .. ";1H\27[2K")
+  end
   return screen
 end
 
@@ -742,36 +739,21 @@ function METHODS:screen_off()
   local screen = self.screen
   self.screen = nil
   if not screen then return end
+  if self.editor and host.input_editor then pcall(host.input_editor, 0, self.limit, 3) end
   self:control("\27[" .. screen.status .. ";1H\27[2K")
-  self:control("\27[" .. screen.input .. ";1H\27[2K")
+  for row = screen.input_top or screen.input, screen.input do
+    self:control("\27[" .. row .. ";1H\27[2K")
+  end
   self:control("\27[r")
   self:control("\27[" .. screen.input .. ";1H\n")
 end
 
--- The input line, written where the last output ended.
---
--- It used to be pinned to the console's last row - CUD 999 (`\27[999B`) moves down as far as the
--- screen allows and clamps - and that row was erased first (`\27[2K`). Two things are wrong with
--- that, and together they are why it is gone:
---
---   * the erase takes a *line of output* with it. CUD 999 clamps to the bottom row, and once the
---     transcript has reached the bottom of the screen, that row holds the last line the reader was
---     sent: the prompt deleted it.
---   * a row reached by clamping is a row whose contents are unknown, so nothing can be said about
---     what the cursor lands on - and there is no way to ask, because the reader thread owns stdin
---     and the terminal's own answer to `\27[6n` would arrive as if the reader had typed it.
---
--- Pinning the input to the bottom of the screen is what pi and codex do, and the difference is not
--- cosmetic: it is the row a reader's eye and fingers already went to. They can pin it because they
--- own the input row - raw mode, a frame the CLI redraws. Until this CLI owns one, the honest prompt
--- is a shell's: at the cursor, on the line the output ended, erasing nothing.
---
--- Only the live rendering has anything to take back. A captured transcript is a log, and a log with
--- cursor movement in it is not a transcript: the plain path writes the same prompt it always did,
--- byte for byte.
+-- A framed terminal gives its input rows to the native editor; captured/plain
+-- output and consoles without raw input retain the shell-style line prompt.
 -- Reclaim only the submitted input row, after Enter and before a run starts.
 -- Never do this during a model call: the user may already be typing another line.
 function METHODS:submitted()
+  if self.editor then return end -- the native editor cleared the row on Enter
   if self.screen then
     self:control("\27[" .. self.screen.input .. ";1H\27[2Kwa> ")
   end
@@ -784,9 +766,14 @@ function METHODS:prompt(text)
     self:clear()
     return self:control(text)
   end
-  -- The input row is this CLI's, and the cursor is left on it: that is where the terminal's own
-  -- echo puts the reader's typing, which is the whole point of keeping the row for them.
-  self:control("\27[" .. screen.input .. ";1H\27[2K" .. text)
+  -- A native editor, when available, owns the bottom row and redraws it on every
+  -- keystroke even when Lua is blocked. No terminal echo or Enter newline is involved.
+  if self.editor then
+    assert(host.input_editor(screen.input, self.limit, screen.input - screen.input_top + 1),
+      "terminal editor could not draw")
+  else
+    self:control("\27[" .. screen.input .. ";1H\27[2K" .. text)
+  end
 end
 
 -- The reader's line, moved into the transcript.

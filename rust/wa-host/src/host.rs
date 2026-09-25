@@ -1412,7 +1412,6 @@ fn stop_ticker() -> bool {
 }
 
 fn start_ticker(spec: TickerSpec) -> bool {
-    use std::io::Write;
     let mut slot = TICKER.lock().unwrap_or_else(|error| error.into_inner());
     if let Some(running) = slot.as_ref() {
         // Already ticking (the same run, a new phase): move the line rather than restart it.
@@ -1440,9 +1439,7 @@ fn start_ticker(spec: TickerSpec) -> bool {
                 // Never erase to the end of the row: the reader's own typing starts one column
                 // after this line ends, and erasing from the cursor to the right takes it with it.
                 // Flushed every time: this text has no newline to flush it.
-                let mut out = std::io::stdout();
-                let _ = write!(out, "{frame}");
-                let _ = out.flush();
+                let _ = crate::terminal_editor::write(&frame);
                 ticks = ticks.wrapping_add(1);
                 let guard = flag.lock().unwrap_or_else(|error| error.into_inner());
                 if *guard {
@@ -2009,6 +2006,14 @@ pub extern "C" fn terminal_size(l: *mut LuaState) -> c_int {
     1
 }
 
+/// Serialize terminal writes with the editor and the ticker. The Lua view uses this
+/// only for its real stdout; captured/plain views keep their own writers.
+pub extern "C" fn terminal_write(l: *mut LuaState) -> c_int {
+    let ok = arg_string(l, 1).is_some_and(|text| crate::terminal_editor::write(&text).is_ok());
+    unsafe { crate::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
+    1
+}
+
 // ---- input that arrives while the interpreter is blocked --------------------------------
 
 /// What the reader has typed and nobody has read yet.
@@ -2030,6 +2035,8 @@ struct ConsoleInput {
     eof: bool,
     stop: bool,
     running: bool,
+    raw: Option<crate::terminal_editor::RawMode>,
+    editor: Option<crate::terminal_editor::Editor>,
 }
 
 static CONSOLE_INPUT: OnceLock<(Mutex<ConsoleInput>, std::sync::Condvar)> = OnceLock::new();
@@ -2043,11 +2050,37 @@ fn console_input() -> &'static (Mutex<ConsoleInput>, std::sync::Condvar) {
 /// One reader per process: a second would split the reader's typing between two queues and
 /// neither caller would see the whole of it. The stdin lock is taken once, for the same reason.
 fn console_reader() {
-    use std::io::BufRead;
+    use std::io::{BufRead, Read};
     let stdin = std::io::stdin();
     let mut handle = stdin.lock();
     let mut line = String::new();
+    let editor = console_input().0.lock().unwrap_or_else(|e| e.into_inner()).editor.is_some();
     loop {
+        if editor {
+            let mut byte = [0u8; 1];
+            let read = handle.read(&mut byte);
+            let (lock, wake) = console_input();
+            let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+            if state.stop { state.running = false; wake.notify_all(); return; }
+            match read {
+                Ok(0) | Err(_) => { state.eof = true; state.running = false; wake.notify_all(); return; }
+                Ok(_) => {
+                    if let Some(input) = state.editor.as_mut() {
+                        let action = input.feed(byte[0]);
+                        let frame = input.render();
+                        if !frame.is_empty() { let _ = crate::terminal_editor::write(&frame); }
+                        match action {
+                            crate::terminal_editor::Action::Submit(text) => state.lines.push(text),
+                            crate::terminal_editor::Action::Eof => { state.eof = true; state.running = false; },
+                            crate::terminal_editor::Action::None => {}
+                        }
+                        wake.notify_all();
+                        if state.eof { return; }
+                    }
+                }
+            }
+            continue;
+        }
         line.clear();
         let read = handle.read_line(&mut line);
         let (lock, wake) = console_input();
@@ -2096,9 +2129,14 @@ pub extern "C" fn input_start(l: *mut LuaState) -> c_int {
     match lock.lock() {
         Ok(mut state) => {
             if state.running {
-                push_json(l, &json!({"started": true}));
+                push_json(l, &json!({"started": true, "editor": state.editor.is_some()}));
                 return 1;
             }
+            state.raw = if arg_integer(l, 1) == Some(1) && console_size().is_some()
+                && std::env::var("WASM_AGENT_CLI_EDITOR").unwrap_or_default() != "off" {
+                crate::terminal_editor::try_raw()
+            } else { None };
+            state.editor = state.raw.as_ref().map(|_| crate::terminal_editor::Editor::default());
             state.running = true;
             state.stop = false;
         }
@@ -2108,7 +2146,26 @@ pub extern "C" fn input_start(l: *mut LuaState) -> c_int {
         }
     }
     std::thread::spawn(console_reader);
-    push_json(l, &json!({"started": true}));
+    let editor = lock.lock().unwrap_or_else(|e| e.into_inner()).editor.is_some();
+    push_json(l, &json!({"started": true, "editor": editor}));
+    1
+}
+
+/// Configure and draw the live editor's input row after the view sets its scroll region.
+/// No reader thread is started here: it must already be the *one* input_start reader.
+pub extern "C" fn input_editor(l: *mut LuaState) -> c_int {
+    let row = arg_integer(l, 1).unwrap_or(0).max(0) as usize;
+    let width = arg_integer(l, 2).unwrap_or(0).max(0) as usize;
+    let height = arg_integer(l, 3).unwrap_or(1).clamp(1, 3) as usize;
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let ok = if let Some(editor) = state.editor.as_mut() {
+        editor.row = row;
+        editor.width = width;
+        editor.height = height;
+        crate::terminal_editor::write(&format!("\x1b[?2004h{}", editor.render())).is_ok()
+    } else { false };
+    unsafe { crate::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
 }
 
@@ -2165,12 +2222,19 @@ pub extern "C" fn input_take(l: *mut LuaState) -> c_int {
 /// interrupt, and making the process exit wait for a reader to type one more line is a worse
 /// answer than leaving one thread to die with the process it belongs to. A caller that stops and
 /// starts again gets its lines, never a second reader.
-pub extern "C" fn input_stop(l: *mut LuaState) -> c_int {
+pub fn restore_input() {
     let (lock, wake) = console_input();
     if let Ok(mut state) = lock.lock() {
         state.stop = true;
+        if state.editor.is_some() { let _ = crate::terminal_editor::write("\x1b[?2004l"); }
+        state.editor = None;
+        state.raw = None; // Drop restores the original console mode and input codepage.
         wake.notify_all();
     }
+}
+
+pub extern "C" fn input_stop(l: *mut LuaState) -> c_int {
+    restore_input();
     push_json(l, &json!({"stopped": true}));
     1
 }

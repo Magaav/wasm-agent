@@ -39,6 +39,9 @@ cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host ticker
 # The console size is the one number the CLI cannot learn for itself, and the only thing standing
 # between a detached console (which reports 0x0, not failure) and a screen wrapped to nothing.
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host terminal_tests
+# The native editor is the only side that can edit input while Lua is blocked. Its
+# parser, history, multiline viewport and submit/clear behavior are not Lua tests.
+cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host terminal_editor::tests
 # The graph is a capability the agent navigates its own code with, so its extractor and
 # incremental reindex are part of the contract, not a side project.
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-graph

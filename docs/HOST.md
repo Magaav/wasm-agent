@@ -294,20 +294,26 @@ round-boundary steering, not per-keystroke interruption.
 - `input_stop()` asks the thread to stop and does **not** join it: it is blocked in a read that no
   portable call can interrupt, and making the process exit wait for the reader to type one more
   line is a worse answer than one thread dying with the process.
-- The console is left in the terminal's own mode. This puts nothing into raw mode and echoes
-  nothing itself, so line editing, the echo and Enter stay the terminal's, as for any shell. What
-  changes is who reads the line, and that a line typed during a run is still there when it ends.
+- On a real console with a live frame, `input_start(1)` switches stdin into raw mode and
+  returns `editor:true`. The host reader edits and redraws a three-row input area while Lua
+  is blocked; `input_editor(row,width,height)` places it after the view sets its scroll region.
+  Enter clears the draft immediately and queues a complete line without terminal echo or a
+  newline on the bottom row. Ctrl+J/Shift+Enter inserts a newline; arrows, Home/End,
+  Backspace/Delete, history, Ctrl+A/E/K/U/W, bracketed paste and UTF-8 are handled locally.
+  `terminal_write` serializes view, local slash-command output and ticker output with the
+  editor's frames. `input_stop()`
+  restores terminal input mode and codepage, and the CLI host also restores them on Lua errors.
+- Pipes, redirected stdout, tiny/dumb consoles and `WASM_AGENT_CLI_EDITOR=off` retain canonical
+  line input. Raw mode is never enabled for a captured transcript.
 - `lua/core/cli_input.lua` is the Lua side, and tolerates the capability being absent (an older
   binary) by falling back to the blocking read it replaced.
 
-What this does **not** do: raw-mode input, per-key editing, an interrupt key, and
-multi-line input all need the terminal handed over (raw mode plus a frame the CLI owns). The
-terminal still echoes canonical input, including Enter's newline; when the input sits on the
-last row this may scroll the whole terminal and damage a pinned frame. Clearing the submitted
-row before a run fixes the stale text, but is **not** a replacement for a raw-mode editor.
-Risk: a line typed during a run is not erased until the next prompt, to avoid erasing a
-subsequent half-typed line. `WASM_AGENT_CLI_FRAME=off` remains the fallback for terminals
-whose canonical echo does not cooperate with the frame.
+Risk/limits: the editor uses a three-row viewport; long drafts remain intact but older
+rows scroll out of that viewport. Ctrl+C clears the draft (it does not cancel a blocked
+provider request); Ctrl+D on an empty draft ends input. A terminal resize during a blocked
+run is applied to the frame on the next prompt, not on the next keystroke. Complex emoji
+ZWJ/grapheme widths are approximate. `WASM_AGENT_CLI_EDITOR=off` disables raw mode and
+`WASM_AGENT_CLI_FRAME=off` disables the pinned frame if a terminal needs canonical input.
 
 `scripts/test-cli-input.lua` is observed through a real child process, like the ticker's test and
 for the same reason: the reader is a thread, so the only honest evidence is that process's own

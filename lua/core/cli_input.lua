@@ -16,11 +16,9 @@
 -- `input_take` answers with everything buffered, so a reader who typed three lines during a run
 -- gets all three here, in order, the moment the run ends - no polling and no keystroke lost.
 --
--- The console is left in the terminal's own mode. This does not put stdin into raw mode and echoes
--- nothing itself: line editing, the echo and Enter stay the terminal's, as they are for a shell.
--- What changes is only who reads the line, and that the line is not dropped while the interpreter
--- is elsewhere. Per-key editing, an interrupt key and multi-line input need the terminal handed
--- over (raw mode, a frame) and are deliberately not this change.
+-- A live framed terminal asks the host for its native editor: raw input, local key editing,
+-- a three-row draft and an immediately cleared submission. Pipes and older binaries still
+-- use canonical lines and the same queue contract. See docs/HOST.md for the limits.
 --
 -- The capability may be missing - an older binary, or a test - and `host.input_*` answers a JSON
 -- *string* like every host capability that pushes a table, so both absences are handled here: a
@@ -31,9 +29,8 @@ local json = dofile("lua/vendor/json.lua")
 
 local M = {}
 
--- How long a single wait lasts before the caller looks up again. Long on purpose: a shorter wait
--- would have to redraw the prompt to stay honest about "still waiting", and redrawing it erases
--- whatever the reader has typed so far - the prompt and their typing are on the same row.
+-- The editor redraws on the reader thread. Canonical input must not be reprompted on
+-- timeout, or that redraw would erase what the terminal has already echoed.
 M.WAIT_MS = 1800000
 
 -- A host function by name, or nil when this binary does not have it.
@@ -60,13 +57,14 @@ end
 
 -- Start the host reading stdin. Idempotent - the host has one reader per process - and false when
 -- the capability is not there, which is a condition and not an error.
-function M.start(deps)
+function M.start(deps, editor)
   deps = deps or {}
   local start = deps.start or host_fn("input_start")
-  if not start then return false end
-  local ok, raw = pcall(start)
-  if not ok then return false end
-  return decode(raw) ~= nil
+  if not start then return false, false end
+  local ok, raw = pcall(start, editor and 1 or 0)
+  if not ok then return false, false end
+  local answer = decode(raw)
+  return answer ~= nil, answer and answer.editor == true or false
 end
 
 -- Stop the host reading stdin, on the way out. Not required for correctness (the thread dies with
@@ -114,7 +112,7 @@ function M.new(opts)
     deps = opts.deps or {},
     read_line = opts.read_line or function() return io.read("*l") end,
   }
-  self.supported = M.start(self.deps)
+  self.supported, self.editor = M.start(self.deps, opts.editor)
   return setmetatable(self, { __index = METHODS })
 end
 
