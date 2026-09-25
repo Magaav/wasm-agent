@@ -4,8 +4,10 @@
 # The failure this exists for: `5cc38d1` moved the WebSocket runtime into
 # `scripts/lib/websocket-runtime.mjs`, deploy.sh copied `scripts/whatsapp-*` and nothing else, and the
 # install held a reader whose own import was absent. The deploy reported success; every subsequent delivery
-# died at step 3 with ERR_MODULE_NOT_FOUND, 26 of them, one per tick, and `job history` was the only place
-# that said so. A pipeline that cannot start is not a deployed pipeline.
+# install held a reader whose own import was absent. The deploy reported success; every subsequent delivery
+# failed at step 2 - the transcribe step runs the same reader - with `{"step":"read","error":
+# "process_output_unreadable: ... ERR_MODULE_NOT_FOUND"}`, one per 30 s tick, until the job's whole
+# recorded history was failures. `job history` was the only place that said so.
 #
 # So this test does not describe what deploy.sh does - it *runs it*: the block under test is read out of
 # deploy.sh between its own markers, with a scratch ROOT and a scratch INSTALL_DIR, and then:

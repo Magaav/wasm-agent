@@ -416,9 +416,11 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
   # The glob above ships `scripts/whatsapp-*` and nothing else, and that is how the install came to hold a
   # reader whose own import was absent: `5cc38d1` moved the WebSocket runtime into
   # `scripts/lib/websocket-runtime.mjs`, the install got the new `whatsapp-read.mjs` and no `lib/`, and every
-  # delivery then died at step 3 with ERR_MODULE_NOT_FOUND - 26 in a row, one per tick - while the deploy
-  # reported success. A pipeline that cannot start is not a deployed pipeline, and a hand-written list would
-  # have been wrong in exactly the same way one commit later. So the list is the imports.
+  # delivery then failed at step 2 - the transcribe step, which runs the same reader - with
+  # `{"step":"read","error":"process_output_unreadable: ... ERR_MODULE_NOT_FOUND"}`, one per 30 s tick,
+  # while the deploy reported success. A pipeline that cannot start is not a deployed pipeline, and a
+  # hand-written list would have been wrong in exactly the same way one commit later. So the list is the
+  # imports.
   MODULES=""
   for source in "$ROOT"/scripts/whatsapp-*; do
     [ -f "$source" ] || continue

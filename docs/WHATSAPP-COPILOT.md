@@ -249,8 +249,10 @@ Each of these was found live, with evidence, and fixed. They are the reason the 
    `scripts/whatsapp-*` and `jobs/whatsapp-*.json` into the install; a reader that exists only in a
    checkout is not deployed. The second half of that sentence was paid for: `5cc38d1` moved the WebSocket
    runtime into `scripts/lib/websocket-runtime.mjs`, the install received the new `whatsapp-read.mjs` and
-   no `lib/`, and every delivery then died at step 3 with `ERR_MODULE_NOT_FOUND` - 26 in a row, one per
-   30 s tick - while `job history` was the only place that said so. The ship list now derives the modules
+   no `lib/`, and every delivery then failed at **step 2** - the transcribe step, which runs the same
+   reader - with `{"step":"read","error":"process_output_unreadable: ... ERR_MODULE_NOT_FOUND"}`, one per
+   30 s tick, until the job's whole recorded `history` was failures. `job history` was the only place that
+   said so. The ship list now derives the modules
    from the shipped scripts' own imports, checks the install is import-closed, and refuses by name when it
    is not; `scripts/test-deploy-ship.sh` runs that block on a scratch tree, including both refusals.
 6. **Old audio was transcribed and answered.** Nothing bounded the *age* of a message: the reader selects by
