@@ -112,7 +112,7 @@ local function parse_run_body(body)
   end
   local thread = decoded.thread
   if thread == "" then thread = nil end
-  return tostring(decoded.text or ""), images, nil, thread
+  return tostring(decoded.text or ""), images, nil, thread, decoded.resume_seq
 end
 
 -- Exported for the same reason as `wa_agent_for`: what a body *means* is the one thing
@@ -120,6 +120,23 @@ end
 -- the one that was typed. Text stays text; only pictures and a thread name make a body
 -- structured.
 wa_parse_run_body = parse_run_body
+
+-- An automatic continuation is conditional on the exact ledger tail the window saw.
+-- Runs for one conversation are serialized, so a second window or a reloaded page
+-- reaches this check only after the first continuation has changed that tail.
+local function resume_guard(session_id, expected_seq)
+  if expected_seq == nil then return true end
+  if type(expected_seq) ~= "number" or expected_seq < 0 or expected_seq % 1 ~= 0 then
+    return false, "invalid_resume_seq"
+  end
+  local state = memory.session_state(session_id)
+  if not state or state.seq ~= expected_seq or state.state ~= "unfinished"
+     or state.role ~= "tool" or #state.pending > 0 then
+    return false, "resume_tail_changed"
+  end
+  return true
+end
+wa_resume_guard = resume_guard
 
 -- The authoritative pre-admission resolution for a run.
 --
@@ -175,15 +192,18 @@ function wa_identity(session)
 end
 
 function wa_reply(text, session, node)
-  local prompt, images, problem, thread = parse_run_body(text)
+  local prompt, images, problem, thread, resume_seq = parse_run_body(text)
   if problem then return json.encode({ error = redact.text(problem) }) end
   if remote_target(node) then
+    if resume_seq ~= nil then return json.encode({ error = "resume_requires_local_node" }) end
     local result = nodeslib.remote_call(node, "chat", { text = prompt or "" })
     if result and result.error then return json.encode({ error = redact.text(tostring(result.error)) }) end
     return json.encode({ reply = result and result.reply or "" })
   end
   local bot, refusal = agent_for(session, node, thread)
   if not bot then return json.encode({ error = refusal }) end
+  local allowed, reason = resume_guard(bot.session_id, resume_seq)
+  if not allowed then return json.encode({ error = reason }) end
   local ok, reply = pcall(bot.run, bot, prompt or "", images)
   if not ok then return json.encode({ error = redact.text(tostring(reply)) }) end
   return json.encode({ reply = reply })
@@ -192,12 +212,16 @@ end
 -- Streaming turn: events are pushed to the SSE client as the agent runs.
 -- When a peer is selected, its stream is relayed here unchanged.
 function wa_reply_stream(text, session, node)
-  local prompt, images, problem, thread = parse_run_body(text)
+  local prompt, images, problem, thread, resume_seq = parse_run_body(text)
   if problem then
     emit({ type = "error", error = redact.text(problem) })
     return ""
   end
   if remote_target(node) then
+    if resume_seq ~= nil then
+      emit({ type = "error", error = "resume_requires_local_node" })
+      return ""
+    end
     local result = nodeslib.remote_chat(node, prompt or "")
     if result and result.error then emit({ type = "error", error = redact.text(tostring(result.error)) }) end
     return ""
@@ -205,6 +229,11 @@ function wa_reply_stream(text, session, node)
   local bot, refusal = agent_for(session, node, thread)
   if not bot then
     emit({ type = "error", error = refusal })
+    return ""
+  end
+  local allowed, reason = resume_guard(bot.session_id, resume_seq)
+  if not allowed then
+    emit({ type = "error", error = reason })
     return ""
   end
   local ok, reply = pcall(bot.run, bot, prompt or "", images)

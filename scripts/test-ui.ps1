@@ -45,6 +45,8 @@ $harness = @'
     check(window.__modelsRejected > 0, "startup fixture must fail the model catalogue");
     check(document.getElementById("messages").textContent.includes("RELOAD-MID-RUN-QUESTION"),
       "an idle startup must retry its transcript even when /models fails");
+    check(!window.__calls.some(function (call) { return call.url === "chat" && call.method === "POST"; }),
+      "an unrecorded tool call must not be started again by automatic recovery");
     window.__failModels = false;
     await window.__ensureMeta();
     check(!document.getElementById("chip-model").textContent.includes("retrying"),
@@ -132,7 +134,7 @@ $harness = @'
     // defines. A stage that throws asserted nothing - and reported itself as `FAIL the harness threw`
     // for every later run, which is how a dead assertion hides.
     window.__fixtures.session.messages.push(
-      { seq: 7, role: "tool", tool_name: "bash", content: "done", created_at: 1790000013, tool_calls: [] },
+      { seq: 7, role: "tool", tool_call_id: "reload-tool", tool_name: "bash", content: "done", created_at: 1790000013, tool_calls: [] },
       { seq: 8, role: "assistant", content: "RELOAD-MID-RUN-ANSWER", created_at: 1790000014, tool_calls: [] });
     window.__fixtures.health.current = null;
     window.__fixtures.health.workers = [];
@@ -153,13 +155,37 @@ $harness = @'
     // A saved interim answer followed by a tool result is still unfinished if the node says so.
     // The live DeepSeek run exposed the contradiction: its bubble said completed above a stopped notice.
     window.__fixtures.session.messages.pop();
-    window.__fixtures.session.state = { state: "unfinished", at: 1790000013, detail: "stopped after a tool result" };
+    window.__fixtures.session.state = {
+      state: "unfinished", role: "tool", seq: 7, pending: [], at: 1790000013,
+      detail: "stopped after a tool result with no next step",
+    };
+    var step = window.__fixtures.session.messages.find(function (row) { return row.seq === 6; });
+    step.tool_calls.push({ id: "missing-sibling", type: "function", function: { name: "bash", arguments: "{}" } });
+    window.__fixtures.session.state.pending = ["bash"];
+    await window.__restoreSession();
+    check(!window.__calls.some(function (call) { return call.url === "chat" && call.method === "POST"; }),
+      "a tool result with an unrecorded sibling must wait for inspection");
+    step.tool_calls.pop();
+    window.__fixtures.session.state.pending = [];
+    window.__typeCommand("saved draft");
+    window.__attachMany(1);
     await window.__restoreSession();
     var stopped = Array.from(restored.querySelectorAll("wa-message.assistant")).slice(-1)[0];
     var stoppedFooter = stopped?.body.querySelector(":scope > .chat-content-run-status.finished");
     check(!!stoppedFooter && /unfinished/.test(stoppedFooter.textContent) &&
       stoppedFooter.textContent.includes("0:03") && !/completed/.test(stoppedFooter.textContent),
       "a stopped final run must show its recorded duration without a false completed claim");
+    for (var resumeTick = 0; resumeTick < 100 && !window.__calls.some(function (call) { return call.url === "chat" && call.method === "POST"; }); resumeTick++) await tick();
+    var autoPosts = window.__calls.filter(function (call) { return call.url === "chat" && call.method === "POST"; });
+    var autoBody = autoPosts.length ? JSON.parse(autoPosts[0].body) : {};
+    check(autoPosts.length === 1 && autoBody.thread === window.__fixtures.session.session.id &&
+      autoBody.resume_seq === 7 && autoBody.text === "continue where you stopped" && !autoBody.images,
+      "a complete recorded tool batch must post one guarded continuation to its own thread");
+    check(window.__commandInput().value === "saved draft",
+      "automatic recovery must preserve the reader's unsent draft");
+    await window.__restoreSession();
+    check(window.__calls.filter(function (call) { return call.url === "chat" && call.method === "POST"; }).length === 1,
+      "a second transcript repaint must not post a duplicate continuation");
     if (problems.length) {
       var reloadLog = document.createElement("pre");
       reloadLog.id = "harness-log";

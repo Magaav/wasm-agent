@@ -1348,6 +1348,24 @@ function sessionOutcome(full) {
   return { name: typeof value === "string" ? value : "", detail: full?.state_detail || "" };
 }
 
+// A recorded tool result is safe to continue from only when every call in its
+// batch has a matching result. A result with an unknown call id needs inspection.
+function completeToolBatch(rows) {
+  const last = rows[rows.length - 1];
+  if (last?.role !== "tool") return false;
+  for (let i = rows.length - 2; i >= 0; i -= 1) {
+    const row = rows[i];
+    if (row.role === "user") return false;
+    if (row.role !== "assistant" || !Array.isArray(row.tool_calls) || !row.tool_calls.length) continue;
+    const results = new Set(rows.slice(i + 1).filter((item) => item.role === "tool")
+      .map((item) => item.tool_call_id));
+    return row.tool_calls.every((call) => call?.id && results.has(call.id));
+  }
+  return false;
+}
+
+const autoResumedTails = new Set();
+
 let restoringSession = null;
 let transcriptReady = false;
 async function restoreSession(target = chatSession) {
@@ -1413,6 +1431,12 @@ async function restoreSessionOnce(target, epoch) {
     } else {
       repaintMessages([]);
     }
+    const state = full.state;
+    const autoResumeSeq = state && typeof state === "object" && state.state === "unfinished"
+      && state.role === "tool" && Array.isArray(state.pending) && state.pending.length === 0
+      && Number.isInteger(Number(state.seq)) && completeToolBatch(full.messages)
+      && health && !runningSessions(health).has(wanted.id) && !busy
+      ? Number(state.seq) : null;
     const unresolved = outcome.name === "failed" || outcome.name === "unfinished";
     if (unresolved) {
       const notice = document.createElement("div");
@@ -1426,19 +1450,28 @@ async function restoreSessionOnce(target, epoch) {
         notice.textContent = "no result is recorded yet. A run is in progress on the node; this page will check again when it becomes idle.";
         sawTurnInFlight = true;
       } else {
-        notice.textContent = "this message has no recorded answer - " +
-          (outcome.detail || "the last step has no recorded result") +
-          ". Its effects may have happened; check them before continuing.";
+        notice.textContent = autoResumeSeq !== null
+          ? "this run stopped after a recorded tool result; resuming automatically."
+          : "this message has no recorded answer - " +
+            (outcome.detail || "the last step has no recorded result") +
+            ". Its effects may have happened; check them before continuing.";
       }
-      // Reloading a page must never execute an unfinished tool a second time. Recovery
-      // requires a person to inspect possible side effects and explicitly continue.
-      if (health && !activeRun(health, wanted.id)) {
+      // Missing tool results still require inspection. A complete batch can resume
+      // from its recorded tail; the node checks that exact sequence at admission.
+      if (health && !runningSessions(health).has(wanted.id) && autoResumeSeq === null) {
         notice.append(nodeButton("continue", () => { notice.remove(); resumeSession(wanted.id); }));
       }
       messages.append(notice);
     }
     followedSeq = Number(wanted.last_seq) || (full.messages || []).reduce((last, row) => Math.max(last, Number(row.seq) || 0), 0);
     transcriptReady = true;
+    if (autoResumeSeq !== null) {
+      const key = wanted.id + ":" + autoResumeSeq;
+      if (!autoResumedTails.has(key)) {
+        autoResumedTails.add(key);
+        void resumeSession(wanted.id, autoResumeSeq);
+      }
+    }
     return true;
   } catch (error) {
     if (chatSession !== target || conversationEpoch !== epoch) return false;
@@ -1575,7 +1608,7 @@ function composedText(text) {
 // The server accepts plain text too, so this only changes when pictures are
 // actually attached. `data` is a full data URL; the server strips the envelope.
 function composedBody(text, options = {}) {
-  const images = attachments.filter((file) => file.kind === "image");
+  const images = options.resumeSeq === undefined ? attachments.filter((file) => file.kind === "image") : [];
   // The thread this run belongs to, named in the body.
   //
   // It used to be sent as `X-WA-Session`, which is the *account* header: a thread id in that field
@@ -1591,9 +1624,10 @@ function composedBody(text, options = {}) {
   if (images.length === 0 && !thread) {
     return { contentType: "text/plain; charset=utf-8", body: composedText(text) };
   }
-  const payload = { text: composedText(text) };
+  const payload = { text: options.resumeSeq === undefined ? composedText(text) : text };
   if (images.length) payload.images = images.map((file) => ({ name: file.name, mime: file.mime, data: file.data }));
   if (thread) payload.thread = thread;
+  if (options.resumeSeq !== undefined) payload.resume_seq = options.resumeSeq;
   return { contentType: "application/json", body: JSON.stringify(payload) };
 }
 
@@ -1652,7 +1686,7 @@ async function send(text, options = {}) {
   submittedRunIds = null;
   // The draft is going out, so what was stored is stale: a respawn must not put the sent prompt
   // back into the composer.
-  clearDraft();
+  if (options.resumeSeq === undefined) clearDraft();
   setBusy(true);
   // Sending is an explicit request to see the answer: follow again, even if the
   // reader had scrolled up to read something.
@@ -1664,14 +1698,16 @@ async function send(text, options = {}) {
   controller = runController;
   streamBody = null;
   streamText = "";
-  const names = attachments.map((file) => file.name).join(", ");
+  const names = options.resumeSeq === undefined ? attachments.map((file) => file.name).join(", ") : "";
   add("user", text + (names ? `\n\nattached: ${names}` : ""));
   const outgoing = composedBody(text, options);
   // Clear in place, like the submit handler does. Reassigning the binding here was
   // enough to make a reader's captured reference stale - which is how a test can end
   // up asserting against a dead array and passing.
-  attachments.length = 0;
-  renderAttachments();
+  if (options.resumeSeq === undefined) {
+    attachments.length = 0;
+    renderAttachments();
+  }
   setStatus("wasm-agent is thinking…");
   // /health is answered without waiting for a worker. Take the baseline before admitting this run
   // so later polls can tell its queued id from an older run in the same conversation.
@@ -1689,6 +1725,8 @@ async function send(text, options = {}) {
   // and the meta refresh never ran, and the window sat there looking like it was still working on a run
   // that had finished. The gate's bug hunt found it; the product would only have shown it as "stuck".
   let watchdog = null;
+  let sawDone = false;
+  let lostRun = false;
   try {
     const headers = { "Content-Type": outgoing.contentType, "Accept": "text/event-stream" };
     // Which thread this run belongs to travels in the body (`composedBody`), not here: the header
@@ -1736,14 +1774,16 @@ async function send(text, options = {}) {
         // should say so and stop pretending it is still listening.
         clearInterval(watchdog);
         streamNotice = add("assistant", "the node is no longer running this run (" + (health.worker || "no worker") +
-          "). It is recorded as unfinished - the sessions topic offers to continue it.");
+          "). Checking the recorded result for recovery.");
         watchNode();
+        lostRun = true;
         runController.abort();
       } catch (error) {
         // Unreachable: the node is gone, which is a different message and the one that fits.
         clearInterval(watchdog);
         streamNotice = add("assistant", connectionMessage());
         watchNode();
+        lostRun = true;
         runController.abort();
       }
       asking = false;
@@ -1782,6 +1822,7 @@ async function send(text, options = {}) {
           // A run that says it is done, or has answered, or has failed, is finished: whatever the
           // watchdog asks next, this run is not unfinished, and any notice it put up is stale.
           const kind = (() => { try { return JSON.parse(line.slice(6)).type; } catch (error) { return ""; } })();
+          if (kind === "done") sawDone = true;
           if (kind === "done" || kind === "reply" || kind === "error") {
             turnFinished = true;
             if (stillViewingRun()) clearStreamNotice();
@@ -1801,6 +1842,10 @@ async function send(text, options = {}) {
     if (stillViewingRun()) {
       setBusy(false);
       refreshMeta();
+      // A dead stream can finish after the ledger follower already read its tail
+      // while this page was busy. Re-read once after releasing the stream so the
+      // recorded tool result can trigger recovery without a page reload.
+      if (!sawDone && (!runController.signal.aborted || lostRun)) void restoreSession(runThread);
     }
     if (controller === runController) controller = null;
     // Learn which thread this run went into, but only until we know one: after that the window
@@ -3945,10 +3990,12 @@ function applySessionHealth(health) {
 // repair nobody asked for destroys the evidence of the crash. That leaves a person to notice a
 // badge and type a command, which is not recovery - this is the same thing as one click, sent to
 // the node so the run runs where the session lives and the window can watch it.
-function resumeSession(id) {
+function resumeSession(id, expectedSeq) {
   if (!id) return;
   rememberSession(id);
-  send("continue where you stopped", { session: id });
+  return send("continue where you stopped", {
+    session: id, ...(expectedSeq === undefined ? {} : { resumeSeq: expectedSeq }),
+  });
 }
 
 function renderSessions() {

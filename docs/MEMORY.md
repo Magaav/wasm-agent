@@ -108,6 +108,14 @@ Context-only is deliberate: the transcript is what was said, and a synthetic tur
 it would be replayed to every later request as if the agent had said it, and would be
 found by `search_messages`.
 
+The UI resumes a stopped thread automatically when its last row is a tool result
+and every call in that batch has a recorded result. It sends the observed tail
+sequence with the continuation; the node checks the sequence and unfinished
+state immediately before running it. A second window or reload therefore cannot
+run the same continuation after the first has advanced the ledger. Missing tool
+results remain visible for inspection because their effects may have happened
+without being recorded.
+
 Not to be confused with the `resume_session` **tool**, which folds a past session into
 the current one's context: that is a recall aid, this is crash recovery.
 
