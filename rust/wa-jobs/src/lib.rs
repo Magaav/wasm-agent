@@ -290,6 +290,11 @@ impl Store {
     }
     pub fn put(&self, definition: &Value) -> Result<Value> {
         validate(definition)?;
+        self.replace(definition)
+    }
+
+    /// Write a definition that has already passed `validate`, and give it a revision of its own.
+    fn replace(&self, definition: &Value) -> Result<Value> {
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let id = definition["id"].as_str().unwrap();
@@ -315,6 +320,39 @@ impl Store {
         tx.execute("UPDATE deliveries SET state='cancelled',detail='definition changed' WHERE job_id=? AND state='queued'",[id])?;
         tx.commit()?;
         self.get(id)
+    }
+
+    /// The definition exactly as it was stored, without the fields `list` derives for display.
+    fn definition(&self, id: &str) -> Result<Value> {
+        let db = self.db()?;
+        let raw: Option<String> = db
+            .query_row("SELECT definition FROM jobs WHERE id=?1", [id], |r| r.get(0))
+            .optional()?;
+        Ok(serde_json::from_str(&raw.ok_or("job_not_found")?)?)
+    }
+
+    /// Change only the `controls` of a job that is already installed - the route behind the Engine's
+    /// control fields.
+    ///
+    /// This is `put` of the same definition with a different `controls` object and nothing else, so it is
+    /// the edit it looks like: the revision moves, deliveries queued against the old revision are
+    /// cancelled, and the job is left disabled for the operator to enable again. A control is a bound the
+    /// operator chose for what their own messages do; moving it under a job that keeps running would apply
+    /// a number nobody approved. The panel says so before the button is pressed, and `docs/JOBS.md` says it
+    /// with the rest of the control contract.
+    ///
+    /// The rest of the definition is written back exactly as it was read, so a surface that shows two
+    /// numbers cannot become a second way to change an action, a trigger or a prompt.
+    pub fn set_controls(&self, id: &str, controls: &Value) -> Result<Value> {
+        let mut definition = self.definition(id)?;
+        if definition.get("controls") == Some(controls) {
+            return self.get(id);
+        }
+        definition["controls"] = controls.clone();
+        // The whole definition, not only the controls: a job that was installed under earlier rules is
+        // re-checked rather than trusted because it is already stored.
+        validate(&definition)?;
+        self.replace(&definition)
     }
     pub fn get(&self, id: &str) -> Result<Value> {
         self.list()?

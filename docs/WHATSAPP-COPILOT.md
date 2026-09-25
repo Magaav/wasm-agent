@@ -78,7 +78,10 @@ number came from (the `window` field of its result, and one line on stderr), so 
 force is read rather than inferred from a verdict - and a value that is not whole seconds is discarded in
 favour of the next source instead of becoming a zero-second window. The prompt window is what is left of
 the bound once the grace band is taken out of it, deliberately derived rather than a third knob that could
-contradict the hard bound.
+contradict the hard bound. Both numbers are editable from the Engine - the copilot's row shows a field per
+control and a **Set controls** button ([JOBS.md](JOBS.md), "Setting them from the Engine") - so the window
+is moved where the numbers are rather than by editing JSON on disk, and the next read step's `window` line
+reports the number that took effect.
 applies the same bound (`WA_WHATSAPP_TRANSCRIBE_MAX_AGE_SECONDS`, 600): audio past it is refused with a
 durable `transcription_refused reason=stale_audio`, including notes queued in an earlier pass that have gone
 stale since, and a refusal is what settles the message so the next pass cannot queue it again.

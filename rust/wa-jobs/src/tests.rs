@@ -569,3 +569,68 @@ fn a_delivery_carries_its_jobs_controls_and_a_job_without_them_carries_none() {
     assert!(claimed["controls"].is_null(), "no controls is null, which control_env reads as none");
     assert!(control_env(&claimed["controls"]).is_empty());
 }
+
+/// A control is part of the definition, so moving one from the surface the Engine draws is an edit and
+/// costs what an edit costs: the revision moves, a delivery queued against the old revision is cancelled,
+/// and the job is left disabled for the operator to approve again. The rest of the definition comes back
+/// byte-identical - a panel that shows two numbers is not a second way to change an action or a prompt.
+#[test]
+fn changing_a_control_is_an_edit_and_leaves_the_rest_of_the_definition_alone() {
+    let s = store();
+    let job = json!({"id":"copilot","name":"WhatsApp Copilot",
+        "trigger":{"kind":"schedule","every_seconds":30},
+        "controls":{"grace_seconds":300,"max_age_seconds":600},
+        "action":{"kind":"run","script":std::env::temp_dir().join("read.sh"),"timeout_seconds":60}});
+    let before = s.put(&job).unwrap();
+    s.enable("copilot", true).unwrap();
+    let revision = s.get("copilot").unwrap()["revision"].as_i64().unwrap();
+    s.enqueue("copilot", revision, "e1", &json!({}), 0).unwrap();
+
+    let after = s
+        .set_controls("copilot", &json!({"grace_seconds":60,"max_age_seconds":120}))
+        .unwrap();
+    assert_eq!(after["controls"]["grace_seconds"], 60);
+    assert_eq!(after["controls"]["max_age_seconds"], 120);
+    assert_eq!(after["enabled"], false, "an edit invalidates approval, exactly as `put` does");
+    assert!(
+        after["revision"].as_i64().unwrap() > before["revision"].as_i64().unwrap(),
+        "the revision moves with the definition"
+    );
+    let history = s.history().unwrap();
+    assert!(
+        history.as_array().unwrap().iter().any(|d| d["state"] == "cancelled"
+            && d["detail"] == "definition changed"),
+        "a delivery pinned to the old revision is cancelled, not run with numbers nobody re-approved: {history}"
+    );
+    let stored = s.get("copilot").unwrap();
+    assert_eq!(stored["trigger"], json!({"kind":"schedule","every_seconds":30}));
+    assert_eq!(stored["action"]["script"], job["action"]["script"]);
+
+    // The refusals are the ones `put` gives, from the same validator: this route is not a way around them.
+    assert_eq!(
+        s.set_controls("copilot", &json!({"tick_seconds":30})).unwrap_err().to_string(),
+        "unknown_job_control:tick_seconds"
+    );
+    assert_eq!(
+        s.set_controls("copilot", &json!({"max_age_seconds":0})).unwrap_err().to_string(),
+        "job_control_out_of_range:max_age_seconds"
+    );
+    assert_eq!(
+        s.set_controls("copilot", &json!({"grace_seconds":900,"max_age_seconds":600})).unwrap_err().to_string(),
+        "job_control_grace_exceeds_max_age_seconds"
+    );
+    assert_eq!(
+        s.set_controls("copilot", &json!(60)).unwrap_err().to_string(),
+        "job_controls_must_be_an_object"
+    );
+    // A refused change left the stored definition where it was.
+    assert_eq!(s.get("copilot").unwrap()["controls"]["grace_seconds"], 60);
+    // Setting the numbers the job already carries is not an edit, and this route never creates a job.
+    let revision = s.get("copilot").unwrap()["revision"].as_i64().unwrap();
+    let same = s.set_controls("copilot", &json!({"grace_seconds":60,"max_age_seconds":120})).unwrap();
+    assert_eq!(same["revision"].as_i64().unwrap(), revision, "an identical set changes nothing");
+    assert_eq!(
+        s.set_controls("absent", &json!({"grace_seconds":60})).unwrap_err().to_string(),
+        "job_not_found"
+    );
+}

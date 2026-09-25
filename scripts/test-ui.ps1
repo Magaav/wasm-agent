@@ -216,6 +216,31 @@ $harness = @'
   document.querySelector('wa-jobs input').click();
   for (var jtick=0;jtick<30;jtick++) await tick();
   check(!document.querySelector('wa-jobs input').checked, 'accepted disable is displayed');
+  // A job's controls are on the surface: shown with their values, and settable. The store is the only
+  // judge of them, so a refusal has to come back in its own words rather than as a quiet repaint.
+  var controlFields = function () { return Array.prototype.slice.call(document.querySelectorAll("wa-jobs .job-control input")); };
+  var controlButton = function () { return document.querySelector("wa-jobs .job-controls button"); };
+  var controlPosts = function () { return window.__calls.filter(function (call) { return call.url === "jobs" && call.method === "POST" && call.body.indexOf("controls") >= 0; }); };
+  check(controlFields().length === 2 && controlFields()[0].value === "300" && controlFields()[1].value === "600", "a declared control is shown with its value");
+  check(document.querySelectorAll("wa-jobs input[type=checkbox]").length === 2, "a control field is not mistaken for a job toggle");
+  controlFields()[1].value = "120";
+  controlButton().click();
+  for (var ctick=0;ctick<30;ctick++) await tick();
+  var sentControls = controlPosts();
+  var sentBody = sentControls.length ? JSON.parse(sentControls[0].body) : {};
+  check(sentControls.length === 1 && sentBody.action === "controls" && sentBody.controls.grace_seconds === 300 && sentBody.controls.max_age_seconds === 120, "a control change posts the numbers the fields hold");
+  check(controlFields()[1].value === "120" && document.querySelectorAll("wa-jobs input[type=checkbox]")[1].checked === false, "an accepted control edit is displayed as the store left the job");
+  controlFields()[0].value = "";
+  controlButton().click();
+  for (var ctick=0;ctick<30;ctick++) await tick();
+  var emptied = controlPosts();
+  check(emptied.length === 2 && JSON.parse(emptied[1].body).controls.grace_seconds === null, "an empty control field sends null rather than a zero nobody typed");
+  window.__fixtures.controlsRefuse = true;
+  controlFields()[1].value = "900";
+  controlButton().click();
+  for (var ctick=0;ctick<30;ctick++) await tick();
+  check(controlButton().disabled === false && document.getElementById("jobs-box").textContent.indexOf("job_control_grace_exceeds_max_age_seconds") >= 0, "a refused control change is reported in the store's words and leaves the button usable");
+  window.__fixtures.controlsRefuse = false;
   var events = [
     { type: "round", n: 1 },
     { type: "delta", text: "Reading the config module to see what it names." },

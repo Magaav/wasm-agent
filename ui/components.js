@@ -1149,8 +1149,37 @@ class WaJobs extends HTMLElement {
       const last = document.createElement('div');
       last.textContent = job.last_delivery ? `Last delivery: ${job.last_delivery.state} · ${job.last_delivery.detail || ''}` : 'No deliveries yet';
       const details = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = 'Review trigger and instruction';
-      const config = document.createElement('pre'); config.textContent = JSON.stringify({trigger: job.trigger, action: job.action, revision: job.revision}, null, 2);
-      details.append(summary, config); row.append(label, status, source, last, details); this.append(row);
+      const config = document.createElement('pre'); config.textContent = JSON.stringify({controls: job.controls, trigger: job.trigger, action: job.action, revision: job.revision}, null, 2);
+      details.append(summary, config); row.append(label, status, source, last);
+      // A job's controls are the numbers the operator chose for a deterministic step - how old a message may
+      // be and still be answered. They are on the surface because a number nobody can see is a number nobody
+      // can change, and they are the part of a definition that is meant to be tuned. What a field holds is
+      // sent as it is: an empty field sends null rather than a zero nobody typed, and the store is the only
+      // thing that judges a range or the relation between two values. A second copy of those rules here
+      // would be a second thing to disagree with it, so a refusal is shown in the store's own words.
+      const declared = job.controls && typeof job.controls === 'object' && !Array.isArray(job.controls) ? Object.keys(job.controls) : [];
+      if (declared.length) {
+        const block = document.createElement('div'); block.className = 'job-controls';
+        const fields = new Map();
+        for (const controlName of declared) {
+          const field = document.createElement('label'); field.className = 'job-control';
+          const caption = document.createElement('span'); caption.textContent = controlName;
+          const input = document.createElement('input'); input.type = 'number'; input.step = '1'; input.value = String(job.controls[controlName]);
+          input.setAttribute('aria-label', `Control ${controlName} for job ${job.name || job.id}`);
+          field.append(caption, input); fields.set(controlName, input); block.append(field);
+        }
+        const save = document.createElement('button'); save.type = 'button'; save.textContent = 'Set controls';
+        save.addEventListener('click', () => {
+          const values = {};
+          for (const [controlName, input] of fields) values[controlName] = input.value.trim() === '' ? null : Number(input.value);
+          save.disabled = true;
+          this.dispatchEvent(new CustomEvent('job-controls', { bubbles: true, detail: { id: job.id, control: save, controls: values } }));
+        });
+        const warning = document.createElement('div'); warning.className = 'job-control-note';
+        warning.textContent = 'Saving a control is an edit: the revision moves, queued deliveries are cancelled, and the job is left disabled until you enable it again.';
+        block.append(save, warning); row.append(block);
+      }
+      row.append(details); this.append(row);
     }
     const note = document.createElement('p'); note.textContent = 'Disabling cancels queued deliveries. An action already admitted may have effects; running scripts receive cancellation. Re-enabling does not replay cancelled deliveries. Browser events are untrusted data.'; this.append(note);
   }

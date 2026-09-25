@@ -11,9 +11,10 @@ script need not start a run or call a model. See ARCHITECTURE.md section 6 and
 
 The sentinel observes sources and consumes a durable SQLite queue at
 `<config>/sentinel/jobs.db`. The host exposes the same store through master-only
-`GET /jobs` and `POST /jobs` (enable/disable). The Engine lists jobs **after tools**,
-with toggles, source state, queued count, last outcome and the exact definition.
-A toggle is not shown successful until the server confirms it.
+`GET /jobs` and `POST /jobs` (enable/disable, and a job's controls). The Engine lists jobs **after
+tools**, with toggles, source state, queued count, last outcome and the exact definition; a job that
+declares controls gets a field and a button per number. Neither a toggle nor a control is shown successful
+until the server confirms it, and a refusal is shown in the store's own words.
 
 Definitions are installed with `wa-sentinel job put <definition.json>`. New AND
 edited definitions are disabled; an edit invalidates approval. Enable deliberately:
@@ -128,6 +129,27 @@ How it works, in four facts:
 
 They are portable with the job: `controls` survives export and import, and is re-validated on the way in
 (see [ARTIFACTS.md](ARTIFACTS.md)).
+
+### Setting them from the Engine
+
+A control is the one part of a definition meant to be tuned, so the panel that lists jobs shows each
+declared name with its value and a **Set controls** button, and
+`POST /jobs` with `{"id":"whatsapp-copilot","action":"controls","controls":{...}}` moves them. Four rules
+keep that surface from becoming a second, weaker way to edit a job:
+
+- **The store is the only judge.** The panel sends what a field holds and copies no rule of its own: whole
+  seconds, the ranges and the grace/bound relation are `validate_controls`' decisions, and a refusal travels
+  back as `job_control_grace_exceeds_max_age_seconds` rather than a silent clamp. An empty field sends
+  `null`, not a zero nobody typed, and is refused for the same reason a quoted number is.
+- **It cannot touch anything else.** `Store::set_controls` re-reads the stored definition, replaces
+  `controls` and writes it back: a route that shows two numbers cannot become a way to change an action, a
+  trigger or a prompt.
+- **It is an edit, and costs what an edit costs.** The revision moves, deliveries queued against the old
+  revision are cancelled, and the job is left disabled. A bound the operator moved is a bound nobody
+  re-approved, and the panel says so before the button is pressed. Setting the values the job already
+  carries is a no-op, exactly as re-putting an identical definition is.
+- **Master only, and it executes nothing.** The same route and role check as the toggle; what runs is the
+  next delivery, in the pipeline's own step.
 
 ## Sources
 
@@ -301,10 +323,12 @@ any retry - an ambiguous send is never retried.
 deduplication, queue limits, concurrent claims, budgets, deterministic actions,
 `cargo test -p wa-jobs --offline` checks default-off, revision invalidation,
 deduplication, queue limits, concurrent claims, budgets, deterministic actions, controls (the two names,
-their ranges, the refusal of a control no step could read, and the delivery carrying the values of the
-revision it was claimed against), schedule persistence and interrupted-delivery ambiguity.
+their ranges, the refusal of a control no step could read, the delivery carrying the values of the
+revision it was claimed against, and a control moved from the surface - an edit's cost, the same refusals,
+and the rest of the definition unchanged), schedule persistence and interrupted-delivery ambiguity.
 `scripts/test-jobs.cjs`
 uses scratch homes, a fake local chat receiver and a real isolated Chrome page.
 `scripts/test-ui.ps1` checks the jobs position, safe rendering, toggle request and
-failure behavior in a real browser. None of these tests is a paid-model benchmark
-or permission to send a real WhatsApp reply.
+failure behavior in a real browser, and that a declared control is shown with its value, posted as the
+number the field holds, and that its refusal comes back in the store's words.
+None of these tests is a paid-model benchmark or permission to send a real WhatsApp reply.
