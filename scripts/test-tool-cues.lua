@@ -48,11 +48,27 @@ ok(read_description ~= nil, "read must be in the master tool list")
 ok(prompt:find(read_description:sub(1, 40), 1, true) == nil,
   "the schema description must not be duplicated in the index")
 
+-- Shell search has a faster default without pretending that the native grep tool is
+-- the shell program: native grep remains the portable, bounded literal-search contract.
+local rg_guidance = "prefer ripgrep (`rg` and `rg --files`)"
+ok(prompt:find(rg_guidance, 1, true) ~= nil,
+  "a master with bash must prefer ripgrep for shell search and file discovery")
+local no_shell = agent.system_prompt("master", nil, nil,
+  tools.all_for({ read = true, grep = true }, "master"))
+ok(no_shell:find(rg_guidance, 1, true) == nil,
+  "ripgrep guidance must not be offered when bash is unavailable")
+
 -- The child prompt reads the same cue; the names-only switch still drops it.
 local bot = { subagent = { id = "test", instructions = "", limits = {} }, role = "master" }
 local child = agent.subagent_system_prompt(bot, tool_list)
 ok(child:find("- read: " .. tools.snippet("read"), 1, true) ~= nil,
   "the child index must be the authored cue")
+ok(child:find(rg_guidance, 1, true) ~= nil,
+  "a child with bash must also prefer ripgrep for shell search")
+local no_shell_child = agent.subagent_system_prompt(bot,
+  tools.all_for({ read = true, grep = true }, "master"))
+ok(no_shell_child:find(rg_guidance, 1, true) == nil,
+  "a child without bash must not receive ripgrep guidance")
 local real_getenv = host.getenv
 host.getenv = function(key)
   if key == "WASM_AGENT_TOOL_SNIPPETS" then return "names" end
