@@ -1205,10 +1205,19 @@ let replayMessageEndedAt = 0;
 // reload fixture's is - must keep its in-progress notice, not a "completed" footer.
 let replayRunAnswered = false;
 let renderedMessageIds = new Set();
+function finishReplayedRun() {
+  if (replayRunAnswered && runBubble) {
+    if (!statusLine) setStatus("completed");
+    finishRunStatus();
+  } else {
+    clearStatus();
+  }
+}
 function repaintMessages(rows, options = {}) {
   // A repaint is a view of durable rows, not a resumed event stream. In particular, an
   // assistant tool call without a result must never inherit a live timer from this page.
   stopToolTicker();
+  clearStatus();
   trace = null;
   lastTool = null;
   messages.replaceChildren();
@@ -1229,8 +1238,10 @@ function repaintMessages(rows, options = {}) {
     // are drawn, the rows after it are not, and nothing says so.
     try {
       if (message.role === "user") {
+        finishReplayedRun();
         flushDecision(true);
         runStartedAt = Number(message.created_at) > 0 ? Number(message.created_at) * 1000 : Date.now();
+        replayMessageEndedAt = 0;
         replayRunAnswered = false;
         add("user", message.content || "");
       } else if (message.role === "assistant") {
@@ -1277,11 +1288,9 @@ function repaintMessages(rows, options = {}) {
   // a tool call with no recorded result is history, not work this page can watch. Keeping its
   // line pending and starting a ticker invented a clock for a call nobody was timing, and the
   // reader could not tell it from a live one. Every replayed decision closes as unrecorded.
-  // The repaint draws history, and history still has a footer: the run's own duration, taken from
-  // the stored row that runStartedAt already carries. The live path gets this from the stream's
-  // `done`; a replay emits no done at all, so nothing ever created a status line and
-  // finishRunStatus returned early - which is why a reloaded transcript had no footers.
-  if (replayingMessages && replayRunAnswered && !statusLine && runBubble) { setStatus("completed"); finishRunStatus(); }
+  // Replay has no `done` event. Close each answered run at its next user boundary and the last
+  // one here; closing only here gave the final answer a footer and lost every earlier duration.
+  finishReplayedRun();
   if (trace) finishTrace();
   replayingMessages = false;
   // The transcript just drawn is history, so the bubble it ended on is closed. The `reply` handler

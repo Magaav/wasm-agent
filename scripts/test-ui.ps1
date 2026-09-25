@@ -76,6 +76,13 @@ $harness = @'
     check(!!repaintedLast && repaintedLast.classList.contains("chat-content-run-status"),
       "a repainted bubble must show its run's footer, saw: "
       + (repaintedLast ? repaintedLast.tagName + "." + (repaintedLast.className || "") : "nothing"));
+    var earlierAnswer = Array.from(repaintedBubbles).find(function (bubble) {
+      return bubble.textContent.includes("EARLIER-FINISHED-ANSWER");
+    });
+    var earlierFooter = earlierAnswer?.body.querySelector(":scope > .chat-content-run-status.finished");
+    check(!!earlierFooter && earlierFooter.textContent.includes("0:05"),
+      "every answered run must keep its duration after reload, saw: "
+      + (earlierFooter ? earlierFooter.textContent : "no footer"));
 
     // The stream belongs to the old page, so the new page must notice the worker become idle
     // and repaint the answer from the durable ledger, not open the engine's session view.
