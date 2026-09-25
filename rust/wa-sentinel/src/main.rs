@@ -1809,8 +1809,13 @@ mod self_update_tests {
         let mut wrote = None;
         for _ in 0..40 {
             if let Ok(text) = std::fs::read_to_string(&marker) {
+                let complete = text.contains("--session thread-1")
+                    && text.contains("--prompt continue")
+                    && text.contains("--reason fixture");
                 wrote = Some(text);
-                break;
+                if complete {
+                    break;
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
