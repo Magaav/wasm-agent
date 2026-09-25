@@ -21,9 +21,16 @@ let selectedPython;
 
 function python() {
   if (selectedPython) return selectedPython;
-  const candidates = [process.env.WA_TEST_SQLITE_PYTHON, "python3", "python"].filter(Boolean);
+  const candidates = [
+    process.env.WA_TEST_SQLITE_PYTHON && { command: process.env.WA_TEST_SQLITE_PYTHON, args: [] },
+    { command: "python3", args: [] },
+    { command: "python", args: [] },
+    process.platform === "win32" && { command: "py", args: ["-3"] },
+  ].filter(Boolean);
   for (const candidate of candidates) {
-    const probe = spawnSync(candidate, ["-c", "import sqlite3"], { encoding: "utf8", windowsHide: true });
+    const probe = spawnSync(candidate.command, [...candidate.args, "-c", "import sqlite3"], {
+      encoding: "utf8", windowsHide: true,
+    });
     if (!probe.error && probe.status === 0) {
       selectedPython = candidate;
       return selectedPython;
@@ -33,7 +40,9 @@ function python() {
 }
 
 function invoke(mode, databasePath, statement, params) {
-  const result = spawnSync(python(), ["-c", PROGRAM, databasePath, mode, statement, JSON.stringify(params)], {
+  const runtime = python();
+  const result = spawnSync(runtime.command,
+    [...runtime.args, "-c", PROGRAM, databasePath, mode, statement, JSON.stringify(params)], {
     encoding: "utf8",
     windowsHide: true,
   });

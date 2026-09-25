@@ -237,12 +237,23 @@ ok "$([ -n "$OP_PID" ] && [ -n "$GUEST_PID" ] && [ "$OP_PID" != "$GUEST_PID" ] &
 
 # 5. the guest cannot read the operator's sessions or memory -----------------
 say "checking the guest cannot see the operator's sessions or memory"
-PYTHON_BIN="$(command -v python3 || command -v python || true)"
-if [ -z "$PYTHON_BIN" ]; then
+PYTHON_CMD=()
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 \
+      && "$candidate" -c 'import sqlite3' >/dev/null 2>&1; then
+    PYTHON_CMD=("$candidate")
+    break
+  fi
+done
+if [ "${#PYTHON_CMD[@]}" -eq 0 ] && command -v py >/dev/null 2>&1 \
+    && py -3 -c 'import sqlite3' >/dev/null 2>&1; then
+  PYTHON_CMD=(py -3)
+fi
+if [ "${#PYTHON_CMD[@]}" -eq 0 ]; then
   echo "node instances: Python with sqlite3 is required for the database isolation probe" >&2
   exit 2
 fi
-"$PYTHON_BIN" - "$(winpath "$OP_DB")" <<'PY'
+"${PYTHON_CMD[@]}" - "$(winpath "$OP_DB")" <<'PY'
 import sqlite3, sys, time
 db = sqlite3.connect(sys.argv[1])
 db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, route_id TEXT NOT NULL DEFAULT '', objective TEXT NOT NULL DEFAULT '', parent_session_id TEXT, started_at REAL NOT NULL, ended_at REAL)")
@@ -253,7 +264,7 @@ db.execute("INSERT OR REPLACE INTO sessions(id, started_at, title) VALUES(?,?,?)
 db.commit()
 db.close()
 PY
-MARKER="$("$PYTHON_BIN" - "$(winpath "$GUEST_DB")" <<'PY'
+MARKER="$("${PYTHON_CMD[@]}" - "$(winpath "$GUEST_DB")" <<'PY'
 import sqlite3, sys
 db = sqlite3.connect(sys.argv[1])
 row = db.execute("SELECT id FROM sessions WHERE id=?", ("op-secret-session",)).fetchone()
