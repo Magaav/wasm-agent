@@ -588,14 +588,24 @@ pub fn import_artifact(
 mod tests {
     use super::*;
 
+    fn fixture_path(relative: &str) -> String {
+        std::env::temp_dir()
+            .join("wasm-agent-artifact-tests")
+            .join(relative)
+            .to_string_lossy()
+            .into_owned()
+    }
+
     fn wake_job() -> Value {
         json!({"id":"received","name":"Review incoming","trigger":{"kind":"event","topic":"whatsapp.message"},
             "action":{"kind":"subagent","profile":"whatsapp-responder","prompt":"Decide; do not send without approval."}})
     }
     fn file_job() -> Value {
+        let trigger_path = fixture_path("approved/incoming");
+        let script = fixture_path("approved/procedures/validate.sh");
         json!({"id":"documents","name":"Validate incoming",
-            "trigger":{"kind":"file","path":"C:/approved/incoming","pattern":".json"},
-            "action":{"kind":"run","script":"C:/approved/procedures/validate.sh","timeout_seconds":60}})
+            "trigger":{"kind":"file","path":trigger_path,"pattern":".json"},
+            "action":{"kind":"run","script":script,"timeout_seconds":60}})
     }
     fn page_job() -> Value {
         json!({"id":"page","name":"Page events",
@@ -605,7 +615,10 @@ mod tests {
 
     #[test]
     fn export_strips_absolute_bindings_into_slots() {
-        let artifact = export_artifact(&file_job()).unwrap();
+        let job = file_job();
+        let trigger_path = job["trigger"]["path"].as_str().unwrap().to_owned();
+        let script = job["action"]["script"].as_str().unwrap().to_owned();
+        let artifact = export_artifact(&job).unwrap();
         assert_eq!(artifact["trigger"]["kind"], "file");
         assert!(artifact["trigger"].get("path").is_none(), "path must become a slot");
         assert!(artifact["action"].get("script").is_none(), "script must become a slot");
@@ -617,7 +630,8 @@ mod tests {
             .collect();
         assert!(slots.contains(&"trigger_path") && slots.contains(&"script"));
         let text = artifact.to_string();
-        assert!(!text.contains("C:/approved"), "no machine path may survive export: {text}");
+        assert!(!text.contains(&trigger_path), "trigger path may not survive export: {text}");
+        assert!(!text.contains(&script), "script path may not survive export: {text}");
     }
 
     #[test]
@@ -640,30 +654,32 @@ mod tests {
     #[test]
     fn import_requires_every_required_binding_and_approval() {
         let artifact = export_artifact(&file_job()).unwrap();
-        let bindings = json!({"trigger_path":"C:/approved/incoming","script":"C:/approved/procedures/validate.sh"});
+        let trigger_path = fixture_path("approved/incoming");
+        let script = fixture_path("approved/procedures/validate.sh");
+        let bindings = json!({"trigger_path":trigger_path,"script":script});
         assert_eq!(
             import_artifact(&artifact, &bindings, false, "operator").unwrap_err().to_string(),
             "resource_binding_needs_approval"
         );
-        let missing = json!({"trigger_path":"C:/approved/incoming"});
+        let missing = json!({"trigger_path":fixture_path("approved/incoming")});
         assert_eq!(
             import_artifact(&artifact, &missing, true, "operator").unwrap_err().to_string(),
             "resource_not_bound:script"
         );
-        let relative = json!({"trigger_path":"incoming","script":"C:/approved/procedures/validate.sh"});
+        let relative = json!({"trigger_path":"incoming","script":fixture_path("approved/procedures/validate.sh")});
         assert_eq!(
             import_artifact(&artifact, &relative, true, "operator").unwrap_err().to_string(),
             "resource_needs_absolute_path:trigger_path"
         );
         // A binding for a slot the artifact never declared is refused, not silently ignored.
-        let extra = json!({"trigger_path":"C:/approved/incoming","script":"C:/approved/procedures/validate.sh","endpoint":"ws://127.0.0.1:1/devtools/page/X"});
+        let extra = json!({"trigger_path":fixture_path("approved/incoming"),"script":fixture_path("approved/procedures/validate.sh"),"endpoint":"ws://127.0.0.1:1/devtools/page/X"});
         assert_eq!(
             import_artifact(&artifact, &extra, true, "operator").unwrap_err().to_string(),
             "unknown_binding_slot:endpoint"
         );
         let rebuilt = import_artifact(&artifact, &bindings, true, "operator").unwrap();
-        assert_eq!(rebuilt["definition"]["trigger"]["path"], "C:/approved/incoming");
-        assert_eq!(rebuilt["definition"]["action"]["script"], "C:/approved/procedures/validate.sh");
+        assert_eq!(rebuilt["definition"]["trigger"]["path"], bindings["trigger_path"]);
+        assert_eq!(rebuilt["definition"]["action"]["script"], bindings["script"]);
         assert_eq!(rebuilt["definition"]["imported_by"], "operator");
     }
 
@@ -738,7 +754,7 @@ mod tests {
         run["action"] = json!({"kind":"run","timeout_seconds":30});
         run["resources"] = json!([{"slot":"script","kind":"script_path","required":true}]);
         assert_eq!(
-            import_artifact(&run, &json!({"script":"C:/approved/x.sh"}), true, "guest").unwrap_err().to_string(),
+            import_artifact(&run, &json!({"script":fixture_path("approved/x.sh")}), true, "guest").unwrap_err().to_string(),
             "guest_artifact_capability_not_permitted"
         );
         // Regression: a guest cannot import even the guest-named deterministic profile, because it would
@@ -839,11 +855,12 @@ mod tests {
             "artifact_contains_raw_binding:trigger.websocket_url"
         );
         let mut raw_script = artifact.clone();
-        raw_script["action"] = json!({"kind":"run","script":"C:/approved/x.sh"});
+        let script = fixture_path("approved/x.sh");
+        raw_script["action"] = json!({"kind":"run","script":script});
         raw_script["trigger"] = json!({"kind":"event","topic":"t"});
         raw_script["resources"] = json!([{"slot":"script","kind":"script_path","required":true}]);
         assert_eq!(
-            import_artifact(&raw_script, &json!({"script":"C:/approved/x.sh"}), true, "operator").unwrap_err().to_string(),
+            import_artifact(&raw_script, &json!({"script":fixture_path("approved/x.sh")}), true, "operator").unwrap_err().to_string(),
             "artifact_contains_raw_binding:action.script"
         );
         let mut unknown = artifact.clone();
