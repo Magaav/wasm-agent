@@ -1,0 +1,13 @@
+{
+  "id": "ui-diff-topic",
+  "source": "1f0292e53f409e7262498372c709d5c0e65a36eb",
+  "knownFix": "211e9fc2c3014eb3c6d98410ed6d13732016c96b",
+  "prompt": "1. code diff topic should be bellow the final answer not inside run topic\n2. fix its ui to exactly replicate the current wa-topic component\n\nWork only in this checkout. Do not deploy, push, or use a live client. Commit locally if useful; finish with the change and tests you could run.",
+  "provider": "opencode-go",
+  "model": "deepseek-v4.1-flash",
+  "reasoning": "high",
+  "ratesUsdPerMillion": { "input": 0.15, "cacheRead": 0.003, "cacheWrite": 0, "output": 0.6 },
+  "timeLimitSeconds": 420,
+  "image": "wa-agent-benchmark:0.87.1",
+  "oracle": "scripts/test-ui.ps1"
+}
