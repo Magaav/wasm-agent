@@ -386,10 +386,10 @@ ok(not command:find("it's", 1, true) and command:find("it'\\''s", 1, true),
 local tree = host.paths().temp .. '/wa-update-tree'
 local broken = host.paths().temp .. '/wa-update-broken'
 host.exec("mkdir -p '" .. tree .. "/rust/target/release' '" .. broken .. "'", "")
-host.write_file(tree .. '/rust/target/release/wa.e' .. 'xe', 'placeholder\n')
+host.write_file(tree .. '/rust/target/release/' .. update.binary_name(), 'placeholder\n')
 host.write_file(broken .. '/runtime-worktree.txt', (tree:gsub('/', '\\')) .. "\r\n")
 host.write_file(broken .. '/installed.txt', 'commit=0000000\nsource_commit_hint=0000000\n')
-host.write_file(broken .. '/wa-sentinel.e' .. 'xe', 'not a program\n')
+host.write_file(broken .. '/' .. update.sentinel_name(), 'not a program\n')
 local report = update.run({ install = broken, reason = 'the update test' })
 ok(report.ok == false, 'a sentinel that cannot run must not report success: ' .. tostring(report.message))
 ok(report.error == 'sentinel_refused' or report.error == 'sentinel_unreachable',

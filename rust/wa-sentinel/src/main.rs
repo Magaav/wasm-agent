@@ -1809,8 +1809,13 @@ mod self_update_tests {
         let mut wrote = None;
         for _ in 0..40 {
             if let Ok(text) = std::fs::read_to_string(&marker) {
+                let complete = text.contains("--session thread-1")
+                    && text.contains("--prompt continue")
+                    && text.contains("--reason fixture");
                 wrote = Some(text);
-                break;
+                if complete {
+                    break;
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
@@ -1937,10 +1942,20 @@ mod self_update_tests {
         assert_eq!(activity_of(&json!({"current": null})), None);
     }
 
-    /// Path comparison is how the recorded image is matched to the running one; it must be case-
-    /// and separator-insensitive, and must ignore the Windows verbatim prefix.
+    /// Path comparison is how the recorded image is matched to the running one on every platform.
     #[test]
     fn recorded_and_running_paths_compare_as_files() {
+        let recorded = std::env::temp_dir().join("wasm-agent").join("wa");
+        let other = std::env::temp_dir().join("another-wasm-agent").join("wa");
+        assert!(instance::same_path(&recorded, &recorded));
+        assert!(!instance::same_path(&recorded, &other));
+    }
+
+    /// Windows file identity is additionally case- and separator-insensitive and ignores the
+    /// verbatim prefix. Those strings are paths only on Windows, so only assert that contract there.
+    #[cfg(windows)]
+    #[test]
+    fn windows_recorded_and_running_paths_ignore_spelling_differences() {
         assert!(instance::same_path(
             Path::new(r"C:\Users\Victor\wasm-agent\wa.exe"),
             Path::new(r"\\?\C:/Users/Victor/wasm-agent/WA.EXE")

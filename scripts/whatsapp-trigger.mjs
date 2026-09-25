@@ -22,6 +22,7 @@
 import { HOOK } from "./whatsapp-hook.mjs";
 import fs from "node:fs";
 import path from "node:path";
+import { WebSocket } from "./lib/websocket-runtime.mjs";
 
 const PORTS = [Number(process.env.WA_CDP_PORT) || 9222];
 const HOSTS = ["127.0.0.1", "[::1]"];

@@ -56,6 +56,7 @@ const WHATSAPP_URL = "web.whatsapp.com";
 
 import { acquire as acquireSendLock, defaultLockPath } from "./whatsapp-sendlock.mjs";
 import { composerMatches, classifySendAttempt, sendGuard, identityGuard, lookupExpression } from "./whatsapp-reply-core.mjs";
+import { WebSocket } from "./lib/websocket-runtime.mjs";
 
 // The composer lock is released by `done`, but a crash between acquiring and sending must not leave the
 // lock for the stale timeout. One process-wide handler covers every abnormal exit.

@@ -59,10 +59,12 @@ skip() {
 
 winpath() { cygpath -w "$1" 2>/dev/null || printf '%s' "$1"; }
 port_in_use() {
-  if command -v netstat >/dev/null 2>&1; then
-    netstat -ano -p TCP 2>/dev/null | grep -q ":$1 .*LISTENING"
-  else
+  if command -v ss >/dev/null 2>&1; then
     ss -ltn 2>/dev/null | grep -q ":$1 "
+  elif [ "$(uname -s 2>/dev/null)" = "Linux" ]; then
+    netstat -ltn 2>/dev/null | grep -q ":$1 .*LISTEN"
+  else
+    netstat -ano -p TCP 2>/dev/null | grep -q ":$1 .*LISTENING"
   fi
 }
 pick_port_base() {
@@ -79,10 +81,12 @@ pick_port_base() {
 pid_of() { sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$1" 2>/dev/null | head -1; }
 node_id_of() { curl -s -m 5 "http://127.0.0.1:$1/sync/head" 2>/dev/null | sed -n 's/.*"node_id":"\([^"]*\)".*/\1/p'; }
 pid_on_port() {
-  if command -v netstat >/dev/null 2>&1; then
-    netstat -ano -p TCP 2>/dev/null | grep ":$1 .*LISTENING" | awk '{print $5}' | head -1
-  else
+  if command -v ss >/dev/null 2>&1; then
     ss -ltnp 2>/dev/null | grep ":$1 " | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1
+  elif [ "$(uname -s 2>/dev/null)" = "Linux" ]; then
+    netstat -ltnp 2>/dev/null | grep ":$1 .*LISTEN" | sed -n 's#.* \([0-9][0-9]*\)/.*#\1#p' | head -1
+  else
+    netstat -ano -p TCP 2>/dev/null | grep ":$1 .*LISTENING" | awk '{print $5}' | head -1
   fi
 }
 kill_port() {
@@ -233,22 +237,41 @@ ok "$([ -n "$OP_PID" ] && [ -n "$GUEST_PID" ] && [ "$OP_PID" != "$GUEST_PID" ] &
 
 # 5. the guest cannot read the operator's sessions or memory -----------------
 say "checking the guest cannot see the operator's sessions or memory"
-node -e '
-const {DatabaseSync} = require("node:sqlite");
-const db = new DatabaseSync(process.argv[1]);
-db.exec("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, route_id TEXT NOT NULL DEFAULT \x27\x27, objective TEXT NOT NULL DEFAULT \x27\x27, parent_session_id TEXT, started_at REAL NOT NULL, ended_at REAL)");
-const cols = db.prepare("PRAGMA table_info(sessions)").all().map(c => c.name);
-if (!cols.includes("title")) db.exec("ALTER TABLE sessions ADD COLUMN title TEXT NOT NULL DEFAULT \x27\x27");
-db.prepare("INSERT OR REPLACE INTO sessions(id, started_at, title) VALUES(?,?,?)").run("op-secret-session", Date.now()/1000, "operator secret session");
-db.close();
-' "$(winpath "$OP_DB")"
-MARKER="$(node -e '
-const {DatabaseSync} = require("node:sqlite");
-const db = new DatabaseSync(process.argv[1]);
-const row = db.prepare("SELECT id FROM sessions WHERE id=?").get("op-secret-session");
-console.log(row ? "FOUND" : "ABSENT");
-db.close();
-' "$(winpath "$GUEST_DB")")"
+PYTHON_CMD=()
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 \
+      && "$candidate" -c 'import sqlite3' >/dev/null 2>&1; then
+    PYTHON_CMD=("$candidate")
+    break
+  fi
+done
+if [ "${#PYTHON_CMD[@]}" -eq 0 ] && command -v py >/dev/null 2>&1 \
+    && py -3 -c 'import sqlite3' >/dev/null 2>&1; then
+  PYTHON_CMD=(py -3)
+fi
+if [ "${#PYTHON_CMD[@]}" -eq 0 ]; then
+  echo "node instances: Python with sqlite3 is required for the database isolation probe" >&2
+  exit 2
+fi
+"${PYTHON_CMD[@]}" - "$(winpath "$OP_DB")" <<'PY'
+import sqlite3, sys, time
+db = sqlite3.connect(sys.argv[1])
+db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, route_id TEXT NOT NULL DEFAULT '', objective TEXT NOT NULL DEFAULT '', parent_session_id TEXT, started_at REAL NOT NULL, ended_at REAL)")
+columns = [row[1] for row in db.execute("PRAGMA table_info(sessions)")]
+if "title" not in columns:
+    db.execute("ALTER TABLE sessions ADD COLUMN title TEXT NOT NULL DEFAULT ''")
+db.execute("INSERT OR REPLACE INTO sessions(id, started_at, title) VALUES(?,?,?)", ("op-secret-session", time.time(), "operator secret session"))
+db.commit()
+db.close()
+PY
+MARKER="$("${PYTHON_CMD[@]}" - "$(winpath "$GUEST_DB")" <<'PY'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+row = db.execute("SELECT id FROM sessions WHERE id=?", ("op-secret-session",)).fetchone()
+print("FOUND" if row else "ABSENT")
+db.close()
+PY
+)"
 ok "$([ "$MARKER" = "ABSENT" ] && echo 1 || echo 0)" \
   "the operator's session is not in the guest's database" "$MARKER"
 GUEST_SESSIONS="$(curl -s -m 5 "http://127.0.0.1:$GUEST_PORT/sessions" 2>/dev/null)"

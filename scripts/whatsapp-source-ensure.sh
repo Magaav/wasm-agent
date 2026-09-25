@@ -68,15 +68,30 @@ whatsapp_page() {
     END { exit(found ? 0 : 1) }'
 }
 listener_pid() {
-  # The pid listening on our port, or empty. `netstat` is the only tool that answers this on Windows.
-  netstat -ano 2>/dev/null | tr -d '\r' | awk -v want="127.0.0.1:$PORT" '$2 == want && $4 == "LISTENING" { print $5; exit }'
+  # The pid listening on our port, or empty. The gate also exercises this refusal on Linux, whose
+  # netstat columns and state spelling are different from Windows'.
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp 2>/dev/null | grep ":$PORT " | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1
+  elif [ "$(uname -s 2>/dev/null)" = "Linux" ]; then
+    netstat -ltnp 2>/dev/null | grep ":$PORT .*LISTEN" | sed -n 's#.* \([0-9][0-9]*\)/.*#\1#p' | head -1
+  else
+    netstat -ano -p TCP 2>/dev/null | tr -d '\r' | awk -v want="127.0.0.1:$PORT" '$2 == want && $4 == "LISTENING" { print $5; exit }'
+  fi
 }
 pid_image() {
-  # tasklist prints a blank line before the row, so the first *non-empty* line is the process.
-  tasklist //FI "PID eq $1" //NH 2>/dev/null | tr -d '\r' | awk 'NF { print $1; exit }'
+  if [ "$(uname -s 2>/dev/null)" = "Linux" ]; then
+    ps -p "$1" -o comm= 2>/dev/null | awk 'NF { print; exit }'
+  else
+    # tasklist prints a blank line before the row, so the first *non-empty* line is the process.
+    tasklist //FI "PID eq $1" //NH 2>/dev/null | tr -d '\r' | awk 'NF { print $1; exit }'
+  fi
 }
 pid_commandline() {
-  powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter \"ProcessId=$1\").CommandLine" 2>/dev/null | tr -d '\r'
+  if [ "$(uname -s 2>/dev/null)" = "Linux" ]; then
+    ps -p "$1" -o args= 2>/dev/null
+  else
+    powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter \"ProcessId=$1\").CommandLine" 2>/dev/null | tr -d '\r'
+  fi
 }
 
 start_via_task() {

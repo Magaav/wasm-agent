@@ -32,6 +32,7 @@
 // to learn the module names, and the sentinel's cdp trigger, as its `setup_expression`, so the page keeps
 // it across reloads. Two copies would drift.
 import { HOOK } from "./whatsapp-hook.mjs";
+import { WebSocket } from "./lib/websocket-runtime.mjs";
 
 const PORTS = [Number(process.env.WA_CDP_PORT) || 9222];
 const HOSTS = ["127.0.0.1", "[::1]"];

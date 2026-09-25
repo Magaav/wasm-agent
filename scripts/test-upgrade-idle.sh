@@ -17,10 +17,14 @@ trap 'rm -rf "$WORK"' EXIT
 
 INST="$WORK/install"
 mkdir -p "$INST/scripts"
-NEW="$WORK/candidate.exe"
+case "$(uname -s 2>/dev/null)" in
+  CYGWIN*|MINGW*|MSYS*) WA_NAME=wa.exe ;;
+  *) WA_NAME=wa ;;
+esac
+NEW="$WORK/candidate-${WA_NAME}"
 printf '#!/bin/sh\nexit 0\n' > "$NEW"
 chmod +x "$NEW"
-cp -f "$NEW" "$INST/wa.exe"
+cp -f "$NEW" "$INST/$WA_NAME"
 HASH="$(sha256sum < "$NEW" | awk '{print $1}')"
 # `commit=unknown` skips the downgrade guard, which cannot compare against an unknown commit.
 printf 'commit=unknown\nsource_commit_hint=unknown\nsha256=%s\n' "$HASH" > "$INST/installed.txt"
