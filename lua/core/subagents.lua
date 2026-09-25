@@ -382,7 +382,13 @@ local function resolve_event(profile, args)
   if scoped and not scope_has(profile, row.conversation_id) then
     return nil, "event_conversation_not_in_profile"
   end
-  return { conversation_id = row.conversation_id, message_id = row.message_id }, nil
+  -- The ledger's own two clocks for the trigger travel with the event. They are not decoration: a scoped
+  -- responder proves the operator has not answered the conversation since this message arrived before it
+  -- sends anything, and that proof needs the arrival as this node recorded it (`observed_at`) with the
+  -- sender's claim (`sent_at`) as the fallback. Both are copied from the row that was just resolved, so the
+  -- comparison is against the same ledger the reply is read from, never against a caller's argument.
+  return { conversation_id = row.conversation_id, message_id = row.message_id,
+    sent_at = tonumber(row.sent_at) or 0, observed_at = tonumber(row.observed_at) or 0 }, nil
 end
 
 -- Start one child. Ownership, depth and the allowed set are derived here; the

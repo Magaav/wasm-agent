@@ -562,6 +562,11 @@ function M.dispatch(memory, name, args, role, ctx)
       event = ctx.subagent.event,
       effects = ctx.subagent.effects,
       sends = ctx.subagent.sends,
+      -- The ledger handle, so a send can ask the one question only the ledger can answer: has the operator
+      -- replied in this conversation since the message this run was woken for? It is passed here
+      -- deliberately - the child's own tools cannot reach the ledger, and this is not the ledger, it is one
+      -- yes/no question asked at the moment of the effect.
+      memory = memory,
     })
   elseif name == "search_ledger" then
     return memory.search_ledger(args.query or "", args.conversation_id, args.limit or 20)
