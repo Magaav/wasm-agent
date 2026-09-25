@@ -2408,7 +2408,7 @@ async function efficiencyReport() {
   messages.append(panel);
   pin();
   try {
-    const response = await apiFetch("efficiency?session_id=" + encodeURIComponent(session), { headers: apiHeaders() });
+    const response = await apiFetch("efficiency?session_id=" + encodeURIComponent(chatSession), { headers: apiHeaders() });
     const payload = await response.json();
     if (payload && payload.error) {
       panel.textContent = "/efficiency_report: " + payload.error;
