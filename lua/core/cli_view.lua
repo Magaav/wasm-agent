@@ -495,7 +495,7 @@ function M.new(opts)
     branch = opts.branch or "",
     budget = opts.budget or 0,
     context = 0,
-    frame = 0, phase = "", round = 0, pending = nil,
+    frame = 0, phase = "", round = 0, runs = 0, total_rounds = 0, pending = nil,
     -- `shown_cols` is how many columns of the terminal the status line currently holds: the
     -- bound every in-place write is kept inside - see `METHODS:status_draw`. `screen` is the rows
     -- the view owns once it knows the console's height - see `METHODS:screen_on`.
@@ -537,13 +537,10 @@ function METHODS:status_template()
   local started = self.pending and self.pending.started or (self.turn and self.turn.started or nil)
   local function compose(shown)
     local line = "  {m}" .. shown
-    if self.pending then
-      local bound = self.pending.bound and (" of " .. M.duration(self.pending.bound)) or ""
-      return line .. " \194\183 {t}" .. bound
-    end
     if not self.turn then return line end
-    local round = (self.round and self.round > 0) and (" \194\183 round " .. self.round) or ""
-    return line .. " \194\183 {t}" .. round
+    local step = self.total_rounds > 0 and (" \194\183 step " .. self.total_rounds) or ""
+    local bound = self.pending and self.pending.bound and (" of " .. M.duration(self.pending.bound)) or ""
+    return line .. " \194\183 {t}" .. bound .. " \194\183 run " .. self.runs .. step
   end
   local plain = compose(phase)
   -- The phase word carries the colour and nothing else does: the host's ticker draws this
@@ -772,6 +769,14 @@ end
 -- Only the live rendering has anything to take back. A captured transcript is a log, and a log with
 -- cursor movement in it is not a transcript: the plain path writes the same prompt it always did,
 -- byte for byte.
+-- Reclaim only the submitted input row, after Enter and before a run starts.
+-- Never do this during a model call: the user may already be typing another line.
+function METHODS:submitted()
+  if self.screen then
+    self:control("\27[" .. self.screen.input .. ";1H\27[2Kwa> ")
+  end
+end
+
 function METHODS:prompt(text)
   text = text or "wa> "
   local screen = self:screen_on()
@@ -792,7 +797,9 @@ end
 function METHODS:accepted(text)
   text = tostring(text or "")
   if text == "" or not self.screen then return end
+  self:clear() -- the host ticker must not write while this line is committed
   self:write(paint("wa> " .. clip(text, math.max(10, self.limit - 4)), "accent", self.live) .. "\n")
+  if self.turn then self:paint(true) end
 end
 
 -- The terminal title carries the same word as the status line, which is how a reader
@@ -812,6 +819,7 @@ end
 -- ---- the events ----------------------------------------------------------------
 
 function METHODS:run_started()
+  self.runs = self.runs + 1
   self.frame = 0
   self.phase = "Thinking"
   self.pending = nil
@@ -993,7 +1001,9 @@ function METHODS:event(event)
       self:line(paint("  ! " .. M.clip(text, self.limit), "yellow", self.live))
     end
   elseif kind == "round" then
+    local previous = self.round
     self.round = tonumber(event.n) or (self.round + 1)
+    self.total_rounds = self.total_rounds + math.max(0, self.round - previous)
     if self.turn then self.turn.rounds = self.round end
     self:paint()
   elseif kind == "tool" then

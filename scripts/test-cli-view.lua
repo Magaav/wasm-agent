@@ -251,7 +251,8 @@ live_view:event({ type = "round", n = 1 })
 ok(has(live.text(), "\27" .. "7\r"), "the status line is rewritten in place, not printed again")
 ok(not has(live.text(), "\27[2K"), "and never erases to the end of the row the reader types on")
 ok(has(live.text(), view_lib.spinner(0)), "the status line carries a spinner")
-ok(has(visible(live.text()), "Thinking \194\183 12.0s"), "the status line says what and for how long")
+ok(has(visible(live.text()), "Thinking \194\183 12.0s \194\183 run 1 \194\183 step 1"),
+  "the status line says what, for how long, and counts the run and its steps")
 clock.value = 20
 live_view:event({ type = "tool", name = "bash", arguments = { command = "echo hi" }, timeout_ms = 300000 })
 ok(has(live.text(), "Running bash"), "a call in flight is named in the status line")
@@ -582,6 +583,18 @@ mark = #screen_out + 1
 screen_view:accepted("is this lost?")
 ok(has(visible(since(screen_out, mark)), "wa> is this lost?"),
   "an accepted line is committed to the transcript")
+mark = #screen_out + 1
+screen_view:submitted()
+ok(has(since(screen_out, mark), "\27[12;1H\27[2Kwa> "),
+  "a submitted line is cleared from the input row before the run begins")
+
+-- Counters persist across turns in this process instead of restarting with each answer.
+screen_view:event({ type = "round", n = 1 })
+screen_view:answered("one")
+screen_view:run_started()
+screen_view:event({ type = "round", n = 1 })
+ok(has(visible(table.concat(screen_out)), "run 2 \194\183 step 2"),
+  "the live ticker counts runs and steps across turns")
 
 -- Leaving gives the screen back: a scroll region outlives the process that set it.
 mark = #screen_out + 1

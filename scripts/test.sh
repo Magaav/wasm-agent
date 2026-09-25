@@ -1073,6 +1073,10 @@ else
   exit 1
 fi
 
+# A complete note typed while a tool runs must reach the next model round and the
+# durable transcript. A local mock provider checks the actual agent loop without inference.
+WA_SCRIPT=scripts/test-cli-steering.lua "$BIN" --db "$DB.cli-steering" | grep 'cli steering ok'
+
 # A command must not be able to hold the interpreter forever: an agent curled the node's own port
 # from inside a turn, the request queued behind the turn that made it, and the worker waited on
 # itself. The deadline is set short here so the check takes seconds, not minutes.

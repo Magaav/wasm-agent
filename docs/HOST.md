@@ -278,7 +278,11 @@ typing their next message typed into a stream nobody was looking at, and the lin
 codex do not lock input, and a reader compared them to this, correctly.
 
 So a thread of the host reads stdin for the life of the process, and Lua takes what arrived when
-it next runs.
+it next runs. In `wa chat`, complete non-command lines are now taken before the next model
+round and appended as durable user turns, so they steer the current run after its in-flight
+model/tool call finishes. Slash commands and everything after one remain queued for the REPL;
+if the model has already produced its final answer, the line becomes the next turn. This is
+round-boundary steering, not per-keystroke interruption.
 
 - `input_start()` starts it, once per process; a second call is still `true` and does not add a
   second reader - two readers would split the reader's typing between two queues and neither
@@ -296,9 +300,14 @@ it next runs.
 - `lua/core/cli_input.lua` is the Lua side, and tolerates the capability being absent (an older
   binary) by falling back to the blocking read it replaced.
 
-What this does **not** do, deliberately: raw-mode input, per-key editing, an interrupt key, and
-multi-line input all need the terminal handed over (raw mode plus a frame the CLI owns), which is a
-larger change than reading the reader's lines.
+What this does **not** do: raw-mode input, per-key editing, an interrupt key, and
+multi-line input all need the terminal handed over (raw mode plus a frame the CLI owns). The
+terminal still echoes canonical input, including Enter's newline; when the input sits on the
+last row this may scroll the whole terminal and damage a pinned frame. Clearing the submitted
+row before a run fixes the stale text, but is **not** a replacement for a raw-mode editor.
+Risk: a line typed during a run is not erased until the next prompt, to avoid erasing a
+subsequent half-typed line. `WASM_AGENT_CLI_FRAME=off` remains the fallback for terminals
+whose canonical echo does not cooperate with the frame.
 
 `scripts/test-cli-input.lua` is observed through a real child process, like the ticker's test and
 for the same reason: the reader is a thread, so the only honest evidence is that process's own

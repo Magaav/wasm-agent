@@ -148,6 +148,29 @@ function METHODS:poll(timeout_ms)
   return nil, self.eof
 end
 
+-- Take complete, ordinary messages for the current run at a model-round boundary.
+-- A slash command is REPL control, not model input: leave it and everything behind
+-- it in the queue so ordering is preserved. Never block the model waiting for a key.
+function METHODS:take_steering()
+  if self.supported and not self.eof then
+    local lines, eof = M.arrived(0, self.deps)
+    if lines then
+      for _, line in ipairs(lines) do self.pending[#self.pending + 1] = line end
+      if eof then self.eof = true end
+    else
+      self.supported = false
+    end
+  end
+  local steering = {}
+  while #self.pending > 0 do
+    local text = self.pending[1]:gsub("^%s+", ""):gsub("%s+$", "")
+    if text:sub(1, 1) == "/" then break end
+    table.remove(self.pending, 1)
+    if text ~= "" then steering[#steering + 1] = text end
+  end
+  return steering
+end
+
 -- How many lines are waiting, without taking one. The REPL uses it to say so.
 function METHODS:waiting()
   return #self.pending

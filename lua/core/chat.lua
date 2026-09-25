@@ -176,6 +176,15 @@ function M.run(argv)
     limit = platform.columns(host.getenv("COLUMNS")),
   })
   local agent = agentlib.new(session.id, printer(view), "master", USER, NODE)
+  -- The host reads complete lines while the interpreter is in a provider/tool call.
+  -- Give the next model round any waiting messages; slash commands still belong to
+  -- the REPL and remain queued for after the run.
+  local input = cli_input.new()
+  agent.steer = function()
+    local lines = input:take_steering()
+    for _, line in ipairs(lines) do view:accepted(line) end
+    return lines
+  end
 
   print("")
   print(cli_view.banner({
@@ -216,8 +225,6 @@ function M.run(argv)
   -- where they are typing, and who is not locked out while the agent works. The prompt is drawn
   -- once per wait rather than in a loop, because the prompt and the reader's typing share a row -
   -- a redraw on a timeout would erase what they have typed so far.
-  local input = cli_input.new()
-
   local function read_line()
     view:prompt("wa> ")
     while true do
@@ -227,6 +234,9 @@ function M.run(argv)
         -- it lives only on that row, and a message that vanishes when it is sent is one its author
         -- cannot check. See `cli_view.accepted`.
         view:accepted(line)
+        -- The terminal echoes a submitted line on the input row. Reclaim it before
+        -- the synchronous run starts; otherwise it stays there for the entire run.
+        view:submitted()
         return line
       end
       -- The input ended: a closed pipe, or the terminal's own end-of-file. Nothing left to wait
@@ -255,6 +265,11 @@ function M.run(argv)
       local previous = agent.session_id
       local id, notice = commands.new_session({ previous = previous, user = USER, node = NODE })
       agent = agentlib.new(id, printer(view), "master", USER, NODE)
+      agent.steer = function()
+        local lines = input:take_steering()
+        for _, text in ipairs(lines) do view:accepted(text) end
+        return lines
+      end
       print(redact.text(notice))
     elseif line == "/stats" then
       print(json.encode(memory.stats()))
