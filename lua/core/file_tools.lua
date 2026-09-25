@@ -377,7 +377,8 @@ function M.edit(args,record)
       if item.start_line~=nil then
         if item.start_line>item.end_line or item.start_line<selection.start_line or item.end_line>selection.end_line then
           return {error='selection_line_range_out_of_bounds',edit=i,
-            selection_start_line=selection.start_line,selection_end_line=selection.end_line}
+            selection_start_line=selection.start_line,selection_end_line=selection.end_line,
+            note='Use start_line/end_line inside the returned selection, or read the needed lines again.'}
         end
         local starts={1}
         for at in selected:gmatch('()\n') do if at<#selected then starts[#starts+1]=at+1 end end
