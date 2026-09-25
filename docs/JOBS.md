@@ -85,6 +85,50 @@ packages; editing them changes behavior. The allow-list is not an OS sandbox.
 A successful exit is not a proof of business correctness: the reviewed script must
 check its own postconditions.
 
+## Controls: a named number a job carries
+
+A deterministic step sometimes needs one number that is the operator's choice rather than the script's -
+how old a message may be and still be answered, say. That is a **control**: a top-level `controls` object
+on the definition, validated when the job is installed, and passed to every `run` step of the delivery as
+an environment variable.
+
+```json
+{
+  "id": "whatsapp-copilot",
+  "name": "WhatsApp Copilot",
+  "controls": {"grace_seconds": 300, "max_age_seconds": 600},
+  "trigger": {"kind": "schedule", "every_seconds": 30},
+  "action": {"kind": "pipeline", "steps": [
+    {"kind": "run", "script": "<install>/scripts/whatsapp-copilot-read.sh", "timeout_seconds": 300}
+  ]}
+}
+```
+
+| control | whole seconds | floor | what it means to the WhatsApp pipeline |
+| --- | --- | --- | --- |
+| `grace_seconds` | 0–86400 | 0 | the extra band after the prompt window in which a direct message the operator has not answered is still eligible |
+| `max_age_seconds` | 1–86400 | 1 | the hard bound: past it nothing is answered and nothing is transcribed |
+
+How it works, in four facts:
+
+- **The name is the environment.** `grace_seconds` arrives in a step as `WA_JOB_CONTROL_GRACE_SECONDS`,
+  `max_age_seconds` as `WA_JOB_CONTROL_MAX_AGE_SECONDS` (`wa_jobs::control_env`). The sentinel does not
+  know what either number means; the step's own script decides.
+- **Jobs may carry no others.** A name outside that pair is refused (`unknown_job_control:<name>`) rather
+  than accepted and ignored: a job carrying a knob no step reads looks configured and is not. For the same
+  reason a `wake` or `subagent` action - whose steps cannot read an environment - is refused
+  (`job_controls_need_a_deterministic_action`).
+- **The values are validated, not trusted.** A whole number in range, and `grace_seconds` may not exceed
+  `max_age_seconds`: the prompt window is derived as what is left of the bound, so a grace band wider than
+  the bound would make it silently empty. `max_age_seconds` of 0 is refused because a bound of zero refuses
+  every message - a job that does nothing wearing the shape of one that works.
+- **A delivery pins them with its revision.** The controls are carried in the delivery (`claimed["controls"]`),
+  from the same definition row it was claimed against. Reading the current definition at execution time
+  would apply a number that was never approved for that delivery.
+
+They are portable with the job: `controls` survives export and import, and is re-validated on the way in
+(see [ARTIFACTS.md](ARTIFACTS.md)).
+
 ## Sources
 
 * **event**: explicit local CLI ingress, a named topic and stable event id.
@@ -255,7 +299,11 @@ any retry - an ambiguous send is never retried.
 
 `cargo test -p wa-jobs --offline` checks default-off, revision invalidation,
 deduplication, queue limits, concurrent claims, budgets, deterministic actions,
-schedule persistence and interrupted-delivery ambiguity. `scripts/test-jobs.cjs`
+`cargo test -p wa-jobs --offline` checks default-off, revision invalidation,
+deduplication, queue limits, concurrent claims, budgets, deterministic actions, controls (the two names,
+their ranges, the refusal of a control no step could read, and the delivery carrying the values of the
+revision it was claimed against), schedule persistence and interrupted-delivery ambiguity.
+`scripts/test-jobs.cjs`
 uses scratch homes, a fake local chat receiver and a real isolated Chrome page.
 `scripts/test-ui.ps1` checks the jobs position, safe rendering, toggle request and
 failure behavior in a real browser. None of these tests is a paid-model benchmark

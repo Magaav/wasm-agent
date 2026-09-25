@@ -1,6 +1,10 @@
 {
   "id": "whatsapp-copilot",
   "name": "WhatsApp Copilot",
+  "controls": {
+    "grace_seconds": 300,
+    "max_age_seconds": 600
+  },
   "trigger": {
     "kind": "schedule",
     "every_seconds": 30

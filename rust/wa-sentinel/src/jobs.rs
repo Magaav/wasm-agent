@@ -464,6 +464,11 @@ fn execute(store: &wa_jobs::Store, delivery: &Value) -> Result<String> {
                 "WA_JOB_EVENT_FILE".into(),
                 event_path.to_string_lossy().to_string(),
             ));
+            // The job's own controls, from the definition this delivery was pinned to. A deterministic
+            // step is the only kind that can read them, which is why the schema refuses them elsewhere.
+            for (name, value) in wa_jobs::control_env(&delivery["controls"]) {
+                spec.env.push((name, value));
+            }
             let manager = wa_operation::Manager::new(sentinel_dir().join("operations"));
             let operation = manager.start(spec)?;
             loop {
@@ -597,6 +602,13 @@ fn run_pipeline_step(
         "WA_JOB_EVENT_FILE".into(),
         event_path.to_string_lossy().to_string(),
     ));
+    // Every deterministic step of a pipeline gets the job's controls, not only the one that happens to
+    // read them today: which step consumes a control is the pipeline's business, and a step that
+    // silently received none would look configured and do nothing. Validated in `wa_jobs::validate_controls`,
+    // so a value here is always a whole number of seconds.
+    for (name, value) in wa_jobs::control_env(&delivery["controls"]) {
+        spec.env.push((name, value));
+    }
     // The result goes where the runner says, not where it hopes: a step that writes nothing is then
     // distinguishable from a step that found nothing, and the runner never has to guess a layout.
     let result_path = sentinel_dir().join(format!("job-result-{}-{}.json", delivery["id"], number));

@@ -20,7 +20,7 @@
 const DEFAULT_PORTS = [9222];
 const WHATSAPP_URL = "web.whatsapp.com";
 
-import { eligibility } from "./whatsapp-eligibility.mjs";
+import { eligibility, windowFromEnv } from "./whatsapp-eligibility.mjs";
 import { deriveLeft } from "./whatsapp-read-core.mjs";
 import { WebSocket } from "./lib/websocket-runtime.mjs";
 // A message whose body is media is stored as base64 by the app; keeping that would put megabytes in
@@ -256,20 +256,20 @@ async function main() {
   const operatorIds = String(args.operator || "").split(",").map((value) => value.trim()).filter(Boolean);
   // The window, measured against one clock: epoch seconds from this process, which is the same unit the
   // store's `sent_at` is in. Never a local wall clock - an epoch has no zone, so no time zone can shift
-  // the verdict in either direction. The defaults live in the rule; the environment can widen or tighten
-  // them, which is how an operator tunes this without a code change (and what the test drives).
-  const envSeconds = (name) => {
-    const value = Number(process.env[name]);
-    return Number.isFinite(value) && value >= 0 ? value : null;
-  };
+  // the verdict in either direction.
+  //
+  // Where the two numbers come from is the rule's business, not this script's: `windowFromEnv` resolves
+  // the job's own controls first (`WA_JOB_CONTROL_*`, validated when the definition was installed), then
+  // the node's environment, then the constant in the rule. The resolution is reported below with the
+  // verdicts, so a reader's own output says which controls were in force.
+  const window = windowFromEnv();
   const eligibilityOptions = {
     operator: { ids: operatorIds, phones: operatorIds },
     now: Math.floor(Date.now() / 1000),
+    max_seconds: window.max_seconds,
+    grace_seconds: window.grace_seconds,
   };
-  const maxAge = envSeconds("WA_WHATSAPP_MAX_AGE_SECONDS");
-  if (maxAge !== null) eligibilityOptions.max_seconds = maxAge;
-  const grace = envSeconds("WA_WHATSAPP_GRACE_SECONDS");
-  if (grace !== null) eligibilityOptions.grace_seconds = grace;
+  console.error(`window max_age_seconds=${window.max_seconds} (${window.source.max_age_seconds}) grace_seconds=${window.grace_seconds} (${window.source.grace_seconds}) prompt_seconds=${window.prompt_seconds}`);
   let eligible = 0;
   let ineligible = 0;
   for (const message of messages) {
@@ -294,6 +294,14 @@ async function main() {
     newest: payload.newest || 0,
     eligible,
     ineligible,
+    // The window the verdicts above were decided with, and which source each number came from: a reader
+    // that says which controls were in force makes a stale verdict in the ledger a visible contradiction.
+    window: {
+      grace_seconds: window.grace_seconds,
+      max_age_seconds: window.max_seconds,
+      prompt_seconds: window.prompt_seconds,
+      source: window.source,
+    },
   };
   // The inbox does not fit in a pipe: 700 conversations and their messages are hundreds of
   // kilobytes, and a caller that reads this through a shell gets a truncated string that parses as

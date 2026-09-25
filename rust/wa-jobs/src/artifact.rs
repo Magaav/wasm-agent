@@ -214,6 +214,7 @@ fn validate_portable_shape(artifact: &Value) -> super::Result<()> {
             "id",
             "name",
             "description",
+            "controls",
             "trigger",
             "action",
             "resources",
@@ -358,7 +359,9 @@ pub fn export_artifact(job: &Value) -> super::Result<Value> {
     let mut artifact = Map::new();
     artifact.insert("schema".into(), json!(SCHEMA));
     artifact.insert("schema_version".into(), json!(SCHEMA_VERSION));
-    for key in ["id", "name", "description"] {
+    // `controls` travels with the artifact: dropping it would export a job that looks complete and runs
+    // with different numbers from the one that was reviewed.
+    for key in ["id", "name", "description", "controls"] {
         if let Some(value) = job.get(key) {
             artifact.insert(key.into(), value.clone());
         }
@@ -472,6 +475,11 @@ pub fn import_artifact(
     job.insert("name".into(), artifact["name"].clone());
     if let Some(description) = artifact.get("description") {
         job.insert("description".into(), description.clone());
+    }
+    // A control is portable: it is a number, not a machine binding. It is still re-validated by
+    // `validate_controls` on the way in, because an artifact is a hand-written file until it is not.
+    if let Some(controls) = artifact.get("controls") {
+        job.insert("controls".into(), controls.clone());
     }
     let mut trigger = artifact["trigger"].clone();
     let mut action = artifact["action"].clone();
@@ -692,7 +700,36 @@ mod tests {
             "resource_needs_loopback_devtools_page:page"
         );
         let loopback = json!({"page":"ws://127.0.0.1:9222/devtools/page/ABC"});
+        let loopback = json!({"page":"ws://127.0.0.1:9222/devtools/page/ABC"});
         assert!(import_artifact(&artifact, &loopback, true, "operator").is_ok());
+    }
+
+    /// A deterministic job's controls travel with it. Exporting a job and importing it elsewhere must not
+    /// quietly change the numbers its steps run with - and an artifact that carries an unusable control is
+    /// refused on import, because a hand-written artifact is not more trustworthy than a hand-written job.
+    #[test]
+    fn controls_survive_export_and_import_and_are_revalidated() {
+        let mut job = file_job();
+        job["controls"] = json!({"grace_seconds":120,"max_age_seconds":300});
+        let artifact = export_artifact(&job).unwrap();
+        assert_eq!(artifact["controls"]["grace_seconds"], 120);
+        let bindings = json!({"trigger_path":fixture_path("approved/incoming"),
+            "script":fixture_path("approved/procedures/validate.sh")});
+        let rebuilt = import_artifact(&artifact, &bindings, true, "operator").unwrap();
+        assert_eq!(rebuilt["definition"]["controls"]["max_age_seconds"], 300);
+        let mut widened = artifact.clone();
+        widened["controls"] = json!({"grace_seconds":900,"max_age_seconds":600});
+        assert_eq!(
+            import_artifact(&widened, &bindings, true, "operator").unwrap_err().to_string(),
+            "job_control_grace_exceeds_max_age_seconds"
+        );
+        // An unknown control name is refused as an artifact field, so it cannot ride in as dead weight.
+        let mut unknown = artifact.clone();
+        unknown["controls"] = json!({"prompt_seconds":60});
+        assert_eq!(
+            import_artifact(&unknown, &bindings, true, "operator").unwrap_err().to_string(),
+            "unknown_job_control:prompt_seconds"
+        );
     }
 
     /// Export is an allowlist: an unknown trigger/action field is refused (not silently dropped), so a

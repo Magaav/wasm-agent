@@ -47,6 +47,80 @@ fn ident_str(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
 }
+/// The controls a job may carry, and **only** these. A control is a whole number of seconds that the
+/// job's own deterministic steps read from their environment, so the surface stays small enough to
+/// reason about: a second way to express one of them is a second way for the two to disagree. A name
+/// that is not here is refused by `validate_controls` rather than accepted and ignored.
+pub const JOB_CONTROLS: &[&str] = &["grace_seconds", "max_age_seconds"];
+
+/// The environment name one control arrives in. The sentinel is not the WhatsApp pipeline: it passes
+/// `WA_JOB_CONTROL_<NAME>` to every deterministic step, and a step's own script decides what that number
+/// means. `scripts/whatsapp-read.mjs` is the reader of these two.
+pub fn control_env_name(control: &str) -> String {
+    format!("WA_JOB_CONTROL_{}", control.to_ascii_uppercase())
+}
+
+/// The controls as (name, value) environment pairs, in a stable order, or nothing when the job carries
+/// none. Values are read with `as_u64`, so a control that `validate_controls` refused (a string, a
+/// negative number, a fraction) cannot reach a step by another route.
+pub fn control_env(controls: &Value) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for name in JOB_CONTROLS {
+        if let Some(seconds) = controls.get(name).and_then(Value::as_u64) {
+            pairs.push((control_env_name(name), seconds.to_string()));
+        }
+    }
+    pairs
+}
+
+/// A job's optional `controls`, validated.
+///
+/// Three refusals, each for a way a control can be configured into something nobody can observe:
+///
+///   - a name outside `JOB_CONTROLS` is refused, not ignored: a definition that carries a knob no step
+///     reads looks configured and is not;
+///   - a value must be whole seconds in range - `max_age_seconds` needs at least 1, because a hard bound
+///     of zero refuses every message and is indistinguishable from a job that does nothing;
+///   - `grace_seconds` may not exceed `max_age_seconds`: the prompt window is derived as what is left of
+///     the bound, so a grace band wider than the bound would make the derived window silently empty.
+///
+/// The action must be one whose steps can read the environment. A `wake` or `subagent` action cannot, and
+/// carrying controls it would never apply is the silent no-op this refuses by name.
+pub fn validate_controls(job: &Value) -> Result<()> {
+    let Some(controls) = job.get("controls") else {
+        return Ok(());
+    };
+    let map = match controls.as_object() {
+        Some(map) => map,
+        None => return fail("job_controls_must_be_an_object"),
+    };
+    match job["action"]["kind"].as_str().unwrap_or("") {
+        "run" | "pipeline" => {}
+        _ => return fail("job_controls_need_a_deterministic_action"),
+    }
+    let max_allowed = 86400;
+    for (name, value) in map {
+        if !JOB_CONTROLS.contains(&name.as_str()) {
+            return fail(&format!("unknown_job_control:{name}"));
+        }
+        let Some(seconds) = value.as_u64() else {
+            return fail(&format!("job_control_must_be_whole_seconds:{name}"));
+        };
+        let floor = if name == "max_age_seconds" { 1 } else { 0 };
+        if seconds < floor || seconds > max_allowed {
+            return fail(&format!("job_control_out_of_range:{name}"));
+        }
+    }
+    let grace = map.get("grace_seconds").and_then(Value::as_u64);
+    let max_age = map.get("max_age_seconds").and_then(Value::as_u64);
+    if let (Some(grace), Some(max_age)) = (grace, max_age) {
+        if grace > max_age {
+            return fail("job_control_grace_exceeds_max_age_seconds");
+        }
+    }
+    Ok(())
+}
+
 pub fn validate(job: &Value) -> Result<()> {
     if !ident(job["id"].as_str().unwrap_or("")) {
         return fail("invalid_job_id");
@@ -87,7 +161,10 @@ pub fn validate(job: &Value) -> Result<()> {
         }
         _ => return fail("unknown_job_trigger"),
     }
-    validate_action(&job["action"])
+    validate_action(&job["action"])?;
+    // After the action, so a malformed action is reported as itself rather than as a control it could
+    // not have carried.
+    validate_controls(job)
 }
 
 /// One action, validated. Split out of `validate` because a `pipeline` validates each of its steps with
@@ -544,7 +621,11 @@ impl Store {
             )?;
             tx.commit()?;
             return Ok(Some(
-                json!({"id":id,"job_id":job_id,"revision":revision,"event_id":event_id,"event":serde_json::from_str::<Value>(&payload)?,"action":job["action"]}),
+                // The controls ride with the action, from the same definition row this delivery was
+                // claimed against: a delivery pins its revision, so reading the *current* definition
+                // later would apply a knob that was never approved for this delivery. `null` when the
+                // job carries none, which is what `control_env` reads as no pairs.
+                json!({"id":id,"job_id":job_id,"revision":revision,"event_id":event_id,"event":serde_json::from_str::<Value>(&payload)?,"action":job["action"],"controls":job.get("controls").cloned().unwrap_or(Value::Null)}),
             ));
         }
         tx.commit()?;

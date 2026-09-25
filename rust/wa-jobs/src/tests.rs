@@ -472,3 +472,100 @@ fn forget_refuses_while_a_delivery_is_active() {
     );
     assert_eq!(s.list().unwrap().as_array().unwrap().len(), 1, "a refusal must not remove the row");
 }
+
+/// A job's controls are exactly two named whole numbers of seconds - `grace_seconds` and
+/// `max_age_seconds` - and each refusal below is a way a control can look configured and change nothing.
+///
+/// The disabled-by-default rule still applies to a definition that carries them: a control is part of the
+/// definition, so editing one is an edit and needs re-approval.
+#[test]
+fn job_controls_are_two_named_validated_numbers() {
+    let s = store();
+    let copilot = |controls: Value| {
+        json!({"id":"copilot","name":"WhatsApp Copilot",
+            "trigger":{"kind":"schedule","every_seconds":30},
+            "controls":controls,
+            "action":{"kind":"pipeline","steps":[{"kind":"run",
+                "script":std::env::temp_dir().join("copilot-read.sh"),"timeout_seconds":60,"returns":"events"}]}})
+    };
+
+    // The shipped defaults, and the environment a deterministic step actually receives for them.
+    let job = copilot(json!({"grace_seconds":300,"max_age_seconds":600}));
+    assert_eq!(s.put(&job).unwrap()["enabled"], false, "a control does not enable anything");
+    assert_eq!(
+        control_env(&s.get("copilot").unwrap()["controls"]),
+        vec![
+            ("WA_JOB_CONTROL_GRACE_SECONDS".to_string(), "300".to_string()),
+            ("WA_JOB_CONTROL_MAX_AGE_SECONDS".to_string(), "600".to_string()),
+        ],
+        "a control arrives under its own name, in a stable order"
+    );
+
+    let refuse = |controls: Value, expected: &str| {
+        let mut bad = job.clone();
+        bad["controls"] = controls;
+        assert_eq!(s.put(&bad).unwrap_err().to_string(), expected);
+    };
+    // Only the two names: a third knob is refused rather than accepted and ignored.
+    refuse(json!({"prompt_seconds":60}), "unknown_job_control:prompt_seconds");
+    refuse(json!({"tick_seconds":30}), "unknown_job_control:tick_seconds");
+    // Whole seconds, in range. `max_age_seconds` of 0 refuses every message, which is a job that does
+    // nothing wearing the shape of one that works.
+    refuse(json!({"grace_seconds":"300"}), "job_control_must_be_whole_seconds:grace_seconds");
+    refuse(json!({"grace_seconds":-5}), "job_control_must_be_whole_seconds:grace_seconds");
+    refuse(json!({"max_age_seconds":0}), "job_control_out_of_range:max_age_seconds");
+    refuse(json!({"max_age_seconds":90000}), "job_control_out_of_range:max_age_seconds");
+    // The prompt window is derived as what is left of the bound, so a grace band wider than the bound
+    // would make it silently empty.
+    refuse(json!({"grace_seconds":900,"max_age_seconds":600}), "job_control_grace_exceeds_max_age_seconds");
+    // A control on an action whose steps cannot read an environment is a knob nobody can observe.
+    let wake_with_controls = json!({"id":"noisy","name":"Wake",
+        "trigger":{"kind":"event","topic":"whatsapp.message"},
+        "controls":{"grace_seconds":60},
+        "action":{"kind":"wake","session":"thread-id","prompt":"Decide."}});
+    assert_eq!(
+        s.put(&wake_with_controls).unwrap_err().to_string(),
+        "job_controls_need_a_deterministic_action"
+    );
+    // `controls` must be an object, not a bare number or a string.
+    let mut not_an_object = job.clone();
+    not_an_object["controls"] = json!(60);
+    assert_eq!(
+        s.put(&not_an_object).unwrap_err().to_string(),
+        "job_controls_must_be_an_object"
+    );
+}
+
+/// The controls a delivery runs with are the ones from the revision it was claimed against, and they ride
+/// in the delivery itself. Reading the current definition at execution time would apply a number that was
+/// never approved for that delivery - the reason a delivery pins its revision at all.
+#[test]
+fn a_delivery_carries_its_jobs_controls_and_a_job_without_them_carries_none() {
+    let s = store();
+    let controlled = json!({"id":"copilot","name":"Copilot",
+        "trigger":{"kind":"schedule","every_seconds":30},
+        "controls":{"grace_seconds":60,"max_age_seconds":120},
+        "action":{"kind":"run","script":std::env::temp_dir().join("read.sh"),"timeout_seconds":60}});
+    s.put(&controlled).unwrap();
+    s.enable("copilot", true).unwrap();
+    let revision = s.get("copilot").unwrap()["revision"].as_i64().unwrap();
+    s.enqueue("copilot", revision, "e1", &json!({}), 0).unwrap();
+    let claimed = s.claim(1, 6).unwrap().unwrap();
+    assert_eq!(claimed["controls"]["grace_seconds"], 60);
+    assert_eq!(
+        control_env(&claimed["controls"]),
+        vec![("WA_JOB_CONTROL_GRACE_SECONDS".to_string(), "60".to_string()),
+             ("WA_JOB_CONTROL_MAX_AGE_SECONDS".to_string(), "120".to_string())]
+    );
+
+    let plain = json!({"id":"plain","name":"Plain",
+        "trigger":{"kind":"schedule","every_seconds":30},
+        "action":{"kind":"run","script":std::env::temp_dir().join("read.sh"),"timeout_seconds":60}});
+    s.put(&plain).unwrap();
+    s.enable("plain", true).unwrap();
+    let revision = s.get("plain").unwrap()["revision"].as_i64().unwrap();
+    s.enqueue("plain", revision, "e2", &json!({}), 0).unwrap();
+    let claimed = s.claim(2, 6).unwrap().unwrap();
+    assert!(claimed["controls"].is_null(), "no controls is null, which control_env reads as none");
+    assert!(control_env(&claimed["controls"]).is_empty());
+}
