@@ -50,6 +50,17 @@ ok(line == nil and eof == true, "a closed stdin reads as the end of input")
 
 input:stop()
 
+-- The native editor is an opt-in for a real terminal; a pipe stays line-oriented.
+local selected = cli_input.new({ editor = true, deps = {
+  start = function(enabled) return '{"started":true,"editor":' .. (enabled == 1 and 'true' or 'false') .. '}' end,
+  take = function() return '{"lines":[],"eof":true,"running":false}' end,
+} })
+ok(selected.editor == true, "a terminal can request the native editor")
+local pipe = cli_input.new({ deps = {
+  start = function(enabled) return '{"started":true,"editor":' .. (enabled == 1 and 'true' or 'false') .. '}' end,
+} })
+ok(pipe.editor == false, "a pipe does not request terminal raw mode")
+
 -- A line the reader sends that is empty is a line, not an exit: the REPL treats it as "keep
 -- prompting". Asserted on the queue rather than on a terminal, which needs no terminal at all.
 local blank = cli_input.new({ deps = {
