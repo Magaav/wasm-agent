@@ -304,3 +304,19 @@ permissions; separate warm/cold cache conditions; include failures, retries and
 summaries. Assert that experimental arms really differ in the intended component.
 Keep changes independently reviewable and reversible. An available artifact does
 not prove omitted information was unnecessary for the model's decision.
+
+### Source-first edit guidance experiment
+
+`WASM_AGENT_EDIT_SOURCE_FIRST=1` adds a tool-aware guideline to parent and child
+prompts: read the exact source before editing, use the returned selection receipt,
+and consult the graph for cross-file relationships or patch impact when needed.
+The default prompt is unchanged. The native edit tool also returns a recovery note
+when a requested line range falls outside its selection.
+
+The September 2026 edit-workflow pilot was insufficient to choose a default: it
+ran one candidate per arm, its verifier required a schema location the task did
+not specify, and the graph-first candidate did not start with the graph. Its
+token and time totals describe those runs only. Before enabling this guideline
+by default, compare verified task outcomes, tool errors/retries, uncached and
+cached input tokens, output tokens, and wall time on equivalent fixtures. Check
+the first tool calls to confirm each arm followed its intended policy.

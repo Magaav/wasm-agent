@@ -139,9 +139,12 @@ check(files.edit({path=other,range_edits={{selection=current_page.selection,repl
 check(files.edit({path=guarded,range_edits={{selection=current_page.selection,
   start_line=2,replacement_lines={'NO'}}}}).error=='selection_line_range_requires_both',
   'a partial line slice is refused before mutation')
-check(files.edit({path=guarded,range_edits={{selection=current_page.selection,
-  start_line=2,end_line=20,replacement_lines={'NO'}}}}).error=='selection_line_range_out_of_bounds',
+local out_of_bounds=files.edit({path=guarded,range_edits={{selection=current_page.selection,
+  start_line=2,end_line=20,replacement_lines={'NO'}}}})
+check(out_of_bounds.error=='selection_line_range_out_of_bounds',
   'a line slice must remain inside the returned selection')
+check(out_of_bounds.note and out_of_bounds.note:find('read the needed lines again',1,true),
+  'an out-of-bounds receipt explains how to recover')
 check(files.edit({path=guarded,old_text='one',new_text='NO',range_edits={{
   selection=current_page.selection,replacement_lines={'NO'}}}}).error=='mixed_edit_forms',
   'legacy and receipt forms cannot be mixed')

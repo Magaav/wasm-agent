@@ -194,6 +194,19 @@ local SHELL_SEARCH_GUIDELINE = "For shell text search or file discovery, prefer 
   .. "(`rg` and `rg --files`) over `grep`/`find`; fall back when `rg` is unavailable. "
   .. "Keep the portable `grep` tool for bounded literal searches"
 
+local function source_edit_guideline(have)
+  if host.getenv("WASM_AGENT_EDIT_SOURCE_FIRST") ~= "1" or not (have.read and have.edit) then
+    return nil
+  end
+  local reader = have.read_many and "read/read_many" or "read"
+  local line = "Before editing source, use " .. reader .. " for the exact lines and copy "
+    .. "read.selection unchanged into edit. Shell output does not provide an edit receipt"
+  if have.graph then
+    line = line .. "; use graph for cross-file relationships or patch impact when needed"
+  end
+  return line
+end
+
 local function guidelines_for(tool_list)
   local have = {}
   for _, tool in ipairs(tool_list or {}) do
@@ -222,6 +235,7 @@ local function guidelines_for(tool_list)
     add("When several known file reads are independent, request them together with read_many; "
       .. "keep dependent reads and edits in order")
   end
+  add(source_edit_guideline(have))
   add("Before changing this project's behaviour, read the relevant file under docs/ "
     .. "(or the section of AGENTS.md) in full, and follow its cross-references")
   add("When a task matches a skill in <available_skills>, load it with the skill tool before starting")
@@ -319,13 +333,13 @@ function M.subagent_system_prompt(self, tool_list)
     parts[#parts + 1] = "Profile instructions:\n" .. instructions
   end
   parts[#parts + 1] = "Running on: " .. ENVIRONMENT
-  local have_bash = false
+  local have = {}
   if tool_list and #tool_list > 0 then
     local lines = { "Your tools (and only these):" }
     for _, tool in ipairs(tool_list) do
       local function_ = tool["function"] or {}
       local name = tostring(function_.name or "?")
-      if name == "bash" then have_bash = true end
+      have[name] = true
       -- The same authored cue as the parent index (agent.system_prompt, tools.snippet),
       -- never a slice of the description, and the same names-only switch applies.
       local cue
@@ -338,7 +352,13 @@ function M.subagent_system_prompt(self, tool_list)
     end
     parts[#parts + 1] = table.concat(lines, "\n")
   end
-  if have_bash then parts[#parts + 1] = "Guidelines:\n- " .. SHELL_SEARCH_GUIDELINE end
+  local child_guidelines = {}
+  if have.bash then child_guidelines[#child_guidelines + 1] = SHELL_SEARCH_GUIDELINE end
+  local edit_guideline = source_edit_guideline(have)
+  if edit_guideline then child_guidelines[#child_guidelines + 1] = edit_guideline end
+  if #child_guidelines > 0 then
+    parts[#parts + 1] = "Guidelines:\n- " .. table.concat(child_guidelines, "\n- ")
+  end
   local limits = profile.limits or {}
   local budget_lines = {}
   if limits.max_tokens then budget_lines[#budget_lines + 1] = "model tokens (a hard stop; report what you have when it approaches)" end
