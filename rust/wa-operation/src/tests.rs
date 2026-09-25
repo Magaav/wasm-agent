@@ -104,7 +104,10 @@ fn deadline_covers_both_streams_without_serial_graces() {
     let s = settled(&m, &id);
     assert!(start.elapsed() < Duration::from_millis(1400), "{s}");
     assert_eq!(s["error"], "deadline_exceeded");
-    assert_eq!(s["stdout"], "before");
+    // The deadline begins at admission, before the supervisor creates its
+    // record and starts the shell. On a loaded host it can expire before the
+    // shell prints; both empty output and the complete prefix are valid.
+    assert!(s["stdout"] == "" || s["stdout"] == "before", "{s}");
     assert_eq!(s["output_complete"], true);
     fs::remove_dir_all(root).unwrap();
 }

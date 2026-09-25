@@ -42,7 +42,9 @@ SH
 chmod +x "$STUB/curl"
 
 run() { # state idle_timeout idle_max
-  WA_TEST_HEALTH="$1" WA_INSTALL_DIR="$INST" WA_PORT=1 \
+  # The real turn guard belongs to the caller. This scratch upgrade is testing
+  # idle waiting, so it must not inherit that guard from an in-turn smoke run.
+  env -u WASM_AGENT_IN_TURN WA_TEST_HEALTH="$1" WA_INSTALL_DIR="$INST" WA_PORT=1 \
     WA_IDLE_TIMEOUT="$2" WA_IDLE_MAX_SECONDS="$3" \
     PATH="$STUB:$PATH" bash "$ROOT/scripts/upgrade.sh" "$NEW" 2>&1
 }
