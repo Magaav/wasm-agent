@@ -4,6 +4,16 @@ The Lua core decides what the agent does; `host.*` is everything it needs from
 the platform. Those functions are the seam that becomes WIT imports when the Lua
 core runs as a WASM component, so their semantics have to be boring and exact.
 
+## Search dependency
+
+At startup the host ensures `rg` works: reuse a working copy on PATH, otherwise
+download checksum-pinned ripgrep into `host.paths().config .. '/bin'` and prepend
+that directory to the process PATH inherited by shell tools and workers. No admin
+rights or Pi installation are needed. Windows and Linux/macOS x64/ARM64 have
+release assets. Initial provisioning needs network access and PowerShell on Windows
+or `tar` on Unix; a cached copy works offline. If provisioning fails, startup reports
+`ripgrep_unavailable` and exits instead of leaving the model to discover shell 127.
+
 ## Missing values: `nil`, never "no values"
 
 A host function **always returns a value**. An absent one is `nil`.
