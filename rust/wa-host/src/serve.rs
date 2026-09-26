@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 mod scheduler;
+mod journal;
 
 /// Milliseconds since the process started, written by anything that is making
 /// progress: every event the worker emits, and every run or tool boundary the Lua loop
@@ -102,6 +103,9 @@ fn finish_run_events(run_id: u64) {
 }
 
 fn record_run_event(run_id: u64, payload: &str) {
+    if let Some(scheduler) = scheduler::global() {
+        if scheduler.record_event(run_id,payload).is_err() { return; }
+    }
     let Ok(event) = serde_json::from_str::<serde_json::Value>(payload) else { return };
     let Ok(mut logs) = run_events().lock() else { return };
     let Some(log) = logs.get_mut(&run_id) else { return };
@@ -247,6 +251,7 @@ thread_local! {
     /// Which worker this thread is. `beat()` is called from inside Lua and had no way to say *which*
     /// interpreter had made progress, so per-worker liveness was impossible until this existed.
     static WORKER_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CURRENT_RUN_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static IN_RUN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The cancel flag of the run this thread is executing right now. The runtime's provider reader
     /// and agent loop poll `run_cancel_requested()`, so a cancel request reaches a model call on the
@@ -928,6 +933,7 @@ impl Drop for SinkGuard {
 /// the point: there is deliberately no process-wide fallback to leak into.
 pub fn write_event(payload: &str) {
     beat();
+    CURRENT_RUN_ID.with(|id| { if id.get() != 0 { record_run_event(id.get(),payload); } });
     ACTIVE_SINK.with(|cell| {
         let mut slot = cell.borrow_mut();
         match slot.as_mut() {
@@ -937,8 +943,7 @@ pub fn write_event(payload: &str) {
                 buffer.push_str(payload);
                 buffer.push_str("\n\n");
             }
-            Some(Sink::Socket { stream, run_id }) => {
-                record_run_event(*run_id, payload);
+            Some(Sink::Socket { stream, run_id: _ }) => {
                 let _ = stream.write_all(format!("data: {payload}\n\n").as_bytes());
                 let _ = stream.flush();
             }
@@ -1125,7 +1130,7 @@ fn handle_runs(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<Resol
     };
     match action {
         "status" => {
-            let runs: Vec<serde_json::Value> = scheduler
+            let memory_runs: Vec<serde_json::Value> = scheduler
                 .runs_for(&owner, &conversation)
                 .into_iter()
                 .map(|view| {
@@ -1136,6 +1141,10 @@ fn handle_runs(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<Resol
                     })
                 })
                 .collect();
+            let runs = match scheduler.durable_views(&owner,&conversation) {
+                Ok(Some(runs)) => runs, Ok(None) => memory_runs,
+                Err(error) => return (503,"application/json",serde_json::json!({"error":error}).to_string().into_bytes()),
+            };
             let cancelled = runs.iter().any(|run| run["cancel_requested"] == serde_json::json!(true));
             let body = serde_json::json!({
                 "ok": true,
@@ -1146,6 +1155,14 @@ fn handle_runs(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<Resol
             .to_string();
             (200, "application/json", body.into_bytes())
         }
+        "inspect" => match run_id {
+            Some(id) => match scheduler.inspect(&owner,&conversation,id) {
+                Ok(Some(detail)) => (200,"application/json",detail.to_string().into_bytes()),
+                Ok(None) => (404,"application/json",b"{\"error\":\"run_not_found\"}".to_vec()),
+                Err(error) => (503,"application/json",serde_json::json!({"error":error}).to_string().into_bytes()),
+            },
+            None => (400,"application/json",b"{\"error\":\"run_id_required\"}".to_vec()),
+        },
         "cancel" => match scheduler.cancel_run(&owner, &conversation, run_id) {
             scheduler::CancelOutcome::Requested { run_id, state } => {
                 let body = serde_json::json!({
@@ -1188,6 +1205,12 @@ fn handle_run_events(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender
     let Some(scheduler) = scheduler::global() else {
         return (503, "application/json", b"{\"error\":\"admission_unavailable\"}".to_vec());
     };
+    let after = parsed.get("after").and_then(|value| value.as_u64()).unwrap_or(0);
+    match scheduler.replay(&owner, conversation, run_id, after) {
+        Ok(Some(replay)) => return (200,"application/json",replay.to_string().into_bytes()),
+        Err(error) => return (503,"application/json",serde_json::json!({"error":error}).to_string().into_bytes()),
+        Ok(None) => {},
+    }
     if !scheduler.runs_for(&owner, conversation).iter().any(|run| run.run_id == run_id) {
         return (404, "application/json", b"{\"error\":\"run_not_found\"}".to_vec());
     }
@@ -1286,13 +1309,16 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     // without limit. `session_queue_depth` bounds one conversation's own backlog so a single
     // conversation cannot fill a worker's queue and starve another. The interactive reserve is
     // `WASM_AGENT_INTERACTIVE_RESERVE` workers (default two), and background runs never use one.
-    scheduler::install(scheduler::Config {
+    if let Err(error) = scheduler::install(scheduler::Config {
         session_queue_depth: env_usize("WASM_AGENT_SESSION_QUEUE_DEPTH", 4).max(1),
         // The interactive reserve is subtracted from the run capacity, so background work is bounded
         // to the workers the reserve does not own.
         background_max: env_usize("WASM_AGENT_BACKGROUND_MAX", (ceiling + 1).saturating_sub(interactive_reserve())).max(1),
         background_backlog: env_usize("WASM_AGENT_BACKGROUND_BACKLOG", 8),
-    });
+    }) {
+        eprintln!("[serve] run journal initialization failed: {error}");
+        std::process::exit(1);
+    }
     // Register the run half of unified cancellation with the host, so the provider reader and the
     // agent loop observe a run's own flag as well as a child's. One name (`host::run_cancel_requested`)
     // combines both, and a caller cannot check the wrong one.
@@ -1447,6 +1473,13 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
             match scheduler::admit(&request.routing_session, &request.owner, request.run_class, pick_run_worker) {
                 scheduler::Decision::Run { run_id, worker, cancel, sockets }
                 | scheduler::Decision::Behind { run_id, worker, cancel, sockets } => {
+                    if let Some(scheduler) = scheduler::global() {
+                        if scheduler.record_request(run_id,&String::from_utf8_lossy(&request.body)).is_err() {
+                            scheduler.complete_run(run_id);
+                            let _ = respond(&mut stream,503,"application/json",b"{\"error\":\"run_journal_unavailable\"}");
+                            continue;
+                        }
+                    }
                     request.run_id = run_id;
                     request.run_cancel = Some(cancel);
                     request.run_sockets = Some(sockets);
@@ -1649,6 +1682,7 @@ fn worker_loop(
                     // cancel request reaches the provider reader on this thread and can wake a silent
                     // read, while the lifecycle is observable.
                     set_current_run_io(request.run_cancel.clone(), request.run_sockets.clone(), format!("run:{}", request.run_id));
+                    CURRENT_RUN_ID.with(|id|id.set(request.run_id));
                     scheduler::mark_running(request.run_id);
                 }
                 let replay_run = is_run_route(&request) && request.accept_sse;
@@ -1665,6 +1699,7 @@ fn worker_loop(
                     finish_run_events(request.run_id);
                 }
                 if is_run_route(&request) {
+                    CURRENT_RUN_ID.with(|id|id.set(0));
                     set_current_run_io(None, None, String::new());
                 }
                 IN_RUN.with(|flag| flag.set(false));
@@ -1700,8 +1735,11 @@ fn worker_loop(
                 LAST_SERVED_MS.store(now_ms(), Ordering::Relaxed);
                 begin_work(format!("relay {} {}", relay.job.method, relay.job.path));
                 set_current_run_io(Some(relay.cancel.clone()), Some(relay.sockets.clone()), format!("run:{}", relay.run_id));
+                CURRENT_RUN_ID.with(|id|id.set(relay.run_id));
                 scheduler::mark_running(relay.run_id);
-                let (status, body) = process_relay_job(&lua, &agent_ui, &relay.job, relay.verified.as_ref());
+                let (status, body) = if run_cancel_requested() { (503, "{\"error\":\"run_cancelled\"}".to_string()) }
+                    else { process_relay_job(&lua, &agent_ui, &relay.job, relay.verified.as_ref()) };
+                CURRENT_RUN_ID.with(|id|id.set(0));
                 set_current_run_io(None, None, String::new());
                 scheduler::complete_run(relay.run_id);
                 end_work();
@@ -1759,6 +1797,13 @@ fn worker_loop(
             match scheduler::admit(&conversation, &owner, scheduler::RunClass::Background, pick_run_worker) {
                 scheduler::Decision::Run { run_id, worker, cancel, sockets }
                 | scheduler::Decision::Behind { run_id, worker, cancel, sockets } => {
+                    if let Some(scheduler) = scheduler::global() {
+                        if scheduler.record_request(run_id,&job.body).is_err() {
+                            scheduler.complete_run(run_id);
+                            let _ = job.reply.send((503,"{\"error\":\"run_journal_unavailable\"}".into()));
+                            continue;
+                        }
+                    }
                     let sender = POOL
                         .get()
                         .and_then(|pool| pool.slots.lock().ok().and_then(|slots| slots.get(worker).cloned().flatten()));

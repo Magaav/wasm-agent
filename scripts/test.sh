@@ -676,6 +676,7 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-tool-cues.lua" "$BIN" --db "$DB.too
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-worktree.lua" "$BIN" --db "$DB.session-worktree" | grep 'session worktree ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-fork.lua" "$BIN" --db "$DB.session-fork" | grep 'session fork ok'
 node scripts/test-session-workspaces.cjs "$BIN"
+node scripts/test-run-recovery.cjs "$BIN"
 # The tool-choice experiment's verifier must reject a plausible-looking wrong answer, and
 # its treatment must reach the child prompt the rig runs. Both are what make the arm's
 # result mean anything, so they are tested without a model and before any paid run.

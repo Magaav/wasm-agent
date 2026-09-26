@@ -74,6 +74,9 @@ pub enum RunState {
     Cancelled,
     /// Finished on its own.
     Completed,
+    /// The process or durable evidence was lost; effects require reconciliation.
+    Unknown,
+    NotStarted,
 }
 
 impl RunState {
@@ -83,6 +86,8 @@ impl RunState {
             RunState::Running => "running",
             RunState::Cancelled => "cancelled",
             RunState::Completed => "completed",
+            RunState::Unknown => "unknown",
+            RunState::NotStarted => "not_started",
         }
     }
 }
@@ -93,6 +98,7 @@ impl RunState {
 pub enum Refusal {
     /// This conversation already has its bounded backlog full. Retry when it drains.
     SessionQueueFull,
+    JournalUnavailable,
     /// The background lane is at its concurrency + backlog bound.
     BackgroundQueueFull,
 }
@@ -101,6 +107,7 @@ impl Refusal {
     /// `(error code, hint)` for the 503 body.
     pub fn as_error(self) -> (&'static str, &'static str) {
         match self {
+            Refusal::JournalUnavailable => ("run_journal_unavailable", "durable admission failed; inspect node diagnostics before retry"),
             Refusal::SessionQueueFull => (
                 "session_queue_full",
                 "this conversation already has the maximum number of runs queued; retry when it drains",
@@ -192,11 +199,13 @@ struct Inner {
 pub struct Scheduler {
     inner: Mutex<Inner>,
     config: Config,
+    journal: Option<super::journal::Journal>,
+    journal_failed: AtomicBool,
 }
 
 impl Scheduler {
     pub fn new(config: Config) -> Self {
-        Scheduler { inner: Mutex::new(Inner::default()), config }
+        Scheduler { inner: Mutex::new(Inner::default()), config, journal: None, journal_failed: AtomicBool::new(false) }
     }
 
     /// Claim a place for a run. `pick` chooses a worker for a conversation nobody owns; it is
@@ -208,7 +217,11 @@ impl Scheduler {
     {
         let mut inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
         inner.next_run_id = inner.next_run_id.wrapping_add(1);
-        let run_id = inner.next_run_id;
+        let fallback_id = inner.next_run_id;
+        if self.journal_failed.load(Ordering::SeqCst) { return Decision::Refused(Refusal::JournalUnavailable); }
+        let allocate = || -> Result<u64, String> {
+            match &self.journal { Some(journal) => journal.admit(owner, conversation), None => Ok(fallback_id) }
+        };
         let cancel = Arc::new(AtomicBool::new(false));
         // The run's own socket slot lives from admission through settlement, so a cancel on the
         // accept thread can wake this run's silent provider read without touching the queued run
@@ -231,6 +244,7 @@ impl Scheduler {
                 if owner_record.pending >= self.config.session_queue_depth {
                     return Decision::Refused(Refusal::SessionQueueFull);
                 }
+                let run_id = match allocate() { Ok(id) => id, Err(error) => { self.journal_error(&error); return Decision::Refused(Refusal::JournalUnavailable); } };
                 owner_record.pending += 1;
                 let worker = owner_record.worker;
                 inner.runs.insert(run_id, record(owner, conversation, class, &cancel, &sockets));
@@ -261,6 +275,7 @@ impl Scheduler {
                 RunClass::Interactive => Refusal::SessionQueueFull,
             });
         };
+        let run_id = match allocate() { Ok(id) => id, Err(error) => { self.journal_error(&error); return Decision::Refused(Refusal::JournalUnavailable); } };
         if !conversation.is_empty() {
             inner.owners.insert(conversation.to_string(), Owner { worker, class, pending: 1 });
         }
@@ -273,6 +288,14 @@ impl Scheduler {
         let mut inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
         if let Some(record) = inner.runs.get_mut(&run_id) {
             if record.state == RunState::Queued {
+                if let Some(journal) = &self.journal {
+                    if let Err(error) = journal.state(run_id, "running", false) {
+                        self.journal_error(&error);
+                        record.cancel.store(true, Ordering::SeqCst);
+                        record.state = RunState::Unknown;
+                        return;
+                    }
+                }
                 record.state = RunState::Running;
             }
         }
@@ -284,7 +307,15 @@ impl Scheduler {
         let mut inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
         let Some(record) = inner.runs.get_mut(&run_id) else { return };
         let conversation = record.conversation.clone();
-        record.state = if record.cancel.load(Ordering::SeqCst) { RunState::Cancelled } else { RunState::Completed };
+        record.state = if record.state == RunState::Unknown { RunState::Unknown }
+            else if record.cancel.load(Ordering::SeqCst) { RunState::Cancelled }
+            else if record.state == RunState::Queued { RunState::NotStarted } else { RunState::Completed };
+        if let Some(journal) = &self.journal {
+            if let Err(error) = journal.state(run_id, record.state.as_str(), record.cancel.load(Ordering::SeqCst)) {
+                self.journal_error(&error);
+                record.state = RunState::Unknown;
+            }
+        }
         if let Some(owner) = inner.owners.get_mut(&conversation) {
             owner.pending = owner.pending.saturating_sub(1);
             if owner.pending == 0 {
@@ -341,6 +372,9 @@ impl Scheduler {
             return CancelOutcome::Forbidden;
         }
         record.cancel.store(true, Ordering::SeqCst);
+        if let Some(journal) = &self.journal {
+            if let Err(error) = journal.state(id, record.state.as_str(), true) { self.journal_error(&error); }
+        }
         // Wake a read that is producing nothing. This is the run's own slot, so a later cancel can
         // never shut down the socket of the run queued behind this one.
         crate::subagents::shutdown_sockets(&record.sockets);
@@ -389,6 +423,44 @@ impl Scheduler {
         rows
     }
 
+    fn journal_error(&self, error: &str) {
+        self.journal_failed.store(true, Ordering::SeqCst);
+        eprintln!("[run-journal] durable evidence failed: {error}");
+    }
+
+    pub fn durable_views(&self, owner: &str, conversation: &str) -> Result<Option<Vec<serde_json::Value>>, String> {
+        if self.journal_failed.load(Ordering::SeqCst) { return Err("run_journal_unavailable".into()); }
+        self.journal.as_ref().map(|j|j.views(owner,conversation)).transpose()
+    }
+
+    pub fn record_request(&self,id:u64,body:&str) -> Result<(),String> {
+        if let Some(journal) = &self.journal {
+            if let Err(error) = journal.request(id,body) { self.journal_error(&error); return Err(error); }
+        }
+        Ok(())
+    }
+
+    pub fn inspect(&self,owner:&str,conversation:&str,id:u64) -> Result<Option<serde_json::Value>,String> {
+        match &self.journal { Some(j) => j.inspect(owner,conversation,id), None => Ok(None) }
+    }
+
+    pub fn record_event(&self, id: u64, payload: &str) -> Result<(), String> {
+        if let Some(journal) = &self.journal {
+            if let Err(error) = journal.event(id,payload) {
+                self.journal_error(&error);
+                let inner = self.inner.lock().unwrap_or_else(|p|p.into_inner());
+                if let Some(run) = inner.runs.get(&id) { run.cancel.store(true,Ordering::SeqCst); }
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn replay(&self, owner: &str, conversation: &str, id: u64, after: u64) -> Result<Option<serde_json::Value>,String> {
+        if self.journal_failed.load(Ordering::SeqCst) { return Err("run_journal_unavailable".into()); }
+        match &self.journal { Some(j) => j.replay(owner,conversation,id,after), None => Ok(None) }
+    }
+
     pub fn config(&self) -> Config {
         self.config
     }
@@ -398,8 +470,13 @@ impl Scheduler {
 /// both need it, and there is exactly one node per process.
 static SCHEDULER: OnceLock<Scheduler> = OnceLock::new();
 
-pub fn install(config: Config) {
-    let _ = SCHEDULER.set(Scheduler::new(config));
+pub fn install(config: Config) -> Result<(), String> {
+    let mut scheduler = Scheduler::new(config);
+    let path = std::env::var("WASM_AGENT_DB").map_err(|_| "run_journal_database_path_missing")?;
+    if !path.contains(":memory:") && !path.is_empty() {
+        scheduler.journal = Some(super::journal::Journal::open(std::path::Path::new(&path))?);
+    }
+    SCHEDULER.set(scheduler).map_err(|_| "scheduler_already_installed".to_string())
 }
 
 pub fn global() -> Option<&'static Scheduler> {
