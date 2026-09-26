@@ -52,7 +52,7 @@ fi
 [ -d "$RUNTIME_ROOT" ] || { say "runtime worktree does not exist: $RUNTIME_ROOT"; exit 2; }
 RUNTIME_ROOT="$(cd "$RUNTIME_ROOT" && pwd)"
 SOURCE_UI="${WA_SOURCE_UI_DIR:-$ROOT/ui}"
-UI_FILES="index.html app.js components.js style.css render.wasm"
+UI_FILES="index.html app.js components.js style.css render.wasm manifest.webmanifest service-worker.js icon-192.png icon-512.png"
 
 NEW="${1:-}"
 if [ -z "$NEW" ]; then

@@ -5,6 +5,7 @@ function Get-WaReleaseFiles {
   @(
     'wa.exe', 'wa-window.exe', 'wa-sentinel.exe', 'WebView2Loader.dll',
     'ui/index.html', 'ui/style.css', 'ui/app.js', 'ui/components.js', 'ui/render.wasm',
+    'ui/manifest.webmanifest', 'ui/service-worker.js', 'ui/icon-192.png', 'ui/icon-512.png',
     'scripts/upgrade.sh', 'LICENSE', 'README.md', 'AGENTS.runtime.md',
     'bin/wa.cmd', 'scripts/first-run.ps1', 'scripts/lib/first-run.ps1',
     'scripts/lib/release-package.ps1', 'scripts/lib/managed-guest.ps1', 'install.ps1'
