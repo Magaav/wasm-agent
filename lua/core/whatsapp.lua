@@ -477,6 +477,18 @@ local function send_tool(args, profile, ctx)
     })
   end
 
+  -- The last check before the effect, and the one that cannot be left to read time: has the operator
+  -- answered this conversation themselves since the message this run was woken for? If so, nothing is sent.
+  -- It sits here - past every cheap refusal, immediately before the reservation - so a send is refused for
+  -- the reason that matters, and the refusal costs no budget and no browser.
+  local took_over = operator_too_late_to_reply(ctx and ctx.memory, event)
+  if took_over then
+    return fail(took_over, {
+      conversation_id = event.conversation_id,
+      note = "the operator replied in this conversation after the message this run was woken for",
+    })
+  end
+
   local effects = effect_store(ctx, { "reserve", "confirm" })
   if not effects then
     return fail("effect_store_unbound", { note = "the runtime must pass a durable effect store with reserve+confirm" })
