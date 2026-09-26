@@ -2281,6 +2281,13 @@ input.addEventListener("keydown", (event) => {
   }
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
+    if (busy) {
+      // Typing ahead is not a stop gesture. The red button remains the explicit stop control; Enter
+      // keeps the next prompt in the composer so one keystroke cannot cancel a healthy provider call.
+      saveDraft();
+      setStatus("run still working - draft kept; use the red Stop button to cancel");
+      return;
+    }
     form.requestSubmit();
   }
 });
@@ -2373,7 +2380,10 @@ async function updateNode() {
     const response = await apiFetch("update", {
       method: "POST",
       headers: apiHeaders({ "Content-Type": "application/json" }),
-      body: "{}",
+      // Replacement drops every in-memory connection. Name the durable thread so the sentinel can
+      // wake it only after the new node answers, instead of making the window's reconnect luck the
+      // continuation protocol.
+      body: JSON.stringify(chatSession ? { thread: chatSession } : {}),
     });
     const payload = await response.json();
     notice.textContent = updateNotice(payload);

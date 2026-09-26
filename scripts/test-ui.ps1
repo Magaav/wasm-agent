@@ -922,11 +922,24 @@ $harness = @'
       (foreignNotice ? foreignNotice.textContent.slice(0, 120) : "no notice"));
   window.__fixtures.health.workers = [];
 
-  // Stop must tell the node, not only stop reading the stream: a client-side abort leaves the model
-  // call running. The request is `POST /runs {action:cancel, thread}` for this window's conversation.
+  // Enter while a run is busy means "keep this draft for the next turn", not "cancel the run". The
+  // red button is the explicit Stop control. Conflating them made a reader typing ahead kill a healthy
+  // model call, then wonder why the next prompt had apparently made the agent lose control.
   var cancelCalls = window.__calls.filter(function (call) { return call.url === "runs" && call.method === "POST"; }).length;
   window.__setBusy(true);
-  window.__cancelActiveRun();
+  var busyInput = window.__commandInput();
+  busyInput.value = "the next task";
+  var busyEnter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+  busyInput.dispatchEvent(busyEnter);
+  for (var holdTick = 0; holdTick < 5; holdTick++) await tick();
+  var heldCalls = window.__calls.filter(function (call) { return call.url === "runs" && call.method === "POST"; });
+  check(heldCalls.length === cancelCalls, "Enter during a run must not cancel it");
+  check(busyInput.value === "the next task", "Enter during a run must preserve the queued draft");
+  check(busyEnter.defaultPrevented, "the busy Enter key must not fall through to form submission");
+
+  // Stop must tell the node, not only stop reading the stream: a client-side abort leaves the model
+  // call running. Clicking the red button is `POST /runs {action:cancel, thread}`.
+  document.getElementById("send").click();
   for (var cancelTick = 0; cancelTick < 10; cancelTick++) await tick();
   var runCalls = window.__calls.filter(function (call) { return call.url === "runs" && call.method === "POST"; });
   check(runCalls.length === cancelCalls + 1,
@@ -1441,6 +1454,11 @@ $harness = @'
       return String(call.url).indexOf("update") >= 0 && call.method === "POST";
     });
     check(asked, "commands: running /update must POST to the node's update route");
+    var updateCall = (window.__calls || []).filter(function (call) {
+      return String(call.url).indexOf("update") >= 0 && call.method === "POST";
+    }).pop();
+    check(!!updateCall && JSON.parse(updateCall.body || "{}").thread === now,
+      "commands: /update must carry the current thread for the post-replacement continuation");
     check(messages.lastElementChild && messages.lastElementChild.classList.contains("thread-notice"),
       "commands: /update must leave its answer in the transcript");
 

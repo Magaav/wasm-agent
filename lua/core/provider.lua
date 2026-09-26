@@ -531,6 +531,22 @@ function M.is_overflow_error(problem, context_tokens, limit)
   return false
 end
 
+-- A request that never received response headers cannot have returned a tool call for this process
+-- to execute. That makes it the one provider timeout safe enough for a bounded replay. It is still
+-- possible the upstream completed and billed the inference before its edge lost the response, so the
+-- retry count is explicit and operator-disableable rather than a general retry policy.
+function M.is_response_timeout(problem)
+  return tostring(problem or ""):lower():find("provider_error: timeout: receive response", 1, true) ~= nil
+end
+
+function M.response_timeout_retries()
+  local raw = env("WASM_AGENT_PROVIDER_RESPONSE_RETRIES")
+  if raw == nil or trim(raw) == "" then return 1 end
+  local count = tonumber(raw)
+  if not count then return 1 end
+  return math.max(0, math.min(3, math.floor(count)))
+end
+
 -- `stream` forwards content deltas to the UI and still returns the whole
 -- message (content + tool_calls + usage) so the tool loop can continue.
 function M.complete(messages, tools, stream, opts)
@@ -561,6 +577,7 @@ function M.complete_with(model, messages, tools, stream, opts)
   local prefix_comparison=prefix_audit.observe(opts.session_id,opts.kind,body,{
     endpoint=url,session=attribution and attribution.session and headers[attribution.session] or nil})
   local request_meta={model=body.model,provider=provider.id,round=opts.round,
+    attempt=tonumber(opts.attempt) or 1,
     prefix_audit=prefix_comparison,prefix_audit_ms=math.max(0,telemetry.clock()-audit_started),
     -- Which routing this request used. Recorded because a cache miss and the
     -- routing that produced it have to be readable together: without this the

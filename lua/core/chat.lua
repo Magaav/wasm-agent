@@ -291,7 +291,10 @@ function M.run(argv)
     elseif line == "/update" then
       -- The same report the window gets from POST /update, and the same sentence: this node cannot
       -- replace itself, so the answer is what it decided and what it queued for the sentinel.
-      local report = updater.run({ reason = "requested from the interactive chat" })
+      local report = updater.run({
+        reason = "requested from the interactive chat",
+        session_id = agent.session_id,
+      })
       print(redact.text(report.message or json.encode(report)))
       if report.next then print(redact.text("  next: " .. report.next)) end
     elseif line == "/merge" then
