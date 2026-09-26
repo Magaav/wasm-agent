@@ -75,6 +75,9 @@ The `pre-commit` hook enforces it - that hook is the contract, this line is the 
   standard, shared with pi and Orca). Only the description is always in
   context; the body loads when a task matches. Write the *trigger* into the
   description. See `docs/SKILLS.md`.
+- **Evolve skills while using them:** crystallize deterministic sequences into verified spells,
+  compose repeatable adjacent spells, and refactor the skill to use them. Failure diagnosis,
+  repair/retirement decisions and effect reconciliation default to inference; see `docs/SKILLS.md`.
 - **UI changes need the UI test, not an opinion.** Run `scripts/test-ui.ps1` before claiming a UI
   change works; the UI is not observable through `bash`, `grep` or `read`. The technique and the
   headless harness are in `skills/see-your-output/SKILL.md`.

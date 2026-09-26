@@ -359,11 +359,13 @@ if [ "$UI_OK" = "1" ] && wait_health; then
     if ! cmp -s "$0" "$INSTALL_DIR/scripts/upgrade.sh"; then
       cp -f "$0" "$INSTALL_DIR/scripts/upgrade.sh" || { say "node upgraded, but could not ship upgrade.sh"; exit 3; }
     fi
-    if [ -n "$SOURCE_ROOT" ] && [ -f "$SOURCE_ROOT/skills/self-update/SKILL.md" ]; then
-      mkdir -p "$HOME_DIR/skills/self-update"
-      cp -f "$SOURCE_ROOT/skills/self-update/SKILL.md" "$HOME_DIR/skills/self-update/SKILL.md" \
-        || { say "node upgraded, but could not ship self-update skill"; exit 3; }
-    fi
+    for skill in self-update parallel-evolution; do
+      if [ -n "$SOURCE_ROOT" ] && [ -f "$SOURCE_ROOT/skills/$skill/SKILL.md" ]; then
+        mkdir -p "$HOME_DIR/skills/$skill"
+        cp -R "$SOURCE_ROOT/skills/$skill/." "$HOME_DIR/skills/$skill/" \
+          || { say "node upgraded, but could not ship $skill skill and its helpers"; exit 3; }
+      fi
+    done
     record_install || { say "node upgraded, but final installed.txt could not be recorded"; exit 3; }
     say "upgraded and recorded: $(health)"
     # Keep this one binary/UI backup for recovery after the deployment verdict.

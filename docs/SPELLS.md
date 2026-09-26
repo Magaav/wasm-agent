@@ -57,7 +57,7 @@ are optional.
 | Kind | Shape | Notes |
 | --- | --- | --- |
 | `client` | `{action, ...}` where action ∈ `click move type key shell cdp frame` | `retries` needs `idempotent: true` |
-| `run` | `{script, expect?}` | a node-side deterministic command; success is exit 0 **and** a JSON object on stdout, and `expect` compares named fields of it. Never exportable as a sentinel plan (see below) |
+| `run` | `{script, expect?, timeout_seconds?}` | a node-side deterministic command; success is settled execution, exit 0 **and** a JSON object on stdout, and `expect` compares named fields of it. Timeout is 1–86400 seconds. Never exportable as a sentinel plan (see below) |
 | `wait` | `{ms}` | bounded to 10s by `host.sleep` |
 | `assert` | `{script, <operator>}` | mid-run checkpoint |
 | `sentinel` | `{verb, binary?}` | a plan for the supervisor, executed outside the node |
@@ -79,6 +79,28 @@ cannot reach the supervisor tomorrow.
 `equals`, `not_equals`, `contains`, `matches` (Lua pattern), `gt`, `lt`,
 `truthy`. An assertion reads a value with CDP `Runtime.evaluate` and compares.
 A failed assertion is an error, never a warning.
+
+For node workflows, `pre`/`post` may use `{ "kind": "run", "script": "...",
+"expect": { "ready": true } }`. These observational commands use the same JSON
+contract as a run step; `expect` must be non-empty. They do not need a browser and
+cannot be exported as sentinel checks. Step traces retain their observed JSON, and
+an adopted/unsettled command is not successful spell evidence.
+
+## Compose verified sequences
+
+`spell_compose({name, parts:[{name, params?}, ...]})` saves one node-side spell from
+two or more existing, verified spells with the same target. It snapshots their
+steps and versions, preserves every intermediate pre/post check and each original
+retry policy, and exposes parameters as `p1_name`, `p2_name`, etc. Supplied component
+parameter values become defaults. The final source postconditions are observed
+again at composite settlement. Trace `origin` identifies the source spell, version,
+phase and index. `composed_from` records source versions in the saved spell.
+
+Composition never inserts inference or retries the whole sequence. Decide with
+inference whether the sequence and its bindings are repeatable; source changes do
+not silently update a saved composition. Rebuild and verify it after source repair.
+On failure, inspect the trace and reconcile effects before choosing manual completion,
+repair/reverification or retirement. See [SKILLS.md](SKILLS.md).
 
 ### Results
 
@@ -102,7 +124,8 @@ bad_param:* | precondition_failed | step_failed | postcondition_failed`.
 
 Spells are arbitrary automation on a real machine, so `spell_save` / `spell_run`
 are **master-only** tiers (`DESIGN.md §8`). A guest node can never save or run a
-spell. Spells are stored locally at `~/.wasm-agent/spells.json`; nothing is
+spell. Spells are stored locally at `~/.wasm-agent/nodes/<node_id>/spells.json`
+(with the old flat file as a read fallback); nothing is
 uploaded.
 
 ## Self-update — plans the sentinel must run
