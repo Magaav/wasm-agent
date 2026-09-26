@@ -916,6 +916,17 @@ fn browser_action(args: &Value, budget_ms: u64) -> Value {
                 }
             };
             let loaded = if url == "about:blank" { None } else { Some(wait_loaded(&cdp.version, &target, budget_ms.min(15_000))) };
+            if let Some(loaded) = loaded.as_ref() {
+                let actual_url = loaded["url"].as_str().unwrap_or_default();
+                if !same_page(actual_url, url) {
+                    return failure(
+                        "navigation_redirected",
+                        &format!("requested {url}, but the browser ended at {actual_url}"),
+                        "inspect the redirect or authentication state; retry only after confirming the destination",
+                        json!({ "requested_url": url, "actual_url": actual_url, "page_id": target["id"], "chrome": cdp.json() }),
+                    );
+                }
+            }
             remember(&cdp, &target, loaded.as_ref().and_then(|v| v["title"].as_str()));
             let mut result = page_result(&cdp, &target, loaded);
             result["opened"] = json!(opened);
@@ -1278,6 +1289,7 @@ mod tests {
         assert!(same_page("https://web.whatsapp.com/", "https://web.whatsapp.com"));
         assert!(same_page("https://x.com/a#frag", "https://x.com/a"));
         assert!(!same_page("https://x.com/a", "https://x.com/b"));
+        assert!(!same_page("https://chatgpt.com/", "https://chatgpt.com/share/abc"));
         assert!(!same_page("", "https://x.com/a"));
     }
 
