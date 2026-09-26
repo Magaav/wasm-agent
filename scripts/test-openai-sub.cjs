@@ -13,16 +13,31 @@ const put = (name, value) => {
 };
 try {
   put('pi/package.json', '{"type":"module"}');
-  put('pi/dist/core/auth-storage.js', 'export class AuthStorage {static create(path) {return {path};}}');
+  put('pi/dist/core/auth-storage.js', `export class AuthStorage {
+    static create(path) {return {path, async read(provider) {
+      if (provider !== 'openai-codex') throw new Error('unexpected auth provider');
+      return {type:'oauth',accountId:'fixture-account'};
+    }};}
+  }`);
   put('pi/node_modules/@earendil-works/pi-ai/package.json', '{"type":"module"}');
   put('pi/node_modules/@earendil-works/pi-ai/dist/providers/openai-codex.js',
     'export function openaiCodexProvider() {return {id:"openai-codex"};}');
   put('pi/node_modules/@earendil-works/pi-ai/dist/models.js', `
     import assert from 'node:assert/strict';
+    globalThis.fetch = async (url, options) => {
+      assert.equal(url,'https://chatgpt.com/backend-api/wham/usage');
+      assert.equal(options.headers['ChatGPT-Account-Id'],'fixture-account');
+      assert.equal(options.headers.Authorization,'Bearer fixture-access-token');
+      return {ok:true,status:200,async json() {return {rate_limit:{
+        primary_window:{used_percent:23,limit_window_seconds:18000,reset_at:2000000000},
+        secondary_window:{used_percent:71,limit_window_seconds:604800,reset_at:2000003600}
+      }}}};
+    };
     export function createModels({credentials}) {
       assert.equal(credentials.path, 'fixture-auth.json');
       return {
         setProvider(p) {assert.equal(p.id,'openai-codex');},
+        async getAuth(provider) {assert.equal(provider,'openai-codex'); return {auth:{apiKey:'fixture-access-token'}};},
         getModel(provider,id) {return id==='missing' ? undefined : {id,provider,api:'openai-codex-responses'};},
         stream(model,context,options) {
           assert.equal(options.reasoningEffort,'none');
@@ -76,5 +91,10 @@ try {
   const malformed=run({...request,messages:[...request.messages,{role:'unexpected'}]});
   assert.equal(malformed.status,1);
   assert.match(malformed.events[0].error,/Unsupported subscription message role/);
-  console.log('PASS OpenAI subscription bridge: messages, images, tools, stream, usage and visible failures');
+  const limits=run({...request,action:'limits'});
+  assert.equal(limits.status,0,limits.stdout);
+  assert.deepEqual(limits.events[0].limits,{rolling:{status:'available',percent:23,
+    resetsAt:'2033-05-18T03:33:20.000Z'},weekly:{status:'available',percent:71,
+    resetsAt:'2033-05-18T04:33:20.000Z'}});
+  console.log('PASS OpenAI subscription bridge: messages, images, tools, stream, usage, limits and visible failures');
 } finally {fs.rmSync(root,{recursive:true,force:true});}

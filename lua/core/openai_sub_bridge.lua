@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const send = value => process.stdout.write(JSON.stringify(value) + '\n');
+const send = value => new Promise(resolve => process.stdout.write(JSON.stringify(value) + '\n', resolve));
 let request;
 try {
   const input = process.argv[2];
@@ -39,8 +39,41 @@ try {
   if (!ai) throw new Error('Pi AI package is missing');
   const { createModels } = await load(join(ai, 'models.js'));
   const { openaiCodexProvider } = await load(join(ai, 'providers/openai-codex.js'));
-  const models = createModels({ credentials: AuthStorage.create(request.auth_path) });
+  const credentials = AuthStorage.create(request.auth_path);
+  const models = createModels({ credentials });
   models.setProvider(openaiCodexProvider());
+  if (request.action === 'limits') {
+    // Ask Pi to resolve/refresh OAuth under its own credential-store lock. The
+    // access token stays in this child and is never returned to Lua or persisted
+    // by wasm-agent. OpenAI's subscription endpoint is private and can change.
+    const resolved = await models.getAuth('openai-codex');
+    const credential = await credentials.read('openai-codex');
+    if (!resolved?.auth?.apiKey || !credential?.accountId) {
+      await send({type:'limits', limits:{}});
+      process.exit(0);
+    }
+    const response = await fetch('https://chatgpt.com/backend-api/wham/usage', {
+      headers:{'Accept':'application/json', 'Authorization':`Bearer ${resolved.auth.apiKey}`,
+        'ChatGPT-Account-Id':credential.accountId, 'User-Agent':'codex-cli'}
+    });
+    if (!response.ok) throw new Error(`subscription_limits_http_${response.status}`);
+    const payload = await response.json();
+    const root = payload.rate_limits || payload.rate_limit || {};
+    const limits = {};
+    const addWindow = (window, fallback) => {
+      if (!window || !Number.isFinite(Number(window.used_percent))) return;
+      const duration = Number(window.limit_window_seconds);
+      const key = Number.isFinite(duration) ? (duration >= 172800 ? 'weekly' : 'rolling') : fallback;
+      limits[key] = {status:window.limit_reached ? 'limited' : 'available',
+        percent:Number(window.used_percent),
+        resetsAt:Number.isFinite(Number(window.reset_at))
+          ? new Date(Number(window.reset_at)*1000).toISOString() : null};
+    };
+    addWindow(root.primary_window || root.primary || root.five_hour, 'rolling');
+    addWindow(root.secondary_window || root.secondary || root.weekly, 'weekly');
+    await send({type:'limits', limits});
+    process.exit(0);
+  }
   const model = models.getModel('openai-codex', request.model);
   if (!model) throw new Error('Model is absent from Pi catalog; update Pi: ' + request.model);
   const zeroUsage = { input:0, output:0, cacheRead:0, cacheWrite:0, totalTokens:0,
