@@ -11,7 +11,7 @@
     "self_destination": "",
     "account": "",
     "browser_endpoint": "",
-    "send_path": "ui",
+    "send_path": "store",
     "allow_mark_read": false,
     "send_approved": false,
     "reply_script": "",

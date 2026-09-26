@@ -2,12 +2,19 @@
 //
 // These are the two rules that decide whether a send happens, so they are tested without a browser.
 const assert = require("node:assert/strict");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 
 let checked = 0;
 const check = (value, label) => { assert.ok(value, label); checked += 1; };
 
 (async () => {
   const { normalise, composerMatches, classifySendAttempt, sendGuard, accountMatches, endpointMatches, identityGuard, lookupExpression } = await import("../scripts/whatsapp-reply-core.mjs");
+
+  const retired = spawnSync(process.execPath, [path.resolve(__dirname, "../scripts/whatsapp-reply.mjs"), "--to-self", "--body", "must not type", "--send"], { encoding: "utf8" });
+  assert.equal(retired.status, 5, "the legacy UI sender is retired before browser discovery or input");
+  assert.equal(JSON.parse(retired.stdout.trim()).error, "ui_input_route_retired");
+  checked += 2;
 
   check(normalise("  a\n b\tc ") === "a b c", "normalise collapses whitespace");
   check(composerMatches("a b c", "a\n b   c") === true, "matching ignores whitespace shape");

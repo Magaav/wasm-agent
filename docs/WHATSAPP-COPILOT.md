@@ -11,7 +11,7 @@ steps: the deterministic ones first, judgement last.
 | # | step | kind | what it is |
 | --- | --- | --- | --- |
 | 1 | `scripts/whatsapp-source-ensure.sh` | `run` | keeps the source up: Chrome on the agent profile, DevTools on 9222, the WhatsApp page bound |
-| 2 | `scripts/whatsapp-transcribe.sh` | `run` | local speech-to-text for voice notes, sent back to the source chat (no model) |
+| 2 | `scripts/whatsapp-transcribe.sh` | `run` | local speech-to-text for voice notes, sent back through the injected app action (no model or input events) |
 | 3 | `scripts/whatsapp-copilot-read.sh` | `run`, `returns: events` | reads the store, diffs it against the cursor, hands on the eligible messages |
 | 4 | `foreach` → `subagent` (`whatsapp-responder`) | judgement | answers one message: read, decide, and at most one verified reply |
 
@@ -140,9 +140,9 @@ later message is handed to a responder. View-once audio, invalid media, and reco
 are reported as unanswerable. Images and other unsupported media are also reported, with no responder
 event. See [local recognizer setup](WHATSAPP-TRANSCRIPTION.md) for the required Python environment and
 offline model cache. Step 2 of the same job (`whatsapp-transcribe.sh`) sends each transcript back into
-the source chat, deterministically and with no model. Because that reply is an outgoing message in that
-conversation, the reader's operator-precedence rule makes step 4 stand down on it — so a voice note gets
-the transcript rather than two messages.
+the source chat through WhatsApp's injected app action, deterministically and with no model or input events.
+Because that reply is an outgoing message in that conversation, the reader's operator-precedence rule makes
+step 4 stand down on it — so a voice note gets the transcript rather than two messages.
 
 **Standing down is reported too.** When the operator has taken a conversation over themselves, the copilot
 does not answer — and that is a decision the operator cannot see: they observe no reply, and "the copilot
@@ -185,7 +185,10 @@ send is never announced twice, and is best-effort: a failed note does not fail t
 
 It lives in the reader rather than in the child on purpose. A child's send budget is one, so a note home
 would be a second send it is refused; and "what did the copilot send as me" is decidable from the effect
-tables without a model. Child tokens are spent on judgement, never on bookkeeping.
+tables without a model. Child tokens are spent on judgement, never on bookkeeping. Reader notices use the
+same injected store action, bound by `WA_WHATSAPP_SELF_DESTINATION`, `WA_WHATSAPP_ACCOUNT` and
+`WA_WHATSAPP_BROWSER_ENDPOINT`; missing bindings or a human draft refuse the notice, with the failure
+visible on stderr. There is no UI/input fallback.
 
 `scripts/test-whatsapp-cursor.cjs` proves each of these against a mock store, the real ingest script and a
 real ledger: no browser, no sentinel, no model.
@@ -213,11 +216,14 @@ pending row, which returns `ambiguous` and is refused or reconciled — never re
 their own table (`effect_decisions`), keyed by message id, so recording one can never erase a
 reservation.
 
-**Sending.** `send_path: ui` is the only route proven for a third-party chat, and it **opens the chat**,
-which clears that chat's unread marker — accepted explicitly by the operator (`allow_mark_read: true`).
-The route refuses to overwrite a draft, refuses a non-self send without that approval, and verifies the
-sent message in the app's store: a keystroke's acknowledgement is not evidence (it has reported
-`timeout: Input.dispatchKeyEvent` while the message verifiably delivered).
+**Sending.** The Copilot profile selects `send_path: store`: it invokes WhatsApp's own
+`WAWebSendTextMsgChatAction.sendTextMsgToChat` in the bound page. This does not open or focus a chat,
+mark it read, or use CDP input events. The raw route requires matching account and loopback page bindings,
+proven direct/group Wid metadata, a supported target, and no target draft/link-preview/composition state.
+It calls the action once and verifies a new exact-recipient/body message with server ack in the store; an
+ambiguous result is never retried. The fake-store/CDP tests cover direct and group dispatch, refusal cases,
+and duplicate prevention. No live third-party send has been performed; the current notes-to-self chat has
+a human draft, so the route correctly refuses even a self-send until an operator resolves that draft.
 
 **Every reply announces itself.** The send tool puts the marker (`M.REPLY_PREFIX` in
 `lua/core/whatsapp.lua`) at the very beginning of the body *before* it is reserved, sent and verified, so

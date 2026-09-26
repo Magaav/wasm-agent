@@ -204,6 +204,14 @@ for _, id in ipairs(ids) do
         all_sent = false
         break
       end
+      local store_send_script = host.getenv("WA_WHATSAPP_STORE_SEND_SCRIPT") or (dir .. "/whatsapp-store-send.mjs")
+      local account = tostring(host.getenv("WA_WHATSAPP_ACCOUNT") or "")
+      local endpoint = tostring(host.getenv("WA_WHATSAPP_BROWSER_ENDPOINT") or "")
+      if account == "" or endpoint == "" then
+        result = {ok=false,step="send_config",error="store_identity_unbound",message_id=id,part=index,state="retryable"}
+        all_sent = false
+        break
+      end
       local body_file = paths.temp() .. "/wa-audio-body-" .. host.uuid() .. ".txt"
       if not host.write_file(body_file,body) then
         result = {ok=false,step="body_file",error="body_not_written",message_id=id,part=index}
@@ -217,34 +225,36 @@ for _, id in ipairs(ids) do
         all_sent = false
         break
       end
-    local reply_script = host.getenv("WA_WHATSAPP_REPLY_SCRIPT") or (dir .. "/whatsapp-reply.mjs")
-    local sent, send_error = run(table.concat({quote(node),quote(reply_script),"--chat",quote(detail.conversation_id),
-      "--body-file",quote(body_file),"--send","--allow-mark-read"}," "),120)
-    clean(body_file)
-    if sent and sent.sent == true and sent.verified == true then
-      if not effect.confirm({message_id=key,conversation_id=detail.conversation_id,message=sent.message or {}}) then
-        result = {ok=false,step="confirm",error="sent_but_confirmation_failed",message_id=id,part=index}
+      local sent, send_error = run(table.concat({quote(node),quote(store_send_script),"--chat",quote(detail.conversation_id),
+        "--expect-account",quote(account),"--expect-browser-endpoint",quote(endpoint),
+        "--body-file",quote(body_file),"--send"}," "),120)
+      clean(body_file)
+      if sent and sent.sent == true and sent.verified == true then
+        if not effect.confirm({message_id=key,conversation_id=detail.conversation_id,message=sent.message or {}}) then
+          result = {ok=false,step="confirm",error="sent_but_confirmation_failed",message_id=id,part=index}
+          all_sent = false
+          break
+        end
+      else
+        local definitely_unsent = {
+          send_resource_busy=true, target_draft_present=true, draft_unknown=true, link_preview_present=true,
+          target_composing=true, target_read_only=true, target_archived=true, target_kind_unverified=true,
+          unsupported_chat_kind=true, target_identity_unverified=true, chat_not_found=true,
+          account_unbound=true, account_unproven=true, account_mismatch=true,
+          endpoint_unbound=true, endpoint_unproven=true, endpoint_mismatch=true, endpoint_not_loopback=true,
+        }
+        if definitely_unsent[send_error] and effect.release({message_id=key}) then
+          result = {ok=false,step="send_precheck",error=send_error,message_id=id,part=index,state="retryable"}
+        else
+          -- An unverified dispatch may have reached WhatsApp; never replay it.
+          effect.unknown({message_id=key,detail=send_error or "send_unverified"})
+          effect.record({message_id=id,conversation_id=detail.conversation_id,decision="transcription_unknown",reason=send_error or "send_unverified"})
+          pending[id] = nil
+          result = {ok=false,step="send",error=send_error or "send_unverified",message_id=id,part=index,state="unknown"}
+        end
         all_sent = false
         break
       end
-    else
-    local definitely_unsent = {
-      send_resource_busy=true, composer_preoccupied=true, opened_the_wrong_chat=true,
-      unread_would_be_broken=true, chat_not_found=true, account_mismatch=true,
-      endpoint_mismatch=true, composer_focus_missing=true,
-    }
-    if definitely_unsent[send_error] and effect.release({message_id=key}) then
-      result = {ok=false,step="send_precheck",error=send_error,message_id=id,part=index,state="retryable"}
-    else
-      -- An unverified dispatch may have reached WhatsApp; never replay it.
-      effect.unknown({message_id=key,detail=send_error or "send_unverified"})
-      effect.record({message_id=id,conversation_id=detail.conversation_id,decision="transcription_unknown",reason=send_error or "send_unverified"})
-      pending[id] = nil
-      result = {ok=false,step="send",error=send_error or "send_unverified",message_id=id,part=index,state="unknown"}
-    end
-    all_sent = false
-    break
-    end
     ::next_part::
     end
     if all_sent then

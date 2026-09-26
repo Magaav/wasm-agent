@@ -211,8 +211,8 @@ local wa_profile = {
   schema_version = 1, id = "whatsapp-responder",
   allowed_tools = { "whatsapp_read", "whatsapp_decide", "whatsapp_send" },
   instructions = "",
-  resources = { conversation = "c-wa", send_approved = true, send_path = "ui",
-    reply_script = "reply.js", self_destination = "c-wa" },
+  resources = { conversation = "c-wa", send_approved = true, send_path = "store",
+    store_send_script = "store-send.js", self_destination = "c-wa" },
   limits = { context_messages = 20, body_bytes = 4096, sends_per_run = 1 },
 }
 local wa_store = effects.new("wa-session-1")
@@ -256,8 +256,8 @@ local taken_profile = {
   schema_version = 1, id = "whatsapp-responder",
   allowed_tools = { "whatsapp_read", "whatsapp_decide", "whatsapp_send" },
   instructions = "",
-  resources = { conversation = "c-taken", send_approved = true, send_path = "ui",
-    reply_script = "reply.js", self_destination = "c-taken" },
+  resources = { conversation = "c-taken", send_approved = true, send_path = "store",
+    store_send_script = "store-send.js", self_destination = "c-taken" },
   limits = { context_messages = 20, body_bytes = 4096, sends_per_run = 1 },
 }
 local took_over_store = effects.new("wa-session-late")

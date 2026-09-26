@@ -40,10 +40,11 @@ fs.writeFileSync(path.join(scripts, "stt.mjs"), `
 if (process.env.WA_TEST_STT_FAIL==='1') {console.log(JSON.stringify({ok:false,error:'local_stt_failed'}));process.exitCode=1}
 else console.log(JSON.stringify({ok:true,transcript:process.env.WA_TEST_LONG==='1'?'x'.repeat(7000):'Olá mundo',local_only:true}));
 `);
-fs.writeFileSync(path.join(scripts, "reply.mjs"), `
+fs.writeFileSync(path.join(scripts, "store-send.mjs"), `
 import { readFileSync, appendFileSync } from 'node:fs';
 const args=process.argv.slice(2), body=readFileSync(args[args.indexOf('--body-file')+1],'utf8');
-if (process.env.WA_TEST_SEND_PRECHECK==='1' && body.includes('(2/3)')) {console.log(JSON.stringify({ok:false,error:'composer_preoccupied'}));process.exitCode=1}
+if (!args.includes('--expect-account') || !args.includes('--expect-browser-endpoint') || args.includes('--allow-mark-read')) {console.log(JSON.stringify({ok:false,error:'store_identity_unbound'}));process.exitCode=1}
+else if (process.env.WA_TEST_SEND_PRECHECK==='1' && body.includes('(2/3)')) {console.log(JSON.stringify({ok:false,error:'target_draft_present'}));process.exitCode=1}
 else {
 appendFileSync(process.env.WA_TEST_SEND_LOG,JSON.stringify({body,chat:args[args.indexOf('--chat')+1]})+'\\n');
 if (process.env.WA_TEST_SEND_UNKNOWN==='1') {console.log(JSON.stringify({ok:false,error:'ambiguous_send'}));process.exitCode=1}
@@ -72,7 +73,10 @@ function pass(extra = {}) {
       WA_TEST_STORE: store, WA_TEST_SEND_LOG: sends, WA_WHATSAPP_NODE: process.execPath,
       WA_WHATSAPP_AUDIO_SCRIPT: path.join(scripts, "audio.mjs"),
       WA_WHATSAPP_STT_PYTHON: process.execPath, WA_WHATSAPP_STT_SCRIPT: path.join(scripts, "stt.mjs"),
-      WA_WHATSAPP_REPLY_SCRIPT: path.join(scripts, "reply.mjs"), ...extra } });
+      WA_WHATSAPP_STORE_SEND_SCRIPT: path.join(scripts, "store-send.mjs"),
+      WA_WHATSAPP_ACCOUNT: "5511999999999@c.us",
+      WA_WHATSAPP_BROWSER_ENDPOINT: "ws://127.0.0.1:9222/devtools/page/fixture",
+      ...extra } });
   const line = String(run.stdout || "").trim().split(/\r?\n/).pop();
   let value;
   try { value = JSON.parse(line); } catch { throw new Error(`not JSON: ${run.stdout}\n${run.stderr}`); }
@@ -87,6 +91,9 @@ assert.ok(fs.existsSync(wa) && fs.existsSync(wasm));
 setStore([message("old", 1000)]);
 assert.equal(pass().value.primed, true);
 setStore([message("old", 1000), message("voice1", 2000, "ptt")]);
+const unbound = pass({ WA_WHATSAPP_ACCOUNT: "" });
+assert.equal(unbound.value.error, "store_identity_unbound", "store send requires local account/page bindings");
+assert.equal(effect("voice1:transcript:1"), undefined, "missing route bindings never reserve a send");
 const first = pass();
 assert.equal(first.code, 0, JSON.stringify(first));
 assert.equal(first.value.state, "sent");
