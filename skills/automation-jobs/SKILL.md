@@ -77,6 +77,14 @@ persistent `Page.addScriptToEvaluateOnNewDocument` hook can also execute page Ja
 names, call shape and side effects against the live app build; internal names are not stable APIs. Keep the
 one-dispatch rule and verify the message store afterward.
 
+Use `Page.addScriptToEvaluateOnNewDocument({source})` when code must run before app code on future document
+loads/navigation. It returns an identifier; retain it to unregister with
+`Page.removeScriptToEvaluateOnNewDocument({identifier})` when disabling the hook. It does not retroactively
+run in an already-loaded document: use `Runtime.evaluate` for that, or feature-detect any newer protocol
+option rather than assuming it exists. Leave `worldName` unset when the hook must share the page's main
+JavaScript world and reach app modules; a named isolated world has a separate global. Keep the CDP target
+session alive and rebind after target/session replacement or a job off->on transition.
+
 Five measurements on one real app (WhatsApp Web) are why:
 
 | the UI route | what actually happened |
