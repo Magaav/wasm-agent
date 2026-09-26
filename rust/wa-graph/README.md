@@ -8,6 +8,7 @@ grep → read → grep:
 wa-graph explain <name>     # what is it, what does it use, who uses it
 wa-graph path <from> <to>   # how does <from> reach <to> (direction of use)
 wa-graph query <text>       # where does this name appear
+wa-graph search <concept>   # ranked definitions with coverage and confidence; optional --prefer-implementations
 wa-graph caps                # host.* capabilities, ranked by use
 wa-graph index | stats
 ```

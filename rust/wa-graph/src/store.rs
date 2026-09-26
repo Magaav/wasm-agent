@@ -59,6 +59,8 @@ pub struct SearchHit {
     pub confidence: &'static str,
     pub reason: &'static str,
     pub matched_terms: Vec<String>,
+    pub unmatched_terms: Vec<String>,
+    pub unmatched_definition_terms: Vec<String>,
     pub score_breakdown: BTreeMap<String, i64>,
 }
 
@@ -695,6 +697,12 @@ impl Store {
     /// The score is deliberately explainable lexical evidence plus a small incoming-edge boost;
     /// it is not presented as semantic similarity.
     pub fn search_symbols(&self, text: &str, limit: i64) -> Result<Vec<SearchHit>> {
+        self.search_symbols_with_preference(text, limit, false)
+    }
+
+    pub fn search_symbols_with_preference(
+        &self, text: &str, limit: i64, prefer_implementations: bool,
+    ) -> Result<Vec<SearchHit>> {
         let query = text.trim().to_ascii_lowercase();
         let terms = lexical_terms(text.trim());
         if query.is_empty() || terms.is_empty() {
@@ -744,6 +752,7 @@ impl Store {
             let detail = node.detail.as_deref().unwrap_or("").to_ascii_lowercase();
             let mut score = 0i64;
             let mut matched = Vec::new();
+            let mut definition_matched = Vec::new();
             let mut reason = "path";
             let mut score_breakdown = BTreeMap::new();
 
@@ -769,6 +778,9 @@ impl Store {
                 let tf = name_tf + detail_tf + path_tf;
                 if tf > 0 {
                     matched.push(term.clone());
+                    if name_tf > 0 || detail_tf > 0 {
+                        definition_matched.push(term.clone());
+                    }
                     let df = *document_frequency.get(term).unwrap_or(&0) as f64;
                     let idf = (1.0 + (document_count - df + 0.5) / (df + 0.5)).ln();
                     let tf = tf as f64;
@@ -783,6 +795,9 @@ impl Store {
                 } else if name.contains(term) || detail.contains(term) || path.contains(term) {
                     // Preserve substring recall for identifiers that the tokenizer cannot split.
                     matched.push(term.clone());
+                    if name.contains(term) || detail.contains(term) {
+                        definition_matched.push(term.clone());
+                    }
                     lexical_score += 25;
                 }
             }
@@ -794,9 +809,17 @@ impl Store {
             if matched.len() == terms.len() {
                 score += 120;
                 score_breakdown.insert("all_terms".to_string(), 120);
-                if reason != "exact_name" && reason != "exact_member" {
+                if definition_matched.len() == terms.len()
+                    && reason != "exact_name" && reason != "exact_member" {
                     reason = "all_terms";
                 }
+            }
+            // A local variable mentioning one concept word is a useful lead, but its
+            // tiny definition is usually a poor first implementation to retrieve.
+            if prefer_implementations && terms.len() > 1
+                && matched.len() < terms.len() && node.kind == "var" {
+                score -= 240;
+                score_breakdown.insert("partial_variable".to_string(), -240);
             }
             let graph_score = incoming.min(20) * 2;
             score += graph_score;
@@ -818,19 +841,25 @@ impl Store {
             }
             let confidence = if reason == "exact_name" || reason == "exact_member" {
                 "exact"
-            } else if matched.len() == terms.len() || score >= 400 {
+            } else if definition_matched.len() == terms.len() {
                 "high"
-            } else if reason != "path" || matched.len() > 1 {
+            } else if !definition_matched.is_empty() {
                 "medium"
             } else {
                 "low"
             };
+            let unmatched_terms = terms.iter().filter(|term| !matched.contains(term))
+                .cloned().collect();
+            let unmatched_definition_terms = terms.iter()
+                .filter(|term| !definition_matched.contains(term)).cloned().collect();
             hits.push(SearchHit {
                 node,
                 score,
                 confidence,
                 reason,
                 matched_terms: matched,
+                unmatched_terms,
+                unmatched_definition_terms,
                 score_breakdown,
             });
         }
@@ -1137,8 +1166,14 @@ impl Store {
     }
 
     pub fn search_symbols_json(&self, text: &str, limit: i64) -> Result<Value> {
+        self.search_symbols_json_with_preference(text, limit, false)
+    }
+
+    pub fn search_symbols_json_with_preference(
+        &self, text: &str, limit: i64, prefer_implementations: bool,
+    ) -> Result<Value> {
         Ok(Value::Array(
-            self.search_symbols(text, limit)?
+            self.search_symbols_with_preference(text, limit, prefer_implementations)?
                 .into_iter()
                 .map(|hit| {
                     json!({
@@ -1152,6 +1187,8 @@ impl Store {
                         "confidence": hit.confidence,
                         "reason": hit.reason,
                         "matched_terms": hit.matched_terms,
+                        "unmatched_terms": hit.unmatched_terms,
+                        "unmatched_definition_terms": hit.unmatched_definition_terms,
                         "score_breakdown": hit.score_breakdown,
                     })
                 })

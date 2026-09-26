@@ -67,6 +67,16 @@ local searched = assert(graph.search_symbols("target", {limit=1}))
 assert(searched.count == 1 and searched.truncated and searched.verdict == "ok")
 assert(searched.results[1].confidence == "exact" and searched.results[1].signature == "target(value)")
 assert(searched.results[1].score_breakdown.exact == 1000)
+host.graph_search = function(_, options)
+  assert(json.decode(options).prefer_implementations == true)
+  return json.encode({{kind="var",name="topic",path="ui/components.js",line=10,
+    score=410,confidence="medium",matched_terms={"topic"},unmatched_terms={"diff"},
+    unmatched_definition_terms={"diff"},
+    score_breakdown={partial_variable=-240}}})
+end
+local partial = assert(graph.search_symbols("diff topic", {prefer_implementations=true}))
+assert(partial.verdict == "partial" and partial.results[1].unmatched_terms[1] == "diff")
+assert(partial.next:find("bounded grep", 1, true))
 local source = assert(graph.symbol_source(searched.results[1]))
 assert(source.eof and source.source:find("return value", 1, true))
 local overview=assert(graph.overview({aspects={"languages"},limit=1}))

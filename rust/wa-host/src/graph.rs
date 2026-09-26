@@ -151,8 +151,10 @@ pub extern "C" fn graph_search(l: *mut LuaState) -> std::ffi::c_int {
             .and_then(Value::as_i64)
             .unwrap_or(12)
             .clamp(1, 100);
+        let prefer_implementations = options.get("prefer_implementations")
+            .and_then(Value::as_bool).unwrap_or(false);
         store
-            .search_symbols_json(&text, limit)
+            .search_symbols_json_with_preference(&text, limit, prefer_implementations)
             .map_err(|e| e.to_string())
     })
 }
