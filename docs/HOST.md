@@ -92,7 +92,9 @@ tell *which* key failed without being able to use it.
 
 `host.exec(command, cwd, timeout_seconds?)` is the synchronous facade for an owned
 **operation**; the optional third argument bounds it (1-86400 seconds, the configured
-default when omitted). `host.operation`
+default when omitted). `host.exec_timeout(timeout_seconds?)` reports the same effective
+foreground deadline for the configured default or a requested override, including a tighter
+remaining child-run budget; out-of-range integer overrides return `nil`. `host.operation`
 exposes explicit launch receipts, status, cursor-based output, bounded waits and
 cancellation; `host.jobs` manages automation definitions/enable state, never executes
 a job itself. Both always return one JSON value, including failure. Do not add a

@@ -761,14 +761,26 @@ pub extern "C" fn write_file(l: *mut LuaState) -> c_int {
     1
 }
 
-/// The deadline a `bash`/`shell` call is given, in seconds. Read here because this is where it is
-/// enforced; `host.exec_timeout()` and `serve::health_body` both report this same number, so a
-/// client can show the bound without duplicating the parse or drifting from what the host does.
+/// The node-wide default deadline for a `bash`/`shell` call. `/health` reports this same number;
+/// `effective_exec_timeout_seconds` applies call overrides and child budgets before execution.
 pub(crate) fn exec_timeout_seconds() -> u64 {
     std::env::var("WASM_AGENT_EXEC_TIMEOUT_SECONDS")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(300u64)
+}
+
+/// Resolve the exact foreground shell timeout used by both the tool trace and `host.exec`.
+fn effective_exec_timeout_seconds(requested_seconds: Option<u64>) -> Result<u64, String> {
+    let mut seconds = match requested_seconds {
+        Some(value) if (1..=86_400).contains(&value) => value,
+        Some(_) => return Err("invalid_timeout_seconds".into()),
+        None => exec_timeout_seconds(),
+    };
+    if let Some(remaining) = crate::subagents::remaining_budget() {
+        seconds = seconds.min(remaining.as_secs().max(1));
+    }
+    Ok(seconds)
 }
 
 /// Compatibility facade over the supervised operation runtime. No pipes, reader threads or
@@ -786,14 +798,7 @@ fn run_bounded(
     // A caller may name its own budget (the `bash` tool's `timeout_seconds`), in the
     // same 1-86400 range `operation start` accepts; an out-of-range value is refused,
     // not clamped, so a caller never believes it got a bound it did not.
-    let mut seconds = match requested_seconds {
-        Some(value) if (1..=86_400).contains(&value) => value,
-        Some(_) => return Err("invalid_timeout_seconds".into()),
-        None => exec_timeout_seconds(),
-    };
-    if let Some(remaining) = crate::subagents::remaining_budget() {
-        seconds = seconds.min(remaining.as_secs().max(1));
-    }
+    let seconds = effective_exec_timeout_seconds(requested_seconds)?;
     crate::operations::foreground(program, flag, command, cwd, seconds)
 }
 
@@ -2269,16 +2274,27 @@ pub extern "C" fn now(l: *mut LuaState) -> c_int {
     1
 }
 
-/// `host.exec_timeout()` -> the deadline a `bash`/`shell` call is given, in seconds.
+/// `host.exec_timeout(requested_seconds?)` -> the deadline a `bash`/`shell` call is given, in seconds.
 ///
-/// Reported rather than duplicated. A run can spend 300 seconds inside one command and, until this
-/// existed, nothing said so: the trace showed a line that had not come back yet, and the only signal
-/// was the call being killed five minutes later - which reads as the agent being stuck rather than
-/// as a deadline that was always there. The number lives here because this is where it is enforced;
-/// anything showing it to a person reads it from here.
+/// With no argument, this returns the configured default, limited by any active child budget.
+/// With an override, it applies the same validation and child budget as `host.exec`, so a trace can
+/// show the actual deadline. Out-of-range integer overrides return `nil`; `host.exec` reports the
+/// corresponding error when called.
 pub extern "C" fn exec_timeout(l: *mut LuaState) -> c_int {
-    let seconds = exec_timeout_seconds();
-    unsafe { crate::lua::lua_pushnumber(l, seconds as f64) };
+    let requested = match arg_integer(l, 1) {
+        Some(value) => match u64::try_from(value) {
+            Ok(value) => Some(value),
+            Err(_) => {
+                unsafe { crate::lua::lua_pushnil(l) };
+                return 1;
+            }
+        },
+        None => None,
+    };
+    match effective_exec_timeout_seconds(requested) {
+        Ok(seconds) => unsafe { crate::lua::lua_pushnumber(l, seconds as f64) },
+        Err(_) => unsafe { crate::lua::lua_pushnil(l) },
+    }
     1
 }
 
