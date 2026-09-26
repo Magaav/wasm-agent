@@ -96,6 +96,17 @@ Rules that save time, all of them learned the hard way:
 
 ## 3. Screenshot it, and look at the image
 
+Inside the disposable Linux coding benchmark image, `wa-ui-observe` serves a
+staged copy of `/work/ui`, injects `test-fixtures.js`, and writes `dom.html` and
+`screenshot.png` from real headless Chromium. Pass `--probe /path/to/probe.js`
+to run a task-specific check; the probe must write a `pre#wa-probe` with
+`data-status="pass"` or `data-status="fail"`. The command fails if Chromium or
+the probe fails. Use `--out /trace/ui-observation` to retain only the evidence.
+`wa-ui-contracts --base HEAD` reports classes, custom elements, and custom
+events removed by the patch. Review each reported removal against callers and
+CSS; a clean result does not prove behavior. These commands are available to
+benchmark agents without revealing the hidden oracle.
+
 Structure is not appearance: spacing, wrapping, contrast and overflow are only
 visible. A screenshot is also the only way to catch that the window is running a
 *stale* build of the UI while your assertions pass against your files.
