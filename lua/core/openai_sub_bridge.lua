@@ -64,7 +64,9 @@ try {
     const addWindow = (window, fallback) => {
       if (!window || !Number.isFinite(Number(window.used_percent))) return;
       const duration = Number(window.limit_window_seconds);
-      const key = Number.isFinite(duration) ? (duration >= 172800 ? 'weekly' : 'rolling') : fallback;
+      const key = Number.isFinite(duration)
+        ? (duration >= 2592000 ? 'monthly' : duration >= 172800 ? 'weekly' : 'rolling')
+        : fallback;
       limits[key] = {status:window.limit_reached ? 'limited' : 'available',
         percent:Number(window.used_percent),
         resetsAt:Number.isFinite(Number(window.reset_at))
@@ -72,6 +74,7 @@ try {
     };
     addWindow(root.primary_window || root.primary || root.five_hour, 'rolling');
     addWindow(root.secondary_window || root.secondary || root.weekly, 'weekly');
+    addWindow(root.tertiary_window || root.tertiary || root.monthly_window || root.monthly, 'monthly');
     await send({type:'limits', limits});
     return;
   }
