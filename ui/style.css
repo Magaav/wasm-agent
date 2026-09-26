@@ -251,6 +251,8 @@ wa-trace { display: block; align-self: flex-start; max-width: 760px; width: 100%
 .tool-line.ok { border-left-color: rgba(63, 185, 80, .5); }
 .tool-line.err { border-left-color: #f85149; }
 .tool-line.unrecorded { border-left-color: var(--warn); }
+.tool-line.decision { border-left-color: var(--accent); }
+.tool-line.decision-complete .tool-outcome { color: var(--accent); }
 .tool-line.pending .tool-title b { opacity: .6; }
 .tool-head { display: flex; align-items: baseline; gap: var(--space); }
 .tool-title { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #c9d1e0; }

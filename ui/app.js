@@ -491,8 +491,8 @@ function clearStatus() {
 // visible instead of reading as a run that only called tools.
 let reasoningBlock = null;
 let reasoningText = "";
-function appendReasoning(text) {
-  if (!text) return;
+function appendReasoning(text, complete = false) {
+  if (!text && !complete) return reasoningText;
   const bubble = currentBubble();
   if (!reasoningBlock || reasoningBlock.parentNode !== bubble.body) {
     // A topic like every other one: <wa-reasoning> builds the same header as the tool calls beside it,
@@ -502,9 +502,10 @@ function appendReasoning(text) {
     bubble.body.append(reasoningBlock);
     reasoningText = "";
   }
-  reasoningText += text;
+  reasoningText = complete ? text : reasoningText + text;
   reasoningBlock.setText(reasoningText);
   pin();
+  return reasoningText;
 }
 
 // A round is over: the thinking it produced is history, and the block folds away.
@@ -908,6 +909,12 @@ function addTool(name, args, options) {
   pin();
 }
 
+function addDecision(event) {
+  currentTrace().addDecision(event.call_id, event.name, event.arguments_text || "",
+    event.complete === true, event.previous_call_id);
+  pin();
+}
+
 function startToolTicker() {
   if (toolTicker) return;
   toolTicker = setInterval(() => {
@@ -1110,7 +1117,7 @@ function typeOut(body, text) {
 }
 
 function handleEvent(event) {
-  if (["round", "reasoning", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
+  if (["round", "reasoning", "decision", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
     clearActiveRunNotice();
   }
   if (event.type === "round") {
@@ -1129,9 +1136,11 @@ function handleEvent(event) {
     // A reasoning model can think for a long time before it says anything, and a
     // silent panel is indistinguishable from a hung one. The text becomes a thinking
     // block; the count still drives the status line, the live "not hung" signal.
-    const chars = Number(event.chars) || 0;
-    appendReasoning(event.text || "");
+    const fullText = appendReasoning(event.text || "", event.complete === true);
+    const chars = Number(event.chars) || Array.from(fullText || "").length;
     if (!replayingMessages) setStatus("thinking… " + chars + " chars of reasoning");
+  } else if (event.type === "decision") {
+    addDecision(event);
   } else if (event.type === "tool") {
     // The bound travels with the tool event when the host enforces one (bash/shell); /health is the
     // fallback so an in-flight line still says "of 300s" instead of only "42s".
