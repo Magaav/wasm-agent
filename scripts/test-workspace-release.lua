@@ -40,6 +40,14 @@ host.write_file(opdir..'/state.json',json.encode({settled=false,cleanup='unknown
 local uncertain,uncertain_why=workspaces.release(memory,id,'owner')
 check(not uncertain and uncertain_why=='workspace_release_operation_unresolved:fixture-unresolved','unknown operation blocks removal')
 host.write_file(opdir..'/state.json',json.encode({settled=true,cleanup='terminated'}))
+local original_list=host.list_dir
+host.list_dir=function(path)
+  if path==paths.data()..'/operations' then return json.encode({entries={{name='unreadable',kind='other'}}}) end
+  return original_list(path)
+end
+local unreadable,unreadable_why=workspaces.release(memory,id,'owner')
+host.list_dir=original_list
+check(not unreadable and unreadable_why=='workspace_release_operation_unreadable:unreadable','unreadable operation entry blocks removal')
 local released,release_why=workspaces.release(memory,id,'owner')
 check(released and released.state=='released','clean inactive worktree released: '..tostring(release_why))
 check(host.canonical_path(saved)==nil,'released directory is gone')

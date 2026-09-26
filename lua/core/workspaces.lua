@@ -269,6 +269,7 @@ function M.release(memory,id,user_id)
     local operations=json.decode(host.list_dir(paths.data()..'/operations'))
     if type(operations)~='table' or operations.error or type(operations.entries)~='table' then return nil,'workspace_release_operations_unavailable' end
     for _,entry in ipairs(operations.entries) do
+      if entry.kind~='dir' and entry.kind~='file' then return nil,'workspace_release_operation_unreadable:'..tostring(entry.name) end
       if entry.kind=='dir' then
         local raw=host.read_file(paths.data()..'/operations/'..entry.name..'/state.json')
         local ok,state=pcall(json.decode,raw or '')

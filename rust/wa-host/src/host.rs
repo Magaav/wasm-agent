@@ -245,7 +245,14 @@ pub extern "C" fn list_dir(l: *mut LuaState) -> c_int {
     let mut entries: Vec<Value> = Vec::new();
     match std::fs::read_dir(&path) {
         Ok(reader) => {
-            for entry in reader.flatten() {
+            for entry in reader {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        push_json(l, &json!({ "error": error.to_string(), "path": path }));
+                        return 1;
+                    }
+                };
                 let metadata = entry.metadata().ok();
                 let kind = match metadata.as_ref().map(|m| m.is_dir()) {
                     Some(true) => "dir",
