@@ -16,6 +16,7 @@ mod plugins;
 mod subagents;
 mod serve;
 mod terminal_editor;
+mod ripgrep;
 
 use host::Host;
 use lua::Lua;
@@ -225,6 +226,12 @@ fn main() {
     if args.iter().any(|arg| arg == "--version" || arg == "-v") {
         println!("wasm-agent {}", env!("CARGO_PKG_VERSION"));
         return;
+    }
+    // Every node and worker gets rg, including service launches with a sparse PATH.
+    // Installation happens before model execution; failure is visible, never a shell 127 later.
+    if let Err(error) = ripgrep::ensure(std::path::Path::new(&home)) {
+        eprintln!("ripgrep_unavailable: {error:#}");
+        std::process::exit(2);
     }
 
     // The host consumes --db; the Lua core gets the rest.
