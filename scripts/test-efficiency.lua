@@ -295,6 +295,19 @@ check(r.tools_changed and r.settings_changed and r.routing_changed,'tools settin
 check(not json.encode(r):find('SECRET',1,true),'prefix report contains no prompt text')
 check(prefix.observe('b','model_call',body,{}).reason=='baseline_missing','sessions isolated')
 check(prefix.observe('a','summary',body,{}).reason=='baseline_missing','summary baseline isolated')
+-- Independent shell calls from one assistant reply start as supervised operations before either
+-- result is awaited; results remain attached to their original call ids.
+local batch_calls={
+  {id='parallel-a',['function']={name='bash',arguments=json.encode({command='echo parallel-a',timeout_seconds=10})}},
+  {id='parallel-b',['function']={name='bash',arguments=json.encode({command='echo parallel-b',timeout_seconds=10})}},
+}
+local batch=tools.start_parallel_bash(batch_calls,memory,'master',{session_id=sid})
+check(batch and batch['parallel-a'] and batch['parallel-a'].operation_id
+  and batch['parallel-b'] and batch['parallel-b'].operation_id,'independent shell calls start together')
+local parallel_a=tools.await_parallel_bash(batch['parallel-a'].operation_id,'master',{session_id=sid})
+local parallel_b=tools.await_parallel_bash(batch['parallel-b'].operation_id,'master',{session_id=sid})
+check(parallel_a.ok and parallel_a.stdout:find('parallel%-a')
+  and parallel_b.ok and parallel_b.stdout:find('parallel%-b'),'parallel results preserve each tool call output')
 -- A single await waits for the existing operation, never launches another one.
 local op=tools.dispatch(memory,'operation',{action='start',command='echo fixture',timeout_seconds=10},'master',{session_id=sid})
 check(op.operation_id~=nil,'operation launched')

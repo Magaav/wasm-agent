@@ -609,6 +609,12 @@ function M.dispatch(memory, name, args, role, ctx)
         end
       end
     end
+    if ctx.parallel_start then
+      -- Start independent shell calls through the existing supervised operation manager. The
+      -- model chose this call group; policy, session cwd and the commit review still run here.
+      return M.dispatch(memory, "operation", { action = "start", command = args.command,
+        cwd = cwd, timeout_seconds = timeout }, role, ctx)
+    end
     local result = run(args.command, timeout, cwd)
     -- The adopted-tree guidance is *policy*, and policy depends on what this caller may use:
     -- a profile with `bash` but not `operation` cannot read or cancel the operation it has just
@@ -918,6 +924,70 @@ function M.dispatch(memory, name, args, role, ctx)
   local decoded = json.decode(result)
   if type(decoded) ~= "table" then return { result = result } end
   return decoded
+end
+
+-- Launch only shell calls the model returned in the same assistant response. The system
+-- guideline tells it to group independent actions; writes and commands with dependencies must
+-- remain in separate responses. Every command still passes through normal bash validation and
+-- patch review before the operation manager starts it. At most eight can be active in one batch.
+function M.start_parallel_bash(calls, memory, role, ctx)
+  if not is_master(role) or (ctx and ctx.subagent
+      and (not ctx.subagent.allowed or not ctx.subagent.allowed.operation))
+      or type(calls) ~= "table" or #calls < 2 then return nil end
+  local read_only = { read=true, read_many=true, grep=true, ls=true, tool_result=true, skill=true }
+  local pending, count = {}, 0
+  for _, call in ipairs(calls) do
+    local fn = type(call) == "table" and call["function"] or nil
+    if type(fn) ~= "table" or (fn.name ~= "bash" and not read_only[fn.name]) then return nil end
+    if fn.name == "bash" and type(call.id) == "string" and call.id ~= "" then
+      local ok, args = pcall(json.decode, fn.arguments or "")
+      if ok and type(args) == "table" and type(args.command) == "string" and args.command ~= "" then
+        pending[#pending + 1] = { id = call.id, args = args }
+        count = count + 1
+      end
+    end
+  end
+  if count == 0 or count > 8 then return nil end
+
+  local started = {}
+  for _, item in ipairs(pending) do
+    local parallel_ctx = {}
+    for key, value in pairs(ctx or {}) do parallel_ctx[key] = value end
+    parallel_ctx.parallel_start = true
+    local result = M.dispatch(memory, "bash", item.args, role, parallel_ctx)
+    if type(result) == "table" and type(result.operation_id) == "string" then
+      started[item.id] = { operation_id = result.operation_id }
+    end
+  end
+  return started
+end
+
+function M.await_parallel_bash(operation_id, role, ctx)
+  local state = M.dispatch(nil, "operation", { action = "await", id = operation_id }, role, ctx)
+  if type(state) ~= "table" then return { error = "parallel_operation_await_failed" } end
+  if state.error == "await_interrupted" then
+    M.dispatch(nil, "operation", { action = "cancel", id = operation_id }, role, ctx)
+    for _ = 1, 10 do
+      state = M.dispatch(nil, "operation", { action = "wait", id = operation_id, wait_ms = 500 }, role, ctx)
+      if type(state) == "table" and state.settled == true then break end
+    end
+    if type(state) ~= "table" or state.settled ~= true then
+      return {operation_id=operation_id,error="run_cancelled",cleanup="unknown",output_complete=false}
+    end
+    state.error = state.error or "run_cancelled"
+  end
+  local stdout = M.dispatch(nil, "operation", { action = "read", id = operation_id,
+    stream = "stdout", offset = 0, limit = 24576 }, role, ctx)
+  local stderr = M.dispatch(nil, "operation", { action = "read", id = operation_id,
+    stream = "stderr", offset = 0, limit = 8192 }, role, ctx)
+  local code = tonumber(state.process_exit_code) or -1
+  return { operation_id = operation_id, code = code, ok = code == 0,
+    stdout = type(stdout) == "table" and stdout.content or "",
+    stderr = type(stderr) == "table" and stderr.content or "",
+    output_complete = state.output_complete == true,
+    stdout_truncated = type(stdout) == "table" and
+      (tonumber(stdout.available_bytes) or 0) > 24576 or false,
+    error = state.error, timing = state.timing, parallel = true }
 end
 
 return M
