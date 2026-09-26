@@ -1,6 +1,6 @@
 ---
 name: automation-jobs
-description: Create or diagnose scheduled, file, event or Chrome/CDP automations. Use when asked to wake the agent from an event, apply a skill automatically, run a deterministic procedure, or enable/disable an Engine job.
+description: Create or diagnose scheduled, file, event, desktop or Chrome/CDP automations, especially when choosing between simulated input and a direct app action. Prefer APIs/in-process execution over mouse or keyboard simulation. Use when asked to wake the agent from an event, apply a skill automatically, run a deterministic procedure, or enable/disable an Engine job.
 ---
 
 # Build an automation deliberately
@@ -38,11 +38,36 @@ description: Create or diagnose scheduled, file, event or Chrome/CDP automations
    require reconciliation, not an automatic retry. Browser disconnects can miss events;
    lossless delivery needs a replayable source, not just CDP notifications.
 
-## Page work: inject at document start, do not drive the UI
+## Prefer direct execution; simulate input only as a last resort
 
-For anything that touches a web app, the default path is a **CDP document-start script**
-(`Page.addScriptToEvaluateOnNewDocument`) that reaches the app's own modules - not clicks, typing and
-scrolling. Five measurements on one real app (WhatsApp Web) are why:
+Design every automation to act on the application's semantic state, not imitate a person. The preference
+order is:
+
+1. A supported API, CLI, SDK, IPC channel or database transaction that performs the intended action.
+2. If none exists and the target is explicitly authorized, an in-process extension or module/DLL injection
+   that calls the application's own action. Direct memory/model access is acceptable only when the data
+   layout, invariants and write semantics are understood and verified; do not blindly patch bytes or bypass
+   required business logic.
+3. For browser apps, JavaScript in the page (CDP `Runtime.evaluate`, or a persistent document-start hook)
+   that resolves the intended model and calls the app's own action. Prefer this over CDP `Input.*`, DOM
+   clicks, typing and scrolling.
+4. OS-level mouse/keyboard simulation only when the direct options are unavailable or unsuitable, the
+   operator has approved any external effect, and the action can be asserted before and after. Make the
+   fallback explicit; never silently fall back from a refused direct route to simulated input.
+
+In-process injection and direct-memory access are powerful and can corrupt state, bypass permissions or
+break on app updates. Use them only on an owned/authorized target, with a narrow scope, fail-closed
+preconditions, rollback/recovery where possible, and tests against a fixture before a live effect. Preserve
+the app's own action pipeline whenever available, then verify the resulting state rather than trusting the
+injection/dispatch response. Treat performance as a measurement: direct actions usually remove UI timing and
+focus races, but do not claim a speedup without a benchmark.
+
+## Browser implementation: page JavaScript, not UI input
+
+For a web app, resolve its current models and invoke its own semantic action using page JavaScript. Use a
+CDP document-start script (`Page.addScriptToEvaluateOnNewDocument`) when a persistent hook is needed; use
+`Runtime.evaluate` for a bound one-shot action. Do not synthesize user input when an app action exists.
+Five measurements on one real app (WhatsApp Web) are why:
 
 | the UI route | what actually happened |
 | --- | --- |
