@@ -64,7 +64,7 @@ INSTANCE_VERDICT="$(mktemp)"
 rm -f "$INSTANCE_VERDICT" # The child must produce NEW evidence, never a previous run's verdict.
 INSTANCE_STATUS=0
 WA_INSTANCE_VERDICT="$INSTANCE_VERDICT" bash scripts/test-node-instances.sh || INSTANCE_STATUS=$?
-INSTANCE_SKIPPED=$(node scripts/lib/suite-verdict.cjs "$INSTANCE_VERDICT" test-node-instances "$INSTANCE_STATUS" 56)
+INSTANCE_SKIPPED=$(node scripts/lib/suite-verdict.cjs "$INSTANCE_VERDICT" test-node-instances "$INSTANCE_STATUS" 62)
 SKIPPED=$((SKIPPED + INSTANCE_SKIPPED))
 rm -f "$INSTANCE_VERDICT"
 BIN=rust/target/release/wa
