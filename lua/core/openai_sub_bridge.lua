@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const send = value => new Promise(resolve => process.stdout.write(JSON.stringify(value) + '\n', resolve));
+async function main() {
 let request;
 try {
   const input = process.argv[2];
@@ -50,7 +51,7 @@ try {
     const credential = await credentials.read('openai-codex');
     if (!resolved?.auth?.apiKey || !credential?.accountId) {
       await send({type:'limits', limits:{}});
-      process.exit(0);
+      return;
     }
     const response = await fetch('https://chatgpt.com/backend-api/wham/usage', {
       headers:{'Accept':'application/json', 'Authorization':`Bearer ${resolved.auth.apiKey}`,
@@ -72,7 +73,7 @@ try {
     addWindow(root.primary_window || root.primary || root.five_hour, 'rolling');
     addWindow(root.secondary_window || root.secondary || root.weekly, 'weekly');
     await send({type:'limits', limits});
-    process.exit(0);
+    return;
   }
   const model = models.getModel('openai-codex', request.model);
   if (!model) throw new Error('Model is absent from Pi catalog; update Pi: ' + request.model);
@@ -148,4 +149,6 @@ try {
   send({type:'error', error:message});
   process.exitCode = 1;
 }
+}
+main();
 ]==]
