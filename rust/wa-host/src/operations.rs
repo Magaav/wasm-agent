@@ -47,7 +47,9 @@ fn spec(
     owner: String,
     promote: bool,
 ) -> Spec {
-    let mut spec = Spec::command(program, vec![flag.into(), command.into()]);
+    configure_spec(Spec::command(program, vec![flag.into(), command.into()]), cwd, seconds, owner, promote)
+}
+fn configure_spec(mut spec: Spec, cwd: &str, seconds: u64, owner: String, promote: bool) -> Spec {
     spec.cwd = cwd.into();
     spec.timeout = Duration::from_secs(seconds);
     // A foreground `bash` adopts a descendant tree it cannot wait for; a deliberately
@@ -133,24 +135,39 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
     let id = args["id"].as_str().unwrap_or("");
     let result = match action {
         "start" => {
-            let command = args["command"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .ok_or("command_required")?;
             let owner = args["owner"].as_str().unwrap_or("").to_string();
             let seconds = args["timeout_seconds"]
                 .as_u64()
                 .unwrap_or(crate::host::exec_timeout_seconds());
-            let id = manager()
-                .start(spec(
+            let cwd=args["cwd"].as_str().unwrap_or("");
+            let launch=if let Some(program)=args["program"].as_str() {
+                if args.get("command").is_some() {return Err("program_and_command_are_exclusive".into());}
+                let name=if cfg!(windows) && !program.ends_with(".exe") {format!("{program}.exe")} else {program.to_string()};
+                let executable=if std::path::Path::new(&name).is_absolute() {
+                    if !std::path::Path::new(&name).is_file() {return Err("program_not_found".into());}
+                    name
+                } else {
+                    if name.contains('/') || name.contains('\\') {return Err("program_requires_native_absolute_path_or_path_name".into());}
+                    crate::host::executable_on_path(&name).ok_or("program_not_found_on_path")?
+                };
+                let argv=args["args"].as_array().ok_or("program_args_required")?.iter()
+                    .map(|arg|arg.as_str().map(String::from).ok_or("program_args_must_be_strings"))
+                    .collect::<Result<Vec<_>,_>>()?;
+                configure_spec(Spec::command(executable,argv),cwd,seconds,owner,false)
+            } else {
+                let command=args["command"].as_str().filter(|s|!s.is_empty()).ok_or("command_required")?;
+                spec(
                     &shell.0,
                     &shell.1,
                     command,
-                    args["cwd"].as_str().unwrap_or(""),
+                    cwd,
                     seconds,
                     owner,
                     false,
-                ))
+                )
+            };
+            let id = manager()
+                .start(launch)
                 .map_err(|e| e.to_string())?;
             return Ok(
                 json!({"operation_id":id,"state":"accepted","settled":false,"note":"Launch receipt, not execution success. Observe this operation; do not launch it again. Keep background commands in the foreground of this shell (or use wait)."}),

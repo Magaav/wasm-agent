@@ -354,6 +354,13 @@ second, 80 last.
 
 ## Adding a capability
 
+`host.operation('start', args_json)` accepts either a shell `command` or a native
+`program` with an `args` string array. Native program names resolve through PATH;
+explicit paths must be native absolute paths. These forms are mutually exclusive.
+Both retain the same deadline, cancellation, process-tree containment and durable
+operation evidence. The subscription adapter launches Node directly, so a shell
+launcher cannot become the reported completion boundary for its response.
+
 `host.resource(action, args_json)` provides atomic named-resource ownership in
 `host.paths().data/resources/claims.sqlite`. Lua chooses keys and authorization.
 `claim` takes `principal`, `session`, `run`, and an array of `keys`; it acquires all

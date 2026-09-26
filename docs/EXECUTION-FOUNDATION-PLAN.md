@@ -112,3 +112,25 @@ and evidence and refuses live owners. Scope, availability/storage risks and the
 This is not cross-home distributed locking or shell sandboxing. Full repository
 gate evidence is recorded separately on the final candidate; workspace cleanup,
 deployed acceptance and the Luna development exercise still need completion.
+
+## Deployed exercise and subscription process boundary
+
+Candidate `402b006` was deployed through `scripts/deploy.sh`; `verify-install.sh`
+passed all 14 checks without skips. An isolated headless browser loaded the live
+task panel and its 187 retained child records. Luna high then used an actual HTTP
+fork/worktree to implement the retry-idempotency regression in commit
+`69f6b8e197d35546692fccdfb98470dbc289b035`, verified the UI (including deliberate
+failure injection), and pushed its assigned branch. Codex supplied the task and
+owns review, full gate, integration and deployment; those are external interventions.
+
+The run did **not** settle successfully: its final response streamed, then the
+subscription helper failed with `background_descendants`. Retained operation
+`op-1790461476759897-24184-141` records exit code 0, closed output streams and
+terminated cleanup after 6751 ms. This evidence does not identify which descendant
+remained. The adapter had launched Node through a shell. `change/subscription-direct-process`
+removes that intermediary using native argv while preserving containment and
+failure reporting; it does not turn a failed operation into success merely because
+model text arrived. The native mock-adapter fixture exercises 12 complete calls,
+limits, provider failure and invalid launch arguments with an unusable configured
+shell and a temporary path containing spaces (15 checks). Deployment and an explicit
+continuation remain necessary before calling the adoption exercise settled.

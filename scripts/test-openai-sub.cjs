@@ -98,5 +98,34 @@ try {
     resetsAt:'2033-05-18T03:33:20.000Z'},weekly:{status:'available',percent:71,
     resetsAt:'2033-05-18T04:33:20.000Z'},monthly:{status:'available',percent:84,
     resetsAt:'2033-05-18T05:33:20.000Z'}});
+  if (process.argv[2]) {
+    const nativeInput=put('native-request.json',JSON.stringify(request));
+    const fixture=put('native.lua',`
+local json=dofile('lua/vendor/json.lua')
+local adapter=dofile('lua/core/openai_sub.lua')
+local request=json.decode(host.read_file(host.getenv('WA_SUB_REQUEST')))
+adapter.auth_path=function() return 'fixture-auth.json' end
+for n=1,12 do
+  local result=adapter.complete(request.model,request.messages,request.tools,false,{session_id='native-fixture'},{selected='off'})
+  assert(result.content=='fixture answer' and result.stream_complete==true,'native bridge must settle and retain complete output')
+end
+assert(adapter.limits().rolling.percent==23,'native limits bridge must settle')
+local ok,why=pcall(adapter.complete,'missing',request.messages,request.tools,false,{}, {selected='off'})
+assert(not ok and tostring(why):find('absent from Pi catalog',1,true),'provider errors remain visible')
+local rejected=json.decode(host.operation('start',json.encode({program='node',args={},command='echo must-not-run'})))
+assert(rejected.error=='program_and_command_are_exclusive','ambiguous launch must be refused')
+print('native subscription operations ok (15 checks)')
+`);
+    const env={...process.env};
+    for(const key of Object.keys(env))if(/^(WA_|WASM_AGENT_)/.test(key))delete env[key];
+    const nativeTemp=path.join(root,'native temp');fs.mkdirSync(nativeTemp);
+    Object.assign(env,{TEMP:nativeTemp,TMP:nativeTemp,TMPDIR:nativeTemp,WASM_AGENT_HOME:root,WASM_AGENT_LUA_ROOT:process.cwd(),WASM_AGENT_PI_PACKAGE:path.join(root,'pi'),
+      WASM_AGENT_SHELL:path.join(root,'nonexistent-shell'),WASM_AGENT_RELAY:'',WASM_AGENT_RENDEZVOUS:'',
+      WA_SCRIPT:fixture,WA_SUB_REQUEST:nativeInput});
+    const native=spawnSync(path.resolve(process.argv[2]),['--db',path.join(root,'native.db')],{env,encoding:'utf8',timeout:60000,windowsHide:true});
+    assert.equal(native.status,0,native.stderr||String(native.error));
+    assert.match(native.stdout,/native subscription operations ok \(15 checks\)/);
+    console.log(native.stdout.trim());
+  }
   console.log('PASS OpenAI subscription bridge: messages, images, tools, stream, usage, limits and visible failures');
 } finally {fs.rmSync(root,{recursive:true,force:true});}
