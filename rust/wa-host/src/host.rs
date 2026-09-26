@@ -492,7 +492,7 @@ pub extern "C" fn sha256(l: *mut LuaState) -> c_int {
 /// /proc/sys/kernel/random/uuid and fell back to the *process id* everywhere
 /// else, which is one value per process - so off Linux the second write in any
 /// session died on a duplicate row id.
-fn new_uuid() -> String {
+pub(crate) fn new_uuid() -> String {
     let mut bytes = [0u8; 16];
     let random = SystemRandom::new();
     if random.fill(&mut bytes).is_err() {
@@ -844,6 +844,14 @@ pub extern "C" fn subagent(l: *mut LuaState) -> c_int {
     let args: Value = serde_json::from_str(&arg_string(l, 2).unwrap_or_else(|| "{}".into()))
         .unwrap_or(Value::Null);
     push_json(l, &crate::subagents::control(&action, &args).unwrap_or_else(|error| json!({"ok": false, "error": error})));
+    1
+}
+
+/// Atomic named-resource claims. Resource choice and authorization stay in Lua.
+pub extern "C" fn resource(l: *mut LuaState) -> c_int {
+    let action=arg_string(l,1).unwrap_or_default();
+    let args=arg_string(l,2).and_then(|raw|serde_json::from_str::<Value>(&raw).ok()).unwrap_or(Value::Null);
+    push_json(l,&crate::resources::control(&action,&args).unwrap_or_else(|error|json!({"ok":false,"error":error})));
     1
 }
 

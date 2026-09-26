@@ -6,6 +6,7 @@
 -- of llm calls and tool calls with timings, tokens and failures.
 local json = dofile("lua/vendor/json.lua")
 local tools = dofile("lua/core/tools.lua")
+local resources = dofile("lua/core/resources.lua")
 local changeset = dofile("lua/core/changeset.lua")
 local patch_audit = dofile("lua/core/patch_audit.lua")
 local provider = dofile("lua/core/provider.lua")
@@ -993,7 +994,12 @@ end
 
 function M:run(text, images)
   self.run_id=host.uuid()
-  local span=telemetry.start({session_id=self.session_id,run_id=self.run_id},'run',{})
+  local resource_ctx={session_id=self.session_id,user_id=self.user,run_id=self.run_id,subagent=self.subagent}
+  local claimed=resources.begin(resource_ctx)
+  if not claimed.ok then error("run_resource_refused: "..json.encode(claimed)) end
+  local span
+  local ok,result=pcall(function()
+  span=telemetry.start({session_id=self.session_id,run_id=self.run_id},'run',{})
   provider.pin()
   -- A child's approved model/reasoning override applies to this interpreter only.
   -- `provider.pin()` has already snapshotted the caller's settings, so mutating
@@ -1006,8 +1012,15 @@ function M:run(text, images)
       if self.subagent.reasoning and self.subagent.reasoning ~= "" then pinned.reasoning.selected = self.subagent.reasoning end
     end
   end
-  local ok,result=pcall(self.run_body,self,text,images)
+  return self:run_body(text,images)
+  end)
   provider.unpin()
+  local marked=not ok and resources.uncertain(resource_ctx) or {ok=true}
+  local released=marked.ok and resources.finish(resource_ctx) or marked
+  if not released.ok then
+    self.emit({type="error",error="resource_release_failed: "..json.encode(released)})
+    ok,result=false,"resource_release_failed: "..json.encode(released)
+  end
   telemetry.finish(span,{ok=ok,error=not ok and tostring(result) or nil})
   if not ok then error(result) end
   return result

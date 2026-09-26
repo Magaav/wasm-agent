@@ -14,6 +14,7 @@ mod relay_client;
 mod rendezvous;
 mod plugins;
 mod subagents;
+mod resources;
 mod serve;
 mod terminal_editor;
 mod ripgrep;
@@ -60,6 +61,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/effects.lua", include_str!("../../../lua/core/effects.lua")),
     ("lua/core/whatsapp.lua", include_str!("../../../lua/core/whatsapp.lua")),
     ("lua/core/subagents.lua", include_str!("../../../lua/core/subagents.lua")),
+    ("lua/core/resources.lua", include_str!("../../../lua/core/resources.lua")),
     ("lua/core/workspaces.lua", include_str!("../../../lua/core/workspaces.lua")),
     ("lua/core/agent.lua", include_str!("../../../lua/core/agent.lua")),
     ("lua/core/markdown.lua", include_str!("../../../lua/core/markdown.lua")),
@@ -330,6 +332,7 @@ fn main() {
     lua.register("operation", host::operation);
     lua.register("jobs", host::jobs);
     lua.register("subagent", host::subagent);
+    lua.register("resource", host::resource);
     lua.register("run_cancelled", host::run_cancelled);
     lua.register("sleep", host::sleep);
     lua.register("node_identity", host::node_identity);

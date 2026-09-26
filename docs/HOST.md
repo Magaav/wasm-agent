@@ -354,6 +354,15 @@ second, 80 last.
 
 ## Adding a capability
 
+`host.resource(action, args_json)` provides atomic named-resource ownership in
+`host.paths().data/resources/claims.sqlite`. Lua chooses keys and authorization.
+`claim` takes `principal`, `session`, `run`, and an array of `keys`; it acquires all
+or none. `finish` releases that run's known-settled claims, while `uncertain`
+retains them. `list` returns durable ownership. `reconcile` requires the exact
+`key`, `principal`, `run` and nonempty `evidence`, and refuses live owners. An
+OS-held SQLite lease proves process liveness; elapsed time is never that proof.
+Every operation returns a JSON value, including visible storage/refusal errors.
+
 `host.monotonic_ms()` measures elapsed time within a process. Use `host.now()` only
 for cross-process event timestamps. `host.runtime_info()` returns version, OS,
 architecture, PID and the SHA-256 of the executable (computed once per process).
