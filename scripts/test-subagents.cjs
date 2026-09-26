@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 
 const repo = path.resolve(__dirname, '..');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-subagents-'));
@@ -69,6 +69,13 @@ function check(value, label) { assert.ok(value, label); checks++; }
           }
         };
         if (isChild) {
+          if (text.includes('WRITE-CODE')) {
+            if (!messages.some((message) => message.role === 'tool')) {
+              const content = text.includes('CODE-B') ? 'written-by-B' : 'written-by-A';
+              replyToolCall({ index: 0, id: 'coding-write-' + content, type: 'function', function: { name: 'write', arguments: JSON.stringify({ path: 'shared.txt', content }) } });
+            } else replyFinal('coding-child-complete');
+            return;
+          }
           if (text.includes('NOUSAGE')) {
             // A tool call every round with no usage at all: the runtime must charge
             // its reservation rather than let the loop continue unbounded.
@@ -129,6 +136,15 @@ function check(value, label) { assert.ok(value, label); checks++; }
     });
     await new Promise((resolve) => provider.listen(0, '127.0.0.1', resolve));
     const modelPort = provider.address().port;
+    const workspaceSource = path.join(root, 'workspace-source');
+    fs.mkdirSync(workspaceSource, {recursive:true});
+    fs.writeFileSync(path.join(workspaceSource, 'seed.txt'), 'clean source\n');
+    for (const args of [['init',workspaceSource],['-C',workspaceSource,'config','user.name','workspace-fixture'],
+      ['-C',workspaceSource,'config','user.email','workspace@invalid'],['-C',workspaceSource,'add','seed.txt'],
+      ['-C',workspaceSource,'commit','-m','workspace baseline']]) {
+      const result=spawnSync('git',args,{encoding:'utf8'});
+      if (result.status!==0) throw new Error('workspace source git setup failed: '+result.stderr);
+    }
 
     // A record left running by another boot must read `unknown`, never replay.
     const staleDir = path.join(root, 'subagents', 'stale-child');
@@ -147,6 +163,7 @@ function check(value, label) { assert.ok(value, label); checks++; }
       WASM_AGENT_LLM_BASE_URL: 'http://127.0.0.1:' + modelPort,
       WASM_AGENT_LLM_API_KEY: 'fixture-not-a-credential',
       WASM_AGENT_LLM_MODEL: 'fixture',
+      WASM_AGENT_TEST_SOURCE: workspaceSource,
       WASM_AGENT_RELAY: '',
       WASM_AGENT_RENDEZVOUS: '',
       WA_SCRIPT: path.join(repo, 'scripts/test-subagents-integration.lua'),
@@ -157,7 +174,7 @@ function check(value, label) { assert.ok(value, label); checks++; }
     const out = fs.readFileSync(path.join(root, 'wa.log'), 'utf8');
     check(code === 0, 'the integration script must exit 0, got ' + code + '\n' + out);
     check(out.includes('SUBAGENTS_INTEGRATION_OK'), 'the script must print its verdict\n' + out);
-    for (const marker of ['ok-success', 'ok-idempotency', 'ok-isolation', 'ok-cancel', 'ok-overflow', 'ok-result', 'ok-tool-denial', 'ok-restart-unknown', 'ok-parent-run', 'ok-silent-cancel', 'ok-delayed-ttft', 'ok-budget-zero-calls', 'ok-missing-usage-bounded']) {
+    for (const marker of ['ok-success', 'ok-idempotency', 'ok-isolation', 'ok-cancel', 'ok-overflow', 'ok-result', 'ok-tool-denial', 'ok-restart-unknown', 'ok-parent-run', 'ok-silent-cancel', 'ok-delayed-ttft', 'ok-coding-workspaces', 'ok-budget-zero-calls', 'ok-missing-usage-bounded']) {
       check(out.includes('MARK ' + marker), 'missing marker ' + marker + '\n' + out);
     }
     // The child's durable record survives on disk with its terminal state.
