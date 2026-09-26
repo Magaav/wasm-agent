@@ -235,6 +235,10 @@ local function guidelines_for(tool_list)
     add("When several known file reads are independent, request them together with read_many; "
       .. "keep dependent reads and edits in order")
   end
+  add("When multiple tool actions are independent, request them together in one assistant response "
+    .. "so the tool round can make progress without another model reply. The tool runner may "
+    .. "overlap independent shell commands; keep dependent actions and conflicting side effects "
+    .. "in separate responses")
   add(source_edit_guideline(have))
   add("Before changing this project's behaviour, read the relevant file under docs/ "
     .. "(or the section of AGENTS.md) in full, and follow its cross-references")
@@ -1456,9 +1460,16 @@ function M:run_body(text, images)
         break
       end
     end
-      record_turn(self, {
-        role = "assistant", content = result.content or "", tool_calls = calls, debug = self.debug,reasoning=result.reasoning or "",
-      })
+    record_turn(self, {
+      role = "assistant", content = result.content or "", tool_calls = calls, debug = self.debug,reasoning=result.reasoning or "",
+    })
+
+    local dispatch_ctx = { session_id = self.session_id, user_id = self.user, node_id = self.node,
+      run_id = self.run_id, subagent = self.subagent, changes = self.changes,
+      model_call = true, reviewed_paths = self.reviewed_paths,
+      commit_audits = self.commit_audits, audit_step = self.audit_step,
+      model = self.model, reasoning = (provider.reasoning(self.model) or {}).selected }
+    local parallel_ops = tools.start_parallel_bash(calls, memory, self.role, dispatch_ctx)
 
     for _, call in ipairs(calls) do
       local function_ = call["function"] or {}
@@ -1480,22 +1491,20 @@ function M:run_body(text, images)
       end
       self.emit(emitted)
       local tool_started = host.now()
+      local parallel_op = parallel_ops and parallel_ops[call.id]
       local tool_span=telemetry.start({session_id=self.session_id,run_id=self.run_id},"tool",
-        {name=function_.name,call_id=call.id,round=round,arguments_hash=host.sha256(function_.arguments or "")})
+        {name=function_.name,call_id=call.id,round=round,parallel_batch=parallel_op~=nil,
+          arguments_hash=host.sha256(function_.arguments or "")})
       host.beat()
       local handled, output = pcall(function() if argument_error then return {error=argument_error} end
+        if parallel_op then
+          if parallel_op.operation_id then
+            return tools.await_parallel_bash(parallel_op.operation_id, self.role, dispatch_ctx)
+          end
+          return parallel_op.result or {error="parallel_operation_start_failed"}
+        end
         return tools.dispatch(memory, function_.name, args, self.role,
-        { session_id = self.session_id, user_id = self.user, node_id = self.node,
-          run_id = self.run_id, subagent = self.subagent, changes = self.changes,
-          -- Trusted origin metadata, never a tool argument: schemas steer model output, while
-          -- dispatch enforces model-only migrations even when old calls remain in the transcript.
-          model_call = true,
-          reviewed_paths = self.reviewed_paths,
-          commit_audits = self.commit_audits,
-          audit_step = self.audit_step,
-          -- The caller's actual model and reasoning, so a child inherits what this
-          -- run is using rather than whatever is configured globally.
-          model = self.model, reasoning = (provider.reasoning(self.model) or {}).selected }) end)
+        dispatch_ctx) end)
       host.beat()
       if not handled then output = { error = tostring(output) } end
       -- The node's own secrets must not enter the transcript through a tool result. A `bash`
