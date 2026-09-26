@@ -163,6 +163,8 @@ async function startProvider() {
     WASM_AGENT_HOME: home,
     WASM_AGENT_ALLOW_DEV_HOME: '1',
     WASM_AGENT_PROVIDER: wasmProvider,
+    ...(wasmProvider === 'openai-sub'
+      ? { PI_CODING_AGENT_DIR: path.join(os.homedir(), '.pi', 'agent') } : {}),
     WASM_AGENT_LLM_BASE_URL: upstream.base_url,
     WASM_AGENT_LLM_API_KEY: upstream.key,
     WASM_AGENT_LLM_MODEL: model,
