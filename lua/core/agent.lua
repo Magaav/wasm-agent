@@ -1480,14 +1480,15 @@ function M:run_body(text, images)
         if decoded_ok and type(decoded) == "table" then args = decoded
         else argument_error="invalid_tool_arguments_json" end
       end
-      -- The deadline travels with the call, not with the UI. `bash`/`shell` are bounded (300s
-      -- by default, WASM_AGENT_EXEC_TIMEOUT_SECONDS to change it), and a message can spend all of it
-      -- inside one command - which used to appear only as a trace line that had not come back, and
-      -- was then killed five minutes later. It reads as the agent being stuck rather than as a
-      -- deadline that was always there, so the number is reported by the side that enforces it.
+      -- The deadline travels with the call, not with the UI. `bash`/`shell` use the configured
+      -- default unless `timeout_seconds` overrides it; the host resolves the effective bound,
+      -- including a child run's remaining budget, so the trace reports the same limit it enforces.
       local emitted = { type = "tool", call_id = call.id, name = function_.name, arguments = args }
       if function_.name == "bash" or function_.name == "shell" then
-        if host.exec_timeout then emitted.timeout_ms = math.floor(host.exec_timeout() * 1000) end
+        if host.exec_timeout then
+          local seconds = host.exec_timeout(args.timeout_seconds)
+          if seconds then emitted.timeout_ms = math.floor(seconds * 1000) end
+        end
       end
       self.emit(emitted)
       local tool_started = host.now()
