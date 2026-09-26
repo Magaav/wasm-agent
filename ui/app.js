@@ -967,7 +967,8 @@ function formatBytes(count) {
 // like the preview failed. Output bytes are not proof of useful progress (a quiet compiler is
 // healthy), so the newest line is appended when there is one, not invented when there is not.
 async function refreshOperationProgress(health, running) {
-  if (!trace || !trace.pending || !running) return;
+  const activeTrace = trace;
+  if (!activeTrace || !activeTrace.pending || !running) return;
   // The owner is `run:<run_id>` - serve.rs sets it for the run before the interpreter starts,
   // so an in-turn operation carries the run, not the worker. Older builds used the worker id;
   // both are matched so the window works against whichever node it is attached to.
@@ -996,7 +997,10 @@ async function refreshOperationProgress(health, running) {
       }
     } catch (error) { /* a preview is never worth breaking the run over */ }
   }
-  trace.setProgress((operation.state || "running") + " · " + formatBytes(bytes) + (tail ? " · " + tail : ""));
+  // The operation read above is asynchronous. A reply, repaint, or session switch can finish
+  // and detach this trace while it waits; only paint if this is still the live trace.
+  if (trace !== activeTrace || !activeTrace.pending || typeof activeTrace.setProgress !== "function") return;
+  activeTrace.setProgress((operation.state || "running") + " · " + formatBytes(bytes) + (tail ? " · " + tail : ""));
 }
 
 // The answer is the point; the route is reference. On reply, everything the run
@@ -1090,6 +1094,9 @@ function typeOut(body, text) {
 }
 
 function handleEvent(event) {
+  if (["round", "reasoning", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
+    clearActiveRunNotice();
+  }
   if (event.type === "round") {
     // A new step begins: close the previous one (its text and its tool topic).
     if (!runStartedAt) runStartedAt = Date.now();
@@ -1316,11 +1323,13 @@ function repaintMessages(rows, options = {}) {
   finishReplayedRun(true, options);
   if (trace) finishTrace();
   replayingMessages = false;
-  // The transcript just drawn is history, so the bubble it ended on is closed. The `reply` handler
-  // used to close it, and when that stopped (one bubble per run) this became the place that must:
-  // without it the next thing that arrives is appended to the last repainted run's bubble, so a
-  // message sent after a reload lands inside the previous run's reply. Caught by the UI harness.
-  runBubble = null;
+  // A repaint during a live run is not finished history. Keep its last bubble as the target for
+  // the reconnecting event tail; otherwise the in-progress notice and eventual answer split into
+  // separate assistant bubbles. An idle repaint still closes the historical bubble so the next
+  // user turn starts cleanly.
+  if (options.active) {
+    if (!runBubble) currentBubble();
+  } else runBubble = null;
   pin(true);
   if (failed) {
     add("assistant", `repaint: ${rendered} of ${rows.length} messages drawn, ${failed} failed — first: ${firstFailure}`);
@@ -1453,6 +1462,7 @@ async function restoreSessionOnce(target, epoch) {
       } else if (!health) {
         notice.textContent = "no result is recorded for the last message; the node is unavailable, so its outcome is unknown.";
       } else if (activeRun(health, wanted.id)) {
+        notice.classList.add("active-run-notice");
         notice.textContent = "no result is recorded yet. A run is in progress on the node; this page will check again when it becomes idle.";
         sawTurnInFlight = true;
       } else {
@@ -1467,7 +1477,9 @@ async function restoreSessionOnce(target, epoch) {
       if (health && !runningSessions(health).has(wanted.id) && autoResumeSeq === null) {
         notice.append(nodeButton("continue", () => { notice.remove(); resumeSession(wanted.id); }));
       }
-      messages.append(notice);
+      if (notice.classList.contains("active-run-notice")) {
+        (runBubble || currentBubble()).body.append(notice);
+      } else messages.append(notice);
     }
     followedSeq = Number(wanted.last_seq) || (full.messages || []).reduce((last, row) => Math.max(last, Number(row.seq) || 0), 0);
     transcriptReady = true;
@@ -1682,6 +1694,10 @@ function clearStreamNotice() {
   // node says the thread is settled, the claim is stale and the span should go - the durable record is
   // the engine's sessions topic, which is where a reader looks for it.
   for (const notice of document.querySelectorAll(".unfinished-notice")) notice.remove();
+}
+
+function clearActiveRunNotice() {
+  for (const notice of document.querySelectorAll(".active-run-notice")) notice.remove();
 }
 
 async function send(text, options = {}) {
@@ -2210,11 +2226,9 @@ function redoDraft() {
 // named function because the callers describe an intent - "the stacks moved" - not a widget.
 function syncUndoButtons() {}
 
-// Stop means "stop on the node", not only "stop reading the stream". A client-side abort leaves the
-// model call running and the ledger records an unfinished run. `POST /runs {action:cancel}` sets the
-// run's own cancel flag, which the provider reader observes on the node; the abort then only stops
-// this page reading. The request is fire-and-forget: the reader has already asked to stop, and the
-// node reports the settled state in the ledger and `/health`.
+// Stop means "stop on the node", not only "stop reading the stream". Keep the stream open until the
+// node acknowledges its cancel request; an early browser abort hid both refusals and the node's
+// eventual cancelled result, making Stop look inert even when the request failed.
 function cancelActiveRun() {
   const thread = chatSession;
   if (thread && activeRunId === null && submittedRunIds) {
@@ -2230,16 +2244,24 @@ function cancelActiveRun() {
   cancelRun(activeRunId);
 }
 
-function cancelRun(runId) {
+async function cancelRun(runId) {
   const thread = chatSession;
-  if (thread) {
-    apiFetch("runs", {
+  if (!thread) { setStatus("there is no active conversation to stop"); return; }
+  try {
+    const response = await apiFetch("runs", {
       method: "POST",
       headers: apiHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ action: "cancel", thread, ...(runId === null ? {} : { run_id: runId }) }),
-    }).catch(() => { /* the abort below is what the reader sees; the node still gets the request */ });
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.ok !== true || payload.cancel_requested !== true) {
+      setStatus("could not stop this run: " + String(payload.error || ("HTTP " + response.status)));
+      return;
+    }
+    setStatus("stop requested — waiting for the node to finish cancelling");
+  } catch (error) {
+    setStatus("could not stop this run: " + String(error));
   }
-  controller?.abort();
 }
 
 form.addEventListener("submit", (event) => {
@@ -2386,6 +2408,7 @@ function newId() {
 async function updateNode() {
   const notice = document.createElement("div");
   notice.className = "thread-notice";
+  notice.dataset.state = "checking";
   notice.textContent = "/update — asking the node what it runs and what its tree holds…";
   messages.append(notice);
   pin();
@@ -2401,6 +2424,9 @@ async function updateNode() {
     const payload = await response.json();
     notice.textContent = updateNotice(payload);
     notice.dataset.state = payload && payload.queued ? "queued" : payload && payload.ok === false ? "refused" : "current";
+    if (payload && payload.queued) {
+      updateLock("Deploy queued in the background. The page will reload when the new UI is ready.", true);
+    }
   } catch (error) {
     notice.textContent = "/update could not be asked: " + String(error);
     notice.dataset.state = "refused";
@@ -2953,12 +2979,13 @@ let reload = () => { rememberPlace(); location.reload(); };
 // It is a lock rather than a toast because it covers the panel: a run is still running behind it,
 // and the reader should not be typing into a page that is about to be replaced. It is escapable -
 // reload now, or dismiss and let the reload land when the run finishes.
-function updateLock(reason) {
+function updateLock(reason, working = true) {
   let lock = document.getElementById("update-lock");
   if (!lock) {
     lock = document.createElement("div");
     lock.id = "update-lock";
-    lock.innerHTML = '<div class="lock-card"><div class="lock-title">UI updating</div>' +
+    lock.innerHTML = '<div class="lock-card"><span class="update-spinner" aria-hidden="true"></span>' +
+      '<div class="lock-title">UI updating</div>' +
       '<div class="lock-reason"></div><div class="lock-actions">' +
       '<button type="button" class="lock-now">reload now</button>' +
       '<button type="button" class="lock-later">keep working</button></div></div>';
@@ -2966,6 +2993,7 @@ function updateLock(reason) {
     lock.querySelector(".lock-later").addEventListener("click", () => lock.remove());
     document.body.append(lock);
   }
+  lock.classList.toggle("working", working);
   lock.querySelector(".lock-reason").textContent = reason;
   return lock;
 }
@@ -3028,10 +3056,10 @@ function applyUiVersion(next) {
   if (busy) {
     pendingReload = true;
     setStatus("update ready - reloading when this run finishes");
-    updateLock("A run is running, so the reload waits for it to finish. Your place and your draft are kept.");
+    updateLock("New UI is ready. Reloading waits for this run to finish; your place and draft are kept.", false);
     return "deferred";
   }
-  updateLock("Reloading now - your place and your draft are kept.");
+  updateLock("New UI is ready. Reload when convenient; your place and draft are kept.", false);
   reload();
   return "reloading";
 }

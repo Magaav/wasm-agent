@@ -160,6 +160,47 @@ function M.facts(options)
   return facts
 end
 
+-- Bring the node-owned worktree to the source the deploy gate will build. `/update` used to queue
+-- a deploy from whichever branch happened to be checked out; the gate then refused it after the
+-- user had already been told it was queued. Only an explicit `/update` runs this, and only on a
+-- clean tree. Switch to the worktree's own lane, fetch, and fast-forward when that is provably safe.
+-- A diverged lane is reported for integration; it is never reset or force-moved.
+function M.sync_source(tree, expected_branch)
+  tree = slashes(tree)
+  local branch = trim(git(tree, "branch --show-current") or "")
+  if branch == "" then return { ok=false, error="detached_runtime_tree", observed="the runtime worktree has no checked-out branch" } end
+  if expected_branch and branch ~= expected_branch then
+    local switched = shell("git -C " .. quote(tree) .. " switch --quiet " .. quote(expected_branch) .. " 2>&1")
+    if not switched or switched.code ~= 0 then
+      return { ok=false, error="runtime_branch_mismatch", observed="expected branch " .. expected_branch .. "; current branch " .. branch ..
+        (switched and trim(switched.stdout .. " " .. switched.stderr) or "") }
+    end
+    branch = expected_branch
+  end
+
+  local fetched = shell("git -C " .. quote(tree) .. " fetch --quiet origin 2>&1")
+  if not fetched or fetched.code ~= 0 then
+    return { ok=false, error="source_fetch_failed", observed=trim(fetched and (fetched.stderr ~= "" and fetched.stderr or fetched.stdout) or "git fetch returned no result") }
+  end
+  local counts = git(tree, "rev-list --left-right --count HEAD...origin/main")
+  local ahead, behind = tostring(counts or ""):match("^(%d+)%s+(%d+)")
+  ahead, behind = tonumber(ahead), tonumber(behind)
+  if not ahead or not behind then
+    return { ok=false, error="origin_main_unavailable", observed="origin/main is not available after fetching origin" }
+  end
+  if ahead > 0 then
+    return { ok=false, error="runtime_branch_not_integrated", observed=branch .. " is " .. ahead .. " commit(s) ahead and " .. behind ..
+      " commit(s) behind origin/main; the deploy gate requires the source commit to be integrated" }
+  end
+  if behind > 0 then
+    local merged = shell("git -C " .. quote(tree) .. " merge --ff-only --quiet origin/main 2>&1")
+    if not merged or merged.code ~= 0 then
+      return { ok=false, error="runtime_fast_forward_failed", observed=trim(merged and (merged.stderr ~= "" and merged.stderr or merged.stdout) or "git merge returned no result") }
+    end
+  end
+  return { ok=true, branch=branch, behind=behind, synchronized=behind > 0 }
+end
+
 -- ---- the decision -----------------------------------------------------------
 
 -- Three answers and no others. Each carries `message` (one sentence for a human), `observed` (what
@@ -248,6 +289,24 @@ end
 function M.run(options)
   options = options or {}
   local facts = M.facts(options)
+  if facts.tree and (facts.dirty or 0) == 0 and not options.skip_source_sync then
+    local name = facts.tree:match("([^/]+)$") or ""
+    local expected = name == "wasm-agent" and "main" or name
+    local synced = M.sync_source(facts.tree, expected)
+    if not synced.ok then
+      local reason = synced.error == "runtime_branch_not_integrated"
+        and "integrate this worktree's commits into main, then ask again"
+        or "repair the runtime worktree or its origin/main connection, then ask again"
+      return {
+        ok=false, status="source_sync_failed", error=synced.error,
+        tree=facts.tree, observed=synced.observed,
+        message="the runtime source could not be synchronized safely, so no deploy was queued.",
+        next=reason, installed_commit=facts.installed_commit, candidate=facts.candidate,
+        installed_sha256=facts.installed_sha256, installed_at=facts.installed_at,
+      }
+    end
+    facts = M.facts(options)
+  end
   local verdict = M.verdict(facts)
   verdict.tree = verdict.tree or facts.tree
   verdict.installed_commit = verdict.installed_commit or facts.installed_commit

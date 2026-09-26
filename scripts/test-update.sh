@@ -28,8 +28,11 @@ case "$(uname -s 2>/dev/null)" in
 esac
 mkdir -p "$INST" "$TREE/rust/target/release"
 printf 'rust/target/\n' > "$TREE/.gitignore"
-( cd "$TREE" && echo fixture > file.txt && git init -q . && git add file.txt .gitignore \
-  && git -c user.email=fixture@local -c user.name=fixture commit -qm 'fixture' )
+( cd "$TREE" && echo fixture > file.txt && git init -q --initial-branch=main . && git add file.txt .gitignore \
+  && git -c user.email=fixture@local -c user.name=fixture commit -qm 'fixture' \
+  && git init -q --bare "$W/origin.git" \
+  && git remote add origin "$W/origin.git" && git push -q origin main \
+  && git checkout -q -b tree )
 COMMIT="$(git -C "$TREE" rev-parse --short HEAD)"
 # Native form, because runtime-worktree.txt is consumed by a native git process.
 printf '%s\n' "$(native_path "$TREE")" > "$INST/runtime-worktree.txt"

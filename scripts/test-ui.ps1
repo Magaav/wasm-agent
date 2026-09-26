@@ -904,6 +904,7 @@ $harness = @'
     "an idle page with historical missing results must not repaint the transcript");
   check(window.__calls.filter(function (call) { return call.url === "chat" && call.method === "POST"; }).length === sendsBeforeRestore,
     "restoring an unfinished tool must never execute it again");
+
   window.__fixtures.health.current = { label: "GET /models", ms: 50 };
   await window.__restoreSession();
   var readNotice = document.querySelector(".unfinished-notice");
@@ -938,7 +939,7 @@ $harness = @'
   check(busyEnter.defaultPrevented, "the busy Enter key must not fall through to form submission");
 
   // Stop must tell the node, not only stop reading the stream: a client-side abort leaves the model
-  // call running. Clicking the red button is `POST /runs {action:cancel, thread}`.
+  // call running. It must wait for the node's acknowledgment and surface a refusal.
   document.getElementById("send").click();
   for (var cancelTick = 0; cancelTick < 10; cancelTick++) await tick();
   var runCalls = window.__calls.filter(function (call) { return call.url === "runs" && call.method === "POST"; });
@@ -946,6 +947,13 @@ $harness = @'
     "stopping a run must ask the node to cancel it, not only abort the stream");
   check(runCalls.some(function (call) { return /"action":"cancel"/.test(call.body || "") && /"thread"/.test(call.body || ""); }),
     "the cancel request must name the action and the conversation");
+  check(/stop requested/.test(document.querySelector(".status:not(.finished) .chat-content-run-label").textContent),
+    "Stop must report the node's cancellation acknowledgment, saw: " + document.querySelector(".status:not(.finished) .chat-content-run-label").textContent);
+  window.__fixtures.runsCancelRefuse = true;
+  await window.__cancelRunForTest(3);
+  check(/could not stop this run: run_not_found/.test(document.querySelector(".status:not(.finished) .chat-content-run-label").textContent),
+    "a rejected cancellation must be shown instead of silently aborting the stream, saw: " + document.querySelector(".status:not(.finished) .chat-content-run-label").textContent);
+  window.__fixtures.runsCancelRefuse = false;
   window.__setBusy(false);
 
   // A session whose last turn *failed* is the same situation by another route, and it used to be
@@ -1757,6 +1765,9 @@ $harness = @'
   // route away, and a topic cannot span bubbles, so a multi-step run read as several unrelated replies.
   (function () {
     var msgs = document.getElementById("messages");
+    // The reload fixture is intentionally live. Close its bubble before starting this independent
+    // synthetic run so the test measures one new bubble, rather than continuation of that fixture.
+    window.handleEvent({ type: "done" });
     var before = msgs.querySelectorAll("wa-message.assistant").length;
     window.handleEvent({ type: "round", n: 1 });
     window.handleEvent({ type: "delta", text: "Let me check the record." });
@@ -1983,6 +1994,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
 Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', data: 'data:image/png;base64,iVBORw0KGgo=' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__cancelActiveRun = cancelActiveRun; window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker; window.__updateNotice = updateNotice; window.__refreshOperationProgress = refreshOperationProgress; window.__watch = watch;"
+Add-Content -Path $app -Value "`nwindow.__cancelRunForTest = cancelRun;"
 
 Add-Content -Path $app -Value "`nwindow.__resetFollow = () => { followedSeq = 0; lastFollowAt = 0; }; window.__followRun = followRun; window.__repaintMessages = repaintMessages; window.__ensureMeta = ensureMeta;"
 
