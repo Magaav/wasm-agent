@@ -393,6 +393,22 @@ function add(role, text, asHtml = false) {
   return body;
 }
 
+function appendMessageImages(body, images) {
+  const visible = images.filter((image) => typeof image.data === "string" && image.data.startsWith("data:image/"));
+  if (!visible.length) return;
+  const gallery = document.createElement("div");
+  gallery.className = "message-images";
+  for (const attachment of visible) {
+    const image = document.createElement("img");
+    image.className = "message-image";
+    image.src = attachment.data;
+    image.alt = attachment.name || "attached image";
+    if (attachment.name) image.title = attachment.name;
+    gallery.append(image);
+  }
+  body.append(gallery);
+}
+
 function setStatus(text) {
   document.getElementById("empty")?.remove();
   if (!statusLine) {
@@ -1721,14 +1737,19 @@ async function send(text, options = {}) {
   streamBody = null;
   streamText = "";
   const names = options.resumeSeq === undefined ? attachments.map((file) => file.name).join(", ") : "";
-  add("user", text + (names ? `\n\nattached: ${names}` : ""));
+  const attachedImages = options.resumeSeq === undefined ? attachments.filter((file) => file.kind === "image") : [];
+  const userBody = add("user", text + (names ? `\n\nattached: ${names}` : ""));
+  appendMessageImages(userBody, attachedImages);
   const outgoing = composedBody(text, options);
   // Clear in place, like the submit handler does. Reassigning the binding here was
   // enough to make a reader's captured reference stale - which is how a test can end
   // up asserting against a dead array and passing.
+  // Cleanup belongs here, after the user bubble and request have captured the attachments.
+  // Clearing them in the form handler runs before send() starts, leaving nothing to display or send.
   if (options.resumeSeq === undefined) {
     attachments.length = 0;
     renderAttachments();
+    draftNow = snapshotDraft();
   }
   setStatus("wasm-agent is thinking…");
   // /health is answered without waiting for a worker. Take the baseline before admitting this run
@@ -2274,15 +2295,12 @@ form.addEventListener("submit", (event) => {
   if (!text && attachments.length === 0) return;
   commandMenu.close();
   input.value = "";
-  attachments.length = 0;
   draftGeneration += 1;
   // The draft has been sent, so there is nothing to undo *to*: keeping the
   // stack would let Ctrl+Z resurrect a draft that is already in the transcript,
   // and pressing Enter again would send it twice.
   draftUndo = [];
   draftRedo = [];
-  draftNow = snapshotDraft();
-  renderAttachments();
   syncUndoButtons();
   autosize();
   send(text);

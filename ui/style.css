@@ -92,6 +92,11 @@ body.compact {
 wa-message { display: block; }
 wa-message.user { align-self: flex-end; background: var(--user); border-color: #2a3a63; }
 wa-message.assistant { align-self: flex-start; background: var(--assistant); }
+.message-images { display: flex; flex-direction: column; gap: var(--gap); margin-top: var(--gap); }
+.message-image {
+  display: block; max-width: min(100%, 320px); max-height: 320px; object-fit: contain;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel-2);
+}
 
 /* A reply is one bubble containing the run's steps and their tool topics,
    stacked with the spacing scale - not one bubble per step, which puts a
