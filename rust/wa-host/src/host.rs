@@ -1278,6 +1278,7 @@ struct TickerSpec {
     /// the status line owns a row of its own. `None` means "the row the cursor is on", which is
     /// what a caller with no frame has - and the row the reader may be typing on.
     row: Option<u16>,
+    width: Option<usize>,
 }
 
 struct Ticker {
@@ -1328,7 +1329,23 @@ fn ticker_render(spec: &TickerSpec, ticks: usize) -> String {
         spec.marks[(spec.frame.wrapping_add(ticks)) % spec.marks.len()].as_str()
     };
     let clock = ticker_duration(ticker_seconds() - spec.started);
-    spec.line.replace("{m}", mark).replace("{t}", &clock)
+    let text = spec.line.replace("{m}", mark).replace("{t}", &clock);
+    let width = spec.width.map(|width| console_size().map(|(cols, _)| width.min(cols as usize)).unwrap_or(width));
+    match width {
+        Some(width) if visible_width(&text) > width => {
+            // A changing clock must not wrap the footer. Strip colour before
+            // clipping rather than cutting an escape sequence on a narrow screen.
+            let mut plain = String::new();
+            let mut chars = text.chars().peekable();
+            while let Some(ch) = chars.next() {
+                if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+                    for ch in chars.by_ref().skip(1) { if ('@'..='~').contains(&ch) { break; } }
+                } else { plain.push(ch); }
+            }
+            plain.chars().take(width.saturating_sub(1)).collect::<String>() + "\u{2026}"
+        }
+        _ => text,
+    }
 }
 
 /// The columns a line occupies on screen: an escape sequence is an instruction, not characters.
@@ -1378,7 +1395,7 @@ fn visible_width(text: &str) -> usize {
 /// more room than it drew, commits the row with a newline and starts again below rather than writing
 /// over columns that may hold their text.
 ///
-/// The cursor is saved and restored around the frame (`ESC 7` / `ESC 8`), because the cursor is also
+/// The cursor is saved and restored around the frame (CSI `s` / `u`), because the cursor is also
 /// where the reader's next keystroke lands. A terminal that ignores those leaves the cursor at the
 /// end of the frame: that garbles the display of a line typed during a run and loses nothing - the
 /// line is read from the reader thread, never from the screen. `cli_view.status_draw` obeys the same
@@ -1394,7 +1411,7 @@ fn ticker_frame(text: &str, drawn: usize, row: Option<u16>) -> (String, usize) {
         frame.push_str("\r\n");
         drawn = 0;
     }
-    frame.push_str("\u{1b}7");
+    frame.push_str("\u{1b}[?25l\u{1b}[s");
     match row {
         Some(row) => frame.push_str(&format!("\u{1b}[{row};1H")),
         None => frame.push('\r'),
@@ -1403,7 +1420,7 @@ fn ticker_frame(text: &str, drawn: usize, row: Option<u16>) -> (String, usize) {
     for _ in cols..drawn {
         frame.push(' ');
     }
-    frame.push_str("\u{1b}8");
+    frame.push_str("\u{1b}[u\u{1b}[?25h");
     (frame, drawn.max(cols))
 }
 
@@ -1460,12 +1477,15 @@ fn start_ticker(spec: TickerSpec) -> bool {
                     let guard = spec.lock().unwrap_or_else(|error| error.into_inner());
                     (ticker_render(&guard, ticks), guard.row)
                 };
+                // Resizing a ConPTY resets its margins. Reclaim the editor and
+                // footer while Lua is blocked, before drawing on the new last row.
+                let spec_row = refresh_editor_size().map(|rows| rows as u16).or(spec_row);
                 let (frame, cols) = ticker_frame(&text, drawn, spec_row);
                 drawn = cols;
                 // Never erase to the end of the row: the reader's own typing starts one column
                 // after this line ends, and erasing from the cursor to the right takes it with it.
                 // Flushed every time: this text has no newline to flush it.
-                let _ = crate::terminal_editor::write(&frame);
+                let _ = write_at_editor(&frame);
                 ticks = ticks.wrapping_add(1);
                 let guard = flag.lock().unwrap_or_else(|error| error.into_inner());
                 if *guard {
@@ -1548,7 +1568,8 @@ fn parse_ticker_spec(text: &str) -> Option<TickerSpec> {
     let frame = value.get("frame").and_then(Value::as_u64).unwrap_or(0) as usize;
     // A row is 1-based and positive; anything else is "no row", not row zero.
     let row = value.get("row").and_then(Value::as_u64).filter(|row| *row > 0).map(|row| row as u16);
-    Some(TickerSpec { line, marks, started, frame, row })
+    let width = value.get("width").and_then(Value::as_u64).filter(|width| *width > 0).map(|width| width as usize);
+    Some(TickerSpec { line, marks, started, frame, row, width })
 }
 
 #[cfg(test)]
@@ -1556,11 +1577,11 @@ mod ticker_tests {
     use super::*;
 
     fn spec(line: &str, frame: usize) -> TickerSpec {
-        TickerSpec { line: line.to_string(), marks: vec!["one ".to_string(), "two ".to_string()], started: ticker_seconds(), frame, row: None }
+        TickerSpec { line: line.to_string(), marks: vec!["one ".to_string(), "two ".to_string()], started: ticker_seconds(), frame, row: None, width: None }
     }
 
     fn rowed(line: &str, row: u16) -> TickerSpec {
-        TickerSpec { line: line.to_string(), marks: vec!["one ".to_string()], started: ticker_seconds(), frame: 0, row: Some(row) }
+        TickerSpec { line: line.to_string(), marks: vec!["one ".to_string()], started: ticker_seconds(), frame: 0, row: Some(row), width: None }
     }
 
     /// The same three values `scripts/test-cli-view.lua` pins for `cli_view.duration`:
@@ -1588,6 +1609,16 @@ mod ticker_tests {
         assert!(started_at.starts_with("  two "), "a frame offset is where the cycle starts: {started_at}");
         let cycled = ticker_render(&spec("  {m}{t}", 0), 2);
         assert!(cycled.starts_with("  one "), "ticks wrap around the marks: {cycled}");
+    }
+
+    #[test]
+    fn a_clock_cannot_wrap_the_footer() {
+        let mut spec = spec("\u{1b}[33mThinking\u{1b}[0m {t} many statistics", 0);
+        spec.width = Some(12);
+        let text = ticker_render(&spec, 0);
+        assert_eq!(visible_width(&text), 12);
+        assert!(!text.contains('\u{1b}'));
+        assert!(text.ends_with('\u{2026}'));
     }
 
     #[test]
@@ -1619,8 +1650,8 @@ mod ticker_tests {
         // which sits one column after the line.
         let (frame, cols) = ticker_frame("  {m}Thinking - {t}", 0, None);
         assert!(!frame.contains("\u{1b}[2K"), "erase-to-end-of-line is gone: {frame:?}");
-        assert!(frame.starts_with("\u{1b}7\r"), "the cursor is saved before the write: {frame:?}");
-        assert!(frame.ends_with("\u{1b}8"), "and restored after it: {frame:?}");
+        assert!(frame.starts_with("\u{1b}[?25l\u{1b}[s\r"), "the cursor is saved before the write: {frame:?}");
+        assert!(frame.ends_with("\u{1b}[u\u{1b}[?25h"), "and restored after it: {frame:?}");
         assert_eq!(cols, visible_width("  {m}Thinking - {t}"));
 
         // A shorter line pads the columns it drew, so no tail of the last frame is left behind.
@@ -1645,8 +1676,8 @@ mod ticker_tests {
     #[test]
     fn a_rowed_frame_is_placed_instead_of_returned_to() {
         let (frame, cols) = ticker_frame("  {m}Thinking", 0, Some(23));
-        assert!(frame.starts_with("\u{1b}7\u{1b}[23;1H"), "the row is placed, not the cursor: {frame:?}");
-        assert!(frame.ends_with("\u{1b}8"), "and the reader's cursor comes back: {frame:?}");
+        assert!(frame.starts_with("\u{1b}[?25l\u{1b}[s\u{1b}[23;1H"), "the row is placed, not the cursor: {frame:?}");
+        assert!(frame.ends_with("\u{1b}[u\u{1b}[?25h"), "and the reader's cursor comes back: {frame:?}");
         assert!(!frame.starts_with("\r\n"), "a rowed frame has nothing to commit: {frame:?}");
         assert!(!frame.contains("\u{1b}[2K"), "and erases nothing: {frame:?}");
         assert_eq!(cols, visible_width("  {m}Thinking"));
@@ -2035,7 +2066,7 @@ pub extern "C" fn terminal_size(l: *mut LuaState) -> c_int {
 /// Serialize terminal writes with the editor and the ticker. The Lua view uses this
 /// only for its real stdout; captured/plain views keep their own writers.
 pub extern "C" fn terminal_write(l: *mut LuaState) -> c_int {
-    let ok = arg_string(l, 1).is_some_and(|text| crate::terminal_editor::write(&text).is_ok());
+    let ok = arg_string(l, 1).is_some_and(|text| write_at_editor(&text).is_ok());
     unsafe { crate::lua::lua_pushboolean(l, if ok { 1 } else { 0 }) };
     1
 }
@@ -2071,6 +2102,42 @@ fn console_input() -> &'static (Mutex<ConsoleInput>, std::sync::Condvar) {
     CONSOLE_INPUT.get_or_init(|| (Mutex::new(ConsoleInput::default()), std::sync::Condvar::new()))
 }
 
+/// A saved cursor can move when ConPTY scrolls output. Finish every view/ticker
+/// write at the editor's actual draft cursor, under the same input/output locks.
+fn write_at_editor(text: &str) -> std::io::Result<()> {
+    let state = console_input().0.lock().unwrap_or_else(|e| e.into_inner());
+    match state.editor.as_ref().filter(|editor| editor.row > 0) {
+        Some(editor) => crate::terminal_editor::write(&format!("\x1b[?25l{}{}\x1b[?25h",
+            text.replace("\x1b[?25h", ""), editor.cursor_frame())),
+        None => crate::terminal_editor::write(text),
+    }
+}
+
+/// Keep the raw editor's rows attached to the current viewport while Lua is
+/// blocked. All redraws take the input lock before the shared output lock.
+fn refresh_editor_size() -> Option<usize> {
+    let (columns, rows) = console_size()?;
+    if rows < 7 { return None; }
+    let (lock, _) = console_input();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let editor = state.editor.as_mut()?;
+    if editor.row == 0 { return None; }
+    resize_editor(editor, columns as usize, rows as usize);
+    Some(rows as usize)
+}
+
+fn resize_editor(editor: &mut crate::terminal_editor::Editor, columns: usize, rows: usize) {
+    if editor.row == rows - 1 && editor.width == columns { return; }
+    let mut frame = String::from("\x1b[?25l");
+    for row in editor.row.saturating_sub(editor.height - 1)..=editor.row.min(rows) {
+        frame.push_str(&format!("\x1b[{row};1H\x1b[2K"));
+    }
+    editor.row = rows - 1;
+    editor.width = columns;
+    frame.push_str(&format!("\x1b[1;{}r{}", rows - 4, editor.render()));
+    let _ = crate::terminal_editor::write(&frame);
+}
+
 /// Read lines forever, waking anyone waiting each time one lands.
 ///
 /// One reader per process: a second would split the reader's typing between two queues and
@@ -2092,6 +2159,11 @@ fn console_reader() {
                 Ok(0) | Err(_) => { state.eof = true; state.running = false; wake.notify_all(); return; }
                 Ok(_) => {
                     if let Some(input) = state.editor.as_mut() {
+                        if input.row > 0 {
+                            if let Some((columns, rows)) = console_size().filter(|(_, rows)| *rows >= 7) {
+                                resize_editor(input, columns as usize, rows as usize);
+                            }
+                        }
                         let action = input.feed(byte[0]);
                         let frame = input.render();
                         if !frame.is_empty() { let _ = crate::terminal_editor::write(&frame); }

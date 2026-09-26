@@ -264,8 +264,8 @@ animated line and the printed line cannot drift apart.
   columns it drew (a shorter line is padded with spaces, never `\27[2K`, which would erase the
   message they are halfway through typing), commits the row with a newline when it needs more room
   rather than writing over columns that may now hold their text, and saves and restores the cursor
-  (`ESC 7` / `ESC 8`) around the write. `cli_view.status_draw` obeys the same rule on the Lua side,
-  because the view writes this line too. A terminal that ignores `ESC 7`/`ESC 8` garbles the
+  (CSI `s` / `u`) around the write. `cli_view.status_draw` obeys the same rule on the Lua side,
+  because the view writes this line too. A terminal that ignores cursor save/restore garbles the
   *display* of a line typed during a run and loses nothing: the line is read from the reader thread,
   never from the screen.
 - Stopping is immediate - the thread waits on a condition variable, not on a sleep - and the
@@ -281,6 +281,23 @@ animated line and the printed line cannot drift apart.
 `scripts/test-cli-ticker.lua` measures the timer for real: it starts a ticker, then sleeps -
 so it cannot repaint anything itself - and the gate reads the frames and the clock out of
 its captured stdout.
+
+The raw editor uses three rows above a footer on the last viewport row. The footer
+shows per-run rounds/tools, live elapsed time, tokens, cache hits and context usage;
+the last summary stays there while idle. `spec.width` bounds the animated line after
+clock substitution, so a growing clock cannot wrap it. Resizing a Windows ConPTY
+resets its scroll margins: the ticker reclaims the output region and redraws the
+draft at the new size even while Lua is blocked. The view refreshes its dimensions
+before subsequent output. All native writes finish at the draft's explicit cursor,
+because a saved Windows cursor may move with scrolling output.
+
+Risk: this retains a custom VT editor rather than replacing the CLI architecture.
+Unknown key sequences are ignored; terminals smaller than seven rows cannot host
+the framed editor. `WASM_AGENT_CLI_FRAME=off` / `WASM_AGENT_CLI_EDITOR=off` retain the
+existing fallback. The real-terminal fixture is `scripts/test-cli-terminal.lua`;
+its input assertions and rendered-frame observations complement parser unit tests.
+Orca on Windows sends `ESC CR` for Shift+Enter, so that sequence (also Alt+Enter)
+inserts a newline rather than being discarded; plain CR still submits.
 
 ## Input that arrives while Lua is blocked
 
