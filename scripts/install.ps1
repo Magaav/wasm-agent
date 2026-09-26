@@ -171,7 +171,7 @@ foreach ($doc in @("AGENTS.md", "AGENTS.guest.md")) {
 $uiDir = Join-Path $nodeDir "ui"
 New-Item -ItemType Directory -Force -Path $uiDir | Out-Null
 $localUiDir = if ($PSScriptRoot) { Join-Path $PSScriptRoot "../ui" } else { $null }
-$uiNames = @("index.html", "style.css", "app.js", "components.js", "render.wasm")
+$uiNames = @("index.html", "style.css", "app.js", "components.js", "render.wasm", "manifest.webmanifest", "service-worker.js", "icon-192.png", "icon-512.png")
 if ($localUiDir -and (Test-Path $localUiDir)) {
   foreach ($name in $uiNames) {
     $source = Join-Path $localUiDir $name
