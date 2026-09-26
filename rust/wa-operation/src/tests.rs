@@ -22,6 +22,21 @@ fn settled(m: &Manager, id: &str) -> Value {
     assert_eq!(value["settled"], true, "{value}");
     value
 }
+#[cfg(windows)]
+fn remove_executable_fixture(root: PathBuf) {
+    // Windows may retain an image mapping briefly after the process is signalled.
+    // Retry only the fixture deletion, never the operation or its assertions.
+    let deadline=Instant::now()+Duration::from_secs(2);
+    loop {
+        match fs::remove_dir_all(&root) {
+            Ok(())=>return,
+            Err(error) if error.kind()==std::io::ErrorKind::PermissionDenied && Instant::now()<deadline=>{
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error)=>panic!("fixture cleanup {}: {error}",root.display()),
+        }
+    }
+}
 #[test]
 fn settlement_wakes_all_observers_without_relaunch_or_lost_notification() {
     let (m,root)=fixture();
@@ -428,7 +443,7 @@ fn compiler_telemetry_cannot_keep_a_completed_build_running() {
     assert!(result["auxiliary_cleanup"].as_array().unwrap().iter()
         .any(|image| image.as_str().unwrap().to_ascii_lowercase().ends_with("vctip.exe")));
     assert!(result["stdout"].as_str().unwrap().contains("build_done"), "{result}");
-    fs::remove_dir_all(root).unwrap();
+    remove_executable_fixture(root);
 }
 
 #[cfg(windows)]
@@ -442,7 +457,7 @@ fn compiler_helper_cleanup_waits_for_real_work() {
     let result = settled(&m, &id);
     assert_eq!(result["ok"], true, "{result}");
     assert!(result["stdout"].as_str().unwrap().contains("actual_work_done"), "{result}");
-    fs::remove_dir_all(root).unwrap();
+    remove_executable_fixture(root);
 }
 
 #[cfg(windows)]
@@ -456,7 +471,7 @@ fn a_process_named_vctip_outside_msvc_stays_adopted() {
     let result = settled(&m, &id);
     assert_eq!(result["state"], "cancelled", "{result}");
     assert!(result.get("auxiliary_cleanup").is_none());
-    fs::remove_dir_all(root).unwrap();
+    remove_executable_fixture(root);
 }
 
 #[test]
