@@ -50,10 +50,11 @@ WASM_AGENT_REASONING=high node scripts/experiment-edit-workflow.cjs \
 ```
 
 The `openai-sub` route uses Pi's `openai-codex` OAuth login and the installed Pi adapter;
-it does not use an OpenAI API key or the OpenCode Go forwarder. The selected model and
-`WASM_AGENT_REASONING` are recorded in the manifest/report. `--lua-root` is shared by
-all solver and reviewer nodes; it keeps transport/runtime differences out of the arm
-comparison.
+it does not use an OpenAI API key or the OpenCode Go forwarder. The runner discovers
+Pi under `npm root -g`; set `WASM_AGENT_PI_PACKAGE` to its package directory if it is
+installed elsewhere. The Pi package version, selected model, and `WASM_AGENT_REASONING`
+are recorded in the manifest/report. `--lua-root` is shared by all solver and reviewer
+nodes; it keeps transport/runtime differences out of the arm comparison.
 
 `--n 1` is a pilot. Use at least three interleaved attempts per arm before discussing a
 fixture-specific tendency, and do not use this one repository task to select a global

@@ -57,6 +57,33 @@ const subscriptionModels = ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra'];
 if (wasmProvider === 'openai-sub' && !subscriptionModels.includes(model)) {
   throw new Error(`model ${model} is not in the openai-sub catalog`);
 }
+let piPackage = null;
+let piPackageVersion = null;
+if (wasmProvider === 'openai-sub') {
+  piPackage = process.env.WASM_AGENT_PI_PACKAGE || '';
+  if (!piPackage) {
+    const npm = process.platform === 'win32'
+      ? spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'npm root -g'],
+        { encoding: 'utf8', windowsHide: true })
+      : spawnSync('npm', ['root', '-g'], { encoding: 'utf8' });
+    if (npm.status !== 0) throw new Error(`could not locate global Pi package: ${npm.stderr || npm.error}`);
+    const globalRoot = npm.stdout.trim();
+    for (const name of ['@earendil-works/pi-coding-agent', '@mariozechner/pi-coding-agent']) {
+      const candidate = path.join(globalRoot, name);
+      if (fs.existsSync(path.join(candidate, 'dist', 'core', 'auth-storage.js'))) {
+        piPackage = candidate;
+        break;
+      }
+    }
+  }
+  if (!piPackage || !fs.existsSync(path.join(piPackage, 'dist', 'core', 'auth-storage.js'))) {
+    throw new Error('Pi package missing; set WASM_AGENT_PI_PACKAGE to its installed package directory');
+  }
+  piPackage = path.resolve(piPackage);
+  process.env.WASM_AGENT_PI_PACKAGE = piPackage;
+  try { piPackageVersion = JSON.parse(fs.readFileSync(path.join(piPackage, 'package.json'), 'utf8')).version; }
+  catch { throw new Error('Pi package metadata is unreadable'); }
+}
 const repetitions = Math.max(1, Math.min(10, Number(arg('n', '1')) || 1));
 const binary = path.resolve(arg('wa', path.join(harness, 'rust', 'target', 'release', process.platform === 'win32' ? 'wa.exe' : 'wa')));
 if (!fs.existsSync(binary)) throw new Error(`wa binary not found: ${binary}`);
@@ -109,7 +136,8 @@ for (let runIndex = 1; runIndex <= repetitions; runIndex += 1) {
 fs.writeFileSync(path.join(root, 'manifest.json'), JSON.stringify({
   schema: 'wasm-agent.edit-workflow-experiment/v1', created_at: new Date().toISOString(),
   base_requested: base, base_commit: baseCommit, provider, wasm_provider: wasmProvider,
-  model, lua_root: luaRoot, reasoning: process.env.WASM_AGENT_REASONING || null, repetitions,
+  model, lua_root: luaRoot, reasoning: process.env.WASM_AGENT_REASONING || null,
+  pi_package_version: piPackageVersion, repetitions,
   harness_commit: run('git', ['rev-parse', 'HEAD'], { cwd: harness }).stdout.trim(),
   harness_files_sha256: harnessHashes,
   binary_sha256: crypto.createHash('sha256').update(fs.readFileSync(binary)).digest('hex'),
@@ -256,7 +284,8 @@ fs.writeFileSync(path.join(root, 'manifest.json'), JSON.stringify({
     schema: 'wasm-agent.edit-workflow-experiment/v1', base_commit: baseCommit,
     provider, wasm_provider: wasmProvider, model,
     reasoning: process.env.WASM_AGENT_REASONING || null, lua_root: luaRoot,
-    repetitions, comparable_tool_model_surface: comparable,
+    pi_package_version: piPackageVersion, repetitions,
+    comparable_tool_model_surface: comparable,
     note: repetitions < 3
       ? 'Pilot only: fewer than three attempts per arm cannot choose a default.'
       : 'One repository fixture still cannot choose a global default; compare with organic tasks.',
