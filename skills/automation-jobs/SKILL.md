@@ -67,6 +67,16 @@ focus races, but do not claim a speedup without a benchmark.
 For a web app, resolve its current models and invoke its own semantic action using page JavaScript. Use a
 CDP document-start script (`Page.addScriptToEvaluateOnNewDocument`) when a persistent hook is needed; use
 `Runtime.evaluate` for a bound one-shot action. Do not synthesize user input when an app action exists.
+
+Concrete repo example: `scripts/whatsapp-store-send.mjs` sends the CDP `Runtime.evaluate` command over the
+bound page WebSocket (`awaitPromise: true`, `returnByValue: true`). Its expression, in
+`scripts/whatsapp-store-core.mjs`, resolves the chat through `window.require('WAWebChatCollection')` and
+calls `window.require('WAWebSendTextMsgChatAction').sendTextMsgToChat(chat, body, {})`. This is the
+currently proven WhatsApp path, not a mandatory CDP primitive: an already-bound page bridge/extension or a
+persistent `Page.addScriptToEvaluateOnNewDocument` hook can also execute page JavaScript. Re-check module
+names, call shape and side effects against the live app build; internal names are not stable APIs. Keep the
+one-dispatch rule and verify the message store afterward.
+
 Five measurements on one real app (WhatsApp Web) are why:
 
 | the UI route | what actually happened |
