@@ -528,10 +528,10 @@ body.term .terminal { display: flex; }
 .composer textarea {
   flex: 1; resize: none; overflow-y: auto; height: 45px; min-height: 45px; max-height: 180px;
   padding: var(--pad); border-radius: var(--radius); line-height: 25px;
-  border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--line); background: linear-gradient(135deg, rgba(79,140,255,.09), var(--panel-2) 55%); color: var(--text);
   font: inherit; outline: none;
 }
-.composer textarea:focus { border-color: var(--accent); }
+.composer textarea:focus { border-color: var(--accent); background: linear-gradient(135deg, rgba(79,140,255,.14), var(--panel-2) 60%); }
 
 /* The composer's own scroll is a detail, not a control: the default bar is wide and opaque and
    sits against the text being written. Keep it thin and quiet, and let it appear only when the
@@ -558,7 +558,13 @@ body.term .terminal { display: flex; }
 .send:disabled { opacity: .45; cursor: default; }
 
 .composer-footer { display: flex; align-items: center; justify-content: space-between; gap: var(--gap); min-height: 30px; }
-.footer-left { display: flex; align-items: center; gap: var(--gap); min-width: 0; }
+.footer-left, .footer-right { display: flex; align-items: center; gap: var(--gap); min-width: 0; }
+.footer-right { justify-content: flex-end; margin-left: auto; }
+.composer-model {
+  max-width: min(40vw, 240px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums;
+}
+.composer-model::before { content: "·"; color: var(--accent); margin-right: var(--space); }
 
 .icon-btn {
   flex: none; width: 30px; height: 30px; border-radius: var(--radius-sm);
@@ -727,6 +733,7 @@ wa-menu.menu {
   border-radius: var(--radius); padding: var(--space);
   box-shadow: 0 18px 45px rgba(0, 0, 0, .6);
 }
+#command-menu.menu { min-width: min(360px, calc(100vw - 20px)); max-height: min(280px, 45vh); overflow: auto; }
 .menu-item {
   display: block; width: 100%; text-align: left; border: none; background: none;
   color: var(--text); font: inherit; font-size: 13px; cursor: pointer;

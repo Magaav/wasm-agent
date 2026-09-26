@@ -1383,6 +1383,12 @@ $harness = @'
     var menu = window.__commandMenu();
     function type(value) { window.__typeCommand(value); }
 
+    var composerModel = document.getElementById("composer-model");
+    check(!!composerModel && composerModel.textContent === "previous-model",
+      "composer status: the far-right model label must show the latest observed model, not the selected model");
+    check(!!composerModel && getComputedStyle(composerModel.parentElement).justifyContent === "flex-end",
+      "composer status: the model label must sit at the far-right edge");
+
     type("/");
     check(menu.open, "commands: `/` must open the list");
     var items = Array.prototype.slice.call(menu.querySelectorAll(".menu-item"));

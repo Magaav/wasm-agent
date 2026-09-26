@@ -13,6 +13,7 @@ const sendButton = document.getElementById("send");
 const statusBtn = document.getElementById("status-btn");
 const chipModel = document.getElementById("chip-model");
 const chipUsage = document.getElementById("chip-usage");
+const composerModel = document.getElementById("composer-model");
 const balloon = document.getElementById("status-balloon");
 // Built here rather than in the markup: it lives in the account balloon now, and that balloon is
 // drawn from JS. The id is stable, so everything that reads the selection keeps working.
@@ -100,6 +101,7 @@ let streamText = "";
 let controller = null;
 let attachments = [];
 let settings = { provider: "", model: "", providers: [], usage: {}, stats: {}, configured: false, base_url: "" };
+let lastUsedModel = "";
 let session = localStorage.getItem("wa-session") || "";
 let me = { user: null, role: "guest", tools: [] };
 let activeNode = localStorage.getItem("wa-node") || "";
@@ -1170,7 +1172,11 @@ function handleEvent(event) {
     // here was the bug - one run drew one bubble per reply. flushDecision(true) closes it, on `done`
     // or on the next user turn, which is the contract its own comment already stated.
   } else if (event.type === "usage") {    settings.usage = event.total || settings.usage;
-    if (event.model) settings.model = event.model;
+    if (event.model) {
+      lastUsedModel = event.model;
+      composerModel.textContent = event.model;
+      composerModel.title = "Model used for the latest request: " + event.model;
+    }
     updateChip();
     if (balloon.open) { renderUsage(); renderModels(); }
   } else if (event.type === "error") {
@@ -1868,6 +1874,11 @@ function activeProvider() {
 
 function updateChip() {
   chipModel.textContent = settings.configured ? (settings.model || "model") : "local mode";
+  const observedModel = lastUsedModel || settings.observability?.last_request?.model || "";
+  composerModel.textContent = observedModel || settings.model || "model unavailable";
+  composerModel.title = observedModel
+    ? "Model used for the latest request: " + observedModel
+    : settings.model ? "Selected model; no request model observed yet" : "No model information available";
   statusBtn.classList.toggle("local", !settings.configured);
   const total = settings.observability?.available ? settings.observability.total?.total : 0;
   chipUsage.textContent = total ? formatTokens(total) + " tok" : "";
@@ -2490,6 +2501,7 @@ function syncCommands() {
   commandMenu.move(1);
 }
 input.addEventListener("input", syncCommands);
+input.addEventListener("focus", syncCommands);
 window.addEventListener("resize", () => requestAnimationFrame(autosize));
 
 messages.addEventListener("click", (event) => {
