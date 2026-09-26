@@ -227,7 +227,7 @@ function M.run(argv)
     end
   end
 
-  if prompt ~= "" then turn(prompt) end
+  if prompt ~= "" then view:prompt("wa> "); turn(prompt) end
 
   -- The input, and where the prompt is drawn. Both matter to the same thing: a reader who can see
   -- where they are typing, and who is not locked out while the agent works. The prompt is drawn

@@ -152,12 +152,10 @@ local function visible_columns(text)
 end
 M.visible_columns = visible_columns
 
--- DECSC / DECRC: the cursor as the terminal sees it, saved and put back. The status line is written
--- in place on the row the reader types on, so the write has to leave their cursor where it was -
--- `ESC 7` and `ESC 8` are the pair every VT terminal this runs in understands, and the alternative
--- (raw mode, an input row this CLI owns) is a larger change. See `METHODS:status_draw` for what a
--- terminal that ignores them costs.
-local CURSOR_SAVE, CURSOR_RESTORE = "\27" .. "7", "\27" .. "8"
+-- CSI cursor save/restore is supported by Windows and Unix VT terminals. Hide
+-- the cursor during output; the native writer finally places it at the draft's
+-- actual cursor because ConPTY may move saved positions when output scrolls.
+local CURSOR_SAVE, CURSOR_RESTORE = "\27[?25l\27[s", "\27[u\27[?25h"
 
 local function clip(text, limit)
   text = tostring(text or ""):gsub("%s+", " ")
@@ -410,7 +408,7 @@ local function screen_rows(rows, editor)
   if not rows or rows < (editor and 7 or 4) then return nil end
   rows = math.floor(rows)
   if editor then
-    return { top = 1, bottom = rows - 4, status = rows - 3, input_top = rows - 2, input = rows }
+    return { top = 1, bottom = rows - 4, status = rows, input_top = rows - 3, input = rows - 1 }
   end
   return { top = 1, bottom = rows - 2, status = rows - 1, input = rows }
 end
@@ -520,6 +518,8 @@ function METHODS:write(text)
   -- typing on: a write that left the cursor in the output region would send their next keystroke
   -- into the middle of the transcript.
   if self.screen then
+    self:screen_on()
+    text = text:gsub("\r?\n", "\r\n")
     self.out(CURSOR_SAVE .. "\27[" .. self.screen.bottom .. ";1H" .. text .. CURSOR_RESTORE)
     return
   end
@@ -542,11 +542,25 @@ end
 -- itself, and `host.ticker` fills them on a timer while this process is blocked. The second
 -- value is when the timed thing started, which is what the clock counts from either way.
 function METHODS:status_template()
+  if self.screen and not self.turn and self.last_summary then
+    return paint("  " .. clip(self.last_summary, self.limit - 2), "dim", self.live), nil
+  end
   local phase = self.pending and M.phase(self.pending.name) or self.phase
-  local started = self.pending and self.pending.started or (self.turn and self.turn.started or nil)
+  local started = self.screen and self.turn and self.turn.started
+    or (self.pending and self.pending.started) or (self.turn and self.turn.started)
   local function compose(shown)
     local line = "  {m}" .. shown
     if not self.turn then return line end
+    if self.screen then
+      local run, base, totals = self.turn, self.turn.baseline or {}, self.totals or {}
+      local summary = M.footer({
+        rounds = run.rounds, tools = run.tools,
+        prompt = math.max(0, (totals.prompt or 0) - (base.prompt or 0)),
+        completion = math.max(0, (totals.completion or 0) - (base.completion or 0)),
+        cached = math.max(0, (totals.cached or 0) - (base.cached or 0)),
+      }, { context = self.context, budget = self.budget })
+      return line .. " \194\183 {t} \194\183 " .. summary
+    end
     local step = self.total_rounds > 0 and (" \194\183 step " .. self.total_rounds) or ""
     local bound = self.pending and self.pending.bound and (" of " .. M.duration(self.pending.bound)) or ""
     return line .. " \194\183 {t}" .. bound .. " \194\183 run " .. self.runs .. step
@@ -556,7 +570,7 @@ function METHODS:status_template()
   -- same line, and the mark and the clock are its own. A terminal too narrow for the plain
   -- line gets the plain line, because `clip` counts columns and an escape sequence is not
   -- one - a coloured line clipped by width loses its reset and bleeds into the next line.
-  if columns(plain) > self.limit then return plain, started end
+  if columns(plain) + 10 > self.limit then return plain, started end
   return compose(paint(phase, "accent", self.live)), started
 end
 
@@ -585,12 +599,13 @@ function METHODS:animate()
   if not self.live or not self.stdout then return end
   if not (host and host.ticker) then return end
   local template, started = self:status_template()
-  if not started then return end
+  if not started and not (self.screen and self.last_summary) then return end
   local ok = pcall(host.ticker, json.encode({
-    line = template, marks = M.marks(), started = started, frame = self.frame,
+    line = template, marks = started and M.marks() or {}, started = started or self.now(), frame = self.frame,
     -- A row of its own while there is a screen: the ticker draws on the status row and hands the
     -- cursor back, which is what lets the reader keep typing on the input row at the same time.
     row = self.screen and self.screen.status or nil,
+    width = self.limit,
   }))
   if not ok then return end
   self.animating = true
@@ -616,11 +631,11 @@ end
 --   * commits the row (a newline) when it needs more room than it drew, instead of writing over
 --     columns that may now hold their text. A status line is not worth a reader's message; the
 --     cost is one line in the scrollback, when the clock or a token count grows;
---   * saves and restores the cursor around the write (`ESC 7` / `ESC 8`), because the cursor is
+--   * saves and restores the cursor around the write (CSI `s` / `u`), because the cursor is
 --     also where the reader's *next* keystroke lands. Leaving it at the end of the frame would
 --     make their next character overwrite the line they had already typed.
 --
--- Risk, named: a terminal that ignores `ESC 7`/`ESC 8` leaves the cursor at the end of the frame,
+-- Risk, named: a terminal that ignores cursor save/restore leaves the cursor at the end of the frame,
 -- and continued typing then lands a few columns away from the reader's text. That garbles the
 -- *display* of a line typed during a run and loses nothing: the line is read from the host's
 -- reader, never from the screen. The alternatives are the erase this replaces, or owning the input
@@ -656,6 +671,7 @@ function METHODS:paint(force)
   -- The console draws every event as its own line, so a line rewritten in place has nothing
   -- to say and would fight it for the cursor.
   if self.console then return end
+  if self.screen then self:screen_on() end
   self.frame = self.frame + 1
   local line = clip(self:status_text(self.live), self.limit)
   if self.live then
@@ -703,7 +719,7 @@ end
 -- The rows this view owns, once the console's height is known.
 --
 -- Canonical fallback: output through R-2, status R-1, input R.
--- Native editor: output through R-4, status R-3, three input rows R-2..R.
+-- Native editor: output through R-4, three input rows R-3..R-1, footer R.
 -- A reserved scroll region keeps output from scrolling over the draft. The raw
 -- editor owns the bottom rows and handles echo/Enter itself while Lua is blocked.
 -- `WASM_AGENT_CLI_FRAME=off` or a console too short for the regions falls back
@@ -711,6 +727,12 @@ end
 function METHODS:screen_on()
   if not self.live then return nil end
   if (self.getenv("WASM_AGENT_CLI_FRAME") or "") == "off" then return nil end
+  if self.stdout and host.terminal_size then
+    local ok, raw = pcall(host.terminal_size)
+    local parsed
+    if ok and type(raw) == "string" and pcall(function() parsed = json.decode(raw) end)
+      and parsed.columns and parsed.columns > 0 then self.limit = parsed.columns end
+  end
   local screen = screen_rows(self.rows and self.rows(), self.editor)
   -- A console that cannot report a height keeps whatever screen it already had: the caller falls
   -- back to the prompt at the cursor, which is on the input row anyway.
@@ -718,16 +740,21 @@ function METHODS:screen_on()
   -- A resized window moves the rows with it. The old screen is given back (its scroll region with
   -- it) and a new one is laid out on the height the console now reports; without this, a window
   -- made smaller leaves output scrolling over the status and input rows for the life of the chat.
-  if self.screen and self.screen.input == screen.input then return self.screen end
-  if self.screen then self:screen_off() end
+  if self.screen and self.screen.status == screen.status and self.screen.input == screen.input then return self.screen end
+  local resized = self.screen ~= nil
+  if resized then self:unanimate(); self:screen_off() end
   self.screen = screen
   -- The region first, then one newline inside it: the region's last row may hold output from
   -- before the screen existed, and every write below assumes the row it writes into is free.
   self:control("\27[1;" .. screen.bottom .. "r")
-  self:control("\27[" .. screen.bottom .. ";1H\n")
+  self:control("\27[" .. screen.bottom .. ";1H\r\n")
   self:control("\27[" .. screen.status .. ";1H\27[2K")
   for row = screen.input_top or screen.input, screen.input do
     self:control("\27[" .. row .. ";1H\27[2K")
+  end
+  if resized and self.editor then
+    assert(host.input_editor(screen.input, self.limit, screen.input - screen.input_top + 1),
+      "terminal editor could not resize")
   end
   return screen
 end
@@ -736,6 +763,7 @@ end
 -- whose output scrolls only the top 22 rows of a 24-row window is a bug the next reader gets to
 -- explain.
 function METHODS:screen_off()
+  self:unanimate()
   local screen = self.screen
   self.screen = nil
   if not screen then return end
@@ -745,7 +773,7 @@ function METHODS:screen_off()
     self:control("\27[" .. row .. ";1H\27[2K")
   end
   self:control("\27[r")
-  self:control("\27[" .. screen.input .. ";1H\n")
+  self:control("\27[" .. math.max(screen.input, screen.status) .. ";1H\r\n")
 end
 
 -- A framed terminal gives its input rows to the native editor; captured/plain
@@ -766,6 +794,10 @@ function METHODS:prompt(text)
     self:clear()
     return self:control(text)
   end
+  self:unanimate()
+  if self.last_summary then
+    self:status_draw(paint("  " .. clip(self.last_summary, self.limit - 2), "dim", self.live))
+  end
   -- A native editor, when available, owns the bottom row and redraws it on every
   -- keystroke even when Lua is blocked. No terminal echo or Enter newline is involved.
   if self.editor then
@@ -774,6 +806,7 @@ function METHODS:prompt(text)
   else
     self:control("\27[" .. screen.input .. ";1H\27[2K" .. text)
   end
+  if not self.turn then self:animate() end
 end
 
 -- The reader's line, moved into the transcript.
@@ -841,7 +874,8 @@ function METHODS:run_finished()
     run.cost = run.cost or (self.totals and self.totals.cost) or 0
   end
   local text = M.footer(run, { context = self.context, budget = self.budget })
-  if text ~= "" then
+  self.last_summary = text
+  if text ~= "" and not self.screen then
     -- One line, clipped to the width: a footer that wraps puts its own tail at column
     -- zero, which reads as a second, unrelated line. The workspace and the branch are in
     -- the banner, where there is room for them.
@@ -850,6 +884,10 @@ function METHODS:run_finished()
   self.turn = nil
   self.pending = nil
   self.phase = ""
+  if self.screen and text ~= "" then
+    self:status_draw(paint("  " .. clip(text, self.limit - 2), "dim", self.live))
+    self:animate()
+  end
   self:set_title()
 end
 
@@ -909,7 +947,7 @@ function METHODS:reasoning_block(text)
   self:clear()
   local mark = paint("\226\156\187 thinking", "thinkingText", self.live)
   self:write("  " .. mark .. "\n")
-  self:write(markdown.wrap(body, {
+  self:write(markdown.render(body, {
     paint = function(plain, style) return paint(plain, style, self.live) end,
     width = self.limit,
     indent = "      ",
@@ -1028,6 +1066,7 @@ function METHODS:event(event)
     -- The context in use is the last model call's prompt, measured by the provider;
     -- `total.prompt` is the session's running sum and would grow without bound.
     self.context = tonumber(event.prompt) or self.context
+    self:paint()
   elseif kind == "compact" then
     self:line(paint("  ! compacted through seq " .. tostring(event.through or "?"), "dim", self.live))
   elseif kind == "delta" then

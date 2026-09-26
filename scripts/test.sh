@@ -1066,7 +1066,7 @@ TICKER_OUT="$DB.ticker.out"
 WA_SCRIPT=scripts/test-cli-ticker.lua "$BIN" --db "$DB.ticker" > "$TICKER_OUT" 2>&1
 ticker_frames=$(tr '\r' '\n' < "$TICKER_OUT" | grep -c "Thinking" || true)
 ticker_clocks=$(tr '\r' '\n' < "$TICKER_OUT" | sed -n 's/.* \([0-9][0-9]*\.[0-9]s\).*/\1/p' | uniq | wc -l | tr -d ' ')
-ticker_marks=$(tr '\r' '\n' < "$TICKER_OUT" | grep "Thinking" | cut -b 1-5 | LC_ALL=C sort -u | wc -l | tr -d ' ')
+ticker_marks=$(node -e 'const fs=require("fs");const lines=fs.readFileSync(process.argv[1],"utf8").split(/[\r\n]/).filter(s=>s.includes("Thinking"));console.log(new Set(lines.map(s=>Array.from(s.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,"").trim())[0])).size)' "$TICKER_OUT")
 ticker_last=$(tr '\r' '\n' < "$TICKER_OUT" | sed -n 's/.* \([0-9][0-9]*\.[0-9]s\).*/\1/p' | tail -1 || true)
 if [ "$ticker_frames" -ge 8 ] && [ "$ticker_clocks" -ge 8 ] && [ "$ticker_marks" -ge 3 ] \
   && [ "$ticker_last" != "0.0s" ] && [ -n "$ticker_last" ]; then
