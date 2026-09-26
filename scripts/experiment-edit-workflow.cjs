@@ -50,7 +50,13 @@ if (gitRoot.status !== 0) throw new Error(gitRoot.stderr || 'not in a git reposi
 const repo = path.resolve(gitRoot.stdout.trim());
 const base = arg('base', 'bad2cdc');
 const provider = arg('provider', 'mock');
+const wasmProvider = arg('wasm-provider', 'opencode-go');
 const model = arg('model', 'deepseek-v4.1-flash');
+const luaRoot = path.resolve(arg('lua-root', repo));
+const subscriptionModels = ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra'];
+if (wasmProvider === 'openai-sub' && !subscriptionModels.includes(model)) {
+  throw new Error(`model ${model} is not in the openai-sub catalog`);
+}
 const repetitions = Math.max(1, Math.min(10, Number(arg('n', '1')) || 1));
 const binary = path.resolve(arg('wa', path.join(harness, 'rust', 'target', 'release', process.platform === 'win32' ? 'wa.exe' : 'wa')));
 if (!fs.existsSync(binary)) throw new Error(`wa binary not found: ${binary}`);
@@ -102,7 +108,8 @@ for (let runIndex = 1; runIndex <= repetitions; runIndex += 1) {
 }
 fs.writeFileSync(path.join(root, 'manifest.json'), JSON.stringify({
   schema: 'wasm-agent.edit-workflow-experiment/v1', created_at: new Date().toISOString(),
-  base_requested: base, base_commit: baseCommit, provider, model, repetitions,
+  base_requested: base, base_commit: baseCommit, provider, wasm_provider: wasmProvider,
+  model, lua_root: luaRoot, reasoning: process.env.WASM_AGENT_REASONING || null, repetitions,
   harness_commit: run('git', ['rev-parse', 'HEAD'], { cwd: harness }).stdout.trim(),
   harness_files_sha256: harnessHashes,
   binary_sha256: crypto.createHash('sha256').update(fs.readFileSync(binary)).digest('hex'),
@@ -117,7 +124,8 @@ fs.writeFileSync(path.join(root, 'manifest.json'), JSON.stringify({
     const ledger = path.join(attempt.dir, 'solver-ledger.json');
     const args = [path.join(harness, 'scripts', 'experiment-tool-choice.cjs'), binary,
       '--repo-root', attempt.worktree, '--arm', attempt.id, '--task', 'whatsapp-controls',
-      '--n', '1', '--profile', attempt.profile, '--provider', provider, '--model', model,
+      '--n', '1', '--profile', attempt.profile, '--provider', provider,
+      '--wasm-provider', wasmProvider, '--model', model, '--lua-root', luaRoot,
       '--index', '1', '--label', `solver-${attempt.id}`, '--timeout_ms', '1500000', '--output', ledger];
     attempt.solver = await spawnCaptured(process.execPath, args, harness, process.env,
       path.join(attempt.dir, 'solver.stdout.log'), path.join(attempt.dir, 'solver.stderr.log'));
@@ -174,7 +182,8 @@ fs.writeFileSync(path.join(root, 'manifest.json'), JSON.stringify({
     const ledger = path.join(attempt.dir, 'review-ledger.json');
     const args = [path.join(harness, 'scripts', 'experiment-tool-choice.cjs'), binary,
       '--repo-root', attempt.worktree, '--arm', `review-${attempt.id}`, '--task', 'whatsapp-controls-review',
-      '--n', '1', '--profile', attempt.review, '--provider', provider, '--model', model,
+      '--n', '1', '--profile', attempt.review, '--provider', provider,
+      '--wasm-provider', wasmProvider, '--model', model, '--lua-root', luaRoot,
       '--index', '1', '--label', `review-${attempt.id}`, '--timeout_ms', '900000', '--output', ledger];
     attempt.review_run = await spawnCaptured(process.execPath, args, harness, process.env,
       path.join(attempt.dir, 'review.stdout.log'), path.join(attempt.dir, 'review.stderr.log'));
@@ -245,7 +254,9 @@ fs.writeFileSync(path.join(root, 'manifest.json'), JSON.stringify({
   });
   const report = {
     schema: 'wasm-agent.edit-workflow-experiment/v1', base_commit: baseCommit,
-    provider, model, repetitions, comparable_tool_model_surface: comparable,
+    provider, wasm_provider: wasmProvider, model,
+    reasoning: process.env.WASM_AGENT_REASONING || null, lua_root: luaRoot,
+    repetitions, comparable_tool_model_surface: comparable,
     note: repetitions < 3
       ? 'Pilot only: fewer than three attempts per arm cannot choose a default.'
       : 'One repository fixture still cannot choose a global default; compare with organic tasks.',

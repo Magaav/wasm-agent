@@ -34,16 +34,26 @@ retained as review evidence; it does not override the deterministic verifier.
 
 ## Run
 
-Build the candidate binary first. Real inference requires an explicit acknowledgement:
+Build the candidate binary first. Real inference requires an explicit acknowledgement.
+The `--provider` flag chooses paid versus mock inference; `--wasm-provider` selects
+wasm-agent's actual route. For Pi's GPT-6 subscription route, point `--lua-root` at
+the current source checkout so every frozen arm uses the same updated transport code:
 
 ```sh
-node scripts/experiment-edit-workflow.cjs \
+WASM_AGENT_REASONING=high node scripts/experiment-edit-workflow.cjs \
   --wa rust/target/release/wa.exe \
   --base bad2cdc \
   --provider real --confirm-paid yes \
-  --model deepseek-v4.1-flash \
+  --wasm-provider openai-sub --lua-root . \
+  --model gpt-6-luna \
   --n 1
 ```
+
+The `openai-sub` route uses Pi's `openai-codex` OAuth login and the installed Pi adapter;
+it does not use an OpenAI API key or the OpenCode Go forwarder. The selected model and
+`WASM_AGENT_REASONING` are recorded in the manifest/report. `--lua-root` is shared by
+all solver and reviewer nodes; it keeps transport/runtime differences out of the arm
+comparison.
 
 `--n 1` is a pilot. Use at least three interleaved attempts per arm before discussing a
 fixture-specific tendency, and do not use this one repository task to select a global
