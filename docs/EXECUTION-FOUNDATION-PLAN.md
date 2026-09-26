@@ -82,3 +82,21 @@ Compare a predeclared representative task set under equivalent models/context: v
 | Earlier pre-commit smoke | hermetic | exit 0, `smoke ok (2 skipped)`; deploy-downgrade also skipped because tree was dirty; superseded by final post-commit run above | `C:\\Users\\Victor\\AppData\\Local\\Temp\\pi-bash-7ea7c56f5fdb1bcd.log` |
 | Installed/deployed candidate | deployed | pending; gate/authorization required | pending |
 | Luna follow-up inside wasm-agent | runtime/deployed | blocked pending installed candidate/deployment authorization and model selection | pending |
+
+## Durable ordinary-run recovery follow-up
+
+Implemented on `change/durable-run-recovery`: server admissions, original requests and stream
+records persist separately from the transcript; restart distinguishes `not_started` from `unknown`
+and never replays either. A server-lifetime database lease prevents a second server from recovering
+live work. Owner-scoped status, inspection and paginated output remain available after restart.
+See `docs/CONCURRENCY.md` for the storage/performance risk and exact scope.
+
+Proof: `node scripts/test-run-recovery.cjs rust/target/release/wa.exe` passes 13 checks, 0 skips,
+using an actual killed/restarted embedded-Lua node and mock inference. It checks queued request
+preservation, partial output/cursor persistence, no automatic inference replay, stable IDs,
+unauthorized reads and duplicate-server refusal. Rust journal/scheduler tests cover pagination
+and lease release. Full gate evidence is bound to the final source tree by the finish runner.
+
+Still required: combined multi-agent UI acceptance, supported shared-resource coordination,
+workspace lifecycle/cleanup, deployed proof and Luna adoption exercise. This does not claim the
+entire cross-device/Wasm roadmap is complete.

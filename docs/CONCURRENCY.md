@@ -100,10 +100,28 @@ keeps the active run's unsaved event tail in memory and serves it through owner-
 `record_turn` emits a checkpoint after each durable message; events before it are already represented by the
 transcript, so the refreshed page reloads through that message and then applies only the newer events. Tool-call
 ids let the page attach a replayed live call to its already-painted pending row, and message ids prevent a saved
-final reply from appearing twice. The replay tail is capped at 4 MiB per run and discarded when the run settles.
-If it fills before another checkpoint, the endpoint reports overflow and the UI says live replay is waiting for
-the next saved step. A process restart does not preserve the tail; the durable transcript remains the recovery
-source.
+final reply from appearing twice. File-backed servers persist admissions and emitted events in `<database>.run-journal.sqlite`.
+Run IDs remain unique across restarts. Events are committed before socket delivery; `/run-events`
+returns owner-scoped pages of up to 512 events after the latest transcript checkpoint. `next_seq`
+is the delivered cursor and `has_more` indicates another page. Evidence remains available after
+settlement and restart. In-memory test databases retain the earlier 4 MiB transient replay behavior.
+
+A separate `<database>.run-lease.sqlite` holds an exclusive SQLite lock for the server lifetime.
+A second server using that database refuses startup; OS lock release after process death permits
+recovery. On restart, queued admissions become `not_started`, and executing admissions become
+`unknown`. Neither is automatically executed. `POST /runs {action:"inspect",thread,run_id}` returns
+the original request and recovery guidance to its owner, including requests that never reached the
+transcript. The recovery policy stays in Lua: inspect transcript/operations/effects before deciding
+whether a new continuation is safe. `completed` means execution settled, not verified task success;
+an emitted error settles as `failed`. Cancellation remains a request until settlement.
+
+Risk: full stream evidence increases disk writes and storage. SQLite uses FULL synchronous commits;
+this favors recovery correctness over unmeasured throughput. There is no automatic evidence pruning
+in this slice. Back up both the transcript and run journal. This is a server ownership lease, not an
+OS sandbox or a claim that independently launched CLI writers are serialized by the HTTP scheduler.
+The process-kill fixture `scripts/test-run-recovery.cjs` proves restart, no automatic replay, original
+queued request preservation, stable IDs/cursors, ownership denial and duplicate-server refusal with
+real processes and mock inference.
 
 ## Subagents are a control call
 
