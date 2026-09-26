@@ -1976,6 +1976,55 @@ $harness = @'
   check(!!imagePost && imagePayload.images && imagePayload.images.length === 1 && imagePayload.images[0].name === "shot-0.png",
     "the visible user-turn image must also be the image sent to the node");
   for (var finishImageSend = 0; finishImageSend < 20; finishImageSend++) await tick();
+  await window.__refreshTasks();
+  var taskPanel=document.querySelector('#tasks-box wa-tasks');
+  check(taskPanel.querySelectorAll('.task-card').length===2, 'tasks: both child records are visible');
+  check(taskPanel.textContent.includes('investigate A') && taskPanel.textContent.includes('investigate B'), 'tasks: objectives are attributable');
+  check(!taskPanel.querySelector('img'), 'tasks: objective text is never HTML');
+  var cancelButtons=Array.from(taskPanel.querySelectorAll('button')).filter(b=>b.textContent==='Cancel task');
+  check(cancelButtons.length===1,'tasks: only unsettled child has cancellation');
+  cancelButtons[0].click();
+  for(var ti=0;ti<80;ti++) await tick();
+  check(window.__calls.some(c=>c.url==='subagents' && c.body.includes('"action":"cancel"') && c.body.includes('"subagent_id":"child-a"')),
+    'tasks: cancel names exactly the selected child');
+  Array.from(taskPanel.querySelectorAll('button')).find(b=>b.textContent==='Inspect result').click();
+  for(var ti=0;ti<80;ti++) await tick();
+  check(taskPanel.querySelector('.task-evidence').textContent.includes('verified fixture result'),'tasks: actual result is inspectable');
+  window.__holdTaskStart=true;
+  taskPanel.prompt.value='new bounded investigation';
+  taskPanel.form.dispatchEvent(new Event('submit',{cancelable:true}));
+  for(var ti=0;ti<80;ti++) await tick();
+  await window.__refreshTasks();
+  check(taskPanel.start.disabled,'tasks: polling cannot admit a duplicate submission while the response is pending');
+  window.__releaseTaskStart(); window.__holdTaskStart=false;
+  for(var ti=0;ti<80;ti++) await tick();
+  var taskStart=window.__calls.filter(c=>c.url==='subagents' && c.body.includes('"action":"start"')).pop();
+  check(taskStart && JSON.parse(taskStart.body).thread && JSON.parse(taskStart.body).idempotency_key,
+    'tasks: start binds a parent and a deduplication key');
+  window.__taskFailure=true;
+  await window.__refreshTasks();
+  check(taskPanel.querySelectorAll('.task-card').length===2 && taskPanel.notice.textContent.includes('unavailable'),
+    'tasks: failed refresh keeps prior evidence and shows the failure');
+  window.__taskFailure=false;
+  window.__fixtures.runs.runs=[{run_id:99,state:'unknown'}];
+  await window.__refreshTasks();
+  check(taskPanel.textContent.includes('Inspect effects before continuing.') &&
+    !Array.from(taskPanel.querySelectorAll('button')).some(b=>b.textContent==='Cancel run'),
+    'tasks: interrupted runs require inspection and cannot be presented as cancellable live work');
+  window.__fixtures.runs.runs=[];
+  await window.__openSessionById('aaaaaaaa-0000-0000-0000-000000000001');
+  check(Array.from(document.querySelectorAll('#sessions-box button')).some(b=>b.textContent==='Fork here'),
+    'fork: transcript offers explicit message boundaries');
+  var forkButton=Array.from(document.querySelectorAll('#sessions-box button')).find(b=>b.textContent==='Fork here');
+  window.__fixtures['session/fork']={error:'incomplete_tool_exchange'};
+  forkButton.click();
+  for(var ti=0;ti<80;ti++) await tick();
+  var forkCall=window.__calls.filter(c=>c.url==='session/fork').pop();
+  check(forkCall && Number.isInteger(JSON.parse(forkCall.body).before_seq) &&
+    JSON.parse(forkCall.body).session_id==='aaaaaaaa-0000-0000-0000-000000000001',
+    'fork: request names the source and explicit boundary');
+  check(document.body.textContent.includes('incomplete_tool_exchange') && !forkButton.disabled,
+    'fork: refused tool boundary stays visible and retryable');
   document.title = "stage: end";
 } catch (error) {
     // A throw must still produce a log: a reporter that swallows its own failure is worse
@@ -2011,6 +2060,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
+Add-Content -Path $app -Value "`nwindow.__refreshTasks=refreshTasks; window.__openSessionById=openSessionById;"
 Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', mime: 'image/png', data: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__cancelActiveRun = cancelActiveRun; window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker; window.__updateNotice = updateNotice; window.__refreshOperationProgress = refreshOperationProgress; window.__watch = watch;"
 Add-Content -Path $app -Value "`nwindow.__cancelRunForTest = cancelRun;"
 

@@ -89,6 +89,12 @@ window.__fixtures = {
   // fixture so Stop must prove the node accepted cancellation before changing its UI state.
   runs: { ok: true, conversation: "fixture", runs: [], cancelled: false },
   runsCancelRefuse: false,
+  subagents: {subagents:[{subagent_id:'child-a',session_id:'child-session-a',parent_session_id:'aaaaaaaa-0000-0000-0000-000000000001',
+    profile:'explore',prompt:'<img src=x onerror=alert(1)> investigate A',state:'running',settled:false},
+    {subagent_id:'child-b',session_id:'child-session-b',parent_session_id:'aaaaaaaa-0000-0000-0000-000000000001',
+    profile:'explore',prompt:'investigate B',state:'cancelled',settled:true}]},
+  taskProfiles:{profiles:[{id:'explore',description:'Read-only investigation',available:true}]},
+  'session/fork':{ok:true,session_id:'fork-fixture',workspace:{state:'allocated'}},
   // `POST /operation` with `action:'read'`: the running operation's output page. The progress
   // check overwrites this with the line it wants to see.
   operation: { content: "", offset: 0, next_offset: 0, bytes: 0, eof: true },
@@ -223,7 +229,19 @@ window.fetch = function (input, init) {
   // A relative fetch like "nodes" has no slash at all: keep it as the path.
   path = slashAt >= 0 ? path.slice(slashAt + 1) : path;
   if (path.endsWith("/")) path = path.slice(0, -1);
+  if (path === 'subagents' && init?.method === 'POST') {
+    const request=JSON.parse(init.body);
+    if (window.__taskFailure) return Promise.resolve({ok:false,status:503,json:()=>Promise.resolve({error:'fixture task service unavailable'})});
+    if (request.action==='start' && window.__holdTaskStart) return new Promise(resolve=>{window.__releaseTaskStart=()=>resolve({ok:true,status:200,json:()=>Promise.resolve({subagent_id:'new-child',state:'queued'})});});
+    const value=request.action==='profiles' ? window.__fixtures.taskProfiles :
+      request.action==='list' ? window.__fixtures.subagents :
+      request.action==='result' ? {subagent_id:request.subagent_id,state:'completed',settled:true,result:{text:'verified fixture result'}} :
+      {subagent_id:request.subagent_id || 'new-child',state:'accepted',settled:false};
+    return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve(value)});
+  }
   if ((path === "runs" || path.endsWith("/runs")) && init?.method === "POST") {
+    if(JSON.parse(init.body).action==='status') return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve(window.__fixtures.runs)});
+    if(JSON.parse(init.body).action==='inspect') return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve({request:{prompt:'interrupted request'},state:'unknown'})});
     if (window.__fixtures.runsCancelRefuse) {
       return Promise.resolve({ ok: false, status: 404,
         json: () => Promise.resolve({ error: "run_not_found" }) });
