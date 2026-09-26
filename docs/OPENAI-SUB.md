@@ -13,8 +13,8 @@ Node and a current Pi installation are required on the machine running the node.
 when automatic discovery cannot find it. `PI_CODING_AGENT_DIR` overrides Pi's agent
 directory (normally `.pi/agent` beneath the host's home directory).
 
-The status balloon reads the account's 5-hour and weekly quota windows through
-Codex's private `/wham/usage` endpoint. Pi resolves and refreshes the OAuth token;
+The status balloon reads the account's 5-hour, weekly, and monthly quota windows through
+Codex's private `/wham/usage` endpoint when the account response exposes them. Pi resolves and refreshes the OAuth token;
 wasm-agent keeps the token inside its short-lived bridge process. If the endpoint
 or account response changes, the balloon reports limits unavailable.
 

@@ -30,7 +30,8 @@ try {
       assert.equal(options.headers.Authorization,'Bearer fixture-access-token');
       return {ok:true,status:200,async json() {return {rate_limit:{
         primary_window:{used_percent:23,limit_window_seconds:18000,reset_at:2000000000},
-        secondary_window:{used_percent:71,limit_window_seconds:604800,reset_at:2000003600}
+        secondary_window:{used_percent:71,limit_window_seconds:604800,reset_at:2000003600},
+        monthly_window:{used_percent:84,limit_window_seconds:2592000,reset_at:2000007200}
       }}}};
     };
     export function createModels({credentials}) {
@@ -95,6 +96,7 @@ try {
   assert.equal(limits.status,0,limits.stdout);
   assert.deepEqual(limits.events[0].limits,{rolling:{status:'available',percent:23,
     resetsAt:'2033-05-18T03:33:20.000Z'},weekly:{status:'available',percent:71,
-    resetsAt:'2033-05-18T04:33:20.000Z'}});
+    resetsAt:'2033-05-18T04:33:20.000Z'},monthly:{status:'available',percent:84,
+    resetsAt:'2033-05-18T05:33:20.000Z'}});
   console.log('PASS OpenAI subscription bridge: messages, images, tools, stream, usage, limits and visible failures');
 } finally {fs.rmSync(root,{recursive:true,force:true});}
