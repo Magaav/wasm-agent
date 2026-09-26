@@ -280,6 +280,19 @@ impl Manager {
             let elapsed = entry.started.elapsed();
             if state["settled"] != true {
                 state["elapsed_ms"] = json!(elapsed.as_millis() as u64);
+                state["remaining_ms"] = json!(entry.deadline_ms.load(Ordering::Acquire)
+                    .saturating_sub(elapsed.as_millis() as u64));
+                state["shell_exited"] = json!(state["process_exit_code"].is_number());
+                state["waiting_for"] = json!(if state["state"] == "draining" {
+                    "output_and_cleanup"
+                } else if state["promoted"] == true {
+                    "descendants"
+                } else {
+                    "command"
+                });
+                if let Some(last) = state["last_output_elapsed_ms"].as_u64() {
+                    state["output_idle_ms"] = json!((elapsed.as_millis() as u64).saturating_sub(last));
+                }
             }
             state["overdue"] = json!(
                 !state["settled"].as_bool().unwrap_or(false)
@@ -434,6 +447,8 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
                         files[index].write_all(&clean)?;
                         tail(&mut views[index], &clean);
                         bytes += keep;
+                        entry.state.lock().unwrap()["last_output_elapsed_ms"] =
+                            json!(entry.started.elapsed().as_millis() as u64);
                         if keep < n {
                             reason.get_or_insert("output_limit_exceeded".to_string());
                             break;
