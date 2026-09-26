@@ -1,0 +1,142 @@
+#!/usr/bin/env sh
+# Termux launcher for the wasm-agent developer preview.
+set -eu
+
+install_root=${WA_TERMUX_INSTALL:-"${PREFIX:-/data/data/com.termux/files/usr}/opt/wasm-agent-preview"}
+native="$install_root/wa"
+ui="$install_root/ui"
+config_root=${WASM_AGENT_HOME:-"$HOME"}
+config="$config_root/.wasm-agent"
+
+fail() {
+  printf '%s\n' "termux: $*" >&2
+  exit 1
+}
+
+config_value() {
+  key=$1
+  [ -f "$config/env" ] || return 0
+  sed -n "s/^${key}=//p" "$config/env" | head -n 1
+}
+
+need_runtime() {
+  [ -x "$native" ] || fail "runtime_missing: run scripts/install-termux.sh from a wasm-agent checkout"
+}
+
+valid_line() {
+  [ -n "$1" ] && [ "$(printf '%s' "$1" | wc -l)" -eq 0 ]
+}
+
+read_value() {
+  label=$1
+  default=${2:-}
+  if [ -n "$default" ]; then
+    printf '%s [%s]: ' "$label" "$default" >&2
+  else
+    printf '%s: ' "$label" >&2
+  fi
+  IFS= read -r answer || fail "input_closed"
+  [ -n "$answer" ] || answer=$default
+  valid_line "$answer" || fail "invalid_value: $label"
+  printf '%s' "$answer"
+}
+
+setup() {
+  need_runtime
+  mkdir -p "$config"
+  chmod 700 "$config"
+  saved_workspace=$(config_value WASM_AGENT_WORKSPACE)
+  current_workspace=${WASM_AGENT_WORKSPACE:-${saved_workspace:-"$HOME"}}
+  name=$(read_value "Agent display name" "Android agent")
+  workspace=$(read_value "Full path to an existing workspace" "$current_workspace")
+  [ "${workspace#/}" != "$workspace" ] || fail "workspace_must_be_absolute"
+  [ -d "$workspace" ] || fail "workspace_not_found: $workspace"
+  base_url=$(read_value "Compatible provider URL" "https://api.openai.com/v1")
+  case "$base_url" in
+    https://*|http://127.0.0.1:*|http://localhost:*) ;;
+    *) fail "provider_url_requires_https_or_loopback_http" ;;
+  esac
+  model=$(read_value "Model name" "gpt-5")
+  printf 'API key (input hidden; leave empty to preserve the existing key): ' >&2
+  old_stty=$(stty -g 2>/dev/null || true)
+  [ -z "$old_stty" ] || stty -echo
+  IFS= read -r api_key || api_key=
+  [ -z "$old_stty" ] || stty "$old_stty"
+  printf '\n' >&2
+  valid_line "$name" && valid_line "$base_url" && valid_line "$model" || fail "invalid_setup_value"
+
+  old_key=$(config_value WASM_AGENT_LLM_API_KEY)
+  [ -n "$api_key" ] || api_key=$old_key
+  [ -n "$api_key" ] || fail "api_key_required_on_first_setup"
+
+  temporary="$config/.env.$$"
+  umask 077
+  : > "$temporary"
+  chmod 600 "$temporary"
+  {
+    printf 'WASM_AGENT_ONBOARDING_MODE=personal\n'
+    printf 'WASM_AGENT_DISPLAY_NAME=%s\n' "$name"
+    printf 'WASM_AGENT_WORKSPACE=%s\n' "$workspace"
+    printf 'WASM_AGENT_LLM_BASE_URL=%s\n' "$base_url"
+    printf 'WASM_AGENT_LLM_MODEL=%s\n' "$model"
+    printf 'WASM_AGENT_LLM_API_KEY=%s\n' "$api_key"
+  } > "$temporary"
+  mv "$temporary" "$config/env"
+  chmod 600 "$config/env"
+  printf '%s\n' "Configuration saved in $config/env. Provider not validated."
+  printf '%s\n' "Run 'wa ui' to start the local node and open its browser UI."
+}
+
+doctor() {
+  need_runtime
+  printf 'Runtime: %s\n' "$native"
+  printf 'Architecture: %s\n' "$(uname -m)"
+  printf 'UI assets: %s\n' "$(if [ -f "$ui/index.html" ]; then printf present; else printf missing; fi)"
+  printf 'Configuration: %s\n' "$(if [ -f "$config/env" ]; then printf present; else printf "missing; run wa setup"; fi)"
+  printf 'ripgrep: %s\n' "$(if command -v rg >/dev/null 2>&1; then command -v rg; else printf missing; fi)"
+  printf '%s\n' 'Authority: Termux app sandbox; this workspace is not an additional filesystem sandbox.'
+  [ -f "$ui/index.html" ] && command -v rg >/dev/null 2>&1 && [ -f "$config/env" ]
+}
+
+open_ui() {
+  need_runtime
+  [ -f "$ui/index.html" ] || fail "ui_assets_missing"
+  port=8799
+  no_open=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --port) [ "$#" -ge 2 ] || fail "port_value_required"; port=$2; shift 2 ;;
+      --no-open) no_open=1; shift ;;
+      *) fail "unknown_ui_option: $1" ;;
+    esac
+  done
+  case "$port" in *[!0-9]*|'') fail "invalid_port" ;; esac
+  [ "$port" -ge 1024 ] && [ "$port" -le 65534 ] || fail "invalid_port"
+  url="http://127.0.0.1:$port/"
+  if [ "$no_open" -eq 0 ]; then
+    if command -v termux-open-url >/dev/null 2>&1; then
+      (sleep 1; termux-open-url "$url" >/dev/null 2>&1 || true) &
+    else
+      printf 'Open %s in this phone browser.\n' "$url"
+    fi
+  fi
+  printf 'Starting wasm-agent at %s; keep this Termux session running.\n' "$url"
+  saved_workspace=$(config_value WASM_AGENT_WORKSPACE)
+  workspace=${WASM_AGENT_WORKSPACE:-${saved_workspace:-"$HOME"}}
+  [ -d "$workspace" ] || fail "workspace_not_found: $workspace"
+  cd "$workspace"
+  exec "$native" serve --port "$port" --client-port "$((port + 1))" --ui "$ui"
+}
+
+command=${1:-help}
+[ "$#" -eq 0 ] || shift
+case "$command" in
+  setup) setup "$@" ;;
+  doctor) doctor "$@" ;;
+  ui) open_ui "$@" ;;
+  help|--help|-h)
+    printf '%s\n' 'Termux preview: wa setup | wa doctor | wa ui [--port N] [--no-open]'
+    printf '%s\n' 'All other commands are passed to the native wasm-agent CLI.'
+    ;;
+  *) need_runtime; exec "$native" "$command" "$@" ;;
+esac

@@ -130,6 +130,30 @@ own credentials with restricted file permissions; guest mode stays disconnected.
 See the [candidate guide](docs/release/RUNTIME.md) and
 [release status](docs/release/RELEASE_STATUS.md) for instructions and verification.
 
+### Android / Termux developer preview
+
+An Android arm64 phone can build and run the local agent inside
+[Termux](https://termux.dev/). This is a source-based developer preview, not an
+APK, Play Store release, background Android service, or unrestricted controller
+of other apps. It runs with Termux's Android app authority and serves the existing
+UI only on the phone's loopback interface.
+
+Clone this repository in Termux, check out the revision you intend to run, then:
+
+```sh
+bash scripts/install-termux.sh
+wa setup
+wa doctor
+wa ui
+```
+
+The installer obtains build prerequisites through Termux `pkg`, builds the locked
+Rust workspace on the phone, and installs it under `$PREFIX/opt`. `wa ui` remains
+in the foreground and opens `http://127.0.0.1:8799/`; keep that Termux session
+running. Reinstallation currently refuses an existing preview so it cannot
+overwrite a running or stateful installation silently. Agent state and credentials
+live under `~/.wasm-agent`, outside the replaceable runtime directory.
+
 ### Model-free assisted onboarding
 
 `scripts/bootstrap-windows.ps1` installs a checksum-pinned package in the background

@@ -1415,6 +1415,15 @@ node scripts/test-source-ensure.cjs
 bash scripts/test-deploy-ship.sh
 node scripts/test-source-ensure.cjs
 
+# The Android build itself needs Termux, but its installer and launcher contracts
+# are hermetic: setup preserves an existing secret, keeps the env private, UI
+# arguments reach the native runtime, and both shell entrypoints parse.
+bash scripts/test-termux.sh
+case "$(uname -o 2>/dev/null || true)" in
+  Android) ;;
+  *) SKIPPED=$((SKIPPED + 1)) ;;
+esac
+
 # The UI tests are JS and run outside the embedded interpreter, so they need node
 # and they need the repo root as cwd (they read ui/app.js from disk). A test that does
 # not run must not look like one that passed, so a skip is counted and asked for: if
