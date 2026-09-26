@@ -20,7 +20,7 @@ if (-not (Test-Path (Join-Path $ui "index.html"))) { Write-Host "  !  no ui/ in 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("wa-ui-test-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 $db = Join-Path $tmp "ui-test.db"
-foreach ($name in @("index.html", "style.css", "app.js", "components.js", "render.wasm")) {
+foreach ($name in @("index.html", "style.css", "app.js", "components.js", "render.wasm", "manifest.webmanifest", "service-worker.js", "icon-192.png", "icon-512.png")) {
   $from = Join-Path $ui $name
   if (Test-Path $from) { Copy-Item $from (Join-Path $tmp $name) }
 }

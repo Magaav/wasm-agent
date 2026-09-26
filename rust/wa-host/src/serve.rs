@@ -2404,9 +2404,22 @@ fn content_type(path: &str) -> &'static str {
         "js" => "text/javascript; charset=utf-8",
         "css" => "text/css; charset=utf-8",
         "json" => "application/json; charset=utf-8",
+        "webmanifest" => "application/manifest+json; charset=utf-8",
         "wasm" => "application/wasm",
         "svg" => "image/svg+xml",
+        "png" => "image/png",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod content_type_tests {
+    use super::content_type;
+
+    #[test]
+    fn pwa_assets_have_browser_types() {
+        assert_eq!(content_type("manifest.webmanifest"), "application/manifest+json; charset=utf-8");
+        assert_eq!(content_type("icon-192.png"), "image/png");
     }
 }
 
