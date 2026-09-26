@@ -4141,6 +4141,18 @@ function renderSessions() {
       const workspace=document.createElement('span'); workspace.className='session-meta';
       workspace.textContent='workspace: '+(session.workspace_state || 'unknown');
       workspace.title=session.worktree || session.workspace_error || ''; row.append(workspace);
+      if(['allocated','releasing','release_unknown'].includes(session.workspace_state)) {
+        const release=nodeButton('Release clean workspace',async()=>{
+          release.disabled=true;
+          try {
+            await taskRequest('session/worktree',{session_id:session.id,action:'release'});
+            await refreshSessions();
+          } catch(error) { workspace.textContent='Workspace release refused: '+error.message; }
+          finally { release.disabled=false; }
+        });
+        release.title='Remove only a verified clean, inactive, merged worktree. The branch and transcript remain.';
+        row.append(release);
+      }
     }
     // Only where there is something to recover, and named as what it does: the node's own words for
     // this are "continue where you stopped". A running turn has nothing to recover yet.

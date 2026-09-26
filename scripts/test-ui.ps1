@@ -2012,6 +2012,20 @@ $harness = @'
     !Array.from(taskPanel.querySelectorAll('button')).some(b=>b.textContent==='Cancel run'),
     'tasks: interrupted runs require inspection and cannot be presented as cancellable live work');
   window.__fixtures.runs.runs=[];
+  window.__fixtures.sessions.sessions[0].workspace_required=1;
+  window.__fixtures.sessions.sessions[0].workspace_state='allocated';
+  window.__fixtures['session/worktree']={error:'resource_busy'};
+  await window.__refreshSessionsForRelease();
+  var releaseWorkspace=Array.from(document.querySelectorAll('.session-row button')).find(b=>b.textContent==='Release clean workspace');
+  check(!!releaseWorkspace,'workspace: allocated session offers explicit cleanup');
+  releaseWorkspace.click();
+  for(var ti=0;ti<80;ti++) await tick();
+  var releaseCall=window.__calls.filter(c=>c.url==='session/worktree').pop();
+  check(releaseCall && JSON.parse(releaseCall.body).action==='release' &&
+    JSON.parse(releaseCall.body).session_id===window.__fixtures.sessions.sessions[0].id,
+    'workspace: release targets exactly the selected session');
+  check(document.getElementById('sessions-box').textContent.includes('Workspace release refused: resource_busy'),
+    'workspace: active-owner refusal remains visible');
   await window.__openSessionById('aaaaaaaa-0000-0000-0000-000000000001');
   check(Array.from(document.querySelectorAll('#sessions-box button')).some(b=>b.textContent==='Fork here'),
     'fork: transcript offers explicit message boundaries');
@@ -2023,7 +2037,7 @@ $harness = @'
   check(forkCall && Number.isInteger(JSON.parse(forkCall.body).before_seq) &&
     JSON.parse(forkCall.body).session_id==='aaaaaaaa-0000-0000-0000-000000000001',
     'fork: request names the source and explicit boundary');
-  check(document.body.textContent.includes('incomplete_tool_exchange') && !forkButton.disabled,
+  check(document.querySelector('.chat-content-run-label')?.textContent.includes('incomplete_tool_exchange') && !forkButton.disabled,
     'fork: refused tool boundary stays visible and retryable');
   document.title = "stage: end";
 } catch (error) {
@@ -2061,6 +2075,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
 Add-Content -Path $app -Value "`nwindow.__refreshTasks=refreshTasks; window.__openSessionById=openSessionById;"
+Add-Content -Path $app -Value "`nwindow.__refreshSessionsForRelease=refreshSessions;"
 Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', mime: 'image/png', data: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__cancelActiveRun = cancelActiveRun; window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker; window.__updateNotice = updateNotice; window.__refreshOperationProgress = refreshOperationProgress; window.__watch = watch;"
 Add-Content -Path $app -Value "`nwindow.__cancelRunForTest = cancelRun;"
 

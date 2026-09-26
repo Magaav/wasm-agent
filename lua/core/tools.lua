@@ -260,8 +260,8 @@ M.admin = {
     session_id = { type = "string", description = "Defaults to the current session." } }),
   -- Master only: it changes where a session's shell and file tools point, so it can move a
   -- guest's tools outside the tree a guest was scoped to.
-  schema("session_worktree", "Inspect or allocate a session-owned git worktree. `allocate`/`recover` creates or reconciles a clean worktree from its fork/parent session; dirty source trees fail visibly and are never copied implicitly. Required isolated workspaces cannot be cleared or manually redirected, and write-capable tools never fall back to the node checkout.", {
-    action = { type = "string", enum = { "status", "allocate", "recover", "set", "clear" } },
+  schema("session_worktree", "Inspect or allocate a session-owned git worktree. `allocate`/`recover` creates or reconciles a clean worktree from its fork/parent session; dirty source trees fail visibly. `release` removes only a clean, inactive, merged managed worktree, retaining its branch and transcript; use the Engine or another conversation, never the run being removed. Required workspaces cannot be manually redirected or fall back to the node checkout.", {
+    action = { type = "string", enum = { "status", "allocate", "recover", "release", "set", "clear" } },
     path = { type = "string", description = "set: an existing directory for a legacy non-managed session." },
     session_id = { type = "string", description = "Defaults to the current session." } }, { "action" }),
   schema("resource", "Inspect durable resource claims. Reconcile only after checking the recorded owner's effects; name the exact key, run, principal and evidence. Live owners cannot be released. No automatic timeout or effect replay.", {
@@ -953,6 +953,10 @@ function M.dispatch(memory, name, args, role, ctx)
     local action = args.action or "status"
     if action == "status" then
       return { session_id = id, worktree = memory.session_worktree(id), workspace = workspace }
+    elseif action=='release' then
+      local released,why,detail=workspaces.release(memory,id,user_id)
+      if not released then return {error=why,detail=detail,session_id=id} end
+      return {ok=true,session_id=id,workspace=released,branch_retained=true}
     elseif action == "allocate" or action == "recover" then
       local source_id = record.fork_parent_id
       if not source_id or source_id == "" then source_id = record.parent_session_id end
