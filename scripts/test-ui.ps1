@@ -2011,6 +2011,20 @@ $harness = @'
   check(taskPanel.textContent.includes('Inspect effects before continuing.') &&
     !Array.from(taskPanel.querySelectorAll('button')).some(b=>b.textContent==='Cancel run'),
     'tasks: interrupted runs require inspection and cannot be presented as cancellable live work');
+  window.__fixtures.subagents.subagents.reverse();
+  var oldTaskPrompt=window.__fixtures.subagents.subagents[0].prompt;
+  var longTaskPrompt='Full objective remains available. '.repeat(20);
+  window.__fixtures.subagents.subagents[0].prompt=longTaskPrompt;
+  await window.__refreshTasks();
+  check(taskPanel.list.querySelector('.task-card').dataset.state==='running',
+    'tasks: active work precedes retained history regardless of response order');
+  var history=taskPanel.list.querySelector('.task-history');
+  check(history && !history.open && history.querySelectorAll('.task-card').length===1,
+    'tasks: settled history remains inspectable without burying active work');
+  check(history.querySelector('.task-objective p').textContent===longTaskPrompt,
+    'tasks: a folded objective preserves its full original text');
+  window.__fixtures.subagents.subagents[0].prompt=oldTaskPrompt;
+  window.__fixtures.subagents.subagents.reverse();
   window.__fixtures.runs.runs=[];
   await window.__openSessionById('aaaaaaaa-0000-0000-0000-000000000001');
   check(Array.from(document.querySelectorAll('#sessions-box button')).some(b=>b.textContent==='Fork here'),
