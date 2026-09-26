@@ -2012,7 +2012,9 @@ function renderLimits() {
   if (!shown) {
     const none = document.createElement("span");
     none.className = "usage-note";
-    none.textContent = "limits unavailable";
+    none.textContent = settings.limits_error
+      ? "limits unavailable · " + settings.limits_error
+      : "limits unavailable";
     limitsBox.append(none);
   }
 }

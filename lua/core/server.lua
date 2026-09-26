@@ -980,6 +980,7 @@ function wa_model(node, session, chat_session)
       models = provider.list_models(item.id),
     }
   end
+  local limits, limits_error = provider.limits()
   return json.encode({
     provider = settings.provider,
     model = settings.model,
@@ -993,7 +994,8 @@ function wa_model(node, session, chat_session)
     compact_reserve=budget.reserve,
     compact_keep=budget.keep,
     compact_trigger=budget.trigger,
-    limits = provider.limits(),
+    limits = limits,
+    limits_error = limits_error,
     -- The window for the model that is actually selected, from the same place compaction
     -- reads it. It used to read WASM_AGENT_LLM_CONTEXT directly, so the balloon and
     -- compaction could disagree - and the balloon showed a number no model had.

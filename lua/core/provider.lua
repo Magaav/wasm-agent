@@ -250,24 +250,35 @@ end
 -- `monthly` = 30d), each `{status, percent, resetsAt}`. Cached briefly.
 function M.limits()
   local provider = M.active()
-  if provider.api_key == "" then return {} end
+  local configured = provider.id == "openai-sub" and subscription.configured() or provider.api_key ~= ""
+  if not configured then return {}, "provider not configured" end
   local now = (host and host.now and host.now()) or 0
-  if M._limits and (now - (M._limits_at or 0)) < 30 then return M._limits end
+  local cache_key = provider.id .. "\n" .. provider.base_url
+  if M._limits and M._limits_key == cache_key and (now - (M._limits_at or 0)) < 30 then
+    return M._limits, M._limits_error
+  end
   local limits = {}
-  pcall(function()
-    local url = provider.base_url:gsub("/+$", "") .. "/usage"
-    local headers = headers_for(provider)
-    local response = json.decode(host.http("GET", url, json.encode(headers), ""))
-    if response and tonumber(response.status) == 200 then
-      local ok, payload = pcall(json.decode, response.body)
-      if ok and type(payload) == "table" and type(payload.usage) == "table" then
-        limits = payload.usage
+  local ok, err = pcall(function()
+    if provider.id == "openai-sub" then
+      limits = subscription.limits()
+    else
+      local url = provider.base_url:gsub("/+$", "") .. "/usage"
+      local headers = headers_for(provider)
+      local response = json.decode(host.http("GET", url, json.encode(headers), ""))
+      if response and tonumber(response.status) == 200 then
+        local ok, payload = pcall(json.decode, response.body)
+        if ok and type(payload) == "table" and type(payload.usage) == "table" then
+          limits = payload.usage
+        end
       end
     end
   end)
   M._limits = limits
+  M._limits_error = nil
+  if not ok then M._limits_error = redact.text(tostring(err)) end
+  M._limits_key = cache_key
   M._limits_at = now
-  return limits
+  return limits, M._limits_error
 end
 
 -- Prompt-cache routing. Providers cache the *prefix* of a request (system +

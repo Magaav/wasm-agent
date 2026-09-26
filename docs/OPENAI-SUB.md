@@ -13,12 +13,18 @@ Node and a current Pi installation are required on the machine running the node.
 when automatic discovery cannot find it. `PI_CODING_AGENT_DIR` overrides Pi's agent
 directory (normally `.pi/agent` beneath the host's home directory).
 
+The status balloon reads the account's 5-hour and weekly quota windows through
+Codex's private `/wham/usage` endpoint. Pi resolves and refreshes the OAuth token;
+wasm-agent keeps the token inside its short-lived bridge process. If the endpoint
+or account response changes, the balloon reports limits unavailable.
+
 The bridge runs as a supervised operation: streamed text and reasoning are forwarded,
 tool calls return to the Lua agent, and cancellation/deadlines stop the process.
 The model window is Pi's subscription catalog's 272,000 tokens, rather than assuming
 the public API's larger window. Subscription access still depends on the account.
 
-Risk: this intentionally depends on Pi's installed adapter API. Update Pi to a version
-whose catalog includes the GPT-6 family; incompatible/missing dependencies fail visibly.
+Risk: this intentionally depends on Pi's installed adapter API and OpenAI's private usage
+endpoint. Update Pi to a version whose catalog includes the GPT-6 family; incompatible/missing
+dependencies fail visibly.
 The graph audit does not resolve calls inside the embedded JavaScript string;
 the bridge's offline contract test and real subscription exchanges cover that boundary.
