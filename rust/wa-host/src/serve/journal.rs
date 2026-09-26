@@ -92,7 +92,7 @@ impl Journal {
         tx.commit().map_err(|e| e.to_string())
     }
 
-    pub fn replay(&self, owner: &str, conversation: &str, id: u64, after: u64) -> Result<Option<Value>, String> {
+    pub fn replay(&self, owner: &str, conversation: &str, id: u64, after: u64, archive: bool) -> Result<Option<Value>, String> {
         use rusqlite::OptionalExtension;
         let db = self.db.lock().map_err(|e| e.to_string())?;
         let state = db.query_row("SELECT state FROM admissions WHERE id=? AND owner=? AND conversation=?",
@@ -109,9 +109,12 @@ impl Journal {
         // end of the archive, so a client cannot skip an undisplayed page.
         let mut stmt = db.prepare("SELECT seq,payload FROM events WHERE run_id=? AND seq>? ORDER BY seq LIMIT 512")
             .map_err(|e| e.to_string())?;
-        let rows = stmt.query_map(params![id,after.max(checkpoint_seq)], |row| Ok((row.get::<_,u64>(0)?,row.get::<_,String>(1)?)))
+        // Reconnect starts after the transcript checkpoint; evidence inspection
+        // must also expose earlier partial output that a failed turn did not save.
+        let start=if archive {after} else {after.max(checkpoint_seq)};
+        let rows = stmt.query_map(params![id,start], |row| Ok((row.get::<_,u64>(0)?,row.get::<_,String>(1)?)))
             .map_err(|e| e.to_string())?;
-        let mut next = after.max(checkpoint_seq);
+        let mut next = start;
         let mut events = Vec::new();
         for row in rows {
             let (seq,payload) = row.map_err(|e|e.to_string())?;
@@ -119,7 +122,7 @@ impl Journal {
             next = seq;
         }
         let latest: u64 = db.query_row("SELECT COALESCE(MAX(seq),0) FROM events WHERE run_id=?", [id], |row|row.get(0)).map_err(|e|e.to_string())?;
-        Ok(Some(json!({"ok":true,"run_id":id,"state":state,"durable":true,
+        Ok(Some(json!({"ok":true,"run_id":id,"state":state,"durable":true,"archive":archive,
             "checkpoint_seq":checkpoint_seq,"checkpoint_message_seq":checkpoint_message_seq,
             "next_seq":next,"latest_seq":latest,"has_more":next<latest,"overflow":false,"events":events})))
     }
@@ -145,18 +148,24 @@ mod tests {
         let views = journal.views("alice","a").unwrap();
         assert_eq!(views[0]["state"],"unknown");
         assert_eq!(views[1]["state"],"not_started");
-        assert!(journal.replay("bob","a",running,0).unwrap().is_none());
-        assert!(journal.replay("alice","b",running,0).unwrap().is_none());
-        let replay = journal.replay("alice","a",running,0).unwrap().unwrap();
+        assert!(journal.replay("bob","a",running,0,false).unwrap().is_none());
+        assert!(journal.replay("alice","b",running,0,false).unwrap().is_none());
+        let replay = journal.replay("alice","a",running,0,false).unwrap().unwrap();
         assert_eq!(replay["checkpoint_message_seq"],4);
         assert_eq!(replay["events"][0]["event"]["text"],"unsaved evidence");
         assert!(journal.admit("alice","a").unwrap() > queued, "run IDs survive restart");
         for _ in 0..520 { journal.event(running,r#"{"type":"delta","text":"x"}"#).unwrap(); }
-        let page = journal.replay("alice","a",running,0).unwrap().unwrap();
+        let page = journal.replay("alice","a",running,0,false).unwrap().unwrap();
         assert_eq!(page["events"].as_array().unwrap().len(),512);
         assert_eq!(page["has_more"],true);
-        let tail = journal.replay("alice","a",running,page["next_seq"].as_u64().unwrap()).unwrap().unwrap();
+        let tail = journal.replay("alice","a",running,page["next_seq"].as_u64().unwrap(),false).unwrap().unwrap();
         assert_eq!(tail["events"].as_array().unwrap().len(),9);
+        journal.event(running,r#"{"type":"checkpoint","seq":5}"#).unwrap();
+        let reconnect=journal.replay("alice","a",running,0,false).unwrap().unwrap();
+        assert!(reconnect["events"].as_array().unwrap().is_empty());
+        let archive=journal.replay("alice","a",running,0,true).unwrap().unwrap();
+        assert_eq!(archive["events"][1]["event"]["text"],"unsaved evidence");
+        assert_eq!(archive["has_more"],true);
         drop(journal);
         std::fs::remove_dir_all(root).unwrap();
     }

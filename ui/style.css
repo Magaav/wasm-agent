@@ -935,6 +935,8 @@ wa-tasks summary { cursor: pointer; padding: var(--space); }
 .task-card { padding: var(--pad); border: 1px solid var(--line); border-radius: var(--radius-sm); overflow-wrap: anywhere; }
 .task-card p { margin: var(--space) 0; color: var(--muted); }
 .task-card strong { display: block; white-space: pre-wrap; }
+.task-objective summary { font-weight: bold; }
+.task-history .task-card { margin-top: var(--space); }
 .task-state { color: var(--accent); }
 .task-card[data-state="unknown"] .task-state, .task-card[data-state="failed"] .task-state { color: var(--warn); }
 .task-actions { display: flex; flex-wrap: wrap; gap: var(--gap); }

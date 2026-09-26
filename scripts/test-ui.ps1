@@ -2001,6 +2001,31 @@ $harness = @'
   var taskStart=window.__calls.filter(c=>c.url==='subagents' && c.body.includes('"action":"start"')).pop();
   check(taskStart && JSON.parse(taskStart.body).thread && JSON.parse(taskStart.body).idempotency_key,
     'tasks: start binds a parent and a deduplication key');
+  // A failed start keeps its submission identity for an unchanged retry, but a new prompt is a new task.
+  taskPanel.prompt.value='retry this bounded investigation';
+  window.__taskFailure=true;
+  taskPanel.form.dispatchEvent(new Event('submit',{cancelable:true}));
+  for(var ti=0;ti<80;ti++) await tick();
+  var failedTaskStarts=window.__calls.filter(c=>c.url==='subagents' && c.body.includes('"action":"start"'));
+  var failedTaskBody=failedTaskStarts.length ? JSON.parse(failedTaskStarts[failedTaskStarts.length-1].body) : {};
+  check(taskPanel.notice.textContent.includes('unavailable'), 'tasks: a failed start is reported before retry');
+  window.__taskFailure=false;
+  taskPanel.form.dispatchEvent(new Event('submit',{cancelable:true}));
+  for(var ti=0;ti<80;ti++) await tick();
+  var retriedTaskStarts=window.__calls.filter(c=>c.url==='subagents' && c.body.includes('"action":"start"'));
+  var retriedTaskBody=retriedTaskStarts.length ? JSON.parse(retriedTaskStarts[retriedTaskStarts.length-1].body) : {};
+  check(failedTaskStarts.length+1===retriedTaskStarts.length && failedTaskBody.thread===retriedTaskBody.thread &&
+    failedTaskBody.profile===retriedTaskBody.profile && failedTaskBody.prompt===retriedTaskBody.prompt &&
+    !!failedTaskBody.idempotency_key && failedTaskBody.idempotency_key===retriedTaskBody.idempotency_key,
+    'tasks: retrying an unchanged failed start reuses its parent/profile/prompt idempotency key');
+  taskPanel.prompt.value='a different bounded investigation';
+  taskPanel.form.dispatchEvent(new Event('submit',{cancelable:true}));
+  for(var ti=0;ti<80;ti++) await tick();
+  var newTaskStarts=window.__calls.filter(c=>c.url==='subagents' && c.body.includes('"action":"start"'));
+  var newTaskBody=newTaskStarts.length ? JSON.parse(newTaskStarts[newTaskStarts.length-1].body) : {};
+  check(newTaskStarts.length===retriedTaskStarts.length+1 && newTaskBody.prompt!==retriedTaskBody.prompt &&
+    !!newTaskBody.idempotency_key && newTaskBody.idempotency_key!==retriedTaskBody.idempotency_key,
+    'tasks: changing the prompt for a new task uses a different idempotency key');
   window.__taskFailure=true;
   await window.__refreshTasks();
   check(taskPanel.querySelectorAll('.task-card').length===2 && taskPanel.notice.textContent.includes('unavailable'),
@@ -2011,7 +2036,44 @@ $harness = @'
   check(taskPanel.textContent.includes('Inspect effects before continuing.') &&
     !Array.from(taskPanel.querySelectorAll('button')).some(b=>b.textContent==='Cancel run'),
     'tasks: interrupted runs require inspection and cannot be presented as cancellable live work');
+  Array.from(taskPanel.querySelectorAll('button')).find(b=>b.textContent==='Inspect run').click();
+  for(var ti=0;ti<80;ti++) await tick();
+  check(taskPanel.evidence.textContent.includes('ARCHIVE-BEFORE-CHECKPOINT') && !taskPanel.more.hidden,
+    'tasks: inspection requests original output before checkpoints and exposes further pages');
+  taskPanel.more.click();
+  for(var ti=0;ti<80;ti++) await tick();
+  check(taskPanel.evidence.textContent.includes('ARCHIVE-BEFORE-CHECKPOINT') &&
+    taskPanel.evidence.textContent.includes('ARCHIVE-SECOND-PAGE') && taskPanel.more.hidden,
+    'tasks: subsequent archive pages preserve already inspected evidence');
+  window.__fixtures.subagents.subagents.reverse();
+  var oldTaskPrompt=window.__fixtures.subagents.subagents[0].prompt;
+  var longTaskPrompt='Full objective remains available. '.repeat(20);
+  window.__fixtures.subagents.subagents[0].prompt=longTaskPrompt;
+  await window.__refreshTasks();
+  check(taskPanel.list.querySelector('.task-card').dataset.state==='running',
+    'tasks: active work precedes retained history regardless of response order');
+  var history=taskPanel.list.querySelector('.task-history');
+  check(history && !history.open && history.querySelectorAll('.task-card').length===1,
+    'tasks: settled history remains inspectable without burying active work');
+  check(history.querySelector('.task-objective p').textContent===longTaskPrompt,
+    'tasks: a folded objective preserves its full original text');
+  window.__fixtures.subagents.subagents[0].prompt=oldTaskPrompt;
+  window.__fixtures.subagents.subagents.reverse();
   window.__fixtures.runs.runs=[];
+  window.__fixtures.sessions.sessions[0].workspace_required=1;
+  window.__fixtures.sessions.sessions[0].workspace_state='allocated';
+  window.__fixtures['session/worktree']={error:'resource_busy'};
+  await window.__refreshSessionsForRelease();
+  var releaseWorkspace=Array.from(document.querySelectorAll('.session-row button')).find(b=>b.textContent==='Release clean workspace');
+  check(!!releaseWorkspace,'workspace: allocated session offers explicit cleanup');
+  releaseWorkspace.click();
+  for(var ti=0;ti<80;ti++) await tick();
+  var releaseCall=window.__calls.filter(c=>c.url==='session/worktree').pop();
+  check(releaseCall && JSON.parse(releaseCall.body).action==='release' &&
+    JSON.parse(releaseCall.body).session_id===window.__fixtures.sessions.sessions[0].id,
+    'workspace: release targets exactly the selected session');
+  check(document.getElementById('sessions-box').textContent.includes('Workspace release refused: resource_busy'),
+    'workspace: active-owner refusal remains visible');
   await window.__openSessionById('aaaaaaaa-0000-0000-0000-000000000001');
   check(Array.from(document.querySelectorAll('#sessions-box button')).some(b=>b.textContent==='Fork here'),
     'fork: transcript offers explicit message boundaries');
@@ -2023,7 +2085,7 @@ $harness = @'
   check(forkCall && Number.isInteger(JSON.parse(forkCall.body).before_seq) &&
     JSON.parse(forkCall.body).session_id==='aaaaaaaa-0000-0000-0000-000000000001',
     'fork: request names the source and explicit boundary');
-  check(document.body.textContent.includes('incomplete_tool_exchange') && !forkButton.disabled,
+  check(document.querySelector('.chat-content-run-label')?.textContent.includes('incomplete_tool_exchange') && !forkButton.disabled,
     'fork: refused tool boundary stays visible and retryable');
   document.title = "stage: end";
 } catch (error) {
@@ -2061,6 +2123,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
 Add-Content -Path $app -Value "`nwindow.__refreshTasks=refreshTasks; window.__openSessionById=openSessionById;"
+Add-Content -Path $app -Value "`nwindow.__refreshSessionsForRelease=refreshSessions;"
 Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', mime: 'image/png', data: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__cancelActiveRun = cancelActiveRun; window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker; window.__updateNotice = updateNotice; window.__refreshOperationProgress = refreshOperationProgress; window.__watch = watch;"
 Add-Content -Path $app -Value "`nwindow.__cancelRunForTest = cancelRun;"
 

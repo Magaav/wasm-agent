@@ -116,6 +116,16 @@ pub extern "C" fn paths(l: *mut LuaState) -> c_int {
     1
 }
 
+/// Resolve an existing path through symlinks/junctions; missing paths return nil.
+pub extern "C" fn canonical_path(l: *mut LuaState) -> c_int {
+    let path=arg_string(l,1).and_then(|value|std::fs::canonicalize(value).ok());
+    if let Some(path)=path {
+        let value=path.to_string_lossy().replace('\\',"/");
+        unsafe {lua_pushlstring(l,value.as_ptr() as *const c_char,value.len());}
+    } else { unsafe {crate::lua::lua_pushnil(l);} }
+    1
+}
+
 /// The shell `host.exec` runs commands with.
 ///
 /// The model speaks POSIX: `ls`, `pwd`, `tail`, `grep`, single quotes, `$VAR`.
@@ -125,7 +135,7 @@ pub extern "C" fn paths(l: *mut LuaState) -> c_int {
 /// command" and the model, which cannot see the difference, tried variants of the
 /// same idea until its budget was gone. That was mistaken for the model being bad
 /// at tool calls; it was answering in the wrong language.
-fn executable_on_path(name: &str) -> Option<String> {
+pub(crate) fn executable_on_path(name: &str) -> Option<String> {
     let path = std::env::var("PATH").ok()?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(name);
@@ -235,7 +245,14 @@ pub extern "C" fn list_dir(l: *mut LuaState) -> c_int {
     let mut entries: Vec<Value> = Vec::new();
     match std::fs::read_dir(&path) {
         Ok(reader) => {
-            for entry in reader.flatten() {
+            for entry in reader {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        push_json(l, &json!({ "error": error.to_string(), "path": path }));
+                        return 1;
+                    }
+                };
                 let metadata = entry.metadata().ok();
                 let kind = match metadata.as_ref().map(|m| m.is_dir()) {
                     Some(true) => "dir",

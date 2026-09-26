@@ -1,12 +1,12 @@
 # Execution foundation: plan, evidence and staged roadmap
 
-Status: exact conversational forks are on `origin/main`. This change auto-allocates and durably binds isolated git worktrees for forks and write-capable delegated children. It does not complete the multi-agent milestone or deployment/adoption acceptance.
+Status: local foundation integration candidate. Exact forks, isolated workspaces, durable ordinary-run recovery, bounded children, cooperative resource ownership and the task UI are implemented. This candidate integrates full original-event inspection, active-task ordering, explicit safe workspace release, native subscription-helper launch and Luna's retry-idempotency regression. Combined gate and deployment receipts remain the authority for installed acceptance; the broader remote/Wasm and primary-environment adoption roadmap remains open.
 
 ## Audit and chosen slice
 
 Implemented: per-conversation admission/order/cancellation and reserved interactive workers (`rust/wa-host/src/serve/scheduler.rs`); per-run output/reconnect tails; durable native subagents with separate child sessions, bounded capacity, cancellation, owner checks and restart-unknown outcomes; transcript-backed recovery; explicit session worktree bindings; authorized signed peer execution. Existing proof includes `scripts/test-run-isolation.sh`, `scripts/test-subagents.cjs`, `scripts/test-peer-run-admission.cjs`, recovery fixtures and `scripts/test-ui.ps1` (hermetic/runtime fixtures, not deployed proof). See `docs/CONCURRENCY.md`, `docs/SUBAGENTS.md`, `docs/MEMORY.md`, and `docs/release/ORCHESTRATION_ROLLOUT.md` for exact boundaries.
 
-Missing: durable cross-process ordinary-run admission/event replay; comprehensive recovery reconciliation; coordinated locks for shared resources; automatic workspace reaping; integrated UI/deployed evidence on one candidate. Existing ordinary sessions remain compatible and unbound unless explicitly allocated. Allocated workspaces are node-local git worktrees, not a filesystem sandbox or cross-node shared checkout. Subagent parentage remains distinct from conversational fork ancestry.
+Remaining: automatic workspace reaping; comprehensive external-effect reconciliation; final combined deployment acceptance; repeated representative adoption measurements. Durable run admission/events and cooperative same-home resource claims now exist. Explicit cleanup preserves branches and refuses uncertain effects; arbitrary external effects still require operator evidence. Existing ordinary sessions remain compatible and unbound unless explicitly allocated. Allocated workspaces are node-local git worktrees, not a filesystem sandbox or cross-node shared checkout. Subagent parentage remains distinct from conversational fork ancestry.
 
 Exact forks use explicit message boundaries, separate ancestry metadata, complete tool exchanges, copied non-summary evidence and no later context. This change then binds each fork to a newly allocated worktree before reporting success. Write-capable delegated profiles are bound before native child admission. Both reuse `sessions.worktree` and preserve source HEAD/branch/status. Dirty sources are explicitly recorded and refused; failed required bindings block writes rather than falling back to node cwd. Ordinary legacy sessions and read-only children remain unchanged. Filesystem/external effects are never rolled back.
 
@@ -37,15 +37,15 @@ Forking copies selected immutable transcript evidence into an independently writ
 - Outcome: concurrent conversations, exact forks, bounded children, isolated workspaces and attributable recovery.
 - Dependencies: scheduler, durable transcript, authentication, subagent runtime, worktree allocator, resource coordination.
 - Acceptance: adversarial isolation/fork/order/cancel/restart/authorization tests; independent workspace writes; verified child-result consumption; unknown effects never blindly replayed.
-- Status: scheduling, subagents, transcript recovery, exact forks, explicit worktree binding, and automatic local git worktrees for fork/write-capable child sessions have targeted fixture proof. Durable ordinary-run claims/event log, automatic cleanup, resource locks, comprehensive recovery reconciliation, full UI/deployed proof and combined acceptance remain unproven.
+- Status: scheduling, subagents, exact forks, automatic isolated worktrees, durable ordinary-run admission/events and cooperative resource claims have runtime fixture proof. Explicit verified workspace release is included in this integration. Recovery exposes unknown effects and original paginated evidence without automatic replay. Automatic cleanup and comprehensive external-effect reconciliation remain open; combined gate/deploy receipts are recorded separately.
 - Risks: git worktrees share an object store and can accumulate; dirty source changes are refused rather than transferred; interrupted allocation can remain unknown; arbitrary shell is not a sandbox; node-local paths/artifacts do not provide cross-node workspace portability.
 
 ### B. Multi-agent UI and daily development through wasm-agent
 - Outcome: inspect, redirect, fork, cancel and recover work without changing output destination.
 - Dependencies: stable owner-scoped execution APIs/events and isolated workspaces.
 - Acceptance: reconnect/dedup/order under concurrent runs; UI reconnect tests; daily development task completes implementation, verification and repository delivery with interventions recorded.
-- Status: session view, child controls and run replay exist; task board and workflow planned. In-agent follow-up is pending installed candidate/model authorization.
-- Risks: reconnect uses durable transcript plus bounded in-memory tail; restart loses transient tail; full redesign deferred.
+- Status: task board supports approved child admission, parent attribution, results, cancellation, run inspection, full original archive pagination, exact forks and explicit workspace release. Active/uncertain work precedes folded retained history. Initial task UI deployment passed install verification; Luna delivered a tested, pushed change but its final provider response failed containment settlement. The native helper fix and explicit continuation require deployed verification.
+- Risks: retained session discovery is bounded by the existing session endpoint; cooperative claims do not sandbox arbitrary shell activity; archives and audit records currently have no automatic retention policy.
 
 ### C. Authorized remote placement and resource-aware admission
 - Outcome: explicitly place work on eligible nodes without changing selected model or required context.
@@ -80,8 +80,8 @@ Compare a predeclared representative task set under equivalent models/context: v
 | Concurrency-sensitive gate observation | hermetic | An initial unbounded `finish.mjs gate` attempt exited 101: one wa-operation test hit Windows `PermissionDenied` (code 5); the test passed in isolation, and the serialized whole gate above passed. The initial failure is retained as a risk; the serial pass does not erase it. | Initial gate command output; final machine verdict/log above |
 | UI reconnect | runtime fixture | UI invoked by smoke and passed structure, mid-run reload and startup recovery; not a new UI change | same retained gate log |
 | Earlier pre-commit smoke | hermetic | exit 0, `smoke ok (2 skipped)`; deploy-downgrade also skipped because tree was dirty; superseded by final post-commit run above | `C:\\Users\\Victor\\AppData\\Local\\Temp\\pi-bash-7ea7c56f5fdb1bcd.log` |
-| Installed/deployed candidate | deployed | pending; gate/authorization required | pending |
-| Luna follow-up inside wasm-agent | runtime/deployed | blocked pending installed candidate/deployment authorization and model selection | pending |
+| Initial task UI deployment | deployed | `402b006` through gated deploy; install verification 14 passed, 0 skipped; live task panel observed | `%TEMP%/wa-foundation-deploy.log`; `%TEMP%/wa-live-task-ui-hgaj7L/verdict.json` |
+| Luna development exercise | real model, deployed node | Luna high implemented, tested and pushed `69f6b8e`; final response failed containment settlement after delivery; explicit continuation pending | `%TEMP%/wa-luna-adoption-f64e813f-6d9e-464f-9d7d-bdf617d21f35/`; deployed exercise section below |
 
 ## Durable ordinary-run recovery follow-up
 
@@ -97,8 +97,8 @@ preservation, partial output/cursor persistence, no automatic inference replay, 
 unauthorized reads and duplicate-server refusal. Rust journal/scheduler tests cover pagination
 and lease release. Full gate evidence is bound to the final source tree by the finish runner.
 
-Still required: combined multi-agent UI acceptance, supported shared-resource coordination,
-workspace lifecycle/cleanup, deployed proof and Luna adoption exercise. This does not claim the
+Subsequent slices add the multi-agent UI, shared-resource coordination and explicit workspace
+release. Combined deployed acceptance and a settled Luna continuation are still required. This does not claim the
 entire cross-device/Wasm roadmap is complete.
 
 ## Shared-resource ownership follow-up
@@ -110,5 +110,55 @@ does not free effectful resources; explicit reconciliation requires an exact own
 and evidence and refuses live owners. Scope, availability/storage risks and the
 17-check two-process crash fixture are documented in `docs/CONCURRENCY.md`.
 This is not cross-home distributed locking or shell sandboxing. Full repository
-gate evidence is recorded separately on the final candidate; workspace cleanup,
-deployed acceptance and the Luna development exercise still need completion.
+gate evidence is recorded separately on the final candidate; explicit workspace release is
+included in the integration, while final deployed acceptance and a settled Luna continuation
+still need completion.
+
+## Deployed exercise and subscription process boundary
+
+Candidate `402b006` was deployed through `scripts/deploy.sh`; `verify-install.sh`
+passed all 14 checks without skips. An isolated headless browser loaded the live
+task panel and its 187 retained child records. Luna high then used an actual HTTP
+fork/worktree to implement the retry-idempotency regression in commit
+`69f6b8e197d35546692fccdfb98470dbc289b035`, verified the UI (including deliberate
+failure injection), and pushed its assigned branch. Codex supplied the task and
+owns review, full gate, integration and deployment; those are external interventions.
+
+The run did **not** settle successfully: its final response streamed, then the
+subscription helper failed with `background_descendants`. Retained operation
+`op-1790461476759897-24184-141` records exit code 0, closed output streams and
+terminated cleanup after 6751 ms. This evidence does not identify which descendant
+remained. The adapter had launched Node through a shell. `change/subscription-direct-process`
+removes that intermediary using native argv while preserving containment and
+failure reporting; it does not turn a failed operation into success merely because
+model text arrived. The native mock-adapter fixture exercises 12 complete calls,
+limits, provider failure and invalid launch arguments with an unusable configured
+shell and a temporary path containing spaces (15 checks). Deployment and an explicit
+continuation remain necessary before calling the adoption exercise settled.
+
+## Combined local foundation acceptance
+
+`change/foundation-integration` preserves the concern commits from PRs #13, #14,
+#16, #17 and #18 and Luna's unchanged `69f6b8e`. The integration also includes the
+PWA and CLI work already on `main`. Additive UI fixture overlaps were resolved
+by retaining every archive, task-order, release and retry assertion. Review closed
+an unreadable-operation-entry cleanup gap: incomplete directory enumeration and
+unknown metadata now refuse removal rather than silently ignoring evidence.
+
+Targeted concern proof: workspace allocation (23 contract assertions), explicit
+release (21 assertions, including unreadable metadata), restart persistence and
+independent writes; subagents (18 checks); resource ownership (17 checks across
+two processes); original run archive/recovery (15 checks with killed/restarted
+node); native subscription adapter (15 checks); UI structure/reload/recovery with
+all added assertions. The final combined gate must repeat these on the exact
+pushed tree before merge. Machine evidence is retained under
+`.git/worktrees/codex-multi-agent-ui/wa-finish-gate.json` and its `.log` sibling.
+Historical gate rows above describe their named commits, not this combined tree.
+
+Workspace release is explicit and never forced. It retains the branch, requires
+clean tracked/untracked/ignored state, refuses unmerged commits and participating
+live runs, verifies native canonical paths and Git registration, and refuses
+unresolved operation evidence. Legacy unattributed unresolved operations can
+conservatively block cleanup. No automatic reaper is enabled. Resource ownership
+is cooperative within one runtime home; remote placement, cross-home locking,
+Wasm backend conformance and repeated Pi-comparison trials remain future work.

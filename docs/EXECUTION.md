@@ -110,8 +110,30 @@ writes outside the binding, explicit shell cwd escapes, and shell/client/remote/
 do not accept a verifiable session cwd are refused. Ordinary pre-existing sessions remain
 unbound/compatible until they request isolation. Worktrees are node-local and share Git's object
 store; this is coordination, **not** an OS sandbox against an unrestricted shell, symlink, or
-administrator. Browser/desktop/remote resource locks and automatic worktree cleanup are not part
-of this contract yet. See `docs/SESSION-FIRST.md` and `scripts/test-session-workspaces.cjs`.
+administrator. Cooperative client resource claims are described in `docs/CONCURRENCY.md`.
+Automatic worktree reaping and cross-home resource locking remain outside this contract.
+See `docs/SESSION-FIRST.md` and `scripts/test-session-workspaces.cjs`.
+
+### Explicit workspace release
+
+`session_worktree{action:"release",session_id}` and the Engine's **Release clean
+workspace** control remove only an allocator-owned worktree. A session claim fences
+participating runs during inspection/removal. The canonical directory must match
+the managed root, Git registry and recorded branch. Dirty or ignored files and
+commits not at the starting base or reachable from the locally fetched `origin/main`
+refuse removal. Git runs without `--force`; the branch and transcript remain.
+
+Unsettled operations in that workspace block removal. Legacy operation records
+without cwd attribution conservatively block all cleanup while unresolved; this
+may require inspecting old operation evidence before a legacy node can release a
+workspace. There is no destructive automatic migration of those records. New
+operation receipts persist cwd. Missing/corrupt operation evidence fails visibly.
+
+Release intent and outcome persist as `releasing`, `release_unknown`, or `released`.
+A lost removal receipt is reconciled against both the directory and Git registry.
+Released sessions stay required-but-unavailable for writes and cannot silently
+fall back to the shared checkout or reallocate themselves. A crash may also leave
+the maintenance resource claim, which requires the ordinary evidenced reconciliation.
 
 ## Subagent contract
 

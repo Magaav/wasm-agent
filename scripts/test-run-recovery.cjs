@@ -78,6 +78,11 @@ function chat(text) {
     check(finished.run_id>second.run_id,'new run IDs cannot alias pre-restart operations');
     const settled=await api('run-events',{thread:'recovery-thread',run_id:finished.run_id});
     check(settled.status===200&&settled.events.some(e=>e.event.type==='done'),'settled replay remains available');
+    const archive=await api('run-events',{thread:'recovery-thread',run_id:finished.run_id,archive:true});
+    check(archive.archive===true&&archive.events.some(e=>e.event.text==='DURABLE-RESTART-MARKER'),
+      'full inspection preserves stream output before the final transcript checkpoint');
+    check((await api('run-events',{thread:'different-thread',run_id:finished.run_id,archive:true})).status===404,
+      'full archive keeps conversation authorization');
     console.log(`run recovery ok (${checks} checks, 0 skipped; real process restart, mock inference)`);
   } catch(e) { console.error(e.stack); process.exitCode=1; }
   finally { await stop(child); await stop(other); for(const s of connections)s.destroy(); if(provider)provider.close(); console.log('evidence: '+root); }

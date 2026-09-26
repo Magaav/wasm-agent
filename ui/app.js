@@ -4141,6 +4141,18 @@ function renderSessions() {
       const workspace=document.createElement('span'); workspace.className='session-meta';
       workspace.textContent='workspace: '+(session.workspace_state || 'unknown');
       workspace.title=session.worktree || session.workspace_error || ''; row.append(workspace);
+      if(['allocated','releasing','release_unknown'].includes(session.workspace_state)) {
+        const release=nodeButton('Release clean workspace',async()=>{
+          release.disabled=true;
+          try {
+            await taskRequest('session/worktree',{session_id:session.id,action:'release'});
+            await refreshSessions();
+          } catch(error) { workspace.textContent='Workspace release refused: '+error.message; }
+          finally { release.disabled=false; }
+        });
+        release.title='Remove only a verified clean, inactive, merged worktree. The branch and transcript remain.';
+        row.append(release);
+      }
     }
     // Only where there is something to recover, and named as what it does: the node's own words for
     // this are "continue where you stopped". A running turn has nothing to recover yet.
@@ -4326,6 +4338,9 @@ document.getElementById('tasks-box').addEventListener('task-action',async event=
   const {action,control,...detail}=event.detail;
   const panel=event.target.closest('wa-tasks');
   if (activeNode) { panel.message='Select this node before controlling its tasks.'; return; }
+  if(!['refresh','open'].includes(action)) panel.actionSerial=(panel.actionSerial || 0)+1;
+  const serial=panel.actionSerial;
+  const showEvidence=(value,cursor)=>{if(serial===panel.actionSerial)panel.showEvidence(value,cursor);};
   if(control) control.disabled=true;
   try {
     if(action==='refresh') await refreshTasks();
@@ -4333,27 +4348,29 @@ document.getElementById('tasks-box').addEventListener('task-action',async event=
     else if(action==='start') {
       const receipt=await taskRequest('subagents',{action:'start',thread:detail.parent,profile:detail.profile,
         prompt:detail.prompt,idempotency_key:detail.key});
-      panel.showEvidence(receipt); panel.prompt.value=''; panel.submission=null;
+      showEvidence(receipt); panel.prompt.value=''; panel.submission=null;
       await refreshTasks();
-    } else if(action==='result') panel.showEvidence(await taskRequest('subagents',{action:'result',subagent_id:detail.id}));
+    } else if(action==='result') showEvidence(await taskRequest('subagents',{action:'result',subagent_id:detail.id}));
     else if(action==='cancel') {
-      panel.showEvidence(await taskRequest('subagents',{action:'cancel',subagent_id:detail.id}));
+      showEvidence(await taskRequest('subagents',{action:'cancel',subagent_id:detail.id}));
       await refreshTasks();
     } else if(action==='inspect-run') {
       const [receipt,replay]=await Promise.all([
         taskRequest('runs',{action:'inspect',thread:detail.session,run_id:detail.runId}),
-        taskRequest('run-events',{thread:detail.session,run_id:detail.runId})]);
+        taskRequest('run-events',{thread:detail.session,run_id:detail.runId,archive:true})]);
+      if(serial!==panel.actionSerial)return;
       panel.runEvidence={receipt,pages:[replay]};
-      panel.showEvidence(panel.runEvidence,replay.has_more ? {...detail,after:replay.next_seq} : null);
+      showEvidence(panel.runEvidence,replay.has_more ? {...detail,after:replay.next_seq} : null);
     } else if(action==='more-output') {
-      const replay=await taskRequest('run-events',{thread:detail.session,run_id:detail.runId,after:detail.after});
+      const replay=await taskRequest('run-events',{thread:detail.session,run_id:detail.runId,after:detail.after,archive:true});
+      if(serial!==panel.actionSerial)return;
       panel.runEvidence.pages.push(replay);
-      panel.showEvidence(panel.runEvidence,replay.has_more ? {...detail,after:replay.next_seq} : null);
+      showEvidence(panel.runEvidence,replay.has_more ? {...detail,after:replay.next_seq} : null);
     } else if(action==='cancel-run') {
-      panel.showEvidence(await taskRequest('runs',{action:'cancel',thread:detail.session,run_id:detail.runId}));
+      showEvidence(await taskRequest('runs',{action:'cancel',thread:detail.session,run_id:detail.runId}));
       await refreshTasks();
     }
-  } catch(error) { panel.message='Task action did not complete: '+error.message+'. Inspect the task list before retrying.'; }
+  } catch(error) { if(serial===panel.actionSerial)panel.message='Task action did not complete: '+error.message+'. Inspect the task list before retrying.'; }
   finally { if(action==='start') panel.finishSubmission(); else if(control)control.disabled=false; }
 });
 setInterval(()=>{if(!document.getElementById('tasks-box').hidden) void refreshTasks();},3000);

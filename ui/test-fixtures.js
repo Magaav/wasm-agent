@@ -222,13 +222,14 @@ window.fetch = function (input, init) {
   // Match the path, not a substring of it: url.includes("me") matched "node/name", so a
   // rename POST was answered with the account payload and the write never reached its
   // handler. A stub that answers the wrong request is worse than one that answers none.
-  let path = url.split("?")[0];
-  const schemeAt = path.indexOf("://");
-  if (schemeAt >= 0) path = path.slice(schemeAt + 3);
-  const slashAt = path.indexOf("/");
-  // A relative fetch like "nodes" has no slash at all: keep it as the path.
-  path = slashAt >= 0 ? path.slice(slashAt + 1) : path;
-  if (path.endsWith("/")) path = path.slice(0, -1);
+  // Preserve all segments of relative routes such as session/worktree.
+  const path = new URL(url,location.href).pathname.replace(/^\/+|\/+$/g,'');
+  if(path==='run-events' && init?.method==='POST' && JSON.parse(init.body).archive) {
+    const after=JSON.parse(init.body).after || 0;
+    return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve({archive:true,next_seq:after ? 2 : 1,
+      has_more:!after,events:[{seq:after ? 2 : 1,event:{type:'delta',text:after ? 'ARCHIVE-SECOND-PAGE' : 'ARCHIVE-BEFORE-CHECKPOINT'}}]})});
+  }
+
   if (path === 'subagents' && init?.method === 'POST') {
     const request=JSON.parse(init.body);
     if (window.__taskFailure) return Promise.resolve({ok:false,status:503,json:()=>Promise.resolve({error:'fixture task service unavailable'})});

@@ -4,6 +4,7 @@
 local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
 local platform = dofile("lua/core/platform.lua")
+local resources = dofile("lua/core/resources.lua")
 local M = {}
 
 local function quote(value)
@@ -101,6 +102,9 @@ function M.ensure(memory, session_id, source_session_id)
   end
   local workspace = memory.require_session_workspace(session_id)
   if not workspace then return nil, "workspace_requirement_failed" end
+  if workspace.state=="released" or workspace.state=="releasing" or workspace.state=="release_unknown" then
+    return nil,"workspace_released_or_release_unresolved"
+  end
   if workspace.state == "allocated" then
     local valid, err = verify_binding(memory, session_id, workspace)
     if valid then return workspace end
@@ -204,6 +208,96 @@ function M.requires_write_tools(allowed)
         or name == "client" or name == "remote" or name == "operation" or name == "spell_run" then return true end
   end
   return false
+end
+
+local function normalized(path)
+  local value=tostring(path or ''):gsub('\\','/'):gsub('/$','')
+  if platform.os()=='windows' then value=value:lower() end
+  return value
+end
+
+-- Release is explicit, fenced against participating runs, and never forced.
+-- The branch and transcript survive. Unknown process effects block cleanup.
+function M.release(memory,id,user_id)
+  local session=memory.session(id)
+  if not session then return nil,'unknown_session' end
+  if session.user_id~=user_id then return nil,'forbidden' end
+  local workspace=memory.session_workspace(id)
+  if not workspace or not workspace.required then return nil,'workspace_not_managed' end
+  if workspace.state=='released' then return workspace end
+  if not host.canonical_path then return nil,'workspace_canonical_path_unavailable' end
+  local ctx={user_id=user_id,session_id=id..':release',run_id=host.uuid()}
+  local claimed=resources.claim(ctx,{'session:'..id})
+  if not claimed.ok then return nil,claimed.error,claimed end
+  local function release_body()
+    local clean_id=tostring(id):gsub('[^%w-]','')
+    local expected=paths.data()..'/wa-worktree-'..clean_id
+    if clean_id=='' or normalized(workspace.worktree)~=normalized(expected)
+        or workspace.branch~='change/wa-session-'..clean_id then
+      return nil,'workspace_release_binding_mismatch'
+    end
+    local source=workspace.start_state.source_root
+    if not source or source=='' then return nil,'workspace_release_source_missing' end
+    local listing,list_error=run('git worktree list --porcelain',source)
+    if not listing or listing.code~=0 then return nil,'workspace_release_registry_unavailable: '..tostring(list_error) end
+    local registered=false
+    for path in tostring(listing.stdout):gmatch('worktree ([^\r\n]+)') do
+      if normalized(path)==normalized(expected) then registered=true end
+    end
+    local canonical=host.canonical_path(expected)
+    if not canonical and not registered and (workspace.state=='releasing' or workspace.state=='release_unknown') then
+      workspace.state,workspace.error='released',''
+      return memory.set_session_workspace(id,workspace)
+    end
+    local root=host.canonical_path(paths.data())
+    if not canonical or not root or normalized(canonical)~=normalized(root..'/wa-worktree-'..clean_id) or not registered then
+      return nil,'workspace_release_path_unverified'
+    end
+    local verified,why=verify_binding(memory,id,workspace)
+    if not verified then return nil,why end
+    local status,status_error=run('git status --porcelain --untracked-files=all --ignored',expected)
+    if not status or status.code~=0 then return nil,'workspace_release_status_failed: '..tostring(status_error) end
+    if tostring(status.stdout or '')~='' then return nil,'workspace_release_dirty_or_ignored_files' end
+    local head,head_error=run('git rev-parse HEAD',expected)
+    if not head or head.code~=0 then return nil,'workspace_release_head_failed: '..tostring(head_error) end
+    if trimmed(head.stdout)~=workspace.base_commit then
+      local merged=run('git merge-base --is-ancestor HEAD refs/remotes/origin/main',expected)
+      if not merged or merged.code~=0 then return nil,'workspace_release_unmerged_commits' end
+    end
+    -- Older records lack cwd attribution and conservatively block cleanup while
+    -- unresolved. Attributed operations in other workspaces do not block this one.
+    local operations=json.decode(host.list_dir(paths.data()..'/operations'))
+    if type(operations)~='table' or operations.error or type(operations.entries)~='table' then return nil,'workspace_release_operations_unavailable' end
+    for _,entry in ipairs(operations.entries) do
+      if entry.kind~='dir' and entry.kind~='file' then return nil,'workspace_release_operation_unreadable:'..tostring(entry.name) end
+      if entry.kind=='dir' then
+        local raw=host.read_file(paths.data()..'/operations/'..entry.name..'/state.json')
+        local ok,state=pcall(json.decode,raw or '')
+        if not ok or type(state)~='table' then return nil,'workspace_release_operation_unreadable:'..entry.name end
+        local cwd=normalized(state.cwd)
+        local target=normalized(expected)
+        local relevant=cwd=='' or cwd==target or cwd:sub(1,#target+1)==target..'/'
+        if relevant and (state.settled~=true or state.cleanup=='unknown') then
+          return nil,'workspace_release_operation_unresolved:'..entry.name
+        end
+      end
+    end
+    workspace.state,workspace.error='releasing',''
+    memory.set_session_workspace(id,workspace)
+    local removed,remove_error=run('git worktree remove '..assert(quote(expected)),source)
+    if not removed or removed.code~=0 then
+      workspace.state,workspace.error='release_unknown',tostring(remove_error)
+      memory.set_session_workspace(id,workspace)
+      return nil,'workspace_release_failed: '..tostring(remove_error)
+    end
+    workspace.state,workspace.error='released',''
+    return memory.set_session_workspace(id,workspace)
+  end
+  local ok,result,why,detail=pcall(release_body)
+  local released=resources.finish(ctx)
+  if not released.ok then return nil,'workspace_release_claim_failed',released end
+  if not ok then return nil,'workspace_release_exception: '..tostring(result) end
+  return result,why,detail
 end
 
 return M

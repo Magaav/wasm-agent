@@ -56,6 +56,10 @@ function runAsync(script, extras={}) {
     check(restarted.status===0 && restarted.stdout.includes('session workspace restart ok (4 checks)'),
       `fresh-process binding recovery failed (${restarted.status}): ${restarted.stderr}\n${restarted.stdout}`);
     checks+=4;
+    const released=run('test-workspace-release.lua',{WASM_AGENT_TEST_SOURCE:source});
+    check(released.status===0 && released.stdout.includes('workspace release ok (21 checks)'),
+      `workspace release failed (${released.status}): ${released.stderr}\n${released.stdout}`);
+    console.log(released.stdout.trim());
     console.log(`session workspaces integration ok (${checks} checks; real git worktrees, two concurrent processes, restart, no inference)`);
   } catch (error) {
     failed=true; console.error(`session workspaces failed; retained fixture: ${root}\n${error.stack||error}`); process.exitCode=1;

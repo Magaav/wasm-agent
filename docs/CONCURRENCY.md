@@ -1,5 +1,16 @@
 # Concurrent runs: the implementation
 
+## Run archive inspection
+
+Run output has two read modes. `POST /run-events` normally starts after the latest
+transcript checkpoint for reconnect without duplicate rendering. Explicit
+`archive:true` reads the original durable events from the supplied `after` cursor,
+including output before checkpoints. The Engine's **Inspect run** uses this mode
+and exposes subsequent pages. This matters when a provider emits text and then
+fails: the transcript may checkpoint the error without saving that streamed text.
+The archive preserves it without treating it as a successful result. Authorization
+and pagination are identical; in-memory-only runs cannot claim a full archive.
+
 ## Shared resources
 
 Participating agent runs hold an exclusive `session:<id>` claim across the run.
