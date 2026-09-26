@@ -1245,7 +1245,13 @@ class WaTasks extends HTMLElement {
     const cards = [];
     const add = (title, state, detail, controls) => {
       const card=document.createElement('section'); card.className='task-card'; card.dataset.state=state;
-      const heading=document.createElement('strong'); heading.textContent=title;
+      let heading=document.createElement('strong'); heading.textContent=title;
+      if(title.length>160) {
+        heading=document.createElement('details'); heading.className='task-objective';
+        const summary=document.createElement('summary'); summary.textContent=title.slice(0,120)+'…';
+        const full=document.createElement('p'); full.textContent=title;
+        heading.append(summary,full);
+      }
       const status=document.createElement('span'); status.className='task-state'; status.textContent=state;
       const text=document.createElement('p'); text.textContent=detail;
       const actions=document.createElement('div'); actions.className='task-actions';
@@ -1273,8 +1279,18 @@ class WaTasks extends HTMLElement {
           run.state==='not_started' ? 'This request did not start. Inspect it before submitting again.' : `Run ${run.run_id}`,controls);
       }
     }
-    if (!cards.length) { const empty=document.createElement('p'); empty.textContent='No delegated tasks or runs needing attention.'; cards.push(empty); }
-    this.list.replaceChildren(...cards);
+    const rank={running:0,accepted:0,queued:1,unknown:2,not_started:2,failed:3};
+    cards.sort((a,b)=>(rank[a.dataset.state] ?? 4)-(rank[b.dataset.state] ?? 4));
+    const history=cards.filter(card=>['completed','cancelled'].includes(card.dataset.state));
+    const currentCards=cards.filter(card=>!history.includes(card));
+    if (!currentCards.length) { const empty=document.createElement('p'); empty.textContent='No delegated tasks or runs needing attention.'; currentCards.push(empty); }
+    if(history.length) {
+      const details=document.createElement('details'); details.className='task-history';
+      details.open=!!this.list.querySelector('.task-history')?.open;
+      const summary=document.createElement('summary'); summary.textContent=`Settled task history (${history.length})`;
+      details.append(summary,...history); currentCards.push(details);
+    }
+    this.list.replaceChildren(...currentCards);
   }
 }
 customElements.define('wa-tasks', WaTasks);
