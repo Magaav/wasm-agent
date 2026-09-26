@@ -668,6 +668,20 @@ body.view-only .panel { display: none; }
   color: var(--muted); font-size: 12px; padding: var(--space) 0;
   border-top: 1px solid var(--line); margin-top: var(--gap);
 }
+.thread-notice[data-state="queued"]::before,
+#update-lock .update-spinner {
+  content: ""; flex: none; width: 14px; height: 14px; box-sizing: border-box;
+  border: 2px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  border-top-color: var(--accent); border-radius: 50%;
+}
+.thread-notice[data-state="queued"]::before { animation: wa-update-spin .8s linear infinite; }
+#update-lock.working .update-spinner { animation: wa-update-spin .8s linear infinite; }
+#update-lock:not(.working) .update-spinner { display: none; }
+@keyframes wa-update-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .thread-notice[data-state="queued"]::before,
+  #update-lock.working .update-spinner { animation-duration: 2s; }
+}
 
 /* `/efficiency_report`: the report is preformatted tables, not prose, so it keeps its own
    whitespace and alignment and can scroll sideways on a narrow window rather than wrap into

@@ -85,9 +85,10 @@ window.__fixtures = {
   // What the node says about right now. The window asks this before believing a run is over, so a
   // notice can be taken down when the thread is settled - and a run that completed is not "unfinished".
   health: { current: null, operations: [], ok: true, queue: 0, stalled_ms: 0, worker: "alive" },
-  // `POST /runs` is the node-side cancel/status route. The UI fires it and does not wait on the
-  // answer, but the fixture must exist so the request is answered locally and never reaches a node.
+  // `POST /runs` is the node-side cancel/status route. Keep an explicit acknowledgment in the
+  // fixture so Stop must prove the node accepted cancellation before changing its UI state.
   runs: { ok: true, conversation: "fixture", runs: [], cancelled: false },
+  runsCancelRefuse: false,
   // `POST /operation` with `action:'read'`: the running operation's output page. The progress
   // check overwrites this with the line it wants to see.
   operation: { content: "", offset: 0, next_offset: 0, bytes: 0, eof: true },
@@ -222,6 +223,14 @@ window.fetch = function (input, init) {
   // A relative fetch like "nodes" has no slash at all: keep it as the path.
   path = slashAt >= 0 ? path.slice(slashAt + 1) : path;
   if (path.endsWith("/")) path = path.slice(0, -1);
+  if ((path === "runs" || path.endsWith("/runs")) && init?.method === "POST") {
+    if (window.__fixtures.runsCancelRefuse) {
+      return Promise.resolve({ ok: false, status: 404,
+        json: () => Promise.resolve({ error: "run_not_found" }) });
+    }
+    return Promise.resolve({ ok: true, status: 200,
+      json: () => Promise.resolve({ ok: true, run_id: 3, cancel_requested: true, state: "running" }) });
+  }
   if (path === 'jobs' && init?.method === 'POST') {
     const request = JSON.parse(init.body);
     if (window.__fixtures.jobsRefuse) return Promise.resolve({ok:false,status:403,json:()=>Promise.resolve({error:'fixture_job_refused'})});
