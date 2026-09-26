@@ -33,7 +33,7 @@ trap cleanup EXIT
 mkdir -p "$stage/ui" "$stage/bin"
 install -m 755 "$root/rust/target/release/wa" "$stage/wa"
 install -m 755 "$root/scripts/termux/wa" "$stage/bin/wa"
-for asset in index.html style.css app.js components.js render.wasm; do
+for asset in index.html style.css app.js components.js render.wasm manifest.webmanifest service-worker.js icon-192.png icon-512.png; do
   install -m 644 "$root/ui/$asset" "$stage/ui/$asset"
 done
 install -m 644 "$root/LICENSE" "$stage/LICENSE"
