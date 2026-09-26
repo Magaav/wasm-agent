@@ -310,6 +310,11 @@ fn promoted_descendants_are_adopted_not_failed() {
     assert_eq!(live["promoted"], true, "{live}");
     assert_eq!(live["state"], "running", "{live}");
     assert_eq!(live["settled"], false, "{live}");
+    assert_eq!(live["shell_exited"], true, "{live}");
+    assert_eq!(live["process_exit_code"], 0, "{live}");
+    assert_eq!(live["waiting_for"], "descendants", "{live}");
+    assert!(live["remaining_ms"].as_u64().unwrap() <= 30000, "{live}");
+    assert!(live["output_idle_ms"].as_u64().unwrap() > 0, "{live}");
     // Adoption is not abandonment: the same job object still owns the tree, so cancel
     // reaches the descendant and it never gets to write.
     m.cancel(&id).unwrap();

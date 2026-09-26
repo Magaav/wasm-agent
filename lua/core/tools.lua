@@ -614,7 +614,10 @@ function M.dispatch(memory, name, args, role, ctx)
       local id = tostring(result.operation_id or "")
       if allowed == nil or allowed["operation"] == true then
         result.note = "the shell exited leaving live processes; they are adopted as operation " .. id ..
-          " and keep running. Read it with operation read; stop it with operation cancel."
+          " and keep running. Shell exit code: " .. tostring(result.process_exit_code) ..
+          ". Output reporting ALL PASS is test evidence, not process-tree completion. " ..
+          "Inspect operation status and operation read before choosing await; await can wait until the adoption deadline. " ..
+          "Cancel only when you intend to terminate the remaining work. Do not rerun the command."
       else
         result.note = "the shell exited leaving live processes; they are adopted as operation " .. id ..
           " and keep running. This profile does not allow the `operation` tool, so you cannot read or " ..

@@ -26,6 +26,14 @@ not execution success. Default execution budget is 300 seconds; explicit
 operations may request 1–86400 seconds. Eight operations may be active per manager.
 
 State: accepted → running → draining → completed / failed / cancelled.
+Live snapshots expose `shell_exited`, `process_exit_code`, `waiting_for`
+(`command`, `descendants`, or `output_and_cleanup`), and the remaining execution
+budget in `remaining_ms`. After captured output, `output_idle_ms` reports how
+long neither stream has produced bytes; silence is not proof of a stalled process.
+These observations do not infer a test verdict from output. An adopted command
+can exit successfully and print ALL PASS while its operation remains unsettled.
+Inspect status and output before choosing `await`, which may wait through the
+adoption deadline; cancel means terminate remaining owned work, never detach it.
 Settled results include monotonic phase timing (`timing.schema_version=1`): exclusive
 setup, accepted-record persistence, process spawn, execution, drain/cleanup and
 output-sync milliseconds, plus measured/unattributed/total time. `execution_ms`

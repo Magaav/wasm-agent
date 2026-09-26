@@ -55,6 +55,10 @@ local adopted_read=json.decode(host.operation("read",json.encode({id=bg.operatio
 ok(tostring(adopted_read.content):find("started",1,true), "the adopted operation's output is readable")
 local adopted_status=json.decode(host.operation("status",json.encode({id=bg.operation_id})))
 ok(adopted_status.promoted==true and adopted_status.settled==false, "the adopted operation is still running")
+ok(adopted_status.shell_exited==true and adopted_status.process_exit_code==0,
+  "shell success is visible independently of operation completion")
+ok(adopted_status.waiting_for=="descendants" and type(adopted_status.remaining_ms)=="number",
+  "the live operation reports its wait reason and remaining budget")
 json.decode(host.operation("cancel",json.encode({id=bg.operation_id})))
 local adopted_done=json.decode(host.operation("wait",json.encode({id=bg.operation_id,wait_ms=3000})))
 ok(adopted_done.settled==true, "cancelling the adopted operation settles it")
@@ -77,6 +81,9 @@ local allowed=tools.dispatch(memory,"bash",{command="sleep 60 & echo started"},"
 ok(allowed.promoted==true and tostring(allowed.note):find("operation read",1,true)~=nil,
   "a caller that does allow `operation` is told to use it")
 json.decode(host.operation("cancel",json.encode({id=allowed.operation_id})))
+ok(tostring(allowed.note):find("Do not rerun",1,true)~=nil and
+  tostring(allowed.note):find("before choosing await",1,true)~=nil,
+  "adoption guidance prevents blind replay and premature long waits")
 local hello=json.decode(host.exec("echo hello"))
 ok(hello.ok and hello.code==0 and hello.stdout:find("hello",1,true), "normal command succeeds")
 local slow=json.decode(host.exec("sleep 1; echo done"))
