@@ -31,7 +31,10 @@ impl Drop for RawMode {
 }
 
 #[cfg(windows)]
-pub struct RawMode { handle: *mut std::ffi::c_void, mode: u32, codepage: u32 }
+pub struct RawMode {
+    handle: *mut std::ffi::c_void, mode: u32, codepage: u32,
+    output: *mut std::ffi::c_void, output_mode: u32,
+}
 #[cfg(windows)]
 unsafe impl Send for RawMode {} // the handle belongs to this process for its entire life
 #[cfg(windows)]
@@ -52,12 +55,19 @@ pub fn try_raw() -> Option<RawMode> {
         // through the same byte stream as UTF-8 text; keep the other console flags.
         let raw = (mode & !(0x0001 | 0x0002 | 0x0004)) | 0x0200;
         if SetConsoleMode(handle, raw) == 0 { return None; }
-        let codepage = GetConsoleCP();
-        if SetConsoleCP(65001) == 0 {
+        let output = GetStdHandle(0xffff_fff5);
+        let mut output_mode = 0;
+        if GetConsoleMode(output, &mut output_mode) == 0 || SetConsoleMode(output, output_mode | 0x0005) == 0 {
             SetConsoleMode(handle, mode);
             return None;
         }
-        Some(RawMode { handle, mode, codepage })
+        let codepage = GetConsoleCP();
+        if SetConsoleCP(65001) == 0 {
+            SetConsoleMode(handle, mode);
+            SetConsoleMode(output, output_mode);
+            return None;
+        }
+        Some(RawMode { handle, mode, codepage, output, output_mode })
     }
 }
 #[cfg(windows)]
@@ -68,7 +78,11 @@ impl Drop for RawMode {
             fn SetConsoleMode(handle: *mut c_void, mode: u32) -> i32;
             fn SetConsoleCP(codepage: u32) -> i32;
         }
-        unsafe { SetConsoleMode(self.handle, self.mode); SetConsoleCP(self.codepage); }
+        unsafe {
+            SetConsoleMode(self.handle, self.mode);
+            SetConsoleMode(self.output, self.output_mode);
+            SetConsoleCP(self.codepage);
+        }
     }
 }
 #[cfg(not(any(unix, windows)))]
@@ -109,7 +123,9 @@ impl Editor {
             // CSI arrows, Home/End, Delete and bracketed paste boundaries.
             if seq == b"\x1b[200~" { self.paste = true; self.escape.clear(); return Action::None; }
             if seq == b"\x1b[201~" { self.paste = false; self.escape.clear(); return Action::None; }
-            if seq == b"\x1b[13;2u" || seq == b"\x1b[27;2;13~" {
+            // Orca on Windows sends ESC CR for Shift+Enter (also Alt+Enter).
+            if seq == b"\x1b\r" || seq == b"\x1b\n" || seq == b"\x1b[13;2u"
+                || seq == b"\x1b[27;2;13~" || seq == b"\x1b[13;2~" {
                 self.insert('\n'); self.escape.clear(); return Action::None;
             }
             if seq == b"\x1b[D" { self.cursor = self.cursor.saturating_sub(1); }
@@ -164,10 +180,7 @@ impl Editor {
             }
         }
     }
-    /// Three rows of wrapped, editable input below the ticker. Only this region is
-    /// erased; the output scroll region never moves when Enter is pressed.
-    pub fn render(&self) -> String {
-        if self.row == 0 || self.width < 8 || self.height == 0 { return String::new(); }
+    fn layout(&self) -> (Vec<String>, (usize, usize)) {
         let available = self.width.saturating_sub(4);
         let mut lines = vec![String::new()];
         let (mut line, mut col) = (0usize, 0usize);
@@ -186,8 +199,24 @@ impl Editor {
             }
         }
         if self.cursor == self.chars.len() { cursor = (line, col); }
+        (lines, cursor)
+    }
+
+    /// Explicit placement avoids saved cursors moving with Windows scrollback.
+    pub fn cursor_frame(&self) -> String {
+        if self.row == 0 || self.width < 8 || self.height == 0 { return String::new(); }
+        let (_, cursor) = self.layout();
         let first = cursor.0.saturating_sub(self.height - 1);
-        let mut frame = String::new();
+        format!("\x1b[{};{}H", self.row - self.height + 1 + cursor.0 - first, 3 + cursor.1)
+    }
+
+    /// Three rows of wrapped, editable input below the ticker. Only this region is
+    /// erased; the output scroll region never moves when Enter is pressed.
+    pub fn render(&self) -> String {
+        if self.row == 0 || self.width < 8 || self.height == 0 { return String::new(); }
+        let (lines, cursor) = self.layout();
+        let first = cursor.0.saturating_sub(self.height - 1);
+        let mut frame = String::from("\x1b[?25l");
         for visual in 0..self.height {
             let row = self.row - self.height + 1 + visual;
             frame.push_str(&format!("\x1b[{row};1H\x1b[2K"));
@@ -198,6 +227,7 @@ impl Editor {
         }
         frame.push_str(&format!("\x1b[{};{}H", self.row - self.height + 1 + cursor.0 - first,
             3 + cursor.1));
+        frame.push_str("\x1b[?25h");
         frame
     }
 }
@@ -249,6 +279,25 @@ mod tests {
         assert!(e.render().contains("> first") && e.render().contains("  second"));
         assert_eq!(type_bytes(&mut e, b"\r"), Action::Submit("first\nsecond".into()));
         assert!(!e.render().contains("first") && !e.render().contains("second"));
+    }
+    #[test]
+    fn orca_shift_enter_and_modified_enter_keep_the_draft() {
+        for sequence in [b"\x1b\r".as_slice(), b"\x1b\n", b"\x1b[13;2u", b"\x1b[27;2;13~", b"\x1b[13;2~"] {
+            let mut e = Editor::default();
+            type_bytes(&mut e, b"first");
+            assert_eq!(type_bytes(&mut e, sequence), Action::None);
+            type_bytes(&mut e, b"second");
+            assert_eq!(type_bytes(&mut e, b"\r"), Action::Submit("first\nsecond".into()));
+        }
+    }
+    #[test]
+    fn redraw_places_the_cursor_at_the_edited_multiline_draft() {
+        let mut e = Editor::default(); e.row = 14; e.width = 20; e.height = 3;
+        type_bytes(&mut e, b"first\x1b\rsecond\x1b[D\x1b[D");
+        assert_eq!(e.cursor_frame(), "\x1b[13;7H");
+        assert!(e.render().ends_with("\x1b[13;7H\x1b[?25h"));
+        e.row = 24;
+        assert_eq!(e.cursor_frame(), "\x1b[23;7H", "a resize moves the cursor with the draft");
     }
     #[test]
     fn long_draft_does_not_wrap_terminal() {

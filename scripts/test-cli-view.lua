@@ -52,7 +52,7 @@ ok(has(view_lib.call_line("plugin_tool", { alpha = "one", beta = 2 }), "alpha=on
 
 -- A clip must not split a multi-byte character in half: the spinner and the ellipsis
 -- are UTF-8, and half a character on screen is a rendering bug, not a cosmetic one.
-local wide = view_lib.clip(string.rep("a", 9) .. "é" .. string.rep("b", 40), 11)
+local wide = view_lib.clip(string.rep("a", 9) .. "Ã©" .. string.rep("b", 40), 11)
 ok(#wide > 0 and not wide:find("\195\169$"), "a clip never ends mid-character")
 ok(not has(wide, "\n"), "a clip is one line")
 ok(view_lib.clip(string.rep("\194\183", 10), 4) == string.rep("\194\183", 3) .. "\226\128\166",
@@ -248,7 +248,7 @@ clock.value = 3
 live_view:event({ type = "status", text = "thinking" })
 clock.value = 12
 live_view:event({ type = "round", n = 1 })
-ok(has(live.text(), "\27" .. "7\r"), "the status line is rewritten in place, not printed again")
+ok(has(live.text(), "\27[?25l\27[s\r"), "the status line is rewritten in place, not printed again")
 ok(not has(live.text(), "\27[2K"), "and never erases to the end of the row the reader types on")
 ok(has(live.text(), view_lib.spinner(0)), "the status line carries a spinner")
 ok(has(visible(live.text()), "Thinking \194\183 12.0s \194\183 run 1 \194\183 step 1"),
@@ -517,7 +517,7 @@ typed_view:run_started()
 typed_view:event({ type = "status", text = "thinking" })
 local repaint = table.concat(typed_out)
 ok(not has(repaint, "\27[2K"), "a live status line never erases to the end of that row")
-ok(has(repaint, "\27" .. "7\r") and repaint:sub(-2) == "\27" .. "8",
+ok(has(repaint, "\27[?25l\27[s\r") and repaint:sub(-9) == "\27[u\27[?25h",
   "it saves and restores the cursor, which is also where the reader's next keystroke lands")
 
 -- A shorter line: the columns it drew are padded, or the tail of the last frame stays on screen.
@@ -568,7 +568,7 @@ local mark = #screen_out + 1
 screen_view:line("hello")
 local line_out = since(screen_out, mark)
 ok(has(line_out, "\27[10;1Hhello"), "an output line is written inside the region")
-ok(line_out:sub(1, 2) == "\27" .. "7" and line_out:sub(-2) == "\27" .. "8",
+ok(line_out:sub(1, 9) == "\27[?25l\27[s" and line_out:sub(-9) == "\27[u\27[?25h",
   "with the reader's cursor saved and restored around it")
 
 -- The status line has a row of its own, and the ticker is told which: that is what lets it draw
@@ -593,8 +593,8 @@ screen_view:event({ type = "round", n = 1 })
 screen_view:answered("one")
 screen_view:run_started()
 screen_view:event({ type = "round", n = 1 })
-ok(has(visible(table.concat(screen_out)), "run 2 \194\183 step 2"),
-  "the live ticker counts runs and steps across turns")
+ok(has(visible(table.concat(screen_out)), "1 round"),
+  "the pinned summary counts rounds in the current run")
 
 -- With a raw editor the host owns and redraws the input row while Lua is blocked.
 -- The view must not overwrite it with a canonical prompt or clear it after Enter.
@@ -604,10 +604,24 @@ host.input_editor = function(row, width, height) editor_calls[#editor_calls + 1]
 local editor_view, editor_out = capture({ live = true, limit = 80, rows = function() return 12 end })
 editor_view.editor = true
 editor_view:prompt("wa> ")
-ok(#editor_calls == 1 and editor_calls[1][1] == 12 and editor_calls[1][2] == 80
+ok(#editor_calls == 1 and editor_calls[1][1] == 11 and editor_calls[1][2] == 80
   and editor_calls[1][3] == 3, "the live view gives the editor three rows and its width")
-ok(has(table.concat(editor_out), "\27[1;8r") and has(table.concat(editor_out), "\27[9;1H"),
+ok(has(table.concat(editor_out), "\27[1;8r") and has(table.concat(editor_out), "\27[12;1H"),
   "the ticker and editor do not share the output scroll region")
+editor_view:run_started()
+editor_view:event({ type = "round", n = 6 })
+editor_view:event({ type = "tool", name = "bash", arguments = { command = "true" } })
+editor_view:event({ type = "usage", total = { prompt = 120400, completion = 1000, cached = 90540 }, prompt = 27200 })
+local running = table.concat(editor_out)
+ok(has(running, "6 rounds") and has(running, "1 tool") and has(running, "120.4k"),
+  "the bottom footer shows usage before the run finishes")
+editor_view:answered("## Done")
+local summary = editor_view.last_summary
+ok(summary and has(summary, "6 rounds"), "completion keeps the last run summary")
+local idle_mark = #editor_out + 1
+editor_view:prompt()
+ok(has(since(editor_out, idle_mark), "6 rounds") and has(since(editor_out, idle_mark), "\27[12;1H"),
+  "the summary remains pinned below the composer while idle")
 local before_submit = #editor_out
 editor_view:submitted()
 ok(#editor_out == before_submit, "the submitted draft was already cleared by the editor")
@@ -659,9 +673,9 @@ ok(view_lib.rows(function() return "24" end) == 24,
   "and a height that arrives as text (the shape JSON would give) is still a height")
 ok(view_lib.screen_rows(24).input == 24 and view_lib.screen_rows(24).status == 23
   and view_lib.screen_rows(24).bottom == 22, "a 24-row console gives the screen its three zones")
-ok(view_lib.screen_rows(12, true).bottom == 8 and view_lib.screen_rows(12, true).status == 9
-  and view_lib.screen_rows(12, true).input_top == 10,
-  "a live editor reserves three rows below the status row")
+ok(view_lib.screen_rows(12, true).bottom == 8 and view_lib.screen_rows(12, true).status == 12
+  and view_lib.screen_rows(12, true).input_top == 9,
+  "a live editor reserves three rows above the bottom footer")
 ok(view_lib.screen_rows(6, true) == nil, "a short console cannot host a three-row editor")
 ok(view_lib.screen_rows(3) == nil, "a 3-row console gives it none")
 ok(view_lib.screen_rows(nil) == nil, "an unknown height gives it none")
