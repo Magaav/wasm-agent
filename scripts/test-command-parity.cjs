@@ -37,7 +37,7 @@ function windowCommands(text) {
   const end = text.indexOf('\n];', start);
   assert.notEqual(end, -1, 'ui/app.js: the COMMANDS array is not closed');
   const names = [];
-  for (const match of text.slice(start, end).matchAll(/name:\s*"(\/[a-z_-]+)"/g)) names.push(match[1]);
+  for (const match of text.slice(start, end).matchAll(/name:\s*"(\/[a-z_-]+(?: all)?)"/g)) names.push(match[1]);
   return names;
 }
 
@@ -46,8 +46,8 @@ function windowCommands(text) {
 function cliCommands(text) {
   const names = [];
   const aliases = [];
-  for (const row of text.matchAll(/\{\s*name\s*=\s*"(\/[a-z_-]+)"/g)) names.push(row[1]);
-  for (const alias of text.matchAll(/alias\s*=\s*\{\s*"(\/[a-z_-]+)"/g)) aliases.push(alias[1]);
+  for (const row of text.matchAll(/\{\s*name\s*=\s*"(\/[a-z_-]+(?: all)?)"/g)) names.push(row[1]);
+  for (const alias of text.matchAll(/alias\s*=\s*\{\s*"(\/[a-z_-]+(?: all)?)"/g)) aliases.push(alias[1]);
   return { names, aliases };
 }
 
@@ -69,8 +69,8 @@ function literals(text, from, to) {
 // The window's brief: one `const` statement of `"..." +` lines. The pieces are read one after another
 // rather than by slicing to the next `;` - the sentence contains one ("Escalate a conflict; never
 // force it"), and a rule about punctuation inside prose is a rule that breaks on the next edit.
-function windowBrief(text) {
-  const marker = 'const ORCHESTRATOR_BRIEF = ';
+function windowBrief(text, name = 'ORCHESTRATOR_BRIEF') {
+  const marker = `const ${name} = `;
   const at = text.indexOf(marker);
   assert.notEqual(at, -1, 'ui/app.js: ORCHESTRATOR_BRIEF is gone');
   const out = [];
@@ -87,8 +87,8 @@ function windowBrief(text) {
 }
 
 // The CLI's brief: `table.concat({ ... }, " ")`.
-function luaBrief(text) {
-  const at = text.indexOf('M.brief = table.concat({');
+function luaBrief(text, name = 'brief') {
+  const at = text.indexOf(`M.${name} = table.concat({`);
   assert.notEqual(at, -1, 'lua/core/merge.lua: M.brief is gone');
   const stop = text.indexOf('}, " ")', at);
   assert.notEqual(stop, -1, 'lua/core/merge.lua: M.brief is not closed by `}, " ")`');
@@ -105,7 +105,7 @@ function checkSurface(options = {}) {
   assert.ok(names.length >= 3, `the CLI's list no longer parses: found ${names.length} rows`);
   checks += 2;
 
-  for (const required of ['/new', '/update', '/merge']) {
+  for (const required of ['/new', '/update', '/merge', '/merge all']) {
     assert.ok(offered.includes(required), `ui/app.js no longer offers ${required}`);
     assert.ok(names.includes(required), `lua/core/commands.lua no longer offers ${required}`);
     checks += 2;
@@ -148,6 +148,10 @@ assert.ok(offeredBrief.includes('never force it'), 'the /merge brief must say a 
 assert.equal(offeredBrief, promisedBrief,
   'the /merge brief differs between ui/app.js and lua/core/merge.lua: it is written twice so that the '
   + 'trigger is one word in both surfaces, and the sentence is what says which procedure it triggers');
+checks += 3;
+assert.equal(windowBrief(ui,'ORCHESTRATOR_ALL_BRIEF'),luaBrief(merge,'all_brief'),'PR-inclusive brief parity');
+assert.ok(offeredBrief.includes('Open PR work is excluded'),'ordinary merge must exclude PR work');
+assert.ok(windowBrief(ui,'ORCHESTRATOR_ALL_BRIEF').includes('honor required checks and approvals'),'all mode must retain PR review policy');
 checks += 3;
 
 // A rule that cannot fail is not a check, so each one is run against a text it must reject. Four of

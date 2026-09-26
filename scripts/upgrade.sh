@@ -359,7 +359,7 @@ if [ "$UI_OK" = "1" ] && wait_health; then
     if ! cmp -s "$0" "$INSTALL_DIR/scripts/upgrade.sh"; then
       cp -f "$0" "$INSTALL_DIR/scripts/upgrade.sh" || { say "node upgraded, but could not ship upgrade.sh"; exit 3; }
     fi
-    for skill in self-update parallel-evolution; do
+    for skill in self-update parallel-evolution git-orchestrator; do
       if [ -n "$SOURCE_ROOT" ] && [ -f "$SOURCE_ROOT/skills/$skill/SKILL.md" ]; then
         mkdir -p "$HOME_DIR/skills/$skill"
         cp -R "$SOURCE_ROOT/skills/$skill/." "$HOME_DIR/skills/$skill/" \

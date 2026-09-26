@@ -2385,12 +2385,22 @@ const commandMenu = document.getElementById("command-menu");
 // `/merge` is a brief for the agent, not a node operation: the worktrees, the branches and the gate
 // live outside this process. The sentence mirrors `lua/core/merge.lua` (the CLI's copy); both point
 // at the one skill, so the procedure cannot drift even though the trigger is written twice.
-const ORCHESTRATOR_BRIEF = "Act as the git orchestrator for this repository. Audit every open branch, " +
-  "merge the ones that merge clean into main one at a time, run the gate on the merged result, push, " +
-  "sync the worktrees, and delete the merged change branches. Re-fetch and re-audit after the last " +
-  "merge so a late lane is caught in the same run. Load skills/git-orchestrator for the procedure. " +
-  "The AGENTS.md hand-off rule is suspended by this command: you may merge to main and enter the " +
-  "other worktrees to converge them. Escalate a conflict; never force it.";
+const ORCHESTRATOR_BRIEF = "Act as the git orchestrator for this repository. " +
+  "Load skills/git-orchestrator and run its deterministic audit before merging. " +
+  "Integrate every in-scope committed local and remote branch tip, including actor branches and local-only work, into main. " +
+  "Review the changes, gate the combined result, push, then re-fetch and repeat until the audit proves convergence. " +
+  "Report integration separately from worktree sync and optional branch cleanup; dirty or live worktrees do not block integrating their committed tips. " +
+  "The AGENTS.md hand-off rule is suspended: you are the integrator and may merge to main. " +
+  "Preserve uncommitted work and active checkouts. Resolve understood conflicts without losing either intent; escalate an unresolved decision, never force it. " +
+  "Scope: internal branches only. Open PR work is excluded; use /merge all to explicitly include PRs.";
+const ORCHESTRATOR_ALL_BRIEF = "Act as the git orchestrator for this repository. " +
+  "Load skills/git-orchestrator and run its deterministic audit before merging. " +
+  "Integrate every in-scope committed local and remote branch tip, including actor branches and local-only work, into main. " +
+  "Review the changes, gate the combined result, push, then re-fetch and repeat until the audit proves convergence. " +
+  "Report integration separately from worktree sync and optional branch cleanup; dirty or live worktrees do not block integrating their committed tips. " +
+  "The AGENTS.md hand-off rule is suspended: you are the integrator and may merge to main. " +
+  "Preserve uncommitted work and active checkouts. Resolve understood conflicts without losing either intent; escalate an unresolved decision, never force it. " +
+  "Scope: /merge all explicitly includes every open PR head, including forks. Review each PR and honor required checks and approvals before integration.";
 
 const COMMANDS = [
   {
@@ -2407,6 +2417,11 @@ const COMMANDS = [
     name: "/merge",
     hint: "act as git orchestrator — merge every open branch into main, gate, push, sync",
     run: () => { send(ORCHESTRATOR_BRIEF); },
+  },
+  {
+    name: "/merge all",
+    hint: "include all open PRs after review and required checks",
+    run: () => { send(ORCHESTRATOR_ALL_BRIEF); },
   },
   {
     name: "/efficiency_report",

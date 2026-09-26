@@ -113,10 +113,12 @@ if [ -n "$TREE" ] && git -C "$TREE" rev-parse --is-inside-work-tree >/dev/null 2
 
   for pair in "scripts/deploy.sh:$TREE/scripts/deploy.sh" \
               "scripts/upgrade.sh:$TREE/scripts/upgrade.sh" \
-              "skills/self-update/SKILL.md:$TREE/skills/self-update/SKILL.md"; do
+              "skills/self-update/SKILL.md:$TREE/skills/self-update/SKILL.md" \
+              "skills/git-orchestrator/SKILL.md:$TREE/skills/git-orchestrator/SKILL.md" \
+              "skills/git-orchestrator/scripts/audit.mjs:$TREE/skills/git-orchestrator/scripts/audit.mjs"; do
     rel="${pair%%:*}"; src="${pair#*:}"
     dst="$INSTALL_DIR/$rel"
-    [ "$rel" = "skills/self-update/SKILL.md" ] && dst="$CONFIG/$rel"
+    case "$rel" in skills/*) dst="$CONFIG/$rel" ;; esac
     if [ -f "$src" ]; then
       record "$([ -f "$dst" ] && cmp -s "$src" "$dst" && echo ok || echo fail)" \
         "shipped $rel == repo" "${dst:-missing}"
