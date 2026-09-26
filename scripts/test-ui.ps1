@@ -560,6 +560,22 @@ $harness = @'
   check(/last measured input/.test(contextText) && /128/.test(contextText),
     "context must show measured last request and selected capacity, saw: " + contextText);
   window.renderUsage(); window.renderModels();
+  var savedModelSettings = settings;
+  settings = Object.assign({}, settings, {provider:'openai-sub',model:'gpt-6-luna',
+    providers:[{id:'openai-sub',label:'OpenAI subscription',auth:'subscription',configured:true,
+      models:['gpt-6-luna','gpt-6-sol','gpt-6-astra']}]});
+  window.renderProviders(); window.renderModels();
+  check(document.getElementById('provider-select').selectedOptions[0].textContent==='OpenAI subscription',
+    'a configured subscription is shown without an API-key requirement');
+  check(document.getElementById('model-select').value==='gpt-6-luna' &&
+    document.getElementById('model-select').options.length===3,
+    'the subscription picker offers the GPT-6 family and selects Luna');
+  settings.providers[0].configured=false;
+  window.renderProviders();
+  check(document.getElementById('provider-select').textContent.includes('login in Pi'),
+    'a missing subscription login points to Pi');
+  settings=savedModelSettings;
+  window.renderProviders(); window.renderModels();
   var diagnostics=document.getElementById('harness-status');
   check(diagnostics.querySelectorAll('details').length===4,'harness diagnostics have four progressively disclosed categories');
   check(/different configuration/.test(diagnostics.textContent),'model drift must be disclosed');
