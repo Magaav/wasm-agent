@@ -375,11 +375,13 @@ ok(source == 'runtime-worktree.txt', 'the source of the tree must be named, got 
 -- end the quoting early: the sentinel would then read a different verb than the one intended.
 local command = update.request_command(
   { sentinel = 'C:/install/wa-sentinel.exe', candidate = 'C:/tree/rust/target/release/wa.exe' },
-  "/update: it's mine")
+  "/update: it's mine", { session_id = 'thread-123', prompt = 'verify and continue' })
 ok(command:find("'C:/install/wa%-sentinel%.exe' request deploy"), 'the verb must be deploy, spelled out: ' .. command)
 ok(not command:find('%-%-binary', 1), 'a deploy names no candidate binary: ' .. command)
 ok(not command:find("it's", 1, true) and command:find("it'\\''s", 1, true),
   'a quote in the reason must be escaped, not left to end the word: ' .. command)
+ok(command:find("--session 'thread-123' --prompt 'verify and continue'", 1, true),
+  'the update must durably continue the session after replacement: ' .. command)
 
 -- A sentinel that exists and does not work must be a refusal - never a crash, and never a claim of
 -- success. The fixture is a real file that is not a program, reached through the same seam a node
@@ -687,6 +689,10 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-efficiency-report.lua" "$BIN" --db 
 # A provider 400 on a too-large request must compact and retry once. Without it, one
 # oversized turn makes every later turn of the session fail and the thread never answers.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-overflow-recovery.lua" "$BIN" --db "$DB.overflow" | grep 'overflow recovery ok'
+# A provider edge can accept a model request and then send no response headers. Retrying is safe for
+# tool effects only before a response exists, is bounded to one attempt, and remains operator-disableable
+# because an upstream inference may still have been billed even though its response was lost.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-provider-timeout-recovery.lua" "$BIN" --db "$DB.provider-timeout" | grep 'provider timeout recovery ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-tool.lua" "$BIN" --db "$DB.graph-tool" | grep 'graph tool ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-freshness.lua" "$BIN" --db "$DB.graph-freshness" | grep 'graph freshness ok'
 # Offline accounting must run even when UI tests are explicitly skipped.

@@ -36,6 +36,34 @@ export const GRACE_SECONDS = 300;
 // a state nobody can reason about - `max_seconds` widened while `prompt_seconds` stayed put made the window
 // silently the smaller of the two.
 export const PROMPT_SECONDS = MAX_SECONDS - GRACE_SECONDS;
+// How long a direct message is *held* before it may be answered at all, whichever band it is in.
+//
+// The window above answers "how old may a message be"; this answers "how young may it be". The band
+// [0, prompt_seconds] used to be answered on sight, and measured live that meant a reply 30-60 s after
+// somebody spoke - while the operator was still typing theirs. The operator's own words for it: "copilot
+// is answering within 60 seconds". A hold is not the hard bound and not the grace band: the bound says
+// when a message has stopped being worth answering, the grace band says how long the operator's turn
+// lasts, and the hold says how long the copilot waits before taking a turn the operator has not taken.
+//
+// It is the operator's window, not a policy of ours, so it is **derived from the job's own control**:
+// `grace_seconds` is the operator saying how long they want to answer first, so the hold is that number,
+// capped per move at 60 s (the ticks are 30 s, and a longer first move buys little while spending the
+// bound). `grace_seconds: 0` means "answer immediately", which is the only value that closes the hold.
+export const HOLD_SECONDS = 60;
+
+// The hold a resolved window implies, and where the number came from.
+//
+// A resolved window has already read the job control, the node environment and the constant, so this is
+// arithmetic on the operator's own answer rather than a second place to configure anything. The floor of
+// the wait: a message arrives mid-tick and the next tick is up to `every_seconds` away.
+export function holdFor(window, env = process.env) {
+  const fromNode = envSeconds(env, "WA_WHATSAPP_HOLD_SECONDS", 0);
+  if (fromNode !== null) return { seconds: fromNode, source: "node_env" };
+  const grace = Number(window && window.grace_seconds);
+  if (!Number.isFinite(grace) || grace < 0) return { seconds: HOLD_SECONDS, source: "default" };
+  if (grace === 0) return { seconds: 0, source: "grace_seconds" };
+  return { seconds: Math.min(HOLD_SECONDS, grace), source: "grace_seconds" };
+}
 // The two knobs a job may carry, as the *job controls* `grace_seconds` and `max_age_seconds`, and the
 // environment each one can arrive in.
 //

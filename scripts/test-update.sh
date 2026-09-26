@@ -17,7 +17,11 @@ PORT="${1:-8941}"
 W="$(mktemp -d /tmp/wa-upd-XXXXXX)"
 INST="$W/install"
 TREE="$W/tree"
-native_path() { command -v cygpath >/dev/null 2>&1 && cygpath -w "$1" || printf '%s' "$1"; }
+native_path() {
+  if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"
+  else printf '%s' "$1"
+  fi
+}
 case "$(uname -s 2>/dev/null)" in
   CYGWIN*|MINGW*|MSYS*) WA_NAME=wa.exe; SENTINEL_NAME=wa-sentinel.exe ;;
   *) WA_NAME=wa; SENTINEL_NAME=wa-sentinel ;;
@@ -33,12 +37,13 @@ printf 'commit=%s\nsource_commit_hint=%s\n' "$COMMIT" "$COMMIT" > "$INST/install
 REQUESTS="$HOME/.wasm-agent/sentinel/requests"
 BEFORE="$(ls "$REQUESTS" 2>/dev/null | wc -l)"
 STUB="$INST/$SENTINEL_NAME"
-printf '#!/bin/sh\necho "  requested deploy: %s/requests/1789987058-0000.json"\necho "  the sentinel performs it - it is only a stub"\n' "$W" > "$STUB"
+ARGS="$W/sentinel-args.txt"
+printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "%s"\necho "  requested deploy: %s/requests/1789987058-0000.json"\necho "  the sentinel performs it - it is only a stub"\n' "$ARGS" "$W" > "$STUB"
 chmod +x "$STUB"
 
 echo "fixture: tree=$TREE commit=$COMMIT"
 WA_INSTALL_DIR="$(native_path "$INST")" "$BIN" --db "$W/node.db" serve --port "$PORT" \
-  --client-port $((PORT + 1)) --ui "$ROOT/ui" > "$W/node.log" 2>&1 &
+  --client-port $((PORT + 1)) --ui "$(native_path "$ROOT/ui")" > "$W/node.log" 2>&1 &
 NODE=$!
 trap 'kill $NODE 2>/dev/null; sleep 0.3; rm -rf "$W"' EXIT
 for _ in $(seq 1 40); do
@@ -47,13 +52,17 @@ for _ in $(seq 1 40); do
   sleep 0.25
 done
 [ "${code:-}" = "200" ] || { echo "FAIL: fixture node did not come up"; tail -5 "$W/node.log"; exit 1; }
-ask() { curl -s -m 30 -X POST -H 'content-type: application/json' -d '{}' "http://127.0.0.1:$PORT/update"; }
+ask() { curl -s -m 30 -X POST -H 'content-type: application/json' -d '{"thread":"fixture-session"}' "http://127.0.0.1:$PORT/update"; }
 show() { echo "$1" | tr ',' '\n' | grep -E "\"$2\"" | head -"${3:-4}"; }
 
 echo "--- 1. a tree with nothing built in it ---"
 A="$(ask)"; show "$A" "status|queued|message"
 case "$A" in *'"queued":true'*) echo "  ok: an unbuilt tree queues - the gate builds it" ;;
   *) echo "  FAIL: expected a queued deploy, got: $A"; exit 1 ;; esac
+grep -qx -- '--session' "$ARGS" && grep -qx -- 'fixture-session' "$ARGS" \
+  && grep -qx -- '--prompt' "$ARGS" \
+  && echo "  ok: the replacement carries a durable session continuation" \
+  || { echo "  FAIL: the sentinel request lost its session continuation: $(tr '\n' ' ' < "$ARGS")"; exit 1; }
 
 echo "--- 2. the tree is clean and at the installed commit ---"
 echo placeholder > "$TREE/rust/target/release/$WA_NAME"

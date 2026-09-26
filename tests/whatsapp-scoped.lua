@@ -96,20 +96,65 @@ local function verified_result(conversation_id, body, message_id)
 end
 
 local function memory_for()
-  return {
+  -- Two conversations, both real: `unanswered` (the operator has not replied) and `replied` (they replied
+  -- 1500 after the trigger that arrived at 1000/1001). A check picks the ledger it means and does not set a
+  -- flag another check has to remember to reset - and every check that is not about the operator's precedence
+  -- keeps `unanswered`, so a read still sees exactly one message.
+  local unanswered = { takeover_at = 0 }
+  local replied = { takeover_at = 1500 }
+  local ledgers = { unanswered = unanswered, replied = replied }
+  local function ledger() return ledgers.current or unanswered end
+  local m = {
+    ledgers = ledgers,
+    -- The ledger's own shape (`direction`, `sent_at`), because the send tool has two ways to ask the same
+    -- question - the direct accessor, and the bounded history - and a fixture that made them disagree would
+    -- test one of them by accident. The reply is carried only by the ledger that has one.
     conversation = function(id, limit)
-      return { { role = "user", content = "are you coming?", conversation_id = id }, limit = limit }
+      local current = ledger()
+      local rows = {
+        { conversation_id = id, message_id = "MSG1", direction = "incoming", sent_at = 1000, body = "are you coming?", limit = limit },
+      }
+      if current.takeover_at > 0 then
+        rows[#rows + 1] = { conversation_id = id, message_id = "OP1", direction = "outgoing",
+          sent_at = current.takeover_at, body = "i got this" }
+      end
+      return rows
     end,
     conversation_record = function(id)
       return { id = id, kind = "group", title = "A Casa Lar | 🏠" }
     end,
+    newest_outgoing_after = function(_, since)
+      local current = ledger()
+      if current.takeover_at > since then
+        return { message_id = "OP1", body = "i got this", sent_at = current.takeover_at }
+      end
+      return nil
+    end,
   }
+  return m
 end
 
-local function send_ctx(profile, effects, message_id, sender)
+local profile = base_profile()
+local memory = memory_for()
+-- The trusted event carries the ledger's own clocks for the trigger (`observed_at` is the arrival this node
+-- recorded, `sent_at` the sender's claim). The send tool needs them to prove the operator has not answered
+-- since; a fixture without them would be testing the refusal instead of the branch it names.
+local event = { conversation_id = "5511888888888@c.us", message_id = "MSG1", sent_at = 1000, observed_at = 1001 }
+
+-- The context a send check uses, built here and not above: the ledger handle has to be in scope, or the
+-- closure captures a shadowed local holding nil and every send silently tests "ledger unreadable".
+local function send_ctx(profile, effects, message_id, sender, ledger)
   return {
     profile = profile,
-    event = { conversation_id = profile.resources.allowed_conversation, message_id = message_id },
+    -- The ledger handle travels with the other trusted snapshots, never from the model's arguments: it is how
+    -- the send tool asks whether the operator has answered since the trigger.
+    memory = ledger or memory,
+    -- The ledger's own clocks for the trigger travel with the event (`observed_at` is the arrival this node
+    -- recorded, `sent_at` the sender's claim). The send tool refuses without them: a run that cannot say
+    -- when the message arrived cannot prove the operator has stayed quiet, and an unprovable silence is not
+    -- permission to write over a person.
+    event = { conversation_id = profile.resources.allowed_conversation, message_id = message_id,
+      sent_at = 1000, observed_at = 1001 },
     effects = effects,
     send = sender or function(request) return verified_result(request.conversation_id, request.body) end,
   }
@@ -122,13 +167,9 @@ check(names["whatsapp_read"] and names["whatsapp_decide"] and names["whatsapp_se
 check(not names["whatsapp_conversation"], "the pre-rename name is not advertised")
 check(not names["bash"] and not names["edit"] and not names["operation"], "no shell/edit/deploy tool is exposed")
 
-local profile = base_profile()
-local memory = memory_for()
-local event = { conversation_id = "5511888888888@c.us", message_id = "MSG1" }
-local ctx = { profile = profile, event = event, effects = new_effects() }
-
 -- Conversation scope: the trusted event's conversation works; another is refused; a ledger row outside it
 -- is a scope mismatch.
+local ctx = { profile = profile, event = event, effects = new_effects() }
 local read = whatsapp.dispatch(memory, "whatsapp_read", {}, ctx)
 check(read.conversation_id == "5511888888888@c.us" and read.count == 1, "reads the event's conversation")
 -- The title comes from the ledger, so a child names the conversation it answered instead of inferring
@@ -254,6 +295,55 @@ local notConfirmed = whatsapp.dispatch(memory, "whatsapp_send", { body = "yes", 
 check(notConfirmed.error ~= nil and notConfirmed.error:find("send_not_confirmed") ~= nil, "a verified send whose record fails is not success")
 check(failConfirm.find("F1").state == "pending", "the reservation remains pending after a failed confirmation")
 check(whatsapp.dispatch(memory, "whatsapp_send", { body = "yes", confirm = true }, send_ctx(profile, failConfirm, "F1")).error == "ambiguous_prior_send", "a failed confirmation is never replayed")
+
+-- ---- the operator's precedence, asked again at send time ------------------------------------------
+-- Read time refuses a message the operator already answered, but the child reads, reasons and sends
+-- seconds-to-minutes later - and the operator may answer in that gap. Measured live, that is exactly what
+-- happened: the copilot replied over the operator in the same minute they did. So the same determination is
+-- repeated against the ledger immediately before the reservation, and a conversation the operator has taken
+-- over is refused. The trigger's arrival is `observed_at` (the ledger's clock for both sides of the
+-- comparison), with the sender's `sent_at` as the fallback.
+local guard = new_effects()
+local guard_calls = 0
+local guard_sender = function(request) guard_calls = guard_calls + 1; return verified_result(request.conversation_id, request.body) end
+-- The conversation where the operator replied after the trigger: the send must not happen.
+memory.ledgers.current = memory.ledgers.replied
+local blocked = whatsapp.dispatch(memory, "whatsapp_send", { body = "yes", confirm = true }, send_ctx(profile, guard, "G1", guard_sender))
+check(blocked.error == "operator_took_over", "a reply the operator sent after the trigger refuses the send")
+check(guard_calls == 0, "a refused send never reaches the route")
+check(guard.find("G1") == nil, "a refusal before the reservation spends no send budget")
+check(blocked.note ~= nil and blocked.note:find("after the message") ~= nil, "the refusal says what happened, in the operator's words")
+-- The operator having spoken *before* the trigger is their turn being over, not the copilot's being taken:
+-- the message this run answers came after them, so it is still this run's to answer.
+local before = { takeover_at = 900 }
+memory.ledgers.before_trigger = before
+memory.ledgers.current = before
+check(whatsapp.dispatch(memory, "whatsapp_send", { body = "yes", confirm = true }, send_ctx(profile, new_effects(), "G2", guard_sender)).ok == true, "a reply that came before the trigger does not block the send")
+memory.ledgers.current = nil
+-- A run whose event carries neither clock cannot prove the operator stayed quiet, so it fails closed rather
+-- than reading an unprovable silence as permission.
+local noClock = { conversation_id = profile.resources.allowed_conversation, message_id = "G3" }
+check(whatsapp.dispatch(memory, "whatsapp_send", { body = "yes", confirm = true },
+  { profile = profile, memory = memory, event = noClock, effects = new_effects(), send = guard_sender }).error == "trigger_time_unknown",
+  "an event with no arrival time cannot justify a send")
+-- A memory implementation without the direct accessor still gets the answer, from the bounded history.
+local historyMemory = {
+  conversation = function(id) return {
+    { conversation_id = id, direction = "incoming", sent_at = 1000 },
+    { conversation_id = id, direction = "outgoing", sent_at = 1600 },
+  } end,
+}
+check(whatsapp.dispatch(historyMemory, "whatsapp_send", { body = "yes", confirm = true },
+  send_ctx(profile, new_effects(), "G4", guard_sender, historyMemory)).error == "operator_took_over",
+  "the bounded history is the fallback when the accessor is absent")
+local quietHistory = {
+  conversation = function(id) return {
+    { conversation_id = id, direction = "incoming", sent_at = 1000 },
+    { conversation_id = id, direction = "outgoing", sent_at = 800 },
+  } end,
+}
+check(whatsapp.dispatch(quietHistory, "whatsapp_send", { body = "yes", confirm = true },
+  send_ctx(profile, new_effects(), "G5", guard_sender, quietHistory)).ok == true, "an operator who spoke last before the trigger is not a takeover")
 
 -- An unknown outcome after a possible effect is recorded and never retried.
 local unknownStore = new_effects()

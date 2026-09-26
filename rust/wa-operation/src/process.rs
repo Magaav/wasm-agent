@@ -85,6 +85,8 @@ impl Process {
             Err(error)
         }
     }
+    pub fn cleanup_auxiliaries(&mut self) -> io::Result<()> { Ok(()) }
+    pub fn auxiliary_cleanup(&self) -> &[String] { &[] }
     pub fn containment() -> &'static str {
         "posix_process_group"
     }

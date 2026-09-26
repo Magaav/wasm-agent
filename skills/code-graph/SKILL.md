@@ -28,11 +28,26 @@ specific section or a larger limit only when the clipped rows hide a needed lead
 graph {action:"search_symbols", name:"session routing", limit:8}
 ```
 
+When seeking a component or function implementation rather than a state binding,
+pass `prefer_implementations:true`. This opt-in ranking lowers partial local
+variables while leaving them visible. It is useful for multiword concept search;
+leave it off when variables are the subject of the task.
+
 Results are ranked by explainable BM25-like lexical evidence plus a small
 graph-centrality boost. camelCase and snake_case identifiers are tokenized.
-`score`, `score_breakdown`, `confidence`, `reason`, and `matched_terms` expose why a result
-ranked. This is lexical retrieval, not semantic proof. Select a result rather
-than broadening immediately when confidence is useful.
+`score`, `score_breakdown`, `confidence`, `reason`, `matched_terms`,
+`unmatched_terms`, and `unmatched_definition_terms` expose why a result ranked.
+`high` means every concept word appears in the definition name or signature;
+`medium` means some do; `low` may be path evidence alone. A `partial` verdict
+means the top definition misses words even if its path contains them. This is
+lexical retrieval, not semantic proof. Retrieve a useful candidate with
+`symbol_source`, then confirm missing words with a bounded `grep`/`read` before editing.
+
+When a named component from a task is absent, try one exact-name lookup and a
+bounded source search. Record the absence as a finding and inspect the nearest
+verified component. Repeating broader concept queries without new evidence
+does not make an absent symbol appear. There is no elapsed-time cutoff for
+discovery; stop a search when its evidence is sufficient to choose the next step.
 
 ```
 graph {action:"symbol_source", path:"lua/core/agent.lua", name:"choose_worker", line:123, kind:"fn"}
@@ -131,5 +146,8 @@ call is a typed edge, not a string.
 - Rust, Lua, JavaScript/TypeScript, Bash, PowerShell and Markdown are indexed. Other files are not.
 - Ranking is lexical. Synonyms that do not occur in a name, signature, or path can
   return `absent`; use `grep` rather than treating absence as proof.
+- With `prefer_implementations:true`, local variables that match only part of a multiword concept rank lower. This
+  favors an implementation-sized definition during discovery, but can miss an
+  important data binding; inspect variable leads when the task concerns state.
 - `symbol_source` returns the syntax node itself. Leading comments, sibling
   attributes, imports, and nearby module state may require a surrounding `read`.

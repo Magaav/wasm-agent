@@ -463,6 +463,9 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
             {
                 reason.get_or_insert("deadline_exceeded".into());
             }
+            if code.is_some() && reason.is_none() {
+                process.cleanup_auxiliaries()?;
+            }
             // Launchers (notably Git's bin/bash.exe) may signal before their real shell finishes
             // closing stdio. One shared 50ms drain allowance, inside the absolute deadline, not per pipe.
             let descendants = code.is_some() && process.descendants()?;
@@ -584,6 +587,10 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
     // would read as a cleanup that did not happen.
     state["cleanup"] = json!(cleanup.unwrap_or(if promoted { "self_exited" } else { "unknown" }));
     state["promoted"] = json!(promoted);
+    if !process.auxiliary_cleanup().is_empty() {
+        state["auxiliary_cleanup"] = json!(process.auxiliary_cleanup());
+        state["cleanup"] = json!("compiler_helpers_terminated");
+    }
     state["stdout"] = json!(String::from_utf8_lossy(&views[0]));
     state["stderr"] = json!(String::from_utf8_lossy(&views[1]));
     state["output_truncated"] = json!(bytes > views.iter().map(Vec::len).sum());

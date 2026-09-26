@@ -20,7 +20,7 @@
 const DEFAULT_PORTS = [9222];
 const WHATSAPP_URL = "web.whatsapp.com";
 
-import { eligibility, windowFromEnv } from "./whatsapp-eligibility.mjs";
+import { eligibility, holdFor, windowFromEnv } from "./whatsapp-eligibility.mjs";
 import { deriveLeft } from "./whatsapp-read-core.mjs";
 import { WebSocket } from "./lib/websocket-runtime.mjs";
 // A message whose body is media is stored as base64 by the app; keeping that would put megabytes in
@@ -42,6 +42,14 @@ function parseArgs(argv) {
     // The operator's own ids are a *local binding*, not part of any portable artifact: they are how a
     // group mention is verified. Passed as a comma-separated list, or via WA_WHATSAPP_OPERATOR.
     else if (flag === "--operator") { args.operator = String(value || ""); index += 1; }
+    // An explicit hold, for a caller that has already resolved it (and for a test that wants a fixed
+    // one). Negative or unreadable is refused rather than rounded, so a bad argument cannot become a
+    // window nobody typed; absent, the hold comes from the resolved window below.
+    else if (flag === "--hold") {
+      const seconds = Number(value);
+      if (Number.isSafeInteger(seconds) && seconds >= 0) args.hold = seconds;
+      index += 1;
+    }
     else if (flag === "--print-expression") { args.printExpression = true; }
   }
   return args;
@@ -263,13 +271,18 @@ async function main() {
   // the node's environment, then the constant in the rule. The resolution is reported below with the
   // verdicts, so a reader's own output says which controls were in force.
   const window = windowFromEnv();
+  // The hold is the other half of the window: the window says how old a message may be, the hold says how
+  // young. The ingest enforces it against the ledger (it is the side that knows when a message was first
+  // observed, and it is the side that would otherwise hand it to a child), so this only *reports* the
+  // number in force - the same reason the window is reported: a hold read rather than inferred.
+  const hold = Number.isSafeInteger(args.hold) ? { seconds: args.hold, source: "argument" } : holdFor(window);
   const eligibilityOptions = {
     operator: { ids: operatorIds, phones: operatorIds },
     now: Math.floor(Date.now() / 1000),
     max_seconds: window.max_seconds,
     grace_seconds: window.grace_seconds,
   };
-  console.error(`window max_age_seconds=${window.max_seconds} (${window.source.max_age_seconds}) grace_seconds=${window.grace_seconds} (${window.source.grace_seconds}) prompt_seconds=${window.prompt_seconds}`);
+  console.error(`window max_age_seconds=${window.max_seconds} (${window.source.max_age_seconds}) grace_seconds=${window.grace_seconds} (${window.source.grace_seconds}) prompt_seconds=${window.prompt_seconds} hold_seconds=${hold.seconds} (${hold.source})`);
   let eligible = 0;
   let ineligible = 0;
   for (const message of messages) {
@@ -300,7 +313,9 @@ async function main() {
       grace_seconds: window.grace_seconds,
       max_age_seconds: window.max_seconds,
       prompt_seconds: window.prompt_seconds,
+      hold_seconds: hold.seconds,
       source: window.source,
+      hold_source: hold.source,
     },
   };
   // The inbox does not fit in a pipe: 700 conversations and their messages are hundreds of

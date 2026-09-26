@@ -38,8 +38,8 @@ def pi_trace(root):
                                          for u in usage), 6)}
 
 
-def wasm_trace(root):
-    db = root / "wasm" / "wa.db"
+def wasm_trace(root, label="wasm"):
+    db = root / label / "wa.db"
     if not db.exists():
         return {"error": "wasm-agent session database absent"}
     connection = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
@@ -49,7 +49,7 @@ def wasm_trace(root):
         starts = connection.execute(
             "SELECT count(*) FROM harness_events WHERE kind='model_call' AND phase='start'").fetchone()[0]
         calls = [call for (raw,) in connection.execute(
-            "SELECT tool_calls FROM messages WHERE role='assistant'")
+            "SELECT tool_calls FROM messages WHERE role='assistant' ORDER BY seq")
             for call in json.loads(raw or "[]")]
         failures = connection.execute(
             "SELECT count(*) FROM messages WHERE role='tool' AND ok=0").fetchone()[0]
@@ -57,11 +57,26 @@ def wasm_trace(root):
             "SELECT count(*) FROM messages WHERE role='tool'").fetchone()[0]
     tokens = {key: sum((e.get("normalized") or {}).get(key) or 0 for e in events)
               for key in ("input", "cacheRead", "cacheWrite", "output", "reasoning")}
-    return {"modelCalls": len(events), "unfinishedModelCalls": starts - len(events),
+    result = {"modelCalls": len(events), "unfinishedModelCalls": starts - len(events),
             "toolCalls": len(calls),
             "tools": dict(collections.Counter(c.get("function", {}).get("name") for c in calls)),
             "toolFailures": failures, "unfinishedToolCalls": len(calls) - results,
             "tokens": tokens, "modelElapsedMs": sum(e.get("ms") or 0 for e in events)}
+    if label == "wasm-graph":
+        steps = [(c.get("function", {}).get("name"),
+                  json.loads(c.get("function", {}).get("arguments") or "{}")) for c in calls]
+        first_edit = next((i for i, (name, args) in enumerate(steps)
+                           if name == "edit" and "/ui/" in args.get("path", "")), None)
+        before = steps[:first_edit] if first_edit is not None else []
+        after = steps[first_edit + 1:] if first_edit is not None else []
+        result["graphTreatmentComplied"] = bool(
+            any(name == "graph" and args.get("action") == "search_symbols"
+                for name, args in before)
+            and any(name == "graph" and args.get("action") == "symbol_source"
+                    for name, args in before)
+            and any(name == "graph" and args.get("action") == "impact"
+                    for name, args in after))
+    return result
 
 
 def main():
@@ -71,7 +86,8 @@ def main():
     fixture = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
     run = json.loads((root / "report.json").read_text(encoding="utf-8"))
     rates = fixture.get("ratesUsdPerMillion") or {}
-    arms = {"pi": pi_trace(root), "wasm": wasm_trace(root)}
+    arms = {name: pi_trace(root) if name == "pi" else wasm_trace(root, name)
+            for name in run.get("arms", {})}
     for name, arm in arms.items():
         receipt = run.get("arms", {}).get(name, {})
         arm.update({"oraclePass": receipt.get("oracle", {}).get("pass"),

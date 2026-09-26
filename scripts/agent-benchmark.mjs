@@ -7,6 +7,7 @@ import net from 'node:net';
 import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { DUMMY_KEY } from './agent-benchmark-proxy.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const checkOnly = process.argv.includes('--check');
@@ -25,9 +26,16 @@ if (!/^[a-z0-9-]+$/.test(fixture.id || '') ||
     !fixture.provider || !fixture.image || fixture.oracle !== 'scripts/test-ui.ps1' ||
     !/^[a-zA-Z0-9._/-]+$/.test(fixture.provider) ||
     !/^[a-zA-Z0-9._/-]+$/.test(fixture.model) ||
-    !/^[a-zA-Z0-9._-]+$/.test(fixture.reasoning || '')) {
+    !/^[a-zA-Z0-9._-]+$/.test(fixture.reasoning || '') ||
+    (fixture.graphTreatment !== undefined &&
+      (typeof fixture.graphTreatment !== 'string' || !fixture.graphTreatment.trim() ||
+        fixture.graphTreatment.length > 4000)) ||
+    (fixture.sharedInstructions !== undefined &&
+      (typeof fixture.sharedInstructions !== 'string' ||
+        fixture.sharedInstructions.length > 4000))) {
   throw new Error('invalid benchmark fixture');
 }
+const labels = fixture.graphTreatment ? ['pi', 'wasm', 'wasm-graph'] : ['pi', 'wasm'];
 
 function command(exe, args, options = {}) {
   const run = spawnSync(exe, args, { cwd: repo, encoding: 'utf8', timeout: 30000, ...options });
@@ -99,16 +107,20 @@ async function grade(label, sourceDir, scratch, traceDir) {
     exit: output.status, error: output.error?.message || null };
 }
 
-function benchmarkNetwork(id) {
+function benchmarkNetwork(id, token) {
   const name = `wa-bench-${id}`;
   const proxy = `${name}-proxy`;
   command('docker', ['network', 'create', '--internal', name]);
   const script = path.join(repo, 'scripts', 'agent-benchmark-proxy.mjs');
   command('docker', ['run', '-d', '--rm', '--name', proxy, '--network', name,
+    '--network-alias', 'model-proxy',
     '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+    '--env', 'BENCHMARK_PROXY_API_KEY',
     '--env', `BENCHMARK_PROXY_MAX_SECONDS=${fixture.timeLimitSeconds + 180}`,
     '--mount', `type=bind,source=${script},target=/proxy.mjs,readonly`,
-    'node:22-bookworm', 'node', '/proxy.mjs']);
+    'node:22-bookworm', 'node', '/proxy.mjs'], {
+    env: { ...process.env, BENCHMARK_PROXY_API_KEY: token },
+  });
   command('docker', ['network', 'connect', 'bridge', proxy]);
   const inspected = JSON.parse(command('docker', ['inspect', proxy]))[0];
   const ip = inspected.NetworkSettings.Networks[name]?.IPAddress;
@@ -118,17 +130,19 @@ function benchmarkNetwork(id) {
 
 function probeNetwork(network) {
   const script = `Promise.allSettled([
-    fetch('https://opencode.ai/zen/go/v1/models',{signal:AbortSignal.timeout(5000)}),
+    fetch('http://model-proxy:8080/zen/go/v1/models',{
+      headers:{authorization:'Bearer ${DUMMY_KEY}'},signal:AbortSignal.timeout(5000)}),
     fetch('https://raw.githubusercontent.com/Magaav/wasm-agent/main/ui/app.js',
       {signal:AbortSignal.timeout(5000)})
   ]).then(([model,github])=>{
     console.log(JSON.stringify({modelReachable:model.status==='fulfilled',
+      modelAuthorized:model.status==='fulfilled' && model.value.status!==401,
       githubReachable:github.status==='fulfilled'}));
   })`;
   const output = command('docker', ['run', '--rm', '--network', network.name,
-    '--add-host', `opencode.ai:${network.ip}`, 'node:22-bookworm', 'node', '-e', script]);
+    'node:22-bookworm', 'node', '-e', script]);
   const result = JSON.parse(output);
-  if (!result.modelReachable || result.githubReachable) {
+  if (!result.modelReachable || !result.modelAuthorized || result.githubReachable) {
     throw new Error('benchmark network fence failed its model/GitHub probe');
   }
   return result;
@@ -136,7 +150,7 @@ function probeNetwork(network) {
 
 function dockerArgs(label, work, trace, name, network) {
   const args = ['run', '--rm', '--name', name, '--network', network.name,
-    '--add-host', `opencode.ai:${network.ip}`, '--workdir', '/work', '--read-only',
+    '--workdir', '/work', '--read-only',
     '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '128',
     '--memory', '3g', '--cpus', '2', '--tmpfs', '/tmp:rw,nosuid,nodev,size=512m',
     '--mount', `type=bind,source=${work},target=/work`,
@@ -144,30 +158,41 @@ function dockerArgs(label, work, trace, name, network) {
     '--env', 'HOME=/tmp/home', '--env', 'GIT_CONFIG_COUNT=1',
     '--env', 'GIT_CONFIG_KEY_0=safe.directory', '--env', 'GIT_CONFIG_VALUE_0=/work'];
   if (label === 'pi') {
-    args.push('--env', 'OPENCODE_API_KEY', '--env', 'PI_CODING_AGENT_DIR=/tmp/home/.pi/agent');
+    args.push('--env', `OPENCODE_API_KEY=${DUMMY_KEY}`,
+      '--env', 'PI_CODING_AGENT_DIR=/tmp/home/.pi/agent');
   } else {
-    args.push('--env', 'WASM_AGENT_LLM_API_KEY',
+    args.push('--env', `WASM_AGENT_LLM_API_KEY=${DUMMY_KEY}`,
       '--env', 'WASM_AGENT_HOME=/tmp/home',
-      '--env', 'WASM_AGENT_LLM_BASE_URL=https://opencode.ai/zen/go/v1',
+      '--env', 'WASM_AGENT_LLM_BASE_URL=http://model-proxy:8080/zen/go/v1',
       '--env', `WASM_AGENT_LLM_MODEL=${fixture.model}`,
       '--env', `WASM_AGENT_REASONING=${fixture.reasoning}`,
       '--env', 'WASM_AGENT_MANAGED=0');
   }
   const script = label === 'pi'
-    ? `mkdir -p /tmp/home /trace/session && exec timeout -k 2s ${fixture.timeLimitSeconds}s pi -p --mode json --no-extensions --no-skills --no-prompt-templates --no-themes --approve --provider ${fixture.provider} --model ${fixture.model} --thinking ${fixture.reasoning} --session-dir /trace/session -- "$(cat /trace/prompt.txt)"`
+    ? `mkdir -p /tmp/home/.pi/agent /trace/session && cp /trace/pi-models.json /tmp/home/.pi/agent/models.json && exec timeout -k 2s ${fixture.timeLimitSeconds}s pi -p --mode json --no-extensions --no-skills --no-prompt-templates --no-themes --approve --provider ${fixture.provider} --model ${fixture.model} --thinking ${fixture.reasoning} --session-dir /trace/session -- "$(cat /trace/prompt.txt)"`
     : `mkdir -p /tmp/home && exec timeout -k 2s ${fixture.timeLimitSeconds}s wa --db /trace/wa.db chat "$(cat /trace/prompt.txt)"`;
   args.push(fixture.image, 'sh', '-lc', script);
   return args;
 }
 
-async function runArm(label, work, trace, id, token, network) {
+async function runArm(label, work, trace, id, network) {
   const name = `wa-bench-${id}-${label}`;
   fs.mkdirSync(trace, { recursive: true });
-  fs.writeFileSync(path.join(trace, 'prompt.txt'), fixture.prompt);
+  fs.writeFileSync(path.join(trace, 'prompt.txt'), fixture.prompt +
+    (fixture.sharedInstructions || '') +
+    (label === 'wasm-graph' ? fixture.graphTreatment : ''));
+  if (label === 'pi') fs.writeFileSync(path.join(trace, 'pi-models.json'), JSON.stringify({
+    providers: { [fixture.provider]: {
+      baseUrl: 'http://model-proxy:8080/zen/go/v1', apiKey: DUMMY_KEY,
+    } },
+  }));
   const out = fs.createWriteStream(path.join(trace, 'stdout.log'));
   const err = fs.createWriteStream(path.join(trace, 'stderr.log'));
   const started = Date.now();
-  const env = { ...process.env, OPENCODE_API_KEY: token, WASM_AGENT_LLM_API_KEY: token };
+  const env = { ...process.env };
+  delete env.OPENCODE_API_KEY;
+  delete env.WASM_AGENT_LLM_API_KEY;
+  delete env.BENCHMARK_PROXY_API_KEY;
   let timedOut = false;
   const child = spawn('docker', dockerArgs(label, work, trace, name, network), { env, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.pipe(out);
@@ -208,6 +233,22 @@ function removeScratch(scratch) {
   fs.rmSync(resolved, { recursive: true, force: true });
 }
 
+function purgeSecretLeaks(root, token) {
+  const removed = [];
+  function visit(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const target = path.join(dir, entry.name);
+      if (entry.isDirectory()) visit(target);
+      else if (entry.isFile() && fs.readFileSync(target).includes(Buffer.from(token))) {
+        fs.unlinkSync(target);
+        removed.push(path.relative(root, target));
+      }
+    }
+  }
+  visit(root);
+  return removed;
+}
+
 async function main() {
   command('git', ['cat-file', '-e', `${fixture.source}^{commit}`]);
   command('git', ['cat-file', '-e', `${fixture.knownFix}^{commit}`]);
@@ -221,6 +262,10 @@ async function main() {
   const report = { fixture: fixture.id, source: fixture.source, knownFix: fixture.knownFix,
     model: `${fixture.provider}/${fixture.model}`, reasoning: fixture.reasoning,
     limitSeconds: fixture.timeLimitSeconds, promptSha256: crypto.createHash('sha256').update(fixture.prompt).digest('hex'),
+    sharedInstructionsSha256: fixture.sharedInstructions &&
+      crypto.createHash('sha256').update(fixture.sharedInstructions).digest('hex'),
+    graphTreatmentSha256: fixture.graphTreatment &&
+      crypto.createHash('sha256').update(fixture.graphTreatment).digest('hex'),
     image: fixture.image, startedAt: new Date().toISOString(), controls: {}, arms: {} };
   let cleanupSafe = true;
   try {
@@ -234,36 +279,48 @@ async function main() {
       throw new Error('oracle preflight failed: baseline must fail and known repair must pass');
     }
     if (checkOnly) return;
-    const pi = workspace('pi', scratch);
-    const wasm = workspace('wasm', scratch);
-    if (pi.tree !== wasm.tree) throw new Error('agent starting trees differ');
-    report.startTree = pi.tree;
-    const network = benchmarkNetwork(id);
-    report.network = { internal: true, fixedDestination: 'opencode.ai:443',
+    const workspaces = Object.fromEntries(labels.map(label => [label, workspace(label, scratch)]));
+    if (labels.some(label => workspaces[label].tree !== workspaces.pi.tree)) {
+      throw new Error('agent starting trees differ');
+    }
+    report.startTree = workspaces.pi.tree;
+    const network = benchmarkNetwork(id, token);
+    report.network = { internal: true, fixedDestination: 'opencode.ai:443 via model-proxy:8080',
       probe: probeNetwork(network) };
-    const piTrace = path.join(traceRoot, 'pi');
-    const wasmTrace = path.join(traceRoot, 'wasm');
-    const attempts = await Promise.allSettled([
-      runArm('pi', pi.dir, piTrace, id, token, network),
-      runArm('wasm', wasm.dir, wasmTrace, id, token, network),
-    ]);
+    const attempts = await Promise.allSettled(labels.map(label =>
+      runArm(label, workspaces[label].dir, path.join(traceRoot, label), id, network)));
     if (attempts.some(x => x.status === 'rejected')) {
       throw new Error('an agent container failed to settle: ' +
         attempts.filter(x => x.status === 'rejected').map(x => x.reason.message).join('; '));
     }
-    const [piRun, wasmRun] = attempts.map(x => x.value);
-    report.arms.pi = { ...piRun, ...captureDiff(pi.dir, pi.base, piTrace),
-      oracle: await grade('pi', pi.dir, scratch, traceRoot) };
-    report.arms.wasm = { ...wasmRun, ...captureDiff(wasm.dir, wasm.base, wasmTrace),
-      oracle: await grade('wasm', wasm.dir, scratch, traceRoot) };
-    cleanupSafe = piRun.containerRemoved && wasmRun.containerRemoved;
+    for (const [index, label] of labels.entries()) {
+      const run = attempts[index].value;
+      const work = workspaces[label];
+      report.arms[label] = { ...run,
+        ...captureDiff(work.dir, work.base, path.join(traceRoot, label)),
+        oracle: await grade(label, work.dir, scratch, traceRoot) };
+    }
+    cleanupSafe = attempts.every(x => x.value.containerRemoved);
   } catch (error) {
     report.error = error.message;
     throw error;
   } finally {
+    if (token) {
+      try {
+        const leaked = purgeSecretLeaks(traceRoot, token);
+        if (leaked.length) {
+          report.credentialLeakFilesPurged = leaked;
+          report.error = 'real model credential appeared in retained traces; affected files removed';
+          process.exitCode = 1;
+        }
+      } catch (error) {
+        report.error = `credential scan failed: ${error.message}`;
+        process.exitCode = 1;
+      }
+    }
     if (!checkOnly) {
       cleanupSafe = true;
-      for (const label of ['pi', 'wasm']) {
+      for (const label of labels) {
         const name = `wa-bench-${id}-${label}`;
         spawnSync('docker', ['rm', '--force', name], { timeout: 15000, encoding: 'utf8' });
         const check = spawnSync('docker', ['ps', '-a', '--filter', `name=^/${name}$`,
@@ -291,7 +348,7 @@ async function main() {
       report.cleanup.scratchPath = scratch;
     }
     fs.writeFileSync(path.join(traceRoot, 'report.json'), JSON.stringify(report, null, 2) + '\n');
-    if (!checkOnly && report.arms.pi && report.arms.wasm) {
+    if (!checkOnly && labels.every(label => report.arms[label])) {
       const python = process.platform === 'win32' ? 'python' : 'python3';
       const summary = spawnSync(python,
         [path.join(repo, 'scripts', 'agent-benchmark-report.py'), traceRoot, fixturePath],

@@ -71,6 +71,7 @@ pub struct Process {
     job: Handle,
     stdout: Handle,
     stderr: Handle,
+    auxiliary_cleanup: Vec<String>,
 }
 impl Process {
     pub fn spawn(spec: &Spec) -> io::Result<Self> {
@@ -221,6 +222,7 @@ impl Process {
             job,
             stdout: out_read,
             stderr: err_read,
+            auxiliary_cleanup: Vec::new(),
         };
         if unsafe { ResumeThread(thread.0) } == u32::MAX {
             return Err(io::Error::last_os_error());
@@ -242,6 +244,16 @@ impl Process {
         check(unsafe { TerminateJobObject(self.job.0, 1) })
     }
     pub fn descendants(&self) -> io::Result<bool> {
+        match self.live_descendants() {
+            Ok(live) => Ok(!live.is_empty()),
+            // Windows can deny opening/querying a process while it is exiting.
+            // Keep supervising until the job snapshot removes it; do not invent
+            // either successful cleanup or an execution failure from that race.
+            Err(error) if process_query_exiting(&error) => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+    fn live_descendants(&self) -> io::Result<Vec<Handle>> {
         // Accounting can briefly include an already-signalled root; do not misreport that as an orphan.
         let mut storage = [0usize; 66];
         check(unsafe {
@@ -261,16 +273,68 @@ impl Process {
             )
         };
         let root = unsafe { GetProcessId(self.process.0) };
+        let mut live = Vec::new();
         for &id in ids {
             if id as u32 == root {
                 continue;
             }
-            let handle = Handle(unsafe { OpenProcess(SYNCHRONIZE, 0, id as u32) });
-            if !handle.0.is_null() && unsafe { WaitForSingleObject(handle.0, 0) } == WAIT_TIMEOUT {
-                return Ok(true);
+            let handle = Handle(unsafe {
+                OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, id as u32)
+            });
+            if handle.0.is_null() {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) { continue; }
+                return Err(error);
+            }
+            // A PID from the job snapshot may have been recycled before OpenProcess.
+            // Check membership on the opened handle, never terminate a process by name.
+            let mut owned = 0;
+            if unsafe { WaitForSingleObject(handle.0, 0) } != WAIT_TIMEOUT { continue; }
+            check(unsafe { IsProcessInJob(handle.0, self.job.0, &mut owned) })?;
+            if owned != 0 {
+                live.push(handle);
             }
         }
-        Ok(false)
+        Ok(live)
+    }
+    pub fn cleanup_auxiliaries(&mut self) -> io::Result<()> {
+        let live = match self.live_descendants() {
+            Ok(live) => live,
+            Err(error) if process_query_exiting(&error) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if live.is_empty() { return Ok(()); }
+        let mut images = Vec::new();
+        let mut compiler_helper = false;
+        for handle in &live {
+            let mut image = vec![0u16; 32768];
+            let mut size = image.len() as u32;
+            if let Err(error) = check(unsafe {
+                QueryFullProcessImageNameW(handle.0, 0, image.as_mut_ptr(), &mut size)
+            }) {
+                if process_query_exiting(&error) || unsafe { WaitForSingleObject(handle.0, 0) }==WAIT_OBJECT_0 {
+                    return Ok(());
+                }
+                return Err(error);
+            }
+            let image = String::from_utf16_lossy(&image[..size as usize]);
+            let helper = compiler_auxiliary(&image);
+            if !helper && !console_host(&image) { return Ok(()); }
+            compiler_helper |= helper;
+            images.push(image);
+        }
+        if !compiler_helper { return Ok(()); }
+        // Risk: explicitly reap MSVC's resident telemetry uploader, but only after
+        // the launcher exited AND every remaining owned process is that helper
+        // or its system console host. A console host alone is never sufficient.
+        // An active shell/compiler/background task prevents this cleanup entirely.
+        // Terminate the verified job, not reopened numeric PIDs (which can recycle).
+        check(unsafe { TerminateJobObject(self.job.0, 0) })?;
+        self.auxiliary_cleanup.extend(images);
+        Ok(())
+    }
+    pub fn auxiliary_cleanup(&self) -> &[String] {
+        &self.auxiliary_cleanup
     }
     pub fn containment() -> &'static str {
         "windows_job_object"
@@ -302,6 +366,22 @@ impl Process {
         })?;
         Ok(Some(read as usize))
     }
+}
+fn compiler_auxiliary(image: &str) -> bool {
+    let image = image.replace('\\', "/").to_ascii_lowercase();
+    image.contains("/microsoft visual studio/")
+        && image.contains("/vc/tools/msvc/")
+        && image.ends_with("/vctip.exe")
+}
+fn process_query_exiting(error: &io::Error) -> bool {
+    // Querying a process as Windows tears it down can return ACCESS_DENIED or
+    // GEN_FAILURE before its handle signals. Retry via the next job snapshot.
+    matches!(error.raw_os_error(), Some(code) if code==ERROR_ACCESS_DENIED as i32 || code==ERROR_GEN_FAILURE as i32)
+}
+fn console_host(image: &str) -> bool {
+    let Some(system) = std::env::var_os("SystemRoot") else { return false; };
+    std::path::PathBuf::from(system).join("System32/conhost.exe")
+        .to_string_lossy().replace('\\', "/").eq_ignore_ascii_case(&image.replace('\\', "/"))
 }
 impl Drop for Process {
     fn drop(&mut self) {

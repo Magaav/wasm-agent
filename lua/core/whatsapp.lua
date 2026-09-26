@@ -125,9 +125,15 @@ end
 -- route, a script or a capability into the tools.
 function M.trusted_event(ctx)
   local event = (ctx and type(ctx.event) == "table") and ctx.event or {}
+  -- `sent_at` and `observed_at` are carried, not invented: they are the ledger's own two clocks for the
+  -- message (the sender's claim, and when this node first saw it), and the send tool compares them against
+  -- the operator's own reply to decide whose turn it is. A run that is not given them cannot prove the
+  -- operator stayed quiet, and refuses rather than assuming the turn is free.
   return {
     conversation_id = type(event.conversation_id) == "string" and event.conversation_id or "",
     message_id = type(event.message_id) == "string" and event.message_id or "",
+    sent_at = tonumber(event.sent_at) or 0,
+    observed_at = tonumber(event.observed_at) or 0,
   }
 end
 
@@ -403,6 +409,51 @@ function M.route_identity_flags(profile)
   return flags
 end
 
+-- The operator's precedence, asked *again* immediately before the effect.
+--
+-- Read time already refuses a message the operator has answered (the ingest's operator-precedence rule),
+-- but that decision is made before the child exists, and a child then reads, reasons and sends - seconds to
+-- minutes later, in which the operator may well have answered the person themselves. Measured live: the
+-- copilot replied over the operator in the same minute they did, which is the one thing this pipeline must
+-- never do. So the same determination is repeated here, against the ledger, at the last moment before
+-- anything is sent: an external effect must be justified at the moment it happens, not by a decision taken
+-- earlier. It reads one row and costs nothing beside the send it guards.
+--
+-- `nil` from the ledger is "no proof either way", so it refuses: a send that cannot show the operator has
+-- stayed quiet must not happen. The alternative - treating an unreadable ledger as permission - is how a
+-- model writes over a person.
+local function operator_too_late_to_reply(memory, event)
+  -- The trigger's ordering key is the sender's own claim (`sent_at`) where the ledger has one, and the arrival
+  -- this node recorded (`observed_at`) only as the fallback. That matters more than it looks: the ledger's
+  -- accessor compares the operator's reply on the same key, so mixing the two would compare a reply's claim
+  -- against a trigger's arrival - and a reply whose clock was behind (or a sender whose phone was wrong)
+  -- would read as *older* than the message it answered. A copilot that sent over that operator is exactly
+  -- the failure this guard exists to prevent, so the two sides are compared on one basis.
+  local trigger_at = tonumber(event.sent_at)
+  if not trigger_at or trigger_at <= 0 then trigger_at = tonumber(event.observed_at) end
+  if not trigger_at or trigger_at <= 0 then return "trigger_time_unknown" end
+  if type(memory) ~= "table" then return nil end
+  local newest = nil
+  if type(memory.newest_outgoing_after) == "function" then
+    newest = memory.newest_outgoing_after(event.conversation_id, trigger_at)
+  else
+    -- The bounded history is the fallback for any memory implementation without the direct accessor. The
+    -- limit is deliberately wide: a bounded window that is too small would report "no reply" for a reply
+    -- that is older than the window, which reads as permission.
+    if type(memory.conversation) ~= "function" then return "ledger_unreadable" end
+    local ok, messages = pcall(memory.conversation, event.conversation_id, 200)
+    if not ok or type(messages) ~= "table" then return "ledger_unreadable" end
+    for _, message in ipairs(messages) do
+      if type(message) == "table" and message.direction == "outgoing" then
+        local at = tonumber(message.sent_at) or tonumber(message.observed_at) or 0
+        if at > trigger_at and (not newest or at > newest) then newest = at end
+      end
+    end
+  end
+  if not newest then return nil end
+  return "operator_took_over"
+end
+
 local function send_tool(args, profile, ctx)
   local event = M.trusted_event(ctx)
   if event.conversation_id == "" or event.message_id == "" then return fail("event_context_required") end
@@ -438,6 +489,18 @@ local function send_tool(args, profile, ctx)
       }
     end
     return fail(why, extra)
+  end
+
+  -- The last check before the effect, and the one that cannot be left to read time: has the operator
+  -- answered this conversation themselves since the message this run was woken for? If so, nothing is sent.
+  -- It sits here - past every cheap refusal, immediately before the reservation - so a send is refused for
+  -- the reason that matters, and the refusal costs no budget and no browser.
+  local took_over = operator_too_late_to_reply(ctx and ctx.memory, event)
+  if took_over then
+    return fail(took_over, {
+      conversation_id = event.conversation_id,
+      note = "the operator replied in this conversation after the message this run was woken for",
+    })
   end
 
   local effects = effect_store(ctx, { "reserve", "confirm" })

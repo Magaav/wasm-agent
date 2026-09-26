@@ -57,7 +57,9 @@ function M.search_symbols(text, opts)
   if type(text) ~= "string" or text == "" then return nil, "query_required" end
   if not capability("graph_search") then return nil, "graph_retrieval_unavailable" end
   local limit = math.max(1, math.min(tonumber(opts and opts.limit) or 8, 50))
-  local rows, err = call("graph_search", text, json.encode({ limit = limit + 1 }))
+  local prefer = opts and opts.prefer_implementations == true
+  local rows, err = call("graph_search", text,
+    json.encode({ limit = limit + 1, prefer_implementations = prefer }))
   if not rows then return nil, err end
   local results = {}
   for i = 1, math.min(#rows, limit) do
@@ -66,13 +68,20 @@ function M.search_symbols(text, opts)
       kind = row.kind, name = row.name, path = row.path, line = row.line,
       language = row.language, signature = row.signature, score = row.score,
       confidence = row.confidence, reason = row.reason, matched_terms = row.matched_terms,
+      unmatched_terms = row.unmatched_terms,
+      unmatched_definition_terms = row.unmatched_definition_terms,
       score_breakdown = row.score_breakdown,
     }
   end
+  local top = results[1]
+  local partial = top and ((top.unmatched_terms and #top.unmatched_terms > 0)
+    or (top.unmatched_definition_terms and #top.unmatched_definition_terms > 0))
   return {
     query = text, count = #results, truncated = #rows > limit,
-    verdict = #results > 0 and "ok" or "absent", results = results,
-    next = #results > 0 and "Call graph action=symbol_source with one result's path, name, line and kind." or nil,
+    verdict = #results == 0 and "absent" or partial and "partial" or "ok", results = results,
+    next = #results == 0 and "Try an exact identifier or bounded grep; absence here is lexical only."
+      or partial and "Top result lacks some query terms in its definition. Inspect a likely definition, then use bounded grep for the missing terms before editing."
+      or "Call graph action=symbol_source with one result's path, name, line and kind.",
   }
 end
 

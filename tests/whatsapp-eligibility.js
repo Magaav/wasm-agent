@@ -177,6 +177,25 @@ function message(overrides) {
   const zeroGrace = windowFromEnv({ WA_JOB_CONTROL_GRACE_SECONDS: "0" });
   check(zeroGrace.grace_seconds === 0 && zeroGrace.source.grace_seconds === "job_control",
     "zero is a real control value - closing the grace band is a choice, not a missing value");
+
+  // ---- the hold ---------------------------------------------------------------------------------
+  // The window says how old a message may be; the hold says how young. Without it a message inside the
+  // prompt window is answered on sight, and measured live that meant a reply 30-60 s after somebody spoke,
+  // while the operator was still typing theirs. It is derived from the operator's own control, never a
+  // second knob: `grace_seconds` is them saying how long they want to answer first.
+  const { holdFor, HOLD_SECONDS } = mod;
+  check(holdFor({ grace_seconds: 300 }).seconds === HOLD_SECONDS && holdFor({ grace_seconds: 300 }).source === "grace_seconds",
+    "the hold is the operator's own grace, capped per tick");
+  check(holdFor({ grace_seconds: 0 }).seconds === 0, "grace_seconds 0 means answer immediately, and is the only value that closes the hold");
+  check(holdFor({ grace_seconds: 10 }).seconds === 10, "a grace shorter than the cap is the hold itself");
+  check(holdFor({ grace_seconds: 86400 }).seconds === HOLD_SECONDS, "a longer grace cannot buy an unbounded first move");
+  check(holdFor({ grace_seconds: 300 }, { WA_WHATSAPP_HOLD_SECONDS: "0" }).seconds === 0, "the node override can close the hold too");
+  check(holdFor({ grace_seconds: 300 }, { WA_WHATSAPP_HOLD_SECONDS: "45" }).seconds === 45
+    && holdFor({ grace_seconds: 300 }, { WA_WHATSAPP_HOLD_SECONDS: "45" }).source === "node_env",
+    "and it says where the number came from");
+  check(holdFor({ grace_seconds: 300 }, { WA_WHATSAPP_HOLD_SECONDS: "nonsense" }).seconds === HOLD_SECONDS,
+    "a value that is not whole seconds is not a hold");
+
   // And the resolved window is the window a verdict uses: the same message is eligible or refused
   // depending only on the controls, never on which script asked.
   const justPast = { conversation: chat, message: at(400) };

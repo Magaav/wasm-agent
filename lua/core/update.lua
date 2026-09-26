@@ -26,6 +26,11 @@ local json = dofile("lua/vendor/json.lua")
 local platform = dofile("lua/core/platform.lua")
 local paths = dofile("lua/core/paths.lua")
 
+-- The sentinel owns the other side of replacement, so it is also the only actor that can prove the
+-- new node came back before resuming the conversation. Keep this server-owned: a browser may choose
+-- which of its threads to continue, but it may not inject a different post-deploy instruction.
+M.CONTINUATION_PROMPT = "The update request settled; report its result, verify the node if it changed, and continue this session."
+
 local function trim(text)
   return (tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", ""))
 end
@@ -221,14 +226,22 @@ end
 -- The exact command line handed to the shell for a queued install. Pure, so a test can read it:
 -- every path and the reason are single-quoted (this node runs commands through `bash -c`), and a
 -- quote inside a reason must not be able to end the quoting early.
-function M.request_command(facts, reason)
+function M.request_command(facts, reason, continuation)
   -- A deploy, not an `upgrade --binary`: the gate builds the tree itself, so there is no candidate
   -- to name, and it is the only path that installs the sentinel, the scripts and the job templates
   -- and records a commit it verified.
-  return table.concat({
+  local command = {
     quote(facts.sentinel), "request", "deploy",
     "--reason", quote(reason),
-  }, " ")
+  }
+  local session_id = trim(continuation and continuation.session_id)
+  if session_id ~= "" then
+    command[#command + 1] = "--session"
+    command[#command + 1] = quote(session_id)
+    command[#command + 1] = "--prompt"
+    command[#command + 1] = quote(trim(continuation.prompt) ~= "" and continuation.prompt or M.CONTINUATION_PROMPT)
+  end
+  return table.concat(command, " ")
 end
 
 -- Gather, decide, and - only in the queueing case - write one request for the sentinel.
@@ -251,7 +264,11 @@ function M.run(options)
   else
     reason = "/update: " .. reason
   end
-  local command = M.request_command(facts, reason)
+  local session_id = trim(options.session_id)
+  local command = M.request_command(facts, reason, {
+    session_id = session_id,
+    prompt = M.CONTINUATION_PROMPT,
+  })
   local result = shell(command)
   if not result then
     verdict.ok, verdict.queued, verdict.status = false, nil, "sentinel_unreachable"
@@ -277,8 +294,12 @@ function M.run(options)
   verdict.next = "the sentinel performs it when this node is idle. The record lands in " ..
                  slashes(paths.config()) .. "/sentinel/done/ or failed/, and installed.txt records the commit it installed."
   verdict.reason = reason
+  if session_id ~= "" then verdict.continuation_session = session_id end
   verdict.message = "queued: the sentinel will deploy " .. tostring(verdict.commit or "this tree") ..
                     " through the gate once this node is idle. This is not done yet."
+  if session_id ~= "" then
+    verdict.next = verdict.next .. " After it settles, the sentinel will wake this session to report the result and continue."
+  end
   return verdict
 end
 

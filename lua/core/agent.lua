@@ -1099,6 +1099,14 @@ function M:run_body(text, images)
     return type(state) == "table" and state or nil
   end
 
+  local function foreground_cancelled()
+    if not host.run_cancelled then return false end
+    local checked, raw = pcall(host.run_cancelled)
+    if not checked then return false end
+    local state = json.decode(raw)
+    return type(state) == "table" and state.cancelled == true
+  end
+
   -- Preflight a child call against the remaining token and cost budgets.
   -- The post-call check cannot be a hard budget: by then the provider has been
   -- paid. This narrows the request's own output cap to what is left, refuses the
@@ -1161,13 +1169,7 @@ function M:run_body(text, images)
     end
     -- Unified cancellation: a foreground run's scoped cancel and a supervised
     -- child's cancel both answer here, so the loop checks one name.
-    if host.run_cancelled then
-      local checked, raw = pcall(host.run_cancelled)
-      if checked then
-        local state = json.decode(raw)
-        if type(state) == "table" and state.cancelled then error("run_cancelled") end
-      end
-    end
+    if foreground_cancelled() then error("run_cancelled") end
     local child_state = child_status()
     if child_state and child_state.cancelled then error("subagent_cancelled") end
     while self:maybe_compact(messages) do
@@ -1212,6 +1214,25 @@ function M:run_body(text, images)
        context={estimate_source=context_source,summary_watermark=(memory.session(self.session_id) or {}).summarized_until or 0}}
     for key, value in pairs(budget_opts or {}) do call_opts[key] = value end
     local ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
+    -- No response headers means no model output reached this process, hence no returned tool call
+    -- could have run. Retry only that phase, with a strict operator-controlled bound. The upstream
+    -- may nevertheless have billed the lost inference; telemetry names every replay for that audit.
+    local response_retries = provider.response_timeout_retries()
+    local response_attempt = 0
+    while not ok and response_attempt < response_retries
+        and provider.is_response_timeout(tostring(result)) do
+      if foreground_cancelled() then result = "run_cancelled"; break end
+      local retry_child = child_status()
+      if retry_child and retry_child.cancelled then result = "subagent_cancelled"; break end
+      response_attempt = response_attempt + 1
+      self.emit({ type = "status", text = "provider did not start a response in time - retrying " ..
+        tostring(response_attempt) .. "/" .. tostring(response_retries) })
+      telemetry.event(self.session_id,self.run_id,"","provider_retry","attempt",{
+        reason="receive_response_timeout",attempt=response_attempt,limit=response_retries,
+        context_estimate=context_tokens})
+      call_opts.attempt = response_attempt + 1
+      ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
+    end
     -- A provider 400/413 on a request at/near the window is a context overflow even when
     -- the body says nothing - this deployment answers a too-large request with a bare
     -- `{"model":"..."}`. Without this the thread re-sends the same oversized request on
@@ -1238,14 +1259,7 @@ function M:run_body(text, images)
     if not ok then
       -- A cancel can land *during* the provider call (the socket is shut down to wake a
       -- silent read). Report it as the cancellation it is, not as a provider fault.
-      local cancelled = false
-      if host.run_cancelled then
-        local checked, raw = pcall(host.run_cancelled)
-        if checked then
-          local state = json.decode(raw)
-          cancelled = type(state) == "table" and state.cancelled == true
-        end
-      end
+      local cancelled = foreground_cancelled()
       local problem = cancelled and "run_cancelled" or tostring(result)
       trace[#trace + 1] = { kind = "model_call", model = self.model, ok = false,
         ms = math.floor((host.now() - llm_started) * 1000), error = redact.text(problem):sub(1, 400) }
