@@ -2415,7 +2415,7 @@ const COMMANDS = [
   },
   {
     name: "/merge",
-    hint: "act as git orchestrator — merge every open branch into main, gate, push, sync",
+    hint: "merge internal branches; leave open PR work for review",
     run: () => { send(ORCHESTRATOR_BRIEF); },
   },
   {
