@@ -2293,6 +2293,7 @@ fn dispatch(
         // now fetches it while worker 0 is wedged, which catches both a missing handler (404) and a
         // handler that is not a read.
         "/efficiency" => (200, "application/json", call("wa_efficiency", &[query_value(&query, "session_id").as_str(), session]).into_bytes()),
+        "/session/fork" if method == "POST" => (200, "application/json", call("wa_session_fork", &[body, session]).into_bytes()),
         "/session/mode" if method == "POST" => (200, "application/json", call("wa_session_mode", &[body, session]).into_bytes()),
         "/session/worktree" if method == "POST" => (200, "application/json", call("wa_session_worktree", &[body, session]).into_bytes()),
         "/session/fixture" => (200, "application/json", call("wa_session_fixture", &[query_value(&query, "id").as_str(), session]).into_bytes()),

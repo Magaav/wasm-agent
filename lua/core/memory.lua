@@ -3,6 +3,7 @@
 local json = dofile("lua/vendor/json.lua")
 local paths = dofile("lua/core/paths.lua")
 local M = {}
+local in_transaction
 
 local function decode(raw)
   if type(raw) == "string" then
@@ -179,6 +180,8 @@ local function migrate()
   -- exactly as it did before sessions could own one, so this column changes nothing until a
   -- session opts in. See docs/SESSION-FIRST.md.
   add_column("sessions", "worktree", "TEXT NOT NULL DEFAULT ''")
+  add_column("sessions", "fork_parent_id", "TEXT")
+  add_column("sessions", "fork_parent_seq", "INTEGER")
   add_column("sessions", "title", "TEXT NOT NULL DEFAULT ''")
   add_column("sessions", "mode", "TEXT NOT NULL DEFAULT 'default'")
   add_column("sessions", "summary", "TEXT NOT NULL DEFAULT ''")
@@ -567,6 +570,57 @@ function M.session(session_id)
   return rows[1]
 end
 
+-- Fork an immutable transcript prefix into a new, independently writable conversation.
+-- A boundary must be an existing non-summary message and may not leave a tool call
+-- unresolved. Copied rows get new identities and local sequence numbers; the source
+-- remains untouched and the new session starts without its parent's lossy summary or cwd.
+function M.fork_session(source_id, boundary_seq, user_id)
+  local source = M.session(source_id)
+  if not source then return nil, "unknown_session" end
+  if source.user_id ~= user_id then return nil, "forbidden" end
+  boundary_seq = tonumber(boundary_seq)
+  if not boundary_seq or boundary_seq < 1 or boundary_seq % 1 ~= 0 then return nil, "invalid_boundary" end
+  local rows = query("SELECT * FROM messages WHERE session_id=? AND seq<=? ORDER BY seq", {source_id, boundary_seq})
+  if #rows == 0 or rows[#rows].seq ~= boundary_seq or rows[#rows].role == "summary" then
+    return nil, "invalid_boundary"
+  end
+  local pending, prefix = {}, {}
+  for _, row in ipairs(rows) do
+    if row.role ~= "summary" then
+      local calls = decode(row.tool_calls or "[]") or {}
+      for _, call in ipairs(calls) do
+        local id = call.id or (call["function"] and call["function"].id)
+        if not id or id == "" or pending[id] then return nil, "invalid_tool_history" end
+        pending[id] = true
+      end
+      if row.role == "tool" then
+        if not row.tool_call_id or not pending[row.tool_call_id] then return nil, "invalid_tool_history" end
+        pending[row.tool_call_id] = nil
+      end
+      prefix[#prefix + 1] = row
+    end
+  end
+  if next(pending) then return nil, "incomplete_tool_exchange" end
+
+  local id = host.uuid()
+  local now = host.now()
+  local title = "Fork: " .. tostring(source.title or source_id)
+  in_transaction(function()
+    exec("INSERT INTO sessions(id,route_id,objective,parent_session_id,fork_parent_id,fork_parent_seq,started_at,ended_at,user_id,node_id,title,mode,summary,summarized_until,updated_at,worktree) VALUES(?,?,?,NULL,?,?,?,NULL,?,?,?,?,'',0,?,'')",
+      {id, source.route_id or "", "fork", source_id, boundary_seq, now,
+       source.user_id, source.node_id, title, source.mode or "default", now})
+    for seq, row in ipairs(prefix) do
+      local new_id = host.uuid()
+      exec("INSERT INTO messages(id,session_id,seq,role,content,images,tool_calls,tool_call_id,tool_name,tokens,ms,ok,debug,trace,changes,created_at,reasoning) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        {new_id,id,seq,row.role,row.content or "",row.images or "[]",row.tool_calls or "[]",row.tool_call_id or "",row.tool_name or "",row.tokens or 0,row.ms or 0,row.ok or 1,row.debug or 0,row.trace or "[]",row.changes or "{}",row.created_at or now,row.reasoning or ""})
+      exec("INSERT INTO messages_fts(content,session_id,message_id) VALUES(?,?,?)", {row.content or "",id,new_id})
+      M.journal("message", new_id, {id=new_id,session_id=id,seq=seq,role=row.role,content=row.content or "",images=decode(row.images or "[]") or {},tool_calls=decode(row.tool_calls or "[]") or {},tool_call_id=row.tool_call_id or "",tool_name=row.tool_name or "",tokens=row.tokens or 0,ms=row.ms or 0,ok=row.ok or 1,debug=row.debug or 0,trace=decode(row.trace or "[]") or {},changes=decode(row.changes or "{}") or {},reasoning=row.reasoning or "",created_at=row.created_at or now})
+    end
+    M.journal("session", id, M.session(id))
+  end)
+  return id
+end
+
 -- The most recently used session for this (user, node) pair, open or finished.
 -- `wa chat --continue` resumes the thread the user was last in: a session ends
 -- when its process exits, so filtering to open ones would never find anything.
@@ -805,7 +859,7 @@ end
 -- against the turn that produced them. `BEGIN IMMEDIATE` takes the write lock for the whole append, so the
 -- read-modify-write is atomic, writers are serialised, and the three writes (message, search row, session
 -- touch) are one unit a kill cannot tear in half.
-local function in_transaction(fn)
+in_transaction = function(fn)
   exec("BEGIN IMMEDIATE")
   local ok, result = pcall(fn)
   if not ok then
