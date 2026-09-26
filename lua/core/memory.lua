@@ -180,6 +180,13 @@ local function migrate()
   -- exactly as it did before sessions could own one, so this column changes nothing until a
   -- session opts in. See docs/SESSION-FIRST.md.
   add_column("sessions", "worktree", "TEXT NOT NULL DEFAULT ''")
+  add_column("sessions", "workspace_required", "INTEGER NOT NULL DEFAULT 0")
+  add_column("sessions", "workspace_state", "TEXT NOT NULL DEFAULT 'unbound'")
+  add_column("sessions", "workspace_branch", "TEXT NOT NULL DEFAULT ''")
+  add_column("sessions", "workspace_base_commit", "TEXT NOT NULL DEFAULT ''")
+  add_column("sessions", "workspace_source_path", "TEXT NOT NULL DEFAULT ''")
+  add_column("sessions", "workspace_start_state", "TEXT NOT NULL DEFAULT '{}'")
+  add_column("sessions", "workspace_error", "TEXT NOT NULL DEFAULT ''")
   add_column("sessions", "fork_parent_id", "TEXT")
   add_column("sessions", "fork_parent_seq", "INTEGER")
   add_column("sessions", "title", "TEXT NOT NULL DEFAULT ''")
@@ -539,13 +546,16 @@ function M.start_session(route_id, objective, opts)
   if parent == nil and route_id == "subagent" then parent = "" end
   local base = {id, route_id or "", objective or "", now, opts.user_id or "master",
                 opts.node_id or "", opts.title or objective or "", opts.mode or "default", now}
+  local required = opts.workspace_required == true
   if parent ~= nil then
-    exec("INSERT INTO sessions(id,route_id,objective,started_at,user_id,node_id,title,mode,updated_at,parent_session_id) " ..
-         "VALUES(?,?,?,?,?,?,?,?,?,?)",
-         {base[1], base[2], base[3], base[4], base[5], base[6], base[7], base[8], base[9], parent})
+    exec("INSERT INTO sessions(id,route_id,objective,started_at,user_id,node_id,title,mode,updated_at,parent_session_id,workspace_required,workspace_state) " ..
+         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+         {base[1], base[2], base[3], base[4], base[5], base[6], base[7], base[8], base[9], parent,
+          required and 1 or 0, required and "pending" or "unbound"})
   else
-    exec("INSERT INTO sessions(id,route_id,objective,started_at,user_id,node_id,title,mode,updated_at) " ..
-         "VALUES(?,?,?,?,?,?,?,?,?)", base)
+    exec("INSERT INTO sessions(id,route_id,objective,started_at,user_id,node_id,title,mode,updated_at,workspace_required,workspace_state) " ..
+         "VALUES(?,?,?,?,?,?,?,?,?,?,?)", {base[1],base[2],base[3],base[4],base[5],base[6],base[7],base[8],base[9],
+           required and 1 or 0, required and "pending" or "unbound"})
   end
   M.journal("session", id, M.session(id))
   return id
@@ -606,7 +616,7 @@ function M.fork_session(source_id, boundary_seq, user_id)
   local now = host.now()
   local title = "Fork: " .. tostring(source.title or source_id)
   in_transaction(function()
-    exec("INSERT INTO sessions(id,route_id,objective,parent_session_id,fork_parent_id,fork_parent_seq,started_at,ended_at,user_id,node_id,title,mode,summary,summarized_until,updated_at,worktree) VALUES(?,?,?,NULL,?,?,?,NULL,?,?,?,?,'',0,?,'')",
+    exec("INSERT INTO sessions(id,route_id,objective,parent_session_id,fork_parent_id,fork_parent_seq,started_at,ended_at,user_id,node_id,title,mode,summary,summarized_until,updated_at,worktree,workspace_required,workspace_state) VALUES(?,?,?,NULL,?,?,?,NULL,?,?,?,?,'',0,?,'',1,'pending')",
       {id, source.route_id or "", "fork", source_id, boundary_seq, now,
        source.user_id, source.node_id, title, source.mode or "default", now})
     for seq, row in ipairs(prefix) do
@@ -666,10 +676,44 @@ function M.list_sessions(user_id, limit, opts)
 end
 
 -- The directory this session's tools run in. '' means the node's own cwd.
+function M.session_workspace(session_id)
+  if type(session_id) ~= "string" or session_id == "" then return nil end
+  local rows = query("SELECT worktree,workspace_required,workspace_state,workspace_branch,workspace_base_commit,workspace_source_path,workspace_start_state,workspace_error FROM sessions WHERE id=?", {session_id})
+  local row = rows[1]
+  if not row then return nil end
+  row.required = row.workspace_required == 1
+  row.state = row.workspace_state
+  row.branch = row.workspace_branch
+  row.base_commit = row.workspace_base_commit
+  row.source_path = row.workspace_source_path
+  row.error = row.workspace_error
+  row.start_state = decode(row.workspace_start_state or "{}") or {}
+  return row
+end
+
 function M.session_worktree(session_id)
-  if type(session_id) ~= "string" or session_id == "" then return "" end
-  local rows = query("SELECT worktree FROM sessions WHERE id=?", {session_id})
-  return (rows[1] and rows[1].worktree) or ""
+  local workspace = M.session_workspace(session_id)
+  return workspace and workspace.worktree or ""
+end
+
+-- Durable binding and allocation evidence are one session record. A required workspace that
+-- is pending/failed is intentionally distinct from an old unbound session (which may use cwd).
+function M.set_session_workspace(session_id, workspace)
+  workspace = workspace or {}
+  exec("UPDATE sessions SET worktree=?,workspace_required=?,workspace_state=?,workspace_branch=?,workspace_base_commit=?,workspace_source_path=?,workspace_start_state=?,workspace_error=? WHERE id=?",
+    {workspace.worktree or "", workspace.required and 1 or 0, workspace.state or "unbound",
+     workspace.branch or "", workspace.base_commit or "", workspace.source_path or "",
+     json.encode(workspace.start_state or {}), workspace.error or "", session_id})
+  M.journal("session", session_id, M.session(session_id))
+  return M.session_workspace(session_id)
+end
+
+function M.require_session_workspace(session_id)
+  local current = M.session_workspace(session_id)
+  if not current then return nil, "unknown_session" end
+  if current.required then return current end
+  current.required, current.state = true, "pending"
+  return M.set_session_workspace(session_id, current)
 end
 
 -- Point a session at a checkout. Not a usage event, so `updated_at` is left alone: the session
@@ -1300,13 +1344,20 @@ function M.apply_entry(entry)
       -- Every position needs a concrete value: a nil would leave a hole in the
       -- params array and the JSON encoder rejects sparse arrays.
       exec("INSERT OR REPLACE INTO sessions(id,route_id,objective,parent_session_id,started_at," ..
-           "ended_at,user_id,node_id,title,mode,summary,summarized_until,updated_at) " ..
-           "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+           "ended_at,user_id,node_id,title,mode,summary,summarized_until,updated_at,worktree," ..
+           "fork_parent_id,fork_parent_seq,workspace_required,workspace_state,workspace_branch," ..
+           "workspace_base_commit,workspace_source_path,workspace_start_state,workspace_error) " ..
+           "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
            {payload.id, payload.route_id or "", payload.objective or "",
             payload.parent_session_id or "", payload.started_at or host.now(),
             payload.ended_at or 0, payload.user_id or "master",
             payload.node_id or "", payload.title or "", payload.mode or "default",
-            payload.summary or "", payload.summarized_until or 0, payload.updated_at or host.now()})
+            payload.summary or "", payload.summarized_until or 0, payload.updated_at or host.now(),
+            payload.worktree or "", payload.fork_parent_id or "", payload.fork_parent_seq or 0,
+            payload.workspace_required or 0, payload.workspace_state or "unbound",
+            payload.workspace_branch or "", payload.workspace_base_commit or "",
+            payload.workspace_source_path or "", payload.workspace_start_state or "{}",
+            payload.workspace_error or ""})
     end
   elseif entry.kind == "memory" then
     exec("INSERT OR IGNORE INTO memories(id,scope,content,tags,source,session_id,created_at," ..

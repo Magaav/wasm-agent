@@ -15,6 +15,7 @@ local skillslib = dofile("lua/core/skills.lua")
 local redact = dofile("lua/core/redact.lua")
 local telemetry = dofile("lua/core/telemetry.lua")
 local updater = dofile("lua/core/update.lua")
+local workspaces = dofile("lua/core/workspaces.lua")
 
 memory.setup()
 local agent
@@ -831,7 +832,14 @@ function wa_session_fork(payload, session)
   if source_id == "" or request.before_seq == nil then return json.encode({error="session_id_and_before_seq_required"}) end
   local id, why = memory.fork_session(source_id, request.before_seq, user.id)
   if not id then return json.encode({error=why or "fork_failed"}) end
-  return json.encode({ok=true,session_id=id,fork_parent_id=source_id,fork_parent_seq=tonumber(request.before_seq)})
+  local workspace, allocation_error = workspaces.ensure(memory, id, source_id)
+  if not workspace then
+    return json.encode({error="workspace_allocation_failed",detail=allocation_error,
+      session_id=id,fork_parent_id=source_id,fork_parent_seq=tonumber(request.before_seq),
+      workspace=memory.session_workspace(id)})
+  end
+  return json.encode({ok=true,session_id=id,fork_parent_id=source_id,
+    fork_parent_seq=tonumber(request.before_seq),workspace=workspace})
 end
 
 function wa_session_mode(payload, session)
@@ -854,9 +862,24 @@ function wa_session_worktree(payload, session)
   if not ok or type(request) ~= "table" then return json.encode({ error = "bad_request" }) end
   local id = request.session_id
   if not id or id == "" then return json.encode({ error = "session_id_required" }) end
-  -- No `path` is a read; a string sets it ("" clears it). The directory must exist, or a typo would
-  -- silently point every tool at a missing tree.
-  if request.path == nil then return json.encode({ session_id = id, worktree = memory.session_worktree(id) }) end
+  local record = memory.session(id)
+  if not record then return json.encode({error="unknown_session"}) end
+  if record.user_id ~= user.id then return json.encode({error="forbidden"}) end
+  local workspace = memory.session_workspace(id)
+  if request.action == "allocate" or request.action == "recover" then
+    local source_id = record.fork_parent_id
+    if not source_id or source_id == "" then source_id = record.parent_session_id end
+    if not source_id or source_id == "" then source_id = id end
+    memory.require_session_workspace(id)
+    local allocated, detail = workspaces.ensure(memory, id, source_id)
+    if not allocated then return json.encode({error="workspace_allocation_failed",detail=detail,
+      session_id=id,workspace=memory.session_workspace(id)}) end
+    return json.encode({ok=true,session_id=id,workspace=allocated})
+  end
+  -- No `path` is a read; a string sets it ("" clears it). Managed bindings are immutable through
+  -- this legacy manual setter, so a caller cannot make required isolation silently fall back to cwd.
+  if request.path == nil then return json.encode({ session_id = id, worktree = memory.session_worktree(id), workspace=workspace }) end
+  if workspace and workspace.required then return json.encode({error="workspace_managed",state=workspace.state}) end
   local path = tostring(request.path)
   if path ~= "" then
     -- `host.list_dir` reports failure as `{error=...}`, not nil, so the JSON must be read.

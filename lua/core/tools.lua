@@ -11,6 +11,7 @@ local tool_output = dofile("lua/core/tool_output.lua")
 local file_tools = dofile("lua/core/file_tools.lua")
 local evidence_view = dofile("lua/core/evidence_view.lua")
 local diagnose = dofile("lua/core/diagnose.lua")
+local workspaces = dofile("lua/core/workspaces.lua")
 local M = {}
 
 local function is_master(role)
@@ -258,9 +259,9 @@ M.admin = {
     session_id = { type = "string", description = "Defaults to the current session." } }),
   -- Master only: it changes where a session's shell and file tools point, so it can move a
   -- guest's tools outside the tree a guest was scoped to.
-  schema("session_worktree", "Point a session's file and shell tools at their own checkout, so parallel sessions on one node do not overwrite each other. `status` reports the current one; `set` points at an existing directory (usually a git worktree); `clear` returns the session to the node's working directory. After `set`, relative paths in read/write/edit/ls/grep/bash resolve inside it.", {
-    action = { type = "string", enum = { "status", "set", "clear" } },
-    path = { type = "string", description = "set: an existing directory, usually a git worktree." },
+  schema("session_worktree", "Inspect or allocate a session-owned git worktree. `allocate`/`recover` creates or reconciles a clean worktree from its fork/parent session; dirty source trees fail visibly and are never copied implicitly. Required isolated workspaces cannot be cleared or manually redirected, and write-capable tools never fall back to the node checkout.", {
+    action = { type = "string", enum = { "status", "allocate", "recover", "set", "clear" } },
+    path = { type = "string", description = "set: an existing directory for a legacy non-managed session." },
     session_id = { type = "string", description = "Defaults to the current session." } }, { "action" }),
 }
 
@@ -481,6 +482,64 @@ local function resolve_path(memory, ctx, path)
   return (base:gsub("[/\\]+$", "")) .. "/" .. path
 end
 
+local function normalized_path(path)
+  path = tostring(path or ""):gsub("\\", "/")
+  local drive = path:match("^(%a:)") or ""
+  path = path:gsub("^%a:", "")
+  local parts = {}
+  for part in path:gmatch("[^/]+") do
+    if part == ".." then
+      if #parts > 0 then table.remove(parts) else parts[#parts + 1] = part end
+    elseif part ~= "." then parts[#parts + 1] = part end
+  end
+  return drive .. "/" .. table.concat(parts, "/")
+end
+
+local function inside_workspace(root, path)
+  local base, candidate = normalized_path(root), normalized_path(path)
+  if platform.os() == "windows" then base, candidate = base:lower(), candidate:lower() end
+  return candidate == base or candidate:sub(1, #base + 1) == base .. "/"
+end
+
+local function required_workspace_error(memory, ctx, name, args)
+  local writes_files = name == "write" or name == "edit" or name == "bash"
+    or name == "operation" and (args.action or "") == "start"
+    or name == "shell" or name == "client" or name == "remote" or name == "spell_run"
+  if not writes_files or not memory or not ctx.session_id or not memory.session_workspace then return nil end
+  local workspace = memory.session_workspace(ctx.session_id)
+  if not workspace or not workspace.required then return nil end
+  if workspace.state ~= "allocated" or not workspace.worktree or workspace.worktree == "" then
+    return {error="session_workspace_unavailable",state=workspace.state or "unknown",
+      detail=workspace.error or "required workspace has no durable binding"}
+  end
+  if name == "shell" or name == "client" or name == "remote" or name == "spell_run" then
+    return {error="workspace_execution_context_unsupported",tool=name,
+      detail="this capability does not yet accept an enforced session worktree binding"}
+  end
+  if host.list_dir then
+    local ok, raw = pcall(host.list_dir, workspace.worktree)
+    local good, result = ok and pcall(json.decode, raw) or false, nil
+    if good then result = json.decode(raw) end
+    if not good or type(result) ~= "table" or result.error then
+      return {error="session_workspace_unavailable",state="binding_missing",detail="bound workspace directory is unavailable"}
+    end
+  end
+  if name == "write" or name == "edit" then
+    local target = resolve_path(memory, ctx, args.path)
+    if target and not inside_workspace(workspace.worktree, target) then
+      return {error="workspace_path_outside_binding",path=target}
+    end
+  elseif name == "bash" and args.cwd and args.cwd ~= "" then
+    local cwd = args.cwd
+    if cwd:sub(1,1) ~= "/" and not cwd:match("^%a:[/\\]") and cwd:sub(1,2) ~= "\\\\" then
+      cwd = workspace.worktree:gsub("[/\\]+$", "") .. "/" .. cwd
+    end
+    if not inside_workspace(workspace.worktree, cwd) then return {error="workspace_cwd_outside_binding",cwd=args.cwd} end
+    args.cwd = cwd
+  end
+  return nil
+end
+
 local function run(command, timeout_seconds, cwd)
   -- `cwd` is applied in the shell rather than through host.exec's second argument, because that is
   -- how a caller-supplied `args.cwd` already worked: one code path, so a session cwd and an explicit
@@ -509,6 +568,8 @@ function M.dispatch(memory, name, args, role, ctx)
     if name == "subagent" then return { error = "subagent_recursion_forbidden" } end
   end
   if not is_master(role) and admin_names()[name] then return { error = "forbidden_for_role:" .. role } end
+  local workspace_error = required_workspace_error(memory, ctx, name, args)
+  if workspace_error then return workspace_error end
   if name == "operation" then
     if not is_master(role) then return {error="forbidden_for_role:" .. role} end
     args.owner = ctx.session_id or user_id
@@ -869,10 +930,23 @@ function M.dispatch(memory, name, args, role, ctx)
   elseif name == "session_worktree" then
     local id = args.session_id or ctx.session_id
     if not id or id == "" then return { error = "session_id_required" } end
+    local record = memory.session(id)
+    if not record then return {error="unknown_session"} end
+    if record.user_id ~= user_id then return {error="forbidden"} end
+    local workspace = memory.session_workspace(id)
     local action = args.action or "status"
     if action == "status" then
-      return { session_id = id, worktree = memory.session_worktree(id) }
+      return { session_id = id, worktree = memory.session_worktree(id), workspace = workspace }
+    elseif action == "allocate" or action == "recover" then
+      local source_id = record.fork_parent_id
+      if not source_id or source_id == "" then source_id = record.parent_session_id end
+      if not source_id or source_id == "" then source_id = id end
+      memory.require_session_workspace(id)
+      local allocated, detail = workspaces.ensure(memory, id, source_id)
+      if not allocated then return {error="workspace_allocation_failed",detail=detail,workspace=memory.session_workspace(id)} end
+      return {ok=true,session_id=id,workspace=allocated}
     elseif action == "set" then
+      if workspace and workspace.required then return {error="workspace_managed",state=workspace.state} end
       if type(args.path) ~= "string" or args.path == "" then return { error = "path_required" } end
       -- The directory must exist: a typo that silently pointed every tool at a missing tree
       -- would look like the whole project vanished, which is worse than a refusal. `host.list_dir`
@@ -887,6 +961,7 @@ function M.dispatch(memory, name, args, role, ctx)
       end
       return { ok = true, session_id = id, worktree = memory.set_session_worktree(id, args.path) }
     elseif action == "clear" then
+      if workspace and workspace.required then return {error="workspace_managed",state=workspace.state} end
       return { ok = true, session_id = id, worktree = memory.set_session_worktree(id, "") }
     end
     return { error = "unknown_action", action = action }

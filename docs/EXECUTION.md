@@ -93,6 +93,26 @@ Reserved capacity promises separation from unrelated background inference, **not
 unlimited simultaneous sessions, provider quota, zero scheduling latency or freedom
 from shared hardware limits. Same-session ordering is intentional.
 
+## Session workspaces
+
+Conversational forks and delegated sessions whose approved tool profile can write files or run
+shell are marked `workspace_required` and receive a dedicated local git worktree before they are
+reported as ready/admitted. Binding metadata (`worktree`, branch, base commit, source path, starting
+status, allocation state/error) lives on the session and survives process restart. Allocation
+starts at the source session's exact clean HEAD. A dirty source is recorded and refused; the node
+does not implicitly copy, stash, or discard uncommitted work. The caller may clean/commit and retry
+through `session_worktree{action:"recover"}`. A process interrupted during `git worktree add` is
+reconciled from Git's worktree registry; unresolved state is `unknown` and is not blindly retried.
+
+A required but unbound/failed workspace is not equivalent to a legacy unbound session: file and
+shell writes return `session_workspace_unavailable` and never fall back to the node checkout. File
+writes outside the binding, explicit shell cwd escapes, and shell/client/remote/spell tools that
+do not accept a verifiable session cwd are refused. Ordinary pre-existing sessions remain
+unbound/compatible until they request isolation. Worktrees are node-local and share Git's object
+store; this is coordination, **not** an OS sandbox against an unrestricted shell, symlink, or
+administrator. Browser/desktop/remote resource locks and automatic worktree cleanup are not part
+of this contract yet. See `docs/SESSION-FIRST.md` and `scripts/test-session-workspaces.cjs`.
+
 ## Subagent contract
 
 A caller supplies a bounded task, fresh context, a result contract and a capability

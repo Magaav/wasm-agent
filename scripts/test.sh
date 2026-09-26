@@ -64,7 +64,7 @@ INSTANCE_VERDICT="$(mktemp)"
 rm -f "$INSTANCE_VERDICT" # The child must produce NEW evidence, never a previous run's verdict.
 INSTANCE_STATUS=0
 WA_INSTANCE_VERDICT="$INSTANCE_VERDICT" bash scripts/test-node-instances.sh || INSTANCE_STATUS=$?
-INSTANCE_SKIPPED=$(node scripts/lib/suite-verdict.cjs "$INSTANCE_VERDICT" test-node-instances "$INSTANCE_STATUS" 56)
+INSTANCE_SKIPPED=$(node scripts/lib/suite-verdict.cjs "$INSTANCE_VERDICT" test-node-instances "$INSTANCE_STATUS" 62)
 SKIPPED=$((SKIPPED + INSTANCE_SKIPPED))
 rm -f "$INSTANCE_VERDICT"
 BIN=rust/target/release/wa
@@ -675,6 +675,7 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-tool-cues.lua" "$BIN" --db "$DB.too
 # or this feature would silently relocate every existing session's files.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-worktree.lua" "$BIN" --db "$DB.session-worktree" | grep 'session worktree ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-fork.lua" "$BIN" --db "$DB.session-fork" | grep 'session fork ok'
+node scripts/test-session-workspaces.cjs "$BIN"
 # The tool-choice experiment's verifier must reject a plausible-looking wrong answer, and
 # its treatment must reach the child prompt the rig runs. Both are what make the arm's
 # result mean anything, so they are tested without a model and before any paid run.
@@ -1390,7 +1391,7 @@ node scripts/test-operation-control.cjs "$BIN" --await
 
 # Actual child runtime and real sentinel deliveries, never a /subagents route stub.
 run_proof_fixture policy 62 node scripts/test-subagents-policy.cjs "$BIN"
-run_proof_fixture children 17 node scripts/test-subagents.cjs "$BIN"
+run_proof_fixture children 18 node scripts/test-subagents.cjs "$BIN"
 run_proof_fixture jobs 37 node scripts/test-job-subagents.cjs
 run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN"
 run_proof_fixture whatsapp 40 node scripts/test-whatsapp-subagent-e2e.cjs

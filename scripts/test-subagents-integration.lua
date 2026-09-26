@@ -10,6 +10,9 @@ memory.setup()
 local subagents = dofile("lua/core/subagents.lua")
 
 local parent_id = memory.start_session("", "chat", { user_id = "alice", node_id = "", title = "parent" })
+local workspace_source = host.getenv("WASM_AGENT_TEST_SOURCE")
+assert(workspace_source and workspace_source ~= "", "coding-child source repository required")
+memory.set_session_worktree(parent_id, workspace_source)
 local function ctx(user, role)
   return { user_id = user or "alice", role = role or "master", session_id = parent_id, run_id = "parent-run", node_id = "" }
 end
@@ -31,6 +34,36 @@ local child = memory.session(started.session_id)
 assert(child and child.parent_session_id == parent_id, "the child session must link to the parent")
 assert(memory.message_count(started.session_id) > 0, "the child must keep its own transcript")
 print("MARK ok-success " .. started.subagent_id)
+
+-- Coding profiles get a durable isolated git worktree before their child is admitted.
+local paths=dofile("lua/core/paths.lua")
+local profile_path=paths.config() .. "/subagent-profiles/coding-workspace.json"
+host.write_file(profile_path,json.encode({schema_version=1,id="coding-workspace",operator_authorized=true,
+  allowed_tools={"write"},limits={max_depth=0,timeout_seconds=60,max_tokens=8000}}))
+local code_a=control({action="start",profile="coding-workspace",prompt="WRITE-CODE CODE-A",idempotency_key="workspace-a"},ctx("alice"))
+local code_b=control({action="start",profile="coding-workspace",prompt="WRITE-CODE CODE-B",idempotency_key="workspace-b"},ctx("alice"))
+assert(not code_a.error and not code_b.error,"coding children allocate before admission: "..json.encode(code_a).." / "..json.encode(code_b))
+local code_a_result=control({action="await",id=code_a.subagent_id,wait_ms=60000},ctx("alice"))
+local code_b_result=control({action="await",id=code_b.subagent_id,wait_ms=60000},ctx("alice"))
+assert(code_a_result.state=="completed" and code_b_result.state=="completed","both coding children settle")
+local code_a_ws=memory.session_workspace(code_a.session_id)
+local code_b_ws=memory.session_workspace(code_b.session_id)
+assert(code_a_ws.state=="allocated" and code_b_ws.state=="allocated" and code_a_ws.worktree~=code_b_ws.worktree,
+  "delegated coding children own durable independent worktrees")
+assert(host.read_file(code_a_ws.worktree.."/shared.txt")=="written-by-A"
+  and host.read_file(code_b_ws.worktree.."/shared.txt")=="written-by-B","concurrent child writes never share a checkout")
+local cancel_code=control({action="start",profile="coding-workspace",prompt="SLOW CANCEL-CODE",idempotency_key="workspace-cancel"},ctx("alice"))
+assert(not cancel_code.error,"cancel coding child starts with isolated workspace")
+local cancel_workspace=memory.session_workspace(cancel_code.session_id)
+assert(cancel_workspace.state=="allocated","cancellable child workspace is bound before run")
+control({action="cancel",id=cancel_code.subagent_id},ctx("alice"))
+local cancel_code_result=control({action="await",id=cancel_code.subagent_id,wait_ms=30000},ctx("alice"))
+assert(cancel_code_result.state=="cancelled","coding child cancellation settles")
+assert(memory.session_workspace(cancel_code.session_id).worktree==cancel_workspace.worktree
+  and memory.session_workspace(code_b.session_id).state=="allocated"
+  and host.read_file(code_b_ws.worktree.."/shared.txt")=="written-by-B",
+  "cancelling one coding child leaves sibling workspace and writes intact")
+print("MARK ok-coding-workspaces")
 
 -- 2. Idempotency: a repeat start collects the same child, with no second run.
 local first = control({ action = "start", profile = "explore", prompt = "x", idempotency_key = "same" }, ctx("alice"))
