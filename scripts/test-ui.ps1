@@ -2001,6 +2001,31 @@ $harness = @'
   var taskStart=window.__calls.filter(c=>c.url==='subagents' && c.body.includes('"action":"start"')).pop();
   check(taskStart && JSON.parse(taskStart.body).thread && JSON.parse(taskStart.body).idempotency_key,
     'tasks: start binds a parent and a deduplication key');
+  // A failed start keeps its submission identity for an unchanged retry, but a new prompt is a new task.
+  taskPanel.prompt.value='retry this bounded investigation';
+  window.__taskFailure=true;
+  taskPanel.form.dispatchEvent(new Event('submit',{cancelable:true}));
+  for(var ti=0;ti<80;ti++) await tick();
+  var failedTaskStarts=window.__calls.filter(c=>c.url==='subagents' && c.body.includes('"action":"start"'));
+  var failedTaskBody=failedTaskStarts.length ? JSON.parse(failedTaskStarts[failedTaskStarts.length-1].body) : {};
+  check(taskPanel.notice.textContent.includes('unavailable'), 'tasks: a failed start is reported before retry');
+  window.__taskFailure=false;
+  taskPanel.form.dispatchEvent(new Event('submit',{cancelable:true}));
+  for(var ti=0;ti<80;ti++) await tick();
+  var retriedTaskStarts=window.__calls.filter(c=>c.url==='subagents' && c.body.includes('"action":"start"'));
+  var retriedTaskBody=retriedTaskStarts.length ? JSON.parse(retriedTaskStarts[retriedTaskStarts.length-1].body) : {};
+  check(failedTaskStarts.length+1===retriedTaskStarts.length && failedTaskBody.thread===retriedTaskBody.thread &&
+    failedTaskBody.profile===retriedTaskBody.profile && failedTaskBody.prompt===retriedTaskBody.prompt &&
+    !!failedTaskBody.idempotency_key && failedTaskBody.idempotency_key===retriedTaskBody.idempotency_key,
+    'tasks: retrying an unchanged failed start reuses its parent/profile/prompt idempotency key');
+  taskPanel.prompt.value='a different bounded investigation';
+  taskPanel.form.dispatchEvent(new Event('submit',{cancelable:true}));
+  for(var ti=0;ti<80;ti++) await tick();
+  var newTaskStarts=window.__calls.filter(c=>c.url==='subagents' && c.body.includes('"action":"start"'));
+  var newTaskBody=newTaskStarts.length ? JSON.parse(newTaskStarts[newTaskStarts.length-1].body) : {};
+  check(newTaskStarts.length===retriedTaskStarts.length+1 && newTaskBody.prompt!==retriedTaskBody.prompt &&
+    !!newTaskBody.idempotency_key && newTaskBody.idempotency_key!==retriedTaskBody.idempotency_key,
+    'tasks: changing the prompt for a new task uses a different idempotency key');
   window.__taskFailure=true;
   await window.__refreshTasks();
   check(taskPanel.querySelectorAll('.task-card').length===2 && taskPanel.notice.textContent.includes('unavailable'),
