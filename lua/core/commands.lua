@@ -54,7 +54,8 @@ M.commands = {
     hint = "deterministic cost/context report: token domination, KV cache, USD, and a readable prefix artifact",
   },
   { name = "/update", usage = "/update", hint = "install the newest build in this node's tree (the sentinel does it, once idle)" },
-  { name = "/merge", usage = "/merge", hint = "act as git orchestrator: merge every open branch into main, gate, push, sync" },
+  { name = "/merge", usage = "/merge", hint = "merge internal branches; leave open PR work for review" },
+  { name = "/merge all", usage = "/merge all", hint = "include all open PRs after review and required checks" },
   { name = "/help", usage = "/help", hint = "this help" },
   { name = "/exit", usage = "/exit", alias = { "/quit" }, hint = "quit" },
 }

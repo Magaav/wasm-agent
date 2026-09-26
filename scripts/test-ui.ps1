@@ -1400,15 +1400,17 @@ $harness = @'
     type("/");
     check(menu.open, "commands: `/` must open the list");
     var items = Array.prototype.slice.call(menu.querySelectorAll(".menu-item"));
-    check(items.length === 4, "commands: `/` must offer all four commands, got " + items.length);
+    check(items.length === 5, "commands: `/` must offer all five commands, got " + items.length);
     check(items[0] && items[0].textContent.indexOf("/new") >= 0,
       "commands: the list must offer /new first, got: " + (items[0] && items[0].textContent));
     check(items[1] && items[1].textContent.indexOf("/update") >= 0,
       "commands: the list must offer /update, got: " + (items[1] && items[1].textContent));
     check(items[2] && items[2].textContent.indexOf("/merge") >= 0,
       "commands: the list must offer /merge, got: " + (items[2] && items[2].textContent));
-    check(items[3] && items[3].textContent.indexOf("/efficiency_report") >= 0,
-      "commands: the window must offer /efficiency_report, got: " + (items[3] && items[3].textContent));
+    check(items[3] && items[3].textContent.indexOf("/merge all") >= 0,
+      "commands: the window must offer explicit PR-inclusive merge all");
+    check(items[4] && items[4].textContent.indexOf("/efficiency_report") >= 0,
+      "commands: the window must offer /efficiency_report, got: " + (items[4] && items[4].textContent));
 
     // `/update` asks the node to install its own tree's build. The three answers it can give must
     // read as three different things: queued is *not* done, and a refusal is not a silence. The
@@ -1907,6 +1909,17 @@ $harness = @'
     check(!!merged, "commands: running /merge must send a turn");
     check(!!merged && String(merged.body).indexOf("git-orchestrator") >= 0,
       "commands: the /merge brief must name the orchestrator skill, got: " + (merged && merged.body));
+    check(!!merged && String(merged.body).includes('Open PR work is excluded'),
+      'commands: ordinary merge excludes PR work');
+    for (var mergeDrain = 0; mergeDrain < 80; mergeDrain += 1) await tick();
+    window.__typeCommand('/merge all');
+    mergeInput.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter',bubbles:true}));
+    for (var mergeDrain = 0; mergeDrain < 80; mergeDrain += 1) await tick();
+    var allMerged=(window.__calls || []).filter(call=>String(call.url).includes('chat') && call.method==='POST').pop();
+    check(!!allMerged && String(allMerged.body).includes('/merge all explicitly includes every open PR head'),
+      'commands: explicit merge all sends the PR-inclusive scope');
+    check(!!allMerged && String(allMerged.body).includes('honor required checks and approvals'),
+      'commands: merge all retains required PR review');
   })();
 
   // ---- choosing and creating sessions in the engine ------------------------------------------

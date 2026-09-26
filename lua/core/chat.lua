@@ -301,6 +301,8 @@ function M.run(argv)
       -- Not a node operation: the merge runs outside this process, in the worktrees. The command
       -- is the agent's brief, and it names the skill that holds the procedure.
       turn(merger.brief)
+    elseif line == "/merge all" then
+      turn(merger.all_brief)
     elseif line == "/efficiency_report" then
       -- Deterministic: it reads the ledger and the transcript, writes the prefix artifact, and
       -- prints. It is not sent to the model, so it cannot spend a token or change the thread.
