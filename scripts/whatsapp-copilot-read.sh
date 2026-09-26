@@ -44,9 +44,33 @@ if [ -n "$rows" ]; then
       stooddown) body="wasm-agent: did NOT answer the message in $conv (id $mid) - you took that conversation over yourself, so the copilot stood down and nothing was sent. Reply there yourself if it still needs one." ;;
       *) continue ;;
     esac
-    node "$ROOT/scripts/whatsapp-reply.mjs" --to-self \
-      --body "$body" \
-      --send >/dev/null 2>&1 || true
+    self_destination="${WA_WHATSAPP_SELF_DESTINATION:-}"
+    account="${WA_WHATSAPP_ACCOUNT:-}"
+    browser_endpoint="${WA_WHATSAPP_BROWSER_ENDPOINT:-}"
+    if [ -z "$self_destination" ] || [ -z "$account" ] || [ -z "$browser_endpoint" ]; then
+      echo "[whatsapp-copilot-read] notification not sent: store route identity/self binding is missing" >&2
+      continue
+    fi
+    body_file="$(mktemp)"
+    if [ -z "$body_file" ] || ! printf '%s' "$body" > "$body_file"; then
+      echo "[whatsapp-copilot-read] notification not sent: body file unavailable" >&2
+      [ -n "$body_file" ] && rm -f "$body_file"
+      continue
+    fi
+    store_script="$ROOT/scripts/whatsapp-store-send.mjs"
+    body_file_arg="$body_file"
+    if command -v cygpath >/dev/null 2>&1; then
+      store_script="$(cygpath -w "$store_script")"
+      body_file_arg="$(cygpath -w "$body_file")"
+    fi
+    send_output="$(node "$store_script" --chat "$self_destination" \
+      --expect-account "$account" --expect-browser-endpoint "$browser_endpoint" \
+      --body-file "$body_file_arg" --send 2>&1)"
+    send_status=$?
+    rm -f "$body_file"
+    if [ "$send_status" -ne 0 ]; then
+      echo "[whatsapp-copilot-read] notification send failed (no retry): $(printf '%s' "$send_output" | head -c 240)" >&2
+    fi
   done <<< "$rows"
 fi
 

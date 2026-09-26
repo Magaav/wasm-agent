@@ -1,5 +1,5 @@
-// The pure half of the store send route: identity/endpoint binding, the conservative self-only route
-// rule, the pre-effect state guard, the send reconciliation, and the page expressions the CLI evaluates.
+// The pure half of the store send route: identity/endpoint binding, supported Wid-kind authorization,
+// the pre-effect state guard, send reconciliation, and the page expressions the CLI evaluates.
 //
 // Kept separate from the browser code so the rules that decide whether a message is sent are testable
 // without a browser, and so they can be evaluated against adversarial fake app stores.
@@ -139,13 +139,15 @@ export function storeIdentityGuard({ send, expectedAccount, expectedEndpoint, ac
   return null;
 }
 
-// The conservative initial route: only the verified self chat is sent to. Ordinary/group/business
-// metadata contracts are not verified here, so a non-self send is refused by name rather than guessed.
-// The route can be widened only after the metadata contract is verified.
-export function routeGuard({ send, isMe }) {
+// App-action sends are allowed only for a target whose Wid methods explicitly prove it is a direct
+// user or group. Suffix-based fallback labels are useful for inspection, never authorization. Bots,
+// broadcasts, unknown kinds, and unproven self identity fail closed.
+export function routeGuard({ send, isMe, kind, kindProven }) {
   if (!send) return null;
-  if (isMe === true) return null;
-  return "ordinary_chat_unverified";
+  if (kindProven !== true) return "target_kind_unverified";
+  if (kind !== "direct" && kind !== "group") return "unsupported_chat_kind";
+  if (isMe !== true && isMe !== false) return "target_identity_unverified";
+  return null;
 }
 
 // The pre-effect state guard, built against the actual verified chat shape (app 2.3000.1048024606):
@@ -228,9 +230,13 @@ export function lookupExpression(chatId) {
     const chat = chats.find((candidate) => idOf(candidate.id) === CHAT) || null;
     if (!chat) return JSON.stringify({ error: 'chat_not_found', account: meIds[0] || '', account_known: accountKnown });
     const wid = chat.id;
-    const kind = (wid && typeof wid.isGroup === 'function' && wid.isGroup()) ? 'group'
-      : (wid && typeof wid.isBot === 'function' && wid.isBot()) ? 'bot'
-      : (wid && typeof wid.isUser === 'function' && wid.isUser()) ? 'direct'
+    let group = null, bot = null, user = null;
+    try { if (wid && typeof wid.isGroup === 'function') group = wid.isGroup(); } catch (error) { group = null; }
+    try { if (wid && typeof wid.isBot === 'function') bot = wid.isBot(); } catch (error) { bot = null; }
+    try { if (wid && typeof wid.isUser === 'function') user = wid.isUser(); } catch (error) { user = null; }
+    const trueKinds = [group, bot, user].filter((value) => value === true).length;
+    const kindProven = typeof group === 'boolean' && typeof bot === 'boolean' && typeof user === 'boolean' && trueKinds === 1;
+    const kind = kindProven ? (group ? 'group' : bot ? 'bot' : 'direct')
       : CHAT.endsWith('@g.us') ? 'group' : CHAT.endsWith('@broadcast') ? 'broadcast'
       : (CHAT.endsWith('@c.us') || CHAT.endsWith('@lid') || CHAT.endsWith('@s.whatsapp.net')) ? 'direct' : 'unknown';
     const maybe = (value) => value === undefined || value === null ? null : String(value);
@@ -246,6 +252,7 @@ export function lookupExpression(chatId) {
     return JSON.stringify({
       ok: true,
       chat: { id: idOf(chat.id), name: String(chat.formattedTitle || chat.name || ''), kind: kind },
+      kind_proven: kindProven,
       is_me: isMe(idOf(chat.id)),
       account: meIds[0] || '',
       account_ids: meIds,

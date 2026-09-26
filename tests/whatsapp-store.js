@@ -1,4 +1,4 @@
-// The store send route: identity/endpoint binding, the conservative self-only rule, the pre-effect
+// The store send route: identity/endpoint binding, supported Wid-kind authorization, the pre-effect
 // state guard, one-dispatch reconciliation, and the page expressions against adversarial fake app
 // stores. A fake CDP server then runs the real CLI end to end. No real browser, no real HOME.
 const assert = require("node:assert/strict");
@@ -127,9 +127,13 @@ function runCli(args, timeoutMs = 20000) {
   check(core.storeIdentityGuard({ send: true, expectedAccount: "5511", expectedEndpoint: "ws://127.0.0.1:9222/devtools/page/A", actualAccount: "5511", actualEndpoint: "ws://127.0.0.1:9222/devtools/page/B" }) === "endpoint_mismatch", "a mismatched endpoint is refused");
   check(core.storeIdentityGuard({ send: false, expectedAccount: "5511" }) === null, "a rehearsal does not require both bindings");
 
-  check(core.routeGuard({ send: true, isMe: true }) === null, "the verified self chat is the allowed route");
-  check(core.routeGuard({ send: true, isMe: false }) === "ordinary_chat_unverified", "a non-self send is refused as unverified");
-  check(core.routeGuard({ send: true, isMe: undefined }) === "ordinary_chat_unverified", "an unproven self is refused");
+  check(core.routeGuard({ send: true, isMe: true, kind: "direct", kindProven: true }) === null, "a proven self direct chat is allowed");
+  check(core.routeGuard({ send: true, isMe: false, kind: "direct", kindProven: true }) === null, "a proven ordinary direct chat is allowed");
+  check(core.routeGuard({ send: true, isMe: false, kind: "group", kindProven: true }) === null, "a proven group chat is allowed");
+  check(core.routeGuard({ send: true, isMe: false, kind: "direct", kindProven: false }) === "target_kind_unverified", "suffix-only kind metadata is refused");
+  check(core.routeGuard({ send: true, isMe: false, kind: "bot", kindProven: true }) === "unsupported_chat_kind", "bot chats are refused");
+  check(core.routeGuard({ send: true, isMe: false, kind: "broadcast", kindProven: true }) === "unsupported_chat_kind", "broadcasts are refused");
+  check(core.routeGuard({ send: true, isMe: undefined, kind: "direct", kindProven: true }) === "target_identity_unverified", "an unproven app identity is refused");
   check(core.routeGuard({ send: false, isMe: false }) === null, "a rehearsal is never blocked");
 
   const clean = { id: "a@c.us", isReadOnly: false, archived: false, typing: false, recording: false, isComposing: false, draftPresent: false, urlText: null, urlNumber: null };
@@ -186,7 +190,8 @@ function runCli(args, timeoutMs = 20000) {
   const draftLookup = lookup([{ ...selfChat, draftMessage: { text: "a human draft", timestamp: 1 } }], me, SELF_ID);
   check(draftLookup.draft_present === true && !JSON.stringify(draftLookup).includes("a human draft"), "a present draft is reported without its text");
   const groupChat = { ...selfChat, id: wid("123@g.us", { isUser: false, isGroup: true, isBot: false }) };
-  check(lookup([groupChat], me, "123@g.us").chat.kind === "group", "a group Wid is reported as a group");
+  const groupLookup = lookup([groupChat], me, "123@g.us");
+  check(groupLookup.chat.kind === "group" && groupLookup.kind_proven === true, "a group Wid is proven by its app methods");
   const strangerLookup = lookup([stranger, selfChat], me, STRANGER_ID);
   check(strangerLookup.is_me === false, "an unanswered stranger is never self");
   const unknownMe = lookup([selfChat], null, SELF_ID);
@@ -221,16 +226,21 @@ function runCli(args, timeoutMs = 20000) {
   // ---- the real CLI against a fake CDP server ---------------------------------
   const loopback = (port, page = "ABC") => `ws://127.0.0.1:${port}/devtools/page/${page}`;
   const cleanLookup = { ok: true, chat: { id: SELF_ID, name: "Notes", kind: "direct" }, is_me: true, account: SELF_ID,
-    account_known: true, unread: 0, marked_unread: false, archived: false, is_read_only: false, draft_present: false,
+    account_known: true, kind_proven: true, unread: 0, marked_unread: false, archived: false, is_read_only: false, draft_present: false,
     url_text: null, url_number: null, active: true, active_chat_id: SELF_ID, typing: false, recording: false,
     is_composing: false, action_available: true, chats: 2 };
 
   const scenario = (state) => {
-    let actionCalls = 0;
+    let actionCalls = 0, lookupCalls = 0;
     const fake = startFakeCdp((expression) => {
       if (expression.includes("await action.sendTextMsgToChat")) { actionCalls += 1; return state.action === undefined ? { dispatched: true, result: null } : state.action; }
       if (expression.includes("fromMe")) return state.verify === undefined ? { verified: true, message: { id: "NEW", recipient: SELF_ID, body: "hello", from_me: true, ack: 1, t: 1 } } : state.verify;
-      return state.lookup === undefined ? cleanLookup : state.lookup;
+      if (expression.includes("const kindProven")) {
+        lookupCalls += 1;
+        const lookup = lookupCalls > 1 && state.lookupAfterFirst !== undefined ? state.lookupAfterFirst : state.lookup;
+        return lookup === undefined ? cleanLookup : lookup;
+      }
+      return cleanLookup;
     });
     return fake.then((f) => ({ ...f, calls: () => actionCalls }));
   };
@@ -283,6 +293,11 @@ function runCli(args, timeoutMs = 20000) {
   check(result.code === 5 && result.payload.error === "target_draft_present" && draft.calls() === 0, "a target draft refuses before dispatch");
   draft.server.close();
 
+  const draftAppearsAfterLock = await scenario({ lookupAfterFirst: { ...cleanLookup, draft_present: true } });
+  result = await runCli(["--chat", SELF_ID, "--expect-account", SELF_ID, "--expect-browser-endpoint", loopback(draftAppearsAfterLock.port), "--body", "hello", "--send"]);
+  check(result.code === 5 && result.payload.error === "target_draft_present" && draftAppearsAfterLock.calls() === 0, "a draft appearing while waiting for the send lock still refuses before dispatch");
+  draftAppearsAfterLock.server.close();
+
   const preview = await scenario({ lookup: { ...cleanLookup, url_text: "http://example" } });
   result = await runCli(["--chat", SELF_ID, "--expect-account", SELF_ID, "--expect-browser-endpoint", loopback(preview.port), "--body", "hello", "--send"]);
   check(result.code === 5 && result.payload.error === "link_preview_present" && preview.calls() === 0, "a link preview refuses before dispatch");
@@ -298,11 +313,25 @@ function runCli(args, timeoutMs = 20000) {
   check(result.code === 5 && result.payload.error === "account_mismatch" && mismatch.calls() === 0, "a mismatched bound account refuses before dispatch");
   mismatch.server.close();
 
-  const nonSelf = await scenario({ lookup: { ...cleanLookup, is_me: false } });
-  result = await runCli(["--chat", STRANGER_ID, "--expect-account", SELF_ID, "--expect-browser-endpoint", loopback(nonSelf.port), "--body", "hello", "--send"]);
-  check(result.code === 5 && result.payload.error === "ordinary_chat_unverified" && nonSelf.calls() === 0, "a non-self send is refused as unverified");
-  check(/self chat/.test(String(result.payload.limitation || "")), "the self-only limitation is reported, not hidden");
-  nonSelf.server.close();
+  const directChat = await scenario({ lookup: { ...cleanLookup, chat: { id: STRANGER_ID, name: "Contact", kind: "direct" }, is_me: false } });
+  result = await runCli(["--chat", STRANGER_ID, "--expect-account", SELF_ID, "--expect-browser-endpoint", loopback(directChat.port), "--body", "hello", "--send"]);
+  check(result.code === 0 && result.payload.sent === true && directChat.calls() === 1, "a proven ordinary direct send uses exactly one app action");
+  directChat.server.close();
+
+  const unprovenKind = await scenario({ lookup: { ...cleanLookup, chat: { id: STRANGER_ID, name: "Contact", kind: "direct" }, kind_proven: false, is_me: false } });
+  result = await runCli(["--chat", STRANGER_ID, "--expect-account", SELF_ID, "--expect-browser-endpoint", loopback(unprovenKind.port), "--body", "hello", "--send"]);
+  check(result.code === 5 && result.payload.error === "target_kind_unverified" && unprovenKind.calls() === 0, "an ordinary-looking suffix is insufficient to authorize a send");
+  unprovenKind.server.close();
+
+  const fakeGroup = await scenario({ lookup: { ...cleanLookup, chat: { id: "123@g.us", name: "Group", kind: "group" }, is_me: false } });
+  result = await runCli(["--chat", "123@g.us", "--expect-account", SELF_ID, "--expect-browser-endpoint", loopback(fakeGroup.port), "--body", "hello", "--send"]);
+  check(result.code === 0 && result.payload.sent === true && fakeGroup.calls() === 1, "a proven group send uses exactly one app action");
+  fakeGroup.server.close();
+
+  const botChat = await scenario({ lookup: { ...cleanLookup, chat: { id: "bot@c.us", name: "Bot", kind: "bot" }, is_me: false } });
+  result = await runCli(["--chat", "bot@c.us", "--expect-account", SELF_ID, "--expect-browser-endpoint", loopback(botChat.port), "--body", "hello", "--send"]);
+  check(result.code === 5 && result.payload.error === "unsupported_chat_kind" && botChat.calls() === 0, "a proven bot chat is refused before dispatch");
+  botChat.server.close();
 
   const missingChat = await scenario({ lookup: { error: "chat_not_found" } });
   result = await runCli(["--chat", "nope@c.us", "--expect-account", SELF_ID, "--expect-browser-endpoint", loopback(missingChat.port), "--body", "hello", "--send"]);

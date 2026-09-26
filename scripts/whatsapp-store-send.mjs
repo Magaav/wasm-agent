@@ -7,8 +7,8 @@
 // This is the store route: it calls the app's own
 //   WAWebSendTextMsgChatAction.sendTextMsgToChat(chatModel, body, options = {})
 // and never opens the chat, never focuses or types into the composer, and never marks anything read.
-// The route is conservative on purpose: only the verified self chat is sent to until the ordinary/group
-// metadata contract is verified, and both identity bindings are required for a send.
+// The route sends only to an explicitly resolved direct/group Wid, and both identity bindings are
+// required for a send. It refuses bots, broadcasts, unknown kinds, and metadata not proven by Wid methods.
 //
 // Safety rules, each learned from a failure:
 //   - **The effect decides.** A new message in the store, in this chat, mine, with the exact body and a
@@ -120,7 +120,8 @@ async function main() {
         is_read_only: target.is_read_only === true, draft_present: target.draft_present,
         url_text: target.url_text, url_number: target.url_number, active: target.active === true,
         active_chat_id: target.active_chat_id, typing: target.typing === true, recording: target.recording === true,
-        is_composing: target.is_composing === true, is_me: target.is_me === true, account_known: target.account_known === true,
+        is_composing: target.is_composing === true, is_me: target.is_me === true, kind_proven: target.kind_proven === true,
+        account_known: target.account_known === true,
       } }, 0);
   }
 
@@ -138,13 +139,12 @@ async function main() {
       observed: "the store route is not acting as the locally bound account/endpoint" }, 5);
   }
 
-  // 3. The conservative self-only route. Ordinary/group metadata is not verified here, so a non-self
-  //    send is refused by name rather than guessed; the limitation is explicit.
-  const route = routeGuard({ send: true, isMe: target.is_me === true });
+  // 3. The app's own Wid methods must prove the target is a direct user or group. Suffix-derived labels
+  //    are informational only; bots, broadcasts, unknown kinds and unproven identity fail closed.
+  const route = routeGuard({ send: true, isMe: target.is_me, kind: target.chat.kind, kindProven: target.kind_proven });
   if (route) {
     return done({ ok: false, error: route, ...base,
-      limitation: "the store route sends only to the verified self chat until the ordinary/group metadata contract is verified; it does not claim all-chat support",
-      observed: "the target is not proven to be the account's own chat" }, 5);
+      observed: "the target kind or app identity is not proven by the current store metadata" }, 5);
   }
 
   // 4. The pre-effect state guard, built against the verified chat shape: read-only, archived, actively
@@ -176,6 +176,23 @@ async function main() {
   if (!sendLock.ok) {
     return done({ ok: false, error: "send_resource_busy", holder: sendLock.holder, ...base }, 7);
   }
+
+  // Re-read immediately before any effect. The lock serializes agent senders, not a human changing the
+  // target's draft while we waited for it; a newly-present or unknown draft still refuses the send.
+  const fresh = await page(lookupExpression(args.chat));
+  if (fresh.error) return done({ ok: false, error: fresh.error, ...base }, 5);
+  const freshIdentity = storeIdentityGuard({ send: true, expectedAccount: args.expectAccount,
+    expectedEndpoint, actualAccount: fresh.account || "", actualEndpoint });
+  if (freshIdentity) return done({ ok: false, error: freshIdentity, ...base }, 5);
+  const freshRoute = routeGuard({ send: true, isMe: fresh.is_me, kind: fresh.chat.kind, kindProven: fresh.kind_proven });
+  if (freshRoute) return done({ ok: false, error: freshRoute, ...base }, 5);
+  const freshState = stateGuard({ send: true, target: {
+    isReadOnly: fresh.is_read_only, archived: fresh.archived, typing: fresh.typing,
+    recording: fresh.recording, isComposing: fresh.is_composing, draftPresent: fresh.draft_present,
+    urlText: fresh.url_text, urlNumber: fresh.url_number,
+  } });
+  if (freshState) return done({ ok: false, error: freshState, ...base,
+    observed: "the target's state changed or is not safe immediately before dispatch" }, 5);
 
   // 6. Snapshot the newest matching message id, so an identical earlier message cannot be mistaken for
   //    this send, then dispatch the app action exactly once.

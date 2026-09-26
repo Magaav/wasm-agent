@@ -1,8 +1,8 @@
 -- The scoped WhatsApp responder tools enforce their restrictions structurally.
 --
 -- These are the rules that keep a whatsapp-responder run inside one conversation with no shell, no edit
--- and no deploy. Each bypass review found has a mutation test here: a non-self send cannot be smuggled
--- into the UI script, a crash between send and confirm must not replay, a missing counter/store is not
+-- and no deploy. Each bypass review found has a mutation test here: UI/input sends are retired, a crash
+-- between send and confirm must not replay, a missing counter/store is not
 -- "unlimited", a shell exit is not a send, and an event cannot supply a route or a capability.
 local whatsapp = dofile("lua/core/whatsapp.lua")
 
@@ -205,26 +205,15 @@ local notAllowed = whatsapp.dispatch(memory, "whatsapp_decide", { decision = "re
   { profile = { schema_version = 1, id = "whatsapp-responder", allowed_tools = { "whatsapp_send" }, resources = {} }, event = event, effects = new_effects() })
 check(notAllowed.error == "tool_not_in_profile", "a tool outside allowed_tools is refused")
 
--- A `store` label cannot smuggle the UI script past the unread guard; the flag pass-through is binding-only.
+-- Store sends are the only supported route; the old UI/input path fails closed.
 profile.resources.send_approved = true
 profile.resources.send_path = "store"
 profile.resources.store_send_script = ""
 check(whatsapp.dispatch(memory, "whatsapp_send", { body = "yes", confirm = true }, send_ctx(profile, new_effects(), "S0")).error == "store_route_unbound", "store route without a store script is refused")
-check(#whatsapp.route_flags(profile, { name = "store", self_only = false }) == 0, "the store route takes no unread flag")
-check(#whatsapp.route_flags(profile, { name = "ui", self_only = false }) == 0, "an unapproved non-self UI send takes no flag")
-check(#whatsapp.route_flags(profile, { name = "ui", self_only = true }) == 0, "an unapproved self UI send takes no flag (the raw script enforces unread)")
 profile.resources.send_path = "ui"
-check(whatsapp.dispatch(memory, "whatsapp_send", { body = "yes", confirm = true }, send_ctx(profile, new_effects(), "S1")).error == "unread_would_be_broken", "an unapproved non-self UI send is refused")
-profile.resources.allow_mark_read = true
-check(whatsapp.route_flags(profile, { name = "ui", self_only = false })[1] == "--allow-mark-read", "an approved non-self UI send passes --allow-mark-read to the raw script")
-check(whatsapp.route_flags(profile, { name = "ui", self_only = true })[1] == "--allow-mark-read", "an approved self UI send also passes --allow-mark-read")
-
--- A debug/event argument cannot supply the approved flag: route_flags reads the profile only.
-local forged = base_profile()
-forged.resources.send_approved = true
-forged.resources.send_path = "ui"
-forged.resources.allow_mark_read = false
-check(#whatsapp.route_flags(forged, { name = "ui", self_only = false }) == 0, "an event-supplied flag cannot approve a send")
+local retiredEffects = new_effects()
+check(whatsapp.dispatch(memory, "whatsapp_send", { body = "yes", confirm = true }, send_ctx(profile, retiredEffects, "S1")).error == "ui_input_route_retired", "the UI/input route is retired")
+check(#retiredEffects.rows == 0 and retiredEffects.budget_used == 0, "a retired UI route refuses before reserving a send")
 
 -- The happy path: reserve, send, confirm.
 profile.resources.send_path = "store"

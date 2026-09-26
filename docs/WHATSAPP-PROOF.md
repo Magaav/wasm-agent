@@ -1,26 +1,25 @@
-# WhatsApp self-chat live proof — setup (not performed here)
+# WhatsApp injected app-action send — proof status and live procedure
 
-The final live proof sends one reply to the operator's **own notes-to-self** chat. It is the smallest
-real send that exercises the whole route (resolve, open, type, send, verify in the store) without
-touching a third party or clearing someone else's unread marker. The coordinator performs the send; this
-page is the exact setup it needs.
+The Copilot uses `scripts/whatsapp-store-send.mjs`, which invokes WhatsApp's own
+`WAWebSendTextMsgChatAction.sendTextMsgToChat` action. It does not open/focus a chat, type, dispatch keys,
+or mark a conversation read. A read-only live lookup and dry run confirmed the bound account/page, a
+proven self identity, and that the app action exists. It also found a human draft on the self chat, so no
+live send was attempted. The fake app-store/CDP suite covers ordinary direct and group dispatch, one-call
+semantics, store verification and fail-closed refusal paths.
 
-## Why self-chat is the safe live proof
+## Live send approval boundary
 
-The only route this build proves is the UI route: it opens the chat, and opening a chat is what clears
-its unread marker. For **notes-to-self** there is nothing to clear, so the route is acceptable without
-accepting a third party's marker being cleared. `lua/core/whatsapp.lua` encodes that exemption
-(`conversation == resources.self_destination`), and `scripts/whatsapp-reply.mjs` refuses a non-self
-`--send` before it opens anything unless `--allow-mark-read` (or `WA_WHATSAPP_ALLOW_MARK_READ=1`) is
-passed. A third-party live proof is out of scope here: it needs an approved store send path
-(`resources.store_send_script`) or an explicit decision to accept the unread consequence.
+A live message remains an external effect. Do not validate against a third-party or group chat without
+explicit approval of the recipient and exact content. The current self chat has a human draft; do not
+clear, overwrite or restore it for this test. A later live proof requires the operator to resolve that
+draft and explicitly authorize the exact test message. The route refuses unsupported/unproven target
+metadata, identity/page mismatch, a draft, active composition or link-preview state before dispatch.
 
 ## Prerequisites
 
-- The node and sentinel are running, and the job pipeline is enabled (`docs/JOBS.md`).
-- Chrome holds the operator's WhatsApp Web session, and the document-start hook is bound:
-  `bash scripts/whatsapp-preflight.sh` must print `whatsapp preflight ok ... hook=...`. A red line names
-  the broken link; do not proceed past it.
+- The node and sentinel are running if proving the Copilot pipeline (`docs/JOBS.md`).
+- Chrome holds the approved WhatsApp Web session. Bind the exact loopback DevTools page and account from
+  a read-only lookup; the store route does not require the document-start event hook.
 - The self chat id is **resolved from the app's store**, never typed from memory: the account has both a
   phone (`@c.us`) and a LID (`@lid`) identity and "message yourself" lives under one of them. Run a
   rehearsal first and read `self_id` from its JSON output.
@@ -45,11 +44,11 @@ a **local approved** binding; none of it appears in a portable artifact.
     "self_destination": "<SELF_CHAT_ID>",
     "account": "<OWN_ACCOUNT_ID>",
     "browser_endpoint": "ws://[::1]:9222/devtools/page/<EXPLICIT_TARGET_ID>",
-    "send_path": "ui",
+    "send_path": "store",
     "allow_mark_read": false,
     "send_approved": true,
-    "reply_script": "<INSTALL>/scripts/whatsapp-reply.mjs",
-    "store_send_script": ""
+    "reply_script": "",
+    "store_send_script": "<INSTALL>/scripts/whatsapp-store-send.mjs"
   },
   "limits": { "context_messages": 20, "body_bytes": 4096, "sends_per_run": 1 },
   "model": null,
@@ -65,11 +64,11 @@ Bindings, and why each is required:
 | `actions` | `["read","send"]`; read does not imply send, so a draft-only binding is `["read"]` |
 | `self_destination` | the notes-to-self chat id. It is a convenience binding, **not** an unread exemption: a self chat is still refused when its unread is nonzero or unproven |
 | `account` | the operator's own account id. Passed as `--expect-account`; a phone/PN compares by digits, while a `@lid` or a label compares exactly (so `operator1` never equals `other1`) |
-| `browser_endpoint` | the explicit loopback DevTools page from `whatsapp-preflight.sh`. On the verified machine the store and hook are on **IPv6 `[::1]:9222`**; IPv4 `127.0.0.1:9222` answers 404 (not a browser). Passed as `--expect-browser-endpoint`; protocol, port and page id must match exactly, and only genuine loopback aliases are interchangeable |
-| `send_path` | `ui` (the only proven route); `store` is refused without a real `store_send_script` |
-| `allow_mark_read` | `false`; opening any chat without a proven zero unread (the operator's own notes included) requires `true` |
+| `browser_endpoint` | the explicit loopback DevTools page from the read-only lookup. Passed as `--expect-browser-endpoint`; protocol, port and page id must match exactly, and only genuine loopback aliases are interchangeable |
+| `send_path` | `store`; bind the installed `whatsapp-store-send.mjs` locally |
+| `allow_mark_read` | `false`; the store route opens no chat and does not alter unread state |
 | `send_approved` | `true` **only for the proof**; a decision never grants it |
-| `reply_script` | the deterministic reply tool in the install |
+| `store_send_script` | the deterministic app-action sender in the install |
 | `limits.sends_per_run` | `1` |
 
 ## The commands
@@ -92,56 +91,45 @@ Bindings, and why each is required:
    (`browser_endpoint`) so the binding can be copied exactly. To read recent context without opening
    anything either, use `node <INSTALL>/scripts/whatsapp-read.mjs` (the store reader).
 
-   A **rehearsal** (`--to-self --body "..."` without `--send`) is *not* read-only: it opens the chat,
-   types the body, asserts the composer and clears its own text (opening clears the self chat's marker,
-   which is empty anyway). Use it only when you intend to interact with the page.
+   The legacy UI send/rehearsal modes now fail closed with `ui_input_route_retired`; `whatsapp-reply.mjs`
+   remains only as a read-only lookup shim. The store sender's no-body invocation below is read-only and
+   does not touch the composer.
 
-2. **Confirm the raw-script guard.** Opening the chat clears its unread marker, so a non-self target is
-   refused before it is opened, and a self target is refused unless its unread is a proven zero. Passing
-   `--allow-mark-read` explicitly accepts the marker being cleared; the script independently proves the
-   account through the app rather than a string comparison against a guessed id:
+2. **Inspect the target, read-only.** Bind the conversation id from the trusted ledger/store, never a
+   guessed title. This rehearsal connects only to the explicitly bound page and dispatches nothing:
 
    ```
-   node <INSTALL>/scripts/whatsapp-reply.mjs --chat <OTHER_CHAT_ID> --body "should not send" --send
-   # {"error":"unread_would_be_broken", ...}  exit 8, and no chat was opened
+   node <INSTALL>/scripts/whatsapp-store-send.mjs --chat <BOUND_CHAT_ID> --expect-account <OWN_ACCOUNT_ID> --expect-browser-endpoint <BOUND_PAGE>
+   # dry_run=true; inspect kind, draft_present, active state and action_available
    ```
 
-3. **The live send (coordinator).** One message to the operator's own notes:
+3. **The live send (coordinator only, after explicit approval).** The current self chat is not eligible
+   while its draft is present. Do not work around `target_draft_present`. Once the operator has resolved
+   the draft and approved the exact content, make one `--send` call against the bound target. Success
+   requires a new store message with the exact recipient/body, `fromMe`, and server `ack >= 1`; timeout or
+   missing proof is ambiguous and must not be retried.
 
-   ```
-   node <INSTALL>/scripts/whatsapp-reply.mjs --to-self --body "wasm-agent live proof <timestamp>" --send
-   ```
+4. **Record the ledger.** The Copilot's reader records decisions/effects separately; its note-home notices
+   and transcript replies use the injected store sender with locally bound account, browser page and
+   self-destination. They never fall back to `whatsapp-reply.mjs` or simulated input events.
 
-   Success is the store, not the keystroke:
-
-   ```json
-   {"ok":true,"sent":true,"verified":true,"chat":{"id":"<SELF_CHAT_ID>"},
-    "message":{"id":"3EB0...","ack":3},"body":"wasm-agent live proof ...","unread_before":0}
-   ```
-
-4. **Record the ledger.** The reply job, when it runs, summarises to the same notes chat with
-   `whatsapp-reply.mjs --to-self` and first calls `whatsapp_decide`, which writes a durable effect
-   through `ctx.effects` (reserve/confirm; a decision must not clobber a send reservation).
-
-This task performed none of the live steps above: no browser was opened and no message was sent.
+This task performed only read-only live lookup/dry-run steps; it did not open a chat or send a message.
 
 ## What is proven, and what is not
 
-- Proven by this proof: resolve → open → type → send → store verification, on a real session, plus the
-  refusal paths above.
-- Not proven by this proof, and must not be claimed: a third-party reply (needs an approved store path or
-  an accepted unread consequence), and the end-to-end scoped-tool path through `POST /subagents` until
-  the runtime worker's registry and durable `ctx.effects` adapter land.
-- Never do: overwrite a human draft (the tool refuses a non-empty composer), open another chat, retry an
-  ambiguous send, or send to anyone the operator did not bind.
+- Proven here: the live page exposes the app action and bound account/self chat; live state reports a
+  present draft, which the route refuses. Fake-store/CDP tests prove direct/group app-action calls, exact
+  store reconciliation, supported-kind guards and no retry on ambiguity.
+- Not proven: a live third-party/group send. The end-to-end scoped-tool path through `POST /subagents` is
+  separate from the raw store-send proof.
+- Never overwrite a human draft, open another chat, retry an ambiguous send, or send to an unbound target.
 
-## The store send route (source, not live-proven)
+## The store send route (implementation and fixture-proven; no third-party live send)
 
 `scripts/whatsapp-store-send.mjs` is the store route: it calls the app's own
 `WAWebSendTextMsgChatAction.sendTextMsgToChat(chatModel, body, options)` and never opens the chat,
-focuses, types, or marks anything read. It is **self-only until the ordinary/group metadata contract is
-verified**: a non-self send is refused `ordinary_chat_unverified` and the limitation is reported, so it
-does not claim all-chat support.
+focuses, types, or marks anything read. It permits only Wid-method-proven direct/group chats; bot,
+broadcast, suffix-only and unknown kinds fail closed.
 
 Rules the route enforces:
 
@@ -164,8 +152,9 @@ live browser is opened by the fixture.
 The coordinator read these from the live app; the route and its fixture are built against them, not
 against guessed booleans:
 
-- `chat.id` is a Wid with pure `isUser()`/`isGroup()`/`isBot()` methods; `chat.isGroup` is **undefined**.
-  The route takes the kind from the Wid methods, with the id suffix only as a fallback.
+- `chat.id` is a Wid with `isUser()`/`isGroup()`/`isBot()` methods; `chat.isGroup` is **undefined**.
+  A kind is authorized only when all methods return booleans and exactly one returns true; suffix fallback
+  is display-only and cannot authorize a send.
 - The per-chat draft is **`chat.draftMessage`**, an object with a `text` string and a `timestamp`.
   `chat.draft`/`draftText`/`composeContents` are undefined. The route uses `draftMessage` only to
   decide whether a draft is present, and **never reads the text out**.
@@ -175,11 +164,7 @@ against guessed booleans:
   `archive`/`isReadOnly` are booleans; `active` is a boolean; `typing`/`recording`/`isComposingPoll` are
   booleans. The route refuses a read-only, archived or actively-composing target.
 
-The live self chat currently **has a draft** (`draftMessage.text` length 75). The live proof is therefore
-blocked until the operator clears it; the route refuses a present draft and never clears, overwrites or
-restores a draft automatically. The remaining open question is whether `sendTextMsgToChat` resolves to a
-value carrying the new message id/ack - the route does not depend on that, because it verifies from the
-store.
+The live self chat has a draft; the route refuses it and never clears, overwrites or restores it. The app
+action's return value is not delivery proof: only a new matching store message with a server ack confirms.
 
-Widening the route past self-only still needs the ordinary/group metadata contract (which metadata
-proves the target kind and the account's own identity); until then a non-self send is refused by name.
+The direct/group guard is enabled against Wid methods and adversarial fixtures, but has not been live-proven by sending to a third party or group; the live third-party/group send remains unproven.

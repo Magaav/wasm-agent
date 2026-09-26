@@ -365,33 +365,14 @@ end
 -- manually-marked-unread notes-to-self has unread too).
 local function resolve_route(profile, conversation_id)
   local route = profile.resources.send_path
-  if route == nil or route == "" then route = "ui" end
+  if route == nil or route == "" then route = "store" end
   if route == "store" then
     local script = profile.resources.store_send_script
     if type(script) ~= "string" or script == "" then return nil, "store_route_unbound" end
     return { name = "store", script = script }, nil
   end
-  if route ~= "ui" then return nil, "unsupported_send_route" end
-  local self_destination = profile.resources.self_destination
-  local self_only = type(self_destination) == "string" and self_destination ~= "" and self_destination == conversation_id
-  if not self_only and profile.resources.allow_mark_read ~= true then
-    return nil, "unread_would_be_broken"
-  end
-  local script = profile.resources.reply_script
-  return { name = "ui", script = script, self_only = self_only }, nil
-end
-
--- The raw-script flags are derived from the profile binding only, never from an event or an argument. A
--- non-self UI send needs the explicit `--allow-mark-read` approval; notes-to-self and the store route do
--- not take it. Exposed so the pass-through is testable without a subprocess.
-function M.route_flags(profile, route)
-  local flags = {}
-  -- The approved flag is passed whenever the operator approved it, self or not; the raw script then
-  -- enforces the unread guard for the exact target.
-  if route.name == "ui" and profile.resources.allow_mark_read == true then
-    flags[#flags + 1] = "--allow-mark-read"
-  end
-  return flags
+  if route == "ui" then return nil, "ui_input_route_retired" end
+  return nil, "unsupported_send_route"
 end
 
 -- Identity flags, from the local profile binding only. The route must prove it is acting as the bound
@@ -481,14 +462,7 @@ local function send_tool(args, profile, ctx)
 
   local route, why = resolve_route(profile, event.conversation_id)
   if not route then
-    local extra = { route = profile.resources.send_path }
-    if why == "unread_would_be_broken" then
-      extra.options = {
-        "bind resources.store_send_script to an operator-approved store send path (opens nothing, marks nothing read)",
-        "set resources.allow_mark_read=true so the approved flag is passed to the raw UI script",
-      }
-    end
-    return fail(why, extra)
+    return fail(why, { route = profile.resources.send_path })
   end
 
   -- The last check before the effect, and the one that cannot be left to read time: has the operator
@@ -562,11 +536,6 @@ local function send_tool(args, profile, ctx)
       "--body-file", quote(body_file),
       "--send",
     }
-    -- The approved flag comes from the profile binding only, never from an event or an argument: the raw
-    -- script refuses a non-self send without it.
-    for _, flag in ipairs(M.route_flags(profile, route)) do
-      script_args[#script_args + 1] = flag
-    end
     for _, pair in ipairs(M.route_identity_flags(profile)) do
       script_args[#script_args + 1] = pair[1]
       script_args[#script_args + 1] = quote(pair[2])

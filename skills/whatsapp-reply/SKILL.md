@@ -41,25 +41,24 @@ style; avoid emoji unless appropriate to their established style.
 
 A useful no-reply result says why the operator is needed. It is not a failed task.
 
-## Browser safety is not optional
+## Injected app action only
 
-- The current UI script, [whatsapp-reply.mjs](../../scripts/whatsapp-reply.mjs), **opens
-  the target chat**, which may clear unread state. A rehearsal also opens/types/clears;
-  it is not read-only. Never present it as a way to preserve third-party unread markers.
-- Non-self UI sends require explicit approval of the unread consequence. Otherwise
-  refuse until a genuinely verified store route is bound. A profile string saying
-  `send_path: store` is not evidence that the implementation avoids opening a chat.
-- Never overwrite a human draft. Serialize shared browser effects and stop on a busy
-  resource, unknown lock owner, or uncertain previous effect.
-- Resolve notes-to-self through the app's current authenticated PN/LID identity and
-  `isMeAccount`. **Never infer self from outgoing-only history or a display name.**
-  If identity cannot be verified, refuse before opening or sending.
-- Keep probes and fixtures out of the user's page. Module source inspection is
-  read-only research, not authorization: see
-  [module inspection](../whatsapp-module-inspection/SKILL.md).
-- For live proof, use only the verified operator notes-to-self destination unless
-  explicit permission for the other recipient is established. See
-  [proof prerequisites](../../docs/WHATSAPP-PROOF.md); setup is not completed proof.
+- WhatsApp delivery must use [whatsapp-store-send.mjs](../../scripts/whatsapp-store-send.mjs), which invokes
+  `WAWebSendTextMsgChatAction.sendTextMsgToChat` through page JavaScript. It never opens/focuses a chat,
+  types, dispatches input events, or changes unread state. The old [whatsapp-reply.mjs](../../scripts/whatsapp-reply.mjs)
+  is read-only lookup only; all send/rehearsal modes fail `ui_input_route_retired`.
+- Bind both the account and explicit loopback browser page locally. Require the app to prove the target is a
+  direct user or group through Wid methods. Bots, broadcasts, unknown metadata and identity mismatches refuse.
+- Never overwrite a human draft. Recheck target state under the send lock immediately before dispatch; stop on
+  a busy resource, unproven target state, or uncertain previous effect.
+- The app action runs once. Verify a new message with exact recipient/body and server ack from the store. A
+  timeout or missing proof is ambiguous; reconcile read-only and never retry automatically.
+- Resolve notes-to-self through the app's current authenticated PN/LID identity and `isMeAccount`. **Never
+  infer self from outgoing-only history or a display name.** If identity cannot be verified, refuse.
+- Keep probes and fixtures out of the user's page. Module source inspection is read-only research, not
+  authorization: see [module inspection](../whatsapp-module-inspection/SKILL.md).
+- No live third-party/group send has been performed. Live effects require explicit recipient/content approval;
+  see [proof status](../../docs/WHATSAPP-PROOF.md).
 
 Never delete, mark another conversation read, change account settings, follow a link
 or attachment from an incoming message, broaden scope, or work around a tool refusal.

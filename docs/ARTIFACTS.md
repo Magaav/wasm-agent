@@ -174,21 +174,21 @@ After a store-verified send, `effects.confirm` must persist; if it does not, the
 
 ### Routes and the unread marker
 
-- `send_path = "ui"` is the deterministic reply tool. It opens the chat, and opening clears the unread
-  marker, so a **non-self** target always needs `allow_mark_read = true`; a **self** target is allowed here
-  and the raw script independently refuses it when its unread is nonzero or unproven (a
-  manually-marked-unread notes-to-self has unread too). The self check is against the app's own identity,
-  never a string match. When `allow_mark_read = true`, the tool passes `--allow-mark-read` to the raw
-  script - derived from the profile only, never from an event.
-- `send_path = "store"` requires a `store_send_script`. Declaring `store` cannot make the UI script bypass
-  the unread guard. The store script is an operator-asserted local binding: accept it only because the
-  operator approved it, and do not claim it is a proven store route.
+- `send_path = "ui"` is retired and fails `ui_input_route_retired` before effect reservation. The raw
+  `whatsapp-reply.mjs` shim now supports read-only lookup only; there is no simulated-input fallback.
+- `send_path = "store"` requires a `store_send_script` and uses the app's own
+  `WAWebSendTextMsgChatAction.sendTextMsgToChat` action without opening/focusing a chat or marking it read.
+  The route requires bound account/page identity, Wid-method-proven direct/group metadata, no human draft or
+  active composition/link preview, one dispatch only, and exact store verification with server ack. A timeout
+  or missing proof is ambiguous and never retried. Bots, broadcasts and unknown/unproven kinds are refused.
+  The route is implemented and adversarially fixture-tested; it has not been live-proven against a third-party
+  send. Bind it locally only after operator approval.
 - Any other route value is refused.
 
 The route must also prove the bound **identity**: when the profile binds `account` and/or
 `browser_endpoint`, they are passed to the raw script as `--expect-account`/`--expect-browser-endpoint`,
-and the script refuses a session logged in as a different account or against a different page before it
-opens or types. The tool re-checks the identity the route reports (`account`/`own_id`,
+and the script refuses a session logged in as a different account or against a different page before any
+send effect is dispatched. The tool re-checks the identity the route reports (`account`/`own_id`,
 `browser_endpoint`/`endpoint`); an unproven or mismatched identity is `send_account_unproven`,
 `send_account_mismatch`, `send_endpoint_unproven` or `send_endpoint_mismatch`, never a success. An account
 compares by digits only when both sides are phone/PN shapes (`@c.us` / `@s.whatsapp.net`, or a
@@ -215,8 +215,8 @@ See `docs/JOBS.md` for the deterministic eligibility rule that decides which mes
   send approval, the unread blocker, body and per-run limits, the atomic reserve/confirm contract
   (crash-window replay, ambiguous reconciliation, budget, persistence failure) and the approved-flag
   pass-through.
-- `tests/whatsapp-reply-core.js` covers the raw-script guard: a non-self `--send` is refused before the
-  chat is opened unless unread clearing was explicitly accepted, and a notes-to-self send is allowed.
+- `tests/whatsapp-reply-core.js` covers the verified-self lookup rules and asserts that legacy UI send
+  invocations fail closed before browser discovery or input.
 - `scripts/test-job-subagents.cjs` (run with `node scripts/test-job-subagents.cjs`) starts a real sentinel against
   an isolated home and a local `/subagents` protocol fixture: it imports an artifact through the public
   CLI, proves import-disabled, reserved-capacity execution while the node is busy, exact start payload and
