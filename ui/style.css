@@ -907,3 +907,20 @@ wa-jobs .job-toggle { display: flex; align-items: center; gap: var(--gap); }
 wa-jobs .job-status { color: var(--muted); }
 wa-jobs pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .job-error { color: var(--danger, #f88); padding: var(--pad); }
+
+wa-tasks { display: block; padding: var(--space); }
+wa-tasks button { font: inherit; padding: var(--space); color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer; }
+wa-tasks button:hover { border-color: var(--accent); }
+wa-tasks button:disabled { opacity: .5; cursor: default; }
+wa-tasks > details { margin-bottom: var(--space); }
+wa-tasks summary { cursor: pointer; padding: var(--space); }
+.task-form, .task-form label, .task-list { display: grid; gap: var(--gap); }
+.task-form { margin-bottom: var(--pad); }
+.task-form select, .task-form textarea { width: 100%; min-width: 0; padding: var(--space); color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius-sm); font: inherit; }
+.task-card { padding: var(--pad); border: 1px solid var(--line); border-radius: var(--radius-sm); overflow-wrap: anywhere; }
+.task-card p { margin: var(--space) 0; color: var(--muted); }
+.task-card strong { display: block; white-space: pre-wrap; }
+.task-state { color: var(--accent); }
+.task-card[data-state="unknown"] .task-state, .task-card[data-state="failed"] .task-state { color: var(--warn); }
+.task-actions { display: flex; flex-wrap: wrap; gap: var(--gap); }
+.task-evidence { white-space: pre-wrap; overflow-wrap: anywhere; padding: var(--pad); background: var(--panel-2); }

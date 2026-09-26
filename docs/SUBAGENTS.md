@@ -59,6 +59,23 @@ agent's `(user_id, role, session_id, run_id, node_id)`.
 
 ## Profiles
 
+The Engine's **tasks** panel lists owner-scoped children with their objectives,
+parent conversations, state and result. **New child task** starts work using an
+approved profile and the selected model. Retrying an unanswered submission uses
+the same idempotency key while the form is unchanged. Switching conversations
+does not cancel any work. Cancellation targets one child or ordinary run.
+
+Interrupted ordinary runs appear as `unknown`; queued requests recovered before
+execution appear as `not_started`. Inspect the preserved request and paginated
+output before deciding whether to continue. This panel controls the local node;
+remote placement remains a separate capability. Run discovery covers the recent
+conversations returned by the sessions endpoint, not an unbounded history search.
+
+The sessions transcript offers **Fork here** at an explicit message boundary.
+The server refuses incomplete tool exchanges and workspace allocation failures.
+Fork ancestry is separate from delegated parentage; neither forks nor cancellation
+roll back files or external effects.
+
 Profiles are local approved JSON files at `<config>/subagent-profiles/<id>.json`
 (`config` is `host.paths().config`, i.e. `~/.wasm-agent`). Built-ins live in Lua
 and cannot be broad: `explore` (read-only) and `guest` (its own memory only).
