@@ -1407,6 +1407,8 @@ $harness = @'
       "commands: the list must offer /update, got: " + (items[1] && items[1].textContent));
     check(items[2] && items[2].textContent.indexOf("/merge") >= 0,
       "commands: the list must offer /merge, got: " + (items[2] && items[2].textContent));
+    check(items[2] && items[2].textContent.includes('internal branches') && items[2].textContent.includes('PR work for review'),
+      'commands: ordinary merge menu describes its internal-only scope');
     check(items[3] && items[3].textContent.indexOf("/merge all") >= 0,
       "commands: the window must offer explicit PR-inclusive merge all");
     check(items[4] && items[4].textContent.indexOf("/efficiency_report") >= 0,
