@@ -344,6 +344,80 @@ fn adopted_tree_settles_when_it_exits_and_keeps_its_output() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(windows)]
+fn compiler_helper_command(root: &Path, regular_work: bool, helper_path: &str) -> Spec {
+    let helper = root.join(helper_path);
+    fs::create_dir_all(helper.parent().unwrap()).unwrap();
+    fs::copy(std::env::current_exe().unwrap(), &helper).unwrap();
+    let helper = helper.to_string_lossy().replace('\\', "/");
+    let system = std::env::var("SystemRoot").unwrap();
+    let mut spec = Spec::command(
+        format!("{system}/System32/WindowsPowerShell/v1.0/powershell.exe"),
+        vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), format!(
+            "Start-Process -WindowStyle Hidden -FilePath '{}' -ArgumentList '--exact tests::compiler_helper_fixture --nocapture'; Start-Sleep -Milliseconds 200; Write-Output build_done{}",
+            helper.replace('\'', "''"),
+            if regular_work { "; Start-Sleep -Seconds 1; Write-Output actual_work_done" } else { "" }
+        )],
+    );
+    spec.env.push(("WA_OPERATION_COMPILER_HELPER_FIXTURE".into(), "1".into()));
+    spec.promote_descendants = true;
+    spec.promoted_timeout = Duration::from_secs(30);
+    spec
+}
+
+#[cfg(windows)]
+#[test]
+fn compiler_helper_fixture() {
+    if std::env::var("WA_OPERATION_COMPILER_HELPER_FIXTURE").as_deref() == Ok("1") {
+        println!("compiler_helper_ready");
+        std::thread::sleep(Duration::from_secs(30));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn compiler_telemetry_cannot_keep_a_completed_build_running() {
+    let (m, root) = fixture();
+    let id = m.start(compiler_helper_command(&root, false,
+        "Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44/bin/Hostx64/x64/VCTIP.EXE")).unwrap();
+    let result = settled(&m, &id);
+    assert_eq!(result["ok"], true, "{result}");
+    assert_eq!(result["process_exit_code"], 0, "{result}");
+    assert_eq!(result["cleanup"], "compiler_helpers_terminated", "{result}");
+    assert!(result["auxiliary_cleanup"].as_array().unwrap().iter()
+        .any(|image| image.as_str().unwrap().to_ascii_lowercase().ends_with("vctip.exe")));
+    assert!(result["stdout"].as_str().unwrap().contains("build_done"), "{result}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn compiler_helper_cleanup_waits_for_real_work() {
+    let (m, root) = fixture();
+    let id = m.start(compiler_helper_command(&root, true,
+        "Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44/bin/Hostx64/x64/vctip.exe")).unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(m.snapshot(&id).unwrap()["settled"], false);
+    let result = settled(&m, &id);
+    assert_eq!(result["ok"], true, "{result}");
+    assert!(result["stdout"].as_str().unwrap().contains("actual_work_done"), "{result}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn a_process_named_vctip_outside_msvc_stays_adopted() {
+    let (m, root) = fixture();
+    let id = m.start(compiler_helper_command(&root, false, "user-work/vctip.exe")).unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(m.snapshot(&id).unwrap()["settled"], false);
+    m.cancel(&id).unwrap();
+    let result = settled(&m, &id);
+    assert_eq!(result["state"], "cancelled", "{result}");
+    assert!(result.get("auxiliary_cleanup").is_none());
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn launch_failure_is_visible() {
     let (m, root) = fixture();

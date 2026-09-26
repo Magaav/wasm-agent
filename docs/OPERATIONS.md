@@ -80,6 +80,18 @@ reconciliation, not automatic replay; lack of attachment is not proof of death. 
   already uses work, and it is why `KILL_ON_JOB_CLOSE` is what makes the trade safe:
   the tree still cannot outlive the node. If a future change removes the job object,
   this becomes a leak and must be revisited.
+* On Windows, once the launcher has exited and every remaining job member is
+  the MSVC `VCTIP.EXE` telemetry helper under Visual Studio's `VC/Tools/MSVC`
+  installation path (plus its system console host), terminate the owned job and settle the build. Compiler
+  telemetry must not turn a finished build into an hour-long adopted operation.
+  `auxiliary_cleanup` records the helper images and `cleanup` reports
+  `compiler_helpers_terminated`. A live shell, compiler, or other background
+  process prevents this cleanup. PID membership is checked on opened handles
+  to avoid mistaking a recycled PID for an owned descendant.
+  Risk: this deliberately ends that resident helper after actual work exits;
+  unknown helper images remain supervised under the ordinary adoption deadline.
+  Classification uses the full image path, not a binary signature; this is a
+  completion policy inside an already-owned job, not a security boundary.
 * Foreground/background is an explicit API choice. `operation start` launches
   something you intend to supervise from the beginning; `bash` adopts a tree it
   cannot wait for rather than failing the call. Neither `&` nor `nohup` is
