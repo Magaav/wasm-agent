@@ -73,7 +73,9 @@ administrator or an unrestricted shell.
 ## Admission, execution and cancellation
 
 * A session has one active writer. Admission reserves ownership atomically, covering
-  both queued and executing requests until the last admitted request settles.
+  both queued and executing requests until the last admitted request settles. An explicit
+  conversational fork creates a separate session from a validated historical message boundary;
+  it is not a delegated task.
 * Distinct interactive sessions can execute concurrently. Background inference has
   bounded capacity and cannot occupy all interactive capacity. Queue overflow is an
   explicit refusal or retained delivery, never invisible loss.
@@ -112,6 +114,15 @@ runtime operation, not repeated model calls to poll status.
 
 Results are explicitly retrieved or awaited. Parent-child links and task outcomes are
 inspectable without inserting every child's transcript into the parent's conversation.
+
+`POST /session/fork` accepts `{session_id, before_seq}` under the authenticated principal.
+It copies only non-summary transcript evidence through that exact message, rejects incomplete
+tool exchanges and unauthorized source sessions, and records `fork_parent_id`/`fork_parent_seq`
+separately from subagent `parent_session_id`. The new session has no inherited summary or
+worktree. Copied evidence survives source transcript retention; images still reference
+node-local content-addressed attachments. This is a conversation fork only: workspace contents
+and external effects are not rolled back. See `scripts/test-session-fork.lua`; automatic
+isolated worktree allocation remains unimplemented.
 
 ## Jobs and portable artifacts
 

@@ -134,6 +134,7 @@ The canonical execution concepts are:
 | --- | --- |
 | **Node** | An identity, authority boundary and supervised runtime. |
 | **Session** | An independently resumable conversation. |
+| **Fork** | A new conversation rooted at one exact historical message boundary. |
 | **Run** | One execution within a session. |
 | **Subagent** | A supervised child task with its own context and execution state. |
 | **Job** | A reusable automation definition that can execute deterministic steps and invoke subagents. |
@@ -146,9 +147,7 @@ has a separate session and executes runs; it is not another node. A job definiti
 not an execution, and an operation is not a job. A received submission is not a
 completed run or delivery.
 
-[docs/EXECUTION.md](docs/EXECUTION.md) defines these ownership and isolation contracts.
-The rollout evidence is recorded separately: terminology or a contract does not claim
-an implementation has passed its integration test.
+[docs/EXECUTION.md](docs/EXECUTION.md) defines these ownership and isolation contracts. `POST /session/fork` implements exact transcript ancestry separately from delegated child linkage; see [the foundation plan and evidence ledger](docs/EXECUTION-FOUNDATION-PLAN.md). The rollout evidence is recorded separately: terminology or a contract does not claim an implementation has passed its integration test.
 
 Three different things shared two words, and it cost a real question: `session_turns()` returns *messages*,
 `turn_id` identifies a *run*, and the UI says "this turn 99s" meaning the run. Settled here, once, and chosen

@@ -823,6 +823,17 @@ function wa_diff(payload, session)
   return json.encode({ error = "unknown_action:" .. tostring(action) })
 end
 
+function wa_session_fork(payload, session)
+  local user = users.current(session)
+  local ok, request = pcall(json.decode, payload or "{}")
+  if not ok or type(request) ~= "table" then return json.encode({error="bad_request"}) end
+  local source_id = tostring(request.session_id or "")
+  if source_id == "" or request.before_seq == nil then return json.encode({error="session_id_and_before_seq_required"}) end
+  local id, why = memory.fork_session(source_id, request.before_seq, user.id)
+  if not id then return json.encode({error=why or "fork_failed"}) end
+  return json.encode({ok=true,session_id=id,fork_parent_id=source_id,fork_parent_seq=tonumber(request.before_seq)})
+end
+
 function wa_session_mode(payload, session)
   local user = require_master(session)
   if not user then return json.encode({ error = "forbidden" }) end

@@ -25,6 +25,12 @@ branch and one `/merge`. Three sessions on that node are three writers in one wo
 overwrite each other's edits, they cannot each run their own parallel-evolution loop, and the
 orchestrator has one place to integrate. The parallelism stops at the transcript.
 
+A session may now be conversationally forked at an explicit completed message boundary with
+`POST /session/fork`. The fork stores `fork_parent_id`/`fork_parent_seq`, copies only selected
+non-summary transcript rows, and inherits no worktree. This isolates conversation context, not
+filesystem state: bind an independently writable worktree before code-writing. It is distinct from
+a subagent's `parent_session_id`. See `docs/EXECUTION.md` and `scripts/test-session-fork.lua`.
+
 The node-scoped assumptions, each with the code that holds it:
 
 | assumption | where |
