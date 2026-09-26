@@ -100,3 +100,15 @@ and lease release. Full gate evidence is bound to the final source tree by the f
 Still required: combined multi-agent UI acceptance, supported shared-resource coordination,
 workspace lifecycle/cleanup, deployed proof and Luna adoption exercise. This does not claim the
 entire cross-device/Wasm roadmap is complete.
+
+## Shared-resource ownership follow-up
+
+`change/shared-resource-claims` adds durable cooperative claims for session
+execution, client/spell interactions and approved profile-exclusive resources.
+Contending runs fail visibly before touching the claimed capability. Process death
+does not free effectful resources; explicit reconciliation requires an exact owner
+and evidence and refuses live owners. Scope, availability/storage risks and the
+17-check two-process crash fixture are documented in `docs/CONCURRENCY.md`.
+This is not cross-home distributed locking or shell sandboxing. Full repository
+gate evidence is recorded separately on the final candidate; workspace cleanup,
+deployed acceptance and the Luna development exercise still need completion.

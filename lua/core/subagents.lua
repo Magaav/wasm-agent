@@ -28,6 +28,7 @@ local M = {}
 local BROAD = {
   bash = true, shell = true, client = true, remote = true,
   write = true, edit = true, spell_save = true, spell_run = true, spell_export = true,
+  resource = true,
 }
 
 -- Built-in profiles. `explore` is the default and is read-only; `guest` is the
@@ -202,6 +203,16 @@ function M.resolve(id, ctx)
   end
 
   local limits = profile.limits or {}
+  local exclusive
+  if type(profile.resources)=="table" then exclusive=profile.resources.exclusive end
+  if exclusive~=nil then
+    if type(exclusive)~="table" or #exclusive>63 then return nil,"invalid_exclusive_resources" end
+    for key,value in pairs(exclusive) do
+      if type(key)~="number" or key%1~=0 or key<1 or key>#exclusive or type(value)~="string" or value=="" or #value>500 then
+        return nil,"invalid_exclusive_resources"
+      end
+    end
+  end
   local depth = tonumber(ctx.depth) or 1
   local max_depth = tonumber(host.getenv("WASM_AGENT_SUBAGENT_MAX_DEPTH")) or 1
   if depth > max_depth then return nil, "depth_exceeded" end
