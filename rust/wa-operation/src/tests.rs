@@ -78,11 +78,14 @@ fn normal_command_succeeds_and_closes_stdin() {
 fn exited_shell_cannot_leave_descendant_or_lose_output() {
     let (m, root) = fixture();
     let mut spec = shell("sleep 30 & printf visible; printf diagnostic >&2");
-    spec.timeout = Duration::from_millis(300);
+    // This checks descendant containment after shell exit, not shell startup speed.
+    // Cold Windows Git Bash startup can exceed 300 ms before executing the first printf.
+    // The separate deadline test retains its 150 ms absolute-deadline assertion.
+    spec.timeout = Duration::from_secs(3);
     let start = Instant::now();
     let id = m.start(spec).unwrap();
     let s = settled(&m, &id);
-    assert!(start.elapsed() < Duration::from_millis(1500), "{s}");
+    assert!(start.elapsed() < Duration::from_secs(5), "{s}");
     assert_eq!(s["ok"], false, "{s}");
     assert_eq!(s["process_exit_code"], 0);
     assert_eq!(s["stdout"], "visible");
@@ -304,8 +307,14 @@ fn promoted_descendants_are_adopted_not_failed() {
     let id = m.start(spec).unwrap();
     // The shell exits at once. Without promotion this is `background_descendants`; with
     // it the operation is still running and says so, instead of reporting a failure.
-    std::thread::sleep(Duration::from_millis(400));
-    let live = m.snapshot(&id).unwrap();
+    let observed = Instant::now();
+    let live = loop {
+        let state = m.snapshot(&id).unwrap();
+        if state["promoted"] == true || state["settled"] == true || observed.elapsed() >= Duration::from_secs(3) {
+            break state;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
     assert_eq!(live["promoted"], true, "{live}");
     assert_eq!(live["state"], "running", "{live}");
     assert_eq!(live["settled"], false, "{live}");
