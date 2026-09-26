@@ -107,7 +107,7 @@ an environment variable.
 
 | control | whole seconds | floor | what it means to the WhatsApp pipeline |
 | --- | --- | --- | --- |
-| `grace_seconds` | 0–86400 | 0 | the extra band after the prompt window in which a direct message the operator has not answered is still eligible |
+| `grace_seconds` | 0–86400 | 0 | the operator's own answer window: how long a direct message is held before the copilot may take a turn (0 answers immediately), and the band after the prompt window in which a direct message the operator has not answered is still eligible |
 | `max_age_seconds` | 1–86400 | 1 | the hard bound: past it nothing is answered and nothing is transcribed |
 
 How it works, in four facts:
