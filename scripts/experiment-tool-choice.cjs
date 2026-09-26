@@ -34,6 +34,7 @@ const task = arg('task', 'long-lived');
 const runs = Number(arg('n', '3'));
 const profile = arg('profile', arm === 'op' ? 'exp-op' : 'exp-control');
 const provider = arg('provider', 'mock');
+const wasmProvider = arg('wasm-provider', 'opencode-go');
 const model = arg('model', 'deepseek-v4.1-flash');
 const label = arg('label', `${arm}-${task}`);
 const outputPath = arg('output', '');
@@ -123,9 +124,14 @@ function credential() {
 }
 
 async function startProvider() {
-  if (provider === 'real') {
+  if (provider === 'real' && wasmProvider === 'openai-sub') {
+    return { base_url: '', key: '', close: () => {} };
+  }
+  if (provider === 'real' && wasmProvider === 'opencode-go') {
     return { base_url: 'https://opencode.ai/zen/go/v1', key: credential(), close: () => {} };
   }
+  if (provider === 'real') throw new Error(`unsupported real route: ${wasmProvider}`);
+  if (wasmProvider !== 'opencode-go') throw new Error('mock provider supports only --wasm-provider opencode-go');
   // A mock that answers immediately: it exists to prove the rig, not to behave.
   let calls = 0;
   const server = http.createServer((req, res) => {
@@ -156,6 +162,9 @@ async function startProvider() {
     ...process.env,
     WASM_AGENT_HOME: home,
     WASM_AGENT_ALLOW_DEV_HOME: '1',
+    WASM_AGENT_PROVIDER: wasmProvider,
+    ...(wasmProvider === 'openai-sub'
+      ? { PI_CODING_AGENT_DIR: path.join(os.homedir(), '.pi', 'agent') } : {}),
     WASM_AGENT_LLM_BASE_URL: upstream.base_url,
     WASM_AGENT_LLM_API_KEY: upstream.key,
     WASM_AGENT_LLM_MODEL: model,
@@ -175,6 +184,11 @@ async function startProvider() {
     // and a slow provider minute reads as a difference between the arms.
     WASM_AGENT_LUA_ROOT: path.resolve(arg('lua-root', repo)),
   };
+  if (wasmProvider === 'openai-sub') {
+    delete env.WASM_AGENT_LLM_BASE_URL;
+    delete env.WASM_AGENT_LLM_API_KEY;
+    delete env.WASM_AGENT_LLM_MODEL;
+  }
   const child = spawn(wa, ['--db', path.join(home, 'memory.db')], { cwd: repo, env, windowsHide: true });
   let out = '';
   const rows = [];
