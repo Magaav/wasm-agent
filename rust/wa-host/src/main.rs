@@ -308,6 +308,7 @@ fn main() {
     lua.register("mark_db_ready", host::mark_db_ready);
     lua.register("getenv", host::getenv);
     lua.register("paths", host::paths);
+    lua.register("canonical_path", host::canonical_path);
     lua.register("platform", host::platform);
     lua.register("grep", host::grep);
     lua.register("list_dir", host::list_dir);

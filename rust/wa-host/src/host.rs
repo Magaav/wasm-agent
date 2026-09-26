@@ -116,6 +116,16 @@ pub extern "C" fn paths(l: *mut LuaState) -> c_int {
     1
 }
 
+/// Resolve an existing path through symlinks/junctions; missing paths return nil.
+pub extern "C" fn canonical_path(l: *mut LuaState) -> c_int {
+    let path=arg_string(l,1).and_then(|value|std::fs::canonicalize(value).ok());
+    if let Some(path)=path {
+        let value=path.to_string_lossy().replace('\\',"/");
+        unsafe {lua_pushlstring(l,value.as_ptr() as *const c_char,value.len());}
+    } else { unsafe {crate::lua::lua_pushnil(l);} }
+    1
+}
+
 /// The shell `host.exec` runs commands with.
 ///
 /// The model speaks POSIX: `ls`, `pwd`, `tail`, `grep`, single quotes, `$VAR`.

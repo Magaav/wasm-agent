@@ -866,6 +866,11 @@ function wa_session_worktree(payload, session)
   if not record then return json.encode({error="unknown_session"}) end
   if record.user_id ~= user.id then return json.encode({error="forbidden"}) end
   local workspace = memory.session_workspace(id)
+  if request.action=='release' then
+    local released,why,detail=workspaces.release(memory,id,user.id)
+    if not released then return json.encode({error=why,detail=detail,session_id=id}) end
+    return json.encode({ok=true,session_id=id,workspace=released,branch_retained=true})
+  end
   if request.action == "allocate" or request.action == "recover" then
     local source_id = record.fork_parent_id
     if not source_id or source_id == "" then source_id = record.parent_session_id end

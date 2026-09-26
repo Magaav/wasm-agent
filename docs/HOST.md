@@ -361,6 +361,11 @@ Both retain the same deadline, cancellation, process-tree containment and durabl
 operation evidence. The subscription adapter launches Node directly, so a shell
 launcher cannot become the reported completion boundary for its response.
 
+`host.canonical_path(path)` resolves an existing path through symlinks and junctions
+and returns its absolute native location (with `/` separators), or `nil` if it
+cannot be resolved. Workspace removal compares this with the canonical managed
+root before passing a verified target to Git.
+
 `host.resource(action, args_json)` provides atomic named-resource ownership in
 `host.paths().data/resources/claims.sqlite`. Lua chooses keys and authorization.
 `claim` takes `principal`, `session`, `run`, and an array of `keys`; it acquires all
