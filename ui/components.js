@@ -1185,3 +1185,96 @@ class WaJobs extends HTMLElement {
   }
 }
 customElements.define('wa-jobs', WaJobs);
+
+// Execution is owned by the node. This component emits intent and renders receipts;
+// changing conversations or closing the Engine never cancels a task.
+class WaTasks extends HTMLElement {
+  connectedCallback() {
+    if (this.form) return;
+    this.form = document.createElement('form'); this.form.className = 'task-form';
+    const field = (label, element) => {
+      const wrapper = document.createElement('label'); wrapper.textContent = label;
+      element.setAttribute('aria-label', label); wrapper.append(element); this.form.append(wrapper); return element;
+    };
+    this.parent = field('Parent conversation', document.createElement('select'));
+    this.profile = field('Approved profile', document.createElement('select'));
+    this.prompt = field('Task and completion criteria', document.createElement('textarea'));
+    this.prompt.required = true; this.prompt.rows = 3;
+    this.start = document.createElement('button'); this.start.type = 'submit'; this.start.textContent = 'Start child task';
+    this.form.append(this.start);
+    this.form.addEventListener('submit', event => {
+      event.preventDefault();
+      const prompt = this.prompt.value.trim(), parent = this.parent.value, profile = this.profile.value;
+      if (!prompt || !parent || !profile || this.start.disabled) return;
+      const fingerprint = JSON.stringify({prompt, parent, profile});
+      if (this.submission?.fingerprint !== fingerprint) this.submission = {fingerprint, key: crypto.randomUUID()};
+      this.pending = true; this.start.disabled = true;
+      this.emit('start', {prompt, parent, profile, key: this.submission.key, control: this.start});
+    });
+    const refresh = document.createElement('button'); refresh.type = 'button'; refresh.textContent = 'Refresh tasks';
+    refresh.addEventListener('click', () => this.emit('refresh'));
+    this.notice = document.createElement('p'); this.notice.setAttribute('role','status');
+    this.list = document.createElement('div'); this.list.className = 'task-list';
+    this.evidence = document.createElement('pre'); this.evidence.className = 'task-evidence'; this.evidence.hidden = true;
+    this.more = document.createElement('button'); this.more.type='button'; this.more.hidden=true;
+    this.more.textContent='Load more output';
+    this.more.addEventListener('click',()=>this.emit('more-output',{...this.outputCursor,control:this.more}));
+    const create=document.createElement('details');
+    const summary=document.createElement('summary'); summary.textContent='New child task';
+    create.append(summary,this.form);
+    this.append(create,refresh,this.notice,this.list,this.evidence,this.more);
+  }
+  emit(action, detail = {}) { this.dispatchEvent(new CustomEvent('task-action',{bubbles:true,detail:{action,...detail}})); }
+  set message(text) { this.notice.textContent = text; }
+  showEvidence(value, cursor) {
+    this.evidence.hidden = false;
+    this.evidence.textContent = typeof value === 'string' ? value : JSON.stringify(value,null,2);
+    this.outputCursor=cursor; this.more.hidden=!cursor;
+  }
+  finishSubmission() { this.pending=false; this.start.disabled=!this.parent.value || !this.profile.value; }
+  set data({sessions = [], tasks = [], profiles = [], runs = {}, current = ''}) {
+    const options = (select, rows, preferred) => {
+      const selected = select.value || preferred;
+      select.replaceChildren(...rows.map(row => {const option=document.createElement('option'); option.value=row.id; option.textContent=row.title || row.description || row.id; return option;}));
+      if (rows.some(row=>row.id===selected)) select.value=selected;
+    };
+    options(this.parent,sessions.filter(s=>!s.parent_session_id),current);
+    options(this.profile,profiles.filter(p=>p.available!==false));
+    this.start.disabled = this.pending || !this.parent.value || !this.profile.value;
+    const titles = new Map(sessions.map(s=>[s.id,s.title || s.id]));
+    const cards = [];
+    const add = (title, state, detail, controls) => {
+      const card=document.createElement('section'); card.className='task-card'; card.dataset.state=state;
+      const heading=document.createElement('strong'); heading.textContent=title;
+      const status=document.createElement('span'); status.className='task-state'; status.textContent=state;
+      const text=document.createElement('p'); text.textContent=detail;
+      const actions=document.createElement('div'); actions.className='task-actions';
+      for (const [label,action,data] of controls) {
+        const button=document.createElement('button'); button.type='button'; button.textContent=label;
+        button.addEventListener('click',()=>this.emit(action,{...data,control:button})); actions.append(button);
+      }
+      card.append(heading,status,text,actions); cards.push(card);
+    };
+    for (const task of tasks) {
+      const controls=[['Open conversation','open',{session:task.session_id}],['Inspect result','result',{id:task.subagent_id}]];
+      if (task.parent_session_id) controls.push(['Open parent','open',{session:task.parent_session_id}]);
+      if (!task.settled && task.state!=='unknown') controls.push(['Cancel task','cancel',{id:task.subagent_id}]);
+      add(task.prompt || `${task.profile} · ${task.subagent_id}`,task.state,
+        `Parent: ${titles.get(task.parent_session_id) || task.parent_session_id || 'none'}${task.error ? ' · '+task.error : ''}`,controls);
+    }
+    for (const conversation of sessions) {
+      const records=runs[conversation.id] || [];
+      for (const run of records.filter(r=>['running','queued','unknown','not_started','failed'].includes(r.state))) {
+        const detail={session:conversation.id,runId:run.run_id};
+        const controls=[['Open conversation','open',detail],['Inspect run','inspect-run',detail]];
+        if (['running','queued'].includes(run.state)) controls.push(['Cancel run','cancel-run',detail]);
+        add(conversation.title || conversation.id,run.state,
+          run.state==='unknown' ? 'Execution was interrupted. Inspect effects before continuing.' :
+          run.state==='not_started' ? 'This request did not start. Inspect it before submitting again.' : `Run ${run.run_id}`,controls);
+      }
+    }
+    if (!cards.length) { const empty=document.createElement('p'); empty.textContent='No delegated tasks or runs needing attention.'; cards.push(empty); }
+    this.list.replaceChildren(...cards);
+  }
+}
+customElements.define('wa-tasks', WaTasks);

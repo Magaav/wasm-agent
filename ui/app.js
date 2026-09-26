@@ -4136,6 +4136,12 @@ function renderSessions() {
     if (session.parent_session_id) {
       row.append(nodeButton("parent", () => openSession(session.parent_session_id)));
     }
+    if (session.fork_parent_id) row.append(nodeButton('fork source',()=>openSession(session.fork_parent_id)));
+    if (session.workspace_required) {
+      const workspace=document.createElement('span'); workspace.className='session-meta';
+      workspace.textContent='workspace: '+(session.workspace_state || 'unknown');
+      workspace.title=session.worktree || session.workspace_error || ''; row.append(workspace);
+    }
     // Only where there is something to recover, and named as what it does: the node's own words for
     // this are "continue where you stopped". A running turn has nothing to recover yet.
     if (!live && session.state === "unfinished") {
@@ -4258,6 +4264,11 @@ async function openSessionById(id) {
     body.className = "message-body";
     body.textContent = (message.content || "").slice(0, 1500);
     row.append(head, body);
+    if (message.role !== 'summary' && Number.isInteger(Number(message.seq))) {
+      const fork=nodeButton('Fork here',()=>forkSessionAt(id,Number(message.seq),fork));
+      fork.title='Continue from this message in a separate conversation and clean worktree. File and external effects are not rolled back.';
+      row.append(fork);
+    }
     const trace = message.trace || [];
     if (trace.length) {
       const line = document.createElement("div");
@@ -4280,6 +4291,83 @@ async function openSessionById(id) {
 const pendingTopics = new Set();
 
 const runWorkerTopics = new Set(['spells-box', 'tools-box']);
+
+let tasksPolling = false;
+async function taskRequest(route, body) {
+  const response = await apiFetch(route, {method:body ? 'POST' : 'GET',headers:apiHeaders({'Content-Type':'application/json'}),...(body ? {body:JSON.stringify(body)} : {})});
+  const value = await response.json();
+  if (!response.ok || value.error) throw new Error(value.detail || value.error || `HTTP ${response.status}`);
+  return value;
+}
+async function refreshTasks() {
+  const panel = document.querySelector('#tasks-box wa-tasks');
+  if (!panel || tasksPolling) return;
+  if (activeNode) { panel.message='Select this node to manage its tasks. Remote task placement is not available here.'; return; }
+  const account=session;
+  tasksPolling=true;
+  try {
+    const [list,children,profiles] = await Promise.all([
+      taskRequest('sessions'),taskRequest('subagents',{action:'list'}),taskRequest('subagents',{action:'profiles'})]);
+    const runs={};
+    const sessions=list.sessions || [];
+    for (let offset=0;offset<sessions.length;offset+=4) {
+      await Promise.all(sessions.slice(offset,offset+4).map(async item=>{
+        const result=await taskRequest('runs',{action:'status',thread:item.id}); runs[item.id]=result.runs || [];
+      }));
+    }
+    if (account!==session || activeNode) return;
+    panel.data={sessions,tasks:children.subagents || [],profiles:profiles.profiles || [],runs,current:chatSession};
+    panel.message=(profiles.errors || []).length ? 'Some profiles could not load: '+JSON.stringify(profiles.errors) :
+      'Tasks use the selected model and approved profile. Accepted tasks may still be waiting or running; inspect the result before treating work as complete.';
+  } catch(error) { if(account===session) panel.message='Tasks unavailable: '+error.message; }
+  finally { tasksPolling=false; }
+}
+document.getElementById('tasks-box').addEventListener('task-action',async event=>{
+  const {action,control,...detail}=event.detail;
+  const panel=event.target.closest('wa-tasks');
+  if (activeNode) { panel.message='Select this node before controlling its tasks.'; return; }
+  if(control) control.disabled=true;
+  try {
+    if(action==='refresh') await refreshTasks();
+    else if(action==='open') await openSession(detail.session);
+    else if(action==='start') {
+      const receipt=await taskRequest('subagents',{action:'start',thread:detail.parent,profile:detail.profile,
+        prompt:detail.prompt,idempotency_key:detail.key});
+      panel.showEvidence(receipt); panel.prompt.value=''; panel.submission=null;
+      await refreshTasks();
+    } else if(action==='result') panel.showEvidence(await taskRequest('subagents',{action:'result',subagent_id:detail.id}));
+    else if(action==='cancel') {
+      panel.showEvidence(await taskRequest('subagents',{action:'cancel',subagent_id:detail.id}));
+      await refreshTasks();
+    } else if(action==='inspect-run') {
+      const [receipt,replay]=await Promise.all([
+        taskRequest('runs',{action:'inspect',thread:detail.session,run_id:detail.runId}),
+        taskRequest('run-events',{thread:detail.session,run_id:detail.runId})]);
+      panel.runEvidence={receipt,pages:[replay]};
+      panel.showEvidence(panel.runEvidence,replay.has_more ? {...detail,after:replay.next_seq} : null);
+    } else if(action==='more-output') {
+      const replay=await taskRequest('run-events',{thread:detail.session,run_id:detail.runId,after:detail.after});
+      panel.runEvidence.pages.push(replay);
+      panel.showEvidence(panel.runEvidence,replay.has_more ? {...detail,after:replay.next_seq} : null);
+    } else if(action==='cancel-run') {
+      panel.showEvidence(await taskRequest('runs',{action:'cancel',thread:detail.session,run_id:detail.runId}));
+      await refreshTasks();
+    }
+  } catch(error) { panel.message='Task action did not complete: '+error.message+'. Inspect the task list before retrying.'; }
+  finally { if(action==='start') panel.finishSubmission(); else if(control)control.disabled=false; }
+});
+setInterval(()=>{if(!document.getElementById('tasks-box').hidden) void refreshTasks();},3000);
+
+async function forkSessionAt(id, seq, control) {
+  control.disabled=true;
+  try {
+    const result=await taskRequest('session/fork',{session_id:id,before_seq:seq});
+    if (!result.ok || !result.session_id) throw new Error('fork receipt is incomplete');
+    await refreshSessions();
+    await openSession(result.session_id);
+  } catch(error) { setStatus('Fork failed at message '+seq+': '+error.message); }
+  finally { control.disabled=false; }
+}
 
 async function refreshJobs() {
   const box = document.getElementById('jobs-box');
@@ -4339,6 +4427,7 @@ function loadTopic(id) {
   else if (id === "spells-box") refreshSpells();
   else if (id === "tools-box") refreshTools();
   else if (id === "jobs-box") refreshJobs();
+  else if (id === "tasks-box") refreshTasks();
 }
 
 /// Everything the engine was asked for while the node was busy, plus whatever is open, once it is free.

@@ -201,6 +201,7 @@ impl Task {
             "settled": self.settled,
             "session_id": self.session_id,
             "profile": self.profile,
+            "prompt": self.spec["prompt"],
             "owner_user": self.owner_user,
             "parent_session_id": self.parent_session_id,
             "parent_run_id": self.parent_run_id,
