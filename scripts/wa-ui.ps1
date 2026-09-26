@@ -51,7 +51,7 @@ function Invoke-Ssh([string]$RemoteCommand) {
 
 function Get-UiFiles {
   # The local server serves ui/ from disk (so it hot-reloads); fetch it once.
-  $needed = @("index.html", "style.css", "app.js", "components.js", "render.wasm")
+  $needed = @("index.html", "style.css", "app.js", "components.js", "render.wasm", "manifest.webmanifest", "service-worker.js", "icon-192.png", "icon-512.png")
   $missing = $needed | Where-Object { -not (Test-Path (Join-Path $uiDir $_)) }
   if (-not $missing) { return $true }
   New-Item -ItemType Directory -Force -Path $uiDir | Out-Null

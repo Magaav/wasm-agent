@@ -76,7 +76,8 @@ try {
   if ($loaders.Count -ne 1) { throw 'expected_one_x64_webview_loader' }
   Copy-Asset $loaders[0].FullName 'WebView2Loader.dll'
   foreach ($asset in @('ui/index.html', 'ui/style.css', 'ui/app.js', 'ui/components.js',
-                       'ui/render.wasm', 'scripts/upgrade.sh', 'LICENSE')) {
+                       'ui/render.wasm', 'ui/manifest.webmanifest', 'ui/service-worker.js',
+                       'ui/icon-192.png', 'ui/icon-512.png', 'scripts/upgrade.sh', 'LICENSE')) {
     Copy-Asset (Join-Path $root $asset) $asset
   }
   Copy-Asset (Join-Path $root 'docs/release/RUNTIME.md') 'README.md'
