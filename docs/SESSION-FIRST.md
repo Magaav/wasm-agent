@@ -4,12 +4,16 @@ This is a **proposal**, not a description of the running system. It exists so th
 "work in parallel sessions from one node" is a contract to build against rather than a slogan, and
 so the node-scoped assumptions it removes are named where a reader can check them.
 
-**Status.** Steps 1 and the cwd half of step 2 are implemented: a session carries a `worktree`
-(`memory.set_session_worktree`), and `read`/`read_many`/`write`/`edit`/`ls`/`grep`/`bash` and the
-patch audit resolve through it (`lua/core/tools.lua`). Allocation is **explicit** for now — the
-master-only `session_worktree` tool points a session at an existing directory, and `clear` returns
-it to the node cwd; lazy creation of `change/<session>` trees (step 3) is not built yet. The
-default is `""`, so nothing changes for a session that has not opted in.
+**Status.** Session cwd routing and durable bindings are implemented. Conversational forks and
+subagents whose approved profile has write-capable tools automatically get dedicated Git
+worktrees (`lua/core/workspaces.lua`), persisted with base commit, source branch/path, initial
+status and allocation state. Dirty source checkouts are refused with their status recorded;
+changes are never silently copied or omitted. Required-but-failed bindings block file writes and
+shell execution rather than falling back to the node cwd. Existing ordinary sessions remain
+unbound for compatibility and can explicitly allocate through `session_worktree{action:'allocate'}`.
+The shell/client/remote/spell capabilities that cannot honor a session cwd are refused for a
+required-workspace session. See `scripts/test-session-workspaces.cjs` and
+`scripts/test-subagents.cjs` for runtime fixtures.
 
 Read [CONCURRENCY.md](CONCURRENCY.md) for what is already true. This file is only about what is
 still keyed by the *node* and should be keyed by the *session*.
@@ -68,28 +72,35 @@ cancelled or still thinking never blocks another session's edit.
 2. **Resolve cwd from the session.** `host.exec`, the `shell` tool and the spell step resolve the
    directory through `sessions.worktree(session)` and fall back to the node worktree. A step that
    does not name a session keeps today's behavior.
-3. **Allocate on first write.** A session gets its own worktree the first time it stages an edit
-   (or explicitly, `wa worktree new`), not on creation — most sessions never write code, and
-   allocating a worktree per chat is how this becomes disk sprawl.
+3. **Allocate at independent-writer admission.** A conversational fork is bound before the fork
+   operation reports success. A delegated task whose approved tools can write files or run shell
+   receives a bound worktree before native child admission; failures are visible and the child is
+   not launched. Plain existing conversations are not auto-migrated. Their owner can explicitly
+   request allocation. Each source must be a clean Git checkout; uncommitted changes are recorded
+   in the failed allocation state and require a clean/commit followed by explicit retry.
 4. **Point the patch audit at the session.** `patch_audit.lua` audits the session's worktree and
    records which one, so a "no patch" verdict names the tree it looked at.
-5. **`/merge` reads session branches.** The orchestrator still merges to `main`; the branches it
-   audits are `change/<session-short>`.
+5. **`/merge` reads session branches.** The orchestrator still merges to `main`; allocated
+   branches are `change/wa-session-<session-id>`. Merged worktree reclamation is not automatic.
 
 ## Risks, named rather than hidden
 
 - **Worktree sprawl and git lock contention.** N worktrees share one object store; `git gc` and
-  concurrent `git add` are the contention points. Prefer short-lived per-concern worktrees and reap
-  them when the branch lands, the way the board already reaps merged `change/*` branches.
+  concurrent `git add` are contention points. Bindings are durable and not automatically reaped;
+  operators must retain/review/remove them through Git worktree management until lifecycle cleanup
+  has its own evidence. An interrupted `git worktree add` is reconciled from Git's registry when
+  possible; ambiguous state is marked unknown and never blindly replayed.
 - **The name becomes ambiguous.** `node_name()` currently answers "which checkout am I?". With a
   session-scoped worktree, a node hosts several — the node identity and the session identity have to
   be two different answers, not one reused string.
 - **The orchestrator is still a serialization point.** Session branches reduce the blast radius of a
   conflict; they do not remove the need for one integration order. Do not claim `/merge` became
   parallel.
-- **A session is not a security boundary by itself.** Session-scoped worktrees must key on the
-  authenticated owner, not the conversation id, or two users sharing a conversation id could share a
-  tree.
+- **A session is not a security boundary by itself.** Allocation checks the authenticated owner
+  and node linkage; it does not sandbox an unrestricted native shell, defend against symlink escapes,
+  coordinate browsers/desktops, or provide cross-node filesystem portability. Explicit file paths
+  outside the binding and shell/client/remote/spell execution are refused where the tool boundary can
+  see them; shell commands can still deliberately address external resources.
 
 ## What this does not cover
 
@@ -99,5 +110,5 @@ cancelled or still thinking never blocks another session's edit.
   inline admission resolve can hold it for `WASM_AGENT_ADMISSION_TIMEOUT_MS` (8s), which is the same
   number as the UI's `apiFetch` timeout. That is a separate, measured change, not part of this
   contract.
-- **It does not allocate anything for non-writing sessions.** A conversation that only chats keeps
-  costing exactly what it costs today.
+- **It does not transparently migrate existing ordinary sessions or allocate for read-only children.**
+  Such sessions preserve today's cwd behavior unless their owner explicitly requires isolation.

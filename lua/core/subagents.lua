@@ -19,6 +19,7 @@ local users = dofile("lua/core/users.lua")
 local nodes = dofile("lua/core/nodes.lua")
 local paths = dofile("lua/core/paths.lua")
 local redact = dofile("lua/core/redact.lua")
+local workspaces = dofile("lua/core/workspaces.lua")
 
 local M = {}
 
@@ -450,7 +451,17 @@ function M.start(args, ctx)
     node_id = ctx.node_id,
     title = "subagent:" .. profile.id,
     parent_session_id = ctx.session_id,
+    workspace_required = workspaces.requires_write_tools(profile.allowed_tools),
   })
+  local workspace
+  if workspaces.requires_write_tools(profile.allowed_tools) then
+    workspace, detail = workspaces.ensure(memory, session_id, ctx.session_id)
+    if not workspace then
+      pcall(memory.finish_session, session_id)
+      return { error = "workspace_allocation_failed", detail = detail, session_id = session_id,
+        workspace = memory.session_workspace(session_id) }
+    end
+  end
   local spec = {
     -- Generated here, never taken from the caller: the id is a path component and
     -- a caller-supplied one would be a traversal and a collision with an existing
