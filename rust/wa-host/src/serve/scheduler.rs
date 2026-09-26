@@ -456,9 +456,9 @@ impl Scheduler {
         Ok(())
     }
 
-    pub fn replay(&self, owner: &str, conversation: &str, id: u64, after: u64) -> Result<Option<serde_json::Value>,String> {
+    pub fn replay(&self, owner: &str, conversation: &str, id: u64, after: u64, archive: bool) -> Result<Option<serde_json::Value>,String> {
         if self.journal_failed.load(Ordering::SeqCst) { return Err("run_journal_unavailable".into()); }
-        match &self.journal { Some(j) => j.replay(owner,conversation,id,after), None => Ok(None) }
+        match &self.journal { Some(j) => j.replay(owner,conversation,id,after,archive), None => Ok(None) }
     }
 
     pub fn config(&self) -> Config {

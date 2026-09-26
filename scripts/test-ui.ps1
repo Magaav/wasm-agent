@@ -2011,6 +2011,15 @@ $harness = @'
   check(taskPanel.textContent.includes('Inspect effects before continuing.') &&
     !Array.from(taskPanel.querySelectorAll('button')).some(b=>b.textContent==='Cancel run'),
     'tasks: interrupted runs require inspection and cannot be presented as cancellable live work');
+  Array.from(taskPanel.querySelectorAll('button')).find(b=>b.textContent==='Inspect run').click();
+  for(var ti=0;ti<80;ti++) await tick();
+  check(taskPanel.evidence.textContent.includes('ARCHIVE-BEFORE-CHECKPOINT') && !taskPanel.more.hidden,
+    'tasks: inspection requests original output before checkpoints and exposes further pages');
+  taskPanel.more.click();
+  for(var ti=0;ti<80;ti++) await tick();
+  check(taskPanel.evidence.textContent.includes('ARCHIVE-BEFORE-CHECKPOINT') &&
+    taskPanel.evidence.textContent.includes('ARCHIVE-SECOND-PAGE') && taskPanel.more.hidden,
+    'tasks: subsequent archive pages preserve already inspected evidence');
   window.__fixtures.runs.runs=[];
   await window.__openSessionById('aaaaaaaa-0000-0000-0000-000000000001');
   check(Array.from(document.querySelectorAll('#sessions-box button')).some(b=>b.textContent==='Fork here'),

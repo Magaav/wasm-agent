@@ -1206,10 +1206,14 @@ fn handle_run_events(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender
         return (503, "application/json", b"{\"error\":\"admission_unavailable\"}".to_vec());
     };
     let after = parsed.get("after").and_then(|value| value.as_u64()).unwrap_or(0);
-    match scheduler.replay(&owner, conversation, run_id, after) {
+    let archive=parsed.get("archive").and_then(|value|value.as_bool()).unwrap_or(false);
+    match scheduler.replay(&owner, conversation, run_id, after, archive) {
         Ok(Some(replay)) => return (200,"application/json",replay.to_string().into_bytes()),
         Err(error) => return (503,"application/json",serde_json::json!({"error":error}).to_string().into_bytes()),
         Ok(None) => {},
+    }
+    if archive {
+        return (404,"application/json",b"{\"error\":\"run_archive_unavailable\"}".to_vec());
     }
     if !scheduler.runs_for(&owner, conversation).iter().any(|run| run.run_id == run_id) {
         return (404, "application/json", b"{\"error\":\"run_not_found\"}".to_vec());

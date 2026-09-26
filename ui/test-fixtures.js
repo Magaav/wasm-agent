@@ -229,6 +229,11 @@ window.fetch = function (input, init) {
   // A relative fetch like "nodes" has no slash at all: keep it as the path.
   path = slashAt >= 0 ? path.slice(slashAt + 1) : path;
   if (path.endsWith("/")) path = path.slice(0, -1);
+  if(path==='run-events' && init?.method==='POST' && JSON.parse(init.body).archive) {
+    const after=JSON.parse(init.body).after || 0;
+    return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve({archive:true,next_seq:after ? 2 : 1,
+      has_more:!after,events:[{seq:after ? 2 : 1,event:{type:'delta',text:after ? 'ARCHIVE-SECOND-PAGE' : 'ARCHIVE-BEFORE-CHECKPOINT'}}]})});
+  }
   if (path === 'subagents' && init?.method === 'POST') {
     const request=JSON.parse(init.body);
     if (window.__taskFailure) return Promise.resolve({ok:false,status:503,json:()=>Promise.resolve({error:'fixture task service unavailable'})});
