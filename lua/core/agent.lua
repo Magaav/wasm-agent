@@ -1368,7 +1368,9 @@ function M:run_body(text, images)
     -- `serve::write_event` writes deltas to the node's, and this process has none), so without
     -- this event the reasoning exists only in the transcript and a terminal never shows it.
     if (result.reasoning or "") ~= "" then
-      self.emit({ type = "reasoning", text = result.reasoning, round = round })
+      -- Stream consumers may already have painted partial reasoning. `complete` makes this
+      -- authoritative copy replace that buffer instead of appending the whole text a second time.
+      self.emit({ type = "reasoning", text = result.reasoning, round = round, complete = true })
     end
 
     local calls = result.tool_calls or {}

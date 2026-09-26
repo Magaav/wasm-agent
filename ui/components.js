@@ -270,6 +270,7 @@ class WaTrace extends HTMLElement {
     super();
     this._lines = new Map();
     this._pending = [];
+    this._decisions = new Map();
     this._count = 0;
     this._errors = 0;
     this._started = Date.now();
@@ -317,10 +318,73 @@ class WaTrace extends HTMLElement {
     this.open = true;
   }
 
+  // A streamed model decision is provisional until the matching `tool` event. Keep one row by
+  // call id, then promote it in addTool() so selection appears before execution without duplication.
+  addDecision(callId, name, argumentsText, complete, previousCallId) {
+    const id = String(callId || "");
+    const oldId = String(previousCallId || "");
+    let decision = (oldId && this._decisions.get(oldId)) || this._decisions.get(id);
+    if (!decision) {
+      if (!this._userToggled) this.open = true;
+      const line = document.createElement("li");
+      line.className = "tool-line decision";
+      const head = document.createElement("div");
+      head.className = "tool-head";
+      const label = document.createElement("span");
+      label.className = "tool-title";
+      const outcome = document.createElement("span");
+      outcome.className = "tool-outcome";
+      head.append(label, outcome);
+      line.append(head);
+      const output = document.createElement("div");
+      output.className = "tool-output";
+      line.append(output);
+      const progress = document.createElement("div");
+      progress.className = "tool-progress";
+      progress.hidden = true;
+      line.append(progress);
+      decision = { line, label, output, progress, outcome };
+      this._count += 1;
+      this._body.append(line);
+      this._header.classList.add("running");
+    } else if (oldId && oldId !== id) {
+      this._decisions.delete(oldId);
+    }
+    const strong = document.createElement("b");
+    strong.textContent = name || "tool";
+    decision.label.replaceChildren(strong);
+    decision.output.textContent = argumentsText || "";
+    decision.output.hidden = !argumentsText;
+    decision.outcome.textContent = complete ? "selected" : "forming call";
+    decision.line.classList.toggle("decision-complete", complete === true);
+    this._decisions.set(id, decision);
+    this._lines.set(name || "tool", decision.line);
+    this._refresh();
+  }
+
   // addTool(name, title, detail, bound) -> the line element, so the caller can fill the outcome.
   // `bound` is the call's deadline in seconds, when it has one: the line can then say how long it has
   // run *of* how long it may take, which is the question "bash" alone cannot answer.
   addTool(name, title, detail, bound, callId) {
+    const decision = callId && this._decisions.get(String(callId));
+    if (decision) {
+      this._decisions.delete(String(callId));
+      const strong = document.createElement("b");
+      strong.textContent = name;
+      decision.label.replaceChildren(strong, document.createTextNode(" " + (title || "")));
+      decision.output.hidden = true;
+      decision.output.textContent = "";
+      decision.line.classList.remove("decision", "decision-complete");
+      decision.line.classList.add("pending");
+      decision.outcome.textContent = "";
+      this._lines.set(name, decision.line);
+      this._pending.push({ line: decision.line, output: decision.output, progress: decision.progress,
+        outcome: decision.outcome, started: Date.now(), bound: bound || null, callId: String(callId) });
+      if (!this._userToggled) this.open = true;
+      this._refresh();
+      this.setAge(0);
+      return decision.line;
+    }
     if (!this._userToggled) this.open = true;   // live: show the lines, not a count
     this._count += 1;
     const line = document.createElement("li");
@@ -414,6 +478,12 @@ class WaTrace extends HTMLElement {
   }
 
   finish() {
+    for (const decision of this._decisions.values()) {
+      decision.outcome.textContent = "not executed";
+      decision.line.classList.remove("decision", "decision-complete");
+      decision.line.classList.add("unrecorded");
+    }
+    this._decisions.clear();
     this._header.classList.remove("running");
     this._done = true;
     if (!this._userToggled) this.open = false;   // the step is over: fold it away

@@ -99,7 +99,9 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
           pending = pending:sub(ending+1)
           if event.type=='result' then result=event.result
           elseif event.type=='error' then failure=event.error
-          elseif stream and (event.type=='delta' or event.type=='reasoning') then host.stream(json.encode(event)) end
+          elseif stream and (event.type=='delta' or event.type=='reasoning' or event.type=='decision') then
+            host.stream(json.encode(event))
+          end
         end
         if #content==0 then break end
       end

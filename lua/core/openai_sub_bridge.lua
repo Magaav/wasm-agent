@@ -119,12 +119,53 @@ try {
       description:tool.function.description, parameters:tool.function.parameters}))};
   const started = Date.now();
   let ttft;
+  let reasoningText = '';
+  const toolDecisions = new Map();
+  const partialToolCall = event => event.partial?.content?.[event.contentIndex] || {};
+  const publishDecision = (decision, complete, previousId) => send({type:'decision',
+    call_id:decision.id, ...(previousId && previousId !== decision.id ? {previous_call_id:previousId} : {}),
+    name:decision.name, arguments_text:decision.arguments, complete});
   const stream = models.stream(model, context, {sessionId:request.session_id,
     transport:'sse', reasoningEffort:request.reasoning, maxTokens:request.max_output});
   for await (const event of stream) {
     if (event.type === 'text_delta' || event.type === 'thinking_delta') {
       ttft ??= Date.now() - started;
-      send({type:event.type === 'text_delta' ? 'delta' : 'reasoning', text:event.delta});
+      if (event.type === 'text_delta') send({type:'delta', text:event.delta});
+      else {
+        reasoningText += event.delta;
+        send({type:'reasoning', text:event.delta, chars:[...reasoningText].length});
+      }
+    } else if (event.type === 'toolcall_start') {
+      ttft ??= Date.now() - started;
+      const index = event.contentIndex;
+      const block = partialToolCall(event);
+      const decision = {id:block.id || `pi-${index}`, name:block.name || '', arguments:''};
+      toolDecisions.set(index, decision);
+      publishDecision(decision, false);
+    } else if (event.type === 'toolcall_delta') {
+      ttft ??= Date.now() - started;
+      const index = event.contentIndex;
+      const block = partialToolCall(event);
+      let decision = toolDecisions.get(index);
+      if (!decision) {
+        decision = {id:block.id || `pi-${index}`, name:block.name || '', arguments:''};
+        toolDecisions.set(index, decision);
+      }
+      decision.name = block.name || decision.name;
+      decision.arguments += event.delta || '';
+      publishDecision(decision, false);
+    } else if (event.type === 'toolcall_end') {
+      ttft ??= Date.now() - started;
+      const index = event.contentIndex;
+      const call = event.toolCall || {};
+      let decision = toolDecisions.get(index);
+      if (!decision) decision = {id:call.id || `pi-${index}`, name:call.name || '', arguments:''};
+      const previousId = decision.id;
+      decision.id = call.id || decision.id;
+      decision.name = call.name || decision.name;
+      decision.arguments = JSON.stringify(call.arguments || {});
+      publishDecision(decision, true, previousId);
+      toolDecisions.delete(index);
     }
   }
   const answer = await stream.result();
