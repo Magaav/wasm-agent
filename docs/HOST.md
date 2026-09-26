@@ -157,7 +157,9 @@ Browser control (`client {action:'browser'|'cdp'}`) lives in
 `rust/wa-window/src/cdp.rs`, where a port is never assumed: an endpoint must
 prove it is DevTools, the profile's own `DevToolsActivePort` is the authority for
 which port Chrome chose, and a launch that hands off to an already-open profile is
-reported as itself instead of as a 35-second timeout.
+reported as itself instead of as a 35-second timeout. The fluent `browser.open`
+checks the final URL against the requested URL and fails explicitly on redirects;
+a loaded homepage is not proof that a requested share page opened.
 
 ## The database capability
 
