@@ -2,6 +2,30 @@
 use serde_json::{json, Value};
 use std::{sync::OnceLock, time::Duration};
 use wa_operation::{Manager, Spec};
+
+fn command_result(manager: &Manager, id: &str, mut state: Value) -> Value {
+    let code = state["process_exit_code"].as_i64().unwrap_or(-1);
+    if let Ok(page) = manager.read(id, "stdout", 0, 24 * 1024) {
+        state["stdout"] = page["content"].clone();
+        state["stdout_truncated"] =
+            json!(page["available_bytes"].as_u64().unwrap_or(0) > 24 * 1024);
+    }
+    if let Ok(page) = manager.read(id, "stderr", 0, 8 * 1024) {
+        state["stderr"] = page["content"].clone();
+    }
+    state["command_completed"] = json!(true);
+    state["command_code"] = json!(code);
+    state["command_ok"] = json!(code == 0);
+    state["completion_scope"] = json!("command");
+    state["operation_settled"] = state["settled"].clone();
+    state["ok"] = json!(code == 0);
+    state["code"] = json!(code);
+    state["output_complete"] = json!(state["output_streams_closed"] == true);
+    state["note"] = json!(format!(
+        "the shell command completed with exit code {code}; descendants remain supervised as operation {id} under the original command timeout. Their work is not complete, and they may produce more output. Observe or await full settlement only if the task depends on them."
+    ));
+    state
+}
 pub fn manager() -> &'static Manager {
     static MANAGER: OnceLock<Manager> = OnceLock::new();
     MANAGER.get_or_init(|| {
@@ -14,7 +38,15 @@ pub fn manager() -> &'static Manager {
         .with_env_secrets()
     })
 }
-fn spec(program: &str, flag: &str, command: &str, cwd: &str, seconds: u64, owner: String, promote: bool) -> Spec {
+fn spec(
+    program: &str,
+    flag: &str,
+    command: &str,
+    cwd: &str,
+    seconds: u64,
+    owner: String,
+    promote: bool,
+) -> Spec {
     let mut spec = Spec::command(program, vec![flag.into(), command.into()]);
     spec.cwd = cwd.into();
     spec.timeout = Duration::from_secs(seconds);
@@ -61,22 +93,13 @@ pub fn foreground(
         // The shell exited leaving live descendants, so they were adopted rather than
         // failed. Return the receipt now: the operation keeps running under the
         // supervisor, and the caller is told which process it now owns.
-        if state["promoted"] == true {
-            let mut receipt = state;
-            // Output up to the moment the shell exited is real evidence; a receipt with
-            // none would read as a command that printed nothing.
-            if let Ok(page) = manager().read(&id, "stdout", 0, 24 * 1024) {
-                receipt["stdout"] = page["content"].clone();
-                receipt["stdout_truncated"] =
-                    json!(page["available_bytes"].as_u64().unwrap_or(0) > 24 * 1024);
-            }
-            if let Ok(page) = manager().read(&id, "stderr", 0, 8 * 1024) {
-                receipt["stderr"] = page["content"].clone();
-            }
-            receipt["ok"] = json!(true);
-            receipt["output_complete"] = json!(false);
-            receipt["note"] = json!("the shell exited leaving live processes; they are adopted as this operation and keep running. Read it with operation read; stop it with operation cancel.");
-            return Ok(receipt);
+        if state["promoted"] == true
+            && (state["output_streams_closed"] == true
+                || state["output_idle_ms"].as_u64().unwrap_or(0)
+                    >= wa_operation::COMMAND_OUTPUT_IDLE_MS)
+        {
+            state["foreground_return_elapsed_ms"] = state["elapsed_ms"].clone();
+            return Ok(command_result(manager(), &id, state));
         }
         if state["overdue"] == true {
             let _ = manager().cancel(&id);
@@ -136,10 +159,33 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
         "list" => return Ok(manager().list()),
         "status" => manager().snapshot(id),
         "await" => {
-            // One model call observes settlement; no synthesized conversation events or replay.
+            // Foreground bash can complete while its adopted descendants remain supervised.
+            // Default to the command boundary for those operations; explicit operation start
+            // and wait_for=settled retain full process-tree settlement semantics.
+            let wait_for = args["wait_for"].as_str().unwrap_or("command");
+            if wait_for != "command" && wait_for != "settled" {
+                return Err("invalid_wait_for:expected_command_or_settled".into());
+            }
             loop {
-                let state=manager().wait(id,Duration::from_millis(250)).map_err(|e|e.to_string())?;
-                if state["settled"] == true {return Ok(state);}
+                let state = manager()
+                    .wait(id, Duration::from_millis(250))
+                    .map_err(|e| e.to_string())?;
+                if state["settled"] == true {
+                    return Ok(state);
+                }
+                if wait_for == "command"
+                    && state["promoted"] == true
+                    && (state["output_streams_closed"] == true
+                        || state["output_idle_ms"].as_u64().unwrap_or(0)
+                            >= wa_operation::COMMAND_OUTPUT_IDLE_MS)
+                {
+                    return Ok(command_result(manager(), id, state));
+                }
+                if crate::host::run_cancel_requested() {
+                    return Ok(json!({"operation_id":id,"ok":false,"settled":false,
+                        "error":"await_interrupted","outcome":"still_running",
+                        "note":"The wait was interrupted; the independently supervised operation was not canceled. Inspect it or await again. Do not rerun it."}));
+                }
                 if state["overdue"] == true {
                     return Ok(json!({"operation_id":id,"ok":false,"settled":false,
                         "error":"operation_supervisor_overdue","outcome":"unknown",
@@ -147,7 +193,7 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
                 }
                 crate::serve::beat();
             }
-        },
+        }
         "cancel" => manager().cancel(id),
         "wait" => manager().wait(
             id,

@@ -57,7 +57,7 @@ are optional.
 | Kind | Shape | Notes |
 | --- | --- | --- |
 | `client` | `{action, ...}` where action ∈ `click move type key shell cdp frame` | `retries` needs `idempotent: true` |
-| `run` | `{script, expect?, timeout_seconds?}` | a node-side deterministic command; success is settled execution, exit 0 **and** a JSON object on stdout, and `expect` compares named fields of it. Timeout is 1–86400 seconds. Never exportable as a sentinel plan (see below) |
+| `run` | `{script, expect?, timeout_seconds?}` | a node-side deterministic command; success requires command completion, exit 0 **and** a JSON object on stdout, and `expect` compares named fields of it. If descendants remain supervised, the spell's required `post` checks must observe the intended effect before the spell succeeds. Timeout is 1–86400 seconds. Never exportable as a sentinel plan (see below) |
 | `wait` | `{ms}` | bounded to 10s by `host.sleep` |
 | `assert` | `{script, <operator>}` | mid-run checkpoint |
 | `sentinel` | `{verb, binary?}` | a plan for the supervisor, executed outside the node |
@@ -83,8 +83,10 @@ A failed assertion is an error, never a warning.
 For node workflows, `pre`/`post` may use `{ "kind": "run", "script": "...",
 "expect": { "ready": true } }`. These observational commands use the same JSON
 contract as a run step; `expect` must be non-empty. They do not need a browser and
-cannot be exported as sentinel checks. Step traces retain their observed JSON, and
-an adopted/unsettled command is not successful spell evidence.
+cannot be exported as sentinel checks. Step traces retain their observed JSON. A
+foreground command result can complete a step while descendants remain supervised;
+only the spell's observed `post` conditions can establish that their intended effect
+occurred. A launch receipt without `command_completed` is not successful spell evidence.
 
 ## Compose verified sequences
 

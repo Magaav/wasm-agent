@@ -301,7 +301,6 @@ fn promoted_descendants_are_adopted_not_failed() {
     let mut spec = shell("(sleep 30; printf leaked > orphan-proof) & printf visible");
     spec.cwd = root.to_string_lossy().to_string();
     spec.promote_descendants = true;
-    spec.promoted_timeout = Duration::from_secs(30);
     let id = m.start(spec).unwrap();
     // The shell exits at once. Without promotion this is `background_descendants`; with
     // it the operation is still running and says so, instead of reporting a failure.
@@ -313,7 +312,10 @@ fn promoted_descendants_are_adopted_not_failed() {
     assert_eq!(live["shell_exited"], true, "{live}");
     assert_eq!(live["process_exit_code"], 0, "{live}");
     assert_eq!(live["waiting_for"], "descendants", "{live}");
-    assert!(live["remaining_ms"].as_u64().unwrap() <= 30000, "{live}");
+    assert!(live["remaining_ms"].as_u64().unwrap() <= 300000, "{live}");
+    assert_eq!(live["timeout_ms"], 300000, "adoption must keep the original command budget: {live}");
+    assert_eq!(live["command_completed"], true, "{live}");
+    assert!(live["process_exit_elapsed_ms"].is_number(), "{live}");
     assert!(live["output_idle_ms"].as_u64().unwrap() > 0, "{live}");
     // Adoption is not abandonment: the same job object still owns the tree, so cancel
     // reaches the descendant and it never gets to write.
@@ -349,6 +351,32 @@ fn adopted_tree_settles_when_it_exits_and_keeps_its_output() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn output_after_shell_exit_restarts_the_command_idle_window() {
+    let (m, root) = fixture();
+    let mut spec = shell("(sleep 0.2; printf later; sleep 30) & printf first");
+    spec.promote_descendants = true;
+    let id = m.start(spec).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let mut observed_later = false;
+    while Instant::now() < deadline {
+        let state = m.snapshot(&id).unwrap();
+        if state["post_exit_last_output_elapsed_ms"].as_u64().is_some() {
+            let output = m.read(&id, "stdout", 0, 128).unwrap();
+            assert!(output["content"].as_str().unwrap().contains("later"), "{output}");
+            assert!(state["output_idle_ms"].as_u64().unwrap() < 100, "{state}");
+            observed_later = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(observed_later, "late descendant output was not observed");
+    m.cancel(&id).unwrap();
+    let result = settled(&m, &id);
+    assert_eq!(result["state"], "cancelled", "{result}");
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(windows)]
 fn compiler_helper_command(root: &Path, regular_work: bool, helper_path: &str) -> Spec {
     let helper = root.join(helper_path);
@@ -366,7 +394,6 @@ fn compiler_helper_command(root: &Path, regular_work: bool, helper_path: &str) -
     );
     spec.env.push(("WA_OPERATION_COMPILER_HELPER_FIXTURE".into(), "1".into()));
     spec.promote_descendants = true;
-    spec.promoted_timeout = Duration::from_secs(30);
     spec
 }
 

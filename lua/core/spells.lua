@@ -140,8 +140,8 @@ end
 local SENTINEL_VERBS = { ["wait-idle"] = true, ["upgrade"] = true, ["restart"] = true, ["wait-health"] = true, ["run"] = true }
 
 -- A `run` step: the node-side deterministic step a skill needs for the part that never required a
--- model. Its outcome contract is the one the `run` job action already uses - exit 0 *and* a JSON
--- object on stdout - so the system has one outcome shape rather than two.
+-- model. Its outcome requires a completed command, exit 0 and a JSON object on stdout. If that
+-- command adopted descendants, the spell's required postconditions still have to observe its effect.
 --
 -- `expect` compares named fields of that object. A mismatch is a failed step, never a warning: a step
 -- that reports success while the world says otherwise is the failure this module exists to prevent.
@@ -159,7 +159,7 @@ function M.run_step(step)
   if not started_ok then return false, "run_step_exec_failed" end
   local decoded_ok, wrapper = pcall(json.decode, raw or "")
   if not decoded_ok or type(wrapper) ~= "table" then return false, "run_step_unreadable_result" end
-  if wrapper.settled == false or wrapper.promoted == true then
+  if wrapper.settled == false and wrapper.command_completed ~= true then
     return false, "run_step_unsettled", wrapper
   end
   if wrapper.ok == false and tonumber(wrapper.code) == 0 then
