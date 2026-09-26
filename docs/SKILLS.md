@@ -59,6 +59,34 @@ Directories are scanned recursively for `SKILL.md`, skipping `.git`,
 - Add a test to `scripts/test.sh` when the skill encodes something the repo
   depends on. There is one for discovery, the prompt block and loading.
 
+## Evolve the procedure while using it
+
+When executing any skill, identify segments with repeatable inputs, deterministic
+steps and observable success. Work out the sequence, parameterize changing values,
+save it with `spell_save`, execute it and verify its mandatory `post`. Refactor the
+editable skill to point to that spell, its inputs, and its fallback. Keep the original
+inference procedure available until the replacement is proven. Stay within the current
+task's authorization and tool/file scope; do not install or edit someone else's skill.
+
+If spell A succeeds in one turn and spell B follows in the next, crystallize their
+verified sequence with `spell_compose` when it will recur. Preserve A's postconditions,
+B's preconditions, step retry limits and final settlement. Parameter bindings and the
+decision to run B must be deterministic; any intervening judgment stays outside the
+composition. Test the combined spell before making it the skill's preferred path.
+Composition snapshots source versions; after a source repair, rebuild and reverify
+affected compositions instead of assuming they inherited the fix.
+
+**Failure recovery always starts with inference.** Inspect the failing step and trace,
+reconcile effects already performed, then decide whether to finish the remaining work
+manually, repair/refactor and reverify the segment, or retire it with `spell_forget` and
+restore inference in the skill. A valid refusal (dirty work, failed tests, missing
+preconditions) means fix the work state, not the spell. Never weaken a check to obtain
+success or replay a non-idempotent effect blindly. If the segment inherently requires
+judgment, remove its spell preference and record why it stays inference-driven.
+
+The built-in skill prompt carries this rule for every loaded skill; `AGENTS.md` carries
+it for external repo agents. The reusable closing example is `parallel-evolution`.
+
 ## Security
 
 A skill can instruct the model to do anything its tools allow, and can ship code

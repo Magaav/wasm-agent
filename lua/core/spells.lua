@@ -55,7 +55,7 @@ local function load()
 end
 
 local function store(data)
-  if host.write_file then host.write_file(path(), json.encode(data)) end
+  return host.write_file and host.write_file(path(), json.encode(data)) == true
 end
 
 -- ---- parameter substitution ---------------------------------------------
@@ -116,6 +116,7 @@ local function observe(script)
 end
 
 local function check_assertion(check)
+  if check.kind == "run" then return M.run_step(check) end
   local value, error = observe(check.script)
   if error then return false, error, value end
   local text = value == nil and "" or tostring(value)
@@ -154,12 +155,18 @@ local SENTINEL_VERBS = { ["wait-idle"] = true, ["upgrade"] = true, ["restart"] =
 function M.run_step(step)
   local command = tostring(step.script or "")
   if command == "" then return false, "run_step_script_required" end
-  local started_ok, raw = pcall(host.exec, command, "")
+  local started_ok, raw = pcall(host.exec, command, "", step.timeout_seconds)
   if not started_ok then return false, "run_step_exec_failed" end
   local decoded_ok, wrapper = pcall(json.decode, raw or "")
   if not decoded_ok or type(wrapper) ~= "table" then return false, "run_step_unreadable_result" end
+  if wrapper.settled == false or wrapper.promoted == true then
+    return false, "run_step_unsettled", wrapper
+  end
+  if wrapper.ok == false and tonumber(wrapper.code) == 0 then
+    return false, "run_step_operation_failed", wrapper
+  end
   if (tonumber(wrapper.code) or 1) ~= 0 then
-    return false, "run_step_exit_" .. tostring(wrapper.code)
+    return false, "run_step_exit_" .. tostring(wrapper.code), wrapper
   end
   local result_ok, result = pcall(json.decode, wrapper.stdout or "")
   if not result_ok or type(result) ~= "table" then return false, "run_step_stdout_not_json" end
@@ -172,7 +179,7 @@ function M.run_step(step)
     local actual = result[field]
     if actual ~= expected then
       return false, "run_step_expect_" .. tostring(field) .. ": " .. json.encode(actual)
-        .. " ~= " .. json.encode(expected)
+        .. " ~= " .. json.encode(expected), result
     end
   end
   return true, nil, result
@@ -187,6 +194,9 @@ function M.validate(spec)
   end
   for index, step in ipairs(spec.steps) do
     local kind = step.kind or "client"
+    if kind ~= "client" and kind ~= "run" and kind ~= "wait" and kind ~= "assert" and kind ~= "sentinel" then
+      return "step_" .. index .. "_unknown_kind"
+    end
     if kind == "client" and (type(step.action) ~= "string" or step.action == "") then
       return "step_" .. index .. "_action_required"
     end
@@ -205,6 +215,10 @@ function M.validate(spec)
       if step.expect ~= nil and type(step.expect) ~= "table" then
         return "step_" .. index .. "_expect_must_be_a_table"
       end
+      if step.timeout_seconds ~= nil and (type(step.timeout_seconds) ~= "number"
+          or step.timeout_seconds % 1 ~= 0 or step.timeout_seconds < 1 or step.timeout_seconds > 86400) then
+        return "step_" .. index .. "_invalid_timeout_seconds"
+      end
     end
     if kind == "sentinel" then
       if type(step.verb) ~= "string" or not SENTINEL_VERBS[step.verb] then
@@ -221,8 +235,19 @@ function M.validate(spec)
       return "step_" .. index .. "_retries_require_idempotent"
     end
   end
-  for index, check in ipairs(spec.post) do
-    if type(check.script) ~= "string" then return "post_" .. index .. "_script_required" end
+  for _, phase in ipairs({"pre", "post"}) do
+    for index, check in ipairs(spec[phase] or {}) do
+      if type(check.script) ~= "string" or check.script == "" then return phase .. "_" .. index .. "_script_required" end
+      if check.kind == "run" then
+        if type(check.expect) ~= "table" or next(check.expect) == nil then
+          return phase .. "_" .. index .. "_expect_required"
+        end
+        local problem = M.validate({name="check", steps={check}, post={{script="check"}}})
+        if problem then return phase .. "_" .. index .. "_" .. problem end
+      elseif check.kind ~= nil and check.kind ~= "assert" then
+        return phase .. "_" .. index .. "_unknown_check_kind"
+      end
+    end
   end
   return nil
 end
@@ -249,6 +274,11 @@ function M.export(name, params, binary)
   if not spell then return nil, "unknown_spell:" .. tostring(name) end
   local problem = M.validate(spell)
   if problem then return nil, "invalid_spell:" .. problem end
+  for _, phase in ipairs({"pre", "post"}) do
+    for _, check in ipairs(spell[phase] or {}) do
+      if check.kind == "run" then return nil, "run_check_not_exportable" end
+    end
+  end
   -- The `binary` argument fills the `binary` parameter. It is supplied at export time because the
   -- build to install is a fact about *now*, not about the spell: the same plan is exported again for
   -- the next build. Merging it here (rather than requiring the caller to pass it twice, once as a
@@ -310,6 +340,7 @@ function M.list()
       steps = #(spell.steps or {}),
       post = #(spell.post or {}),
       params = spell.params or {},
+      composed_from = spell.composed_from,
     }
   end
   return { spells = out }
@@ -340,6 +371,7 @@ function M.save(spec)
     steps = spec.steps,
     post = spec.post,
     created_at = host.now(),
+    composed_from = spec.composed_from,
   }
   local replaced = false
   for index, existing in ipairs(data.spells) do
@@ -349,7 +381,7 @@ function M.save(spec)
     end
   end
   if not replaced then data.spells[#data.spells + 1] = entry end
-  store(data)
+  if not store(data) then return { error = "spell_store_failed" } end
   return { ok = true, name = entry.name, version = version, steps = #entry.steps, post = #entry.post }
 end
 
@@ -360,8 +392,67 @@ function M.remove(name)
     if spell.name == name then removed = true else kept[#kept + 1] = spell end
   end
   data.spells = kept
-  store(data)
+  if not store(data) then return { error = "spell_store_failed" } end
   return { ok = removed, name = name }
+end
+
+-- Snapshot a sequence rather than calling live spell names: later source edits must
+-- not silently change a verified composition. Preserve every boundary assertion.
+function M.compose(args)
+  if type(args.parts) ~= "table" or #args.parts < 2 then return {error="at_least_two_spells_required"} end
+  local combined = {name=args.name, description=args.description or "Verified spell sequence",
+    params={}, pre={}, steps={}, post={}, composed_from={}}
+  for index, part in ipairs(args.parts) do
+    if type(part) ~= "table" or type(part.name) ~= "string" then return {error="component_name_required",step=index} end
+    local source = M.get(part.name)
+    if not source then return {error="unknown_spell:" .. tostring(part.name)} end
+    local problem = M.validate(source)
+    if problem then return {error="invalid_component:" .. part.name .. ":" .. problem} end
+    if M.needs_sentinel(source) then return {error="composition_requires_node_spells",spell=part.name} end
+    if index == 1 then combined.target = source.target end
+    for _, field in ipairs({"node", "app", "profile"}) do
+      if (combined.target or {})[field] ~= (source.target or {})[field] then
+        return {error="composition_target_mismatch",spell=part.name,field=field}
+      end
+    end
+    local mapping = {}
+    for key, definition in pairs(source.params or {}) do
+      local name = "p" .. index .. "_" .. key
+      combined.params[name] = substitute(definition, {})
+      if part.params and part.params[key] ~= nil then combined.params[name].default = part.params[key] end
+      mapping[key] = "{{" .. name .. "}}"
+    end
+    for key in pairs(part.params or {}) do
+      if not mapping[key] then return {error="unknown_component_param:" .. key,spell=part.name} end
+    end
+    local function copied(raw, phase, position)
+      local item = substitute(raw, mapping)
+      if phase ~= "step" then item.retries=nil; item.retry_ms=nil; item.idempotent=nil end
+      item.origin = {spell=source.name,version=source.version,phase=phase,index=position}
+      return item
+    end
+    for position, check in ipairs(source.pre or {}) do
+      local item = copied(check, "pre", position)
+      if index == 1 then combined.pre[#combined.pre+1] = item
+      else
+        item.kind = item.kind == "run" and "run" or "assert"
+        combined.steps[#combined.steps+1] = item
+      end
+    end
+    for position, step in ipairs(source.steps) do
+      combined.steps[#combined.steps+1] = copied(step, "step", position)
+    end
+    for position, check in ipairs(source.post) do
+      local item = copied(check, "post", position)
+      item.kind = item.kind == "run" and "run" or "assert"
+      combined.steps[#combined.steps+1] = item
+      if index == #args.parts then combined.post[#combined.post+1] = copied(check, "post", position) end
+    end
+    combined.composed_from[#combined.composed_from+1] = {name=source.name,version=source.version}
+  end
+  local result = M.save(combined)
+  if result.ok then result.params = combined.params; result.composed_from = combined.composed_from end
+  return result
 end
 
 -- Validate without executing (dry run): shape + parameter resolution.
@@ -445,7 +536,7 @@ function M.run(name, params)
   for index, check in ipairs(spell.pre or {}) do
     local resolved_check = substitute(check, resolved)
     local ok, error, value = check_assertion(resolved_check)
-    trace[#trace + 1] = { phase = "pre", index = index, ok = ok, value = value, error = error }
+    trace[#trace + 1] = { phase = "pre", index = index, ok = ok, value = value, error = error, origin = check.origin }
     if not ok then return fail("precondition_failed", index, error or value) end
   end
 
@@ -457,19 +548,22 @@ function M.run(name, params)
     repeat
       attempt = attempt + 1
       local step_started = host.now()
+      local observed
       if kind == "wait" then
         host.sleep(tonumber(step.ms) or 250)
         ok, detail = true, nil
       elseif kind == "run" then
-        local passed, failure = M.run_step(step)
+        local passed, failure, result = M.run_step(step)
         ok, detail = passed, failure
+        observed = result
       elseif kind == "assert" then
         local passed, error, value = check_assertion(step)
         ok, detail = passed, error or value
+        observed = value
       else
         local args = {}
         for key, value in pairs(step) do
-          if key ~= "kind" and key ~= "retries" and key ~= "retry_ms" and key ~= "idempotent" then
+          if key ~= "kind" and key ~= "retries" and key ~= "retry_ms" and key ~= "idempotent" and key ~= "origin" then
             args[key] = value
           end
         end
@@ -480,6 +574,7 @@ function M.run(name, params)
       trace[#trace + 1] = {
         phase = "step", index = index, kind = kind, attempt = attempt, ok = ok,
         ms = math.floor((host.now() - step_started) * 1000), detail = detail,
+        value = observed, origin = step.origin,
       }
       if not ok and attempt <= retries then host.sleep(tonumber(step.retry_ms) or 300) end
     until ok or attempt > retries
@@ -490,7 +585,7 @@ function M.run(name, params)
   for index, check in ipairs(spell.post or {}) do
     local resolved_check = substitute(check, resolved)
     local ok, error, value = check_assertion(resolved_check)
-    trace[#trace + 1] = { phase = "post", index = index, ok = ok, value = value, error = error }
+    trace[#trace + 1] = { phase = "post", index = index, ok = ok, value = value, error = error, origin = check.origin }
     if not ok then return fail("postcondition_failed", index, error or value) end
   end
 

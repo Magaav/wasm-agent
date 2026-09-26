@@ -29,6 +29,7 @@ export HTTP_PROXY="" HTTPS_PROXY="" ALL_PROXY="" NO_PROXY=127.0.0.1,localhost,::
 echo "gate isolated home: $WASM_AGENT_HOME (retained for diagnostics)"
 
 cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
+node scripts/test-parallel-finish.mjs
 # The execution and automation contracts have native, model-free adversarial tests.
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host file_search::tests
@@ -1291,6 +1292,9 @@ local block = skills.prompt_block()
 assert(block and block:find("<available_skills>", 1, true),
   "the system prompt must advertise the skills")
 assert(block:find("see-your-output", 1, true), "the advertised block must name the skill")
+assert(block:find("crystallize repeatable deterministic sequences",1,true) and
+  block:find("Compose consecutive spells",1,true) and block:find("inference by default",1,true),
+  "every skill must receive the crystallization, composition and inference recovery rule")
 local loaded = tools.dispatch(memory, "skill", { name = "see-your-output" }, "master")
 assert(loaded.content and #loaded.content > 200, "loading a skill must return its instructions")
 assert(loaded.path and loaded.path:find("SKILL.md", 1, true), "a loaded skill reports its file")

@@ -229,8 +229,11 @@ M.admin = {
     target = { type = "object", description = "{node, app, profile} the spell was recorded against." },
     params = { type = "object", description = "parameter -> {type: string|number|boolean, default}. Reference them as {{name}}." },
     pre = { type = "array", items = { type = "object" }, description = "Assertions checked before the first step." },
-    steps = { type = "array", items = { type = "object" }, description = "Steps: {kind=client|wait|assert}. Retries allowed only with idempotent=true." },
-    post = { type = "array", items = { type = "object" }, description = "REQUIRED. Assertions checked after the steps (effect settlement)." } }, { "name", "steps", "post" }),
+    steps = { type = "array", items = { type = "object" }, description = "Steps: {kind=client|run|wait|assert|sentinel}. Run: {script, expect?, timeout_seconds?}. Retries allowed only with idempotent=true." },
+    post = { type = "array", items = { type = "object" }, description = "REQUIRED. Browser assertions or observational {kind:run,script,expect} checks after the steps." } }, { "name", "steps", "post" }),
+  schema("spell_compose", "Snapshot an already verified sequence into one spell. Preserves source pre/post checks and step retries, records source versions in its trace. No intervening inference; inspect and reconcile failures with inference before repairing or retiring a spell.", {
+    name = { type = "string" }, description = { type = "string" },
+    parts = { type = "array", items = { type = "object" }, description = "Ordered {name,params?} source spells. Parameters are exposed as p1_name, p2_name, etc.; provided values become defaults. Node spells with the same target only." } }, { "name", "parts" }),
   schema("spell_run", "Replay a saved spell; fails loudly at the first failing step or assertion.", {
     name = { type = "string" },
     params = { type = "object", description = "Values for the spell's declared parameters." } }, { "name" }),
@@ -277,7 +280,7 @@ M.tier_of = {
   search_ledger = "ledger", conversation = "ledger", list_conversations = "ledger",
   client = "client",
   spell_save = "spells", spell_run = "spells", spell_list = "spells",
-  spell_get = "spells", spell_forget = "spells", spell_export = "spells",
+  spell_get = "spells", spell_forget = "spells", spell_export = "spells", spell_compose = "spells",
   whatsapp_read = "whatsapp", whatsapp_conversation = "whatsapp", whatsapp_decide = "whatsapp", whatsapp_send = "whatsapp",
   nodes = "nodes", remote = "nodes",
 }
@@ -372,6 +375,7 @@ local CUES = {
   shell = "Run a shell command on the client machine",
   spell_save = "Save a verified command sequence as a reusable spell",
   spell_run = "Replay a saved spell",
+  spell_compose = "Combine a verified spell sequence with its checks intact",
   spell_list = "List saved spells",
   spell_get = "Read one saved spell in full",
   spell_forget = "Delete a saved spell",
@@ -758,6 +762,8 @@ function M.dispatch(memory, name, args, role, ctx)
     return spellslib.save(args)
   elseif name == "spell_run" then
     return spellslib.run(args.name, args.params)
+  elseif name == "spell_compose" then
+    return spellslib.compose(args)
   elseif name == "spell_list" then
     return spellslib.list()
   elseif name == "spell_get" then

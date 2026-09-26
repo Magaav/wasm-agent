@@ -238,6 +238,14 @@ function M.prompt_block()
   local lines = {
     "The following skills provide specialized instructions for specific tasks.",
     "Read the full skill file when the task matches its description.",
+    "While using any skill, crystallize repeatable deterministic sequences into verified spells, " ..
+      "then refactor the skill to call them. Verify the postconditions before preferring the spell.",
+    "Compose consecutive spells into one reusable spell when their sequence and parameter bindings " ..
+      "are repeatable and no inference decision lies between them; preserve every boundary check.",
+    "On spell failure, use inference by default: inspect the trace and reconcile effects, then " ..
+      "finish safely, repair and reverify the segment, or retire the spell and restore inference. " ..
+      "A correct refusal is not a spell defect. Never weaken checks or blindly replay effects. " ..
+      "Stay within your allowed tools and editable skill scope.",
     "When a skill file references a relative path, resolve it against the skill directory " ..
       "(parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
     "",

@@ -61,6 +61,8 @@ Fix a conflict now, while the change is small and fresh in your head, not later.
 Whatever the repository uses as its test entry point, run it on the merged result. A
 change is not done because it compiles; it is done when the repository's own check passes
 with your change in it. If there is no gate, say so in your report.
+In wasm-agent, the closing spell below supplies this gate after the candidate commit
+and push, before integration. A published concern branch is still a proposal until it passes.
 
 **5. Commit one logical change.**
 A small commit whose message says **why**, not what — the diff already says what. Include
@@ -73,6 +75,35 @@ cannot be attributed later.
 - Branch pushed.
 - Branch current with `main`.
 - A one-line status: what changed, ahead/behind, does it merge, does the gate pass.
+
+### The wasm-agent closing spell
+
+In wasm-agent, use [scripts/finish.mjs](scripts/finish.mjs) for the mechanical
+closing sequence. Commit and push your concern first, then:
+
+1. Run `node <absolute-skill-dir>/scripts/finish.mjs spell <absolute-own-repo>`.
+   Save each returned definition with `spell_save` and pass `composition` to
+   `spell_compose`. This creates `parallel-evolution-finish` on this node.
+2. Observe your current `git rev-parse HEAD`. Run `parallel-evolution-finish`
+   with `p1_head` and `p2_head` both set to that exact hash, and `p1_repo_arg`
+   and `p2_repo_arg` both set to your shell-quoted native repository path.
+   Repository paths are required so a node's shared spell cannot silently use
+   another actor's checkout. The runner default is shell-quoted for this node's
+   bash; regenerate it when the skill moves.
+3. Read the trace: repository readiness, gate verdict/skips, and postcondition
+   proof must all pass. It checks only your tree, fetches refs, and writes gate
+   evidence under your worktree's Git metadata; it never commits, pushes, merges,
+   switches another tree, or deploys.
+4. Review the `inference_required` items: one concern/patch review, impact audit
+   coverage, and requested integration/deployment. The spell cannot decide these.
+5. After integration, `node <runner> verify <own-repo> <new-HEAD>` rechecks Git
+   state and gate proof. Proof is bound to the exact Git source tree and its log
+   hash; an identical-tree merge can reuse it, and changed source requires a new gate.
+
+For Pi/Orca without spell tools, run the same `check`, `gate`, and `verify` commands
+directly. If the spell refuses, inspect its trace and use inference to finish or
+repair; dirty/unpushed/stale work is a valid refusal, never a reason to weaken it.
+Rebuild a composition after repairing a source spell: source versions are snapshots.
 
 ## Before you report done
 
