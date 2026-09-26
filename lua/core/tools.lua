@@ -12,6 +12,7 @@ local file_tools = dofile("lua/core/file_tools.lua")
 local evidence_view = dofile("lua/core/evidence_view.lua")
 local diagnose = dofile("lua/core/diagnose.lua")
 local workspaces = dofile("lua/core/workspaces.lua")
+local resources = dofile("lua/core/resources.lua")
 local M = {}
 
 local function is_master(role)
@@ -263,6 +264,9 @@ M.admin = {
     action = { type = "string", enum = { "status", "allocate", "recover", "set", "clear" } },
     path = { type = "string", description = "set: an existing directory for a legacy non-managed session." },
     session_id = { type = "string", description = "Defaults to the current session." } }, { "action" }),
+  schema("resource", "Inspect durable resource claims. Reconcile only after checking the recorded owner's effects; name the exact key, run, principal and evidence. Live owners cannot be released. No automatic timeout or effect replay.", {
+    action={type="string",enum={"list","reconcile"}},key={type="string"},run={type="string"},
+    principal={type="string"},evidence={type="string"} }, {"action"}),
 }
 
 -- Which capability tier each tool belongs to (DESIGN.md §8). Anything not
@@ -275,6 +279,7 @@ M.tier_of = {
   sessions = "sessions", session = "sessions", search_messages = "sessions",
   resume_session = "sessions", session_debug = "sessions", session_fixture = "sessions",
   session_worktree = "sessions",
+  resource = "sessions",
   bash = "environment", read = "environment", read_many = "environment", write = "environment",
   diagnose = "environment", operation = "environment",
   edit = "environment", ls = "environment", grep = "environment", graph = "environment",
@@ -360,6 +365,7 @@ local CUES = {
   session_debug = "Set a session's recording mode (debug or default)",
   session_fixture = "Export a session as a reproducible fixture",
   session_worktree = "Point this session's tools at their own checkout",
+  resource = "Inspect resource ownership and reconcile interrupted effects",
   search_ledger = "Search the message ledger (WhatsApp/chat)",
   conversation = "Read one conversation's recent messages",
   list_conversations = "List conversations in the ledger",
@@ -570,6 +576,16 @@ function M.dispatch(memory, name, args, role, ctx)
   if not is_master(role) and admin_names()[name] then return { error = "forbidden_for_role:" .. role } end
   local workspace_error = required_workspace_error(memory, ctx, name, args)
   if workspace_error then return workspace_error end
+  if name=="resource" then
+    if args.action=="list" then return resources.inspect() end
+    if args.action=="reconcile" then return resources.reconcile(args) end
+    return {error="unknown_resource_action"}
+  end
+  if ctx.run_id and (name=="client" or name=="shell" or name=="spell_run") then
+    local claimed=resources.claim(ctx,{"client:local"})
+    if not claimed.ok then return claimed end
+    ctx.resource_effect_generation=(ctx.resource_effect_generation or 0)+1
+  end
   if name == "operation" then
     if not is_master(role) then return {error="forbidden_for_role:" .. role} end
     args.owner = ctx.session_id or user_id
@@ -1063,6 +1079,21 @@ function M.await_parallel_bash(operation_id, role, ctx)
     stdout_truncated = type(stdout) == "table" and
       (tonumber(stdout.available_bytes) or 0) > 24576 or false,
     error = state.error, timing = state.timing, parallel = true }
+end
+
+local dispatch = M.dispatch
+function M.dispatch(memory,name,args,role,ctx)
+  ctx=ctx or {}
+  local generation=ctx.resource_effect_generation or 0
+  local ok,result=pcall(dispatch,memory,name,args,role,ctx)
+  if (ctx.resource_effect_generation or 0)>generation and (not ok or type(result)~="table" or result.error
+      or result.ok==false or result.cancelled or result.cleanup=="unknown"
+      or (result.code and result.code~=0) or result.state=="running" or result.state=="unknown") then
+    local marked=resources.uncertain(ctx)
+    if not marked.ok then error("resource_uncertainty_record_failed: "..json.encode(marked)) end
+  end
+  if not ok then error(result) end
+  return result
 end
 
 return M

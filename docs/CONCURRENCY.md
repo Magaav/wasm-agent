@@ -1,5 +1,35 @@
 # Concurrent runs: the implementation
 
+## Shared resources
+
+Participating agent runs hold an exclusive `session:<id>` claim across the run.
+Lua acquires `client:local` before client, client-shell or spell tools and keeps
+it until the run settles, so multi-step client interactions cannot interleave.
+Approved child profiles may also declare `resources.exclusive: ["name", ...]`;
+these `shared:<name>` claims are acquired together before inference. Contention
+fails visibly; this is cooperative exclusion, not a waiting scheduler.
+
+The store is shared by processes using the same runtime home, even when their
+transcript databases differ. Claims survive process death. Failed or uncertain
+client effects retain ownership after settlement. The operator's `resource` tool
+lists claims and requires the exact owner/run and inspected evidence to reconcile
+one. It refuses live owners using an OS-held SQLite lease, with no expiry heuristic.
+A new explicit request may reclaim a dead *session* owner; it never automatically
+releases an effectful resource or replays an old request.
+
+Scope and risk: arbitrary operator shell, direct manual client calls, external
+programs and separate runtime homes do not participate. Spells conservatively
+claim the client even if a particular spell only reads files. A failed client
+call may retain a claim despite having made no effect; that costs availability
+but avoids silently allowing conflicting work. Lease files and the audit history
+are retained; no automatic retention/reaper is introduced. SQLite FULL synchronous
+writes add latency; no throughput improvement is claimed.
+
+Proof: `scripts/test-resource-claims.cjs` uses two real processes, kills the owner,
+and tests contention, live-owner refusal, explicit reconciliation, session recovery,
+uncertain-effect retention and guest denial with a mock client (17 checks, no skips).
+Rust tests additionally verify all-or-none multi-key acquisition and identity checks.
+
 The canonical execution concepts and the target contract are in
 [ARCHITECTURE.md section 6](../ARCHITECTURE.md#6-naming-and-execution-ownership) and
 [EXECUTION.md](EXECUTION.md). This file is only the **mechanism** behind the admission,
