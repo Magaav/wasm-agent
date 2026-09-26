@@ -11,6 +11,7 @@ local windowlib = dofile("lua/core/model_window.lua")
 local telemetry = dofile("lua/core/telemetry.lua")
 local prefix_audit = dofile("lua/core/prefix_audit.lua")
 local M = {}
+local subscription = dofile("lua/core/openai_sub.lua")
 
 local function env(name) return host.getenv(name) end
 local function trim(value) return (value or ""):gsub("^%s+", ""):gsub("%s+$", "") end
@@ -51,6 +52,12 @@ function M.providers()
       api_key = env("OPENAI_API_KEY") or "",
       default_model = "gpt-4.1",
     },
+    {
+      id = "openai-sub", label = "OpenAI subscription",
+      base_url = "https://chatgpt.com/backend-api",
+      api_key = "", auth = "subscription", configured = subscription.configured(),
+      default_model = "gpt-6-luna",
+    },
   }
 end
 
@@ -81,6 +88,7 @@ function M.settings()
 end
 
 function M.configured()
+  if M.active().id == "openai-sub" then return subscription.configured() end
   local settings = M.settings()
   return settings.base_url ~= "" and settings.api_key ~= "" and settings.model ~= ""
 end
@@ -139,6 +147,7 @@ local ATTRIBUTION = {
     -- Declared so the absence is a decision a reader can see, not an oversight.
     host = "api.openai.com",
   },
+  { host = "chatgpt.com" }, -- Pi's subscription adapter owns its account/session headers.
 }
 
 -- The authority of a base URL, lowercased: "https://opencode.ai/zen/go/v1" gives
@@ -208,6 +217,7 @@ function M.list_models(id)
     end
   end
   provider = provider or M.active()
+  if provider.id == "openai-sub" then return subscription.models end
   M._cache = M._cache or {}
   local now = (host and host.now and host.now()) or 0
   local entry = M._cache[provider.id]
@@ -305,6 +315,9 @@ end
 -- last-resort fallback so no existing deployment changes behaviour by surprise.
 function M.budget(model)
   local window = windowlib.for_model(model)
+  if M.active().id=="openai-sub" then
+    window={context=272000,output=128000,source="pi-openai-codex"}
+  end
   local budget = {
     context = window.context,
     source = window.source,
@@ -356,6 +369,12 @@ end
 -- Only public model metadata is read from Pi's local store, never credentials.
 function M.capabilities(model)
   local provider_id = M.active().id
+  if provider_id == "openai-sub" then
+    local levels={low="low",medium="medium",high="high",xhigh="xhigh",max="max"}
+    if model~="gpt-6-astra" then levels.off="none" end
+    return {reasoning=true, levels=levels, compat={}, max_output=128000,
+      source="pi-openai-codex"}
+  end
   local file = host.getenv("WASM_AGENT_PI_MODELS_STORE")
     or (dofile("lua/core/paths.lua").home() .. "/.pi/agent/models-store.json")
   local text = host.read_file(file)
@@ -534,7 +553,8 @@ function M.complete_with(model, messages, tools, stream, opts)
   end
   for key, value in pairs(M.cache_params(opts)) do body[key] = value end
   if stream then body.stream=true; body.stream_options={include_usage=true} end
-  local url = provider.base_url:gsub("/+$", "") .. "/chat/completions"
+  local url = provider.base_url:gsub("/+$", "") ..
+    (provider.id=="openai-sub" and "/codex/responses" or "/chat/completions")
   local headers, attribution = headers_for(provider, opts.session_id)
   local serialized=json.encode(body)
   local audit_started=telemetry.clock()
@@ -557,8 +577,18 @@ function M.complete_with(model, messages, tools, stream, opts)
     context_tokens_estimate=opts.context_tokens or telemetry.estimate_messages(messages)+math.ceil(#json.encode(tools or {})/4),
     estimation="text bytes/4 + 1200 per image estimate; provider usage is authoritative",
     runtime=telemetry.runtime(),context=opts.context}
+  if provider.id=="openai-sub" then
+    request_meta.transport="pi-openai-codex-responses"
+    request_meta.request_hash_source="bridge input; Pi assembles the provider wire request"
+  end
   local span=telemetry.start(opts,opts.kind or "model_call",request_meta)
   local ok,result=pcall(function()
+  if provider.id=="openai-sub" then
+    local bridge_opts={}
+    for key,value in pairs(opts) do bridge_opts[key]=value end
+    bridge_opts.max_output=effective.output_limit
+    return subscription.complete(body.model,messages,tools,stream,bridge_opts,effective.reasoning)
+  end
   if stream then
     local result = json.decode(host.http_stream("POST", url, json.encode(headers), serialized))
     if result.error then error(redact.text("provider_error: " .. tostring(result.error))) end

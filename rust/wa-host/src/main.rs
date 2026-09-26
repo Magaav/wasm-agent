@@ -51,6 +51,8 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/merge.lua", include_str!("../../../lua/core/merge.lua")),
     ("lua/core/toolchain.lua", include_str!("../../../lua/core/toolchain.lua")),
     ("lua/core/provider.lua", include_str!("../../../lua/core/provider.lua")),
+    ("lua/core/openai_sub.lua", include_str!("../../../lua/core/openai_sub.lua")),
+    ("lua/core/openai_sub_bridge.lua", include_str!("../../../lua/core/openai_sub_bridge.lua")),
     ("lua/core/model_window.lua", include_str!("../../../lua/core/model_window.lua")),
     ("lua/core/changeset.lua", include_str!("../../../lua/core/changeset.lua")),
     ("lua/core/patch_audit.lua", include_str!("../../../lua/core/patch_audit.lua")),

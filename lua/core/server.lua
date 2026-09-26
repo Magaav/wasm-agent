@@ -971,7 +971,8 @@ function wa_model(node, session, chat_session)
       label = item.label,
       base_url = item.base_url,
       default_model = item.default_model,
-      configured = item.base_url ~= "" and item.api_key ~= "",
+      configured = item.auth=="subscription" and item.configured or (item.base_url ~= "" and item.api_key ~= ""),
+      auth = item.auth,
       models = provider.list_models(item.id),
     }
   end

@@ -1903,7 +1903,8 @@ function renderProviders() {
   for (const provider of settings.providers || []) {
     const option = document.createElement("option");
     option.value = provider.id;
-    option.textContent = provider.configured ? provider.label : provider.label + " (no key)";
+    option.textContent = provider.configured ? provider.label : provider.label +
+      (provider.auth === "subscription" ? " (login in Pi)" : " (no key)");
     if (provider.id === settings.provider) option.selected = true;
     providerSelect.append(option);
   }

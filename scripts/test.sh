@@ -1351,6 +1351,7 @@ node scripts/test-execution-terminology.cjs
 # as nothing checked it. The rule is the window's list against the REPL's, plus the one sentence that
 # is deliberately written twice (the `/merge` brief).
 node scripts/test-command-parity.cjs
+node scripts/test-openai-sub.cjs
 node scripts/test-auth-sessions.cjs "$BIN"
 node scripts/test-fixture-verdict.cjs
 node scripts/test-suite-verdict.cjs
