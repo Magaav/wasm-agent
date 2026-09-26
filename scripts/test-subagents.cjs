@@ -185,7 +185,8 @@ function check(value, label) { assert.ok(value, label); checks++; }
       .map((id) => path.join(subagentsRoot, id, 'record.json'))
       .filter((file) => fs.existsSync(file))
       .map((file) => JSON.parse(fs.readFileSync(file, 'utf8')))
-      .find((record) => record.state === 'completed' && record.result && record.result.reply);
+      .find((record) => record.state === 'completed' && record.result
+        && String(record.result.reply).includes('child-answer'));
     check(completed && String(completed.result.reply).includes('child-answer'), 'a completed child record must keep its result');
     console.log(`subagents integration ok (${checks} checks; local mock model, no paid inference)\nevidence: ${root}`);
   } catch (error) {
