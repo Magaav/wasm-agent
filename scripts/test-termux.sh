@@ -21,7 +21,7 @@ EOF
 chmod +x "$prefix/bin/rg"
 printf 'WASM_AGENT_LLM_API_KEY=preserved-key\n' > "$work/home/.wasm-agent/env"
 
-export PREFIX="$prefix" HOME="$work/home" PATH="$prefix/bin:$PATH"
+export PREFIX="$prefix" HOME="$work/home" WASM_AGENT_HOME="$work/home" PATH="$prefix/bin:$PATH"
 help=$($install/bin/wa help)
 [[ "$help" == *'wa setup'* ]]
 delegated=$($install/bin/wa status one)
