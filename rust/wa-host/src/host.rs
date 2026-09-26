@@ -125,7 +125,7 @@ pub extern "C" fn paths(l: *mut LuaState) -> c_int {
 /// command" and the model, which cannot see the difference, tried variants of the
 /// same idea until its budget was gone. That was mistaken for the model being bad
 /// at tool calls; it was answering in the wrong language.
-fn executable_on_path(name: &str) -> Option<String> {
+pub(crate) fn executable_on_path(name: &str) -> Option<String> {
     let path = std::env::var("PATH").ok()?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(name);
