@@ -18,6 +18,7 @@ use std::{
 };
 
 const CLEANUP_MS: u64 = 1000;
+pub const COMMAND_OUTPUT_IDLE_MS: u64 = 100;
 const VIEW_BYTES: usize = 24 * 1024;
 const MAX_ACTIVE: usize = 8;
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -34,8 +35,6 @@ pub struct Spec {
     /// operation instead of failing. Off by default: a deliberately started operation is
     /// already background, and only the `bash` tool wants this.
     pub promote_descendants: bool,
-    /// The deadline an adopted tree gets, in place of the foreground timeout.
-    pub promoted_timeout: Duration,
 }
 impl Spec {
     pub fn command(program: impl Into<String>, args: Vec<String>) -> Self {
@@ -48,7 +47,6 @@ impl Spec {
             output_limit: 8 * 1024 * 1024,
             owner: String::new(),
             promote_descendants: false,
-            promoted_timeout: Duration::from_secs(3600),
         }
     }
 }
@@ -280,7 +278,9 @@ impl Manager {
             let elapsed = entry.started.elapsed();
             if state["settled"] != true {
                 state["elapsed_ms"] = json!(elapsed.as_millis() as u64);
-                state["remaining_ms"] = json!(entry.deadline_ms.load(Ordering::Acquire)
+                state["remaining_ms"] = json!(entry
+                    .deadline_ms
+                    .load(Ordering::Acquire)
                     .saturating_sub(elapsed.as_millis() as u64));
                 state["shell_exited"] = json!(state["process_exit_code"].is_number());
                 state["waiting_for"] = json!(if state["state"] == "draining" {
@@ -290,8 +290,12 @@ impl Manager {
                 } else {
                     "command"
                 });
-                if let Some(last) = state["last_output_elapsed_ms"].as_u64() {
-                    state["output_idle_ms"] = json!((elapsed.as_millis() as u64).saturating_sub(last));
+                if let Some(process_exit) = state["process_exit_elapsed_ms"].as_u64() {
+                    let last = state["post_exit_last_output_elapsed_ms"]
+                        .as_u64()
+                        .unwrap_or(process_exit);
+                    state["output_idle_ms"] =
+                        json!((elapsed.as_millis() as u64).saturating_sub(last));
                 }
             }
             state["overdue"] = json!(
@@ -420,6 +424,7 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
     let mut parent_exit = None;
     // Set once when a foreground shell's descendants are adopted rather than failed.
     let mut promoted = false;
+    let mut execution_recorded = false;
     let mut buffer = [0u8; 8192];
     loop {
         // Bounded work per iteration: a noisy child cannot starve cancellation or its deadline.
@@ -447,8 +452,12 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
                         files[index].write_all(&clean)?;
                         tail(&mut views[index], &clean);
                         bytes += keep;
-                        entry.state.lock().unwrap()["last_output_elapsed_ms"] =
-                            json!(entry.started.elapsed().as_millis() as u64);
+                        let output_at = entry.started.elapsed().as_millis() as u64;
+                        let mut state = entry.state.lock().unwrap();
+                        state["last_output_elapsed_ms"] = json!(output_at);
+                        if code.is_some() {
+                            state["post_exit_last_output_elapsed_ms"] = json!(output_at);
+                        }
                         if keep < n {
                             reason.get_or_insert("output_limit_exceeded".to_string());
                             break;
@@ -467,6 +476,9 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
             code = process.code()?;
             if code.is_some() {
                 parent_exit = Some(Instant::now());
+                let mut state = entry.state.lock().unwrap();
+                state["process_exit_elapsed_ms"] =
+                    json!(entry.started.elapsed().as_millis() as u64);
             }
         }
         if stopped.is_none() {
@@ -487,9 +499,23 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
             let exited = code.is_some()
                 && ((!descendants && eof.iter().all(|v| *v))
                     || parent_exit.unwrap().elapsed() >= Duration::from_millis(50));
-            if exited || reason.is_some() {
-                phase(entry, "execution_ms", execution_started.elapsed());
-                drain_started = Some(Instant::now());
+            if promoted && stopped.is_none() && reason.is_none() {
+                // Do not restart the completion path on every supervisor poll. The command
+                // has already exited; only output, descendants, cancellation and its original
+                // deadline remain relevant.
+                if eof.iter().all(|v| *v) && !process.descendants()? {
+                    cleanup = Some("self_exited");
+                    stopped = Some(Instant::now());
+                    entry.state.lock().unwrap()["state"] = json!("draining");
+                }
+            } else if exited || reason.is_some() {
+                if !execution_recorded {
+                    phase(entry, "execution_ms", execution_started.elapsed());
+                    execution_recorded = true;
+                }
+                if drain_started.is_none() {
+                    drain_started = Some(Instant::now());
+                }
                 // A shell that exits leaving live descendants is normally a failure: the result
                 // would no longer be the whole story of what the command did. When the caller
                 // asked to promote instead, the descendants are *adopted* - the job object still
@@ -499,14 +525,10 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
                 if descendants && spec.promote_descendants && reason.is_none() {
                     if !promoted {
                         promoted = true;
-                        entry.deadline_ms.store(
-                            spec.promoted_timeout.as_millis() as u64,
-                            Ordering::Release,
-                        );
                         let mut state = entry.state.lock().unwrap();
                         state["promoted"] = json!(true);
                         state["state"] = json!("running");
-                        state["timeout_ms"] = json!(spec.promoted_timeout.as_millis() as u64);
+                        state["command_completed"] = json!(true);
                     }
                 } else if promoted && reason.is_none() {
                     // The adopted tree ended on its own. Nothing was terminated, so do not
@@ -539,6 +561,7 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
             let mut state = entry.state.lock().unwrap();
             state["output_bytes"] = json!(bytes);
             state["process_exit_code"] = json!(code);
+            state["output_streams_closed"] = json!(eof.iter().all(|v| *v));
         }
         if let Some(at) = stopped {
             // Windows can observe its contained tree. POSIX groups only prove signal delivery;

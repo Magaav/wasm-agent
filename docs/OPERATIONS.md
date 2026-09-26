@@ -9,11 +9,17 @@ See [JOBS.md](JOBS.md) and ARCHITECTURE.md section 6.
 
 `rust/wa-operation` owns shell process lifetime and output independently of Lua.
 `rust/wa-host/src/operations.rs` is the adapter; agent policy remains in Lua.
-The existing `bash`/`host.exec` interface waits for an operation, bounded by the
-default budget or a per-call `timeout_seconds` (1-86400, the same range as
+The existing `bash`/`host.exec` interface waits for the shell command, bounded by
+the default budget or a per-call `timeout_seconds` (1-86400, the same range as
 `operation start`); the `bash` description carries the default and the knob, so a
-long command is planned rather than discovered by a kill. The `operation` tool
-exposes start/list/status/read/wait/await/cancel for explicit long-lived work.
+long command is planned rather than discovered by a kill. If the shell exits with
+descendants remaining, `bash` returns the command result once both output streams
+close or have been idle for 100 ms. Output activity resets that idle grace. The
+operation remains supervised and retains later output; the command result does not
+claim descendant work is complete. Adoption keeps the original command deadline.
+Use `operation await` with `wait_for=settled` when task completion depends on the
+complete process tree. An explicit `operation start` always has full settlement as
+its default wait target.
 Native waits use a settlement condition variable. `await` waits in one model tool
 call under the operation's existing execution/cleanup budget, maintaining host
 heartbeats and returning terminal evidence or an explicit overdue/unknown outcome.
@@ -21,23 +27,29 @@ It never launches/replays work or injects a synthetic conversation message. The
 independent HTTP route refuses long `await`; bounded `wait` and cancellation remain
 available there.
 `wait` is bounded to ten seconds; a still-running result is not failure and is
-never permission to launch the command again. `start` returns a launch receipt,
-not execution success. Default execution budget is 300 seconds; explicit
+never permission to launch the command again. `await` defaults to command completion
+for a foreground-adopted tree and returns `command_completed`, `command_code`, and
+`operation_settled=false`; use `wait_for=settled` to await full tree settlement.
+`start` returns a launch receipt, not execution success. Default execution budget is 300 seconds; explicit
 operations may request 1–86400 seconds. Eight operations may be active per manager.
 
 State: accepted → running → draining → completed / failed / cancelled.
 Live snapshots expose `shell_exited`, `process_exit_code`, `waiting_for`
 (`command`, `descendants`, or `output_and_cleanup`), and the remaining execution
-budget in `remaining_ms`. After captured output, `output_idle_ms` reports how
-long neither stream has produced bytes; silence is not proof of a stalled process.
+budget in `remaining_ms`. After shell exit, `output_idle_ms` reports how long both
+streams have been idle; output activity resets it. Silence while the command is
+running is not proof of completion.
 These observations do not infer a test verdict from output. An adopted command
 can exit successfully and print ALL PASS while its operation remains unsettled.
-Inspect status and output before choosing `await`, which may wait through the
-adoption deadline; cancel means terminate remaining owned work, never detach it.
+The command result and descendant settlement are separate facts; use the former
+for the foreground shell outcome and the latter only when the task requires the
+remaining processes. Cancel means terminate remaining owned work, never detach it.
 Settled results include monotonic phase timing (`timing.schema_version=1`): exclusive
 setup, accepted-record persistence, process spawn, execution, drain/cleanup and
 output-sync milliseconds, plus measured/unattributed/total time. `execution_ms`
-is child lifetime after spawn until settlement begins; it is not CPU time. The
+is child lifetime after spawn until command exit or deadline cleanup begins; it is
+not CPU time. For an adopted tree, later descendant lifetime is included in
+`drain_cleanup_ms`, separately from command execution. The
 final atomic state record is explicitly excluded because its duration cannot be
 written into itself. For synchronous `bash`, the agent copies this object into
 aggregate telemetry and removes it from the model-facing tool result; the audit

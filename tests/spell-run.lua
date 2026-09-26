@@ -32,6 +32,19 @@ local passed, failure, result = spells.run_step({ kind = "run", script = "stub",
 ok(passed == true, "a run step with matching expectations must pass, got " .. tostring(failure))
 ok(type(result) == "table" and result.sent == 2, "the step must hand back its decoded result")
 
+-- A foreground command result can complete its deterministic step while adopted
+-- descendants remain supervised. The spell's required postconditions still settle
+-- the effect before the spell itself reports success.
+stub_exec({ code = 0, command_code = 0, command_completed = true, promoted = true,
+  settled = false, ok = true, stdout = '{"status":"ok"}' })
+local adopted_pass, adopted_failure = spells.run_step({ kind = "run", script = "stub" })
+ok(adopted_pass == true,
+  "a completed foreground command is usable by a spell with postconditions: " .. tostring(adopted_failure))
+stub_exec({ code = 0, promoted = true, settled = false, ok = true, stdout = '{"status":"ok"}' })
+local _, incomplete_command = spells.run_step({ kind = "run", script = "stub" })
+ok(incomplete_command == "run_step_unsettled",
+  "an adopted launch receipt without command completion is not spell evidence")
+
 -- No expectations is legal: the exit code and the JSON object are the contract, not the fields.
 stub_exec(wrapper(0, '{"anything":true}'))
 ok(spells.run_step({ kind = "run", script = "stub" }) == true, "a run step needs no expect")

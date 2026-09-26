@@ -11,7 +11,7 @@ local started=host.monotonic_ms()
 local stuck=json.decode(host.exec("printf before; sleep 30 & wait"))
 local took=host.monotonic_ms()-started
 ok(took < host.exec_timeout()*1000+1800, "deadline and one explicit cleanup budget bound the whole operation")
-ok(stuck.ok==false and stuck.code~=0, "timeout is failure")
+ok(stuck.ok==false and stuck.code~=0, "timeout is failure: " .. json.encode(stuck))
 ok(stuck.error=="deadline_exceeded", "typed timeout reason")
 ok(stuck.stdout=="before", "partial output survives cancellation")
 ok(stuck.output_complete==true, "both pipes actually drained after termination")
@@ -50,6 +50,11 @@ ok(bg.promoted==true and bg.ok==true, "a backgrounded descendant is adopted, not
 ok(bg.settled==false and bg.output_complete==false, "an adopted tree is running, not finished")
 ok(tostring(bg.operation_id):find("^op%-")~=nil, "the receipt names the adopted operation")
 ok(tostring(bg.stdout):find("started",1,true), "background case keeps its printed output")
+local failed_bg=json.decode(host.exec("sleep 60 & exit 7"))
+ok(failed_bg.promoted==true and failed_bg.command_completed==true and
+   failed_bg.command_code==7 and failed_bg.ok==false,
+  "an adopted command preserves its nonzero shell exit status")
+json.decode(host.operation("cancel",json.encode({id=failed_bg.operation_id})))
 -- Adoption is not abandonment: it is a real operation, readable and cancellable.
 local adopted_read=json.decode(host.operation("read",json.encode({id=bg.operation_id,stream="stdout",offset=0,limit=4096})))
 ok(tostring(adopted_read.content):find("started",1,true), "the adopted operation's output is readable")
@@ -71,19 +76,20 @@ local tools=dofile("lua/core/tools.lua")
 local memory=dofile("lua/core/memory.lua");memory.setup()
 local restricted=tools.dispatch(memory,"bash",{command="sleep 60 & echo started"},"master",
   {subagent={allowed={read=true,bash=true}}})
-ok(restricted.promoted==true, "a caller without `operation` still gets the adoption")
+ok(restricted.promoted==true and restricted.command_completed==true and restricted.command_code==0,
+  "a caller without `operation` receives the completed shell result while adoption continues")
 ok(not tostring(restricted.note):find("operation read",1,true),
   "but is not told to use a tool its profile does not allow")
 ok(tostring(restricted.note):find(tostring(restricted.operation_id),1,true)~=nil,
   "and the note still names the operation it was handed")
 local allowed=tools.dispatch(memory,"bash",{command="sleep 60 & echo started"},"master",
   {subagent={allowed={read=true,bash=true,operation=true}}})
-ok(allowed.promoted==true and tostring(allowed.note):find("operation read",1,true)~=nil,
-  "a caller that does allow `operation` is told to use it")
+ok(allowed.promoted==true and tostring(allowed.note):find("wait_for=settled",1,true)~=nil,
+  "a caller that allows `operation` gets full settlement only when the task needs it")
 json.decode(host.operation("cancel",json.encode({id=allowed.operation_id})))
 ok(tostring(allowed.note):find("Do not rerun",1,true)~=nil and
-  tostring(allowed.note):find("before choosing await",1,true)~=nil,
-  "adoption guidance prevents blind replay and premature long waits")
+  tostring(allowed.note):find("Do not await just to confirm shell exit",1,true)~=nil,
+  "adoption guidance prevents blind replay and unnecessary waits")
 local hello=json.decode(host.exec("echo hello"))
 ok(hello.ok and hello.code==0 and hello.stdout:find("hello",1,true), "normal command succeeds")
 local slow=json.decode(host.exec("sleep 1; echo done"))

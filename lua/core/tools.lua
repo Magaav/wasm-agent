@@ -118,15 +118,16 @@ M.admin = {
     id = { type = "string" } }, { "id" }),
   -- The dialect is in the description because the model otherwise assumes POSIX
   -- and wastes its tool budget on commands this machine does not have.
-  schema("bash", "Run a foreground command on this machine using " .. platform.shell() .. ". It is killed at " .. exec_deadline_seconds() .. "s unless timeout_seconds says otherwise (1-86400); pass a larger timeout_seconds for anything that may outlast that - a build, the full test gate. If the command leaves a process running (a trailing `&`, or `nohup`), that process is adopted as a supervised operation and the call returns its operation id instead of a result: read it with operation read, stop it with operation cancel. Its entire process tree is owned either way, so nothing can outlive this node. Output and process exit are separate evidence.", {
+  schema("bash", "Run a foreground command on this machine using " .. platform.shell() .. ". It is killed at " .. exec_deadline_seconds() .. "s unless timeout_seconds says otherwise (1-86400); pass a larger timeout_seconds for anything that may outlast that - a build, the full test gate. The shell command result returns when the shell exits and captured output ends or is idle for 100ms. If descendants remain, they stay supervised as an operation under the original timeout; the result names the operation and says output may continue. The command exit code is its result, not proof that descendant work is done. Do not await just to confirm shell exit; observe or await the operation only when the task depends on background work. For deliberate long-lived work, use operation start with an explicit timeout and collect its full settlement.", {
     command = { type = "string" }, cwd = { type = "string" },
     timeout_seconds = { type = "integer", minimum = 1, maximum = 86400, description = "Kill the command after this many seconds. Defaults to the node's foreground deadline (" .. exec_deadline_seconds() .. "s); raise it for a build or a full test gate, lower it to fail fast." } }, { "command" }),
-  schema("operation", "Start, observe, read streamed output, wait briefly for, or cancel a supervised external operation. A launch receipt is not completion. Output read uses byte cursors; when text_lossy is true, decode content_base64 for exact bytes instead of concatenating content. Use await once to wait for settlement without repeated model polling (up to the operation deadline); wait is a short peek. Jobs are automation rules, not operations. No automatic replay after an unknown outcome.", {
+  schema("operation", "Start, observe, read streamed output, wait briefly for, or cancel a supervised external operation. A launch receipt is not completion. Output read uses byte cursors; when text_lossy is true, decode content_base64 for exact bytes instead of concatenating content. `await` on work adopted by foreground bash defaults to the shell command result after output reaches EOF or is idle for 100ms; descendants remain supervised and may still produce output. Set wait_for=`settled` to await their full operation. Explicitly started operations always await full settlement. Jobs are automation rules, not operations. No automatic replay after an unknown outcome.", {
     action = { type = "string", enum = {"start", "list", "status", "read", "wait", "await", "cancel"} },
     id = { type = "string" }, command = { type = "string" }, cwd = { type = "string" },
     timeout_seconds = { type = "integer", minimum = 1, maximum = 86400 },
     stream = { type = "string", enum = {"stdout", "stderr"} }, offset = { type = "integer", minimum = 0 },
-    limit = { type = "integer", minimum = 1, maximum = 24576 }, wait_ms = { type = "integer", minimum = 0, maximum = 10000 }
+    limit = { type = "integer", minimum = 1, maximum = 24576 }, wait_ms = { type = "integer", minimum = 0, maximum = 10000 },
+    wait_for = { type = "string", enum = {"command", "settled"}, description = "await only: foreground adoption defaults to command completion; settled waits for the complete owned process tree." }
   }, {"action"}),
   schema("read", "Read a PNG, JPEG, WebP or GIF up to 4 MB as visual input, or read exact text with versioned line/byte-column continuation. Image type is detected from its bytes; ranges apply only to text. For text, ask for the range you need rather than a whole file, and follow next_offset/next_column with version until eof. A whole-line page also carries `selection`, its opaque edit address, and `edit_lines`, the inclusive line frame an edit inside it may name - so a line range is copied rather than counted.", {
     path = { type = "string" },
@@ -617,16 +618,15 @@ function M.dispatch(memory, name, args, role, ctx)
       local allowed = ctx.subagent and ctx.subagent.allowed or nil
       local id = tostring(result.operation_id or "")
       if allowed == nil or allowed["operation"] == true then
-        result.note = "the shell exited leaving live processes; they are adopted as operation " .. id ..
-          " and keep running. Shell exit code: " .. tostring(result.process_exit_code) ..
-          ". Output reporting ALL PASS is test evidence, not process-tree completion. " ..
-          "Inspect operation status and operation read before choosing await; await can wait until the adoption deadline. " ..
-          "Cancel only when you intend to terminate the remaining work. Do not rerun the command."
+        result.note = "The shell command completed with exit code " .. tostring(result.command_code or result.process_exit_code) ..
+          ". Its command result is complete; descendants remain supervised as operation " .. id ..
+          " under the original timeout and may produce more output. Do not await just to confirm shell exit. " ..
+          "Read or await wait_for=settled only if the task depends on background work. Cancel only when you intend to terminate it. Do not rerun the command."
       else
-        result.note = "the shell exited leaving live processes; they are adopted as operation " .. id ..
-          " and keep running. This profile does not allow the `operation` tool, so you cannot read or " ..
-          "cancel it from here: it ends at its own deadline, or when the node exits. Start long-lived " ..
-          "work from a profile that allows `operation` when you need to watch or stop it."
+        result.note = "The shell command completed with exit code " .. tostring(result.command_code or result.process_exit_code) ..
+          ". Descendants remain supervised as operation " .. id .. " under the original timeout and may produce more output. " ..
+          "This profile does not allow the `operation` tool, so background work cannot be inspected or canceled here. " ..
+          "The shell result is complete; do not rerun it."
       end
     end
     return result
