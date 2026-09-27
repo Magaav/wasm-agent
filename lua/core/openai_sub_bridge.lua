@@ -82,10 +82,17 @@ try {
   if (!model) throw new Error('Model is absent from Pi catalog; update Pi: ' + request.model);
   const zeroUsage = { input:0, output:0, cacheRead:0, cacheWrite:0, totalTokens:0,
     cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0} };
+  const responseMessageId = id => {
+    // Responses input message ids must use the provider's `msg` namespace. The
+    // durable wasm-agent id is still useful for stability, but its `wa_` prefix
+    // is not a valid Responses message id.
+    const value = String(id || 'message').replace(/[^a-zA-Z0-9_-]/g, '_');
+    return `msg_${value}`.slice(0,64);
+  };
   const textParts = (content, phase, id) => {
     // Pi's Responses adapter reads this signature to round-trip message phase.
     const textPart = text => ({type:'text', text,
-      ...(phase ? {textSignature:JSON.stringify({v:1, id:`wa_${id || 'message'}`.slice(0,64), phase})} : {})});
+      ...(phase ? {textSignature:JSON.stringify({v:1, id:responseMessageId(id), phase})} : {})});
     if (typeof content === 'string') return [textPart(content)];
     return (content || []).map(part => {
       if (part.type === 'text') return textPart(part.text);

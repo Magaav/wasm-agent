@@ -47,6 +47,12 @@ try {
           assert.equal(context.messages[0].content[1].mimeType,'image/png');
           assert.equal(context.messages[1].content[0].arguments.tag,'luna');
           assert.equal(context.messages[2].toolName,'lookup_marker');
+          const phased = context.messages.find(message => message.role === 'assistant' &&
+            message.content.some(part => part.type === 'text' && part.text === 'phase fixture'));
+          assert.ok(phased, 'phase-aware assistant message must reach Pi');
+          const phaseText = phased.content.find(part => part.type === 'text' && part.text === 'phase fixture');
+          assert.match(JSON.parse(phaseText.textSignature).id, /^msg_/,
+            'phase replay must use a Responses message id');
           assert.equal(context.tools[0].name,'lookup_marker');
           return {
             async *[Symbol.asyncIterator]() {
@@ -83,7 +89,8 @@ try {
     messages:[{role:'system',content:'fixture system'},
       {role:'user',content:[{type:'text',text:'hello'},{type:'image_url',image_url:{url:'data:image/png;base64,AA=='}}]},
       {role:'assistant',content:'',tool_calls:[{id:'call-1',function:{name:'lookup_marker',arguments:'{"tag":"luna"}'}}]},
-      {role:'tool',tool_call_id:'call-1',content:'marker'}]};
+      {role:'tool',tool_call_id:'call-1',content:'marker'},
+      {role:'assistant',id:'wa_fixture-message',phase:'final_answer',content:'phase fixture'}]};
   const run = request => {
     const input = put('input.json', JSON.stringify(request));
     const response = spawnSync(process.execPath,[bridge,input],{encoding:'utf8',
