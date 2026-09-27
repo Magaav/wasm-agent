@@ -151,6 +151,12 @@ local captured = artifact.json and json.decode(host.read_file(artifact.json) or 
 check(captured.model == 'test-model' and #captured.messages == 3 and #captured.tools == 1 and
   captured.tool_choice == nil and captured.stream == nil,
   'the JSON has the captured components, without implying per-call options are present')
+report.artifact = artifact
+local rendered_artifact = efficiency.render(report)
+check(rendered_artifact:find('context/tool snapshot', 1, true) and
+  rendered_artifact:find('not exact request bytes', 1, true) and
+  not rendered_artifact:find('the exact bytes sent', 1, true),
+  'the report heading must not call a partial snapshot exact sent bytes')
 
 local reconstructed = session('efficiency-reconstructed')
 local preview = efficiency.dump_prefix({ model = 'test-model', tool_list = {},

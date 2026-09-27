@@ -3,8 +3,8 @@
 --
 -- Deterministic and read-only with respect to the model. It reads the durable
 -- harness ledger (`harness_events`) and the transcript, computes the report, and
--- (when a caller passes the live agent) writes the exact prefix to a file a human
--- can open. It never calls a provider.
+-- (when a caller passes the live agent) writes a model/messages/tools snapshot
+-- to a file a human can open. It never calls a provider.
 --
 -- The numbers are the provider's own usage where the provider reported it, and
 -- the configured rates (`WASM_AGENT_MODEL_RATES`) where a price is asked for. A
@@ -456,7 +456,7 @@ function M.render(report)
 
   if report.artifact then
     lines[#lines + 1] = ""
-    lines[#lines + 1] = "prefix artifact - the exact bytes sent, to read and diff"
+    lines[#lines + 1] = "context/tool snapshot - inspect the source before comparing; not exact request bytes"
     if report.artifact.error then
       lines[#lines + 1] = "  unavailable: " .. tostring(report.artifact.error)
     else
