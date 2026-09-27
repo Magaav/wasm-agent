@@ -332,9 +332,9 @@ body.drift .drift { display: flex; }
 .engine-name { font-weight: 500; }
 .engine-note { margin-left: auto; color: var(--muted); font-size: 11px; }
 .engine-content { padding: var(--pad); border-top: 1px solid var(--line); max-height: 46vh; overflow-y: auto; }
-.envelope-raw { margin-top: var(--pad); }
-.envelope-raw summary { cursor: pointer; color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px; }
-.envelope-raw pre {
+.request-preview { margin-top: var(--pad); }
+.request-preview summary { cursor: pointer; color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px; }
+.request-preview pre {
   margin: var(--space) 0 0; padding: var(--pad); border: 1px solid var(--line); border-radius: var(--radius-sm);
   background: #0a0c11; color: #c9d1e0; font-size: 11px; line-height: 1.45;
   max-height: 40vh; overflow: auto; white-space: pre;

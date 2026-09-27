@@ -122,7 +122,7 @@ A **mode** is a full-view switch (chat ⇄ engine ⇄ shell ⇄ control).
 
 **Keep concerns apart.** The status balloon diagnoses the *model and harness* (§6).
 Management of the *machine or the fabric*
-(nodes, spells, tools/envelope, jobs, accounts) lives in the **engine** view, reached
+(nodes, spells, tool surface/request preview, jobs, accounts) lives in the **engine** view, reached
 from the engine button in the topbar. Do not mix the two.
 
 - The switch lives in the **topbar**, beside the collapse control — never in the

@@ -651,10 +651,10 @@ function wa_frame(request, session, node)
   return json.encode(control_client(args, user.role, node))
 end
 
--- The exact envelope sent to the model, at full depth. Tiers are NOT included:
--- they duplicate every schema (~9 KB) and `GET /tools` already serves the
--- grouped view for the UI.
-function wa_envelope(session)
+-- Selected provider configuration and advertised tool schemas, NOT a model-call
+-- envelope: there are no messages or per-call options here. Tiers are not included:
+-- they duplicate every schema and `GET /tools` already serves the grouped view.
+function wa_model_configuration_preview(session)
   local user = users.current(session)
   local role = users.normalize(user.role)
   local settings = provider.settings()
@@ -674,7 +674,10 @@ function wa_envelope(session)
   })
 end
 
--- The tool surface (envelope) the current role sees, grouped by tier.
+-- Legacy name for callers of GET /envelope; the shape remains unchanged.
+function wa_envelope(session) return wa_model_configuration_preview(session) end
+
+-- The current role's advertised tool surface, grouped by tier.
 function wa_tools(session)
   local user = users.current(session)
   local role = users.normalize(user.role)

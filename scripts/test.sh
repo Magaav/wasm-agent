@@ -751,6 +751,7 @@ print("gating ok")
 LUA
 WA_SCRIPT="$DB.gating.lua" "$BIN" --db "$DB" | grep "gating ok"
 rm -f "$DB.gating.lua"
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-model-configuration-preview.lua" "$BIN" --db "$DB.preview" | grep 'model request preview ok'
 
 # Every embedded Lua module must at least compile. Without this a typo in a
 # file the test does not exercise (the chat REPL, a spell helper) ships and only

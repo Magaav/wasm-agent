@@ -130,7 +130,7 @@ The profile is a **local, approved** config at `<config>/subagent-profiles/<id>.
 (`schema_version 1`, `id`, `instructions`, `allowed_tools`, `resources`, `limits`). It is where machine
 bindings live, so the artifact stays portable:
 
-- `allowed_tools` is the tool envelope. The runtime registry exposes only these; a tool outside the list
+- `allowed_tools` is the approved tool allow-list, not the entire model-request envelope. The runtime registry exposes only these; a tool outside the list
   is refused even if the registry is wrong.
 - `resources` binds the things the run may touch: the conversation, the self destination, the account,
   the browser endpoint, the send path and whether sending is approved.

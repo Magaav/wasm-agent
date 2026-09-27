@@ -21,11 +21,14 @@ A node is not a computer. A worker thread is not a node, session, or subagent. A
 conversation with its own name is not necessarily a lean child task. A portable job
 artifact is a definition, not authorization to execute it on another node.
 
-Authentication session tokens (including the historical `X-WA-Session` header) are
-credentials, **not conversation identifiers**. The chat body's `thread` identifies a
-conversation. Resolve its owner before admitting work; never substitute the credential
-for the conversation name. Keep the historical header compatible, but describe its
-meaning explicitly wherever it crosses a boundary.
+An **auth-session token** (including the historical `X-WA-Session` header) is a
+credential, **not a conversation identifier**. A **conversation session** owns a
+transcript and runs; the chat body's `thread` names one for routing. `session_id`
+in provider attribution means the conversation session id, not the header value.
+Resolve the conversation's owner before admitting work; never substitute the
+credential for its id. Keep `X-WA-Session` compatible rather than silently
+renaming a wire key. At new internal boundaries say `auth_token` versus
+`conversation_id`; where `session` is a legacy parameter, document which one it is.
 
 ### Local authentication sessions
 

@@ -1221,10 +1221,11 @@ function M:run_body(text, images)
         .. "changed, commit it, and state plainly what is unfinished." }
       self.emit({ type = "status", text = "runaway guard reached - asking the model to wrap up" })
     end
-    -- One round is one step. Announcing it lets the UI close the previous
-    -- step's text and tool topic, so the transcript reads step -> its
-    -- tools -> next step, instead of every tool topic stacked behind one
-    -- growing block of text.
+    -- One loop round is one decision step, not necessarily one provider request:
+    -- response-timeout retries and overflow recovery below can send multiple
+    -- model-call attempts in this step. `round` is the legacy UI event/index;
+    -- announcing it closes the previous step's text and tool topic so the
+    -- transcript reads step -> its tools -> next step.
     -- Proof of life for the node's own watchdog: the interpreter is working, so a
     -- /health check can tell this from a wedged message. Cheap (an atomic store).
     host.beat()
@@ -1325,8 +1326,9 @@ function M:run_body(text, images)
         ms = math.floor((host.now() - llm_started) * 1000), prefix = prefix_fingerprint,
         usage = usage,normalized=normalized,
         tokens = { prompt = prompt, completion = completion, total = total, cached = cached, cost = cost } }
-      -- In debug mode keep the exact request so a failing message can be replayed
-      -- byte for byte (round 1 only: later rounds are derived from tool calls).
+      -- In debug mode retain a model/messages/tools snapshot for the first
+      -- decision step only. The legacy `request` trace key is NOT a complete
+      -- prepared request: per-call options, retry attempts and wire bytes are absent.
       if round == 1 then
         -- Which instructions, if any, this message ran with. A node without the
         -- file is visible here instead of being indistinguishable from one with it.

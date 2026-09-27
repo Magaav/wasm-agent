@@ -5,17 +5,22 @@ Use wasm-agent and Pi normally, then review the next day or two of actual work.
 
 ## What is measured
 
-`harness_events` is an append-only, node-local SQLite ledger. Request, summary,
-tool and whole-turn spans persist a start before the operation and an end after
-it. An unmatched start means running or interrupted—not zero cost. Request
+`harness_events` is an append-only, node-local SQLite ledger. Model-call
+attempts (including summary calls), tool calls and runs persist start/end evidence.
+A decision step may contain multiple model-call attempts when a timeout or context
+overflow is retried; `round` identifies the step, while `attempt` distinguishes
+response-timeout replays. Overflow recovery may rebuild the envelope even within
+that step. An unmatched start means running or interrupted—not zero cost. Request
 events link to the actual user row through `run_id`; final outcome events link
 to the assistant row. Failed requests with no provider usage remain unmeasured.
 
 Each model end stores the raw usage, normalized usage, provider/model, request ID,
 finish reason and elapsed time. Streaming also records first nonempty delta time.
-Starts record sent settings, exact request hash/bytes, system/schema hashes,
-component estimates, context watermark and Lua/native fingerprints. Prompt text,
-authorization headers and tool arguments are not copied into this ledger. Error
+Starts record sent settings, prepared-request hash/bytes, system/schema hashes,
+component estimates, context watermark and Lua/native fingerprints. The subscription
+bridge records a hash of its input; Pi assembles the wire request separately, so
+this is not a hash of provider wire bytes. Prompt text, authorization headers
+and tool arguments are not copied into this ledger. Error
 excerpts are redacted heuristically and may still contain task-sensitive text.
 
 Pi 0.85.1's local source is the behavioral reference:
@@ -139,12 +144,15 @@ rate, and the call cost at the configured rates with the cache share of that cos
 It names the part that did **not** hit the cache: the appended suffix, or the
 prefix break (`rewritten`/`shortened`, a changed tool set, model or routing).
 
-It also writes the exact prefix to `data/efficiency/<session>-prefix.{json,md}`
-and prints `file://` links. The `.md` is the readable one - system prompt whole,
-tools ranked by schema size, transcript as a byte-sized outline; the `.json` is
-the bytes. When the session ran in debug mode the artifact is the last call's
-request; otherwise it is `build_context()`, the deterministic assembly the next
-call will send, and the report says which.
+It also writes a **model/messages/tools snapshot** to
+`data/efficiency/<session>-prefix.{json,md}` (historical filenames retained for
+saved links) and prints `file://` links. The `.md` shows the system prompt, tools
+ranked by schema size and a transcript outline; `.json` holds that snapshot.
+In debug mode it uses the most recent available **first-step** trace capture,
+which may not be the last model call. Otherwise `build_context()` reconstructs
+the context at report time; it is not a promise of the next request. Neither
+source includes per-call options or subscription wire bytes. The report labels
+which source it used. Inspect these files as sensitive prompt material.
 
 The footer gathers the other surfaces (harness events, the graph/patch-audit
 trial report, the offline token audit, the runtime fingerprint, the docs) so one
