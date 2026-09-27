@@ -34,11 +34,14 @@ made while the window was closed took the client away from its own run for the r
 of the run, which is availability lost for a mistake that changed nothing.
 
 An uncertain claim no longer wedges the run that owns it. The owner - same run, same
-principal, same *process* that granted the claim - may clear its own uncertainty with
-`resource{action:"recover"}` (Lua: `resources.recover`), stating the evidence it
-inspected. The client path does this itself before refusing, and its evidence is the
+principal, same *process* that granted the claim - may clear its own uncertainty through
+the host's `recover` action (Lua: `resources.recover`), stating the evidence it
+inspected. The client path calls it itself before refusing, and its evidence is the
 client's own answer to a claim-free `status`: a disconnected or still-busy client is a
-real answer, and it refuses rather than guessing. Recovery is **not** a release: it
+real answer, and it refuses rather than guessing. `recover` is deliberately **not** a
+`resource` tool action: a model may not clear its own uncertainty without an
+observation to show for it, so the one route to it carries evidence by construction.
+Recovery is **not** a release: it
 clears one flag on a claim that stays owned, durable and visible, and the action whose
 answer was lost is never replayed - only a new request proceeds. A different owner, a different process, or a crashed owner still needs the operator's `resource` tool,
 which requires the exact owner/run and inspected evidence. Both paths land in the same
