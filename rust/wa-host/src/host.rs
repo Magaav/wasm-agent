@@ -1801,6 +1801,9 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
     }
     let reader = std::io::BufReader::new(response.into_body().into_reader());
     let mut content = String::new();
+    let mut commentary = String::new();
+    let mut active_phase = String::new();
+    let mut final_phase = String::new();
     // Reasoning models stream their thinking in a sibling field, and endpoints
     // spell it differently. pi reads all three and takes the first non-empty one,
     // which is also what we do - the field is not an answer, but a run that spends
@@ -1872,11 +1875,24 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
             || delta["tool_calls"].as_array().is_some_and(|a| !a.is_empty())) {
             ttft_ms = Some(started.elapsed().as_millis());
         }
+        let phase = delta["phase"].as_str().or_else(|| chunk["choices"][0]["phase"].as_str());
+        if let Some(phase) = phase {
+            active_phase = if matches!(phase, "commentary" | "final_answer") { phase } else { "" }.to_string();
+        }
         if let Some(text) = chunk["choices"][0]["delta"]["content"].as_str() {
             if !text.is_empty() {
-                content.push_str(text);
-                mark_delta("answer", elapsed_ms);
-                crate::serve::write_event(&json!({"type": "delta", "text": text}).to_string());
+                if active_phase == "commentary" {
+                    commentary.push_str(text);
+                    mark_delta("commentary", elapsed_ms);
+                    crate::serve::write_event(
+                        &json!({"type": "commentary_delta", "text": text}).to_string(),
+                    );
+                } else {
+                    content.push_str(text);
+                    if active_phase == "final_answer" { final_phase = active_phase.clone(); }
+                    mark_delta("answer", elapsed_ms);
+                    crate::serve::write_event(&json!({"type": "delta", "text": text}).to_string());
+                }
             }
         }
         for field in ["reasoning_content", "reasoning", "reasoning_text"] {
@@ -1924,7 +1940,8 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
             usage = Some(chunk["usage"].clone());
         }
     }
-    Ok(json!({"status": status, "content": content, "reasoning": reasoning,
+    Ok(json!({"status": status, "content": content, "commentary": commentary,
+        "final_phase": final_phase, "reasoning": reasoning,
         "stream_complete": finish_reason.is_some(), "ttft_ms": ttft_ms, "request_id": request_id,
         "finish_reason": finish_reason, "tool_calls": tool_calls, "usage": usage,
         // Termination telemetry: how it ended, what arrived, and whether it was still talking.
@@ -2411,7 +2428,7 @@ mod stream_tests {
     use super::*;
     use std::io::{Read, Write};
 
-    fn fixture(body: &str) -> Value {
+    fn fixture_with_events(body: &str) -> (Value, String) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let body = body.to_owned();
@@ -2430,9 +2447,16 @@ mod stream_tests {
             let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
             socket.write_all(response.as_bytes()).unwrap();
         });
-        let result = stream_completion("POST", &format!("http://{address}/fixture"), &[], "{}").unwrap();
+        let result = std::cell::RefCell::new(Value::Null);
+        let events = crate::serve::capture_events(|| {
+            *result.borrow_mut() = stream_completion("POST", &format!("http://{address}/fixture"), &[], "{}").unwrap();
+        });
         server.join().unwrap();
-        result
+        (result.into_inner(), events)
+    }
+
+    fn fixture(body: &str) -> Value {
+        fixture_with_events(body).0
     }
 
     #[test]
@@ -2466,6 +2490,29 @@ mod stream_tests {
         assert!(events.contains("\"type\":\"reasoning\""), "no reasoning event in: {events}");
         assert!(events.contains("\"text\":\"thinking\""), "the event must carry the delta: {events}");
         assert!(events.contains("\"chars\":8"), "the event must still carry the count: {events}");
+    }
+
+    #[test]
+    fn commentary_deltas_stream_as_their_own_phase_without_a_duplicate_result_event() {
+        let (result, events) = fixture_with_events(concat!(
+            "data: {\"choices\":[{\"delta\":{\"phase\":\"commentary\",\"content\":\"Thinking \"}}]}\n\n",
+            "data: {\"choices\":[{\"phase\":\"commentary\",\"delta\":{\"content\":\"through it.\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"phase\":\"final_answer\",\"content\":\"The answer.\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"));
+        let parsed: Vec<Value> = events.lines().filter_map(|line| line.strip_prefix("data: "))
+            .map(|line| serde_json::from_str(line).unwrap()).collect();
+        let commentary: Vec<&str> = parsed.iter().filter(|event| event["type"] == "commentary_delta")
+            .map(|event| event["text"].as_str().unwrap()).collect();
+        assert_eq!(commentary.concat(), "Thinking through it.");
+        assert_eq!(result["commentary"], "Thinking through it.");
+        assert_eq!(result["content"], "The answer.");
+        assert_eq!(result["final_phase"], "final_answer");
+        assert_eq!(parsed.iter().filter(|event| event["type"] == "commentary_delta").count(), 2);
+        assert_eq!(parsed.iter().filter(|event| event["type"] == "commentary").count(), 0,
+            "the host streams chunks only; the agent closes the saved block by id");
+        let answers: Vec<&str> = parsed.iter().filter(|event| event["type"] == "delta")
+            .map(|event| event["text"].as_str().unwrap()).collect();
+        assert_eq!(answers.concat(), "The answer.");
     }
 
     #[test]

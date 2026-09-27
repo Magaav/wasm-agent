@@ -66,13 +66,15 @@ function M.limits()
 end
 function M.complete(model, messages, tools, stream, opts, reasoning)
   local stem = paths.temp() .. '/wa-openai-sub-' .. host.uuid()
+  local stream_id = host.uuid()
   local script, input = stem .. '.mjs', stem .. '.json'
   host.write_file(script, dofile('lua/core/openai_sub_bridge.lua'))
   host.write_file(input, json.encode({home=paths.home(), auth_path=M.auth_path(),
-    model=model, messages=messages, tools=tools, session_id=opts.session_id,
+    model=model, messages=messages, tools=tools, session_id=opts.session_id, stream_id=stream_id,
     reasoning=reasoning.selected=='provider' and 'medium' or reasoning.selected=='off' and 'none' or reasoning.selected,
     max_output=opts.max_output}))
   local id, offset, pending, result, failure = nil, 0, '', nil, nil
+  local commentary_ids, commentary_pending_ids = {}, {}
   local ok, problem = pcall(function()
     local launch = operation('start', {program='node',args={script,input},
       timeout_seconds=tonumber(host.getenv('WASM_AGENT_LLM_TIMEOUT')) or 300})
@@ -89,9 +91,23 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
           local ending = pending:find('\n',1,true)
           local event = json.decode(pending:sub(1,ending-1))
           pending = pending:sub(ending+1)
-          if event.type=='result' then result=event.result
+          if event.type=='result' then
+            result=event.result
+            if type(result.commentary) == 'table' then
+              for index, item in ipairs(result.commentary) do
+                local text = type(item) == 'table' and item.content or item
+                result.commentary[index] = {content=text, id=commentary_ids[index],
+                  pending_id=type(item) == 'table' and item.pending_id or commentary_pending_ids[index]}
+              end
+            end
+            result.commentary_streamed = stream and #commentary_ids > 0 or false
           elseif event.type=='error' then failure=event.error
-          elseif stream and (event.type=='delta' or event.type=='reasoning' or event.type=='decision') then
+          elseif stream and (event.type=='delta' or event.type=='pending_delta' or event.type=='reasoning' or event.type=='decision' or event.type=='commentary') then
+            if event.type == 'commentary' then
+              event.message_id = host.uuid()
+              commentary_ids[#commentary_ids + 1] = event.message_id
+              commentary_pending_ids[#commentary_pending_ids + 1] = event.pending_id
+            end
             host.stream(json.encode(event))
           end
         end

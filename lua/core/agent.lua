@@ -599,6 +599,7 @@ function M:build_context()
   local rows = memory.session_messages(self.session_id, {
     after_seq = session.summarized_until or 0, all = true,exclude_summaries=true,
   })
+  local replay_phase = provider.active().id == "openai-sub"
   -- A window that begins with a tool result is missing the tool call it answers
   -- (it was summarised away, or the boundary was cut mid-exchange). Providers
   -- reject an orphan tool result with a 400, so drop leading tool messages until
@@ -615,6 +616,10 @@ function M:build_context()
     elseif row.role == "assistant" then
       started = true
       local message = { role = "assistant", content = row.content or "" }
+      if replay_phase then
+        message.id = row.id
+        if row.phase and row.phase ~= "" then message.phase = row.phase end
+      end
       -- Full text or nothing. `provider.reasoning` documents why a partial replay (a
       -- "window") is a cache-hostile change to a message already sent, not an option.
       if replay_reasoning then message.reasoning_content = row.reasoning or "" end
@@ -833,7 +838,11 @@ function M:maybe_compact(messages, force)
       local ref=tool_output.store(content)
       content=tool_output.slice(content,1,2000).."\n[Tool output excerpt; full_result sha256="..ref.sha256.."; bytes="..#content.."]"
     end
-    transcript[#transcript+1]=string.format("[%s seq=%d]: %s",row.role,row.seq,content)
+    local transcript_role = row.role
+    if row.role == "assistant" and row.phase and row.phase ~= "" then
+      transcript_role = transcript_role .. " " .. row.phase
+    end
+    transcript[#transcript+1]=string.format("[%s seq=%d]: %s",transcript_role,row.seq,content)
     if row.reasoning and row.reasoning~="" then transcript[#transcript+1]="[Assistant thinking]: "..row.reasoning end
     if type(row.tool_calls)=="table" and #row.tool_calls>0 then
       transcript[#transcript+1]="[Assistant tool calls]: "..json.encode(row.tool_calls)
@@ -1049,9 +1058,10 @@ function M:run_body(text, images)
   end
 
   local messages = self:build_context()
+  local replay_phase = provider.active().id == "openai-sub"
   local trace = {}
   local reply = ""
-  local reply_reasoning, completed = "", false
+  local reply_reasoning, reply_phase, reply_message_id, completed = "", "", nil, false
   local totals = { prompt = 0, completion = 0, total = 0, cached = 0 }
   local run_started = host.now()
   -- What this message changes on disk, recorded by write/edit as it goes. It lives on the
@@ -1373,8 +1383,48 @@ function M:run_body(text, images)
       self.emit({ type = "reasoning", text = result.reasoning, round = round, complete = true })
     end
 
+    -- Commentary is a separate assistant message in OpenAI Responses. Keep it
+    -- in the transcript and replay its phase so it is never mistaken for an answer.
+    local commentaries = {}
+    if type(result.commentary) == "string" then
+      if result.commentary ~= "" then commentaries[1] = { content = result.commentary } end
+    elseif type(result.commentary) == "table" then
+      for _, item in ipairs(result.commentary) do
+        local text = type(item) == "string" and item or type(item) == "table" and (item.content or item.text) or ""
+        if type(text) == "string" and text ~= "" then
+          commentaries[#commentaries + 1] = { content = text,
+            id = type(item) == "table" and item.id or nil,
+            pending_id = type(item) == "table" and item.pending_id or nil }
+        end
+      end
+    end
+    for _, item in ipairs(commentaries) do
+      local commentary_id = item.id or host.uuid()
+      record_turn(self, { id = commentary_id, role = "assistant", content = item.content,
+        phase = "commentary", debug = self.debug })
+      local commentary_message = { role = "assistant", content = item.content }
+      if replay_phase then
+        commentary_message.phase = "commentary"
+        commentary_message.id = commentary_id
+      end
+      messages[#messages + 1] = commentary_message
+      if result.commentary_streamed == "delta" then
+        -- The OpenCode-compatible host already streamed the text chunks. Close that
+        -- live block with its durable transcript id instead of sending the text again.
+        self.emit({ type = "commentary_end", message_id = commentary_id, round = round })
+      elseif not result.commentary_streamed then
+        self.emit({ type = "commentary", text = item.content, message_id = commentary_id,
+          pending_id = item.pending_id, round = round })
+      end
+    end
+
     local calls = result.tool_calls or {}
     local assistant = { role = "assistant", content = result.content or "" }
+    reply_phase = result.final_phase or ""
+    if replay_phase and reply_phase ~= "" then assistant.phase = reply_phase end
+    local assistant_id
+    if replay_phase or #calls > 0 then assistant_id = host.uuid() end
+    if replay_phase and assistant_id then assistant.id = assistant_id end
     if provider.reasoning(self.model).replay then assistant.reasoning_content=result.reasoning or "" end
     if result.finish_reason=="length" or result.stream_complete==false then
       local reason=result.stream_complete==false and "incomplete_stream" or "output_limit"
@@ -1385,7 +1435,8 @@ function M:run_body(text, images)
         failed_span.ok=false; failed_span.error=problem; failed_span.finish_reason=result.finish_reason
         failed_span.reasoning_bytes=#(result.reasoning or "")
       end
-      record_turn(self,{role="assistant",content=result.content or "",reasoning=result.reasoning or "",ok=false,trace=trace})
+      record_turn(self,{role="assistant",content=result.content or "",reasoning=result.reasoning or "",
+        phase=result.final_phase or "",ok=false,trace=trace})
       telemetry.event(self.session_id,self.run_id,"","step","end",{outcome=reason})
       error(problem)
     end
@@ -1395,6 +1446,7 @@ function M:run_body(text, images)
     if #calls == 0 then
       reply = result.content or ""
       reply_reasoning = result.reasoning or ""
+      reply_phase = result.final_phase or ""
       -- An empty answer with no tool call is not an answer. A reasoning model that
       -- runs out of output budget before it writes anything returns exactly this,
       -- and this path used to record it as a finished message: the model looked like
@@ -1472,11 +1524,13 @@ function M:run_body(text, images)
         -- The final assistant message is recorded once, after the loop, with the
         -- message's trace. Recording it here as well would duplicate it in context.
         completed=true
+        reply_message_id = assistant_id
         break
       end
     end
     record_turn(self, {
-      role = "assistant", content = result.content or "", tool_calls = calls, debug = self.debug,reasoning=result.reasoning or "",
+      id = assistant_id, role = "assistant", content = result.content or "", tool_calls = calls, debug = self.debug,
+      reasoning=result.reasoning or "", phase=result.final_phase or "",
     })
 
     local dispatch_ctx = { session_id = self.session_id, user_id = self.user, node_id = self.node,
@@ -1628,10 +1682,11 @@ function M:run_body(text, images)
   -- The message id is minted here rather than by append_turn, because the reply event has to
   -- name the message *before* the record exists: the UI's topic carries the id it will ask
   -- about, and append_turn uses the same one so the topic and the ledger agree.
-  local message_id = host.uuid()
+  local message_id = reply_message_id or host.uuid()
   record_turn(self, {
     id = message_id,ok=completed,
-    role = "assistant", content = reply, reasoning=reply_reasoning, trace = trace, tokens = totals.total, debug = self.debug,
+    role = "assistant", content = reply, reasoning=reply_reasoning, phase=reply_phase,
+    trace = trace, tokens = totals.total, debug = self.debug,
     ms = math.floor((host.now() - run_started) * 1000),
     changes = changes,
   })

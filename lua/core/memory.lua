@@ -218,6 +218,10 @@ local function migrate()
   -- reads as no topic rather than an empty one.
   add_column("messages", "changes", "TEXT NOT NULL DEFAULT '{}'")
   add_column("messages", "reasoning", "TEXT NOT NULL DEFAULT ''")
+  -- Assistant message phases are part of the provider transcript contract. In
+  -- particular, OpenAI Responses commentary must replay as commentary rather
+  -- than being mistaken for a completed answer on the next request.
+  add_column("messages", "phase", "TEXT NOT NULL DEFAULT ''")
   -- Rows written before the state was renamed kept the wording of the claim we used to
   -- make: "died after a tool result", "died right after a compaction". Nobody observed
   -- those deaths - a live run was reported as interrupted fourteen times in a row - so
@@ -621,10 +625,10 @@ function M.fork_session(source_id, boundary_seq, user_id)
        source.user_id, source.node_id, title, source.mode or "default", now})
     for seq, row in ipairs(prefix) do
       local new_id = host.uuid()
-      exec("INSERT INTO messages(id,session_id,seq,role,content,images,tool_calls,tool_call_id,tool_name,tokens,ms,ok,debug,trace,changes,created_at,reasoning) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        {new_id,id,seq,row.role,row.content or "",row.images or "[]",row.tool_calls or "[]",row.tool_call_id or "",row.tool_name or "",row.tokens or 0,row.ms or 0,row.ok or 1,row.debug or 0,row.trace or "[]",row.changes or "{}",row.created_at or now,row.reasoning or ""})
+      exec("INSERT INTO messages(id,session_id,seq,role,content,images,tool_calls,tool_call_id,tool_name,tokens,ms,ok,debug,trace,changes,created_at,reasoning,phase) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        {new_id,id,seq,row.role,row.content or "",row.images or "[]",row.tool_calls or "[]",row.tool_call_id or "",row.tool_name or "",row.tokens or 0,row.ms or 0,row.ok or 1,row.debug or 0,row.trace or "[]",row.changes or "{}",row.created_at or now,row.reasoning or "",row.phase or ""})
       exec("INSERT INTO messages_fts(content,session_id,message_id) VALUES(?,?,?)", {row.content or "",id,new_id})
-      M.journal("message", new_id, {id=new_id,session_id=id,seq=seq,role=row.role,content=row.content or "",images=decode(row.images or "[]") or {},tool_calls=decode(row.tool_calls or "[]") or {},tool_call_id=row.tool_call_id or "",tool_name=row.tool_name or "",tokens=row.tokens or 0,ms=row.ms or 0,ok=row.ok or 1,debug=row.debug or 0,trace=decode(row.trace or "[]") or {},changes=decode(row.changes or "{}") or {},reasoning=row.reasoning or "",created_at=row.created_at or now})
+      M.journal("message", new_id, {id=new_id,session_id=id,seq=seq,role=row.role,content=row.content or "",images=decode(row.images or "[]") or {},tool_calls=decode(row.tool_calls or "[]") or {},tool_call_id=row.tool_call_id or "",tool_name=row.tool_name or "",tokens=row.tokens or 0,ms=row.ms or 0,ok=row.ok or 1,debug=row.debug or 0,trace=decode(row.trace or "[]") or {},changes=decode(row.changes or "{}") or {},reasoning=row.reasoning or "",phase=row.phase or "",created_at=row.created_at or now})
     end
     M.journal("session", id, M.session(id))
   end)
@@ -651,7 +655,7 @@ function M.list_sessions(user_id, limit, opts)
   local sql = "SELECT s.*, (SELECT COUNT(*) FROM messages t WHERE t.session_id=s.id) AS message_count"
   if opts.states then
     -- The last turn per session, in the same query: one row per thread, no N+1.
-    sql = sql .. ", l.role AS last_role, l.ok AS last_ok, l.tool_calls AS last_tool_calls, " ..
+    sql = sql .. ", l.role AS last_role, l.ok AS last_ok, l.phase AS last_phase, l.tool_calls AS last_tool_calls, " ..
                 "l.created_at AS last_at, l.seq AS last_seq"
   end
   sql = sql .. " FROM sessions s"
@@ -666,7 +670,7 @@ function M.list_sessions(user_id, limit, opts)
   local rows = query(sql, params)
   if opts.states then
     for _, row in ipairs(rows) do
-      local last = row.last_seq and { role = row.last_role, ok = row.last_ok,
+      local last = row.last_seq and { role = row.last_role, ok = row.last_ok, phase = row.last_phase,
         tool_calls = row.last_tool_calls, created_at = row.last_at } or nil
       row.state = classify(last)
       row.state_detail = detail_of(row.state, last, nil)
@@ -919,13 +923,13 @@ function M.append_turn(session_id, turn)
     local seq = turn.seq or M.next_seq(session_id)
     local id = turn.id or host.uuid()
     exec("INSERT INTO messages(id,session_id,seq,role,content,images,tool_calls,tool_call_id,tool_name," ..
-         "tokens,ms,ok,debug,trace,changes,created_at,reasoning) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+         "tokens,ms,ok,debug,trace,changes,created_at,reasoning,phase) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
          {id, session_id, seq, turn.role or "user", turn.content or "",
           json.encode(turn.images or {}),
           json.encode(turn.tool_calls or {}), turn.tool_call_id or "", turn.tool_name or "",
           turn.tokens or 0, turn.ms or 0, turn.ok == false and 0 or 1,
           turn.debug and 1 or 0, json.encode(turn.trace or {}),
-          json.encode(turn.changes or {}), host.now(), turn.reasoning or ""})
+          json.encode(turn.changes or {}), host.now(), turn.reasoning or "", turn.phase or ""})
     exec("INSERT INTO messages_fts(content,session_id,message_id) VALUES(?,?,?)",
          {turn.content or "", session_id, id})
     exec("UPDATE sessions SET updated_at=? WHERE id=?", {host.now(), session_id})
@@ -936,7 +940,7 @@ function M.append_turn(session_id, turn)
       tokens = turn.tokens or 0, ms = turn.ms or 0,
       ok = turn.ok == false and 0 or 1, debug = turn.debug and 1 or 0,
       trace = turn.trace or {}, created_at = host.now(), reasoning=turn.reasoning or "",
-      changes=turn.changes or {},
+      changes=turn.changes or {}, phase=turn.phase or "",
     })
     -- A thread is named after the first thing asked in it, the way a chat is named after its opening
     -- message. Set once and never rewritten: a name that drifts as the conversation moves is worse
@@ -1066,7 +1070,7 @@ end
 --                errored. That is a landed outcome, not an interruption, and
 --                conflating the two would send a reader looking for lost work
 --                that was never started.
---   unfinished   last message is a question, a tool result, or a step whose tools
+--   unfinished   last message is a question, commentary, a tool result, or a step whose tools
 --                have no recorded result. The process that was working on it may
 --                have stopped, or it may still be working - the ledger cannot tell
 --                those apart, so nothing here claims a death.
@@ -1095,6 +1099,7 @@ function classify(last)
   if not last then return "empty" end
   if last.role == "assistant" then
     if last.ok == 0 or last.ok == false then return "failed" end
+    if last.phase == "commentary" then return "unfinished" end
     if #decode_calls(last.tool_calls) > 0 then return "unfinished" end
     return "answered"
   end
@@ -1123,6 +1128,9 @@ function detail_of(state, last, pending)
   if last.role == "user" then return "an unanswered question, " .. ago(last.created_at) end
   if last.role == "summary" then return "stopped after a compaction, " .. ago(last.created_at) end
   if last.role == "assistant" then
+    if last.phase == "commentary" then
+      return "the assistant sent commentary but no completed answer is recorded, " .. ago(last.created_at)
+    end
     local names = pending
     if names == nil then
       names = {}
@@ -1329,12 +1337,12 @@ function M.apply_entry(entry)
   -- era, not a second vocabulary. See `meta.journal_kind_legacy` for the boundary the migration records.
   if entry.kind == "message" or entry.kind == "turn" then -- naming-check: allow (a pre-rename journal entry)
     exec("INSERT OR REPLACE INTO messages(id,session_id,seq,role,content,tool_calls,tool_call_id," ..
-         "tool_name,tokens,ms,ok,debug,trace,created_at,reasoning,images,changes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+         "tool_name,tokens,ms,ok,debug,trace,created_at,reasoning,images,changes,phase) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
          {payload.id, payload.session_id, payload.seq, payload.role, payload.content or "",
           json.encode(payload.tool_calls or {}), payload.tool_call_id or "", payload.tool_name or "",
           payload.tokens or 0, payload.ms or 0, payload.ok or 1, payload.debug or 0,
           json.encode(payload.trace or {}), payload.created_at or host.now(),payload.reasoning or "",
-          json.encode(payload.images or {}),json.encode(payload.changes or {})})
+          json.encode(payload.images or {}),json.encode(payload.changes or {}),payload.phase or ""})
     exec("DELETE FROM messages_fts WHERE message_id=?", {payload.id})
     exec("INSERT INTO messages_fts(content,session_id,message_id) VALUES(?,?,?)",
          {payload.content or "", payload.session_id, payload.id})

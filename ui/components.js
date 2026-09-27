@@ -613,6 +613,52 @@ class WaReasoning extends HTMLElement {
 }
 customElements.define("wa-reasoning", WaReasoning);
 
+// A Responses API commentary message is user-facing progress, not hidden
+// reasoning and not the completed answer. Keep it as its own readable topic.
+class WaCommentary extends HTMLElement {
+  static get observedAttributes() { return ["open"]; }
+  connectedCallback() { this._build(); }
+
+  _build() {
+    if (this._body) return;
+    const parts = topicParts(this, {
+      className: "commentary", glyph: "\u2726", label: "commentary", bodyClass: "commentary-body",
+    });
+    this._header = parts.header;
+    this._label = parts.label;
+    this._meta = parts.meta;
+    this._chevron = parts.chevron;
+    this._body = parts.body;
+    this.append(this._header, this._body);
+    this._sync();
+  }
+
+  get open() { return this.hasAttribute("open"); }
+  set open(value) {
+    if (value) this.setAttribute("open", "");
+    else this.removeAttribute("open");
+  }
+
+  attributeChangedCallback() { this._build(); this._sync(); }
+
+  _sync() {
+    if (!this._body) return;
+    this._body.hidden = !this.open;
+    this._header.setAttribute("aria-expanded", String(this.open));
+    topicChevron(this._chevron, this.open);
+  }
+
+  toggle() { this.open = !this.open; }
+
+  setText(text) {
+    this._build();
+    const raw = String(text || "");
+    this._body.textContent = raw.replace(/\s+$/, "");
+    this._meta.textContent = raw.length + " chars";
+  }
+}
+customElements.define("wa-commentary", WaCommentary);
+
 // <wa-tool> — a tool-activity chip. `name` sets the label; `.detail` is writable.
 class WaTool extends HTMLElement {
   connectedCallback() {

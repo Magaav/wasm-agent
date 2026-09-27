@@ -33,8 +33,10 @@ thread from talking locally, and a guest's threads are their own. `ensure_sessio
 reuses the newest open session for that pair, so a restart continues the thread
 instead of starting a new one.
 
-`messages` holds `seq, role (user|assistant|tool|summary), content, tool_calls,
-tool_call_id, tool_name, tokens, ms, ok, debug, trace`. **The transcript is the
+`messages` holds `seq, role (user|assistant|tool|summary), content, phase,
+tool_calls, tool_call_id, tool_name, tokens, ms, ok, debug, trace`. Assistant
+`phase` preserves provider message roles such as OpenAI Responses `commentary`
+and `final_answer`; commentary alone is not a settled answer. **The transcript is the
 context**: `agent.lua` rebuilds the provider messages from it every turn
 (system + AGENTS.md + summary + messages after the watermark). There is no separate
 in-memory message list, which is what makes restarts resumable.
@@ -63,7 +65,7 @@ proceeds. The last turn is an exact record of how far the process got:
 | `empty` | none | nothing said yet |
 | `answered` | assistant reply | the thread is settled |
 | `failed` | assistant with `ok=0` | the model call errored — a **landed** outcome, not an unfinished one |
-| `unfinished` | user, tool, or assistant with `tool_calls` | no answer is recorded after this turn; the process may have stopped or may still be working |
+| `unfinished` | user, tool, assistant commentary, or assistant with `tool_calls` | no completed answer is recorded after this turn; the process may have stopped or may still be working |
 
 `memory.session_state(id)` returns that, plus where it stopped and which calls of the
 last step have no recorded result: "1 of 2 never reported" is a different fact

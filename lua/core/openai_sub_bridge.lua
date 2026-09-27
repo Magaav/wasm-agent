@@ -82,10 +82,13 @@ try {
   if (!model) throw new Error('Model is absent from Pi catalog; update Pi: ' + request.model);
   const zeroUsage = { input:0, output:0, cacheRead:0, cacheWrite:0, totalTokens:0,
     cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0} };
-  const textParts = content => {
-    if (typeof content === 'string') return [{type:'text', text:content}];
+  const textParts = (content, phase, id) => {
+    // Pi's Responses adapter reads this signature to round-trip message phase.
+    const textPart = text => ({type:'text', text,
+      ...(phase ? {textSignature:JSON.stringify({v:1, id:`wa_${id || 'message'}`.slice(0,64), phase})} : {})});
+    if (typeof content === 'string') return [textPart(content)];
     return (content || []).map(part => {
-      if (part.type === 'text') return {type:'text', text:part.text};
+      if (part.type === 'text') return textPart(part.text);
       const url = part.image_url?.url;
       const match = typeof url === 'string' && url.match(/^data:([^;]+);base64,(.*)$/s);
       if (!match) throw new Error('Unsupported subscription image part');
@@ -98,7 +101,7 @@ try {
   for (const message of request.messages) {
     if (message.role === 'system') { system.push(message.content); continue; }
     if (message.role === 'assistant') {
-      const content = message.content ? textParts(message.content) : [];
+      const content = message.content ? textParts(message.content, message.phase, message.id) : [];
       for (const call of message.tool_calls || []) {
         toolNames.set(call.id, call.function.name);
         content.push({type:'toolCall', id:call.id, name:call.function.name,
@@ -120,6 +123,7 @@ try {
   const started = Date.now();
   let ttft;
   let reasoningText = '';
+  const streamedFinalText = new Set();
   const toolDecisions = new Map();
   const partialToolCall = event => event.partial?.content?.[event.contentIndex] || {};
   const publishDecision = (decision, complete, previousId) => send({type:'decision',
@@ -130,11 +134,30 @@ try {
   for await (const event of stream) {
     if (event.type === 'text_delta' || event.type === 'thinking_delta') {
       ttft ??= Date.now() - started;
-      if (event.type === 'text_delta') send({type:'delta', text:event.delta});
-      else {
+      if (event.type === 'text_delta' && event.partial?.stopReason === 'stop') {
+        send({type:'delta', text:event.delta});
+        streamedFinalText.add(event.contentIndex);
+      } else if (event.type === 'text_delta') {
+        send({type:'pending_delta', pending_id:`${request.stream_id || 'stream'}:${event.contentIndex}`, text:event.delta});
+      } else if (event.type === 'thinking_delta') {
         reasoningText += event.delta;
         send({type:'reasoning', text:event.delta, chars:[...reasoningText].length});
       }
+    } else if (event.type === 'text_end') {
+      ttft ??= Date.now() - started;
+      const block = event.partial?.content?.[event.contentIndex] || {};
+      let phase = '';
+      try {
+        const value = JSON.parse(block.textSignature || '{}').phase;
+        if (value === 'commentary' || value === 'final_answer') phase = value;
+      } catch {}
+      // Pi exposes final_answer while deltas are arriving, but commentary only
+      // on the completed text block's signature. Keep unclassified text visibly
+      // provisional, then resolve it to commentary or the completed answer here.
+      const pendingId = `${request.stream_id || 'stream'}:${event.contentIndex}`;
+      if (phase === 'commentary') send({type:'commentary', pending_id:pendingId, text:event.content || block.text || ''});
+      else if (!streamedFinalText.has(event.contentIndex)) send({type:'delta', pending_id:pendingId, text:event.content || block.text || ''});
+      streamedFinalText.delete(event.contentIndex);
     } else if (event.type === 'toolcall_start') {
       ttft ??= Date.now() - started;
       const index = event.contentIndex;
@@ -173,8 +196,24 @@ try {
     throw new Error(answer.errorMessage || answer.stopReason);
   }
   const usage = answer.usage;
+  const textMessages = answer.content
+    .map((p, index) => ({p, index}))
+    .filter(item => item.p.type === 'text')
+    .map(({p, index}) => {
+      let phase = '';
+      try {
+        const value = JSON.parse(p.textSignature || '{}').phase;
+        if (value === 'commentary' || value === 'final_answer') phase = value;
+      } catch {}
+      return {phase, content:p.text, pending_id:`${request.stream_id || 'stream'}:${index}`};
+    });
+  const finalMessages = textMessages.filter(message => message.phase !== 'commentary');
+  const finalPhase = finalMessages.length ? finalMessages[finalMessages.length - 1].phase : '';
   send({type:'result', result:{
-    content:answer.content.filter(p => p.type === 'text').map(p => p.text).join(''),
+    content:finalMessages.map(p => p.content).join(''),
+    commentary:textMessages.filter(message => message.phase === 'commentary')
+      .map(p => ({content:p.content, pending_id:p.pending_id})),
+    final_phase:finalPhase,
     reasoning:answer.content.filter(p => p.type === 'thinking').map(p => p.thinking).join(''),
     tool_calls:answer.content.filter(p => p.type === 'toolCall').map(p => ({id:p.id,
       type:'function', function:{name:p.name, arguments:JSON.stringify(p.arguments)}})),

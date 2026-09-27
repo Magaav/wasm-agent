@@ -625,6 +625,9 @@ function M.complete_with(model, messages, tools, stream, opts)
     end
     return {
       content = result.content or "",
+      commentary = result.commentary or "",
+      commentary_streamed = stream and result.commentary ~= "" and "delta" or false,
+      final_phase = result.final_phase or "",
       reasoning = result.reasoning or "",
       finish_reason = result.finish_reason,
       tool_calls = result.tool_calls or {},
@@ -656,8 +659,11 @@ function M.complete_with(model, messages, tools, stream, opts)
   end
   local payload = json.decode(response.body)
   local message = payload.choices[1].message
+  local phase = message.phase or ""
   return {
-    content = message.content or "",
+    content = phase == "commentary" and "" or message.content or "",
+    commentary = phase == "commentary" and (message.content or "") or "",
+    final_phase = phase == "final_answer" and phase or "",
     reasoning = M.reasoning_of(message),
     finish_reason = payload.choices[1].finish_reason,
     tool_calls = message.tool_calls or {},
