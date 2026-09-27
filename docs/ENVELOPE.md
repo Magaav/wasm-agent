@@ -1,15 +1,27 @@
-# The envelope — every control the model gets
+# Model-request envelope and tool surface
 
-Each turn is one HTTP request to the provider:
+[ARCHITECTURE.md §6](../ARCHITECTURE.md#6-naming-and-execution-ownership) owns the
+vocabulary: one run contains steps; each step has one model call; each model call
+prepares a **model-request envelope**. A turn is a speaker's contribution, not a
+provider request. The prepared request includes the model, messages (instructions,
+summary if any, and transcript), advertised tools when present, and applicable
+output, reasoning, cache and streaming options. Summaries can use a different
+model and no tools. `lua/core/agent.lua` builds context and the tool list;
+`lua/core/provider.lua` assembles the request. The subscription bridge translates
+that prepared input to its own provider wire request. Neither the selected settings
+nor a predicted next context is the exact request of a past model call.
 
-```
-{ model, messages[], tools[] }        <- the "envelope"
-```
-
-`tools[]` is built in `lua/core/tools.lua` from the caller's **role**, so the
-model literally cannot see a tool its account may not use. This is the map of
-that surface. The live version is rendered in the UI under **engine → tools**
-(`GET /tools`).
+The **tool surface** (`tools[]`) is built in `lua/core/tools.lua` from the role
+and, for a subagent, its approved profile. Dispatch independently enforces the
+capability policy: advertising a schema does not itself grant execution. The
+following is an orientation map, **not a frozen or exhaustive schema catalog**.
+The current role-filtered list and schemas are shown under **engine → tools**
+(`GET /tools`). That view also shows a **selected configuration/tool preview**
+(`GET /model-configuration-preview`, with `/envelope` retained as a legacy alias): it
+contains model, provider, base URL and advertised tools, **not** messages or
+per-call options. It is not the full envelope and is not provider wire bytes.
+For an observed last request versus a next-context reconstruction, see
+[OBSERVABILITY.md](OBSERVABILITY.md#live-efficiency-report).
 
 ## Tiers
 
@@ -91,15 +103,15 @@ name is reserved for spells only; the tier that *lists* what you may do is
 
 ## What the model does **not** get
 
-No raw HTTP, no SQL, no filesystem, no process, no network, no key material.
-Every side effect goes through a named tool in one of the tiers above, and the
-tier is enforced twice: the schema is filtered *and* `dispatch` re-checks the
-role, so a hallucinated tool name cannot escalate.
+The model does not receive credentials or direct, unmediated host access. It can
+request side effects through tools (including shell and filesystem access for an
+authorized operator). The schema is filtered and `dispatch` re-checks authority,
+so inventing a tool name cannot bypass the role or subagent policy.
 
 ## Result shapes
 
 Tools return JSON. An image returned by `read` is persisted as a reference on the tool
-turn, while the provider receives a following user-role image part after the complete
+message, while the provider receives a following user-role image part after the complete
 tool-result block. This preserves Chat Completions tool-call ordering without storing
 base64 in the result. Missing, unsupported and oversized images are explicit errors.
 

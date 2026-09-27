@@ -4032,15 +4032,15 @@ async function refreshTools() {
       }
       toolsBox.append(block);
     }
-    // The literal object sent to the provider, at full depth.
-    const envelope = await (await apiFetch("envelope", { headers: apiHeaders() })).json();
-    if (envelope.request) {
+    // Selected configuration and tool schemas; no transcript or per-call settings.
+    const preview = await (await apiFetch("model-configuration-preview", { headers: apiHeaders() })).json();
+    if (preview.request) {
       const details = document.createElement("details");
-      details.className = "envelope-raw";
+      details.className = "request-preview";
       const summary = document.createElement("summary");
-      summary.textContent = `raw envelope · ${envelope.tool_count} tools`;
+      summary.textContent = `selected configuration + tools · ${preview.tool_count} tools (not a model request)`;
       const pre = document.createElement("pre");
-      pre.textContent = JSON.stringify(envelope.request, null, 2);
+      pre.textContent = JSON.stringify(preview.request, null, 2);
       details.append(summary, pre);
       toolsBox.append(details);
     }

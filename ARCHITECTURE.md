@@ -166,6 +166,26 @@ to match what the words already mean everywhere else rather than what was conven
 | **trigger** | the job's event/schedule matching rule; it does not execute the action | legacy `triggers.json` combined rule/action fields |
 | **delivery** | one durable queued occurrence of a job, pinned to revision and source event id | new; not a run, message, or operation |
 
+### Model-request boundaries
+
+One **model call** prepares one **model-request envelope**: the complete input assembled
+for that inference (model, messages, advertised tool schemas, and applicable output,
+reasoning, cache and streaming options). A run can contain several steps and therefore
+several envelopes; a turn is not an HTTP request. A summary model call has its own
+envelope and may have no tools. The **prepared model request** is what Lua assembles;
+the **wire request** is what a provider-specific transport actually sends. They can
+differ (notably the subscription bridge). A preview of selected configuration and
+tools, or a reconstructed next context, is not an observed exact request.
+
+The **tool surface** is the schemas advertised to the model in an envelope. The
+**capability policy** is the separate authorization enforced at execution; exposing
+or hiding a schema does not grant or revoke authority. A **peer transport envelope**
+wraps node-to-node traffic, and a **tool-result wrapper** surrounds projected output;
+neither is a model-request envelope. Qualify "envelope" when the boundary is not
+already explicit. Similarly, a spell's *execution step* is not the agent's
+*decision step* above, and an authentication session token is not a conversation
+session (see [docs/EXECUTION.md](docs/EXECUTION.md)).
+
 A job can queue a wake (which starts a run and can apply a skill) or deterministic execution
 (which may use operations without any model inference). A tool call may await an operation or return
 its explicit launch receipt. A receipt is not completion. These contracts and their enforcement are in

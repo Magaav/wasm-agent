@@ -297,7 +297,7 @@ local TIER_ORDER = {
   "client", "spells", "nodes", "whatsapp", "plugins",
 }
 
--- The envelope the model sees, grouped by tier.
+-- The advertised tool surface, grouped by tier (not a complete model request).
 function M.tiers(role)
   local groups = {}
   for _, item in ipairs(M.all(role)) do

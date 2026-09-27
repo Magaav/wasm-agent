@@ -2319,7 +2319,8 @@ fn dispatch(
             let signature = header_of(node_headers, "x-wa-sig");
             (200, "application/json", call("wa_node_call", &[body, &from, &public_key, &ts, &signature]).into_bytes())
         }
-        "/envelope" => (200, "application/json", call("wa_envelope", &[session]).into_bytes()),
+        "/model-configuration-preview" => (200, "application/json", call("wa_model_configuration_preview", &[session]).into_bytes()),
+        "/envelope" => (200, "application/json", call("wa_envelope", &[session]).into_bytes()), // legacy alias
         "/tools" => (200, "application/json", call("wa_tools", &[session]).into_bytes()),
         "/jobs" if method == "GET" => (200,"application/json",call("wa_jobs", &["{}",session]).into_bytes()),
         "/jobs" if method == "POST" => (200,"application/json",call("wa_jobs", &[body,session]).into_bytes()),

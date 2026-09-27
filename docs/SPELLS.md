@@ -9,7 +9,7 @@ one shape a spell can take, not what a spell is.
 
 > **Naming.** "Spells" always means these deterministic, verified executions. The tool that
 > lists what an account may call is **`capabilities`**, never `spells`. The two
-> used to share the name, which was a defect: it made the envelope read
+> used to share the name, which was a defect: it made the advertised tool surface read
 > `capabilities → spells` and `spells → spell_save`, two different things under
 > one word.
 

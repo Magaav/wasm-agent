@@ -193,7 +193,7 @@ visible on stderr. There is no UI/input fallback.
 `scripts/test-whatsapp-cursor.cjs` proves each of these against a mock store, the real ingest script and a
 real ledger: no browser, no sentinel, no model.
 
-## The paid stage: the child's envelope
+## The paid stage: the child's tool surface and authority
 
 Everything below is structural, not prompt-level.
 

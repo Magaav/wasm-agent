@@ -197,6 +197,16 @@ $harness = @'
     location.reload();
     return;
   }
+  // The tools topic is a selected preview, never an observed provider request.
+  await refreshTools();
+  var preview = document.querySelector('#tools-box .request-preview');
+  check(!!preview && /not a model request/.test(preview.querySelector('summary').textContent) &&
+    /"model": "fixture-model"/.test(preview.querySelector('pre').textContent) &&
+    !/"messages"/.test(preview.querySelector('pre').textContent),
+    'the selected tool/configuration preview must not claim to be an exact request');
+  check(window.__calls.some(function (call) { return call.url === 'model-configuration-preview'; }) &&
+    !window.__calls.some(function (call) { return call.url === 'envelope'; }),
+    'the tools topic reads the preview route, not the legacy envelope route');
   // Managed jobs are rules, after tools, and never optimistically reported enabled.
   check(document.querySelector('[data-target="tools-box"]').closest('.engine-topic').nextElementSibling.querySelector('[data-target="jobs-box"]'), 'jobs must follow tools in the engine');
   await refreshJobs();
