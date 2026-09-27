@@ -960,7 +960,7 @@ pub fn health() -> Value {
 /// interrupted preview is never presented as durable evidence or completion.
 pub fn capture_event(payload: &str) -> bool {
     let Some(owner) = current_owner() else { return false };
-    let session = owner.strip_prefix("subagent:").unwrap_or(&owner);
+    let Some(session) = owner.strip_prefix("subagent:") else { return false };
     let Ok(event) = serde_json::from_str::<Value>(payload) else { return true };
     let mut tasks = manager().inner.tasks.lock().expect("subagents tasks");
     if let Some(task) = tasks.values_mut().find(|task| task.session_id == session && task.state == "running" && !task.settled) {
@@ -983,6 +983,19 @@ pub fn capture_event(payload: &str) -> bool {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn preview_does_not_capture_interactive_run_events() {
+        let event = r#"{"type":"delta","text":"durable interactive output"}"#;
+        assert!(!capture_event(event));
+        enter_task(TaskContext {
+            cancel: Arc::new(AtomicBool::new(false)), deadline: None,
+            sockets: Arc::new(Mutex::new(Vec::new())), owner: "run:interactive".into(),
+        });
+        let captured = capture_event(event);
+        leave_task();
+        assert!(!captured, "ordinary runs must retain their SSE and durable replay");
+    }
 
     fn temp_root(tag: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("wa-subagent-test-{tag}-{}", now_ms()));
