@@ -199,7 +199,7 @@ To test a patched branch:
 
 ```bash
 git checkout <branch>
-cd rust && cargo build --release && cd ..
+cargo build --release --manifest-path rust/Cargo.toml
 cp rust/target/release/wa /tmp/wa-candidate
 git checkout main
 

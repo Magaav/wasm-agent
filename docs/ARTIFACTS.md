@@ -205,7 +205,7 @@ See `docs/JOBS.md` for the deterministic eligibility rule that decides which mes
 
 ## Proof
 
-- `cargo test -p wa-jobs --offline` covers export stripping, the field allowlist (unknown fields
+- `cargo test --manifest-path rust/Cargo.toml -p wa-jobs --offline` covers export stripping, the field allowlist (unknown fields
   refused), credential/machine-binding refusal (including nested params, prompts and context, POSIX paths
   and value credentials), raw-binding refusal on import, unknown binding slots, required and approved
   bindings, loopback page bindings, importer-role allowlisting and normalization, owner spoofing and

@@ -319,13 +319,12 @@ any retry - an ambiguous send is never retried.
 
 ## Proof
 
-`cargo test -p wa-jobs --offline` checks default-off, revision invalidation,
-deduplication, queue limits, concurrent claims, budgets, deterministic actions,
-`cargo test -p wa-jobs --offline` checks default-off, revision invalidation,
-deduplication, queue limits, concurrent claims, budgets, deterministic actions, controls (the two names,
-their ranges, the refusal of a control no step could read, the delivery carrying the values of the
-revision it was claimed against, and a control moved from the surface - an edit's cost, the same refusals,
-and the rest of the definition unchanged), schedule persistence and interrupted-delivery ambiguity.
+`cargo test --manifest-path rust/Cargo.toml -p wa-jobs --offline` checks default-off, revision
+invalidation, deduplication, queue limits, concurrent claims, budgets, deterministic actions,
+controls (the two names, their ranges, the refusal of a control no step could read, the delivery
+carrying the values of the revision it was claimed against, and a control moved from the surface -
+an edit's cost, the same refusals, and the rest of the definition unchanged), schedule persistence
+and interrupted-delivery ambiguity.
 `scripts/test-jobs.cjs`
 uses scratch homes, a fake local chat receiver and a real isolated Chrome page.
 `scripts/test-ui.ps1` checks the jobs position, safe rendering, toggle request and
