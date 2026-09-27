@@ -35,14 +35,20 @@ check(provider.response_timeout_retries()==1,'the configured retry count must be
 local sid=session('provider-timeout-retry')
 local bot=agentlib.new(sid,function() end,'master','master','')
 local calls=0
-provider.complete_with=function()
+local attempts={}
+provider.complete_with=function(_, messages, _, _, opts)
   calls=calls+1
+  attempts[#attempts+1]={round=opts.round,attempt=opts.attempt or 1,content=messages[#messages].content}
   if calls==1 then error(timeout) end
   return {content='recovered answer',tool_calls={},finish_reason='stop',usage=usage}
 end
 local reply=bot:run('continue after the edge timeout')
 check(reply=='recovered answer','the turn must answer after the bounded retry')
 check(calls==2,'one timeout must produce exactly one retry')
+check(attempts[1].round==1 and attempts[2].round==1 and
+  attempts[1].attempt==1 and attempts[2].attempt==2 and
+  attempts[1].content==attempts[2].content,
+  'two provider attempts in one decision step replay the same input on response timeout')
 
 overrides.WASM_AGENT_PROVIDER_RESPONSE_RETRIES='0'
 local disabled=session('provider-timeout-disabled')

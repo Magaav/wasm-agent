@@ -1,9 +1,11 @@
 # Model-request envelope and tool surface
 
 [ARCHITECTURE.md §6](../ARCHITECTURE.md#6-naming-and-execution-ownership) owns the
-vocabulary: one run contains steps; each step has one model call; each model call
-prepares a **model-request envelope**. A turn is a speaker's contribution, not a
-provider request. The prepared request includes the model, messages (instructions,
+vocabulary: a run contains decision steps; each provider attempt is a model call
+with its own **model-request envelope**. A step normally makes one call, but a
+timeout retry can replay the envelope and overflow recovery can prepare a different
+one in the same step. A preflight failure can make none. A turn is a speaker's
+contribution, not a provider request. The prepared request includes the model, messages (instructions,
 summary if any, and transcript), advertised tools when present, and applicable
 output, reasoning, cache and streaming options. Summaries can use a different
 model and no tools. `lua/core/agent.lua` builds context and the tool list;

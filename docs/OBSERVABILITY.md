@@ -5,17 +5,22 @@ Use wasm-agent and Pi normally, then review the next day or two of actual work.
 
 ## What is measured
 
-`harness_events` is an append-only, node-local SQLite ledger. Request, summary,
-tool and whole-turn spans persist a start before the operation and an end after
-it. An unmatched start means running or interrupted—not zero cost. Request
+`harness_events` is an append-only, node-local SQLite ledger. Model-call
+attempts (including summary calls), tool calls and runs persist start/end evidence.
+A decision step may contain multiple model-call attempts when a timeout or context
+overflow is retried; `round` identifies the step, while `attempt` distinguishes
+response-timeout replays. Overflow recovery may rebuild the envelope even within
+that step. An unmatched start means running or interrupted—not zero cost. Request
 events link to the actual user row through `run_id`; final outcome events link
 to the assistant row. Failed requests with no provider usage remain unmeasured.
 
 Each model end stores the raw usage, normalized usage, provider/model, request ID,
 finish reason and elapsed time. Streaming also records first nonempty delta time.
-Starts record sent settings, exact request hash/bytes, system/schema hashes,
-component estimates, context watermark and Lua/native fingerprints. Prompt text,
-authorization headers and tool arguments are not copied into this ledger. Error
+Starts record sent settings, prepared-request hash/bytes, system/schema hashes,
+component estimates, context watermark and Lua/native fingerprints. The subscription
+bridge records a hash of its input; Pi assembles the wire request separately, so
+this is not a hash of provider wire bytes. Prompt text, authorization headers
+and tool arguments are not copied into this ledger. Error
 excerpts are redacted heuristically and may still contain task-sensitive text.
 
 Pi 0.85.1's local source is the behavioral reference:

@@ -1211,10 +1211,11 @@ function M:run_body(text, images)
         .. "changed, commit it, and state plainly what is unfinished." }
       self.emit({ type = "status", text = "runaway guard reached - asking the model to wrap up" })
     end
-    -- One round is one step. Announcing it lets the UI close the previous
-    -- step's text and tool topic, so the transcript reads step -> its
-    -- tools -> next step, instead of every tool topic stacked behind one
-    -- growing block of text.
+    -- One loop round is one decision step, not necessarily one provider request:
+    -- response-timeout retries and overflow recovery below can send multiple
+    -- model-call attempts in this step. `round` is the legacy UI event/index;
+    -- announcing it closes the previous step's text and tool topic so the
+    -- transcript reads step -> its tools -> next step.
     -- Proof of life for the node's own watchdog: the interpreter is working, so a
     -- /health check can tell this from a wedged message. Cheap (an atomic store).
     host.beat()

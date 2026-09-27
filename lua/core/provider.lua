@@ -587,6 +587,9 @@ function M.complete_with(model, messages, tools, stream, opts)
   local audit_started=telemetry.clock()
   local prefix_comparison=prefix_audit.observe(opts.session_id,opts.kind,body,{
     endpoint=url,session=attribution and attribution.session and headers[attribution.session] or nil})
+  -- `round` names the decision step; `attempt` counts response-timeout replays.
+  -- An overflow-recovery retry may keep that attempt number while changing the
+  -- prepared request; the span/request hash, not (round, attempt), identifies it.
   local request_meta={model=body.model,provider=provider.id,round=opts.round,
     attempt=tonumber(opts.attempt) or 1,
     prefix_audit=prefix_comparison,prefix_audit_ms=math.max(0,telemetry.clock()-audit_started),

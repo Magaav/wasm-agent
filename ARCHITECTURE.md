@@ -157,8 +157,8 @@ to match what the words already mean everywhere else rather than what was conven
 |---|---|---|
 | **run** | one execution within a session, from accepted input to a terminal outcome (including failure/cancellation) | `turn_id`, `turn_span`, "turn" in the UI and `/health` |
 | **turn** | one speaker's contribution within the run (the user's ask; the assistant's answer) | `turn_id` |
-| **step** | one model call plus the tool calls it caused — the decision cycle | the `turn` span, "decision" in the UI |
-| **model call** | one provider request and response | `llm` span |
+| **step** | one decision cycle: attempt inference, then execute any tools its accepted answer requests | the `turn` span, "decision" in the UI; `round` event/index in the agent loop |
+| **model call** | one provider invocation attempt, including failed or timed-out attempts | `llm` span |
 | **tool call** | one tool execution | `tool` span |
 | **message** | one stored transcript row (user, assistant, tool, summary) | the `turns` table, `session_turns()` |
 | **operation** | one supervised external execution, with identity, owner, output, cancellation and settlement | formerly the blocking internals of `host.exec`; never called a job |
@@ -168,14 +168,18 @@ to match what the words already mean everywhere else rather than what was conven
 
 ### Model-request boundaries
 
-One **model call** prepares one **model-request envelope**: the complete input assembled
-for that inference (model, messages, advertised tool schemas, and applicable output,
-reasoning, cache and streaming options). A run can contain several steps and therefore
-several envelopes; a turn is not an HTTP request. A summary model call has its own
-envelope and may have no tools. The **prepared model request** is what Lua assembles;
-the **wire request** is what a provider-specific transport actually sends. They can
-differ (notably the subscription bridge). A preview of selected configuration and
-tools, or a reconstructed next context, is not an observed exact request.
+Each **model call** (provider invocation attempt) prepares its own **model-request
+envelope**: the complete input assembled for that attempt (model, messages,
+advertised tool schemas, and applicable output, reasoning, cache and streaming
+options). A step normally has one model call, but can have more: a response timeout
+can replay the request, and context-overflow recovery can compact and send a
+*different* envelope within the same step. A step can have none when stopped before
+inference; summary model calls for compaction are separate from the decision step
+and may have no tools. A turn is not an HTTP request. The **prepared model request**
+is what Lua assembles; the **wire request** is what a provider-specific transport
+actually sends. They can differ (notably the subscription bridge). A preview of
+selected configuration and tools, or a reconstructed next context, is not an
+observed exact request.
 
 The **tool surface** is the schemas advertised to the model in an envelope. The
 **capability policy** is the separate authorization enforced at execution; exposing
@@ -192,9 +196,11 @@ its explicit launch receipt. A receipt is not completion. These contracts and th
 [docs/OPERATIONS.md](docs/OPERATIONS.md) and [docs/JOBS.md](docs/JOBS.md).
 
 An ordinary completed conversational run has one input user turn, an assistant response, and one or more
-steps. A failed or cancelled run need not reach a final assistant answer. Each step has exactly one model
-call and zero or more tool calls. A step is **not** a model call: it contains one, and the tools that call asked for run between
-it and the next step — which is why a ledger of 178 model calls held 151 tool executions.
+steps. A failed or cancelled run need not reach a final assistant answer. Each step can make zero or more
+model calls (normally one successful call) and execute zero or more tool calls. A step is **not** a model
+call: retries and overflow recovery can add attempts inside the same step, and tools requested by an
+accepted answer run before the next step. A ledger of 178 model calls and 151 tool executions counts
+different events; neither total alone determines the number of steps.
 
 Two choices worth recording, because both were the other way round in the first draft of this section:
 
