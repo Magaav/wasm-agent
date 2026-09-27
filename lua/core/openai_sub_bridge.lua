@@ -137,6 +137,8 @@ try {
       if (event.type === 'text_delta' && event.partial?.stopReason === 'stop') {
         send({type:'delta', text:event.delta});
         streamedFinalText.add(event.contentIndex);
+      } else if (event.type === 'text_delta') {
+        send({type:'pending_delta', pending_id:`${request.stream_id || 'stream'}:${event.contentIndex}`, text:event.delta});
       } else if (event.type === 'thinking_delta') {
         reasoningText += event.delta;
         send({type:'reasoning', text:event.delta, chars:[...reasoningText].length});
@@ -150,9 +152,11 @@ try {
         if (value === 'commentary' || value === 'final_answer') phase = value;
       } catch {}
       // Pi exposes final_answer while deltas are arriving, but commentary only
-      // on the completed text block's signature. Buffer that block to classify it.
-      if (phase === 'commentary') send({type:'commentary', text:event.content || block.text || ''});
-      else if (!streamedFinalText.has(event.contentIndex)) send({type:'delta', text:event.content || block.text || ''});
+      // on the completed text block's signature. Keep unclassified text visibly
+      // provisional, then resolve it to commentary or the completed answer here.
+      const pendingId = `${request.stream_id || 'stream'}:${event.contentIndex}`;
+      if (phase === 'commentary') send({type:'commentary', pending_id:pendingId, text:event.content || block.text || ''});
+      else if (!streamedFinalText.has(event.contentIndex)) send({type:'delta', pending_id:pendingId, text:event.content || block.text || ''});
       streamedFinalText.delete(event.contentIndex);
     } else if (event.type === 'toolcall_start') {
       ttft ??= Date.now() - started;
@@ -192,19 +196,23 @@ try {
     throw new Error(answer.errorMessage || answer.stopReason);
   }
   const usage = answer.usage;
-  const textMessages = answer.content.filter(p => p.type === 'text').map(p => {
-    let phase = '';
-    try {
-      const value = JSON.parse(p.textSignature || '{}').phase;
-      if (value === 'commentary' || value === 'final_answer') phase = value;
-    } catch {}
-    return {phase, content:p.text};
-  });
+  const textMessages = answer.content
+    .map((p, index) => ({p, index}))
+    .filter(item => item.p.type === 'text')
+    .map(({p, index}) => {
+      let phase = '';
+      try {
+        const value = JSON.parse(p.textSignature || '{}').phase;
+        if (value === 'commentary' || value === 'final_answer') phase = value;
+      } catch {}
+      return {phase, content:p.text, pending_id:`${request.stream_id || 'stream'}:${index}`};
+    });
   const finalMessages = textMessages.filter(message => message.phase !== 'commentary');
   const finalPhase = finalMessages.length ? finalMessages[finalMessages.length - 1].phase : '';
   send({type:'result', result:{
     content:finalMessages.map(p => p.content).join(''),
-    commentary:textMessages.filter(message => message.phase === 'commentary').map(p => p.content),
+    commentary:textMessages.filter(message => message.phase === 'commentary')
+      .map(p => ({content:p.content, pending_id:p.pending_id})),
     final_phase:finalPhase,
     reasoning:answer.content.filter(p => p.type === 'thinking').map(p => p.thinking).join(''),
     tool_calls:answer.content.filter(p => p.type === 'toolCall').map(p => ({id:p.id,

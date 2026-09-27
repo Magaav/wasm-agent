@@ -129,6 +129,8 @@ wa-message.assistant { align-self: flex-start; background: var(--assistant); }
   border-top: 1px solid rgba(35, 41, 54, .8);
 }
 .run-body .seg { padding-left: var(--space); color: var(--muted); }
+.seg.phase-pending { opacity: .78; font-style: italic; }
+.seg.phase-incomplete { opacity: .78; font-style: italic; text-decoration: underline dotted; }
 
 /* The model's thinking, when the provider streams it separately from the answer. It is the
    route to the reply, not the reply, so it folds away - but it stays a visible step, because a

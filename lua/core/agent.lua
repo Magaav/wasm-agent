@@ -1392,7 +1392,9 @@ function M:run_body(text, images)
       for _, item in ipairs(result.commentary) do
         local text = type(item) == "string" and item or type(item) == "table" and (item.content or item.text) or ""
         if type(text) == "string" and text ~= "" then
-          commentaries[#commentaries + 1] = { content = text, id = type(item) == "table" and item.id or nil }
+          commentaries[#commentaries + 1] = { content = text,
+            id = type(item) == "table" and item.id or nil,
+            pending_id = type(item) == "table" and item.pending_id or nil }
         end
       end
     end
@@ -1407,7 +1409,8 @@ function M:run_body(text, images)
       end
       messages[#messages + 1] = commentary_message
       if not result.commentary_streamed then
-        self.emit({ type = "commentary", text = item.content, message_id = commentary_id, round = round })
+        self.emit({ type = "commentary", text = item.content, message_id = commentary_id,
+          pending_id = item.pending_id, round = round })
       end
     end
 

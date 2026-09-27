@@ -98,6 +98,7 @@ let lastAssistantBody = null;
 let runStatusTicker = null;
 let streamBody = null;
 let streamText = "";
+let phasePendingText = new Map();
 let controller = null;
 let attachments = [];
 let settings = { provider: "", model: "", providers: [], usage: {}, stats: {}, configured: false, base_url: "" };
@@ -519,6 +520,27 @@ function appendCommentary(text, messageId) {
   }
   currentBubble().body.append(block);
   pin();
+}
+
+function removePendingText(id) {
+  if (!id) return;
+  const pending = phasePendingText.get(String(id));
+  if (!pending) return;
+  pending.node.remove();
+  phasePendingText.delete(String(id));
+}
+
+function discardPendingText() {
+  for (const pending of phasePendingText.values()) pending.node.remove();
+  phasePendingText.clear();
+}
+
+function markPendingTextIncomplete() {
+  for (const pending of phasePendingText.values()) {
+    pending.node.classList.remove("phase-pending");
+    pending.node.classList.add("phase-incomplete");
+  }
+  phasePendingText.clear();
 }
 
 // A round is over: the thinking it produced is history, and the block folds away.
@@ -1130,7 +1152,7 @@ function typeOut(body, text) {
 }
 
 function handleEvent(event) {
-  if (["round", "reasoning", "commentary", "decision", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
+  if (["round", "reasoning", "commentary", "pending_delta", "decision", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
     clearActiveRunNotice();
   }
   if (event.type === "round") {
@@ -1146,6 +1168,7 @@ function handleEvent(event) {
     const note = event.text || "working";
     setStatus(note === "model" ? "thinking…" : "wasm-agent is " + note + "…");
   } else if (event.type === "commentary") {
+    removePendingText(event.pending_id);
     appendCommentary(event.text || "", event.message_id);
   } else if (event.type === "reasoning") {
     // A reasoning model can think for a long time before it says anything, and a
@@ -1164,7 +1187,23 @@ function handleEvent(event) {
     addTool(event.name, event.arguments, { timeoutMs: boundMs, callId: event.call_id });
   } else if (event.type === "tool_result") {
     settleTool(event.result, event.name);
+  } else if (event.type === "pending_delta") {
+    const key = String(event.pending_id || "");
+    if (!key) return;
+    if (statusLabel) statusLabel.textContent = "responding…";
+    let pending = phasePendingText.get(key);
+    if (!pending) {
+      const node = document.createElement("div");
+      node.className = "seg phase-pending";
+      currentBubble().body.append(node);
+      pending = { node, text: "" };
+      phasePendingText.set(key, pending);
+    }
+    pending.text += event.text || "";
+    pending.node.textContent = pending.text;
+    pin();
   } else if (event.type === "delta") {
+    removePendingText(event.pending_id);
     if (statusLabel) statusLabel.textContent = "responding…";
     // A new segment per step, inside the same bubble.
     if (!streamBody) {
@@ -1176,6 +1215,7 @@ function handleEvent(event) {
     streamBody.textContent = stripThinking(streamText);
     pin();
   } else if (event.type === "reply") {
+    discardPendingText();
     if (statusLabel) statusLabel.textContent = "finishing…";
     if (!replayingMessages && event.message_id && renderedMessageIds.has(String(event.message_id))) {
       // The durable reply can be repainted before its trailing `reply` event is replayed.
@@ -1227,11 +1267,13 @@ function handleEvent(event) {
     updateChip();
     if (balloon.open) { renderUsage(); renderModels(); }
   } else if (event.type === "error") {
+    markPendingTextIncomplete();
     add("assistant", "error: " + (event.error || "unknown"));
     finishRunStatus("failed");
     finishTrace();
     runBubble = null;
   } else if (event.type === "done") {
+    markPendingTextIncomplete();
     finishRunStatus();
     flushDecision(true);
   }
@@ -1292,6 +1334,7 @@ function repaintMessages(rows, options = {}) {
   streamBody = null;
   streamText = "";
   reasoningBlock = null;
+  phasePendingText = new Map();
   runStartedAt = 0;
   replayMessageEndedAt = 0;
   replayRunLastMessage = null;
