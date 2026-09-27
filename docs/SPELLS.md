@@ -81,8 +81,15 @@ cannot reach the supervisor tomorrow.
 A failed assertion is an error, never a warning.
 
 For node workflows, `pre`/`post` may use `{ "kind": "run", "script": "...",
-"expect": { "ready": true } }`. These observational commands use the same JSON
-contract as a run step; `expect` must be non-empty. They do not need a browser and
+"expect": { "ready": true } }`. **The JSON contract, in one place**: a `run` step or
+check must print exactly one JSON *object* on stdout and exit 0, and `expect` is an
+object whose named fields must equal the decoded values - it is not a string, and
+"stdout contains" is not a form this takes. A string or empty `expect` is refused when
+the spell is saved (`step_N_expect_must_be_a_table`, `pre_N_expect_required`); a command
+whose stdout is not an object fails when it runs (`run_step_stdout_not_json`). Both
+messages state the contract, because the reader is a model that has just guessed wrong.
+PowerShell needs `| ConvertTo-Json -Compress` to satisfy it. These observational commands
+do not need a browser and
 cannot be exported as sentinel checks. Step traces retain their observed JSON. A
 foreground command result can complete a step while descendants remain supervised;
 only the spell's observed `post` conditions can establish that their intended effect

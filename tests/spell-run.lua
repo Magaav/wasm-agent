@@ -55,13 +55,21 @@ local _, exit_failure = spells.run_step({ kind = "run", script = "stub" })
 ok(type(exit_failure) == "string" and exit_failure:find("run_step_exit_3", 1, true) ~= nil,
   "a non-zero exit must fail the step, got " .. tostring(exit_failure))
 
--- Stdout that is not a JSON object is not evidence.
+-- Stdout that is not a JSON object is not evidence, and the refusal has to say what to do about it:
+-- this message is read while confused, and a bare code cost a model two round trips (it printed a
+-- human-readable line, then guessed that `expect` took a string).
 stub_exec(wrapper(0, "not json at all"))
 local _, unparsed = spells.run_step({ kind = "run", script = "stub" })
-ok(unparsed == "run_step_stdout_not_json", "stdout that is not JSON must fail, got " .. tostring(unparsed))
+ok(type(unparsed) == "string" and unparsed:find("run_step_stdout_not_json", 1, true) == 1,
+  "stdout that is not JSON must fail, got " .. tostring(unparsed))
+ok(type(unparsed) == "string" and unparsed:find("JSON object on stdout", 1, true) ~= nil,
+  "the stdout refusal must name the contract, got " .. tostring(unparsed))
+ok(type(unparsed) == "string" and unparsed:find("ConvertTo-Json", 1, true) ~= nil,
+  "the stdout refusal must name the PowerShell remedy, got " .. tostring(unparsed))
 stub_exec(wrapper(0, '[1,2,3]'))
 local _, array = spells.run_step({ kind = "run", script = "stub" })
-ok(array == "run_step_stdout_not_json", "a JSON array is not a result object, got " .. tostring(array))
+ok(type(array) == "string" and array:find("run_step_stdout_not_json", 1, true) == 1,
+  "a JSON array is not a result object, got " .. tostring(array))
 
 -- An expectation that does not hold is a failed step, never a warning.
 stub_exec(wrapper(0, '{"status":"failed"}'))
@@ -78,8 +86,16 @@ ok(select(2, spells.run_step({ kind = "run", script = "stub" })) == "run_step_un
 -- Validation: the step must be saveable only when it is well-formed.
 ok(spells.validate({ name = "t", steps = { { kind = "run" } }, post = { { script = "x" } } }) == "step_1_script_required",
   "validate must refuse a run step with no script")
-ok(spells.validate({ name = "t", steps = { { kind = "run", script = "s", expect = "not a table" } }, post = { { script = "x" } } })
-  == "step_1_expect_must_be_a_table", "validate must refuse a non-table expect")
+local string_expect = spells.validate({ name = "t", steps = { { kind = "run", script = "s", expect = "ok" } }, post = { { script = "x" } } })
+ok(type(string_expect) == "string" and string_expect:find("step_1_expect_must_be_a_table", 1, true) == 1,
+  "validate must refuse a non-table expect, got " .. tostring(string_expect))
+ok(type(string_expect) == "string" and string_expect:find("a string is not accepted", 1, true) ~= nil,
+  "the expect refusal must say a string is not accepted, got " .. tostring(string_expect))
+local no_expect = spells.validate({ name = "t", steps = { { kind = "run", script = "s" } }, post = { { kind = "run", script = "x" } } })
+ok(type(no_expect) == "string" and no_expect:find("post_1_expect_required", 1, true) == 1,
+  "a run check with no expect must be refused, got " .. tostring(no_expect))
+ok(type(no_expect) == "string" and no_expect:find("non-empty expect object", 1, true) ~= nil,
+  "the missing-expect refusal must say what expect is, got " .. tostring(no_expect))
 ok(spells.validate({ name = "t", steps = { { kind = "run", script = "s" } }, post = { { script = "x" } } }) == nil,
   "a well-formed run step must validate")
 
