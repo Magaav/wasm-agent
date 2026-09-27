@@ -50,12 +50,7 @@ const engineBtn = document.getElementById("engine-btn");
 const engineView = document.getElementById("engine");
 const engineClose = document.getElementById("engine-close");
 const engineSub = document.getElementById("engine-sub");
-const driftBtn = document.getElementById("diff-btn");
-const driftView = document.getElementById("drift");
-const driftClose = document.getElementById("drift-close");
-const driftSub = document.getElementById("drift-sub");
-const driftBody = document.getElementById("drift-body");
-const driftRefresh = document.getElementById("drift-refresh");
+const orchestratorBtn = document.getElementById("orchestrator-btn");
 const spellsBox = document.getElementById("spells-box");
 const spellsNote = document.getElementById("spells-note");
 const skillsBox = document.getElementById("skills-box");
@@ -3806,6 +3801,14 @@ async function refreshNodes() {
         }
       }
     }
+    const replication=document.createElement('details');
+    const summary=document.createElement('summary'); summary.textContent='Replication diagnostics';
+    const evidence=document.createElement('pre'); replication.append(summary,evidence);nodesBox.append(replication);
+    replication.addEventListener('toggle',async()=>{
+      if(!replication.open)return;
+      try { evidence.textContent=JSON.stringify(await taskRequest('sync'),null,2); }
+      catch(error) { evidence.textContent='Replication status unavailable: '+error.message; }
+    });
   } catch (error) { /* leave the panel as-is */ }
 }
 
@@ -3891,6 +3894,102 @@ function viewUrl(view) {
   return location.origin + location.pathname + "?view=" + encodeURIComponent(view);
 }
 
+function openOrchestrator() {
+  const url=viewUrl('orchestrator');
+  if(native && typeof native.openView==='function') native.openView('orchestrator',url);
+  else if(!window.open(url,'wa-orchestrator')) meta.textContent='Allow a window to open the orchestrator.';
+}
+orchestratorBtn.addEventListener('click',openOrchestrator);
+
+let orchestratorPanel=null;
+let orchestratorPolling=false;
+let orchestratorTimer=null;
+async function orchestratorRequest(body) {
+  const response=await apiFetch('subagents',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),body:JSON.stringify(body)},65000);
+  const result=await response.json();
+  if(!response.ok || result.error) throw new Error(result.error || `HTTP ${response.status}`);
+  return result;
+}
+function saveOrchestratorLayout() {
+  if(!orchestratorPanel)return;
+  const panes=[...orchestratorPanel.panes.values()].map(pane=>({id:pane.task.subagent_id,draft:pane.input.value}));
+  try { localStorage.setItem('wa-orchestrator-layout:'+session,JSON.stringify({panes,drafts:[...orchestratorPanel.drafts]})); } catch(error) { orchestratorPanel.message='Layout could not be saved: '+error.message; }
+}
+async function refreshOrchestrator() {
+  if(!orchestratorPanel || orchestratorPolling)return;
+  orchestratorPolling=true;
+  try {
+    if(!orchestratorPanel.configured)orchestratorPanel.configure(await orchestratorRequest({action:'fleet'}));
+    const list=await orchestratorRequest({action:'list'});
+    orchestratorPanel.data=list.subagents || [];
+    if(!orchestratorPanel.restored) {
+      orchestratorPanel.restored=true;
+      let saved={};try { saved=JSON.parse(localStorage.getItem('wa-orchestrator-layout:'+session) || '{}'); } catch(error) { /* layout only */ }
+      orchestratorPanel.drafts=new Map(saved.drafts || []);
+      orchestratorPanel.restoring=true;
+      for(const item of saved.panes || []) {
+        const task=orchestratorPanel.tasks.find(task=>task.subagent_id===item.id);
+        if(task)orchestratorPanel.pin(task).input.value=item.draft || '';
+      }
+      orchestratorPanel.restoring=false;
+    }
+    for(const pane of orchestratorPanel.panes.values()) await refreshAgentPane(pane);
+    orchestratorPanel.message=`${orchestratorPanel.tasks.length} agent sessions · closing this window keeps work running`;
+  } catch(error) { orchestratorPanel.message='Orchestration unavailable: '+error.message; }
+  finally {
+    orchestratorPolling=false;
+    if(orchestratorPanel?.isConnected)orchestratorTimer=setTimeout(refreshOrchestrator,2000);
+  }
+}
+async function refreshAgentPane(pane,before_seq) {
+  if(!pane.task.session_id) { pane.notice.textContent=pane.task.error || 'Waiting for placement…'; return; }
+  try {
+    const result=await orchestratorRequest({action:'session',id:pane.task.subagent_id,before_seq,after_seq:before_seq ? undefined : pane.lastSeq});
+    if(!pane.isConnected)return;
+    pane.showMessages(result.messages,renderMarkdown,!!before_seq);
+    pane.notice.textContent=pane.task.error || (pane.task.settled ? 'Ready for your next message.' : 'Working. New messages queue in this session after the current run.');
+  } catch(error) { pane.notice.textContent='Conversation unavailable: '+error.message; }
+}
+function mountOrchestrator() {
+  activeNode=''; // This node owns the dispatcher; each task carries its destination.
+  orchestratorPanel=document.createElement('wa-orchestrator');
+  document.body.append(orchestratorPanel);
+  if(native?.maximize)native.maximize();
+  orchestratorPanel.addEventListener('input',saveOrchestratorLayout);
+  orchestratorPanel.addEventListener('orchestrator-action',async event=>{
+    const {action}=event.detail;
+    if(action==='close') { saveOrchestratorLayout(); if(native?.closeView)native.closeView();else window.close();return; }
+    if(action==='layout') { if(!orchestratorPanel.restoring)saveOrchestratorLayout(); for(const pane of orchestratorPanel.panes.values())refreshAgentPane(pane);return; }
+    try {
+      if(action==='save-placement') {
+        await orchestratorRequest({action:'placement',policy:orchestratorPanel.policy});
+        orchestratorPanel.message='Node order and limits saved.';
+      } else if(action==='refresh') { clearTimeout(orchestratorTimer);await refreshOrchestrator(); }
+    } catch(error) { orchestratorPanel.message=error.message; }
+  });
+  orchestratorPanel.addEventListener('agent-action',async event=>{
+    const {action,pane,text,key,before_seq}=event.detail;
+    if(action==='earlier') { await refreshAgentPane(pane,before_seq);return; }
+    if(!['message','cancel'].includes(action))return;
+    const button=pane.querySelector(action==='message' ? 'button[type="submit"]' : '[data-action="cancel"]');
+    button.disabled=true;
+    try {
+      const receipt=await orchestratorRequest({action,id:pane.task.subagent_id,text,idempotency_key:key});
+      if(action==='message') { pane.input.value='';pane.submission=null;pane.task={...receipt,execution_node:pane.task.execution_node};saveOrchestratorLayout(); }
+      pane.notice.textContent=action==='message' ? 'Message accepted in this session.' : 'Cancellation requested.';
+    } catch(error) { pane.notice.textContent=error.message; }
+    finally { button.disabled=false; }
+  });
+  document.addEventListener('keydown',event=>{
+    if(event.key==='Escape') {
+      const expanded=orchestratorPanel.querySelector('.agent-expanded');
+      if(expanded) { expanded.classList.remove('agent-expanded');orchestratorPanel.layout(); }
+      else orchestratorPanel.querySelector('[data-action="close"]').click();
+    }
+  });
+  refreshOrchestrator();
+}
+
 function controlViewName(name) {
   return "control:" + (name || "this-node");
 }
@@ -3904,6 +4003,7 @@ function applyViewMode() {
   const parts = wanted.split(":");
   const kind = parts[0];
   const target = parts[1] && parts[1] !== "this-node" ? parts.slice(1).join(":") : "";
+  if (kind === "orchestrator") { mountOrchestrator(); return true; }
   if (kind === "control") {
     if (target) activeNode = target;
     document.body.append(control);
@@ -3928,6 +4028,7 @@ function openFromQuery() {
   const parts = wanted.split(":");
   const target = parts[1] && parts[1] !== "this-node" ? parts.slice(1).join(":") : "";
   if (parts[0] === "control") openControl(target);
+  if (parts[0] === "orchestrator") openOrchestrator();
   return true;
 }
 
@@ -4644,153 +4745,6 @@ function setEngine(open) {
 engineBtn.addEventListener("click", () => setEngine(!document.body.classList.contains("engine")));
 engineClose.addEventListener("click", () => setEngine(false));
 
-// ---- drift: what this node has that a peer does not ----------------------
-// A diff of the replication journal, read from GET /sync. This is the one place
-// in the UI that shows a *diff* rather than a transcript, so it is worth being
-// explicit about what the rows mean: a node keeps an append-only journal of
-// entries, and a cursor per peer recording how far that peer has been sent. The
-// gap between a cursor and the head is therefore exactly the set of entries that
-// peer has not seen - the drift. The local node has a head and no cursor; a peer
-// has both.
-//
-// It is READ-ONLY, and that is a deliberate limit rather than an oversight:
-// showing drift must not cause it. Pushing from a button would make merely
-// looking at the panel a mutation of another node's ledger, which is the kind of
-// thing that should be its own step with its own confirmation.
-
-function driftRow(label, value, kind = "") {
-  const row = document.createElement("div");
-  row.className = "drift-row" + (kind ? " " + kind : "");
-  const name = document.createElement("span");
-  name.className = "drift-key";
-  name.textContent = label;
-  const val = document.createElement("span");
-  val.className = "drift-val";
-  val.textContent = value;
-  row.append(name, val);
-  return row;
-}
-
-function driftTopic(title, note) {
-  const topic = document.createElement("div");
-  topic.className = "engine-topic";
-  const head = document.createElement("div");
-  head.className = "engine-head";
-  const name = document.createElement("span");
-  name.className = "engine-name";
-  name.textContent = title;
-  const detail = document.createElement("span");
-  detail.className = "engine-note";
-  detail.textContent = note;
-  head.append(name, detail);
-  topic.append(head);
-  return topic;
-}
-
-// The journal head and a peer's cursor are both counts of entries, so the gap is
-// a count too - and a negative gap would mean the peer is *ahead* of us, which is
-// real (we may have been offline while it advanced) and must not be clamped to
-// zero. Showing "0 behind" for a peer that is ahead would be a lie in the same
-// family as a silent failure.
-function renderDrift(status) {
-  driftBody.replaceChildren();
-  const head = Number(status.head || 0);
-  const peers = Array.isArray(status.peers) ? status.peers : [];
-
-  driftSub.textContent = status.node_id
-    ? `${String(status.node_id).slice(0, 12)}… · head ${head}`
-    : `head ${head}`;
-
-  const own = driftTopic("this node", `${head} journal entr${head === 1 ? "y" : "ies"}`);
-  const ownBody = document.createElement("div");
-  ownBody.className = "engine-content";
-  ownBody.append(driftRow("head", String(head)));
-  ownBody.append(driftRow("pushing to", status.pushing_to ? String(status.pushing_to) : "nobody (WASM_AGENT_SYNC_TO is unset)"));
-  own.append(ownBody);
-  driftBody.append(own);
-
-  const peersTopic = driftTopic(
-    "peers",
-    peers.length === 0 ? "no peer has been sent anything yet" : `${peers.length} peer${peers.length === 1 ? "" : "s"}`,
-  );
-  const peersBody = document.createElement("div");
-  peersBody.className = "engine-content";
-
-  if (peers.length === 0) {
-    // Say why rather than showing an empty box: "no peers" and "peers that are
-    // all level" are different states and must not look the same.
-    const note = document.createElement("div");
-    note.className = "drift-empty";
-    note.textContent = "No cursors recorded. Either nothing has been pushed yet, or this node is not configured to push.";
-    peersBody.append(note);
-  } else {
-    for (const peer of peers) {
-      const cursor = Number(peer.cursor || 0);
-      const behind = head - cursor;
-      const topic = driftTopic(
-        String(peer.peer_id || "unknown").slice(0, 20),
-        behind > 0 ? `${behind} behind` : behind < 0 ? `${-behind} ahead` : "level",
-      );
-      const body = document.createElement("div");
-      body.className = "engine-content";
-      // Every pushed entry gets its own + line, so the count is auditable rather
-      // than asserted: a row per entry, capped so a large gap cannot hang the
-      // render, and the cap is stated instead of silently truncating.
-      const shown = Math.min(behind, 50);
-      for (let i = 0; i < shown; i += 1) {
-        body.append(driftRow("+", `journal entry ${cursor + i + 1}`, "add"));
-      }
-      if (behind > shown) {
-        body.append(driftRow("…", `${behind - shown} more not listed`, "muted"));
-      }
-      if (behind < 0) {
-        body.append(driftRow("−", `we are ${-behind} behind this peer`, "del"));
-      }
-      if (behind === 0) {
-        body.append(driftRow("=", "nothing to send", "muted"));
-      }
-      body.append(driftRow("cursor", String(cursor), "muted"));
-      topic.append(body);
-      peersBody.append(topic);
-    }
-  }
-  peersTopic.append(peersBody);
-  driftBody.append(peersTopic);
-}
-
-async function loadDrift() {
-  driftSub.textContent = "reading…";
-  try {
-    const response = await fetch("sync", { headers: apiHeaders() });
-    if (!response.ok) throw new Error(`sync ${response.status}`);
-    const payload = await response.json();
-    if (payload && payload.error) throw new Error(payload.error);
-    renderDrift(payload || {});
-  } catch (error) {
-    // Never render a failed read as "no drift": an unreadable journal is not a
-    // clean one, and conflating them is how a sync problem hides for a week.
-    driftBody.replaceChildren();
-    driftSub.textContent = "unreadable";
-    const topic = driftTopic("this node", "could not read the journal");
-    const body = document.createElement("div");
-    body.className = "engine-content";
-    body.append(driftRow("error", String(error && error.message ? error.message : error), "del"));
-    topic.append(body);
-    driftBody.append(topic);
-  }
-}
-
-function setDrift(open) {
-  document.body.classList.toggle("drift", open);
-  driftView.hidden = !open;
-  driftBtn.classList.toggle("active", open);
-  if (open) loadDrift();
-}
-
-driftBtn.addEventListener("click", () => setDrift(!document.body.classList.contains("drift")));
-driftClose.addEventListener("click", () => setDrift(false));
-driftRefresh.addEventListener("click", () => loadDrift());
-
 // ---- terminal: shell on this machine + spell replay ----------------------
 const termHistory = [];
 let termIndex = 0;
@@ -4868,7 +4822,6 @@ termClose.addEventListener("click", () => setTerm(false));
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     if (document.body.classList.contains("engine")) { event.preventDefault(); setEngine(false); input.focus(); return; }
-    if (document.body.classList.contains("drift")) { event.preventDefault(); setDrift(false); input.focus(); return; }
     if (document.body.classList.contains("term")) { event.preventDefault(); setTerm(false); input.focus(); return; }
     if (document.body.classList.contains("control")) { event.preventDefault(); closeControl(); return; }
   }
@@ -4881,7 +4834,7 @@ document.addEventListener("keydown", (event) => {
   } else if (event.ctrlKey && (event.key === "d" || event.key === "D")) {
     // Ctrl+D would otherwise be the browser's bookmark gesture.
     event.preventDefault();
-    setDrift(!document.body.classList.contains("drift"));
+    openOrchestrator();
   }
 });
 termForm.addEventListener("submit", (event) => {

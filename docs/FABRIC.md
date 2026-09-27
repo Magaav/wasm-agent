@@ -1,5 +1,10 @@
 # Fabric scheduling contract
 
+The first ordered child dispatcher and external workspace are described in
+[ORCHESTRATOR-WORKSPACE.md](ORCHESTRATOR-WORKSPACE.md). It implements priority,
+task-count admission and a durable queue. The broader resource/affinity contract
+below still includes planned behavior; task-count limits are not memory quotas.
+
 The rendezvous is the fabric control plane. It carries identity, reachability and the latest
 advisory resource sample. A node's local scheduler remains the authority for admission; a remote
 sample can guide placement but cannot reserve capacity.

@@ -187,6 +187,43 @@ function M.agents_md(role)
   return nil, nil
 end
 
+-- Execution role is separate from authority. Guests never inherit either
+-- operator role file. Packaged defaults are portable; explicit overrides fail
+-- visibly rather than silently selecting different instructions.
+function M.role_instructions(kind, role)
+  if role == "guest" then return nil, nil end
+  assert(kind == "orchestrator" or kind == "subagents", "invalid_agent_kind")
+  local name = "AGENTS." .. kind .. ".md"
+  local configured = host.getenv("WASM_AGENT_AGENTS_MD_" .. kind:upper())
+  if configured and configured ~= "" then
+    local text = host.read_file(configured)
+    if not text or text == "" then error("instructions_unreadable:" .. configured) end
+    return text, configured
+  end
+  for _, path in ipairs({ name, dofile("lua/core/paths.lua").config() .. "/" .. name }) do
+    local text = host.read_file and host.read_file(path)
+    if text and text ~= "" then return text, path end
+  end
+  return EMBEDDED and EMBEDDED[name], "embedded:" .. name
+end
+
+local function role_block(kind, role)
+  local text, path = M.role_instructions(kind, role)
+  if text then return "Execution instructions (" .. path .. "):\n" .. text end
+end
+
+-- One tool index for both envelopes. Keep authored discovery cues and the
+-- complete schemas; this removes duplicate implementation, not model evidence.
+local function tool_index(tool_list, title)
+  local lines = { title }
+  for _, tool in ipairs(tool_list or {}) do
+    local name = tostring((tool["function"] or {}).name or "?")
+    local cue = host.getenv("WASM_AGENT_TOOL_SNIPPETS") ~= "names" and tools.snippet(name)
+    lines[#lines + 1] = "- " .. name .. (cue and (": " .. cue) or "")
+  end
+  return table.concat(lines, "\n")
+end
+
 -- Guidelines, built the way pi builds them: a base set, entries that depend on
 -- which tools actually exist, and project-supplied ones from
 -- WASM_AGENT_GUIDELINES (one per line - pi's `promptGuidelines`). Deduplicated,
@@ -255,25 +292,12 @@ end
 
 local function system_prompt(role, agents, agents_path, tool_list)
   local parts = { SYSTEM, "Running on: " .. ENVIRONMENT }
+  local execution = role_block("orchestrator", role)
+  if execution then parts[#parts + 1] = execution end
   if tool_list and #tool_list > 0 then
     -- pi lists the tools in the prompt as well as in the schemas: a model that
     -- under-uses a tool is more likely to reach for it when it is named here.
-    local lines = { "Available tools:" }
-    for _, tool in ipairs(tool_list) do
-      local function_ = tool["function"] or {}
-      local name = tostring(function_.name or "?")
-      -- An authored discovery cue (tools.snippet), not a truncation of the schema
-      -- description: the description is already in the schema, and deriving the cue from it
-      -- put the same text in the request twice. A tool with no cue is listed by name alone.
-      local cue
-      if host.getenv('WASM_AGENT_TOOL_SNIPPETS') ~= 'names' then cue = tools.snippet(name) end
-      if cue then
-        lines[#lines + 1] = string.format("- %s: %s", name, cue)
-      else
-        lines[#lines + 1] = "- " .. name
-      end
-    end
-    parts[#parts + 1] = table.concat(lines, "\n")
+    parts[#parts + 1] = tool_index(tool_list, "Available tools:")
     parts[#parts + 1] = "In addition to the tools above, you may have access to other tools " ..
       "depending on the project."
   end
@@ -333,6 +357,8 @@ end
 function M.subagent_system_prompt(self, tool_list)
   local profile = self.subagent or {}
   local parts = { SYSTEM, SUBAGENT_BOUNDARY }
+  local execution = role_block("subagents", self.role)
+  if execution then parts[#parts + 1] = execution end
   local instructions = tostring(profile.instructions or "")
   if instructions ~= "" then
     parts[#parts + 1] = "Profile instructions:\n" .. instructions
@@ -340,22 +366,8 @@ function M.subagent_system_prompt(self, tool_list)
   parts[#parts + 1] = "Running on: " .. ENVIRONMENT
   local have = {}
   if tool_list and #tool_list > 0 then
-    local lines = { "Your tools (and only these):" }
-    for _, tool in ipairs(tool_list) do
-      local function_ = tool["function"] or {}
-      local name = tostring(function_.name or "?")
-      have[name] = true
-      -- The same authored cue as the parent index (agent.system_prompt, tools.snippet),
-      -- never a slice of the description, and the same names-only switch applies.
-      local cue
-      if host.getenv('WASM_AGENT_TOOL_SNIPPETS') ~= 'names' then cue = tools.snippet(name) end
-      if cue then
-        lines[#lines + 1] = string.format("- %s: %s", name, cue)
-      else
-        lines[#lines + 1] = "- " .. name
-      end
-    end
-    parts[#parts + 1] = table.concat(lines, "\n")
+    parts[#parts + 1] = tool_index(tool_list, "Your tools (and only these):")
+    for _, tool in ipairs(tool_list) do have[(tool["function"] or {}).name or "?"] = true end
   end
   local child_guidelines = {}
   if have.bash then child_guidelines[#child_guidelines + 1] = SHELL_SEARCH_GUIDELINE end

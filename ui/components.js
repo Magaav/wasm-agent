@@ -1410,3 +1410,164 @@ class WaTasks extends HTMLElement {
   }
 }
 customElements.define('wa-tasks', WaTasks);
+
+// A session pane owns its draft and scroll position, never the execution.
+class WaAgentSession extends HTMLElement {
+  connectedCallback() {
+    if (this.form) return;
+    this.innerHTML = '<header class="agent-pane-head"><strong></strong><span></span><button type="button" data-action="expand">Expand</button><button type="button" data-action="collapse">Collapse</button></header><button type="button" class="agent-earlier" hidden>Earlier messages</button><div class="agent-transcript"></div><div class="agent-notice" role="status"></div><form class="agent-composer"><textarea aria-label="Message this agent" rows="2" placeholder="Talk to this agent…"></textarea><button type="submit">Send</button><button type="button" data-action="cancel">Cancel task</button></form>';
+    this.form=this.querySelector('form');
+    this.input=this.querySelector('textarea');
+    this.transcript=this.querySelector('.agent-transcript');
+    this.notice=this.querySelector('.agent-notice');
+    this.preview=document.createElement('div');this.preview.className='agent-preview';
+    this.transcript.after(this.preview);
+    this.rows=new Map();
+    this.form.addEventListener('submit',event=>{
+      event.preventDefault();
+      const text=this.input.value;
+      if(!text.trim()) return;
+      if(!this.submission || this.submission.text!==text) this.submission={text,key:crypto.randomUUID()};
+      this.emit('message',this.submission);
+    });
+    this.input.addEventListener('keydown',event=>{
+      if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); this.form.requestSubmit(); }
+    });
+    this.querySelector('.agent-earlier').addEventListener('click',()=>this.emit('earlier',{before_seq:this.firstSeq}));
+    this.querySelectorAll('[data-action]').forEach(button=>button.addEventListener('click',()=>this.emit(button.dataset.action)));
+  }
+  emit(action,detail={}) { this.dispatchEvent(new CustomEvent('agent-action',{bubbles:true,detail:{action,pane:this,...detail}})); }
+  set task(value) {
+    this.connectedCallback(); this._task=value;
+    this.querySelector('strong').textContent=value.profile || 'agent';
+    this.querySelector('.agent-pane-head span').textContent=[value.model,value.execution_node || 'local',value.state].filter(Boolean).join(' · ');
+    this.querySelector('[data-action="cancel"]').disabled=!!value.settled || value.state==='unknown';
+    this.preview.textContent=value.preview?.text || '';
+    this.preview.hidden=!this.preview.textContent;
+  }
+  get task() { return this._task; }
+  showMessages(messages,render,earlier=false) {
+    const nearBottom=this.transcript.scrollHeight-this.transcript.scrollTop-this.transcript.clientHeight<40;
+    const height=this.transcript.scrollHeight;
+    for(const message of messages || []) this.rows.set(Number(message.seq),message);
+    const ordered=[...this.rows.values()].sort((a,b)=>a.seq-b.seq);
+    const fingerprint=JSON.stringify(ordered);
+    if(fingerprint===this.fingerprint)return;
+    this.fingerprint=fingerprint;
+    this.firstSeq=ordered[0]?.seq;
+    this.lastSeq=ordered.at(-1)?.seq;
+    this.querySelector('.agent-earlier').hidden=!(this.firstSeq>1);
+    const children=ordered.map(message=>{
+      if(message.role==='tool') {
+        const tool=document.createElement('wa-tool');
+        tool.setAttribute('name',message.tool_name || 'tool');
+        tool.connectedCallback(); tool.detail.textContent=String(message.content || '');
+        return tool;
+      }
+      const bubble=document.createElement('wa-message');
+      bubble.setAttribute('role',message.role==='user' ? 'user' : 'assistant');
+      bubble.body.innerHTML=render(String(message.content || ''));
+      if(message.tool_calls?.length) {
+        const detail=document.createElement('details'); const summary=document.createElement('summary');
+        summary.textContent='Tool calls'; const pre=document.createElement('pre');
+        pre.textContent=JSON.stringify(message.tool_calls,null,2); detail.append(summary,pre); bubble.body.append(detail);
+      }
+      return bubble;
+    });
+    this.transcript.replaceChildren(...children);
+    if(earlier) this.transcript.scrollTop+=this.transcript.scrollHeight-height;
+    else if(nearBottom) this.transcript.scrollTop=this.transcript.scrollHeight;
+  }
+}
+customElements.define('wa-agent-session',WaAgentSession);
+
+class WaOrchestrator extends HTMLElement {
+  connectedCallback() {
+    if(this.sidebar)return;
+    this.innerHTML='<header class="orchestrator-head"><strong>Orchestrator</strong><span class="orchestrator-status" role="status"></span><button type="button" data-action="refresh">Refresh</button><button type="button" data-action="close">Back to main chat</button></header><div class="orchestrator-body"><aside class="orchestrator-sidebar"><details class="placement"><summary>Node order and limits</summary><p>Fill in order. A limit of 0 keeps a device out of background execution.</p><label><input type="checkbox" class="placement-enabled"> Use ordered placement</label><div class="placement-nodes"></div><button type="button" data-action="save-placement">Save placement</button></details><nav aria-label="Agents"></nav></aside><main class="orchestrator-canvas"><p class="orchestrator-empty">Agents appear here when delegated from the main chat. Select a card to follow its conversation.</p></main></div>';
+    this.sidebar=this.querySelector('nav'); this.canvas=this.querySelector('main'); this.panes=new Map(); this.drafts=new Map();
+    this.querySelectorAll('[data-action]').forEach(button=>button.addEventListener('click',()=>{
+      this.dispatchEvent(new CustomEvent('orchestrator-action',{bubbles:true,detail:{action:button.dataset.action}}));
+    }));
+    this.addEventListener('agent-action',event=>{
+      const {action,pane}=event.detail;
+      if(action==='collapse')this.unpin(pane.dataset.key);
+      if(action==='expand') {
+        const expanded=!pane.classList.contains('agent-expanded');
+        this.panes.forEach(item=>item.classList.remove('agent-expanded'));
+        pane.classList.toggle('agent-expanded',expanded); this.canvas.classList.toggle('has-expanded',expanded);
+      }
+    });
+  }
+  set message(text) { this.connectedCallback(); this.querySelector('.orchestrator-status').textContent=text; }
+  set data(tasks) {
+    this.connectedCallback();
+    // Follow-up tasks share a session. One card per conversation, newest run.
+    const sessions=new Map();
+    for(const task of tasks || []) {
+      const key=(task.execution_node || 'local')+':'+(task.session_id || task.subagent_id);
+      const old=sessions.get(key);
+      if(!old || task.created_at>=old.created_at)sessions.set(key,task);
+    }
+    this.tasks=[...sessions.values()];
+    const cards=this.tasks.map(task=>{
+      const card=document.createElement('button'); card.type='button'; card.className='agent-card';
+      card.textContent=[task.profile,task.model,task.execution_node || 'local',task.state,task.prompt].filter(Boolean).join(' · ');
+      card.addEventListener('click',()=>this.pin(task));
+      for(const pane of this.panes.values()) {
+        if(pane.task.session_id && pane.task.session_id===task.session_id && pane.task.execution_node===task.execution_node) pane.task=task;
+        else if(pane.task.subagent_id===task.subagent_id)pane.task=task;
+      }
+      return card;
+    });
+    this.sidebar.replaceChildren(...cards);
+  }
+  pin(task) {
+    const existing=[...this.panes.values()].find(pane=>pane.task.subagent_id===task.subagent_id ||
+      (task.session_id && pane.task.session_id===task.session_id && pane.task.execution_node===task.execution_node));
+    if(existing) { existing.input.focus(); return existing; }
+    const pane=document.createElement('wa-agent-session');
+    const key=task.subagent_id; pane.dataset.key=key; pane.task=task;
+    pane.input.value=this.drafts.get(key) || '';
+    this.panes.set(key,pane); this.canvas.append(pane); this.layout();
+    this.dispatchEvent(new CustomEvent('orchestrator-action',{bubbles:true,detail:{action:'layout'}}));
+    return pane;
+  }
+  unpin(key) {
+    const pane=this.panes.get(key);
+    if(pane)this.drafts.set(pane.task.subagent_id,pane.input.value);
+    this.panes.get(key)?.remove(); this.panes.delete(key); this.layout();
+    this.dispatchEvent(new CustomEvent('orchestrator-action',{bubbles:true,detail:{action:'layout'}}));
+  }
+  layout() {
+    this.querySelector('.orchestrator-empty').hidden=this.panes.size>0;
+    this.canvas.dataset.count=String(this.panes.size);
+    this.canvas.classList.toggle('has-expanded',[...this.panes.values()].some(p=>p.classList.contains('agent-expanded')));
+  }
+  configure(fleet) {
+    if(this.configured)return;
+    this.configured=true; this.querySelector('.placement-enabled').checked=!!fleet.policy?.enabled;
+    const selected=fleet.policy?.nodes || [];
+    const nodes=selected.map(item=>({...item,name:fleet.nodes?.find(n=>n.node_id===item.node)?.name || item.node}));
+    for(const node of fleet.nodes || []) {
+      const id=node.local_node ? 'local' : node.node_id;
+      if(!nodes.some(item=>item.node===id))nodes.push({node:id,name:node.name,max_tasks:0});
+    }
+    const container=this.querySelector('.placement-nodes');
+    for(const node of nodes) {
+      const row=document.createElement('div'); row.className='placement-node'; row.dataset.node=node.node;
+      const label=document.createElement('label'); label.textContent=node.name+' ';
+      const input=document.createElement('input');input.type='number';input.min='0';input.max='128';input.step='1';input.value=node.max_tasks;
+      input.setAttribute('aria-label',node.name+' task limit'); label.append(input);
+      const up=document.createElement('button');up.type='button';up.textContent='↑';up.title='Higher priority';
+      const down=document.createElement('button');down.type='button';down.textContent='↓';down.title='Lower priority';
+      up.onclick=()=>{if(row.previousElementSibling)container.insertBefore(row,row.previousElementSibling);};
+      down.onclick=()=>{if(row.nextElementSibling)container.insertBefore(row.nextElementSibling,row);};
+      row.append(label,up,down);container.append(row);
+    }
+  }
+  get policy() {
+    return {enabled:this.querySelector('.placement-enabled').checked,nodes:[...this.querySelectorAll('.placement-node')].map(row=>({node:row.dataset.node,max_tasks:Number(row.querySelector('input').value)}))};
+  }
+}
+customElements.define('wa-orchestrator',WaOrchestrator);
