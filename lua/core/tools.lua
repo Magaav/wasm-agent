@@ -69,8 +69,10 @@ M.shared = {
   schema("skill", "Load a skill: the full instructions for a specialized task listed in your context. Read the one that matches before starting that kind of work.", {
     name = { type = "string", description = "The skill's name, as listed in <available_skills>." } }, { "name" }),
   schema("capabilities", "List the tools available to this account (its capabilities).", {}),
-  schema("subagent", "Start and supervise a local child agent (a subagent) that works on a bounded task with its own fresh context, its own transcript and a restricted tool profile. `start` returns a durable receipt, not a result: the child runs in the background. Use `await` (one bounded wait, never repeated model polling) or `status`/`result` to collect it, and `cancel` to stop it. You may only inspect or cancel the subagents you started. A profile's tools can only narrow your own; they can never grant more than you have. Use `list` to see your subagents and `profiles` to see what is approved.", {
-    action = { type = "string", enum = { "start", "status", "list", "result", "await", "cancel", "profiles" } },
+  schema("subagent", "Start and supervise a child agent (a subagent), using configured node placement, that works on a bounded task with its own fresh context, its own transcript and a restricted tool profile. `start` returns a durable receipt, not a result: the child runs in the background. Use `await` (one bounded wait, never repeated model polling) or `status`/`result` to collect it, and `cancel` to stop it. You may only inspect or cancel the subagents you started. A profile's tools can only narrow your own; they can never grant more than you have. Use `list` to see your subagents and `profiles` to see what is approved. `session` reads the original child conversation; `message` queues its next turn with the same profile and model.", {
+    action = { type = "string", enum = { "start", "status", "list", "result", "await", "cancel", "profiles", "message", "session", "fleet" } },
+    text = { type = "string", description = "message: queue a user turn in the child's existing session, preserving its approved profile." },
+    before_seq = { type = "integer", description = "session: read original messages before this sequence." },
     profile = { type = "string", description = "Approved profile id, e.g. explore. Defaults to explore (read-only)." },
     prompt = { type = "string", description = "The bounded task for the child. Required for start." },
     context = { type = "string", description = "Optional extra context; the parent transcript is never sent." },
@@ -297,7 +299,7 @@ local TIER_ORDER = {
   "client", "spells", "nodes", "whatsapp", "plugins",
 }
 
--- The envelope the model sees, grouped by tier.
+-- The advertised tool surface, grouped by tier (not a complete model request).
 function M.tiers(role)
   local groups = {}
   for _, item in ipairs(M.all(role)) do

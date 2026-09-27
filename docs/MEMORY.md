@@ -149,7 +149,7 @@ recovery must not be the thing that breaks the request.
 
 | | `default` | `debug` |
 | --- | --- | --- |
-| tool payloads | stable bounded view + retrievable original JSON artifact | same, plus debug request capture |
+| tool payloads | stable bounded view + retrievable original JSON artifact | same, plus first-step model/messages/tools snapshot (not a complete provider request) |
 | retention | **100% for 7 days**, then pruned | **kept forever** |
 | purpose | everyday use, small DB | reproduce a failure, build a fixture |
 
@@ -246,6 +246,11 @@ Cached tokens are accumulated and shown in the status balloon; when
 also shows the session's cost, with cache reads priced separately.
 
 ## AGENTS.md — the only automatic injection
+
+Execution-role instructions are also instruction files: operators load
+`AGENTS.orchestrator.md`, children load `AGENTS.subagents.md`, and guests receive
+neither. They do not inject memory or grant capabilities. See
+[the role-file contract](ORCHESTRATOR-WORKSPACE.md#instructions-and-envelope).
 
 Read fresh every turn (so editing takes effect immediately) and appended to the
 system prompt as "Project instructions". This is deliberate: project rules are

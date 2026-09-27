@@ -122,7 +122,7 @@ A **mode** is a full-view switch (chat ⇄ engine ⇄ shell ⇄ control).
 
 **Keep concerns apart.** The status balloon diagnoses the *model and harness* (§6).
 Management of the *machine or the fabric*
-(nodes, spells, tools/envelope, jobs, accounts) lives in the **engine** view, reached
+(nodes, spells, tool surface/request preview, jobs, accounts) lives in the **engine** view, reached
 from the engine button in the topbar. Do not mix the two.
 
 - The switch lives in the **topbar**, beside the collapse control — never in the
@@ -149,6 +149,8 @@ from the engine button in the topbar. Do not mix the two.
 | `<wa-window>` | A promoted panel in its own OS window (§3). | — | — |
 | `<wa-harness-status>` | §6's harness diagnostics. | — | `export` |
 | `<wa-tasks>` | Concurrent child tasks, run recovery and cancellation. | `.data`, `.message`, `showEvidence()` | `task-action` |
+| `<wa-orchestrator>` | External workspace with node priority controls, agent sidebar and stable tiled sessions. | `.data`, `.message`, `.configure(fleet)`, `.policy` | `orchestrator-action` |
+| `<wa-agent-session>` | Child conversation, original tool evidence, live preview and independent composer. | `.task`, `.showMessages(messages, render, earlier)` | `agent-action` |
 | `<wa-jobs>` | Reviewed automation definitions, enabled state, queue/source/outcome evidence. Engine topic immediately after tools. | `.items` | `job-toggle` |
 
 Keyboard selection belongs to `<wa-menu>`, not to its caller: the highlight and the click target

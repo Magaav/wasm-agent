@@ -149,7 +149,11 @@ window.__fixtures = {
       { peer_id: "dddddddd-cccc-dddd-eeee-ffffffffffff", cursor: 42 },
     ],
   },
-  tools: { tools: [] },
+  tools: { tiers: [{ tier: "environment", tools: [{ name: "read", description: "Read a file" }] }] },
+  "model-configuration-preview": { role: "master", tool_count: 1, request: {
+    model: "fixture-model", provider: "fixture", base_url: "https://example.test/v1",
+    tools: [{ type: "function", function: { name: "read", description: "Read a file", parameters: {} } }],
+  } },
   spells: { spells: [] },
   // Two skills, one of them hidden from the model: the topic must show that difference, because
   // "the agent has this skill" and "the agent is told about this skill" are not the same claim.

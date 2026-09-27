@@ -751,6 +751,7 @@ print("gating ok")
 LUA
 WA_SCRIPT="$DB.gating.lua" "$BIN" --db "$DB" | grep "gating ok"
 rm -f "$DB.gating.lua"
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-model-configuration-preview.lua" "$BIN" --db "$DB.preview" | grep 'model request preview ok'
 
 # Every embedded Lua module must at least compile. Without this a typo in a
 # file the test does not exercise (the chat REPL, a spell helper) ships and only
@@ -1400,6 +1401,7 @@ node scripts/test-operation-control.cjs "$BIN" --await
 # Actual child runtime and real sentinel deliveries, never a /subagents route stub.
 run_proof_fixture policy 62 node scripts/test-subagents-policy.cjs "$BIN"
 run_proof_fixture children 18 node scripts/test-subagents.cjs "$BIN"
+run_proof_fixture fleet 20 node scripts/test-orchestrator.cjs "$BIN"
 run_proof_fixture jobs 37 node scripts/test-job-subagents.cjs
 run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN"
 run_proof_fixture whatsapp 40 node scripts/test-whatsapp-subagent-e2e.cjs

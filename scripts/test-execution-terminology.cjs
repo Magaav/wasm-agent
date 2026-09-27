@@ -31,6 +31,21 @@ for (const file of ['ARCHITECTURE.md', 'docs/EXECUTION.md']) {
 }
 const execution = fs.readFileSync(path.join(root, 'docs/EXECUTION.md'), 'utf8');
 assert.ok(execution.includes('not an OS sandbox')); checks++;
-assert.ok(execution.includes('not conversation identifiers')); checks++;
+assert.ok(execution.includes('not a conversation identifier') && execution.includes('X-WA-Session') &&
+  execution.includes('auth_token') && execution.includes('conversation_id'));
+checks++;
 assert.ok(execution.includes('does not claim') || execution.includes('Never treat a design requirement as a passed test')); checks++;
+const architecture = fs.readFileSync(path.join(root, 'ARCHITECTURE.md'), 'utf8');
+const envelope = fs.readFileSync(path.join(root, 'docs/ENVELOPE.md'), 'utf8');
+const observability = fs.readFileSync(path.join(root, 'docs/OBSERVABILITY.md'), 'utf8');
+const spells = fs.readFileSync(path.join(root, 'docs/SPELLS.md'), 'utf8');
+for (const [source, evidence] of [
+  [architecture, ['provider invocation attempt', 'can have more', 'can have none', 'different* envelope']],
+  [envelope, ['timeout retry', 'overflow recovery', 'preflight failure']],
+  [observability, ['prepared-request hash/bytes', 'not a hash of provider wire bytes']],
+  [spells, ['spell step', 'decision step']],
+]) {
+  for (const text of evidence) { assert.ok(source.includes(text), `missing boundary: ${text}`); checks++; }
+  assert.ok(!/each step has exactly one model call/i.test(source), 'outdated one-call-per-step claim'); checks++;
+}
 console.log(`execution terminology ok (${checks} checks, 0 skipped; vocabulary only, not behavior)`);

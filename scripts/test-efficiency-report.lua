@@ -118,7 +118,7 @@ check(unknown_report.cache.known == false and unknown_report.cache.hit_percent =
 local unknown_text = efficiency.render(unknown_report)
 check(unknown_text:find('unknown, not zero', 1, true) ~= nil, 'the unknown cache rate says so')
 
--- The prefix artifact is written from a debug capture, and the markdown is readable.
+-- The legacy debug `request` key captures only model/messages/tools, not an exact request.
 local with_prefix = session('efficiency-prefix')
 memory.append_turn(with_prefix, {
   role = 'assistant', content = 'reply', trace = { {
@@ -141,11 +141,31 @@ local start4 = telemetry.start({ session_id = with_prefix, run_id = 'run' }, 'mo
 telemetry.finish(start4, { ok = true, usage = RAW, normalized = telemetry.normalize(RAW, RATES) })
 local artifact = efficiency.dump_prefix(nil, with_prefix)
 check(artifact.error == nil, 'a debug capture dumps without a live agent')
-check(artifact.source:find('debug', 1, true) ~= nil, 'the artifact names its source')
+check(artifact.source:find('first step', 1, true) and artifact.source:find('not a complete request', 1, true),
+  'the source identifies the first-step snapshot, not an exact provider request')
 check(artifact.markdown and host.read_file(artifact.markdown), 'the markdown artifact is written')
-check(host.read_file(artifact.markdown):find('SYSTEM PROMPT SENTINEL', 1, true) ~= nil,
-  'the markdown holds the system prompt, so a human can read the prefix')
-check(artifact.json and host.read_file(artifact.json), 'the exact JSON artifact is written')
+check(host.read_file(artifact.markdown):find('SYSTEM PROMPT SENTINEL', 1, true) ~= nil and
+  host.read_file(artifact.markdown):find('Context and tool-surface snapshot', 1, true) ~= nil,
+  'the markdown names and shows the prompt snapshot')
+local captured = artifact.json and json.decode(host.read_file(artifact.json) or '{}') or {}
+check(captured.model == 'test-model' and #captured.messages == 3 and #captured.tools == 1 and
+  captured.tool_choice == nil and captured.stream == nil,
+  'the JSON has the captured components, without implying per-call options are present')
+report.artifact = artifact
+local rendered_artifact = efficiency.render(report)
+check(rendered_artifact:find('context/tool snapshot', 1, true) and
+  rendered_artifact:find('not exact request bytes', 1, true) and
+  not rendered_artifact:find('the exact bytes sent', 1, true),
+  'the report heading must not call a partial snapshot exact sent bytes')
+
+local reconstructed = session('efficiency-reconstructed')
+local preview = efficiency.dump_prefix({ model = 'test-model', tool_list = {},
+  build_context = function() return { { role = 'system', content = 'CURRENT CONTEXT' } } end,
+}, reconstructed)
+check(preview.source:find('report time', 1, true) and preview.source:find('not an observed request', 1, true),
+  'the rebuilt snapshot does not promise next-call bytes')
+check(preview.json and host.read_file(preview.json):find('CURRENT CONTEXT', 1, true),
+  'the rebuilt snapshot preserves current context')
 
 -- A session with no call is not a zero-cost session.
 local empty = session('efficiency-empty')

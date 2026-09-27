@@ -322,6 +322,8 @@ local function derive_ctx(ctx)
     -- run is using and not merely whatever is configured globally.
     model = ctx.model,
     reasoning = ctx.reasoning,
+    remote = ctx.remote,
+    placement = ctx.placement,
   }
 end
 
@@ -409,6 +411,10 @@ function M.start(args, ctx)
   args = args or {}
   ctx = derive_ctx(ctx)
   if ctx.subagent then return { error = "subagent_recursion_forbidden" } end
+  if not ctx.remote and not ctx.placement then
+    local fleet = dofile("lua/core/orchestrator.lua")
+    if fleet.enabled(ctx.user_id) then return fleet.enqueue(args, ctx) end
+  end
   local raw_prompt = tostring(args.prompt or "")
   if raw_prompt == "" then return { error = "prompt_required" } end
   local profile_id = tostring(args.profile or "explore")
@@ -499,6 +505,7 @@ function M.start(args, ctx)
     idempotency_key = idempotency,
     resources = profile.resources,
     event = event,
+    admission_limit = ctx.placement and ctx.placement.max_tasks,
   }
   local receipt = json.decode(host.subagent("start", json.encode(spec)))
   if type(receipt) ~= "table" then return { error = "subagent_runtime_error" } end
@@ -524,6 +531,38 @@ function M.control(args, ctx)
   if ctx.subagent then
     -- A child has no subagents of its own and may not inspect or control any.
     return { error = "subagent_recursion_forbidden" }
+  end
+
+  if not ctx.remote then
+    local fleet = dofile("lua/core/orchestrator.lua")
+    local handled, result = fleet.control(args, ctx, M)
+    if handled then return result end
+  end
+
+  if action == "session" or action == "message" then
+    local receipt = json.decode(host.subagent("status", json.encode({
+      owner_user = ctx.user_id, id = tostring(args.id or args.subagent_id or "") })))
+    if not receipt or receipt.error then return receipt or { error = "subagent_runtime_error" } end
+    if action == "session" then
+      local before = tonumber(args.before_seq)
+      local after=tonumber(args.after_seq)
+      local messages = memory.session_messages(receipt.session_id, { limit = 100, before_seq = before,
+        all=not before and after~=nil, after_seq=after })
+      return { task = receipt, messages = messages, session_id = receipt.session_id }
+    end
+    if tostring(args.idempotency_key or "") == "" then return { error = "idempotency_key_required" } end
+    for attempt = 1, 3 do
+      local result = json.decode(host.subagent("continue", json.encode({
+        owner_user = ctx.user_id, id = receipt.subagent_id, text = tostring(args.text or ""),
+        new_id = host.uuid(), idempotency_key = tostring(args.idempotency_key) })))
+      if result.error ~= "session_tail_changed" then return result end
+    end
+    return { error = "session_tail_changed", retryable = true }
+  end
+
+  if action == "capacity" then
+    return { resources = host.system_resources and json.decode(host.system_resources()) or {},
+      runtime = json.decode(host.subagent("capacity", "{}")) }
   end
 
   if action == "start" then return M.start(args, ctx) end
@@ -586,7 +625,7 @@ function wa_subagent_run(receipt_json)
   }
   local allowed = as_set(profile.allowed_tools)
   local child_role = tostring(receipt.role or "master")
-  local events = {}
+  local events = 0
   -- The approved profile is snapshotted here, immutably: a specialist tool
   -- (whatsapp) must see the resources and limits the operator approved, not a
   -- re-derived or caller-supplied subset.
@@ -604,7 +643,8 @@ function wa_subagent_run(receipt_json)
   local sends = { count = effects.count(), limit = tonumber(limits.sends_per_run) or 1 }
   local child_ok, child = pcall(agentlib.new, receipt.session_id, function(event)
     -- Events stay local: a child must never write into the parent's stream.
-    events[#events + 1] = event
+    events = events + 1
+    host.stream(json.encode(event))
   end, child_role, tostring(receipt.owner_user or "master"), tostring(receipt.node_id or ""), {
     subagent = {
       id = profile.id, allowed = allowed, allowed_tools = profile.allowed_tools,
@@ -646,7 +686,7 @@ function wa_subagent_run(receipt_json)
       session_id = receipt.session_id,
       usage = usage,
       truncated = truncated,
-      events = #events,
+      events = events,
     },
   })
 end
@@ -670,15 +710,16 @@ function wa_subagents(body, session)
   -- read from the body.
   local parent = tostring(decoded.thread or "")
   local requested = tostring(decoded.parent_session_id or "")
-  if requested ~= "" then
-    local existing = memory.session(requested)
-    if existing and (existing.user_id == user.id or users.is_master(role)) then parent = requested end
+  if requested ~= "" then parent=requested end
+  if parent ~= "" then
+    local existing = memory.session(parent)
+    if not existing or existing.user_id ~= user.id then return json.encode({error="forbidden_parent_session"}) end
   end
   local ctx = {
     user_id = user.id,
     role = role,
     session_id = parent,
-    run_id = decoded.parent_run_id or "",
+    run_id = "",
     node_id = "",
   }
   local ok, result = pcall(M.control, decoded, ctx)
@@ -686,6 +727,11 @@ function wa_subagents(body, session)
     return json.encode({ error = redact.text(tostring(result)) })
   end
   return json.encode(result)
+end
+
+function wa_orchestrator_tick()
+  dofile("lua/core/orchestrator.lua").tick(M)
+  return "ok"
 end
 
 return M

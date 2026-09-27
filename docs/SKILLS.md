@@ -91,8 +91,7 @@ it for external repo agents. The reusable closing example is `parallel-evolution
 
 A skill can instruct the model to do anything its tools allow, and can ship code
 the model then runs. Review skills before adding a directory of them, and
-remember that a guest reading a skill still cannot act beyond its own tool
-envelope.
+remember that a guest reading a skill still cannot act beyond its own capability policy (independently checked at tool dispatch).
 
 ## Skills that ship with the node
 

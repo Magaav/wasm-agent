@@ -32,6 +32,9 @@ const names = [
   'renderTurns', 'repaintTurns', 'turnBubble', 'turnPolling', 'turnStartedAt', 'turnId',
   'turn_count', 'parse_turn_body', 'run_turn', 'local_turn', 'search_turns',
   'turn-shape', 'the last turn failed',
+  // These labels falsely described a tool/configuration preview as a provider request.
+  'raw envelope', 'envelope the model sees', 'exact envelope sent',
+  'each turn is one HTTP request', 'envelope-raw',
 ];
 let scanned = 0, hits = 0;
 const files = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }).split('\0').filter(Boolean);

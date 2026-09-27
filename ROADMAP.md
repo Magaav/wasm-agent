@@ -173,6 +173,12 @@ version update requiring fresh approval where permissions change.
 
 ## 4. An operator console that knows the work
 
+The [orchestrator workspace candidate](docs/ORCHESTRATOR-WORKSPACE.md) adds a
+separate tiled session window, execution-role instructions, direct child
+continuations and ordered cloud-first placement with per-node task limits.
+Its proofs use isolated nodes and mock inference; live deployment acceptance
+remains separate. Wake-word input and transparent remote memory are later work.
+
 Keep the avatar and compact chat for everyday use. Add an operator view when the
 number of real engagements needs it, reusing the existing UI components.
 

@@ -66,15 +66,24 @@ provider.budget=function() return {context=100000,reserve=16384,keep=1000,output
 -- provider actually rejects: only the recovery path (not the ordinary trigger) may fire.
 bot.context_tokens=function() return 80000,'test' end
 local model_calls=0
+local summary_calls=0
+local requests={}
 provider.complete_with=function(_,messages,_,_,opts)
-  if opts and opts.kind=='summary' then return {content='a checkpoint',tool_calls={},finish_reason='stop',usage=raw} end
+  if opts and opts.kind=='summary' then
+    summary_calls=summary_calls+1
+    return {content='a checkpoint',tool_calls={},finish_reason='stop',usage=raw}
+  end
   model_calls=model_calls+1
+  requests[#requests+1]={round=opts.round,body=json.encode(messages)}
   if model_calls==1 then error('provider_http_400: {"model":"deepseek-v4.1-flash"}') end
   return {content='recovered answer',tool_calls={},finish_reason='stop',usage=raw}
 end
 local reply=bot:run('please continue')
 check(reply=='recovered answer','an overflow is retried once and answered')
 check(model_calls==2,'exactly one retry was made, not a loop')
+check(requests[1].round==1 and requests[2].round==1 and
+  requests[1].body~=requests[2].body and summary_calls==1,
+  'one decision step may issue two different provider requests and a separate summary call')
 check(memory.session(sid).summarized_until>0,'the recovery compacted the transcript')
 provider.budget=real_budget
 print('overflow recovery ok ('..cases..' checks)')

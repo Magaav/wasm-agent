@@ -1,15 +1,17 @@
 # Spells — deterministic, verified automation
 
-A **spell** is a named, parameterised sequence of **deterministic** steps with
-declared preconditions and mandatory postconditions. A step is any deterministic
-execution - a shell command or script, a client action, a wait, an assertion, or a
-supervisor verb - and the agent *crystallizes* a task into a spell once it has
-worked it out, then replays it later **without the model in the loop**. A macro is
-one shape a spell can take, not what a spell is.
+A **spell** is a named, parameterised sequence of **deterministic** execution steps
+with declared preconditions and mandatory postconditions. A **spell step** is a shell
+command or script, a client action, a wait, an assertion, or a supervisor verb—not
+the agent's **decision step** (inference plus its resulting tool work, defined in
+[ARCHITECTURE.md §6](../ARCHITECTURE.md#6-naming-and-execution-ownership)). The agent
+*crystallizes* a task into a spell once it has worked it out, then replays it later
+**without the model in the loop**. A macro is one shape a spell can take, not what
+a spell is.
 
 > **Naming.** "Spells" always means these deterministic, verified executions. The tool that
 > lists what an account may call is **`capabilities`**, never `spells`. The two
-> used to share the name, which was a defect: it made the envelope read
+> used to share the name, which was a defect: it made the advertised tool surface read
 > `capabilities → spells` and `spells → spell_save`, two different things under
 > one word.
 
@@ -25,7 +27,7 @@ in ways we are not repeating.
 | Hardcoded values that broke on the next run | **`params`** with types + defaults; steps reference `{{name}}`; unknown/missing params are errors. |
 | Blind retries that doubled an effect | Retries are **only allowed on steps marked `idempotent: true`**; otherwise `spell_save` rejects the spell. |
 | Silent partial failures | **First failure stops the run** with a typed error, the failing index and a trace. |
-| No evidence of what happened | Every run returns a **trace** with per-step timing, attempt count and observed values. |
+| No evidence of what happened | Every spell execution returns a **trace** with per-spell-step timing, attempt count and observed values. |
 | Drift between recording and replay | Spells are **versioned** (each save bumps `version`) and record their `target` (node/app/profile). |
 
 ## Contract
@@ -54,6 +56,10 @@ are optional.
 
 ### Step kinds
 
+The `run` step kind means a deterministic command inside a spell, **not** a
+conversational agent run or a decision step. Existing JSON keys and kind names
+remain unchanged for saved spells and clients.
+
 | Kind | Shape | Notes |
 | --- | --- | --- |
 | `client` | `{action, ...}` where action ∈ `click move type key shell cdp frame` | `retries` needs `idempotent: true` |
@@ -69,7 +75,7 @@ it has lost the two properties that make a spell worth having: no model in the l
 variance. A job's pipeline may mix deterministic and inference steps (`docs/PIPELINES.md`); a spell may
 not. `spell_save` refuses a step that is not deterministic.
 
-A `run` step executes in the node's worker, where a turn is already running - never in the process that
+A `run` spell step executes in the node's worker, where an agent run is already executing - never in the process that
 can restart this node. That boundary needs no new code: `M.export` refuses any step whose kind is not
 `sentinel`, and `rust/wa-sentinel/src/spell.rs` refuses a plan containing one, so a step kind added today
 cannot reach the supervisor tomorrow.

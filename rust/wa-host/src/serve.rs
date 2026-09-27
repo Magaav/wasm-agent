@@ -932,6 +932,7 @@ impl Drop for SinkGuard {
 /// client, and a run whose worker is between requests has no client either - and that is
 /// the point: there is deliberately no process-wide fallback to leak into.
 pub fn write_event(payload: &str) {
+    if crate::subagents::capture_event(payload) { return; }
     beat();
     CURRENT_RUN_ID.with(|id| { if id.get() != 0 { record_run_event(id.get(),payload); } });
     ACTIVE_SINK.with(|cell| {
@@ -1327,6 +1328,15 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     // agent loop observe a run's own flag as well as a child's. One name (`host::run_cancel_requested`)
     // combines both, and a caller cannot check the wrong one.
     crate::host::set_run_cancel_probe(crate::serve::run_cancel_requested);
+    // Lifetime only: ordering, eligibility and recovery policy stay in Lua.
+    // Start after the run journal's process lease, never from a browser poll.
+    let placement = factory();
+    std::thread::Builder::new().name("wa-placement".into()).spawn(move || loop {
+        if let Err(error) = placement.call_string("wa_orchestrator_tick", &[]) {
+            eprintln!("[placement] {error}");
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }).expect("placement worker");
     // Sized to the ceiling once, so a worker's liveness slot never has to be created later: the arrays are
     // indexed by worker id, and a slot whose sender is None is simply not running.
     // u64::MAX, not 0, for "never beaten": a worker beats at the top of its own loop, which can happen
@@ -2319,7 +2329,8 @@ fn dispatch(
             let signature = header_of(node_headers, "x-wa-sig");
             (200, "application/json", call("wa_node_call", &[body, &from, &public_key, &ts, &signature]).into_bytes())
         }
-        "/envelope" => (200, "application/json", call("wa_envelope", &[session]).into_bytes()),
+        "/model-configuration-preview" => (200, "application/json", call("wa_model_configuration_preview", &[session]).into_bytes()),
+        "/envelope" => (200, "application/json", call("wa_envelope", &[session]).into_bytes()), // legacy alias
         "/tools" => (200, "application/json", call("wa_tools", &[session]).into_bytes()),
         "/jobs" if method == "GET" => (200,"application/json",call("wa_jobs", &["{}",session]).into_bytes()),
         "/jobs" if method == "POST" => (200,"application/json",call("wa_jobs", &[body,session]).into_bytes()),
