@@ -43,6 +43,16 @@ elseif mode=='reuse' then
   check(resources.claim(d,{'client:local'}).ok,'reuse: a refusal that never reached the client leaves no uncertainty')
   check(resources.finish(d).ok,'reuse: independent run settles')
 
+  -- A write refused before it was dispatched - nothing to run - is not an uncertain
+  -- effect either: the node marks `client_not_connected`, and Lua marks its own
+  -- argument refusals the same way.
+  local e={user_id='erin',session_id='session-e',run_id='run-e'}
+  check(resources.begin(e).ok,'reuse: third run begins')
+  local empty=tools.dispatch(nil,'shell',{command=''},'master',e)
+  check(empty.error=='command_required' and empty.effect=='none','reuse: a pre-dispatch argument refusal says it had no effect')
+  check(resources.claim(e,{'client:local'}).ok,'reuse: an argument refusal leaves no uncertainty')
+  check(resources.finish(e).ok,'reuse: third run settles')
+
   local c={user_id='carol',session_id='session-c',run_id='run-c'}
   check(resources.begin(c).ok,'reuse: owner begins')
   check(resources.claim(c,{'client:local'}).ok,'reuse: owner reserves client')

@@ -29,9 +29,12 @@ The store is shared by processes using the same runtime home, even when their
 transcript databases differ. Claims survive process death. Failed or uncertain
 client effects retain ownership after settlement. Uncertainty is recorded for
 **unknown effects, not for refusals**: a result the node marks `effect:"none"` never
-reached the client, so it leaves the run's claims settled. Without that, one call
-made while the window was closed took the client away from its own run for the rest
-of the run, which is availability lost for a mistake that changed nothing.
+reached the client, so it leaves the run's claims settled. The node marks a refusal it
+makes before dispatching (`client_not_connected`), and Lua marks the argument refusals
+it makes before dispatching (`command_required`), the same way. Without that, one call
+made while the window was closed - or one `shell` call with no command - took the
+client away from its own run for the rest of the run, which is availability lost for a
+mistake that changed nothing.
 
 An uncertain claim no longer wedges the run that owns it. The owner - same run, same
 principal, same *process* that granted the claim - may clear its own uncertainty through

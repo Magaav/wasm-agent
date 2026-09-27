@@ -883,7 +883,10 @@ function M.dispatch(memory, name, args, role, ctx)
     if type(decoded) ~= "table" then return { result = raw } end
     return decoded
   elseif name == "shell" then
-    if not args.command or args.command == "" then return { error = "command_required" } end
+    -- Nothing was dispatched, so nothing can be uncertain: the run must not lose its
+    -- client to a mistyped call. Lua marks its own pre-dispatch refusals the same way
+    -- the node marks `client_not_connected`.
+    if not args.command or args.command == "" then return { error = "command_required", effect = "none" } end
     local ok, raw = pcall(host.client, "shell", json.encode(args))
     if not ok then return { error = tostring(raw) } end
     local decoded = json.decode(raw)
