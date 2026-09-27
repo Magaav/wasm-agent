@@ -1096,6 +1096,11 @@ fi
 # durable transcript. A local mock provider checks the actual agent loop without inference.
 WA_SCRIPT=scripts/test-cli-steering.lua "$BIN" --db "$DB.cli-steering" | grep 'cli steering ok'
 
+# A phase-aware HTTP stream sends commentary chunks live, then only associates the
+# durable message id when the result settles. The transcript keeps commentary apart
+# from the final answer, and ordinary unstreamed commentary still emits once.
+WA_SCRIPT=scripts/test-commentary-stream.lua "$BIN" --db "$DB.commentary-stream" | grep 'commentary stream contract ok'
+
 # A command must not be able to hold the interpreter forever: an agent curled the node's own port
 # from inside a turn, the request queued behind the turn that made it, and the worker waited on
 # itself. The deadline is set short here so the check takes seconds, not minutes.

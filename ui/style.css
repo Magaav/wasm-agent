@@ -139,6 +139,8 @@ wa-message.assistant { align-self: flex-start; background: var(--assistant); }
    chevron) and the same border and background as <wa-trace>, so nothing about it reads as a
    different kind of thing. Its own part is the body: pre-wrap prose, capped and scrollable. */
 wa-reasoning, wa-commentary { display: block; align-self: flex-start; max-width: 760px; width: 100%; }
+wa-commentary.phase-pending { opacity: .78; }
+wa-commentary.phase-incomplete .commentary { opacity: .78; text-decoration: underline dotted; }
 .reasoning { border: 1px solid var(--line); border-radius: var(--radius); background: rgba(15, 18, 25, .6); overflow: hidden; }
 .commentary { border: 1px solid var(--line); border-radius: var(--radius); background: rgba(15, 18, 25, .6); overflow: hidden; }
 .reasoning-body, .commentary-body {

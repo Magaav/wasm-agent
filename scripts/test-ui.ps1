@@ -2106,6 +2106,48 @@ $harness = @'
     'fork: request names the source and explicit boundary');
   check(document.querySelector('.chat-content-run-label')?.textContent.includes('incomplete_tool_exchange') && !forkButton.disabled,
     'fork: refused tool boundary stays visible and retryable');
+
+  // Phase resolution replaces provisional text: commentary becomes one commentary
+  // topic, while final-answer text becomes one answer segment with no lost prefix.
+  window.__repaintMessages([]);
+  window.handleEvent({type:'round',n:1});
+  window.handleEvent({type:'pending_delta',pending_id:'fixture-commentary',text:'Checking '});
+  window.handleEvent({type:'pending_delta',pending_id:'fixture-commentary',text:'the result.'});
+  var provisionalCommentary=document.querySelector('.phase-pending');
+  check(!!provisionalCommentary && provisionalCommentary.textContent==='Checking the result.',
+    'pending commentary text remains visible while its phase is unknown');
+  window.handleEvent({type:'commentary',pending_id:'fixture-commentary',message_id:'fixture-commentary-id',text:'Checking the result.'});
+  check(document.querySelectorAll('wa-commentary').length===1 &&
+    document.querySelector('wa-commentary .commentary-body').textContent==='Checking the result.' &&
+    !document.querySelector('.phase-pending'),
+    'commentary resolution removes provisional text and retains it once in its own phase');
+  window.handleEvent({type:'pending_delta',pending_id:'fixture-answer',text:'The answer '});
+  window.handleEvent({type:'pending_delta',pending_id:'fixture-answer',text:'is complete.'});
+  window.handleEvent({type:'delta',pending_id:'fixture-answer',text:'The answer is complete.'});
+  window.handleEvent({type:'reply',message_id:'fixture-answer-id',text:'The answer is complete.'});
+  var resolvedAnswer=document.querySelectorAll('#messages .seg');
+  check(resolvedAnswer.length===1 && resolvedAnswer[0].textContent==='The answer is complete.' &&
+    !document.querySelector('.phase-pending'),
+    'final-answer resolution removes provisional text and preserves the answer exactly once');
+
+  // OpenCode-compatible commentary arrives as chunks and is closed by transcript
+  // identity only; a failed stream keeps its partial text visibly incomplete.
+  window.handleEvent({type:'round',n:2});
+  window.handleEvent({type:'commentary_delta',text:'OpenCode '});
+  window.handleEvent({type:'commentary_delta',text:'commentary.'});
+  var streamedCommentary=document.querySelector('wa-commentary.phase-pending');
+  check(!!streamedCommentary && streamedCommentary.querySelector('.commentary-body').textContent==='OpenCode commentary.',
+    'OpenCode commentary chunks render distinctly as they arrive');
+  window.handleEvent({type:'commentary_end',message_id:'fixture-opencode-commentary'});
+  streamedCommentary=document.querySelector('wa-commentary[data-message-id="fixture-opencode-commentary"]');
+  check(!!streamedCommentary && streamedCommentary.querySelector('.commentary-body').textContent==='OpenCode commentary.' &&
+    !streamedCommentary.classList.contains('phase-pending'),
+    'the saved commentary id closes the streamed block without a second text event');
+  window.handleEvent({type:'commentary_delta',text:'Partial commentary'});
+  window.handleEvent({type:'error',error:'fixture stream interrupted'});
+  var incompleteCommentary=document.querySelector('wa-commentary.phase-incomplete');
+  check(!!incompleteCommentary && incompleteCommentary.querySelector('.commentary-body').textContent==='Partial commentary',
+    'interrupted streamed commentary remains visible and marked incomplete');
   document.title = "stage: end";
 } catch (error) {
     // A throw must still produce a log: a reporter that swallows its own failure is worse

@@ -51,10 +51,24 @@ try {
           return {
             async *[Symbol.asyncIterator]() {
               yield {type:'thinking_delta',delta:'thinking'};
-              yield {type:'text_delta',delta:'fixture answer'};
+              yield {type:'text_delta',contentIndex:0,delta:'Checking '};
+              yield {type:'text_delta',contentIndex:0,delta:'the result',
+                partial:{content:[{type:'text',text:'Checking the result'}]}};
+              yield {type:'text_end',contentIndex:0,content:'Checking the result',
+                partial:{content:[{type:'text',text:'Checking the result',
+                  textSignature:JSON.stringify({phase:'commentary'})}]}};
+              yield {type:'text_delta',contentIndex:1,delta:'fixture '};
+              yield {type:'text_delta',contentIndex:1,delta:'answer',
+                partial:{content:[null,{type:'text',text:'fixture answer'}]}};
+              yield {type:'text_end',contentIndex:1,content:'fixture answer',
+                partial:{content:[null,{type:'text',text:'fixture answer',
+                  textSignature:JSON.stringify({phase:'final_answer'})}]}};
             },
             async result() {return {stopReason:'toolUse',responseId:'fixture-id',
-              content:[{type:'text',text:'fixture answer'},
+              content:[{type:'text',text:'Checking the result',
+                  textSignature:JSON.stringify({phase:'commentary'})},
+                {type:'text',text:'fixture answer',
+                  textSignature:JSON.stringify({phase:'final_answer'})},
                 {type:'toolCall',id:'call-2',name:'lookup_marker',arguments:{tag:'next'}}],
               usage:{input:10,cacheRead:20,cacheWrite:0,output:4,totalTokens:34,reasoning:2}};}
           };
@@ -80,8 +94,24 @@ try {
   };
   const success=run(request);
   assert.equal(success.status,0,success.stdout);
-  assert.deepEqual(success.events.slice(0,2).map(event=>event.type),['reasoning','delta']);
-  const result=success.events[2].result;
+  const pending=success.events.filter(event=>event.type==='pending_delta');
+  const resolutions=success.events.filter(event=>event.type==='commentary' || event.type==='delta');
+  assert.deepEqual(success.events.map(event=>event.type),[
+    'reasoning','pending_delta','pending_delta','commentary',
+    'pending_delta','pending_delta','delta','result']);
+  for (const pendingId of new Set(pending.map(event=>event.pending_id))) {
+    const provisional=pending.filter(event=>event.pending_id===pendingId).map(event=>event.text).join('');
+    const resolved=resolutions.filter(event=>event.pending_id===pendingId);
+    assert.equal(resolved.length,1,`pending text ${pendingId} must resolve once`);
+    assert.equal(resolved[0].text,provisional,`pending text ${pendingId} must resolve without loss or duplication`);
+  }
+  assert.deepEqual(resolutions.map(event=>event.type),['commentary','delta']);
+  assert.equal(resolutions[0].text,'Checking the result');
+  assert.equal(resolutions[1].text,'fixture answer');
+  const result=success.events.at(-1).result;
+  assert.equal(result.commentary.length,1);
+  assert.equal(result.commentary[0].content,'Checking the result');
+  assert.equal(result.content,'fixture answer');
   assert.equal(result.tool_calls[0].function.arguments,'{"tag":"next"}');
   assert.equal(result.usage.prompt_tokens,30);
   assert.equal(result.usage.prompt_tokens_details.cached_tokens,20);

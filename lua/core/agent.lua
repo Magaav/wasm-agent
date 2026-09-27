@@ -1408,7 +1408,11 @@ function M:run_body(text, images)
         commentary_message.id = commentary_id
       end
       messages[#messages + 1] = commentary_message
-      if not result.commentary_streamed then
+      if result.commentary_streamed == "delta" then
+        -- The OpenCode-compatible host already streamed the text chunks. Close that
+        -- live block with its durable transcript id instead of sending the text again.
+        self.emit({ type = "commentary_end", message_id = commentary_id, round = round })
+      elseif not result.commentary_streamed then
         self.emit({ type = "commentary", text = item.content, message_id = commentary_id,
           pending_id = item.pending_id, round = round })
       end

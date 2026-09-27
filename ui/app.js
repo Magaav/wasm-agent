@@ -492,6 +492,8 @@ function clearStatus() {
 // visible instead of reading as a run that only called tools.
 let reasoningBlock = null;
 let reasoningText = "";
+let streamedCommentaryBlock = null;
+let streamedCommentaryText = "";
 function appendReasoning(text, complete = false) {
   if (!text && !complete) return reasoningText;
   const bubble = currentBubble();
@@ -520,6 +522,45 @@ function appendCommentary(text, messageId) {
   }
   currentBubble().body.append(block);
   pin();
+}
+
+function appendStreamedCommentary(text) {
+  if (!text) return;
+  const bubble = currentBubble();
+  if (!streamedCommentaryBlock || streamedCommentaryBlock.parentNode !== bubble.body) {
+    streamedCommentaryBlock = document.createElement("wa-commentary");
+    streamedCommentaryBlock.classList.add("phase-pending");
+    streamedCommentaryBlock.open = !replayingMessages;
+    bubble.body.append(streamedCommentaryBlock);
+    streamedCommentaryText = "";
+  }
+  streamedCommentaryText += text;
+  streamedCommentaryBlock.setText(streamedCommentaryText);
+  pin();
+}
+
+function finishStreamedCommentary(messageId) {
+  if (!streamedCommentaryBlock) return;
+  const id = messageId == null ? "" : String(messageId);
+  if (id && renderedMessageIds.has(id)) {
+    streamedCommentaryBlock.remove();
+  } else {
+    if (id) {
+      streamedCommentaryBlock.dataset.messageId = id;
+      renderedMessageIds.add(id);
+    }
+    streamedCommentaryBlock.classList.remove("phase-pending", "phase-incomplete");
+  }
+  streamedCommentaryBlock = null;
+  streamedCommentaryText = "";
+}
+
+function markStreamedCommentaryIncomplete() {
+  if (!streamedCommentaryBlock) return;
+  streamedCommentaryBlock.classList.remove("phase-pending");
+  streamedCommentaryBlock.classList.add("phase-incomplete");
+  streamedCommentaryBlock = null;
+  streamedCommentaryText = "";
 }
 
 function removePendingText(id) {
@@ -1152,12 +1193,13 @@ function typeOut(body, text) {
 }
 
 function handleEvent(event) {
-  if (["round", "reasoning", "commentary", "pending_delta", "decision", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
+  if (["round", "reasoning", "commentary", "commentary_delta", "commentary_end", "pending_delta", "decision", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
     clearActiveRunNotice();
   }
   if (event.type === "round") {
     // A new step begins: close the previous one (its text and its tool topic).
     if (!runStartedAt) runStartedAt = Date.now();
+    markStreamedCommentaryIncomplete();
     flushDecision();
   } else if (event.type === "node") {
     // Another window renamed this node, or this one did: either way the name is the node's,
@@ -1170,6 +1212,10 @@ function handleEvent(event) {
   } else if (event.type === "commentary") {
     removePendingText(event.pending_id);
     appendCommentary(event.text || "", event.message_id);
+  } else if (event.type === "commentary_delta") {
+    appendStreamedCommentary(event.text || "");
+  } else if (event.type === "commentary_end") {
+    finishStreamedCommentary(event.message_id);
   } else if (event.type === "reasoning") {
     // A reasoning model can think for a long time before it says anything, and a
     // silent panel is indistinguishable from a hung one. The text becomes a thinking
@@ -1216,6 +1262,7 @@ function handleEvent(event) {
     pin();
   } else if (event.type === "reply") {
     discardPendingText();
+    markStreamedCommentaryIncomplete();
     if (statusLabel) statusLabel.textContent = "finishing…";
     if (!replayingMessages && event.message_id && renderedMessageIds.has(String(event.message_id))) {
       // The durable reply can be repainted before its trailing `reply` event is replayed.
@@ -1268,12 +1315,14 @@ function handleEvent(event) {
     if (balloon.open) { renderUsage(); renderModels(); }
   } else if (event.type === "error") {
     markPendingTextIncomplete();
+    markStreamedCommentaryIncomplete();
     add("assistant", "error: " + (event.error || "unknown"));
     finishRunStatus("failed");
     finishTrace();
     runBubble = null;
   } else if (event.type === "done") {
     markPendingTextIncomplete();
+    markStreamedCommentaryIncomplete();
     finishRunStatus();
     flushDecision(true);
   }
@@ -1334,6 +1383,8 @@ function repaintMessages(rows, options = {}) {
   streamBody = null;
   streamText = "";
   reasoningBlock = null;
+  streamedCommentaryBlock = null;
+  streamedCommentaryText = "";
   phasePendingText = new Map();
   runStartedAt = 0;
   replayMessageEndedAt = 0;

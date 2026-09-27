@@ -626,6 +626,7 @@ function M.complete_with(model, messages, tools, stream, opts)
     return {
       content = result.content or "",
       commentary = result.commentary or "",
+      commentary_streamed = stream and result.commentary ~= "" and "delta" or false,
       final_phase = result.final_phase or "",
       reasoning = result.reasoning or "",
       finish_reason = result.finish_reason,
