@@ -247,6 +247,11 @@ also shows the session's cost, with cache reads priced separately.
 
 ## AGENTS.md — the only automatic injection
 
+Execution-role instructions are also instruction files: operators load
+`AGENTS.orchestrator.md`, children load `AGENTS.subagents.md`, and guests receive
+neither. They do not inject memory or grant capabilities. See
+[the role-file contract](ORCHESTRATOR-WORKSPACE.md#instructions-and-envelope).
+
 Read fresh every turn (so editing takes effect immediately) and appended to the
 system prompt as "Project instructions". This is deliberate: project rules are
 the one thing that should always be present, and everything else is retrieved

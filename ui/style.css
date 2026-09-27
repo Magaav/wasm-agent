@@ -23,6 +23,36 @@
   --font: Consolas, "Cascadia Mono", "Cascadia Code", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --font-size: 14.5px;
 }
+
+wa-orchestrator { display:flex; flex-direction:column; width:100%; height:100%; color:var(--text); font:var(--font-size)/1.55 var(--font); }
+.orchestrator-head, .agent-pane-head { display:flex; align-items:center; gap:var(--gap); padding:var(--pad); border-bottom:1px solid var(--line); }
+.orchestrator-status, .agent-pane-head span { flex:1; min-width:0; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+.orchestrator-body { display:flex; flex:1; min-height:0; }
+.orchestrator-sidebar { width:250px; min-width:200px; max-width:40%; overflow:auto; resize:horizontal; border-right:1px solid var(--line); padding:var(--space); }
+.orchestrator-sidebar nav { display:flex; flex-direction:column; gap:var(--gap); }
+.agent-card { text-align:left; padding:var(--pad); border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel); color:var(--text); overflow-wrap:anywhere; }
+.placement { padding:var(--space); margin-bottom:var(--space); color:var(--muted); font-size:12px; }
+.placement-node { display:flex; align-items:center; gap:var(--gap); padding:var(--space) 0; }
+.placement-node label { flex:1; overflow-wrap:anywhere; }
+.placement-node input { width:55px; }
+.orchestrator-canvas { flex:1; min-width:0; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); grid-auto-rows:minmax(250px,1fr); gap:var(--gap); padding:var(--space); overflow:auto; }
+.orchestrator-canvas[data-count="0"], .orchestrator-canvas[data-count="1"] { grid-template-columns:minmax(0,1fr); }
+.orchestrator-canvas[data-count="3"] { grid-template-columns:repeat(3,minmax(0,1fr)); }
+.orchestrator-canvas.has-expanded { grid-template-columns:minmax(0,1fr); }
+.orchestrator-canvas.has-expanded wa-agent-session:not(.agent-expanded) { display:none; }
+wa-agent-session { min-width:0; min-height:0; display:flex; flex-direction:column; background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; }
+.agent-pane-head { padding:var(--space); flex-wrap:wrap; }
+.agent-transcript { flex:1; min-height:0; overflow:auto; padding:var(--pad); }
+.agent-transcript wa-message { margin-bottom:var(--space); }
+.agent-transcript wa-tool { display:block; margin-bottom:var(--space); }
+.agent-transcript pre { overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
+.agent-composer { display:flex; flex-wrap:wrap; gap:var(--gap); padding:var(--space); border-top:1px solid var(--line); }
+.agent-composer textarea { width:100%; resize:vertical; min-height:55px; background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:var(--radius-sm); padding:var(--space); font:inherit; }
+.agent-notice { padding:0 var(--space); color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+.agent-preview { padding:var(--pad); white-space:pre-wrap; overflow:auto; max-height:40%; overflow-wrap:anywhere; }
+wa-orchestrator button { cursor:pointer; color:var(--text); background:var(--panel-2); border:1px solid var(--line); border-radius:var(--radius-sm); padding:var(--space); font:inherit; }
+wa-orchestrator button:disabled { opacity:.5; cursor:default; }
+@media(max-width:700px) { .orchestrator-sidebar { width:200px; min-width:150px; } .orchestrator-canvas[data-count] { grid-template-columns:minmax(0,1fr); } }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body {
@@ -296,24 +326,6 @@ wa-trace { display: block; align-self: flex-start; max-width: 760px; width: 100%
 body.engine .messages, body.engine .composer, body.engine .terminal, body.engine .control { display: none; }
 .engine { display: none; flex: 1; min-height: 0; flex-direction: column; }
 body.engine .engine { display: flex; }
-/* drift: the replication journal as a diff between this node and its peers.
-   Reuses the engine view's bar/topic/content idioms (§1) rather than inventing a
-   second visual language for what is structurally the same kind of screen. */
-body.drift .messages, body.drift .composer, body.drift .terminal, body.drift .control, body.drift .engine { display: none; }
-.drift { display: none; flex: 1; min-height: 0; flex-direction: column; }
-body.drift .drift { display: flex; }
-.drift-row {
-  display: flex; gap: var(--gap); padding: 2px 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
-}
-.drift-key { color: var(--muted); min-width: 4.5em; flex: 0 0 auto; }
-.drift-val { color: var(--text); word-break: break-all; }
-/* The + and − rows are the diff itself, so they carry the two colours a diff
-   reader already knows. Not decorative: the pair is the whole point of the view. */
-.drift-row.add .drift-key, .drift-row.add .drift-val { color: #7ee787; }
-.drift-row.del .drift-key, .drift-row.del .drift-val { color: #ff7b72; }
-.drift-row.muted .drift-val, .drift-row.muted .drift-key { color: var(--muted); }
-.drift-empty { color: var(--muted); font-size: 12px; line-height: 1.5; }
 .engine-bar {
   display: flex; align-items: center; gap: var(--gap); padding: var(--space) var(--pad);
   border-bottom: 1px solid var(--line); background: rgba(18, 21, 28, .82);

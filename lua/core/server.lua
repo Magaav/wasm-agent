@@ -56,6 +56,7 @@ local function agent_for(session, node, thread)
   local want = thread or ""
   if want ~= "" then
     local existing = memory.session(want)
+    if existing and existing.objective == "subagent" then return nil, "use_subagent_message" end
     if existing and existing.user_id ~= user.id and not users.is_master(role) then
       return nil, "forbidden_thread"
     end
@@ -171,6 +172,7 @@ function wa_admission(session, node, body)
   end
   if thread ~= "" then
     local existing = memory.session(thread)
+    if existing and existing.objective == "subagent" then return json.encode({error="use_subagent_message"}) end
     if existing and existing.user_id ~= user.id and not users.is_master(role) then
       return json.encode({ error = "forbidden_thread" })
     end
@@ -532,6 +534,17 @@ local function node_capability(capability, args, caller)
     local ok, reply = pcall(bot.run, bot, args.text or "")
     if not ok then return { error = tostring(reply) } end
     return { reply = reply }
+  elseif capability == "subagent" then
+    -- Peer ownership comes from the verified identity. A request cannot forge
+    -- a local account, become another dispatcher, or change node policy.
+    local allowed = { start=true, list=true, profiles=true, status=true, result=true,
+      await=true, cancel=true, message=true, session=true, capacity=true }
+    if not allowed[args.action or "list"] then return { error="forbidden_peer_action" } end
+    return dofile("lua/core/subagents.lua").control(args, {
+      user_id=author, role=users.normalize(caller.role), node_id=nodeslib.node_name(),
+      session_id=tostring(args.parent_session_id or ""), remote=true,
+      placement=args.placement,
+    })
   end
   -- The caller's role, not a hard-coded one: `verify_peer` proved it is a master, and passing
   -- the proof through means a future caller that is not a master cannot inherit these tools by
@@ -550,6 +563,9 @@ function wa_node_call(payload, from, public_key, ts, signature)
   if capability == "remote" then return json.encode({ error = "remote_cannot_recurse" }) end
   local caller, problem = verify_peer(from, public_key, ts, signature, "call", payload)
   if problem then return json.encode({ error = problem }) end
+  if capability == "subagent" and request.to_node_id ~= (nodeslib.identity() or {}).node_id then
+    return json.encode({error="wrong_target"})
+  end
   if enrollment.managed() then
     if not enrollment.target(request) then return json.encode({ error = "wrong_target" }) end
     local allowed = { status=true, set_role=true, read=true, write=true, edit=true,

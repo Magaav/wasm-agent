@@ -191,6 +191,7 @@ struct Task {
     sockets: SocketSlot,
     boot: String,
     pid: u32,
+    preview: Value,
 }
 
 impl Task {
@@ -211,6 +212,9 @@ impl Task {
             "started_at": self.started_at,
             "settled_at": self.settled_at,
             "timeout_seconds": self.timeout_seconds,
+            "model": self.spec["model"],
+            "after_id": self.spec["after_id"],
+            "preview": if self.settled { Value::Null } else { self.preview.clone() },
         });
         if let Some(error) = &self.error {
             value["error"] = json!(error);
@@ -365,6 +369,7 @@ impl Manager {
                 sockets: Arc::new(Mutex::new(Vec::new())),
                 boot: value["boot"].as_str().unwrap_or_default().to_string(),
                 pid: value["pid"].as_u64().unwrap_or(0) as u32,
+                preview: Value::Null,
             };
             if !task.idempotency_key.is_empty() {
                 if let Ok(mut idem) = self.inner.idem.lock() {
@@ -433,6 +438,24 @@ impl Manager {
         if Self::live_count(&tasks) >= self.max_live {
             return Err("queue_full".into());
         }
+        // Placement's limit is a reservation, checked under the admission lock.
+        // It can narrow the runtime ceiling, never enlarge it. Follow-up turns
+        // stay on their session's node and use the ordinary bounded queue.
+        if let Some(limit) = spec["admission_limit"].as_u64() {
+            if Self::live_count(&tasks) >= (limit as usize).min(self.inner.max_concurrent) {
+                return Err("node_full".into());
+            }
+        }
+        if let Some(after) = spec["after_id"].as_str() {
+            let previous = tasks.get(after).ok_or("unknown_subagent")?;
+            if previous.owner_user != owner || previous.session_id != spec["session_id"].as_str().unwrap_or_default() {
+                return Err("forbidden_subagent".into());
+            }
+            if previous.state == "unknown" { return Err("predecessor_unknown".into()); }
+            if tasks.values().any(|task| task.spec["after_id"].as_str() == Some(after)) {
+                return Err("session_tail_changed".into());
+            }
+        }
         let queued = tasks.values().filter(|task| !task.settled && task.state == "accepted").count();
         let task = Task {
             id: id.to_string(),
@@ -457,6 +480,7 @@ impl Manager {
             sockets: Arc::new(Mutex::new(Vec::new())),
             boot: boot_id().to_string(),
             pid: std::process::id(),
+            preview: Value::Null,
         };
         persist_task(&self.inner.root, &task).map_err(|error| format!("record_write_failed:{error}"))?;
         if !idempotency.is_empty() {
@@ -508,6 +532,31 @@ impl Manager {
             return Err("forbidden_subagent".into());
         }
         Ok(task.view(true))
+    }
+
+    fn continue_session(&self, args: &Value) -> Result<Value, String> {
+        let owner = args["owner_user"].as_str().unwrap_or_default();
+        let id = args["id"].as_str().unwrap_or_default();
+        let text = args["text"].as_str().filter(|s| !s.trim().is_empty()).ok_or("text_required")?;
+        let tasks = self.inner.tasks.lock().map_err(|_| "subagent_state_poisoned")?;
+        let mut task = tasks.get(id).ok_or("unknown_subagent")?;
+        if task.owner_user != owner { return Err("forbidden_subagent".into()); }
+        // Follow the chain so messages from different windows serialize.
+        while let Some(next) = tasks.values().find(|item| item.spec["after_id"].as_str() == Some(task.id.as_str())) {
+            task = next;
+        }
+        if text.len() > task.spec["limits"]["max_prompt_bytes"].as_u64().unwrap_or(262144) as usize {
+            return Err("prompt_too_large".into());
+        }
+        let mut spec = task.spec.clone();
+        spec["after_id"] = json!(task.id);
+        spec["id"] = args["new_id"].clone();
+        spec["prompt"] = json!(text);
+        spec["context"] = json!("");
+        spec["idempotency_key"] = args["idempotency_key"].clone();
+        spec.as_object_mut().unwrap().remove("admission_limit");
+        drop(tasks);
+        self.start(&spec)
     }
 
     fn list(&self, owner: &str) -> Value {
@@ -707,6 +756,23 @@ fn write_record(directory: &Path, record: &Value) -> Result<(), String> {
 /// The body of a child task's own thread. Capacity is acquired here, not in
 /// `start`, so admission is a durable receipt and execution is bounded.
 fn run_child(inner: Arc<Inner>, runner: Runner, id: String, cancel: Arc<AtomicBool>, sockets: SocketSlot) {
+    // A queued conversation turn must not occupy a worker while its predecessor
+    // still owns that session. Unknown effects stop the chain visibly.
+    {
+        let mut tasks = inner.tasks.lock().expect("subagents tasks");
+        loop {
+            let after = tasks.get(&id).and_then(|task| task.spec["after_id"].as_str()).map(str::to_string);
+            let Some(after) = after else { break };
+            let previous = tasks.get(&after);
+            if previous.is_none() || previous.is_some_and(|task| task.state == "unknown") {
+                drop(tasks);
+                settle_view(&inner, &id, "failed", Value::Null, Some("predecessor_unknown".into()));
+                return;
+            }
+            if cancel.load(Ordering::SeqCst) || previous.is_some_and(|task| task.settled) { break; }
+            tasks = inner.changed.wait_timeout(tasks, Duration::from_millis(100)).expect("subagent predecessor").0;
+        }
+    }
     // Acquire a bounded execution slot; a cancelled or settled task is skipped.
     if !acquire(&inner, &cancel) {
         settle_view(&inner, &id, "cancelled", Value::Null, Some("cancelled_before_start".into()));
@@ -844,6 +910,9 @@ pub fn control(action: &str, args: &Value) -> Result<Value, String> {
     let manager = manager();
     match action {
         "start" => manager.start(args),
+        "continue" => manager.continue_session(args),
+        "capacity" => Ok(json!({"max_concurrent": manager.inner.max_concurrent,
+            "max_live": manager.max_live, "usage": manager.summary()})),
         "status" | "result" => {
             let id = args["id"].as_str().unwrap_or_default();
             let owner = args["owner_user"].as_str().unwrap_or_default();
@@ -887,10 +956,46 @@ pub fn health() -> Value {
     manager().summary()
 }
 
+/// Live rendering only. Original messages remain in the transcript; an
+/// interrupted preview is never presented as durable evidence or completion.
+pub fn capture_event(payload: &str) -> bool {
+    let Some(owner) = current_owner() else { return false };
+    let Some(session) = owner.strip_prefix("subagent:") else { return false };
+    let Ok(event) = serde_json::from_str::<Value>(payload) else { return true };
+    let mut tasks = manager().inner.tasks.lock().expect("subagents tasks");
+    if let Some(task) = tasks.values_mut().find(|task| task.session_id == session && task.state == "running" && !task.settled) {
+        if !task.preview.is_object() { task.preview = json!({"text":""}); }
+        match event["type"].as_str().unwrap_or_default() {
+            "delta" => {
+                if let Some(Value::String(text)) = task.preview.get_mut("text") {
+                    text.push_str(event["text"].as_str().unwrap_or_default());
+                }
+            }
+            "round" | "checkpoint" => { task.preview["text"] = json!(""); }
+            "status" => { task.preview["status"] = event["text"].clone(); }
+            _ => {}
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn preview_does_not_capture_interactive_run_events() {
+        let event = r#"{"type":"delta","text":"durable interactive output"}"#;
+        assert!(!capture_event(event));
+        enter_task(TaskContext {
+            cancel: Arc::new(AtomicBool::new(false)), deadline: None,
+            sockets: Arc::new(Mutex::new(Vec::new())), owner: "run:interactive".into(),
+        });
+        let captured = capture_event(event);
+        leave_task();
+        assert!(!captured, "ordinary runs must retain their SSE and durable replay");
+    }
 
     fn temp_root(tag: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("wa-subagent-test-{tag}-{}", now_ms()));
@@ -910,6 +1015,53 @@ mod tests {
             "timeout_seconds": 30,
             "idempotency_key": key,
         })
+    }
+
+    #[test]
+    fn placement_limit_reserves_capacity_atomically() {
+        let manager = Arc::new(Manager::with_root(temp_root("placement-limit"), 4, 8));
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let wait = gate.clone();
+        let _ = manager.runner.set(Arc::new(move |_| {
+            let mut open = wait.0.lock().unwrap();
+            while !*open { open = wait.1.wait(open).unwrap(); }
+            Ok(json!({"state":"completed"}))
+        }));
+        let racers: Vec<_> = (0..8).map(|index| {
+            let manager = manager.clone();
+            std::thread::spawn(move || {
+                let mut request = spec(&format!("placement-{index}"), "alice", "");
+                request["admission_limit"] = json!(1);
+                manager.start(&request)
+            })
+        }).collect();
+        let outcomes: Vec<_> = racers.into_iter().map(|thread| thread.join().unwrap()).collect();
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+        assert!(outcomes.iter().filter_map(|result| result.as_ref().err()).all(|error| error == "node_full"));
+    }
+
+    #[test]
+    fn continuation_preserves_profile_and_refuses_foreign_owner() {
+        let manager = Manager::with_root(temp_root("continuation"), 2, 6);
+        let _ = manager.runner.set(Arc::new(|_| Ok(json!({"state":"completed"}))));
+        let mut original = spec("original", "alice", "");
+        original["allowed_tools"] = json!(["read"]);
+        original["model"] = json!("approved-model");
+        manager.start(&original).unwrap();
+        manager.await_task("original", "alice", 5000).unwrap();
+        let mut request = json!({"id":"original","owner_user":"mallory","new_id":"continued",
+            "text":"new instruction","idempotency_key":"continuation"});
+        assert_eq!(manager.continue_session(&request).unwrap_err(), "forbidden_subagent");
+        request["owner_user"] = json!("alice");
+        let receipt = manager.continue_session(&request).unwrap();
+        assert_eq!(receipt["session_id"], original["session_id"]);
+        manager.await_task("continued", "alice", 5000).unwrap();
+        let record: Value = serde_json::from_str(&std::fs::read_to_string(manager.inner.root.join("continued/record.json")).unwrap()).unwrap();
+        assert_eq!(record["spec"]["allowed_tools"], json!(["read"]));
+        assert_eq!(record["spec"]["model"], "approved-model");
+        assert_eq!(manager.continue_session(&request).unwrap()["subagent_id"], "continued");
     }
 
     #[test]
