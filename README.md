@@ -102,9 +102,7 @@ Do not use them to onboard customers.
 From a source checkout with the Rust/C build prerequisites and cached crates:
 
 ```bash
-cd rust
-cargo build --release --offline
-cd ..
+cargo build --release --offline --manifest-path rust/Cargo.toml
 ```
 
 The executable is `rust/target/release/wa` (`wa.exe` on Windows). Use its `help`,

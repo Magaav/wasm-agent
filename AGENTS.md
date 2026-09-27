@@ -47,6 +47,10 @@ The `pre-commit` hook enforces it - that hook is the contract, this line is the 
   are Rust `host.*`. Read `docs/HOST.md` before adding a capability: a host function
   returns `nil` for missing values (never zero values), and paths come from
   `host.paths()`, never `$HOME` or a Linux-only path.
+- **The Rust workspace manifest is `rust/Cargo.toml`; the repo root has none.** A bare
+  `cargo test -p wa-host` at the root fails with "could not find `Cargo.toml`", which reads like a
+  broken checkout and is not. Pass `--manifest-path rust/Cargo.toml` (what `scripts/test.sh`,
+  `scripts/deploy.sh` and `scripts/build-*.sh` do), or run the command from `rust/`.
 - **Use the graph to check impact, not to replace source inspection.** Grep/read are
   normal navigation. Before finishing a code patch, the opt-in graph impact audit
   (`WA_GRAPH_PATCH_AUDIT=1`) flags resolved callers not read in this run; a

@@ -188,7 +188,7 @@ is about 29 ms here; it cannot explain the field audit's 88.2-second bash p95 or
 
 ## Enforcement
 
-* `cargo test -p wa-operation --offline`: real children, inherited pipes, both
+* `cargo test --manifest-path rust/Cargo.toml -p wa-operation --offline`: real children, inherited pipes, both
   streams, deadline, cancellation, output limits, quiet work, parallel inheritance,
   cursor reads, failed launch and restart ambiguity.
 * `scripts/test-exec-timeout.lua`: same scenarios through the real host and Lua
