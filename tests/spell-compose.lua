@@ -51,7 +51,11 @@ assert(spells.compose({name="bad",parts={{name="no-such-spell"},{name=b.name}}})
 b.target={node="other"}; assert(spells.save(b).ok)
 assert(spells.compose({name="bad",parts={{name=a.name},{name=b.name}}}).error=="composition_target_mismatch")
 assert(spells.validate({name="bad",steps={{kind="inference"}},post={{script="x"}}})=="step_1_unknown_kind")
-assert(spells.validate({name="bad",steps={{kind="wait",ms=1}},post={{kind="run",script="echo"}}})=="post_1_expect_required")
+local no_expect=spells.validate({name="bad",steps={{kind="wait",ms=1}},post={{kind="run",script="echo"}}})
+assert(type(no_expect)=="string" and no_expect:find("post_1_expect_required",1,true)==1,
+  "a run check without expect is refused: "..tostring(no_expect))
+assert(no_expect:find("non-empty expect object",1,true)~=nil,
+  "the refusal must say what expect is: "..tostring(no_expect))
 host.exec=function() return json.encode({code=0,ok=true,settled=false,stdout='{"ready":true}'}) end
 assert(select(2,spells.run_step(check("stub",{ready=true})))=="run_step_unsettled")
 host.write_file=function() return false end

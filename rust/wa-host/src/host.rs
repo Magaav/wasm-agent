@@ -921,6 +921,11 @@ pub extern "C" fn client(l: *mut LuaState) -> c_int {
         if let Some(map) = payload.as_object_mut() {
             map.insert("ok".into(), json!(action == "status" && false));
             map.insert("error".into(), json!("client_not_connected"));
+            // Nothing was handed to the client, so there is no uncertain effect to
+            // inspect. Lua reads this to keep the run's effect claims usable: without
+            // it, one call against a closed window branded the run as uncertain and
+            // took the client away from it for the rest of the run.
+            map.insert("effect".into(), json!("none"));
             map.insert("observed".into(), json!(diagnosis(&status)));
             map.insert("next".into(), json!(remedy(&status)));
         }

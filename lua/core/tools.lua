@@ -232,8 +232,8 @@ M.admin = {
     target = { type = "object", description = "{node, app, profile} the spell was recorded against." },
     params = { type = "object", description = "parameter -> {type: string|number|boolean, default}. Reference them as {{name}}." },
     pre = { type = "array", items = { type = "object" }, description = "Assertions checked before the first step." },
-    steps = { type = "array", items = { type = "object" }, description = "Steps: {kind=client|run|wait|assert|sentinel}. Run: {script, expect?, timeout_seconds?}. Retries allowed only with idempotent=true." },
-    post = { type = "array", items = { type = "object" }, description = "REQUIRED. Browser assertions or observational {kind:run,script,expect} checks after the steps." } }, { "name", "steps", "post" }),
+    steps = { type = "array", items = { type = "object" }, description = "Steps: {kind=client|run|wait|assert|sentinel}. Run: {script, expect?, timeout_seconds?} - the script must print ONE JSON object on stdout (exit 0), and expect is an object naming fields of it, compared by equality; a string expect is refused, and 'stdout contains' is not a thing here. Retries allowed only with idempotent=true." },
+    post = { type = "array", items = { type = "object" }, description = "REQUIRED. The assertions that settle the effect. Browser form {script, <operator>} evaluated by CDP. Node form {kind='run', script, expect={field=value}}: the command must print ONE JSON object on stdout and every named field must equal its value - a string expect is refused, an empty expect is refused, and a run check with no expect is refused. Use this for any effect a browser cannot see." } }, { "name", "steps", "post" }),
   schema("spell_compose", "Snapshot an already verified sequence into one spell. Preserves source pre/post checks and step retries, records source versions in its trace. No intervening inference; inspect and reconcile failures with inference before repairing or retiring a spell.", {
     name = { type = "string" }, description = { type = "string" },
     parts = { type = "array", items = { type = "object" }, description = "Ordered {name,params?} source spells. Parameters are exposed as p1_name, p2_name, etc.; provided values become defaults. Node spells with the same target only." } }, { "name", "parts" }),
@@ -560,6 +560,52 @@ local function run(command, timeout_seconds, cwd)
   return decoded
 end
 
+-- The one client action that only reports and holds no state on the client. It takes no
+-- claim, because a held or uncertain effect claim must never stop a caller from asking
+-- the client what it is doing - that answer is how a refusal is diagnosed and how an
+-- uncertain effect gets inspected. `screenshot` and `frame` deliberately keep the
+-- claim: the client writes one screenshot file per client and the frame action keeps a
+-- diff cache, so both are stateful even though they only look.
+local OBSERVING_CLIENT_ACTIONS={status=true}
+
+-- The run that owns an uncertain `client:local` claim may use the client again once
+-- it has looked at the thing it owns. Two limits keep this from being a blind retry:
+-- only the owning run in the granting process may do it, and the evidence must be the
+-- client's own answer - a disconnected or still-busy client is a real answer, and it
+-- refuses. The actions that were lost are never replayed; only a new request proceeds.
+local function reuse_own_client_claim(ctx,refused)
+  local prior=type(refused)=="table" and refused.claim
+  if type(prior)~="table" or prior.key~="client:local" or prior.uncertain~=true
+      or prior.run~=ctx.run_id or prior.principal~=ctx.user_id then
+    refused.observed=refused.observed or
+      "client:local is held by someone else, and only an owner may clear its own uncertainty"
+    refused.next=refused.next or
+      "read it with client{action:'status'} or resource{action:'list'}; another owner's claim needs an operator's reconcile"
+    return refused
+  end
+  local ok,raw=pcall(host.client,"status",json.encode({action="status"}))
+  local seen=ok and json.decode(raw) or nil
+  local busy=type(seen)=="table" and type(seen.busy)=="table" and (seen.busy.action or seen.busy.id) or nil
+  if type(seen)~="table" or seen.connected~=true or busy then
+    local because="the client did not answer"
+    if type(seen)=="table" and seen.connected~=true then because="the client is not connected" end
+    if busy then because="the client is still running "..tostring(busy) end
+    refused.observed="this run owns client:local as an uncertain effect, and "..because
+    refused.next="inspect it with client{action:'status'} or client{action:'screenshot'}, "..
+      "then decide: no operator action is needed for your own claim once the client is idle"
+    return refused
+  end
+  local recovered=resources.recover(ctx,"client:local",
+    "this run's client call failed without a receipt; the client answered status as connected and idle, "..
+    "the lost action was not replayed")
+  if not recovered.ok then
+    refused.observed="the client answered status, but this run could not clear its own uncertain claim"
+    refused.detail=recovered
+    return refused
+  end
+  return resources.claim(ctx,{"client:local"})
+end
+
 function M.dispatch(memory, name, args, role, ctx)
   args = args or {}
   role = role or "master"
@@ -581,8 +627,10 @@ function M.dispatch(memory, name, args, role, ctx)
     if args.action=="reconcile" then return resources.reconcile(args) end
     return {error="unknown_resource_action"}
   end
-  if ctx.run_id and (name=="client" or name=="shell" or name=="spell_run") then
+  local observing=name=="client" and OBSERVING_CLIENT_ACTIONS[args.action or ""]
+  if ctx.run_id and not observing and (name=="client" or name=="shell" or name=="spell_run") then
     local claimed=resources.claim(ctx,{"client:local"})
+    if not claimed.ok then claimed=reuse_own_client_claim(ctx,claimed) end
     if not claimed.ok then return claimed end
     ctx.resource_effect_generation=(ctx.resource_effect_generation or 0)+1
   end
@@ -835,7 +883,10 @@ function M.dispatch(memory, name, args, role, ctx)
     if type(decoded) ~= "table" then return { result = raw } end
     return decoded
   elseif name == "shell" then
-    if not args.command or args.command == "" then return { error = "command_required" } end
+    -- Nothing was dispatched, so nothing can be uncertain: the run must not lose its
+    -- client to a mistyped call. Lua marks its own pre-dispatch refusals the same way
+    -- the node marks `client_not_connected`.
+    if not args.command or args.command == "" then return { error = "command_required", effect = "none" } end
     local ok, raw = pcall(host.client, "shell", json.encode(args))
     if not ok then return { error = tostring(raw) } end
     local decoded = json.decode(raw)
@@ -1090,7 +1141,12 @@ function M.dispatch(memory,name,args,role,ctx)
   ctx=ctx or {}
   local generation=ctx.resource_effect_generation or 0
   local ok,result=pcall(dispatch,memory,name,args,role,ctx)
-  if (ctx.resource_effect_generation or 0)>generation and (not ok or type(result)~="table" or result.error
+  -- Uncertainty is for unknown *effects*, not for refusals. A result the node marked
+  -- `effect:"none"` never reached the client, so it cannot have changed anything, and
+  -- branding the run's claims for it would take the client away from the run that had
+  -- simply mistyped something.
+  local no_effect = type(result)=="table" and result.effect=="none"
+  if (ctx.resource_effect_generation or 0)>generation and not no_effect and (not ok or type(result)~="table" or result.error
       or result.ok==false or result.cancelled or result.cleanup=="unknown"
       or (result.code and result.code~=0) or result.state=="running" or result.state=="unknown") then
     local marked=resources.uncertain(ctx)

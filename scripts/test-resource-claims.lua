@@ -31,5 +31,71 @@ elseif mode=='recover' then
   check(resources.reconcile({key='client:local',run='run-b',principal='bob',evidence='mock client failure inspected; no real effect'}).ok,'settled uncertain owner can be explicitly reconciled')
   check(resources.claim(a,{'client:local'}).ok,'resource usable after reconciliation')
   check(resources.finish(a).ok,'normal completion releases owned resources')
+elseif mode=='reuse' then
+  -- A refusal that never reached the client is not an uncertain effect: uncertainty is
+  -- for unknown effects, and branding a run that mistyped something costs it the client.
+  local d={user_id='dave',session_id='session-d',run_id='run-d'}
+  check(resources.begin(d).ok,'reuse: independent run begins')
+  local real=host.client
+  host.client=function(action,args) return json.encode({ok=false,error='client_not_connected',connected=false,effect='none'}) end
+  local refused=tools.dispatch(nil,'client',{action='click',x=1,y=1},'master',d)
+  check(refused.error=='client_not_connected','reuse: a pre-effect refusal is surfaced')
+  check(resources.claim(d,{'client:local'}).ok,'reuse: a refusal that never reached the client leaves no uncertainty')
+  check(resources.finish(d).ok,'reuse: independent run settles')
+
+  -- A write refused before it was dispatched - nothing to run - is not an uncertain
+  -- effect either: the node marks `client_not_connected`, and Lua marks its own
+  -- argument refusals the same way.
+  local e={user_id='erin',session_id='session-e',run_id='run-e'}
+  check(resources.begin(e).ok,'reuse: third run begins')
+  local empty=tools.dispatch(nil,'shell',{command=''},'master',e)
+  check(empty.error=='command_required' and empty.effect=='none','reuse: a pre-dispatch argument refusal says it had no effect')
+  check(resources.claim(e,{'client:local'}).ok,'reuse: an argument refusal leaves no uncertainty')
+  check(resources.finish(e).ok,'reuse: third run settles')
+
+  local c={user_id='carol',session_id='session-c',run_id='run-c'}
+  check(resources.begin(c).ok,'reuse: owner begins')
+  check(resources.claim(c,{'client:local'}).ok,'reuse: owner reserves client')
+
+  -- Looking is free, so the holder can always see what the client is doing.
+  host.client=function(action,args)
+    if action=='status' then return json.encode({ok=true,connected=true}) end
+    return json.encode({error='fixture: write not expected here'})
+  end
+  local reading=tools.dispatch(nil,'client',{action='status'},'master',c)
+  check(type(reading)=='table' and reading.error==nil,'reuse: a read is answered while the claim is held')
+
+  -- A write whose answer was lost leaves the claim uncertain ...
+  host.client=function(action,args)
+    if action=='status' then return json.encode({ok=true,connected=true}) end
+    return json.encode({error='client_timeout',observed='fixture lost the answer'})
+  end
+  local lost=tools.dispatch(nil,'client',{action='click',x=2,y=2},'master',c)
+  check(lost.error=='client_timeout','reuse: the unanswered write is surfaced')
+  local held=resources.claim(c,{'client:local'})
+  check(held.error=='resource_busy' and held.claim.uncertain==true,'reuse: a lost answer leaves the run holding an uncertain claim')
+
+  -- ... so the next write of the *same* run is not wedged behind its own claim: it
+  -- looks at the client, clears only its own uncertainty, and reaches the client again.
+  local calls=0
+  host.client=function(action,args)
+    calls=calls+1
+    if action=='status' then return json.encode({ok=true,connected=true}) end
+    return json.encode({error='client_timeout',observed='fixture lost the answer again'})
+  end
+  local again=tools.dispatch(nil,'client',{action='click',x=3,y=3},'master',c)
+  check(again.error=='client_timeout','reuse: the next write is not refused by the run\'s own uncertain claim')
+  check(calls>0,'reuse: the next write actually reached the client')
+
+  -- An absent or busy client is a real answer, and it refuses rather than guessing.
+  host.client=function(action,args)
+    if action=='status' then return json.encode({ok=false,error='client_not_connected',connected=false,effect='none'}) end
+    return json.encode({error='fixture: write must not be attempted while the owner is uncertain'})
+  end
+  local blocked=tools.dispatch(nil,'client',{action='click',x=4,y=4},'master',c)
+  check(blocked.error=='resource_busy','reuse: an absent client cannot justify clearing uncertainty')
+  check(type(blocked.observed)=='string' and type(blocked.next)=='string','reuse: the refusal names what was seen and what to do next')
+  host.client=real
+  check(resources.finish(c).ok,'reuse: uncertain owner settles')
 else error('unknown fixture mode') end
 print('resource claims '..mode..' ok')

@@ -16,17 +16,39 @@ and pagination are identical; in-memory-only runs cannot claim a full archive.
 Participating agent runs hold an exclusive `session:<id>` claim across the run.
 Lua acquires `client:local` before client, client-shell or spell tools and keeps
 it until the run settles, so multi-step client interactions cannot interleave.
-Approved child profiles may also declare `resources.exclusive: ["name", ...]`;
-these `shared:<name>` claims are acquired together before inference. Contention
-fails visibly; this is cooperative exclusion, not a waiting scheduler.
+**`client{action:"status"}` does not claim it**: it is answered while a claim is held
+or uncertain, because asking the client what it is doing is how a refusal is diagnosed
+and how an uncertain effect is inspected. The other actions keep the claim even when
+they only look - the client writes one screenshot file per client process and `frame`
+keeps a diff cache, so both are stateful. Approved child
+profiles may also declare `resources.exclusive: ["name", ...]`; these
+`shared:<name>` claims are acquired together before inference. Contention fails
+visibly; this is cooperative exclusion, not a waiting scheduler.
 
 The store is shared by processes using the same runtime home, even when their
 transcript databases differ. Claims survive process death. Failed or uncertain
-client effects retain ownership after settlement. The operator's `resource` tool
-lists claims and requires the exact owner/run and inspected evidence to reconcile
-one. It refuses live owners using an OS-held SQLite lease, with no expiry heuristic.
-A new explicit request may reclaim a dead *session* owner; it never automatically
-releases an effectful resource or replays an old request.
+client effects retain ownership after settlement. Uncertainty is recorded for
+**unknown effects, not for refusals**: a result the node marks `effect:"none"` never
+reached the client, so it leaves the run's claims settled. The node marks a refusal it
+makes before dispatching (`client_not_connected`), and Lua marks the argument refusals
+it makes before dispatching (`command_required`), the same way. Without that, one call
+made while the window was closed - or one `shell` call with no command - took the
+client away from its own run for the rest of the run, which is availability lost for a
+mistake that changed nothing.
+
+An uncertain claim no longer wedges the run that owns it. The owner - same run, same
+principal, same *process* that granted the claim - may clear its own uncertainty through
+the host's `recover` action (Lua: `resources.recover`), stating the evidence it
+inspected. The client path calls it itself before refusing, and its evidence is the
+client's own answer to a claim-free `status`: a disconnected or still-busy client is a
+real answer, and it refuses rather than guessing. `recover` is deliberately **not** a
+`resource` tool action: a model may not clear its own uncertainty without an
+observation to show for it, so the one route to it carries evidence by construction.
+Recovery is **not** a release: it
+clears one flag on a claim that stays owned, durable and visible, and the action whose
+answer was lost is never replayed - only a new request proceeds. A different owner, a different process, or a crashed owner still needs the operator's `resource` tool,
+which requires the exact owner/run and inspected evidence. Both paths land in the same
+audit history, as `recover` and `reconcile` rows.
 
 Scope and risk: arbitrary operator shell, direct manual client calls, external
 programs and separate runtime homes do not participate. Spells conservatively
@@ -38,8 +60,12 @@ writes add latency; no throughput improvement is claimed.
 
 Proof: `scripts/test-resource-claims.cjs` uses two real processes, kills the owner,
 and tests contention, live-owner refusal, explicit reconciliation, session recovery,
-uncertain-effect retention and guest denial with a mock client (17 checks, no skips).
-Rust tests additionally verify all-or-none multi-key acquisition and identity checks.
+uncertain-effect retention, guest denial, a claim-free `status` read, a run recovering
+its own uncertain claim only after the client answers, and a pre-effect refusal leaving
+no uncertainty, with a mock client (31 checks, no skips).
+Rust tests additionally verify all-or-none multi-key acquisition, identity checks, and
+that only the live owning process clears its own uncertainty, with evidence, without
+releasing the claim.
 
 The canonical execution concepts and the target contract are in
 [ARCHITECTURE.md section 6](../ARCHITECTURE.md#6-naming-and-execution-ownership) and

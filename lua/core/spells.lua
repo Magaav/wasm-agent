@@ -169,11 +169,18 @@ function M.run_step(step)
     return false, "run_step_exit_" .. tostring(wrapper.code), wrapper
   end
   local result_ok, result = pcall(json.decode, wrapper.stdout or "")
-  if not result_ok or type(result) ~= "table" then return false, "run_step_stdout_not_json" end
+  -- The refusal carries the contract, not only its name. This message is read by a model that has just
+  -- printed a human-readable line and is about to guess again; a bare code costs it the round trip twice.
+  if not result_ok or type(result) ~= "table" then
+    return false, "run_step_stdout_not_json: a run step must print one JSON object on stdout "
+      .. "(PowerShell: end the pipeline with | ConvertTo-Json -Compress)"
+  end
   -- An *object* is the contract: `expect` names fields, and an array has none. The decoder maps both
   -- to a Lua table, so a numeric key is what tells them apart.
   for key in pairs(result) do
-    if type(key) == "number" then return false, "run_step_stdout_not_json" end
+    if type(key) == "number" then
+      return false, "run_step_stdout_not_json: an array is not a result object; expect names fields"
+    end
   end
   for field, expected in pairs(step.expect or {}) do
     local actual = result[field]
@@ -213,7 +220,8 @@ function M.validate(spec)
         return "step_" .. index .. "_script_required"
       end
       if step.expect ~= nil and type(step.expect) ~= "table" then
-        return "step_" .. index .. "_expect_must_be_a_table"
+        return "step_" .. index .. "_expect_must_be_a_table: expect names fields of the step's JSON "
+          .. "stdout and compares them by equality - a string is not accepted"
       end
       if step.timeout_seconds ~= nil and (type(step.timeout_seconds) ~= "number"
           or step.timeout_seconds % 1 ~= 0 or step.timeout_seconds < 1 or step.timeout_seconds > 86400) then
@@ -239,8 +247,13 @@ function M.validate(spec)
     for index, check in ipairs(spec[phase] or {}) do
       if type(check.script) ~= "string" or check.script == "" then return phase .. "_" .. index .. "_script_required" end
       if check.kind == "run" then
+        if check.expect == nil then
+          return phase .. "_" .. index .. "_expect_required: a run check needs a non-empty expect "
+            .. "object naming fields of the step's JSON stdout (a string is not accepted)"
+        end
         if type(check.expect) ~= "table" or next(check.expect) == nil then
-          return phase .. "_" .. index .. "_expect_required"
+          return phase .. "_" .. index .. "_expect_must_be_a_table: expect names fields of the JSON "
+            .. "stdout and compares them by equality - a string is not accepted"
         end
         local problem = M.validate({name="check", steps={check}, post={{script="check"}}})
         if problem then return phase .. "_" .. index .. "_" .. problem end
