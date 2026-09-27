@@ -22,7 +22,8 @@ The current role-filtered list and schemas are shown under **engine → tools**
 (`GET /model-configuration-preview`, with `/envelope` retained as a legacy alias): it
 contains model, provider, base URL and advertised tools, **not** messages or
 per-call options. It is not the full envelope and is not provider wire bytes.
-For an observed last request versus a next-context reconstruction, see
+For the available debug context/tool snapshot versus a reconstruction at report
+time (neither a complete provider request), see
 [OBSERVABILITY.md](OBSERVABILITY.md#live-efficiency-report).
 
 ## Tiers

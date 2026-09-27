@@ -147,7 +147,7 @@ recovery must not be the thing that breaks the request.
 
 | | `default` | `debug` |
 | --- | --- | --- |
-| tool payloads | stable bounded view + retrievable original JSON artifact | same, plus debug request capture |
+| tool payloads | stable bounded view + retrievable original JSON artifact | same, plus first-step model/messages/tools snapshot (not a complete provider request) |
 | retention | **100% for 7 days**, then pruned | **kept forever** |
 | purpose | everyday use, small DB | reproduce a failure, build a fixture |
 

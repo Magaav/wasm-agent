@@ -1316,8 +1316,9 @@ function M:run_body(text, images)
         ms = math.floor((host.now() - llm_started) * 1000), prefix = prefix_fingerprint,
         usage = usage,normalized=normalized,
         tokens = { prompt = prompt, completion = completion, total = total, cached = cached, cost = cost } }
-      -- In debug mode keep the exact request so a failing message can be replayed
-      -- byte for byte (round 1 only: later rounds are derived from tool calls).
+      -- In debug mode retain a model/messages/tools snapshot for the first
+      -- decision step only. The legacy `request` trace key is NOT a complete
+      -- prepared request: per-call options, retry attempts and wire bytes are absent.
       if round == 1 then
         -- Which instructions, if any, this message ran with. A node without the
         -- file is visible here instead of being indistinguishable from one with it.

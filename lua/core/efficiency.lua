@@ -58,10 +58,11 @@ local function setting(request, key)
   return request[key]
 end
 
--- The exact request of the last call, when the session ran in debug mode: the
--- trace of the assistant row carries `request` (agent.lua, round 1 only). Debug
--- is off by default, so this is usually nil and the caller rebuilds instead.
-local function find_debug_request(session_id)
+-- Most recent *available* debug snapshot of model/messages/tools. The legacy
+-- trace key is `request`, but agent.lua captures only the first decision step;
+-- this may not be the session's last model call, and has no per-call options.
+-- Debug is off by default, so this is usually nil and the caller rebuilds.
+local function find_debug_context_snapshot(session_id)
   local rows = memory.session_messages(session_id, { limit = 100 })
   for index = #rows, 1, -1 do
     local trace = rows[index].trace
@@ -76,9 +77,8 @@ local function find_debug_request(session_id)
   return nil
 end
 
--- A human-readable rendering of one request: the system prompt whole, the tools
--- ranked by schema size, and the transcript as an outline with per-message byte
--- sizes. The JSON beside it is the exact bytes; this is the version to read.
+-- Render the captured/reconstructed model, messages and advertised tools. The
+-- companion JSON is this snapshot's content, not an exact prepared or wire request.
 function M.prefix_markdown(request, session_id, source)
   local messages = request.messages or {}
   local tools = request.tools or {}
@@ -89,7 +89,7 @@ function M.prefix_markdown(request, session_id, source)
     else transcript_bytes = transcript_bytes + size end
   end
   local lines = {
-    "# Request prefix - session " .. tostring(session_id),
+    "# Context and tool-surface snapshot - session " .. tostring(session_id),
     "",
     "source: " .. tostring(source),
     "model: " .. tostring(request.model),
@@ -132,23 +132,23 @@ function M.prefix_markdown(request, session_id, source)
   return table.concat(lines, "\n")
 end
 
--- Write the prefix a human will read. With a debug capture that is the last call
--- exactly; otherwise it is `build_context()` - the same deterministic function
--- that builds the next call, and therefore the prefix the next call will send.
--- The file name is session-derived and stable, so re-running overwrites rather
--- than accumulating, and the report is deterministic.
+-- Persist a snapshot for inspection. A debug capture is from the latest recorded
+-- first decision step; otherwise build_context reconstructs the state *now*, not
+-- a promise of the next provider request (whose options/context may change).
+-- Keep the existing -prefix filenames for saved links and clients. Re-running
+-- overwrites rather than accumulating; the report is deterministic.
 function M.dump_prefix(agent, session_id)
   if not (host.write_file and session_id and session_id ~= "") then
     return { error = "write_unavailable" }
   end
-  local request = find_debug_request(session_id)
-  local source = "debug capture (the last call, byte for byte)"
+  local request = find_debug_context_snapshot(session_id)
+  local source = "debug model/messages/tools snapshot (latest recorded first step; not a complete request)"
   if not request then
     if not agent then return { error = "no_debug_capture_and_no_agent" } end
     local built, context = pcall(function() return agent:build_context() end)
     if not built or type(context) ~= "table" then return { error = "build_context_failed" } end
     request = { model = agent.model, messages = context, tools = agent.tool_list }
-    source = "rebuilt from the transcript (the next call's prefix)"
+    source = "model/messages/tools reconstructed at report time (not an observed request)"
   end
   local short = tostring(session_id):sub(1, 8)
   local directory = paths.data() .. "/efficiency"
