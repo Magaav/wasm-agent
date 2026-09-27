@@ -560,6 +560,52 @@ local function run(command, timeout_seconds, cwd)
   return decoded
 end
 
+-- The one client action that only reports and holds no state on the client. It takes no
+-- claim, because a held or uncertain effect claim must never stop a caller from asking
+-- the client what it is doing - that answer is how a refusal is diagnosed and how an
+-- uncertain effect gets inspected. `screenshot` and `frame` deliberately keep the
+-- claim: the client writes one screenshot file per client and the frame action keeps a
+-- diff cache, so both are stateful even though they only look.
+local OBSERVING_CLIENT_ACTIONS={status=true}
+
+-- The run that owns an uncertain `client:local` claim may use the client again once
+-- it has looked at the thing it owns. Two limits keep this from being a blind retry:
+-- only the owning run in the granting process may do it, and the evidence must be the
+-- client's own answer - a disconnected or still-busy client is a real answer, and it
+-- refuses. The actions that were lost are never replayed; only a new request proceeds.
+local function reuse_own_client_claim(ctx,refused)
+  local prior=type(refused)=="table" and refused.claim
+  if type(prior)~="table" or prior.key~="client:local" or prior.uncertain~=true
+      or prior.run~=ctx.run_id or prior.principal~=ctx.user_id then
+    refused.observed=refused.observed or
+      "client:local is held by someone else, and only an owner may clear its own uncertainty"
+    refused.next=refused.next or
+      "read it with client{action:'status'} or resource{action:'list'}; another owner's claim needs an operator's reconcile"
+    return refused
+  end
+  local ok,raw=pcall(host.client,"status",json.encode({action="status"}))
+  local seen=ok and json.decode(raw) or nil
+  local busy=type(seen)=="table" and type(seen.busy)=="table" and (seen.busy.action or seen.busy.id) or nil
+  if type(seen)~="table" or seen.connected~=true or busy then
+    local because="the client did not answer"
+    if type(seen)=="table" and seen.connected~=true then because="the client is not connected" end
+    if busy then because="the client is still running "..tostring(busy) end
+    refused.observed="this run owns client:local as an uncertain effect, and "..because
+    refused.next="inspect it with client{action:'status'} or client{action:'screenshot'}, "..
+      "then decide: no operator action is needed for your own claim once the client is idle"
+    return refused
+  end
+  local recovered=resources.recover(ctx,"client:local",
+    "this run's client call failed without a receipt; the client answered status as connected and idle, "..
+    "the lost action was not replayed")
+  if not recovered.ok then
+    refused.observed="the client answered status, but this run could not clear its own uncertain claim"
+    refused.detail=recovered
+    return refused
+  end
+  return resources.claim(ctx,{"client:local"})
+end
+
 function M.dispatch(memory, name, args, role, ctx)
   args = args or {}
   role = role or "master"
@@ -581,8 +627,10 @@ function M.dispatch(memory, name, args, role, ctx)
     if args.action=="reconcile" then return resources.reconcile(args) end
     return {error="unknown_resource_action"}
   end
-  if ctx.run_id and (name=="client" or name=="shell" or name=="spell_run") then
+  local observing=name=="client" and OBSERVING_CLIENT_ACTIONS[args.action or ""]
+  if ctx.run_id and not observing and (name=="client" or name=="shell" or name=="spell_run") then
     local claimed=resources.claim(ctx,{"client:local"})
+    if not claimed.ok then claimed=reuse_own_client_claim(ctx,claimed) end
     if not claimed.ok then return claimed end
     ctx.resource_effect_generation=(ctx.resource_effect_generation or 0)+1
   end
@@ -1090,7 +1138,12 @@ function M.dispatch(memory,name,args,role,ctx)
   ctx=ctx or {}
   local generation=ctx.resource_effect_generation or 0
   local ok,result=pcall(dispatch,memory,name,args,role,ctx)
-  if (ctx.resource_effect_generation or 0)>generation and (not ok or type(result)~="table" or result.error
+  -- Uncertainty is for unknown *effects*, not for refusals. A result the node marked
+  -- `effect:"none"` never reached the client, so it cannot have changed anything, and
+  -- branding the run's claims for it would take the client away from the run that had
+  -- simply mistyped something.
+  local no_effect = type(result)=="table" and result.effect=="none"
+  if (ctx.resource_effect_generation or 0)>generation and not no_effect and (not ok or type(result)~="table" or result.error
       or result.ok==false or result.cancelled or result.cleanup=="unknown"
       or (result.code and result.code~=0) or result.state=="running" or result.state=="unknown") then
     local marked=resources.uncertain(ctx)

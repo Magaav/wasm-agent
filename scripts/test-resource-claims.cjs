@@ -21,5 +21,6 @@ function run(mode){
   run('contend');
   const exited=once(child,'exit');child.kill('SIGKILL');await exited;
   run('recover');
+  run('reuse');
   console.log(`resource claims ok (${checks} checks, 0 skipped; separate processes, actual process death, mock client)`);
 }catch(error){console.error(error.stack);process.exitCode=1;}finally{if(child&&child.exitCode===null&&child.signalCode===null)child.kill();console.log('evidence: '+root);}})();

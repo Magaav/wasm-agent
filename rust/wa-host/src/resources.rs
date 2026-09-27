@@ -131,6 +131,57 @@ impl Store {
                 .map_err(err)?;
             return Ok(json!({"ok":true}));
         }
+        if action == "recover" {
+            // Clearing one's *own* uncertainty is not a release. The claim, its owner
+            // and its durability are unchanged; what changes is that the one run whose
+            // call failed without a receipt - and which has since inspected the effect -
+            // may use the resource it already holds again.
+            //
+            // Who may do it is deliberately narrow: the same run, the same principal,
+            // and the same process that granted the claim (`boot`). A different process
+            // never speaks for a live owner, so a crashed owner's claims still need the
+            // operator's reconcile. Evidence is required and is recorded, because the
+            // question this answers is "was the effect inspected?", not "does it matter?".
+            let key = field(args, "key")?;
+            let evidence = field(args, "evidence")?;
+            if evidence.trim().is_empty() {
+                return Err("recovery_evidence_required".into());
+            }
+            let tx = state
+                .db
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(err)?;
+            let claim = tx
+                .query_row(
+                    "SELECT key,principal,session,run,boot,uncertain FROM claims WHERE key=?",
+                    [key],
+                    row,
+                )
+                .optional()
+                .map_err(err)?
+                .ok_or("resource_not_found")?;
+            if claim["run"] != run || claim["principal"] != principal {
+                return Err("resource_owner_changed".into());
+            }
+            if field(&claim, "boot")? != self.boot {
+                return Err("resource_owner_not_this_process".into());
+            }
+            if claim["uncertain"] == true {
+                tx.execute(
+                    "INSERT INTO history(action,evidence,claim) VALUES('recover',?,?)",
+                    params![evidence, claim.to_string()],
+                )
+                .map_err(err)?;
+                tx.execute(
+                    "UPDATE claims SET uncertain=0 WHERE key=? AND run=? AND principal=? AND boot=?",
+                    params![key, run, principal, self.boot],
+                )
+                .map_err(err)?;
+            }
+            // Idempotent: recovering an already-settled claim is a no-op, not an error.
+            tx.commit().map_err(err)?;
+            return Ok(json!({"ok":true,"recovered":claim}));
+        }
         if action == "finish" {
             let tx = state
                 .db
@@ -281,6 +332,59 @@ mod tests {
             "uncertain effects retain their claims"
         );
         drop(second);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_the_live_owner_clears_its_own_uncertainty_with_stated_evidence() {
+        let root = std::env::temp_dir().join(format!("wa-resources-recover-{}", crate::host::new_uuid()));
+        let owner = Store::open(&root).unwrap();
+        let other = Store::open(&root).unwrap();
+        let claim = json!({"principal":"alice","session":"s-a","run":"run-a","keys":["client:local"]});
+        assert_eq!(owner.control("claim", &claim).unwrap()["ok"], true);
+        // A call of alice's failed without a receipt, so the claim stays - uncertain.
+        owner
+            .control("uncertain", &json!({"principal":"alice","run":"run-a"}))
+            .unwrap();
+        assert_eq!(
+            owner.control("claim", &claim).unwrap()["error"],
+            "resource_busy",
+            "the very run that owns an uncertain claim cannot reuse it yet"
+        );
+        let no_evidence = json!({"principal":"alice","run":"run-a","key":"client:local","evidence":"  "});
+        assert_eq!(
+            owner.control("recover", &no_evidence).unwrap_err(),
+            "recovery_evidence_required"
+        );
+        let wrong_run = json!({"principal":"alice","run":"run-b","key":"client:local","evidence":"inspected"});
+        assert_eq!(
+            owner.control("recover", &wrong_run).unwrap_err(),
+            "resource_owner_changed"
+        );
+        let owned = json!({"principal":"alice","run":"run-a","key":"client:local","evidence":"client answered status: connected and idle"});
+        assert_eq!(
+            other.control("recover", &owned).unwrap_err(),
+            "resource_owner_not_this_process",
+            "a second process never clears a live owner's uncertainty"
+        );
+        assert_eq!(owner.control("recover", &owned).unwrap()["ok"], true);
+        assert_eq!(
+            owner.control("claim", &claim).unwrap()["ok"], true,
+            "the owner may use the resource it still holds"
+        );
+        assert_eq!(
+            owner.control("recover", &owned).unwrap()["ok"], true,
+            "recovery is idempotent"
+        );
+        assert_eq!(
+            other
+                .control("claim", &json!({"principal":"bob","session":"s-b","run":"run-b","keys":["client:local"]}))
+                .unwrap()["error"],
+            "resource_busy",
+            "recovery is not a release: another owner stays refused"
+        );
+        drop(owner);
+        drop(other);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

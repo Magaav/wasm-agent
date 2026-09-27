@@ -46,6 +46,13 @@ function M.begin(ctx)
 end
 function M.finish(ctx) return call("finish",owner(ctx)) end
 function M.uncertain(ctx) return call("uncertain",owner(ctx)) end
+-- Clear this run's own uncertainty on a claim it still holds, with the evidence that
+-- was inspected. Narrow by construction: the host accepts it only from the same run,
+-- principal and process that granted the claim. Never a release.
+function M.recover(ctx,key,evidence)
+  local args=owner(ctx); args.key=key; args.evidence=evidence
+  return call("recover",args)
+end
 function M.inspect() return call("list",{}) end
 function M.reconcile(args) return call("reconcile",args) end
 return M
