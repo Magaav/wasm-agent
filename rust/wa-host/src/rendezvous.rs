@@ -77,6 +77,9 @@ pub fn run(bind: &str, port: u16, db_path: &str) {
                 eprintln!("[rendezvous] schema: {error}");
                 return;
             }
+            // SQLite has no `ADD COLUMN IF NOT EXISTS`. Existing registries need this once;
+            // subsequent starts harmlessly report the duplicate column and continue.
+            let _ = connection.execute("ALTER TABLE nodes ADD COLUMN resources TEXT", []);
             if !network_admins().is_empty() {
                 if let Err(error) = connection.execute_batch(
                     "UPDATE nodes SET role=COALESCE((SELECT role FROM network_roles WHERE network_roles.node_id=nodes.node_id),'guest');"
@@ -550,12 +553,13 @@ fn register(connection: &Connection, stream: &mut TcpStream, payload: &Value, pa
         }
     }
     let outcome = connection.execute(
-        "INSERT INTO nodes (node_id, public_key, name, role, endpoints, last_seen, registered_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+        "INSERT INTO nodes (node_id, public_key, name, role, endpoints, resources, last_seen, registered_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
          ON CONFLICT(node_id) DO UPDATE SET
            public_key=excluded.public_key, name=excluded.name, role=excluded.role,
-           endpoints=excluded.endpoints, last_seen=excluded.last_seen",
-        rusqlite::params![node_id, public_key, name, role, endpoints, now],
+           endpoints=excluded.endpoints, resources=excluded.resources, last_seen=excluded.last_seen",
+        rusqlite::params![node_id, public_key, name, role, endpoints,
+            serde_json::to_string(&payload["resources"]).unwrap_or_else(|_| "null".into()), now],
     );
     match outcome {
         Ok(_) => respond(
@@ -596,16 +600,17 @@ fn public_key_of(connection: &Connection, node_id: &str) -> Option<String> {
 fn lookup(connection: &Connection, node_id: &str) -> Option<Value> {
     connection
         .query_row(
-            "SELECT node_id, public_key, name, role, endpoints, last_seen FROM nodes WHERE node_id = ?1",
+            "SELECT node_id, public_key, name, role, endpoints, resources, last_seen FROM nodes WHERE node_id = ?1",
             rusqlite::params![node_id],
             |row| {
-                let last_seen: i64 = row.get(5)?;
+                let last_seen: i64 = row.get(6)?;
                 Ok(json!({
                     "node_id": row.get::<_, String>(0)?,
                     "public_key": row.get::<_, String>(1)?,
                     "name": row.get::<_, String>(2)?,
                     "role": row.get::<_, String>(3)?,
                     "endpoints": serde_json::from_str::<Value>(&row.get::<_, String>(4)?).unwrap_or(json!([])),
+                    "resources": serde_json::from_str::<Value>(&row.get::<_, Option<String>>(5)?.unwrap_or_default()).unwrap_or(Value::Null),
                     "last_seen": last_seen,
                     "online": now() - last_seen < ONLINE_WINDOW,
                 }))
@@ -617,16 +622,17 @@ fn lookup(connection: &Connection, node_id: &str) -> Option<Value> {
 fn list(connection: &Connection) -> Value {
     let mut list: Vec<Value> = Vec::new();
     if let Ok(mut statement) = connection.prepare(
-        "SELECT node_id, public_key, name, role, endpoints, last_seen FROM nodes ORDER BY last_seen DESC",
+        "SELECT node_id, public_key, name, role, endpoints, resources, last_seen FROM nodes ORDER BY last_seen DESC",
     ) {
         if let Ok(rows) = statement.query_map([], |row| {
-            let last_seen: i64 = row.get(5)?;
+            let last_seen: i64 = row.get(6)?;
             Ok(json!({
                 "node_id": row.get::<_, String>(0)?,
                 "public_key": row.get::<_, String>(1)?,
                 "name": row.get::<_, String>(2)?,
                 "role": row.get::<_, String>(3)?,
                 "endpoints": serde_json::from_str::<Value>(&row.get::<_, String>(4)?).unwrap_or(json!([])),
+                "resources": serde_json::from_str::<Value>(&row.get::<_, Option<String>>(5)?.unwrap_or_default()).unwrap_or(Value::Null),
                 "last_seen": last_seen,
                 "online": now() - last_seen < ONLINE_WINDOW,
             }))

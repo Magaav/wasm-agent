@@ -395,6 +395,9 @@ Every operation returns a JSON value, including visible storage/refusal errors.
 `host.monotonic_ms()` measures elapsed time within a process. Use `host.now()` only
 for cross-process event timestamps. `host.runtime_info()` returns version, OS,
 architecture, PID and the SHA-256 of the executable (computed once per process).
+`host.system_resources()` returns a fresh advisory sample of CPU use, logical cores,
+physical memory and free/total bytes on the filesystem containing the node workspace.
+Unavailable measurements are `nil`; zero is never substituted for missing capacity.
 The Lua loader records hashes in `LOADED_SOURCES` before evaluating each module.
 HTTP clients reuse their connection pool. Stream results include provider request
 ID, first-content/reasoning/tool-delta latency and `stream_complete`; EOF without

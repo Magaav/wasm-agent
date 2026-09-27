@@ -10,6 +10,7 @@ mod http_transport;
 mod operations;
 mod lua;
 mod node;
+mod system_resources;
 mod relay_client;
 mod rendezvous;
 mod plugins;
@@ -354,6 +355,7 @@ fn main() {
     lua.register("now", host::now);
     lua.register("monotonic_ms", host::monotonic_ms);
     lua.register("runtime_info", host::runtime_info);
+    lua.register("system_resources", host::system_resources);
     // The console's own size: `COLUMNS` is a shell variable and usually absent, so the width a
     // terminal has is not something the Lua side can learn for itself.
     lua.register("terminal_size", host::terminal_size);

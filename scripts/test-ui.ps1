@@ -1187,6 +1187,10 @@ $harness = @'
     if (/control/.test(rows[c].textContent)) controlButtons += 1;
   }
   check(controlButtons === 2, "local and remote desktops must each offer control, saw " + controlButtons + " button(s)");
+  var resourceLines = document.querySelectorAll("#nodes-box .node-resources");
+  check(resourceLines.length === 2, "every machine node must have a resource line, saw " + resourceLines.length);
+  check(/CPU 13%.*RAM 41%\/32GB.*DISK 30%\/2\.0TB/.test(resourceLines[0]?.textContent || ""),
+    "the node card must format live CPU, RAM and workspace disk, saw: " + (resourceLines[0]?.textContent || "nothing"));
   // Keep it: the engine re-renders when its topics change, and the nodes rows are gone by the
   // time the control view is opened further down.
   var controlButton = null;

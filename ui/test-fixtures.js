@@ -111,6 +111,9 @@ window.__fixtures = {
         id: "aaaaaaaa-1111-2222-3333-444444444444", node_id: "aaaaaaaa-1111-2222-3333-444444444444",
         name: "foundation", kind: "host", role: "master", online: true, local_node: true,
         worktree: "foundation", endpoints: {},
+        resources: { cpu: { used_percent: 12.6, logical_cores: 8 },
+          memory: { used_percent: 41.2, total_bytes: 34359738368 },
+          disk: { used_percent: 30.4, total_bytes: 2199023255552 } },
       },
       // The desktop running this window: local, but not the node. Both are local and they
       // must not both claim to be "this node".
@@ -121,6 +124,9 @@ window.__fixtures = {
       {
         id: "bbbbbbbb-5555-6666-7777-888888888888", node_id: "bbbbbbbb-5555-6666-7777-888888888888",
         name: "openclaw", kind: "peer", online: true, local_node: false, endpoints: {},
+        resources: { cpu: { used_percent: 55.1, logical_cores: 16 },
+          memory: { used_percent: 63.7, total_bytes: 68719476736 },
+          disk: { used_percent: 18.2, total_bytes: 4398046511104 } },
       },
     ],
   },
