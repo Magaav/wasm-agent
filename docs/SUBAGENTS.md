@@ -1,5 +1,9 @@
 # Local subagents
 
+The [orchestrator workspace](ORCHESTRATOR-WORKSPACE.md) extends this facade with
+ordered remote placement and direct follow-up messages in the same child session.
+Original local profile and ownership restrictions remain authoritative.
+
 A **subagent** is a supervised child task with its own fresh context and its own
 execution state. It runs a child *run*, in a child *session*, and is owned by a
 parent run or job delivery. It is not a job (an automation definition), not an

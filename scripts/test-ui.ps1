@@ -702,38 +702,42 @@ $harness = @'
   check(runningText.indexOf("Reading") >= 0,
     "a running decision must show its streaming text, saw: " + runningText.slice(0, 40));
 
-  // The drift panel is a diff, not a transcript, and it is the one view that could
-  // plausibly be given a write: pushing from here would make *looking* at another node's
-  // ledger a mutation. So it is asserted twice - that it draws the drift it is given, and
-  // that it has nothing to push with.
-  document.getElementById("diff-btn").click();
-  for (var d = 0; d < 20; d++) { await tick(); }
-  var driftBody = document.getElementById("drift-body");
-  var driftText = driftBody ? driftBody.textContent : "";
-  check(driftBody && driftBody.children.length === 2,
-    "the drift panel must show this node and its peers, saw " + (driftBody ? driftBody.children.length : "no panel"));
-  check(/head/.test(driftText) && /42/.test(driftText), "it must state the local head, saw: " + driftText.slice(0, 120));
-  check(/openclaw\.ohana/.test(driftText), "it must name where it is pushing, saw: " + driftText.slice(0, 120));
-  check(/2 behind/.test(driftText), "a peer behind the head must say so");
-  check(/3 ahead/.test(driftText), "a peer ahead of the head must say so");
-  check(/level/.test(driftText), "a peer at the head must say level");
-  var plusRows = driftBody ? driftBody.querySelectorAll(".drift-row.add").length : 0;
-  check(plusRows === 2, "two pending entries must render two + rows, saw " + plusRows);
-  check(!!driftBody && driftBody.querySelectorAll(".drift-row.del").length === 1,
-    "the peer we are behind must render one - row");
-  check(!!driftBody && driftBody.querySelectorAll(".drift-row.muted").length >= 1,
-    "a level peer must render the muted = row");
-  check(/cursor/.test(driftText), "each peer must show its cursor, so the count is auditable");
-  var driftButtons = document.getElementById("drift").querySelectorAll("button");
-  check(driftButtons.length <= 2, "the panel must have no action beyond refresh and close, saw " + driftButtons.length);
-  var mutationWords = /push|send|upload|apply|sync now/i;
-  var mutates = false;
-  for (var b = 0; b < driftButtons.length; b += 1) {
-    if (mutationWords.test(driftButtons[b].textContent + " " + (driftButtons[b].title || ""))) mutates = true;
-  }
-  check(!mutates, "nothing in the drift panel may push: looking at drift must not change it");
-  document.getElementById("drift-close").click();
-
+  // The showroom reuses chat elements and never owns the runs it displays.
+  window.__setShell(window.__makeShell());
+  document.getElementById('orchestrator-btn').click();
+  check(window.__shellCalls.some(call=>call.call==='openView' && call.view==='orchestrator' && call.url.includes('view=orchestrator')),
+    'the topbar must open a separate native orchestrator window');
+  window.__setShell(null);
+  check(!document.getElementById('drift'),'the retired Drift inner view must be removed');
+  var showroom=document.createElement('wa-orchestrator');
+  showroom.style.cssText='position:fixed;inset:0;width:1200px;height:800px;z-index:9999';
+  document.body.append(showroom);
+  var agents=Array.from({length:4},(_,i)=>({subagent_id:'tile-'+i,session_id:'session-'+i,profile:'worker',model:'fixture',execution_node:'cloud',state:'running',created_at:i,prompt:'task '+i}));
+  showroom.data=agents;
+  agents.forEach(task=>showroom.pin(task));
+  check(showroom.panes.size===4,'four pinned agents must create four session panes');
+  var panes=[...showroom.panes.values()];
+  var firstRect=panes[0].getBoundingClientRect(), secondRect=panes[1].getBoundingClientRect(), thirdRect=panes[2].getBoundingClientRect();
+  check(firstRect.width>200 && secondRect.left>firstRect.left && thirdRect.top>firstRect.top,'four panes must form a readable two by two grid');
+  panes[0].input.value='keep my draft';
+  panes[0].showMessages([{seq:1,role:'user',content:'hello'},{seq:2,role:'tool',tool_name:'read',content:'original tool evidence'},{seq:3,role:'assistant',content:'answer'}],text=>text);
+  check(panes[0].querySelectorAll('wa-message').length===2 && panes[0].querySelector('wa-tool').textContent.includes('original tool evidence'), 'a pane must render original messages and tool evidence');
+  showroom.data=agents.slice().reverse();
+  check([...showroom.panes.values()][0]===panes[0] && panes[0].input.value==='keep my draft','refresh must preserve pane order and drafts');
+  panes[0].querySelector('[data-action="expand"]').click();
+  check(showroom.canvas.classList.contains('has-expanded'),'expand must focus a single conversation');
+  panes[0].querySelector('[data-action="expand"]').click();
+  var messageDetail;
+  showroom.addEventListener('agent-action',event=>{if(event.detail.action==='message')messageDetail=event.detail;});
+  panes[0].form.requestSubmit();
+  var messageKey=messageDetail?.key;
+  panes[0].form.requestSubmit();
+  check(messageDetail?.text==='keep my draft' && messageKey===messageDetail.key,'a repeated send must retain its idempotency key');
+  showroom.unpin('tile-0');
+  check(showroom.panes.size===3 && showroom.sidebar.children.length===4,'collapse must keep the running agent in the sidebar');
+  showroom.configure({policy:{enabled:true,nodes:[{node:'cloud',max_tasks:2},{node:'local',max_tasks:0}]},nodes:[]});
+  check(showroom.policy.nodes[0].node==='cloud' && showroom.policy.nodes[1].max_tasks===0,'node order and zero-capacity devices must round trip');
+  showroom.remove();
 
   document.title = "stage: node block done";
   // The engine view: open it, let the fixture fetch settle in microtasks, and

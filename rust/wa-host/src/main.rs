@@ -30,6 +30,8 @@ use std::sync::Mutex;
 /// The Lua core is embedded so `wa` is a single self-contained binary that runs
 /// from any working directory. WA_SCRIPT overrides the entry point with a file.
 const EMBEDDED: &[(&str, &str)] = &[
+    ("AGENTS.orchestrator.md", include_str!("../../../AGENTS.orchestrator.md")),
+    ("AGENTS.subagents.md", include_str!("../../../AGENTS.subagents.md")),
     ("lua/vendor/json.lua", include_str!("../../../lua/vendor/json.lua")),
     ("lua/core/schema.sql", include_str!("../../../lua/core/schema.sql")),
     ("lua/core/skills.lua", include_str!("../../../lua/core/skills.lua")),
@@ -62,6 +64,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/effects.lua", include_str!("../../../lua/core/effects.lua")),
     ("lua/core/whatsapp.lua", include_str!("../../../lua/core/whatsapp.lua")),
     ("lua/core/subagents.lua", include_str!("../../../lua/core/subagents.lua")),
+    ("lua/core/orchestrator.lua", include_str!("../../../lua/core/orchestrator.lua")),
     ("lua/core/resources.lua", include_str!("../../../lua/core/resources.lua")),
     ("lua/core/workspaces.lua", include_str!("../../../lua/core/workspaces.lua")),
     ("lua/core/agent.lua", include_str!("../../../lua/core/agent.lua")),

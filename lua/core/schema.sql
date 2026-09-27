@@ -142,3 +142,16 @@ CREATE TABLE IF NOT EXISTS effect_decisions (
   updated_at      REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS effect_decisions_session_idx ON effect_decisions(session_id);
+
+-- Placement belongs to the node, never to a window. A destination is written
+-- before dispatch so an uncertain delivery can only retry that same node/key.
+CREATE TABLE IF NOT EXISTS orchestration_policy (
+  owner TEXT PRIMARY KEY, policy TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS orchestration_tasks (
+  id TEXT PRIMARY KEY, owner TEXT NOT NULL, request_key TEXT NOT NULL,
+  args TEXT NOT NULL, context TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued',
+  destination TEXT NOT NULL DEFAULT '', receipt TEXT NOT NULL DEFAULT '{}',
+  detail TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL,
+  UNIQUE(owner, request_key)
+);

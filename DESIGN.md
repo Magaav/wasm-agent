@@ -149,6 +149,8 @@ from the engine button in the topbar. Do not mix the two.
 | `<wa-window>` | A promoted panel in its own OS window (§3). | — | — |
 | `<wa-harness-status>` | §6's harness diagnostics. | — | `export` |
 | `<wa-tasks>` | Concurrent child tasks, run recovery and cancellation. | `.data`, `.message`, `showEvidence()` | `task-action` |
+| `<wa-orchestrator>` | External workspace with node priority controls, agent sidebar and stable tiled sessions. | `.data`, `.message`, `.configure(fleet)`, `.policy` | `orchestrator-action` |
+| `<wa-agent-session>` | Child conversation, original tool evidence, live preview and independent composer. | `.task`, `.showMessages(messages, render, earlier)` | `agent-action` |
 | `<wa-jobs>` | Reviewed automation definitions, enabled state, queue/source/outcome evidence. Engine topic immediately after tools. | `.items` | `job-toggle` |
 
 Keyboard selection belongs to `<wa-menu>`, not to its caller: the highlight and the click target
