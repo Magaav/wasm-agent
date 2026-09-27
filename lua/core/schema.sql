@@ -83,7 +83,8 @@ CREATE TABLE IF NOT EXISTS messages (
   ok           INTEGER NOT NULL DEFAULT 1,
   debug        INTEGER NOT NULL DEFAULT 0,
   trace        TEXT NOT NULL DEFAULT '[]',
-  created_at   REAL NOT NULL
+  created_at   REAL NOT NULL,
+  phase        TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS messages_session_idx ON messages(session_id, seq);
 CREATE INDEX IF NOT EXISTS messages_time_idx ON messages(created_at);

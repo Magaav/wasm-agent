@@ -1796,6 +1796,9 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
     }
     let reader = std::io::BufReader::new(response.into_body().into_reader());
     let mut content = String::new();
+    let mut commentary = String::new();
+    let mut active_phase = String::new();
+    let mut final_phase = String::new();
     // Reasoning models stream their thinking in a sibling field, and endpoints
     // spell it differently. pi reads all three and takes the first non-empty one,
     // which is also what we do - the field is not an answer, but a run that spends
@@ -1867,11 +1870,21 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
             || delta["tool_calls"].as_array().is_some_and(|a| !a.is_empty())) {
             ttft_ms = Some(started.elapsed().as_millis());
         }
+        let phase = delta["phase"].as_str().or_else(|| chunk["choices"][0]["phase"].as_str());
+        if let Some(phase) = phase {
+            active_phase = if matches!(phase, "commentary" | "final_answer") { phase } else { "" }.to_string();
+        }
         if let Some(text) = chunk["choices"][0]["delta"]["content"].as_str() {
             if !text.is_empty() {
-                content.push_str(text);
-                mark_delta("answer", elapsed_ms);
-                crate::serve::write_event(&json!({"type": "delta", "text": text}).to_string());
+                if active_phase == "commentary" {
+                    commentary.push_str(text);
+                    mark_delta("commentary", elapsed_ms);
+                } else {
+                    content.push_str(text);
+                    if active_phase == "final_answer" { final_phase = active_phase.clone(); }
+                    mark_delta("answer", elapsed_ms);
+                    crate::serve::write_event(&json!({"type": "delta", "text": text}).to_string());
+                }
             }
         }
         for field in ["reasoning_content", "reasoning", "reasoning_text"] {
@@ -1919,7 +1932,8 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
             usage = Some(chunk["usage"].clone());
         }
     }
-    Ok(json!({"status": status, "content": content, "reasoning": reasoning,
+    Ok(json!({"status": status, "content": content, "commentary": commentary,
+        "final_phase": final_phase, "reasoning": reasoning,
         "stream_complete": finish_reason.is_some(), "ttft_ms": ttft_ms, "request_id": request_id,
         "finish_reason": finish_reason, "tool_calls": tool_calls, "usage": usage,
         // Termination telemetry: how it ended, what arrived, and whether it was still talking.

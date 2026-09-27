@@ -508,6 +508,19 @@ function appendReasoning(text, complete = false) {
   return reasoningText;
 }
 
+function appendCommentary(text, messageId) {
+  if (!text || (messageId && renderedMessageIds.has(String(messageId)))) return;
+  const block = document.createElement("wa-commentary");
+  block.open = !replayingMessages;
+  block.setText(text);
+  if (messageId) {
+    block.dataset.messageId = String(messageId);
+    renderedMessageIds.add(String(messageId));
+  }
+  currentBubble().body.append(block);
+  pin();
+}
+
 // A round is over: the thinking it produced is history, and the block folds away.
 function sealReasoning() {
   if (reasoningBlock) reasoningBlock.open = false;
@@ -1117,7 +1130,7 @@ function typeOut(body, text) {
 }
 
 function handleEvent(event) {
-  if (["round", "reasoning", "decision", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
+  if (["round", "reasoning", "commentary", "decision", "tool", "tool_result", "delta", "reply", "error", "done"].includes(event.type)) {
     clearActiveRunNotice();
   }
   if (event.type === "round") {
@@ -1132,6 +1145,8 @@ function handleEvent(event) {
   } else if (event.type === "status") {
     const note = event.text || "working";
     setStatus(note === "model" ? "thinking…" : "wasm-agent is " + note + "…");
+  } else if (event.type === "commentary") {
+    appendCommentary(event.text || "", event.message_id);
   } else if (event.type === "reasoning") {
     // A reasoning model can think for a long time before it says anything, and a
     // silent panel is indistinguishable from a hung one. The text becomes a thinking
@@ -1309,7 +1324,9 @@ function repaintMessages(rows, options = {}) {
         if (message.reasoning) {
           handleEvent({ type: "reasoning", text: message.reasoning, chars: message.reasoning.length });
         }
-        if (message.content) {
+        if (message.phase === "commentary") {
+          handleEvent({ type: "commentary", text: message.content, message_id: message.id });
+        } else if (message.content) {
           handleEvent({ type: "reply", text: message.content, changes: message.changes, message_id: message.id });
         }
         const calls = message.tool_calls || [];

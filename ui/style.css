@@ -136,14 +136,15 @@ wa-message.assistant { align-self: flex-start; background: var(--assistant); }
    It is a topic like the tool calls beside it: the same `trace-head` header (glyph, label, meta,
    chevron) and the same border and background as <wa-trace>, so nothing about it reads as a
    different kind of thing. Its own part is the body: pre-wrap prose, capped and scrollable. */
-wa-reasoning { display: block; align-self: flex-start; max-width: 760px; width: 100%; }
+wa-reasoning, wa-commentary { display: block; align-self: flex-start; max-width: 760px; width: 100%; }
 .reasoning { border: 1px solid var(--line); border-radius: var(--radius); background: rgba(15, 18, 25, .6); overflow: hidden; }
-.reasoning-body {
+.commentary { border: 1px solid var(--line); border-radius: var(--radius); background: rgba(15, 18, 25, .6); overflow: hidden; }
+.reasoning-body, .commentary-body {
   padding: var(--space); border-top: 1px solid rgba(35, 41, 54, .8);
   color: var(--muted); font-size: 12px; white-space: pre-wrap;
   word-break: break-word; max-height: 320px; overflow: auto;
 }
-.run-body wa-trace, .run-body wa-reasoning { border: 0; border-left: 2px solid rgba(35, 41, 54, .8); border-radius: 0; background: none; }
+.run-body wa-trace, .run-body wa-reasoning, .run-body wa-commentary { border: 0; border-left: 2px solid rgba(35, 41, 54, .8); border-radius: 0; background: none; }
 
 /* The diff topic: what the run changed on disk, collapsed *after* the answer.
    It uses the same `trace-head` header as <wa-run>/<wa-trace> - a topic is a topic, and a

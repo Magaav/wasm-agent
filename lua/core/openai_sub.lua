@@ -73,6 +73,7 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
     reasoning=reasoning.selected=='provider' and 'medium' or reasoning.selected=='off' and 'none' or reasoning.selected,
     max_output=opts.max_output}))
   local id, offset, pending, result, failure = nil, 0, '', nil, nil
+  local commentary_ids = {}
   local ok, problem = pcall(function()
     local launch = operation('start', {program='node',args={script,input},
       timeout_seconds=tonumber(host.getenv('WASM_AGENT_LLM_TIMEOUT')) or 300})
@@ -89,9 +90,20 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
           local ending = pending:find('\n',1,true)
           local event = json.decode(pending:sub(1,ending-1))
           pending = pending:sub(ending+1)
-          if event.type=='result' then result=event.result
+          if event.type=='result' then
+            result=event.result
+            if type(result.commentary) == 'table' then
+              for index, text in ipairs(result.commentary) do
+                result.commentary[index] = {content=text, id=commentary_ids[index]}
+              end
+            end
+            result.commentary_streamed = stream and #commentary_ids > 0 or false
           elseif event.type=='error' then failure=event.error
-          elseif stream and (event.type=='delta' or event.type=='reasoning' or event.type=='decision') then
+          elseif stream and (event.type=='delta' or event.type=='reasoning' or event.type=='decision' or event.type=='commentary') then
+            if event.type == 'commentary' then
+              event.message_id = host.uuid()
+              commentary_ids[#commentary_ids + 1] = event.message_id
+            end
             host.stream(json.encode(event))
           end
         end
