@@ -1958,6 +1958,12 @@ pub extern "C" fn runtime_info(l: *mut LuaState) -> c_int {
     1
 }
 
+/// host.system_resources() -> a fresh CPU, memory and workspace-filesystem sample.
+pub extern "C" fn system_resources(l: *mut LuaState) -> c_int {
+    push_json(l, &crate::system_resources::sample());
+    1
+}
+
 /// `host.terminal_size()` -> `{columns, rows}` for the console this process draws on, or `nil`.
 ///
 /// The width a terminal *has* is not the width a child *knows*. `COLUMNS` is a shell variable on most

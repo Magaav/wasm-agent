@@ -402,6 +402,7 @@ body.drift .drift { display: flex; }
 .nodes-box { display: flex; flex-direction: column; gap: var(--gap); }
 .node {
   display: flex; align-items: center; gap: var(--gap);
+  flex-wrap: wrap;
   border: 1px solid var(--line); border-radius: var(--radius-sm); padding: var(--space);
 }
 .node .node-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); flex: none; }
@@ -409,6 +410,10 @@ body.drift .drift { display: flex; }
 .node-name { font-weight: 500; }
 .node-kind, .node-caps { color: var(--muted); font-size: 11px; }
 .node-caps { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.node-resources {
+  flex: 0 0 100%; padding-left: 10px; color: var(--muted); font-size: 11px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .node button {
   border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
   border-radius: var(--radius-sm); padding: 2px var(--space); cursor: pointer; font-size: 11px;

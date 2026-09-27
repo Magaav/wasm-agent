@@ -284,6 +284,7 @@ function M.list()
       -- handed off, and it is not.
       worktree = M.is_master() and M.worktree() or "",
       endpoints = {},
+      resources = (host.system_resources and json.decode(host.system_resources())) or nil,
       -- A guest's own capabilities are read-only. It edits files when a master asks, through
       -- /node/call, which runs as that master - not on its own initiative. So the write tools
       -- are absent here rather than merely discouraged.

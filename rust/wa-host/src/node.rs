@@ -200,12 +200,14 @@ pub fn spawn_heartbeat(url: String) {
                 .map(|duration| duration.as_secs())
                 .unwrap_or(0);
             let message = announcement(&identity.node_id, ts);
+            let resources = crate::system_resources::sample();
             let payload = json!({
                 "node_id": identity.node_id,
                 "public_key": identity.public_key,
                 "name": name,
                 "role": role,
                 "endpoints": if endpoint.is_empty() { vec![] } else { vec![endpoint.clone()] },
+                "resources": resources,
                 "ts": ts,
                 "signature": identity.sign(&message),
             })

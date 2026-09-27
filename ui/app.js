@@ -3604,6 +3604,28 @@ async function saveNodeName(name) {
   await refreshNodes();
 }
 
+function formatResourceBytes(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return "?";
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  const power = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+  const amount = value / Math.pow(1024, power);
+  return `${amount >= 10 || power === 0 ? amount.toFixed(0) : amount.toFixed(1)}${units[power]}`;
+}
+
+function resourcePercent(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${Math.round(number)}%` : "?";
+}
+
+function formatNodeResources(resources, online) {
+  if (!online) return "resources offline";
+  if (!resources || typeof resources !== "object") return "resources pending";
+  const ram = resources.memory || {};
+  const disk = resources.disk || {};
+  return `CPU ${resourcePercent(resources.cpu?.used_percent)} · RAM ${resourcePercent(ram.used_percent)}/${formatResourceBytes(ram.total_bytes)} · DISK ${resourcePercent(disk.used_percent)}/${formatResourceBytes(disk.total_bytes)}`;
+}
+
 async function refreshNodes() {
   try {
     const payload = await (await apiFetch("nodes", { headers: apiHeaders() })).json();
@@ -3646,6 +3668,11 @@ async function refreshNodes() {
       caps.className = "node-caps";
       caps.textContent = (node.capabilities || []).join(" ");
       row.append(dot, name, kind, caps);
+      const resources = document.createElement("span");
+      resources.className = "node-resources";
+      resources.textContent = formatNodeResources(node.resources, node.online);
+      resources.title = "Latest node sample: CPU use · RAM use/total · workspace disk use/total";
+      row.append(resources);
       row.append(nodeButton("talk", () => { balloon.close(); input.focus(); }));
       if (node.kind === "peer" && node.online && me.role === "master") {
         row.append(nodeButton("control", () => openControl(node.name)));
