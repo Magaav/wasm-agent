@@ -4,7 +4,7 @@ description: >-
   Converge committed repository branches into main when /merge is invoked or the
   owner asks for integration. /merge all explicitly includes open PRs, including
   outside contributions. Discover exact tips, review, integrate, gate, push and
-  re-audit in one run. Report worktree synchronization and cleanup separately.
+  re-audit in one run. Leave origin with only main after successful integration.
 ---
 
 # The git orchestrator
@@ -104,32 +104,47 @@ Re-fetch/repeat for late arrivals. A valid final manifest plus exact-tree gate a
 remote-main proof establishes integration completion. Do not infer it from the
 names of deleted branches or a model-written summary.
 
-## 4. Synchronize and clean up without blocking integration
+## 4. Enforce the remote main-only invariant
 
-Report this as a separate phase. For each actor checkout, inspect its status,
-branch and activity. Only fast-forward a clean, confirmed-idle branch whose tip
-is already contained in main. Keep its branch identity; it need not be renamed
-to the directory's name merely to receive main. A branch's unique committed work
-must first be integrated by the earlier loop, not treated as a permanent blocker.
-If no owner/activity evidence establishes idleness, preserve the checkout and
-report deferred sync. Never move the current executing workspace out from under
-its run. Dirty, live, locked and detached trees are retained with exact reasons.
+After the tested candidate is published and the final audit is clean, `origin`
+must have exactly one branch: `main`. This is a required postcondition of both
+`/merge` and `/merge all`, not optional housekeeping. A GitHub branch selector
+lists refs, not PR state; merged branches remain visible until their refs are
+deleted.
 
-Delete only disposable merged `change/` refs: re-read each exact tip, prove it
-is in main, verify no checkout uses it, and check local/remote divergence. Keep
-actor/name branches. Never wildcard-delete, force-delete or switch a live tree
-just to delete its branch. Retaining a checked-out merged ref is not a failed
-merge and never requires another `/merge` to integrate that same work.
+Before deleting, fetch and record every exact `refs/heads/*` tip on `origin`.
+For each non-main ref, prove its tip is an ancestor of the tested `origin/main`
+and confirm no open PR still depends on that head. Delete each exact ref
+individually with a normal non-force push deletion, rechecking the remote tip
+immediately before deletion. Never use a wildcard, delete `main`, or force-push.
+If a tip moved, appeared late, is not integrated, or belongs to an unresolved PR,
+stop cleanup, re-audit and integrate/review it as required. Do not claim complete
+until a fresh `git ls-remote --heads origin` returns only `refs/heads/main`.
+Enable the hosting provider's delete-head-branch-on-merge setting as defense in
+depth; the explicit final audit and deletion loop still covers direct merges and
+old refs.
+
+This remote invariant does not authorize disturbing local worktrees. Active
+worktrees may keep local branch refs while their task is live. Inspect each
+checkout separately; preserve dirty, live, locked and detached trees and never
+move the current executing workspace out from under its run. Retire a clean,
+confirmed-idle worktree through its owner/lifecycle procedure, then delete its
+local branch once no checkout uses it and its tip is contained in main. Report
+remaining local refs and worktree reasons separately; they do not excuse leaving
+non-main refs on `origin`.
 
 ## Report three independent outcomes
 
 1. **Integration:** complete or blocked, scope (`internal` or `all`), final main
    SHA, merged/excluded/blocked exact inputs, review and gate verdict/skips.
 2. **Worktree synchronization:** updated and deferred paths with concrete reasons.
-3. **Branch cleanup:** deleted and retained refs with concrete reasons.
+3. **Branch cleanup:** prove `origin` contains only `main`; report local refs and
+   retained worktrees separately with concrete reasons.
 
-Say `Integration complete; workspace synchronization deferred for ...` when all
-in-scope commits reached tested/pushed main but a dirty/live tree remains. Never
-call that `orchestration partially complete`. Conversely, never call integration
-complete if a real in-scope commit, PR review requirement or discovery error is
-unresolved. Preserve those distinctions in the final response.
+Say `Integration complete; workspace synchronization deferred for ...` only
+when the tested main is current and the remote main-only invariant passes, even
+if a dirty/live local tree remains. If any non-main remote ref remains, report
+cleanup blocked and do not claim the command fully completed. Never force-delete
+or discard local work to satisfy the invariant. Conversely, never call
+integration complete if a real in-scope commit, PR review requirement or
+discovery error is unresolved. Preserve those distinctions in the final response.

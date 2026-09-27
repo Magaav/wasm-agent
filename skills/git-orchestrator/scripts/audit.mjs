@@ -106,7 +106,7 @@ export function audit(repo,{target='origin/main',includePRs=false,listPRs=github
   return {schema_version:1,repo,target,target_sha:targetSha,include_prs:includePRs,discovery_complete:errors.length===0,
     integration_complete:errors.length===0 && pending.length===0,pending_tips:pending.length,
     errors,candidates,worktrees,
-    note:'Integration covers committed tips. Worktree dirt, activity and optional branch deletion are separate follow-up; never discard them to claim convergence.'};
+    note:'Integration covers committed tips. The required origin main-only invariant is a separate postcondition. Worktree dirt and activity are reported separately; never discard them to claim convergence.'};
 }
 
 if(process.argv[1] && import.meta.url===pathToFileURL(resolve(process.argv[1])).href) {

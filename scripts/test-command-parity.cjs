@@ -145,6 +145,8 @@ const promisedBrief = luaBrief(merge);
 assert.ok(offeredBrief.includes('skills/git-orchestrator'),
   'the /merge brief must name the skill that holds the procedure');
 assert.ok(offeredBrief.includes('never force it'), 'the /merge brief must say a conflict is escalated');
+assert.ok(offeredBrief.includes('origin to contain only main'),
+  'the /merge brief must make remote branch cleanup a completion requirement');
 assert.equal(offeredBrief, promisedBrief,
   'the /merge brief differs between ui/app.js and lua/core/merge.lua: it is written twice so that the '
   + 'trigger is one word in both surfaces, and the sentence is what says which procedure it triggers');
