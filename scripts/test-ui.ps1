@@ -580,6 +580,22 @@ $harness = @'
   check(document.getElementById('model-select').value==='gpt-6-luna' &&
     document.getElementById('model-select').options.length===3,
     'the subscription picker offers the GPT-6 family and selects Luna');
+  var statusBalloon=document.getElementById('status-balloon');
+  var statusButton=document.getElementById('status-btn');
+  statusButton.click();
+  check(statusBalloon.open && statusButton.getAttribute('aria-expanded')==='true',
+    'status button opens the balloon for settings changes');
+  window.__fixtures.model=Object.assign({},settings,{model:'gpt-6-sol'});
+  var modelPicker=document.getElementById('model-select');
+  modelPicker.value='gpt-6-sol'; modelPicker.dispatchEvent(new Event('change'));
+  for(var modelTick=0;modelTick<20;modelTick++) await tick();
+  check(window.__calls.some(c=>c.url==='model' && c.method==='POST' && c.body==='gpt-6-sol') &&
+    modelPicker.value==='gpt-6-sol','model selection must persist the chosen model');
+  // A native dropdown may deliver a pointerup without a document pointerdown for its option.
+  document.dispatchEvent(new PointerEvent('pointerup',{bubbles:true}));
+  check(statusBalloon.open && statusButton.getAttribute('aria-expanded')==='true',
+    'choosing a model must not dismiss the status balloon on an unmatched release');
+  delete window.__fixtures.model;
   settings.providers[0].configured=false;
   window.renderProviders();
   check(document.getElementById('provider-select').textContent.includes('login in Pi'),
@@ -602,6 +618,16 @@ $harness = @'
   for(var c=0;c<20;c++) await tick();
   check(window.__calls.some(c=>c.url.indexOf('reasoning')>=0 && c.method==='POST' && c.body==='low'),'reasoning selection sends the selected level');
   check(/unsupported_reasoning_level/.test(document.getElementById('settings-error').textContent),'refused settings must be visible');
+  document.dispatchEvent(new PointerEvent('pointerup',{bubbles:true}));
+  check(statusBalloon.open && statusButton.getAttribute('aria-expanded')==='true',
+    'choosing reasoning must leave the status balloon open');
+  reasoningPicker.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));
+  document.dispatchEvent(new PointerEvent('pointerup',{bubbles:true}));
+  check(statusBalloon.open,'a press inside a native picker released outside must stay open');
+  document.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));
+  document.dispatchEvent(new PointerEvent('pointerup',{bubbles:true}));
+  check(!statusBalloon.open && statusButton.getAttribute('aria-expanded')==='false',
+    'a matched press and release outside still dismisses the balloon');
   diagnostics.querySelector('button').click();
   for(var c=0;c<20;c++) await tick();
   check(/Export failed/.test(document.getElementById('settings-error').textContent),'export failure must not claim a download');

@@ -13,6 +13,7 @@ class WaOverlay extends HTMLElement {
   constructor() {
     super();
     this._pressInside = false;
+    this._pressTracked = false;
     this._onDown = this._onDown.bind(this);
     this._onUp = this._onUp.bind(this);
     this._onKey = this._onKey.bind(this);
@@ -50,12 +51,14 @@ class WaOverlay extends HTMLElement {
 
   _onDown(event) {
     if (!this.open) return;
+    this._pressTracked = true;
     this._pressInside = WaOverlay._within(this, event.target)
       || WaOverlay._within(this.anchor, event.target);
   }
 
   _onUp() {
-    if (!this.open) return;
+    if (!this.open || !this._pressTracked) return;
+    this._pressTracked = false;
     if (!this._pressInside) this.close();
     this._pressInside = false;
   }
@@ -72,6 +75,8 @@ class WaOverlay extends HTMLElement {
 
   close() {
     if (!this.open) return;
+    this._pressTracked = false;
+    this._pressInside = false;
     this.open = false;
     this.dispatchEvent(new CustomEvent("close"));
   }
