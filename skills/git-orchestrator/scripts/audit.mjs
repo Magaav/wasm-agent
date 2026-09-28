@@ -146,7 +146,7 @@ export function audit(repo,{target='origin/main',includePRs=false,listPRs=github
     const receiptPath=resolve(repo,gateReceipts.stdout.trim());
     try {
       const receipt=JSON.parse(fs.readFileSync(receiptPath,'utf8'));
-      const tree=requireResult(git('rev-parse','HEAD^{tree}'),'Source tree');
+      const tree=requireResult(git('rev-parse',`${targetSha}^{tree}`),'Target tree');
       const gateRepo=command(repo,'git',['rev-parse','--show-toplevel']);
       const logPath=resolve(gateRepo.stdout.trim(),receipt.log);
       const log=fs.readFileSync(logPath);

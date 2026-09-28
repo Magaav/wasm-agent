@@ -22,7 +22,8 @@ For a comparison, run baseline and candidate on the same disposable Git/worktree
 remote layout; compare repeated `timings_ms`, `counts`, `gate_ms`, skips and gate run
 counts. A single run is not a speedup estimate, and historical times remain unknown
 without captured baseline JSON. Independent reviews can run in parallel; serialize
-shared writes to a candidate tree. Preserve all refs/worktrees during `/merge`.
+shared writes to a candidate tree. Preserve all local refs and worktrees during
+`/merge`; the remote main-only invariant is separate.
 
 ## The loop
 
