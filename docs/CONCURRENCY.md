@@ -14,7 +14,7 @@ and pagination are identical; in-memory-only runs cannot claim a full archive.
 ## Shared resources
 
 Participating agent runs hold an exclusive `session:<id>` claim across the run.
-Lua acquires `client:local` before client, client-shell or spell tools and keeps
+Lua acquires `client:local` before client, client-shell or client-bound spell tools and keeps
 it until the run settles, so multi-step client interactions cannot interleave.
 **`client{action:"status"}` does not claim it**: it is answered while a claim is held
 or uncertain, because asking the client what it is doing is how a refusal is diagnosed
@@ -51,8 +51,10 @@ which requires the exact owner/run and inspected evidence. Both paths land in th
 audit history, as `recover` and `reconcile` rows.
 
 Scope and risk: arbitrary operator shell, direct manual client calls, external
-programs and separate runtime homes do not participate. Spells conservatively
-claim the client even if a particular spell only reads files. A failed client
+programs and separate runtime homes do not participate. A validated spell whose
+steps are only node `run`/`wait` and whose checks are all node `run` does not claim
+the client. A mixed spell, invalid spell or browser assertion still conservatively
+claims it; a target label alone cannot bypass ownership. A failed client
 call may retain a claim despite having made no effect; that costs availability
 but avoids silently allowing conflicting work. Lease files and the audit history
 are retained; no automatic retention/reaper is introduced. SQLite FULL synchronous
@@ -61,8 +63,9 @@ writes add latency; no throughput improvement is claimed.
 Proof: `scripts/test-resource-claims.cjs` uses two real processes, kills the owner,
 and tests contention, live-owner refusal, explicit reconciliation, session recovery,
 uncertain-effect retention, guest denial, a claim-free `status` read, a run recovering
-its own uncertain claim only after the client answers, and a pre-effect refusal leaving
-no uncertainty, with a mock client (31 checks, no skips).
+its own uncertain claim only after the client answers, a pre-effect refusal leaving
+no uncertainty, and node-only versus mixed/composed spell locking, with a mock client
+(47 checks, no skips).
 Rust tests additionally verify all-or-none multi-key acquisition, identity checks, and
 that only the live owning process clears its own uncertainty, with evidence, without
 releasing the claim.

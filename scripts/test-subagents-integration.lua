@@ -120,7 +120,7 @@ assert(tostring(delayed_final.result.reply):find("child-answer", 1, true), "dela
 print("MARK ok-delayed-ttft")
 
 -- 4d. A prompt larger than the child's whole token budget makes ZERO provider
---     calls: the preflight refuses before the request is sent.
+--     calls: admission refuses before a session/native task is created.
 local paths = dofile("lua/core/paths.lua")
 local base_url = tostring(host.getenv("WASM_AGENT_LLM_BASE_URL") or "")
 local function model_calls()
@@ -133,10 +133,9 @@ host.write_file(paths.config() .. "/subagent-profiles/tiny-budget.json", json.en
 }))
 local calls_before = model_calls()
 local tiny = control({ action = "start", profile = "tiny-budget", prompt = "a", idempotency_key = "tiny" }, ctx("alice"))
-assert(not tiny.error, "tiny start: " .. json.encode(tiny))
-local tiny_final = control({ action = "await", subagent_id = tiny.subagent_id, timeout_ms = 30000 }, ctx("alice"))
-assert(tiny_final.state == "failed", "tiny state=" .. tostring(tiny_final.state))
-assert(tostring(tiny_final.error):find("subagent_token_budget", 1, true), "tiny error: " .. tostring(tiny_final.error))
+assert(tostring(tiny.error):find("subagent_token_budget", 1, true) and
+  tiny.estimated_prompt_tokens >= tiny.max_tokens and not tiny.subagent_id,
+  "tiny must refuse before admission: " .. json.encode(tiny))
 local calls_after = model_calls()
 assert(calls_after == calls_before, "an over-budget child must make zero provider calls: " .. calls_before .. " -> " .. calls_after)
 print("MARK ok-budget-zero-calls")

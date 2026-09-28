@@ -389,6 +389,16 @@ function M.subagent_system_prompt(self, tool_list)
   return table.concat(parts, "\n\n")
 end
 
+-- Admission uses the same system prompt, tool schemas and message estimator as
+-- the first child call. This is an estimate, not a tokenizer guarantee; the
+-- child loop remains the authority when usage or instructions change later.
+function M.subagent_initial_tokens(profile, role, prompt)
+  local tool_list = M.subagent_tool_list(profile, role)
+  local system = M.subagent_system_prompt({subagent=profile, role=role}, tool_list)
+  return telemetry.estimate_messages({{role="system", content=system},
+    {role="user", content=prompt}}) + estimate_tokens(json.encode(tool_list))
+end
+
 function M.new(session_id, on_event, role, user, node, opts)
   role = role or "master"
   user = user or "master"
@@ -1164,7 +1174,9 @@ function M:run_body(text, images)
       -- The prompt alone must fit: if it does not, the call is refused before it
       -- is made, so an oversized input costs zero provider calls.
       if reserved_prompt >= remaining then
-        error("subagent_token_budget: the prompt exceeds the remaining budget")
+        error("subagent_token_budget: the prompt exceeds the remaining budget " ..
+          "(estimated_prompt_tokens=" .. tostring(reserved_prompt) ..
+          ", remaining_tokens=" .. tostring(remaining) .. ")")
       end
       max_output = math.min(max_output, remaining - reserved_prompt)
       if max_output <= 0 then error("subagent_token_budget: no output budget remains") end

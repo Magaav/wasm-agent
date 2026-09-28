@@ -273,6 +273,25 @@ function M.needs_sentinel(spec)
   return false
 end
 
+-- Resource classification follows what actually executes, never a caller's
+-- target label. Missing/invalid saved plans conservatively claim the client;
+-- only validated run/wait steps and run-only checks are node-only. A mixed
+-- composition is client-bound even if its target says "local".
+function M.needs_client(name)
+  local spell = M.get(name)
+  if not spell or M.validate(spell) then return true end
+  for _, phase in ipairs({"pre", "post"}) do
+    for _, check in ipairs(spell[phase] or {}) do
+      if check.kind ~= "run" then return true end
+    end
+  end
+  for _, step in ipairs(spell.steps) do
+    local kind = step.kind or "client"
+    if kind ~= "run" and kind ~= "wait" then return true end
+  end
+  return false
+end
+
 -- The portable plan: the resolved, literal steps the sentinel executes, with no model and no node
 -- involved. This is the artifact `wa-sentinel request spell --file` consumes.
 --
