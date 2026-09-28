@@ -4,6 +4,26 @@ The agent can work on its own repository: it has `bash`, `read`, `write`, `edit`
 and `grep`, the repo's `AGENTS.md` is injected every turn, and its instruction
 files describe the two-tree workflow. This document is the plumbing around that.
 
+## Reproducible integration measurements
+
+`node skills/git-orchestrator/scripts/audit.mjs audit <repo> origin/main [--all]`
+returns `timings_ms` for fetch, branch/PR discovery, merge proof, worktree inspection,
+snapshot validation, live remote-head verification, and total wall time. `counts`
+records candidate/pending/excluded tips, merge conflicts/errors, and dirty/total
+worktrees. It reads and reports; it does not delete refs or move worktrees. Save its
+JSON with the source HEAD when comparing runs.
+
+`node skills/parallel-evolution/scripts/finish.mjs gate <repo> <exact-HEAD>` stores
+source-tree-bound evidence under Git metadata, including `gate_ms`, the parsed skip
+count, exit/verdict proof, and log hash. Re-running against the identical source tree
+reuses a valid receipt (`gate_run_count: 0`); a changed tree requires another gate.
+Report the `gate_run_count` with elapsed time so avoided gate reruns are visible.
+For a comparison, run baseline and candidate on the same disposable Git/worktree and
+remote layout; compare repeated `timings_ms`, `counts`, `gate_ms`, skips and gate run
+counts. A single run is not a speedup estimate, and historical times remain unknown
+without captured baseline JSON. Independent reviews can run in parallel; serialize
+shared writes to a candidate tree. Preserve all refs/worktrees during `/merge`.
+
 ## The loop
 
 ```
@@ -12,8 +32,18 @@ files describe the two-tree workflow. This document is the plumbing around that.
 3. give it the brief
 4. it edits, tests, commits, pushes the branch
 5. a human reviews the branch and merges
-Two rules make step 5 possible, and `scripts/worktrees.sh` exists to keep them
-visible:
+```
+
+The current `skills/git-orchestrator/SKILL.md` branch-cleanup contract was
+changed after the last install; an installed-node invocation of `/merge all`
+then required deleting every remote branch and treating local worktree cleanup
+as a completion condition. The repository is authoritative: integration preserves
+all refs and worktrees (including drafts and benches); cleanups are separate,
+optional and require their own authorization. The installed mismatch is a source
+alignment defect, not a request to overwrite the running install outside its gate.
+`scripts/verify-install.sh` checks these source files byte-for-byte before any
+future install is reported aligned; the historical failed check remains a failure
+until an authorized install runs and a fresh verification passes.
 
 - **The agent rebases before it reports done.** A branch that conflicts is a task
   handed to the reviewer, and every hour it waits it grows: a branch based on a base

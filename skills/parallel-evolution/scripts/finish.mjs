@@ -32,7 +32,9 @@ function inspect() {
   const tree = check('source_tree', () => git('rev-parse','HEAD^{tree}'));
   const branch = check('branch', () => git('symbolic-ref','--short','HEAD'));
   check('clean', () => require(git('status','--porcelain') === '', 'uncommitted changes remain'));
-  check('fresh_remote_refs', () => git('fetch','--prune','origin'));
+  // Refresh observations without pruning local remote-tracking refs: drafts and
+  // stale refs are operator-owned evidence, not finish-gate cleanup targets.
+  check('fresh_remote_refs', () => git('fetch','origin'));
   check('current', () => require(git('rev-list','--count','HEAD..origin/main') === '0', 'branch is behind origin/main'));
   check('pushed', () => {
     const upstream = git('rev-parse','--abbrev-ref','--symbolic-full-name','@{upstream}');
@@ -53,12 +55,19 @@ function verify(state) {
     if (receipt.schema !== 1 || receipt.repo !== repo || receipt.tree !== state.tree || receipt.passed !== true)
       throw Error('no passing gate evidence for this source tree');
     if (receipt.log_sha256 !== sha(fs.readFileSync(receipt.log))) throw Error('gate log differs from recorded evidence');
-    return {...state,gate_verified:true,tested_head:receipt.head,equivalence:'git_tree',skipped:receipt.skipped,gate_log:receipt.log};
+    if (!Number.isFinite(receipt.gate_ms) || receipt.gate_ms < 0) throw Error('gate duration is missing or invalid');
+    if (receipt.gate_runs !== 1) throw Error('gate run count is missing or invalid');
+    if (receipt.gate_exit !== 0) throw Error('gate exit status is missing or nonzero');
+    return {...state,gate_verified:true,tested_head:receipt.head,equivalence:'git_tree',skipped:receipt.skipped,
+      gate_ms:receipt.gate_ms,gate_runs:receipt.gate_runs,gate_log:receipt.log};
   } catch (error) { return {...state,gate_verified:false,gate_error:error.message}; }
 }
 function gate() {
+  const gateStarted = process.hrtime.bigint();
   const before = inspect();
   if (!before.repository_ready) return {...before,gate_verified:false};
+  const existing = verify(before);
+  if (existing.gate_verified) return {...existing,gate_reused:true,gate_run_count:0,gate_exit:0};
   const receipt = receiptPath(), log = `${receipt}.log`;
   fs.mkdirSync(path.dirname(receipt),{recursive:true});
   // Remove old proof before execution: a failed rerun must never leave a passing receipt.
@@ -70,14 +79,15 @@ function gate() {
       windowsHide:true,timeout:3500*1000});
   } finally { fs.closeSync(fd); }
   const bytes = fs.readFileSync(log);
+  const gateMs = Number((Number(process.hrtime.bigint() - gateStarted) / 1e6).toFixed(3));
   const verdict = /(?:^|\n)smoke ok(?: \((\d+) skipped\))?\r?\n?$/u.exec(bytes.toString('utf8'));
   const after = inspect();
   if (result.error || result.status !== 0 || !verdict || !after.repository_ready || after.tree !== before.tree)
     return {...after,gate_verified:false,gate_error:result.error?.message || `gate exit=${result.status}; verdict=${Boolean(verdict)}`,
-      gate_log:log};
+      gate_log:log,gate_ms:gateMs,gate_runs:1,gate_run_count:1,gate_exit:result.status};
   fs.writeFileSync(receipt,JSON.stringify({schema:1,repo,head:before.head,tree:before.tree,passed:true,
-    skipped:Number(verdict[1] || 0),log,log_sha256:sha(bytes),at:new Date().toISOString()}));
-  return verify(after);
+    skipped:Number(verdict[1] || 0),gate_ms:gateMs,gate_runs:1,gate_exit:result.status,log,log_sha256:sha(bytes),at:new Date().toISOString()}));
+  return {...verify(after),gate_reused:false,gate_run_count:1,gate_exit:result.status};
 }
 function spellDefinitions() {
   // This repo uses bash on Windows too. Native paths are quoted as bash literals.

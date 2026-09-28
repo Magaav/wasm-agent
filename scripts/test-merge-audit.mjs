@@ -29,6 +29,10 @@ try {
   const options={listPRs:()=>prs,includePRs:true};
   const first=audit(repo,options);
   check(first.discovery_complete,'all discovery sources succeeded');
+  check(first.integration_complete===false && first.verification_complete===false,'verification refuses pending tips and remote refs');
+  check(first.counts.merge_conflicts===0 && first.counts.pending_tips>0,'candidate and merge counts are reported');
+  check(Number.isFinite(first.timings_ms.total_ms) && first.timings_ms.total_ms>=0,'audit phase durations are measured');
+  check(first.origin_main_only===false && first.origin_heads.some(ref=>ref.name==='astra'),'remote heads are observed independently from integration');
   check(!first.integration_complete,'unmerged tips fail completion');
   check(first.candidates.some(c=>c.sha===local&&c.state==='pending'),'non-change local actor is an integration input');
   check(first.candidates.some(c=>c.sha===divergent&&c.state==='pending'),'divergent remote actor is a separate input');
@@ -53,7 +57,16 @@ try {
   git('push','origin','main');
   const merged=audit(repo,options);
   check(merged.integration_complete,'every committed input is now contained');
+  check(merged.verification_complete===false && merged.origin_main_only===false,'integrated non-main remote ref still blocks full verification');
+  check(merged.counts.pending_tips===0 && merged.counts.excluded_pr_tips===0,'final audit counts are settled');
   check(merged.worktrees.some(w=>w.sync==='dirty_retained'),'dirty worktree does not relabel completed integration as partial');
+  git('push','origin','--delete','astra');
+  const mainOnly=audit(repo,options);
+  check(mainOnly.integration_complete&&mainOnly.origin_main_matches_target,'main-only remote plus integrated tips is distinguished from source-gate verification');
+  check(!mainOnly.verification_complete&&mainOnly.gate_proof.status!=='verified','main-only refs without exact-tree gate proof do not pass verification');
+  check(mainOnly.counts.dirty_worktrees===1,'verification audit preserves and reports dirty worktree');
+  const verified=spawnSync(process.execPath,[path.resolve('skills/git-orchestrator/scripts/audit.mjs'),'verify',repo,'origin/main','--all'],{cwd:process.cwd(),encoding:'utf8',windowsHide:true});
+  check(verified.status===1&&JSON.parse(verified.stdout).verification_complete===false,'verify requires current source-tree gate receipt');
   check(gitAt(lane,'rev-parse','HEAD')===local,'worktree remains on original branch and tip');
   check(fs.readFileSync(path.join(lane,'unfinished.txt'),'utf8')==='keep this uncommitted\n','merging committed tips preserves uncommitted work');
   const unavailable=audit(repo,{listPRs:()=>{throw Error('fixture GitHub unavailable');}});
@@ -65,6 +78,7 @@ try {
   git('switch','-c','late-lane');const late=commit('late.txt');git('switch','main');
   const final=audit(repo,options);
   check(!final.integration_complete&&final.candidates.some(c=>c.sha===late&&c.state==='pending'),'fresh audit catches a late non-change local lane');
+  check(['missing','stale_or_invalid'].includes(final.gate_proof.status)&&final.counts.gate_run_count===0,'audit reports unavailable gate evidence without running a gate');
   console.log(`merge audit ok (${checks} checks, 0 skipped; real Git, fixture PR discovery)`);
 } finally {
   // Entire fixture is an explicitly created disposable root; retain it on failure for diagnosis.
