@@ -5,6 +5,15 @@ description: Retrieve a ranked code symbol and its exact implementation, answer 
 
 # Symbol retrieval, dependency leads and patch impact
 
+Use graph for discovery and static relationships. An empty result is not proof
+of absence. Inspect source before editing; investigate relevant unresolved edges.
+Test leads are not test coverage. Audit/impact `unresolved_calls` separates calls
+originating in changed symbols from repository totals and gives exact call-site
+`read`/`grep` followups. These are unresolved/ambiguous leads, not dependencies.
+Check returned/truncated counts; this initial view covers changed symbols only,
+not every unresolved edge in the transitive impact scope. A gap-free result does
+not exclude dynamic callers.
+
 The `graph` tool retrieves exact definitions from a verified source snapshot and
 answers relationship questions from the same index. For concept-to-code discovery,
 try `search_symbols` before broad grep/file reads, then retrieve the selected
