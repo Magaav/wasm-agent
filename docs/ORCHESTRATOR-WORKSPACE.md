@@ -111,8 +111,15 @@ user work. It does not interrupt that run or claim task verification. Authority
 is rechecked at both observation and execution. The coordinator instructions
 bound feedback to one deduplicated improvement task and one review; this is an
 instruction policy, not a native semantic classifier of feedback requests.
-The showroom polls durable messages and live model-text preview; interrupted
-preview is not durable transcript evidence.
+The showroom polls durable messages and bounded live model/tool preview every
+two seconds. Tool starts are visible before results; active runs are expanded by
+default, with reader folds and scroll position preserved across refreshes. Each
+pane has `chat-content-run-status`, an elapsed clock, and per-balloon duration
+footers. Final durations come from stored message timing, not time since repaint.
+`start.title` supplies a short task heading; legacy tasks use a bounded prompt
+fallback, while profile/model/reasoning remain secondary details. Interrupted
+preview is not durable transcript evidence. Very short tools between polls may
+appear directly as completed transcript rows rather than an observed running state.
 
 ## Scope and risks
 

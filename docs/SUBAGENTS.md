@@ -127,6 +127,18 @@ Rules, each enforced in `lua/core/subagents.lua`:
   `WASM_AGENT_SUBAGENT_MODELS`; a reasoning level must be one the model supports.
   The override applies to the child interpreter only and is never persisted.
 
+General operator profiles have no implicit cumulative token/cost cap. Omit
+`max_tokens` / `max_cost_usd` for unlimited; explicit numeric limits (including
+zero as a zero-spend ceiling) remain enforced. Specialist/guest limits are not
+removed. `profiles` exposes declared and effective model approvals, reasoning
+choices, defaults and budget semantics without granting new approvals.
+
+Subscription inference has a separate 3600s request safety deadline rather than
+the 300s shell default. `WASM_AGENT_SUBSCRIPTION_TIMEOUT` overrides it (1–86400s),
+then `WASM_AGENT_LLM_TIMEOUT` for compatibility. Child task deadlines and cancellation
+still apply. Risk: a hung provider can occupy capacity longer; explicit deadlines
+and cancellation remain available. No failed call or external effect is auto-replayed.
+
 ## Context, transcripts and budgets
 
 - A child gets a **fresh, lean context**: the mandatory boundary rules, the

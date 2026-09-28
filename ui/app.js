@@ -3999,6 +3999,7 @@ async function refreshAgentPane(pane,before_seq) {
   try {
     const result=await orchestratorRequest({action:'session',id:pane.task.subagent_id,before_seq,after_seq:before_seq ? undefined : pane.lastSeq});
     if(!pane.isConnected)return;
+    if(result.task)pane.task={...pane.task,...result.task};
     pane.showMessages(result.messages,renderMarkdown,!!before_seq);
     pane.notice.textContent=pane.task.error || (pane.task.settled ? 'Ready for your next message.' : 'Working. Steer updates the active run; Send queues a follow-up.');
   } catch(error) { pane.notice.textContent='Conversation unavailable: '+error.message; }

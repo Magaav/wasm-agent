@@ -48,7 +48,7 @@ local BUILTIN = {
     -- blind to the navigation capability the parent already has.
     allowed_tools = { "read", "read_many", "grep", "ls", "graph", "diagnose" },
     resources = {},
-    limits = { max_depth = 0, timeout_seconds = 600, max_output_bytes = 65536, max_tokens = 200000 },
+    limits = { max_depth = 0, timeout_seconds = 600, max_output_bytes = 65536 },
   },
   guest = {
     schema_version = 1,
@@ -236,7 +236,7 @@ function M.resolve(id, ctx)
   resolved_limits.max_depth = math.min(tonumber(limits.max_depth) or 0, max_depth)
   resolved_limits.timeout_seconds = tonumber(limits.timeout_seconds) or 600
   resolved_limits.max_output_bytes = tonumber(limits.max_output_bytes) or 65536
-  resolved_limits.max_tokens = tonumber(limits.max_tokens) or 200000
+  resolved_limits.max_tokens = tonumber(limits.max_tokens)
   resolved_limits.max_cost_usd = tonumber(limits.max_cost_usd)
   resolved_limits.max_children = tonumber(limits.max_children)
   resolved_limits.max_prompt_bytes = tonumber(limits.max_prompt_bytes) or 262144
@@ -459,6 +459,7 @@ function M.start(args, ctx)
       owner_user = ctx.user_id, idempotency_key = idempotency })))
     if type(existing) == "table" and existing.subagent_id then
       existing.deduplicated = true
+      dofile('lua/core/completions.lua').watch(existing.subagent_id,{user_id=ctx.user_id,role=ctx.role,remote=ctx.remote,session_id=existing.parent_session_id})
       return existing
     end
   end
@@ -478,7 +479,7 @@ function M.start(args, ctx)
   local session_id = memory.start_session(ctx.node_id, "subagent", {
     user_id = ctx.user_id,
     node_id = ctx.node_id,
-    title = "subagent:" .. profile.id,
+    title = tostring(args.title or prompt):gsub('%s+',' '):sub(1,100),
     parent_session_id = ctx.session_id,
     workspace_required = workspaces.requires_write_tools(profile.allowed_tools),
   })
@@ -499,6 +500,7 @@ function M.start(args, ctx)
     session_id = session_id,
     profile = profile.id,
     prompt = prompt,
+    title = tostring(args.title or prompt):gsub('%s+',' '):sub(1,100),
     context = context,
     instructions = profile.instructions,
     allowed_tools = profile.allowed_tools,
@@ -529,6 +531,7 @@ function M.start(args, ctx)
   end
   if receipt.deduplicated then
     pcall(memory.finish_session, session_id)
+    dofile('lua/core/completions.lua').watch(receipt.subagent_id,{user_id=ctx.user_id,role=ctx.role,remote=ctx.remote,session_id=receipt.parent_session_id})
     return receipt
   end
   receipt.profile = profile.id
@@ -561,11 +564,10 @@ function M.control(args, ctx)
       owner_user = ctx.user_id, id = tostring(args.id or args.subagent_id or "") })))
     if not receipt or receipt.error then return receipt or { error = "subagent_runtime_error" } end
     if action=='steer' or action=='steering_status' then
-      if action=='steer' and (receipt.settled or receipt.state=='unknown') then return {error='no_active_steering_target'} end
       local request={}
       for k,v in pairs(args) do request[k]=v end
       request.session_id=receipt.session_id
-      return dofile('lua/core/steering.lua').control(request,ctx,receipt.subagent_id)
+      return dofile('lua/core/steering.lua').control(request,ctx,receipt.subagent_id,receipt.settled or receipt.state=='unknown')
     end
     if action == "session" then
       return dofile('lua/core/session_view.lua').get(memory,receipt.session_id,args,receipt)
@@ -603,8 +605,25 @@ function M.control(args, ctx)
           allowed_tools = resolved.allowed_tools, builtin = resolved.builtin,
           operator_authorized = resolved.operator_authorized,
           limits = resolved.limits, model = resolved.model, reasoning = resolved.reasoning,
-          approved_models = resolved.approved_models,
+          approved_models = resolved.approved_models or {},
+          effective_models = {}, reasoning_choices = {},
+          default_model = resolved.model or ctx.model or provider.settings().model,
+          default_reasoning = resolved.reasoning or ctx.reasoning or 'provider',
+          token_budget = resolved.limits.max_tokens == nil and 'unlimited' or 'explicit',
+          cost_budget = resolved.limits.max_cost_usd == nil and 'unlimited' or 'explicit',
         }
+        local item=listed[#listed]
+        local candidates={ctx.model or provider.settings().model}
+        for _,name in ipairs(resolved.approved_models or {}) do candidates[#candidates+1]=name end
+        for _,name in ipairs(split_list(host.getenv('WASM_AGENT_SUBAGENT_MODELS'))) do candidates[#candidates+1]=name end
+        local seen={}
+        for _,name in ipairs(candidates) do
+          if name and name~='' and not seen[name] then
+            seen[name]=true;item.effective_models[#item.effective_models+1]=name
+            local info=provider.reasoning(name)
+            item.reasoning_choices[name]={supported=info.supported,levels=info.levels or {},provider_default_allowed=true}
+          end
+        end
       else
         listed[#listed + 1] = { id = id, available = false, reason = refusal }
       end

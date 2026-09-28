@@ -1417,17 +1417,29 @@ class WaTasks extends HTMLElement {
 }
 customElements.define('wa-tasks', WaTasks);
 
+function agentTaskTitle(task) {
+  const text=String(task.title || task.prompt || '').replace(/\s+/g,' ').trim();
+  return text ? (text.length>90 ? text.slice(0,87)+'…' : text) : 'Untitled task';
+}
+function agentElapsed(ms) {
+  const seconds=Math.max(0,Math.floor(ms/1000));
+  return Math.floor(seconds/60)+':'+String(seconds%60).padStart(2,'0');
+}
 // A session pane owns its draft and scroll position, never the execution.
 class WaAgentSession extends HTMLElement {
   connectedCallback() {
-    if (this.form) return;
+    if (this.form) { this.startClock(); return; }
     this.innerHTML = '<header class="agent-pane-head"><strong></strong><span></span><button type="button" data-action="expand">Expand</button><button type="button" data-action="collapse">Collapse</button></header><button type="button" class="agent-earlier" hidden>Earlier messages</button><div class="agent-transcript"></div><div class="agent-notice" role="status"></div><form class="agent-composer"><textarea aria-label="Message this agent" rows="2" placeholder="Talk to this agent…"></textarea><button type="submit">Send</button><button type="button" data-action="steer">Steer</button><button type="button" data-action="cancel">Cancel task</button></form>';
     this.form=this.querySelector('form');
     this.input=this.querySelector('textarea');
     this.transcript=this.querySelector('.agent-transcript');
     this.notice=this.querySelector('.agent-notice');
     this.preview=document.createElement('div');this.preview.className='agent-preview';
-    this.transcript.after(this.preview);
+    this.statusLine=document.createElement('div');this.statusLine.className='status chat-content-run-status';
+    this.statusLine.innerHTML='<span class="spinner"></span><span class="chat-content-run-label"></span><span class="chat-content-run-elapsed"></span>';
+    this.statusLine.setAttribute('role','status');
+    this.transcript.after(this.preview,this.statusLine);
+    this.startClock();
     this.rows=new Map();
     this.form.addEventListener('submit',event=>{
       event.preventDefault();
@@ -1448,30 +1460,50 @@ class WaAgentSession extends HTMLElement {
       } else this.emit(button.dataset.action);
     }));
   }
+  startClock() { if(!this.clock)this.clock=setInterval(()=>this.updateClock(),1000); }
+  disconnectedCallback() { clearInterval(this.clock);this.clock=null; }
+  updateClock() {
+    if(!this._task)return;
+    const task=this._task, started=Number(task.started_at)*1000;
+    const end=task.settled ? Number(task.settled_at)*1000 : Date.now();
+    const duration=started && end ? agentElapsed(end-started) : 'duration unknown';
+    this.statusLine.querySelector('.chat-content-run-elapsed').textContent=duration;
+    this.querySelectorAll('[data-live-footer]').forEach(node=>node.querySelector('.chat-content-run-elapsed').textContent=duration);
+    if(this.liveTrace && task.preview?.tool?.started_at)this.liveTrace.setAge((Date.now()/1000)-task.preview.tool.started_at);
+  }
   emit(action,detail={}) { this.dispatchEvent(new CustomEvent('agent-action',{bubbles:true,detail:{action,pane:this,...detail}})); }
   set task(value) {
     this.connectedCallback(); this._task=value;
-    this.querySelector('strong').textContent=value.profile || 'agent';
-    this.querySelector('.agent-pane-head span').textContent=[value.model,value.reasoning || 'reasoning unknown',value.execution_node || 'local',value.state].filter(Boolean).join(' · ');
+    this.querySelector('strong').textContent=agentTaskTitle(value);
+    this.querySelector('.agent-pane-head span').textContent=[value.profile,value.model,value.reasoning || 'reasoning unknown',value.execution_node || 'local',value.state].filter(Boolean).join(' · ');
     this.querySelector('[data-action="cancel"]').disabled=!!value.settled || value.state==='unknown';
     this.querySelector('[data-action="steer"]').disabled=!!value.settled || value.state==='unknown';
-    this.preview.textContent=value.preview?.text || '';
+    this.preview.textContent=[value.preview?.reasoning,value.preview?.commentary,value.preview?.text].filter(Boolean).join('\n');
     this.preview.hidden=!this.preview.textContent;
+    this.statusLine.querySelector('.chat-content-run-label').textContent=value.settled ? value.state : (value.preview?.status || value.state || 'unknown');
+    this.statusLine.querySelector('.spinner').hidden=!!value.settled || value.state==='unknown';
+    this.statusLine.classList.toggle('finished',!!value.settled);
+    this.updateClock();
+    if(this.renderMessages)this.showMessages([],this.renderMessages);
   }
   get task() { return this._task; }
   showMessages(messages,render,earlier=false) {
+    this.renderMessages=render;
+    const folds=[...this.transcript.querySelectorAll('wa-run,wa-trace,wa-reasoning')].map(node=>({open:node.open,toggled:node._userToggled}));
+    const scroll=this.transcript.scrollTop;
     const nearBottom=this.transcript.scrollHeight-this.transcript.scrollTop-this.transcript.clientHeight<40;
     const height=this.transcript.scrollHeight;
     for(const message of messages || []) this.rows.set(Number(message.seq),message);
     const ordered=[...this.rows.values()].sort((a,b)=>a.seq-b.seq);
-    const fingerprint=JSON.stringify(ordered);
+    const fingerprint=JSON.stringify([ordered,this.task?.subagent_id,this.task?.settled,this.task?.state,this.task?.preview?.tool]);
     if(fingerprint===this.fingerprint)return;
     this.fingerprint=fingerprint;
     this.firstSeq=ordered[0]?.seq;
     this.lastSeq=ordered.at(-1)?.seq;
     this.querySelector('.agent-earlier').hidden=!(this.firstSeq>1);
     const children=[];
-    let bubble=null, run=null, trace=null, calls=0;
+    let bubble=null, run=null, trace=null, calls=0, finalMessage=null;
+    this.liveTrace=null;
     const boundary=message=>message.run_id || message.runId || null;
     let runId=null;
     const startBubble=()=>{
@@ -1482,13 +1514,25 @@ class WaAgentSession extends HTMLElement {
       return bubble;
     };
     const startRun=()=>{
-      if(!run) {run=document.createElement('wa-run');startBubble().body.prepend(run);}
+      if(!run) {run=document.createElement('wa-run');run.open=true;startBubble().body.prepend(run);}
       return run;
     };
-    const finishRun=()=>{
-      if(trace) {trace.unrecorded();trace.finish();}
-      if(run)run.setSummary(0,calls,null);
-      bubble=null;run=null;trace=null;calls=0;
+    const finishRun=(live=false)=>{
+      if(trace) {
+        if(!live) {trace.unrecorded();trace.finish();}
+        else {trace.open=true;this.liveTrace=trace;}
+      }
+      if(run)run.setSummary(0,calls,finalMessage?.ms || null);
+      if(bubble && (finalMessage?.ms || live || this.task?.settled)) {
+        const footer=document.createElement('div');footer.className='status chat-content-run-status finished';
+        const label=document.createElement('span');label.className='chat-content-run-label';
+        const elapsed=document.createElement('span');elapsed.className='chat-content-run-elapsed';
+        label.textContent=live ? (this.task?.preview?.status || 'working') : (finalMessage?.ok===0 ? 'failed' : 'completed');
+        elapsed.textContent=finalMessage?.ms ? agentElapsed(finalMessage.ms) : 'duration unknown';
+        if(live)footer.dataset.liveFooter='true';
+        footer.append(label,elapsed);bubble.body.append(footer);
+      }
+      bubble=null;run=null;trace=null;calls=0;finalMessage=null;
     };
     for(const message of ordered) {
       if(message.omitted && message.evidence) {
@@ -1512,12 +1556,13 @@ class WaAgentSession extends HTMLElement {
         if(!trace) {trace=document.createElement('wa-trace');startRun().body.append(trace);trace.connectedCallback();}
         if(!trace.pending) {trace.addTool(name,name,'');calls++;}
         const pending=trace.querySelector('.tool-line.pending');
-        trace.settle('recorded',String(message.content || ''),false);
+        trace.settle(message.ok===0 ? 'failed' : 'recorded',String(message.content || ''),message.ok===0);
         const result=pending?.querySelector('.tool-output');
         if(result && message.content)result.hidden=false;
         continue;
       }
       if(message.role!=='assistant')continue;
+      if(message.ms || message.trace?.length)finalMessage=message;
       if(message.reasoning) {
         const thinking=document.createElement('wa-reasoning');thinking.setText(message.reasoning);
         startRun().body.append(thinking);
@@ -1535,14 +1580,27 @@ class WaAgentSession extends HTMLElement {
           const fn=call.function || call;
           const name=String(fn.name || 'tool');
           const args=typeof fn.arguments==='string' ? fn.arguments : JSON.stringify(fn.arguments || {});
-          trace.addTool(name,name,args || '');calls++;
+          trace.addTool(name,name,args || '',undefined,call.id);calls++;
         }
       }
     }
-    finishRun();
+    const active=!this.task?.settled && this.task?.state==='running';
+    const tool=this.task?.preview?.tool;
+    if(active && tool && !ordered.some(row=>row.role==='tool' && row.tool_call_id===tool.call_id)) {
+      if(!trace) {trace=document.createElement('wa-trace');startRun().body.append(trace);trace.connectedCallback();}
+      if(!trace.hasPendingCall(tool.call_id)) {
+        trace.addTool(tool.name,tool.name,JSON.stringify(tool.arguments || {}),tool.timeout_ms,tool.call_id);calls++;
+      }
+    }
+    finishRun(active && !finalMessage);
     this.transcript.replaceChildren(...children);
-    if(earlier) this.transcript.scrollTop+=this.transcript.scrollHeight-height;
+    [...this.transcript.querySelectorAll('wa-run,wa-trace,wa-reasoning')].forEach((node,index)=>{
+      if(folds[index]) {node.open=folds[index].open;node._userToggled=folds[index].toggled;}
+    });
+    if(earlier) this.transcript.scrollTop=scroll+this.transcript.scrollHeight-height;
     else if(nearBottom) this.transcript.scrollTop=this.transcript.scrollHeight;
+    else this.transcript.scrollTop=scroll;
+    this.updateClock();
   }
 }
 customElements.define('wa-agent-session',WaAgentSession);
@@ -1581,7 +1639,7 @@ class WaOrchestrator extends HTMLElement {
       const state=task.state || 'unknown';
       card.dataset.state=state;
       const mission=document.createElement('span');mission.className='agent-card-mission';
-      mission.textContent=task.prompt || task.profile || 'Untitled mission';
+      mission.textContent=agentTaskTitle(task);
       mission.title=mission.textContent;
       const details=document.createElement('span');details.className='agent-card-details';
       const model=document.createElement('span');model.className='agent-card-model';model.textContent=[task.model || 'model unknown',task.reasoning || 'reasoning unknown'].join(' · ');

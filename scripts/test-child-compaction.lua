@@ -25,5 +25,7 @@ assert(ok and result=='continued' and summaries>0 and models==1,'child compacts 
 assert(memory.session(sid).summarized_until>0,'durable checkpoint')
 local ok2,error2,s2,m2=run(100)
 assert(not ok2 and tostring(error2):find('summary reservation',1,true) and s2==0 and m2==0,'budget refusal before any model spend')
+local unlimited,answer,us,um=run(nil)
+assert(unlimited and answer=='continued' and us>0 and um==1,'omitted cumulative budget permits compaction and continuation')
 provider.budget=base_budget
 print('child compaction ok (budgeted summary, exact originals, refusal before spend)')

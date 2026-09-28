@@ -203,6 +203,7 @@ impl Task {
             "session_id": self.session_id,
             "profile": self.profile,
             "prompt": self.spec["prompt"],
+            "title": self.spec["title"],
             "owner_user": self.owner_user,
             "parent_session_id": self.parent_session_id,
             "parent_run_id": self.parent_run_id,
@@ -974,9 +975,35 @@ pub fn capture_event(payload: &str) -> bool {
                     text.push_str(event["text"].as_str().unwrap_or_default());
                 }
             }
-            "round" | "checkpoint" => { task.preview["text"] = json!(""); }
+            "round" | "checkpoint" => {
+                task.preview = json!({"text":"", "round":event["n"], "status":"model"});
+            }
             "status" => { task.preview["status"] = event["text"].clone(); }
+            "tool" => {
+                task.preview["tool"] = event.clone();
+                task.preview["tool"]["started_at"] = json!(now_secs());
+                task.preview["status"] = json!(format!("running {}", event["name"].as_str().unwrap_or("tool")));
+            }
+            "tool_result" => { task.preview["tool"] = Value::Null; task.preview["status"] = json!("tool finished"); }
+            "reasoning" => {
+                let previous=task.preview["reasoning"].as_str().unwrap_or("");
+                task.preview["reasoning"]=json!(format!("{}{}",previous,event["text"].as_str().unwrap_or("")));
+            }
+            "commentary" => { task.preview["commentary"] = event["text"].clone(); }
             _ => {}
+        }
+        // Preview is disposable, bounded presentation. Originals remain in the ledger.
+        for key in ["text", "reasoning", "commentary"] {
+            if let Some(text)=task.preview[key].as_str() {
+                if text.len()>32768 {
+                    let mut start=text.len()-32768;
+                    while !text.is_char_boundary(start) { start+=1; }
+                    task.preview[key]=json!(format!("[earlier preview omitted; inspect transcript] {}", &text[start..]));
+                }
+            }
+        }
+        if task.preview["tool"]["arguments"].to_string().len()>8192 {
+            task.preview["tool"]["arguments"]=json!({"preview_omitted":true,"note":"Full arguments are in the original transcript"});
         }
     }
     true

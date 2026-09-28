@@ -64,10 +64,29 @@ assert(memory.session_workspace(cancel_code.session_id).worktree==cancel_workspa
   and host.read_file(code_b_ws.worktree.."/shared.txt")=="written-by-B",
   "cancelling one coding child leaves sibling workspace and writes intact")
 print("MARK ok-coding-workspaces")
+host.write_file(paths.config()..'/subagent-profiles/live-tool.json',json.encode({schema_version=1,id='live-tool',operator_authorized=true,allowed_tools={'bash'},limits={timeout_seconds=30}}))
+local live=control({action='start',profile='live-tool',title='Watch a real tool',prompt='LIVE-TOOL',idempotency_key='live-tool'},ctx('alice'))
+assert(not live.error,json.encode(live))
+local observed=false
+for i=1,100 do
+ local current=control({action='status',id=live.subagent_id},ctx('alice'))
+ if current.preview and current.preview.tool then
+  assert(current.preview.tool.call_id=='live-call' and current.title=='Watch a real tool')
+  assert(not current.settled);observed=true;break
+ end
+ control({action='await',id=live.subagent_id,wait_ms=50},ctx('alice'))
+end
+assert(observed,'tool start visible via real child status before settlement')
+local live_done=control({action='await',id=live.subagent_id,wait_ms=10000},ctx('alice'))
+assert(live_done.state=='completed',json.encode(live_done))
+print('MARK ok-live-tool')
 
 -- 2. Idempotency: a repeat start collects the same child, with no second run.
 local first = control({ action = "start", profile = "explore", prompt = "x", idempotency_key = "same" }, ctx("alice"))
+host.sql_exec('DELETE FROM child_completions WHERE child_id=?',json.encode({first.subagent_id}))
 local second = control({ action = "start", profile = "explore", prompt = "x", idempotency_key = "same" }, ctx("alice"))
+local repaired=json.decode(host.sql_query('SELECT * FROM child_completions WHERE child_id=?',json.encode({first.subagent_id})))
+assert(#repaired==1,'idempotent start repairs interrupted completion registration')
 assert(second.deduplicated == true and second.subagent_id == first.subagent_id,
   "idempotency: " .. json.encode(second))
 control({ action = "await", id = first.subagent_id, wait_ms = 60000 }, ctx("alice"))

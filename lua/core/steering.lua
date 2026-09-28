@@ -33,7 +33,7 @@ function M.finish(owner,sid,rid,state)
     return true
   end)
 end
-function M.control(args,ctx,target)
+function M.control(args,ctx,target,closed)
   local owner,sid=ctx.user_id,tostring(args.session_id or '')
   local session=memory.session(sid)
   if not session or session.user_id~=owner then return {error='forbidden_steering_session'} end
@@ -50,6 +50,7 @@ function M.control(args,ctx,target)
       if old.text~=text or (args.run_id and old.run_id~=args.run_id) then return {error='idempotency_conflict'} end
       old.deduplicated=true;return old
     end
+    if closed then return {error='no_active_steering_target',target=active} end
     local rid=target or (active and active.state=='active' and active.run_id)
     if target and active and active.run_id==target and active.state~='active' then
       return {error='no_active_steering_target',target=active}

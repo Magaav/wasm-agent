@@ -84,6 +84,7 @@ M.shared = {
     byte_offset = { type = "integer", minimum = 1 },
     message_version = { type = "string" },
     profile = { type = "string", description = "Approved profile id, e.g. explore. Defaults to explore (read-only)." },
+    title = { type = "string", description = "Short task-specific heading for the child conversation, not its profile name." },
     prompt = { type = "string", description = "The bounded task for the child. Required for start." },
     context = { type = "string", description = "Optional extra context; the parent transcript is never sent." },
     id = { type = "string", description = "Subagent id, for status/result/await/cancel." },
