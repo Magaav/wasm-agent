@@ -538,7 +538,7 @@ local function node_capability(capability, args, caller)
     -- Peer ownership comes from the verified identity. A request cannot forge
     -- a local account, become another dispatcher, or change node policy.
     local allowed = { start=true, list=true, profiles=true, status=true, result=true,
-      await=true, cancel=true, message=true, session=true, capacity=true }
+      await=true, cancel=true, message=true, steer=true, steering_status=true, session=true, capacity=true }
     if not allowed[args.action or "list"] then return { error="forbidden_peer_action" } end
     return dofile("lua/core/subagents.lua").control(args, {
       user_id=author, role=users.normalize(caller.role), node_id=nodeslib.node_name(),

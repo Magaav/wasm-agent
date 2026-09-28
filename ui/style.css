@@ -117,6 +117,12 @@ body.compact {
     padding-left: env(safe-area-inset-left);
   }
 }
+/* Links are visibly actionable across chat, child and report surfaces. */
+a[href] { color: #8bbcff; text-decoration: underline; text-underline-offset: .15em; }
+a[href]:hover { opacity: .8; }
+a[href]:focus-visible { outline: 2px solid #8bbcff; outline-offset: 2px; }
+#steer { border: 1px solid var(--line); border-radius: var(--radius); padding: var(--pad); background: var(--panel-2); color: var(--text); cursor: pointer; }
+
 .topbar {
   display: flex; align-items: center; justify-content: space-between;
   gap: var(--gap); padding: var(--pad);

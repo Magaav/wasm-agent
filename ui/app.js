@@ -269,6 +269,31 @@ document.addEventListener("click", function (event) {
                                function () { acknowledgeCopy(button, true); });
 });
 
+function safeLinks(html) {
+  const template=document.createElement('template');template.innerHTML=html;
+  for(const link of template.content.querySelectorAll('a')) {
+    const href=link.getAttribute('href') || '';
+    if(!/^(https?:\/\/|mailto:|file:\/\/)/i.test(href) || /[\u0000-\u0020]/.test(href)) {
+      link.replaceWith(...link.childNodes);continue;
+    }
+    link.target='_blank';link.rel='noopener noreferrer';
+  }
+  const walker=document.createTreeWalker(template.content,NodeFilter.SHOW_TEXT);
+  const nodes=[];while(walker.nextNode())nodes.push(walker.currentNode);
+  for(const node of nodes) {
+    if(node.parentElement?.closest('a,pre,code,script,style'))continue;
+    const re=/https?:\/\/[^\s<>"']+/g;let match,last=0;const parts=[];
+    while((match=re.exec(node.textContent))) {
+      const url=match[0].replace(/[.,;!?)}\]]+$/,'');
+      parts.push(document.createTextNode(node.textContent.slice(last,match.index)));
+      const a=document.createElement('a');a.href=url;a.textContent=url;a.target='_blank';a.rel='noopener noreferrer';parts.push(a);
+      last=match.index+url.length;re.lastIndex=match.index+match[0].length;
+    }
+    if(parts.length) {parts.push(document.createTextNode(node.textContent.slice(last)));node.replaceWith(...parts);}
+  }
+  return template.innerHTML;
+}
+
 function renderMarkdown(text) {
   if (renderer && renderer.memory) {
     try {
@@ -278,10 +303,10 @@ function renderMarkdown(text) {
       const packed = renderer.render(pointer, bytes.length);
       const outPointer = Number((packed >> 32n) & 0xffffffffn);
       const outLength = Number(packed & 0xffffffffn);
-      return enhanceCodeBlocks(new TextDecoder().decode(new Uint8Array(renderer.memory.buffer, outPointer, outLength)));
+      return safeLinks(enhanceCodeBlocks(new TextDecoder().decode(new Uint8Array(renderer.memory.buffer, outPointer, outLength))));
     } catch (error) { /* fall through */ }
   }
-  return escapeHtml(text).replace(/\n/g, "<br>");
+  return safeLinks(escapeHtml(text).replace(/\n/g, "<br>"));
 }
 
 // Some models leak their reasoning into the message; drop it.
@@ -1640,6 +1665,7 @@ function setBusy(value) {
   }
   // A run ending is what frees the node for everything the engine asked for while it ran.
   if (!value && document.body.classList.contains("engine")) reloadTopics();
+  document.getElementById('steer').hidden=!value;
   sendButton.classList.toggle("busy", value);
   sendButton.title = value ? "Stop" : "Send";
   sendButton.setAttribute("aria-label", sendButton.title);
@@ -2400,6 +2426,32 @@ async function cancelRun(runId) {
   }
 }
 
+let steeringSubmission=null;
+let steeringPending=false;
+async function steerActiveRun() {
+  const text=input.value.trim(), thread=chatSession;
+  if(!busy || !thread || !text || steeringPending)return;
+  if(attachments.length) {setStatus('Steering accepts text only; attachments and draft kept.');return;}
+  if(!steeringSubmission || steeringSubmission.text!==text || steeringSubmission.thread!==thread)
+    steeringSubmission={text,thread,key:crypto.randomUUID()};
+  const submission=steeringSubmission;
+  steeringPending=true;
+  document.getElementById('steer').disabled=true;
+  try {
+    const response=await apiFetch('subagents',{method:'POST',headers:apiHeaders({'Content-Type':'application/json'}),
+      body:JSON.stringify({action:'steer_session',session_id:thread,text,idempotency_key:submission.key})});
+    const receipt=await response.json();
+    if(!response.ok || receipt.error || !receipt.id)throw new Error(receipt.error || 'missing steering receipt');
+    if(chatSession===thread && input.value.trim()===text) {
+      input.value='';draftGeneration++;draftUndo=[];draftRedo=[];autosize();saveDraft();
+    }
+    steeringSubmission=null;
+    setStatus('Steering '+receipt.state+' — applies at the next safe boundary; in-flight effects are not undone.');
+  } catch(error) {setStatus('Steering not confirmed; draft kept: '+error.message);}
+  finally {steeringPending=false;document.getElementById('steer').disabled=false;}
+}
+document.getElementById('steer').addEventListener('click',steerActiveRun);
+
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   if (busy) {
@@ -2433,6 +2485,7 @@ input.addEventListener("keydown", (event) => {
       if (commandMenu.activate()) { event.preventDefault(); return; }
     }
   }
+  if(accel && event.key==='Enter' && busy) {event.preventDefault();steerActiveRun();return;}
   // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, the three spellings people actually use.
   // Only while the composer has focus, so we never shadow an undo a browser
   // context (a dialog, a native field) is entitled to handle itself.
@@ -2453,7 +2506,7 @@ input.addEventListener("keydown", (event) => {
       // Typing ahead is not a stop gesture. The red button remains the explicit stop control; Enter
       // keeps the next prompt in the composer so one keystroke cannot cancel a healthy provider call.
       saveDraft();
-      setStatus("run still working - draft kept; use the red Stop button to cancel");
+      setStatus("run still working — draft kept; Ctrl+Enter or Steer sends it now; Stop cancels");
       return;
     }
     form.requestSubmit();
@@ -3947,7 +4000,7 @@ async function refreshAgentPane(pane,before_seq) {
     const result=await orchestratorRequest({action:'session',id:pane.task.subagent_id,before_seq,after_seq:before_seq ? undefined : pane.lastSeq});
     if(!pane.isConnected)return;
     pane.showMessages(result.messages,renderMarkdown,!!before_seq);
-    pane.notice.textContent=pane.task.error || (pane.task.settled ? 'Ready for your next message.' : 'Working. New messages queue in this session after the current run.');
+    pane.notice.textContent=pane.task.error || (pane.task.settled ? 'Ready for your next message.' : 'Working. Steer updates the active run; Send queues a follow-up.');
   } catch(error) { pane.notice.textContent='Conversation unavailable: '+error.message; }
 }
 function mountOrchestrator() {
@@ -3970,13 +4023,33 @@ function mountOrchestrator() {
   orchestratorPanel.addEventListener('agent-action',async event=>{
     const {action,pane,text,key,before_seq}=event.detail;
     if(action==='earlier') { await refreshAgentPane(pane,before_seq);return; }
-    if(!['message','cancel'].includes(action))return;
-    const button=pane.querySelector(action==='message' ? 'button[type="submit"]' : '[data-action="cancel"]');
+    if(action==='exact') {
+      const {evidence,button}=event.detail;button.disabled=true;
+      try {
+        let offset=1,version,parts=[],total=0;
+        for(let pages=0;pages<256;pages++) {
+          const part=await orchestratorRequest({action:'session',id:pane.task.subagent_id,message_id:evidence.message_id,byte_offset:offset,message_version:version,byte_limit:20000});
+          if(!part.content || part.next_offset<=offset)throw new Error('original page did not advance');
+          parts.push(part.content);total+=part.content.length;offset=part.next_offset;version=part.message_version;
+          if(total>4000000)throw new Error('Original exceeds 4 MB browser inspection limit; use exact session tool pages.');
+          if(part.eof) {pane.showMessages([JSON.parse(parts.join(''))],renderMarkdown);return;}
+        }
+        throw new Error('Original exceeds browser page limit; use exact session tool pages.');
+      } catch(error) {pane.notice.textContent='Original unavailable: '+error.message;}
+      finally {button.disabled=false;}
+      return;
+    }
+    if(!['message','steer','cancel'].includes(action))return;
+    const button=pane.querySelector(action==='message' ? 'button[type="submit"]' : '[data-action="'+action+'"]');
     button.disabled=true;
     try {
       const receipt=await orchestratorRequest({action,id:pane.task.subagent_id,text,idempotency_key:key});
-      if(action==='message') { pane.input.value='';pane.submission=null;pane.task={...receipt,execution_node:pane.task.execution_node};saveOrchestratorLayout(); }
-      pane.notice.textContent=action==='message' ? 'Message accepted in this session.' : 'Cancellation requested.';
+      if(action==='message' || action==='steer') {
+        if(pane.input.value===text)pane.input.value='';pane.submission=null;
+        if(action==='message')pane.task={...receipt,execution_node:pane.task.execution_node};
+        saveOrchestratorLayout();
+      }
+      pane.notice.textContent=action==='steer' ? 'Steering '+receipt.state+'; in-flight effects are not undone.' : action==='message' ? 'Message accepted in this session.' : 'Cancellation requested.';
     } catch(error) { pane.notice.textContent=error.message; }
     finally { button.disabled=false; }
   });

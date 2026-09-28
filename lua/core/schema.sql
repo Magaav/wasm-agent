@@ -60,6 +60,24 @@ CREATE TABLE IF NOT EXISTS run_links (
   run_id TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
   PRIMARY KEY (run_id, entity_type, entity_id));
 
+CREATE TABLE IF NOT EXISTS child_completions (
+  child_id TEXT PRIMARY KEY, target_id TEXT NOT NULL, owner TEXT NOT NULL, parent_session TEXT NOT NULL,
+  state TEXT NOT NULL, boot TEXT NOT NULL DEFAULT '', run_id TEXT NOT NULL DEFAULT '',
+  detail TEXT NOT NULL DEFAULT '');
+
+-- Node-local steering control; never replicated as authority.
+CREATE TABLE IF NOT EXISTS steering_runs (
+  session_id TEXT PRIMARY KEY, owner TEXT NOT NULL, run_id TEXT NOT NULL,
+  boot TEXT NOT NULL, state TEXT NOT NULL, updated_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS steering_inbox (
+  ordinal INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+  owner TEXT NOT NULL, session_id TEXT NOT NULL, run_id TEXT NOT NULL,
+  request_key TEXT NOT NULL, text TEXT NOT NULL, attribution TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'queued', created_at REAL NOT NULL,
+  read_at REAL, message_seq INTEGER, detail TEXT NOT NULL DEFAULT '',
+  UNIQUE(owner,session_id,request_key));
+CREATE INDEX IF NOT EXISTS steering_target ON steering_inbox(owner,session_id,run_id,state,ordinal);
+
 -- ---------------------------------------------------------------- transcript
 -- The agent's OWN dialogue: one row per stored message (a user turn, an assistant turn, a tool
 -- result, a summary). Deliberately separate from `ledger_messages`, which is the external inbox.

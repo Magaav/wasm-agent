@@ -213,6 +213,7 @@ impl Task {
             "settled_at": self.settled_at,
             "timeout_seconds": self.timeout_seconds,
             "model": self.spec["model"],
+            "reasoning": self.spec["reasoning"],
             "after_id": self.spec["after_id"],
             "preview": if self.settled { Value::Null } else { self.preview.clone() },
         });
@@ -916,7 +917,9 @@ pub fn control(action: &str, args: &Value) -> Result<Value, String> {
         "status" | "result" => {
             let id = args["id"].as_str().unwrap_or_default();
             let owner = args["owner_user"].as_str().unwrap_or_default();
-            manager.find(id, owner)
+            let mut value=manager.find(id, owner)?;
+            if action=="status" { value.as_object_mut().unwrap().remove("result"); }
+            Ok(value)
         }
         "list" => {
             let owner = args["owner_user"].as_str().unwrap_or_default();

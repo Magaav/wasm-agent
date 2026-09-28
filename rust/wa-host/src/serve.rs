@@ -1633,7 +1633,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
 fn unwrap_http(work: Work) -> (TcpStream, Request) {
     match work {
         Work::Http(stream, request) => (stream, request),
-        Work::Relay(_) => unreachable!("the accept loop only sends HTTP work"),
+        Work::Relay(_) | Work::Completion { .. } => unreachable!("the accept loop only sends HTTP work"),
     }
 }
 
@@ -1659,6 +1659,40 @@ fn worker_loop(
         // putting it in front of the queue is how a peer's slow call made the window say "connecting…".
         let local = receiver.recv_timeout(std::time::Duration::from_millis(100));
         match local {
+            Ok(Work::Completion { body, run_id, cancel, sockets }) => {
+                QUEUED.fetch_sub(1, Ordering::Relaxed);
+                begin_work("child completion".into());
+                let args: serde_json::Value=serde_json::from_str(&body).unwrap_or_default();
+                if let Some(slot)=WORKER_SESSION.get().and_then(|slots|slots.get(index)) {
+                    if let Ok(mut value)=slot.lock() {*value=args["session_id"].as_str().map(str::to_string);}
+                }
+                if let Some(slot)=WORKER_RUN.get().and_then(|slots|slots.get(index)) {
+                    if let Ok(mut value)=slot.lock() {*value=Some(run_id);}
+                }
+                IN_RUN.with(|flag| flag.set(true));
+                CURRENT_RUN_ID.with(|id| id.set(run_id));
+                set_current_run_io(Some(cancel), Some(sockets), format!("run:{run_id}"));
+                scheduler::mark_running(run_id);
+                begin_run_events(run_id);
+                let mut request: serde_json::Value=serde_json::from_str(&body).unwrap_or_default();
+                request["cancelled"]=serde_json::json!(run_cancel_requested());
+                if let Err(error) = lua.call_string("wa_completion_run", &[&request.to_string()]) {
+                    write_event(&serde_json::json!({"type":"error","error":error}).to_string());
+                }
+                finish_run_events(run_id);
+                CURRENT_RUN_ID.with(|id| id.set(0));
+                set_current_run_io(None,None,String::new());
+                IN_RUN.with(|flag| flag.set(false));
+                scheduler::complete_run(run_id);
+                if let Some(slot)=WORKER_SESSION.get().and_then(|slots|slots.get(index)) {
+                    if let Ok(mut value)=slot.lock() {*value=None;}
+                }
+                if let Some(slot)=WORKER_RUN.get().and_then(|slots|slots.get(index)) {
+                    if let Ok(mut value)=slot.lock() {*value=None;}
+                }
+                end_work();beat();idle_since=std::time::Instant::now();
+                continue;
+            }
             Ok(Work::Http(mut stream, request)) => {
                 if test_stall && !stalled_once {
                     stalled_once = true;
@@ -2045,10 +2079,40 @@ struct Request {
     accept_sse: bool,
 }
 
+/// Internal bounded enqueue. Lua owns eligibility and the durable outbox;
+/// scheduler owns same-session serialization and cancellation. No loopback HTTP.
+pub(crate) fn enqueue_completion(body: &str) -> serde_json::Value {
+    let args: serde_json::Value = match serde_json::from_str(body) {
+        Ok(args) => args, Err(_) => return serde_json::json!({"error":"invalid_completion", "not_started":true}),
+    };
+    let session=args["session_id"].as_str().unwrap_or_default();
+    let owner=args["owner"].as_str().unwrap_or_default();
+    if session.is_empty() || owner.is_empty() || POOL.get().is_none() {
+        return serde_json::json!({"error":"completion_runtime_unavailable","not_started":true});
+    }
+    match scheduler::admit(session,owner,scheduler::RunClass::Background,pick_run_worker) {
+        scheduler::Decision::Run {run_id,worker,cancel,sockets}
+        | scheduler::Decision::Behind {run_id,worker,cancel,sockets} => {
+            let recorded=scheduler::global().is_some_and(|s| s.record_request(run_id,body).is_ok());
+            if !recorded {scheduler::complete_run(run_id);return serde_json::json!({"error":"run_journal_unavailable","not_started":true});}
+            let sender=POOL.get().and_then(|pool| pool.slots.lock().ok().and_then(|slots| slots.get(worker).cloned().flatten()));
+            QUEUED.fetch_add(1,Ordering::Relaxed);
+            if sender.is_some_and(|s| s.try_send(Work::Completion {body:body.to_string(),run_id,cancel,sockets}).is_ok()) {
+                serde_json::json!({"accepted":true,"run_id":run_id})
+            } else {
+                QUEUED.fetch_sub(1,Ordering::Relaxed);scheduler::complete_run(run_id);
+                serde_json::json!({"error":"completion_queue_full","not_started":true})
+            }
+        }
+        scheduler::Decision::Refused(reason) => serde_json::json!({"error":reason.as_error().0,"not_started":true}),
+    }
+}
+
 /// One unit of work a worker can be handed. HTTP requests and relayed peer requests travel the same
 /// queue and the same admission, so a peer run can no longer bypass the scheduler by arriving on
 /// worker 0's housekeeping path.
 enum Work {
+    Completion { body: String, run_id: u64, cancel: Arc<AtomicBool>, sockets: crate::subagents::SocketSlot },
     Http(TcpStream, Request),
     Relay(RelayWork),
 }

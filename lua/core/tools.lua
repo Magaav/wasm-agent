@@ -70,9 +70,19 @@ M.shared = {
     name = { type = "string", description = "The skill's name, as listed in <available_skills>." } }, { "name" }),
   schema("capabilities", "List the tools available to this account (its capabilities).", {}),
   schema("subagent", "Start and supervise a child agent (a subagent), using configured node placement, that works on a bounded task with its own fresh context, its own transcript and a restricted tool profile. `start` returns a durable receipt, not a result: the child runs in the background. Use `await` (one bounded wait, never repeated model polling) or `status`/`result` to collect it, and `cancel` to stop it. You may only inspect or cancel the subagents you started. A profile's tools can only narrow your own; they can never grant more than you have. Use `list` to see your subagents and `profiles` to see what is approved. `session` reads the original child conversation; `message` queues its next turn with the same profile and model.", {
-    action = { type = "string", enum = { "start", "status", "list", "result", "await", "cancel", "profiles", "message", "session", "fleet" } },
-    text = { type = "string", description = "message: queue a user turn in the child's existing session, preserving its approved profile." },
+    action = { type = "string", enum = { "start", "status", "list", "result", "await", "cancel", "profiles", "message", "steer", "steer_session", "steering_status", "session", "fleet" } },
+    text = { type = "string", description = "message: queue a follow-up; steer: amend active child; steer_session: amend active main session. Steering fences calls not yet admitted, never undoes in-flight effects." },
+    session_id = { type = "string", description = "steer_session / steering_status: owned main session." },
+    run_id = { type = "string", description = "Optional expected steering target; stale targets are refused." },
     before_seq = { type = "integer", description = "session: read original messages before this sequence." },
+    after_seq = { type = "integer", minimum = 0 },
+    offset = { type = "integer", minimum = 0, description = "list: next_offset from previous page." },
+    limit = { type = "integer", minimum = 1, maximum = 1000 },
+    byte_limit = { type = "integer", minimum = 4, maximum = 20000 },
+    view = { type = "string", enum = { "full", "compact" } },
+    message_id = { type = "string" },
+    byte_offset = { type = "integer", minimum = 1 },
+    message_version = { type = "string" },
     profile = { type = "string", description = "Approved profile id, e.g. explore. Defaults to explore (read-only)." },
     prompt = { type = "string", description = "The bounded task for the child. Required for start." },
     context = { type = "string", description = "Optional extra context; the parent transcript is never sent." },
@@ -681,7 +691,26 @@ function M.dispatch(memory, name, args, role, ctx)
   elseif name == "subagent" then
     -- One Lua facade for the model and for the HTTP control route; the owner is
     -- derived from `ctx` (server side), never from the arguments the model sent.
-    return dofile("lua/core/subagents.lua").control(args, ctx)
+    local result=dofile("lua/core/subagents.lua").control(args, ctx)
+    if args.action=='list' and type(result.subagents)=='table' then
+      local source=result.subagents
+      local offset=math.max(0,math.floor(tonumber(args.offset) or 0))
+      local limit=math.min(50,math.max(1,math.floor(tonumber(args.limit) or 12)))
+      local page={subagents={},total=#source,offset=offset}
+      for i=offset+1,math.min(#source,offset+limit) do
+        local task=source[i]
+        page.subagents[#page.subagents+1]={subagent_id=task.subagent_id,session_id=task.session_id,
+          parent_session_id=task.parent_session_id,profile=task.profile,model=task.model,reasoning=task.reasoning,
+          state=task.state,settled=task.settled,execution_node=task.execution_node,
+          error=task.error and tool_output.slice(tostring(task.error),1,512),
+          prompt=tool_output.slice(tostring(task.prompt or ''),1,512),
+          evidence={action='status',id=task.subagent_id}}
+      end
+      page.next_offset=offset+#page.subagents<#source and offset+#page.subagents or nil
+      page.note='Bounded list; status/result and exact session pages retain original evidence.'
+      return page
+    end
+    return result
   elseif WHATSAPP_TOOLS[name] then
     -- The scoped responder tools. They are only reachable from a subagent whose
     -- approved profile names them, and the trusted profile/event/effects snapshot
@@ -915,51 +944,7 @@ function M.dispatch(memory, name, args, role, ctx)
     local session = memory.session(args.session_id)
     if not session then return { error = "unknown_session" } end
     if session.user_id ~= user_id and not is_master(role) then return { error = "forbidden" } end
-    if args.view~=nil and args.view~='full' and args.view~='compact' then return {error='invalid_view'} end
-    if args.message_id then
-      local row=memory.message(args.message_id)
-      if not row or row.session_id~=args.session_id then return {error='unknown_message'} end
-      if args.byte_offset~=nil then
-        -- The page must fit the projector's envelope, or it comes back "omitted" and the
-        -- exact-byte contract this route exists for is lost. Derived from the one budget,
-        -- not hardcoded, so the two cannot drift apart again.
-        local page_limit=tool_output.MAX_BYTES-2048
-        local offset,limit=tonumber(args.byte_offset),tonumber(args.byte_limit) or page_limit
-        if not offset or offset<1 or offset%1~=0 or limit<4 or limit>page_limit or limit%1~=0 then return {error='invalid_message_range'} end
-        local encoded=json.encode(row);local version=host.sha256(encoded)
-        if offset>#encoded+1 then return {error='message_range_out_of_bounds'} end
-        if offset<=#encoded and encoded:byte(offset)>=128 and encoded:byte(offset)<192 then return {error='offset_inside_utf8'} end
-        if args.message_version and args.message_version~=version then return {error='message_changed',message_version=version} end
-        local content,next_offset=tool_output.slice(encoded,offset,limit)
-        local page={content=content,encoding='exact_message_json',message_id=row.id,message_version=version,
-          next_offset=next_offset,bytes=#encoded,eof=next_offset>#encoded}
-        -- Bound the *encoded view*: the row is already JSON text, so its escapes are escaped
-        -- again here and an escape-heavy page can be nearly twice the slice it was sized from.
-        -- A view over the budget is replaced by the omitted envelope, which drops `next_offset`
-        -- and makes the page uncontinuable - the one thing this route exists to avoid.
-        while #json.encode(page)>tool_output.MAX_BYTES and limit>4 do
-          limit=math.floor(limit*0.75)
-          content,next_offset=tool_output.slice(encoded,offset,limit)
-          page={content=content,encoding='exact_message_json',message_id=row.id,message_version=version,
-            next_offset=next_offset,bytes=#encoded,eof=next_offset>#encoded}
-        end
-        return page
-      end
-      return {message=args.view=='compact' and evidence_view.message(row) or row}
-    end
-    local messages = memory.session_messages(args.session_id, { limit = math.min(1000,math.max(1,tonumber(args.limit) or 200)),before_seq=tonumber(args.before_seq) })
-    if args.view=='compact' then messages=evidence_view.messages(messages) end
-    -- Say when it is a window. A model that reads 200 of 260 messages without being told
-    -- will treat the oldest row it can see as the start of the thread, which is how
-    -- ancient history reads as current state.
-    local total = memory.message_count(args.session_id)
-    local note
-    if total > #messages then
-      note = string.format("showing %d of %d messages; %d are outside this page; use before_seq for earlier evidence",
-        #messages, total, total - #messages)
-      if not args.before_seq then note=string.format("showing the newest %d of %d messages; use before_seq for earlier evidence",#messages,total) end
-    end
-    return { session = session, messages = messages, note = note,next_before_seq=messages[1] and messages[1].seq }
+    return dofile('lua/core/session_view.lua').get(memory,args.session_id,args)
   elseif name == "search_messages" then
     if args.view~=nil and args.view~='full' and args.view~='compact' then return {error='invalid_view'} end
     local matches=memory.search_messages(args.query or '',is_master(role) and nil or user_id,math.min(50,math.max(1,tonumber(args.limit) or 20)))
@@ -1103,9 +1088,17 @@ function M.start_parallel_bash(calls, memory, role, ctx)
     local parallel_ctx = {}
     for key, value in pairs(ctx or {}) do parallel_ctx[key] = value end
     parallel_ctx.parallel_start = true
-    local result = M.dispatch(memory, "bash", item.args, role, parallel_ctx)
+    local result
+    if ctx and ctx.steering_admit and not ctx.steering_admit() then
+      result={error='superseded_by_steering',executed=false,effect='none'}
+    else
+      result = M.dispatch(memory, "bash", item.args, role, parallel_ctx)
+    end
     if type(result) == "table" and type(result.operation_id) == "string" then
       started[item.id] = { operation_id = result.operation_id }
+    else
+      -- A refusal is a result, not permission to execute the call a second time.
+      started[item.id] = { result = result }
     end
   end
   return started

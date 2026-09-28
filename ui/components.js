@@ -1421,7 +1421,7 @@ customElements.define('wa-tasks', WaTasks);
 class WaAgentSession extends HTMLElement {
   connectedCallback() {
     if (this.form) return;
-    this.innerHTML = '<header class="agent-pane-head"><strong></strong><span></span><button type="button" data-action="expand">Expand</button><button type="button" data-action="collapse">Collapse</button></header><button type="button" class="agent-earlier" hidden>Earlier messages</button><div class="agent-transcript"></div><div class="agent-notice" role="status"></div><form class="agent-composer"><textarea aria-label="Message this agent" rows="2" placeholder="Talk to this agent…"></textarea><button type="submit">Send</button><button type="button" data-action="cancel">Cancel task</button></form>';
+    this.innerHTML = '<header class="agent-pane-head"><strong></strong><span></span><button type="button" data-action="expand">Expand</button><button type="button" data-action="collapse">Collapse</button></header><button type="button" class="agent-earlier" hidden>Earlier messages</button><div class="agent-transcript"></div><div class="agent-notice" role="status"></div><form class="agent-composer"><textarea aria-label="Message this agent" rows="2" placeholder="Talk to this agent…"></textarea><button type="submit">Send</button><button type="button" data-action="steer">Steer</button><button type="button" data-action="cancel">Cancel task</button></form>';
     this.form=this.querySelector('form');
     this.input=this.querySelector('textarea');
     this.transcript=this.querySelector('.agent-transcript');
@@ -1440,14 +1440,21 @@ class WaAgentSession extends HTMLElement {
       if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); this.form.requestSubmit(); }
     });
     this.querySelector('.agent-earlier').addEventListener('click',()=>this.emit('earlier',{before_seq:this.firstSeq}));
-    this.querySelectorAll('[data-action]').forEach(button=>button.addEventListener('click',()=>this.emit(button.dataset.action)));
+    this.querySelectorAll('[data-action]').forEach(button=>button.addEventListener('click',()=>{
+      if(button.dataset.action==='steer') {
+        const text=this.input.value;if(!text.trim())return;
+        if(!this.submission || this.submission.text!==text)this.submission={text,key:crypto.randomUUID()};
+        this.emit('steer',this.submission);
+      } else this.emit(button.dataset.action);
+    }));
   }
   emit(action,detail={}) { this.dispatchEvent(new CustomEvent('agent-action',{bubbles:true,detail:{action,pane:this,...detail}})); }
   set task(value) {
     this.connectedCallback(); this._task=value;
     this.querySelector('strong').textContent=value.profile || 'agent';
-    this.querySelector('.agent-pane-head span').textContent=[value.model,value.execution_node || 'local',value.state].filter(Boolean).join(' · ');
+    this.querySelector('.agent-pane-head span').textContent=[value.model,value.reasoning || 'reasoning unknown',value.execution_node || 'local',value.state].filter(Boolean).join(' · ');
     this.querySelector('[data-action="cancel"]').disabled=!!value.settled || value.state==='unknown';
+    this.querySelector('[data-action="steer"]').disabled=!!value.settled || value.state==='unknown';
     this.preview.textContent=value.preview?.text || '';
     this.preview.hidden=!this.preview.textContent;
   }
@@ -1484,6 +1491,12 @@ class WaAgentSession extends HTMLElement {
       bubble=null;run=null;trace=null;calls=0;
     };
     for(const message of ordered) {
+      if(message.omitted && message.evidence) {
+        finishRun();
+        const retrieve=document.createElement('button');retrieve.type='button';retrieve.textContent='Load original message '+message.seq;
+        retrieve.addEventListener('click',()=>this.emit('exact',{evidence:message.evidence,button:retrieve}));
+        children.push(retrieve);continue;
+      }
       const nextId=boundary(message);
       if(nextId && runId && nextId!==runId)finishRun();
       if(nextId)runId=nextId;
@@ -1571,7 +1584,7 @@ class WaOrchestrator extends HTMLElement {
       mission.textContent=task.prompt || task.profile || 'Untitled mission';
       mission.title=mission.textContent;
       const details=document.createElement('span');details.className='agent-card-details';
-      const model=document.createElement('span');model.className='agent-card-model';model.textContent=task.model || 'model unknown';
+      const model=document.createElement('span');model.className='agent-card-model';model.textContent=[task.model || 'model unknown',task.reasoning || 'reasoning unknown'].join(' · ');
       const status=document.createElement('span');status.className='agent-card-status';status.textContent=state;
       details.append(model,status);card.append(mission,details);
       card.setAttribute('aria-label',`${mission.textContent} · ${model.textContent} · ${state}`);

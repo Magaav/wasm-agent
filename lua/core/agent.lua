@@ -11,6 +11,7 @@ local changeset = dofile("lua/core/changeset.lua")
 local patch_audit = dofile("lua/core/patch_audit.lua")
 local provider = dofile("lua/core/provider.lua")
 local memory = dofile("lua/core/memory.lua")
+local steering = dofile("lua/core/steering.lua")
 local telemetry = dofile("lua/core/telemetry.lua")
 local tool_output = dofile("lua/core/tool_output.lua")
 -- Failure text is persisted in the trace and shown in the session view, so it is
@@ -443,6 +444,8 @@ function M.new(session_id, on_event, role, user, node, opts)
 end
 
 function M:summary_model()
+  -- A child's approved model boundary also covers summarization.
+  if self.subagent then return self.model end
   return host.getenv("WASM_AGENT_LLM_SUMMARY_MODEL") or provider.settings().model
 end
 
@@ -782,11 +785,9 @@ end
 -- once instead of constantly. The transcript keeps everything regardless; only
 -- the context is windowed.
 function M:maybe_compact(messages, force)
-  -- A lean child does not compact: an automatic summary is unaccounted work
-  -- outside its token budget, and a child that reaches the context limit should
-  -- stop with that reason rather than silently spend more. The caller's
-  -- `context_overflow` error is the visible outcome.
-  if self.subagent then return false end
+  -- A child's summary must reserve from the same per-run budget as task calls.
+  -- Outside a running loop there is no accountant and no permission to spend.
+  if self.subagent and not self.reserve_summary then return false end
   local limits = provider.budget(self.model)
   local limit = limits.context or 0
   if limit <= 0 then return false end
@@ -939,8 +940,9 @@ function M:maybe_compact(messages, force)
   local started = host.now()
   -- cache = false: a one-off prompt must not read or write the conversation's
   -- cache (pi does the same, to avoid paying a cache-write premium for nothing).
-  local ok, result = pcall(provider.complete_with, self:summary_model(), prompt, nil, false,
-    {cache=false,session_id=self.session_id,run_id=self.run_id,kind="summary",max_output=math.floor(reserve*.8)})
+  local summary_opts={cache=false,session_id=self.session_id,run_id=self.run_id,kind='summary',max_output=math.floor(reserve*.8)}
+  if self.reserve_summary then self.reserve_summary(prompt,summary_opts,self:summary_model()) end
+  local ok, result = pcall(provider.complete_with, self:summary_model(), prompt, nil, false,summary_opts)
   if not ok or provider.visible_text(type(result)=="table" and result.content or "")==""
       or (type(result)=="table" and (result.finish_reason=="length" or #(result.tool_calls or {})>0)) then
     local problem=type(result)=="table" and ("invalid summary: "..tostring(result.finish_reason or "empty/tool response")) or tostring(result)
@@ -1028,8 +1030,10 @@ function M:run(text, images)
   local resource_ctx={session_id=self.session_id,user_id=self.user,run_id=self.run_id,subagent=self.subagent}
   local claimed=resources.begin(resource_ctx)
   if not claimed.ok then error("run_resource_refused: "..json.encode(claimed)) end
+  self.steering_run_id=self.subagent and self.subagent.run_id or self.run_id
   local span
   local ok,result=pcall(function()
+  steering.begin(self.user,self.session_id,self.steering_run_id)
   span=telemetry.start({session_id=self.session_id,run_id=self.run_id},'run',{})
   provider.pin()
   -- A child's approved model/reasoning override applies to this interpreter only.
@@ -1046,6 +1050,9 @@ function M:run(text, images)
   return self:run_body(text,images)
   end)
   provider.unpin()
+  self.reserve_summary=nil
+  local inbox_ok,inbox_error=pcall(steering.finish,self.user,self.session_id,self.steering_run_id,ok and 'settled' or 'failed')
+  if not inbox_ok then ok,result=false,'steering_settlement_failed: '..tostring(inbox_error) end
   local marked=not ok and resources.uncertain(resource_ctx) or {ok=true}
   local released=marked.ok and resources.finish(resource_ctx) or marked
   if not released.ok then
@@ -1197,6 +1204,26 @@ function M:run_body(text, images)
     return opts, { prompt = reserved_prompt, output = (max_output == math.huge and 0 or max_output), cost = reserved_cost }
   end
 
+  if child_limits then
+    self.reserve_summary=function(prompt,opts,model)
+      local input=estimate_tokens(json.encode(prompt))+1024
+      local charge=input+opts.max_output
+      if child_limits.max_tokens and (totals.total or 0)+charge>child_limits.max_tokens then
+        error('subagent_token_budget: summary reservation exceeds remaining budget')
+      end
+      local cost=0
+      if child_limits.max_cost_usd then
+        local rates=provider.rates(model)
+        if not rates or not rates.output then error('subagent_cost_budget: summary rates unavailable') end
+        cost=charge*math.max(rates.input or 0,rates.output)/1000000
+        if (totals.cost or 0)+cost>child_limits.max_cost_usd then error('subagent_cost_budget: summary reservation exceeds cap') end
+      end
+      -- Charge the full reservation, even if a response is lost or lacks usage.
+      -- This is conservative budget accounting, not a claim of provider billing.
+      totals.total=(totals.total or 0)+charge;totals.cost=(totals.cost or 0)+cost
+      telemetry.event(self.session_id,self.run_id,'','summary_budget','reserved',{tokens=charge,cost=cost,estimated=true})
+    end
+  end
   -- The loop is bounded by *context*, not by a round budget - pi's model, and
   -- the better one. A fixed round budget fails the worst way: it stops the message
   -- mid-task, so the work exists in the transcript but nothing is verified,
@@ -1208,7 +1235,17 @@ function M:run_body(text, images)
   -- context from the transcript. Each round checks; nothing is cut off.
   -- WASM_AGENT_MAX_TOOL_ROUNDS therefore only guards against a runaway loop, not
   -- against a long task: it should never fire in practice.
+  local function consume_steering()
+    local rows=steering.consume(self.user,self.session_id,self.steering_run_id)
+    for _,row in ipairs(rows) do
+      messages[#messages+1]={role='user',content=row.text}
+      self.emit({type='steering',id=row.id,state='read',seq=row.message_seq})
+      self.emit({type='checkpoint',seq=row.message_seq})
+    end
+    return #rows
+  end
   for round = 1, MAX_TOOL_ROUNDS do
+    consume_steering()
     -- A CLI reader can collect complete messages while a model/tool call blocks Lua.
     -- Deliver them before the next request, as durable user turns, not transient
     -- system instructions. No callback on node/peer runs; they retain their protocol.
@@ -1261,6 +1298,10 @@ function M:run_body(text, images)
     if round == 1 and configured_agents and configured_agents ~= "" and not self.agents_source then
       self.emit({ type = "status", text = agents_var .. " configured but unreadable: " .. configured_agents })
     end
+    if consume_steering()>0 then
+      context_tokens,context_source=self:context_tokens(messages)
+      if capacity>0 and context_tokens>=capacity then error('context_overflow: steering exceeds capacity; transcript preserved') end
+    end
     local budget_opts, budget_reserved = child_call_budget(context_tokens)
     local call_opts = {session_id=self.session_id,run_id=self.run_id,round=round,context_tokens=context_tokens,
        context={estimate_source=context_source,summary_watermark=(memory.session(self.session_id) or {}).summarized_until or 0}}
@@ -1282,6 +1323,13 @@ function M:run_body(text, images)
       telemetry.event(self.session_id,self.run_id,"","provider_retry","attempt",{
         reason="receive_response_timeout",attempt=response_attempt,limit=response_retries,
         context_estimate=context_tokens})
+      if consume_steering()>0 then
+        context_tokens,context_source=self:context_tokens(messages)
+        if capacity>0 and context_tokens>=capacity then error('context_overflow: steering exceeds capacity; transcript preserved') end
+        budget_opts,budget_reserved=child_call_budget(context_tokens)
+        for key,value in pairs(budget_opts or {}) do call_opts[key]=value end
+        call_opts.context_tokens=context_tokens
+      end
       call_opts.attempt = response_attempt + 1
       ok, result = pcall(provider.complete_with, self.model, messages, tool_list, self.stream, call_opts)
     end
@@ -1301,7 +1349,10 @@ function M:run_body(text, images)
         {ok=compacted,error=compacted and nil or "nothing_to_summarise",before=context_tokens})
       if compacted then
         messages = self:build_context()
+        consume_steering()
         context_tokens, context_source = self:context_tokens(messages)
+        budget_opts,budget_reserved=child_call_budget(context_tokens)
+        for key,value in pairs(budget_opts or {}) do call_opts[key]=value end
         call_opts.context_tokens = context_tokens
         call_opts.context = {estimate_source=context_source,
           summary_watermark=(memory.session(self.session_id) or {}).summarized_until or 0}
@@ -1536,6 +1587,8 @@ function M:run_body(text, images)
           .."and a critique of the graph result. This is self-report, not operator feedback."
         messages[#messages+1]={role="user",content=audit_prompt}
         reply=""
+      elseif steering.pending(self.user,self.session_id,self.steering_run_id) then
+        reply=''
       else
         if audit and (audit.error or (audit.lead_count or 0)>0 or #(audit.gaps or {})>0) then
           reply=reply.."\n\n[Patch impact audit: "
@@ -1564,6 +1617,7 @@ function M:run_body(text, images)
       model_call = true, reviewed_paths = self.reviewed_paths,
       commit_audits = self.commit_audits, audit_step = self.audit_step,
       model = self.model, reasoning = (provider.reasoning(self.model) or {}).selected }
+    dispatch_ctx.steering_admit=function() return steering.admit(self.user,self.session_id,self.steering_run_id) end
     local parallel_ops = tools.start_parallel_bash(calls, memory, self.role, dispatch_ctx)
 
     for _, call in ipairs(calls) do
@@ -1598,6 +1652,9 @@ function M:run_body(text, images)
             return tools.await_parallel_bash(parallel_op.operation_id, self.role, dispatch_ctx)
           end
           return parallel_op.result or {error="parallel_operation_start_failed"}
+        end
+        if not dispatch_ctx.steering_admit() then
+          return {error='superseded_by_steering',executed=false,effect='none',note='Reconsider this planned call after reading steering.'}
         end
         return tools.dispatch(memory, function_.name, args, self.role,
         dispatch_ctx) end)

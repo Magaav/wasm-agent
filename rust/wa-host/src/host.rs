@@ -848,6 +848,13 @@ pub extern "C" fn jobs(l: *mut LuaState) -> c_int {
     push_json(l,&result.unwrap_or_else(|e|json!({"error":e.to_string()})));1
 }
 
+/// Internal scheduler enqueue; not exposed as a model tool or HTTP route.
+pub extern "C" fn enqueue_completion(l: *mut LuaState) -> c_int {
+    let body=arg_string(l,1).unwrap_or_default();
+    push_json(l,&crate::serve::enqueue_completion(&body));
+    1
+}
+
 /// host.subagent(action, args_json): the local subagent runtime.
 ///
 /// Agent policy lives in Lua (`lua/core/subagents.lua`): which profile, which
@@ -1973,7 +1980,7 @@ pub extern "C" fn runtime_info(l: *mut LuaState) -> c_int {
             .map(|bytes| ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref()
                 .iter().map(|b| format!("{b:02x}")).collect::<String>());
         json!({"version": env!("CARGO_PKG_VERSION"), "binary_sha256": digest,
-            "process_id": std::process::id(), "os": std::env::consts::OS,
+            "process_id": std::process::id(), "boot_id": new_uuid(), "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH})
     });
     push_json(l, identity);

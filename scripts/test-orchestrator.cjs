@@ -106,6 +106,8 @@ print("cancel race ok")
   const third=await call({action:'start',prompt:'third',idempotency_key:'third'});
   await sleep(2500);
   check((await status(third.subagent_id)).state==='queued','all-full work remains durably queued');
+  const steering=await call({action:'steer',id:first.subagent_id,text:'remote corrected requirement',idempotency_key:'remote-steer'});
+  assert.equal(steering.state,'queued','signed peer path accepts live steering');
   const turn=await call({action:'message',id:first.subagent_id,text:'follow up',idempotency_key:'follow'});
   check(turn.session_id===a.session_id && turn.after_id,'direct conversation keeps session and serializes its next run');
   const repeated=await call({action:'message',id:first.subagent_id,text:'follow up',idempotency_key:'follow'});
@@ -118,7 +120,8 @@ print("cancel race ok")
   const done=await until(async()=>{const value=await status(first.subagent_id);return value.settled && value;},'continued session settlement');
   check(done.state==='completed','remote follow-up settles');
   const transcript=await call({action:'session',id:first.subagent_id});
-  check(transcript.messages.filter(m=>m.role==='user').length===2,'both user turns are preserved in one child transcript');
+  check(transcript.messages.filter(m=>m.role==='user').length===3 && transcript.messages.some(m=>m.content==='remote corrected requirement'),'original prompts and steering survive in one child transcript');
+  assert(seen.some(r=>r.messages.at(-1)?.content==='remote corrected requirement'),'remote steering reaches next model call');
   const childRequests=seen.filter(r=>r.messages[0].content.includes('subagent'));
   check(childRequests.every(r=>r.messages[0].content.includes('# Subagent') && !r.messages[0].content.includes('# Orchestrator')),'children receive only their execution-role instructions');
   check(childRequests.every(r=>!r.tools.some(t=>t.function.name==='bash')),'continuation preserves the read-only profile');

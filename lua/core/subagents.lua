@@ -532,6 +532,7 @@ function M.start(args, ctx)
     return receipt
   end
   receipt.profile = profile.id
+  dofile('lua/core/completions.lua').watch(receipt.subagent_id,ctx)
   return receipt
 end
 
@@ -551,23 +552,36 @@ function M.control(args, ctx)
     if handled then return result end
   end
 
-  if action == "session" or action == "message" then
+  if action=='steer_session' or (action=='steering_status' and not args.id and not args.subagent_id) then
+    if ctx.remote then return {error='explicit_child_target_required'} end
+    return dofile('lua/core/steering.lua').control(args,ctx)
+  end
+  if action == "session" or action == "message" or action=='steer' or action=='steering_status' then
     local receipt = json.decode(host.subagent("status", json.encode({
       owner_user = ctx.user_id, id = tostring(args.id or args.subagent_id or "") })))
     if not receipt or receipt.error then return receipt or { error = "subagent_runtime_error" } end
+    if action=='steer' or action=='steering_status' then
+      if action=='steer' and (receipt.settled or receipt.state=='unknown') then return {error='no_active_steering_target'} end
+      local request={}
+      for k,v in pairs(args) do request[k]=v end
+      request.session_id=receipt.session_id
+      return dofile('lua/core/steering.lua').control(request,ctx,receipt.subagent_id)
+    end
     if action == "session" then
-      local before = tonumber(args.before_seq)
-      local after=tonumber(args.after_seq)
-      local messages = memory.session_messages(receipt.session_id, { limit = 100, before_seq = before,
-        all=not before and after~=nil, after_seq=after })
-      return { task = receipt, messages = messages, session_id = receipt.session_id }
+      return dofile('lua/core/session_view.lua').get(memory,receipt.session_id,args,receipt)
     end
     if tostring(args.idempotency_key or "") == "" then return { error = "idempotency_key_required" } end
     for attempt = 1, 3 do
       local result = json.decode(host.subagent("continue", json.encode({
         owner_user = ctx.user_id, id = receipt.subagent_id, text = tostring(args.text or ""),
         new_id = host.uuid(), idempotency_key = tostring(args.idempotency_key) })))
-      if result.error ~= "session_tail_changed" then return result end
+      if result.error ~= "session_tail_changed" then
+        if result.subagent_id then
+          local parent_ctx={user_id=ctx.user_id,role=ctx.role,remote=ctx.remote,session_id=receipt.parent_session_id}
+          dofile('lua/core/completions.lua').watch(result.subagent_id,parent_ctx)
+        end
+        return result
+      end
     end
     return { error = "session_tail_changed", retryable = true }
   end
@@ -588,7 +602,8 @@ function M.control(args, ctx)
           id = resolved.id, description = resolved.description,
           allowed_tools = resolved.allowed_tools, builtin = resolved.builtin,
           operator_authorized = resolved.operator_authorized,
-          limits = resolved.limits,
+          limits = resolved.limits, model = resolved.model, reasoning = resolved.reasoning,
+          approved_models = resolved.approved_models,
         }
       else
         listed[#listed + 1] = { id = id, available = false, reason = refusal }
@@ -609,6 +624,7 @@ function M.control(args, ctx)
   end
   local result = json.decode(host.subagent(action, json.encode(call)))
   if type(result) ~= "table" then return { error = "subagent_runtime_error" } end
+  if result.subagent_id then result.completion=dofile('lua/core/completions.lua').status(result.subagent_id,ctx.user_id) end
   return result
 end
 
@@ -659,7 +675,7 @@ function wa_subagent_run(receipt_json)
     host.stream(json.encode(event))
   end, child_role, tostring(receipt.owner_user or "master"), tostring(receipt.node_id or ""), {
     subagent = {
-      id = profile.id, allowed = allowed, allowed_tools = profile.allowed_tools,
+      id = profile.id, run_id = receipt.subagent_id, allowed = allowed, allowed_tools = profile.allowed_tools,
       instructions = profile.instructions, limits = limits,
       model = profile.model, reasoning = profile.reasoning,
       resources = profile.resources,
@@ -741,8 +757,10 @@ function wa_subagents(body, session)
   return json.encode(result)
 end
 
+local completions=dofile('lua/core/completions.lua')
 function wa_orchestrator_tick()
   dofile("lua/core/orchestrator.lua").tick(M)
+  completions.tick(M)
   return "ok"
 end
 

@@ -738,14 +738,21 @@ $harness = @'
   var showroom=document.createElement('wa-orchestrator');
   showroom.style.cssText='position:fixed;inset:0;width:1200px;height:800px;z-index:9999';
   document.body.append(showroom);
-  var agents=Array.from({length:4},(_,i)=>({subagent_id:'tile-'+i,session_id:'session-'+i,profile:'worker',model:'fixture',execution_node:'cloud',state:'running',created_at:i,prompt:'task '+i}));
+  var agents=Array.from({length:4},(_,i)=>({subagent_id:'tile-'+i,session_id:'session-'+i,profile:'worker',model:'fixture',reasoning:'max',execution_node:'cloud',state:'running',created_at:i,prompt:'task '+i}));
   showroom.data=agents;
   var card=showroom.sidebar.querySelector('.agent-card');
   check(card?.querySelectorAll('.agent-card-mission, .agent-card-details').length===2 &&
     card.querySelector('.agent-card-mission').textContent==='task 0' &&
-    card.querySelector('.agent-card-model').textContent==='fixture' &&
+    card.querySelector('.agent-card-model').textContent==='fixture · max' &&
     card.querySelector('.agent-card-status').textContent==='running',
     'each sidebar card must show mission, model and running status in two rows');
+  var linkProbe=document.createElement('div');
+  linkProbe.innerHTML=window.__safeLinks('<a href="javascript:alert(1)">unsafe</a><a href="https://example.com">safe</a><code>https://code.example</code> https://bare.example.');
+  document.body.append(linkProbe);
+  check(linkProbe.querySelectorAll('a').length===2 && !linkProbe.querySelector('a[href^="javascript"]') && !linkProbe.querySelector('code a'),'links reject executable schemes and leave code alone');
+  check([...linkProbe.querySelectorAll('a')].every(a=>a.target==='_blank' && a.rel.includes('noopener')),'links isolate external destinations');
+  check(getComputedStyle(linkProbe.querySelector('a')).textDecorationLine.includes('underline') && getComputedStyle(linkProbe.querySelector('a')).color==='rgb(139, 188, 255)','links are blue-ish and underlined');
+  linkProbe.remove();
   var cardHeight=card.getBoundingClientRect().height;
   var lineHeight=parseFloat(getComputedStyle(card).lineHeight);
   check(cardHeight<=lineHeight*2+15,'sidebar cards must be compact two-line cards');
@@ -783,6 +790,12 @@ $harness = @'
   var messageKey=messageDetail?.key;
   panes[0].form.requestSubmit();
   check(messageDetail?.text==='keep my draft' && messageKey===messageDetail.key,'a repeated send must retain its idempotency key');
+  var steerDetail=null;
+  panes[0].addEventListener('agent-action',event=>{if(event.detail.action==='steer')steerDetail=event.detail;});
+  panes[0].querySelector('[data-action="steer"]').click();
+  check(steerDetail?.text==='keep my draft' && !!steerDetail.key,'child steering is distinct from queued Send');
+  panes[0].showMessages([{seq:9,role:'tool',omitted:true,evidence:{message_id:'original'}}],text=>text);
+  check([...panes[0].transcript.querySelectorAll('button')].some(b=>b.textContent==='Load original message 9'),'bounded child rows offer exact original retrieval');
   showroom.unpin('tile-0');
   check(showroom.panes.size===3 && showroom.sidebar.children.length===4,'collapse must keep the running agent in the sidebar');
   showroom.configure({policy:{enabled:true,nodes:[{node:'cloud',max_tasks:2},{node:'local',max_tasks:0}]},nodes:[]});
@@ -1001,6 +1014,11 @@ $harness = @'
   check(heldCalls.length === cancelCalls, "Enter during a run must not cancel it");
   check(busyInput.value === "the next task", "Enter during a run must preserve the queued draft");
   check(busyEnter.defaultPrevented, "the busy Enter key must not fall through to form submission");
+  check(!document.getElementById('steer').hidden,'active run exposes explicit steering');
+  document.getElementById('steer').click();
+  for(var st=0;st<10;st++)await tick();
+  check(window.__calls.some(call=>call.url==='subagents' && String(call.body).includes('steer_session')) && busyInput.value==='', 'steering sends durably and clears only accepted draft');
+  check(window.__calls.filter(call=>call.url==='runs' && call.method==='POST').length===cancelCalls,'steering never cancels the run');
 
   // Stop must tell the node, not only stop reading the stream: a client-side abort leaves the model
   // call running. It must wait for the node's acknowledgment and surface a refusal.
@@ -2247,7 +2265,7 @@ Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $h
 
 # app.js keeps handleEvent module-scoped; expose it for the harness.
 $app = Join-Path $tmp "app.js"
-Add-Content -Path $app -Value "`nwindow.__refreshTasks=refreshTasks; window.__openSessionById=openSessionById;"
+Add-Content -Path $app -Value "`nwindow.__safeLinks=safeLinks; window.__refreshTasks=refreshTasks; window.__openSessionById=openSessionById;"
 Add-Content -Path $app -Value "`nwindow.__refreshSessionsForRelease=refreshSessions;"
 Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', mime: 'image/png', data: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__cancelActiveRun = cancelActiveRun; window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker; window.__updateNotice = updateNotice; window.__refreshOperationProgress = refreshOperationProgress; window.__watch = watch;"
 Add-Content -Path $app -Value "`nwindow.__cancelRunForTest = cancelRun;"
