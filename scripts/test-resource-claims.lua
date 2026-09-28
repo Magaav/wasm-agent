@@ -43,6 +43,45 @@ elseif mode=='reuse' then
   check(resources.claim(d,{'client:local'}).ok,'reuse: a refusal that never reached the client leaves no uncertainty')
   check(resources.finish(d).ok,'reuse: independent run settles')
 
+  -- A node-only spell must not claim the client's resource. Classification
+  -- inspects the saved steps/checks, not the untrusted target label.
+  local spells=dofile('lua/core/spells.lua')
+  local old_exec=host.exec
+  host.exec=function() return json.encode({ok=true,code=0,stdout='{"ready":true}'}) end
+  local node_spec={name='resource-node-only',target={node='local'},
+    steps={{kind='run',script='fixture',expect={ready=true}}},
+    post={{kind='run',script='fixture',expect={ready=true}}}}
+  check(spells.save(node_spec).ok,'reuse: node-only spell saved')
+  check(spells.needs_client(node_spec.name)==false,'reuse: run checks do not need client')
+  local holder={user_id='holder',session_id='holder-session',run_id='holder-run'}
+  check(resources.begin(holder).ok and resources.claim(holder,{'client:local'}).ok,
+    'reuse: another owner holds client')
+  local node_owner={user_id='no-client',session_id='node-session',run_id='node-run'}
+  check(resources.begin(node_owner).ok,'reuse: node-only owner begins')
+  local node_result=tools.dispatch(nil,'spell_run',{name=node_spec.name},'master',node_owner)
+  check(node_result.settled==true,'reuse: node-only spell runs despite another client owner')
+  local mixed_spec={name='resource-mixed',target={node='local'},
+    steps={{kind='run',script='fixture'}},post={{script='document.title',truthy=true}}}
+  check(spells.save(mixed_spec).ok and spells.needs_client(mixed_spec.name),
+    'reuse: browser postcondition makes a spell client-bound regardless of target')
+  local blocked_spell=tools.dispatch(nil,'spell_run',{name=mixed_spec.name},'master',node_owner)
+  check(blocked_spell.error=='resource_busy','reuse: mixed spell cannot bypass client owner')
+  local node_chain=spells.compose({name='resource-node-chain',
+    parts={{name=node_spec.name},{name=node_spec.name}}})
+  check(node_chain.ok and not spells.needs_client(node_chain.name),
+    'reuse: composed run-only spells remain node-only')
+  check(tools.dispatch(nil,'spell_run',{name=node_chain.name},'master',node_owner).settled==true,
+    'reuse: composed node-only spell runs despite another client owner')
+  local mixed_chain=spells.compose({name='resource-mixed-chain',
+    parts={{name=node_spec.name},{name=mixed_spec.name}}})
+  check(mixed_chain.ok and spells.needs_client(mixed_chain.name),
+    'reuse: composed browser check remains client-bound')
+  check(tools.dispatch(nil,'spell_run',{name=mixed_chain.name},'master',node_owner).error=='resource_busy',
+    'reuse: composed mixed spell cannot bypass client owner')
+  check(resources.finish(node_owner).ok and resources.finish(holder).ok,'reuse: both owners settle')
+  for _,name in ipairs({node_spec.name,mixed_spec.name,node_chain.name,mixed_chain.name}) do spells.remove(name) end
+  host.exec=old_exec
+
   -- A write refused before it was dispatched - nothing to run - is not an uncertain
   -- effect either: the node marks `client_not_connected`, and Lua marks its own
   -- argument refusals the same way.

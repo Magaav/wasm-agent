@@ -714,6 +714,20 @@ $harness = @'
   document.body.append(showroom);
   var agents=Array.from({length:4},(_,i)=>({subagent_id:'tile-'+i,session_id:'session-'+i,profile:'worker',model:'fixture',execution_node:'cloud',state:'running',created_at:i,prompt:'task '+i}));
   showroom.data=agents;
+  var card=showroom.sidebar.querySelector('.agent-card');
+  check(card?.querySelectorAll('.agent-card-mission, .agent-card-details').length===2 &&
+    card.querySelector('.agent-card-mission').textContent==='task 0' &&
+    card.querySelector('.agent-card-model').textContent==='fixture' &&
+    card.querySelector('.agent-card-status').textContent==='running',
+    'each sidebar card must show mission, model and running status in two rows');
+  var cardHeight=card.getBoundingClientRect().height;
+  var lineHeight=parseFloat(getComputedStyle(card).lineHeight);
+  check(cardHeight<=lineHeight*2+15,'sidebar cards must be compact two-line cards');
+  showroom.data=[{...agents[0],state:'completed'},...agents.slice(1)];
+  check(showroom.sidebar.querySelector('[data-state="completed"] .agent-card-status').textContent==='completed' &&
+    getComputedStyle(showroom.sidebar.querySelector('[data-state="completed"]')).opacity!=='1',
+    'settled cards must be distinguishable from running cards without opening them');
+  showroom.data=agents;
   agents.forEach(task=>showroom.pin(task));
   check(showroom.panes.size===4,'four pinned agents must create four session panes');
   var panes=[...showroom.panes.values()];
@@ -721,7 +735,17 @@ $harness = @'
   check(firstRect.width>200 && secondRect.left>firstRect.left && thirdRect.top>firstRect.top,'four panes must form a readable two by two grid');
   panes[0].input.value='keep my draft';
   panes[0].showMessages([{seq:1,role:'user',content:'hello'},{seq:2,role:'tool',tool_name:'read',content:'original tool evidence'},{seq:3,role:'assistant',content:'answer'}],text=>text);
-  check(panes[0].querySelectorAll('wa-message').length===2 && panes[0].querySelector('wa-tool').textContent.includes('original tool evidence'), 'a pane must render original messages and tool evidence');
+  check(panes[0].querySelectorAll('wa-message').length===2 && panes[0].querySelector('wa-run wa-trace').textContent.includes('original tool evidence'), 'a pane must render original messages and tool evidence inside the shared run topic');
+  panes[0].showMessages([{seq:4,role:'user',content:'next'},{seq:5,role:'assistant',phase:'commentary',content:'Checking…'},
+    {seq:6,role:'assistant',reasoning:'considering',tool_calls:[{id:'call-1',function:{name:'read',arguments:'{}'}}]},
+    {seq:7,role:'tool',tool_name:'read',content:'result text'},{seq:8,role:'assistant',content:'**done**'}],text=>text);
+  check(panes[0].querySelectorAll('wa-message').length===4 &&
+    panes[0].querySelectorAll('wa-run').length===2 &&
+    !!panes[0].querySelector('wa-commentary') && !!panes[0].querySelector('wa-reasoning') &&
+    panes[0].querySelectorAll('wa-trace .tool-line').length===2 &&
+    panes[0].querySelector('wa-trace .tool-output').textContent.includes('original tool evidence') &&
+    !panes[0].querySelector('wa-trace .tool-output').hidden,
+    'agent chat must group commentary, thinking, calls and visible results into shared chat components');
   showroom.data=agents.slice().reverse();
   check([...showroom.panes.values()][0]===panes[0] && panes[0].input.value==='keep my draft','refresh must preserve pane order and drafts');
   panes[0].querySelector('[data-action="expand"]').click();

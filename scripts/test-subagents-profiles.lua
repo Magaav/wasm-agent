@@ -128,6 +128,20 @@ check(prompt:find("PROFILE-INSTRUCTION-MARKER", 1, true), "the profile instructi
 check(prompt:find("You are a subagent", 1, true), "the mandatory boundary must be present")
 check(not prompt:find("Project-specific instructions", 1, true), "a child must not get the operator project instructions")
 check(not prompt:find("AGENTS.md", 1, true), "a child must not be pointed at AGENTS.md")
+-- The admission estimate is the first call's system/schema/user estimate. A
+-- refusal must happen before a child session or native task is created.
+local initial=agentlib.subagent_initial_tokens({id="explore",allowed={read=true},
+  allowed_tools={"read"},instructions="PROFILE-INSTRUCTION-MARKER",limits={max_tokens=1000}},
+  "master","investigate a file")
+check(initial>0,"initial context estimator includes system, schema and task")
+write_profile("tiny-budget",{schema_version=1,id="tiny-budget",allowed_tools={"read"},
+  limits={max_tokens=1}})
+local before=memory.list_sessions("alice",100)
+local refusal_budget=subagents.start({profile="tiny-budget",prompt="investigate a file"},ctx("alice"))
+check(tostring(refusal_budget.error):find("subagent_token_budget",1,true)~=nil and
+  refusal_budget.estimated_prompt_tokens>=refusal_budget.max_tokens,
+  "a too-small budget refuses at admission with its estimate")
+check(#memory.list_sessions("alice",100)==#before,"budget refusal creates no child session")
 
 -- 7. The tool list is visible to both roles, so a guest may spawn within its own
 --    reduced authority, and the facade is named `subagent`.

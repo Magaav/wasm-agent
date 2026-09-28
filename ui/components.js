@@ -393,7 +393,8 @@ class WaTrace extends HTMLElement {
     head.className = "tool-head";
     const label = document.createElement("span");
     label.className = "tool-title";
-    label.innerHTML = `<b>${name}</b> ${title}`;
+    const strong = document.createElement("b"); strong.textContent = name;
+    label.append(strong, document.createTextNode(" " + (title || "")));
     const outcome = document.createElement("span");
     outcome.className = "tool-outcome";
     head.append(label, outcome);
@@ -550,12 +551,12 @@ class WaRun extends HTMLElement {
 
   setSummary(steps, calls, ms) {
     this._build();
-    const seconds = ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms";
+    const seconds = ms == null ? null : (ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms");
     const parts = [];
     if (steps > 0) parts.push(steps + (steps === 1 ? " step" : " steps"));
     parts.push(calls + (calls === 1 ? " tool call" : " tool calls"));
     this._label.textContent = "run";
-    this._meta.textContent = parts.join(" · ") + " · " + seconds;
+    this._meta.textContent = parts.join(" · ") + (seconds == null ? "" : " · " + seconds);
   }
 }
 customElements.define("wa-run", WaRun);
@@ -1457,23 +1458,70 @@ class WaAgentSession extends HTMLElement {
     this.firstSeq=ordered[0]?.seq;
     this.lastSeq=ordered.at(-1)?.seq;
     this.querySelector('.agent-earlier').hidden=!(this.firstSeq>1);
-    const children=ordered.map(message=>{
-      if(message.role==='tool') {
-        const tool=document.createElement('wa-tool');
-        tool.setAttribute('name',message.tool_name || 'tool');
-        tool.connectedCallback(); tool.detail.textContent=String(message.content || '');
-        return tool;
-      }
-      const bubble=document.createElement('wa-message');
-      bubble.setAttribute('role',message.role==='user' ? 'user' : 'assistant');
-      bubble.body.innerHTML=render(String(message.content || ''));
-      if(message.tool_calls?.length) {
-        const detail=document.createElement('details'); const summary=document.createElement('summary');
-        summary.textContent='Tool calls'; const pre=document.createElement('pre');
-        pre.textContent=JSON.stringify(message.tool_calls,null,2); detail.append(summary,pre); bubble.body.append(detail);
+    const children=[];
+    let bubble=null, run=null, trace=null, calls=0;
+    const boundary=message=>message.run_id || message.runId || null;
+    let runId=null;
+    const startBubble=()=>{
+      if(!bubble) {
+        bubble=document.createElement('wa-message'); bubble.setAttribute('role','assistant');
+        bubble.body.classList.add('steps'); children.push(bubble);
       }
       return bubble;
-    });
+    };
+    const startRun=()=>{
+      if(!run) {run=document.createElement('wa-run');startBubble().body.prepend(run);}
+      return run;
+    };
+    const finishRun=()=>{
+      if(trace) {trace.unrecorded();trace.finish();}
+      if(run)run.setSummary(0,calls,null);
+      bubble=null;run=null;trace=null;calls=0;
+    };
+    for(const message of ordered) {
+      const nextId=boundary(message);
+      if(nextId && runId && nextId!==runId)finishRun();
+      if(nextId)runId=nextId;
+      if(message.role==='user') {
+        finishRun();runId=nextId;
+        const user=document.createElement('wa-message');user.setAttribute('role','user');
+        user.body.innerHTML=render(String(message.content || ''));children.push(user);
+        continue;
+      }
+      if(message.role==='tool') {
+        // A tool result belongs to the previous assistant turn, not to its own chat bubble.
+        const name=message.tool_name || 'tool';
+        if(!trace) {trace=document.createElement('wa-trace');startRun().body.append(trace);trace.connectedCallback();}
+        if(!trace.pending) {trace.addTool(name,name,'');calls++;}
+        const pending=trace.querySelector('.tool-line.pending');
+        trace.settle('recorded',String(message.content || ''),false);
+        const result=pending?.querySelector('.tool-output');
+        if(result && message.content)result.hidden=false;
+        continue;
+      }
+      if(message.role!=='assistant')continue;
+      if(message.reasoning) {
+        const thinking=document.createElement('wa-reasoning');thinking.setText(message.reasoning);
+        startRun().body.append(thinking);
+      }
+      if(message.phase==='commentary') {
+        const commentary=document.createElement('wa-commentary');commentary.setText(String(message.content || ''));
+        startRun().body.append(commentary);
+      } else if(message.content) {
+        const segment=document.createElement('div');segment.className='seg';
+        segment.innerHTML=render(String(message.content));startBubble().body.append(segment);
+      }
+      if(message.tool_calls?.length) {
+        if(!trace) {trace=document.createElement('wa-trace');startRun().body.append(trace);trace.connectedCallback();}
+        for(const call of message.tool_calls) {
+          const fn=call.function || call;
+          const name=String(fn.name || 'tool');
+          const args=typeof fn.arguments==='string' ? fn.arguments : JSON.stringify(fn.arguments || {});
+          trace.addTool(name,name,args || '');calls++;
+        }
+      }
+    }
+    finishRun();
     this.transcript.replaceChildren(...children);
     if(earlier) this.transcript.scrollTop+=this.transcript.scrollHeight-height;
     else if(nearBottom) this.transcript.scrollTop=this.transcript.scrollHeight;
@@ -1512,7 +1560,16 @@ class WaOrchestrator extends HTMLElement {
     this.tasks=[...sessions.values()];
     const cards=this.tasks.map(task=>{
       const card=document.createElement('button'); card.type='button'; card.className='agent-card';
-      card.textContent=[task.profile,task.model,task.execution_node || 'local',task.state,task.prompt].filter(Boolean).join(' · ');
+      const state=task.state || 'unknown';
+      card.dataset.state=state;
+      const mission=document.createElement('span');mission.className='agent-card-mission';
+      mission.textContent=task.prompt || task.profile || 'Untitled mission';
+      mission.title=mission.textContent;
+      const details=document.createElement('span');details.className='agent-card-details';
+      const model=document.createElement('span');model.className='agent-card-model';model.textContent=task.model || 'model unknown';
+      const status=document.createElement('span');status.className='agent-card-status';status.textContent=state;
+      details.append(model,status);card.append(mission,details);
+      card.setAttribute('aria-label',`${mission.textContent} · ${model.textContent} · ${state}`);
       card.addEventListener('click',()=>this.pin(task));
       for(const pane of this.panes.values()) {
         if(pane.task.session_id && pane.task.session_id===task.session_id && pane.task.execution_node===task.execution_node) pane.task=task;

@@ -30,7 +30,16 @@ wa-orchestrator { display:flex; flex-direction:column; width:100%; height:100%; 
 .orchestrator-body { display:flex; flex:1; min-height:0; }
 .orchestrator-sidebar { width:250px; min-width:200px; max-width:40%; overflow:auto; resize:horizontal; border-right:1px solid var(--line); padding:var(--space); }
 .orchestrator-sidebar nav { display:flex; flex-direction:column; gap:var(--gap); }
-.agent-card { text-align:left; padding:var(--pad); border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel); color:var(--text); overflow-wrap:anywhere; }
+.agent-card { display:flex; flex-direction:column; gap:0; width:100%; min-width:0; text-align:left; padding:var(--space); border:1px solid var(--line); border-left:3px solid var(--muted); border-radius:var(--radius-sm); background:var(--panel); color:var(--text); }
+.agent-card-mission { display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-weight:600; }
+.agent-card-details { display:flex; align-items:center; gap:var(--gap); min-width:0; color:var(--muted); font-size:12px; }
+.agent-card-model { flex:1; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.agent-card-status { flex:none; text-transform:capitalize; }
+.agent-card[data-state="running"], .agent-card[data-state="accepted"] { border-left-color:var(--ok); }
+.agent-card[data-state="queued"] { border-left-color:var(--warn); }
+.agent-card[data-state="unknown"], .agent-card[data-state="failed"] { border-left-color:#f77; }
+.agent-card[data-state="completed"], .agent-card[data-state="cancelled"] { opacity:.72; }
+.agent-card:hover, .agent-card:focus-visible { background:var(--panel-2); border-color:var(--accent); }
 .placement { padding:var(--space); margin-bottom:var(--space); color:var(--muted); font-size:12px; }
 .placement-node { display:flex; align-items:center; gap:var(--gap); padding:var(--space) 0; }
 .placement-node label { flex:1; overflow-wrap:anywhere; }
@@ -42,9 +51,10 @@ wa-orchestrator { display:flex; flex-direction:column; width:100%; height:100%; 
 .orchestrator-canvas.has-expanded wa-agent-session:not(.agent-expanded) { display:none; }
 wa-agent-session { min-width:0; min-height:0; display:flex; flex-direction:column; background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; }
 .agent-pane-head { padding:var(--space); flex-wrap:wrap; }
-.agent-transcript { flex:1; min-height:0; overflow:auto; padding:var(--pad); }
-.agent-transcript wa-message { margin-bottom:var(--space); }
-.agent-transcript wa-tool { display:block; margin-bottom:var(--space); }
+.agent-transcript { flex:1; min-height:0; overflow:auto; padding:var(--pad); display:flex; flex-direction:column; gap:var(--gap); }
+.agent-transcript wa-message { flex:none; max-width:100%; }
+.agent-transcript wa-message.assistant { width:min(760px,100%); }
+.agent-transcript wa-run { width:100%; }
 .agent-transcript pre { overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
 .agent-composer { display:flex; flex-wrap:wrap; gap:var(--gap); padding:var(--space); border-top:1px solid var(--line); }
 .agent-composer textarea { width:100%; resize:vertical; min-height:55px; background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:var(--radius-sm); padding:var(--space); font:inherit; }

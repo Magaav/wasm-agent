@@ -96,7 +96,9 @@ whose stdout is not an object fails when it runs (`run_step_stdout_not_json`). B
 messages state the contract, because the reader is a model that has just guessed wrong.
 PowerShell needs `| ConvertTo-Json -Compress` to satisfy it. These observational commands
 do not need a browser and
-cannot be exported as sentinel checks. Step traces retain their observed JSON. A
+cannot be exported as sentinel checks. A validated spell made only of node-side
+`run`/`wait` steps and `run` pre/post checks does not reserve `client:local`;
+client steps or browser assertions still reserve it, regardless of `target.node`. Step traces retain their observed JSON. A
 foreground command result can complete a step while descendants remain supervised;
 only the spell's observed `post` conditions can establish that their intended effect
 occurred. A launch receipt without `command_completed` is not successful spell evidence.

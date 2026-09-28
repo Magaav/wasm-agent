@@ -463,6 +463,18 @@ function M.start(args, ctx)
     end
   end
 
+  local initial_text = prompt
+  if context ~= "" then initial_text = initial_text .. "\n\nContext:\n" .. context end
+  local estimated = agentlib.subagent_initial_tokens({
+    id = profile.id, allowed = profile.allowed, allowed_tools = profile.allowed_tools,
+    instructions = profile.instructions, limits = limits,
+  }, ctx.role, initial_text)
+  if limits.max_tokens and estimated >= limits.max_tokens then
+    return { error = "subagent_token_budget: initial prompt exceeds max_tokens before admission",
+      estimated_prompt_tokens = estimated, max_tokens = limits.max_tokens, model = effective_model,
+      note = "No child session or provider call was started; choose a larger approved budget or shorten the task/context." }
+  end
+
   local session_id = memory.start_session(ctx.node_id, "subagent", {
     user_id = ctx.user_id,
     node_id = ctx.node_id,

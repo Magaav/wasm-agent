@@ -630,7 +630,8 @@ function M.dispatch(memory, name, args, role, ctx)
     return {error="unknown_resource_action"}
   end
   local observing=name=="client" and OBSERVING_CLIENT_ACTIONS[args.action or ""]
-  if ctx.run_id and not observing and (name=="client" or name=="shell" or name=="spell_run") then
+  local client_bound_spell=name=="spell_run" and spellslib.needs_client(args.name)
+  if ctx.run_id and not observing and (name=="client" or name=="shell" or client_bound_spell) then
     local claimed=resources.claim(ctx,{"client:local"})
     if not claimed.ok then claimed=reuse_own_client_claim(ctx,claimed) end
     if not claimed.ok then return claimed end

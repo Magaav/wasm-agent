@@ -138,9 +138,13 @@ Rules, each enforced in `lua/core/subagents.lua`:
   the parent). The parent transcript is never written by a child; `ensure_session`
   excludes child sessions so a normal turn cannot land in one.
 - Budgets (`timeout_seconds`, `max_tokens`, `max_cost_usd`, `max_output_bytes`)
-  are enforced in the child loop and by the runtime's deadline. Output over the
-  byte budget is truncated with a visible marker; token/cost overruns stop the run
-  with a named error.
+  are enforced in the child loop and by the runtime's deadline. Before admission,
+  the initial system prompt, tool schemas and bounded task/context use the same
+  first-call token estimator; when that estimate alone exhausts `max_tokens`,
+  start refuses with the estimate and limit, before a child session or provider call.
+  Later context growth and provider usage remain subject to the child-loop check;
+  an estimate is not a tokenizer guarantee. Output over the byte budget is
+  truncated with a visible marker; token/cost overruns stop with a named error.
 
 ## Scheduling, waiting and recovery
 
