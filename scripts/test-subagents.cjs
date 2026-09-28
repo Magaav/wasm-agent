@@ -69,6 +69,10 @@ function check(value, label) { assert.ok(value, label); checks++; }
           }
         };
         if (isChild) {
+          if (text.includes('RUNAWAY-CHILD')) {
+            sendToolCall({ index: 0, id: 'runaway-' + messages.length, type: 'function', function: { name: 'ls', arguments: JSON.stringify({ path: '.' }) } }, true);
+            return;
+          }
           if (text.includes('LIVE-TOOL')) {
             if (!messages.some(message=>message.role==='tool')) replyToolCall({index:0,id:'live-call',type:'function',function:{name:'bash',arguments:JSON.stringify({command:'node -e "setTimeout(()=>{},2500)"'})}});
             else replyFinal('live tool done');
@@ -168,6 +172,7 @@ function check(value, label) { assert.ok(value, label); checks++; }
       WASM_AGENT_LLM_BASE_URL: 'http://127.0.0.1:' + modelPort,
       WASM_AGENT_LLM_API_KEY: 'fixture-not-a-credential',
       WASM_AGENT_LLM_MODEL: 'fixture',
+      WASM_AGENT_MAX_TOOL_ROUNDS: '3',
       WASM_AGENT_TEST_SOURCE: workspaceSource,
       WASM_AGENT_RELAY: '',
       WASM_AGENT_RENDEZVOUS: '',

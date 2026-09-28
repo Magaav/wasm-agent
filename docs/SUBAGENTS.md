@@ -161,6 +161,9 @@ and cancellation remain available. No failed call or external effect is auto-rep
   Later context growth and provider usage remain subject to the child-loop check;
   an estimate is not a tokenizer guarantee. Output over the byte budget is
   truncated with a visible marker; token/cost overruns stop with a named error.
+- Runaway guard exhaustion preserves its incomplete assistant draft, settles the child as
+  `failed` with the stable error `runaway_guard`, and carries that reason into the parent's
+  completion notice. A normal final answer remains `completed`; cancellation remains `cancelled`.
 
 ### Bounded explicit inspection
 
