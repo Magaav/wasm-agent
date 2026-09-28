@@ -22,7 +22,7 @@ let child,mock,wakes=0,delegated=false,runawayDelegated=false,runawayNotice='';
  });});
  await new Promise(r=>mock.listen(0,'127.0.0.1',r));const p=await port(),cp=await port();
  const log=fs.openSync(path.join(home,'node.log'),'a');
- child=spawn(binary,['serve','--port',String(p),'--client-port',String(cp),'--ui',path.join(root,'ui')],{cwd:home,env:{...env,WASM_AGENT_HOME:home,WASM_AGENT_LUA_ROOT:root,WASM_AGENT_MANAGED:'0',WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_RELAY:'',WASM_AGENT_LLM_BASE_URL:'http://127.0.0.1:'+mock.address().port,WASM_AGENT_LLM_MODEL:'fixture',WASM_AGENT_LLM_API_KEY:'fixture',WASM_AGENT_MAX_TOOL_ROUNDS:'3'},stdio:['ignore',log,log],windowsHide:true});
+ child=spawn(binary,['serve','--port',String(p),'--client-port',String(cp),'--ui',path.join(root,'ui')],{cwd:home,env:{...env,WASM_AGENT_HOME:home,WASM_AGENT_LUA_ROOT:root,WASM_AGENT_MANAGED:'0',WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_RELAY:'',WASM_AGENT_LLM_BASE_URL:'http://127.0.0.1:'+mock.address().port,WASM_AGENT_LLM_MODEL:'fixture',WASM_AGENT_LLM_API_KEY:'fixture',WASM_AGENT_MAX_TOOL_ROUNDS:'4'},stdio:['ignore',log,log],windowsHide:true});
  const base='http://127.0.0.1:'+p;
  const get=async(route,body)=>{const r=await fetch(base+route,{...(body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(30000)});return r.json();};
  await until(async()=>{try{return (await get('/health')).ok!==false;}catch{return false;}},'startup');
