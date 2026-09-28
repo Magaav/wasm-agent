@@ -64,7 +64,7 @@ proceeds. The last turn is an exact record of how far the process got:
 | --- | --- | --- |
 | `empty` | none | nothing said yet |
 | `answered` | assistant reply | the thread is settled |
-| `failed` | assistant with `ok=0` | the model call errored — a **landed** outcome, not an unfinished one |
+| `failed` | assistant with `ok=0` | the model call errored or the runaway guard was exhausted — a **landed** outcome, not an unfinished one |
 | `unfinished` | user, tool, assistant commentary, or assistant with `tool_calls` | no completed answer is recorded after this turn; the process may have stopped or may still be working |
 
 `memory.session_state(id)` returns that, plus where it stopped and which calls of the

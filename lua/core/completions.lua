@@ -33,7 +33,7 @@ function M.tick(api)
     else
       local result=api.control({action='status',id=row.target_id},{user_id=row.owner,role=user.role,session_id=row.parent_session})
       if result.subagent_id and (result.settled or result.state=='unknown') then
-        exec("UPDATE child_completions SET state='ready',detail=? WHERE child_id=? AND state='watching'",{json.encode({state=result.state,session_id=result.session_id}),row.child_id})
+        exec("UPDATE child_completions SET state='ready',detail=? WHERE child_id=? AND state='watching'",{json.encode({state=result.state,session_id=result.session_id,error=result.error}),row.child_id})
         local claimed=exec("UPDATE child_completions SET state='dispatching',boot=? WHERE child_id=? AND state='ready'",{boot,row.child_id})
         if claimed.changes==1 then
           local receipt=json.decode(host.enqueue_completion(json.encode({id=row.child_id,owner=row.owner,session_id=row.parent_session})))

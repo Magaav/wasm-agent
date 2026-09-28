@@ -133,9 +133,13 @@ try {
   const streamedFinalText = new Set();
   const toolDecisions = new Map();
   const partialToolCall = event => event.partial?.content?.[event.contentIndex] || {};
+  // Decisions are display telemetry; the result below carries exact arguments for execution.
+  // Never re-emit the growing argument prefix on every token (quadratic wire output).
   const publishDecision = (decision, complete, previousId) => send({type:'decision',
     call_id:decision.id, ...(previousId && previousId !== decision.id ? {previous_call_id:previousId} : {}),
-    name:decision.name, arguments_text:decision.arguments, complete});
+    name:decision.name, arguments_text:(decision.preview || '') +
+      (decision.truncated ? '… [preview only; complete arguments in result]' : ''), complete,
+    ...(decision.truncated ? {arguments_truncated:true} : {})});
   const stream = models.stream(model, context, {sessionId:request.session_id,
     transport:'sse', reasoningEffort:request.reasoning, maxTokens:request.max_output});
   for await (const event of stream) {
@@ -169,7 +173,7 @@ try {
       ttft ??= Date.now() - started;
       const index = event.contentIndex;
       const block = partialToolCall(event);
-      const decision = {id:block.id || `pi-${index}`, name:block.name || '', arguments:''};
+      const decision = {id:block.id || `pi-${index}`, name:block.name || '', preview:'', truncated:false, announced:false};
       toolDecisions.set(index, decision);
       publishDecision(decision, false);
     } else if (event.type === 'toolcall_delta') {
@@ -178,22 +182,34 @@ try {
       const block = partialToolCall(event);
       let decision = toolDecisions.get(index);
       if (!decision) {
-        decision = {id:block.id || `pi-${index}`, name:block.name || '', arguments:''};
+        decision = {id:block.id || `pi-${index}`, name:block.name || '', preview:'', truncated:false, announced:false};
         toolDecisions.set(index, decision);
       }
       decision.name = block.name || decision.name;
-      decision.arguments += event.delta || '';
-      publishDecision(decision, false);
+      const points = Array.from(event.delta || '');
+      const room = Math.max(0, 256 - Array.from(decision.preview).length);
+      decision.preview += points.slice(0, room).join('');
+      if (points.length > room) decision.truncated = true;
+      if (points.length && !decision.announced) {
+        decision.announced = true;
+        if (decision.truncated) decision.truncationAnnounced = true;
+        publishDecision(decision, false);
+      } else if (decision.truncated && !decision.truncationAnnounced) {
+        decision.truncationAnnounced = true;
+        publishDecision(decision, false);
+      }
     } else if (event.type === 'toolcall_end') {
       ttft ??= Date.now() - started;
       const index = event.contentIndex;
       const call = event.toolCall || {};
       let decision = toolDecisions.get(index);
-      if (!decision) decision = {id:call.id || `pi-${index}`, name:call.name || '', arguments:''};
+      if (!decision) decision = {id:call.id || `pi-${index}`, name:call.name || '', preview:'', truncated:false, announced:false};
       const previousId = decision.id;
       decision.id = call.id || decision.id;
       decision.name = call.name || decision.name;
-      decision.arguments = JSON.stringify(call.arguments || {});
+      const finalPoints = Array.from(JSON.stringify(call.arguments || {}));
+      decision.preview = finalPoints.slice(0, 256).join('');
+      decision.truncated = finalPoints.length > 256;
       publishDecision(decision, true, previousId);
       toolDecisions.delete(index);
     }

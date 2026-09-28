@@ -28,12 +28,28 @@ assert(not tostring(started.subagent_id):find("/", 1, true) and not tostring(sta
 -- The agreed acceptance aliases (`subagent_id`, `timeout_ms`) are accepted.
 local settled = control({ action = "await", subagent_id = started.subagent_id, timeout_ms = 60000 }, ctx("alice"))
 assert(settled.state == "completed", "await state=" .. tostring(settled.state) .. " " .. json.encode(settled))
-assert(tostring(settled.result.reply):find("child-answer", 1, true), "child reply: " .. tostring(settled.result.reply))
+assert(settled.result.reply == "child-answer-42", "child reply preserved exactly: " .. tostring(settled.result.reply))
 assert(memory.message_count(parent_id) == 0, "the parent transcript must not be written by a child")
 local child = memory.session(started.session_id)
 assert(child and child.parent_session_id == parent_id, "the child session must link to the parent")
 assert(memory.message_count(started.session_id) > 0, "the child must keep its own transcript")
 print("MARK ok-success " .. started.subagent_id)
+
+-- Guard exhaustion is a failed terminal result, preserves the original transcript
+-- draft and guard marker, and cancellation remains a separate terminal state.
+local runaway = control({ action = "start", profile = "explore", prompt = "RUNAWAY-CHILD", idempotency_key = "runaway" }, ctx("alice"))
+local runaway_final = control({ action = "await", id = runaway.subagent_id, wait_ms = 60000 }, ctx("alice"))
+assert(runaway_final.state == "failed" and tostring(runaway_final.error):find("runaway_guard", 1, true),
+  "guard exhaustion state/reason: " .. json.encode(runaway_final))
+local runaway_rows = memory.session_messages(runaway.session_id, { all = true })
+local runaway_draft = runaway_rows[#runaway_rows]
+assert(runaway_draft and runaway_draft.role == "assistant" and runaway_draft.ok == 0
+  and runaway_draft.content == "(runaway guard: 3 tool rounds without a final answer)",
+  "guard draft and incomplete assistant row must remain in transcript: " .. json.encode(runaway_draft or {}))
+local repeated_runaway = control({ action = "result", id = runaway.subagent_id }, ctx("alice"))
+assert(repeated_runaway.state == "failed" and tostring(repeated_runaway.error):find("runaway_guard", 1, true),
+  "failed outcome remains durable on retrieval")
+print("MARK ok-runaway-guard")
 
 -- Coding profiles get a durable isolated git worktree before their child is admitted.
 local paths=dofile("lua/core/paths.lua")

@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-sub-test-'));
+const largeArgs = JSON.stringify({path:'lua/core/large.lua',content:'x'.repeat(65536)});
 const put = (name, value) => {
   const file = path.join(root, name);
   fs.mkdirSync(path.dirname(file), { recursive:true });
@@ -41,6 +42,23 @@ try {
         async getAuth(provider) {assert.equal(provider,'openai-codex'); return {auth:{apiKey:'fixture-access-token'}};},
         getModel(provider,id) {return id==='missing' ? undefined : {id,provider,api:'openai-codex-responses'};},
         stream(model,context,options) {
+          if (context.tools[0].name === 'large_fixture') {
+            const text = context.messages.at(-1).content[0].text;
+            const args = JSON.parse(text);
+            return {
+              async *[Symbol.asyncIterator]() {
+                yield {type:'toolcall_start',contentIndex:0,partial:{content:[{id:'pi-large',name:'large_fixture'}]}};
+                const chunkSize = text.length<1024 ? 300 : 256;
+                for (let i=0;i<text.length;i+=chunkSize) yield {type:'toolcall_delta',contentIndex:0,
+                  delta:text.slice(i,i+chunkSize),partial:{content:[{id:'pi-large',name:'large_fixture'}]}};
+                yield {type:'toolcall_end',contentIndex:0,
+                  toolCall:{id:'call-large',name:'large_fixture',arguments:args}};
+              },
+              async result() {return {stopReason:'toolUse',responseId:'large-fixture',
+                content:[{type:'toolCall',id:'call-large',name:'large_fixture',arguments:args}],
+                usage:{input:0,cacheRead:0,cacheWrite:0,output:0,totalTokens:0,reasoning:0}};}
+            };
+          }
           assert.equal(options.reasoningEffort,'none');
           assert.equal(options.transport,'sse');
           assert.equal(context.systemPrompt,'fixture system');
@@ -126,6 +144,26 @@ try {
   const missing=run({...request,model:'missing'});
   assert.equal(missing.status,1);
   assert.match(missing.events[0].error,/absent from Pi catalog/);
+  const large=run({...request,tools:[{function:{name:'large_fixture',parameters:{type:'object'}}}],
+    messages:[...request.messages,{role:'user',content:largeArgs}]});
+  assert.equal(large.status,0,large.stderr);
+  const bytes=Buffer.byteLength(large.stdout);
+  assert.ok(bytes<8*1024*1024,`bounded stream must fit operation limit: ${bytes}`);
+  assert.ok(bytes<2*Buffer.byteLength(JSON.stringify(largeArgs))+65536,
+    `bounded stream should grow linearly with encoded arguments: ${bytes}`);
+  const decisions=large.events.filter(event=>event.type==='decision');
+  assert.deepEqual(decisions.map(event=>[event.call_id,event.complete,event.previous_call_id]),
+    [['pi-large',false,undefined],['pi-large',false,undefined],
+      ['pi-large',false,undefined],['call-large',true,'pi-large']]);
+  assert.ok(decisions.at(-1).arguments_truncated);
+  assert.equal(decisions.at(-1).arguments_text,
+    largeArgs.slice(0,256)+'… [preview only; complete arguments in result]');
+  assert.equal(large.events.at(-1).result.tool_calls[0].function.arguments,largeArgs);
+  // A first delta beyond the preview cap must announce truncation exactly once.
+  const oneChunk=run({...request,tools:[{function:{name:'large_fixture',parameters:{type:'object'}}}],
+    messages:[...request.messages,{role:'user',content:JSON.stringify({content:'z'.repeat(300)})}]});
+  assert.equal(oneChunk.status,0,oneChunk.stderr);
+  assert.equal(oneChunk.events.filter(event=>event.type==='decision' && !event.complete && event.arguments_truncated).length,1);
   const malformed=run({...request,messages:[...request.messages,{role:'unexpected'}]});
   assert.equal(malformed.status,1);
   assert.match(malformed.events[0].error,/Unsupported subscription message role/);
