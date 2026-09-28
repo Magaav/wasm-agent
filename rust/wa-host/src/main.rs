@@ -64,6 +64,9 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/effects.lua", include_str!("../../../lua/core/effects.lua")),
     ("lua/core/whatsapp.lua", include_str!("../../../lua/core/whatsapp.lua")),
     ("lua/core/subagents.lua", include_str!("../../../lua/core/subagents.lua")),
+    ("lua/core/session_view.lua", include_str!("../../../lua/core/session_view.lua")),
+    ("lua/core/steering.lua", include_str!("../../../lua/core/steering.lua")),
+    ("lua/core/completions.lua", include_str!("../../../lua/core/completions.lua")),
     ("lua/core/orchestrator.lua", include_str!("../../../lua/core/orchestrator.lua")),
     ("lua/core/resources.lua", include_str!("../../../lua/core/resources.lua")),
     ("lua/core/workspaces.lua", include_str!("../../../lua/core/workspaces.lua")),
@@ -337,6 +340,7 @@ fn main() {
     lua.register("operation", host::operation);
     lua.register("jobs", host::jobs);
     lua.register("subagent", host::subagent);
+    lua.register("enqueue_completion", host::enqueue_completion);
     lua.register("resource", host::resource);
     lua.register("run_cancelled", host::run_cancelled);
     lua.register("sleep", host::sleep);

@@ -63,17 +63,63 @@ until admission is reconciled. The UI reports uncertainty rather than success.
 `start`, `status`, `result`, `await`, `cancel`, `list`, `profiles` remain on the
 existing subagent facade. `fleet` reads placement and node inventory. `session`
 reads original child messages; `before_seq` pages older records and `after_seq`
-returns every new message, without silently skipping a busy interval. `message`
+returns bounded earliest-unseen pages with `next_after_seq`, without silently
+skipping a busy interval. See [bounded inspection](SUBAGENTS.md#bounded-explicit-inspection).
+`message`
 requires an idempotency key and creates a follow-up run in the same session,
 copying the admitted profile, model and limits. An active predecessor settles
 before that follow-up acquires a worker. An unknown predecessor blocks it.
 Ordinary `/chat` refuses child sessions, preventing profile loss through that path.
 
-Direct messages currently queue after the active run, rather than interrupting a
-tool or steering mid-step. Parent attribution is retained; the parent can inspect
-the conversation and latest child result. This slice does not automatically wake
-a settled parent after a child result. The showroom polls durable messages and a
-live model-text preview; an interrupted preview is not durable transcript evidence.
+### Live steering
+
+`steer` targets a child; `steer_session` targets an owned main session.
+`steering_status` reads receipts. A request needs an idempotency key and can carry
+an expected `run_id`. Owner checks precede lookup and dispatch; remote callers
+must name a child, not an arbitrary session. The inbox and its run identity are
+durable. Only the active run consumes the original text into its own transcript,
+atomically with its read receipt, before the next model call. Pending steering
+fences each sequential/parallel tool admission. After admission an effect is
+in-flight: steering cannot undo it. Read means entered context, not obedience.
+Unread messages at settlement or boot mismatch are deferred, never replayed.
+
+Main chat exposes **Steer** / Ctrl+Enter while busy; plain Enter keeps the draft
+and Stop remains explicit. Child panes distinguish **Send** (follow-up) from
+**Steer** (active run). Drafts clear only after an accepted receipt. Cards expose
+model and reasoning, with unknown values labeled rather than guessed. Links are
+blue-ish and underlined; executable URL schemes are refused.
+
+### Completion return
+
+New delegated tasks register a durable owner/parent-scoped completion outbox.
+The serve-owned tick observes settlement (including failure/unknown) without a
+browser, then enqueues one background coordinator continuation through the normal
+same-session scheduler, not loopback HTTP. Child text is not promoted to authority:
+the notice names the result to inspect and grants no merge/deploy permission.
+A wake interrupted after admission is unknown and is not replayed. Capacity
+refusals proven not started remain ready. Existing historical tasks are not
+backfilled. The outbox is node-local; remote destinations retain their original
+records and the coordinator observes them through the signed facade.
+
+Set `WASM_AGENT_COMPLETION_WAKE=0` to pause automatic completion delivery;
+the durable watching/ready rows remain for later inspection or resumption.
+Task `status`/`result` includes its latest `completion` delivery state, distinct
+from the child's execution state; failed/unknown delivery is not hidden as success.
+
+Risk: automatic return spends coordinator inference and may queue behind active
+user work. It does not interrupt that run or claim task verification. Authority
+is rechecked at both observation and execution. The coordinator instructions
+bound feedback to one deduplicated improvement task and one review; this is an
+instruction policy, not a native semantic classifier of feedback requests.
+The showroom polls durable messages and bounded live model/tool preview every
+two seconds. Tool starts are visible before results; active runs are expanded by
+default, with reader folds and scroll position preserved across refreshes. Each
+pane has `chat-content-run-status`, an elapsed clock, and per-balloon duration
+footers. Final durations come from stored message timing, not time since repaint.
+`start.title` supplies a short task heading; legacy tasks use a bounded prompt
+fallback, while profile/model/reasoning remain secondary details. Interrupted
+preview is not durable transcript evidence. Very short tools between polls may
+appear directly as completed transcript rows rather than an observed running state.
 
 ## Scope and risks
 

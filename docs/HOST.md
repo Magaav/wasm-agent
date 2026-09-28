@@ -394,7 +394,12 @@ Every operation returns a JSON value, including visible storage/refusal errors.
 
 `host.monotonic_ms()` measures elapsed time within a process. Use `host.now()` only
 for cross-process event timestamps. `host.runtime_info()` returns version, OS,
-architecture, PID and the SHA-256 of the executable (computed once per process).
+architecture, PID, a process-unique `boot_id`, and the SHA-256 of the executable
+(computed once per process). `host.enqueue_completion(args_json)` is an internal
+bounded scheduler capability: Lua checks the completion outbox, parent ownership
+and current authority; Rust enqueues one background work item under ordinary
+same-session serialization. It has no model tool or HTTP route. An accepted
+receipt is not delivery; interrupted admissions are unknown and never replayed.
 `host.system_resources()` returns a fresh advisory sample of CPU use, logical cores,
 physical memory and free/total bytes on the filesystem containing the node workspace.
 Unavailable measurements are `nil`; zero is never substituted for missing capacity.

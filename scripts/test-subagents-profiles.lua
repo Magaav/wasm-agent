@@ -81,6 +81,22 @@ write_profile("worker-secure", {
 local secure, secure_refusal = subagents.resolve("worker-secure", ctx("alice"))
 check(secure, "an operator-authorized broad profile resolves: " .. tostring(secure_refusal))
 check(secure.allowed.write and secure.allowed.read, "the authorized profile keeps its exact tools")
+check(secure.limits.max_tokens==nil and secure.limits.max_cost_usd==nil,'omitted cumulative budgets are unlimited')
+check(explore.limits.max_tokens==nil and guest_profile.limits.max_tokens==100000,'general exploration unlimited, guest explicit cap preserved')
+local listed=subagents.control({action='profiles'},ctx('alice'))
+local discovery
+for _,item in ipairs(listed.profiles) do if item.id=='worker-secure' then discovery=item end end
+check(discovery and discovery.token_budget=='unlimited' and #discovery.effective_models>0,'profile discovery exposes effective models and budget semantics')
+check(discovery.reasoning_choices[discovery.effective_models[1]]~=nil,'profile discovery exposes reasoning choices')
+local subscription=dofile('lua/core/openai_sub.lua')
+local real_getenv=host.getenv
+host.getenv=function(k) if k=='WASM_AGENT_SUBSCRIPTION_TIMEOUT' or k=='WASM_AGENT_LLM_TIMEOUT' then return nil end return real_getenv(k) end
+check(subscription.request_timeout()==3600,'subscription reasoning does not inherit 300-second shell default')
+host.getenv=function(k) if k=='WASM_AGENT_SUBSCRIPTION_TIMEOUT' then return '600' end return real_getenv(k) end
+check(subscription.request_timeout()==600,'explicit subscription timeout honored')
+host.getenv=function(k) if k=='WASM_AGENT_SUBSCRIPTION_TIMEOUT' then return '-1' end return real_getenv(k) end
+check(not pcall(subscription.request_timeout),'invalid subscription timeout refuses visibly')
+host.getenv=real_getenv
 -- A specialist profile's own resources and limit names must survive resolution, or
 -- the child is handed a different authority than the operator approved.
 check(secure.resources.conversation == "conv-1", "the resolved resources must survive")

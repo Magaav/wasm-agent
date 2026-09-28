@@ -64,6 +64,16 @@ function M.limits()
   if not ok then error(result) end
   return result
 end
+-- Long reasoning is work, not a stalled shell. Keep an explicit safety bound,
+-- independent of the foreground shell default, and retain cancellation/deadlines.
+function M.request_timeout()
+  local raw=host.getenv('WASM_AGENT_SUBSCRIPTION_TIMEOUT') or host.getenv('WASM_AGENT_LLM_TIMEOUT')
+  local seconds=raw and tonumber(raw) or 3600
+  if not seconds or seconds~=math.floor(seconds) or seconds<1 or seconds>86400 then
+    error('invalid_subscription_timeout: expected 1..86400 seconds')
+  end
+  return seconds
+end
 function M.complete(model, messages, tools, stream, opts, reasoning)
   local stem = paths.temp() .. '/wa-openai-sub-' .. host.uuid()
   local stream_id = host.uuid()
@@ -77,7 +87,7 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
   local commentary_ids, commentary_pending_ids = {}, {}
   local ok, problem = pcall(function()
     local launch = operation('start', {program='node',args={script,input},
-      timeout_seconds=tonumber(host.getenv('WASM_AGENT_LLM_TIMEOUT')) or 300})
+      timeout_seconds=M.request_timeout()})
     id=launch.operation_id
     while true do
       if host.beat then host.beat() end
@@ -114,7 +124,7 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
         if #content==0 then break end
       end
       if state.settled then
-        if not state.ok then error(failure or state.error or 'subscription_bridge_failed') end
+        if not state.ok then error(failure or ('subscription_bridge_'..tostring(state.error or state.state or 'failed')..': configured request bound '..M.request_timeout()..'s; cause is reported above; transcript preserved; no automatic effect replay')) end
         break
       end
       if host.run_cancelled then

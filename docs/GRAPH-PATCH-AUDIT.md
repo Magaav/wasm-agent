@@ -51,6 +51,17 @@ checks.
   agent and operator can inspect them before retrying. Source can change concurrently after
   the check; the graph does not make the patch atomic.
 
+## Actionable uncertainty
+
+`unresolved_calls` separates calls originating in changed definitions from the
+repository total, with exact source locations and bounded `read`/`grep` followups.
+Unresolved and ambiguous calls remain leads, never asserted dependencies. This
+first increment does not classify every transitive-scope gap or dynamic incoming
+caller. Returned/truncated counts preserve that boundary. Coverage gaps carry
+source inspection addresses where a path exists; missing/deleted files can still
+refuse that read. Negative results say no *unread resolved* callers within scope.
+Impact test links explicitly have unknown execution/pass status.
+
 ## The 48-hour keep/remove signal
 
 After enabling the flag on the deployed node, use `graph

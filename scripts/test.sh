@@ -1402,6 +1402,10 @@ node scripts/test-operation-control.cjs "$BIN" --await
 run_proof_fixture policy 62 node scripts/test-subagents-policy.cjs "$BIN"
 run_proof_fixture children 18 node scripts/test-subagents.cjs "$BIN"
 run_proof_fixture fleet 20 node scripts/test-orchestrator.cjs "$BIN"
+node scripts/test-completion-wake.cjs "$BIN"
+for fixture in session-view durable-steering child-compaction completion-outbox orchestrator-defaults; do
+  WA_SCRIPT="scripts/test-$fixture.lua" "$BIN" --db "$DB.$fixture"
+done
 run_proof_fixture jobs 37 node scripts/test-job-subagents.cjs
 run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN"
 run_proof_fixture whatsapp 40 node scripts/test-whatsapp-subagent-e2e.cjs

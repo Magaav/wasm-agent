@@ -918,8 +918,7 @@ in_transaction = function(fn)
   return result
 end
 
-function M.append_turn(session_id, turn)
-  return in_transaction(function()
+local function append_turn(session_id, turn)
     local seq = turn.seq or M.next_seq(session_id)
     local id = turn.id or host.uuid()
     exec("INSERT INTO messages(id,session_id,seq,role,content,images,tool_calls,tool_call_id,tool_name," ..
@@ -947,8 +946,13 @@ function M.append_turn(session_id, turn)
     -- than no name, because the reader cannot use it to find the thread they remember.
     if (turn.role or "user") == "user" then M.name_session(session_id, turn.content or "") end
     return seq
-  end)
 end
+
+function M.append_turn(session_id, turn)
+  return in_transaction(function() return append_turn(session_id,turn) end)
+end
+M.transaction = function(fn) return in_transaction(fn) end
+M.append_turn_in_transaction = append_turn
 
 -- A name has to survive being read in a list and typed into a search box: one line, no markdown
 -- furniture, and short. The first line, not the first sentence: a name that ends mid-thought reads
@@ -1001,6 +1005,9 @@ function M.session_messages(session_id, opts)
   elseif opts.before_seq then
     sql="SELECT * FROM (SELECT * FROM messages WHERE session_id=? AND seq<? ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC"
     params={session_id,opts.before_seq,limit}
+  elseif opts.forward_after_seq then
+    sql = "SELECT * FROM messages WHERE session_id=? AND seq>? ORDER BY seq ASC LIMIT ?"
+    params = {session_id, opts.after_seq or 0, limit}
   elseif opts.after_seq then
     sql = "SELECT * FROM (SELECT * FROM messages WHERE session_id=? AND seq>? " ..
       "ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC"
@@ -1022,6 +1029,10 @@ function M.session_messages(session_id, opts)
     if type(row.changes) ~= "table" or row.changes.files == nil then row.changes = nil end
   end
   return rows
+end
+
+function M.session_message_bounds(session_id)
+  return query("SELECT MIN(seq) AS first_seq,MAX(seq) AS last_seq FROM messages WHERE session_id=?",{session_id})[1] or {}
 end
 
 -- One turn, by id, with its `changes` decoded the same way session_messages decodes it.

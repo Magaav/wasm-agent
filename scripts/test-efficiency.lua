@@ -321,7 +321,7 @@ check(byte.text_lossy and byte.content_base64=='ww==' and byte.next_offset==1,'m
 local bigid=memory.append_turn(sid,{role='user',content=string.rep('large exact é evidence ',4000)})
 local bigrows=memory.session_messages(sid,{limit=1});bigid=bigrows[1].id
 local view=json.decode(output.project('session',tools.dispatch(memory,'session',{session_id=sid,limit=1,view='compact'},'guest',{user_id='efficiency-owner'})))
-check(view.latest_turn.evidence.message_id==bigid,'oversized guest message keeps an authorized exact-evidence pointer')
+check(view.messages[1].evidence.message_id==bigid,'oversized guest message keeps an authorized exact-evidence pointer')
 local offset,version,parts=1,nil,{}
 repeat
   local page=json.decode(output.project('session',tools.dispatch(memory,'session',{session_id=sid,message_id=bigid,byte_offset=offset,message_version=version},'guest',{user_id='efficiency-owner'})))

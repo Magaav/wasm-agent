@@ -127,6 +127,18 @@ Rules, each enforced in `lua/core/subagents.lua`:
   `WASM_AGENT_SUBAGENT_MODELS`; a reasoning level must be one the model supports.
   The override applies to the child interpreter only and is never persisted.
 
+General operator profiles have no implicit cumulative token/cost cap. Omit
+`max_tokens` / `max_cost_usd` for unlimited; explicit numeric limits (including
+zero as a zero-spend ceiling) remain enforced. Specialist/guest limits are not
+removed. `profiles` exposes declared and effective model approvals, reasoning
+choices, defaults and budget semantics without granting new approvals.
+
+Subscription inference has a separate 3600s request safety deadline rather than
+the 300s shell default. `WASM_AGENT_SUBSCRIPTION_TIMEOUT` overrides it (1–86400s),
+then `WASM_AGENT_LLM_TIMEOUT` for compatibility. Child task deadlines and cancellation
+still apply. Risk: a hung provider can occupy capacity longer; explicit deadlines
+and cancellation remain available. No failed call or external effect is auto-replayed.
+
 ## Context, transcripts and budgets
 
 - A child gets a **fresh, lean context**: the mandatory boundary rules, the
@@ -142,9 +154,24 @@ Rules, each enforced in `lua/core/subagents.lua`:
   the initial system prompt, tool schemas and bounded task/context use the same
   first-call token estimator; when that estimate alone exhausts `max_tokens`,
   start refuses with the estimate and limit, before a child session or provider call.
+  Child compaction reserves estimated summary input plus maximum output against
+  the same per-run token/cost caps before inference, charging the full reservation
+  even when usage is missing. This conservative reservation is not provider billing.
+  Original rows survive; a valid checkpoint is required before advancing coverage.
   Later context growth and provider usage remain subject to the child-loop check;
   an estimate is not a tokenizer guarantee. Output over the byte budget is
   truncated with a visible marker; token/cost overruns stop with a named error.
+
+### Bounded explicit inspection
+
+`subagent session` and the `session` tool default to the newest eight messages
+within a 16,000-byte encoded page. `limit`, `byte_limit`, and `view` are explicit
+inspection controls, not changes to the child's model context. Rows always remain
+chronological. `next_before_seq` traverses older evidence; child incremental
+reads use `after_seq` and `next_after_seq` to return the earliest unseen rows,
+never skipping a middle page. Oversized rows carry an `evidence` address for
+owner-checked `message_id` / `byte_offset` / `message_version` exact JSON retrieval.
+No transcript is summarized, deleted or rewritten by inspection.
 
 ## Scheduling, waiting and recovery
 

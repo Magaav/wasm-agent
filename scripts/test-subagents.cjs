@@ -69,6 +69,11 @@ function check(value, label) { assert.ok(value, label); checks++; }
           }
         };
         if (isChild) {
+          if (text.includes('LIVE-TOOL')) {
+            if (!messages.some(message=>message.role==='tool')) replyToolCall({index:0,id:'live-call',type:'function',function:{name:'bash',arguments:JSON.stringify({command:'node -e "setTimeout(()=>{},2500)"'})}});
+            else replyFinal('live tool done');
+            return;
+          }
           if (text.includes('WRITE-CODE')) {
             if (!messages.some((message) => message.role === 'tool')) {
               const content = text.includes('CODE-B') ? 'written-by-B' : 'written-by-A';

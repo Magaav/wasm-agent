@@ -56,10 +56,10 @@ ok(#everything == 260, "an explicit limit large enough must return the whole thr
 local result = tools.dispatch(memory, "session",
   { session_id = id }, "master", { session_id = id, user_id = user, node_id = "local" })
 ok(type(result) == "table" and type(result.messages) == "table", "the session tool must return messages")
-ok(#result.messages == 200, "the tool window is 200 messages", #result.messages)
-ok(type(result.note) == "string" and result.note:find("newest 200 of 260", 1, true),
-  "the tool must say what it dropped", result.note)
-ok(tonumber(result.messages[1].seq) == 61, "the tool must show the newest messages, not the oldest",
+ok(#result.messages == 8, "the tool window is eight messages", #result.messages)
+ok(result.has_more_before and result.next_before_seq==253,
+  "the tool must expose earlier evidence", result.note)
+ok(tonumber(result.messages[1].seq) == 253, "the tool must show the newest messages, not the oldest",
   result.messages[1].seq)
 
 -- A short thread is not a window: no note, no suggestion that anything is missing.
@@ -73,6 +73,6 @@ memory.append_turn(small, { role = "assistant", content = "s 5" })
 local short = tools.dispatch(memory, "session",
   { session_id = small }, "master", { session_id = small, user_id = other, node_id = "local" })
 ok(#short.messages == 5, "a short thread must come back whole", #short.messages)
-ok(short.note == nil, "a short thread must not claim to be truncated", short.note)
+ok(not short.has_more_before and not short.has_more_after, "a short thread must not claim to be truncated", short.note)
 
 print(string.format("memory window ok (%d checks)", checks))

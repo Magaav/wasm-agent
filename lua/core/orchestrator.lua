@@ -48,8 +48,10 @@ local function view(row)
   receipt.prompt = args.prompt
   receipt.profile = receipt.profile or args.profile or "explore"
   receipt.model = receipt.model or args.model
+  receipt.reasoning = receipt.reasoning or args.reasoning
   receipt.parent_session_id = ctx.session_id
   receipt.created_at = row.created_at
+  receipt.completion=dofile('lua/core/completions.lua').status(row.id,row.owner)
   return receipt
 end
 
@@ -69,6 +71,7 @@ function M.enqueue(args, ctx)
     {"dispatch:"..host.uuid(), ctx.user_id, key, json.encode(copy), json.encode(context), host.now(),ctx.user_id})
   local row = query("SELECT * FROM orchestration_tasks WHERE owner=? AND request_key=?", {ctx.user_id,key})[1]
   if not row then return {error="placement_queue_full"} end
+  dofile('lua/core/completions.lua').watch(row.id,ctx)
   local result = view(row)
   result.note = "Queued durably for ordered placement. Observe this receipt; do not submit it again with a new key."
   return result
@@ -164,7 +167,7 @@ function M.control(args, ctx, api)
       row=query("SELECT * FROM orchestration_tasks WHERE id=?",{id})[1]
     end
     if row.state ~= "admitted" then
-      if action=="message" or action=="session" then return true,{error="placement_pending"} end
+      if action=="message" or action=="session" or action=='steer' or action=='steering_status' then return true,{error="placement_pending"} end
       if action=="cancel" and row.state=="placing" then return true,{error="placement_uncertain_reconcile_before_cancelling"} end
       return true,view(row)
     end
@@ -180,10 +183,16 @@ function M.control(args, ctx, api)
         return true,view(row)
       end
     elseif action == "message" and result.subagent_id then
+      dofile('lua/core/completions.lua').watch(row.id,json.decode(row.context),result.subagent_id)
       -- The card follows the latest run in the same conversation.
       exec("UPDATE orchestration_tasks SET receipt=? WHERE id=?",{json.encode(result),id})
       row.receipt=json.encode(result)
       return true,view(row)
+    end
+    if action=='session' and type(result.messages)=='table' then
+      for _,message in ipairs(result.messages) do
+        if message.evidence and message.evidence.tool=='subagent' then message.evidence.id=id end
+      end
     end
     return true,result
   end

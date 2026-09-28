@@ -283,6 +283,33 @@ impl Store {
                 }
             }
         }
+        // Unknown calls originating in changed definitions are inspection leads,
+        // never inferred dependencies. Keep repository totals separate from relevance.
+        let unresolved_total: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM edges WHERE dst IS NULL AND kind='calls'", [], |r| r.get(0))?;
+        let mut unresolved = Vec::new();
+        let mut unresolved_count=0usize;
+        for (id, symbol) in &changed_symbols {
+            let mut stmt=self.conn.prepare("SELECT path,line,target FROM edges WHERE src=?1 AND dst IS NULL AND kind='calls' ORDER BY path,line,target")?;
+            let rows=stmt.query_map(params![id], |row| Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,String>(2)?)))?;
+            for row in rows {
+                let (path,line,target)=row?;
+                unresolved_count+=1;
+                if unresolved.len()<20 {
+                    unresolved.push(json!({"path":path,"line":line,"target":target,
+                        "relation":"originates_in_changed_symbol","symbol":symbol,
+                        "resolution":"unresolved_or_ambiguous","not_a_dependency":true,
+                        "followup":[{"tool":"read","args":{"path":path,"offset":line.max(1),"limit":12}},
+                          {"tool":"grep","args":{"path":symbol["path"],"pattern":target,"limit":20}}]}));
+                }
+            }
+        }
+        for gap in &mut gaps {
+            if let Some(path)=gap["path"].as_str().map(str::to_owned) {
+                let line=gap["line"].as_u64().unwrap_or(1).max(1);
+                gap["followup"]=json!({"tool":"read","args":{"path":path,"offset":line,"limit":20}});
+            }
+        }
         let lead_count = leads.len();
         let gap_count = gaps.len();
         let lead_rows: Vec<Value> = leads.into_values().take(20).collect();
@@ -295,6 +322,13 @@ impl Store {
             "changed_symbol_count": changed_symbol_count,
             "changed_symbols": changed_symbols.into_values().collect::<Vec<_>>(),
             "gap_count": gap_count, "gaps": gaps.into_iter().take(20).collect::<Vec<_>>(),
+            "gaps_truncated":gap_count>20,
+            "generation":self.generation()?,
+            "unresolved_calls":{"total":unresolved_total,"relevant":unresolved_count,
+                "outside_changed_symbols":unresolved_total.saturating_sub(unresolved_count as i64),
+                "returned":unresolved.len(),"truncated":unresolved_count>unresolved.len(),"rows":unresolved,
+                "scope":"outgoing_calls_in_changed_symbols_only; unknown incoming/dynamic calls are not excluded"},
+            "negative_result":if lead_count==0 {json!("No unread resolved callers found within this scope; absence is not proof of no callers.")} else {Value::Null},
             "scope": "resolved_calls_only_not_a_correctness_proof",
         }))
     }
@@ -446,7 +480,9 @@ impl Store {
                     "next_cursor":if next < total { json!(format!("{generation}.{next}.{digest}")) } else { Value::Null }},
                 "coverage":{"changed_lines":audit.get("changed_lines"),
                     "mapped_lines":audit.get("mapped_lines"),"ignored_lines":audit.get("ignored_lines"),
-                    "gap_count":audit.get("gap_count"),"gaps":audit.get("gaps")},
+                    "gap_count":audit.get("gap_count"),"gaps":audit.get("gaps"),
+                    "gaps_truncated":audit.get("gaps_truncated"),"unresolved_calls":audit.get("unresolved_calls")},
+                "test_evidence":"static_test_links_only; execution_and_pass_status_unknown",
                 "scope":"resolved_static_edges_only_not_a_correctness_or_risk_score"
             })
         };
@@ -540,6 +576,31 @@ mod tests {
         assert_eq!(reviewed["lead_count"], 0);
         assert_eq!(reviewed["verdict"], "no_leads");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unresolved_changed_calls_have_actionable_scoped_evidence() {
+        let dir=std::env::temp_dir().join(format!("wa-actionable-{}-{}",std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("changed.js"),"function changed() { receiver.dynamic(); }\nfunction unrelated() { elsewhere.missing(); }\n").unwrap();
+        let mut store=Store::open(dir.join("graph.db")).unwrap();
+        store.index(&dir,false).unwrap();
+        let request=json!({"changes":[{"path":"changed.js","lines":[1]}]});
+        let report=store.audit_json(&dir,&request).unwrap();
+        assert_eq!(report["lead_count"],0);
+        assert!(report["negative_result"].as_str().unwrap().contains("within this scope"));
+        let gaps=&report["unresolved_calls"];
+        assert_eq!(gaps["total"],2);
+        assert_eq!(gaps["relevant"],1);
+        assert_eq!(gaps["outside_changed_symbols"],1);
+        assert_eq!(gaps["rows"][0]["target"],"receiver.dynamic");
+        assert_eq!(gaps["rows"][0]["followup"][0]["args"]["offset"],1);
+        assert_eq!(gaps["rows"][0]["followup"][0]["args"]["path"],"changed.js");
+        assert_eq!(gaps["rows"][0]["not_a_dependency"],true);
+        let impact=store.impact_json(&dir,&request).unwrap();
+        assert!(impact["test_evidence"].as_str().unwrap().contains("execution_and_pass_status_unknown"));
+        assert_eq!(impact["coverage"]["unresolved_calls"]["relevant"],1);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
