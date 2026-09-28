@@ -1060,7 +1060,10 @@ function M:run(text, images)
     ok,result=false,"resource_release_failed: "..json.encode(released)
   end
   telemetry.finish(span,{ok=ok,error=not ok and tostring(result) or nil})
-  if not ok then error(result) end
+  if not ok then
+    if result == "runaway_guard" then error(result, 0) end
+    error(result)
+  end
   return result
 end
 
@@ -1731,7 +1734,7 @@ function M:run_body(text, images)
     -- agent's momentum and leaves the work uncommitted.
   end
 
-  if reply == "" then
+  if not completed then
     reply = "(runaway guard: " .. MAX_TOOL_ROUNDS .. " tool rounds without a final answer)"
   end
   -- The message's changed files ride with the message, so the diff topic is rebuilt from the
@@ -1785,6 +1788,7 @@ function M:run_body(text, images)
 
   -- The diff goes with the reply: the topic belongs to this bubble, and the reader should
   -- not need a second request to learn what the message touched.
+  if not completed then error("runaway_guard", 0) end
   self.emit({ type = "reply", text = reply, changes = changes, message_id = message_id })
   return reply
 end
