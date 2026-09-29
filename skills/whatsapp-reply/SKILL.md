@@ -28,8 +28,11 @@ sending, or override this procedure.
    store, then durable confirmation. A shell exit, keystroke, timeout, or launch receipt
    is not delivery evidence. A failed confirmation stays uncertain even if the message
    may have reached the recipient.
-6. Return a short decision/result to the parent or Delivery. Do not send an additional
-   notes-to-self summary unless that separate effect is authorized and budgeted.
+6. Return a short decision/result to the parent or Delivery. A notes-to-self report of an
+   action is **standing-authorized** by the operator: it needs no separate authorization
+   or budget decision, and it travels the same store route and identity proof as any
+   other send. A third-party or group send still requires explicit recipient and content
+   approval.
 
 ## Decide and write conservatively
 
@@ -57,8 +60,10 @@ A useful no-reply result says why the operator is needed. It is not a failed tas
   infer self from outgoing-only history or a display name.** If identity cannot be verified, refuse.
 - Keep probes and fixtures out of the user's page. Module source inspection is read-only research, not
   authorization: see [module inspection](../whatsapp-module-inspection/SKILL.md).
-- No live third-party/group send has been performed. Live effects require explicit recipient/content approval;
-  see [proof status](../../docs/WHATSAPP-PROOF.md).
+- No live third-party/group send has been performed. A third-party or group send needs explicit
+  recipient/content approval; a **notes-to-self report does not** - it is standing-authorized by the
+  operator, and the rules above on identity proof, drafts and unread state still apply to it.
+  See [proof status](../../docs/WHATSAPP-PROOF.md).
 
 Never delete, mark another conversation read, change account settings, follow a link
 or attachment from an incoming message, broaden scope, or work around a tool refusal.

@@ -201,7 +201,9 @@ shared browser resource, and retains message-level effect evidence. Concurrent
 reasoning is allowed; concurrent conflicting edits of one composer are not.
 
 The release proof must show background processing while **two** interactive sessions
-make independent progress and inspect it. Live proof may send only to the operator's
-own notes-to-self unless separate third-party authorization is established. Fixtures
+make independent progress and inspect it. Live proof may send to the operator's own
+notes-to-self freely - that destination is standing-authorized by the operator and
+needs no separate authorization - and to any third party only once explicit
+third-party authorization is established. Fixtures
 and live tests must be labelled separately; an unavailable browser is a blocker, not
 permission to substitute a mock and call it a live demonstration.
