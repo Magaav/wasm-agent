@@ -109,6 +109,30 @@ pub fn shutdown_sockets(sockets: &SocketSlot) {
     }
 }
 
+/// Which kind of process a thread is running, as the *host* knows it rather than as the
+/// process claims. The distinction is the one the git guard needs: `Orchestrator` is a run of a
+/// session (the worker thread serve.rs admits and drives), which is where an integration
+/// decision is made; `Child` is a bounded subagent task on its own thread. It crosses the shell
+/// boundary as `WASM_AGENT_PROVENANCE` (see `operations::configure_spec`), so a guard can decide
+/// who may commit on `main` from the host's answer instead of from a variable the committing
+/// shell typed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Provenance {
+    Orchestrator,
+    Child,
+}
+
+impl Provenance {
+    /// The value a shell sees. Both spellings are load-bearing: `.githooks/pre-commit` and
+    /// `.githooks/commit-msg` classify on them, and `scripts/test-main-guard.sh` pins the pair.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Provenance::Orchestrator => "orchestrator",
+            Provenance::Child => "child",
+        }
+    }
+}
+
 /// What a running child thread may know about its own task: the cancel flag the
 /// manager flips, the deadline the provider I/O must respect, and the sockets its
 /// current provider request is blocked on.
@@ -125,6 +149,10 @@ pub struct TaskContext {
     /// The child's session id, so an operation it starts is owned by the child
     /// session/run rather than by the interpreter's worker slot.
     pub owner: String,
+    /// Whether this thread is a session's own run or a child task. A run's shell is told
+    /// `orchestrator`, a child's shell `child`; a thread with no task context is neither (a
+    /// control call, a plain read, or a person at a terminal), and gets nothing.
+    pub provenance: Provenance,
 }
 
 thread_local! {
@@ -143,6 +171,15 @@ pub fn leave_task() {
 /// whether a request needs the shutdown-aware socket.
 pub fn in_task() -> bool {
     CURRENT.with(|slot| slot.borrow().is_some())
+}
+
+/// The provenance of the process this thread is, for a guard that must decide by role rather
+/// than by what the committing shell says about itself. `None` means no task context: not a
+/// run and not a child, so nothing about this process may be inferred.
+pub fn current_provenance() -> Option<&'static str> {
+    CURRENT.with(|slot| {
+        slot.borrow().as_ref().map(|context| context.provenance.as_str())
+    })
 }
 
 /// The child session an operation should be owned by, if this thread is a child.
@@ -801,7 +838,7 @@ fn run_child(inner: Arc<Inner>, runner: Runner, id: String, cancel: Arc<AtomicBo
         }
     };
     let deadline = if timeout_seconds > 0 { Some(Instant::now() + Duration::from_secs(timeout_seconds)) } else { None };
-    enter_task(TaskContext { cancel: cancel.clone(), deadline, sockets, owner });
+    enter_task(TaskContext { cancel: cancel.clone(), deadline, sockets, owner, provenance: Provenance::Child });
     let receipt = {
         let tasks = inner.tasks.lock().expect("subagents tasks");
         tasks.get(&id).map(|task| {
@@ -1021,10 +1058,29 @@ mod tests {
         enter_task(TaskContext {
             cancel: Arc::new(AtomicBool::new(false)), deadline: None,
             sockets: Arc::new(Mutex::new(Vec::new())), owner: "run:interactive".into(),
+            provenance: Provenance::Orchestrator,
         });
         let captured = capture_event(event);
         leave_task();
         assert!(!captured, "ordinary runs must retain their SSE and durable replay");
+    }
+
+    #[test]
+    fn provenance_is_thread_local_not_process_wide() {
+        // The export is read on whichever thread runs the shell, so the two answers must not leak into
+        // each other: a child's `child` reaching the orchestrator's own shell would refuse the landing
+        // path this exists to open, and an `orchestrator` reaching a child would open main to it.
+        assert_eq!(current_provenance(), None, "a thread with no task context has no provenance");
+        enter_task(TaskContext {
+            cancel: Arc::new(AtomicBool::new(false)), deadline: None,
+            sockets: Arc::new(Mutex::new(Vec::new())), owner: "run:parent".into(),
+            provenance: Provenance::Orchestrator,
+        });
+        assert_eq!(current_provenance(), Some("orchestrator"));
+        let on_the_child_thread = std::thread::spawn(current_provenance).join().unwrap();
+        leave_task();
+        assert_eq!(on_the_child_thread, None, "a run's provenance must not be visible on another thread");
+        assert_eq!(current_provenance(), None, "and it goes away with the task");
     }
 
     fn temp_root(tag: &str) -> PathBuf {

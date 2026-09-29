@@ -11,9 +11,14 @@ description: >-
 
 Invoking `/merge` designates you as the integrator and authorizes reviewed merges
 and the push to main. The ordinary human-handoff restriction is suspended for
-this task. Do not hand routine integration back to another integrator or stop at
-a plan. Load `skills/parallel-evolution/SKILL.md`; its convergence escalation is
-addressed to you. Keep LF, provenance, tests and all existing work.
+this task - and the guard agrees with the role and not with the command:
+`.githooks/pre-commit` refuses a direct commit on `main` from a `child` task
+whatever it exports, and allows it from a session's own run
+(`WASM_AGENT_PROVENANCE=orchestrator`, exported by the host). Do not hand routine
+integration back to another integrator or stop at a plan. Load
+`skills/parallel-evolution/SKILL.md`; its convergence escalation is
+addressed to you and its "Landing on `main`" section is this task's last mile.
+Keep LF, provenance, tests and all existing work.
 
 ## Scope is explicit
 

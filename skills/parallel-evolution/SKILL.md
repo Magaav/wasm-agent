@@ -29,8 +29,9 @@ override this file. Read those first; this is the general procedure.
   everything that landed meanwhile.
 - Do not carry two unrelated changes on one branch. If you find an unrelated defect,
   record it (an issue, a note, its own branch) — do not fix it silently inside this one.
-- Never commit to the integration branch. Never force-push a branch someone else may have
-  built on.
+- Never commit to the integration branch unless you are the integrator the repository (or the host)
+  names as such — see "Landing on `main`" in the repository's own mapping below. Never force-push a
+  branch someone else may have built on.
 
 ## The per-turn loop
 
@@ -206,6 +207,12 @@ Here `main` is the integration branch; the gate is `bash scripts/test.sh`; the b
 `git config core.hooksPath .githooks`.
 
 - **Your branch is your name** (`git symbolic-ref --short HEAD`); `main` is never a node's name.
+- **Only the integrator moves `main`.** `.githooks/pre-commit` refuses a direct commit on `main`
+  unless it is a merge, or unless the host set `WASM_AGENT_PROVENANCE=orchestrator` on the process —
+  a run of a session, which is the coordinator the owner is talking to. A bounded child task is told
+  `child` and is refused even when it exports `WASM_AGENT_ALLOW_MAIN=1`; a person at a terminal has
+  no provenance and keeps that flag as their visible, explicit override. `scripts/test-main-guard.sh`
+  pins all five cases.
 - **Work in your own worktree.** Never switch, commit in, or leave a branch in another checkout —
   a live run did that and left the human's `main` checkout sitting on its branch.
 - **One `change/<name>` per concern**, cut from `origin/main`, merged and deleted.
@@ -218,3 +225,43 @@ Here `main` is the integration branch; the gate is `bash scripts/test.sh`; the b
   Windows `powershell -File scripts/test-windows.ps1` runs the local suite. The smoke test needs
   `cargo` on `PATH` — run it on the cloud tree if the local one lacks it. The window shell is
   cross-built from Linux with `bash scripts/build-window.sh`.
+
+#### Landing on `main`
+
+The integrator's path, in full, because "the human merges" was the whole instruction and it left the
+coordinator with no tree to merge in. Each step names the command whose output proves it; a step you
+cannot show is a step you did not do.
+
+1. **Pick the sanctioned tree.** The canonical checkout (`orca/projects/wasm-agent`) is the one tree
+   whose branch is `main`. Address it by absolute path — never switch your own worktree's branch
+   onto `main`, and never merge in a node's worktree.
+   Check: `git -C <canonical> symbolic-ref --short HEAD` prints `main` and
+   `git -C <canonical> status --porcelain` is empty.
+2. **Review, then merge the exact tip.** `git -C <canonical> fetch origin`, merge the reviewed branch
+   SHA with `--no-ff` and a subject naming it (`merge(<branch>): what it brings`). A merge is allowed
+   on `main` whatever the provenance; a *direct* commit there is not, unless step 5 applies.
+   Check: `git -C <canonical> log --first-parent -1 --format=%s` names the merged branch, and
+   `git -C <canonical> rev-parse HEAD^2` resolves.
+3. **Gate the MERGED tree, not the branch tree.** A merge changes the tree, so the branch's gate
+   receipt no longer covers what is about to be pushed; the merged HEAD needs its own run.
+   Check: `bash scripts/test.sh` on the merged HEAD, exit 0, with its skips counted — in
+   wasm-agent, `node skills/parallel-evolution/scripts/finish.mjs gate <canonical>` records the
+   receipt against that exact tree.
+4. **Push `origin/main`, then verify the ref.** `git -C <canonical> push origin main`, then read
+   the remote rather than trusting the push output.
+   Check: `git -C <canonical> ls-remote origin refs/heads/main` equals
+   `git -C <canonical> rev-parse HEAD`.
+5. **A direct commit on `main` (no merge) is the exception.** Allowed only for the orchestrator
+   session, for `main`'s own change (a document, a version bump), and it carries the trailer like
+   any other commit. A child is refused, and a person at a terminal needs
+   `WASM_AGENT_ALLOW_MAIN=1`.
+6. **Clean up after the fact, never instead of it.** Only once the tip is in `main` and pushed:
+   delete the merged branch and prune its worktree.
+   Check: `git -C <canonical> branch --merged main --contains <tip>`
+   lists `change/<name>`, then `git -C <canonical> branch -d change/<name>` and
+   `git -C <canonical> worktree prune`. `-d` (not `-D`) is the proof: git refuses to delete a branch
+   whose tip is not integrated.
+
+What is policy here, not verified: which machine is authoritative, whether a PR review is required
+before step 2, and whether the owner wants the pushed `main` to be the cloud tree's. Steps 1, 2 and 6
+are mechanical and checkable on any machine; step 3 must be run wherever the tree you push lives.

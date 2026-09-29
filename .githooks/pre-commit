@@ -12,24 +12,83 @@
 # the same command the suite uses, deliberately: one rule, one implementation.
 set -uo pipefail
 
-# A commit on the integration branch must be a merge. AGENTS.md says agents branch and hand
-# off; the human integrates. Committing directly here is how work ends up "generated inside
-# main" - and it was, several times, by the reviewer rather than an agent. A merge is the rule
-# and an explicit override exists for the times it genuinely is main's own change.
+# A commit on the integration branch must be a merge, or come from the process that owns
+# integration. AGENTS.md says agents branch and hand off; a merge is the rule. Committing directly
+# here is how work ends up "generated inside main" - and it was, several times, by the reviewer rather
+# than an agent. The human keeps the explicit override for the times it genuinely is main's own change,
+# and the node's orchestrator session - the run that holds the whole picture and makes the integration
+# decision - commits as itself.
+#
+# RISK, named because this widens a guard that exists for a reason: an agent once committed to `main`
+# from the wrong tree (docs/ORCHESTRATION.md). The old allow-path was WASM_AGENT_ALLOW_MAIN=1, and the
+# committing process types it, so it proved nothing about *who* was committing: any child could set it
+# and land on main. The authority is now the host's answer about the process - rust/wa-host/src/
+# operations.rs exports WASM_AGENT_PROVENANCE from the thread's own task context for every shell it
+# starts (`orchestrator` = a session's own run, `child` = a bounded subagent task) - so a worker cannot
+# reach main by setting the old flag. This is a guard against the ordinary mistake and against the
+# documented way through, not a sandbox: a shell can still export the provenance it was given, or pass
+# `--no-verify`.
 branch="$(git symbolic-ref --short HEAD 2>/dev/null || echo "")"
 case "$branch" in
   main|master)
     merge_head="$(git rev-parse --git-dir)/MERGE_HEAD"
-    if [ ! -f "$merge_head" ] && [ "${WASM_AGENT_ALLOW_MAIN:-0}" != "1" ]; then
-      cat >&2 <<MESSAGE
+    if [ -f "$merge_head" ]; then
+      : # A merge is the normal landing path; its parents are its provenance.
+    else
+      case "${WASM_AGENT_PROVENANCE:-}" in
+        orchestrator)
+          : # The orchestrator session owns the integration decision; it commits as itself.
+          ;;
+        child)
+          cat >&2 <<MESSAGE
 pre-commit: refusing a direct commit on '$branch'.
 
-Work is made on the node's own branch and merged here; that is what keeps "which branch is
-this work on?" answerable. If this really is main's own change (a document, a version bump),
-re-run with WASM_AGENT_ALLOW_MAIN=1 - the override is deliberate, so it shows up in the
-command you ran rather than in the shape of the history.
+  provenance: child - WASM_AGENT_PROVENANCE, set by the host because this process is a bounded
+              subagent task
+  refused:    a child task does not hold the integration decision, so it does not move main
+
+Your branch is the deliverable: commit and push there, and report; the orchestrator merges it.
+WASM_AGENT_ALLOW_MAIN is deliberately not consulted here - it is the human's override, and a child
+exporting it is the case this refusal exists for.
 MESSAGE
-      exit 1
+          exit 1
+          ;;
+        "")
+          if [ "${WASM_AGENT_ALLOW_MAIN:-0}" = "1" ]; then
+            : # The human's deliberate, visible override.
+          else
+            cat >&2 <<MESSAGE
+pre-commit: refusing a direct commit on '$branch'.
+
+  provenance: none - WASM_AGENT_PROVENANCE is not set, so this process was not started by the host
+              as a run of a session, and this hook cannot tell who is committing
+  refused:    a direct commit here is the one path that makes "which branch is this work on?"
+              unanswerable
+
+Work is made on the node's own branch and merged here. If this really is main's own change (a
+document, a version bump), or you are the human landing work an agent produced, re-run with
+WASM_AGENT_ALLOW_MAIN=1 - the override is deliberate, so it shows up in the command you ran rather
+than in the shape of the history. The orchestrator session does not need it: the host gives it the
+`orchestrator` provenance.
+MESSAGE
+            exit 1
+          fi
+          ;;
+        *)
+          cat >&2 <<MESSAGE
+pre-commit: refusing a direct commit on '$branch'.
+
+  provenance: unrecognised ('${WASM_AGENT_PROVENANCE}') - the host sets either `orchestrator` (a
+              session's own run) or `child` (a subagent task), and this value is neither
+  refused:    a value this guard cannot classify must not open main
+
+If you are a person at a terminal, unset WASM_AGENT_PROVENANCE and re-run with
+WASM_AGENT_ALLOW_MAIN=1. If you are an agent, your branch is the deliverable: commit and push it
+there and report; the orchestrator merges it.
+MESSAGE
+          exit 1
+          ;;
+      esac
     fi
     ;;
 esac

@@ -61,6 +61,15 @@ fn configure_spec(mut spec: Spec, cwd: &str, seconds: u64, owner: String, promot
     if crate::serve::in_turn() {
         spec.env.push(("WASM_AGENT_IN_TURN".into(), "1".into()));
     } // naming-check: allow (installed deploy scripts)
+    // Who this process is, so a guard can decide by role. The host knows it from the thread's own
+    // task context (a run of a session is `orchestrator`, a subagent task is `child`), and the
+    // commit guard in `.githooks/pre-commit` reads it: that is what lets the node's orchestrator
+    // session land on `main` while a child cannot get there by exporting the old
+    // `WASM_AGENT_ALLOW_MAIN` flag, which said nothing about who was committing. Pushed beside the
+    // turn boolean so the bash tool and `operation start` cannot disagree about the answer.
+    if let Some(provenance) = crate::subagents::current_provenance() {
+        spec.env.push(("WASM_AGENT_PROVENANCE".into(), provenance.to_string()));
+    }
     spec
 }
 pub fn foreground(

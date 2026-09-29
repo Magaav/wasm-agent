@@ -295,6 +295,9 @@ fn set_current_run_io(
             deadline: None,
             sockets: sockets.unwrap_or_else(|| Arc::new(Mutex::new(Vec::new()))),
             owner,
+            // This thread is serving a run of a session - the class of process that owns the
+            // integration decision, and the one `.githooks/pre-commit` lets move `main`.
+            provenance: crate::subagents::Provenance::Orchestrator,
         }),
         None => crate::subagents::leave_task(),
     }
