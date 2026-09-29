@@ -9,14 +9,30 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 # A scratch DB does not isolate profile/config/effect files. Fence the ENTIRE gate,
 # including new fixtures whose authors might otherwise forget to select a home.
-# Keep the explicit skip request and in-turn deploy guard; never inherit provider
-# accounts, a real instance registry, a job auth token, or the user's runtime paths.
+# Keep the explicit skip request, the in-turn deploy guard and this gate's own parallelism
+# knob; never inherit provider accounts, a real instance registry, a job auth token, or the
+# user's runtime paths. The knob is a number, not runtime state.
 while IFS= read -r variable; do
   case "$variable" in
-    WASM_AGENT_SKIP_UI_TESTS|WASM_AGENT_IN_TURN) ;;
+    WASM_AGENT_SKIP_UI_TESTS|WASM_AGENT_IN_TURN|WA_GATE_JOBS) ;;
     WASM_AGENT_*|WA_*|OPENAI_*|OPENCODE_*|ANTHROPIC_*) unset "$variable" ;;
   esac
 done < <(compgen -e)
+
+# Build/test parallelism is the repository's knob, not whatever cargo happens to do. With it
+# unset - the default - every `cargo` below compiles one job per logical core (16 on the machine
+# this was measured on), so two concurrent gate runs each claim the whole box and the second one
+# only makes the first slower. WA_GATE_JOBS=<n> caps both cargo's build job count and the test
+# harness's thread count; an explicit CARGO_BUILD_JOBS or RUST_TEST_THREADS still wins, because a
+# request for one variable is more specific than one number for both. The measurement behind this,
+# and why the default is still the uncapped one, are in docs/EVOLUTION.md ("Gate parallelism").
+if [ -n "${WA_GATE_JOBS:-}" ]; then
+  export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$WA_GATE_JOBS}"
+  export RUST_TEST_THREADS="${RUST_TEST_THREADS:-$WA_GATE_JOBS}"
+fi
+# The run says what it ran with, so two gate times can be compared without guessing which
+# parallelism produced them.
+echo "gate parallelism: cargo jobs=${CARGO_BUILD_JOBS:-cargo default} test threads=${RUST_TEST_THREADS:-harness default} (WA_GATE_JOBS=${WA_GATE_JOBS:-unset})"
 GATE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/wa-gate-home-XXXXXX")"
 if command -v cygpath >/dev/null 2>&1; then
   export WASM_AGENT_HOME="$(cygpath -w "$GATE_HOME")"
