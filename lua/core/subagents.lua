@@ -121,6 +121,40 @@ function M.profiles()
   return profiles, errors
 end
 
+-- What a profile says about evaluating its own settlement, for the completion outbox. `coordinator`
+-- (the default) means a settled child is evidence its caller has to judge, so its completion wakes
+-- that session. `self_reported` means the run recorded its own decision durably, so a *successful*
+-- completion has nothing left to judge and waking a model for it is paying for noise. A failure or a
+-- run whose evidence was lost is never covered by this: it still wakes its coordinator.
+--
+-- Declared in two places on purpose: the module that owns a specialist profile names it here, so the
+-- shipped template cannot drift from the code, and a profile file an operator wrote may say
+-- `"settlement": "self_reported"` for itself. An unrecognised or unreadable value is read as
+-- `coordinator`, because the conservative direction is to wake.
+local SELF_REPORTED_SETTLEMENT = "self_reported"
+local function self_reported_profiles()
+  local declared = {}
+  local ok, whatsapp = pcall(dofile, "lua/core/whatsapp.lua")
+  if ok and type(whatsapp) == "table" and tostring(whatsapp.PROFILE_ID or "") ~= "" then
+    -- It reads one conversation, records a decision per message and proves the send: the
+    -- coordinator has no judgement left to make about a completed run of it.
+    declared[tostring(whatsapp.PROFILE_ID)] = true
+  end
+  return declared
+end
+
+function M.settlement(profile_id)
+  local id = tostring(profile_id or "")
+  if id == "" then return "coordinator" end
+  local ok, profiles = pcall(M.profiles)
+  local profile = ok and type(profiles) == "table" and profiles[id] or nil
+  if type(profile) == "table" and tostring(profile.settlement or "") == SELF_REPORTED_SETTLEMENT then
+    return SELF_REPORTED_SETTLEMENT
+  end
+  if self_reported_profiles()[id] then return SELF_REPORTED_SETTLEMENT end
+  return "coordinator"
+end
+
 local function as_set(value)
   -- Accepts either a list of names or a name->true map, because a caller may pass
   -- a ceiling in either shape; `ipairs` alone silently emptied the map case.

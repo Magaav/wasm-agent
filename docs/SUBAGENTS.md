@@ -164,6 +164,19 @@ and cancellation remain available. No failed call or external effect is auto-rep
 - Runaway guard exhaustion preserves its incomplete assistant draft, settles the child as
   `failed` with the stable error `runaway_guard`, and carries that reason into the parent's
   completion notice. A normal final answer remains `completed`; cancellation remains `cancelled`.
+- When a child settles, the coordinator is woken with a **settlement evaluation packet** rather than a
+  bare status line: the child's id, profile, model and provider, its state and error, its session and
+  measured duration, the usage and cost the receipt recorded, and the artifact facts of its own
+  checkout (path, branch, whether that branch is pushed, its head against `origin/main`, and how many
+  files are dirty or untracked). The packet is assembled deterministically by the outbox `tick` - no
+  model, no idle node, no coordinator turn - and travels in the wake body, so evaluation starts from
+  evidence instead of a fetch, and survives a restart. Nothing measured is reported as a zero: an
+  absent measurement says so (`available: false` with a reason).
+- A settlement is woken only where a judgement is still owed: a completed delivery to evaluate, or a
+  failure/lost run needing a recovery decision. A child whose profile recorded its own decision
+  (`"settlement": "self_reported"`, as the scoped responder does) and which left nothing to review is
+  **skipped, with the reason written on its outbox row** - a silent skip would be indistinguishable
+  from a lost wake. A failure is never skipped, whatever the profile says.
 
 ### Bounded explicit inspection
 
@@ -183,6 +196,11 @@ No transcript is summarized, deleted or rewritten by inspection.
   6) admitted-but-waiting. Over that, `start` refuses with `queue_full`: an
   explicit refusal, never invisible loss. Child inference therefore cannot consume
   a reserved interactive HTTP worker.
+- A settlement that already carries a verdict of "needs judgement" is claimed by the outbox in its
+  own pass, ahead of the general scan and independent of the scan cursor, so a wake refused for
+  capacity is retried on the next `tick` instead of waiting for the cursor to come round to its row
+  again. The wake itself is still admitted through the scheduler as background work: its own
+  conversation's order (one writer per conversation) and the interactive reserve are untouched.
 - `await` is **one bounded native wait** on a condition variable; it never makes
   the model poll. A caller waits on its own worker while the child runs on the
   subagent pool, so a parent waiting for a child does not hold the capacity that

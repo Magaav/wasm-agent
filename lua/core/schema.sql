@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS run_links (
 CREATE TABLE IF NOT EXISTS child_completions (
   child_id TEXT PRIMARY KEY, target_id TEXT NOT NULL, owner TEXT NOT NULL, parent_session TEXT NOT NULL,
   state TEXT NOT NULL, boot TEXT NOT NULL DEFAULT '', run_id TEXT NOT NULL DEFAULT '',
-  detail TEXT NOT NULL DEFAULT '');
+  detail TEXT NOT NULL DEFAULT '', packet TEXT NOT NULL DEFAULT '');
 
 -- Node-local steering control; never replicated as authority.
 CREATE TABLE IF NOT EXISTS steering_runs (

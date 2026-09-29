@@ -210,6 +210,92 @@ function M.requires_write_tools(allowed)
   return false
 end
 
+-- The artifact half of a settlement review: which checkout a finished session worked in, what
+-- branch it is on, whether that branch is pushed, how its HEAD stands against `origin/main`, and
+-- how many files are modified or untracked. Read-only: it runs git and writes nothing, takes no
+-- claim and touches no live node, so it can be assembled the moment a child settles.
+--
+-- Every value is *measured* or named absent. A probe that could not be read leaves its key out of
+-- the table and records itself in `unmeasured` with a reason code, because a zero here would read
+-- as "clean and pushed" for a checkout nobody could read - the one mistake this block exists to
+-- prevent. `managed=false` is the honest answer for a session that owns no worktree (nothing was
+-- changed in a checkout of ours), not "dirty=0".
+function M.review_facts(memory, session_id)
+  if not memory or session_id == nil or session_id == "" then return nil, "session_required" end
+  local workspace = memory.session_workspace(session_id)
+  if not workspace then return nil, "workspace_record_unavailable" end
+  if tostring(workspace.worktree or "") == "" then
+    return { managed = false, state = tostring(workspace.state or "unbound") }
+  end
+  local destination, quote_error = quote(workspace.worktree)
+  if not destination then return nil, quote_error end
+  local facts = { managed = true, state = tostring(workspace.state or ""),
+    worktree = workspace.worktree, recorded_branch = tostring(workspace.branch or "") }
+  local unmeasured = {}
+  local function absent(key, reason)
+    unmeasured[#unmeasured + 1] = key .. ":" .. tostring(reason)
+  end
+  local function exec_git(args)
+    local result = run("git -C " .. destination .. " " .. args, "")
+    if not result then return false, nil end
+    return tonumber(result.code) == 0, trimmed(result.stdout)
+  end
+  -- `--verify --quiet` exits non-zero for an absent ref, which is an answer, not a failure: the
+  -- caller reads the boolean and decides. Anything else that fails is named in `unmeasured`.
+  local function probe(key, args)
+    local ok, value = exec_git(args)
+    if not ok or value == "" then absent(key, "not_reported_by_git"); return nil end
+    facts[key] = value
+    return value
+  end
+
+  local branch = probe("branch", "rev-parse --abbrev-ref HEAD")
+  probe("head", "rev-parse HEAD")
+  -- Both counts are taken against `origin/main` as the branch was fetched, and a repository
+  -- without that ref (no remote, never fetched) says so instead of reporting a confident 0.
+  if probe("origin_main", "rev-parse --verify --quiet refs/remotes/origin/main") then
+    local ok, ahead = exec_git("rev-list --count origin/main..HEAD")
+    if ok and ahead ~= "" then facts.ahead = tonumber(ahead) else absent("ahead", "not_reported_by_git") end
+    local behind_ok, behind = exec_git("rev-list --count HEAD..origin/main")
+    if behind_ok and behind ~= "" then facts.behind = tonumber(behind) else absent("behind", "not_reported_by_git") end
+  end
+  -- "Pushed" is the question a coordinator actually asks: is the ref this branch would push to
+  -- present on the remote, and does it already contain HEAD? An absent remote ref is a definite
+  -- `false` (the branch has never been published), not an unmeasured value.
+  if branch and branch ~= "HEAD" then
+    local ref, ref_error = quote("refs/remotes/origin/" .. branch)
+    if not ref then
+      absent("pushed", ref_error)
+    else
+      local exists = exec_git("rev-parse --verify --quiet " .. ref)
+      if exists then
+        local contained = exec_git("merge-base --is-ancestor HEAD " .. ref)
+        if contained then facts.pushed = true
+        else absent("pushed", "remote_containment_unreadable") end
+      else
+        facts.pushed = false
+        facts.pushed_remote = "origin/" .. branch .. " absent"
+      end
+    end
+  else
+    absent("pushed", branch and "detached_head" or "branch_unknown")
+  end
+  -- One `status` read gives both counts, because the two are one measurement of the tree.
+  local status_ok, porcelain = exec_git("status --porcelain --untracked-files=all")
+  if status_ok then
+    local dirty, untracked = 0, 0
+    for line in tostring(porcelain or ""):gmatch("[^\r\n]+") do
+      if line:sub(1, 2) == "??" then untracked = untracked + 1 else dirty = dirty + 1 end
+    end
+    facts.dirty, facts.untracked = dirty, untracked
+  else
+    absent("dirty", "not_reported_by_git")
+    absent("untracked", "not_reported_by_git")
+  end
+  if #unmeasured > 0 then facts.unmeasured = unmeasured end
+  return facts
+end
+
 local function normalized(path)
   local value=tostring(path or ''):gsub('\\','/'):gsub('/$','')
   if platform.os()=='windows' then value=value:lower() end

@@ -22,6 +22,7 @@
     "body_bytes": 4096,
     "sends_per_run": 1
   },
+  "settlement": "self_reported",
   "model": null,
   "reasoning": null
 }

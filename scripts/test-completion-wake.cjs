@@ -35,6 +35,12 @@ let child,mock,wakes=0,delegated=false,runawayDelegated=false,runawayNotice='';
  await until(()=>wakes===2,'failed-child completion wake');await sleep(2500);
  assert.equal(wakes,2,'failed child completion delivered once');
  assert(runawayNotice.includes('"state":"failed"') && runawayNotice.includes('"error":"runaway_guard"'),runawayNotice);
+ // The packet travels with the wake: the coordinator starts from the measured evidence (usage, model,
+ // and the artifact facts of the child's own checkout) instead of fetching it in its own turn. The
+ // hermetic half of this - the facts themselves, from a real worktree - is scripts/test-completion-packet.lua.
+ assert(runawayNotice.includes('Evaluation packet'),runawayNotice.slice(0,600));
+ assert(runawayNotice.includes('"usage"') && runawayNotice.includes('"artifacts"') && runawayNotice.includes('"child"'),
+   'the wake carries the settlement packet: '+runawayNotice.slice(0,600));
  const tasks=await get('/subagents',{action:'list'}),failed=tasks.subagents.find(t=>t.title==='runaway-child');
  assert(failed && failed.state==='failed' && failed.error==='runaway_guard','runaway child state: '+JSON.stringify(failed));
  console.log('completion wake ok (real scheduler, mock inference, deduplication, one failed-child notice, no recursive child)');
