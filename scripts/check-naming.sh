@@ -42,7 +42,7 @@ const names = [
   // operator's `WASM_AGENT_WORKER*` env vars, the node-wide state key `worker` (serve.rs), and the
   // durable `worker:` operation-owner prefix (ui/app.js). `choose_worker` is not listed either:
   // `skills/code-graph/SKILL.md` uses it as an *example* query name, and a skill is out of scope.
-  'workers_count', 'workers_spawned', 'workers_retired', 'worker_count', 'worker_stalled',
+  'workers_count', 'workers_spawned', 'workers_retired', 'control_workers', 'worker_count', 'worker_stalled',
   'live_worker_ids', 'worker_age_ms', 'worker_is_wedged', 'worker_busy_label', 'worker_session',
   'worker_run_id', 'spawn_worker', 'pick_run_worker', 'warm_read_workers', 'max_workers',
   'turn_worker_is_idle', 'worker_loop', 'worker_ui',

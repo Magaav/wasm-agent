@@ -27,8 +27,8 @@ map of who is what, so a thing can be named correctly before it is changed.
 
 Three naming rules follow from the map, and they are the same concern as "one home per rule":
 
-1. a node's execution threads are **node-threads**. `/health`'s `workers`, `workers_count`,
-   `control_workers` and `workers_spawned` fields are the pre-rename names of that array and of the
+1. a node's execution threads are **node-threads**. `/health`'s `workers`, `workers_count`, <!-- naming-check: allow (a naming map prints the pre-rename field names on purpose, so a reader who greps for one finds the new one) -->
+   `control_workers` and `workers_spawned` fields are the pre-rename names of that array and of the <!-- naming-check: allow (same line, same reason: the old field names, printed on purpose) -->
    same count; the code rename is a separate, in-flight change, so prose says node-thread while the
    literal field name stays exactly as the wire has it.
 2. the containment is **sessions -> runs -> turns**: a run belongs to one session, a turn to one run.
