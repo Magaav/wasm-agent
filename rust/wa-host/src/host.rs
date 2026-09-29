@@ -2652,4 +2652,51 @@ mod heartbeat_tests {
         let output = result.expect("shell child should run");
         assert_eq!(output["stdout"], "WASM_AGENT_IN_TURN=1\n");
     }
+
+    #[test]
+    fn shell_child_carries_the_provenance_the_host_knows() {
+        // The commit guard decides by role (`.githooks/pre-commit`, after a child could reach `main`
+        // by exporting `WASM_AGENT_ALLOW_MAIN=1`), so the role has to reach the shell the agent runs
+        // git in. Measured, not read off the code: what the child process actually receives, for a
+        // session's own run, for a subagent task, and for a thread that is neither.
+        let (program, flag) = shell_config();
+        let see = |provenance: Option<crate::subagents::Provenance>| {
+            match provenance {
+                Some(provenance) => crate::subagents::enter_task(crate::subagents::TaskContext {
+                    cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    deadline: None,
+                    sockets: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                    owner: "run:provenance-test".into(),
+                    provenance,
+                }),
+                None => crate::subagents::leave_task(),
+            }
+            let result = run_bounded(program, flag, "env | grep '^WASM_AGENT_PROVENANCE='", "", None);
+            crate::subagents::leave_task();
+            let output = result.expect("shell child should run");
+            output["stdout"].as_str().unwrap_or_default().to_string()
+        };
+        use crate::subagents::Provenance;
+        assert_eq!(
+            see(Some(Provenance::Orchestrator)),
+            "WASM_AGENT_PROVENANCE=orchestrator\n",
+            "a run of a session must reach the shell as `orchestrator`, which is what the guard allows \
+             to commit on main"
+        );
+        assert_eq!(
+            see(Some(Provenance::Child)),
+            "WASM_AGENT_PROVENANCE=child\n",
+            "a bounded child task must reach the shell as `child`, which the guard refuses even when it \
+             exports WASM_AGENT_ALLOW_MAIN"
+        );
+        // A thread with no task context must be told too, with an explicit empty value: the marker is
+        // inherited (`wa-operation` adds env without `env_clear`), so if this case pushed nothing, a
+        // shell started by a host that had inherited `orchestrator` would hand that authority on and
+        // the guard would read it as a run of a session. Empty is the human path in the hook.
+        assert_eq!(
+            see(None),
+            "WASM_AGENT_PROVENANCE=\n",
+            "a thread with no task context must get an empty marker, not silence from the environment"
+        );
+    }
 }

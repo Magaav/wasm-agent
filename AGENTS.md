@@ -17,7 +17,23 @@ Every row above is a **linked worktree of one repo**, whose git dir is
 the source of truth. Before editing: `git pull`; after: commit, push, then pull on the other
 side. Auth is the `github-wasm-agent` SSH host alias. Work happens on a short-lived
 `change/<name>` branch cut from `origin/main` and merged when done; the node's own branch is its
-name. A node never works in the canonical checkout.
+name.
+
+**A node works in its own worktree; the orchestrator session lands in the canonical checkout.**
+The rule used to be one line - "a node never works in the canonical checkout" - and it was written
+after an agent committed to `main` from the wrong tree (`docs/ORCHESTRATION.md`). It stopped the
+mistake by removing the path from everyone, which also removed it from the one session that owns
+the integration decision: the canonical checkout is the only tree whose branch is `main`, so
+merging "nowhere" meant a human step for every landing. The rule by role, from here on:
+
+- A **node's worktree** (any row except the canonical checkout) is for work. It stays on the branch
+  that carries its name and never switches to `main`.
+- The **orchestrator session** - the run the owner is talking to - may merge in the canonical
+  checkout, addressed by absolute path (`git -C <canonical> ...`), never by switching its own
+  worktree's branch onto `main`. The landing procedure is in
+  `skills/parallel-evolution/SKILL.md` ("Landing on `main`").
+- A **child/worker session** may not move `main` at all: its branch is its deliverable.
+  `.githooks/pre-commit` decides this from the host's provenance, not from a flag.
 
 ### Evolving code in parallel
 
@@ -25,8 +41,13 @@ name. A node never works in the canonical checkout.
 per-turn loop (sync → small change → prove it merges → gate → end clean) and the
 convergence/escalation protocol. These rules hold whether or not it is loaded:
 
-- **Your branch is your name** (`git symbolic-ref --short HEAD`); `main` is never a node's name,
-  and a commit to `main` is refused by the hook.
+- **Your branch is your name** (`git symbolic-ref --short HEAD`); `main` is never a node's name.
+  A direct commit on `main` is refused by the hook unless it is a merge or the host says this
+  process is the `orchestrator` (a run of a session); `WASM_AGENT_ALLOW_MAIN=1` is the human's
+  visible override and does not open a direct commit on `main` for a child. That is all it claims:
+  a client-side hook is convenience, not a boundary (`--no-verify`, `core.hooksPath`, `cherry-pick`,
+  `revert`, `rebase`, `update-ref` all skip it). The enforcement point that cannot be skipped is
+  remote-side - branch protection on `origin/main`, or a pre-receive check.
 - **One `change/<name>` per concern**, from current `origin/main`, merged and deleted.
 - **Never move a tree you do not own.**
 - **End every commit with its provenance trailer** (the hook prints the form when one is missing).

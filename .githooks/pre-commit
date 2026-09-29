@@ -12,24 +12,112 @@
 # the same command the suite uses, deliberately: one rule, one implementation.
 set -uo pipefail
 
-# A commit on the integration branch must be a merge. AGENTS.md says agents branch and hand
-# off; the human integrates. Committing directly here is how work ends up "generated inside
-# main" - and it was, several times, by the reviewer rather than an agent. A merge is the rule
-# and an explicit override exists for the times it genuinely is main's own change.
+# A commit on the integration branch must be a merge, or come from the process that owns
+# integration. AGENTS.md says agents branch and hand off; a merge is the rule. Committing directly
+# here is how work ends up "generated inside main" - and it was, several times, by the reviewer rather
+# than an agent. The human keeps the explicit override for the times it genuinely is main's own change,
+# and the node's orchestrator session - the run that holds the whole picture and makes the integration
+# decision - commits as itself.
+#
+# WHAT THIS CLAIMS, EXACTLY: a child task cannot *directly commit* on `main`, and the old
+# WASM_AGENT_ALLOW_MAIN=1 no longer buys it. Nothing more. A client-side hook is convenience, not a
+# boundary, and this one sees only the `git commit` porcelain:
+#   * `git cherry-pick <sha>`, `git revert` and `git rebase --onto` create or move `main` with no hook
+#     consulted at all - measured on this machine's git 2.55.0.windows.3 with instrumented hook
+#     copies (`hooks_ran: []`), and `rebase --onto` moves `main` itself.
+#   * a commit on a detached HEAD is not judged: `git symbolic-ref --short HEAD` is empty, so the
+#     branch case below does not match. That commit does not move `main`, and `git branch -f main` is
+#     refused while `main` is checked out (measured: "cannot force update the branch 'main' used by
+#     worktree at ..."), but from a detached HEAD even that moves `main`, and `git update-ref
+#     refs/heads/main <sha>` moves it from any worktree with no hook consulted (measured) - so "main
+#     cannot move" is not something a client hook can promise.
+#   * a hand-written `.git/MERGE_HEAD` plus a merge-shaped subject is accepted (measured): a merge is
+#     trusted on disk state, because its parents are its provenance. A merge that this hook *refuses*
+#     leaves MERGE_HEAD in place (measured), so the next commit on `main` is judged as a merge too.
+#   * `--no-verify` skips both hooks, and `git -c core.hooksPath=<empty> commit` is the same class.
+# The enforcement point that cannot be skipped is remote-side: branch protection on `origin/main`, or
+# a pre-receive check that refuses a direct update. Until one of those exists, this guard stops the
+# ordinary mistake and the documented way through - not an agent that reaches for other porcelain.
+#
+# WHAT THE AUTHORITY IS: the host's answer about the process. rust/wa-host/src/operations.rs exports
+# WASM_AGENT_PROVENANCE from the thread's own task context for every shell it starts (`orchestrator` =
+# a run of a session, `child` = a bounded subagent task, empty = neither). It replaced an allow-path
+# the committing process typed itself, which proved nothing about who was committing: any child could
+# set WASM_AGENT_ALLOW_MAIN=1 and land on main.
+#
+# RISK, named because this widens a guard that exists for a reason - an agent once committed to `main`
+# from the wrong tree (docs/ORCHESTRATION.md). The authority the host hands out is inherited:
+# `wa-operation` adds `spec.env` without `env_clear`, so every process descended from an orchestrator
+# shell - a terminal, an external agent runtime, a node restarted from that shell - carries
+# orchestrator authority with no flag and no visible trace. The host now pushes an explicit empty
+# value for a thread with no task context, so a shell it starts cannot pass an inherited marker on;
+# the descendants that never re-enter the host are the remaining trust boundary, and the managed node
+# and sentinel (`wa-sentinel/src/instance.rs` clears env down to a system allowlist) are outside it.
 branch="$(git symbolic-ref --short HEAD 2>/dev/null || echo "")"
 case "$branch" in
   main|master)
     merge_head="$(git rev-parse --git-dir)/MERGE_HEAD"
-    if [ ! -f "$merge_head" ] && [ "${WASM_AGENT_ALLOW_MAIN:-0}" != "1" ]; then
-      cat >&2 <<MESSAGE
+    if [ -f "$merge_head" ]; then
+      : # A merge is the normal landing path; its parents are its provenance.
+    else
+      case "${WASM_AGENT_PROVENANCE:-}" in
+        orchestrator)
+          : # The orchestrator session owns the integration decision; it commits as itself.
+          ;;
+        child)
+          cat >&2 <<MESSAGE
 pre-commit: refusing a direct commit on '$branch'.
 
-Work is made on the node's own branch and merged here; that is what keeps "which branch is
-this work on?" answerable. If this really is main's own change (a document, a version bump),
-re-run with WASM_AGENT_ALLOW_MAIN=1 - the override is deliberate, so it shows up in the
-command you ran rather than in the shape of the history.
+  provenance: child - WASM_AGENT_PROVENANCE, set by the host because this process is a bounded
+              subagent task
+  refused:    a child task does not hold the integration decision, so it does not move main
+
+Your branch is the deliverable: commit and push there, and report; the orchestrator merges it.
+WASM_AGENT_ALLOW_MAIN is deliberately not consulted here - it is the human's override, and a child
+exporting it is the case this refusal exists for.
 MESSAGE
-      exit 1
+          exit 1
+          ;;
+        "")
+          if [ "${WASM_AGENT_ALLOW_MAIN:-0}" = "1" ]; then
+            : # The human's deliberate, visible override.
+          else
+            # Note for whoever edits this: the heredocs below EXPAND (they name the branch), so a bare
+            # backtick is command substitution. It already happened once - the refusal printed
+            # "orchestrator: command not found" and lost the word it meant to point at, which is why
+            # scripts/test-main-guard.sh now fails on any shell diagnostic in a refusal.
+            cat >&2 <<MESSAGE
+pre-commit: refusing a direct commit on '$branch'.
+
+  provenance: none - WASM_AGENT_PROVENANCE is unset or empty, so the host did not say this process
+              is a run of a session, and this hook cannot tell who is committing
+  refused:    a direct commit here is the one path that makes "which branch is this work on?"
+              unanswerable
+
+Work is made on the node's own branch and merged here. If this really is main's own change (a
+document, a version bump), or you are the human landing work an agent produced, re-run with
+WASM_AGENT_ALLOW_MAIN=1 - the override is deliberate, so it shows up in the command you ran rather
+than in the shape of the history. The orchestrator session does not need it: the host gives it the
+'orchestrator' provenance.
+MESSAGE
+            exit 1
+          fi
+          ;;
+        *)
+          cat >&2 <<MESSAGE
+pre-commit: refusing a direct commit on '$branch'.
+
+  provenance: unrecognised ('${WASM_AGENT_PROVENANCE}') - the host sets either 'orchestrator' (a
+              session's own run) or 'child' (a subagent task), and this value is neither
+  refused:    a value this guard cannot classify must not open main
+
+If you are a person at a terminal, unset WASM_AGENT_PROVENANCE and re-run with
+WASM_AGENT_ALLOW_MAIN=1. If you are an agent, your branch is the deliverable: commit and push it
+there and report; the orchestrator merges it.
+MESSAGE
+          exit 1
+          ;;
+      esac
     fi
     ;;
 esac

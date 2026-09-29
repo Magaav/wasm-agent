@@ -1367,6 +1367,13 @@ fi
 bash scripts/check-naming.sh
 node scripts/test-naming-check.cjs
 node scripts/test-execution-terminology.cjs
+# Who may commit on `main` is decided by the host's answer about the process, not by a flag the
+# committing process types: the orchestrator session is allowed, a child is refused even when it
+# exports WASM_AGENT_ALLOW_MAIN=1, a person at a terminal keeps the visible override, and a merge is
+# still the normal landing path. Run directly rather than piped, so a failing check prints its own
+# name and what it saw instead of leaving one swallowed line. No build: its fixture is a throwaway
+# repository on `main` (the host export itself is measured by the wa-host test named in that file).
+bash scripts/test-main-guard.sh
 # The window and this CLI offer the same `/` commands, and `/new` was missing from the CLI for as long
 # as nothing checked it. The rule is the window's list against the REPL's, plus the one sentence that
 # is deliberately written twice (the `/merge` brief).

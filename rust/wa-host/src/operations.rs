@@ -61,6 +61,25 @@ fn configure_spec(mut spec: Spec, cwd: &str, seconds: u64, owner: String, promot
     if crate::serve::in_turn() {
         spec.env.push(("WASM_AGENT_IN_TURN".into(), "1".into()));
     } // naming-check: allow (installed deploy scripts)
+    // Who this process is, so a guard can decide by role. The host knows it from the thread's own
+    // task context (a run of a session is `orchestrator`, a subagent task is `child`), and the
+    // commit guard in `.githooks/pre-commit` reads it: that is what lets the node's orchestrator
+    // session land on `main` while a child cannot get there by exporting the old
+    // `WASM_AGENT_ALLOW_MAIN` flag, which said nothing about who was committing. Pushed beside the
+    // turn boolean so the bash tool and `operation start` cannot disagree about the answer.
+    //
+    // Pushed for *every* shell, including an explicit empty value when this thread has no task
+    // context, because the marker is inherited: `wa-operation` adds `spec.env` without `env_clear`,
+    // so a shell started from a run's own shell hands `orchestrator` down to everything below it. An
+    // empty value stops a host-started shell from passing on a marker the *host* did not just
+    // decide - and the hook reads empty exactly as it reads unset (the human path). It does not
+    // reach a process that never re-enters the host: a terminal, an external agent runtime or a node
+    // restarted from an orchestrator shell keeps what it inherited. That residual trust boundary is
+    // named in `.githooks/pre-commit` rather than papered over.
+    spec.env.push((
+        "WASM_AGENT_PROVENANCE".into(),
+        crate::subagents::current_provenance().unwrap_or_default().to_string(),
+    ));
     spec
 }
 pub fn foreground(
