@@ -29,10 +29,12 @@ fn command_result(manager: &Manager, id: &str, mut state: Value) -> Value {
 pub fn manager() -> &'static Manager {
     static MANAGER: OnceLock<Manager> = OnceLock::new();
     MANAGER.get_or_init(|| {
-        Manager::new(
-            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
-                .join(".wasm-agent/operations"),
-        )
+        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
+        Manager::new(home.join(".wasm-agent/operations"))
+            // A shell whose recorded directory is gone starts in the agent home, and says so in
+            // its result, instead of inheriting a directory that no longer exists (a released
+            // worktree is the ordinary way this happens). See `Manager::with_fallback_cwd`.
+            .with_fallback_cwd(home)
         // A command the agent runs can print the node's own key; the operation's stdout is
         // written as it arrives, so redact before the write, not only in the transcript.
         .with_env_secrets()

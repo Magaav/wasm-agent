@@ -66,9 +66,143 @@ pub struct Manager {
     /// The node's own secret values, redacted from every operation's output before it is
     /// written or returned. Empty unless a caller opts in with `with_env_secrets`.
     secrets: Arc<Vec<Vec<u8>>>,
+    /// The directory a shell may start in when the caller's directory is gone. `None` means the
+    /// environment's home, resolved when a substitution is actually needed.
+    fallback: Option<PathBuf>,
 }
 fn error(message: impl ToString) -> io::Error {
     io::Error::other(message.to_string())
+}
+/// What a shell will actually start in, and what to say when that is not what the caller named.
+///
+/// A caller names either a recorded directory (`Spec.cwd`) or nothing at all, meaning "the node's
+/// own working directory". Both can stop existing while the process that recorded them keeps
+/// running: a session worktree is released, a deploy worktree is pruned, and nothing tells the
+/// next shell. On unix a shell whose starting directory is gone does not fail cleanly at its
+/// command - it prints `shell-init: error retrieving current directory` and then treats every
+/// relative path as unresolvable, so work that would have succeeded dies on the way in and the
+/// result carries no reason. The directory is therefore decided here, in the one place every
+/// caller passes through, and any substitution is recorded on the operation so the result can
+/// never look as if the recorded directory had been used.
+struct StartDirectory {
+    /// What the spawned process gets. Empty still means "inherit the node's own directory".
+    used: String,
+    /// What the caller named, kept verbatim for the record.
+    requested: String,
+    /// Present exactly when `used` is not what the caller named.
+    substitution: Option<Value>,
+}
+fn is_usable_directory(path: &Path) -> bool {
+    path.is_dir()
+}
+/// Directories a shell may start in when the caller's is gone, best first: what the host named
+/// explicitly (the agent home), then the home the environment reports, then the filesystem root.
+fn fallback_candidates(explicit: Option<&Path>) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(path) = explicit {
+        candidates.push(path.to_path_buf());
+    }
+    for key in ["HOME", "USERPROFILE"] {
+        if let Ok(value) = std::env::var(key) {
+            if !value.trim().is_empty() {
+                candidates.push(PathBuf::from(value));
+            }
+        }
+    }
+    candidates.push(PathBuf::from("/"));
+    candidates
+}
+fn substitute(requested: &str, reason: &str, detail: &str, explicit: Option<&Path>) -> StartDirectory {
+    let used = fallback_candidates(explicit)
+        .into_iter()
+        .find(|candidate| is_usable_directory(candidate));
+    let Some(used) = used else {
+        // No candidate directory exists, so there is nothing honest to substitute: the caller's
+        // value is kept (the spawn reports its own failure) and the reason is recorded rather
+        // than a made-up destination.
+        return StartDirectory {
+            used: requested.to_string(),
+            requested: requested.to_string(),
+            substitution: Some(json!({"requested":requested,"used":Value::Null,"reason":reason,"detail":detail})),
+        };
+    };
+    let used = used.to_string_lossy().to_string();
+    StartDirectory {
+        used: used.clone(),
+        requested: requested.to_string(),
+        substitution: Some(json!({"requested":requested,"used":used,"reason":reason,"detail":detail})),
+    }
+}
+/// Decide the directory a shell starts in. `node_cwd` is this process's own directory as its
+/// caller resolved it, which may be unknown (deleted on unix) or stale; an empty `requested`
+/// means the node's own directory.
+fn resolve_start_directory(
+    requested: &str,
+    node_cwd: Option<&Path>,
+    explicit_fallback: Option<&Path>,
+) -> StartDirectory {
+    if !requested.is_empty() {
+        let path = Path::new(requested);
+        if is_usable_directory(path) {
+            return StartDirectory {
+                used: requested.to_string(),
+                requested: requested.to_string(),
+                substitution: None,
+            };
+        }
+        return if path.exists() {
+            substitute(
+                requested,
+                "requested_starting_directory_is_not_a_directory",
+                "the starting directory this call recorded is not a directory",
+                explicit_fallback,
+            )
+        } else {
+            substitute(
+                requested,
+                "recorded_starting_directory_missing",
+                "the starting directory this call recorded no longer exists",
+                explicit_fallback,
+            )
+        };
+    }
+    match node_cwd {
+        Some(path) if is_usable_directory(path) => StartDirectory {
+            used: String::new(),
+            requested: String::new(),
+            substitution: None,
+        },
+        _ => substitute(
+            "",
+            "node_working_directory_unavailable",
+            "this call named no directory and the node's own working directory is gone",
+            explicit_fallback,
+        ),
+    }
+}
+/// The sentence an operator reads in a result. It names both directories, because "it ran
+/// somewhere else" without saying where is the same silence the substitution is meant to break.
+fn substitution_note(substitution: &Value) -> String {
+    let requested = substitution["requested"].as_str().unwrap_or("");
+    let reason = substitution["reason"].as_str().unwrap_or("unknown");
+    let detail = substitution["detail"].as_str().unwrap_or("unknown");
+    let named = if requested.is_empty() {
+        "the node's own working directory".to_string()
+    } else {
+        requested.to_string()
+    };
+    match substitution["used"].as_str() {
+        Some(used) => format!(
+            "cwd_substituted ({reason}): {detail}, so this shell did not start in {named}; it \
+             started in {used} instead, and every relative path and command-level cd resolved from \
+             {used}, not from the recorded directory."
+        ),
+        None => format!(
+            "cwd_unavailable ({reason}): {detail}, and no fallback directory exists on this node, \
+             so the shell was spawned with the recorded directory anyway and may fail before it \
+             runs anything."
+        ),
+    }
 }
 const TIMING_PHASES: [&str; 6] = [
     "setup_ms",
@@ -148,6 +282,7 @@ impl Manager {
             root: root.into(),
             entries: Arc::new(Mutex::new(HashMap::new())),
             secrets: Arc::new(Vec::new()),
+            fallback: None,
         }
     }
     /// Redact the node's own secret values from every operation's output. The values come
@@ -162,7 +297,14 @@ impl Manager {
         self.secrets = Arc::new(secrets.into_iter().map(String::into_bytes).collect());
         self
     }
-    pub fn start(&self, spec: Spec) -> io::Result<String> {
+    /// Name the directory a shell may start in when the caller's directory is gone. The agent
+    /// home is the right answer for every caller in this repository, so it is passed explicitly
+    /// rather than guessed from the process's own directory - which is the thing that may be gone.
+    pub fn with_fallback_cwd(mut self, path: impl Into<PathBuf>) -> Self {
+        self.fallback = Some(path.into());
+        self
+    }
+    pub fn start(&self, mut spec: Spec) -> io::Result<String> {
         if spec.timeout.is_zero()
             || spec.timeout > Duration::from_secs(86400)
             || spec.output_limit == 0
@@ -170,6 +312,17 @@ impl Manager {
         {
             return Err(error("invalid_operation_budget"));
         }
+        // The starting directory is decided before the accepted record is written, so the record,
+        // the output and the result all carry where the shell really ran rather than what was
+        // asked for. A caller that named nothing keeps naming nothing when the node's own
+        // directory is usable: an unchanged call stays byte-for-byte unchanged.
+        let node_cwd = std::env::current_dir().ok();
+        let start_directory = resolve_start_directory(
+            &spec.cwd,
+            node_cwd.as_deref(),
+            self.fallback.as_deref(),
+        );
+        spec.cwd = start_directory.used.clone();
         let mut entries = self.entries.lock().map_err(error)?;
         if entries
             .values()
@@ -200,7 +353,11 @@ impl Manager {
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         );
         let dir = self.root.join(&id);
-        let state = json!({"operation_id":id,"owner":spec.owner,"cwd":spec.cwd,"state":"accepted","settled":false,"timeout_ms":spec.timeout.as_millis() as u64,"cleanup_budget_ms":CLEANUP_MS,"containment":Process::containment(),"stdout_path":dir.join("stdout").to_string_lossy(),"stderr_path":dir.join("stderr").to_string_lossy(),"output_bytes":0,"timing":timing_payload()});
+        let mut state = json!({"operation_id":id,"owner":spec.owner,"cwd":spec.cwd,"cwd_requested":start_directory.requested,"state":"accepted","settled":false,"timeout_ms":spec.timeout.as_millis() as u64,"cleanup_budget_ms":CLEANUP_MS,"containment":Process::containment(),"stdout_path":dir.join("stdout").to_string_lossy(),"stderr_path":dir.join("stderr").to_string_lossy(),"output_bytes":0,"timing":timing_payload()});
+        if let Some(substitution) = &start_directory.substitution {
+            state["cwd_substitution"] = substitution.clone();
+            state["cwd_note"] = json!(substitution_note(substitution));
+        }
         let entry = Arc::new(Entry {
             cancel: AtomicBool::new(false),
             state: Mutex::new(state),
