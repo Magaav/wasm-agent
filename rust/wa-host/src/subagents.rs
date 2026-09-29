@@ -390,6 +390,31 @@ impl Manager {
         tasks.values().filter(|task| !task.settled).count()
     }
 
+    /// A durable child task in `session` that this process does not know about and
+    /// that has not settled - the one thing the in-memory chain cannot see.
+    ///
+    /// The directory name is the task id (a record whose id does not match its
+    /// directory is refused as corrupt at boot), so the name identifies the
+    /// occupant without parsing. The session id filters the file before it is
+    /// parsed, which keeps a runtime home with many records to one read per record
+    /// and a parse only for the records that name this session.
+    fn unaccounted_session_task(&self, session: &str, tasks: &HashMap<String, Task>) -> Option<String> {
+        if session.is_empty() { return None; }
+        let needle = format!("\"{session}\"");
+        let entries = std::fs::read_dir(&self.inner.root).ok()?;
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if tasks.contains_key(&name) { continue; }
+            let Ok(text) = std::fs::read_to_string(entry.path().join("record.json")) else { continue };
+            if !text.contains(&needle) { continue; }
+            let Ok(value) = serde_json::from_str::<Value>(&text) else { continue };
+            if value["session_id"].as_str() != Some(session) { continue; }
+            if value["settled"].as_bool().unwrap_or(true) { continue; }
+            return Some(name);
+        }
+        None
+    }
+
     fn start(&self, spec: &Value) -> Result<Value, String> {
         if self.runner.get().is_none() {
             return Err("subagent_runtime_unavailable".into());
@@ -456,6 +481,18 @@ impl Manager {
             if previous.state == "unknown" { return Err("predecessor_unknown".into()); }
             if tasks.values().any(|task| task.spec["after_id"].as_str() == Some(after)) {
                 return Err("session_tail_changed".into());
+            }
+            // The chain above is exactly as complete as this process's own map,
+            // and that map is read once, at boot. A second process sharing the
+            // runtime home keeps its own map, so a successor it has never seen is
+            // not evidence that the child session has no tail: admitting on that
+            // belief is how two live runs could share one session and one
+            // transcript. The durable record is the authority, so a live task in
+            // this session that this process cannot account for refuses the
+            // second writer instead of duplicating it.
+            let session = spec["session_id"].as_str().unwrap_or_default();
+            if let Some(occupant) = self.unaccounted_session_task(session, &tasks) {
+                return Err(format!("session_tail_unobserved:{occupant}"));
             }
         }
         let queued = tasks.values().filter(|task| !task.settled && task.state == "accepted").count();
@@ -1092,6 +1129,92 @@ mod tests {
         assert_eq!(record["spec"]["allowed_tools"], json!(["read"]));
         assert_eq!(record["spec"]["model"], "approved-model");
         assert_eq!(manager.continue_session(&request).unwrap()["subagent_id"], "continued");
+    }
+
+    /// A child session has one writer. The chain that serialized follow-ups lived
+    /// only in this process's map, and that map is read once, at boot: a second
+    /// boot on the same runtime home could admit a second live run for a session
+    /// whose live successor it had never seen - overwriting the live task's record
+    /// and putting two runs into one transcript. The durable record now refuses it.
+    #[test]
+    fn a_second_boot_cannot_admit_a_second_live_run_in_one_child_session() {
+        let root = temp_root("shared-child-session");
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let first = Arc::new(Manager::with_root(root.clone(), 4, 8));
+        let _ = first.runner.set({
+            let gate = gate.clone();
+            Arc::new(move |receipt: &str| {
+                let value: Value = serde_json::from_str(receipt).unwrap_or(Value::Null);
+                if value["subagent_id"] == "follow-up" {
+                    let (lock, cond) = &*gate;
+                    let mut open = lock.lock().unwrap();
+                    while !*open {
+                        open = cond.wait(open).unwrap();
+                    }
+                }
+                Ok(json!({"state": "completed"}))
+            })
+        });
+        let mut initial = spec("initial-child", "alice", "");
+        initial["session_id"] = json!("child-session-shared");
+        first.start(&initial).expect("start");
+        first.await_task("initial-child", "alice", 5_000).expect("await");
+
+        // The second boot reads the durable records once, before any follow-up
+        // exists; its map can never learn about one admitted later by the first.
+        let second = Manager::with_root(root.clone(), 4, 8);
+        let _ = second.runner.set(Arc::new(|_| Ok(json!({"state": "completed"}))));
+        second.recover();
+
+        // The first boot queues its follow-up: the same child session, chained to
+        // the settled child, still running while the second boot tries to attach.
+        let receipt = first
+            .continue_session(&json!({"id": "initial-child", "owner_user": "alice",
+                "new_id": "follow-up", "text": "the queued follow-up",
+                "idempotency_key": "first-key"}))
+            .expect("follow-up");
+        assert_eq!(receipt["subagent_id"], "follow-up");
+        assert_eq!(receipt["session_id"], "child-session-shared");
+        assert_eq!(receipt["after_id"], "initial-child");
+        let record = || -> Value {
+            serde_json::from_str(&std::fs::read_to_string(root.join("follow-up/record.json")).unwrap())
+                .unwrap()
+        };
+        assert_eq!(record()["settled"], false, "the follow-up is live: {}", record());
+
+        // A second writer for that session is refused, never silently admitted.
+        let refusal = second
+            .continue_session(&json!({"id": "initial-child", "owner_user": "alice",
+                "new_id": "second-writer", "text": "a second writer",
+                "idempotency_key": "second-key"}))
+            .unwrap_err();
+        assert_eq!(refusal, "session_tail_unobserved:follow-up");
+        assert!(second.find("second-writer", "alice").is_err(), "a refused writer is not admitted");
+        assert!(
+            std::fs::read_to_string(root.join("second-writer/record.json")).is_err(),
+            "a refused writer must not write over the live task's record"
+        );
+        assert_eq!(record()["spec"]["prompt"], "the queued follow-up");
+
+        // The owner may still queue its next follow-up behind the live one: the
+        // documented `message` behaviour is preserved.
+        let queued = first
+            .continue_session(&json!({"id": "initial-child", "owner_user": "alice",
+                "new_id": "queued-behind", "text": "queued behind the live follow-up",
+                "idempotency_key": "queued-key"}))
+            .expect("queued");
+        assert_eq!(queued["subagent_id"], "queued-behind");
+        assert_eq!(queued["after_id"], "follow-up");
+
+        {
+            let (lock, cond) = &*gate;
+            *lock.lock().unwrap() = true;
+            cond.notify_all();
+        }
+        for id in ["follow-up", "queued-behind"] {
+            let settled = first.await_task(id, "alice", 5_000).expect("await");
+            assert_eq!(settled["state"], "completed");
+        }
     }
 
     #[test]

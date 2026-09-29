@@ -188,6 +188,19 @@ No transcript is summarized, deleted or rewritten by inspection.
   subagent pool, so a parent waiting for a child does not hold the capacity that
   runs the child. Because children do not spawn children by default, there is no
   nested-wait deadlock.
+- **A child session has one writer, durably.** A `message` continues *its* child's
+  session: the new task chains to the tail (`after_id`) and waits for that task to
+  settle before it takes an execution slot, so a queued follow-up inherits the
+  session's transcript by design and never runs beside its predecessor. The chain
+  is additionally checked against the durable records, not only against this
+  process's map: an unsettled task in the same session that this process cannot
+  account for - a second process sharing the runtime home whose successor was
+  admitted after this process read the records - refuses the second writer with
+  `session_tail_unobserved:<subagent_id>` instead of sharing the session. The
+  refusal names the occupant and is retryable once that task settles; a fresh
+  child, which gets its own session, is unaffected. The check reads the records of
+  this runtime home on a continuation, so its cost grows with the number of stored
+  child records.
 - Cancellation is a **request** until settlement. The cancel flag is read by the
   provider reader at each streamed chunk (a native effect on I/O), and the child
   loop checks it between steps. A cancel that arrives while the provider is quiet
