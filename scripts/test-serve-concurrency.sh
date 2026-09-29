@@ -196,7 +196,10 @@ case "$code:$body" in
   503:*node_thread_stalled*) echo "  ok: a blocked request is refused with a reason, not left hanging" ;;
   *) echo "  FAIL: expected 503 node_thread_stalled, got $code $body"; exit 1 ;;
 esac
-echo "  ok: a stalled node-thread is visible, and survivable"
+# The phrase below keeps the older spelling of the noun on purpose: `scripts/test.sh` greps this
+# exact line out of this script's log, and that file is not part of this rename (see the report).
+# The node-thread it reports is a node-thread; only the gate's search string is old.
+echo "  ok: a stalled worker is visible, and survivable"
 
 # ---------------------------------------------------------------------------
 # The pool, hot-swappable: a read must not wait for a turn, and the interpreter that made that possible
