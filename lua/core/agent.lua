@@ -1171,7 +1171,16 @@ function M:run_body(text, images)
   -- paid. This narrows the request's own output cap to what is left, refuses the
   -- call before it is made when nothing is left, and returns the reservation to
   -- charge if the provider reports no usable usage at all.
-  local function child_call_budget(context_tokens)
+  --
+  -- `max_tokens` bounds the child's *cumulative billed* tokens, not one request:
+  -- every round re-sends the whole context, so a long child spends its cap many
+  -- times over and is finally refused here, mid-run, because its own next request
+  -- no longer fits what is left. Two bare numbers make that look like a mis-sized
+  -- limit - a 1.8 KB delegated prompt against a 170k "prompt estimate" - so the
+  -- refusal names its own provenance: the declared cap, the child's own billed
+  -- usage, the source of the estimate, the round and the model. Nothing here is a
+  -- new limit; `remaining_tokens` is arithmetic the reader can now check.
+  local function child_call_budget(context_tokens, context_source, round)
     if not child_limits then return nil, nil end
     local opts = {}
     local rates = provider.rates(self.model)
@@ -1179,14 +1188,28 @@ function M:run_body(text, images)
     local max_output = provider.budget(self.model).output or 0
     if max_output <= 0 then max_output = math.huge end
     if child_limits.max_tokens then
-      local remaining = child_limits.max_tokens - (totals.total or 0)
-      if remaining <= 0 then error("subagent_token_budget: exhausted before the call") end
+      local used = totals.total or 0
+      local remaining = child_limits.max_tokens - used
+      -- Both numbers travel with their origin: `used_tokens` is what this child's
+      -- own provider calls reported (plus any conservative reservation charged for
+      -- a response without usage), and the estimate is this child's own next
+      -- request - its system prompt, tool schemas and its own transcript.
+      local facts = ", max_tokens=" .. tostring(child_limits.max_tokens) ..
+        ", used_tokens=" .. tostring(used) .. " (this child's own calls)" ..
+        ", estimate_source=" .. tostring(context_source or "estimate") ..
+        ", round=" .. tostring(round or 0) .. ", model=" .. tostring(self.model)
+      if remaining <= 0 then
+        error("subagent_token_budget: exhausted before the call " ..
+          "(used_tokens=" .. tostring(used) .. ", max_tokens=" ..
+          tostring(child_limits.max_tokens) .. ", round=" .. tostring(round or 0) ..
+          ", model=" .. tostring(self.model) .. ")")
+      end
       -- The prompt alone must fit: if it does not, the call is refused before it
       -- is made, so an oversized input costs zero provider calls.
       if reserved_prompt >= remaining then
         error("subagent_token_budget: the prompt exceeds the remaining budget " ..
           "(estimated_prompt_tokens=" .. tostring(reserved_prompt) ..
-          ", remaining_tokens=" .. tostring(remaining) .. ")")
+          ", remaining_tokens=" .. tostring(remaining) .. facts .. ")")
       end
       max_output = math.min(max_output, remaining - reserved_prompt)
       if max_output <= 0 then error("subagent_token_budget: no output budget remains") end
@@ -1305,7 +1328,7 @@ function M:run_body(text, images)
       context_tokens,context_source=self:context_tokens(messages)
       if capacity>0 and context_tokens>=capacity then error('context_overflow: steering exceeds capacity; transcript preserved') end
     end
-    local budget_opts, budget_reserved = child_call_budget(context_tokens)
+    local budget_opts, budget_reserved = child_call_budget(context_tokens, context_source, round)
     local call_opts = {session_id=self.session_id,run_id=self.run_id,round=round,context_tokens=context_tokens,
        context={estimate_source=context_source,summary_watermark=(memory.session(self.session_id) or {}).summarized_until or 0}}
     for key, value in pairs(budget_opts or {}) do call_opts[key] = value end
@@ -1329,7 +1352,7 @@ function M:run_body(text, images)
       if consume_steering()>0 then
         context_tokens,context_source=self:context_tokens(messages)
         if capacity>0 and context_tokens>=capacity then error('context_overflow: steering exceeds capacity; transcript preserved') end
-        budget_opts,budget_reserved=child_call_budget(context_tokens)
+        budget_opts,budget_reserved=child_call_budget(context_tokens,context_source,round)
         for key,value in pairs(budget_opts or {}) do call_opts[key]=value end
         call_opts.context_tokens=context_tokens
       end
@@ -1354,7 +1377,7 @@ function M:run_body(text, images)
         messages = self:build_context()
         consume_steering()
         context_tokens, context_source = self:context_tokens(messages)
-        budget_opts,budget_reserved=child_call_budget(context_tokens)
+        budget_opts,budget_reserved=child_call_budget(context_tokens,context_source,round)
         for key,value in pairs(budget_opts or {}) do call_opts[key]=value end
         call_opts.context_tokens = context_tokens
         call_opts.context = {estimate_source=context_source,
