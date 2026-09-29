@@ -540,3 +540,157 @@ fn a_secret_split_across_the_read_buffer_is_redacted() {
     assert!(!on_disk.contains("SECRETVALUE"), "the split secret is on disk");
     fs::remove_dir_all(root).unwrap();
 }
+
+// ---- the starting directory ---------------------------------------------------------------
+//
+// A shell that starts in a directory that no longer exists does not fail at its command, it
+// fails before it: on unix it prints `shell-init: error retrieving current directory:
+// getcwd: cannot access parent directories` and then treats every relative path as
+// unresolvable. Two shapes reach that state, and both are exercised here: a recorded path that
+// was deleted (a released session worktree is the ordinary case) and a node whose *own*
+// directory was deleted while the process kept running.
+
+/// (a) the command still runs, (b) the result states the substitution, and the recorded path is
+/// never claimed as the directory that was used.
+#[test]
+fn a_deleted_starting_directory_is_substituted_and_stated_in_the_result() {
+    let (m, root) = fixture();
+    let fallback = root.join("fallback");
+    let recorded = root.join("recorded-worktree");
+    fs::create_dir_all(&fallback).unwrap();
+    fs::create_dir_all(&recorded).unwrap();
+    let m = m.with_fallback_cwd(&fallback);
+    let mut spec = shell("printf started");
+    spec.cwd = recorded.to_string_lossy().to_string();
+    fs::remove_dir_all(&recorded).unwrap();
+    let id = m.start(spec).unwrap();
+    let s = settled(&m, &id);
+    let recorded_text = recorded.to_string_lossy().to_string();
+    let fallback_text = fallback.to_string_lossy().to_string();
+    assert_eq!(s["ok"], true, "the shell did not run its command: {s}");
+    assert_eq!(s["stdout"], "started", "{s}");
+    assert_eq!(s["cwd_requested"], recorded_text.as_str(), "{s}");
+    assert_eq!(s["cwd_substitution"]["requested"], recorded_text.as_str(), "{s}");
+    assert_eq!(s["cwd_substitution"]["used"], fallback_text.as_str(), "{s}");
+    assert_eq!(
+        s["cwd_substitution"]["reason"],
+        "recorded_starting_directory_missing",
+        "{s}"
+    );
+    assert_eq!(
+        s["cwd"], fallback_text.as_str(),
+        "the recorded directory must not be reported as the one that was used: {s}"
+    );
+    let note = s["cwd_note"].as_str().unwrap_or("");
+    assert!(note.contains(&recorded_text), "the note must name what was asked for: {note}");
+    assert!(note.contains(&fallback_text), "the note must name where it ran: {note}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// (c) a directory that exists is unchanged: the shell starts in it, the recorded path is
+/// reported as the one used, and nothing claims a substitution.
+#[test]
+fn a_usable_starting_directory_is_unchanged() {
+    let (m, root) = fixture();
+    let kept = root.join("kept");
+    let fallback = root.join("fallback");
+    fs::create_dir_all(&kept).unwrap();
+    fs::create_dir_all(&fallback).unwrap();
+    // The marker is only reachable from that directory, so reading it is evidence about where
+    // the shell actually started - not only about what the record says.
+    fs::write(kept.join("marker.txt"), "in the recorded directory").unwrap();
+    let m = m.with_fallback_cwd(&fallback);
+    let mut spec = shell("cat marker.txt");
+    spec.cwd = kept.to_string_lossy().to_string();
+    let id = m.start(spec).unwrap();
+    let s = settled(&m, &id);
+    let kept_text = kept.to_string_lossy().to_string();
+    assert_eq!(s["ok"], true, "{s}");
+    assert_eq!(s["stdout"], "in the recorded directory", "{s}");
+    assert_eq!(s["cwd"], kept_text.as_str(), "{s}");
+    assert_eq!(s["cwd_requested"], kept_text.as_str(), "{s}");
+    assert!(s["cwd_substitution"].is_null(), "an unchanged call claimed a substitution: {s}");
+    assert!(s["cwd_note"].is_null(), "{s}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The peer shape from the field report: the call names no directory, so the shell inherits the
+/// node's own - which is gone. `node_cwd` is a parameter rather than a read of this process, so
+/// the case stays testable: a process's own directory is process-global, and this platform
+/// refuses to remove a directory that is a process's working directory at all.
+#[test]
+fn an_unavailable_node_working_directory_is_substituted() {
+    let root = std::env::temp_dir().join(format!(
+        "wa-operation-startdir-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let fallback = root.join("fallback");
+    let here = root.join("here");
+    let gone = root.join("gone");
+    fs::create_dir_all(&fallback).unwrap();
+    fs::create_dir_all(&here).unwrap();
+    let substituted = resolve_start_directory("", Some(&gone), Some(&fallback));
+    let fallback_text = fallback.to_string_lossy().to_string();
+    assert_eq!(substituted.used, fallback_text);
+    let substitution = substituted.substitution.as_ref().unwrap();
+    assert_eq!(substitution["reason"], "node_working_directory_unavailable");
+    assert_eq!(substitution["used"], fallback_text.as_str());
+    let note = substitution_note(substitution);
+    assert!(note.contains(&fallback_text), "{note}");
+    assert!(
+        note.contains("the node's own working directory"),
+        "a call that named nothing must say so rather than name a path it never had: {note}"
+    );
+    // An ordinary call, with a node directory that exists, keeps today's behaviour exactly.
+    let unchanged = resolve_start_directory("", Some(&here), Some(&fallback));
+    assert_eq!(unchanged.used, "");
+    assert!(unchanged.substitution.is_none());
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A recorded path that exists but is not a directory is a different failure from a deleted one,
+/// and it must not be reported as "missing".
+#[test]
+fn a_recorded_starting_directory_that_is_a_file_says_so() {
+    let root = std::env::temp_dir().join(format!(
+        "wa-operation-startdir-file-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let fallback = root.join("fallback");
+    fs::create_dir_all(&fallback).unwrap();
+    let file = root.join("not-a-directory");
+    fs::write(&file, "x").unwrap();
+    let resolved = resolve_start_directory(
+        &file.to_string_lossy(),
+        Some(&fallback),
+        Some(&fallback),
+    );
+    assert_eq!(resolved.used, fallback.to_string_lossy());
+    assert_eq!(
+        resolved.substitution.as_ref().unwrap()["reason"],
+        "requested_starting_directory_is_not_a_directory"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The two sentences an operator reads. Neither may leave out where the shell actually ran; the
+/// second is only produced when even `/` is not a directory, which is why it is asserted here
+/// directly instead of through a spawn.
+#[test]
+fn the_substitution_sentence_names_both_directories() {
+    let with_fallback = json!({"requested":"/local/colmeio","used":"/home/victor",
+        "reason":"recorded_starting_directory_missing",
+        "detail":"the starting directory this call recorded no longer exists"});
+    let note = substitution_note(&with_fallback);
+    assert!(note.contains("/local/colmeio"), "{note}");
+    assert!(note.contains("/home/victor"), "{note}");
+    assert!(note.contains("resolved from /home/victor"), "{note}");
+    let without_fallback = json!({"requested":"","used":Value::Null,
+        "reason":"node_working_directory_unavailable",
+        "detail":"this call named no directory and the node's own working directory is gone"});
+    let note = substitution_note(&without_fallback);
+    assert!(note.contains("no fallback directory exists"), "{note}");
+    assert!(!note.contains("it started in"), "{note}");
+}

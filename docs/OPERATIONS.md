@@ -70,6 +70,20 @@ reconciliation, not automatic replay; lack of attachment is not proof of death. 
   Forced cleanup has a separately reported **1000 ms** allowance, not one per pipe.
   This is a soft real-time bound subject to OS scheduling, not a hard-real-time OS.
 * stdin is closed. Interactive PTYs are not implemented by this interface.
+* The starting directory is decided before the accepted record is written, and a directory that
+  no longer exists is substituted rather than inherited. A caller either names one (the `bash`
+  tool's `cwd`, or `operation start`'s `cwd`) or names nothing, which means the node's own
+  working directory. Either can be gone while the node keeps running - a released session worktree
+  is the ordinary case. Unix then does not fail at the command, it fails *before* it: the shell
+  prints `shell-init: error retrieving current directory: getcwd: cannot access parent
+  directories`, treats every relative path as unresolvable, and a call that would have worked
+  returns an empty stdout with no reason. The operation therefore records `cwd_requested` (what the
+  caller named, `""` for the node's own), keeps `cwd` as the directory actually used, and, when the
+  two differ, adds `cwd_substitution` (`requested`, `used`, `reason`, `detail`) and `cwd_note` - one
+  sentence naming both directories. The fallback is the agent home (then the environment's home,
+  then `/`); when even that is not a directory, `used` is `null`, the caller's value is kept and the
+  spawn reports its own failure instead of a destination that was invented. A directory that exists
+  is unchanged: `cwd` is the one that was asked for and no substitution is claimed.
 * Captured output is retained incrementally on disk, with a combined 8 MiB default
   per-operation limit (64 MiB API maximum). Crossing it terminates execution and
   reports `output_limit_exceeded`, never silent truncation. In-memory result tails
@@ -190,9 +204,13 @@ is about 29 ms here; it cannot explain the field audit's 88.2-second bash p95 or
 
 * `cargo test --manifest-path rust/Cargo.toml -p wa-operation --offline`: real children, inherited pipes, both
   streams, deadline, cancellation, output limits, quiet work, parallel inheritance,
-  cursor reads, failed launch and restart ambiguity.
+  cursor reads, failed launch and restart ambiguity, and the starting directory (a
+  deleted one is substituted and stated; one that exists is untouched).
 * `scripts/test-exec-timeout.lua`: same scenarios through the real host and Lua
   outcome projection, included in `scripts/test.sh`.
+* `scripts/test-start-directory.lua`: a deleted starting directory and an existing one
+  through the real host, the Lua-projected result, and `operation start`/`await`; the
+  marker it reads back only resolves from the directory the shell actually started in.
 * `scripts/test-jobs.cjs`: real sentinel and Chrome event delivery; no paid inference.
 * `scripts/test-operation-control.cjs`: a real tool holds the run worker while
   another interpreter lists/reads/cancels it; the run then continues (local mock

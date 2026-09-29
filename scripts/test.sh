@@ -1107,6 +1107,13 @@ WA_SCRIPT=scripts/test-commentary-stream.lua "$BIN" --db "$DB.commentary-stream"
 # itself. The deadline is set short here so the check takes seconds, not minutes.
 WASM_AGENT_EXEC_TIMEOUT_SECONDS=2 WA_SCRIPT=scripts/test-exec-timeout.lua "$BIN" --db "$DB.exec" | grep "exec timeout ok"
 
+# A shell must not die on the way in because the directory it was told to start in is gone: a
+# released worktree is the ordinary way that happens, and on unix the shell then splits on
+# `shell-init: error retrieving current directory` with an empty stdout. This runs the real host,
+# so the substitution has to reach the result the caller reads, and a directory that exists has to
+# come through untouched.
+WA_SCRIPT=scripts/test-start-directory.lua "$BIN" --db "$DB.startdir" | grep "start directory ok"
+
 # Reasoning replay is prefix-stable, and that is the property under test: a thought sent in
 # full during its turn must never be emptied later, or the provider recomputes the suffix at
 # the full input rate (see provider.reasoning). The switch has to reach the request, so the
