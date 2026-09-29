@@ -1095,12 +1095,15 @@ async function refreshOperationProgress(health, running) {
   if (!activeTrace || !activeTrace.pending || !running) return;
   // The owner is `run:<run_id>` - serve.rs sets it for the run before the interpreter starts,
   // so an in-turn operation carries the run, not the node-thread. An operation launched outside a run
-  // carries the node-thread instead; older nodes reported its id as `worker_id`, so both names are
-  // read and the window works against whichever node it is attached to. The `worker:` *prefix* is the
-  // operation record's own durable value (rust/wa-operation), not a health field, so it keeps its name.
+  // carries the node-thread instead. A node built before this rename reports that id as `worker_id`
+  // and an even older one as `id`, so all three spellings are read: the window works against
+  // whichever node it is attached to. The `worker:` *prefix* is the operation record's own durable
+  // value (rust/wa-operation), not a health field, so it keeps its name too.
   const owners = [];
   if (running.run_id != null) owners.push("run:" + running.run_id);
-  const nodeThreadId = running.node_thread_id != null ? running.node_thread_id : running.id;
+  const nodeThreadId = running.node_thread_id != null
+    ? running.node_thread_id
+    : (running.worker_id != null ? running.worker_id : running.id);
   if (nodeThreadId != null) owners.push("worker:" + nodeThreadId);
   const operation = (health.operations || []).find((entry) => owners.indexOf(entry.owner) >= 0);
   if (!operation) return;
