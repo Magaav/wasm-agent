@@ -35,8 +35,9 @@ end
 -- record its host in ATTRIBUTION below, or scripts/test.sh refuses the profile
 -- rather than letting it reach the provider with the wrong headers.
 --
--- A profile may also declare what it serves: `models` names the ids the route answers for,
--- and `catalog = "closed"` says that declaration is the whole catalogue. See M.serves.
+-- A profile also declares the `transport` it speaks and, where one exists, the `pi_provider` key
+-- whose ids it is. That pair is compared against the `api` of a model in pi's store, and it is
+-- the only thing that decides servability here; nothing re-lists a catalogue. See M.serves.
 function M.providers()
   return {
     {
@@ -47,8 +48,13 @@ function M.providers()
       api_key = env("WASM_AGENT_LLM_API_KEY") or env("OPENCODE_GO_API_KEY")
         or env("OPENAI_API_KEY") or "",
       default_model = "deepseek-v4.1-flash",
-      -- No `models`: this route's catalogue is the edge's own (/models), which cannot be
-      -- read without a request. An id this file has never heard of is unknown, not refused.
+      -- This client posts /chat/completions to this route. The edge serves some of its ids
+      -- over other apis - gpt-6-luna is `openai-responses`, minimax-m3 is
+      -- `anthropic-messages` - and those are refused below rather than sent.
+      transport = "openai-completions",
+      -- The key pi's store publishes this route's ids under. Absent on `gpt` below: nothing here
+      -- enumerates api.openai.com, so an id only another route lists stays unknown there.
+      pi_provider = "opencode-go",
     },
     {
       id = "gpt",
@@ -56,19 +62,19 @@ function M.providers()
       base_url = env("OPENAI_BASE_URL") or "https://api.openai.com/v1",
       api_key = env("OPENAI_API_KEY") or "",
       default_model = "gpt-4.1",
-      -- Open route too: api.openai.com's catalogue is its own.
+      transport = "openai-completions",
     },
     {
       id = "openai-sub", label = "OpenAI subscription",
       base_url = "https://chatgpt.com/backend-api",
       api_key = "", auth = "subscription", configured = subscription.configured(),
       default_model = "gpt-6-luna",
-      -- Closed catalogue: Pi's adapter resolves the id in its own catalogue and refuses the
-      -- rest (lua/core/openai_sub_bridge.lua: `Model is absent from Pi catalog`), which is
-      -- how 26 recorded child runs of deepseek-v4.1-flash died on this route. The ids here
-      -- are the ones this node offers for it; a model Pi has and this list does not belongs
-      -- in this list, not in a fallback.
-      models = subscription.models, catalog = "closed",
+      -- Pi's bridge speaks the codex responses transport; this route has no catalogue here.
+      -- `subscription.models` is a three-id *picker* list, not this route's catalogue, and
+      -- refusing everything it omits blocked five ids the route serves (gpt-5.5, gpt-5.6-luna,
+      -- gpt-5.6-sol, gpt-5.6-terra, gpt-5.3-codex-spark). Never derive a refusal from it again.
+      transport = "openai-codex-responses",
+      pi_provider = "openai-codex",
     },
   }
 end
@@ -127,66 +133,113 @@ function M.set_model(name)
   return true
 end
 
--- What a route can serve.
+-- What a route can serve, decided by protocol.
 --
--- A provider is an endpoint and a model id belongs to the route that publishes it, so
--- servability is a property of the pair and never of the model alone. This node has measured
--- what a wrong pair costs: a child launched with `gpt-6-luna` on the opencode-go route died in
--- 0.67s with zero tool calls on `provider_http_400 {"type":"ModelProtocolUnsupported"}`, and 26
--- recorded child runs of `deepseek-v4.1-flash` on the subscription route died on Pi's `Model is
--- absent from Pi catalog` after a node process had already been started. Nothing checked the
--- pair; it is refused here, before the request is built.
+-- The deciding fact is the PROTOCOL, not ownership. `gpt-6-luna` is catalogued for opencode-go
+-- *and* openai-codex, and on the opencode-go route its `api` is `openai-responses` while this
+-- client posts /chat/completions - which is precisely what the edge answered in 0.67s,
+-- `Model does not support this protocol`. The first version of this check instead asked which
+-- route "owns" an id, which is false on its face, and it read that ownership from
+-- `subscription.models` - a three-id picker list this file does not own - so it refused five ids
+-- the subscription route serves. A catalogue re-listed here is the defect; there is none below.
 --
--- `models` names the ids a route declares as its own, and `catalog = "closed"` says that
--- declaration is the whole catalogue. A route whose catalogue is the edge's own declares
--- nothing, because this node cannot enumerate it without a request: an id it has never seen is
--- unknown (nil below), not refused, and a *guess* in that direction would refuse models the
--- route serves perfectly well.
-local function route_models(provider) return provider.models or {} end
+-- The catalogue is read where it actually lives: pi's local model store
+-- (~/.pi/agent/models-store.json, the file M.capabilities already reads and the one the
+-- subscription bridge resolves ids against - `models.getModel('openai-codex', id)`). Every entry
+-- carries the `api` that id is served over. This client speaks exactly one transport per route:
+-- the route's `transport` below.
+--
+-- A model the store does not mention is *unsaid*, not refused: the predicate answers nil and the
+-- preflight lets it through. That floor matters as much as the refusal - an absent or silent
+-- store must never block a run, which is how the hardcoded version shipped a regression. The one
+-- thing this cannot see is a store stale in the other direction: if the edge starts serving an id
+-- over a protocol it previously did not, pi's store is what has to be updated - which is the
+-- point of reading it here instead of re-listing it.
 
--- The route that declares `model` as its own, or nil. Ids are route-scoped in this deployment:
--- the gpt-6 family is the subscription route's and "OpenCode Go remains a separate provider"
--- (docs/OPENAI-SUB.md), so an id published by another route is a measured mismatch rather than
--- an unknown.
-local function declared_owner(model)
-  for _, provider in ipairs(M.providers()) do
-    for _, name in ipairs(route_models(provider)) do
-      if name == model then return provider.id end
-    end
-  end
-  return nil
+-- pi's local model store, keyed by pi's own provider id. Read, never written.
+local function pi_store()
+  local file = env("WASM_AGENT_PI_MODELS_STORE")
+    or (dofile("lua/core/paths.lua").home() .. "/.pi/agent/models-store.json")
+  local text = host.read_file(file)
+  if not text then return nil end
+  local ok, store = pcall(json.decode, text)
+  if not ok or type(store) ~= "table" then return nil end
+  return store
 end
 
--- Can `provider` (default: the active route) serve `model`? `true` = yes, `false` = no, `nil` =
--- this node cannot decide it without asking the endpoint. Callers must treat `nil` as unknown
--- and not as served; the preflight only ever refuses a decided `false`, and it never substitutes
--- another model or another provider.
+-- Every `{provider, api}` the store publishes for `model`. Empty when the store is absent,
+-- unreadable, or silent about the id - the three cases that must stay unknown rather than
+-- become a refusal.
+local function catalogue_protocols(model)
+  local store = pi_store()
+  if not store then return {} end
+  local found = {}
+  for key, profile in pairs(store) do
+    for _, entry in pairs(type(profile) == "table" and profile.models or {}) do
+      if type(entry) == "table" and entry.id == model and type(entry.api) == "string" then
+        found[#found + 1] = { provider = tostring(key), api = entry.api }
+      end
+    end
+  end
+  return found
+end
+
+-- What this client actually sends over each transport, for the refusal to name.
+local TRANSPORT_WIRE = {
+  ["openai-completions"] = "POST /chat/completions",
+  ["openai-codex-responses"] = "Pi's subscription bridge (codex/responses)",
+}
+
+-- Can `provider` (default: the active route) serve `model`? `true` = this route's own catalogue
+-- publishes the id over the transport this route speaks; `false` = it is published (by this route
+-- or another, over another protocol) and nothing publishes it over a protocol this client speaks
+-- here; `nil` = not decided - the store is absent, silent, or the id is only another route's,
+-- which is not a refusal. It never substitutes another model or another provider.
 function M.serves(model, provider)
   provider = provider or M.active()
   model = trim(model or "")
   if model == "" then return nil end
-  for _, name in ipairs(route_models(provider)) do
-    if name == model then return true end
+  local protocols = catalogue_protocols(model)
+  if #protocols == 0 then return nil end
+  local own_published, reachable_elsewhere = false, false
+  for _, entry in ipairs(protocols) do
+    local own = provider.pi_provider ~= nil and entry.provider == provider.pi_provider
+    if own then
+      if entry.api == provider.transport then return true end
+      own_published = true
+    elseif entry.api == provider.transport then
+      -- Another route serves the id over a protocol this one speaks, and this route's own
+      -- catalogue says nothing. That is unknown here, not a claim in either direction.
+      reachable_elsewhere = true
+    end
   end
-  if provider.catalog == "closed" then return false end
-  local owner = declared_owner(model)
-  if owner and owner ~= provider.id then return false end
+  if own_published or not reachable_elsewhere then return false end
   return nil
 end
 
 -- The refusal to raise for `model` on `provider`, or nil when the request may be prepared. The
 -- text is stable - a fixed prefix, then `provider=<id>` and `model=<id>` - because it is what a
--- refused run or child reports, and a reader has to be able to match it.
+-- refused run or child reports, and a reader has to be able to match it. It states the real
+-- reason: which protocol the id is served over, and which one this route speaks.
 function M.unservable(model, provider)
   provider = provider or M.active()
   model = trim(model or "")
   if model == "" or M.serves(model, provider) ~= false then return nil end
-  local owner = declared_owner(model)
-  local why = (owner and owner ~= provider.id)
-    and ("the id belongs to route " .. owner)
-    or ("the route declares " .. table.concat(route_models(provider), ", "))
+  local served_over, seen = {}, {}
+  for _, entry in ipairs(catalogue_protocols(model)) do
+    local where = (provider.pi_provider ~= nil and entry.provider == provider.pi_provider)
+      and "this route" or ("route " .. entry.provider)
+    local label = entry.api .. " (" .. where .. ")"
+    if not seen[label] then seen[label] = true; served_over[#served_over + 1] = label end
+  end
+  -- Sorted, because the store is walked with `pairs` and a refusal a reader has to match must
+  -- read the same way twice.
+  table.sort(served_over)
+  local transport = tostring(provider.transport)
   return "model_not_servable: provider=" .. provider.id .. " cannot serve model=" .. model ..
-    "; " .. why .. "; refused before the first provider request, nothing substituted"
+    "; the catalogue serves this id over " .. table.concat(served_over, ", ") ..
+    " and this route speaks " .. transport .. " (" .. (TRANSPORT_WIRE[transport] or transport) .. ")" ..
+    "; refused before the first provider request, nothing substituted"
 end
 
 -- Attribution: what a provider's edge is told about who is calling, and which
@@ -460,19 +513,14 @@ function M.capabilities(model)
     return {reasoning=true, levels=levels, compat={}, max_output=128000,
       source="pi-openai-codex"}
   end
-  local file = host.getenv("WASM_AGENT_PI_MODELS_STORE")
-    or (dofile("lua/core/paths.lua").home() .. "/.pi/agent/models-store.json")
-  local text = host.read_file(file)
-  if text then
-    local ok, store = pcall(json.decode, text)
-    local profile = ok and type(store)=="table" and store[provider_id]
-    if type(profile)=="table" then
-      for _, entry in pairs(profile.models or {}) do
-        if entry.id==model then
-          return {reasoning=entry.reasoning==true, compat=entry.compat or {},
-            levels=entry.thinkingLevelMap, max_output=entry.maxTokens,
-            source="pi-model-store"}
-        end
+  local store = pi_store()
+  local profile = store and store[provider_id]
+  if type(profile)=="table" then
+    for _, entry in pairs(profile.models or {}) do
+      if entry.id==model then
+        return {reasoning=entry.reasoning==true, compat=entry.compat or {},
+          levels=entry.thinkingLevelMap, max_output=entry.maxTokens,
+          source="pi-model-store"}
       end
     end
   end
