@@ -138,6 +138,33 @@ This matches [EXECUTION.md](EXECUTION.md#seven-concepts-seven-different-identiti
 interactive reserve, control workers) and `subagents`/`subagent_counts`, so the guarantees
 are observable from outside the process. None of these carry a prompt or a credential.
 
+## Lane reservations and the serial gate
+
+The lanes above are the runtime's: worker index ranges, the interactive reserve, and
+`WASM_AGENT_SUBAGENT_CONCURRENCY` (the node's env sets **4**; the pool clamps 1..16). The
+**integration lanes** - producer, reviewer, gate, merge - are roles a *run* takes, and what each may
+and may not do is stated once in `skills/git-orchestrator/SKILL.md` ("The integration protocol").
+What this section owns is how many of them fit, and what is serial.
+
+- **The target is 16-32 lanes with a few reserved**, and the reservations are the point: a delivery
+  must never wait behind producers for a reviewer, a gate or the merge lane. A reservation is a slot
+  (the pool total, a profile's `limits.max_children`) and, where two runs must not interleave, a named
+  exclusive claim (`resources.exclusive: [...]` in an approved profile, above). No profile on this
+  node declares one yet - that is a config change to make, not a rule to write.
+- **A number is raised only with the measurement**: peak CPU *and* per-task wall clock, more than one
+  sample per setting, on a box that is not carrying someone else's build. `docs/EVOLUTION.md` ("Gate
+  parallelism") has the only pair measured so far; it settles that the knob works and that the cap is
+  not free, and it settles no default. 16-32 is the owner's target, not a measured default.
+- **The gate is a reserved serial resource, not a free-for-all.** One gate run per tree at a time;
+  `WA_GATE_JOBS=<n>` caps `CARGO_BUILD_JOBS` and `RUST_TEST_THREADS`, and the gate prints what it ran
+  with. Two uncapped gates on a 16-core box each claim the whole box - the failure that knob exists
+  for - and a gate that ran beside another build is weak evidence about the tree it names: the
+  measured pair already had a foreign build inside its sampling window.
+- **Wide production, serial landing.** Producers and reviewers run many at a time; the merge, the
+  merged tree's gate and the push to `origin/main` are one at a time per tree. Within one tree, one
+  unlanded editor per hot file - `skills/git-orchestrator/SKILL.md` says which file counts as hot and
+  why the hot file's change lands first.
+
 ## Cancellation
 
 `POST /runs {action:"status"|"cancel", thread|conversation:"<id>", run_id?}` is answered on

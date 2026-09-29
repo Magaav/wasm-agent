@@ -29,9 +29,8 @@ override this file. Read those first; this is the general procedure.
   everything that landed meanwhile.
 - Do not carry two unrelated changes on one branch. If you find an unrelated defect,
   record it (an issue, a note, its own branch) — do not fix it silently inside this one.
-- Never commit to the integration branch unless you are the integrator the repository (or the host)
-  names as such — see "Landing on `main`" in the repository's own mapping below. Never force-push a
-  branch someone else may have built on.
+- Never commit to the integration branch: it belongs to the merge lane (see the mapping below).
+  Never force-push a branch someone else may have built on.
 
 ## The per-turn loop
 
@@ -207,21 +206,11 @@ Here `main` is the integration branch; the gate is `bash scripts/test.sh`; the b
 `git config core.hooksPath .githooks`.
 
 - **Your branch is your name** (`git symbolic-ref --short HEAD`); `main` is never a node's name.
-- **Only the integrator directly commits on `main`.** `.githooks/pre-commit` refuses a direct commit
-  on `main` unless it is a merge, or unless the host set `WASM_AGENT_PROVENANCE=orchestrator` on the
-  process — a run of a session, which is the coordinator the owner is talking to. A bounded child task
-  is told `child` and is refused even when it exports `WASM_AGENT_ALLOW_MAIN=1`; a person at a terminal
-  has no provenance (empty and unset are one case) and keeps that flag as their visible, explicit
-  override. `scripts/test-main-guard.sh` pins 39 checks, including the boundary below.
-- **A client-side hook is convenience, not a boundary.** Measured on git 2.55.0.windows.3: `git
-  cherry-pick`, `git revert` and `git rebase --onto` make or move commits without consulting a hook at
-  all (`rebase --onto` moves `main` itself); a detached-HEAD commit is not judged; a hand-written
-  `.git/MERGE_HEAD` is trusted; `--no-verify` and `git -c core.hooksPath=<empty> commit` skip both
-  hooks; `git update-ref refs/heads/main <sha>` moves `main` from any worktree with no hook consulted.
-  The accurate claim is therefore "a child cannot *directly commit* on `main`, and the old flag no
-  longer buys it". The enforcement point that cannot be skipped is remote-side: **branch protection on
-  `origin/main`, or a pre-receive check that refuses a direct update**. Until one exists, the guard
-  stops the ordinary mistake, not a determined agent.
+- **Only the merge lane moves `main`.** The authority statement, the guard's exact claim (a direct
+  *commit* on `main` needs the host's `orchestrator` provenance; a merge is trusted by its parents; the
+  human's `WASM_AGENT_ALLOW_MAIN=1` override is theirs alone) and the client-side-hook boundary are
+  stated once in `skills/git-orchestrator/SKILL.md`. `scripts/test-main-guard.sh` pins the measured
+  boundary.
 - **Work in your own worktree.** Never switch, commit in, or leave a branch in another checkout —
   a live run did that and left the human's `main` checkout sitting on its branch.
 - **One `change/<name>` per concern**, cut from `origin/main`, merged and deleted.
@@ -235,80 +224,21 @@ Here `main` is the integration branch; the gate is `bash scripts/test.sh`; the b
   `cargo` on `PATH` — run it on the cloud tree if the local one lacks it. The window shell is
   cross-built from Linux with `bash scripts/build-window.sh`.
 
-#### Landing on `main`
+#### Landing
 
-The integrator's path, in full, because "the human merges" was the whole instruction and it left the
-coordinator with no tree to merge in. Each step names the command whose output proves it; a step you
-cannot show is a step you did not do.
+Landing is the merge lane's step, not the producer's. The authority, the lifecycle, the lanes and the
+landing steps — merge the reviewed tip onto the sanctioned tree, gate the **merged** tree, push
+`origin/main` under the sole lock, read the ref back, prove integration, then clean up — are stated
+once in [skills/git-orchestrator/SKILL.md](../git-orchestrator/SKILL.md) ("The landing steps"), with
+the measurements behind them. Do not re-derive them here.
 
-1. **Pick the sanctioned tree.** The canonical checkout (`orca/projects/wasm-agent`) is the one tree
-   whose branch is `main`. Address it by absolute path — never switch your own worktree's branch
-   onto `main`, and never merge in a node's worktree.
-   Check: `git worktree list` shows that path as the only one on `[main]`;
-   `git -C <canonical> symbolic-ref --short HEAD` prints `main`;
-   `git -C <canonical> status --porcelain` prints nothing;
-   `git -C <canonical> rev-list --count HEAD..origin/main` is `0`.
-2. **Review, then merge the exact tip.** `git -C <canonical> fetch origin`. Merge the reviewed branch
-   **by name** — `git -C <canonical> merge --no-ff change/<name>` — which produces
-   `Merge branch 'change/<name>'`, or pass the subject yourself:
-   `git -C <canonical> merge --no-ff <sha> -m "merge(change/<name>): what it brings"`. Both are accepted
-   by `commit-msg`. Measured: `git merge --no-ff <sha>` **alone is refused**, because git's default
-   subject for a SHA merge is `Merge commit '<sha>'`, which names nothing — that refusal is the rule
-   (a merge whose subject names its source), not an obstacle to route around. A refused merge leaves
-   `MERGE_HEAD` in place, so abort it before trying again.
-   Check: `git -C <canonical> log --first-parent -1 --format=%s` names the merged branch, and
-   `git -C <canonical> rev-parse HEAD^2` resolves.
-3. **Gate the MERGED tree, not the branch tree.** The branch's receipt covers the branch's tree; what
-   is pushed is the merged tree, and those are the same object only when `main` has not moved since the
-   branch was cut. Measured: identical in exactly that case, and different as soon as another branch
-   landed first - which is the ordinary case, because a branch that lived a day met everything that
-   landed meanwhile.
-   Check: `git -C <canonical> rev-parse HEAD^{tree}` against the tree the branch's receipt names (in
-   wasm-agent, the `wa-finish-gate.json` beside its git metadata). If they differ, run
-   `bash scripts/test.sh` on the merged HEAD - exit 0, skips counted - or
-   `node skills/parallel-evolution/scripts/finish.mjs gate <canonical> <merged-HEAD>`, which records the
-   receipt against that exact tree. If they are the same, the existing receipt is still evidence for
-   that tree, and `verify` re-checks it rather than re-running the gate.
-4. **Push `origin/main`, then verify the ref.** `git -C <canonical> push origin main`, then read
-   the remote rather than trusting the push output.
-   Check: `git -C <canonical> ls-remote origin refs/heads/main` equals
-   `git -C <canonical> rev-parse HEAD`.
-5. **A direct commit on `main` (no merge) is the exception.** Allowed only for the orchestrator
-   session, for `main`'s own change (a document, a version bump), and it carries the trailer like
-   any other commit. A child is refused, and a person at a terminal needs
-   `WASM_AGENT_ALLOW_MAIN=1`. This is the only step the hook enforces, and it enforces it against
-   `git commit` alone — see the boundary in the mapping above.
-6. **Clean up after the fact, never instead of it.** Only once the tip is in `main` and `origin/main`
-   is pushed: delete the merged branch, and give up its worktree if that is what the worktree was for.
-   Two conditions, because both failures are quiet:
-   - **Prove the branch is integrated before deleting it.**
-     `git -C <canonical> branch --merged main` lists `change/<name>`, or
-     `git -C <canonical> merge-base --is-ancestor <tip> main` exits 0. Do **not** use `git branch -d`
-     as that proof: measured on git 2.55, a branch whose tip is in its own upstream
-     (`refs/remotes/origin/change/<name>`) but not in `main` is deleted by `-d` after a warning, not
-     refused.
-   - **Let git refuse to give up unfinished work.** `git -C <canonical> worktree remove <path>`
-     refuses a worktree with modified or untracked files (`contains modified or untracked files, use
-     --force`); that refusal is the check, so never reach for `--force`. `git worktree prune` is only
-     for a worktree whose directory was already deleted by hand.
-   Under `/merge`, other actors' branches and worktrees are preserved (see `skills/git-orchestrator`):
-   this step is for the branch you landed, and step 4 is what makes it safe.
+What a producer owes that lane, all provable from its own worktree:
 
-**What is measured, and what is policy.** Measured in a throwaway clone against a bare remote on this
-machine (git 2.55.0.windows.3): step 1's three checks; that `--no-ff` names the branch in the
-first-parent subject and resolves `HEAD^2` (step 2) *when the merge names a branch*, and that a SHA
-merge's default subject is refused; that the merged tree equals the branch tree only when `main` has
-not moved, and differs when it has (step 3); that `ls-remote` equals `HEAD` after the push (step 4);
-that `worktree remove` refuses a dirty worktree while `prune` clears a hand-deleted one, and that
-`branch -d` deletes a branch that is not integrated when it has an upstream (step 6). Policy, not
-verified anywhere: which machine is authoritative, whether a PR review is required before step 2, and
-whether the cloud tree must be pulled after the push. Step 3's gate has to run where the tree you push
-lives - the canonical checkout is on this machine, and the cloud tree consumes what `origin/main`
-becomes.
+- the branch pushed, current with `origin/main`, and one concern;
+- `git merge-tree --write-tree origin/main HEAD` exits 0;
+- the gate's verdict on its own tree, with the skip count;
+- the exact tip SHA, and what it did **not** verify, in the report.
 
-**Before trusting any of this as enforcement:** a client-side hook is not a boundary. The guard that
-this procedure relies on for step 5 is bypassed by ordinary porcelain (`cherry-pick`, `revert`,
-`rebase --onto`), by a detached HEAD, by `--no-verify`, and by `git update-ref refs/heads/main <sha>`
-- each measured, and pinned as a recorded boundary in `scripts/test-main-guard.sh`. Remote branch
-protection on `origin/main`, or a pre-receive check, is the thing to set up; until it exists, this
-procedure's steps are what makes a landing *reviewable*, not what makes it impossible to bypass.
+The lane may land several reviewed tips before it gates and pushes, so expect your commit to be part
+of a combined tree — and expect a re-gate of that tree, because a merge changes the tree and your
+receipt covers only your branch.

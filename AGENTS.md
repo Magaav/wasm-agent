@@ -8,7 +8,7 @@ into wasm-agent's own context at runtime, so keep it short and operational.
 | Tree | Path | Role |
 | --- | --- | --- |
 | Cloud (authoritative runtime) | `openclaw.ohana:/local/projects/wasm-agent` | builds, runs, hosts the rendezvous + relay |
-| Canonical checkout | `orca/projects/wasm-agent` | the primary worktree, on `main`. Review and merges land here |
+| Canonical checkout | `orca/projects/wasm-agent` | the primary worktree, on `main` - the merge lane's sanctioned tree |
 | The node | `orca/workspaces/wasm-agent/wasm_the_first` | the node's own worktree, on the branch that carries its name (`wasm_the_first`) |
 | Agent lanes | `orca/workspaces/wasm-agent/<name>` | `astra`, `codex`, `generalson` - each an actor's own worktree on a branch of the same name |
 
@@ -19,39 +19,25 @@ side. Auth is the `github-wasm-agent` SSH host alias. Work happens on a short-li
 `change/<name>` branch cut from `origin/main` and merged when done; the node's own branch is its
 name.
 
-**A node works in its own worktree; the orchestrator session lands in the canonical checkout.**
-The rule used to be one line - "a node never works in the canonical checkout" - and it was written
-after an agent committed to `main` from the wrong tree (`docs/ORCHESTRATION.md`). It stopped the
-mistake by removing the path from everyone, which also removed it from the one session that owns
-the integration decision: the canonical checkout is the only tree whose branch is `main`, so
-merging "nowhere" meant a human step for every landing. The rule by role, from here on:
-
-- A **node's worktree** (any row except the canonical checkout) is for work. It stays on the branch
-  that carries its name and never switches to `main`.
-- The **orchestrator session** - the run the owner is talking to - may merge in the canonical
-  checkout, addressed by absolute path (`git -C <canonical> ...`), never by switching its own
-  worktree's branch onto `main`. The landing procedure is in
-  `skills/parallel-evolution/SKILL.md` ("Landing on `main`").
-- A **child/worker session** may not move `main` at all: its branch is its deliverable.
-  `.githooks/pre-commit` decides this from the host's provenance, not from a flag.
+**A lane owns its tree; only the merge lane moves `main`.** Work happens in a worktree on the
+branch that carries its name, and a producer's branch is its deliverable - the mistake this
+replaced was an agent committing to `main` from the wrong tree (`docs/ORCHESTRATION.md`).
+Integration is a lane of its own and runs without a human step: a delivery an independent reviewer
+verified, whose own tree passed the gate, is merged and pushed by the merge lane, which is
+authorised to land deliveries without asking each time. Who may move `main`, what a landing must
+carry, the lifecycle (produce -> verify -> accept -> land -> deploy), the lanes and their
+reservations are one rule set in `skills/git-orchestrator/SKILL.md`
+("The integration protocol"); `docs/CONCURRENCY.md` holds the lane reservations. The
+`.githooks/pre-commit` guard is convenience; the boundary that cannot be skipped is remote-side.
 
 ### Evolving code in parallel
 
-**Before the first edit of a code-writing turn, load the `parallel-evolution` skill.** It is the
-per-turn loop (sync → small change → prove it merges → gate → end clean) and the
-convergence/escalation protocol. These rules hold whether or not it is loaded:
-
-- **Your branch is your name** (`git symbolic-ref --short HEAD`); `main` is never a node's name.
-  A direct commit on `main` is refused by the hook unless it is a merge or the host says this
-  process is the `orchestrator` (a run of a session); `WASM_AGENT_ALLOW_MAIN=1` is the human's
-  visible override and does not open a direct commit on `main` for a child. That is all it claims:
-  a client-side hook is convenience, not a boundary (`--no-verify`, `core.hooksPath`, `cherry-pick`,
-  `revert`, `rebase`, `update-ref` all skip it). The enforcement point that cannot be skipped is
-  remote-side - branch protection on `origin/main`, or a pre-receive check.
-- **One `change/<name>` per concern**, from current `origin/main`, merged and deleted.
-- **Never move a tree you do not own.**
-- **End every commit with its provenance trailer** (the hook prints the form when one is missing).
-- **Merging cleanly is part of done** — prove it with `git merge-tree --write-tree origin/main HEAD`.
+**Before the first edit of a code-writing turn, load the `parallel-evolution` skill** - the
+per-turn loop (sync → small change → prove it merges → gate → end clean), the branch rules and the
+convergence/escalation protocol. In one line: one `change/<name>` per concern from current
+`origin/main`, never move a tree you do not own, end every commit with its provenance trailer, and
+prove the merge with `git merge-tree --write-tree origin/main HEAD`. Your branch is your
+deliverable; the merge lane lands it.
 
 ### Never touch the old plugin
 
@@ -129,7 +115,9 @@ The `pre-commit` hook enforces it - that hook is the contract, this line is the 
 - **The gate's build/test parallelism is a knob you own.** `WA_GATE_JOBS=<n>` caps
   `CARGO_BUILD_JOBS` and `RUST_TEST_THREADS` for `scripts/test.sh`; unset means cargo's own
   default, one job per logical core, which two concurrent gate runs then fight over. The gate
-  prints what it ran with. `docs/EVOLUTION.md` ("Gate parallelism") has the measurement.
+  prints what it ran with. `docs/EVOLUTION.md` ("Gate parallelism") has the measurement;
+  `docs/CONCURRENCY.md` ("Lane reservations and the serial gate") says how many gates may run at
+  once and why the gate is a reserved serial resource.
 - Verify before claiming: run the smoke test, and prefer a real two-node check
   over a single-process one.
 - **A Lua test has only tested the tree when a Lua root is in use.** A `WA_SCRIPT` run with no
