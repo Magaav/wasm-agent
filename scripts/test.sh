@@ -787,6 +787,10 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-patch-audit-agent.lua" "$BIN" --db 
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-modules.lua" \
   WASM_AGENT_MODULES_DIR="$WASM_AGENT_LUA_ROOT/modules" "$BIN" --db "$DB.modules" | grep 'module route ok'
 WA_BIN="$BIN" bash scripts/test-modules-removal.sh
+# The same route over real HTTP, against scratch nodes. The Lua harness above pins the route's
+# behaviour *inside* the interpreter; this is the only check that would notice the route not being
+# registered or loaded at all, which is a 500/404 with every other check green.
+WA_BIN="$BIN" bash scripts/test-modules-route.sh
 # Real projector, isolated home, exact artifact recovery. No paid model or ignored A/B switch.
 WA_BIN="$BIN" bash scripts/bench-tool-budget.sh
 WA_BIN="$BIN" bash scripts/bench-tool-tail.sh

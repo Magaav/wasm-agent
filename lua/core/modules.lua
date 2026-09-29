@@ -9,8 +9,11 @@
 --
 -- The route is `wa_modules(op, id, path, session)`, in the positional shape the Rust dispatch
 -- table calls a Lua handler with (`wa_skills`, `wa_session`, ...). It answers with a
--- `{status, content_type, body}` envelope so the HTTP side decides nothing; the one line that
--- binding still needs, and what a page fetches, are in docs/MODULES.md.
+-- `{status, content_type, body}` envelope: the node keeps the status the route chose (403 and 404
+-- are this file's decisions, and re-making them in `serve.rs` is how a route and the page that reads
+-- it come to disagree) and maps the content type onto the static string a reply carries, so a type
+-- the node does not know is served as bytes. The URL space, and what a page fetches, are in
+-- docs/MODULES.md.
 local json = dofile("lua/vendor/json.lua")
 
 local M = {}

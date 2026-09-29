@@ -35,15 +35,27 @@ The route is a Lua function in the shape the Rust dispatch table calls a positio
 wa_modules(op, id, path, session) -> a JSON envelope { status, content_type, body }
 ```
 
-`op` is `list` (or empty) for the listing, `file` for a file. The URL space a binding should expose
-is fixed by the page's own relative URLs, and it is the *binding's* half of the contract — this
-change adds no Rust and no restart:
+`op` is `list` (or empty) for the listing, `file` for a file. It is registered in
+`rust/wa-host/src/serve.rs` (the `/modules` arms) and loaded by `lua/core/server.lua`, which is the
+whole of the node's side: the status in the envelope is kept, so 403 and 404 stay the module
+system's decisions, and the content type is mapped onto the static string a reply carries — a type
+the node does not know is served as bytes rather than guessed at.
+
+**Adding or removing a module needs no Rust and no restart.** A module is a directory; the route
+reads the directory per request. What the node does need is the URL space below, which is fixed by
+the page's own relative URLs:
 
 | request | answer |
 | --- | --- |
-| `GET /modules/` | the host page (`modules/index.html`). **The trailing slash matters**: the page and the module directories are siblings, so `modules/<id>/<entry>` only resolves with the page served at the root. |
-| `GET /modules/index.json` | the listing, computed on every request by reading the directory. Not a file on disk — a checked-in copy would survive a deletion and lie. |
-| `GET /modules/<id>/<path>` | the module's own file. `404` if the id is not a module directory, `403` if the module is not enabled, `400` if the path tries to leave the directory. |
+| `GET /modules` | `301` to `/modules/` — the page is served at the root of that space **and the trailing slash is the contract**: a module is a sibling of the page, so a page served at `/modules` resolves every panel one level outside the tree |
+| `GET /modules/` | the host page (`modules/index.html`) |
+| `GET /modules/index.json` | the listing, computed on every request by reading the directory. Not a file on disk — a checked-in copy would survive a deletion and lie |
+| `GET /modules/<id>/<path>` | the module's own file. `404` if the id is not a module directory, `403` if the module is not enabled, `400` if the path tries to leave the directory. `/modules/<id>` alone is the module's entry point |
+| anything else under `/modules/` | `404` |
+
+A path containing `..` is refused by the node's own static-route guard before the interpreter sees
+it, for every route alike (`static_reply` in `serve.rs`); the route refuses a leading slash, a
+backslash or a drive colon itself. Both answers are `400`.
 
 Modules are **off unless asked for**: `WASM_AGENT_MODULES=<id>,<id>` for a node, or `"enabled": true`
 in the module's own manifest. `WASM_AGENT_MODULE_CAPABILITIES=<name>` grants a capability — it exists
@@ -65,6 +77,14 @@ git tag module-<id>-v<version>   # the tag named in its own module.json
 
 That is the whole add. Nothing outside `modules/<id>/` was edited, and the removal proof asserts
 that no file outside it names the id.
+
+## A new Lua core file (for the next route, not for a module)
+
+There is no module-and-nothing-else exemption at the node level, and two places have to learn about a
+new `lua/core/*.lua`: the binary's `EMBEDDED` registry in `rust/wa-host/src/main.rs` (or the gate
+stops at *"on disk but not in the binary"* and an installed node cannot load it at all), and the
+`dofile` list at the top of `lua/core/server.lua` (or `wa_*` does not exist in a running node and the
+route answers 500 while every Lua-level test stays green). Adding a *module* touches neither.
 
 ## Remove a module
 
