@@ -433,6 +433,14 @@ function M.start(args, ctx)
   local model_ok, model_error = approved_model(profile, model, caller_model)
   if not model_ok then return { error = model_error } end
   local effective_model = model or caller_model
+  -- Policy says whether this model may be delegated; the provider says whether this route can
+  -- run it at all, and that has to be asked before a session and a worktree exist for a pair
+  -- that cannot run. The request path refuses the same pair at the first call, but by then the
+  -- child has a session, a workspace and a thread to retire - which is how `task-worker`'s
+  -- `gpt-6-luna` died on the opencode-go route in 0.67s with zero tool calls. Same predicate,
+  -- earlier place, so there is one rule and two gates rather than two rules.
+  local unservable = provider.unservable(effective_model)
+  if unservable then return { error = unservable, model = effective_model } end
   local reasoning = args.reasoning
   if reasoning == nil or reasoning == "" then reasoning = profile.reasoning end
   if reasoning == nil or reasoning == "" then reasoning = ctx.reasoning end
