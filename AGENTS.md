@@ -107,6 +107,11 @@ The `pre-commit` hook enforces it - that hook is the contract, this line is the 
   pick a default.
 - Verify before claiming: run the smoke test, and prefer a real two-node check
   over a single-process one.
+- **A Lua test has only tested the tree when a Lua root is in use.** A `WA_SCRIPT` run with no
+  `WASM_AGENT_LUA_ROOT` resolves its modules from the copy compiled into the binary, so an edit
+  under `lua/` is not in the run at all; stderr now says so once (`lua root unset: using embedded
+  modules; edits under lua/ are NOT under test`), and a root that is set but unusable fails loudly
+  instead of falling back.
 - A **skipped test is reported as skipped**: the suites count skips and say so in the
   verdict. A run that did not test something must not print the sentence a run that did.
 

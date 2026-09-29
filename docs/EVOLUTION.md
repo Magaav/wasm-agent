@@ -91,7 +91,9 @@ verifiable on Windows, Rust work is not.
 
 The Lua core is compiled into `wa` with `include_str!`, so normally a Lua change
 needs `cargo build`. Set `WASM_AGENT_LUA_ROOT` to a checkout and `dofile` prefers
-the files on disk, falling back to the embedded copy:
+the files on disk; with it unset a script run says so, once, on stderr —
+`lua root unset: using embedded modules; edits under lua/ are NOT under test` — and a
+root that is set but unreadable fails loudly instead of falling back to the binary:
 
 ```powershell
 $env:WASM_AGENT_LUA_ROOT = "C:\Users\Victor\orca\workspaces\foundation\self-evolve"

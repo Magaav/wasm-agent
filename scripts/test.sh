@@ -989,6 +989,13 @@ print("embedded modules ok (" .. #names .. " files)")
 LUA
 ( unset WASM_AGENT_LUA_ROOT; WA_SCRIPT="$DB.embedded.lua" "$BIN" --db "$DB" ) | grep "embedded modules ok"
 rm -f "$DB.embedded.lua"
+# Which copy of the Lua a script run loaded has to be visible. With no WASM_AGENT_LUA_ROOT the
+# `dofile` bootstrap resolves every module from the copy compiled into the binary, so a focused test
+# whose subject is an edit under `lua/` can run green while never loading that edit: one worker lost
+# a whole green run (28 checks) to the binary's own `update.lua`, and the only tell was a line
+# number in a message. Real processes - the same fixture twice, and two unusable roots that must fail
+# loudly instead of falling back.
+WA_BIN="$BIN" node scripts/test-lua-root-notice.cjs
 WA_SCRIPT=scripts/test-recovery.lua "$BIN" --db "$DB" | grep "recovery ok"
 cat > "$DB.seed.lua" <<'LUA'
 -- Seed a thread cut off the way a killed process leaves it: a question, a decision
