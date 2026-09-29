@@ -126,13 +126,16 @@ MESSAGE
       fi
       ;;
     *)
+      # Note for whoever edits this: this heredoc EXPANDS (it names the trailer), so a bare backtick
+      # is command substitution and would print a shell error inside a refusal. Single quotes, and
+      # scripts/test-main-guard.sh fails on any shell diagnostic in a refusal.
       cat >&2 <<MESSAGE
 commit-msg: refusing a commit with an unrecognised provenance on '$branch'.
 
   $trailer
 
-  provenance: unrecognised ('${WASM_AGENT_PROVENANCE}') - the host sets either `orchestrator` (a
-              session's own run) or `child` (a subagent task)
+  provenance: unrecognised ('${WASM_AGENT_PROVENANCE}') - the host sets either 'orchestrator' (a
+              session's own run) or 'child' (a subagent task)
 
 If you are a person at a terminal, unset WASM_AGENT_PROVENANCE and re-run with
 WASM_AGENT_ALLOW_MAIN=1. If you are an agent, your branch is the deliverable.

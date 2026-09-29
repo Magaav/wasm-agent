@@ -57,6 +57,10 @@ MESSAGE
           if [ "${WASM_AGENT_ALLOW_MAIN:-0}" = "1" ]; then
             : # The human's deliberate, visible override.
           else
+            # Note for whoever edits this: the heredocs below EXPAND (they name the branch), so a bare
+            # backtick is command substitution. It already happened once - the refusal printed
+            # "orchestrator: command not found" and lost the word it meant to point at, which is why
+            # scripts/test-main-guard.sh now fails on any shell diagnostic in a refusal.
             cat >&2 <<MESSAGE
 pre-commit: refusing a direct commit on '$branch'.
 
@@ -69,7 +73,7 @@ Work is made on the node's own branch and merged here. If this really is main's 
 document, a version bump), or you are the human landing work an agent produced, re-run with
 WASM_AGENT_ALLOW_MAIN=1 - the override is deliberate, so it shows up in the command you ran rather
 than in the shape of the history. The orchestrator session does not need it: the host gives it the
-`orchestrator` provenance.
+'orchestrator' provenance.
 MESSAGE
             exit 1
           fi
@@ -78,8 +82,8 @@ MESSAGE
           cat >&2 <<MESSAGE
 pre-commit: refusing a direct commit on '$branch'.
 
-  provenance: unrecognised ('${WASM_AGENT_PROVENANCE}') - the host sets either `orchestrator` (a
-              session's own run) or `child` (a subagent task), and this value is neither
+  provenance: unrecognised ('${WASM_AGENT_PROVENANCE}') - the host sets either 'orchestrator' (a
+              session's own run) or 'child' (a subagent task), and this value is neither
   refused:    a value this guard cannot classify must not open main
 
 If you are a person at a terminal, unset WASM_AGENT_PROVENANCE and re-run with

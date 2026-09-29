@@ -47,6 +47,10 @@ git config core.autocrlf false
 
 last_exit=0
 last_out=""
+# Every refusal is kept, so one check at the end can prove that no message ran a command of its own:
+# these heredocs expand, and a bare backtick once ate the word it quoted and printed
+# "orchestrator: command not found" inside a refusal.
+ALL_OUT=""
 # Provenance and flag are passed explicitly and both are cleared otherwise, so a case cannot pass or
 # fail because of a variable this suite happened to be started with. One helper, so a `git merge` case
 # carries exactly the same environment as a `git commit` case.
@@ -58,6 +62,7 @@ git_case() {
   [ -n "$flag" ] && env_args+=("WASM_AGENT_ALLOW_MAIN=$flag")
   last_out="$("${env_args[@]}" git "$@" 2>&1)"
   last_exit=$?
+  ALL_OUT="$ALL_OUT$last_out"
 }
 commit_case() { git_case "$1" "$2" commit "${@:3}"; }
 
@@ -108,6 +113,8 @@ ok "$(grep -q 'provenance: none' <<<"$last_out" && echo 1 || echo 0)" \
   "the refusal says no provenance was found" "$(grep -m1 'provenance:' <<<"$last_out")"
 ok "$(grep -q 'WASM_AGENT_ALLOW_MAIN=1 - the override is deliberate' <<<"$last_out" && echo 1 || echo 0)" \
   "and keeps the visible explicit override"
+ok "$(grep -q "'orchestrator' provenance" <<<"$last_out" && echo 1 || echo 0)" \
+  "and points at the provenance that resolves it, without eating the word"
 
 # --- 5. the human's explicit override still lands on main ------------------------------------------
 commit_case "" 1 -m "fixture: the human lands it" -m "Agent: human integrating (WASM_AGENT_ALLOW_MAIN=1)"
@@ -167,6 +174,15 @@ ok "$([ "$(printf '%s\n' "$SUBJECTS" | wc -l | tr -d ' ')" = "3" ] && echo 1 || 
   "main holds exactly the three allowed commits" "$(tr '\n' '|' <<<"$SUBJECTS")"
 ok "$(grep -q 'reaches for main' <<<"$SUBJECTS" && echo 0 || echo 1)" \
   "and no refused case left a commit behind"
+
+# --- 11. no refusal message ran a command of its own -------------------------------------------
+# The messages are unquoted heredocs so they can name the branch and the provenance; that also means
+# a backtick is command substitution. This check exists because it happened: the human-case refusal
+# printed "orchestrator: command not found" and lost the word it meant to point at.
+LEAK="$( { printf '%s' "$ALL_OUT"; cat "$S/commit-msg-child.txt" "$S/commit-msg-orchestrator.txt" 2>/dev/null; } \
+  | grep -E 'command not found|syntax error|unbound variable' )"
+ok "$([ -z "$LEAK" ] && echo 1 || echo 0)" \
+  "no refusal message leaked a shell error" "$(head -1 <<<"$LEAK")"
 
 printf '\n'
 if [ "$failed" -eq 0 ]; then
