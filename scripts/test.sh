@@ -333,7 +333,8 @@ ok(v.message and #v.message > 20, 'every answer must carry a sentence')
 ok(v.next and #v.next > 20, 'a refusal must say where to go')
 
 -- A tree with nothing built in it: a deploy *builds*, so this is no longer a reason to refuse.
-v = update.verdict({ install = '/i', tree = '/tree', candidate = '/tree/rust/target/release/wa.exe', sentinel_present = true })
+v = update.verdict({ install = '/i', tree = '/tree', candidate = '/tree/rust/target/release/wa.exe',
+  sentinel_present = true, sentinel_running = true })
 ok(v.queued == true, 'an unbuilt tree must still queue - the gate builds it, got ' .. tostring(v.status))
 
 -- Built, but the only process that could deploy it is not there.
@@ -344,14 +345,14 @@ ok(v.error == 'no_sentinel', 'a missing sentinel must be a refusal, got ' .. tos
 -- machine: `installed.txt` read commit=unknown while the shipped deploy.sh was ten lines behind the
 -- tree - so "you already run that" would be a claim about scripts and a sentinel it never looked at.
 v = update.verdict({ install = '/i', tree = '/t', candidate = '/c', candidate_bytes = 10,
-  sentinel_present = true, tree_commit = 'abc1234', installed_commit = 'abc1234', dirty = 0 })
+  sentinel_present = true, sentinel_running = true, tree_commit = 'abc1234', installed_commit = 'abc1234', dirty = 0 })
 ok(v.queued == true and v.status == 'queue', 'the same commit must still deploy, got ' .. tostring(v.status))
 ok(v.message:find('sentinel and scripts', 1, true),
   'the answer must say what a deploy installs: ' .. tostring(v.message))
 
 -- A different commit queues, and says queued rather than done.
 v = update.verdict({ install = '/i', tree = '/t', candidate = '/c', candidate_bytes = 10,
-  sentinel_present = true, tree_commit = 'def5678', installed_commit = 'abc1234', dirty = 0 })
+  sentinel_present = true, sentinel_running = true, tree_commit = 'def5678', installed_commit = 'abc1234', dirty = 0 })
 ok(v.queued == true and v.commit == 'def5678', 'a newer tree must queue')
 ok(v.message:find('queued', 1, true) and v.message:find('not done yet', 1, true),
   'queued must not read as done: ' .. tostring(v.message))
@@ -362,6 +363,22 @@ v = update.verdict({ install = '/i', tree = '/t', candidate = '/c', candidate_by
   sentinel_present = true, tree_commit = 'abc1234', installed_commit = 'abc1234', dirty = 3 })
 ok(v.ok == false and v.error == 'tree_dirty', 'a dirty tree must be refused, got ' .. tostring(v.error))
 ok(v.next:find('commit or stash', 1, true), 'the refusal must say what to do: ' .. tostring(v.next))
+
+-- Nothing a watcher would perform, so nothing may be queued. This is the live shape the check
+-- answers: a deploy request that sat in the sentinel's box for over an hour while the install stayed
+-- on the old commit, reported as queued by a path that never asked whether a watcher was running.
+-- The sentinel state is a directory of this test's own, so the machine's real pid file and request box
+-- are neither read nor written here.
+v = update.verdict({ install = '/i', tree = '/t', sentinel_present = true, sentinel_running = false })
+ok(v.ok == false and v.error == 'no_watcher', 'no watcher must be a refusal, got ' .. tostring(v.error))
+ok(not v.queued, 'and it must not read as queued')
+ok(v.next and v.next:find('wasm-agent-sentinel', 1, true), 'the refusal must name how to start one: ' .. tostring(v.next))
+local stopped = update.verdict({ install = '/i', tree = '/t', sentinel_present = true, sentinel_running = false,
+  sentinel_stopped = true, stop_file = '/state/stop' })
+ok(stopped.error == 'sentinel_stopped', 'a stop file must be reported as the stop it is, got ' .. tostring(stopped.error))
+local duplicate = update.verdict({ install = '/i', tree = '/t', sentinel_present = true, sentinel_running = true,
+  pending_deploys = { 'requests/1-9.json' }, sentinel_dir = '/state' })
+ok(duplicate.error == 'already_pending', 'a deploy already in the box must not be duplicated, got ' .. tostring(duplicate.error))
 
 -- The path a recorded worktree comes back as is a Windows path with backslashes, which the shell
 -- this node runs commands in cannot use: a backslash inside a single-quoted word reaches a native
@@ -384,28 +401,38 @@ ok(not command:find("it's", 1, true) and command:find("it'\\''s", 1, true),
 ok(command:find("--session 'thread-123' --prompt 'verify and continue'", 1, true),
   'the update must durably continue the session after replacement: ' .. command)
 
--- A sentinel that exists and does not work must be a refusal - never a crash, and never a claim of
--- success. The fixture is a real file that is not a program, reached through the same seam a node
--- uses (WA_INSTALL_DIR), so nothing here touches the machine's own install or its sentinel. The tree
--- is a directory of this test's own: the candidate binary is derived from the tree, so a fixture that
--- put it anywhere else would be testing the wrong thing (and did, once).
+-- The whole path, through `run`, over a real tree and a real (empty) sentinel state: with no watcher
+-- running, the refusal happens before anything is written. The fixture is a real file that is not a
+-- program, reached through the same seam a node uses (WA_INSTALL_DIR), so nothing here touches the
+-- machine's own install or its sentinel; the tree is a directory of this test's own, because the
+-- candidate binary is derived from it (a fixture that put it anywhere else tested the wrong thing, and
+-- did, once). A sentinel that refuses - and one that cannot be run - is covered by
+-- scripts/test-update-watcher.lua, which scripts the sentinel's own answer.
 local tree = host.paths().temp .. '/wa-update-tree'
 local broken = host.paths().temp .. '/wa-update-broken'
-host.exec("mkdir -p '" .. tree .. "/rust/target/release' '" .. broken .. "'", "")
+local state = host.paths().temp .. '/wa-update-state'
+host.exec("rm -rf '" .. state .. "' && mkdir -p '" .. tree .. "/rust/target/release' '" .. broken .. "' '" .. state .. "'", "")
 host.write_file(tree .. '/rust/target/release/' .. update.binary_name(), 'placeholder\n')
 host.write_file(broken .. '/runtime-worktree.txt', (tree:gsub('/', '\\')) .. "\r\n")
 host.write_file(broken .. '/installed.txt', 'commit=0000000\nsource_commit_hint=0000000\n')
 host.write_file(broken .. '/' .. update.sentinel_name(), 'not a program\n')
-local report = update.run({ install = broken, reason = 'the update test', skip_source_sync = true })
-ok(report.ok == false, 'a sentinel that cannot run must not report success: ' .. tostring(report.message))
-ok(report.error == 'sentinel_refused' or report.error == 'sentinel_unreachable',
-  'the refusal must name what happened, got ' .. tostring(report.error) .. ' (' .. tostring(report.observed) .. ')')
+local report = update.run({ install = broken, reason = 'the update test', skip_source_sync = true,
+  sentinel_dir = state })
+ok(report.ok == false, 'a request no watcher can perform must not report success: ' .. tostring(report.message))
+ok(report.error == 'no_watcher', 'the refusal must name the missing watcher, got ' .. tostring(report.error))
 ok(not report.queued, 'a refused request must not claim to be queued')
+ok(report.message:find('was not queued', 1, true), 'the answer must say the request was not queued')
+ok(report.next and report.next:find(broken .. '/' .. update.sentinel_name() .. ' start', 1, true),
+  'the refusal must carry the command that starts a watcher: ' .. tostring(report.next))
 ok(report.observed and #report.observed > 10, 'the refusal must carry what was seen')
 print('update decision ok')
 LUA
 WA_SCRIPT="$DB.update.lua" "$BIN" --db "$DB" | grep "update decision ok"
 rm -f "$DB.update.lua"
+# The check that was missing from those decisions: no watcher running means no request is written, and
+# the refusal names the command that starts one. It drives the real command path with a stub host, so it
+# needs no node, no install and no request box of this machine's.
+WA_SCRIPT="$ROOT/scripts/test-update-watcher.lua" "$BIN" --db "$DB" | grep "update watcher decision ok"
 # The same decisions through the route, on a node whose install dir is a fixture. Its sentinel is a
 # stub: a live check that dropped a request into the operator's real request box could install a
 # placeholder over the node that is running. It also asserts that it did not.

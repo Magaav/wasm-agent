@@ -85,6 +85,69 @@ local function lines(text)
   return count
 end
 
+-- ---- who can perform a request ---------------------------------------------
+
+-- `wa-sentinel request` writes a file and returns. The *watcher* is what performs it, so a request
+-- written while no watcher is running is a claim with no actor - and that is the shape this file used
+-- to report as `queued`. Measured on this machine: a deploy request sat in the box for over an hour
+-- while the install stayed on the old commit, and the command that wrote it had already said the
+-- sentinel would deploy the tree.
+--
+-- The watcher writes its pid at `<config>/sentinel/sentinel.pid` when it starts and removes it when it
+-- stops (`watch`/`stop` in `rust/wa-sentinel/src/main.rs`), and `wa-sentinel status` answers
+-- "watching" by testing exactly that pid for liveness. So this asks the same question of the same
+-- file rather than inventing a second definition of "running". It stays local on purpose: asking
+-- `wa-sentinel status` would make the sentinel call this node's own `/health`, which is the one thing
+-- an `/update` served by this node must not wait on.
+local function live_pid(pid)
+  if not host.exec then return nil end
+  -- `MSYS_NO_PATHCONV=1` is not decoration: this platform's bash rewrites the argument `/FI` into
+  -- `C:/Program Files/Git/FI` before `tasklist` ever sees it, so plain `tasklist /FI ...` answers
+  -- "Invalid argument/option" every time - measured on the machine this runs on, and a probe that
+  -- always fails is a refusal that never lifts. `kill -0` answers the same question everywhere else,
+  -- and unlike `/proc/<pid>` it is true on a platform that has no `/proc` (macOS).
+  local result = shell(platform.os() == "windows"
+    and ("MSYS_NO_PATHCONV=1 tasklist /FI \"PID eq " .. pid .. "\" /NH")
+    or ("kill -0 " .. pid .. " 2>/dev/null"))
+  if not result or (result.code or 0) ~= 0 then return nil end
+  -- `tasklist` exits 0 whether or not it matched anything; its answer is the output, which names the
+  -- pid when the process is there and says "no tasks" when it is not. `kill -0` is the exit code.
+  if platform.os() == "windows" and not tostring(result.stdout or ""):find(pid, 1, true) then return nil end
+  return pid
+end
+
+-- The pid of a watcher that is alive right now, or nil. A stale pid file whose number now belongs to
+-- some other process reads as running - that is the sentinel's own rule too (`pid_alive`), and the
+-- alternative, a second opinion about what "the watcher" is, would be worse.
+local function watcher_pid(dir)
+  local pid = trim(first_line(read(dir .. "/sentinel.pid")))
+  if not pid:match("^%d+$") then return nil end
+  return live_pid(pid)
+end
+
+-- Deploys already waiting to be performed, as box-relative names. `requests/` is waiting and
+-- `claimed/` is being performed; `done/` and `failed/` are records, not queues. A request that cannot
+-- be read as JSON is not counted: refusing every future `/update` because one file in the box is
+-- garbage would be a worse failure than the duplicate this prevents.
+local function pending_deploys(dir)
+  local found = {}
+  for _, lane in ipairs({ "requests", "claimed" }) do
+    local listing = shell("ls -1 -- " .. quote(dir .. "/" .. lane) .. " 2>/dev/null")
+    if listing and (listing.code or 0) == 0 then
+      for name in tostring(listing.stdout or ""):gmatch("[^\r\n]+") do
+        name = trim(name)
+        if name:sub(-5) == ".json" then
+          local ok, request = pcall(json.decode, read(dir .. "/" .. lane .. "/" .. name) or "")
+          if ok and type(request) == "table" and tostring(request.verb or "") == "deploy" then
+            found[#found + 1] = lane .. "/" .. name
+          end
+        end
+      end
+    end
+  end
+  return found
+end
+
 -- ---- where things are ------------------------------------------------------
 
 -- The install directory, by the same rule the sentinel uses to find the node it restarts. The two
@@ -138,10 +201,15 @@ end
 -- verdict and the request it writes - at a fixture instead of at the machine's real node.
 function M.facts(options)
   local install = (options and options.install) or M.install_dir()
+  -- The sentinel's own state directory: `<config>/sentinel` by the rule the sentinel uses to find its
+  -- request box. `options.sentinel_dir` names it explicitly, the way `options.install` names the
+  -- install, so a test can point the whole path at a fixture instead of at this machine's real state.
+  local sentinel_dir = (options and options.sentinel_dir) or (slashes(paths.config()) .. "/sentinel")
   local facts = {
     install = install,
     binary = install .. "/" .. M.binary_name(),
     sentinel = install .. "/" .. M.sentinel_name(),
+    sentinel_dir = sentinel_dir,
   }
   facts.tree, facts.tree_source = M.runtime_tree(install)
   if facts.tree then
@@ -156,7 +224,12 @@ function M.facts(options)
   facts.installed_sha256 = record.sha256
   facts.installed_at = record.at
   facts.sentinel_present = exists(facts.sentinel)
-  facts.sentinel_stopped = exists(slashes(paths.config()) .. "/sentinel/stop")
+  facts.stop_file = sentinel_dir .. "/stop"
+  facts.pid_file = sentinel_dir .. "/sentinel.pid"
+  facts.sentinel_stopped = exists(facts.stop_file)
+  facts.sentinel_pid = watcher_pid(sentinel_dir)
+  facts.sentinel_running = facts.sentinel_pid ~= nil
+  facts.pending_deploys = pending_deploys(sentinel_dir)
   return facts
 end
 
@@ -203,6 +276,62 @@ end
 
 -- ---- the decision -----------------------------------------------------------
 
+-- The check that was missing before a request is written: is there a watcher that can perform it?
+-- `verdict` calls this immediately before it says "queued", and `run` calls it before it synchronizes
+-- anything, so a request nothing can perform is refused *before* it is written and before the tree is
+-- moved for it. Pure: every fact it reads is in the table.
+--
+-- Three refusals, each with the same shape as the rest of this module's answers, and each naming the
+-- one command that changes it. Nothing here starts a watcher: an intentional stop must stay stopped,
+-- and a second watcher must not be started beside a running one.
+function M.preconditions(facts)
+  if facts.sentinel_stopped then
+    return {
+      ok = false, status = "sentinel_stopped", error = "sentinel_stopped", tree = facts.tree,
+      message = "the sentinel was stopped on purpose - its stop file is present - so a request nothing " ..
+                "would perform was not queued.",
+      observed = "stop file at " .. tostring(facts.stop_file),
+      next = "start it when you want this deploy, then ask again: " .. M.start_command(facts) ..
+             ". /update does not clear a stop you made.",
+    }
+  end
+  if not facts.sentinel_running then
+    return {
+      ok = false, status = "no_watcher", error = "no_watcher", tree = facts.tree,
+      message = "no sentinel watcher is running, so nothing would perform a queued deploy: this request " ..
+                "was not queued.",
+      observed = "no live pid in " .. tostring(facts.pid_file) ..
+                 ((facts.pending_deploys and #facts.pending_deploys > 0)
+                   and ("; a deploy is already waiting there: " .. table.concat(facts.pending_deploys, ", "))
+                   or ""),
+      next = "start the watcher, then ask again: " .. M.start_command(facts),
+    }
+  end
+  if facts.pending_deploys and #facts.pending_deploys > 0 then
+    return {
+      ok = false, status = "already_pending", error = "already_pending", tree = facts.tree,
+      pending = facts.pending_deploys[1],
+      message = "a deploy request is already waiting in the sentinel's box (" .. facts.pending_deploys[1] ..
+                "), so this /update wrote nothing.",
+      observed = #facts.pending_deploys .. " deploy request(s) waiting in " .. tostring(facts.sentinel_dir) .. "/requests",
+      next = "let it run: the record lands in " .. tostring(facts.sentinel_dir) .. "/done/ or failed/, " ..
+             "and " .. tostring(facts.sentinel_dir) .. "/sentinel.log says what happened to it",
+    }
+  end
+  return nil
+end
+
+-- How to start a watcher that is not running, spelled out for the machine this is. The Windows task
+-- is the one `scripts/install-sentinel-task.ps1` registers, and it is what starts the supervisor again
+-- after a logon; the binary beside the node is what a human at a shell would run now.
+function M.start_command(facts)
+  local command = tostring(facts.sentinel) .. " start"
+  if platform.os() == "windows" then
+    command = command .. " (or the registered logon task: schtasks /Run /TN wasm-agent-sentinel)"
+  end
+  return command
+end
+
 -- Three answers and no others. Each carries `message` (one sentence for a human), `observed` (what
 -- was seen) and - where there is somewhere to go - `next`.
 --
@@ -246,6 +375,10 @@ function M.verdict(facts)
       next = "commit or stash them, then ask again: a deploy installs a commit, not a working copy",
     }
   end
+  -- The last question before the answer that costs something: a request nothing can perform must not
+  -- be written, and an answer of "queued" must not be given for one.
+  local blocked = M.preconditions(facts)
+  if blocked then return blocked end
   return {
     ok = true, queued = true, status = "queue", tree = facts.tree,
     commit = facts.tree_commit or facts.installed_commit,
@@ -253,7 +386,10 @@ function M.verdict(facts)
     message = "queued: the sentinel will deploy this tree through the gate once the node is idle - " ..
               "build, the full test suite, then the node, UI, sentinel and scripts. This is not done yet.",
     observed = "the tree is at " .. tostring(facts.tree_commit) .. " with nothing uncommitted; " ..
-               "the install records " .. tostring(facts.installed_commit),
+               "the install records " .. tostring(facts.installed_commit) .. "; " ..
+               (facts.sentinel_pid
+                 and ("a watcher is running (pid " .. tostring(facts.sentinel_pid) .. ")")
+                 or "a watcher answered as running"),
   }
 end
 
@@ -286,9 +422,22 @@ function M.request_command(facts, reason, continuation)
 end
 
 -- Gather, decide, and - only in the queueing case - write one request for the sentinel.
+local function decorate(verdict, facts)
+  verdict.tree = verdict.tree or facts.tree
+  verdict.installed_commit = verdict.installed_commit or facts.installed_commit
+  verdict.candidate = facts.candidate
+  verdict.installed_sha256 = facts.installed_sha256
+  verdict.installed_at = facts.installed_at
+  return verdict
+end
+
 function M.run(options)
   options = options or {}
   local facts = M.facts(options)
+  -- Asked before the tree is synchronized: a request no watcher can perform is refused without moving
+  -- the runtime worktree for it, and without writing anything.
+  local blocked = M.preconditions(facts)
+  if blocked then return decorate(blocked, facts) end
   if facts.tree and (facts.dirty or 0) == 0 and not options.skip_source_sync then
     local name = facts.tree:match("([^/]+)$") or ""
     local expected = name == "wasm-agent" and "main" or name
@@ -307,12 +456,7 @@ function M.run(options)
     end
     facts = M.facts(options)
   end
-  local verdict = M.verdict(facts)
-  verdict.tree = verdict.tree or facts.tree
-  verdict.installed_commit = verdict.installed_commit or facts.installed_commit
-  verdict.candidate = facts.candidate
-  verdict.installed_sha256 = facts.installed_sha256
-  verdict.installed_at = facts.installed_at
+  local verdict = decorate(M.verdict(facts), facts)
   if verdict.status ~= "queue" then
     return verdict
   end
@@ -341,17 +485,22 @@ function M.run(options)
     verdict.ok, verdict.queued, verdict.status = false, nil, "sentinel_refused"
     verdict.error = "sentinel_refused"
     verdict.observed = "the sentinel exited " .. tostring(result.code) .. ": " .. detail
-    verdict.next = "read its log (" .. slashes(paths.config()) .. "/sentinel/sentinel.log); a refusal is logged there with its reason"
+    verdict.next = "read its log (" .. (facts.sentinel_dir or (slashes(paths.config()) .. "/sentinel")) ..
+                   "/sentinel.log); a refusal is logged there with its reason"
     return verdict
   end
   local output = tostring(result.stdout or "")
   verdict.request = output:match("requested[^:]*:%s*([^\r\n]+)")
   verdict.sentinel = trim(first_line(output))
+  -- The stop file was checked before the request was written, so this is the race it cannot close: a
+  -- stop that appeared in between. The request is on disk and will be performed by whoever starts the
+  -- watcher next - say so rather than let it look like a deploy in flight.
   if facts.sentinel_stopped then
     verdict.warning = "the sentinel's stop file exists, so nothing will happen until it is started again (wa-sentinel start)"
   end
+  local sentinel_dir = facts.sentinel_dir or (slashes(paths.config()) .. "/sentinel")
   verdict.next = "the sentinel performs it when this node is idle. The record lands in " ..
-                 slashes(paths.config()) .. "/sentinel/done/ or failed/, and installed.txt records the commit it installed."
+                 sentinel_dir .. "/done/ or failed/, and installed.txt records the commit it installed."
   verdict.reason = reason
   if session_id ~= "" then verdict.continuation_session = session_id end
   verdict.message = "queued: the sentinel will deploy " .. tostring(verdict.commit or "this tree") ..

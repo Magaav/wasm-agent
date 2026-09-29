@@ -44,11 +44,37 @@ ARGS="$W/sentinel-args.txt"
 printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "%s"\necho "  requested deploy: %s/requests/1789987058-0000.json"\necho "  the sentinel performs it - it is only a stub"\n' "$ARGS" "$W" > "$STUB"
 chmod +x "$STUB"
 
-echo "fixture: tree=$TREE commit=$COMMIT"
-WA_INSTALL_DIR="$(native_path "$INST")" "$BIN" --db "$W/node.db" serve --port "$PORT" \
+# The watcher this fixture claims, and its own application home. `/update` refuses before queueing when
+# no watcher can perform the request - a request that sat in the box for over an hour while the install
+# stayed on the old commit is what that answers - so the fixture has to show one. The pid is a real
+# process, held for the length of this run, written into the fixture's own `sentinel.pid`: the file
+# `update.lua` reads and `wa-sentinel status` reports from. A pid that was only *written* would prove
+# nothing about a probe that asks the OS. WASM_AGENT_HOME keeps all of it - pid file, request box,
+# config - inside the fixture, so the operator's sentinel state is not read or written.
+WATCHER_STATE="$W/home/.wasm-agent/sentinel"
+mkdir -p "$WATCHER_STATE/requests"
+case "$(uname -s 2>/dev/null)" in
+  CYGWIN*|MINGW*|MSYS*)
+    powershell -NoProfile -Command "\$p = Start-Process -FilePath 'powershell' -ArgumentList '-NoProfile','-Command','Start-Sleep 900' -WindowStyle Hidden -PassThru; \$p.Id" 2>/dev/null | tr -d '\r' > "$W/watcher.pid" ;;
+  *) sleep 900 & echo $! > "$W/watcher.pid" ;;
+esac
+WATCHER="$(cat "$W/watcher.pid" 2>/dev/null | tr -d '\r\n')"
+[ -n "$WATCHER" ] || { echo "FAIL: the fixture could not start the watcher process it needs"; exit 1; }
+printf '%s\n' "$WATCHER" > "$WATCHER_STATE/sentinel.pid"
+kill_watcher() {
+  [ -n "$WATCHER" ] || return 0
+  case "$(uname -s 2>/dev/null)" in
+    CYGWIN*|MINGW*|MSYS*) powershell -NoProfile -Command "Stop-Process -Id $WATCHER -Force -ErrorAction SilentlyContinue" >/dev/null 2>&1 ;;
+    *) kill "$WATCHER" 2>/dev/null ;;
+  esac
+}
+
+echo "fixture: tree=$TREE commit=$COMMIT watcher=$WATCHER"
+WASM_AGENT_HOME="$(native_path "$W/home")" WA_INSTALL_DIR="$(native_path "$INST")" \
+  "$BIN" --db "$W/node.db" serve --port "$PORT" \
   --client-port $((PORT + 1)) --ui "$(native_path "$ROOT/ui")" > "$W/node.log" 2>&1 &
 NODE=$!
-trap 'kill $NODE 2>/dev/null; sleep 0.3; rm -rf "$W"' EXIT
+trap 'kill $NODE 2>/dev/null; kill_watcher; sleep 0.3; rm -rf "$W"' EXIT
 for _ in $(seq 1 40); do
   code="$(curl -s -o /dev/null -m 2 -w '%{http_code}' "http://127.0.0.1:$PORT/health" 2>/dev/null)"
   [ "$code" = "200" ] && break
