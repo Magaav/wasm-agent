@@ -324,6 +324,7 @@ rm -f "$DB.bashschema.lua"
 # a real file, because that is where a Windows backslash actually breaks.
 cat > "$DB.update.lua" <<'LUA'
 local update = dofile('lua/core/update.lua')
+local json = dofile('lua/vendor/json.lua')
 local function ok(condition, message) if not condition then error(message, 2) end end
 
 -- Nothing to update from at all.
@@ -425,6 +426,29 @@ ok(report.message:find('was not queued', 1, true), 'the answer must say the requ
 ok(report.next and report.next:find(broken .. '/' .. update.sentinel_name() .. ' start', 1, true),
   'the refusal must carry the command that starts a watcher: ' .. tostring(report.next))
 ok(report.observed and #report.observed > 10, 'the refusal must carry what was seen')
+
+-- The path the new refusal must not have swallowed: a sentinel that exists and does not work is still
+-- a refusal - never a crash, and never a claim of success. Reaching it needs a watcher the OS reports
+-- alive, and a pid that was only *written* would prove nothing about a probe that asks the OS, so the
+-- pid is real on both platforms: on Windows the System process (pid 4), which `tasklist` is asked
+-- about first, and elsewhere the shell's own parent - the node running this script, which cannot be
+-- gone while it runs.
+local watcher = (function()
+  local raw = host.exec(update.binary_name() == 'wa.exe'
+    and 'MSYS_NO_PATHCONV=1 tasklist /FI "PID eq 4" /NH'
+    or 'echo $PPID', "")
+  local answer = raw and json.decode(raw) or nil
+  return tostring(answer and answer.stdout or ''):match('(%d+)')
+end)()
+ok(watcher and watcher ~= '', 'the fixture needs a live watcher pid, got ' .. tostring(watcher))
+host.write_file(state .. '/sentinel.pid', watcher .. '\n')
+report = update.run({ install = broken, reason = 'the update test', skip_source_sync = true,
+  sentinel_dir = state })
+ok(report.ok == false, 'a sentinel that cannot run must not report success: ' .. tostring(report.message))
+ok(report.error == 'sentinel_refused' or report.error == 'sentinel_unreachable',
+  'the refusal must name what happened, got ' .. tostring(report.error) .. ' (' .. tostring(report.observed) .. ')')
+ok(not report.queued, 'a refused request must not claim to be queued')
+ok(report.observed and #report.observed > 10, 'the refusal must carry what was seen')
 print('update decision ok')
 LUA
 WA_SCRIPT="$DB.update.lua" "$BIN" --db "$DB" | grep "update decision ok"
@@ -432,7 +456,7 @@ rm -f "$DB.update.lua"
 # The check that was missing from those decisions: no watcher running means no request is written, and
 # the refusal names the command that starts one. It drives the real command path with a stub host, so it
 # needs no node, no install and no request box of this machine's.
-WA_SCRIPT="$ROOT/scripts/test-update-watcher.lua" "$BIN" --db "$DB" | grep "update watcher decision ok"
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-watcher.lua" "$BIN" --db "$DB" | grep "update watcher decision ok"
 # The same decisions through the route, on a node whose install dir is a fixture. Its sentinel is a
 # stub: a live check that dropped a request into the operator's real request box could install a
 # placeholder over the node that is running. It also asserts that it did not.

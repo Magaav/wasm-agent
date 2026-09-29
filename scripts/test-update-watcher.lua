@@ -51,6 +51,13 @@ end
 
 local real_host = host
 
+-- The module is loaded through the *real* host, before the stub below exists. `scripts/test.sh` exports
+-- WASM_AGENT_LUA_ROOT so that the gate tests the tree and not the copy embedded in the binary, and the
+-- host resolves `dofile` through `host.read_file`: a stub whose file system is an empty table would
+-- make the module unloadable (`lua_root_unreadable`) - and the checks would then run against the
+-- embedded copy, passing while proving nothing about the file under test.
+local update = dofile("lua/core/update.lua")
+
 host = {
   platform = function()
     return { os = "windows", arch = "x86_64", shell = "sh -c", pathSeparator = "/", cwd = home }
@@ -86,8 +93,6 @@ host = {
 -- Anything this test does not script (the host's own bookkeeping around a script) still comes from the
 -- real host, so the stub cannot turn a missing field into a failure of the test itself.
 setmetatable(host, { __index = function(_, key) return real_host[key] end })
-
-local update = dofile("lua/core/update.lua")
 
 -- ---- the fixture ----------------------------------------------------------
 
