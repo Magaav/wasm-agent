@@ -75,7 +75,8 @@ produce -> verify -> accept -> land -> deploy
 ```
 
 - **produce** - a producer lane: its own worktree, its own `change/<name>` from current `origin/main`,
-one concern, committed with its provenance trailer and pushed. Its branch is its deliverable.
+one delivery (adjacent concerns may join it - see "Steering a warm lane"), committed with its
+provenance trailer and pushed. Its branch is its deliverable.
 - **verify** - a reviewer lane that did **not** produce the branch: read the diff and its intent,
   attack the claim on the exact tree, re-run what proves it, and report what it broke.
 - **accept** - the delivery carries evidence bound to one exact tree: the reviewer's verdict plus a
@@ -100,6 +101,27 @@ How many lanes run at once, and why the gate is a reserved serial resource, is
 `docs/CONCURRENCY.md` ("Lane reservations and the serial gate"): the target is 16-32 lanes with a
 few reserved for verify/gate/merge, so a delivery never waits behind producers, and a lane count is
 raised only with the measurement named there.
+
+### Steering a warm lane
+
+New work that is **adjacent** to what a live session is already doing belongs *in that session*.
+Steer it - `steer` for an active session, `message` for a queued follow-up - instead of restarting
+it or spawning a sibling lane to do the neighbour work. A warm session keeps its context, its
+worktree, its branch, its evidence and its unsent state; a new one re-derives all of it, which is
+the expensive path (measured on this node: 3-15M prompt tokens for a child to get back to where the
+warm one already is). Adjacent means the same subsystem, the same files, the same evidence, the
+same causal chain.
+
+The bounds still hold, and they are what keeps "warm" from meaning "unbounded":
+
+- **No unrelated drift** - a concern that is not adjacent gets its own session, and the brief says
+  why.
+- **No recursive feedback chain** - at most one bounded improvement and one review per original
+  task.
+- **One delivery, not one idea.** A branch that ends up carrying several adjacent concerns is
+  acceptable: it is reviewed **per commit** and lands as one delivery. The trade is atomic landing
+  - one failed commit holds the whole branch - not a rule violation, and "one concern per branch"
+  is not a gate a steered warm lane fails.
 
 ### Manual entry points
 
@@ -138,7 +160,7 @@ did not do.
 ### 1. Discover inputs with the audit
 
 Use the loaded skill directory (the installed node copy can be newer than a
-worker checkout) and a native absolute repository path:
+producer's checkout) and a native absolute repository path:
 
 ```
 node <skill-dir>/scripts/audit.mjs audit <repo> origin/main
@@ -221,7 +243,7 @@ git -C <canonical> ls-remote origin refs/heads/main   # must equal rev-parse HEA
 Fetch and re-audit after the gate. If a new tip changes the candidate, review,
 merge and re-gate it. Publish only a passing, current candidate. A normal PR merge
 or fast-forward of clean idle main to the tested candidate preserves its tree;
-verify that equivalence and `origin/main`. Never force-push. If main or a worker
+verify that equivalence and `origin/main`. Never force-push. If main or a producer
 keeps changing, report the concrete moving input rather than hiding the race.
 
 Finally run:

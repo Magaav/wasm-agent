@@ -38,6 +38,22 @@ const RESERVATIONS = 'docs/CONCURRENCY.md'; // how many lanes fit, and what is s
 const INJECTED = 'AGENTS.md';
 const INJECTED_BUDGET_BYTES = 10418;
 
+// The files this refactor owns. The vocabulary check below is enforced here and only here: the rest of
+// the repository names node-threads "workers" in code, UI and tests, which is another worker's rename
+// and is inventoried in the delivery report rather than enforced from this file.
+const OWNED = [
+  INJECTED, 'AGENTS.orchestrator.md', 'docs/CONCURRENCY.md', 'docs/EVOLUTION.md',
+  'docs/FABRIC.md', 'docs/ORCHESTRATION.md', PRODUCER, PROTOCOL,
+];
+
+// Outside a code span, the word "worker" must not appear in an owned file: a node's execution threads
+// are node-threads and a delegated child is a subagent. A `code span` is how an identifier or a live
+// config key is named, and those keep their names until they are renamed (`workers[]`,
+// `WASM_AGENT_WORKERS`, `task-worker`, ...).
+const VOCABULARY = /\bworkers?\b/i;
+const CODE_SPAN = /`[^`]*`/g;
+const ALLOW_LINE_MARKER = 'instructions-check: allow';
+
 // Each home must still state its rule, or the pointer that sends a reader there is a lie.
 const HOMES = [
   { file: PROTOCOL, contains: [
@@ -45,7 +61,10 @@ const HOMES = [
     'The lanes and what each may do', 'The landing steps', 'Manual entry points', 'merge lane'] },
   { file: PRODUCER, contains: ['#### Landing', 'skills/git-orchestrator/SKILL.md'] },
   { file: RESERVATIONS, contains: ['## Lane reservations and the serial gate', 'WA_GATE_JOBS'] },
-  { file: INJECTED, contains: ['skills/git-orchestrator/SKILL.md', 'merge lane', 'The integration protocol'] },
+  { file: INJECTED, contains: ['skills/git-orchestrator/SKILL.md', 'merge lane', 'The integration protocol',
+    'docs/FABRIC.md', 'node-thread'] },
+  { file: 'docs/FABRIC.md', contains: ['Topology: the layers and their real names', 'node-threads',
+    "sessions -> runs -> turns", 'subagent', 'sentinel', 'rendezvous'] },
   { file: 'AGENTS.orchestrator.md', contains: ['skills/git-orchestrator/SKILL.md'] },
   { file: 'docs/EVOLUTION.md', contains: ['skills/git-orchestrator/SKILL.md'] },
   { file: 'docs/ORCHESTRATION.md', contains: ['your branch is your deliverable'] },
@@ -112,6 +131,40 @@ const RETIRED = [
   { id: 'factory-land-step', phrase: 'merge, gate the MERGED tree, push main, delete, prune',
     home: null, wasHome: 'docs/FACTORY.md',
     why: 'the pipeline points at the protocol instead of restating the landing' },
+  { id: 'node-thread-naming-agents', phrase: 'More than one worker is normal',
+    home: null, wasHome: 'AGENTS.md',
+    why: 'a node\'s execution threads are node-threads' },
+  { id: 'node-thread-naming-reads', phrase: 'Read workers spawn on demand',
+    home: null, wasHome: 'AGENTS.md', why: 'same' },
+  { id: 'subagent-naming-orchestrator', phrase: 'approved workers by default',
+    home: null, wasHome: 'AGENTS.orchestrator.md',
+    why: 'a delegated child is a subagent; "workers" there read as node-threads' },
+  { id: 'subagent-naming-review', phrase: 'review-capable worker',
+    home: null, wasHome: 'AGENTS.orchestrator.md', why: 'same' },
+  { id: 'subagent-naming-wait', phrase: 'while workers own the task',
+    home: null, wasHome: 'AGENTS.orchestrator.md', why: 'same' },
+  { id: 'subagent-naming-checkout', phrase: 'a worker checkout',
+    home: null, wasHome: 'skills/git-orchestrator/SKILL.md', why: 'same' },
+  { id: 'node-thread-naming-cloud', phrase: 'the cloud is the worker',
+    home: null, wasHome: 'docs/FABRIC.md', why: 'the cloud node executes a run' },
+  { id: 'node-thread-naming-run', phrase: 'id, worker, cancellation state',
+    home: null, wasHome: 'docs/FABRIC.md', why: 'a run owns a node-thread' },
+  { id: 'one-change-per-branch', phrase: 'One change per branch',
+    home: null, wasHome: 'skills/parallel-evolution/SKILL.md',
+    why: 'one DELIVERY per branch; adjacent work joins the warm session' },
+  { id: 'exactly-one-concern', phrase: 'for exactly one concern',
+    home: null, wasHome: 'skills/parallel-evolution/SKILL.md', why: 'same' },
+  { id: 'one-concern-gate', phrase: '| one concern | the diff touches one thing |',
+    home: null, wasHome: 'skills/parallel-evolution/SKILL.md',
+    why: 'a multi-concern branch is a trade, not a failed gate' },
+  { id: 'one-concern-produce', phrase: 'one concern, committed with',
+    home: null, wasHome: 'skills/git-orchestrator/SKILL.md', why: 'same' },
+  { id: 'unrelated-defect-rule', phrase: 'If you find an unrelated defect',
+    home: null, wasHome: 'skills/parallel-evolution/SKILL.md',
+    why: 'ADJACENT work steers the warm session; only an unrelated concern gets its own branch' },
+  { id: 'no-growing-session', phrase: 'Do not pile unrelated follow-ups into a growing or failed session',
+    home: null, wasHome: 'AGENTS.orchestrator.md',
+    why: 'steering a warm session is the practice; the bounds are what limit it' },
 ];
 
 // Duplicates in files this change does not own, or must not edit. Printed, never fatal; an entry whose
@@ -138,6 +191,11 @@ const DEFERRED = [
     file: 'scripts/test-main-guard.sh',
     owner: 'scripts/test-main-guard.sh (a test another worker may be editing)',
     edit: 'the comment names the old landing home; it is now skills/git-orchestrator/SKILL.md' },
+  { phrase: 'one concern, its files', file: 'docs/FACTORY.md',
+    owner: 'docs/FACTORY.md',
+    edit: 'the `scope` pipeline step says "one concern"; adjacent work may share the delivery' },
+  { phrase: 'a worker session', file: 'docs/FACTORY.md',
+    owner: 'docs/FACTORY.md', edit: 'the `produce` pipeline step means a subagent' },
 ];
 
 // Rules this refactor only RELOCATED. Each must still exist in the file that now owns it: the point of
@@ -168,6 +226,18 @@ const PRESERVED = [
     phrase: 'never moves `main`' },
   { rule: 'the merge lane is the only actor that moves `main`',
     home: PROTOCOL, phrase: 'the merge lane, and only the merge lane' },
+  { rule: 'a warm session is steered, not replaced, for adjacent work',
+    home: PROTOCOL, phrase: 'Steering a warm lane' },
+  { rule: 'the coordinator steers the warm child for adjacent work',
+    home: 'AGENTS.orchestrator.md', phrase: 'adjacent work steers the' },
+  { rule: 'one delivery per branch, adjacent concerns included',
+    home: PRODUCER, phrase: 'One delivery per branch' },
+  { rule: 'a multi-concern branch is a trade, not a violation',
+    home: PROTOCOL, phrase: 'One delivery, not one idea' },
+  { rule: 'a node\'s execution threads are node-threads', home: 'docs/FABRIC.md',
+    phrase: 'singular **node-thread**' },
+  { rule: 'a delegated child is a subagent, and that is its only name',
+    home: 'docs/FABRIC.md', phrase: 'that is the only name for it' },
 ];
 
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'target', 'graph', 'operations', 'tmp']);
@@ -211,11 +281,12 @@ const ok = (label, detail = '') => { checks++; console.log(`  ok   ${label}${det
 const fail = (label, detail = '') => { checks++; failures.push(label); console.log(`  FAIL ${label}${detail ? ' - ' + detail : ''}`); };
 
 function occurrences(phrase) {
+  const needle = phrase.toLowerCase();
   const hits = [];
   for (const [file, { text }] of sources) {
     text.split('\n').forEach((line, index) => {
-      if (!line.includes(phrase)) return;
-      if (line.includes('instructions-check: allow')) { allowed.push({ file, line: index + 1, phrase }); return; }
+      if (!line.toLowerCase().includes(needle)) return;
+      if (line.includes(ALLOW_LINE_MARKER)) { allowed.push({ file, line: index + 1, phrase }); return; }
       hits.push({ file, line: index + 1 });
     });
   }
@@ -235,6 +306,10 @@ function deferredHits(entry) {
   });
 }
 
+// A (file, line) pair that a DEFERRED entry covers is excused from the fatal check below: the file's
+// owner has the edit, and inventing a second home for the rule here would be the same mistake again.
+const excused = new Set(DEFERRED.flatMap(entry => deferredHits(entry).map(hit => `${hit.file}:${hit.line}`)));
+
 console.log(`check-instructions: one rule, one home`);
 console.log(`  root: ${root}`);
 console.log(`  injected: ${INJECTED} (${sources.get(INJECTED)?.bytes ?? '?'} B, budget ${INJECTED_BUDGET_BYTES} B)`);
@@ -252,8 +327,7 @@ for (const { file, contains: phrases } of HOMES) {
 console.log('\n2. a retired phrasing stays retired (outside its home)');
 for (const rule of RETIRED) {
   const hits = occurrences(rule.phrase);
-  const wrong = hits.filter(hit => hit.file !== rule.home &&
-    !DEFERRED.some(entry => entry.file === hit.file && entry.phrase === rule.phrase));
+  const wrong = hits.filter(hit => hit.file !== rule.home && !excused.has(`${hit.file}:${hit.line}`));
   const homeKeeps = rule.home ? hits.some(hit => hit.file === rule.home) : true;
   const deferred = hits.length - wrong.length - (rule.home ? hits.filter(h => h.file === rule.home).length : 0);
   const suffix = deferred > 0 ? ` (${deferred} deferred)` : '';
@@ -277,7 +351,20 @@ console.log('\n4. the injected file did not grow');
   else fail(`${INJECTED} grew`, `${bytes} > ${INJECTED_BUDGET_BYTES} B - move detail to a doc that loads on demand`);
 }
 
-console.log('\n5. known duplicates in files this change does not own (not fatal, printed every run)');
+console.log('\n5. vocabulary: node-threads and subagents, outside a code span (owned files only)');
+for (const file of OWNED) {
+  const offences = [];
+  sources.get(file).text.split('\n').forEach((line, index) => {
+    if (line.includes(ALLOW_LINE_MARKER)) return;
+    const prose = line.replace(CODE_SPAN, ' ');
+    if (VOCABULARY.test(prose)) offences.push(index + 1);
+  });
+  if (offences.length) fail(`vocabulary in ${file}`,
+    `line ${offences.join(', ')} says "worker" in prose - node-threads, or subagents for a child task`);
+  else ok(`vocabulary in ${file}`);
+}
+
+console.log('\n6. known duplicates in files this change does not own (not fatal, printed every run)');
 let deferred = 0;
 for (const entry of DEFERRED) {
   const where = deferredHits(entry);
@@ -287,7 +374,7 @@ for (const entry of DEFERRED) {
     console.log(`  DEFERRED  ${hit.file}:${hit.line} "${entry.phrase}"\n              owner: ${entry.owner}\n              edit:  ${entry.edit}`);
 }
 if (allowed.length) {
-  console.log('\n6. lines exempted by `instructions-check: allow`');
+  console.log('\n7. lines exempted by `instructions-check: allow`');
   for (const hit of allowed) console.log(`  allowed   ${hit.file}:${hit.line} "${hit.phrase}"`);
 }
 if (!deferred) console.log('  (none)');

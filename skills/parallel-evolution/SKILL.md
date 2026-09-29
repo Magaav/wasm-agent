@@ -21,14 +21,18 @@ whoever has to merge it.
 If this repository has its own contributor rules (`AGENTS.md`, `CONTRIBUTING.md`), they
 override this file. Read those first; this is the general procedure.
 
-## One change per branch
+## One delivery per branch
 
-- Cut a **short-lived** branch from current `main` for exactly one concern, and name it
-  for that concern.
+- Cut a **short-lived** branch from current `main` for one delivery, and name it for that delivery.
+  Adjacent work that arrives while it lives does not start a second branch: the warm session is
+  steered and the branch carries both, because a branch is one *delivery*, reviewed per commit
+  (`skills/git-orchestrator/SKILL.md`, "Steering a warm lane"). The trade is atomic landing - one
+  failed commit holds the whole branch.
 - A branch that lives a day cannot fall behind. A branch that lives a week will meet
   everything that landed meanwhile.
-- Do not carry two unrelated changes on one branch. If you find an unrelated defect,
-  record it (an issue, a note, its own branch) — do not fix it silently inside this one.
+- **Unrelated** is the line, not "more than one". A concern that is not adjacent - a different
+  subsystem, different evidence, no shared causal chain - gets its own note, issue or branch; do not
+  fix it silently inside this one, and do not smuggle it in as "adjacent".
 - Never commit to the integration branch: it belongs to the merge lane (see the mapping below).
   Never force-push a branch someone else may have built on.
 
@@ -112,7 +116,7 @@ fact:
 
 | property | how to prove it |
 | --- | --- |
-| one concern | the diff touches one thing |
+| one delivery | the branch carries one delivery's concerns; adjacent ones are expected, and every commit is reviewable on its own |
 | current | `git rev-list --count HEAD..origin/main` is 0, or you merged it |
 | merges | `git merge-tree --write-tree origin/main HEAD` exits 0 |
 | gate | the repository's test command passes on the merged result |
@@ -234,7 +238,7 @@ the measurements behind them. Do not re-derive them here.
 
 What a producer owes that lane, all provable from its own worktree:
 
-- the branch pushed, current with `origin/main`, and one concern;
+- the branch pushed, current with `origin/main`, and one delivery (adjacent commits included);
 - `git merge-tree --write-tree origin/main HEAD` exits 0;
 - the gate's verdict on its own tree, with the skip count;
 - the exact tip SHA, and what it did **not** verify, in the report.

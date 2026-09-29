@@ -91,7 +91,7 @@ marker-echoing provider) and the UI check in `scripts/test-ui.ps1`.
 The accept thread owns one **control interpreter**, and it runs on its own **resolver
 thread** so the accept thread can bound the wait (`WASM_AGENT_ADMISSION_TIMEOUT_MS`,
 default 8000) - a busy SQLite lock or a slow interpreter must not stop the node accepting.
-The resolver calls `wa_admission(session, node, body)` before any worker is reserved and
+The resolver calls `wa_admission(session, node, body)` before any node-thread is reserved and
 returns the authenticated user and the real conversation id, or an error:
 
 - a nonempty invalid/expired credential is refused `401 invalid_session` - it never reaches a
@@ -108,11 +108,11 @@ This matches [EXECUTION.md](EXECUTION.md#seven-concepts-seven-different-identiti
 1. **One writer per conversation, from admission to completion.** A conversation is
    claimed when the run is admitted - not when it starts - and held until the last run
    queued behind it completes. A second run for the same conversation is *behind* the
-   owner and cannot be handed a different worker.
-2. **A worker never executes a conversation it does not own.** The claimed set is passed
-   to the worker pick, so a worker reserved for a run that has not started is not offered
+   owner and cannot be handed a different node-thread.
+2. **A node-thread never executes a conversation it does not own.** The claimed set is passed
+   to the node-thread pick, so a node-thread reserved for a run that has not started is not offered
    to another conversation.
-3. **The lanes are separate index ranges, not priorities.** Run workers live below the
+3. **The lanes are separate index ranges, not priorities.** Run node-threads live below the
    control floor; the control lane owns the top of the range. Background runs use only
    indices `WASM_AGENT_INTERACTIVE_RESERVE..run_capacity` (default reserve **2**), so two
    concurrent chats remain possible while background work saturates the rest. Background
@@ -122,8 +122,8 @@ This matches [EXECUTION.md](EXECUTION.md#seven-concepts-seven-different-identiti
    Overflow is an explicit 503 (`background_queue_full`, `session_queue_full`), never
    invisible loss.
 4. **One admission for every run.** A local `/chat`, a directly-arriving peer `/node/chat`,
-   and a relayed `/node/chat` all travel the same scheduler. The worker channel carries both
-   HTTP and relay work, so a peer run cannot bypass admission on worker 0's housekeeping
+   and a relayed `/node/chat` all travel the same scheduler. The node-thread channel carries both
+   HTTP and relay work, so a peer run cannot bypass admission on node-thread 0's housekeeping
    path. A peer's signature is verified **once, before admission**
    (`wa_verify_peer`), and the conversation is keyed by the verified author, never by the
    `x-wa-node` header; the run half (`wa_node_chat_verified`) does not re-verify, because a
@@ -133,14 +133,14 @@ This matches [EXECUTION.md](EXECUTION.md#seven-concepts-seven-different-identiti
    ignored and the run keeps the default. **No header value grants reserved capacity**, so
    an untrusted caller cannot promote itself.
 
-`/health` reports `runs[]` (conversation, worker, lane, pending), `run_ids[]`
+`/health` reports `runs[]` (conversation, node-thread, lane, pending), `run_ids[]`
 (conversation, run_id, state), `run_limits` (session backlog, background bounds,
-interactive reserve, control workers) and `subagents`/`subagent_counts`, so the guarantees
+interactive reserve, control node-threads) and `subagents`/`subagent_counts`, so the guarantees
 are observable from outside the process. None of these carry a prompt or a credential.
 
 ## Lane reservations and the serial gate
 
-The lanes above are the runtime's: worker index ranges, the interactive reserve, and
+The lanes above are the runtime's: node-thread index ranges, the interactive reserve, and
 `WASM_AGENT_SUBAGENT_CONCURRENCY` (the node's env sets **4**; the pool clamps 1..16). The
 **integration lanes** - producer, reviewer, gate, merge - are roles a *run* takes, and what each may
 and may not do is stated once in `skills/git-orchestrator/SKILL.md` ("The integration protocol").
@@ -177,7 +177,7 @@ cancel flag, so cancelling a running run does not cancel the run queued behind i
 stopped. The run's state becomes `cancelled` only when it settles, and a queued run that was
 cancelled before it started settles its own stream exactly once and never executes.
 
-The worker installs the run's flag as a thread-local current-run context, and
+The node-thread installs the run's flag as a thread-local current-run context, and
 `serve::run_cancel_requested()` is registered with the runtime as the run half of unified
 cancellation (`host::set_run_cancel_probe`). The runtime's provider reader and agent loop
 poll `host::run_cancel_requested()`, which combines the run flag with a child task's own
@@ -227,7 +227,7 @@ the **control lane**, never a run slot, and is never admitted as a run: `start` 
 native background child, so the route itself is a control call. An invalid credential is
 refused `401` at the boundary. The HTTP `await` is capped
 (`WASM_AGENT_SUBAGENT_AWAIT_MS`, default 10000) so one control slot cannot be held
-indefinitely; `POST /runs`, `POST /run-events` and `/health` are answered without a worker,
+indefinitely; `POST /runs`, `POST /run-events` and `/health` are answered without a node-thread,
 so cancellation, live replay and health stay prompt even while every control slot is awaiting.
 
 ## What this does not cover
@@ -241,7 +241,7 @@ Stated so a verdict is not read for more than it says:
 - **The sentinel does not set `X-WA-Run-Class`.** A wake takes the default (interactive);
   the sentinel already limits wake concurrency and refuses to wake while a person's turn is
   running, so the reserve is not unprotected.
-- **A slow write still occupies worker 0.** Writes remain pinned to worker 0 for the
+- **A slow write still occupies node-thread 0.** Writes remain pinned to node-thread 0 for the
   one-writer guarantee; the two interactive slots mean an operator's *run* is not stuck
   behind it, but an operator's next *write* can be.
 
@@ -255,7 +255,7 @@ nodes, a local rendezvous/relay and a local mock model - no cloud rendezvous, no
 It runs a signed direct `POST /node/chat`, a signed relayed one, and one through the native Lua sender
 (`nodeslib.remote_chat`), and asserts against the node's own `/health` that the run went *through
 admission*: the verified peer author owns the conversation, the authenticated body `thread` is the
-scheduling key, the peer run is `background` on a background worker (not one of the two interactive
+scheduling key, the peer run is `background` on a background node-thread (not one of the two interactive
 slots), a duplicate signed request is `replayed_request`, a body that does not match its signature and
 an unregistered master are refused before admission (no owner is created), a registered guest is
 `forbidden_role`, and the peer's transcript is not in the destination operator's session list. A
@@ -271,7 +271,7 @@ A `/node/chat` body is an envelope whose `to_node_id` is inside the signed bytes
 The signature domain is **`chat-v2`**: `chat-v2|<from>|<ts>|<sha256(body)>`. The version is part of
 the signed message, so the target, the prompt and the thread are all authenticated *and* a new request
 cannot execute on an old receiver. The receiver checks `to_node_id` against its own node id at
-admission, before any conversation, worker or model call. This is what stops a relay (or anyone on the
+admission, before any conversation, node-thread or model call. This is what stops a relay (or anyone on the
 path) from redirecting a valid chat: the relay envelope's outer `to`/`path` are not covered by the
 transport signature, but a chat signed for node A delivered to node B is refused `wrong_target`, a
 changed path is refused because the signature names the `chat-v2` kind, and a changed body is refused

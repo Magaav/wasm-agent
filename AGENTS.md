@@ -34,10 +34,11 @@ reservations are one rule set in `skills/git-orchestrator/SKILL.md`
 
 **Before the first edit of a code-writing turn, load the `parallel-evolution` skill** - the
 per-turn loop (sync → small change → prove it merges → gate → end clean), the branch rules and the
-convergence/escalation protocol. In one line: one `change/<name>` per concern from current
-`origin/main`, never move a tree you do not own, end every commit with its provenance trailer, and
-prove the merge with `git merge-tree --write-tree origin/main HEAD`. Your branch is your
-deliverable; the merge lane lands it.
+convergence/escalation protocol. In one line: one `change/<name>` per delivery from current
+`origin/main` (adjacent work steers the warm session and may share the branch), never move a tree
+you do not own, end every commit with its provenance trailer, and prove the merge with
+`git merge-tree --write-tree origin/main HEAD`. Your branch is your deliverable; the merge lane
+lands it.
 
 ### Never touch the old plugin
 
@@ -79,8 +80,10 @@ The `pre-commit` hook enforces it - that hook is the contract, this line is the 
 - **Never restart or replace the window.** It is a client and reloads on its own; a window that
   looks dead is a *page* problem, and the node can say why. The diagnostics are in
   `skills/self-update/SKILL.md`.
-- **More than one worker is normal.** Read workers spawn on demand and retire when
-  idle; runs route by session. `/health`'s `workers[]` says who is busy with what.
+- **More than one node-thread is normal.** Read node-threads spawn on demand and retire once
+  idle; runs route by session. `/health` lists them by `role: "runs"` or `"reads"` (the
+  `workers[]` field is that array's pre-rename name), so "who is busy with what" is a field, not a
+  guess. The layers and their real names are `docs/FABRIC.md` ("Topology").
 - **Skills carry procedures, not context.** A technique the agent should not
   have to be told twice belongs in `skills/<name>/SKILL.md` (the Agent Skills
   standard, shared with pi and Orca). Only the description is always in
