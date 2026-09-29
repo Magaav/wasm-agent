@@ -126,7 +126,7 @@ $harness = @'
       finished.body.textContent.includes("0:04"),
       "the later answered run must retain its own four-second footer");
 
-    // The stream belongs to the old page, so the new page must notice the worker become idle
+    // The stream belongs to the old page, so the new page must notice the node-thread become idle
     // and repaint the answer from the durable ledger, not open the engine's session view.
     window.__fixtures.session.state = { state: "answered", detail: "the last message is a reply" };
     // `messages`, not `turns`: the wire key was renamed (10326b4 renamed it in the fixtures and in
@@ -137,7 +137,7 @@ $harness = @'
       { seq: 7, role: "tool", tool_call_id: "reload-tool", tool_name: "bash", content: "done", created_at: 1790000013, tool_calls: [] },
       { seq: 8, role: "assistant", content: "RELOAD-MID-RUN-ANSWER", created_at: 1790000014, tool_calls: [] });
     window.__fixtures.health.current = null;
-    window.__fixtures.health.workers = [];
+    window.__fixtures.health.node_threads = [];
     await window.__watchTurn();
     for (var settled = 0; settled < 100; settled++) await tick();
     check(restored.textContent.includes("RELOAD-MID-RUN-ANSWER"),
@@ -1085,13 +1085,13 @@ $harness = @'
   // A chat run for a *different* conversation is not this window's run. Before `activeRun` was
   // scoped to the conversation, it returned the first chat run on the node, so a window watching
   // conversation B disabled its own composer and deferred its reconcile for conversation A's run.
-  window.__fixtures.health.workers = [{ label: "POST /chat", busy_ms: 4000, session: "another-conversation" }];
+  window.__fixtures.health.node_threads = [{ label: "POST /chat", busy_ms: 4000, session: "another-conversation" }];
   await window.__restoreSession();
   var foreignNotice = document.querySelector(".unfinished-notice");
   check(!!foreignNotice && /effects may have happened/.test(foreignNotice.textContent) && !!foreignNotice.querySelector("button"),
     "another conversation's run must not be treated as this window's run, saw: " +
       (foreignNotice ? foreignNotice.textContent.slice(0, 120) : "no notice"));
-  window.__fixtures.health.workers = [];
+  window.__fixtures.health.node_threads = [];
 
   // Enter while a run is busy means "keep this draft for the next turn", not "cancel the run". The
   // red button is the explicit Stop control. Conflating them made a reader typing ahead kill a healthy
@@ -1230,20 +1230,20 @@ $harness = @'
   check(!!diffTopic && !!(diffTopic.dataset.messageId || diffTopic.messageId),
     "and the message id the undo route is asked about, saw: " + (diffTopic ? JSON.stringify(diffTopic.dataset.messageId) : "no topic"));
 
-  // Read-only topics use host read workers, so they must remain available while the run worker is
-  // occupied. Topics that still need the run worker must queue clearly and load after the run.
+  // Read-only topics use host read node-threads, so they must remain available while the run node-thread is
+  // occupied. Topics that still need the run node-thread must queue clearly and load after the run.
   window.__setBusy(true);
   window.__loadTopic("sessions-box");
   for (var tb = 0; tb < 5; tb++) { await tick(); }
   var busyBox = document.getElementById("sessions-box");
   check(!/busy with a run/.test(busyBox.textContent) && !!busyBox.querySelector(".session-title"),
-    "sessions must load from the read worker during a run, saw: " + busyBox.textContent.slice(0, 70));
+    "sessions must load from the read node-thread during a run, saw: " + busyBox.textContent.slice(0, 70));
   check(!/AbortError/.test(busyBox.textContent), "and must not report an abort as if the UI were broken");
   window.__loadTopic("spells-box");
   for (var tw = 0; tw < 5; tw++) { await tick(); }
   var waitingBox = document.getElementById("spells-box");
   check(/busy with a run/.test(waitingBox.textContent),
-    "a topic that needs the run worker must say it is queued, saw: " + waitingBox.textContent.slice(0, 70));
+    "a topic that needs the run node-thread must say it is queued, saw: " + waitingBox.textContent.slice(0, 70));
   // And it must load by itself when the turn ends - nobody should have to reopen it.
   window.__setBusy(false);
   for (var tc = 0; tc < 40; tc++) { await tick(); }
@@ -1536,7 +1536,7 @@ $harness = @'
   // reachable, because a display that can only ever say "working" is decoration.
   (function () {
     window.__stopLiveness();
-    window.__setLiveness({ working: true, stalled: 46, busy_ms: 25369, climbing_ms: 0, worker: "alive", queue: 0 });
+    window.__setLiveness({ working: true, stalled: 46, busy_ms: 25369, climbing_ms: 0, node_thread_state: "alive", queue: 0 });
     var ok = document.getElementById("liveness");
     check(!!ok, "liveness: no line rendered while working");
     if (ok) {
@@ -1546,7 +1546,7 @@ $harness = @'
       check(ok.textContent.indexOf("46 ms") >= 0, "liveness: the beat age must be shown, got: " + ok.textContent);
       check(ok.textContent.indexOf("25") >= 0, "liveness: the elapsed time must be shown, got: " + ok.textContent);
     }
-    window.__setLiveness({ working: false, stalled: 9000, busy_ms: 60000, climbing_ms: 9000, worker: "alive", queue: 0 });
+    window.__setLiveness({ working: false, stalled: 9000, busy_ms: 60000, climbing_ms: 9000, node_thread_state: "alive", queue: 0 });
     var stuck = document.getElementById("liveness");
     check(!!stuck, "liveness: the line vanished when it turned into a stall");
     if (stuck) {
@@ -1907,7 +1907,7 @@ $harness = @'
   // the verdict was computed, and a check that never runs looks exactly like one that passes.
   var followThread = window.__chatThread();
   check(!!followThread, "follow: the window must know which thread it is in");
-  window.__fixtures.health.workers = [{ label: "POST /chat", busy_ms: 5000, session: followThread }];
+  window.__fixtures.health.node_threads = [{ label: "POST /chat", busy_ms: 5000, session: followThread }];
   window.__fixtures.health.current = { label: "POST /chat", ms: 5000, session: followThread };
   window.__fixtures.sessions = { sessions: [{ id: followThread, title: "followed", user_id: "master",
     mode: "chat", message_count: 3, last_seq: 4242, updated_at: Math.floor(Date.now() / 1000),

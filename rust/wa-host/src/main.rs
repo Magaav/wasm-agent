@@ -254,7 +254,7 @@ fn main() {
         println!("wasm-agent {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    // Every node and worker gets rg, including service launches with a sparse PATH.
+    // Every node and node-thread gets rg, including service launches with a sparse PATH.
     // Installation happens before model execution; failure is visible, never a shell 127 later.
     if let Err(error) = ripgrep::ensure(std::path::Path::new(&home)) {
         eprintln!("ripgrep_unavailable: {error:#}");
@@ -310,7 +310,7 @@ fn main() {
 
     // One boot sequence, called once per interpreter. Each call opens its own
     // connection and boxes a Host that the interpreter owns and drops with itself,
-    // so a retired worker leaves no connection and no open transaction behind.
+    // so a retired node-thread leaves no connection and no open transaction behind.
     let boot_args = lua_args.clone();
     let db_for_boot = db.clone();
     let boot_state = move || -> Lua {
@@ -442,9 +442,9 @@ fn main() {
     // shared so `serve`, ordinary CLI runs and the subagent runtime cannot drift.
     // The factory is registered with the runtime here, before any command runs,
     // so a child is never left unable to build its own interpreter.
-    let worker: std::sync::Arc<dyn Fn() -> Lua + Send + Sync> = std::sync::Arc::new(move || {
+    let interpreter_factory: std::sync::Arc<dyn Fn() -> Lua + Send + Sync> = std::sync::Arc::new(move || {
         let state = boot_state();
-        // A pool worker or a child interpreter must never take the process down
+        // A pool node-thread or a child interpreter must never take the process down
         // with it: an interpreter that cannot load its module reports the failure
         // and runs on, so a spawned child settles as failed rather than killing
         // the parent and every sibling. The main serve interpreter still exits on
@@ -457,15 +457,15 @@ fn main() {
         }
         state
     });
-    let worker_for_subagents = worker.clone();
-    subagents::set_factory(Box::new(move || worker_for_subagents()));
+    let factory_for_subagents = interpreter_factory.clone();
+    subagents::set_factory(Box::new(move || factory_for_subagents()));
 
     if let Ok(script) = std::env::var("WA_SCRIPT") {
         // Say which copy of the Lua this run will load, before it loads any.
         //
         // With no root, `dofile` resolves every module from the copy compiled into this binary, so
         // a focused test written to exercise an edit under `lua/` runs green while never loading
-        // that edit - one worker lost a whole green run (28 checks) to the binary's own
+        // that edit - one node-thread lost a whole green run (28 checks) to the binary's own
         // `update.lua`, and the only tell was a line number in a message. One line on stderr, once,
         // and only for a script run: an installed node runs without a root by design, and a root
         // that IS set is still preferred for the modules, so there is nothing to warn about then.
@@ -510,7 +510,7 @@ fn main() {
         // rather than a pile of them up front. The host pointer travels as a usize because it is a leaked raw
         // pointer for the life of the process; a newtype with an unsafe Send would be the same claim with
         // more ceremony.
-        let worker_for_serve = worker.clone();
+        let factory_for_serve = interpreter_factory.clone();
         // Keep the graph fresh for the life of the node. The watcher does the initial index on its
         // own thread, so a large tree never delays the port coming up; `WA_GRAPH_WATCH=0` disables it.
         let _graph_watch = if std::env::var("WA_GRAPH_WATCH").map(|value| value != "0").unwrap_or(true) {
@@ -524,7 +524,7 @@ fn main() {
         } else {
             None
         };
-        serve::run(lua, Box::new(move || worker_for_serve()), port, PathBuf::from(ui));
+        serve::run(lua, Box::new(move || factory_for_serve()), port, PathBuf::from(ui));
         return;
     }
 

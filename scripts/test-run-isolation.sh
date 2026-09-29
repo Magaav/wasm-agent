@@ -54,16 +54,16 @@ runs_for() {
     process.stdin.on("data", (d) => s += d).on("end", () => {
       const h = JSON.parse(s);
       const rows = (h.runs || []).filter((r) => r.conversation === process.argv[1]);
-      console.log(rows.map((r) => r.worker + ":" + r.class + ":" + r.pending).join(","));
+      console.log(rows.map((r) => r.node_thread + ":" + r.class + ":" + r.pending).join(","));
     });' "$1"
 }
-distinct_workers_for() {
+distinct_node_threads_for() {
   health | node -e '
     let s = "";
     process.stdin.on("data", (d) => s += d).on("end", () => {
       const h = JSON.parse(s);
-      const workers = new Set((h.runs || []).filter((r) => r.conversation === process.argv[1]).map((r) => r.worker));
-      console.log(workers.size);
+      const threads = new Set((h.runs || []).filter((r) => r.conversation === process.argv[1]).map((r) => r.node_thread));
+      console.log(threads.size);
     });' "$1"
 }
 runs_status() {
@@ -104,8 +104,8 @@ for _ in $(seq 1 40); do curl -fsS -m 2 "http://127.0.0.1:$MOCK_PORT/" >/dev/nul
 curl -fsS -m 2 "http://127.0.0.1:$MOCK_PORT/" >/dev/null 2>&1 || fail "the mock provider did not start"
 
 # The lane bounds are deliberately tiny so saturation is reachable in seconds, and the session
-# backlog is 4 (the default) so the bound is exercised with a handful of runs. Worker 0 is the
-# interactive reserve, so background work uses workers 1..=max.
+# backlog is 4 (the default) so the bound is exercised with a handful of runs. Node-thread 0 is the
+# interactive reserve, so background work uses node-threads 1..=max.
 WASM_AGENT_LLM_BASE_URL="http://127.0.0.1:$MOCK_PORT" \
 WASM_AGENT_LLM_API_KEY=test-only \
 WASM_AGENT_WORKERS_MAX=3 \
@@ -167,8 +167,8 @@ case "$owners" in
   *,*) fail "order-session had more than one owner row: $owners" ;;
   "" ) fail "order-session was not admitted at all" ;;
 esac
-distinct="$(distinct_workers_for order-session)"
-[ "$distinct" = "1" ] || fail "order-session was held by $distinct workers, expected exactly 1"
+distinct="$(distinct_node_threads_for order-session)"
+[ "$distinct" = "1" ] || fail "order-session was held by $distinct node-threads, expected exactly 1"
 pending="$(printf '%s' "$owners" | cut -d: -f3)"
 [ "${pending:-0}" -ge 2 ] || fail "the second run did not queue behind the owner (pending=$pending)"
 echo "  ok: one owner holds the conversation with both runs pending ($owners)"
@@ -236,8 +236,8 @@ for n in 1 2 3 4; do
   RACE_PIDS+=("$!")
 done
 sleep 0.8
-distinct="$(distinct_workers_for race-session)"
-[ "$distinct" = "1" ] || fail "race-session was held by $distinct workers, expected exactly 1"
+distinct="$(distinct_node_threads_for race-session)"
+[ "$distinct" = "1" ] || fail "race-session was held by $distinct node-threads, expected exactly 1"
 echo "  ok: four simultaneous runs shared exactly one owner"
 for pid in "${RACE_PIDS[@]}"; do wait "$pid"; done
 for n in 1 2 3 4; do
@@ -392,7 +392,7 @@ done
 chat "$WORK/mix2.sse" "mixed-session" "RUN-MARKER-MIX2" "x-wa-run-class: background" &
 MIX2=$!
 sleep 0.3
-distinct="$(distinct_workers_for mixed-session)"
+distinct="$(distinct_node_threads_for mixed-session)"
 [ "$distinct" = "1" ] || fail "mixed classes opened $distinct owners for one conversation"
 wait "$MIX1"; wait "$MIX2"
 grep -q 'RUN-MARKER-MIX1' "$WORK/mix1.sse" || fail "the interactive run did not answer"
