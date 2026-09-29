@@ -128,6 +128,20 @@ if scenario == "prepared" then
       and tostring(ws4.start_state.source_fallback):find("workspace_source_path_missing", 1, true) ~= nil,
     "it falls back to this node's checkout and records why: " .. tostring(ws4.start_state.source_fallback))
 
+  -- 4b. A destination whose `git worktree add` fails must report git's own reason. A branch of the
+  -- same name already in that repo is the case that was measured as a lie: the failed add was
+  -- followed by reads that answered with empty stdout, so the refusal read
+  -- `workspace_binding_branch_mismatch` while the truth was on git's stderr.
+  git(destination, "branch", "change/wa-session-collision")
+  local collision = child_session("collision", absent)
+  local collision_ws, collision_why = workspaces.ensure(memory, collision, absent)
+  ok(not collision_ws and tostring(collision_why):find("already exists", 1, true) ~= nil,
+    "a failed worktree add names git's own reason: " .. tostring(collision_why))
+  ok(tostring(collision_why):find("workspace_binding_branch_mismatch", 1, true) == nil,
+    "and does not mis-report it as a branch mismatch")
+  ok(memory.session_workspace(collision).state ~= "pending",
+    "the failed allocation is not left pending: " .. tostring(memory.session_workspace(collision).state))
+
   -- 5. Through the facade a peer actually calls: the same placement, with a write-capable profile.
   local known = session_ids()
   local started = dofile("lua/core/subagents.lua").control({

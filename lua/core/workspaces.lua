@@ -24,9 +24,14 @@ local function run(command, cwd)
   if not ok then return nil, "workspace_exec_failed: " .. tostring(raw) end
   local decoded_ok, result = pcall(json.decode, raw)
   if not decoded_ok or type(result) ~= "table" then return nil, "workspace_exec_invalid_result" end
+  -- A command that exited non-zero is a failure, and the first return value says so. It used to
+  -- return the result table either way, which made every `if not x` below unreachable and let a
+  -- failed `git worktree add` be followed by reads answering with empty stdout - measured: a
+  -- destination where the branch already existed reported `workspace_binding_branch_mismatch`
+  -- instead of git's own `a branch named ... already exists`, the same refusal described wrongly.
   if tonumber(result.code) ~= 0 then
     local detail = tostring(result.stderr or result.error or result.stdout or "git command failed")
-    return result, "workspace_git_failed: " .. detail:sub(1, 1000)
+    return nil, "workspace_git_failed: " .. detail:sub(1, 1000)
   end
   return result
 end

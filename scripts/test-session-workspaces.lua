@@ -4,6 +4,7 @@ local tools=dofile("lua/core/tools.lua")
 local workspaces=dofile("lua/core/workspaces.lua")
 local checks=0
 local function ok(value,label) checks=checks+1; if not value then error(label) end end
+local function norm(path) return tostring(path or ""):gsub("\\","/"):gsub("/$",""):lower() end
 memory.setup()
 local source_path=host.getenv("WASM_AGENT_TEST_SOURCE")
 ok(type(source_path)=="string" and source_path~="","test source repository required")
@@ -65,15 +66,14 @@ local bad_source=memory.start_session("local","chat",{id="workspace-bad-source",
 memory.set_session_worktree(bad_source,source_path.."/missing-repository")
 -- A source path that names nothing on this machine is not a source: a path one machine's session
 -- recorded says nothing about another machine (that is what a placed child arrives with), so the
--- child forks from this node's own checkout and the record says both what was asked for and why it
--- was not used. `source_root` is deliberately not pinned to a path: which tree this node runs from is
--- the machine's answer (`runtime-worktree.txt`, else its working directory).
+-- child forks from this node's own checkout - here the tree `runtime-worktree.txt` records - and the
+-- record says both what was asked for and why it was not used.
 local relocated=memory.start_session("local","subagent",{id="workspace-unavailable",user_id="owner",node_id="test-node",parent_session_id=bad_source,workspace_required=true})
 local relocated_ws,relocated_error=workspaces.ensure(memory,relocated,bad_source)
-ok(relocated_ws and relocated_ws.start_state.source_requested==source_path.."/missing-repository"
-  and tostring(relocated_ws.start_state.source_fallback):find("workspace_source_path_missing",1,true)~=nil
-  and (relocated_ws.start_state.source_origin=="runtime-worktree.txt" or relocated_ws.start_state.source_origin=="working-directory")
-  and relocated_ws.start_state.base_commit~="",
+ok(relocated_ws and norm(relocated_ws.start_state.source_root)==norm(source_path)
+  and relocated_ws.start_state.source_origin=="runtime-worktree.txt"
+  and norm(relocated_ws.start_state.source_requested)==norm(source_path.."/missing-repository")
+  and tostring(relocated_ws.start_state.source_fallback):find("workspace_source_path_missing",1,true)~=nil,
   "a source path that is gone falls back to this node's checkout and records why: "..tostring(relocated_error))
 ok(tools.dispatch(memory,"write",{path="relocated.txt",content="here"},"master",{session_id=relocated,user_id="owner",changes={files={}}}).ok
   and host.read_file(source_path.."/relocated.txt")==nil,
