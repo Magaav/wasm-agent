@@ -1396,6 +1396,180 @@ function finishReplayedRun(isLast = false, options = {}) {
   if (!statusLine) setStatus(label);
   finishRunStatus(label);
 }
+// ---- device notifications: the engine bell, and the native toast it turns on --------
+//
+// A settled child that owes a judgement reaches the operator as the wake the node already runs:
+// `lua/core/completions.lua` decides `review.needs_wake`, and *only* where a judgement is owed does it
+// start a coordinator run in this thread - whose first user row is the notice below. Nothing else
+// writes that row, so this inherits that decision exactly: the classes the outbox skips (a
+// self-reporting responder profile with nothing left to review, a cancelled child whose checkout is
+// clean) never wake, so there is nothing here to notify about. No new polling loop either: this reads
+// the transcript the page is already repainting (`restoreSession` on boot and `followRun` while a run
+// is in flight), which is the same place the wake appears.
+//
+// The page does not raise the toast: a page has no process identity on the Windows notification
+// platform. It asks the window shell, which raises it and answers (§window.wasmAgent.notify).
+//
+// The preference is device-local on purpose. Whether *this* machine should make a noise is a fact
+// about this machine, not about the node, and a node setting would decide for the laptop and the
+// phone at once.
+const COMPLETION_NOTICE = "[Child completion notice]";
+const NOTIFY_PREFERENCE_KEY = "wa.notify.settlement";
+const NOTIFY_WATERMARK_KEY = "wa.notify.settlement.seen";
+
+let notifyStorageAvailable = true;
+let notifyShellState = "";
+let lastNotifyResult = null;
+// The engine card's own nodes, assigned where the engine is wired. `let` and guarded: a repaint that
+// notifies must never be the thing that throws because a card is missing from the DOM.
+let notifyBellEl = null;
+let notifyStateNoteEl = null;
+let notifyDetailEl = null;
+let notifyResultEl = null;
+let notifyTestEl = null;
+
+/// "on" only when this device's own storage says so. Anything unreadable is **off**: a device that
+/// cannot remember the choice has not been told to make a noise.
+function notifyPreference() {
+  try {
+    return localStorage.getItem(NOTIFY_PREFERENCE_KEY) === "on" ? "on" : "off";
+  } catch (error) {
+    notifyStorageAvailable = false;
+    return "off";
+  }
+}
+
+function setNotifyPreference(on) {
+  try {
+    localStorage.setItem(NOTIFY_PREFERENCE_KEY, on ? "on" : "off");
+    notifyStorageAvailable = true;
+  } catch (error) {
+    notifyStorageAvailable = false;
+  }
+}
+
+/// A notice is marked seen whether or not the bell is on, so switching the bell on tells the operator
+/// about the *next* settlement instead of replaying every one it slept through.
+function rememberNotifyWatermark(session, seq) {
+  try { localStorage.setItem(NOTIFY_WATERMARK_KEY, JSON.stringify({ session, seq })); }
+  catch (error) { notifyStorageAvailable = false; }
+}
+
+function readNotifyWatermark(session) {
+  try {
+    const stored = JSON.parse(localStorage.getItem(NOTIFY_WATERMARK_KEY) || "null");
+    if (stored && typeof stored === "object" && String(stored.session || "") === session) {
+      const seq = Number(stored.seq);
+      return Number.isFinite(seq) ? seq : -Infinity;
+    }
+  } catch (error) { /* unreadable or belonging to another thread: nothing has been seen in this one */ }
+  return -Infinity;
+}
+
+/// The wake notices in a transcript, in ledger order.
+function evaluationNotices(rows) {
+  return (rows || []).filter((row) => row && row.role === "user" && typeof row.content === "string" &&
+    row.content.startsWith(COMPLETION_NOTICE));
+}
+
+/// What the toast says, read out of the wake's own sentence. A notice whose shape is not the one
+/// `completions.lua` writes still notifies - the wake is the evidence - but nothing about the child is
+/// invented: the id and the reported state appear when they can be read, and are left out when they
+/// cannot.
+function settlementNotice(row) {
+  const text = String(row.content || "");
+  const id = (/^\[Child completion notice\] Task (\S+) settled\./.exec(text) || [])[1] || "";
+  const state = (/Reported state: \{.*?"state":"([^"]*)"/.exec(text) || [])[1] || "";
+  const what = id ? `Task ${id}${state ? ` settled (${state})` : " settled"}` : "a child task settled and owes an evaluation";
+  return { title: "Evaluation owed", body: what };
+}
+
+/// Ask the window shell for a native notification. The shell answers with its own result
+/// (`{supported, delivered, reason, identity, app_name}`); a surface with no shell answers with a
+/// refusal that says so, because that is what happened - the page raised nothing itself.
+async function raiseNotification({ title, body, diagnostic = false }) {
+  const shell = native;
+  if (!shell || typeof shell.notify !== "function") {
+    lastNotifyResult = { supported: false, delivered: false,
+      reason: "this surface has no window shell, so a page cannot raise a Windows notification" };
+    return lastNotifyResult;
+  }
+  try {
+    lastNotifyResult = await shell.notify({ title, body, diagnostic });
+  } catch (error) {
+    lastNotifyResult = { supported: false, delivered: false,
+      reason: "the shell call failed: " + String((error && error.message) || error) };
+  }
+  return lastNotifyResult;
+}
+
+/// One toast for each settlement that owes an evaluation - and nothing at all when the bell is off.
+/// Returns the notices it acted on, which is what a test asserts against.
+function announceSettlements(rows) {
+  const notices = evaluationNotices(rows);
+  if (!notices.length) return [];
+  const session = chatSession || "";
+  const seq = (row) => (Number.isFinite(Number(row.seq)) ? Number(row.seq) : -Infinity);
+  const seen = readNotifyWatermark(session);
+  const fresh = notices.filter((row) => seq(row) > seen).sort((a, b) => seq(a) - seq(b));
+  if (!fresh.length) return [];
+  rememberNotifyWatermark(session, Math.max(...notices.map(seq)));
+  // Off means nothing is raised, not "raised and then hidden": there is no call to make.
+  if (notifyPreference() !== "on") return [];
+  const toast = settlementNotice(fresh[fresh.length - 1]);
+  raiseNotification(toast).then((result) => {
+    paintNotifyResult(result);
+    console.info("settlement notification", toast.title, toast.body, result.delivered ? "delivered" : "not delivered: " + result.reason);
+  });
+  return fresh;
+}
+
+function paintNotifyResult(result) {
+  lastNotifyResult = result || lastNotifyResult;
+  if (!notifyResultEl) return;
+  const value = lastNotifyResult;
+  if (!value) { notifyResultEl.textContent = ""; notifyResultEl.removeAttribute("data-delivered"); return; }
+  notifyResultEl.dataset.delivered = String(value.delivered === true);
+  notifyResultEl.textContent = value.delivered
+    ? `delivered to Windows as "${value.app_name || "unknown app name"}" (${value.identity || "identity unknown"}) - delivery, not proof that it was seen`
+    : `not delivered: ${value.reason || "the shell gave no reason"}`;
+}
+
+/// The one place the bell's state is drawn: the topic row's note, the switch, the test control and the
+/// explanation are painted together, so they cannot show three different states.
+function paintNotifyState() {
+  const on = notifyPreference() === "on";
+  if (notifyBellEl) { notifyBellEl.checked = on; notifyBellEl.disabled = !notifyStorageAvailable; }
+  if (notifyTestEl) notifyTestEl.disabled = !on || !notifyStorageAvailable;
+  if (notifyStateNoteEl) notifyStateNoteEl.textContent = on ? "on for this device" : "off on this device";
+  if (notifyDetailEl) {
+    const lines = [on
+      ? "A child task that settles owing an evaluation raises a Windows notification on this device."
+      : "Nothing is raised on this device while this is off, including the test below."];
+    lines.push("The choice is stored in this window's own storage, so it is per device: the node is not told and no other device is affected.");
+    if (!notifyStorageAvailable) {
+      lines.push("This window refuses local storage, so the choice cannot be kept here and notifications stay off.");
+    }
+    if (notifyShellState) lines.push(notifyShellState);
+    notifyDetailEl.textContent = lines.join(" ");
+  }
+}
+
+/// Whether the shell can raise a toast at all, without raising one. Runs when the card is opened:
+/// "the shell cannot" and "the bell is off" look identical from the outside otherwise.
+async function refreshNotifySupport() {
+  const shell = native;
+  if (!shell || typeof shell.notifySupport !== "function") {
+    notifyShellState = "No window shell in this surface (a browser page cannot raise a Windows notification), so the bell has nothing to switch on here.";
+  } else {
+    const support = await shell.notifySupport();
+    notifyShellState = support.supported
+      ? `Shell ready: Windows accepted the identity "${support.identity || "unknown"}", which it shows as "${support.app_name || "unknown"}".`
+      : `This shell cannot raise notifications: ${support.reason}`;
+  }
+  paintNotifyState();
+}
+
 function repaintMessages(rows, options = {}) {
   // A repaint is a view of durable rows, not a resumed event stream. In particular, an
   // assistant tool call without a result must never inherit a live timer from this page.
@@ -1494,6 +1668,13 @@ function repaintMessages(rows, options = {}) {
   pin(true);
   if (failed) {
     add("assistant", `repaint: ${rendered} of ${rows.length} messages drawn, ${failed} failed — first: ${firstFailure}`);
+  }
+  // The rows just drawn are the only place a settlement wake appears. Anything thrown here is the
+  // notification's problem, never the transcript's: a toast that fails must not cost the reader a reply.
+  try {
+    announceSettlements(rows);
+  } catch (error) {
+    console.error("settlement notification failed", error);
   }
   return { rendered, failed, firstFailure };
 }
@@ -4639,6 +4820,7 @@ function loadTopic(id) {
   else if (id === "tools-box") refreshTools();
   else if (id === "jobs-box") refreshJobs();
   else if (id === "tasks-box") refreshTasks();
+  else if (id === "notify-box") refreshNotifySupport();
 }
 
 /// Everything the engine was asked for while the node was busy, plus whatever is open, once it is free.
@@ -4659,6 +4841,30 @@ document.querySelectorAll(".engine-head").forEach((head) => {
     if (opening) loadTopic(head.dataset.target);
   });
 });
+
+// ---- engine: the notification bell (device-local, not a node setting) ----------------
+// The card is the only switch for the OS notification, and its state comes from this window's own
+// storage. It also carries the on-demand path: "send a test notification" is how the shell's identity
+// and the raise path are checked without waiting for a real settlement (`wa-window.exe --notify-test`,
+// printed in the card, does the same with no page involved at all).
+notifyBellEl = document.getElementById("notify-bell");
+notifyStateNoteEl = document.getElementById("notify-state");
+notifyDetailEl = document.getElementById("notify-detail");
+notifyResultEl = document.getElementById("notify-result");
+notifyTestEl = document.getElementById("notify-test");
+notifyBellEl.addEventListener("change", () => {
+  setNotifyPreference(notifyBellEl.checked);
+  paintNotifyResult(null);
+  paintNotifyState();
+});
+notifyTestEl.addEventListener("click", async () => {
+  notifyTestEl.disabled = true;
+  notifyResultEl.dataset.delivered = "pending";
+  notifyResultEl.textContent = "asking the shell…";
+  paintNotifyResult(await raiseNotification({ title: "wasm-agent", body: "test notification from the wasm-agent window", diagnostic: true }));
+  paintNotifyState();
+});
+paintNotifyState();
 
 function setEngine(open) {
   document.body.classList.toggle("engine", open);

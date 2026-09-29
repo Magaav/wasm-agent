@@ -201,7 +201,7 @@ mod companion {
     // identity, app_name} - the shell's own result, not a promise that a toast appeared.
     notify: (options) => {
       const value = options || {};
-      return ask('notify', { title: String(value.title || 'wasm-agent'), body: String(value.body || '') });
+      return ask('notify', { title: String(value.title || 'wasm-agent'), body: String(value.body || ''), diagnostic: value.diagnostic === true });
     },
     // Whether this shell can raise a toast at all, without raising one: 'supported: false' means
     // the environment cannot, and the reason says why.
