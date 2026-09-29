@@ -25,6 +25,40 @@ without captured baseline JSON. Independent reviews can run in parallel; seriali
 shared writes to a candidate tree. Preserve all local refs and worktrees during
 `/merge`; the remote main-only invariant is separate.
 
+### Gate parallelism
+
+`scripts/test.sh` compiled with whatever cargo does by default: one job per logical core. On a
+16-core machine a single gate run peaks at 16 `rustc.exe`, and that is wrong for the pool's normal
+case of two children, because each gate claims the whole box and the second only makes the first
+slower. The repository's knob is `WA_GATE_JOBS=<n>`: it sets `CARGO_BUILD_JOBS` and
+`RUST_TEST_THREADS` (an explicit value for either variable still wins over it), and the gate prints
+the values it ran with, so a retained gate log states its own parallelism. Unset is the default,
+and it is the uncapped behaviour above - no new value was chosen, see the verdict.
+
+Measured on the 16-logical-core Windows node at tree `3582e6e`, one child at a time, both runs cold
+(`cargo clean` first, so both compiled the same work). Method: `Get-Process -Name rustc` and
+`Win32_Processor.LoadPercentage` sampled every ~2 s for the whole run - a *machine-wide* process
+count, not the gate's process tree:
+
+| run | gate (`gate_ms`) | peak `rustc.exe` | peak CPU | mean CPU | samples at the cap |
+| --- | --- | --- | --- | --- | --- |
+| default (uncapped) | 733.5 s | 16 | 100% | 30.0% | - |
+| `WA_GATE_JOBS=2` | 965.7 s | 15 | 100% | 10.2% | 111 of 315 at exactly 2 |
+
+The cap held: 111 of 315 samples sat at exactly 2 `rustc.exe`, and `CARGO_BUILD_JOBS=2` is visible
+in that run's own log. The *peaks* are a different story, and this is why the numbers above are not
+a comparison: the node is shared, and a second worktree built inside both windows -
+`wa-worktree-1faec398` compiled at 10:00:33-10:01:47, inside the capped run, and
+`wa-worktree-b7d7c59d` at 09:42-09:45 inside the uncapped one. The capped run's 15-rustc sample is
+that other build, not this gate; the uncapped run's 16-rustc peak is its own opening cold build,
+which is clean (no foreign build output exists on the machine before 09:42).
+
+Verdict: **the default stays uncapped.** This is one pair of runs, so it settles that the knob
+works and that the cap is not free - it cost 32% more wall time in this pair, on a machine that was
+not idle - and it settles nothing about a default. The number that actually decides it is
+contention between two concurrent gates, and that was not measured. Measure that (two children
+gating at once, idle box, more than one sample per setting) before changing the default.
+
 ## The loop
 
 ```

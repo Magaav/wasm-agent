@@ -105,6 +105,10 @@ The `pre-commit` hook enforces it - that hook is the contract, this line is the 
   say what it is risking is one nobody can revisit. When a measurement is too weak to
   settle a question (too few samples, one fixture, high variance), say so and do not let it
   pick a default.
+- **The gate's build/test parallelism is a knob you own.** `WA_GATE_JOBS=<n>` caps
+  `CARGO_BUILD_JOBS` and `RUST_TEST_THREADS` for `scripts/test.sh`; unset means cargo's own
+  default, one job per logical core, which two concurrent gate runs then fight over. The gate
+  prints what it ran with. `docs/EVOLUTION.md` ("Gate parallelism") has the measurement.
 - Verify before claiming: run the smoke test, and prefer a real two-node check
   over a single-process one.
 - A **skipped test is reported as skipped**: the suites count skips and say so in the
