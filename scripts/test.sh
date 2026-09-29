@@ -1502,6 +1502,10 @@ node scripts/test-completion-wake.cjs "$BIN"
 for fixture in session-view durable-steering child-compaction child-budget-refusal completion-outbox orchestrator-defaults; do
   WA_SCRIPT="scripts/test-$fixture.lua" "$BIN" --db "$DB.$fixture"
 done
+# The settlement evaluation packet, against a real git worktree: the artifact facts a coordinator is
+# woken with, who is woken at all (a self-reported profile is skipped with its reason recorded), and
+# the wake that must never be replayed. Model-free: the scheduler seam is counted, not driven.
+WA_SCRIPT="scripts/test-completion-packet.lua" "$BIN" --db "$DB.completion-packet"
 run_proof_fixture jobs 37 node scripts/test-job-subagents.cjs
 run_proof_fixture orchestration 33 node scripts/test-orchestration-e2e.cjs "$BIN"
 run_proof_fixture whatsapp 40 node scripts/test-whatsapp-subagent-e2e.cjs
