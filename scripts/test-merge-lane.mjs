@@ -198,6 +198,19 @@ export function audit(repo,{target='main'}={}) {
   ok(Boolean(timeout.json?.gate.log) && fs.readFileSync(timeout.json.gate.log, 'utf8').includes('starting'),
     'and its partial output survived the kill');
 
+  // ---- 3c. the lane's own environment does not ride into the gate --------------------------------------
+  console.log('3c. the lane does not leak its own switches into the gate');
+  const leak = lane(repo, ['--base', 'main', 'change/one', '--json', path.join(root, 'leak.json'),
+    '--gate-command', 'echo "leak=${MSYS_NO_PATHCONV-unset}"; echo "smoke ok"'],
+    {...env, MSYS_NO_PATHCONV: '1', WA_MERGE_LANE_TIPS: 'must-not-arrive'});
+  ok(leak.status === 0 && leak.json?.gate.exit === 0, 'the run itself still passes', `exit ${leak.status}`);
+  ok(Boolean(leak.json?.gate.log) && fs.readFileSync(leak.json.gate.log, 'utf8').includes('leak=unset'),
+    'MSYS_NO_PATHCONV does not reach the gate: it inverts path conversion for the gate\'s own native calls',
+    leak.json?.gate.log ? fs.readFileSync(leak.json.gate.log, 'utf8').split('\n')[0] : 'no log');
+  ok((leak.json?.gate.environment_dropped || []).includes('MSYS_NO_PATHCONV') &&
+    (leak.json?.gate.environment_dropped || []).includes('WA_MERGE_LANE_TIPS'),
+    'and what was dropped is recorded', JSON.stringify(leak.json?.gate.environment_dropped));
+
   // ---- 4. a conflict with the target, caught before a clone exists ----------------------------------
   console.log('4. a tip that does not merge with the target');
   const diverge = lane(repo, ['--base', 'main', 'change/one', 'change/diverge'], env);

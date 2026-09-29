@@ -316,9 +316,25 @@ async function main() {
     // Inside `.git`, not the worktree: the gate asks for a clean tree (scripts/test-deploy-downgrade.sh
     // refuses on dirt), so the lane's own log must not be the dirt it reports.
     const logPath = path.join(clone.dir, '.git', 'wa-merge-lane-gate.log');
-    const environment = {...process.env, ...(options.jobs === 'default' ? {} : {WA_GATE_JOBS: String(options.jobs)})};
-    if (options.jobs === 'default') { delete environment.WA_GATE_JOBS; }
-    delete environment.WASM_AGENT_PROVENANCE; // the candidate is not committed as a session's run
+    const environment = {...process.env};
+    const dropped = [];
+    // The gate is the repository's, and it must run in the environment it was written for. This lane's
+    // own switches must not ride into it: `MSYS_NO_PATHCONV=1` - which a caller may set to keep its own
+    // arguments intact - inverts MSYS path conversion for every native process the gate spawns, and a
+    // `/tmp/...` path then reaches a Windows binary as `C:\tmp\...`. Measured: the node-instances
+    // suite failed 10 of 62 with both sentinels started but not answering, its own artifact showing
+    // `starting /tmp/wa-instances-...\.wasm-agent\instances\op\install\wa.exe`, and the nested verdict
+    // read failed with ENOENT on `C:\tmp\...`. That failure was this lane's environment, not the merged
+    // tree, so the lane drops its own switches and records what it dropped.
+    for (const name of ['MSYS_NO_PATHCONV', 'MSYS2_ARG_CONV_EXCL', 'WASM_AGENT_PROVENANCE']) {
+      if (environment[name] !== undefined) { delete environment[name]; dropped.push(name); }
+    }
+    for (const name of Object.keys(environment)) {
+      if (name.startsWith('WA_MERGE_LANE_')) { delete environment[name]; dropped.push(name); }
+    }
+    if (options.jobs === 'default') {
+      if (environment.WA_GATE_JOBS !== undefined) { delete environment.WA_GATE_JOBS; dropped.push('WA_GATE_JOBS'); }
+    } else environment.WA_GATE_JOBS = String(options.jobs);
     const gateStarted = nowMs();
     // The gate's own words are streamed to the file as they arrive, the way
     // `skills/parallel-evolution/scripts/finish.mjs` already does it: a holder that dies mid-gate then
@@ -347,6 +363,7 @@ async function main() {
     gate.skipped = verdict.skipped;
     gate.verdict_line = verdict.line;
     gate.verdict_found = verdict.found;
+    gate.environment_dropped = dropped;
   }
   timings.gate_ms = gate.ms;
   // Re-read the integration target itself: "main did not move" is a claim about the ref the candidate
