@@ -222,6 +222,10 @@ local function migrate()
   -- particular, OpenAI Responses commentary must replay as commentary rather
   -- than being mistaken for a completed answer on the next request.
   add_column("messages", "phase", "TEXT NOT NULL DEFAULT ''")
+  -- The settlement evaluation packet (lua/core/completions.lua) travels with the row that carries
+  -- its wake. It is written once, when the child settles and before any model turn, and read back
+  -- verbatim, so a wake delivered after a restart still starts from the evidence the child left.
+  add_column("child_completions", "packet", "TEXT NOT NULL DEFAULT ''")
   -- Rows written before the state was renamed kept the wording of the claim we used to
   -- make: "died after a tool result", "died right after a compaction". Nobody observed
   -- those deaths - a live run was reported as interrupted fourteen times in a row - so
