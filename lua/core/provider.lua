@@ -34,6 +34,9 @@ end
 -- Provider profiles. Add one here and it appears in the UI automatically - and
 -- record its host in ATTRIBUTION below, or scripts/test.sh refuses the profile
 -- rather than letting it reach the provider with the wrong headers.
+--
+-- A profile may also declare what it serves: `models` names the ids the route answers for,
+-- and `catalog = "closed"` says that declaration is the whole catalogue. See M.serves.
 function M.providers()
   return {
     {
@@ -44,6 +47,8 @@ function M.providers()
       api_key = env("WASM_AGENT_LLM_API_KEY") or env("OPENCODE_GO_API_KEY")
         or env("OPENAI_API_KEY") or "",
       default_model = "deepseek-v4.1-flash",
+      -- No `models`: this route's catalogue is the edge's own (/models), which cannot be
+      -- read without a request. An id this file has never heard of is unknown, not refused.
     },
     {
       id = "gpt",
@@ -51,12 +56,19 @@ function M.providers()
       base_url = env("OPENAI_BASE_URL") or "https://api.openai.com/v1",
       api_key = env("OPENAI_API_KEY") or "",
       default_model = "gpt-4.1",
+      -- Open route too: api.openai.com's catalogue is its own.
     },
     {
       id = "openai-sub", label = "OpenAI subscription",
       base_url = "https://chatgpt.com/backend-api",
       api_key = "", auth = "subscription", configured = subscription.configured(),
       default_model = "gpt-6-luna",
+      -- Closed catalogue: Pi's adapter resolves the id in its own catalogue and refuses the
+      -- rest (lua/core/openai_sub_bridge.lua: `Model is absent from Pi catalog`), which is
+      -- how 26 recorded child runs of deepseek-v4.1-flash died on this route. The ids here
+      -- are the ones this node offers for it; a model Pi has and this list does not belongs
+      -- in this list, not in a fallback.
+      models = subscription.models, catalog = "closed",
     },
   }
 end
@@ -113,6 +125,68 @@ function M.set_model(name)
   M.overrides[provider.id] = name
   write_state("model." .. provider.id, name)
   return true
+end
+
+-- What a route can serve.
+--
+-- A provider is an endpoint and a model id belongs to the route that publishes it, so
+-- servability is a property of the pair and never of the model alone. This node has measured
+-- what a wrong pair costs: a child launched with `gpt-6-luna` on the opencode-go route died in
+-- 0.67s with zero tool calls on `provider_http_400 {"type":"ModelProtocolUnsupported"}`, and 26
+-- recorded child runs of `deepseek-v4.1-flash` on the subscription route died on Pi's `Model is
+-- absent from Pi catalog` after a node process had already been started. Nothing checked the
+-- pair; it is refused here, before the request is built.
+--
+-- `models` names the ids a route declares as its own, and `catalog = "closed"` says that
+-- declaration is the whole catalogue. A route whose catalogue is the edge's own declares
+-- nothing, because this node cannot enumerate it without a request: an id it has never seen is
+-- unknown (nil below), not refused, and a *guess* in that direction would refuse models the
+-- route serves perfectly well.
+local function route_models(provider) return provider.models or {} end
+
+-- The route that declares `model` as its own, or nil. Ids are route-scoped in this deployment:
+-- the gpt-6 family is the subscription route's and "OpenCode Go remains a separate provider"
+-- (docs/OPENAI-SUB.md), so an id published by another route is a measured mismatch rather than
+-- an unknown.
+local function declared_owner(model)
+  for _, provider in ipairs(M.providers()) do
+    for _, name in ipairs(route_models(provider)) do
+      if name == model then return provider.id end
+    end
+  end
+  return nil
+end
+
+-- Can `provider` (default: the active route) serve `model`? `true` = yes, `false` = no, `nil` =
+-- this node cannot decide it without asking the endpoint. Callers must treat `nil` as unknown
+-- and not as served; the preflight only ever refuses a decided `false`, and it never substitutes
+-- another model or another provider.
+function M.serves(model, provider)
+  provider = provider or M.active()
+  model = trim(model or "")
+  if model == "" then return nil end
+  for _, name in ipairs(route_models(provider)) do
+    if name == model then return true end
+  end
+  if provider.catalog == "closed" then return false end
+  local owner = declared_owner(model)
+  if owner and owner ~= provider.id then return false end
+  return nil
+end
+
+-- The refusal to raise for `model` on `provider`, or nil when the request may be prepared. The
+-- text is stable - a fixed prefix, then `provider=<id>` and `model=<id>` - because it is what a
+-- refused run or child reports, and a reader has to be able to match it.
+function M.unservable(model, provider)
+  provider = provider or M.active()
+  model = trim(model or "")
+  if model == "" or M.serves(model, provider) ~= false then return nil end
+  local owner = declared_owner(model)
+  local why = (owner and owner ~= provider.id)
+    and ("the id belongs to route " .. owner)
+    or ("the route declares " .. table.concat(route_models(provider), ", "))
+  return "model_not_servable: provider=" .. provider.id .. " cannot serve model=" .. model ..
+    "; " .. why .. "; refused before the first provider request, nothing substituted"
 end
 
 -- Attribution: what a provider's edge is told about who is calling, and which
@@ -571,6 +645,11 @@ function M.complete_with(model, messages, tools, stream, opts)
   local settings = M.settings()
   local provider = M.active()
   local body = { model = model or settings.model, messages = messages }
+  -- Servability comes first, before `request_options`, the URL, the headers and the ledger
+  -- span exist: a model this route cannot serve is refused here, so no bytes leave and no
+  -- provider call is spent on a request that was already doomed. See M.unservable.
+  local refusal = M.unservable(body.model, provider)
+  if refusal then error(refusal) end
   -- Pi's output cap and reasoning fields follow the model compatibility contract.
   local fields, effective = M.request_options(body.model,messages,opts)
   for key,value in pairs(fields) do body[key]=value end

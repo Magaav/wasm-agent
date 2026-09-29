@@ -698,6 +698,11 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-overflow-recovery.lua" "$BIN" --db 
 # tool effects only before a response exists, is bounded to one attempt, and remains operator-disableable
 # because an upstream inference may still have been billed even though its response was lost.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-provider-timeout-recovery.lua" "$BIN" --db "$DB.provider-timeout" | grep 'provider timeout recovery ok'
+# A route must refuse a model it cannot serve before the first provider request. Measured on this
+# node: a child launched with the subscription's `gpt-6-luna` on the opencode-go route failed in
+# 0.67s with zero tool calls on the provider's own 400, and 26 child runs of `deepseek-v4.1-flash`
+# died on Pi's catalogue. Neither mismatch was checked. No network: HTTP is a counter in the test.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-model-route-servability.lua" "$BIN" --db "$DB.model-route" | grep 'model route servability ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-tool.lua" "$BIN" --db "$DB.graph-tool" | grep 'graph tool ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-freshness.lua" "$BIN" --db "$DB.graph-freshness" | grep 'graph freshness ok'
 # Offline accounting must run even when UI tests are explicitly skipped.
