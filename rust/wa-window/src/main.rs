@@ -9,6 +9,8 @@
 mod cdp;
 #[cfg(target_os = "windows")]
 mod client;
+#[cfg(target_os = "windows")]
+mod notify;
 
 #[cfg(not(target_os = "windows"))]
 fn main() {
@@ -62,6 +64,18 @@ mod companion {
         view: String,
         #[serde(default)]
         url: String,
+        /// A notification request (`notify`): the caller's own id, so its answer can be routed back
+        /// to the promise that asked for it, and the text Windows will show.
+        #[serde(default)]
+        id: u64,
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        body: String,
+        /// True for the engine menu's own "send a test notification" control. It changes nothing
+        /// about how the toast is raised - only why it was asked for.
+        #[serde(default)]
+        diagnostic: bool,
     }
 
     /// A view window: a real OS window, decorated and resizable, deliberately *not* always on top.
@@ -144,6 +158,28 @@ mod companion {
         r#"
 (() => {
   const send = (operation, value = {}) => window.ipc.postMessage(JSON.stringify({ operation, ...value }));
+  // A request the shell will answer. The page asks; the shell does the native work and calls
+  // window.__waShellResult with the result. Nothing here assumes success: if no answer arrives the
+  // promise resolves as a refusal that says so, so a page can never paint a delivered toast it did
+  // not get.
+  const pending = new Map();
+  let nextId = 0;
+  const ask = (operation, extra) => new Promise((resolve) => {
+    const id = ++nextId;
+    const timer = setTimeout(() => {
+      if (pending.delete(id)) resolve({ id, supported: false, delivered: false, reason: 'the shell did not answer' });
+    }, 4000);
+    pending.set(id, { resolve, timer });
+    send(operation, Object.assign({ id }, extra));
+  });
+  window.__waShellResult = (result) => {
+    const entry = pending.get(result && result.id);
+    if (!entry) return false;
+    pending.delete(result.id);
+    clearTimeout(entry.timer);
+    entry.resolve(result);
+    return true;
+  };
   Object.defineProperty(window, 'wasmAgent', { configurable: false, value: {
     native: true,
     platform: 'windows',
@@ -161,6 +197,15 @@ mod companion {
     // is built by the page, because the page is what knows where it was loaded from.
     openView: (view, url) => send('open_view', { view: String(view || 'view'), url: String(url || '') }),
     closeView: () => send('close_view'),
+    // The one native thing a page cannot do for itself. Answers {supported, delivered, reason,
+    // identity, app_name} - the shell's own result, not a promise that a toast appeared.
+    notify: (options) => {
+      const value = options || {};
+      return ask('notify', { title: String(value.title || 'wasm-agent'), body: String(value.body || '') });
+    },
+    // Whether this shell can raise a toast at all, without raising one: 'supported: false' means
+    // the environment cannot, and the reason says why.
+    notifySupport: () => ask('notify_support', {}),
     quit: () => send('quit')
   }});
 })();
@@ -328,6 +373,24 @@ mod companion {
         apply_layout(window, webview, mode);
     }
 
+    /// Hand a notification result back to the page that asked for it. The page's bridge resolves its
+    /// own promise from this call, and reports "the shell did not answer" if it never arrives - so a
+    /// result that cannot be delivered is logged here rather than disappearing into a false refusal.
+    fn report_delivery(webview: &WebView, id: u64, delivery: &crate::notify::Delivery) {
+        let payload = serde_json::json!({
+            "id": id,
+            "supported": delivery.supported,
+            "delivered": delivery.delivered,
+            "reason": delivery.reason,
+            "identity": delivery.identity,
+            "app_name": delivery.app_name,
+        });
+        let script = format!("window.__waShellResult && window.__waShellResult({payload})");
+        if let Err(error) = webview.evaluate_script(&script) {
+            note(&format!("could not report a notification result to the page: {error}"));
+        }
+    }
+
     fn handle(main: &Window, main_webview: &WebView, state: &mut State, sender: usize,
               body: &str, target: &tao::event_loop::EventLoopWindowTarget<UserEvent>,
               proxy: &tao::event_loop::EventLoopProxy<UserEvent>) -> bool {
@@ -383,6 +446,23 @@ mod companion {
             "topmost" if from_main => {
                 state.topmost = request.enabled.unwrap_or(true);
                 main.set_always_on_top(state.topmost);
+            }
+            // The page asks (or asks whether it could); the shell is what raises the toast, because a
+            // page has no process identity on the Windows notification platform (see `notify.rs`).
+            // `supported` and `delivered` come from the platform, and the answer goes back to the
+            // page, so "the notification was sent" is never something the page has to assume.
+            "notify" if from_main => {
+                let title = if request.title.is_empty() { "wasm-agent".to_string() } else { request.title.clone() };
+                let delivery = crate::notify::raise(&title, &request.body);
+                note(&format!("notify{}: delivered={} supported={} identity={} title={:?} reason={}",
+                    if request.diagnostic { " (engine menu test)" } else { "" },
+                    delivery.delivered, delivery.supported, delivery.identity, title, delivery.reason));
+                report_delivery(main_webview, request.id, &delivery);
+            }
+            "notify_support" if from_main => {
+                let support = crate::notify::support();
+                note(&format!("notify support probe: supported={} reason={}", support.supported, support.reason));
+                report_delivery(main_webview, request.id, &support);
             }
             "quit" => {
                 note("quit requested by page");
@@ -455,11 +535,46 @@ mod companion {
         }
     }
 
+    /// `wa-window.exe --notify-test [title] [body]`: raise one native notification and exit.
+    ///
+    /// This is the diagnostic path, and it exists so the notification can be verified on demand
+    /// instead of waiting for a settlement to happen: an operator (or an agent) can call it, watch the
+    /// toast appear, and read the platform's own answer. It deliberately **creates no window** - the
+    /// point is to test the toast, not to open a second chat on someone's desktop, and a window here
+    /// would also make "did the notification work" depend on WebView2 coming up.
+    ///
+    /// Returns the process exit code: 0 when the platform accepted the toast, 3 when it did not (so a
+    /// caller can tell "raised" from "refused" without parsing anything), or `None` when this is not a
+    /// diagnostic invocation at all and the window should start normally.
+    pub fn diagnostic(args: &[String]) -> Option<i32> {
+        let request = crate::notify::parse_diagnostic(args)?;
+        let delivery = crate::notify::raise(&request.title, &request.body);
+        note(&format!("notify-test delivered={} supported={} identity={} app_name={} reason={}",
+            delivery.delivered, delivery.supported, delivery.identity, delivery.app_name, delivery.reason));
+        // A GUI-subsystem process may have no console at all, so the result is written to stdout only
+        // when there is one (with the failure ignored on purpose), and always to the log above.
+        {
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            let _ = writeln!(out, "{}", delivery.json());
+            let _ = out.flush();
+        }
+        Some(if delivery.delivered { 0 } else { 3 })
+    }
+
     pub fn run() -> Result<()> {
         become_dpi_aware();
         std::panic::set_hook(Box::new(|info| note(&format!("panic: {info}"))));
         let url = std::env::var("WASM_AGENT_UI_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
         note(&format!("start url={url}"));
+        // Register our own notification identity before anything else: an unpackaged Win32 process
+        // needs an AppUserModelID for a toast, and that identity is also what names the window's
+        // taskbar button. Logged either way, because "which identity did Windows get" is the thing
+        // that explains what a later toast will be called.
+        match crate::notify::register_identity() {
+            Ok(what) => note(&format!("notifications: {what}")),
+            Err(error) => note(&format!("notifications unavailable: {error}")),
+        }
         // Background executor for client tools (screenshot/input/CDP).
         crate::client::spawn();
         let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
@@ -610,6 +725,12 @@ mod companion {
 
 #[cfg(target_os = "windows")]
 fn main() {
+    // The diagnostic runs before anything else and without a window: it is how the notification path
+    // is verified on demand (see `companion::diagnostic`).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = companion::diagnostic(&args) {
+        std::process::exit(code);
+    }
     if let Err(error) = companion::run() {
         companion::note(&format!("fatal: {error:#}"));
         std::process::exit(1);
