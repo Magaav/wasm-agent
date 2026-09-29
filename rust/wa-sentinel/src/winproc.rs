@@ -38,6 +38,17 @@ fn wide(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
+/// The creation flags for a detached child: no console, so it does not attach to (or die with) ours, and
+/// its own process group, so a Ctrl-C sent to us does not reach it.
+///
+/// Exposed because a caller that must also *redirect* a detached child's output cannot use
+/// [`start_detached`]: `CreateProcessW` here deliberately inherits no handles at all, while
+/// `std::process::Command` can only redirect by handing the child the specific handles it was given. The
+/// flags are what make that a detached process rather than a copy of this one.
+pub fn detached_flags() -> u32 {
+    DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+}
+
 /// Kill a pid the caller obtained from the OS. There is deliberately no by-name function in this
 /// module, and none should be added: the parameter is a pid or it is nothing.
 pub fn kill_pid(pid: u32) -> Result<()> {
@@ -67,6 +78,12 @@ pub fn kill_pid(pid: u32) -> Result<()> {
 /// The command line is assembled the way Windows expects: `CreateProcessW` wants a single mutable
 /// buffer holding `"program" arg1 arg2`, with the program quoted so a path containing a space is
 /// still one token - `C:\Program Files\...` would otherwise become two.
+/// Start detached, with no handles inherited at all.
+///
+/// Kept as the handle-free reference, and no longer what the deploy uses: a deploy's output must go
+/// somewhere an operator can read, and redirecting it is exactly the one thing this spawn cannot do
+/// (`bInheritHandles = FALSE`). `detached_flags` is what a caller that does need to redirect asks for.
+#[allow(dead_code)]
 pub fn start_detached(binary: &Path, args: &[String]) -> Result<u32> {
     start_detached_with_env(binary, args, None)
 }

@@ -307,17 +307,30 @@ if [ -f "$INSTALL_DIR/$SENTINEL_NAME" ]; then
   if cmp -s "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME"; then
     echo "deploy: sentinel $SENTINEL_NAME updated"
   else
-    # The file is locked by the running supervisor. Stop it, replace it, start it again - the verb
-    # that exists for exactly this, and the reason it is not done by hand.
-    OLD_SENTINEL_PID="$(netstat -ano -p TCP 2>/dev/null | awk -v p=":$PORT" '$1=="TCP" && $2 ~ p"$" && $4=="LISTENING" { print $5; exit }' | tr -d '\r')"
+    # The file is locked by the running supervisor on Windows, and there the stop/replace/start dance below is
+    # the way through it. On POSIX it is not locked at all: `cp` over a running image fails with ETXTBSY ("text
+    # file busy"), while a *rename* over it succeeds - the running process keeps the inode it already mapped and
+    # the new image is picked up by the restart below. The rename is not a shortcut, it is the only path that
+    # works: this deploy runs inside the supervisor's control group (the watcher started it), so stopping the
+    # supervisor stops the deploy itself, mid-swap, leaving a stopped supervisor and an unreported deploy -
+    # while the `start` that followed spawned a second watcher beside the unit's own (the flapping
+    # `activating`/`MainPID 0`/`NRestarts 20` unit).
     if [ -f "$INSTALL_DIR/$SENTINEL_NAME" ]; then
-      "$INSTALL_DIR/$SENTINEL_NAME" stop >/dev/null 2>&1 || true
-      sleep 2
-      cp -f "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null || true
-      "$INSTALL_DIR/$SENTINEL_NAME" start >/dev/null 2>&1 || true
+      case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*)
+          "$INSTALL_DIR/$SENTINEL_NAME" stop >/dev/null 2>&1 || true
+          sleep 2
+          cp -f "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null || true
+          "$INSTALL_DIR/$SENTINEL_NAME" start >/dev/null 2>&1 || true
+          ;;
+        *)
+          cp -f "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME.new" 2>/dev/null || true
+          mv -f "$INSTALL_DIR/$SENTINEL_NAME.new" "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null || true
+          ;;
+      esac
     fi
     if cmp -s "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME"; then
-      echo "deploy: sentinel $SENTINEL_NAME updated (restarted past the file lock)"
+      echo "deploy: sentinel $SENTINEL_NAME updated (the running watcher keeps its old image until the restart below)"
     else
       fail "could not install $SENTINEL_NAME - it is still the old build; the node and its supervisor would disagree"
     fi
