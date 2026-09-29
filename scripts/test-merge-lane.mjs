@@ -179,6 +179,8 @@ export function audit(repo,{target='main'}={}) {
   ok(gateFail.json?.gate.exit === 1 && gateFail.json?.gate.ran === true, 'the gate exit is reported as it was');
   ok(gateFail.json?.blocked.length === 0 && gateFail.json?.candidate.merges === 1,
     'the candidate is reported even though the gate failed');
+  ok(Boolean(gateFail.json?.gate.log) && fs.readFileSync(gateFail.json.gate.log, 'utf8').includes('boom'),
+    'the gate log is streamed to a file, so a holder that dies mid-gate still leaves evidence');
 
   // ---- 3. a gate that exits 0 without saying so -----------------------------------------------------
   console.log('3. a gate that exits 0 without a verdict');
@@ -186,6 +188,15 @@ export function audit(repo,{target='main'}={}) {
   ok(silent.status === 3, 'exit 3: an unproven pass is not a pass', `exit ${silent.status}`);
   ok(silent.json?.gate.verdict_found === false && silent.json?.gate.exit === 0,
     'exit 0 with no verdict line is recorded as exactly that');
+
+  // ---- 3b. a gate that never finishes ------------------------------------------------------------------
+  console.log('3b. a gate that is killed at its timeout');
+  const timeout = lane(repo, ['--base', 'main', 'change/one', '--timeout-seconds', '1',
+    '--gate-command', 'echo starting; sleep 30; echo "smoke ok"'], env);
+  ok(timeout.status === 3 && timeout.json?.gate.exit === 'timeout_or_spawn_error',
+    'a gate that did not exit is not a pass', JSON.stringify({exit: timeout.status, gate: timeout.json?.gate?.exit}));
+  ok(Boolean(timeout.json?.gate.log) && fs.readFileSync(timeout.json.gate.log, 'utf8').includes('starting'),
+    'and its partial output survived the kill');
 
   // ---- 4. a conflict with the target, caught before a clone exists ----------------------------------
   console.log('4. a tip that does not merge with the target');

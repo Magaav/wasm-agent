@@ -320,11 +320,21 @@ async function main() {
     if (options.jobs === 'default') { delete environment.WA_GATE_JOBS; }
     delete environment.WASM_AGENT_PROVENANCE; // the candidate is not committed as a session's run
     const gateStarted = nowMs();
-    const result = run('bash', ['-c', options.gateCommand], {cwd: clone.dir, env: environment, timeout: options.timeoutSeconds * 1000});
+    // The gate's own words are streamed to the file as they arrive, the way
+    // `skills/parallel-evolution/scripts/finish.mjs` already does it: a holder that dies mid-gate then
+    // leaves the evidence of how far it got, instead of an empty buffer. That partial log is not a
+    // receipt - only a complete run with the verdict line is - but it is what reconciliation reads.
+    const descriptor = fs.openSync(logPath, 'w');
+    let spawned;
+    try {
+      spawned = spawnSync('bash', ['-c', options.gateCommand], {cwd: clone.dir, env: environment,
+        timeout: options.timeoutSeconds * 1000, windowsHide: true, stdio: ['ignore', descriptor, descriptor]});
+    } finally { fs.closeSync(descriptor); }
     gate.ms = elapsedMs(gateStarted);
     gate.ran = true;
-    gate.exit = result.status === null ? 'timeout_or_spawn_error' : result.status;
-    const log = `${result.stdout}${result.stderr}`;
+    gate.exit = spawned.status === null ? 'timeout_or_spawn_error' : spawned.status;
+    gate.detail = spawned.error ? spawned.error.message : null;
+    const log = fs.readFileSync(logPath, 'utf8');
     fs.writeFileSync(logPath, log);
     const verdict = parseGateVerdict(log);
     gate.log = logPath;
@@ -337,7 +347,6 @@ async function main() {
     gate.skipped = verdict.skipped;
     gate.verdict_line = verdict.line;
     gate.verdict_found = verdict.found;
-    gate.detail = result.status === null ? (result.error || 'the gate did not exit (timeout or spawn failure)') : null;
   }
   timings.gate_ms = gate.ms;
   // Re-read the integration target itself: "main did not move" is a claim about the ref the candidate
