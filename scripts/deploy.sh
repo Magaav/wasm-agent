@@ -26,7 +26,14 @@
 #      back - and because the first version of this script reimplemented it, stopped one of two listeners on
 #      the port, failed to bind, and then reported success because the *other* node answered /health. The
 #      verification was reading someone else's outcome, which is the trap this project keeps writing down;
-#   6. what was installed is recorded, and the pid answering must be the pid the install recorded.
+#   6. what was installed is recorded, and the pid answering must be the pid the install recorded;
+#   7. the directory this deploy installs into must be the directory the service runs the node from, and the
+#      port it will be restarted onto must be free of anything that is not that node. Rules 1-6 are all about
+#      *this* tree; none of them asked the machine where its node lives, and on 2026-09-29 that cost 61,117
+#      restarts: the unit ran a ten-day-old install at ~/.local/share/wasm-agent while this script's default
+#      and upgrade.sh's Linux default were two other directories, the unit's process could not bind :8799
+#      (`os error 98`, held by a stray node) and exited 0, and the deploy reported success. The answers live
+#      in scripts/lib/service-target.sh, which is the one expression this project has for that question.
 set -uo pipefail
 
 REASON=""
@@ -41,10 +48,29 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-INSTALL_DIR="${WA_INSTALL_DIR:-$HOME/AppData/Local/wasm-agent}"
-[ -d "$INSTALL_DIR" ] || INSTALL_DIR="${WA_INSTALL_DIR:-$HOME/.local/share/wasm-agent}"
+INSTALL_DIR=""
+# Which directory does this machine run its node from? `WA_INSTALL_DIR` is a caller's explicit statement;
+# otherwise the service definition's ExecStart answers, then the node process holding the node's port, and
+# only then the historical default. The helper is sourced from beside this script and shipped beside it by
+# the deploy below, so an installed copy answers exactly as the checkout copy does - a deploy reading a
+# different source of truth than the machine runs is the whole failure this rule exists for.
+WA_LIB="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lib/service-target.sh"
+[ -f "$WA_LIB" ] && . "$WA_LIB"
+EXPLICIT_INSTALL="${WA_INSTALL_DIR:-}"
 PORT="${WA_PORT:-8799}"
 CLIENT_PORT="${WA_CLIENT_PORT:-8800}"
+if command -v wa_install_target >/dev/null 2>&1; then
+  INSTALL_DIR="$(wa_install_target)"
+  wa_read_service_claim || true
+else
+  # No helper beside this script: an install older than this rule. Fall back to the expression that was here
+  # before and say so - a target this script chose without asking the machine is worth less than one the
+  # machine named, and the absence of the check is evidence too.
+  INSTALL_DIR="${WA_INSTALL_DIR:-$HOME/AppData/Local/wasm-agent}"
+  [ -d "$INSTALL_DIR" ] || INSTALL_DIR="${WA_INSTALL_DIR:-$HOME/.local/share/wasm-agent}"
+  WA_SERVICE_DIR=""
+  WA_SERVICE_CLAIM=""
+fi
 SENTINEL_CONFIG="${WASM_AGENT_HOME:-${USERPROFILE:-$HOME}}/.wasm-agent"
 
 # The sentinel executes `run` scripts only from directories named here, and the install's own scripts (the
@@ -116,6 +142,24 @@ if [ "${WASM_AGENT_IN_TURN:-}" = "1" ]; then
   fail "cannot deploy from a running turn: it cannot become idle while this command waits. Build, then request an upgrade through wa-sentinel; see skills/self-update/SKILL.md"
 fi
 
+# 0. The machine's own answer to "where does the node live" is the service that runs it, and a deploy that
+#    disagrees with that must refuse instead of installing quietly beside the running node. Two installs on
+#    one machine is not a cosmetic problem: the service keeps running the old one, the deploy replaces the
+#    other, and every verification that reads the wrong directory passes.
+if [ -n "${WA_SERVICE_DIR:-}" ] && ! wa_same_dir "$WA_SERVICE_DIR" "$INSTALL_DIR"; then
+  fail "the service runs the node from $WA_SERVICE_DIR (${WA_SERVICE_CLAIM:-no source named}) and this deploy would install into $INSTALL_DIR - they are different installs. Install where the service runs (WA_INSTALL_DIR=$WA_SERVICE_DIR), or repoint the service at $INSTALL_DIR and reload it, then deploy"
+fi
+if [ -n "${WA_SERVICE_DIR:-}" ] && [ -n "$EXPLICIT_INSTALL" ]; then
+  echo "deploy: $INSTALL_DIR is where the machine runs its node (${WA_SERVICE_CLAIM:-unknown})"
+elif [ -n "${WA_SERVICE_DIR:-}" ]; then
+  echo "deploy: installing into $INSTALL_DIR because ${WA_SERVICE_CLAIM:-the machine named it} (not the old default)"
+else
+  # Neither a unit nor a running node: a machine that has never had one, or a probe that could not see them.
+  # Both are "the target is unverified", which is a note and not a refusal - the check must not invent an
+  # answer, and it must not be silent about not having one.
+  note "no service definition and no node on :$PORT this deploy can name, so $INSTALL_DIR is the target only because nothing contradicted it"
+fi
+
 # Which tree does this deploy build from? `dirname $0/..` is a worktree only when this script is run from
 # one, and the sentinel's `deploy` verb runs the copy installed beside the supervisor - whose parent is the
 # install directory. Resolve it the way upgrade.sh resolves the runtime worktree, and refuse loudly rather
@@ -165,6 +209,44 @@ if git rev-parse --verify -q origin/main >/dev/null; then
   fi
 fi
 COMMIT="$(git rev-parse --short HEAD)"
+
+# 2b. The port this deploy will be restarted onto, and who is holding it right now.
+#
+# A node that cannot bind the port it is restarted onto does not fail visibly: on 2026-09-29 the unit's own
+# process started, printed `[serve] bind 127.0.0.1:8799 failed: Address already in use (os error 98)`, and
+# *exited 0* - a stray node (pid 644564, ppid 1, running for 3h10m) held :8799 and :8800 - so systemd saw a
+# clean exit and restarted it every three seconds: 61,117 times. The deploy in that window reported success,
+# because the pid answering /health was the stray's, not the one it had installed. This asks the question
+# before anything is built or replaced: is the process on the port the one this deploy is about to restart?
+# If it is not, the deploy stops and names the process, its parent and its image instead of installing beside
+# it. Waiting until after the swap is what made the earlier version read someone else's outcome.
+if command -v wa_port_pid >/dev/null 2>&1; then
+  LISTENER_PID="$(wa_port_pid "$PORT")"
+  SERVICE_PID="$(wa_service_pid)"
+  RECORDED_PID="$(tr -d '[:space:]' < "$INSTALL_DIR/serve.pid" 2>/dev/null)"
+  EXPECTED_PID="${SERVICE_PID:-$RECORDED_PID}"
+  LISTENER_IMAGE=""
+  [ -n "$LISTENER_PID" ] && LISTENER_IMAGE="$(wa_pid_image "$LISTENER_PID")"
+  LISTENER_DIR=""
+  [ -n "$LISTENER_IMAGE" ] && LISTENER_DIR="${LISTENER_IMAGE%/*}"
+  [ "$LISTENER_DIR" = "$LISTENER_IMAGE" ] && LISTENER_DIR=""
+  if [ -z "$LISTENER_PID" ]; then
+    echo "deploy: nothing is listening on :$PORT; the restart will be the only node on it"
+  elif [ -n "$EXPECTED_PID" ] && [ "$EXPECTED_PID" = "$LISTENER_PID" ]; then
+    echo "deploy: :$PORT is held by $(wa_pid_label "$LISTENER_PID"), the node this deploy will restart"
+  elif [ -n "$LISTENER_DIR" ] && wa_same_dir "$LISTENER_DIR" "$INSTALL_DIR"; then
+    # The install is the right one, but nothing on this machine claims that pid: a service that is not running
+    # it, or a serve.pid that is stale. Say which, and carry on rather than refusing on a bookkeeping gap.
+    note ":$PORT is held by $(wa_pid_label "$LISTENER_PID"), whose install is this one, but neither the service (${SERVICE_PID:-none running}) nor serve.pid (${RECORDED_PID:-none recorded}) names it"
+  else
+    fail "cannot bind the port this node will be restarted onto: :$PORT is held by $(wa_pid_label "$LISTENER_PID")${LISTENER_IMAGE:+ (install ${LISTENER_DIR:-unknown})}, and this deploy installs into $INSTALL_DIR with the service (${SERVICE_PID:-none running}) and serve.pid (${RECORDED_PID:-none recorded}) naming neither. Stop that process, or deploy the install it belongs to"
+  fi
+  if [ -n "$LISTENER_DIR" ] && ! wa_same_dir "$LISTENER_DIR" "$INSTALL_DIR"; then
+    fail "the node holding :$PORT runs $LISTENER_IMAGE, but this deploy would install into $INSTALL_DIR - two installs, one port; installing here would leave the running node untouched and the install that answers unrecorded"
+  fi
+else
+  note "no service-target helper beside this script, so nothing asked who holds :$PORT"
+fi
 
 echo "deploy: $BRANCH@$COMMIT -> $INSTALL_DIR (port $PORT)"
 
@@ -387,6 +469,19 @@ if [ -f "$DEPLOY_SRC" ]; then
     || fail "node installed, but could not ship deploy.sh beside the binary"
 fi
 
+# ...and the helper that answers "where does this machine's node live", beside the copy of this script that
+# will run the next deploy. Without it the installed copy would fall back to the old expression and lose
+# exactly the check this rule added - the same way `request deploy` found no deploy.sh at all until that one
+# was shipped.
+LIB_SRC="$WA_LIB"
+[ -f "$LIB_SRC" ] || LIB_SRC="$ROOT/scripts/lib/service-target.sh"
+if [ -f "$LIB_SRC" ]; then
+  mkdir -p "$INSTALL_DIR/scripts/lib"
+  cmp -s "$LIB_SRC" "$INSTALL_DIR/scripts/lib/service-target.sh" \
+    || cp -f "$LIB_SRC" "$INSTALL_DIR/scripts/lib/service-target.sh" \
+    || fail "node installed, but could not ship scripts/lib/service-target.sh beside deploy.sh"
+fi
+
 # Ship the WhatsApp pipeline with the node it belongs to. `upgrade.sh` installs the binary, the UI and the
 # self-update skill, and has never carried these: the scripts that read the inbox, the job files that
 # schedule and trigger them, and the entry point that says "emit" were placed in <install>/scripts by hand.
@@ -484,8 +579,12 @@ fi
 
 RECORD_TMP="$INSTALL_DIR/.installed.txt.deploy.$$"
 REASON_LINE="$(printf '%s' "$REASON" | tr '\r\n' '  ')"
-printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\nsource_provenance=clean-built-by-deploy\nvia=deploy.sh\nat=%s\nreason=%s\n' \
-  "$COMMIT" "$BRANCH" "$DIRTY" "$HASH" "$SENTINEL_HASH" "$UPGRADE_HASH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$REASON_LINE" \
+# `install_dir=` is the record's own statement of where it was written, and of which directory the machine
+# runs the node from. A record that cannot say that is a record a later reader has to guess about - and
+# `~/.wasm-agent/installed.txt`, empty on the node this rule was written for, is what guessing looks like.
+printf 'commit=%s\nbranch=%s\ndirty=%s\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\ninstall_dir=%s\nservice_install_dir=%s\nsource_provenance=clean-built-by-deploy\nvia=deploy.sh\nat=%s\nreason=%s\n' \
+  "$COMMIT" "$BRANCH" "$DIRTY" "$HASH" "$SENTINEL_HASH" "$UPGRADE_HASH" "$INSTALL_DIR" "${WA_SERVICE_DIR:-unverified}" \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$REASON_LINE" \
   > "$RECORD_TMP" && mv -f "$RECORD_TMP" "$INSTALL_DIR/installed.txt" \
   || fail "node installed, but installed.txt could not be committed atomically"
 

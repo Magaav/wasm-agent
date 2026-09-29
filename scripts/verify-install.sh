@@ -13,10 +13,23 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-INSTALL_DIR="${WA_INSTALL_DIR:-$HOME/AppData/Local/wasm-agent}"
-[ -d "$INSTALL_DIR" ] || INSTALL_DIR="${WA_INSTALL_DIR:-$HOME/.local/share/wasm-agent}"
+# The one file that answers "where does this machine's node live", shared with deploy.sh so the verifier and
+# the deploy cannot disagree about which directory they are talking about. If it is missing (an install
+# older than this rule), fall back to the expression that was here and say so in the checks below.
+WA_LIB="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lib/service-target.sh"
+[ -f "$WA_LIB" ] && . "$WA_LIB"
 PORT="${WA_PORT:-8799}"
-CONFIG="${WASM_AGENT_HOME:-${USERPROFILE:-$HOME}}"; CONFIG="$CONFIG/.wasm-agent"
+if command -v wa_install_target >/dev/null 2>&1; then
+  INSTALL_DIR="$(wa_install_target)"
+  CONFIG="$(wa_config_dir)"
+  wa_read_service_claim || true
+  HAD_SERVICE_LIB=1
+else
+  INSTALL_DIR="${WA_INSTALL_DIR:-$HOME/AppData/Local/wasm-agent}"
+  [ -d "$INSTALL_DIR" ] || INSTALL_DIR="${WA_INSTALL_DIR:-$HOME/.local/share/wasm-agent}"
+  CONFIG="${WASM_AGENT_HOME:-${USERPROFILE:-$HOME}}"; CONFIG="$CONFIG/.wasm-agent"
+  WA_SERVICE_DIR=""; WA_SERVICE_CLAIM=""; HAD_SERVICE_LIB=0
+fi
 
 JSON=0
 [ "${1:-}" = "--json" ] && JSON=1
@@ -59,13 +72,47 @@ resolve_root() {
   printf ''
 }
 
+# 0. This run is verifying the install the machine actually runs. Without this, every check below can pass
+#    while the service keeps running a different directory - which is what happened on 2026-09-29: the unit
+#    ran a ten-day-old install, the deploy wrote a newer one elsewhere, and the node restarted 61,117 times
+#    under a verifier that had no opinion about which of them was the node.
+if [ "$HAD_SERVICE_LIB" = "0" ]; then
+  record skip "the install is where the service runs it" "no scripts/lib/service-target.sh beside this script: nothing asked the machine where its node lives"
+elif [ -n "${WA_SERVICE_DIR:-}" ] && ! wa_same_dir "$WA_SERVICE_DIR" "$INSTALL_DIR"; then
+  record fail "the install is where the service runs it" \
+    "the service runs the node from $WA_SERVICE_DIR (${WA_SERVICE_CLAIM:-no source named}), and this run read $INSTALL_DIR - they are different installs"
+elif [ -n "${WA_SERVICE_DIR:-}" ]; then
+  record ok "the install is where the service runs it" "$WA_SERVICE_DIR (${WA_SERVICE_CLAIM:-named by the machine})"
+else
+  record ok "the install is where the service runs it" "no service definition and no node on :$PORT that this can name; nothing on this machine contradicts $INSTALL_DIR"
+fi
+
 # 1. the install record
 if [ -f "$INSTALL_DIR/installed.txt" ]; then
   RECORD_COMMIT="$(sed_field commit)"
   record ok "installed.txt present" "commit=${RECORD_COMMIT:-?} via=$(sed_field via)"
+  # A record that names a different directory is a record about another install - the shape of a file copied
+  # or written beside the node instead of in it, which is how `~/.wasm-agent/installed.txt` came to exist,
+  # empty, while the node that looped was reading neither.
+  RECORD_DIR="$(sed_field install_dir)"
+  if [ -n "$RECORD_DIR" ]; then
+    record "$(wa_same_dir "$RECORD_DIR" "$INSTALL_DIR" && echo ok || echo fail)" \
+      "the record was written for this install" "installed.txt names install_dir=$RECORD_DIR, read from $INSTALL_DIR"
+  fi
 else
   record fail "installed.txt present" "no $INSTALL_DIR/installed.txt - nothing to verify against"
   RECORD_COMMIT=""
+fi
+
+# 1b. A record in the node's config directory is not a record of the node. `<install>/installed.txt` is
+#     where the deploy writes it and where this verifier reads it; a second one under the config directory
+#     is bookkeeping that cannot be compared with anything, which is the state the cloud node was found in.
+STRAY_RECORD="$CONFIG/installed.txt"
+if [ -f "$STRAY_RECORD" ] && ! wa_same_dir "$CONFIG" "$INSTALL_DIR"; then
+  record fail "there is no second install record" \
+    "$STRAY_RECORD exists but the node's install is $INSTALL_DIR - a record beside the config verifies nothing (it is $(wc -c < "$STRAY_RECORD" | tr -d ' ') byte(s))"
+elif [ -f "$STRAY_RECORD" ]; then
+  record ok "there is no second install record" "$STRAY_RECORD is the install directory itself"
 fi
 
 # 2. worktree comparison (hash equality is the only honest proof that what runs is what is in the tree)
@@ -129,6 +176,34 @@ if [ -n "$TREE" ] && git -C "$TREE" rev-parse --is-inside-work-tree >/dev/null 2
   done
 else
   record skip "worktree comparison" "no worktree resolvable (WA_DEPLOY_ROOT / runtime-worktree.txt) - hash calls not run"
+fi
+
+# 2b. Compare like with like: the skills a deploy writes must be the skills the node reads.
+#
+# This is the same defect as the install directory, in a smaller place. The node scans `<config>/skills`
+# (lua/core/paths.lua: `paths.config() .. "/skills"`), and this verifier compares against `<config>/skills` -
+# but `upgrade.sh` computes its target as `HOME_DIR="${WASM_AGENT_HOME:-$HOME/.wasm-agent}"`, treating that
+# variable as the config directory when it is the *home* (rust/wa-host/src/main.rs resolve_home). So on a
+# machine that sets it - the sentinel unit on the cloud node sets `WASM_AGENT_HOME=/home/ubuntu` - the deploy
+# writes `/home/ubuntu/skills/...` and the node reads `/home/ubuntu/.wasm-agent/skills/...`, and a verifier
+# that only checks one of them reports ok about a pair nobody joined up. Naming both paths is the whole
+# point: this does not repair the disagreement, it stops it from being discoverable only by hand.
+if [ -z "${WASM_AGENT_HOME:-}" ]; then
+  record ok "the skills a deploy writes are the skills the node reads" \
+    "WASM_AGENT_HOME is unset, so upgrade.sh's target and this node's scan root are the same directory ($CONFIG)"
+elif wa_same_dir "$WASM_AGENT_HOME" "$CONFIG"; then
+  record ok "the skills a deploy writes are the skills the node reads" "WASM_AGENT_HOME is the config directory here"
+else
+  DEPLOYED_SKILL="$WASM_AGENT_HOME/skills/self-update/SKILL.md"
+  READ_SKILL="$CONFIG/skills/self-update/SKILL.md"
+  if [ -f "$DEPLOYED_SKILL" ]; then
+    record "$(cmp -s "$DEPLOYED_SKILL" "$READ_SKILL" 2>/dev/null && echo ok || echo fail)" \
+      "the skills a deploy writes are the skills the node reads" \
+      "a deploy writes $DEPLOYED_SKILL; the node reads $READ_SKILL"
+  else
+    record skip "the skills a deploy writes are the skills the node reads" \
+      "WASM_AGENT_HOME=$WASM_AGENT_HOME puts a deploy's skills in $WASM_AGENT_HOME/skills, and nothing is there yet; the node reads $READ_SKILL"
+  fi
 fi
 
 # 3. the node answers, and the pid answering is the pid the install recorded

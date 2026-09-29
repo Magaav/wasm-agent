@@ -9,6 +9,22 @@ set -euo pipefail
 HOST_ALIAS="${WASM_AGENT_HOST:-openclaw.ohana}"
 DIR="${WASM_AGENT_BIN_DIR:-$HOME/.local/bin}"
 
+# Where does this machine run its node from? The same file the deploy gate reads, so "where the node lives"
+# has one answer here too - and so this installer can tell whether the supervisor it is placing is the one the
+# sentinel service will start. Measured on the cloud node: `~/.local/bin/wa-sentinel` (user-owned) and
+# `/usr/local/bin/wa-sentinel` (root-owned) were the same binary at two paths and `$PATH` quietly preferred
+# the first, which is the same class of failure as the node that looped 61,117 times.
+WA_LIB="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lib/service-target.sh"
+HAVE_LIB=0
+if [ -f "$WA_LIB" ]; then . "$WA_LIB"; HAVE_LIB=1; fi
+die() { printf "     ${yellow}!${reset}  %s\n" "$1" >&2; exit 1; }
+
+node_service_dir() { # -> the directory the sentinel service runs its supervisor from, empty when unknowable
+  # Explicitly, not `[ ... ] && cmd`: this file runs under `set -e`, and a false test as the last status of a
+  # function called in a command substitution would end the installer silently.
+  if [ "$HAVE_LIB" = "1" ]; then wa_sentinel_service_dir; fi
+}
+
 cyan="\033[36m"; green="\033[32m"; grey="\033[90m"; yellow="\033[33m"; reset="\033[0m"
 step() { printf "   ${cyan}*${reset} %s\n" "$1"; }
 ok()   { printf "     ${green}ok${reset} ${grey}%s${reset}\n" "$1"; }
@@ -90,6 +106,21 @@ if [ "$SENTINEL_GOT" = "0" ] && [ -n "$ROOT" ] && [ -d "$ROOT/rust/wa-sentinel" 
 fi
 if [ "$SENTINEL_GOT" = "1" ]; then
   ok "$DIR/wa-sentinel"
+  # ...but a supervisor is only installed where the service starts it. `wa-sentinel` in the wrong directory is
+  # the same defect as a node in the wrong directory: the service keeps running the old copy, and everything
+  # that reports success is reading the one nobody runs. Name both paths, place it where the service looks
+  # when that directory is writable, and refuse to claim success when it is not.
+  SENTINEL_SERVICE_DIR="$(node_service_dir)"
+  if [ -n "$SENTINEL_SERVICE_DIR" ] && ! wa_same_dir "$SENTINEL_SERVICE_DIR" "$DIR"; then
+    warn "the sentinel service runs $SENTINEL_SERVICE_DIR/wa-sentinel, not $DIR/wa-sentinel"
+    if [ -w "$SENTINEL_SERVICE_DIR" ]; then
+      cp -f "$DIR/wa-sentinel" "$SENTINEL_SERVICE_DIR/wa-sentinel" \
+        && ok "$SENTINEL_SERVICE_DIR/wa-sentinel (the path the service starts)" \
+        || die "could not place the supervisor at $SENTINEL_SERVICE_DIR/wa-sentinel; the service would keep starting the old one"
+    else
+      die "$SENTINEL_SERVICE_DIR is not writable by $(id -un): install it with sudo (install -m 755 $DIR/wa-sentinel $SENTINEL_SERVICE_DIR/wa-sentinel), or point the unit at $DIR/wa-sentinel; this installer will not report success while the service and the installed supervisor disagree"
+    fi
+  fi
   "$DIR/wa-sentinel" restart >/dev/null 2>&1 || true
 else
   warn "no sentinel: this node cannot restart or upgrade itself. Set WASM_AGENT_REPO to a checkout, or install wa-sentinel by hand."
@@ -117,8 +148,17 @@ fi
 # The skills the node needs to know how to update itself. Delivered as a skill rather than a
 # paragraph in AGENTS.md: only `name` and `description` enter the prompt, and the body loads when the
 # task matches, so the procedure costs nothing per turn and can be as long as it needs to be.
-# `~/.wasm-agent/skills` is the node-scoped place it scans, which is this install directory.
-SKILLS_DIR="$DIR/skills/self-update"
+#
+# The directory is the node's own scan root - `<home>/.wasm-agent/skills`, the same expression
+# `lua/core/paths.lua` uses for `paths.config()` and `scripts/verify-install.sh` uses to check it - and not
+# `$DIR`, which is where the *command* lives and which no node ever reads. The comment here used to claim the
+# install directory and the config directory were the same place; on this project they are not, and a skill
+# written into $DIR/skills is a skill the node never loads.
+if [ "$HAVE_LIB" = "1" ]; then
+  SKILLS_DIR="$(wa_config_dir)/skills/self-update"
+else
+  SKILLS_DIR="${WASM_AGENT_HOME:-$HOME}/.wasm-agent/skills/self-update"
+fi
 mkdir -p "$SKILLS_DIR"
 SKILL_GOT=0
 if [ -n "$ROOT" ] && [ -f "$ROOT/skills/self-update/SKILL.md" ]; then
