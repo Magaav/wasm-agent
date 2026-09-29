@@ -19,6 +19,7 @@ local users = dofile("lua/core/users.lua")
 local nodes = dofile("lua/core/nodes.lua")
 local paths = dofile("lua/core/paths.lua")
 local redact = dofile("lua/core/redact.lua")
+local telemetry = dofile("lua/core/telemetry.lua")
 local workspaces = dofile("lua/core/workspaces.lua")
 
 local M = {}
@@ -647,6 +648,61 @@ function M.control(args, ctx)
   return result
 end
 
+-- What served a child and what it cost, as the durable ledger recorded it. A
+-- settled receipt is the only view a caller has of a child that has already
+-- finished, so "which model was wasteful" must be answerable from the receipt
+-- and not by reconstructing the ledger by hand.
+--
+-- The provider's own numbers are the authority, and their absence stays absent:
+-- `usage.available` is false with a `reason` when nothing was measured, never a
+-- zero that reads like a measured free call. `telemetry.normalize` marks each
+-- call known or unknown, so a run whose calls were only partly reported says so
+-- (`partial`, `unmeasured_calls`) instead of presenting a subset as the total.
+-- This block is control data for a caller: nothing here is written into a model
+-- context, a transcript or a prompt.
+local function run_accounting(session_id)
+  local snapshot = telemetry.snapshot(session_id)
+  local total = snapshot.total or {}
+  local calls = tonumber(total.calls) or 0
+  local unmeasured = tonumber(total.missing_usage) or 0
+  -- The last call's own span carries the model the provider answered with - which
+  -- is not always the one the receipt asked for - and the provider that served it.
+  local last = snapshot.last or {}
+  local account = {
+    provider = type(last.provider) == "string" and last.provider ~= "" and last.provider or nil,
+    model = type(last.model) == "string" and last.model ~= "" and last.model or nil,
+  }
+  if calls == 0 then
+    account.usage = { available = false, reason = "no_model_call_measured", calls = 0,
+      source = "harness_events" }
+  elseif unmeasured >= calls then
+    account.usage = { available = false, reason = "provider_reported_no_usage", calls = calls,
+      unmeasured_calls = unmeasured, source = "harness_events" }
+  else
+    local prompt = tonumber(total.prompt) or 0
+    local completion = tonumber(total.output) or 0
+    local cache_known = total.cache_known == true
+    local cost_known = total.cost_known == true
+    account.usage = {
+      available = unmeasured == 0,
+      partial = unmeasured > 0,
+      reason = unmeasured > 0 and "some_calls_unmeasured" or nil,
+      source = "harness_events", calls = calls, unmeasured_calls = unmeasured,
+      prompt = prompt, completion = completion,
+      total_tokens = prompt + completion,
+      -- A split, a cache figure and a price the provider did not report stay
+      -- absent. Their place is taken by the `*_known` flag, so a reader sees
+      -- "not reported" where they would otherwise read a measured zero.
+      cache_known = cache_known,
+      cache_read = cache_known and (tonumber(total.cacheRead) or 0) or nil,
+      cache_write = cache_known and (tonumber(total.cacheWrite) or 0) or nil,
+      cost_known = cost_known,
+      cost_usd = cost_known and tonumber(total.cost) or nil,
+    }
+  end
+  return account
+end
+
 -- The child entrypoint. Rust calls this on a fresh interpreter, on its own
 -- thread, with the durable receipt. It never comes from the model and never
 -- reads the parent transcript, the operator instruction file or the parent's
@@ -655,6 +711,14 @@ function wa_subagent_run(receipt_json)
   local ok, receipt = pcall(json.decode, receipt_json or "")
   if not ok or type(receipt) ~= "table" then
     return json.encode({ state = "failed", error = "invalid_receipt" })
+  end
+  -- Every outcome carries what served the run and what it cost, a failure
+  -- included: a child that spent its budget and then died is exactly the run a
+  -- caller has to account for.
+  local function report(state, body)
+    body.state = state
+    body.accounting = run_accounting(receipt.session_id)
+    return json.encode(body)
   end
   local limits = receipt.limits or {}
   local profile = {
@@ -706,7 +770,7 @@ function wa_subagent_run(receipt_json)
     },
   })
   if not child_ok then
-    return json.encode({ state = "failed", error = redact.text(tostring(child)), session_id = receipt.session_id })
+    return report("failed", { error = redact.text(tostring(child)), session_id = receipt.session_id })
   end
   local prompt = tostring(receipt.prompt or "")
   if tostring(receipt.context or "") ~= "" then
@@ -714,7 +778,7 @@ function wa_subagent_run(receipt_json)
   end
   local ran, reply = pcall(child.run, child, prompt, {})
   if not ran then
-    return json.encode({ state = "failed", error = redact.text(tostring(reply)), session_id = receipt.session_id })
+    return report("failed", { error = redact.text(tostring(reply)), session_id = receipt.session_id })
   end
   reply = tostring(reply or "")
   local truncated = false
@@ -725,13 +789,13 @@ function wa_subagent_run(receipt_json)
     reply = reply:sub(1, math.max(0, limits.max_output_bytes - #marker)) .. marker
     truncated = true
   end
-  local usage = child.usage_total and child.usage_total.last or {}
-  return json.encode({
-    state = "completed",
+  -- The child's own `usage_total` is not the authority here: it counts what this
+  -- interpreter accumulated and says nothing about what the provider reported.
+  -- The ledger does, so the receipt carries that instead.
+  return report("completed", {
     result = {
       reply = reply,
       session_id = receipt.session_id,
-      usage = usage,
       truncated = truncated,
       events = events,
     },
