@@ -66,8 +66,12 @@ gating at once, idle box, more than one sample per setting) before changing the 
 2. launch the agent there           -> wa chat   (or --agent wasm, see below)
 3. give it the brief
 4. it edits, tests, commits, pushes the branch
-5. a human reviews the branch and merges
+5. an independent reviewer verifies it, the merge lane lands it, and the sentinel deploys it
 ```
+
+That fifth step is fully specified elsewhere, once: who may move `main`, the lanes and their
+reservations, and the landing steps are `skills/git-orchestrator/SKILL.md` ("The integration
+protocol"), with the reservations in `docs/CONCURRENCY.md`. Landing is not a human step.
 
 The current `skills/git-orchestrator/SKILL.md` branch-cleanup contract was
 changed after the last install; an installed-node invocation of `/merge all`
@@ -275,5 +279,7 @@ WASM_AGENT_ENDPOINT=<candidate-endpoint> \
 /tmp/wa-candidate serve --port <port> --client-port <client-port>
 ```
 
-Promotion is a human step: fast-forward `main`, rebuild, and reinstall the binary
-on each machine. The candidate promotes nothing by itself.
+Promotion is the deploy lane's step, and it goes through the sentinel
+(`wa-sentinel request upgrade`), never a hand copy over a running binary, because a run cannot wait
+for the swap: fast-forward `main`, rebuild, and reinstall the binary on each machine. The candidate
+promotes nothing by itself.
