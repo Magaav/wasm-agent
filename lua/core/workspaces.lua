@@ -89,17 +89,138 @@ local function reconcile(memory, id, workspace)
   return nil, err
 end
 
+-- Which checkout a new workspace may fork from, by reading only.
+--
+-- A placed child arrives at a node that has never seen its parent: the coordinator's session, and the
+-- path that session recorded (`C:/Users/.../wasm_the_first`), belong to another machine and mean
+-- nothing here. The only source this node can honestly use is the tree its own node runs from -
+-- which is also what a local child gets. Two things are therefore never a source: a path recorded by
+-- a session of *another* node (one path on two machines is two different repositories, so even a path
+-- that exists here means something else), and a path that names nothing on this machine. An empty
+-- source, or an incoming path that is gone, falls through to this node's own checkout instead of
+-- refusing a child that could still run; a path that IS here and is not a checkout is refused
+-- visibly, because that is the caller's to fix and not ours to silently replace.
+--
+-- Reading only, so the same rule runs as a preflight *before* the child's session row exists: a
+-- destination that refuses must not be left holding a session shell it will only retire.
+local function inspect_tree(path)
+  local result, err = run("git rev-parse --show-toplevel", path)
+  if not result then return nil, "workspace_source_not_git: " .. tostring(err) end
+  local root = trimmed(result.stdout)
+  if root == "" then return nil, "workspace_source_root_missing" end
+  local head_result, head_error = run("git rev-parse HEAD", path)
+  local branch_result, branch_error = run("git rev-parse --abbrev-ref HEAD", path)
+  local status_result, status_error = run("git status --porcelain --untracked-files=all", path)
+  if not head_result or not branch_result or not status_result then
+    return nil, "workspace_source_inspection_failed: " .. tostring(head_error or branch_error or status_error)
+  end
+  return {
+    path = path, root = root, head = trimmed(head_result.stdout),
+    branch = trimmed(branch_result.stdout), status = tostring(status_result.stdout or ""),
+  }
+end
+
+local update_module = nil
+local function own_update()
+  if not update_module then update_module = dofile("lua/core/update.lua") end
+  return update_module
+end
+
+-- `runtime-worktree.txt` written at install time, else the working directory when that really is a
+-- checkout - the same resolver `/update` and `deploy.sh` use, so "the tree this node runs from"
+-- cannot mean two different things on one machine.
+local function own_tree()
+  local ok, update = pcall(own_update)
+  if not ok or type(update) ~= "table" or type(update.runtime_tree) ~= "function" then return nil, nil, "" end
+  local install = update.install_dir()
+  local tree, source = update.runtime_tree(install)
+  return tree, source, install
+end
+
+-- The provenance is recorded, not implied: `origin` says which tree was used, `requested` repeats
+-- what the incoming session named, and `fallback` is the reason it was not used (empty when it was).
+local function inspect_source(memory, user_id, node_id, source_session_id)
+  source_session_id = tostring(source_session_id or "")
+  local source = source_session_id ~= "" and memory.session(source_session_id) or nil
+  -- Another account's session is never a source, whatever its path says.
+  if source and tostring(source.user_id or "") ~= tostring(user_id or "") then
+    return nil, "workspace_owner_mismatch"
+  end
+  local usable = source ~= nil and tostring(source.node_id or "") == tostring(node_id or "")
+  local requested, why_not = "", ""
+  if source ~= nil then requested = tostring(memory.session_worktree(source_session_id) or "") end
+  if source == nil then
+    why_not = "workspace_source_session_not_found: session " .. source_session_id ..
+      " is not on this node (a placed child's parent session lives on the node that dispatched it)"
+  elseif not usable then
+    why_not = "workspace_source_foreign_node: session " .. source_session_id .. " belongs to node " ..
+      tostring(source.node_id or "") .. ", not " .. tostring(node_id or "")
+  else
+    local source_workspace = memory.session_workspace(source_session_id)
+    if source_workspace and source_workspace.required
+        and (source_workspace.state ~= "allocated" or tostring(source_workspace.worktree or "") == "") then
+      return nil, "workspace_source_unavailable: source session requires an allocated isolated workspace"
+    end
+  end
+  -- Read whether or not it will be used: what the incoming session named is provenance a reader
+  -- needs (`C:/Users/.../wasm_the_first` is the whole reason this path exists), while *using* it is
+  -- reserved for a session of this node.
+  if requested == "" and usable and why_not == "" then
+    why_not = "workspace_source_empty: session " .. source_session_id .. " names no checkout"
+  end
+  if usable and requested ~= "" then
+    local inspected, tree_error = inspect_tree(requested)
+    if inspected then
+      inspected.requested, inspected.origin, inspected.fallback = requested, "source-session", ""
+      return inspected
+    end
+    if directory_exists(requested) == false then
+      why_not = "workspace_source_path_missing: " .. requested .. " does not exist on this machine"
+    else
+      -- It is here and it is not a checkout, or we cannot tell that it is gone: say so rather than
+      -- quietly forking somewhere else.
+      return nil, tree_error
+    end
+  end
+  local tree, tree_source, install = own_tree()
+  if tree then
+    local inspected, own_error = inspect_tree(tree)
+    if inspected then
+      inspected.requested, inspected.origin, inspected.fallback = requested, tostring(tree_source or ""), why_not
+      return inspected
+    end
+    return nil, "workspace_destination_source_missing: " .. tostring(tree_source or "runtime-worktree.txt") ..
+      " names " .. tostring(tree) .. ", which is not a usable checkout (" .. tostring(own_error) ..
+      "); the incoming source was unusable: " .. (why_not ~= "" and why_not or "workspace_source_empty")
+  end
+  return nil, "workspace_destination_source_missing: this node has no checkout of its own to fork from: " ..
+    "runtime-worktree.txt is absent from " .. tostring(install) .. " and the working directory " ..
+    tostring(platform.cwd()) .. " is not a checkout; the incoming source was unusable: " ..
+    (why_not ~= "" and why_not or "workspace_source_empty")
+end
+
+-- The same decision `ensure` makes, taken before this node creates the child's session.
+function M.preflight_source(memory, source_session_id, user_id, node_id)
+  return inspect_source(memory, user_id, node_id, source_session_id)
+end
+
+-- A refusal sentence and its code are one string: everything before the first colon names what
+-- happened, and that code is what a caller branches on - the coordinator's spill rule has to tell
+-- "this destination cannot allocate at all" from "the source is dirty and a retry here will work".
+function M.refusal_code(detail, fallback)
+  local code = tostring(detail or ""):match("^([%w_]+)")
+  if not code or code == "" then return fallback or "workspace_allocation_failed" end
+  return code
+end
+
 -- Allocate one linked worktree from the source session's exact clean HEAD. Uncommitted
 -- state is recorded and refused (not copied, stashed, or silently ignored). If a process
 -- dies during git worktree add, the persisted 'allocating' record is reconciled, never
--- blindly replayed. source_session_id must be owned by the same principal and node.
+-- blindly replayed. source_session_id must be owned by the same principal; its checkout is
+-- only used when that session is a session of this node (see inspect_source).
 function M.ensure(memory, session_id, source_session_id)
   local session = memory.session(session_id)
-  local source = memory.session(source_session_id)
-  if not session or not source then return nil, "workspace_session_not_found" end
-  if session.user_id ~= source.user_id or session.node_id ~= source.node_id then
-    return nil, "workspace_owner_mismatch"
-  end
+  if not session then return nil, "workspace_session_not_found" end
   local workspace = memory.require_session_workspace(session_id)
   if not workspace then return nil, "workspace_requirement_failed" end
   if workspace.state=="released" or workspace.state=="releasing" or workspace.state=="release_unknown" then
@@ -115,42 +236,27 @@ function M.ensure(memory, session_id, source_session_id)
     return reconcile(memory, session_id, workspace)
   end
 
-  local source_workspace = memory.session_workspace(source_session_id)
-  if source_workspace and source_workspace.required
-      and (source_workspace.state ~= "allocated" or source_workspace.worktree == "") then
-    local why = "workspace_source_unavailable: source session requires an allocated isolated workspace"
-    mark(memory, session_id, workspace, "failed", why)
-    return nil, why
+  -- From here on every refusal is recorded on the child's own workspace record: a required
+  -- workspace that stays `pending` while the reason sits in a return value nobody persisted is
+  -- exactly the state a retrying dispatcher reads as "not finished yet".
+  local inspected, inspection_error = inspect_source(memory, session.user_id, session.node_id, source_session_id)
+  if not inspected then
+    mark(memory, session_id, workspace, "failed", inspection_error)
+    return nil, inspection_error
   end
-  local source_path = memory.session_worktree(source_session_id)
-  if source_path == "" then source_path = platform.cwd() end
-  local result, err = run("git rev-parse --show-toplevel", source_path)
-  if not result then
-    mark(memory, session_id, workspace, "failed", "workspace_source_not_git: " .. tostring(err))
-    return nil, "workspace_source_not_git: " .. tostring(err)
-  end
-  local root = trimmed(result.stdout)
-  if root == "" then
-    mark(memory, session_id, workspace, "failed", "workspace_source_root_missing")
-    return nil, "workspace_source_root_missing"
-  end
-  local head_result, head_error = run("git rev-parse HEAD", source_path)
-  local branch_result, branch_error = run("git rev-parse --abbrev-ref HEAD", source_path)
-  local status_result, status_error = run("git status --porcelain --untracked-files=all", source_path)
-  if not head_result or not branch_result or not status_result then
-    local why = "workspace_source_inspection_failed: " .. tostring(head_error or branch_error or status_error)
-    mark(memory, session_id, workspace, "failed", why)
-    return nil, why
-  end
-  local dirty = tostring(status_result.stdout or "")
+  local root = inspected.root
+  local dirty = tostring(inspected.status or "")
   local start_state = {
-    source_root = root, source_path = source_path,
-    source_branch = trimmed(branch_result.stdout), base_commit = trimmed(head_result.stdout),
+    source_root = root, source_path = inspected.path,
+    -- Where the tree actually came from, and why anything else was left alone.
+    source_origin = inspected.origin, source_requested = inspected.requested,
+    source_fallback = inspected.fallback,
+    source_branch = inspected.branch, base_commit = inspected.head,
     source_status = dirty:sub(1, 16000), source_status_truncated = #dirty > 16000,
     source_dirty = dirty ~= "", uncommitted_policy = "refuse",
     inspected_at = host.now(),
   }
-  workspace.source_path = source_path
+  workspace.source_path = inspected.path
   workspace.base_commit = start_state.base_commit
   workspace.start_state = start_state
   if dirty ~= "" then

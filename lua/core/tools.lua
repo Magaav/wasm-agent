@@ -1003,7 +1003,7 @@ function M.dispatch(memory, name, args, role, ctx)
       if not source_id or source_id == "" then source_id = id end
       memory.require_session_workspace(id)
       local allocated, detail = workspaces.ensure(memory, id, source_id)
-      if not allocated then return {error="workspace_allocation_failed",detail=detail,workspace=memory.session_workspace(id)} end
+      if not allocated then return {error=workspaces.refusal_code(detail),detail=detail,workspace=memory.session_workspace(id)} end
       return {ok=true,session_id=id,workspace=allocated}
     elseif action == "set" then
       if workspace and workspace.required then return {error="workspace_managed",state=workspace.state} end

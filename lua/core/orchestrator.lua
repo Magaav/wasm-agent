@@ -43,6 +43,9 @@ local function view(row)
   receipt.dispatch_state = row.state
   receipt.state = receipt.state or row.state
   receipt.settled = receipt.settled == true or row.state == "cancelled" or row.state == "failed"
+    -- A refused attempt has nothing left that could still happen, so it settles the completion the
+    -- same way a cancelled one does, and the coordinator is woken to decide what to do with it.
+    or row.state == "refused"
   receipt.error = receipt.error or (row.detail ~= "" and row.detail or nil)
   local args, ctx = json.decode(row.args), json.decode(row.context)
   receipt.prompt = args.prompt
@@ -89,7 +92,34 @@ local function invoke(destination, args, ctx, api)
 end
 
 -- A refusal below proves no admission happened. Transport failures never do.
-local unadmitted = {node_full=true, queue_full=true, subagent_runtime_unavailable=true}
+--
+--   admitted  - a receipt with a subagent id: a run exists there.
+--   spilled   - a refusal that proves nothing was started and that another candidate may still be
+--               able to take: capacity (`node_full`, `queue_full`, runtime unavailable) and a
+--               destination whose own checkout cannot be named at all. The pin is dropped so the
+--               next tick re-reads eligibility, which is also why removing a node from the policy
+--               stops it being tried.
+--   refused   - a refusal that proves nothing was started and that no candidate can be asked to
+--               take as it stands: the attempt is over, and the coordinator may retract the row
+--               instead of waiting for an admission that cannot come. Measured: a destination that
+--               answered `workspace_session_not_found` was re-dispatched every ~2.5s for minutes,
+--               and every attempt wrote another empty session shell on the node that had just
+--               refused it.
+--   uncertain - anything else: the request may or may not have arrived, so only the pinned
+--               destination and key are retried (`no blind failover or replay`).
+local unadmitted = {node_full=true, queue_full=true, subagent_runtime_unavailable=true,
+  workspace_destination_source_missing=true}
+function M.classify(result)
+  if type(result) ~= "table" then return "uncertain" end
+  if result.subagent_id then return "admitted" end
+  if unadmitted[result.error] then return "spilled" end
+  -- `not_started` is the destination's own statement that no run of its was created for this
+  -- request. It is only read together with an error: a receipt with neither an id nor an error
+  -- proves nothing at all and keeps the pinned retry.
+  if result.not_started and result.error then return "refused" end
+  return "uncertain"
+end
+
 function M.tick(api)
   for _, row in ipairs(query("SELECT * FROM orchestration_tasks WHERE state IN ('queued','placing') ORDER BY created_at LIMIT 32")) do
     local user = users.find(row.owner)
@@ -118,13 +148,20 @@ function M.tick(api)
             args.placement={max_tasks=item.max_tasks}
             local ok, result = pcall(invoke,destination,args,ctx,api)
             if not ok then result={error="dispatch_uncertain",detail=tostring(result)} end
-            if result.subagent_id then
+            local outcome = M.classify(result)
+            if outcome == "admitted" then
               exec("UPDATE orchestration_tasks SET state='admitted',receipt=?,detail='' WHERE id=?",
                 {json.encode(result),row.id})
               break
-            elseif unadmitted[result.error] then
+            elseif outcome == "spilled" then
               exec("UPDATE orchestration_tasks SET state='queued',destination='',detail=? WHERE id=?", {result.error,row.id})
               row.destination=""
+            elseif outcome == "refused" then
+              -- The destination answered, and its answer proves no run of it was started, so
+              -- nothing is left in flight to reconcile. The attempt ends here with the refusal on
+              -- the row; the coordinator reads it and cancels the row if it will not retry.
+              exec("UPDATE orchestration_tasks SET state='refused',detail=? WHERE id=?", {json.encode(result),row.id})
+              break
             else
               -- Keep target/key for reconciliation; no blind failover or replay.
               exec("UPDATE orchestration_tasks SET detail=? WHERE id=?", {json.encode(result),row.id})
@@ -162,8 +199,11 @@ function M.control(args, ctx, api)
       end
       args.wait_ms=math.max(0,math.floor((deadline-host.now())*1000))
     end
-    if row.state == "queued" and action == "cancel" then
-      exec("UPDATE orchestration_tasks SET state='cancelled' WHERE id=? AND state='queued'", {id})
+    if (row.state == "queued" or row.state == "refused") and action == "cancel" then
+      -- A refused attempt is retractable without reconciliation: the destination said it never
+      -- started a run, so there is nothing in flight to reconcile - which is exactly what the
+      -- `placing` guard below protects, and why it does not apply here.
+      exec("UPDATE orchestration_tasks SET state='cancelled' WHERE id=? AND state IN ('queued','refused')", {id})
       row=query("SELECT * FROM orchestration_tasks WHERE id=?",{id})[1]
     end
     if row.state ~= "admitted" then

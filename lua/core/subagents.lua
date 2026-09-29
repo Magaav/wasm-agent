@@ -519,20 +519,34 @@ function M.start(args, ctx)
       note = "No child session or provider call was started; choose a larger approved budget or shorten the task/context." }
   end
 
+  -- A destination that cannot fork a workspace refuses *before* it creates the child's session.
+  -- Measured: an empty, already-ended session row per refused attempt, one every ~2.5s, because the
+  -- attempt ended after the shell existed - the shell outlived the attempt on the node that refused
+  -- it. The preflight is the same decision `ensure` makes, taken where nothing has been written yet.
+  local needs_workspace = workspaces.requires_write_tools(profile.allowed_tools)
+  if needs_workspace then
+    local source, source_refusal = workspaces.preflight_source(memory, ctx.session_id, ctx.user_id, ctx.node_id)
+    if not source then
+      return { error = workspaces.refusal_code(source_refusal), detail = source_refusal, not_started = true }
+    end
+  end
   local session_id = memory.start_session(ctx.node_id, "subagent", {
     user_id = ctx.user_id,
     node_id = ctx.node_id,
     title = tostring(args.title or prompt):gsub('%s+',' '):sub(1,100),
     parent_session_id = ctx.session_id,
-    workspace_required = workspaces.requires_write_tools(profile.allowed_tools),
+    workspace_required = needs_workspace,
   })
   local workspace
-  if workspaces.requires_write_tools(profile.allowed_tools) then
+  if needs_workspace then
     workspace, detail = workspaces.ensure(memory, session_id, ctx.session_id)
     if not workspace then
       pcall(memory.finish_session, session_id)
-      return { error = "workspace_allocation_failed", detail = detail, session_id = session_id,
-        workspace = memory.session_workspace(session_id) }
+      -- The refusal keeps its own code (and its sentence in `detail`) so a coordinator can act on
+      -- the reason instead of on "allocation failed": `workspace_source_dirty` and
+      -- `workspace_destination_source_missing` call for different next steps.
+      return { error = workspaces.refusal_code(detail), detail = detail, session_id = session_id,
+        not_started = true, workspace = memory.session_workspace(session_id) }
     end
   end
   local spec = {
@@ -580,6 +594,11 @@ function M.start(args, ctx)
   receipt.profile = profile.id
   dofile('lua/core/completions.lua').watch(receipt.subagent_id,ctx)
   return receipt
+end
+
+local function mark_unadmitted(result)
+  if type(result) == "table" and result.error and not result.subagent_id then result.not_started = true end
+  return result
 end
 
 -- The single control facade. `ctx` is server-built for every caller.
@@ -636,7 +655,7 @@ function M.control(args, ctx)
       runtime = json.decode(host.subagent("capacity", "{}")) }
   end
 
-  if action == "start" then return M.start(args, ctx) end
+  if action == "start" then return mark_unadmitted(M.start(args, ctx)) end
   if action == "profiles" then
     local profiles, errors = M.profiles()
     local listed = {}

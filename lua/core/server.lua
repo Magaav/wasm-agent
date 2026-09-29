@@ -858,7 +858,9 @@ function wa_session_fork(payload, session)
   if not id then return json.encode({error=why or "fork_failed"}) end
   local workspace, allocation_error = workspaces.ensure(memory, id, source_id)
   if not workspace then
-    return json.encode({error="workspace_allocation_failed",detail=allocation_error,
+    -- The refusal keeps its own code (its sentence stays in `detail`): "which reason" is what a
+    -- caller acts on, and `workspace_allocation_failed` said only that something went wrong.
+    return json.encode({error=workspaces.refusal_code(allocation_error),detail=allocation_error,
       session_id=id,fork_parent_id=source_id,fork_parent_seq=tonumber(request.before_seq),
       workspace=memory.session_workspace(id)})
   end
@@ -901,7 +903,7 @@ function wa_session_worktree(payload, session)
     if not source_id or source_id == "" then source_id = id end
     memory.require_session_workspace(id)
     local allocated, detail = workspaces.ensure(memory, id, source_id)
-    if not allocated then return json.encode({error="workspace_allocation_failed",detail=detail,
+    if not allocated then return json.encode({error=workspaces.refusal_code(detail),detail=detail,
       session_id=id,workspace=memory.session_workspace(id)}) end
     return json.encode({ok=true,session_id=id,workspace=allocated})
   end

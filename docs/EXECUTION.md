@@ -107,6 +107,20 @@ does not implicitly copy, stash, or discard uncommitted work. The caller may cle
 through `session_worktree{action:"recover"}`. A process interrupted during `git worktree add` is
 reconciled from Git's worktree registry; unresolved state is `unknown` and is not blindly retried.
 
+A node that did not create the source session — a placed child's destination — cannot use the path
+that session recorded: `C:/Users/.../wasm_the_first` is one machine's checkout and means nothing on
+another, and one path on two machines is two different repositories. There the source is the tree
+*that* node runs from (`runtime-worktree.txt`, else its working directory when that is a checkout),
+which is what a local child gets too. A path that names nothing on this node falls back to that
+checkout; a path that is here and is not a checkout is refused. The session records which tree was
+used (`source_origin`), what the incoming session named (`source_requested`) and why it was left
+alone (`source_fallback`), so a reader can see the decision rather than infer it. A node with no
+usable checkout of its own refuses with `workspace_destination_source_missing`, names what is
+missing, and records the child's workspace as `failed` — never `pending` with an empty source, which
+a retrying dispatcher reads as "not finished yet". A refusal names its own reason as the error code
+(`workspace_source_dirty`, `workspace_source_unavailable`, `workspace_destination_source_missing`),
+with the whole sentence in `detail`.
+
 A required but unbound/failed workspace is not equivalent to a legacy unbound session: file and
 shell writes return `session_workspace_unavailable` and never fall back to the node checkout. File
 writes outside the binding, explicit shell cwd escapes, and shell/client/remote/spell tools that

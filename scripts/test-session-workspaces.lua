@@ -63,10 +63,21 @@ local retried,retry_error=workspaces.ensure(memory,dirty,source)
 ok(retried~=nil,"cleaned source permits explicit retry: "..tostring(retry_error))
 local bad_source=memory.start_session("local","chat",{id="workspace-bad-source",user_id="owner",node_id="test-node"})
 memory.set_session_worktree(bad_source,source_path.."/missing-repository")
-local unavailable=memory.start_session("local","subagent",{id="workspace-unavailable",user_id="owner",node_id="test-node",parent_session_id=bad_source,workspace_required=true})
-local unavailable_ws,unavailable_error=workspaces.ensure(memory,unavailable,bad_source)
-ok(not unavailable_ws and unavailable_error:find("workspace_source_root_missing",1,true)~=nil,"unavailable source fails with an allocation-step error")
-ok(memory.session_workspace(unavailable).state=="failed" and tools.dispatch(memory,"write",{path="no-fallback.txt",content="no"},"master",{session_id=unavailable,user_id="owner",changes={files={}}}).error=="session_workspace_unavailable","unavailable required workspace remains fail-closed")
+-- A source path that names nothing on this machine is not a source: a path one machine's session
+-- recorded says nothing about another machine (that is what a placed child arrives with), so the
+-- child forks from this node's own checkout and the record says both what was asked for and why it
+-- was not used. `source_root` is deliberately not pinned to a path: which tree this node runs from is
+-- the machine's answer (`runtime-worktree.txt`, else its working directory).
+local relocated=memory.start_session("local","subagent",{id="workspace-unavailable",user_id="owner",node_id="test-node",parent_session_id=bad_source,workspace_required=true})
+local relocated_ws,relocated_error=workspaces.ensure(memory,relocated,bad_source)
+ok(relocated_ws and relocated_ws.start_state.source_requested==source_path.."/missing-repository"
+  and tostring(relocated_ws.start_state.source_fallback):find("workspace_source_path_missing",1,true)~=nil
+  and (relocated_ws.start_state.source_origin=="runtime-worktree.txt" or relocated_ws.start_state.source_origin=="working-directory")
+  and relocated_ws.start_state.base_commit~="",
+  "a source path that is gone falls back to this node's checkout and records why: "..tostring(relocated_error))
+ok(tools.dispatch(memory,"write",{path="relocated.txt",content="here"},"master",{session_id=relocated,user_id="owner",changes={files={}}}).ok
+  and host.read_file(source_path.."/relocated.txt")==nil,
+  "the fallback checkout is bound, and the absent path the source named is never written through")
 
 -- Cancelling/settling one child retains its own evidence and cannot detach the sibling.
 memory.finish_session(a)
