@@ -149,12 +149,23 @@ from the engine button in the topbar. Do not mix the two.
 | `<wa-window>` | A promoted panel in its own OS window (§3). | — | — |
 | `<wa-harness-status>` | §6's harness diagnostics. | — | `export` |
 | `<wa-tasks>` | Concurrent child tasks, run recovery and cancellation. | `.data`, `.message`, `showEvidence()` | `task-action` |
-| `<wa-orchestrator>` | External workspace with node priority controls, agent sidebar and stable tiled sessions. | `.data`, `.message`, `.configure(fleet)`, `.policy` | `orchestrator-action` |
-| `<wa-agent-session>` | Child conversation, original tool evidence, live preview and independent composer. | `.task`, `.showMessages(messages, render, earlier)` | `agent-action` |
+| `<wa-orchestrator>` | External workspace with node priority controls, agent sidebar and stable tiled sessions. | `.data`, `.message`, `.configure(fleet)`, `.policy`, `.panes`, `.windows` (promoted conversations), `.allPanes()`, `.promote(pane)`, `.unpin(key, pane)` | `orchestrator-action` |
+| `<wa-chat-shell>` | **The** chat surface: transcript region, composer (text area, send, attach/paste/drop intake), attachment chips, model readout and picker, notification sound. The main conversation and every child session host the same element, so a chat improvement lands in one place. | `.content`, `.host` (the host's own rows between transcript and composer), `.form`, `.input`, `.send`, `.attach`, `.file`, `.attachments` (the live list), `.attachmentsEl`, `.modelEl`, `modelChip`, `.busy`, `.enterLocked`, `.addFiles(files)`, `.renderAttachments()`, `.clearAttachments()`, `.composedText(text)`, `.autosize()`, `.notify()`, `.setModelPicker(facts, label)`; author-provided children take `data-slot` (`footer-left`, `footer-right`, `balloon`, or none for the transcript) | `chat-send` (`{text, busy}`), `chat-files` (`{files}`), `chat-attachments` (`{action, …}`) |
+| `<wa-agent-session>` | Child conversation, original tool evidence, live preview and independent composer. **Hosts the shared `<wa-chat-shell>`** rather than its own composer; its own header is the panel's two controls (close as an `x`, expand as a square that promotes it into its own `<wa-window>`), never the window's topbar. | `.task`, `.showMessages(messages, render, earlier)`, `.promoted`, `.clearDraft()`, `.input`, `.form`, `.transcript`, `.notice`, `.preview`, `.statusLine` | `agent-action` |
 | `<wa-jobs>` | Reviewed automation definitions, enabled state, queue/source/outcome evidence. Engine topic immediately after tools. | `.items` | `job-toggle` |
 
 Keyboard selection belongs to `<wa-menu>`, not to its caller: the highlight and the click target
 must be the same item, or Enter chooses something other than what the list shows.
+
+**One chat, two hosts.** `<wa-chat-shell>` is the chat surface, and the main conversation and every
+child session instantiate it rather than building a composer each. The shell owns the furniture and the
+gestures (transcript region, composer controls, attach/paste/drop intake, attachment chips, model strip,
+send button's busy state, the notification sound) and speaks to its host only through
+`chat-send`/`chat-files`/`chat-attachments`. The host owns what a send *means* — thread, transport,
+streaming — and how one ledger row becomes a bubble, because those are what actually differ between a
+window's own conversation and a delegated child. A child panel therefore differs from the main chat in
+one place only: its header, which is the panel's own two controls (close, expand into its own window)
+instead of the window's topbar (engine, shell, orchestrator window, collapse-to-avatar).
 
 The engine view's topics (nodes, spells, tools) are expandable cards rendered in
 `app.js`; each loads its data on first expand (`GET /nodes`, `/spells`, `/tools`).

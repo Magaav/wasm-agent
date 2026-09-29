@@ -87,8 +87,158 @@ class WaMenuStub extends El {
   activate() { return false; }
 }
 const MENU_IDS = new Set(["user-menu", "context-menu", "command-menu"]);
+
+// `wa-chat-shell` is the fourth element app.js talks to, and the paste/drop/attach intake this file
+// exercises now lives in it: the shell takes the files, reads them (§11's two kinds) and announces
+// what arrived, while app.js keeps the draft's bookkeeping. The stub models that contract - the parts
+// app.js reads through it, the intake on the textarea/the shell element, the attachment list and its
+// strip, the removal that announces itself before it splices, the composer's one send event, and the
+// busy flag - because a harness that cannot run the code it is testing proves nothing about it.
+class WaChatShellStub extends El {
+  constructor() {
+    super("wa-chat-shell", "chat");
+    this.content = byId("messages");
+    this.form = byId("composer");
+    this.input = byId("input");
+    this.send = byId("send");
+    this.attach = byId("attach");
+    this.file = byId("file");
+    this.attachmentsEl = byId("attachments");
+    this.modelEl = byId("composer-model");
+    this.busy = false;
+    this.enterLocked = false;
+    this.attachments = [];
+    this._epoch = 0;
+    this.input.addEventListener("paste", (event) => this._paste(event));
+    this.file.addEventListener("change", () => {
+      this._acceptFiles(this.file.files);
+      this.file.value = "";
+    });
+    this.form.addEventListener("submit", (event) => {
+      if (event && typeof event.preventDefault === "function") event.preventDefault();
+      this.fire("chat-send", { detail: { text: String(this.input.value || "").trim(), busy: this.busy } });
+    });
+    let depth = 0;
+    this.addEventListener("dragenter", (event) => {
+      if (!hasFiles(event)) return;
+      depth += 1;
+      this.classList.add("dropping");
+    });
+    this.addEventListener("dragover", (event) => {
+      if (!hasFiles(event)) return;
+      // Without preventDefault on dragover the browser refuses the drop entirely.
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+    });
+    this.addEventListener("dragleave", (event) => {
+      if (!hasFiles(event)) return;
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) this.classList.remove("dropping");
+    });
+    this.addEventListener("drop", (event) => {
+      if (!hasFiles(event)) return;
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      depth = 0;
+      this.classList.remove("dropping");
+      this._acceptFiles(event.dataTransfer.files);
+    });
+  }
+  autosize() {}
+  composedText(text) {
+    const files = this.attachments.filter((file) => file.kind !== "image");
+    if (files.length === 0) return text;
+    return files.map((file) => "[file: " + file.name + "]\n" + file.text).join("\n\n") + (text ? "\n\n" + text : "");
+  }
+  clearAttachments() {
+    this._epoch += 1;
+    this.attachments.length = 0;
+    this.renderAttachments();
+    this.fire("chat-attachments", { detail: { action: "cleared", attachments: this.attachments } });
+  }
+  async addFiles(files, stillCurrent) {
+    const epoch = this._epoch;
+    const current = () => epoch === this._epoch && (typeof stillCurrent !== "function" || stillCurrent());
+    let added = 0;
+    let refused = 0;
+    const stale = [];
+    for (const file of files || []) {
+      if (!current()) { stale.push(file.name); continue; }
+      if (String(file.type || "").toLowerCase() === "image/png") {
+        await new Promise((resolve) => {
+          const reader = new FileReaderStub();
+          reader.onload = () => {
+            if (current()) { this.attachments.push({ kind: "image", name: file.name, mime: file.type, data: String(reader.result || "") }); added += 1; }
+            else stale.push(file.name);
+            resolve();
+          };
+          reader.readAsDataURL(file);
+        });
+        continue;
+      }
+      if (String(file.type || "").startsWith("image/")) { refused += 1; continue; }
+      try {
+        const text = await file.text();
+        if (!current()) { stale.push(file.name); continue; }
+        this.attachments.push({ kind: "text", name: file.name, text: String(text).slice(0, 20000) });
+      } catch (error) {
+        this.attachments.push({ kind: "text", name: file.name, text: "" });
+      }
+      added += 1;
+    }
+    if (added > 0) this.fire("chat-attachments", { detail: { action: "added", added, attachments: this.attachments } });
+    this.renderAttachments();
+    if (this.attachments.length > 0) this._epoch += 1;
+    return { added, refused, stale };
+  }
+  renderAttachments() {
+    this.attachmentsEl.replaceChildren();
+    this.attachments.forEach((file, index) => {
+      const chip = new El("span");
+      const name = new El("b");
+      name.textContent = file.name;
+      const remove = new El("button");
+      remove.addEventListener("click", () => {
+        this.fire("chat-attachments", { detail: { action: "remove", index, attachments: this.attachments } });
+        this.attachments.splice(index, 1);
+        this.renderAttachments();
+      });
+      chip.append(name, remove);
+      this.attachmentsEl.append(chip);
+    });
+  }
+  _acceptFiles(list) {
+    const files = Array.prototype.slice.call(list || []);
+    if (files.length === 0) return;
+    this.fire("chat-files", { detail: { files } });
+  }
+  // A screenshot pasted from the clipboard arrives as a blob with no filename, so one is given: an
+  // unnamed chip would be unreadable, and the name is what the run shows the model.
+  _paste(event) {
+    const data = event.clipboardData;
+    if (!data) return;
+    const files = [];
+    for (const item of data.items || []) {
+      if (item.kind !== "file") continue;
+      const file = item.getAsFile();
+      if (file) files.push(file);
+    }
+    if (files.length === 0) return;   // ordinary text paste: let it through
+    if (typeof event.preventDefault === "function") event.preventDefault();
+    const stamped = files.map((file, index) => {
+      if (file.name && file.name !== "image.png") return file;
+      const extension = String(file.type || "").split("/")[1] || "png";
+      const suffix = files.length > 1 ? "-" + (index + 1) : "";
+      return new FileStub([file._data], "pasted" + suffix + "." + extension, { type: file.type });
+    });
+    this._acceptFiles(stamped);
+  }
+}
+const hasFiles = (event) => {
+  const types = event.dataTransfer && event.dataTransfer.types;
+  return types ? Array.prototype.includes.call(types, "Files") : false;
+};
 const byId = (id) => {
-  if (!registry.has(id)) registry.set(id, MENU_IDS.has(id) ? new WaMenuStub(id) : new El("div", id));
+  if (!registry.has(id)) registry.set(id, id === "chat" ? new WaChatShellStub() : (MENU_IDS.has(id) ? new WaMenuStub(id) : new El("div", id)));
   return registry.get(id);
 };
 
@@ -163,7 +313,7 @@ try {
 const attachments = vm.runInContext("attachments", sandbox);
 
 const input = byId("input");
-const panel = byId("panel");
+const shell = byId("chat");
 const fileInput = byId("file");
 
 const png = (name = "shot.png") =>
@@ -198,7 +348,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
   // ---- drop a file -------------------------------------------------------
   attachments.length = 0;
   const dropped = png("dropped.png");
-  await panel.fire("drop", {
+  await shell.fire("drop", {
     dataTransfer: { types: ["Files"], files: [dropped], dropEffect: "" },
     preventDefault() { this.defaulted = true; },
   });
@@ -208,7 +358,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
 
   // ---- dragover must preventDefault, or the browser cancels the drop -----
   let overPrevented = false;
-  await panel.fire("dragover", {
+  await shell.fire("dragover", {
     dataTransfer: { types: ["Files"], files: [], dropEffect: "" },
     preventDefault() { overPrevented = true; },
   });
@@ -216,7 +366,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
 
   // ---- dropping selected text must be ignored ----------------------------
   attachments.length = 0;
-  await panel.fire("drop", {
+  await shell.fire("drop", {
     dataTransfer: { types: ["text/plain"], files: [], dropEffect: "" },
     preventDefault() { this.defaulted = true; },
   });
@@ -224,19 +374,19 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
   check(attachments.length === 0, "dropping text/plain attaches nothing");
 
   // ---- the drop outline appears and clears -------------------------------
-  await panel.fire("dragenter", { dataTransfer: { types: ["Files"] }, preventDefault() {} });
-  check(panel.classList.contains("dropping"), "dragenter shows the drop outline");
-  await panel.fire("drop", {
+  await shell.fire("dragenter", { dataTransfer: { types: ["Files"] }, preventDefault() {} });
+  check(shell.classList.contains("dropping"), "dragenter shows the drop outline");
+  await shell.fire("drop", {
     dataTransfer: { types: ["Files"], files: [png()], dropEffect: "" },
     preventDefault() {},
   });
   await settle();
-  check(!panel.classList.contains("dropping"), "the outline clears after the drop");
+  check(!shell.classList.contains("dropping"), "the outline clears after the drop");
 
   // ---- an unsupported image type is refused, visibly ---------------------
   attachments.length = 0;
   const bmp = new FileStub([Buffer.from("BM")], "old.bmp", { type: "image/bmp" });
-  await panel.fire("drop", {
+  await shell.fire("drop", {
     dataTransfer: { types: ["Files"], files: [bmp], dropEffect: "" },
     preventDefault() {},
   });
@@ -254,7 +404,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
 
   // A refusal alongside a good file must still report the refusal.
   attachments.length = 0;
-  await panel.fire("drop", {
+  await shell.fire("drop", {
     dataTransfer: { types: ["Files"], files: [png("good.png"), bmp], dropEffect: "" },
     preventDefault() {},
   });

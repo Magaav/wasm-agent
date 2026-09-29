@@ -1417,6 +1417,415 @@ class WaTasks extends HTMLElement {
 }
 customElements.define('wa-tasks', WaTasks);
 
+// <wa-chat-shell> - the one chat surface, shared by the main conversation and every child pane.
+//
+// The main chat and a subagent's panel are the *same* chat furniture, not two of them: the message
+// list, the composer, the attachment strip, the model strip and the notification sound live here
+// once, so an improvement to any of them is one edit instead of two (DESIGN.md §1, §10).
+//
+// The shell owns the furniture and the gestures: the transcript region, the composer and its
+// controls, the attach/paste/drop intake, the attachment chips, the draft textarea's mechanics
+// (autosize, Enter sends), the send button's busy state, the model readout and picker, and the
+// chime. What it deliberately does *not* own is what a send means - thread, transport, streaming -
+// and how one ledger row becomes a bubble: those are the host's, and a host hears about the former
+// through CustomEvents only (`chat-send`, `chat-files`, `chat-attachments`), never by reaching into
+// this element's internals.
+//
+// A host may author its own children. They are distributed by `data-slot`:
+//   (none)        the transcript region - a jump control, an empty state
+//   footer-left   before the attach control, in authored order
+//   footer-right  before the model readout
+//   balloon       inside the composer, so an author-provided <wa-balloon> keeps its anchor and its
+//                 measured position (`.composer` is the positioning context)
+// The primary shell (`primary`) also takes the ids this app and its tests have always addressed
+// (`messages`, `composer`, `input`, `send`, `attach`, `file`, `attachments`, `composer-model`).
+// A second shell must not duplicate ids in one document, so it carries classes only.
+
+// §11's accepted image set: the types the provider gateway itself takes. Anything else that claims
+// to be an image is refused where it can be reported, rather than sent and rejected mid-run.
+const CHAT_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+function chatIsImage(file) { return CHAT_IMAGE_TYPES.includes(String((file && file.type) || "").toLowerCase()); }
+
+function chatHasFiles(event) {
+  const types = event.dataTransfer && event.dataTransfer.types;
+  return types ? Array.from(types).includes("Files") : false;
+}
+
+function chatReadAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("read_failed"));
+    reader.readAsDataURL(file);
+  });
+}
+
+const CHAT_SHELL_MARKUP = `
+  <div class="messages" data-part="content"></div>
+  <div class="chat-host" data-part="host"></div>
+  <form class="composer" data-part="composer">
+    <div class="attachments" data-part="attachments"></div>
+    <div class="composer-row">
+      <textarea rows="1" data-part="input" placeholder="Message wasm-agent…"></textarea>
+      <button class="send" type="submit" data-part="send" title="Send" aria-label="Send">
+        <svg class="icon-send" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 21 23 12 2 3v7l15 2-15 2z"/></svg>
+        <svg class="icon-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+      </button>
+    </div>
+    <div class="composer-footer">
+      <div class="footer-left" data-part="footer-left">
+        <button class="icon-btn" type="button" data-part="attach" title="Append a file" aria-label="Append a file">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.6 8.7 14.4a1.5 1.5 0 0 0 2.1 2.1l7.8-7.8a3.5 3.5 0 0 0-5-5l-8.1 8.1a5.5 5.5 0 0 0 7.8 7.8l6.7-6.7-1.4-1.4-6.7 6.7a3.5 3.5 0 0 1-5-5l8.1-8.1a1.5 1.5 0 0 1 2.1 2.1z"/></svg>
+        </button>
+        <input type="file" data-part="file" hidden multiple />
+      </div>
+      <div class="footer-right" data-part="footer-right">
+        <span class="composer-model" data-part="model" title="Model used for the latest request">connecting…</span>
+      </div>
+    </div>
+  </form>`;
+
+class WaChatShell extends HTMLElement {
+  connectedCallback() { this._ensure(); }
+
+  _ensure() {
+    if (this._built) return;
+    this._built = true;
+    // The host's authored children survive the template: they are moved back into the region that
+    // `data-slot` names.
+    const seed = Array.from(this.childNodes);
+    this.innerHTML = CHAT_SHELL_MARKUP;
+    const part = (name) => this.querySelector('[data-part="' + name + '"]');
+    this._content = part("content");
+    this._host = part("host");
+    this._form = part("composer");
+    this._attachmentsEl = part("attachments");
+    this._input = part("input");
+    this._send = part("send");
+    this._attach = part("attach");
+    this._file = part("file");
+    this._footerLeft = part("footer-left");
+    this._footerRight = part("footer-right");
+    this._modelEl = part("model");
+    this._attachments = [];
+    this._busy = false;
+    this._epoch = 0;
+    const left = [], right = [], balloons = [];
+    for (const node of seed) {
+      const slot = node.nodeType === 1 ? node.getAttribute("data-slot") : null;
+      if (slot === "footer-left") left.push(node);
+      else if (slot === "footer-right") right.push(node);
+      else if (slot === "balloon") balloons.push(node);
+      else this._content.append(node);
+    }
+    this._footerLeft.prepend(...left);
+    this._footerRight.prepend(...right);
+    this._form.append(...balloons);
+    if (this.hasAttribute("placeholder")) this._input.placeholder = this.getAttribute("placeholder");
+    if (this.hasAttribute("label")) this._input.setAttribute("aria-label", this.getAttribute("label"));
+    if (this.hasAttribute("primary")) this._legacyIds();
+    this._wire();
+  }
+
+  // The ids the app and its tests address. Deliberately not on every instance: two shells in one
+  // document would make `getElementById` a lie about which chat it returned.
+  _legacyIds() {
+    const ids = { content: "messages", composer: "composer", input: "input", send: "send",
+      attach: "attach", file: "file", attachments: "attachments", model: "composer-model" };
+    for (const [name, id] of Object.entries(ids)) {
+      const node = this.querySelector('[data-part="' + name + '"]');
+      if (node && !node.id) node.id = id;
+    }
+  }
+
+  _wire() {
+    // Enter sends, Shift+Enter is a newline. A host whose Enter means something else (the main chat's
+    // `/` command list, a run in flight keeping the draft) sets `enterLocked` or leaves `busy` set,
+    // and the shell leaves the key alone for the host's own listener.
+    this._input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
+      if (this._busy || this.enterLocked) return;
+      event.preventDefault();
+      this._form.requestSubmit();
+    });
+    this._input.addEventListener("input", () => this.autosize());
+    this._input.addEventListener("paste", (event) => this._paste(event));
+    this._attach.addEventListener("click", () => this._file.click());
+    this._file.addEventListener("change", () => { this._acceptFiles(this._file.files); this._file.value = ""; });
+    // The form's own submit is the one path a click, an Enter and a `requestSubmit()` all take, so
+    // the host is told once, wherever it came from.
+    this._form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      this.emit("chat-send", { text: this._input.value.trim(), busy: this._busy });
+    });
+    let depth = 0;
+    const clearDrop = () => { depth = 0; this.classList.remove("dropping"); };
+    this.addEventListener("dragenter", (event) => {
+      if (!chatHasFiles(event)) return;
+      event.preventDefault();
+      depth += 1;
+      this.classList.add("dropping");
+    });
+    this.addEventListener("dragover", (event) => {
+      if (!chatHasFiles(event)) return;
+      // Without preventDefault on dragover the browser refuses the drop entirely.
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+    });
+    this.addEventListener("dragleave", (event) => {
+      if (!chatHasFiles(event)) return;
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) this.classList.remove("dropping");
+    });
+    this.addEventListener("drop", (event) => {
+      if (!chatHasFiles(event)) return;
+      event.preventDefault();
+      clearDrop();
+      this._acceptFiles(event.dataTransfer.files);
+    });
+  }
+
+  emit(name, detail = {}) { this.dispatchEvent(new CustomEvent(name, { detail })); }
+
+  // ---- the transcript region and the host's own rows ----------------------
+  get content() { this._ensure(); return this._content; }
+  get host() { this._ensure(); return this._host; }
+
+  // ---- the composer ------------------------------------------------------
+  get form() { this._ensure(); return this._form; }
+  get input() { this._ensure(); return this._input; }
+  get send() { this._ensure(); return this._send; }
+  get attach() { this._ensure(); return this._attach; }
+  get file() { this._ensure(); return this._file; }
+  get footerLeft() { this._ensure(); return this._footerLeft; }
+  get footerRight() { this._ensure(); return this._footerRight; }
+  get modelEl() { this._ensure(); return this._modelEl; }
+
+  get busy() { this._ensure(); return this._busy; }
+  set busy(value) {
+    this._ensure();
+    this._busy = value === true;
+    // One button, two meanings: the glyph and the name say which send it is, so Stop is never a
+    // second control the reader has to find.
+    this._send.classList.toggle("busy", this._busy);
+    this._send.title = this._busy ? "Stop" : "Send";
+    this._send.setAttribute("aria-label", this._send.title);
+  }
+
+  autosize() {
+    this._ensure();
+    this._input.style.height = "auto";
+    this._input.style.height = Math.min(this._input.scrollHeight, 180) + "px";
+  }
+
+  // ---- attachments (§11) -------------------------------------------------
+  get attachments() { this._ensure(); return this._attachments; }
+  get attachmentsEl() { this._ensure(); return this._attachmentsEl; }
+
+  // One path for every way a file can arrive - the attach button, a paste, a drop - so the three
+  // cannot drift apart in what they accept or how they name it. `stillCurrent` is the host's own
+  // notion of "the draft this read belongs to still exists": the shell knows when its *list* was
+  // cleared, but only the host knows when its draft was sent (DESIGN.md §12's stacks). Returns what
+  // it took, what it refused, and what belonged to a draft that had already gone out.
+  async addFiles(files, stillCurrent) {
+    this._ensure();
+    const epoch = this._epoch;
+    const current = () => epoch === this._epoch && (typeof stillCurrent !== "function" || stillCurrent());
+    let added = 0, refused = 0;
+    const stale = [];
+    const before = this._attachments.length;
+    for (const file of files || []) {
+      if (!current()) { stale.push(file.name); continue; }
+      if (chatIsImage(file)) {
+        try {
+          const data = await chatReadAsDataURL(file);
+          if (!current()) { stale.push(file.name); continue; }
+          this._attachments.push({ kind: "image", name: file.name, mime: file.type, data });
+          added += 1;
+        } catch (error) { refused += 1; }
+        continue;
+      }
+      if (String(file.type || "").startsWith("image/")) { refused += 1; continue; }
+      try {
+        const text = await file.text();
+        if (!current()) { stale.push(file.name); continue; }
+        this._attachments.push({ kind: "text", name: file.name, text: text.slice(0, 20000) });
+      } catch (error) {
+        this._attachments.push({ kind: "text", name: file.name, text: "" });
+      }
+      added += 1;
+    }
+    if (added > 0) this.emit("chat-attachments", { action: "added", added, attachments: this._attachments });
+    this.renderAttachments();
+    if (this._attachments.length > before) this._epoch += 1;
+    return { added, refused, stale };
+  }
+
+  // The chips are the shell's, so a host cannot grow a second strip that agrees with this one only
+  // some of the time.
+  renderAttachments() {
+    this._ensure();
+    this._attachmentsEl.replaceChildren();
+    this._attachments.forEach((file, index) => {
+      const chip = document.createElement("span");
+      chip.className = "attachment" + (file.kind === "image" ? " attachment-image" : "");
+      const name = document.createElement("b");
+      if (file.kind === "image") {
+        const thumb = document.createElement("img");
+        thumb.className = "attachment-thumb";
+        thumb.src = file.data;
+        thumb.alt = file.name;
+        chip.append(thumb);
+      }
+      name.textContent = file.name;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "×";
+      remove.title = "Remove";
+      remove.addEventListener("click", () => {
+        // Announced *before* the change, so a host that keeps an undo stack can record the state to
+        // come back to. A chip removed by hand is the easiest way to lose a pasted screenshot.
+        this.emit("chat-attachments", { action: "remove", index, attachments: this._attachments });
+        this._attachments.splice(index, 1);
+        this.renderAttachments();
+      });
+      chip.append(name, remove);
+      this._attachmentsEl.append(chip);
+    });
+  }
+
+  clearAttachments() {
+    this._ensure();
+    // The epoch moves, so a file still being read for the draft that has just been sent cannot land
+    // in the composer afterwards.
+    this._epoch += 1;
+    this._attachments.length = 0;
+    this.renderAttachments();
+    this.emit("chat-attachments", { action: "cleared", attachments: this._attachments });
+  }
+
+  // Text attachments are inlined into the prompt (DESIGN.md §11). One implementation, so the main
+  // conversation and a delegated child message cannot disagree about what `[file: name]` means.
+  composedText(text) {
+    this._ensure();
+    const files = this._attachments.filter((file) => file.kind !== "image");
+    if (files.length === 0) return text;
+    const bodies = files.map((file) => "[file: " + file.name + "]\n" + file.text);
+    return bodies.join("\n\n") + (text ? "\n\n" + text : "");
+  }
+
+  _acceptFiles(list) {
+    const files = Array.from(list || []);
+    if (files.length === 0) return;
+    this.emit("chat-files", { files });
+  }
+
+  // A screenshot pasted from the clipboard arrives as a blob with no filename; an unnamed chip would
+  // be unreadable, and the name is what the run shows the model.
+  _paste(event) {
+    const data = event.clipboardData;
+    if (!data) return;
+    const files = [];
+    for (const item of data.items || []) {
+      if (item.kind !== "file") continue;
+      const file = item.getAsFile();
+      if (file) files.push(file);
+    }
+    if (files.length === 0) return;   // ordinary text paste: let it through
+    event.preventDefault();
+    const stamped = files.map((file, index) => {
+      if (file.name && file.name !== "image.png") return file;
+      const extension = String(file.type || "").split("/")[1] || "png";
+      const suffix = files.length > 1 ? "-" + (index + 1) : "";
+      return new File([file], "pasted" + suffix + "." + extension, { type: file.type });
+    });
+    this._acceptFiles(stamped);
+  }
+
+  // ---- the model strip ---------------------------------------------------
+  // A host with a chip of its own (the main chat authors the status chip and its §6 balloon) sets
+  // only the readout. A host without one asks for the picker and gives the facts it can show: the
+  // chip and balloon are then built here, so a child pane shows the same control without a second
+  // copy of this markup. Facts, not controls, because in this app the provider/model store is the
+  // node's and a child runs with the model it was delegated.
+  setModelPicker(facts, label) {
+    this._ensure();
+    if (!this._modelChip) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "chip";
+      chip.setAttribute("aria-haspopup", "true");
+      chip.setAttribute("aria-expanded", "false");
+      chip.title = "Model and settings this conversation runs with";
+      const dot = document.createElement("span");
+      dot.className = "chip-dot";
+      this._chipLabel = document.createElement("span");
+      this._chipLabel.className = "chip-label";
+      chip.append(dot, this._chipLabel);
+      this._footerLeft.prepend(chip);
+      const balloon = document.createElement("wa-balloon");
+      balloon.className = "popover";
+      const anchor = "wa-chat-model-" + (WaChatShell._instances += 1);
+      chip.id = anchor;
+      balloon.setAttribute("anchor", anchor);
+      this._form.append(balloon);
+      chip.addEventListener("click", () => {
+        balloon.toggle();
+        chip.setAttribute("aria-expanded", String(balloon.open));
+      });
+      balloon.addEventListener("close", () => chip.setAttribute("aria-expanded", "false"));
+      this._modelChip = chip;
+      this._modelBalloon = balloon;
+    }
+    this._chipLabel.textContent = label || "model unknown";
+    this._modelBalloon.replaceChildren(...(facts || []).map((fact) => {
+      const row = document.createElement("div");
+      row.className = "pop-row";
+      const head = document.createElement("span");
+      head.className = "pop-head";
+      head.textContent = fact.label;
+      const value = document.createElement("span");
+      value.className = "pop-value";
+      value.textContent = fact.value;
+      row.append(head, value);
+      return row;
+    }));
+    return this._modelChip;
+  }
+  get modelChip() { this._ensure(); return this._modelChip || null; }
+
+  // ---- the notification sound --------------------------------------------
+  // The one notification sound, built from the platform's own audio so the shell carries no asset and
+  // two surfaces cannot drift into two tones. Silent until a gesture has unlocked audio in this
+  // window, and it never throws: a chime that breaks a chat is worse than no chime.
+  notify() {
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContext) return false;
+      if (!this._audio) this._audio = new AudioContext();
+      const context = this._audio;
+      if (context.state === "suspended") context.resume().catch(() => {});
+      const now = context.currentTime;
+      for (const [offset, tone] of [[0, 660], [0.16, 880]]) {
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        oscillator.type = "sine";
+        oscillator.frequency.value = tone;
+        gain.gain.setValueAtTime(0.0001, now + offset);
+        gain.gain.exponentialRampToValueAtTime(0.09, now + offset + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + 0.14);
+        oscillator.connect(gain).connect(context.destination);
+        oscillator.start(now + offset);
+        oscillator.stop(now + offset + 0.16);
+      }
+      return true;
+    } catch (error) { return false; }
+  }
+}
+WaChatShell._instances = 0;
+customElements.define("wa-chat-shell", WaChatShell);
+
 function agentTaskTitle(task) {
   const text=String(task.title || task.prompt || '').replace(/\s+/g,' ').trim();
   return text ? (text.length>90 ? text.slice(0,87)+'…' : text) : 'Untitled task';
@@ -1426,40 +1835,102 @@ function agentElapsed(ms) {
   return Math.floor(seconds/60)+':'+String(seconds%60).padStart(2,'0');
 }
 // A session pane owns its draft and scroll position, never the execution.
+//
+// The chat inside it is the shared <wa-chat-shell>: the same transcript region, composer, attachment
+// strip, model strip, send button and notification sound as the main conversation. What this element
+// adds is what belongs to a *child*: its own header (close it, promote it), the earlier-messages
+// control, the live readout of the task it is following, and the two child-only actions (Steer,
+// Cancel task) - all of which talk to the app through the same `agent-action` event as before.
 class WaAgentSession extends HTMLElement {
   connectedCallback() {
-    if (this.form) { this.startClock(); return; }
-    this.innerHTML = '<header class="agent-pane-head"><strong></strong><span></span><button type="button" data-action="expand">Expand</button><button type="button" data-action="collapse">Collapse</button></header><button type="button" class="agent-earlier" hidden>Earlier messages</button><div class="agent-transcript"></div><div class="agent-notice" role="status"></div><form class="agent-composer"><textarea aria-label="Message this agent" rows="2" placeholder="Talk to this agent…"></textarea><button type="submit">Send</button><button type="button" data-action="steer">Steer</button><button type="button" data-action="cancel">Cancel task</button></form>';
-    this.form=this.querySelector('form');
-    this.input=this.querySelector('textarea');
-    this.transcript=this.querySelector('.agent-transcript');
-    this.notice=this.querySelector('.agent-notice');
-    this.preview=document.createElement('div');this.preview.className='agent-preview';
-    this.statusLine=document.createElement('div');this.statusLine.className='status chat-content-run-status';
-    this.statusLine.innerHTML='<span class="spinner"></span><span class="chat-content-run-label"></span><span class="chat-content-run-elapsed"></span>';
-    this.statusLine.setAttribute('role','status');
-    this.transcript.after(this.preview,this.statusLine);
+    if (this.shell) { this.startClock(); return; }
+    // The header holds the two controls that act on the *panel*: an x closes it, a squared button
+    // promotes this conversation into its own window. The topbar's controls - engine, shell,
+    // orchestrator window, collapse-to-avatar - belong to the window, not to a conversation inside it.
+    this.innerHTML = '<header class="agent-pane-head"><strong></strong><span></span>'
+      + '<button type="button" class="icon-btn" data-action="expand" title="Open this conversation in its own window" aria-label="Open in its own window">'
+      + '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v14H5z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg></button>'
+      + '<button type="button" class="icon-btn" data-action="collapse" title="Close this panel" aria-label="Close this panel">'
+      + '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>'
+      + '</header><button type="button" class="agent-earlier" hidden>Earlier messages</button>';
+    this.shell = document.createElement("wa-chat-shell");
+    this.shell.setAttribute("placeholder", "Talk to this agent…");
+    this.shell.setAttribute("label", "Message this agent");
+    this.append(this.shell);
+    this.form = this.shell.form;
+    this.input = this.shell.input;
+    this.transcript = this.shell.content;
+    // The transcript keeps the pane's own measurement hooks, so its rules still apply to it.
+    this.transcript.classList.add("agent-transcript");
+    // The pane's live readout, between the transcript and the composer.
+    this.preview = document.createElement("div"); this.preview.className = "agent-preview";
+    this.statusLine = document.createElement("div"); this.statusLine.className = "status chat-content-run-status";
+    this.statusLine.innerHTML = '<span class="spinner"></span><span class="chat-content-run-label"></span><span class="chat-content-run-elapsed"></span>';
+    this.statusLine.setAttribute("role", "status");
+    this.notice = document.createElement("div"); this.notice.className = "agent-notice"; this.notice.setAttribute("role", "status");
+    this.shell.host.append(this.preview, this.statusLine, this.notice);
+    // Steer and Cancel are the panel's own: they reach the child routes, and they sit where the main
+    // chat keeps its per-message actions.
+    const actions = document.createElement("div");
+    actions.className = "chat-actions";
+    for (const [action, label] of [["steer", "Steer"], ["cancel", "Cancel task"]]) {
+      const button = document.createElement("button");
+      button.type = "button"; button.className = "chat-action"; button.dataset.action = action; button.textContent = label;
+      actions.append(button);
+    }
+    this.shell.footerRight.prepend(actions);
     this.startClock();
-    this.rows=new Map();
-    this.form.addEventListener('submit',event=>{
-      event.preventDefault();
-      const text=this.input.value;
-      if(!text.trim()) return;
-      if(!this.submission || this.submission.text!==text) this.submission={text,key:crypto.randomUUID()};
-      this.emit('message',this.submission);
-    });
-    this.input.addEventListener('keydown',event=>{
-      if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); this.form.requestSubmit(); }
-    });
-    this.querySelector('.agent-earlier').addEventListener('click',()=>this.emit('earlier',{before_seq:this.firstSeq}));
-    this.querySelectorAll('[data-action]').forEach(button=>button.addEventListener('click',()=>{
-      if(button.dataset.action==='steer') {
-        const text=this.input.value;if(!text.trim())return;
-        if(!this.submission || this.submission.text!==text)this.submission={text,key:crypto.randomUUID()};
-        this.emit('steer',this.submission);
-      } else this.emit(button.dataset.action);
+    this.rows = new Map();
+    // `Send` and `Steer` are one draft leaving in two ways, so they are one path with a name: the
+    // shell hands over the text and the attachments, and this element decides what a child accepts.
+    this.shell.addEventListener("chat-send", () => this.sendDraft());
+    this.shell.addEventListener("chat-files", (event) => this.collectFiles(event.detail.files));
+    this.querySelector('.agent-earlier').addEventListener('click', () => this.emit('earlier', { before_seq: this.firstSeq }));
+    this.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', () => {
+      if (button.dataset.action === 'steer') this.sendDraft('steer');
+      else this.emit(button.dataset.action);
     }));
   }
+  // The same text reuses the same idempotency key, so a retry after a lost answer cannot arrive twice.
+  sendDraft(action = 'message') {
+    const text = this.input.value.trim();
+    if (!text && this.shell.attachments.length === 0) return;
+    const pictures = this.shell.attachments.filter(file => file.kind === 'image');
+    // A picture has no structured part on the child route; refusing it here is visible, dropping it
+    // silently is how a reader sends a screenshot nobody ever sees.
+    if (pictures.length) {
+      this.notice.textContent = pictures.length + ' picture(s) cannot ride into a delegated message yet; nothing was sent.';
+      return;
+    }
+    const body = this.shell.composedText(text);
+    if (!this.submission || this.submission.text !== body) this.submission = { text: body, key: crypto.randomUUID() };
+    this.emit(action, this.submission);
+  }
+  // Text attachments ride into the delegated message for the same reason they ride into a run (§11):
+  // they are inlined, and the shell is where that one rule lives.
+  async collectFiles(files) {
+    const receipt = await this.shell.addFiles(files);
+    const parts = [];
+    if (receipt.added > 0) parts.push(receipt.added + ' file(s) attached - press Enter to send');
+    if (receipt.refused > 0) parts.push(receipt.refused + ' image(s) skipped - only png, jpeg, webp and gif are accepted');
+    if (receipt.stale.length) parts.push('the draft was sent while ' + receipt.stale[0] + ' was reading - it was not attached');
+    if (parts.length) this.notice.textContent = parts.join('; ');
+  }
+  // What a host clears when it has accepted the draft. One call, because the draft is not just text.
+  clearDraft() {
+    this.input.value = '';
+    this.submission = null;
+    this.shell.autosize();
+    this.shell.clearAttachments();
+  }
+  // A pane that is already its own window has nothing to promote to.
+  set promoted(value) {
+    this._promoted = value === true;
+    this.connectedCallback();
+    const expand = this.querySelector('[data-action="expand"]');
+    if (expand) expand.hidden = this._promoted;
+  }
+  get promoted() { return this._promoted === true; }
   startClock() { if(!this.clock)this.clock=setInterval(()=>this.updateClock(),1000); }
   disconnectedCallback() { clearInterval(this.clock);this.clock=null; }
   updateClock() {
@@ -1473,9 +1944,21 @@ class WaAgentSession extends HTMLElement {
   }
   emit(action,detail={}) { this.dispatchEvent(new CustomEvent('agent-action',{bubbles:true,detail:{action,pane:this,...detail}})); }
   set task(value) {
-    this.connectedCallback(); this._task=value;
+    this.connectedCallback();
+    const previous=this._task;
+    this._task=value;
     this.querySelector('strong').textContent=agentTaskTitle(value);
     this.querySelector('.agent-pane-head span').textContent=[value.profile,value.model,value.reasoning || 'reasoning unknown',value.execution_node || 'local',value.state].filter(Boolean).join(' · ');
+    // The model strip is the shared one: the readout every shell has, plus a picker built from facts,
+    // because a child runs with the model it was delegated rather than one this panel can choose.
+    const model=[value.model || 'model unknown',value.reasoning || 'reasoning unknown'].join(' · ');
+    this.shell.modelEl.textContent=model;
+    this.shell.modelEl.title='Model this conversation runs with: '+model+' · '+(value.profile || 'profile unknown');
+    this.shell.setModelPicker([{label:'model',value:value.model || 'model unknown'},
+      {label:'reasoning',value:value.reasoning || 'reasoning unknown'},
+      {label:'profile',value:value.profile || 'profile unknown'},
+      {label:'node',value:value.execution_node || 'local'},
+      {label:'state',value:value.state || 'unknown'}], value.model || 'model unknown');
     this.querySelector('[data-action="cancel"]').disabled=!!value.settled || value.state==='unknown';
     this.querySelector('[data-action="steer"]').disabled=!!value.settled || value.state==='unknown';
     this.preview.textContent=[value.preview?.reasoning,value.preview?.commentary,value.preview?.text].filter(Boolean).join('\n');
@@ -1483,6 +1966,9 @@ class WaAgentSession extends HTMLElement {
     this.statusLine.querySelector('.chat-content-run-label').textContent=value.settled ? value.state : (value.preview?.status || value.state || 'unknown');
     this.statusLine.querySelector('.spinner').hidden=!!value.settled || value.state==='unknown';
     this.statusLine.classList.toggle('finished',!!value.settled);
+    // A child that has just finished is the one thing worth hearing while the reader is looking at
+    // something else. The shell owns the sound; this is the pane's only call into it.
+    if(previous && !previous.settled && value.settled)this.shell.notify();
     this.updateClock();
     if(this.renderMessages)this.showMessages([],this.renderMessages);
   }
@@ -1610,17 +2096,15 @@ class WaOrchestrator extends HTMLElement {
     if(this.sidebar)return;
     this.innerHTML='<header class="orchestrator-head"><strong>Orchestrator</strong><span class="orchestrator-status" role="status"></span><button type="button" data-action="refresh">Refresh</button><button type="button" data-action="close">Back to main chat</button></header><div class="orchestrator-body"><aside class="orchestrator-sidebar"><details class="placement"><summary>Node order and limits</summary><p>Fill in order. A limit of 0 keeps a device out of background execution.</p><label><input type="checkbox" class="placement-enabled"> Use ordered placement</label><div class="placement-nodes"></div><button type="button" data-action="save-placement">Save placement</button></details><nav aria-label="Agents"></nav></aside><main class="orchestrator-canvas"><p class="orchestrator-empty">Agents appear here when delegated from the main chat. Select a card to follow its conversation.</p></main></div>';
     this.sidebar=this.querySelector('nav'); this.canvas=this.querySelector('main'); this.panes=new Map(); this.drafts=new Map();
+    // Promoted conversations: each is a <wa-window> reading the same task as the pane it came from.
+    this.windows=new Map();
     this.querySelectorAll('[data-action]').forEach(button=>button.addEventListener('click',()=>{
       this.dispatchEvent(new CustomEvent('orchestrator-action',{bubbles:true,detail:{action:button.dataset.action}}));
     }));
     this.addEventListener('agent-action',event=>{
       const {action,pane}=event.detail;
-      if(action==='collapse')this.unpin(pane.dataset.key);
-      if(action==='expand') {
-        const expanded=!pane.classList.contains('agent-expanded');
-        this.panes.forEach(item=>item.classList.remove('agent-expanded'));
-        pane.classList.toggle('agent-expanded',expanded); this.canvas.classList.toggle('has-expanded',expanded);
-      }
+      if(action==='collapse')this.unpin(pane.dataset.key,pane);
+      if(action==='expand')this.promote(pane);
     });
   }
   set message(text) { this.connectedCallback(); this.querySelector('.orchestrator-status').textContent=text; }
@@ -1666,16 +2150,51 @@ class WaOrchestrator extends HTMLElement {
     this.dispatchEvent(new CustomEvent('orchestrator-action',{bubbles:true,detail:{action:'layout'}}));
     return pane;
   }
-  unpin(key) {
-    const pane=this.panes.get(key);
-    if(pane)this.drafts.set(pane.task.subagent_id,pane.input.value);
-    this.panes.get(key)?.remove(); this.panes.delete(key); this.layout();
+  // Every conversation this workspace is following: the tiled panes and the promoted windows. A host
+  // refreshes through here, so a promoted window is a reader of the same task rather than a snapshot
+  // of what it looked like when it was opened.
+  allPanes() { return [...this.panes.values(),...[...this.windows.values()].map(entry=>entry.pane)]; }
+  // Expand promotes a conversation into its own <wa-window>: a frame the reader can move, resize and
+  // close, with the same task and its own chat shell inside. The workspace pane stays where it was,
+  // and says what happened, because nothing moves out from under the pointer unannounced (DESIGN.md §3).
+  promote(pane) {
+    const key=pane.dataset.key;
+    const existing=this.windows.get(key);
+    if(existing) { existing.window.open=true; return existing.pane; }
+    const frame=document.createElement('wa-window');
+    frame.setAttribute('name','agent-'+key);
+    document.body.append(frame);
+    const promoted=document.createElement('wa-agent-session');
+    promoted.dataset.key=key;
+    promoted.promoted=true;
+    frame.append(promoted);
+    if(pane.task)promoted.task=pane.task;
+    frame.title=agentTaskTitle(pane.task);
+    frame.open=true;
+    frame.addEventListener('close',()=>{
+      this.windows.delete(key);
+      this.dispatchEvent(new CustomEvent('orchestrator-action',{bubbles:true,detail:{action:'layout'}}));
+    });
+    this.windows.set(key,{window:frame,pane:promoted});
+    if(pane.notice)pane.notice.textContent='Open in its own window.';
+    // The host refreshes panes when the layout changes, which is how the promoted frame gets the
+    // conversation without this component ever fetching anything itself.
+    this.dispatchEvent(new CustomEvent('orchestrator-action',{bubbles:true,detail:{action:'layout'}}));
+    return promoted;
+  }
+  unpin(key,pane) {
+    // Closing a promoted frame closes the frame - the workspace pane it came from is not the panel
+    // the reader clicked the x on.
+    const promoted=this.windows.get(key);
+    if(promoted && pane===promoted.pane) { promoted.window.close(); return; }
+    const tiled=this.panes.get(key);
+    if(tiled)this.drafts.set(tiled.task.subagent_id,tiled.input.value);
+    tiled?.remove(); this.panes.delete(key); this.layout();
     this.dispatchEvent(new CustomEvent('orchestrator-action',{bubbles:true,detail:{action:'layout'}}));
   }
   layout() {
     this.querySelector('.orchestrator-empty').hidden=this.panes.size>0;
     this.canvas.dataset.count=String(this.panes.size);
-    this.canvas.classList.toggle('has-expanded',[...this.panes.values()].some(p=>p.classList.contains('agent-expanded')));
   }
   configure(fleet) {
     if(this.configured)return;

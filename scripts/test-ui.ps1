@@ -781,9 +781,87 @@ $harness = @'
     'agent chat must group commentary, thinking, calls and visible results into shared chat components');
   showroom.data=agents.slice().reverse();
   check([...showroom.panes.values()][0]===panes[0] && panes[0].input.value==='keep my draft','refresh must preserve pane order and drafts');
+  // Expand promotes the conversation into its own <wa-window>: a frame the reader can move, resize
+  // and close, reading the same task, while the workspace pane stays where it was. It used to mean
+  // "focus this one tile", which a second reader of a running child makes unnecessary.
+  var expandDetail=null;
+  showroom.addEventListener('agent-action',event=>{if(event.detail.action==='expand')expandDetail=event.detail;});
   panes[0].querySelector('[data-action="expand"]').click();
-  check(showroom.canvas.classList.contains('has-expanded'),'expand must focus a single conversation');
+  var promotedFrame=document.querySelector('wa-window[name="agent-tile-0"]');
+  var promotedPane=promotedFrame?promotedFrame.querySelector('wa-agent-session'):null;
+  check(!!expandDetail && expandDetail.pane===panes[0],
+    'expand must still be announced as an agent-action, so a host can answer it');
+  check(!!promotedFrame && promotedFrame.open && !!promotedPane && promotedPane.task.subagent_id==='tile-0',
+    'expand must promote this conversation into its own wa-window, reading the same task');
+  check(showroom.canvas.contains(panes[0]),'promoting must leave the workspace pane where it was');
+  check(panes[0].notice.textContent.indexOf('own window')>=0,
+    'the pane must say it was promoted, saw: ' + panes[0].notice.textContent);
+  check(!!promotedPane && promotedPane.querySelector('[data-action="expand"]').hidden===true,
+    'a conversation that is already its own window must not offer to expand again');
+  check(showroom.windows.size===1 && showroom.allPanes().length===5,
+    'the promoted conversation must be followed as a pane, not frozen where it was opened');
   panes[0].querySelector('[data-action="expand"]').click();
+  check(showroom.windows.size===1,'expanding twice must focus the frame it already has, not open another');
+  promotedFrame.shadowRoot.querySelector('.close').click();
+  check(!promotedFrame.open && showroom.windows.size===0,
+    'closing the frame must close the promoted conversation, not the workspace pane it came from');
+  promotedFrame.remove();   // leave the document as this run found it
+
+  // THE SHARED CHAT SHELL. A child panel is a host of the same component the main conversation is, so
+  // one chat improvement - model strip, sound, file appending, send button, text area, transcript -
+  // lands in one place. These checks ask both surfaces for the same furniture and read the same
+  // template out of them; a hand-built second implementation fails them.
+  var mainShell=document.getElementById('chat');
+  var paneShell=panes[1].querySelector('wa-chat-shell');
+  var shellParts=function(shell){return Array.prototype.map.call(shell.querySelectorAll('[data-part]'),function(node){return node.dataset.part;}).join(',');};
+  check(!!mainShell && !!paneShell && shellParts(mainShell)==='content,host,composer,attachments,input,send,footer-left,attach,file,footer-right,model'
+    && shellParts(paneShell)===shellParts(mainShell),
+    'the main conversation and a child panel must both be the same shell component, saw main: '
+      + (mainShell?shellParts(mainShell):'none') + ' / child: ' + (paneShell?shellParts(paneShell):'none'));
+  var composerControls=function(shell){
+    return shell ? { textarea:shell.querySelectorAll('.composer-row textarea').length,
+      send:shell.querySelectorAll('.composer-row button[type="submit"]').length,
+      attach:shell.querySelectorAll('[data-part="attach"]').length,
+      file:shell.querySelectorAll('[data-part="file"]').length,
+      strip:shell.querySelectorAll('.attachments').length,
+      model:shell.querySelectorAll('.composer-model').length,
+      picker:shell.querySelectorAll('.footer-left .chip[aria-haspopup="true"]').length>=1,
+      sound:typeof shell.notify==='function' } : null;
+  };
+  var mainControls=composerControls(mainShell), paneControls=composerControls(paneShell);
+  check(JSON.stringify(mainControls)===JSON.stringify(paneControls) && paneControls.textarea===1 &&
+    paneControls.send===1 && paneControls.attach===1 && paneControls.model===1 && paneControls.picker &&
+    paneControls.sound, 'a child panel must render the same composer controls the main chat does - model pick, sound, file appending, send button, text area - saw main: ' + JSON.stringify(mainControls) + ' / child: ' + JSON.stringify(paneControls));
+  check(paneShell && paneShell.querySelector('.composer') && paneShell.querySelector('.composer').parentNode===paneShell,
+    'a child panel must not carry a composer of its own beside the shared one');
+  check(typeof paneShell.notify==='function' && typeof mainShell.notify==='function' &&
+    mainShell.notify===paneShell.notify,'the notification sound must be one implementation, not one per surface');
+  // Requirement: the main conversation keeps its own controls - the shared ones and the ones only it has.
+  check(['messages','composer','input','send','attach','file','attachments','composer-model'].every(function(id){
+    return !!document.getElementById(id) && mainShell.contains(document.getElementById(id)); }),
+    'the main conversation must keep the ids its own code and tests address, inside the shared shell');
+  check(!!document.getElementById('status-balloon') && mainShell.contains(document.getElementById('status-balloon'))
+    && mainShell.contains(document.getElementById('status-btn')) && mainShell.contains(document.getElementById('user-btn'))
+    && mainShell.contains(document.getElementById('mic')) && mainShell.contains(document.getElementById('steer')),
+    'and its own credits - account, status chip and balloon, mic and Steer - anchored to the shared shell');
+  check(['engine-btn','term-btn','orchestrator-btn','collapse'].every(function(id){return !!document.getElementById(id);}),
+    'the main window keeps the topbar controls a child panel must not have');
+  // Requirement: a child panel's header is its own two controls, with the icons asked for.
+  var header=panes[1].querySelector('.agent-pane-head');
+  var headerButtons=header?Array.prototype.slice.call(header.querySelectorAll('button')):[];
+  check(headerButtons.length===2 && headerButtons.some(function(b){return b.dataset.action==='collapse';})
+    && headerButtons.some(function(b){return b.dataset.action==='expand';}),
+    'the child header must hold exactly a close and an expand control, saw: '
+      + headerButtons.map(function(b){return b.dataset.action||b.textContent;}).join(','));
+  var closePath=panes[1].querySelector('[data-action="collapse"] svg path');
+  var expandPath=panes[1].querySelector('[data-action="expand"] svg path');
+  check(!!closePath && !!expandPath && closePath.getAttribute('d')==='M6 6l12 12M18 6L6 18'
+    && expandPath.getAttribute('d')==='M5 5h14v14H5z',
+    'close must be the x icon and expand a squared icon, saw: '
+      + (closePath?closePath.getAttribute('d'):'none') + ' / ' + (expandPath?expandPath.getAttribute('d'):'none'));
+  check(!panes[1].querySelector('#engine-btn, #term-btn, #orchestrator-btn, #collapse, .topbar, .topbar-btn'),
+    'a child panel must not show the window controls (engine, shell, orchestrator window, collapse avatar)');
+
   var messageDetail;
   showroom.addEventListener('agent-action',event=>{if(event.detail.action==='message')messageDetail=event.detail;});
   panes[0].form.requestSubmit();
@@ -2246,6 +2324,19 @@ $harness = @'
   check(!!incompleteCommentary && incompleteCommentary.querySelector('.commentary-body').textContent==='Partial commentary',
     'interrupted streamed commentary remains visible and marked incomplete');
   document.title = "stage: end";
+  // The main conversation still *sends*, and it sends through the shared shell. The run itself is
+  // covered above (a picture's own body, Stop, steering); what is proven here is that the shell is
+  // the surface the app's send path is reached through - the user turn lands in the transcript the
+  // shell renders and the field is cleared, which happens only inside send().
+  window.__setBusy(false);
+  var mainBox=document.getElementById('input');
+  var userTurnsBefore=document.querySelectorAll('wa-message.user').length;
+  mainBox.value='VERB-FROM-THE-SHARED-SHELL';
+  mainBox.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+  for (var sendTick=0; sendTick<40 && document.getElementById('messages').textContent.indexOf('VERB-FROM-THE-SHARED-SHELL')<0; sendTick++) await tick();
+  check(mainBox.value==='' && document.getElementById('messages').textContent.indexOf('VERB-FROM-THE-SHARED-SHELL')>=0 &&
+    document.querySelectorAll('wa-message.user').length===userTurnsBefore+1,
+    'Enter in the main composer must still send through the shared shell, saw value: ' + mainBox.value);
 } catch (error) {
     // A throw must still produce a log: a reporter that swallows its own failure is worse
     // than none, and "the harness did not run" is a symptom with no cause.
@@ -2273,7 +2364,11 @@ $fixtures = Get-Content -Raw (Join-Path $PSScriptRoot "../ui/test-fixtures.js")
 Set-Content -Path (Join-Path $tmp "fixtures.js") -Value $fixtures -NoNewline
 $html = Get-Content -Raw $index
 # Fixtures load first: app.js reads them as it starts.
-$html = $html.Replace('<script src="app.js"></script>', '<script src="fixtures.js"></script>' + "`n" + '<script src="app.js"></script>')
+# This harness installs its own `session` fixture *after* boot, deliberately: its early checks are
+# about a page whose transcript has not been repainted yet. The fixtures file therefore carries a
+# default transcript for the observed page (so a screenshot of ui/ shows a chat and not a retry
+# banner) and this flag, set before that file loads, keeps it out of this harness's way.
+$html = $html.Replace('<script src="app.js"></script>', '<script>window.__waNoDefaultSession = true;</script>' + "`n" + '<script src="fixtures.js"></script>' + "`n" + '<script src="app.js"></script>')
 Set-Content -Path $index -Value $html -NoNewline
 
 Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $harness + "</body>")) -NoNewline

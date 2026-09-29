@@ -53,7 +53,7 @@ class El {
 }
 const reg = new Map();
 const byId = (id) => {
-  if (!reg.has(id)) reg.set(id, MENU_IDS.has(id) ? new WaMenuStub(id) : new El("div", id));
+  if (!reg.has(id)) reg.set(id, id === "chat" ? new WaChatShellStub() : (MENU_IDS.has(id) ? new WaMenuStub(id) : new El("div", id)));
   return reg.get(id);
 };
 
@@ -84,6 +84,112 @@ class WaMenuStub extends El {
   openAt() { this.open = true; }
   move() {}
   activate() { return false; }
+}
+
+// wa-chat-shell is the third element app.js talks to, and the hypotheses below are about what it
+// does with the chat furniture that now lives there: app.js reaches the parts *through* the shell
+// instead of looking them up by id, sends by listening for `chat-send`, and takes files from
+// `chat-files`. So the stub models that contract - the parts, the attachment list and its strip,
+// §11's read policy (including the host's "this draft has already gone out" rule), the removal that
+// announces itself before it changes the list, and the busy flag. A bare div, which is what every id
+// used to get, made `messages` undefined and the whole file fail to load - which reads as an app bug
+// and was not one.
+class WaChatShellStub extends El {
+  constructor() {
+    super("wa-chat-shell", "chat");
+    this.content = byId("messages");
+    this.form = byId("composer");
+    this.input = byId("input");
+    this.send = byId("send");
+    this.attach = byId("attach");
+    this.file = byId("file");
+    this.attachmentsEl = byId("attachments");
+    this.modelEl = byId("composer-model");
+    this.busy = false;
+    this.enterLocked = false;
+    this.attachments = [];
+    this._epoch = 0;
+    // The real component owns the intake: the attach control opens the picker, a change raises
+    // `chat-files` with the raw files, and the *host* reads them through addFiles - which is how the
+    // host's own bookkeeping (the draft's undo stack, the status line's words) runs around the read.
+    this.file.addEventListener("change", () => { this._acceptFiles(this.file.files); });
+    // And the shell owns the form: a click on Send, an Enter in the field and requestSubmit() all
+    // arrive as one `chat-send`, so the app has one send path whatever the reader did.
+    this.form.addEventListener("submit", (event) => {
+      if (event && typeof event.preventDefault === "function") event.preventDefault();
+      this.fire("chat-send", { detail: { text: String(this.input.value || "").trim(), busy: this.busy } });
+    });
+  }
+  _acceptFiles(list) {
+    const files = Array.prototype.slice.call(list || []);
+    if (files.length === 0) return;
+    this.fire("chat-files", { detail: { files } });
+  }
+  autosize() {}
+  composedText(text) {
+    const files = this.attachments.filter((file) => file.kind !== "image");
+    if (files.length === 0) return text;
+    return files.map((file) => "[file: " + file.name + "]\n" + file.text).join("\n\n") + (text ? "\n\n" + text : "");
+  }
+  clearAttachments() {
+    this._epoch += 1;
+    this.attachments.length = 0;
+    this.renderAttachments();
+    this.fire("chat-attachments", { detail: { action: "cleared", attachments: this.attachments } });
+  }
+  async addFiles(files, stillCurrent) {
+    const epoch = this._epoch;
+    const current = () => epoch === this._epoch && (typeof stillCurrent !== "function" || stillCurrent());
+    let added = 0;
+    let refused = 0;
+    const stale = [];
+    for (const file of files || []) {
+      if (!current()) { stale.push(file.name); continue; }
+      if (String(file.type || "").toLowerCase() === "image/png") {
+        await new Promise((resolve) => {
+          const reader = new FileReaderStub();
+          reader.onload = () => {
+            if (current()) { this.attachments.push({ kind: "image", name: file.name, mime: file.type, data: String(reader.result || "") }); added += 1; }
+            else stale.push(file.name);
+            resolve();
+          };
+          reader.readAsDataURL(file);
+        });
+        continue;
+      }
+      if (String(file.type || "").startsWith("image/")) { refused += 1; continue; }
+      try {
+        const text = await file.text();
+        if (!current()) { stale.push(file.name); continue; }
+        this.attachments.push({ kind: "text", name: file.name, text: String(text).slice(0, 20000) });
+      } catch (error) {
+        this.attachments.push({ kind: "text", name: file.name, text: "" });
+      }
+      added += 1;
+    }
+    if (added > 0) this.fire("chat-attachments", { detail: { action: "added", added, attachments: this.attachments } });
+    this.renderAttachments();
+    if (this.attachments.length > 0) this._epoch += 1;
+    return { added, refused, stale };
+  }
+  // The chips the harness reads, built the way the component builds them: the remove button tells the
+  // host *before* it splices, because that is how the draft's undo records the state to come back to.
+  renderAttachments() {
+    this.attachmentsEl.replaceChildren();
+    this.attachments.forEach((file, index) => {
+      const chip = new El("span");
+      const name = new El("b");
+      name.textContent = file.name;
+      const remove = new El("button");
+      remove.addEventListener("click", () => {
+        this.fire("chat-attachments", { detail: { action: "remove", index, attachments: this.attachments } });
+        this.attachments.splice(index, 1);
+        this.renderAttachments();
+      });
+      chip.append(name, remove);
+      this.attachmentsEl.append(chip);
+    });
+  }
 }
 const MENU_IDS = new Set(["user-menu", "context-menu", "command-menu"]);
 const documentStub = {
@@ -168,6 +274,11 @@ const until = async (predicate, label, ms = 2000) => {
   chipEl.append(documentStub.createElement("b"), documentStub.createElement("button"));
   stub(chipEl.children.length === 2 && chipEl.children[1].tagName === "BUTTON", "createElement + append model a chip");
   stub(typeof byId("attach").addEventListener === "function", "the stub registry returns elements that accept listeners");
+  // app.js must be able to reach the chat through the shared shell: without these the file does not
+  // load at all, and every hypothesis below would be a report about this harness.
+  stub(byId("chat").content === byId("messages") && byId("chat").input === byId("input") &&
+    byId("chat").form === byId("composer") && Array.isArray(byId("chat").attachments),
+    "the chat shell stub exposes the parts, the list and the composer app.js reads");
 
   // HYPOTHESIS 1: a send clears the composer in the DOM, not only in the array.
   live().length = 0; input.value = ""; resetHistory();

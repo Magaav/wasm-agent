@@ -1,19 +1,22 @@
 // wasm-agent web UI. Components live in components.js (see DESIGN.md).
-const messages = document.getElementById("messages");
+// The conversation - transcript region, composer, attachments, model strip - is the shared
+// <wa-chat-shell>, the same component a child pane hosts, so a change to the chat is one change.
+const chatShell = document.getElementById("chat");
+const messages = chatShell.content;
 const jump = document.getElementById("jump");
 const meta = document.getElementById("meta");
-const form = document.getElementById("composer");
-const input = document.getElementById("input");
+const form = chatShell.form;
+const input = chatShell.input;
 // The draft's undo/redo are keyboard-only since the diff topic took the only toggle in the
 // transcript: the two footer buttons acted on the *draft* while looking like they acted on
 // the conversation, and the transcript is where the reader looks for "undo the last thing".
 // Ctrl+Z / Ctrl+Shift+Z still work, and they are the controls a text box is expected to have.
 const panel = document.getElementById("panel");
-const sendButton = document.getElementById("send");
+const sendButton = chatShell.send;
 const statusBtn = document.getElementById("status-btn");
 const chipModel = document.getElementById("chip-model");
 const chipUsage = document.getElementById("chip-usage");
-const composerModel = document.getElementById("composer-model");
+const composerModel = chatShell.modelEl;
 const balloon = document.getElementById("status-balloon");
 // Built here rather than in the markup: it lives in the account balloon now, and that balloon is
 // drawn from JS. The id is stable, so everything that reads the selection keeps working.
@@ -30,9 +33,8 @@ const limitsBox = document.getElementById("limits-box");
 const usageBox = document.getElementById("usage-box");
 const popFoot = document.getElementById("pop-foot");
 const micButton = document.getElementById("mic");
-const attachButton = document.getElementById("attach");
-const fileInput = document.getElementById("file");
-const attachmentsEl = document.getElementById("attachments");
+const attachButton = chatShell.attach;
+const fileInput = chatShell.file;
 const userBtn = document.getElementById("user-btn");
 const userAvatar = document.getElementById("user-avatar");
 const userMenu = document.getElementById("user-menu");
@@ -95,7 +97,10 @@ let streamBody = null;
 let streamText = "";
 let phasePendingText = new Map();
 let controller = null;
-let attachments = [];
+// The attachment list and its strip are the shell's; these two names stay because the draft's undo
+// stack and the harness's probe address them.
+const attachments = chatShell.attachments;
+function renderAttachments() { chatShell.renderAttachments(); }
 let settings = { provider: "", model: "", providers: [], usage: {}, stats: {}, configured: false, base_url: "" };
 let lastUsedModel = "";
 let session = localStorage.getItem("wa-session") || "";
@@ -1669,6 +1674,8 @@ function setBusy(value) {
   sendButton.classList.toggle("busy", value);
   sendButton.title = value ? "Stop" : "Send";
   sendButton.setAttribute("aria-label", sendButton.title);
+  // The shell owns the button; telling it keeps Enter and the send path in step with the run.
+  chatShell.busy = value;
   if (value) startLiveness(); else stopLiveness();
 }
 
@@ -1772,11 +1779,9 @@ function identifySubmittedRun(health) {
   if (candidates.length) activeRunId = Number(candidates[candidates.length - 1].run_id);
 }
 
+// The inlining rule for text attachments is the shell's (§11), shared with the child panes.
 function composedText(text) {
-  const files = attachments.filter((file) => file.kind !== "image");
-  if (files.length === 0) return text;
-  const bodies = files.map((file) => `[file: ${file.name}]\n${file.text}`);
-  return bodies.join("\n\n") + (text ? "\n\n" + text : "");
+  return chatShell.composedText(text);
 }
 
 // Images go out as a JSON body: {text, images:[{name, mime, data}]}.
@@ -1888,8 +1893,7 @@ async function send(text, options = {}) {
   // Cleanup belongs here, after the user bubble and request have captured the attachments.
   // Clearing them in the form handler runs before send() starts, leaving nothing to display or send.
   if (options.resumeSeq === undefined) {
-    attachments.length = 0;
-    renderAttachments();
+    chatShell.clearAttachments();
     draftNow = snapshotDraft();
   }
   setStatus("wasm-agent is thinking…");
@@ -2261,35 +2265,8 @@ async function post(path, body) {
 function setProvider(id) { return post("provider", id); }
 function setModel(name) { return post("model", name); }
 
-function renderAttachments() {
-  attachmentsEl.replaceChildren();
-  attachments.forEach((file, index) => {
-    const chip = document.createElement("span");
-    chip.className = "attachment" + (file.kind === "image" ? " attachment-image" : "");
-    if (file.kind === "image") {
-      const thumb = document.createElement("img");
-      thumb.className = "attachment-thumb";
-      thumb.src = file.data;
-      thumb.alt = file.name;
-      chip.append(thumb);
-    }
-    const name = document.createElement("b");
-    name.textContent = file.name;
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.textContent = "×";
-    remove.title = "Remove";
-    remove.addEventListener("click", () => {
-      // A removal by hand is worth undoing: it is the easiest way to lose a
-      // pasted screenshot, and the chip is small enough to hit by accident.
-      pushDraft();
-      attachments.splice(index, 1);
-      renderAttachments();
-    });
-    chip.append(name, remove);
-    attachmentsEl.append(chip);
-  });
-}
+// The chips are the shell's now (it owns the list, the strip and the §11 read policy), so the main chat
+// and a child pane cannot disagree about what an attachment looks like.
 
 // ---- composer undo/redo --------------------------------------------------
 // What this undoes is the *draft*: the text you have typed and the files you
@@ -2452,13 +2429,14 @@ async function steerActiveRun() {
 }
 document.getElementById('steer').addEventListener('click',steerActiveRun);
 
-form.addEventListener("submit", (event) => {
-  event.preventDefault();
-  if (busy) {
+// The shell owns the form: a click on Send, an Enter in the field and `requestSubmit()` all arrive
+// here as one event, so the composer has one send path whatever the reader did.
+chatShell.addEventListener("chat-send", (event) => {
+  const text = String(event.detail.text || "");
+  if (event.detail.busy) {
     cancelActiveRun();
     return;
   }
-  const text = input.value.trim();
   if (!text && attachments.length === 0) return;
   commandMenu.close();
   input.value = "";
@@ -2501,6 +2479,9 @@ input.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key === "Enter" && !event.shiftKey) {
+    // The shell sent it already: a plain Enter in a healthy composer is the shell's gesture, and it
+    // says so by consuming the event. This branch is what a run in flight does with that key.
+    if (event.defaultPrevented) return;
     event.preventDefault();
     if (busy) {
       // Typing ahead is not a stop gesture. The red button remains the explicit stop control; Enter
@@ -2512,16 +2493,16 @@ input.addEventListener("keydown", (event) => {
     form.requestSubmit();
   }
 });
+// The textarea's own mechanics (autosize on input, Enter sends) belong to the shell; what stays here is
+// the draft's undo history, which groups a burst of typing into one step.
 function autosize() {
-  input.style.height = "auto";
-  input.style.height = Math.min(input.scrollHeight, 180) + "px";
+  chatShell.autosize();
 }
 // Group typing into one undo step: without this, every keystroke is its own
 // entry and Ctrl+Z walks back one character at a time, which is not what the
 // gesture means. A pause, or any non-typing change, starts a new step.
 let typingTimer = null;
 input.addEventListener("input", () => {
-  autosize();
   if (typingTimer === null) pushDraft();     // first keystroke of a burst
   clearTimeout(typingTimer);
   typingTimer = setTimeout(() => { typingTimer = null; }, 600);
@@ -2535,6 +2516,10 @@ input.addEventListener("input", () => {
 // owns keyboard selection too, so what a click would choose and what Enter chooses are the same
 // item by construction.
 const commandMenu = document.getElementById("command-menu");
+// While the list is up it owns Enter: the highlight and the item a click would choose are the same
+// thing by construction, so the shell must not send the half-typed command from under it.
+commandMenu.addEventListener("open", () => { chatShell.enterLocked = true; });
+commandMenu.addEventListener("close", () => { chatShell.enterLocked = false; });
 
 // Only commands that can keep their promise. `/new` starts a thread; `/update` asks the node to
 // install what is already built in its own tree - which the node cannot do to itself, so the honest
@@ -2828,170 +2813,44 @@ function setupVoice() {
 }
 
 // ---- file append ---------------------------------------------------------
-// Two kinds of attachment ride through here. Text files keep the original
-// behaviour: read as UTF-8, inlined into the prompt. Images are sent as
-// structured parts so the model can actually see them, and are handled by the
-// server (stored content-addressed, referenced from the run).
-const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
-
-function isImage(file) {
-  return IMAGE_TYPES.includes((file.type || "").toLowerCase());
-}
-
-function readAsDataURL(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ""));
-    reader.onerror = () => reject(reader.error || new Error("read_failed"));
-    reader.readAsDataURL(file);
-  });
-}
-
-// One path for every way a file can arrive - the attach button, a paste, a drop
-// - so the three cannot drift apart in what they accept or how they name it.
-// Returns what it took and what it refused, so a caller can report accurately
-// instead of announcing success over a rejection.
-// The draft moved on while this file was being read. Say so: a file the user attached
-// that quietly does not appear is worse than one that explains why it did not.
-function discard(file, before) {
-  setStatus(`the draft was sent while ${file.name} was reading - it was not attached`);
-  // Files earlier in the same batch may already have been attached, so the state to
-  // undo back to is the one from before the batch - but only if anything changed,
-  // or the stack collects an entry that does nothing.
-  if (!sameDraft(before, snapshotDraft())) {
-    draftUndo.push(before);
-    draftNow = snapshotDraft();
-    syncUndoButtons();
-  }
-  renderAttachments();
-  return { added: 0, refused: 0 };
-}
+// The intake itself - §11's two kinds, the accepted image types, reading a file and building its chip
+// - is the shared shell's, because a child pane appends files the same way. What stays here is what
+// only the main chat knows: the draft's undo step and the words the status line uses.
 
 async function addFiles(files) {
-  let added = 0;
-  let refused = 0;
-  // One snapshot for the whole batch: undoing a three-file drop one file at a
-  // time would make Ctrl+Z feel broken. Captured before the first await, so a
-  // slow read still leaves the pre-drop state on the stack.
+  // One snapshot for the whole batch: undoing a three-file drop one file at a time would make Ctrl+Z
+  // feel broken. Captured before the first await, so a slow read still leaves the pre-drop state.
   const before = snapshotDraft();
   const generation = draftGeneration;
-  for (const file of files) {
-    if (isImage(file)) {
-      try {
-        const dataUrl = await readAsDataURL(file);
-        if (generation !== draftGeneration) return discard(file, before);
-        attachments.push({ kind: "image", name: file.name, mime: file.type, data: dataUrl });
-        added += 1;
-      } catch (error) {
-        // A picture we could not read must not vanish silently.
-        setStatus(`could not read ${file.name}`);
-      }
-      continue;
-    }
-    if ((file.type || "").startsWith("image/")) {
-      // An image type we do not accept (bmp, tiff, svg). Sending it would fail
-      // at the provider; refusing it here says why.
-      refused += 1;
-      continue;
-    }
-    try {
-      const text = await file.text();
-      if (generation !== draftGeneration) return discard(file, before);
-      attachments.push({ kind: "text", name: file.name, text: text.slice(0, 20000) });
-    } catch (error) {
-      attachments.push({ kind: "text", name: file.name, text: "" });
-    }
-    added += 1;
+  // The app's own rule for "this read belongs to a draft that no longer exists", handed to the shell
+  // so a file cannot land in the composer after the prompt it belonged to has gone out.
+  const receipt = await chatShell.addFiles(files, () => generation === draftGeneration);
+  if (receipt.refused > 0) {
+    setStatus(`${receipt.refused} image(s) skipped - only png, jpeg, webp and gif are accepted`);
+  } else if (receipt.added > 0) {
+    setStatus(`${receipt.added} file(s) attached - press Enter to send`);
   }
-  if (refused > 0) {
-    setStatus(`${refused} image(s) skipped - only png, jpeg, webp and gif are accepted`);
-  } else if (added > 0) {
-    setStatus(`${added} file(s) attached - press Enter to send`);
+  // The draft moved on while a file was in flight. A file the reader attached that quietly does not
+  // appear is worse than one that explains why it did not.
+  if (receipt.stale.length > 0) {
+    setStatus(`the draft was sent while ${receipt.stale[0]} was reading - it was not attached`);
   }
-  // Only record a step if the batch actually changed something: a refused-only
-  // drop must not add an undo entry that appears to do nothing.
-  if (added > 0 && !sameDraft(before, snapshotDraft())) {
+  // Only record a step if the batch actually changed something: a refused-only drop must not add an
+  // undo entry that appears to do nothing.
+  if (receipt.added > 0 && !sameDraft(before, snapshotDraft())) {
     draftUndo.push(before);
     if (draftUndo.length > DRAFT_LIMIT) draftUndo.shift();
     draftRedo = [];
     draftNow = snapshotDraft();
   }
-  renderAttachments();
   syncUndoButtons();
-  return { added, refused };
+  return receipt;
 }
 
-attachButton.addEventListener("click", () => fileInput.click());
-fileInput.addEventListener("change", async () => {
-  await addFiles(fileInput.files);
-  fileInput.value = "";
-});
-
-// ---- paste (Ctrl+V) ------------------------------------------------------
-// A screenshot pasted from the clipboard arrives as a blob with no filename, so
-// give it one: an unnamed chip would be unreadable, and the name is what the
-// run shows the model.
-input.addEventListener("paste", async (event) => {
-  const data = event.clipboardData;
-  if (!data) return;
-  const files = [];
-  for (const item of data.items || []) {
-    if (item.kind !== "file") continue;
-    const file = item.getAsFile();
-    if (!file) continue;
-    files.push(file);
-  }
-  if (files.length === 0) return;   // ordinary text paste: let it through
-  event.preventDefault();
-  const stamped = files.map((file, index) => {
-    if (file.name && file.name !== "image.png") return file;
-    const extension = (file.type || "").split("/")[1] || "png";
-    const suffix = files.length > 1 ? `-${index + 1}` : "";
-    return new File([file], `pasted${suffix}.${extension}`, { type: file.type });
-  });
-  await addFiles(stamped);
-});
-
-// ---- drag and drop -------------------------------------------------------
-// The whole panel is a target, not just the 45px textarea: dropping onto a
-// window that looks like it accepts files and having nothing happen is worse
-// than having no drop target at all.
-let dragDepth = 0;
-
-function hasFiles(event) {
-  const types = event.dataTransfer?.types;
-  return types ? Array.from(types).includes("Files") : false;
-}
-
-panel.addEventListener("dragenter", (event) => {
-  if (!hasFiles(event)) return;
-  event.preventDefault();
-  dragDepth += 1;
-  panel.classList.add("dropping");
-});
-
-panel.addEventListener("dragover", (event) => {
-  if (!hasFiles(event)) return;
-  // Without preventDefault on dragover the browser refuses the drop entirely.
-  event.preventDefault();
-  event.dataTransfer.dropEffect = "copy";
-});
-
-panel.addEventListener("dragleave", (event) => {
-  if (!hasFiles(event)) return;
-  dragDepth = Math.max(0, dragDepth - 1);
-  if (dragDepth === 0) panel.classList.remove("dropping");
-});
-
-panel.addEventListener("drop", async (event) => {
-  if (!hasFiles(event)) return;
-  event.preventDefault();
-  dragDepth = 0;
-  panel.classList.remove("dropping");
-  const files = Array.from(event.dataTransfer.files || []);
-  if (files.length === 0) return;
-  await addFiles(files);
-});
+// The shell owns the intake - the attach button, a paste, a drop - and announces what it took.
+chatShell.addEventListener("chat-files", (event) => { addFiles(event.detail.files); });
+// A chip removed by hand is worth undoing: the shell says so *before* it changes the list.
+chatShell.addEventListener("chat-attachments", (event) => { if (event.detail.action === "remove") pushDraft(); });
 
 // ---- account -------------------------------------------------------------
 function initials(name) {
@@ -3986,7 +3845,7 @@ async function refreshOrchestrator() {
       }
       orchestratorPanel.restoring=false;
     }
-    for(const pane of orchestratorPanel.panes.values()) await refreshAgentPane(pane);
+    for(const pane of orchestratorPanel.allPanes()) await refreshAgentPane(pane);
     orchestratorPanel.message=`${orchestratorPanel.tasks.length} agent sessions · closing this window keeps work running`;
   } catch(error) { orchestratorPanel.message='Orchestration unavailable: '+error.message; }
   finally {
@@ -4013,7 +3872,7 @@ function mountOrchestrator() {
   orchestratorPanel.addEventListener('orchestrator-action',async event=>{
     const {action}=event.detail;
     if(action==='close') { saveOrchestratorLayout(); if(native?.closeView)native.closeView();else window.close();return; }
-    if(action==='layout') { if(!orchestratorPanel.restoring)saveOrchestratorLayout(); for(const pane of orchestratorPanel.panes.values())refreshAgentPane(pane);return; }
+    if(action==='layout') { if(!orchestratorPanel.restoring)saveOrchestratorLayout(); for(const pane of orchestratorPanel.allPanes())refreshAgentPane(pane);return; }
     try {
       if(action==='save-placement') {
         await orchestratorRequest({action:'placement',policy:orchestratorPanel.policy});
@@ -4046,7 +3905,7 @@ function mountOrchestrator() {
     try {
       const receipt=await orchestratorRequest({action,id:pane.task.subagent_id,text,idempotency_key:key});
       if(action==='message' || action==='steer') {
-        if(pane.input.value===text)pane.input.value='';pane.submission=null;
+        if(pane.input.value===text)pane.clearDraft();pane.submission=null;
         if(action==='message')pane.task={...receipt,execution_node:pane.task.execution_node};
         saveOrchestratorLayout();
       }
@@ -4055,11 +3914,9 @@ function mountOrchestrator() {
     finally { button.disabled=false; }
   });
   document.addEventListener('keydown',event=>{
-    if(event.key==='Escape') {
-      const expanded=orchestratorPanel.querySelector('.agent-expanded');
-      if(expanded) { expanded.classList.remove('agent-expanded');orchestratorPanel.layout(); }
-      else orchestratorPanel.querySelector('[data-action="close"]').click();
-    }
+    // Escape leaves the orchestrator window. A promoted conversation is its own window: it closes the
+    // way a window closes (its own control), not with this key (DESIGN.md §3).
+    if(event.key==='Escape') orchestratorPanel.querySelector('[data-action="close"]').click();
   });
   refreshOrchestrator();
 }
