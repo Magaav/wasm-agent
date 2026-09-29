@@ -48,6 +48,7 @@ sha() { # file -> hash, empty when unreadable
 }
 
 sed_field() { sed -n "s/^$1=//p" "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1 | tr -d '[:space:]'; }
+json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\r\n' '  '; }
 
 # The tree the install was built from: WA_DEPLOY_ROOT, else `..` when it really is a work tree, else the
 # runtime worktree upgrade.sh records. Same order deploy.sh uses; a check that cannot run is a skip.
@@ -163,7 +164,7 @@ if [ "$JSON" = "1" ]; then
     [ "$first" = "1" ] || printf ','
     first=0
     printf '{"status":"%s","name":"%s","detail":"%s"}' \
-      "$(cut -f1 <<<"$r")" "$(cut -f2 <<<"$r" | sed 's/"/\\"/g')" "$(cut -f3 <<<"$r" | sed 's/"/\\"/g')"
+      "$(cut -f1 <<<"$r")" "$(json_escape "$(cut -f2 <<<"$r")")" "$(json_escape "$(cut -f3 <<<"$r")")"
   done
   printf ']}\n'
 else

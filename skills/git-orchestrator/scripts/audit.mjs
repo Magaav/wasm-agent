@@ -1,10 +1,15 @@
 // Discover immutable integration inputs. Fetches refs, never edits a checkout or merges.
 import {spawnSync} from 'node:child_process';
+import fs from 'node:fs';
+import {createHash} from 'node:crypto';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 
-function command(repo, program, args) {
-  const result=spawnSync(program,args,{cwd:repo,encoding:'utf8',windowsHide:true,maxBuffer:32*1024*1024});
+const nowMs=()=>Number(process.hrtime.bigint())/1e6;
+const elapsedMs=start=>Number((nowMs()-start).toFixed(3));
+
+function command(repo, program, args,options={}) {
+  const result=spawnSync(program,args,{cwd:repo,encoding:'utf8',windowsHide:true,maxBuffer:32*1024*1024,...options});
   return {status:result.status,stdout:result.stdout || '',stderr:result.error?.message || result.stderr || ''};
 }
 function requireResult(result,label) {
@@ -33,9 +38,12 @@ function githubPRs(repo) {
 export function audit(repo,{target='origin/main',includePRs=false,listPRs=githubPRs}={}) {
   if(!target || target.startsWith('-')) throw Error('Invalid integration target');
   repo=resolve(repo);
+  const auditStarted=nowMs(),timings={};
   const git=(...args)=>command(repo,'git',args);
   const errors=[],groups=new Map();
-  const fetched=git('fetch','--all','--prune');
+  let phaseStarted=nowMs();
+  const fetched=git('fetch','--all');
+  timings.fetch_ms=elapsedMs(phaseStarted);
   if(fetched.status!==0) errors.push(`Fetch incomplete: ${fetched.stderr}`);
   const targetSha=requireResult(git('rev-parse','--verify',`${target}^{commit}`),'Integration target');
   const add=(sha,source)=>{
@@ -43,11 +51,18 @@ export function audit(repo,{target='origin/main',includePRs=false,listPRs=github
     if(!groups.has(sha)) groups.set(sha,{sha,sources:[]});
     groups.get(sha).sources.push(source);
   };
+  phaseStarted=nowMs();
   const refs=requireResult(git('for-each-ref','--format=%(refname)%00%(objectname)%00%(symref)','refs/heads','refs/remotes'),'Branch discovery');
+  const cachedOriginHeads=[];
   for(const line of refs.split('\n').filter(Boolean)) {
     const [ref,sha,symref]=line.split('\0');
-    if(!symref) add(sha,{kind:'branch',ref});
+    if(!symref) {
+      add(sha,{kind:'branch',ref});
+      if(ref.startsWith('refs/remotes/origin/')) cachedOriginHeads.push({name:ref.slice('refs/remotes/origin/'.length),sha});
+    }
   }
+  timings.branch_discovery_ms=elapsedMs(phaseStarted);
+  phaseStarted=nowMs();
   let prs=[];
   try { prs=listPRs(repo); if(!Array.isArray(prs)) throw Error('Invalid PR list'); }
   catch(error) { prs=[]; errors.push(`PR discovery incomplete: ${error.message}`); }
@@ -62,6 +77,8 @@ export function audit(repo,{target='origin/main',includePRs=false,listPRs=github
       add(sha,{kind:'pr',ref,number:pr.number,branch:pr.branch,base:pr.base,draft:!!pr.draft,url:pr.url});
     } catch(error) { errors.push(`PR #${pr.number}: ${error.message}`); }
   }
+  timings.pr_discovery_ms=elapsedMs(phaseStarted);
+  phaseStarted=nowMs();
   const pendingPRs=[];
   for(const item of groups.values()) {
     if(item.sources.some(source=>source.kind==='pr') && git('merge-base','--is-ancestor',item.sha,targetSha).status!==0) pendingPRs.push(item.sha);
@@ -85,6 +102,8 @@ export function audit(repo,{target='origin/main',includePRs=false,listPRs=github
     }
     candidates.push(item);
   }
+  timings.merge_proof_ms=elapsedMs(phaseStarted);
+  phaseStarted=nowMs();
   const worktrees=[];
   for(const wt of parseWorktrees(requireResult(git('worktree','list','--porcelain','-z'),'Worktree discovery'))) {
     const item={path:wt.worktree,branch:wt.branch || null,head:wt.HEAD,locked:wt.locked || false};
@@ -98,15 +117,61 @@ export function audit(repo,{target='origin/main',includePRs=false,listPRs=github
       item.dirty ? 'dirty_retained' : item.ahead>0 ? 'integrate_commits_first' : item.behind>0 ? 'fast_forward_after_idle_check' : 'current';
     worktrees.push(item);
   }
+  timings.worktree_inspection_ms=elapsedMs(phaseStarted);
+  phaseStarted=nowMs();
   const finalRefs=requireResult(git('for-each-ref','--format=%(refname)%00%(objectname)%00%(symref)','refs/heads','refs/remotes'),'Final branch discovery');
   if(finalRefs!==refs || requireResult(git('rev-parse','--verify',`${target}^{commit}`),'Final target')!==targetSha) {
     errors.push('Branch tips moved during discovery; re-audit before integrating');
   }
+  timings.snapshot_validation_ms=elapsedMs(phaseStarted);
+  phaseStarted=nowMs();
+  const liveHeadsResult=git('ls-remote','--heads','origin');
+  let originHeads=[];
+  if(liveHeadsResult.status!==0) errors.push(`Origin head verification incomplete: ${liveHeadsResult.stderr}`);
+  else originHeads=liveHeadsResult.stdout.split('\n').filter(Boolean).map(line=>{
+    const [sha,ref]=line.split('\t');
+    return {name:ref?.replace(/^refs\/heads\//,''),sha};
+  }).filter(head=>head.name && head.name!=='HEAD').sort((a,b)=>a.name.localeCompare(b.name));
+  const cachedHeads=cachedOriginHeads.sort((a,b)=>a.name.localeCompare(b.name));
+  if(originHeads.some(head=>!cachedHeads.some(cached=>cached.name===head.name && cached.sha===head.sha)))
+    errors.push('A live origin head is missing or differs from fetched refs; fetch and re-audit before completing');
+  timings.remote_head_verification_ms=elapsedMs(phaseStarted);
   const pending=candidates.filter(item=>item.state==='pending');
+  const conflicts=candidates.filter(item=>item.merge==='conflict').length;
+  const mergeErrors=candidates.filter(item=>item.merge==='error').length;
+  phaseStarted=nowMs();
+  const gateReceipts=command(repo,'git',['rev-parse','--git-path','wa-finish-gate.json']);
+  let gateProof={status:'missing',run_count:0,source_tree:null,gate_ms:null,skipped:null};
+  if(gateReceipts.status===0) {
+    const receiptPath=resolve(repo,gateReceipts.stdout.trim());
+    try {
+      const receipt=JSON.parse(fs.readFileSync(receiptPath,'utf8'));
+      const tree=requireResult(git('rev-parse',`${targetSha}^{tree}`),'Target tree');
+      const gateRepo=command(repo,'git',['rev-parse','--show-toplevel']);
+      const logPath=resolve(gateRepo.stdout.trim(),receipt.log);
+      const log=fs.readFileSync(logPath);
+      const hash=createHash('sha256').update(log).digest('hex');
+      const recordRepo=String(receipt.repo || '').replaceAll('\\','/').toLowerCase();
+      const actualRepo=repo.replaceAll('\\','/').toLowerCase();
+      if(receipt.schema===1 && recordRepo===actualRepo && receipt.tree===tree && receipt.passed===true && receipt.log_sha256===hash &&
+        Number.isFinite(receipt.gate_ms) && receipt.gate_ms>=0 && receipt.gate_runs===1 && receipt.gate_exit===0) {
+        gateProof={status:'verified',run_count:0,source_tree:tree,gate_ms:receipt.gate_ms,skipped:receipt.skipped};
+      } else gateProof.status='stale_or_invalid';
+    } catch { gateProof.status='stale_or_invalid'; }
+  }
+  timings.gate_proof_lookup_ms=elapsedMs(phaseStarted);
+  timings.total_ms=elapsedMs(auditStarted);
+  const originMainOnly=originHeads.length===1 && originHeads[0].name==='main';
+  const originMainMatchesTarget=originMainOnly && originHeads[0].sha===targetSha;
+  const sourceGateVerified=gateProof.status==='verified';
   return {schema_version:1,repo,target,target_sha:targetSha,include_prs:includePRs,discovery_complete:errors.length===0,
-    integration_complete:errors.length===0 && pending.length===0,pending_tips:pending.length,
-    errors,candidates,worktrees,
-    note:'Integration covers committed tips. The required origin main-only invariant is a separate postcondition. Worktree dirt and activity are reported separately; never discard them to claim convergence.'};
+    integration_complete:errors.length===0 && pending.length===0,verification_complete:errors.length===0 && pending.length===0 && originMainMatchesTarget && sourceGateVerified,source_gate_verified:sourceGateVerified,
+    pending_tips:pending.length,origin_heads:originHeads,origin_main_only:originMainOnly,origin_main_matches_target:originMainMatchesTarget,
+    counts:{candidate_tips:candidates.length,pending_tips:pending.length,excluded_pr_tips:candidates.filter(item=>item.state==='excluded_pr').length,
+      merge_conflicts:conflicts,merge_errors:mergeErrors,gate_run_count:gateProof.run_count,worktrees:worktrees.length,dirty_worktrees:worktrees.filter(item=>item.dirty===true).length},
+    gate_proof:gateProof,
+    timings_ms:timings,errors,candidates,worktrees,
+    note:'Integration covers committed tips. Final verification additionally requires origin to contain only main. Worktree dirt and activity are reported separately; never discard them to claim convergence.'};
 }
 
 if(process.argv[1] && import.meta.url===pathToFileURL(resolve(process.argv[1])).href) {
@@ -116,6 +181,6 @@ if(process.argv[1] && import.meta.url===pathToFileURL(resolve(process.argv[1])).
     if(!['audit','verify'].includes(mode) || !repo || extra.length) throw Error('Usage: node audit.mjs audit|verify <repo> [target-ref] [--all]');
     const result=audit(repo,{target:target || 'origin/main',includePRs});
     console.log(JSON.stringify(result,null,2));
-    process.exitCode=!result.discovery_complete || (mode==='verify' && !result.integration_complete) ? 1 : 0;
+    process.exitCode=!result.discovery_complete || (mode==='verify' && !result.verification_complete) ? 1 : 0;
   } catch(error) { console.error(error.message); process.exitCode=1; }
 }

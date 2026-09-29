@@ -4,7 +4,7 @@ description: >-
   Converge committed repository branches into main when /merge is invoked or the
   owner asks for integration. /merge all explicitly includes open PRs, including
   outside contributions. Discover exact tips, review, integrate, gate, push and
-  re-audit in one run. Leave origin with only main after successful integration.
+  re-audit in one run. Preserve every worktree and local ref; verify source alignment.
 ---
 
 # The git orchestrator
@@ -27,8 +27,14 @@ addressed to you. Keep LF, provenance, tests and all existing work.
 - A branch containing an excluded PR head is also excluded by ordinary `/merge`.
   Listing a PR is not permission to merge it. Never broaden scope silently.
 - Uncommitted files are not branch tips. Never commit, stash, reset or discard
-  someone else's unfinished files to satisfy this command. Detached benchmark
-  worktrees are preserved and exempt from synchronization.
+  someone else's unfinished files to satisfy this command. Preserve all worktrees,
+  including detached benchmark worktrees, from synchronization and cleanup.
+
+The audit and the final gate are the slowest expensive phases. Use their measured times and counts to decide whether later work should reduce redundant review/proof, parallelize independent review, or serialize only the short shared-write phase. Do not claim speedup from one run; retain baseline/candidate JSON from the same fixture set and compare medians, conflict counts, and gate reruns. Historical phase times are unknown unless an actual artifact records them.
+
+A suitable bounded workflow is: parallelize read-only review of independent tips, then serialize exact integration of overlapping tips in a short-lived candidate branch. Never run multiple writers against the same checkout, main, a shared ref, or the same staging index. Preserve source-bound gate evidence only when the exact Git tree matches; any changed tree requires a new gate.
+
+`/merge` and `/merge all` authorize integrating reviewed commit tips and enforcing the remote main-only invariant below. Delete only exact non-main remote refs after proving they are integrated and no open PR depends on them. Preserve every local ref and worktree, including dirty drafts, detached benches and worktrees where the branch is already merged; do not synchronize or delete local refs/worktrees.
 
 ## 1. Discover inputs with the audit
 
@@ -99,52 +105,54 @@ node <skill-dir>/scripts/audit.mjs verify <repo> origin/main
 # For /merge all, append --all here too.
 ```
 
-`verify` exits nonzero for incomplete discovery or any unintegrated in-scope tip.
-Re-fetch/repeat for late arrivals. A valid final manifest plus exact-tree gate and
-remote-main proof establishes integration completion. Do not infer it from the
-names of deleted branches or a model-written summary.
+`audit` reports per-phase milliseconds, tip/conflict/worktree counts, and
+`integration_complete` independently from verification. `gate_proof` reports
+whether the current HEAD tree has a valid source-bound gate receipt and log hash,
+and the saved gate run count; it never runs the test gate. `verify` exits nonzero
+unless discovery is complete, every in-scope tip is integrated, the current tree
+has valid gate evidence, the fetched `origin` refs match a fresh
+`git ls-remote --heads origin`, and the only remote head is `main` at the target
+SHA. Gate proof is evidence only for that tree; it does not replace required human review or the full final gate when source changes. It does not delete a ref. Re-fetch/repeat for late arrivals. A valid final manifest plus exact-tree gate and remote-main proof
+establishes integration completion. Do not infer it from names of refs or a
+model-written summary.
 
-## 4. Enforce the remote main-only invariant
+Use the exact JSON timings/counts from an `audit`/`verify` result and the closing
+`finish.mjs gate` receipt for measurements. Keep a baseline result (for example,
+from the preceding revision) and candidate result for the same fixture/worktree
+and remote layout; compare `timings_ms`, `counts`, `gate_ms`, `skipped`, and
+`gate_exit`. This measures wall time and work avoided, not correctness by itself.
+No historical baseline is implied by adding telemetry.
+
+## 4. Enforce remote main-only; preserve local work
 
 After the tested candidate is published and the final audit is clean, `origin`
-must have exactly one branch: `main`. This is a required postcondition of both
-`/merge` and `/merge all`, not optional housekeeping. A GitHub branch selector
-lists refs, not PR state; merged branches remain visible until their refs are
-deleted.
+must have exactly one branch: `main`. This is a required postcondition of `/merge`
+and `/merge all`. Read the exact remote `refs/heads/*` tips; for each non-main
+remote branch, prove its exact tip is an ancestor of the tested `origin/main`,
+confirm no open PR still depends on it, and recheck that its remote tip has not
+moved immediately before deleting that exact remote ref with a normal, non-force
+deletion. Never wildcard-delete or delete `main`. If any tip moves, arrives late,
+is not integrated, or belongs to an unresolved PR, stop cleanup and re-audit/review
+it. `verify` checks without changing refs and succeeds only when the current
+source tree has exact-tree gate evidence and fresh `git ls-remote --heads origin`
+shows `refs/heads/main` at the tested SHA and nothing else.
 
-Before deleting, fetch and record every exact `refs/heads/*` tip on `origin`.
-For each non-main ref, prove its tip is an ancestor of the tested `origin/main`
-and confirm no open PR still depends on that head. Delete each exact ref
-individually with a normal non-force push deletion, rechecking the remote tip
-immediately before deletion. Never use a wildcard, delete `main`, or force-push.
-If a tip moved, appeared late, is not integrated, or belongs to an unresolved PR,
-stop cleanup, re-audit and integrate/review it as required. Do not claim complete
-until a fresh `git ls-remote --heads origin` returns only `refs/heads/main`.
-Enable the hosting provider's delete-head-branch-on-merge setting as defense in
-depth; the explicit final audit and deletion loop still covers direct merges and
-old refs.
-
-This remote invariant does not authorize disturbing local worktrees. Active
-worktrees may keep local branch refs while their task is live. Inspect each
-checkout separately; preserve dirty, live, locked and detached trees and never
-move the current executing workspace out from under its run. Retire a clean,
-confirmed-idle worktree through its owner/lifecycle procedure, then delete its
-local branch once no checkout uses it and its tip is contained in main. Report
-remaining local refs and worktree reasons separately; they do not excuse leaving
-non-main refs on `origin`.
+The remote invariant does **not** authorize local cleanup. Preserve all local
+branch refs and worktrees—including dirty drafts, live, locked, detached and clean
+merged worktrees. Do not synchronize, retire, delete, or move any worktree; report
+its state separately. Never discard unfinished files. A separate cleanup request
+is required for local ref or worktree changes.
 
 ## Report three independent outcomes
 
 1. **Integration:** complete or blocked, scope (`internal` or `all`), final main
    SHA, merged/excluded/blocked exact inputs, review and gate verdict/skips.
-2. **Worktree synchronization:** updated and deferred paths with concrete reasons.
-3. **Branch cleanup:** prove `origin` contains only `main`; report local refs and
-   retained worktrees separately with concrete reasons.
+2. **Worktree synchronization:** none by default; list observed worktrees as
+   preserved and any separately requested sync as a distinct task.
+3. **Branch cleanup:** remote non-main refs removed only under the explicit rule
+   above; all local refs/worktrees retained with concrete reasons.
 
-Say `Integration complete; workspace synchronization deferred for ...` only
-when the tested main is current and the remote main-only invariant passes, even
-if a dirty/live local tree remains. If any non-main remote ref remains, report
-cleanup blocked and do not claim the command fully completed. Never force-delete
-or discard local work to satisfy the invariant. Conversely, never call
-integration complete if a real in-scope commit, PR review requirement or
-discovery error is unresolved. Preserve those distinctions in the final response.
+Say `Integration complete; local workspace synchronization deferred for ...`
+when in-scope commits reached tested/pushed main and the remote invariant passes,
+even when local drafts or worktrees remain. Never call integration complete if a
+real in-scope commit, PR review requirement or discovery error is unresolved.
