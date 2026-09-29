@@ -94,15 +94,31 @@ const EMBEDDED: &[(&str, &str)] = &[
 /// Rust host for the reason. Dev mode has to cover every entry point or it is a
 /// trap.
 fn core_source(name: &str) -> String {
-    if let Ok(root) = std::env::var("WASM_AGENT_LUA_ROOT") {
-        let trimmed = root.trim_end_matches(['/', '\\']);
-        if !trimmed.is_empty() {
-            if let Ok(text) = std::fs::read_to_string(format!("{trimmed}/{name}")) {
-                return text;
-            }
-        }
+    if let Some(root) = lua_root() {
+        return std::fs::read_to_string(format!("{root}/{name}")).unwrap_or_else(|error| {
+            // The rule `dofile`'s bootstrap already follows, for the same reason: a set-but
+            // unreadable root is an error, not a fallback. Falling back here would run
+            // `lua/core/init.lua` - or server.lua, or subagents.lua - out of the binary while the
+            // operator believes they are running the checkout, and the run would not say so.
+            eprintln!("lua_root_unreadable: {root}/{name}: {error}");
+            std::process::exit(2);
+        });
     }
     embedded(name).to_string()
+}
+
+/// The Lua root in force, if there is one: `WASM_AGENT_LUA_ROOT` set to something
+/// that can name a directory. The entry modules, `dofile`'s bootstrap rule and the
+/// notice a script run prints when its modules come from the binary all ask here, so
+/// they cannot disagree about which copy of the Lua is being loaded.
+fn lua_root() -> Option<String> {
+    let root = std::env::var("WASM_AGENT_LUA_ROOT").ok()?;
+    let trimmed = root.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn embedded(name: &str) -> &'static str {
@@ -444,6 +460,17 @@ fn main() {
     subagents::set_factory(Box::new(move || worker_for_subagents()));
 
     if let Ok(script) = std::env::var("WA_SCRIPT") {
+        // Say which copy of the Lua this run will load, before it loads any.
+        //
+        // With no root, `dofile` resolves every module from the copy compiled into this binary, so
+        // a focused test written to exercise an edit under `lua/` runs green while never loading
+        // that edit - one worker lost a whole green run (28 checks) to the binary's own
+        // `update.lua`, and the only tell was a line number in a message. One line on stderr, once,
+        // and only for a script run: an installed node runs without a root by design, and a root
+        // that IS set is still preferred for the modules, so there is nothing to warn about then.
+        if lua_root().is_none() {
+            eprintln!("lua root unset: using embedded modules; edits under lua/ are NOT under test");
+        }
         let source = std::fs::read_to_string(&script).unwrap_or_else(|e| panic!("read {script}: {e}"));
         if let Err(error) = lua.do_string(&source, &script) {
             host::restore_input();
