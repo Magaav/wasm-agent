@@ -330,10 +330,15 @@ pub fn support() -> Delivery {
                 identity: APP_USER_MODEL_ID.to_string(),
                 app_name: APP_DISPLAY_NAME.to_string(),
             },
+            // The identity was accepted but the platform has no setting to read yet (a fresh
+            // registration, before it has raised anything). That is "this shell can raise toasts",
+            // reported with the uncertainty named rather than dressed up as confirmation.
             Err(error) => Delivery {
-                supported: false,
+                supported: true,
                 delivered: false,
-                reason: format!("could not read this identity's notification setting: {error}"),
+                reason: format!(
+                    "the platform accepted {APP_USER_MODEL_ID}, but its notification setting could not be read yet: {error}"
+                ),
                 identity: APP_USER_MODEL_ID.to_string(),
                 app_name: APP_DISPLAY_NAME.to_string(),
             },
@@ -357,6 +362,7 @@ pub fn raise(title: &str, body: &str) -> Delivery {
         Ok(notifier) => notifier,
         Err(reason) => return Delivery::refused(reason),
     };
+    let mut caveat: Option<String> = None;
     match notifier.Setting() {
         Ok(setting) if setting != NotificationSetting::Enabled => {
             return Delivery {
@@ -369,15 +375,18 @@ pub fn raise(title: &str, body: &str) -> Delivery {
                 app_name: APP_DISPLAY_NAME.to_string(),
             };
         }
+        // A setting we could read is a gate, honoured above: nothing is composed when it says the
+        // operator has notifications off. A setting we could **not** read is not a refusal. On a
+        // freshly registered identity this read fails with element-not-found (0x80070490 - measured
+        // on this machine) because the platform has no settings entry for an app that has never
+        // raised anything, while the toast itself is accepted. Reporting that as "disabled" would
+        // refuse exactly the first notification a new install ever sends, so the failure is carried
+        // into the result instead, where a caller can see it.
         Ok(_) => {}
         Err(error) => {
-            return Delivery {
-                supported: false,
-                delivered: false,
-                reason: format!("could not read this identity's notification setting: {error}"),
-                identity: APP_USER_MODEL_ID.to_string(),
-                app_name: APP_DISPLAY_NAME.to_string(),
-            };
+            caveat = Some(format!(
+                " (this identity had no notification setting to read yet, so that gate was skipped: {error})"
+            ))
         }
     }
     let document = match XmlDocument::new() {
@@ -394,24 +403,28 @@ pub fn raise(title: &str, body: &str) -> Delivery {
         Err(error) => return Delivery::refused(format!("could not build the toast: {error}")),
     };
     match notifier.Show(&toast) {
-            Ok(()) => Delivery {
-                supported: true,
-                delivered: true,
-                reason: format!(
-                    "accepted by the Windows notification platform for {APP_USER_MODEL_ID}; Windows \
-                     gives no receipt that it was rendered, so this is delivery, not proof of sight"
-                ),
-                identity: APP_USER_MODEL_ID.to_string(),
-                app_name: APP_DISPLAY_NAME.to_string(),
-            },
-            Err(error) => Delivery {
-                supported: true,
-                delivered: false,
-                reason: format!("the notification platform refused this toast: {error}"),
-                identity: APP_USER_MODEL_ID.to_string(),
-                app_name: APP_DISPLAY_NAME.to_string(),
-            },
-        }
+        Ok(()) => Delivery {
+            supported: true,
+            delivered: true,
+            reason: format!(
+                "accepted by the Windows notification platform for {APP_USER_MODEL_ID}{}; Windows \
+                 gives no receipt that it was rendered, so this is delivery, not proof of sight",
+                caveat.unwrap_or_default()
+            ),
+            identity: APP_USER_MODEL_ID.to_string(),
+            app_name: APP_DISPLAY_NAME.to_string(),
+        },
+        Err(error) => Delivery {
+            supported: true,
+            delivered: false,
+            reason: format!(
+                "the notification platform refused this toast: {error}{}",
+                caveat.unwrap_or_default()
+            ),
+            identity: APP_USER_MODEL_ID.to_string(),
+            app_name: APP_DISPLAY_NAME.to_string(),
+        },
+    }
 }
 
 #[cfg(test)]
