@@ -324,13 +324,14 @@ pub(crate) fn deploy_unit_name(at: u64, pid: u32) -> String {
 /// did it die immediately", and a few inert units are a small price for it (`systemctl reset-failed`
 /// clears them).
 ///
-/// KNOWN, AND NOT VERIFIED FROM THIS HOST: `--user` + `--slice=user.slice`. A system manager's
-/// `system.slice` is where a system unit lives and is the manager's own default; whether a *user* manager
-/// resolves a slice named `user.slice` (rather than the `user-*.slice`/`user@*.service` hierarchy the
-/// system manager spells) cannot be checked on a machine with no systemd. It is kept, because systemd
-/// creates a slice a unit names, so the worst case is a differently-named slice - and because the failure
-/// that matters is not silent: a `systemd-run` that refuses is reported, never worked around by starting
-/// the deploy inside the watcher's control group (see [`placement`]).
+/// `--user` + `--slice=user.slice`, checked against a real user manager (the node, systemd 255, from the
+/// session that owns the user manager): `systemctl --user show user.slice -p LoadState` says `loaded` - an
+/// implicit slice under the user manager's `-.slice`, with `FragmentPath=` empty and `ActiveState=inactive`
+/// - while `app.slice` is the one already `active`, next to `session.slice`. So the name resolves, and a unit
+/// placed in it is outside the caller's unit cgroup, which is the property this flag exists for; `app.slice`
+/// would be the conventional spelling and the difference is naming. Either way the failure that matters is
+/// not silent: a `systemd-run` that refuses is reported, never worked around by starting the deploy inside
+/// the watcher's control group (see [`placement`]).
 pub(crate) fn deploy_unit_command(
     name: &str,
     capture: &Path,

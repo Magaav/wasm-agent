@@ -30,11 +30,17 @@
 //!      host: with a supervisor stated, and no `systemd-run` to start a unit of its own, the deploy is
 //!      refused with a reason in the capture and the script never runs. Falsified by restoring the
 //!      fall-through to the detached child, which is what the capture used to say.
+//!   6. **[`the_watcher_pid_is_believed_by_name_and_verb_not_by_path`]** the watcher's pid is believed
+//!      while it is still a *watching sentinel*, by the kernel's name for the program and its verb - never
+//!      by a path. Falsified by making the name test unconditional (the recycled-pid case fails) and by
+//!      dropping the verb test (another `wa-sentinel` verb reusing the number fails).
 //!
 //! NOT VERIFIED HERE, and it cannot be: no `systemctl` or `systemd-run` invocation can be executed on this
-//! host (no systemd, and Windows has no unit manager at all). The commands are asserted as data -
-//! `systemctl stop <unit>` and no `watch` anywhere in what a deploy is started with - and the commands to run
-//! on the node are in the commit message.
+//! host (Windows has no unit manager at all). The commands are asserted as data - `systemctl stop <unit>`
+//! and no `watch` anywhere in what a deploy is started with. What *was* checked on a real Linux node
+//! (`openclaw.ohana`, read-only, systemd 255, sentinel unit-owned at `/system.slice/wa-sentinel.service`)
+//! is recorded in the commit message; item 6 is what that check changed - the node installs the same build
+//! at two paths, so a path comparison refused the truth there.
 
 use super::*;
 
@@ -381,6 +387,54 @@ fn a_deploy_under_a_supervisor_is_refused_rather_than_become_our_child() {
         "the self-killing fallback must be gone: {capture_text}"
     );
     assert!(!marker.exists(), "the script must not have run at all");
+}
+
+/// 6. The watcher's pid is believed only while it is still a watching sentinel: the program's *name* and
+/// verb, never its path. The node is why the path is wrong - it installs the same build at
+/// `/usr/local/bin/wa-sentinel` (what the unit starts) and `~/.local/bin/wa-sentinel` (what `$PATH` puts
+/// first, and what `deploy.sh` replaces) - and the recycled-pid case is why the name and verb are needed.
+#[test]
+fn the_watcher_pid_is_believed_by_name_and_verb_not_by_path() {
+    let argv = |command: &str| command.as_bytes().to_vec();
+    // Two copies of one build: the watcher started as `/usr/local/bin/wa-sentinel watch`, and the CLI
+    // answering from the copy `$PATH` names first.
+    assert!(is_watching("wa-sentinel", &argv("/usr/local/bin/wa-sentinel\0watch\0"), "wa-sentinel"));
+    assert!(is_watching(
+        "wa-sentinel",
+        &argv("/home/ubuntu/.local/bin/wa-sentinel\0watch\0"),
+        "wa-sentinel"
+    ));
+    // A named instance's watcher, whose argv carries the instance first.
+    assert!(is_watching(
+        "wa-sentinel",
+        &argv("/opt/wa-sentinel\0--instance\0guest\0watch\0"),
+        "wa-sentinel"
+    ));
+    // A recycled number in somebody else's service, and a recycled number taken by another sentinel verb.
+    assert!(!is_watching("systemd", &argv("/usr/lib/systemd/systemd\0--system\0"), "wa-sentinel"));
+    // The case that isolates the *name* half: another program that happens to be watching something (a
+    // `cargo watch` in a checkout is the ordinary way that happens on this node) is not this watcher, however
+    // sentinel-like its argument list looks.
+    assert!(!is_watching(
+        "cargo",
+        &argv("/home/ubuntu/.cargo/bin/cargo\0watch\0-x\0test\0"),
+        "wa-sentinel"
+    ));
+    assert!(!is_watching(
+        "wa-sentinel",
+        &argv("/usr/local/bin/wa-sentinel\0restart\0"),
+        "wa-sentinel"
+    ));
+    assert!(!is_watching("wa-sentinel", &argv("/usr/local/bin/wa-sentinel\0once\0"), "wa-sentinel"));
+    // No `/proc` at all (Windows): the empty reads are not a watcher.
+    assert!(!is_watching("", &[], "wa-sentinel"));
+    // The kernel truncates `comm` to 15 characters, so a binary with a longer name is compared against the
+    // same 15: the comm of `wa-sentinel-node-extra` is `wa-sentinel-nod`.
+    assert!(is_watching(
+        "wa-sentinel-nod",
+        &argv("whatever\0watch\0"),
+        "wa-sentinel-node-extra"
+    ));
 }
 
 /// The watcher's own record, written where a later `stop` reads it - and read back as the same owner. On a

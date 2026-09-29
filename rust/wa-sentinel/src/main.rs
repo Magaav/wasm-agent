@@ -134,29 +134,50 @@ pub(crate) fn owner() -> role::Owner {
 /// The running watcher's control group, read from the pid the watcher itself wrote down.
 ///
 /// Two checks before it is believed, because a pid file outlives the process it names: `pid_alive` (a
-/// recycled number is not a watcher) and `/proc/<pid>/exe` (the kernel's answer to "does this process still
-/// run *this* binary"). Without the second, a recycled pid sitting in some other service would make `stop`
-/// stop that service. A pid whose `/proc/<pid>/exe` cannot be read - a root-owned watcher seen by an
-/// unprivileged shell - is not evidence either; that case is covered by what the watcher recorded for
-/// itself (`record_owner`).
+/// recycled number is not a watcher) and `pid_is_watching` (the pid must still be a *watching sentinel*).
+/// Without the second, a recycled pid sitting in some other service would make `stop` stop that service.
 fn running_watcher_cgroup() -> Option<String> {
     let pid = std::fs::read_to_string(pid_path()).ok()?.trim().parse::<u32>().ok()?;
-    if !pid_alive(pid) || !pid_runs_this_binary(pid) {
+    if !pid_alive(pid) {
+        return None;
+    }
+    let (comm, argv) = (
+        std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default(),
+        std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default(),
+    );
+    let mine = std::env::current_exe()
+        .ok()
+        .and_then(|me| me.file_stem().map(|stem| stem.to_string_lossy().to_string()))
+        .unwrap_or_default();
+    if !is_watching(comm.trim(), &argv, &mine) {
         return None;
     }
     std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()
 }
 
-/// Does `pid` run this same binary? There is no `/proc` on Windows, and no unit manager to ask either.
-fn pid_runs_this_binary(pid: u32) -> bool {
-    let (Ok(theirs), Ok(mine)) = (std::fs::read_link(format!("/proc/{pid}/exe")), std::env::current_exe())
-    else {
+/// Is `pid` a watching sentinel? Answered by the program's *name and verb*, never by its path.
+///
+/// The **name**, because the same build is installed twice on the node: `/usr/local/bin/wa-sentinel` is what
+/// the unit starts (`ExecStart=`, measured on the node) and `~/.local/bin/wa-sentinel` is what `$PATH` puts
+/// first and what `deploy.sh` replaces - the same sha256 in both places. Comparing paths would therefore
+/// refuse the truth on the machine this decision exists for, and an operator's `wa-sentinel stop` would fall
+/// back to a stop file under `Restart=always` - the bug this file was changed to fix. `/proc/<pid>/comm` is
+/// the kernel's own copy of the executable's file name, and both it and `/proc/<pid>/cmdline` are readable
+/// for a process of *any* owner (measured on the node against pid 1), so a root-owned watcher is still
+/// identifiable from an operator's unprivileged shell - which `/proc/<pid>/exe` is not.
+///
+/// The **verb**, because a recycled number taken by another `wa-sentinel` - a `restart`, a `once` - is not
+/// the watcher whose lifecycle is in question.
+///
+/// There is no `/proc` on Windows (both reads are empty, and there is no unit manager to ask either), so this
+/// is false there and the answer stays `Ourselves`.
+pub(crate) fn is_watching(comm: &str, argv: &[u8], my_name: &str) -> bool {
+    // The kernel truncates `comm` to 15 characters; compare like for like.
+    let mine = &my_name[..my_name.len().min(15)];
+    if mine.is_empty() || comm != mine {
         return false;
-    };
-    match (theirs.canonicalize(), mine.canonicalize()) {
-        (Ok(theirs), Ok(mine)) => theirs == mine,
-        _ => theirs == mine,
     }
+    argv.split(|byte| *byte == 0).any(|argument| argument == b"watch")
 }
 
 /// Write down who owns this watcher, from the watcher's own answer, when it takes the role.

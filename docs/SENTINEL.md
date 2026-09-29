@@ -139,7 +139,11 @@ when you need it most.
 - **`run` is disabled** unless `WA_SENTINEL_SCRIPTS` names the directories it may execute from.
 - **A kill switch:** `wa-sentinel stop`. Where a service manager owns the watcher it is the *manager*
   that stops it (`systemctl stop wa-sentinel.service`), because `Restart=always` turns a stop file into a
-  restart five seconds later; run it with the authority the unit needs (`sudo`, or as the unit's user).
+  restart five seconds later. Managing a system unit needs the manager's authority: on a machine whose
+  unit user is not authorised by polkit for `org.freedesktop.systemd1.manage-units` (measured on this
+  project's node: `pkcheck` answers "Authorization requires authentication" for an ssh shell), run
+  `sudo wa-sentinel stop`. A refusal is loud and names the manager's reason and the unit - never a quiet
+  stop file.
 
 ## Operating
 

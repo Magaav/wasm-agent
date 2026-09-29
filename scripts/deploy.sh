@@ -310,11 +310,10 @@ if [ -f "$INSTALL_DIR/$SENTINEL_NAME" ]; then
     # The file is locked by the running supervisor on Windows, and there the stop/replace/start dance below is
     # the way through it. On POSIX it is not locked at all: `cp` over a running image fails with ETXTBSY ("text
     # file busy"), while a *rename* over it succeeds - the running process keeps the inode it already mapped and
-    # the new image is picked up by the restart below. The rename is not a shortcut, it is the only path that
-    # works: this deploy runs inside the supervisor's control group (the watcher started it), so stopping the
-    # supervisor stops the deploy itself, mid-swap, leaving a stopped supervisor and an unreported deploy -
-    # while the `start` that followed spawned a second watcher beside the unit's own (the flapping
-    # `activating`/`MainPID 0`/`NRestarts 20` unit).
+    # the new image is picked up by the restart below. The rename is not a shortcut, it is the shorter path than
+    # stop/replace/start for the watcher nothing outside owns (a `nohup`) - and the `Restart=always` flap that
+    # argument used to name is gone: a deploy under a supervisor now runs in a unit of its own, outside the
+    # watcher's control group (`role::placement`, `rust/wa-sentinel/src/role.rs`).
     if [ -f "$INSTALL_DIR/$SENTINEL_NAME" ]; then
       case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*)
