@@ -2440,6 +2440,27 @@ fn dispatch(
         "/model" if method == "POST" => (200, "application/json", call("wa_set_model", &[body.trim(), node.as_str(), session]).into_bytes()),
         "/reasoning" if method == "POST" => (200,"application/json",call("wa_set_reasoning",&[body.trim(),node.as_str(),session]).into_bytes()),
         "/chat" if method == "POST" => (200, "application/json", call("wa_reply", &[body, session, node.as_str()]).into_bytes()),
+        // The module system: `/modules/` is its own page and `/modules/index.json` the listing beside
+        // it, and a module's own files are under `/modules/<id>/<path>`. The id and the relative path
+        // are split here because that is the shape the route takes, and *what may be reached* stays in
+        // Lua: an id that is not a module directory is refused 404, the files of a module nobody
+        // enabled are refused 403, and a path that tries to leave the directory is refused 400.
+        //
+        // The page is served at the *root* of that space because a module is its sibling - its
+        // `entry_url` is relative to the page - so `/modules` redirects to `/modules/`. Served as a
+        // page at both, the slashless one would resolve every panel one level outside the tree, and
+        // the failure would look like a broken module rather than a missing slash.
+        "/modules" => (301, "text/plain; charset=utf-8", b"/modules/".to_vec()),
+        "/modules/" | "/modules/index.html" => module_reply(lua, "", "index.html", session),
+        "/modules/index.json" => module_reply(lua, "", "index.json", session),
+        route if route.starts_with("/modules/") => {
+            let rest = &route["/modules/".len()..];
+            match rest.split_once('/') {
+                Some((id, relative)) => module_reply(lua, id, relative, session),
+                // `/modules/<id>` is the module's own entry point, as an empty path is in the route.
+                None => module_reply(lua, rest, "", session),
+            }
+        }
         _ => {
             if route == "/chat" || route == "/node/chat" {
                 return None; // streaming
@@ -2461,22 +2482,76 @@ fn dispatch(
     Some(reply)
 }
 
+/// One module-system request, in the route's positional shape: `wa_modules(op, id, path, session)`.
+///
+/// The route answers a `{status, content_type, body}` envelope, and the status is *kept*: whether an
+/// unasked module is refused (403) or an unknown one is missing (404) is the module system's
+/// decision, and re-deciding it here is how a route and the page that reads it come to disagree - the
+/// page renders what it is told and the tests assert the route, so both have to answer the same
+/// question. An envelope that cannot be read is a 500, never a silent empty 200: an empty listing is
+/// a normal state of a node, so an unreadable answer that looked like one would hide a broken route.
+fn module_reply(lua: &Lua, id: &str, relative: &str, session: &str) -> Reply {
+    let answer = match lua.call_string("wa_modules", &["file", id, relative, session]) {
+        Ok(answer) => answer,
+        Err(error) => {
+            // As above: a Lua error can abandon a BEGIN on this interpreter's connection.
+            lua.rollback_if_open();
+            return (500, "application/json; charset=utf-8",
+                format!("{{\"error\":{}}}", json_escape(&error)).into_bytes());
+        }
+    };
+    let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&answer) else {
+        return (500, "application/json; charset=utf-8",
+            b"{\"error\":\"module_route_did_not_answer_an_envelope\"}".to_vec());
+    };
+    let status = envelope.get("status").and_then(serde_json::Value::as_u64).unwrap_or(500) as u16;
+    let body = envelope.get("body").and_then(serde_json::Value::as_str).unwrap_or("");
+    let from_route = envelope.get("content_type").and_then(serde_json::Value::as_str).unwrap_or("");
+    (status, module_content_type(from_route), body.as_bytes().to_vec())
+}
+
+/// The type of what a module serves: named by the route, mapped onto the `&'static str` a reply
+/// carries. The vocabulary is the module system's (a module may hold css, svg or markdown); a type
+/// this node does not know is served as bytes rather than guessed at, which is the same answer the
+/// route gives for a file with no extension.
+fn module_content_type(from_route: &str) -> &'static str {
+    match from_route {
+        "text/html; charset=utf-8" => "text/html; charset=utf-8",
+        "text/css; charset=utf-8" => "text/css; charset=utf-8",
+        "text/javascript; charset=utf-8" => "text/javascript; charset=utf-8",
+        "application/json; charset=utf-8" => "application/json; charset=utf-8",
+        "text/markdown; charset=utf-8" => "text/markdown; charset=utf-8",
+        "image/svg+xml" => "image/svg+xml",
+        "text/plain; charset=utf-8" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
 fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) -> std::io::Result<()> {
     let reason = match status {
         200 => "OK",
         204 => "No Content",
+        301 => "Moved Permanently",
         400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
         _ => "OK",
     };
+    // A redirect carries where to go and no content: the body *is* the target. Every other status is
+    // unchanged, so this costs the existing responses nothing.
+    let (location, length) = if status == 301 {
+        (format!("Location: {}\r\n", String::from_utf8_lossy(body)), 0)
+    } else {
+        (String::new(), body.len())
+    };
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
-         Cache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
-        body.len()
+        "HTTP/1.1 {status} {reason}\r\n{location}Content-Type: {content_type}\r\nContent-Length: {length}\r\n\
+         Cache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n"
     );
     stream.write_all(head.as_bytes())?;
-    stream.write_all(body)?;
+    if status != 301 {
+        stream.write_all(body)?;
+    }
     stream.flush()
 }
 
@@ -2594,6 +2669,37 @@ mod ui_version_tests {
         std::fs::write(&asset, b"<html>two</html>").expect("change");
         assert_ne!(ui_version(&dir), first, "changed content must change the version");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod module_route_tests {
+    use super::module_content_type;
+
+    /// The route names the type of what it serves and the reply carries a `&'static str`, so every
+    /// type the route can name has to survive the mapping. Miss one and a module that serves markdown
+    /// arrives as a download, with nothing failing anywhere.
+    #[test]
+    fn the_routes_own_types_survive_the_mapping() {
+        for (from_route, expected) in [
+            ("text/html; charset=utf-8", "text/html; charset=utf-8"),
+            ("text/css; charset=utf-8", "text/css; charset=utf-8"),
+            ("text/javascript; charset=utf-8", "text/javascript; charset=utf-8"),
+            ("application/json; charset=utf-8", "application/json; charset=utf-8"),
+            ("text/markdown; charset=utf-8", "text/markdown; charset=utf-8"),
+            ("image/svg+xml", "image/svg+xml"),
+            ("text/plain; charset=utf-8", "text/plain; charset=utf-8"),
+        ] {
+            assert_eq!(module_content_type(from_route), expected, "{from_route}");
+        }
+    }
+
+    /// A type this node does not know is served as bytes, not as something that sniffs as safe - and
+    /// an empty one is the same case, because the envelope may be missing the field entirely.
+    #[test]
+    fn an_unknown_type_is_bytes() {
+        assert_eq!(module_content_type("application/x-shockwave-flash"), "application/octet-stream");
+        assert_eq!(module_content_type(""), "application/octet-stream");
     }
 }
 
