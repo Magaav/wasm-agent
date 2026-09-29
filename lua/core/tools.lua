@@ -69,8 +69,8 @@ M.shared = {
   schema("skill", "Load a skill: the full instructions for a specialized task listed in your context. Read the one that matches before starting that kind of work.", {
     name = { type = "string", description = "The skill's name, as listed in <available_skills>." } }, { "name" }),
   schema("capabilities", "List the tools available to this account (its capabilities).", {}),
-  schema("subagent", "Start and supervise a child agent (a subagent), using configured node placement, that works on a bounded task with its own fresh context, its own transcript and a restricted tool profile. `start` returns a durable receipt, not a result: the child runs in the background. Use `await` (one bounded wait, never repeated model polling) or `status`/`result` to collect it, and `cancel` to stop it. You may only inspect or cancel the subagents you started. A profile's tools can only narrow your own; they can never grant more than you have. Use `list` to see your subagents and `profiles` to see what is approved. `session` reads the original child conversation; `message` queues its next turn with the same profile and model.", {
-    action = { type = "string", enum = { "start", "status", "list", "result", "await", "cancel", "profiles", "message", "steer", "steer_session", "steering_status", "session", "fleet" } },
+  schema("subagent", "Start and supervise a child agent (a subagent), using configured node placement, that works on a bounded task with its own fresh context, its own transcript and a restricted tool profile. `start` returns a durable receipt, not a result: the child runs in the background. Use `await` (one bounded wait, never repeated model polling) or `status`/`result` to collect it, and `cancel` to stop it. A placed task's own `state` says what the placement proved: `refused` means the destination answered that it started nothing, so the task will not run and `cancel` retracts it; `unknown` means a delivery may or may not have arrived, and only `reconcile` - which asks the destination whether it holds a run for that key - may then retry or cancel it. `attempts` counts how many times a destination was asked. You may only inspect or cancel the subagents you started. A profile's tools can only narrow your own; they can never grant more than you have. Use `list` to see your subagents and `profiles` to see what is approved. `session` reads the original child conversation; `message` queues its next turn with the same profile and model.", {
+    action = { type = "string", enum = { "start", "status", "list", "result", "await", "cancel", "reconcile", "profiles", "message", "steer", "steer_session", "steering_status", "session", "fleet" } },
     text = { type = "string", description = "message: queue a follow-up; steer: amend active child; steer_session: amend active main session. Steering fences calls not yet admitted, never undoes in-flight effects." },
     session_id = { type = "string", description = "steer_session / steering_status: owned main session." },
     run_id = { type = "string", description = "Optional expected steering target; stale targets are refused." },
@@ -1003,7 +1003,7 @@ function M.dispatch(memory, name, args, role, ctx)
       if not source_id or source_id == "" then source_id = id end
       memory.require_session_workspace(id)
       local allocated, detail = workspaces.ensure(memory, id, source_id)
-      if not allocated then return {error="workspace_allocation_failed",detail=detail,workspace=memory.session_workspace(id)} end
+      if not allocated then return {error=workspaces.refusal_code(detail),detail=detail,workspace=memory.session_workspace(id)} end
       return {ok=true,session_id=id,workspace=allocated}
     elseif action == "set" then
       if workspace and workspace.required then return {error="workspace_managed",state=workspace.state} end

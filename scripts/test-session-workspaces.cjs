@@ -12,14 +12,20 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-session-workspaces-'));
 const home = path.join(root, 'home');
 const source = path.join(root, 'source');
 const db = path.join(root, 'memory.db');
-fs.mkdirSync(home, {recursive:true}); fs.mkdirSync(source, {recursive:true});
+const install = path.join(root, 'install');
+fs.mkdirSync(home, {recursive:true}); fs.mkdirSync(source, {recursive:true}); fs.mkdirSync(install, {recursive:true});
 let checks = 0;
 function check(value, message) { assert.ok(value, message); checks++; }
 function git(args) { spawnSync('git', ['-C', source, ...args], {stdio:'ignore'}); }
 function envFor(script, extras={}) {
   const env = {...process.env};
   for (const key of Object.keys(env)) if (/^(WASM_AGENT_|WA_|OPENAI_|ANTHROPIC_|OPENCODE_)/.test(key)) delete env[key];
+  // `WA_INSTALL_DIR` with a `runtime-worktree.txt` inside it is what makes this fixture hermetic:
+  // the tree a node runs from is read from that record, so the fallback a session uses when the
+  // source it names is gone is the disposable repo below - not whatever the machine's own install
+  // happens to point at (a real checkout would collect branches from a test run).
   Object.assign(env, {WASM_AGENT_HOME:home,WASM_AGENT_LUA_ROOT:repo,WA_SCRIPT:path.join(repo,'scripts',script),
+    WA_INSTALL_DIR:install.replaceAll('/', '\\'),
     WASM_AGENT_LLM_BASE_URL:'http://127.0.0.1:1',WASM_AGENT_LLM_API_KEY:'fixture-only',WASM_AGENT_LLM_MODEL:'fixture',
     WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_RELAY:'',WASM_AGENT_MANAGED:'0',...extras});
   return env;
@@ -41,6 +47,7 @@ function runAsync(script, extras={}) {
     git(['config','user.name','workspace-fixture']);git(['config','user.email','workspace-fixture@invalid']);
     fs.writeFileSync(path.join(source,'seed.txt'),'clean baseline\n');
     git(['add','seed.txt']);git(['commit','-m','baseline']);
+    fs.writeFileSync(path.join(install,'runtime-worktree.txt'),`${source.replaceAll('/', '\\')}\n`);
     const seeded=run('test-session-workspaces.lua',{WASM_AGENT_TEST_SOURCE:source});
     check(seeded.status===0,`allocator/fail-closed fixture exit ${seeded.status}: ${seeded.stderr}\n${seeded.stdout}`);
     check(seeded.stdout.includes('session workspaces ok (23 checks)'),`missing 23-check verdict: ${seeded.stdout}`);
