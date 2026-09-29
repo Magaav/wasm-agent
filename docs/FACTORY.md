@@ -100,3 +100,56 @@ Each of these cost real time in this batch; each has a cheap detector.
 - **Never retry an effect whose outcome is unknown.** Reconcile read-only first; this
   applies to a send, a deploy and a merge alike.
 - **A superseded branch is marked, not deleted, until its replacement is landed.**
+
+## Batch 1 — verified and deployed (2026-09-29)
+
+Nine concerns, three landings, one deploy. This is the first batch produced under the
+pipeline above, so its numbers are the baseline for the next one.
+
+**Landed** (`main`, remote heads = `main` only):
+
+| landing | content | gate | result |
+| --- | --- | --- | --- |
+| 1 | the seven verified branches | full gate on the merged tree, green | `d192fdf` |
+| 2 | peer-cwd fix + embedded-Lua notice | full gate on the merged tree, green | `878b60b` |
+| 3 | the node branch's docs (this file, EXECUTION.md, the notes-to-self rule) | none — docs-only, three files, and the deploy's own gate covers it | `b83ccae` |
+
+**Deployed**: `installed.txt` = `b83ccae`, branch `main`, built by `deploy.sh` at
+`2026-09-29T15:01:17Z`; node sha `ac25bbd9…`, sentinel sha `f265cf69…`, watcher
+`15928 → 11972`. The deploy built the new node from the canonical tree, proved it on a
+scratch port ("it answers") and only then waited for idle — the swap was blocked by the
+coordinator's own turns, which is why it sat in `busy after 60s; waiting for the turn to
+finish` for several minutes.
+
+**`verify-install.sh --json`: 14 of 16 pass.** Failing, and pre-existing rather than
+caused by this batch: `skills/git-orchestrator/SKILL.md` and
+`skills/git-orchestrator/scripts/audit.mjs` differ between the repository and
+`~/.wasm-agent/skills/`. Measured: the shipped copies are from **2026-09-26 20:59**, the
+repository's from **2026-09-29 11:34** (108 and 101 differing lines). Cause:
+`upgrade.sh` ships a skill only `if [ -n "$SOURCE_ROOT" ] && [ -f "$SOURCE_ROOT/skills/$skill/SKILL.md" ]`
+(`upgrade.sh:363-365`), and `SOURCE_ROOT` is derived from the directory holding the new
+binary (`upgrade.sh:69`) — so a deploy that stages the binary anywhere outside a checkout
+silently ships no skills, while `verify-install.sh` still compares them. The two failures
+survived an authorized install, which is exactly what the earlier note said would happen
+until the shipping path itself is fixed.
+
+**Facts worth carrying into the next batch:**
+
+- Three gate runs were needed for one batch, all at `WA_GATE_JOBS=4` to keep the machine
+  usable; that knob was written by this batch and used in anger for the first time on its
+  own landing.
+- Four of eight concerns were **changed by verification** — including two claims the
+  coordinator had already repeated to the operator. Self-report is evidence, never proof.
+- The remote branch set is `main` only: every landed branch deleted, and the dead
+  luna WIP abandoned rather than merged.
+- The canonical checkout is the sanctioned merge tree, by absolute path. It was 17 commits
+  behind `origin/main` before the first landing; the landing path's own first step now
+  refuses that state, which is how it was found.
+- `runtime-worktree.txt` pointed at the node's own worktree, so a deploy would have built a
+  tree missing the whole batch and the guard would have refused it. It now names the
+  canonical tree. A deploy's source and the sanctioned merge tree should be the same tree.
+- `wasm_the_first` is a **local-only** branch: `origin/wasm_the_first` has never existed, so
+  it must be merged by its local ref, not a remote-tracking one.
+- GitHub ssh auth failed intermittently for ~10 minutes (same URL, same key, succeeding
+  from one worktree and failing from another), then recovered. Retry the network step and
+  read the ref back rather than concluding the repository is unreachable.
