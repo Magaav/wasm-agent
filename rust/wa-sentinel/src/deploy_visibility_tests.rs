@@ -275,7 +275,7 @@ fn the_unit_manager_is_asked_and_no_competitor_is_started() {
     // The deploy itself, started by the manager so it is not a child of the watcher it replaces.
     let capture = std::env::temp_dir().join("wa-deploy.out");
     let args = vec!["--reason".to_string(), "fixture".to_string()];
-    let command = role::deploy_unit_command("wa-deploy-1-2", &capture, "sh", &args, false);
+    let command = role::deploy_unit_command("wa-deploy-1-2", &capture, "sh", &args, false, "wa-sentinel.service");
     assert_eq!(command[0], "systemd-run", "a transient unit is started by the manager: {command:?}");
     assert!(command.contains(&"--unit=wa-deploy-1-2".to_string()), "{command:?}");
     assert!(
@@ -295,7 +295,26 @@ fn the_unit_manager_is_asked_and_no_competitor_is_started() {
         "the deploy needs the watcher's PATH - a unit that had no cargo on PATH is one of the failures this \
          file exists for: {command:?}"
     );
+    assert!(
+        command.contains(&"--setenv=WA_SENTINEL_SUPERVISOR=wa-sentinel.service".to_string()),
+        "the deploy runs in a unit of its own, so which unit it must restart has to be handed down - \
+         otherwise it asks the wrong manager or spawns a competitor: {command:?}"
+    );
     assert!(!command.contains(&"watch".to_string()), "no competitor watcher: {command:?}");
     let tail = command.iter().position(|item| item == "--").expect("the command is separated from its args");
     assert_eq!(&command[tail + 1..], &["sh", "--reason", "fixture"], "{command:?}");
+}
+
+/// The trap the hand-off above closes, pinned as a fact: a deploy's own transient unit is *not* named for
+/// the watcher, and a process inside it cannot claim that unit as its supervisor - it must be told. (A name
+/// that contained `sentinel` would be worse still: the deploy would restart *itself* and leave the watcher
+/// on the old image, which is the failure that reads as success.)
+#[test]
+fn a_deploys_own_unit_is_never_mistaken_for_its_supervisor() {
+    use role::Owner;
+    assert_eq!(
+        role::owner_of(None, "0::/system.slice/wa-deploy-1790712000-4242.service"),
+        Owner::Unrecognised { unit: "wa-deploy-1790712000-4242.service".into() }
+    );
+    assert!(!role::deploy_unit_name(1790712000, 4242).contains("sentinel"), "the deploy's unit must not look like the watcher's");
 }

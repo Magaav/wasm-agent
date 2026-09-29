@@ -1069,10 +1069,13 @@ fn start_deploy_detached(script: &Path, capture: &Path, reason: &str, interprete
     // would be killed at the end, before it reports. When that is unavailable (or where there is no unit
     // manager at all, which is every Windows machine) the deploy is still detached and still captured, and
     // the capture says which of the two happened.
-    if let role::Owner::Systemd { user, .. } = role::owner() {
+    if let role::Owner::Systemd { unit, user } = role::owner() {
         let name = role::deploy_unit_name(now_epoch(), std::process::id());
+        // The deploy gets its own unit, so its cgroup no longer names the watcher's unit - hand that fact
+        // down, or the deploy asks the wrong manager for the wrong unit (or, worse, spawns a competitor).
+        let supervisor = if user { format!("user:{unit}") } else { unit.clone() };
         write_to_capture(&mut file, &deploy_capture_header(script, reason, &format!("unit {name}"), now_epoch()));
-        match role::start_deploy_unit(&name, capture, interpreter, args, user) {
+        match role::start_deploy_unit(&name, capture, interpreter, args, user, &supervisor) {
             Ok(started) => {
                 write_to_capture(
                     &mut file,

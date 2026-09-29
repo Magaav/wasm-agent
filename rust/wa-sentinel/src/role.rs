@@ -154,6 +154,12 @@ pub(crate) fn stop_unit(unit: &str, user: bool) -> Result<String> {
 
 /// A name for one deploy's transient unit. Unique per attempt, because it is what an operator asks for
 /// the exit status by (`systemctl status <name>`), and because two deploys must not be one unit.
+///
+/// The name deliberately does **not** contain `sentinel`: [`owner_of`] accepts a unit on its own evidence
+/// only when it is named for this process, and a deploy's own transient unit must never be mistaken for the
+/// watcher's. Which unit a deploy should restart is not something it can infer from its cgroup once it runs
+/// in a unit of its own - that fact is handed down in its environment instead
+/// (`WA_SENTINEL_SUPERVISOR`, see [`deploy_unit_command`]).
 pub(crate) fn deploy_unit_name(at: u64, pid: u32) -> String {
     format!("wa-deploy-{at}-{pid}")
 }
@@ -183,6 +189,7 @@ pub(crate) fn deploy_unit_command(
     interpreter: &str,
     args: &[String],
     user: bool,
+    supervisor: &str,
 ) -> Vec<String> {
     let mut command = vec!["systemd-run".to_string()];
     if user {
@@ -198,6 +205,11 @@ pub(crate) fn deploy_unit_command(
         command.push(format!("--working-directory={}", cwd.display()));
     }
     command.extend(deploy_environment());
+    // Which unit the deploy must ask to restart, handed down because the deploy can no longer work it out:
+    // it runs in a unit of its own now, so its cgroup names *that* rather than the watcher's. Without this
+    // the deploy would see a unit it cannot claim (see `owner_of`) and would fall back to spawning a
+    // competitor watcher - the flapping unit this change exists to stop, arrived at from a new direction.
+    command.push(format!("--setenv=WA_SENTINEL_SUPERVISOR={supervisor}"));
     command.push("--".to_string());
     command.push(interpreter.to_string());
     command.extend(args.iter().cloned());
@@ -231,8 +243,9 @@ pub(crate) fn start_deploy_unit(
     interpreter: &str,
     args: &[String],
     user: bool,
+    supervisor: &str,
 ) -> Result<String> {
-    let command = deploy_unit_command(name, capture, interpreter, args, user);
+    let command = deploy_unit_command(name, capture, interpreter, args, user, supervisor);
     // Non-blocking by design, so this only proves the manager accepted the unit; the capture file is the
     // evidence of what the script then did, and `systemctl status <name>` of how it ended.
     run(&command).with_context(|| format!("start {name} with systemd-run"))?;
