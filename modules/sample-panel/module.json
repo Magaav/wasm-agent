@@ -1,0 +1,11 @@
+{
+  "id": "sample-panel",
+  "name": "Sample panel",
+  "version": "0.1.0",
+  "tag": "module-sample-panel-v0.1.0",
+  "description": "One panel, one string, one capability it is refused.",
+  "attach": { "surface": "wa-window", "slot": "panel" },
+  "entry": "panel.html",
+  "capabilities": ["panel", "network"],
+  "enabled": false
+}

@@ -16,6 +16,11 @@ local redact = dofile("lua/core/redact.lua")
 local telemetry = dofile("lua/core/telemetry.lua")
 local updater = dofile("lua/core/update.lua")
 local workspaces = dofile("lua/core/workspaces.lua")
+-- A module is one directory under `modules/`, and this is the route that lists what is on disk and
+-- serves a module's own files. Loading the file *is* registering the route: it defines `wa_modules`
+-- itself, in the positional shape serve.rs calls a handler with. Without this line the dispatch entry
+-- answers 500 and every Lua-level test stays green - which is exactly what happened.
+local modules = dofile("lua/core/modules.lua")
 
 memory.setup()
 local agent

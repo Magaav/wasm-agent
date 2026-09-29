@@ -779,6 +779,18 @@ node scripts/test-token-audit.cjs
 WA_BIN="$BIN" node scripts/test-efficiency.cjs
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-patch-audit.lua" "$BIN" --db "$DB.patch-audit" | grep 'patch audit ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-patch-audit-agent.lua" "$BIN" --db "$DB.patch-audit-agent" | grep 'patch audit agent ok'
+# A module is one directory under `modules/`, so the route has to list what is on disk and a node
+# with no modules has to be a normal state rather than an error. The harness pins that behaviour -
+# off, on, granted, absent, path escapes, 404s - and the removal proof next to it deletes the
+# directory and asserts the claim the design exists for: no file outside `modules/<id>/` names the
+# module, before or after the deletion, so removing it needs no edit anywhere else.
+WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-modules.lua" \
+  WASM_AGENT_MODULES_DIR="$WASM_AGENT_LUA_ROOT/modules" "$BIN" --db "$DB.modules" | grep 'module route ok'
+WA_BIN="$BIN" bash scripts/test-modules-removal.sh
+# The same route over real HTTP, against scratch nodes. The Lua harness above pins the route's
+# behaviour *inside* the interpreter; this is the only check that would notice the route not being
+# registered or loaded at all, which is a 500/404 with every other check green.
+WA_BIN="$BIN" bash scripts/test-modules-route.sh
 # Real projector, isolated home, exact artifact recovery. No paid model or ignored A/B switch.
 WA_BIN="$BIN" bash scripts/bench-tool-budget.sh
 WA_BIN="$BIN" bash scripts/bench-tool-tail.sh

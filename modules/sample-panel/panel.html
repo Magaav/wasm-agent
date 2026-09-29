@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The module's own policy for its own document, and the only part of its declared capabilities it
+     can enforce by itself: nothing is loaded from anywhere, so a panel that declared `network`
+     could not use it from here even if the host granted it. The host's half of that story - refusing
+     a capability it does not grant - is the badge above this frame. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<title>Sample panel</title>
+<style>
+  body { margin: 0; padding: 18px 14px; background: #0f1115; color: #cbd2dc;
+         font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; }
+  p { margin: 0; }
+  code { color: #9ecbff; }
+</style>
+</head>
+<body>
+<!-- A module is a directory. This one renders a single string and declares a capability it is
+     not granted (`network`), so the host shows a refusal beside it instead of nothing at all. -->
+<p>A module is a directory: this panel is <code>panel.html</code> inside one.</p>
+</body>
+</html>

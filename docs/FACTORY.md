@@ -91,6 +91,40 @@ Each of these cost real time in this batch; each has a cheap detector.
 7. **Deploy through the sentinel**, never from inside a run: queue the request, then read
    `installed.txt` and `deploy-result.json` rather than trusting the request's receipt.
 
+## Modules — a feature that is one directory (2026-09-29)
+
+A new capability enters this repository as **a module**: `modules/<id>/` with a `module.json`, listed
+by a Lua route that reads the directory, and removed by deleting it. `docs/MODULES.md` is the short
+form (add path, remove path, proof); this section is the part that belongs in the factory ledger —
+the exact commands and why they are the whole story.
+
+**Remove a module.** No registry, no route table and no document outside the directory names it, so
+there is nothing else to edit:
+
+```bash
+git rm -r modules/<id>
+git commit -m "remove module <id>"
+```
+
+**Put it back.** The tag is written in the module's own manifest when it is added
+(`module-<id>-v<version>`), so recovery works after the removal is committed and merged:
+
+```bash
+git tag module-<id>-v<version>                    # when the module is added
+git checkout module-<id>-v<version> -- modules/<id>   # when it is wanted back
+```
+
+A module nobody asked for is off, and the ask is data (`WASM_AGENT_MODULES=<id>`, or `"enabled": true`
+in its manifest), so an ask that still names a deleted module is an ask about nothing rather than an
+error — one deletion fewer thing to keep in step.
+
+**The proof is the deliverable.** `bash scripts/test-modules-removal.sh` asserts (a) the module is
+listed and mounted while its directory exists, (b) no listing mentions it after the directory is
+deleted, (c) the host page mounts nothing for it and reports no error, and (d) **no file outside
+`modules/<id>/` names that module's id** — before *and* after the deletion, over every file in a
+scratch copy of the tree, which is the assertion that makes "removed completely" a measurement
+rather than a claim. `--render` adds the headless render of the host page.
+
 ## Batch hygiene
 
 - **One hot-file editor unlanded at a time.** Five branches on `scripts/test.sh` is the
