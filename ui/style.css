@@ -47,17 +47,28 @@ wa-orchestrator { display:flex; flex-direction:column; width:100%; height:100%; 
 .orchestrator-canvas { flex:1; min-width:0; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); grid-auto-rows:minmax(250px,1fr); gap:var(--gap); padding:var(--space); overflow:auto; }
 .orchestrator-canvas[data-count="0"], .orchestrator-canvas[data-count="1"] { grid-template-columns:minmax(0,1fr); }
 .orchestrator-canvas[data-count="3"] { grid-template-columns:repeat(3,minmax(0,1fr)); }
-.orchestrator-canvas.has-expanded { grid-template-columns:minmax(0,1fr); }
-.orchestrator-canvas.has-expanded wa-agent-session:not(.agent-expanded) { display:none; }
+/* The chat shell: one element the main conversation and every child pane both host. It is the flex
+   child of `.panel` (or of a pane), so the transcript region keeps its own scroll and the composer
+   stays at the bottom, exactly as when they were written out by hand. See DESIGN.md §10. */
+wa-chat-shell { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; }
+/* A host's own extra rows (a pane's live readout), between the transcript and the composer. */
+.chat-host { display:flex; flex-direction:column; }
+.chat-host:empty { display:none; }
 wa-agent-session { min-width:0; min-height:0; display:flex; flex-direction:column; background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; }
 .agent-pane-head { padding:var(--space); flex-wrap:wrap; }
+/* The pane's header controls are strokes: `.icon-btn svg { fill:currentColor }` would turn the squared
+   outline into a solid block. */
+.agent-pane-head .icon-btn svg { fill:none; }
 .agent-transcript { flex:1; min-height:0; overflow:auto; padding:var(--pad); display:flex; flex-direction:column; gap:var(--gap); }
 .agent-transcript wa-message { flex:none; max-width:100%; }
 .agent-transcript wa-message.assistant { width:min(760px,100%); }
 .agent-transcript wa-run { width:100%; }
 .agent-transcript pre { overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
-.agent-composer { display:flex; flex-wrap:wrap; gap:var(--gap); padding:var(--space); border-top:1px solid var(--line); }
-.agent-composer textarea { width:100%; resize:vertical; min-height:55px; background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:var(--radius-sm); padding:var(--space); font:inherit; }
+/* A pane's own per-message actions (Steer, Cancel task), where the main chat keeps its Steer. */
+.chat-actions { display:flex; align-items:center; gap:var(--gap); }
+.chat-action { border:1px solid var(--line); border-radius:var(--radius); padding:var(--space) var(--pad); background:var(--panel-2); color:var(--text); cursor:pointer; font:inherit; font-size:12px; }
+.chat-action:hover { border-color:var(--accent); }
+.chat-action:disabled { opacity:.5; cursor:default; }
 .agent-notice { padding:0 var(--space); color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
 .agent-preview { padding:var(--pad); white-space:pre-wrap; overflow:auto; max-height:40%; overflow-wrap:anywhere; }
 wa-orchestrator button { cursor:pointer; color:var(--text); background:var(--panel-2); border:1px solid var(--line); border-radius:var(--radius-sm); padding:var(--space); font:inherit; }
@@ -121,7 +132,7 @@ body.compact {
 a[href] { color: #8bbcff; text-decoration: underline; text-underline-offset: .15em; }
 a[href]:hover { opacity: .8; }
 a[href]:focus-visible { outline: 2px solid #8bbcff; outline-offset: 2px; }
-#steer { border: 1px solid var(--line); border-radius: var(--radius); padding: var(--pad); background: var(--panel-2); color: var(--text); cursor: pointer; }
+#steer, .chat-action { border: 1px solid var(--line); border-radius: var(--radius); padding: var(--pad); background: var(--panel-2); color: var(--text); cursor: pointer; }
 
 .topbar {
   display: flex; align-items: center; justify-content: space-between;
@@ -339,7 +350,7 @@ wa-trace { display: block; align-self: flex-start; max-width: 760px; width: 100%
 .jump:hover { border-color: var(--accent); }
 
 /* engine: expandable topics (nodes, spells, tools) */
-body.engine .messages, body.engine .composer, body.engine .terminal, body.engine .control { display: none; }
+body.engine .messages, body.engine .composer, body.engine wa-chat-shell, body.engine .terminal, body.engine .control { display: none; }
 .engine { display: none; flex: 1; min-height: 0; flex-direction: column; }
 body.engine .engine { display: flex; }
 .engine-bar {
@@ -491,6 +502,7 @@ body.control .control { display: flex; }
 /* terminal (client shell) */
 body.term .messages { display: none; }
 body.term .composer { display: none; }
+body.term wa-chat-shell { display: none; }
 .terminal { display: none; flex: 1; min-height: 0; flex-direction: column; }
 body.term .terminal { display: flex; }
 .term-bar {
@@ -583,6 +595,10 @@ body.term .terminal { display: flex; }
    outline uses the accent so it reads as "drop here", not as an error. */
 .panel.dropping { outline: 2px dashed var(--accent); outline-offset: -4px; }
 .panel.dropping .composer { border-color: var(--accent); }
+/* The chat shell is the drop target now: a drop is about the conversation, and every chat surface
+   accepts one - the main chat and each child pane alike. */
+wa-chat-shell.dropping { outline: 2px dashed var(--accent); outline-offset: -4px; }
+wa-chat-shell.dropping .composer { border-color: var(--accent); }
 
 .composer-row { display: flex; gap: var(--gap); align-items: flex-end; }
 .composer textarea {
@@ -650,7 +666,7 @@ body.term .terminal { display: flex; }
 .chip:hover { border-color: var(--accent); }
 .chip-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--ok); flex: none; }
 .chip.local .chip-dot { background: var(--warn); }
-.chip #chip-model { max-width: 145px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip #chip-model, .chip .chip-label { max-width: 145px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip-usage { color: var(--muted); border-left: 1px solid var(--line); padding-left: var(--space); }
 .chip-usage:empty { display: none; }
 
@@ -664,6 +680,8 @@ wa-balloon.popover {
 .pop-row { display: flex; align-items: center; justify-content: space-between; gap: var(--gap); margin-bottom: var(--gap); }
 .pop-head { color: var(--muted); text-transform: uppercase; letter-spacing: .6px; font-size: 10.5px; padding: var(--space) 0; }
 .pop-row .pop-head { padding: 0; }
+/* The value side of a facts row (a child pane's model strip); numbers line up. */
+.pop-value { color: var(--text); font-size: 12px; text-align: right; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 .wa-select {
   flex: 1; min-width: 0; max-width: 65%;
   background: var(--panel-2); color: var(--text); border: 1px solid var(--line);

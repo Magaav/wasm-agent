@@ -1,7 +1,8 @@
-// Unit test for the composer's attachment handling, extracted from ui/app.js.
-// This reproduces composedText/composedBody exactly as app.js defines them, so
-// a regression in the real functions is caught here only if they are kept in
-// step - the source of truth is the copy in app.js, asserted below.
+// Unit test for the composer's attachment handling. Two halves of one rule: the read policy and the
+// chips live in the shared <wa-chat-shell> (ui/components.js), and app.js delegates the inlining to it
+// so the main conversation and a child pane cannot disagree about what `[file: name]` means. Both
+// halves are read out of the real sources here rather than re-implemented, because the source of truth
+// is the code that ships - asserted below, hole by hole.
 const fs = require("fs");
 let failures = 0;
 const check = (condition, label) => {
@@ -10,25 +11,36 @@ const check = (condition, label) => {
 };
 
 const source = fs.readFileSync("ui/app.js", "utf8");
+const shellSource = fs.readFileSync("ui/components.js", "utf8");
 
 // The test is worthless if the functions drifted, so assert the same bodies.
 check(/function composedText\(text\)/.test(source), "app.js still defines composedText");
 check(/function composedBody\(text, options = \{\}\)/.test(source), "app.js still defines composedBody");
-check(/readAsDataURL/.test(source), "app.js reads images as data URLs");
-check(/attachment-thumb/.test(source), "app.js renders a thumbnail");
-check(/IMAGE_TYPES\s*=\s*\["image\/png"/.test(source), "app.js declares the accepted image types");
+check(/chatShell\.composedText\(/.test(source), "app.js delegates the inlining rule to the shared shell");
+check(/readAsDataURL/.test(shellSource), "the shared shell reads images as data URLs");
+check(/attachment-thumb/.test(shellSource), "the shared shell renders a thumbnail");
+check(/CHAT_IMAGE_TYPES\s*=\s*\["image\/png"/.test(shellSource), "the shared shell declares the accepted image types");
+
+// The inlining rule, out of the shell: the method text is wrapped in an object literal so it can be
+// evaluated on its own, with the attachment list as `this._attachments`.
+const shellMethod = shellSource.match(/\n  composedText\(text\) \{[\s\S]*?\n  \}/)[0];
+const makeShell = new Function("attachments", `
+  const self = { _attachments: attachments, _ensure() {} };
+  const method = ({ ${shellMethod} }).composedText;
+  return { composedText: (text) => method.call(self, text) };
+`);
 
 // Pull the two functions out of app.js and evaluate them with stubs. `chatSession` is part of the
 // sandbox because composedBody reads it: the thread a turn belongs to is named in the body, and a
 // body that lost it would send the turn to whatever thread was newest instead.
 const attachmentsRef = { current: [] };
-const sandbox = new Function("attachments", `
+const sandbox = new Function("attachments", "chatShell", `
   let chatSession = "";
   ${source.match(/function composedText\(text\)\s*\{[\s\S]*?\n\}/)[0]}
   ${source.match(/function composedBody\(text, options = \{\}\)\s*\{[\s\S]*?\n\}/)[0]}
   return { composedText, composedBody, setThread: (id) => { chatSession = id; } };
 `);
-const API = sandbox(attachmentsRef.current);
+const API = sandbox(attachmentsRef.current, makeShell(attachmentsRef.current));
 
 // ---- text only: unchanged legacy behaviour -------------------------------
 attachmentsRef.current.length = 0;

@@ -90,8 +90,12 @@
       </div>
     </header>
 
-    <main id="messages" class="messages">
-      <button type="button" id="jump" class="jump" title="Jump to the latest">\u2193 latest</button>
+    <!-- The conversation is the shared shell (components.js). The app authors the children only it has:
+         the jump control and the empty state (no data-slot, so they land in the transcript region), the
+         account/mic/status chips, the Steer action, and the status balloon - which stays authored here
+         because it is the model/harness diagnostics panel (§6), not chat furniture. -->
+    <wa-chat-shell id="chat" primary>
+      <button type="button" id="jump" class="jump" title="Jump to the latest">↓ latest</button>
       <div class="empty" id="empty">
         <h1>wasm-agent</h1>
         <p>Talk to your agent. It remembers what you tell it and can search your message ledger.</p>
@@ -101,7 +105,44 @@
           <button data-prompt="use the echo tool to echo 'wasm plugins are alive'">use a WASM tool</button>
         </div>
       </div>
-    </main>
+      <!-- The pill is the icon and nothing beside it. A name there was truncated to "ma…",
+           which said nothing the tooltip does not say better. -->
+      <button id="user-btn" class="chip user-chip" type="button" data-slot="footer-left" title="Account" aria-haspopup="true" aria-label="Account">
+        <span class="user-avatar" id="user-avatar">?</span>
+      </button>
+      <button id="status-btn" class="chip" type="button" data-slot="footer-left" title="Provider, model and usage" aria-haspopup="true" aria-expanded="false">
+        <span class="chip-dot"></span>
+        <span id="chip-model">connecting…</span>
+        <span id="chip-usage" class="chip-usage"></span>
+      </button>
+      <button id="mic" class="icon-btn" type="button" data-slot="footer-left" title="Talk with voice" aria-label="Talk with voice">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zm7 8a7 7 0 0 1-6 6.9V21h-2v-3.1A7 7 0 0 1 5 11h2a5 5 0 0 0 10 0h2z"/></svg>
+      </button>
+      <button id="steer" type="button" data-slot="footer-right" hidden title="Send this text to the active run (Ctrl+Enter)">Steer</button>
+      <wa-balloon id="status-balloon" class="popover" data-slot="balloon" anchor="status-btn">
+        <div class="pop-row">
+          <label class="pop-head" for="provider-select">provider</label>
+          <select id="provider-select" class="wa-select"></select>
+        </div>
+        <div class="pop-row">
+          <label class="pop-head" for="model-select">model</label>
+          <select id="model-select" class="wa-select"></select>
+        </div>
+        <div class="pop-row">
+          <label class="pop-head" for="reasoning-select">reasoning</label>
+          <select id="reasoning-select" class="wa-select"></select>
+        </div>
+        <div id="settings-error" class="usage-note" role="alert"></div>
+        <div class="pop-head">context</div>
+        <div id="context-box" class="usage-box"></div>
+        <div class="pop-head">limits</div>
+        <div id="limits-box" class="usage-box"></div>
+        <div class="pop-head">tokens</div>
+        <div id="usage-box" class="usage-box"></div>
+        <wa-harness-status id="harness-status"></wa-harness-status>
+        <div class="pop-foot" id="pop-foot"></div>
+      </wa-balloon>
+    </wa-chat-shell>
 
     <section id="terminal" class="terminal" hidden>
       <header class="term-bar">
@@ -204,66 +245,6 @@
         </button>
       </form>
     </section>
-
-    <form id="composer" class="composer">
-      <div id="attachments" class="attachments"></div>
-      <div class="composer-row">
-        <textarea id="input" rows="1" placeholder="Message wasm-agent…"></textarea>
-        <button id="send" class="send" type="submit" title="Send" aria-label="Send">
-          <svg class="icon-send" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 21 23 12 2 3v7l15 2-15 2z"/></svg>
-          <svg class="icon-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
-        </button>
-      </div>
-      <div class="composer-footer">
-        <div class="footer-left">
-          <!-- The pill is the icon and nothing beside it. A name there was truncated to "ma…",
-               which said nothing the tooltip does not say better. -->
-          <button id="user-btn" class="chip user-chip" type="button" title="Account" aria-haspopup="true" aria-label="Account">
-            <span class="user-avatar" id="user-avatar">?</span>
-          </button>
-          <button id="status-btn" class="chip" type="button" title="Provider, model and usage" aria-haspopup="true" aria-expanded="false">
-            <span class="chip-dot"></span>
-            <span id="chip-model">connecting…</span>
-            <span id="chip-usage" class="chip-usage"></span>
-          </button>
-          <button id="mic" class="icon-btn" type="button" title="Talk with voice" aria-label="Talk with voice">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zm7 8a7 7 0 0 1-6 6.9V21h-2v-3.1A7 7 0 0 1 5 11h2a5 5 0 0 0 10 0h2z"/></svg>
-          </button>
-          <button id="attach" class="icon-btn" type="button" title="Append a file" aria-label="Append a file">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.6 8.7 14.4a1.5 1.5 0 0 0 2.1 2.1l7.8-7.8a3.5 3.5 0 0 0-5-5l-8.1 8.1a5.5 5.5 0 0 0 7.8 7.8l6.7-6.7-1.4-1.4-6.7 6.7a3.5 3.5 0 0 1-5-5l8.1-8.1a1.5 1.5 0 0 1 2.1 2.1z"/></svg>
-          </button>
-          <input id="file" type="file" hidden multiple />
-        </div>
-        <div class="footer-right">
-          <button id="steer" type="button" hidden title="Send this text to the active run (Ctrl+Enter)">Steer</button>
-          <span id="composer-model" class="composer-model" title="Model used for the latest request">connecting…</span>
-        </div>
-      </div>
-
-      <wa-balloon id="status-balloon" class="popover" anchor="status-btn">
-        <div class="pop-row">
-          <label class="pop-head" for="provider-select">provider</label>
-          <select id="provider-select" class="wa-select"></select>
-        </div>
-        <div class="pop-row">
-          <label class="pop-head" for="model-select">model</label>
-          <select id="model-select" class="wa-select"></select>
-        </div>
-        <div class="pop-row">
-          <label class="pop-head" for="reasoning-select">reasoning</label>
-          <select id="reasoning-select" class="wa-select"></select>
-        </div>
-        <div id="settings-error" class="usage-note" role="alert"></div>
-        <div class="pop-head">context</div>
-        <div id="context-box" class="usage-box"></div>
-        <div class="pop-head">limits</div>
-        <div id="limits-box" class="usage-box"></div>
-        <div class="pop-head">tokens</div>
-        <div id="usage-box" class="usage-box"></div>
-        <wa-harness-status id="harness-status"></wa-harness-status>
-        <div class="pop-foot" id="pop-foot"></div>
-      </wa-balloon>
-    </form>
   </div>
 
   <wa-menu id="user-menu"></wa-menu>
