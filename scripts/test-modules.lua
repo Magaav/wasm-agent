@@ -89,8 +89,8 @@ if subject then
     local mine = find(off, subject.id)
     ok(mine ~= nil, "the module is still discoverable while it is off")
     ok(mine.enabled == false and mine.mounted == false, "an unasked module is neither enabled nor mounted")
-    ok(mine.entry_url == "../" .. subject.id .. "/" .. subject.entry,
-       "the entry is addressed beside the host page, which is where the module directory is")
+    ok(mine.entry_url == subject.id .. "/" .. subject.entry,
+       "the entry is a sibling of the host page, which is where the module directory is")
     local denied = request("file", subject.id, subject.entry)
     ok(denied.status == 403, "the files of an unasked module are refused, not served: " .. tostring(denied.body))
     ok(json.decode(denied.body).error == "module_not_enabled", "the refusal names why it refused")
@@ -153,11 +153,13 @@ else
   print("module route: no module in " .. base.dir .. " - the mount, refusal and file-serving checks did NOT run")
 end
 
--- 5. The module system's own directory is not a module, and an empty tree is not an error: this is
---    the state a tree is in after a module is deleted, and a page that showed an error there would
---    be lying about a node that is behaving correctly.
+-- 5. A directory that holds no module directory holds no modules, and an empty tree is not an
+--    error: this is the state a tree is in after a module is deleted, and a page that showed an
+--    error there would be lying about a node that is behaving correctly. The directory used is the
+--    tree root - real, and not one this module system owns - so the check also says modules are
+--    found under `modules/` and nowhere else.
 with_ask(subject and subject.id or absent, "", function()
-  overrides.WASM_AGENT_MODULES_DIR = modules.root() .. "/host"
+  overrides.WASM_AGENT_MODULES_DIR = modules.root() .. "/.."
   local empty = listing()
   ok(empty.exists == true and empty.available == 0, "a directory with no manifest holds no modules")
   ok(#empty.mounted == 0 and #empty.issues == 0, "asking for a module that is not there is not an error")
@@ -170,14 +172,17 @@ with_ask(subject and subject.id or absent, "", function()
 end)
 
 -- 6. The page's own two fetches, which the route answers with no ask at all: the page itself, and
---    its listing where a page expects to find it.
-local page = request("file", "host", "index.html")
+--    its listing where a page expects to find it. Both live under the module system's own empty id -
+--    there is deliberately no second name for them, because a page reachable at two depths resolves
+--    `<id>/<entry>` differently at each.
+local page = request("file", "", "index.html")
 ok(page.status == 200 and page.content_type:match("^text/html") ~= nil, "the host page is served")
 ok(page.body:find("waHostReady", 1, true) ~= nil, "the host page is the one that mounts modules")
-local index = request("file", "host", "index.json")
+local index = request("file", "", "index.json")
 ok(index.status == 200, "the listing is served beside the page")
 ok(index.body == request("list").body, "the page's listing is the route's listing for this tree")
-ok(request("file", "", "index.json").status == 200, "an empty id means the module system itself")
+ok(request("file", "", "not-a-page.html").status == 404, "the module system serves its page and its listing only")
+ok(request("file", absent, "index.html").status == 404, "the page is not reachable under a name that is not a module")
 
 -- 7. What the route refuses, so a caller cannot mistake a bad request for an empty answer.
 local registered = request("list", absent, "")

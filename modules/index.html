@@ -9,13 +9,19 @@
 
   This page holds no list of modules. It fetches the listing from beside itself - `index.json`,
   which the module route computes by reading `modules/`, and which a static copy of this tree
-  carries because the same Lua wrote it. So deleting `modules/<id>/` removes that module from
-  this page with no edit here, and a module nobody enabled changes nothing on screen: the page
-  renders only the ids in the listing's `mounted` list, and counts only those.
+  carries because the same Lua wrote it. So deleting `modules/<id>/` removes that module from this
+  page with no edit here, and a module nobody enabled changes nothing on screen: the page renders
+  only the ids in the listing's `mounted` list, and counts only those.
 
-  A module is not the host: every panel is loaded in a sandboxed frame (no same-origin) with a
-  content policy that denies subresources, so a capability this host refuses is refused in
-  practice and not only in a label.
+  It is served at the *root* of the modules directory - `/modules/` in a node, the root of a static
+  copy of `modules/` for a headless render - because a module is a sibling of this page and its
+  `entry_url` is relative to it. A page served one level deeper would resolve every panel outside
+  the tree that holds it.
+
+  A module is not the host: every panel is loaded in a sandboxed frame, so a module runs beside this
+  page with an opaque origin and cannot reach into it. What that does NOT do is enforce the
+  capabilities a module declares - a refusal is shown here, and the badge is the visible half; the
+  enforcing half is a decision for the route (see docs/MODULES.md, "What is not enforced").
 -->
 <style>
   :root { color-scheme: dark; }
@@ -46,8 +52,11 @@
 <main id="mount"></main>
 <script>
 (function () {
+  // The listing and the module directories share this page's own directory, so both URLs - the
+  // listing it fetches and the panels it mounts - are relative to the page and nothing else.
   var listing_url = location.pathname.replace(/[^/]*$/, '') + 'index.json';
-  var state = { listing_url: listing_url, ok: false, available: 0, mounted: [], refused: {}, errors: [] };
+  var state = { listing_url: listing_url, ok: false, available: 0, mounted: [], refused: {},
+                errors: [], listing: null };
   window.waHostState = state;
   var mount = document.getElementById('mount');
   var status = document.getElementById('status');
@@ -70,7 +79,7 @@
     header.append(element('span', 'name', module.name || module.id));
     header.append(element('span', 'meta', 'v' + (module.version || '?')));
     if (module.tag) header.append(element('span', 'tag', module.tag));
-    header.append(element('span', 'slot', (module.attach && module.attach.surface || '') + ' · ' + (module.description || '')));
+    header.append(element('span', 'slot', (attach.surface || '') + ' · ' + (module.description || '')));
     section.append(header);
 
     var refused = module.refused || [];
@@ -83,10 +92,9 @@
     }
 
     var frame = document.createElement('iframe');
-    // A module runs beside the host, never inside it: opaque origin, and a policy that denies
-    // every subresource, so a refused capability cannot quietly be exercised anyway.
+    // A module runs beside the host, never inside it: `sandbox` without `allow-same-origin` gives
+    // the panel an opaque origin, so it cannot read this page, its listing or its siblings.
     frame.setAttribute('sandbox', 'allow-scripts');
-    frame.setAttribute('csp', "default-src 'none'; style-src 'unsafe-inline'");
     frame.setAttribute('title', module.name || module.id);
     frame.src = new URL(module.entry_url, location.href).href;
     section.append(frame);
@@ -107,10 +115,13 @@
       status.textContent = 'module listing unavailable (' + error.message + ')';
       return state;
     }
+    state.listing = listing;
     state.ok = listing.ok === true;
     state.available = listing.available || 0;
     var byId = {};
     (listing.modules || []).forEach(function (module) { byId[module.id] = module; });
+    // Only what the route says is mounted. An id in `available` but not in `mounted` is present and
+    // off, which is a state this page renders as nothing at all - not as a broken panel.
     (listing.mounted || []).forEach(function (id) {
       if (byId[id]) mountModule(byId[id]);
       else state.errors.push('listing mounted ' + id + ' with no manifest behind it');

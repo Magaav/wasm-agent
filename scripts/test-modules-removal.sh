@@ -47,7 +47,12 @@ while IFS= read -r variable; do
 done < <(compgen -e)
 
 BIN="${WA_BIN:-}"
-if [ -z "$BIN" ]; then
+# A native Windows build is `wa.exe` and the name without the extension is what the rest of the
+# repository passes around: resolve it here rather than failing with "no node binary" on a tree that
+# has one.
+if [ -n "$BIN" ] && [ ! -x "$BIN" ] && [ -x "$BIN.exe" ]; then BIN="$BIN.exe"; fi
+if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+  BIN=""
   for candidate in rust/target/release/wa.exe rust/target/release/wa; do
     if [ -x "$candidate" ]; then BIN="$candidate"; break; fi
   done
@@ -56,6 +61,7 @@ if [ -z "$BIN" ]; then
   echo "  no node binary: build it first (cargo build --release --offline --manifest-path rust/Cargo.toml)" >&2
   exit 1
 fi
+echo "node binary: $BIN"
 BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
 
 # A path a native Windows binary can open. /c/... is unusable as an argument, and the failure looks
@@ -237,11 +243,15 @@ if [ "$RENDER" = "1" ]; then
     FAILED=1
   else
     mkdir -p "$RENDER_OUT"
+    HELPER="$(native "$ROOT/scripts/test-modules-host.mjs")"
     render_case() { # render_case <name> <ask> <capabilities>
-      local args=(--tree "$TREE" --out "$RENDER_OUT/$1" --observer "$OBSERVER" --ask "$2" --capabilities "$3"
-                  --bin "$BIN" --label "$1")
-      [ -n "${WA_CHROME:-}" ] && args+=(--chrome "$WA_CHROME")
-      if node "$ROOT/scripts/test-modules-host.mjs" "${args[@]}"; then
+      # Native paths for the helper and the page it renders: bash paths are fine for this script's own
+      # `diff`/`cp`, and `/tmp/...` handed to a native Windows node resolves somewhere else entirely.
+      local args=(--tree "$(native "$TREE")" --out "$(native "$RENDER_OUT/$1")"
+                  --observer "$(native "$OBSERVER")" --ask "$2" --capabilities "$3"
+                  --bin "$(native "$BIN")" --label "$1")
+      [ -n "${WA_CHROME:-}" ] && args+=(--chrome "$(native "$WA_CHROME")")
+      if node "$HELPER" "${args[@]}"; then
         echo "  ok   render $1"
       else
         echo "  FAIL render $1" >&2
@@ -257,9 +267,9 @@ if [ "$RENDER" = "1" ]; then
     mkdir -p "$GONE_TREE"
     cp -a "$TREE/." "$GONE_TREE/"
     rm -rf "$GONE_TREE/modules/$ID"
-    if node "$ROOT/scripts/test-modules-host.mjs" --tree "$GONE_TREE" --out "$RENDER_OUT/deleted" \
-         --observer "$OBSERVER" --ask "$ID" --capabilities "" --bin "$BIN" --label deleted \
-         ${WA_CHROME:+--chrome "$WA_CHROME"}; then
+    if node "$HELPER" --tree "$(native "$GONE_TREE")" --out "$(native "$RENDER_OUT/deleted")" \
+         --observer "$(native "$OBSERVER")" --ask "$ID" --capabilities "" --bin "$(native "$BIN")" \
+         --label deleted ${WA_CHROME:+--chrome "$(native "$WA_CHROME")"}; then
       echo "  ok   render deleted"
     else
       echo "  FAIL render deleted" >&2

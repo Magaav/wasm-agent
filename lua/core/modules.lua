@@ -16,11 +16,13 @@ local json = dofile("lua/vendor/json.lua")
 local M = {}
 
 local MANIFEST = "module.json"
--- The module system's own page lives beside the modules, not in one of them. It carries no
--- manifest, which is exactly what keeps it out of the listing: a directory is a module only
--- when it holds a `module.json`, so the host page, an abandoned directory, or a stray file can
--- never become a phantom module.
-local HOST_DIR = "host"
+-- The module system's own page lives at the *root* of the modules directory, as a file beside the
+-- module directories. Two reasons, and the first is the load-bearing one: the module URLs are
+-- relative to the page (`<id>/<entry>`, a sibling), so a page served one level down would resolve
+-- every panel to nothing. The second is that a file can never become a phantom module - a
+-- directory is a module only when it holds a `module.json`.
+local PAGE = "index.html"
+local LISTING = "index.json"
 
 -- What this host grants a module. A manifest declares what it needs; everything not granted here
 -- is refused *out loud* - the listing carries the refusal, the host page renders it beside the
@@ -162,9 +164,11 @@ local function describe(root, name, manifest, asked, granted, issues)
     description = type(manifest.description) == "string" and manifest.description or "",
     attach = { surface = attach.surface or "", slot = attach.slot or "" },
     entry = entry,
-    -- Relative to the host page, which sits beside the module directories in both places it is
-    -- served from: `modules/host/` in a node, the root of a static tree.
-    entry_url = entry ~= "" and ("../" .. name .. "/" .. entry) or "",
+    -- Relative to the host page, which is served *at* the root of the modules directory: the module
+    -- directories are its siblings in a node and in a static copy of this tree alike, so one
+    -- relative form is right in both. The binding has to serve the page at that root with a
+    -- trailing slash (`/modules/`), or a sibling URL resolves outside it - docs/MODULES.md says so.
+    entry_url = entry ~= "" and (name .. "/" .. entry) or "",
     capabilities = declared,
     refused = refused,
     enabled = enabled,
@@ -182,7 +186,7 @@ function M.scan()
   if not entries then return modules, issues, { dir = root, exists = false } end
   local asked, granted = asked_for(), M.granted()
   for _, item in ipairs(entries) do
-    if item.kind == "dir" and item.name ~= HOST_DIR then
+    if item.kind == "dir" then
       local manifest, problem = read_manifest(root .. "/" .. item.name)
       if not manifest then
         if problem ~= "no " .. MANIFEST then issues[#issues + 1] = item.name .. ": " .. problem end
@@ -251,14 +255,14 @@ end
 function M.serve(id, path)
   local root = M.root()
   id, path = id or "", path or ""
-  if id == "" or id == HOST_DIR then
-    -- The module system's own page, and its listing where a page expects to find it. `index.json`
-    -- is not a file on disk: it is this listing, so the page never carries a copy of what is on
-    -- disk, which is what would survive a deletion and lie.
-    if path == "" or path == "index.html" then
-      return file(HOST_DIR .. "/index.html", root .. "/" .. HOST_DIR .. "/index.html")
-    end
-    if path == "index.json" then
+  if id == "" then
+    -- The module system's own surface, which belongs to no module: its page, and its listing. There
+    -- is deliberately no second name for these - `host` used to be one, and a page reachable at two
+    -- depths has a different answer for `<id>/<entry>` at each, which is a trap rather than a
+    -- convenience. `index.json` is not a file on disk but this listing, so the page never carries a
+    -- copy of what is on disk, which is what would survive a deletion and lie.
+    if path == "" or path == PAGE then return file(PAGE, root .. "/" .. PAGE) end
+    if path == LISTING then
       return reply(200, "application/json; charset=utf-8", json.encode(M.listing()))
     end
     return problem(404, "not_found", { id = id, path = path })
