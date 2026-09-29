@@ -24,6 +24,14 @@ local workspaces = dofile("lua/core/workspaces.lua")
 
 local M = {}
 
+-- Admission refusals that mean "come back later": the destination has room for the request in
+-- principle and only its current load says no, so the coordinator may try again - and the child
+-- session a refused attempt created stays for the retry to reuse (see `M.start`). Every other
+-- refusal is the destination's answer about the request itself. `orchestrator.unadmitted` is the
+-- other half of this rule (which of them permit moving to the next candidate), and
+-- `scripts/test-placed-child-workspace.lua` pins the two together so they cannot drift apart.
+M.RETRYABLE_ADMISSION = { node_full = true, queue_full = true, subagent_runtime_unavailable = true }
+
 -- Tools that reach outside a sandbox conversation. Any profile that names one
 -- must be explicitly operator-authorized; a built-in read-only profile never is.
 local BROAD = {
@@ -530,13 +538,35 @@ function M.start(args, ctx)
       return { error = workspaces.refusal_code(source_refusal), detail = source_refusal, not_started = true }
     end
   end
-  local session_id = memory.start_session(ctx.node_id, "subagent", {
-    user_id = ctx.user_id,
-    node_id = ctx.node_id,
-    title = tostring(args.title or prompt):gsub('%s+',' '):sub(1,100),
-    parent_session_id = ctx.session_id,
-    workspace_required = needs_workspace,
-  })
+  local session_id
+  -- One shell per *request*, not one per attempt. The coordinator retries a dispatch with the same
+  -- idempotency key, and the runtime's own dedupe cannot help before admission: `resolve` answers
+  -- `found:false` for a key nothing was admitted for, so a destination that refuses at admission
+  -- (a full node, a runtime that is not up) would write a fresh child session and a fresh worktree on
+  -- every retry - measured: one empty, already-ended shell per attempt, ~840 in forty minutes, and a
+  -- git worktree to go with each. The derived id makes the next attempt find the shell the first one
+  -- wrote and reuse its checkout, so a retry has the same effect as the attempt before it.
+  local shell_id = idempotency ~= "" and ("child:" .. idempotency) or nil
+  local shell = shell_id and memory.session(shell_id) or nil
+  if shell then
+    -- A key is a name, not a capability: a reused shell must belong to the same caller, node and
+    -- parent, or the request is refused rather than run in someone else's thread.
+    if tostring(shell.user_id or "") ~= ctx.user_id or tostring(shell.node_id or "") ~= ctx.node_id
+        or tostring(shell.parent_session_id or "") ~= tostring(ctx.session_id or "") then
+      return { error = "idempotency_key_conflict", not_started = true,
+        detail = "this idempotency key names a child session of another caller, node or parent" }
+    end
+    session_id = shell_id
+  else
+    session_id = memory.start_session(ctx.node_id, "subagent", {
+      id = shell_id,
+      user_id = ctx.user_id,
+      node_id = ctx.node_id,
+      title = tostring(args.title or prompt):gsub('%s+',' '):sub(1,100),
+      parent_session_id = ctx.session_id,
+      workspace_required = needs_workspace,
+    })
+  end
   local workspace
   if needs_workspace then
     workspace, detail = workspaces.ensure(memory, session_id, ctx.session_id)
@@ -581,9 +611,11 @@ function M.start(args, ctx)
   local receipt = json.decode(host.subagent("start", json.encode(spec)))
   if type(receipt) ~= "table" then return { error = "subagent_runtime_error" } end
   if receipt.error then
-    -- Admission failed: close the child session we optimistically created so it
-    -- does not linger as an empty open thread.
-    pcall(memory.finish_session, session_id)
+    -- Admission failed. A refusal that means "come back later" keeps the shell: the coordinator
+    -- retries the same key, and the retry must find this session and this checkout rather than
+    -- write another pair. Every other refusal ends the request, and then the shell is retired - it
+    -- said why in `workspace_error` and nothing will reuse it.
+    if not M.RETRYABLE_ADMISSION[receipt.error] then pcall(memory.finish_session, session_id) end
     return receipt
   end
   if receipt.deduplicated then
@@ -653,6 +685,22 @@ function M.control(args, ctx)
   if action == "capacity" then
     return { resources = host.system_resources and json.decode(host.system_resources()) or {},
       runtime = json.decode(host.subagent("capacity", "{}")) }
+  end
+
+  if action == "resolve" then
+    -- "Did you admit a run for this key?" - the question a coordinator has to ask before it may
+    -- retry a delivery whose answer it never received. The runtime answers from its durable records,
+    -- so `found:false` is proof that this destination never started the request, which is what makes
+    -- a retry safe rather than a possible second child.
+    local key = tostring(args.idempotency_key or "")
+    if key == "" then return { error = "idempotency_key_required", not_started = true } end
+    local answer = json.decode(host.subagent("resolve", json.encode({ owner_user = ctx.user_id, idempotency_key = key })))
+    if type(answer) ~= "table" or answer.error then
+      return { error = "resolve_unavailable", not_started = true, idempotency_key = key,
+        detail = tostring(type(answer) == "table" and answer.error or "the runtime did not answer") }
+    end
+    return { idempotency_key = key, found = answer.found == true,
+      unadmitted = answer.found ~= true, receipt = answer.found == true and answer or nil }
   end
 
   if action == "start" then return mark_unadmitted(M.start(args, ctx)) end

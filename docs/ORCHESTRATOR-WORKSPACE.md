@@ -43,22 +43,58 @@ destination's `WASM_AGENT_SUBAGENT_MAX_CONCURRENT` runtime ceiling. It is not a
 RAM allocation or an OS-enforced resource quota. Resource samples remain advisory.
 Only explicit `node_full`/`queue_full`/runtime-unavailable admission refusals, and a destination
 that has no usable checkout of its own, permit moving to the next candidate. An unavailable discovery
-entry is skipped before sending; an uncertain request pins the destination and idempotency key.
+entry is skipped before sending; an unobserved delivery keeps its destination and key for
+`reconcile` and is not sent again until that answer arrives.
 
-A destination's answer decides the attempt in three ways, and the difference is what it *proved*:
+A destination's answer decides the attempt in four ways, and the difference is what it *proved*:
 
 * **admitted** — a receipt with a subagent id: a run exists there.
 * **spilled** — a refusal that proves nothing was started and that another candidate may still take
   (capacity, runtime unavailable, or no checkout on that node). The pin is dropped, so the next tick
-  re-reads eligibility: removing a node from the policy stops it being tried.
+  re-reads eligibility: removing a node from the policy stops it being tried. These are exactly the
+  refusals that keep the child session a refused attempt created, for the retry to reuse.
 * **refused** — a refusal that proves nothing was started and that no candidate can be asked to take
   as it stands. The attempt *ends* (`refused`, with the answer on the row), the coordinator is woken
   to decide, and `cancel` retracts it without a reconciliation it does not need. Measured before this
   rule: a destination that answered `workspace_session_not_found` was re-dispatched every ~2.5s for
   minutes, and every attempt wrote another empty, already-ended session shell on the node that had
   just refused it.
-* **uncertain** — anything else (transport, or an answer that proves nothing). Only the pinned
-  destination and key are retried; no blind failover or replay.
+* **uncertain** — nothing is proved: the request may or may not have arrived, so re-sending it could
+  start a second child for one task. The row is **parked** (`unknown`), keeping the destination and
+  the key; `cancel` refuses until the outcome is known, because a child may be running there.
+
+### Admission refusal versus an unobserved delivery
+
+An unobserved delivery is not retried. `subagent` action `reconcile` asks the pinned destination the
+only question that decides it — `{"action":"resolve","idempotency_key":<the task's key>}` — which the
+runtime answers from its durable records under the same lock admission takes, so a request still in
+flight there is waited for rather than raced:
+
+* a run exists there → the dispatch adopts its receipt and is supervised; nothing was re-sent;
+* nothing was admitted there → the row returns to the queue (pin dropped) and may be placed again,
+  because the destination proved that key was never started;
+* no answer (destination unreachable, or a runtime that cannot answer) → the row stays `unknown` with
+  that failure recorded, and nothing is retried.
+
+Every attempt is counted on the receipt (`attempts`), so "it keeps retrying" is a number an operator
+reads rather than a pattern a log reader has to infer. Capacity refusals are not capped: each of them
+proved that nothing was started and left no effect behind, and all-full work stays durably queued
+(asserted by the two-node fixture). Nothing else loops at all.
+
+### One shell per request, not one per attempt
+
+A request the destination refuses must not add a durable effect, because the coordinator may ask
+again. Two things enforce it: a refusal the destination can decide by reading — a source it does not
+have, a parent workspace that is not allocated — is refused *before* the child's session exists; and
+the child session of a request that carries an idempotency key is named by that key, so the next
+attempt reuses the first attempt's session and its checkout instead of writing another. Measured
+before this rule: one empty, already-ended session shell — and one git worktree — per retry, ~840 in
+forty minutes on a node that answered `workspace_allocation_failed`.
+
+Residual, stated because it is not free: while a dispatch is unresolved, the node that refused it
+holds that one reusable session (it becomes the child's own thread if that node is asked again and
+admits). Nothing reaps it if the task is finished elsewhere, because the destination cannot see the
+coordinator's queue. A refusal that ends the request retires its shell instead.
 
 ### A placed child's source
 
@@ -84,10 +120,11 @@ dispatch; remote calls use the existing signed, target-bound peer capability pat
 Managed guest nodes do not acquire an autonomous inference capability.
 
 Queued work persists across restarts. A destination is recorded before dispatch;
-an uncertain delivery retries only that destination with the same child key.
-The destination recovers interrupted children as unknown and never reruns their
-effects automatically. Unknown remote delivery cannot honestly be cancelled
-until admission is reconciled. The UI reports uncertainty rather than success.
+an unobserved delivery is parked and reconciled rather than retried, and the same
+child key is never active twice: the destination's runtime deduplicates an admitted
+key, and a key that was never admitted resolves to nothing. The destination recovers
+interrupted children as unknown and never reruns their effects automatically. The UI
+reports uncertainty rather than success.
 
 ## Conversations
 

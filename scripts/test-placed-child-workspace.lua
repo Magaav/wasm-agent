@@ -68,6 +68,9 @@ local function session_ids()
   for _, row in ipairs(rows) do seen[row.id] = true end
   return seen
 end
+local function selected_sql(statement)
+  return json.decode(host.sql_query(statement, json.encode({}))) or {}
+end
 
 if scenario == "prepared" then
   -- 1. The measured case: the parent session is not on this node at all, and the incoming source
@@ -159,6 +162,75 @@ if scenario == "prepared" then
     "and it forked from the destination's own checkout: " .. tostring(child_workspace.start_state.source_root))
   print("facade start on the prepared destination: " .. json.encode(started))
 
+  -- 5b. The invariant that made 840 shells possible: a retry must have the effect of the attempt
+  -- before it. An admission refusal is a real one here - a placement limit of zero slots makes the
+  -- runtime answer `node_full` - and two attempts with the same idempotency key must leave one child
+  -- session and one checkout, not two.
+  local subagents = dofile("lua/core/subagents.lua")
+  local function attempts_with(key, limit)
+    return subagents.control({ action = "start", prompt = "retry me", profile = "task-worker",
+      idempotency_key = key },
+      { user_id = "master", role = "master", node_id = NODE, session_id = absent, remote = true,
+        placement = { max_tasks = limit } })
+  end
+  local function children()
+    local count = 0
+    for _, child in pairs(json.decode(host.sql_query(
+        "SELECT id FROM sessions WHERE objective='subagent'", json.encode({})) or {})) do count = count + 1 end
+    return count
+  end
+  local before_attempts = children()
+  local full_first = attempts_with("placed-retry", 0)
+  ok(full_first.error == "node_full", "a zero-slot placement limit is refused by the runtime: " .. json.encode(full_first))
+  ok(children() == before_attempts + 1, "the refused attempt wrote one child session")
+  local shell_id = "child:placed-retry"
+  local shell = memory.session(shell_id)
+  ok(shell ~= nil, "the shell is named by its key, so the retry can find it: " .. tostring(shell_id))
+  local shell_workspace = memory.session_workspace(shell_id)
+  ok(shell_workspace and shell_workspace.state == "allocated" and shell_workspace.worktree ~= "",
+    "and it holds the checkout the retry will run in: " .. json.encode(shell_workspace))
+  local full_second = attempts_with("placed-retry", 0)
+  ok(full_second.error == "node_full", "the retry is refused the same way: " .. json.encode(full_second))
+  ok(children() == before_attempts + 1,
+    "and it reused that shell instead of writing another (" .. children() .. " children, not " .. (before_attempts + 2) .. ")")
+  local reused = memory.session_workspace(shell_id)
+  ok(reused and reused.worktree == shell_workspace.worktree and reused.state == "allocated",
+    "with the same checkout, so a retry costs no second worktree")
+  ok(shell.user_id == "master" and shell.node_id == NODE and shell.parent_session_id == absent,
+    "the reused shell belongs to the same caller, node and parent")
+  local conflict = subagents.control({ action = "start", prompt = "another caller", profile = "task-worker",
+    idempotency_key = "placed-retry" },
+    { user_id = "master", role = "master", node_id = NODE, session_id = "someone-else", remote = true,
+      placement = { max_tasks = 1 } })
+  ok(conflict.error == "idempotency_key_conflict" and conflict.not_started == true,
+    "a key is a name, not a capability: another parent may not reuse that shell: " .. json.encode(conflict))
+
+  -- 5c. A refusal that ends the request retires the shell: nothing is kept for a retry that will not
+  -- come, and the retry of that same key reuses the same row rather than adding one.
+  git(destination, "branch", "change/wa-session-childplaced-nonretry")
+  local nonretry_before = children()
+  local nonretry = attempts_with("placed-nonretry", 1)
+  ok(tostring(nonretry.detail):find("already exists", 1, true) ~= nil,
+    "a non-retryable failure names git's reason: " .. json.encode(nonretry))
+  ok(children() == nonretry_before + 1, "it wrote one session for the attempt")
+  ok(memory.session("child:placed-nonretry").ended_at ~= nil,
+    "and retired it, because nothing will reuse a request that ended")
+
+  -- 5d. The verb reconcile calls on the destination, through the facade a peer reaches: the runtime
+  -- answers from its durable records, so `found:false` is proof that key was never admitted here.
+  local destination_ctx = { user_id = "master", role = "master", node_id = NODE, remote = true }
+  local never = subagents.control({ action = "resolve", idempotency_key = "never-used-key" }, destination_ctx)
+  ok(never.found == false and never.unadmitted == true,
+    "a key with no run there is reported as not admitted: " .. json.encode(never))
+  local admitted = attempts_with("placed-resolve", 1)
+  ok(admitted.subagent_id, "a keyed start is admitted: " .. json.encode(admitted))
+  local found = subagents.control({ action = "resolve", idempotency_key = "placed-resolve" }, destination_ctx)
+  ok(found.found == true and type(found.receipt) == "table" and found.receipt.subagent_id == admitted.subagent_id,
+    "and the key it was admitted under resolves to that run: " .. json.encode(found))
+  local keyless = subagents.control({ action = "resolve" }, destination_ctx)
+  ok(keyless.error == "idempotency_key_required" and keyless.not_started == true,
+    "a resolve without a key is refused: " .. json.encode(keyless))
+
   -- 6. What a destination's answer means for the attempt.
   ok(orchestrator.classify({ subagent_id = "x" }) == "admitted", "a receipt with an id is admission")
   ok(orchestrator.classify({ error = "node_full" }) == "spilled", "capacity moves to the next candidate")
@@ -171,6 +243,14 @@ if scenario == "prepared" then
   ok(orchestrator.classify({}) == "uncertain", "an answer that proves nothing stays pinned")
   ok(orchestrator.classify({ error = "an_error_from_the_future" }) == "uncertain",
     "an unrecognised error keeps the pinned retry rather than guessing")
+  -- The two halves of one rule: a refusal that keeps the destination's shell for a retry is exactly a
+  -- refusal that may move to the next candidate. If they ever disagree, a kept shell is orphaned or a
+  -- reused shell is written twice.
+  for code in pairs(subagents.RETRYABLE_ADMISSION) do
+    ok(orchestrator.spills_on(code), "a retryable admission refusal may also move on: " .. code)
+  end
+  ok(orchestrator.spills_on("workspace_source_dirty") == false,
+    "and a refusal about the request itself may not")
 
   -- 7. The same decision through the queue the serve worker calls, with only the peer transport
   -- stubbed: a refusal ends the row, is retractable, and is not dispatched again; a spillable
@@ -210,10 +290,81 @@ if scenario == "prepared" then
   local attempts = calls
   orchestrator.tick(spill_api)
   ok(calls > attempts, "and the next tick asks the policy again rather than the refused node")
+  local spill_again = select(2, orchestrator.control({ action = "status", id = spill.subagent_id }, ctx))
+  ok(spill_again and spill_again.attempts == 2,
+    "and how many times a destination was asked is on the receipt: " .. json.encode(spill_again))
   orchestrator.control({ action = "placement", policy = { enabled = false, nodes = {} } }, ctx)
   local before_removal = calls
   orchestrator.tick(spill_api)
   ok(calls == before_removal, "a destination that is no longer in the policy is not tried (" .. calls .. ")")
+
+  -- 8. A delivery whose outcome was never observed is parked, not re-sent: sending it again could
+  -- start a second child for one task. Nothing moves until `reconcile` asks the destination what it
+  -- holds for this task's key.
+  orchestrator.control({ action = "placement", policy = {
+    enabled = true, nodes = { { node = "local", max_tasks = 1 } } } }, ctx)
+  local per_key = {}
+  local uncertain_api = { control = function(args)
+    calls = calls + 1
+    local key = tostring((args or {}).idempotency_key or "")
+    per_key[key] = (per_key[key] or 0) + 1
+    -- The spillable task keeps being refused (it may be placed again); everything else is lost in
+    -- transit without an answer, which is the case this section is about.
+    if key == spill.subagent_id then return spill_refusal end
+    return { error = "remote_unreachable" }
+  end }
+  local function task_row(id)
+    return json.decode(host.sql_query("SELECT * FROM orchestration_tasks WHERE id=?", json.encode({ id })))[1]
+  end
+  local lost = orchestrator.enqueue({ prompt = "did you get this?", idempotency_key = "placed-uncertain" }, ctx)
+  orchestrator.tick(uncertain_api)
+  local lost_row = task_row(lost.subagent_id)
+  ok(lost_row.state == "unknown" and lost_row.destination == "local",
+    "an unobserved delivery is parked with its destination kept: " .. json.encode(lost_row))
+  local parked_calls = per_key[lost.subagent_id]
+  orchestrator.tick(uncertain_api)
+  ok(parked_calls == 1 and per_key[lost.subagent_id] == 1,
+    "and it is asked exactly once while it is unknown (" .. tostring(per_key[lost.subagent_id]) .. ")")
+  local refused_cancel = select(2, orchestrator.control({ action = "cancel", id = lost.subagent_id }, ctx, uncertain_api))
+  ok(refused_cancel.error == "placement_uncertain_reconcile_before_cancelling",
+    "cancel still needs the outcome, not a guess: " .. json.encode(refused_cancel))
+
+  -- `reconcile` is the verb that was missing: the destination is asked whether it holds a run for the
+  -- key, and its answer decides. Here it answers that nothing was admitted, which makes a retry safe.
+  local unadmitted_api = { control = function() return { idempotency_key = lost.subagent_id, found = false, unadmitted = true } end }
+  local reconciled = select(2, orchestrator.control({ action = "reconcile", id = lost.subagent_id }, ctx, unadmitted_api))
+  ok(reconciled and reconciled.dispatch_state == "queued" and reconciled.attempts == 1,
+    "a proven-unadmitted delivery returns to the queue for another try: " .. json.encode(reconciled))
+
+  -- And when the destination does hold a run, the receipt is adopted: nothing is re-sent.
+  local second = orchestrator.enqueue({ prompt = "adopt me", idempotency_key = "placed-adopt" }, ctx)
+  orchestrator.tick(uncertain_api)
+  ok(task_row(second.subagent_id).state == "unknown", "a second lost delivery is parked too")
+  local adopted_api = { control = function() return { idempotency_key = second.subagent_id, found = true,
+    receipt = { subagent_id = "remote-child-1", session_id = "remote-session-1", state = "running", settled = false } } end }
+  local adopted = select(2, orchestrator.control({ action = "reconcile", id = second.subagent_id }, ctx, adopted_api))
+  ok(adopted and adopted.dispatch_state == "admitted" and adopted.remote_subagent_id == "remote-child-1",
+    "a run that exists there is adopted, not re-sent: " .. json.encode(adopted))
+  -- A destination that cannot be reached while reconciling answers nothing, so the row stays parked.
+  local third = orchestrator.enqueue({ prompt = "still unknown", idempotency_key = "placed-unknown" }, ctx)
+  orchestrator.tick(uncertain_api)
+  local silent_api = { control = function() return { error = "remote_unreachable" } end }
+  local silent = select(2, orchestrator.control({ action = "reconcile", id = third.subagent_id }, ctx, silent_api))
+  ok(silent.error == "reconcile_failed" and task_row(third.subagent_id).state == "unknown",
+    "an unreachable destination leaves the row unknown: " .. json.encode(silent))
+  -- Nothing that ended, was adopted elsewhere or is still unknown is left where a tick would pick it
+  -- up again: after the reconcile above, the only rows a tick may touch are the ones whose refusals
+  -- proved nothing was started.
+  local queued_ids = {}
+  local queued_rows = selected_sql("SELECT id FROM orchestration_tasks WHERE state IN ('queued','placing')")
+  for _, item in ipairs(queued_rows) do queued_ids[item.id] = true end
+  ok(not queued_ids[queued.subagent_id] and not queued_ids[second.subagent_id] and not queued_ids[third.subagent_id],
+    "a refused, an adopted and an unknown task are not in the queue: " .. json.encode(queued_rows))
+  ok(queued_ids[spill.subagent_id] == true or task_row(spill.subagent_id).state == "unknown",
+    "and the one that may be asked again is the one whose refusal proved nothing started")
+  ok(per_key[lost.subagent_id] == 2 and task_row(lost.subagent_id).state == "unknown",
+    "the task reconciled to unadmitted was placed once more and is parked again (" ..
+    tostring(per_key[lost.subagent_id]) .. " asks)")
 
   print("placed child workspace ok (" .. checks .. " checks)")
   return

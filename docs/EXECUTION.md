@@ -121,6 +121,12 @@ a retrying dispatcher reads as "not finished yet". A refusal names its own reaso
 (`workspace_source_dirty`, `workspace_source_unavailable`, `workspace_destination_source_missing`),
 with the whole sentence in `detail`.
 
+A retry of a request must have the effect of the attempt before it: the child session of a request
+that carries an idempotency key is named by that key, so the next attempt finds the session and the
+checkout its first attempt wrote rather than adding a second pair. A refusal that ends the request
+retires that session; a capacity refusal keeps it, because that is the one case the coordinator asks
+again.
+
 A required but unbound/failed workspace is not equivalent to a legacy unbound session: file and
 shell writes return `session_workspace_unavailable` and never fall back to the node checkout. File
 writes outside the binding, explicit shell cwd escapes, and shell/client/remote/spell tools that

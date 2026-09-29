@@ -49,6 +49,9 @@ local function view(row)
   receipt.error = receipt.error or (row.detail ~= "" and row.detail or nil)
   local args, ctx = json.decode(row.args), json.decode(row.context)
   receipt.prompt = args.prompt
+  -- How many times a destination has been asked for this task. A refusal that loops (capacity) has to
+  -- be countable from the receipt, or "it keeps retrying" is only something a log reader can see.
+  receipt.attempts = tonumber(args.dispatch_attempts) or 0
   receipt.profile = receipt.profile or args.profile or "explore"
   receipt.model = receipt.model or args.model
   receipt.reasoning = receipt.reasoning or args.reasoning
@@ -98,17 +101,22 @@ end
 --               able to take: capacity (`node_full`, `queue_full`, runtime unavailable) and a
 --               destination whose own checkout cannot be named at all. The pin is dropped so the
 --               next tick re-reads eligibility, which is also why removing a node from the policy
---               stops it being tried.
+--               stops it being tried. `subagents.RETRYABLE_ADMISSION` is the other half of this
+--               distinction (which refusals keep the child session for the retry to reuse), and the
+--               placement fixture fails if the two ever disagree.
 --   refused   - a refusal that proves nothing was started and that no candidate can be asked to
 --               take as it stands: the attempt is over, and the coordinator may retract the row
 --               instead of waiting for an admission that cannot come. Measured: a destination that
 --               answered `workspace_session_not_found` was re-dispatched every ~2.5s for minutes,
 --               and every attempt wrote another empty session shell on the node that had just
 --               refused it.
---   uncertain - anything else: the request may or may not have arrived, so only the pinned
---               destination and key are retried (`no blind failover or replay`).
+--   uncertain - nothing was proved: the request may have arrived, so re-sending it could start a
+--               second run of the same task. The row is *parked* (`unknown`, destination and key
+--               kept) rather than retried; `reconcile` asks the destination what it holds for the
+--               key, and that answer decides whether a retry or a cancel is safe.
 local unadmitted = {node_full=true, queue_full=true, subagent_runtime_unavailable=true,
   workspace_destination_source_missing=true}
+function M.spills_on(error) return unadmitted[error] == true end
 function M.classify(result)
   if type(result) ~= "table" then return "uncertain" end
   if result.subagent_id then return "admitted" end
@@ -118,6 +126,12 @@ function M.classify(result)
   -- proves nothing at all and keeps the pinned retry.
   if result.not_started and result.error then return "refused" end
   return "uncertain"
+end
+
+-- A dispatch that ended in `unknown` may have been delivered, so the last write wins: nothing is
+-- sent again until the destination says whether it holds a run for the key.
+local function parked(memory_row)
+  return memory_row.state == "unknown" or memory_row.state == "placing"
 end
 
 function M.tick(api)
@@ -138,6 +152,12 @@ function M.tick(api)
             local destination = target.local_node and "local" or item.node
             if row.destination == "" then
               args.admission_limit=item.max_tasks
+              -- Counted where an operator can read it (`attempts` on the receipt): a task that keeps
+              -- being refused shows how many times a destination was asked, not only the last
+              -- reason. Nothing is capped here, because every code that returns to this loop proved
+              -- that nothing was started and left no effect behind (see section 2 of the placement
+              -- contract in docs/ORCHESTRATOR-WORKSPACE.md).
+              args.dispatch_attempts=(tonumber(args.dispatch_attempts) or 0)+1
               local reserved = exec("UPDATE orchestration_tasks SET destination=?,state='placing',args=? WHERE id=? AND state='queued'",
                 {destination,json.encode(args),row.id})
               -- Cancellation may win after the queue snapshot was read.
@@ -163,8 +183,10 @@ function M.tick(api)
               exec("UPDATE orchestration_tasks SET state='refused',detail=? WHERE id=?", {json.encode(result),row.id})
               break
             else
-              -- Keep target/key for reconciliation; no blind failover or replay.
-              exec("UPDATE orchestration_tasks SET detail=? WHERE id=?", {json.encode(result),row.id})
+              -- Nothing was proved about this delivery, so it is not sent again: a second send
+              -- could start a second child for one task. The destination and key are kept for the
+              -- reconcile that has to happen first (`action="reconcile"`).
+              exec("UPDATE orchestration_tasks SET state='unknown',detail=? WHERE id=?", {json.encode(result),row.id})
               break
             end
           end
@@ -202,13 +224,42 @@ function M.control(args, ctx, api)
     if (row.state == "queued" or row.state == "refused") and action == "cancel" then
       -- A refused attempt is retractable without reconciliation: the destination said it never
       -- started a run, so there is nothing in flight to reconcile - which is exactly what the
-      -- `placing` guard below protects, and why it does not apply here.
+      -- `placing`/`unknown` guard below protects, and why it does not apply here.
       exec("UPDATE orchestration_tasks SET state='cancelled' WHERE id=? AND state IN ('queued','refused')", {id})
       row=query("SELECT * FROM orchestration_tasks WHERE id=?",{id})[1]
     end
+    if action == "reconcile" then
+      -- The only move for a delivery whose outcome was never observed: ask the destination whether
+      -- it holds a run for this task's key. Its answer is authoritative and duplicate-free - the
+      -- runtime looks the key up under the same lock that admission takes, so a request still in
+      -- flight there is waited for, not raced.
+      if not parked(row) then return true,{error="placement_not_uncertain",state=row.state} end
+      local answer = invoke(row.destination,{action="resolve",idempotency_key=row.id},ctx,api)
+      if type(answer) ~= "table" or not answer.idempotency_key then
+        exec("UPDATE orchestration_tasks SET detail=? WHERE id=?",{json.encode(answer),row.id})
+        return true,{error="reconcile_failed",detail=json.encode(answer),dispatch_state=row.state,
+          dispatch_destination=row.destination}
+      end
+      if answer.found then
+        -- A run exists there: adopt its receipt and supervise it. Nothing was re-sent.
+        exec("UPDATE orchestration_tasks SET state='admitted',receipt=?,detail='' WHERE id=?",
+          {json.encode(answer.receipt),row.id})
+        return true,view(query("SELECT * FROM orchestration_tasks WHERE id=?",{id})[1])
+      end
+      -- Nothing was admitted there, so the attempt is over and the task may be placed again.
+      exec("UPDATE orchestration_tasks SET state='queued',destination='',detail=? WHERE id=?",
+        {json.encode({reconciled="unadmitted",from=row.destination}),row.id})
+      return true,view(query("SELECT * FROM orchestration_tasks WHERE id=?",{id})[1])
+    end
     if row.state ~= "admitted" then
       if action=="message" or action=="session" or action=='steer' or action=='steering_status' then return true,{error="placement_pending"} end
-      if action=="cancel" and row.state=="placing" then return true,{error="placement_uncertain_reconcile_before_cancelling"} end
+      if action=="cancel" and parked(row) then
+        -- An unobserved delivery may be running there; cancelling on a guess is how a child keeps
+        -- working after its task looks withdrawn. `action="reconcile"` is how the row stops being
+        -- uncertain - it needs the destination's answer, not a coordinator's.
+        return true,{error="placement_uncertain_reconcile_before_cancelling",state=row.state,
+          dispatch_destination=row.destination}
+      end
       return true,view(row)
     end
     local receipt = json.decode(row.receipt)
