@@ -2364,7 +2364,11 @@ $fixtures = Get-Content -Raw (Join-Path $PSScriptRoot "../ui/test-fixtures.js")
 Set-Content -Path (Join-Path $tmp "fixtures.js") -Value $fixtures -NoNewline
 $html = Get-Content -Raw $index
 # Fixtures load first: app.js reads them as it starts.
-$html = $html.Replace('<script src="app.js"></script>', '<script src="fixtures.js"></script>' + "`n" + '<script src="app.js"></script>')
+# This harness installs its own `session` fixture *after* boot, deliberately: its early checks are
+# about a page whose transcript has not been repainted yet. The fixtures file therefore carries a
+# default transcript for the observed page (so a screenshot of ui/ shows a chat and not a retry
+# banner) and this flag, set before that file loads, keeps it out of this harness's way.
+$html = $html.Replace('<script src="app.js"></script>', '<script>window.__waNoDefaultSession = true;</script>' + "`n" + '<script src="fixtures.js"></script>' + "`n" + '<script src="app.js"></script>')
 Set-Content -Path $index -Value $html -NoNewline
 
 Set-Content -Path $index -Value ((Get-Content -Raw $index).Replace("</body>", $harness + "</body>")) -NoNewline

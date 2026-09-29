@@ -81,6 +81,37 @@ window.__fixtures = {
       },
     ],
   },
+  // The transcript the standalone page restores at boot: this is what the observed page shows, so a
+  // screenshot of `ui/` is a chat rather than a "no fixture for session" retry banner - a banner a
+  // worker reads as a broken layout and has no way to tell from one. The rows use every shape a
+  // bubble can take (a turn with reasoning and one call whose result is shown, an answer with its run
+  // duration, and a change with its diff topic), because that is what the layout has to be judged on.
+  //
+  // `scripts/test-ui.ps1` needs boot to see *no* transcript (it installs its own `session` fixture
+  // after boot, so its early checks are about an untouched page), so it sets `__waNoDefaultSession`
+  // before this file loads; the key is then deleted below, because a neutralised route must be
+  // *absent* - the stub would otherwise find the key and answer 200 with nothing, which is not the
+  // "no fixture" path a harness that installs its own transcript after boot is testing.
+  session: {
+    session: { id: "aaaaaaaa-0000-0000-0000-000000000001", title: "config module audit" },
+    state: { state: "answered", detail: "the last message is a reply" },
+    messages: [
+      { seq: 1, role: "user", created_at: Math.floor(Date.now() / 1000) - 600, tool_calls: [],
+        content: "Which config file does the node read, and did it change yesterday?" },
+      { seq: 2, role: "assistant", created_at: Math.floor(Date.now() / 1000) - 598, ok: 1,
+        content: "", reasoning: "The module names CONFIG_FILE; check it and yesterday's change.",
+        tool_calls: [{ id: "c1", type: "function", function: { name: "read", arguments: "{\"path\":\"lua/core/paths.lua\"}" } }] },
+      { seq: 3, role: "tool", tool_call_id: "c1", tool_name: "read", ok: 1, created_at: Math.floor(Date.now() / 1000) - 596,
+        content: "CONFIG_FILE = ~/.wasm-agent/config\nLEGACY_CONFIG = ~/.wasm-agent.json", tool_calls: [] },
+      { seq: 4, role: "assistant", created_at: Math.floor(Date.now() / 1000) - 590, ok: 1, ms: 5200,
+        content: "It reads `CONFIG_FILE` (`~/.wasm-agent/config`), with `LEGACY_CONFIG` still honoured as a fallback.\n\nYesterday's change added the legacy fallback and documented it. Two files moved:",
+        tool_calls: [],
+        changes: { added: 3, removed: 1, files: [
+          { path: "lua/core/paths.lua", added: 3, removed: 1, created: false, recorded: true },
+          { path: "docs/CONFIG.md", added: 4, removed: 0, created: true, recorded: true },
+        ] } },
+    ],
+  },
   me: { user: { id: "master", name: "master" }, role: "master" },
   // What the node says about right now. The window asks this before believing a run is over, so a
   // notice can be taken down when the thread is settled - and a run that completed is not "unfinished".
@@ -169,6 +200,8 @@ window.__fixtures = {
   env: {},
   usage: {},
 };
+
+if (window.__waNoDefaultSession) delete window.__fixtures.session;
 
 // The UI test reloads the actual browser page halfway through a recorded tool call.
 // Install the second-load fixture before app.js starts its boot requests.
