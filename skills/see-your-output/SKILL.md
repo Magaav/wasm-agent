@@ -107,6 +107,21 @@ events removed by the patch. Review each reported removal against callers and
 CSS; a clean result does not prove behavior. These commands are available to
 benchmark agents without revealing the hidden oracle.
 
+**The same command runs on this host, against *your* worktree, and you can read the
+picture.** Chrome is installed here, so from your checkout:
+
+```bash
+node scripts/agent-benchmark-ui-observe.mjs --out "$TEMP/ui-look"   # ./ui by default
+```
+
+It serves a copy of your `ui/` with `test-fixtures.js` injected, never touches the
+node or the installed UI directory, and exits non-zero unless the page really
+rendered and the probe passed. `--ui <dir>` picks another tree, `--chrome <path>`
+another browser, `--require <text>` pins a DOM marker, `--probe <file>` asserts.
+**A child agent can see the screenshot**: `read screenshot.png` returns it as visual
+input - a blind test (Chrome rendered a random word and number, read back exactly)
+confirmed it. So "open the PNG and look" is an instruction that works.
+
 Structure is not appearance: spacing, wrapping, contrast and overflow are only
 visible. A screenshot is also the only way to catch that the window is running a
 *stale* build of the UI while your assertions pass against your files.
