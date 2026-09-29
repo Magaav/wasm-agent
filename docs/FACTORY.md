@@ -67,6 +67,7 @@ Each of these cost real time in this batch; each has a cheap detector.
 | landmine | shape | detection |
 | --- | --- | --- |
 | shell argument rewriting | MSYS turns `/FI` into `C:/Program Files/Git/FI`, and `origin/x:path` into a backslash path — a probe or a `git show` fails or silently misbehaves | `MSYS_NO_PATHCONV=1` for the affected command; the `/update` probe would have refused *every* update on Windows without it |
+| the lane's own switches ride into the gate | `MSYS_NO_PATHCONV=1`, set so the lane's own `--repo` argument survives, reaches every native process the gate spawns — `/tmp/wa-instances-…` becomes `C:\tmp\…`, the node-instances suite fails 10 of 62 with both sentinels started but not answering, and the nested verdict read dies on `C:\tmp\…` | `scripts/merge-lane.mjs` drops its own variables before the gate and records `gate.environment_dropped`; `scripts/test-merge-lane.mjs` fails if `${MSYS_NO_PATHCONV-unset}` is not `unset` inside the gate |
 | embedded-Lua fallback | `WA_SCRIPT=… wa` without `WASM_AGENT_LUA_ROOT` loads modules compiled into the binary, so a test of a tree edit tests nothing | set `WASM_AGENT_LUA_ROOT`; a stderr note when the embedded copy is used is the fix in flight |
 | a client-side hook is not a boundary | hooks do not run for `cherry-pick`, `revert`, `rebase` on this git, and `--no-verify` skips them | treat hooks as convenience; the enforcement point that cannot be skipped is on the remote |
 | profiles live outside git | a subagent profile's model/limits changed and no one could date the change | the profile is live config; journal it, or record the effective limits on the child receipt |
@@ -99,7 +100,8 @@ deterministic spine that produces a *tested candidate*, one main-mover that may 
 reserved merger who decides what a script cannot. The serial resource is not the merge commit — it is
 the gate. A merge costs a second; the gate on the merged tree costs ~15 minutes at
 `WA_GATE_JOBS=2`, so **~4 landings/hour is the ceiling no matter how many producers run**, and
-batching is the only lever that moves it (batch 1 landed six branches under one gate).
+batching is the only lever that moves it (batch 1 gated seven verified branches in one run,
+`d192fdf`).
 
 ### The spine — `scripts/merge-lane.mjs`
 
@@ -125,6 +127,12 @@ Exit codes: `0` pass (or nothing to merge), `2` a named blocked input, `3` the m
 failed, `4` usage/repository error, `5` discovery could not establish the base or an input. Two seams
 exist for tests and only for tests: `--gate-command` and `WA_MERGE_LANE_AUDIT`; both are recorded
 verbatim in the output, so a run that used them cannot be mistaken for a real gate.
+
+Discovery errors are classified rather than swallowed: one that touches the base or a named input stops
+the run (`5`), while one that does not — a sibling's branch moving while this run reads the world, a
+live `origin` head that differs from the fetched refs — is reported in `discovery.warnings` and does
+not block a candidate whose own inputs are re-proved by SHA. With `--all-pending`, discovery *is* the
+input list, so every discovery error is fatal there.
 
 Facts it always states, because the landing procedure needs them: the base ref before and after
 (`main_moved_by_this_run`), `pushed: false`, the exact SHA of every input, the merge commit each input
@@ -173,7 +181,36 @@ the blocked input named, and still exit nonzero, because a batch with a blocked 
 
 ### Measured, on the real pending branches (2026-09-29)
 
-_Filled in by the run recorded with this section; see "The lane's own run" below._
+Real runs of the spine on this repository's own committed `change/` tips, at `WA_GATE_JOBS=2`, with the
+gate a real `bash scripts/test.sh` in a disposable clone (`--gate-command` was not used):
+
+| run | inputs (exact SHA) | candidate tree | discovery | clone | merges | gate | verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | `380e168` (`change/wa-session-08cb06ff…`), `54b7874` (`change/wa-session-e6bfc741…`) | `ee9c46bc` | 26.7 s | 0.38 s | 1.4 s | exit 1, 688.8 s, no verdict line | `gate_failed` (exit 3) — the lane's own `MSYS_NO_PATHCONV=1` |
+| 2 | `380e168`, `ee15da23` (that branch moved between the runs) | `200309f2` | 277.2 s | 0.66 s | 2.0 s | exit 1, 907.6 s, no verdict line | `gate_failed` (exit 3) — `scripts/test-openai-sub.cjs`, **not attributed** |
+| blocked | `dcf49653` (`wip(update): check sentinel before queuing deploy`, 45 commits behind) | base tree `8f50e352` | 23.7 s | — | — | not run | `blocked` (exit 2): the tip is named, with `content: Merge conflict in lua/core/update.lua` |
+
+What these runs establish, and what they do not:
+
+- the spine never pushed and never moved `main`: `pushed: false` and `base_ref_before = base_ref_after =
+f962844` in all three, and the source worktree was clean after each;
+- the candidate merges are real merges of the exact proven SHAs (`merged: true`,
+`identity_checked_in_clone: true`, a `merge_commit` per input), and the candidate's LF check was `clean`;
+- run 1's gate failure was the lane's own environment, and run 2 proves it: `node instances` failed 10 of
+62 in run 1 and passed 62 of 62 in run 2, with the same kind of candidate and the leak removed;
+- run 2's gate failure is **not** attributed to anything yet. `scripts/test-openai-sub.cjs` fails inside
+the gate but passes standalone in the same candidate clone, both with `TEMP=/tmp` and with a native
+`TEMP`, so neither the merged tree in isolation nor the temp-path mechanism explains it. That is an open
+input for a merger, not a property of the batch, and it is exactly the case this section hands to the
+reserved merger;
+- discovery is dominated by the audit's worktree inspection, which scales with the number of worktrees on
+the machine rather than with the number of inputs: 345 worktrees → 20.7 s of the 26.7 s total, 734
+worktrees (three children active) → 270.4 s of the 277.2 s total. Fetch, PR discovery and the merge proofs
+together stayed under 5 s.
+
+Two of these three runs ended in a failed gate, and that is the honest shape of the result: the lane's job
+was to make the merged tree's verdict impossible to misread, and it did — including naming its own
+environment as the cause of the first one.
 
 ### What needs judgement, and what does not
 
@@ -218,7 +255,7 @@ the lane is attributable without a trailer a merge cannot truthfully carry;
   allow-list) and who may hold it. The lane is a protocol plus a script; it does not install itself.
 - **The remote boundary.** Branch protection or a `pre-receive` check on `origin/main` is the only
   unskippable enforcement point, and it is a repository setting, not a file.
-- **Wire the lane's own test into the gate.** `scripts/test-merge-lane.mjs` (64 checks, ~11 s, no
+- **Wire the lane's own test into the gate.** `scripts/test-merge-lane.mjs` (67 checks, ~12 s, no
   build, no network) is not run by `scripts/test.sh`, which discovers tests explicitly rather than by
   convention. Adding one line to the gate was left out on purpose: the gate script was out of scope
   for this delivery and another delivery is editing it.
