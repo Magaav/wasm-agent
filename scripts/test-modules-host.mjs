@@ -20,10 +20,9 @@
 // survive a deletion and lie, and a hand-built one would be this file's opinion of the route.
 'use strict';
 
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 function usage(problem) {
   if (problem) process.stderr.write(`test-modules-host: ${problem}\n`);

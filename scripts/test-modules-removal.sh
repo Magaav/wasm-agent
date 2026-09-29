@@ -111,14 +111,20 @@ echo "module under test: $ID ($MODULE_DIR)"
 # Every file in the tree that names the module id, outside the module's own directory.
 naming() { # naming <tree> <id>
   local tree="$1" id="$2" file
+  # `rg` prints the separator of the platform it runs on, and on Windows a backslash path slipped
+  # past the exclusion below as "outside the module" - which is how this check failed the first time
+  # it ran, on the module's own README. Normalise the separator before deciding, so the exclusion
+  # means what it says. (`tr` also rewrites a backslash inside a file *name*, which cannot exist on
+  # Windows and would only ever go into this report.)
   if command -v rg >/dev/null 2>&1; then
-    matches="$(cd "$tree" && rg -l --hidden --no-ignore -F "$id" . 2>/dev/null | sed 's|^\./||')"
+    matches="$(cd "$tree" && rg -l --hidden --no-ignore -F "$id" . 2>/dev/null | tr '\\' '/' | sed 's|^\./||')"
   else
-    matches="$(cd "$tree" && grep -rIl --exclude-dir=.git -F "$id" . 2>/dev/null | sed 's|^\./||')"
+    matches="$(cd "$tree" && grep -rIl --exclude-dir=.git -F "$id" . 2>/dev/null | tr '\\' '/' | sed 's|^\./||')"
   fi
   local hits=0
   while IFS= read -r file; do
     [ -n "$file" ] || continue
+    file="${file#./}"
     case "$file" in
       "modules/$id/"*) continue ;;
     esac
