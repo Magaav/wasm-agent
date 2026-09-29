@@ -235,18 +235,26 @@ cannot show is a step you did not do.
 1. **Pick the sanctioned tree.** The canonical checkout (`orca/projects/wasm-agent`) is the one tree
    whose branch is `main`. Address it by absolute path — never switch your own worktree's branch
    onto `main`, and never merge in a node's worktree.
-   Check: `git -C <canonical> symbolic-ref --short HEAD` prints `main` and
-   `git -C <canonical> status --porcelain` is empty.
+   Check: `git worktree list` shows that path as the only one on `[main]`;
+   `git -C <canonical> symbolic-ref --short HEAD` prints `main`;
+   `git -C <canonical> status --porcelain` prints nothing;
+   `git -C <canonical> rev-list --count HEAD..origin/main` is `0`.
 2. **Review, then merge the exact tip.** `git -C <canonical> fetch origin`, merge the reviewed branch
    SHA with `--no-ff` and a subject naming it (`merge(<branch>): what it brings`). A merge is allowed
    on `main` whatever the provenance; a *direct* commit there is not, unless step 5 applies.
    Check: `git -C <canonical> log --first-parent -1 --format=%s` names the merged branch, and
    `git -C <canonical> rev-parse HEAD^2` resolves.
-3. **Gate the MERGED tree, not the branch tree.** A merge changes the tree, so the branch's gate
-   receipt no longer covers what is about to be pushed; the merged HEAD needs its own run.
-   Check: `bash scripts/test.sh` on the merged HEAD, exit 0, with its skips counted — in
-   wasm-agent, `node skills/parallel-evolution/scripts/finish.mjs gate <canonical>` records the
-   receipt against that exact tree.
+3. **Gate the MERGED tree, not the branch tree.** The branch's receipt covers the branch's tree; what
+   is pushed is the merged tree, and those are the same object only when `main` has not moved since the
+   branch was cut. Measured: identical in exactly that case, and different as soon as another branch
+   landed first - which is the ordinary case, because a branch that lived a day met everything that
+   landed meanwhile.
+   Check: `git -C <canonical> rev-parse HEAD^{tree}` against the tree the branch's receipt names (in
+   wasm-agent, the `wa-finish-gate.json` beside its git metadata). If they differ, run
+   `bash scripts/test.sh` on the merged HEAD - exit 0, skips counted - or
+   `node skills/parallel-evolution/scripts/finish.mjs gate <canonical> <merged-HEAD>`, which records the
+   receipt against that exact tree. If they are the same, the existing receipt is still evidence for
+   that tree, and `verify` re-checks it rather than re-running the gate.
 4. **Push `origin/main`, then verify the ref.** `git -C <canonical> push origin main`, then read
    the remote rather than trusting the push output.
    Check: `git -C <canonical> ls-remote origin refs/heads/main` equals
@@ -255,13 +263,28 @@ cannot show is a step you did not do.
    session, for `main`'s own change (a document, a version bump), and it carries the trailer like
    any other commit. A child is refused, and a person at a terminal needs
    `WASM_AGENT_ALLOW_MAIN=1`.
-6. **Clean up after the fact, never instead of it.** Only once the tip is in `main` and pushed:
-   delete the merged branch and prune its worktree.
-   Check: `git -C <canonical> branch --merged main --contains <tip>`
-   lists `change/<name>`, then `git -C <canonical> branch -d change/<name>` and
-   `git -C <canonical> worktree prune`. `-d` (not `-D`) is the proof: git refuses to delete a branch
-   whose tip is not integrated.
+6. **Clean up after the fact, never instead of it.** Only once the tip is in `main` and `origin/main`
+   is pushed: delete the merged branch, and give up its worktree if that is what the worktree was for.
+   Two conditions, because both failures are quiet:
+   - **Prove the branch is integrated before deleting it.**
+     `git -C <canonical> branch --merged main` lists `change/<name>`, or
+     `git -C <canonical> merge-base --is-ancestor <tip> main` exits 0. Do **not** use `git branch -d`
+     as that proof: measured on git 2.55, a branch whose tip is in its own upstream
+     (`refs/remotes/origin/change/<name>`) but not in `main` is deleted by `-d` after a warning, not
+     refused.
+   - **Let git refuse to give up unfinished work.** `git -C <canonical> worktree remove <path>`
+     refuses a worktree with modified or untracked files (`contains modified or untracked files, use
+     --force`); that refusal is the check, so never reach for `--force`. `git worktree prune` is only
+     for a worktree whose directory was already deleted by hand.
+   Under `/merge`, other actors' branches and worktrees are preserved (see `skills/git-orchestrator`):
+   this step is for the branch you landed, and step 4 is what makes it safe.
 
-What is policy here, not verified: which machine is authoritative, whether a PR review is required
-before step 2, and whether the owner wants the pushed `main` to be the cloud tree's. Steps 1, 2 and 6
-are mechanical and checkable on any machine; step 3 must be run wherever the tree you push lives.
+**What is measured, and what is policy.** Measured in a throwaway clone against a bare remote on this
+machine (git 2.55): step 1's three checks; that `--no-ff` names the branch in the first-parent subject
+and resolves `HEAD^2` (step 2); that the merged tree equals the branch tree only when `main` has not
+moved, and differs when it has (step 3); that `ls-remote` equals `HEAD` after the push (step 4); that
+`worktree remove` refuses a dirty worktree while `prune` clears a hand-deleted one, and that `branch -d`
+deletes a branch that is not integrated when it has an upstream (step 6). Policy, not verified anywhere:
+which machine is authoritative, whether a PR review is required before step 2, and whether the cloud
+tree must be pulled after the push. Step 3's gate has to run where the tree you push lives - the
+canonical checkout is on this machine, and the cloud tree consumes what `origin/main` becomes.
