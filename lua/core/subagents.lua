@@ -556,6 +556,12 @@ function M.start(args, ctx)
       return { error = "idempotency_key_conflict", not_started = true,
         detail = "this idempotency key names a child session of another caller, node or parent" }
     end
+    if shell.ended_at then
+      -- A refusal that ended the request retired this session, so there is no live thread here to
+      -- run in: reopening it would be a child running under a session that says it is over.
+      return { error = "idempotency_key_retired", not_started = true,
+        detail = "the child session this key names was ended by a refusal; send the task under a new key" }
+    end
     session_id = shell_id
   else
     session_id = memory.start_session(ctx.node_id, "subagent", {
@@ -619,7 +625,9 @@ function M.start(args, ctx)
     return receipt
   end
   if receipt.deduplicated then
-    pcall(memory.finish_session, session_id)
+    -- The key already owns a run. Only a session *this* attempt created is retired: with a reused
+    -- shell it is the admitted run's own session, and closing it would end a live child's thread.
+    if not shell then pcall(memory.finish_session, session_id) end
     dofile('lua/core/completions.lua').watch(receipt.subagent_id,{user_id=ctx.user_id,role=ctx.role,remote=ctx.remote,session_id=receipt.parent_session_id})
     return receipt
   end

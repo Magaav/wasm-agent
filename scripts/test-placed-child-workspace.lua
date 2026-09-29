@@ -231,6 +231,26 @@ if scenario == "prepared" then
   ok(keyless.error == "idempotency_key_required" and keyless.not_started == true,
     "a resolve without a key is refused: " .. json.encode(keyless))
 
+  -- 5e. Two ways a key must not be reused into harm: a shell a refusal ended is not reopened, and a
+  -- key whose run already exists does not have that run's own session retired underneath it.
+  local retired = attempts_with("placed-nonretry", 1)
+  ok(retired.error == "idempotency_key_retired" and retired.not_started == true,
+    "a key whose shell a refusal ended is refused rather than reopened: " .. json.encode(retired))
+  local live_shell = "child:placed-resolve"
+  local real_resolve = host.subagent
+  host.subagent = function(action, args)
+    -- Make the facade's own lookup miss so the runtime's dedupe is the only one that answers, which
+    -- is the path where a reused shell is the admitted run's session.
+    if action == "resolve" then return json.encode({ found = false }) end
+    return real_resolve(action, args)
+  end
+  local deduplicated = attempts_with("placed-resolve", 1)
+  host.subagent = real_resolve
+  ok(deduplicated.deduplicated == true and deduplicated.subagent_id == admitted.subagent_id,
+    "a run that already exists there is deduplicated: " .. json.encode(deduplicated))
+  ok(memory.session(live_shell) and memory.session(live_shell).ended_at == nil,
+    "and the admitted run's own session is not retired underneath it")
+
   -- 6. What a destination's answer means for the attempt.
   ok(orchestrator.classify({ subagent_id = "x" }) == "admitted", "a receipt with an id is admission")
   ok(orchestrator.classify({ error = "node_full" }) == "spilled", "capacity moves to the next candidate")
