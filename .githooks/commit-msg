@@ -22,6 +22,12 @@
 # itself while a bounded child task is refused even when it exports that flag. The pair of hooks is
 # pinned together by scripts/test-main-guard.sh - this file is second in the chain, so changing only
 # pre-commit would leave the orchestrator refused here.
+#
+# WHAT THIS CLAIMS, EXACTLY: a child task cannot *directly commit* on `main`. A client-side hook is
+# convenience, not a boundary: `--no-verify`, `git -c core.hooksPath=<empty> commit`, and the
+# porcelain that makes or moves a commit without running hooks (`git cherry-pick`, `git revert`,
+# `git rebase --onto`) all skip this file. The unskippable enforcement point is remote-side - branch
+# protection on `origin/main`, or a pre-receive check that refuses a direct update.
 set -uo pipefail
 
 branch="$(git symbolic-ref --short HEAD 2>/dev/null || echo "")"
@@ -51,9 +57,12 @@ if [ -f "$(git rev-parse --git-dir)/MERGE_HEAD" ]; then
   subject="$(printf '%s\n' "$message" | head -1)"
   # Two forms, both of which name the branch: this repository's own 'merge(<branch>): ...', and git's
   # default "Merge branch 'x'" / "Merge remote-tracking branch 'origin/x'". Accepting git's default is
-  # what makes `git merge --no-edit` work, so the rule costs nothing in the ordinary case and still
-  # refuses a subject that says nothing. Written without regex escapes: matching ')' with -F and the
-  # rest with a plain pattern avoids a layer of quoting that has already cost two round trips today.
+  # what makes `git merge --no-edit` work - but only when the merge NAMES a branch, which is why the
+  # landing procedure merges `change/<name>` by name or passes its own subject. `git merge --no-ff
+  # <sha>` alone is refused here (measured): git's default subject for a SHA merge is
+  # "Merge commit '<sha>'", which names nothing. Written without regex escapes: matching ')' with -F
+  # and the rest with a plain pattern avoids a layer of quoting that has already cost two round trips
+  # today.
   if printf '%s' "$subject" | grep -qE '^merge' && printf '%s' "$subject" | grep -qF '):' ; then
     exit 0
   fi
@@ -115,8 +124,8 @@ commit-msg: refusing an agent commit on '$branch'.
 
   $trailer
 
-  provenance: none - WASM_AGENT_PROVENANCE is not set, so this process was not started by the host
-              as a run of a session
+  provenance: none - WASM_AGENT_PROVENANCE is unset or empty, so the host did not say this process
+              is a run of a session
 
 Your branch is the deliverable: put this on one (git switch -c <task>), rebase it onto
 origin/main so it still merges, push it, and let the human merge. If you are the human landing

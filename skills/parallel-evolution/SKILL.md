@@ -207,12 +207,21 @@ Here `main` is the integration branch; the gate is `bash scripts/test.sh`; the b
 `git config core.hooksPath .githooks`.
 
 - **Your branch is your name** (`git symbolic-ref --short HEAD`); `main` is never a node's name.
-- **Only the integrator moves `main`.** `.githooks/pre-commit` refuses a direct commit on `main`
-  unless it is a merge, or unless the host set `WASM_AGENT_PROVENANCE=orchestrator` on the process —
-  a run of a session, which is the coordinator the owner is talking to. A bounded child task is told
-  `child` and is refused even when it exports `WASM_AGENT_ALLOW_MAIN=1`; a person at a terminal has
-  no provenance and keeps that flag as their visible, explicit override. `scripts/test-main-guard.sh`
-  pins all five cases.
+- **Only the integrator directly commits on `main`.** `.githooks/pre-commit` refuses a direct commit
+  on `main` unless it is a merge, or unless the host set `WASM_AGENT_PROVENANCE=orchestrator` on the
+  process — a run of a session, which is the coordinator the owner is talking to. A bounded child task
+  is told `child` and is refused even when it exports `WASM_AGENT_ALLOW_MAIN=1`; a person at a terminal
+  has no provenance (empty and unset are one case) and keeps that flag as their visible, explicit
+  override. `scripts/test-main-guard.sh` pins 39 checks, including the boundary below.
+- **A client-side hook is convenience, not a boundary.** Measured on git 2.55.0.windows.3: `git
+  cherry-pick`, `git revert` and `git rebase --onto` make or move commits without consulting a hook at
+  all (`rebase --onto` moves `main` itself); a detached-HEAD commit is not judged; a hand-written
+  `.git/MERGE_HEAD` is trusted; `--no-verify` and `git -c core.hooksPath=<empty> commit` skip both
+  hooks; `git update-ref refs/heads/main <sha>` moves `main` from any worktree with no hook consulted.
+  The accurate claim is therefore "a child cannot *directly commit* on `main`, and the old flag no
+  longer buys it". The enforcement point that cannot be skipped is remote-side: **branch protection on
+  `origin/main`, or a pre-receive check that refuses a direct update**. Until one exists, the guard
+  stops the ordinary mistake, not a determined agent.
 - **Work in your own worktree.** Never switch, commit in, or leave a branch in another checkout —
   a live run did that and left the human's `main` checkout sitting on its branch.
 - **One `change/<name>` per concern**, cut from `origin/main`, merged and deleted.
@@ -239,9 +248,14 @@ cannot show is a step you did not do.
    `git -C <canonical> symbolic-ref --short HEAD` prints `main`;
    `git -C <canonical> status --porcelain` prints nothing;
    `git -C <canonical> rev-list --count HEAD..origin/main` is `0`.
-2. **Review, then merge the exact tip.** `git -C <canonical> fetch origin`, merge the reviewed branch
-   SHA with `--no-ff` and a subject naming it (`merge(<branch>): what it brings`). A merge is allowed
-   on `main` whatever the provenance; a *direct* commit there is not, unless step 5 applies.
+2. **Review, then merge the exact tip.** `git -C <canonical> fetch origin`. Merge the reviewed branch
+   **by name** — `git -C <canonical> merge --no-ff change/<name>` — which produces
+   `Merge branch 'change/<name>'`, or pass the subject yourself:
+   `git -C <canonical> merge --no-ff <sha> -m "merge(change/<name>): what it brings"`. Both are accepted
+   by `commit-msg`. Measured: `git merge --no-ff <sha>` **alone is refused**, because git's default
+   subject for a SHA merge is `Merge commit '<sha>'`, which names nothing — that refusal is the rule
+   (a merge whose subject names its source), not an obstacle to route around. A refused merge leaves
+   `MERGE_HEAD` in place, so abort it before trying again.
    Check: `git -C <canonical> log --first-parent -1 --format=%s` names the merged branch, and
    `git -C <canonical> rev-parse HEAD^2` resolves.
 3. **Gate the MERGED tree, not the branch tree.** The branch's receipt covers the branch's tree; what
@@ -262,7 +276,8 @@ cannot show is a step you did not do.
 5. **A direct commit on `main` (no merge) is the exception.** Allowed only for the orchestrator
    session, for `main`'s own change (a document, a version bump), and it carries the trailer like
    any other commit. A child is refused, and a person at a terminal needs
-   `WASM_AGENT_ALLOW_MAIN=1`.
+   `WASM_AGENT_ALLOW_MAIN=1`. This is the only step the hook enforces, and it enforces it against
+   `git commit` alone — see the boundary in the mapping above.
 6. **Clean up after the fact, never instead of it.** Only once the tip is in `main` and `origin/main`
    is pushed: delete the merged branch, and give up its worktree if that is what the worktree was for.
    Two conditions, because both failures are quiet:
@@ -280,11 +295,20 @@ cannot show is a step you did not do.
    this step is for the branch you landed, and step 4 is what makes it safe.
 
 **What is measured, and what is policy.** Measured in a throwaway clone against a bare remote on this
-machine (git 2.55): step 1's three checks; that `--no-ff` names the branch in the first-parent subject
-and resolves `HEAD^2` (step 2); that the merged tree equals the branch tree only when `main` has not
-moved, and differs when it has (step 3); that `ls-remote` equals `HEAD` after the push (step 4); that
-`worktree remove` refuses a dirty worktree while `prune` clears a hand-deleted one, and that `branch -d`
-deletes a branch that is not integrated when it has an upstream (step 6). Policy, not verified anywhere:
-which machine is authoritative, whether a PR review is required before step 2, and whether the cloud
-tree must be pulled after the push. Step 3's gate has to run where the tree you push lives - the
-canonical checkout is on this machine, and the cloud tree consumes what `origin/main` becomes.
+machine (git 2.55.0.windows.3): step 1's three checks; that `--no-ff` names the branch in the
+first-parent subject and resolves `HEAD^2` (step 2) *when the merge names a branch*, and that a SHA
+merge's default subject is refused; that the merged tree equals the branch tree only when `main` has
+not moved, and differs when it has (step 3); that `ls-remote` equals `HEAD` after the push (step 4);
+that `worktree remove` refuses a dirty worktree while `prune` clears a hand-deleted one, and that
+`branch -d` deletes a branch that is not integrated when it has an upstream (step 6). Policy, not
+verified anywhere: which machine is authoritative, whether a PR review is required before step 2, and
+whether the cloud tree must be pulled after the push. Step 3's gate has to run where the tree you push
+lives - the canonical checkout is on this machine, and the cloud tree consumes what `origin/main`
+becomes.
+
+**Before trusting any of this as enforcement:** a client-side hook is not a boundary. The guard that
+this procedure relies on for step 5 is bypassed by ordinary porcelain (`cherry-pick`, `revert`,
+`rebase --onto`), by a detached HEAD, by `--no-verify`, and by `git update-ref refs/heads/main <sha>`
+- each measured, and pinned as a recorded boundary in `scripts/test-main-guard.sh`. Remote branch
+protection on `origin/main`, or a pre-receive check, is the thing to set up; until it exists, this
+procedure's steps are what makes a landing *reviewable*, not what makes it impossible to bypass.

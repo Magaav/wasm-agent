@@ -19,15 +19,40 @@ set -uo pipefail
 # and the node's orchestrator session - the run that holds the whole picture and makes the integration
 # decision - commits as itself.
 #
-# RISK, named because this widens a guard that exists for a reason: an agent once committed to `main`
-# from the wrong tree (docs/ORCHESTRATION.md). The old allow-path was WASM_AGENT_ALLOW_MAIN=1, and the
-# committing process types it, so it proved nothing about *who* was committing: any child could set it
-# and land on main. The authority is now the host's answer about the process - rust/wa-host/src/
-# operations.rs exports WASM_AGENT_PROVENANCE from the thread's own task context for every shell it
-# starts (`orchestrator` = a session's own run, `child` = a bounded subagent task) - so a worker cannot
-# reach main by setting the old flag. This is a guard against the ordinary mistake and against the
-# documented way through, not a sandbox: a shell can still export the provenance it was given, or pass
-# `--no-verify`.
+# WHAT THIS CLAIMS, EXACTLY: a child task cannot *directly commit* on `main`, and the old
+# WASM_AGENT_ALLOW_MAIN=1 no longer buys it. Nothing more. A client-side hook is convenience, not a
+# boundary, and this one sees only the `git commit` porcelain:
+#   * `git cherry-pick <sha>`, `git revert` and `git rebase --onto` create or move `main` with no hook
+#     consulted at all - measured on this machine's git 2.55.0.windows.3 with instrumented hook
+#     copies (`hooks_ran: []`), and `rebase --onto` moves `main` itself.
+#   * a commit on a detached HEAD is not judged: `git symbolic-ref --short HEAD` is empty, so the
+#     branch case below does not match. That commit does not move `main`, and `git branch -f main` is
+#     refused while `main` is checked out (measured: "cannot force update the branch 'main' used by
+#     worktree at ..."), but from a detached HEAD even that moves `main`, and `git update-ref
+#     refs/heads/main <sha>` moves it from any worktree with no hook consulted (measured) - so "main
+#     cannot move" is not something a client hook can promise.
+#   * a hand-written `.git/MERGE_HEAD` plus a merge-shaped subject is accepted (measured): a merge is
+#     trusted on disk state, because its parents are its provenance. A merge that this hook *refuses*
+#     leaves MERGE_HEAD in place (measured), so the next commit on `main` is judged as a merge too.
+#   * `--no-verify` skips both hooks, and `git -c core.hooksPath=<empty> commit` is the same class.
+# The enforcement point that cannot be skipped is remote-side: branch protection on `origin/main`, or
+# a pre-receive check that refuses a direct update. Until one of those exists, this guard stops the
+# ordinary mistake and the documented way through - not an agent that reaches for other porcelain.
+#
+# WHAT THE AUTHORITY IS: the host's answer about the process. rust/wa-host/src/operations.rs exports
+# WASM_AGENT_PROVENANCE from the thread's own task context for every shell it starts (`orchestrator` =
+# a run of a session, `child` = a bounded subagent task, empty = neither). It replaced an allow-path
+# the committing process typed itself, which proved nothing about who was committing: any child could
+# set WASM_AGENT_ALLOW_MAIN=1 and land on main.
+#
+# RISK, named because this widens a guard that exists for a reason - an agent once committed to `main`
+# from the wrong tree (docs/ORCHESTRATION.md). The authority the host hands out is inherited:
+# `wa-operation` adds `spec.env` without `env_clear`, so every process descended from an orchestrator
+# shell - a terminal, an external agent runtime, a node restarted from that shell - carries
+# orchestrator authority with no flag and no visible trace. The host now pushes an explicit empty
+# value for a thread with no task context, so a shell it starts cannot pass an inherited marker on;
+# the descendants that never re-enter the host are the remaining trust boundary, and the managed node
+# and sentinel (`wa-sentinel/src/instance.rs` clears env down to a system allowlist) are outside it.
 branch="$(git symbolic-ref --short HEAD 2>/dev/null || echo "")"
 case "$branch" in
   main|master)
@@ -64,8 +89,8 @@ MESSAGE
             cat >&2 <<MESSAGE
 pre-commit: refusing a direct commit on '$branch'.
 
-  provenance: none - WASM_AGENT_PROVENANCE is not set, so this process was not started by the host
-              as a run of a session, and this hook cannot tell who is committing
+  provenance: none - WASM_AGENT_PROVENANCE is unset or empty, so the host did not say this process
+              is a run of a session, and this hook cannot tell who is committing
   refused:    a direct commit here is the one path that makes "which branch is this work on?"
               unanswerable
 

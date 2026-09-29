@@ -44,7 +44,10 @@ convergence/escalation protocol. These rules hold whether or not it is loaded:
 - **Your branch is your name** (`git symbolic-ref --short HEAD`); `main` is never a node's name.
   A direct commit on `main` is refused by the hook unless it is a merge or the host says this
   process is the `orchestrator` (a run of a session); `WASM_AGENT_ALLOW_MAIN=1` is the human's
-  visible override and does not open `main` for a child.
+  visible override and does not open a direct commit on `main` for a child. That is all it claims:
+  a client-side hook is convenience, not a boundary (`--no-verify`, `core.hooksPath`, `cherry-pick`,
+  `revert`, `rebase`, `update-ref` all skip it). The enforcement point that cannot be skipped is
+  remote-side - branch protection on `origin/main`, or a pre-receive check.
 - **One `change/<name>` per concern**, from current `origin/main`, merged and deleted.
 - **Never move a tree you do not own.**
 - **End every commit with its provenance trailer** (the hook prints the form when one is missing).

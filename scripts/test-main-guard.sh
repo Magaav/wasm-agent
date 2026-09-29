@@ -175,7 +175,99 @@ ok "$([ "$(printf '%s\n' "$SUBJECTS" | wc -l | tr -d ' ')" = "3" ] && echo 1 || 
 ok "$(grep -q 'reaches for main' <<<"$SUBJECTS" && echo 0 || echo 1)" \
   "and no refused case left a commit behind"
 
-# --- 11. no refusal message ran a command of its own -------------------------------------------
+# --- 11. provenance set but EMPTY is the human path --------------------------------------------------
+# What the host pushes for a thread with no task context (it must push something: the marker is
+# inherited, and silence would hand on whatever the host itself inherited). Refused here, and the
+# explicit override still works - so empty and unset are one case, as the hook's message says.
+last_out="$(env -u WASM_AGENT_ALLOW_MAIN WASM_AGENT_PROVENANCE= git commit \
+  -m "fixture: empty provenance" -m "Agent: pi session=fixture" 2>&1)"
+last_exit=$?
+ALL_OUT="$ALL_OUT$last_out"
+ok "$([ "$last_exit" != "0" ] && echo 1 || echo 0)" \
+  "an empty provenance is refused like an unset one" "exit $last_exit"
+ok "$(grep -q 'provenance: none' <<<"$last_out" && echo 1 || echo 0)" \
+  "and it says the marker does not name a run of a session" "$(grep -m1 'provenance:' <<<"$last_out")"
+
+# --- 12. the match is exact: a differently-cased forgery is not the host's answer ---------------------
+stage cased
+commit_case Orchestrator 1 -m "fixture: provenance with the wrong casing" -m "$(trailer child)"
+ok "$([ "$last_exit" != "0" ] && echo 1 || echo 0)" \
+  "'Orchestrator' is not accepted as the host's 'orchestrator', even with the old flag" "exit $last_exit"
+ok "$(grep -q 'unrecognised' <<<"$last_out" && echo 1 || echo 0)" \
+  "and it is reported as unrecognised, not as a child"
+
+# --- 13. the landing path's merge forms: a branch name, or a subject you write ----------------------
+# The rule is `commit-msg`'s, and the landing procedure in skills/parallel-evolution must produce a
+# subject it accepts. Measured here, because "merge the reviewed SHA" is exactly what it refuses.
+stage other-work
+git checkout -q -b boundary-other
+printf 'other branch\n' > other.txt
+git add other.txt
+git commit -q -m "fixture: a second branch" -m "$(trailer child)"
+git checkout -q main
+OTHER_TIP="$(git rev-parse boundary-other)"
+git_case child "" merge --no-ff "$OTHER_TIP"
+ok "$([ "$last_exit" != "0" ] && echo 1 || echo 0)" \
+  "merging a SHA with git's default subject is refused (subject: Merge commit '<sha>')" "exit $last_exit"
+ok "$(grep -q 'a merge must name the branch it merged' <<<"$last_out" && echo 1 || echo 0)" \
+  "and the refusal says what a merge must name"
+# A refused merge commit leaves the merge unconcluded. That is why the next merge in this case must
+# abort first - and it is the same on-disk trust the hand-written MERGE_HEAD case records: while that
+# file exists, the next commit is judged as a merge, whatever it contains.
+ok "$(git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1 && echo 1 || echo 0)" \
+  "[recorded] the refused merge leaves MERGE_HEAD behind, so the next attempt would be judged as a merge"
+git merge --abort >/dev/null 2>&1
+git_case child "" merge --no-ff boundary-other
+ok "$([ "$last_exit" = "0" ] && echo 1 || echo 0)" \
+  "merging the branch by name is accepted (subject: Merge branch '<name>')" "exit $last_exit: $(head -2 <<<"$last_out" | tr '\n' ' ')"
+ok "$(git log -1 --format=%s | grep -q "^Merge branch 'boundary-other'" && echo 1 || echo 0)" \
+  "and that is the subject it produced" "$(git log -1 --format=%s)"
+
+# --- 14. the boundary this guard does NOT claim: recorded here, not covered -------------------------
+# Ordinary porcelain makes and moves commits without consulting a client hook. These cases assert that
+# it still does, with a CHILD provenance and a successful exit, so the suite can never be read as "a
+# child session cannot reach main". The claim is "cannot DIRECTLY COMMIT", and the unskippable
+# enforcement point is remote-side (branch protection or a pre-receive check on origin/main).
+stage cherry-work
+git checkout -q -b boundary-cherry
+printf 'cherry\n' > cherry.txt
+git add cherry.txt
+git commit -q -m "fixture: a commit to cherry-pick" -m "$(trailer child)"
+CHERRY_TIP="$(git rev-parse boundary-cherry)"
+git checkout -q main
+git_case child "" cherry-pick "$CHERRY_TIP"
+ok "$([ "$last_exit" = "0" ] && echo 1 || echo 0)" \
+  "[recorded] cherry-pick lands on main with a child provenance: no hook is consulted" "exit $last_exit"
+MAIN_BEFORE_REBASE="$(git rev-parse main)"
+# A branch whose change is NOT yet on main: rebasing onto a branch whose tip main already contains
+# would be a no-op, which is what made the first version of this case pass trivially.
+stage rebase-work
+git checkout -q -b boundary-rebase
+printf 'rebase\n' > rebase.txt
+git add rebase.txt
+git commit -q -m "fixture: a branch to rebase onto" -m "$(trailer child)"
+git checkout -q main
+git_case child "" rebase --onto boundary-rebase main~1
+ok "$([ "$last_exit" = "0" ] && [ "$(git rev-parse main)" != "$MAIN_BEFORE_REBASE" ] && git cat-file -e main:rebase.txt 2>/dev/null && echo 1 || echo 0)" \
+  "[recorded] rebase --onto MOVES main itself and brings the branch's file in, with no hook in the path" "exit $last_exit"
+stage detached-work
+git_case child "" checkout -q --detach main
+printf 'detached\n' > detached.txt
+git add detached.txt
+commit_case child "" -m "fixture: a commit on a detached HEAD" -m "$(trailer child)"
+ok "$([ "$last_exit" = "0" ] && echo 1 || echo 0)" \
+  "[recorded] a detached-HEAD commit is not judged: the guard keys on the branch name" "exit $last_exit"
+ok "$([ -z "$(git symbolic-ref --short -q HEAD 2>/dev/null)" ] && echo 1 || echo 0)" \
+  "[recorded] and that commit does not move main, though branch -f and update-ref are not commits at all"
+git checkout -q main
+stage noverify-work
+printf 'noverify\n' > noverify.txt
+git add noverify.txt
+git_case child "" commit --no-verify -m "fixture: no-verify" -m "$(trailer child)"
+ok "$([ "$last_exit" = "0" ] && echo 1 || echo 0)" \
+  "[recorded] --no-verify commits directly on main as a child; -c core.hooksPath=<empty> is the same class" "exit $last_exit"
+
+# --- 15. no refusal message ran a command of its own -------------------------------------------
 # The messages are unquoted heredocs so they can name the branch and the provenance; that also means
 # a backtick is command substitution. This check exists because it happened: the human-case refusal
 # printed "orchestrator: command not found" and lost the word it meant to point at.
