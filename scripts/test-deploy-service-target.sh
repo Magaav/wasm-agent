@@ -149,11 +149,14 @@ ok "$(grep -q 'different installs' <<<"$last_out" && echo 1 || echo 0)" \
   "removing the drop-in brings the refusal back - the falsification was the missing evidence"
 
 # --- (b) a stray holds the port: refused, by process ----------------------------------------------------
-node -e "require('net').createServer().listen($PORT,'127.0.0.1')" >/dev/null 2>&1 &
+node -e "require('net').createServer().listen($PORT,'127.0.0.1')" >"$W/stray.log" 2>&1 &
 STRAY_JOB=$!
 LISTEN_PID=""
-for _ in $(seq 1 60); do LISTEN_PID="$(wa_port_pid "$PORT")"; [ -n "$LISTEN_PID" ] && break; sleep 0.1; done
-[ -n "$LISTEN_PID" ] || fail_hard "the fixture's own listener never held port $PORT"
+# Generous, in tenths and then some: this runs on a loaded machine during a gate, and a fixture that fails
+# because its own listener needed a second longer is a fixture nobody can trust. What it could not do is
+# reported with what `node` said.
+for _ in $(seq 1 150); do LISTEN_PID="$(wa_port_pid "$PORT")"; [ -n "$LISTEN_PID" ] && break; sleep 0.2; done
+[ -n "$LISTEN_PID" ] || fail_hard "the fixture's own listener never held port $PORT (node said: $(head -2 "$W/stray.log" 2>/dev/null | tr '\n' ' '))"
 # The pid that holds the port is the one the machine reports (that is what the deploy reads); `$!` is this
 # shell's job, and it is only the handle this script kills at the end. Killing the job pid here instead of
 # the holder's - which is what this fixture did first - killed the stray before the deploy could see it, and
@@ -252,6 +255,10 @@ if [ -s "$W/verify-main.sh" ] || git -C "$ROOT" show origin/main:scripts/verify-
 fi
 
 # --- the skills question is the same class, and the verifier now names both paths -----------------------
+# Two directories, one of which the node reads: `<home>/.wasm-agent/skills` (paths.config() .. "/skills") and
+# `<home>/skills`, which is where `upgrade.sh` writes when it runs with WASM_AGENT_HOME set - which every
+# supervisor this project installs does (the sentinel unit on Linux, the launcher install-sentinel-task.ps1
+# writes on Windows).
 SKILL_HOME="$W/skill-home"
 mkdir -p "$SKILL_HOME/.wasm-agent/skills/self-update" "$SKILL_HOME/skills/self-update"
 printf 'what the node reads\n' > "$SKILL_HOME/.wasm-agent/skills/self-update/SKILL.md"
@@ -260,12 +267,20 @@ V_OUT="$(run_verify "$unit_target" "$SKILL_HOME" "$SKILL_HOME")"
 S_LINE="$(grep -F 'the skills a deploy writes are the skills the node reads' <<<"$V_OUT" | head -1)"
 ok "$(grep -q '^  FAIL the skills a deploy writes' <<<"$V_OUT" && echo 1 || echo 0)" \
   "a deploy writing skills outside the node's scan root is reported, not compared one-sided"
-ok "$(grep -qF "$SKILL_HOME/skills/self-update/SKILL.md" <<<"$S_LINE" && grep -qF "$SKILL_HOME/.wasm-agent/skills/self-update/SKILL.md" <<<"$S_LINE" && echo 1 || echo 0)" \
+ok "$(grep -qF "$SKILL_HOME/skills" <<<"$S_LINE" && grep -qF "$SKILL_HOME/.wasm-agent/skills" <<<"$S_LINE" && echo 1 || echo 0)" \
   "naming where the deploy writes and where the node reads" "${S_LINE:0:130}"
 
+# The same two directories, this time with WASM_AGENT_HOME unset - the way an operator at a shell has it, and
+# the way a verifier would have missed this entirely if it trusted its own environment instead of the files.
+V_OUT="$(run_verify "$unit_target" "$SKILL_HOME")"
+ok "$(grep -q '^  FAIL the skills a deploy writes' <<<"$V_OUT" && echo 1 || echo 0)" \
+  "with WASM_AGENT_HOME unset the durable trace is still found, not read off this shell" \
+  "$(grep -F 'the skills a deploy writes' <<<"$V_OUT" | head -1 | cut -c1-120)"
+
+rm -rf "$SKILL_HOME/skills"
 V_OUT="$(run_verify "$unit_target" "$SKILL_HOME")"
 ok "$(grep -q '^  ok   the skills a deploy writes are the skills the node reads' <<<"$V_OUT" && echo 1 || echo 0)" \
-  "with WASM_AGENT_HOME unset the two expressions name one directory, and the check says so" \
+  "with nothing outside the scan root the two expressions name one directory, and the check says so" \
   "$(grep -F 'the skills a deploy writes are the skills the node reads' <<<"$V_OUT" | head -1 | cut -c1-120)"
 
 printf '\n'

@@ -180,30 +180,32 @@ fi
 
 # 2b. Compare like with like: the skills a deploy writes must be the skills the node reads.
 #
-# This is the same defect as the install directory, in a smaller place. The node scans `<config>/skills`
-# (lua/core/paths.lua: `paths.config() .. "/skills"`), and this verifier compares against `<config>/skills` -
-# but `upgrade.sh` computes its target as `HOME_DIR="${WASM_AGENT_HOME:-$HOME/.wasm-agent}"`, treating that
-# variable as the config directory when it is the *home* (rust/wa-host/src/main.rs resolve_home). So on a
-# machine that sets it - the sentinel unit on the cloud node sets `WASM_AGENT_HOME=/home/ubuntu` - the deploy
-# writes `/home/ubuntu/skills/...` and the node reads `/home/ubuntu/.wasm-agent/skills/...`, and a verifier
-# that only checks one of them reports ok about a pair nobody joined up. Naming both paths is the whole
+# This is the same defect as the install directory, in a smaller place, and it is measured rather than
+# theoretical. The node scans `<config>/skills` (lua/core/paths.lua: `paths.config() .. "/skills"`), and this
+# verifier compares against `<config>/skills` - but `upgrade.sh` computes its target as
+# `HOME_DIR="${WASM_AGENT_HOME:-$HOME/.wasm-agent}"`, treating that variable as the config directory when it
+# is the *home* (rust/wa-host/src/main.rs resolve_home). Every supervisor this project installs sets it: the
+# sentinel unit on the cloud node has `Environment=WASM_AGENT_HOME=/home/ubuntu`, and
+# scripts/install-sentinel-task.ps1 writes `set "WASM_AGENT_HOME=%USERPROFILE%"` into the Windows launcher. So
+# a deploy run by a supervisor writes `<home>/skills/...` while the node reads `<home>/.wasm-agent/skills/...`.
+#
+# Measured on the machine this was written on: both directories exist, and `git-orchestrator/SKILL.md`,
+# `git-orchestrator/scripts/audit.mjs` and `parallel-evolution/SKILL.md` differ between them. A verifier that
+# reads only one side reports ok about a pair nobody joined up.
+#
+# The check is against the *files*, not against this shell's environment, and that is deliberate: the presence
+# of `<home>/skills` is the durable trace of a deploy that ran with the variable set (its own supervisor's),
+# so an interactive run - where the variable is usually unset - still sees it. Naming both paths is the whole
 # point: this does not repair the disagreement, it stops it from being discoverable only by hand.
-if [ -z "${WASM_AGENT_HOME:-}" ]; then
-  record ok "the skills a deploy writes are the skills the node reads" \
-    "WASM_AGENT_HOME is unset, so upgrade.sh's target and this node's scan root are the same directory ($CONFIG)"
-elif wa_same_dir "$WASM_AGENT_HOME" "$CONFIG"; then
-  record ok "the skills a deploy writes are the skills the node reads" "WASM_AGENT_HOME is the config directory here"
+if [ "$HAD_SERVICE_LIB" = "1" ]; then DEV_SKILLS="$(wa_home_dir)/skills"; else DEV_SKILLS="${WASM_AGENT_HOME:-$HOME}/skills"; fi
+if [ -d "$DEV_SKILLS" ] && ! wa_same_dir "$DEV_SKILLS" "$CONFIG/skills"; then
+  DEV_DIFFERENCE="$(diff -rq "$DEV_SKILLS" "$CONFIG/skills" 2>&1 | head -3 | tr '\r\n' '  ')"
+  record "$([ -z "$DEV_DIFFERENCE" ] && echo ok || echo fail)" \
+    "the skills a deploy writes are the skills the node reads" \
+    "a deploy writes $DEV_SKILLS; this node reads $CONFIG/skills${DEV_DIFFERENCE:+ - $DEV_DIFFERENCE}"
 else
-  DEPLOYED_SKILL="$WASM_AGENT_HOME/skills/self-update/SKILL.md"
-  READ_SKILL="$CONFIG/skills/self-update/SKILL.md"
-  if [ -f "$DEPLOYED_SKILL" ]; then
-    record "$(cmp -s "$DEPLOYED_SKILL" "$READ_SKILL" 2>/dev/null && echo ok || echo fail)" \
-      "the skills a deploy writes are the skills the node reads" \
-      "a deploy writes $DEPLOYED_SKILL; the node reads $READ_SKILL"
-  else
-    record skip "the skills a deploy writes are the skills the node reads" \
-      "WASM_AGENT_HOME=$WASM_AGENT_HOME puts a deploy's skills in $WASM_AGENT_HOME/skills, and nothing is there yet; the node reads $READ_SKILL"
-  fi
+  record ok "the skills a deploy writes are the skills the node reads" \
+    "nothing outside $CONFIG/skills ($DEV_SKILLS does not exist), so the deploy's writer and this node's reader name one directory here"
 fi
 
 # 3. the node answers, and the pid answering is the pid the install recorded
