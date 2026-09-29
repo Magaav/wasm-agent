@@ -194,8 +194,10 @@ No transcript is summarized, deleted or rewritten by inspection.
   lands at the next chunk or at the child's deadline.
 - A `running`/`accepted` record left by another boot reads `unknown`, with no
   replay. Durable records live at `<data>/subagents/<id>/record.json`; the record
-  keeps the resolved spec and the terminal result, but is never injected into
-  model context.
+  keeps the resolved spec, the terminal result and its `accounting` - the provider
+  and model that served the run and the provider-reported prompt/completion/cache/
+  cost totals, with `usage.available=false` and a reason when nothing was reported
+  (never a zero) - but is never injected into model context.
 
 ## Lifetime, CLI and exits
 

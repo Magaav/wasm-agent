@@ -219,6 +219,10 @@ struct Task {
     state: String,
     settled: bool,
     result: Value,
+    /// What the child reported about the run: the provider and model that served
+    /// it and what the provider said it cost. `Value::Null` when it reported
+    /// nothing, which `accounting_block` states plainly rather than as a zero.
+    accounting: Value,
     error: Option<String>,
     created_at: f64,
     started_at: Option<f64>,
@@ -261,7 +265,24 @@ impl Task {
         if include_result {
             value["result"] = self.result.clone();
         }
+        // Always present, settled or not: a caller asking "which model served this,
+        // and what did it cost" must not have to rebuild that from record.json and
+        // the ledger by hand. When nothing was reported it says so - an absent
+        // measurement is never rendered as a measured zero.
+        value["accounting"] = self.accounting_block();
         value
+    }
+
+    fn accounting_block(&self) -> Value {
+        if self.accounting.get("usage").map(Value::is_object).unwrap_or(false) {
+            return self.accounting.clone();
+        }
+        let reason = if self.settled { "no_child_report" } else { "child_not_settled" };
+        json!({
+            "provider": Value::Null,
+            "model": Value::Null,
+            "usage": { "available": false, "reason": reason },
+        })
     }
 }
 
@@ -399,6 +420,7 @@ impl Manager {
                 state: state.clone(),
                 settled: settled || state == "unknown",
                 result: value["result"].clone(),
+                accounting: value.get("accounting").cloned().unwrap_or(Value::Null),
                 error: value["error"].as_str().map(str::to_string),
                 created_at: value["created_at"].as_f64().unwrap_or(0.0),
                 started_at: value["started_at"].as_f64(),
@@ -510,6 +532,7 @@ impl Manager {
             state: "accepted".to_string(),
             settled: false,
             result: Value::Null,
+            accounting: Value::Null,
             error: None,
             created_at: now_secs(),
             started_at: None,
@@ -732,6 +755,7 @@ fn persist_task(root: &Path, task: &Task) -> Result<(), String> {
         "state": task.state,
         "settled": task.settled,
         "result": task.result,
+        "accounting": task.accounting,
         "error": task.error,
         "created_at": task.created_at,
         "started_at": task.started_at,
@@ -760,7 +784,7 @@ fn persist_view(root: &Path, view: &Value) -> Result<(), String> {
         .filter(Value::is_object)
         .unwrap_or_else(|| json!({}));
     if let (Some(target), Some(source)) = (record.as_object_mut(), view.as_object()) {
-        for key in ["state", "settled", "result", "error", "settled_at", "started_at"] {
+        for key in ["state", "settled", "result", "accounting", "error", "settled_at", "started_at"] {
             if let Some(value) = source.get(key) {
                 target.insert(key.to_string(), value.clone());
             }
@@ -805,7 +829,7 @@ fn run_child(inner: Arc<Inner>, runner: Runner, id: String, cancel: Arc<AtomicBo
             let previous = tasks.get(&after);
             if previous.is_none() || previous.is_some_and(|task| task.state == "unknown") {
                 drop(tasks);
-                settle_view(&inner, &id, "failed", Value::Null, Some("predecessor_unknown".into()));
+                settle_view(&inner, &id, "failed", Value::Null, Some("predecessor_unknown".into()), Value::Null);
                 return;
             }
             if cancel.load(Ordering::SeqCst) || previous.is_some_and(|task| task.settled) { break; }
@@ -814,7 +838,7 @@ fn run_child(inner: Arc<Inner>, runner: Runner, id: String, cancel: Arc<AtomicBo
     }
     // Acquire a bounded execution slot; a cancelled or settled task is skipped.
     if !acquire(&inner, &cancel) {
-        settle_view(&inner, &id, "cancelled", Value::Null, Some("cancelled_before_start".into()));
+        settle_view(&inner, &id, "cancelled", Value::Null, Some("cancelled_before_start".into()), Value::Null);
         return;
     }
     {
@@ -862,9 +886,9 @@ fn run_child(inner: Arc<Inner>, runner: Runner, id: String, cancel: Arc<AtomicBo
             let state = value["state"].as_str().unwrap_or("completed").to_string();
             let result = value.get("result").cloned().unwrap_or(Value::Null);
             let error = value["error"].as_str().map(str::to_string);
-            settle_view(&inner, &id, &state, result, error);
+            settle_view(&inner, &id, &state, result, error, value.get("accounting").cloned().unwrap_or(Value::Null));
         }
-        Err(error) => settle_view(&inner, &id, "failed", Value::Null, Some(error)),
+        Err(error) => settle_view(&inner, &id, "failed", Value::Null, Some(error), Value::Null),
     }
     release(&inner);
 }
@@ -894,7 +918,7 @@ fn release(inner: &Arc<Inner>) {
     inner.capacity.notify_all();
 }
 
-fn settle_view(inner: &Arc<Inner>, id: &str, state: &str, result: Value, error: Option<String>) {
+fn settle_view(inner: &Arc<Inner>, id: &str, state: &str, result: Value, error: Option<String>, accounting: Value) {
     let mut tasks = inner.tasks.lock().expect("subagents tasks");
     let Some(task) = tasks.get_mut(id) else { return };
     if task.settled {
@@ -907,6 +931,9 @@ fn settle_view(inner: &Arc<Inner>, id: &str, state: &str, result: Value, error: 
     task.state = if cancelled { "cancelled".to_string() } else { state.to_string() };
     task.settled = true;
     task.result = result;
+    // The child's report of what served it and what it cost, kept with the result
+    // so a receipt read after a restart still answers the same question.
+    task.accounting = accounting;
     task.error = error;
     task.settled_at = Some(now_secs());
     let view = task.view(true);
@@ -1189,6 +1216,93 @@ mod tests {
         assert!(record.contains("child done"));
         assert!(record.contains("\"state\":\"completed\""), "the durable record must advance to completed: {record}");
         assert!(record.contains("\"spec\""), "the durable record must keep the resolved spec for a restart");
+    }
+
+    #[test]
+    fn a_receipt_says_what_served_the_child_and_what_it_cost() {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let root = temp_root("accounting");
+        let manager = Manager::with_root(root.clone(), 4, 8);
+        let _ = manager.runner.set({
+            let gate = gate.clone();
+            Arc::new(move |receipt: &str| {
+                let request: Value = serde_json::from_str(receipt).unwrap();
+                match request["id"].as_str().unwrap_or_default() {
+                    // A child that reported nothing: no provider, no model, no usage.
+                    "silent-child" => {
+                        let (lock, cond) = &*gate;
+                        let mut open = lock.lock().unwrap();
+                        while !*open { open = cond.wait(open).unwrap(); }
+                        Ok(json!({"state": "completed", "result": {"reply": "quiet"}}))
+                    }
+                    // A provider that reported usage, and reported it as zero.
+                    "zero-child" => Ok(json!({"state": "completed", "accounting": {
+                        "provider": "opencode-go", "model": "zero-model",
+                        "usage": {"available": true, "prompt": 0, "completion": 0,
+                            "cache_read": 0, "cache_write": 0, "total_tokens": 0}}})),
+                    _ => Ok(json!({"state": "completed", "accounting": {
+                        "provider": "opencode-go", "model": "measured-model",
+                        "usage": {"available": true, "partial": false, "calls": 2,
+                            "unmeasured_calls": 0, "prompt": 120, "completion": 30,
+                            "cache_read": 100, "cache_write": 0, "total_tokens": 150,
+                            "cost_usd": 0.002, "cost_known": true, "cache_known": true}}})),
+                }
+            })
+        });
+        // An observed child that has not settled reports no provider and no number
+        // rather than a plausible-looking zero.
+        let observed = manager.start(&spec("silent-child", "leo", "")).expect("start");
+        assert_eq!(observed["settled"], false);
+        assert_eq!(observed["accounting"]["provider"], Value::Null);
+        assert_eq!(observed["accounting"]["usage"]["available"], false);
+        assert_eq!(observed["accounting"]["usage"]["reason"], "child_not_settled");
+        {
+            let (lock, cond) = &*gate;
+            *lock.lock().unwrap() = true;
+            cond.notify_all();
+        }
+        // A child that reported nothing still settles normally, and its receipt says
+        // usage is unavailable instead of showing a measured zero.
+        let silent = manager.await_task("silent-child", "leo", 5_000).expect("await");
+        assert_eq!(silent["state"], "completed");
+        assert_eq!(silent["error"], Value::Null);
+        assert_eq!(silent["result"]["reply"], "quiet");
+        assert_eq!(silent["accounting"]["usage"]["available"], false);
+        assert_eq!(silent["accounting"]["usage"]["reason"], "no_child_report");
+        assert_eq!(silent["accounting"]["usage"].get("prompt"), None,
+            "an unmeasured run must not carry a zero that reads as a measurement");
+
+        // A measured run carries the provider, the model that served it and the
+        // provider's own totals, with the cache split out.
+        manager.start(&spec("measured-child", "leo", "")).expect("start");
+        let measured = manager.await_task("measured-child", "leo", 5_000).expect("await");
+        assert_eq!(measured["accounting"]["provider"], "opencode-go");
+        assert_eq!(measured["accounting"]["model"], "measured-model");
+        let usage = &measured["accounting"]["usage"];
+        assert_eq!(usage["available"], true);
+        assert_eq!(usage["prompt"], 120);
+        assert_eq!(usage["completion"], 30);
+        assert_eq!(usage["cache_read"], 100);
+        assert_eq!(usage["total_tokens"], 150);
+        assert_eq!(usage["cost_usd"], 0.002);
+        assert_eq!(usage["cost_known"], true);
+
+        // A provider reporting a real zero is a measurement, not an unknown: the
+        // two are told apart by `available`, so `0` is never read as "missing".
+        manager.start(&spec("zero-child", "leo", "")).expect("start");
+        let zero = manager.await_task("zero-child", "leo", 5_000).expect("await");
+        assert_eq!(zero["accounting"]["usage"]["available"], true);
+        assert_eq!(zero["accounting"]["usage"]["prompt"], 0);
+
+        // The accounting is durable, not only an in-memory view: a later boot
+        // reads it back off the record.
+        let record = std::fs::read_to_string(root.join("measured-child/record.json")).expect("record");
+        assert!(record.contains("\"accounting\""), "the record must keep the accounting: {record}");
+        let recovered = Manager::with_root(root, 2, 6);
+        recovered.recover();
+        let reread = recovered.find("measured-child", "leo").expect("recovered status");
+        assert_eq!(reread["accounting"]["model"], "measured-model");
+        assert_eq!(reread["accounting"]["usage"]["prompt"], 120);
     }
 
     #[test]
