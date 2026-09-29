@@ -138,10 +138,13 @@ end
 -- verdict and the request it writes - at a fixture instead of at the machine's real node.
 function M.facts(options)
   local install = (options and options.install) or M.install_dir()
+  local config = slashes((options and options.config) or paths.config())
   local facts = {
     install = install,
+    config = config,
     binary = install .. "/" .. M.binary_name(),
     sentinel = install .. "/" .. M.sentinel_name(),
+    sentinel_stop_file = config .. "/sentinel/stop",
   }
   facts.tree, facts.tree_source = M.runtime_tree(install)
   if facts.tree then
@@ -156,7 +159,7 @@ function M.facts(options)
   facts.installed_sha256 = record.sha256
   facts.installed_at = record.at
   facts.sentinel_present = exists(facts.sentinel)
-  facts.sentinel_stopped = exists(slashes(paths.config()) .. "/sentinel/stop")
+  facts.sentinel_stopped = exists(facts.sentinel_stop_file)
   return facts
 end
 
@@ -267,13 +270,121 @@ end
 -- The exact command line handed to the shell for a queued install. Pure, so a test can read it:
 -- every path and the reason are single-quoted (this node runs commands through `bash -c`), and a
 -- quote inside a reason must not be able to end the quoting early.
+function M.preflight_command(sentinel)
+  -- `status` is supported by every installed sentinel build; /update must remain able to
+  -- bootstrap the first build that adds the stronger watcher lock.
+  return quote(sentinel) .. " status"
+end
+
+local function sentinel_state(output)
+  local line = tostring(output or ""):match("[^\r\n]*sentinel:%s*([^\r\n]+)")
+  if not line then return nil end
+  line = trim(line)
+  if line:match("^watching%s*%(") or line == "watching" then return "running" end
+  if line == "not running" then return "stopped" end
+  if line:match("^unverified live pid") then return "ambiguous" end
+  return nil
+end
+
+local function watcher_failure(facts, status, observed, message, next_step)
+  return {
+    ok=false, status=status, error=status, queued=nil,
+    observed=observed, message=message, next=next_step,
+    tree=facts.tree, installed_commit=facts.installed_commit,
+    candidate=facts.candidate, installed_sha256=facts.installed_sha256,
+    installed_at=facts.installed_at,
+  }
+end
+
+local function ensure_watcher(facts)
+  if exists(facts.sentinel_stop_file) then
+    return watcher_failure(facts, "sentinel_intentionally_stopped",
+      "the sentinel stop file is present at " .. facts.sentinel_stop_file,
+      "no deploy was queued: the sentinel is intentionally stopped.",
+      "after an operator chooses to resume watching, remove the stop file and run wa-sentinel start outside the node; then ask /update again")
+  end
+  local result = shell(M.preflight_command(facts.sentinel))
+  if not result then
+    return watcher_failure(facts, "sentinel_unreachable",
+      "calling " .. facts.sentinel .. " status produced no answer",
+      "no deploy was queued because the sentinel status could not be verified.",
+      "check the installed sentinel outside the node; no request was written")
+  end
+  if (result.code or 0) ~= 0 then
+    local detail = trim(result.stderr or "") ~= "" and trim(result.stderr) or trim(result.stdout or "")
+    return watcher_failure(facts, "sentinel_preflight_failed",
+      "the sentinel status exited " .. tostring(result.code) .. ": " .. detail,
+      "no deploy was queued because the sentinel status could not be verified.",
+      "check the installed sentinel outside the node; no request was written")
+  end
+  local output = tostring(result.stdout or "")
+  local state = sentinel_state(output)
+  if state == "running" then return nil end
+  if exists(facts.sentinel_stop_file) or output:match("stop file:%s*present") then
+    return watcher_failure(facts, "sentinel_intentionally_stopped",
+      "the sentinel stop file is present at " .. facts.sentinel_stop_file,
+      "no deploy was queued: the sentinel is intentionally stopped.",
+      "after an operator chooses to resume watching, remove the stop file and run wa-sentinel start outside the node; then ask /update again")
+  end
+  if state == "ambiguous" then
+    return watcher_failure(facts, "sentinel_state_ambiguous", trim(output),
+      "no deploy was queued because a live sentinel process could not be safely identified.",
+      "check wa-sentinel status and the registered service/task outside the node; no request was written")
+  end
+  if state ~= "stopped" then
+    return watcher_failure(facts, "sentinel_state_unknown", trim(output),
+      "no deploy was queued because the sentinel status format was not recognized.",
+      "update or verify the installed sentinel outside the node; no request was written")
+  end
+
+  -- The supported `start` command detaches the watcher. Never spawn `watch` from this node, clear
+  -- the stop marker, or write a deploy until a follow-up status proves the watcher owns its slot.
+  result = shell(quote(facts.sentinel) .. " start")
+  if not result or (result.code or 0) ~= 0 then
+    local detail = result and (trim(result.stderr or "") ~= "" and trim(result.stderr) or trim(result.stdout or "")) or "no answer"
+    return watcher_failure(facts, "sentinel_start_failed",
+      "the sentinel was not running and wa-sentinel start failed: " .. detail,
+      "no deploy was queued because the sentinel is not watching.",
+      "start the registered sentinel service/task outside the node, then ask /update again; no request was written")
+  end
+  if exists(facts.sentinel_stop_file) then
+    return watcher_failure(facts, "sentinel_intentionally_stopped",
+      "the sentinel stop file appeared during recovery",
+      "no deploy was queued: the sentinel is intentionally stopped.",
+      "after an operator chooses to resume watching, remove the stop file and run wa-sentinel start outside the node; then ask /update again")
+  end
+  result = shell(M.preflight_command(facts.sentinel))
+  if not result or (result.code or 0) ~= 0 then
+    return watcher_failure(facts, "sentinel_start_unverified",
+      "wa-sentinel start returned without a verifiable watcher status",
+      "no deploy was queued because the sentinel start could not be verified.",
+      "check wa-sentinel status and the registered service/task outside the node; no request was written")
+  end
+  output = tostring(result.stdout or "")
+  if exists(facts.sentinel_stop_file) or output:match("stop file:%s*present") then
+    return watcher_failure(facts, "sentinel_intentionally_stopped",
+      "the sentinel stop file appeared while recovery was being checked",
+      "no deploy was queued: the sentinel is intentionally stopped.",
+      "after an operator chooses to resume watching, remove the stop file and run wa-sentinel start outside the node; then ask /update again")
+  end
+  state = sentinel_state(output)
+  if state ~= "running" then
+    local ambiguous = state == "ambiguous"
+    return watcher_failure(facts, ambiguous and "sentinel_state_ambiguous" or "sentinel_start_unverified",
+      ambiguous and trim(output) or "wa-sentinel start returned, but status does not prove a running watcher",
+      ambiguous and "no deploy was queued because a live sentinel process could not be safely identified." or "no deploy was queued because the sentinel is not watching.",
+      "check wa-sentinel status and the registered service/task outside the node; no request was written")
+  end
+  return nil
+end
+
 function M.request_command(facts, reason, continuation)
   -- A deploy, not an `upgrade --binary`: the gate builds the tree itself, so there is no candidate
   -- to name, and it is the only path that installs the sentinel, the scripts and the job templates
   -- and records a commit it verified.
   local command = {
     quote(facts.sentinel), "request", "deploy",
-    "--reason", quote(reason),
+    "--reason", quote(reason), "--if-no-pending",
   }
   local session_id = trim(continuation and continuation.session_id)
   if session_id ~= "" then
@@ -328,6 +439,8 @@ function M.run(options)
     session_id = session_id,
     prompt = M.CONTINUATION_PROMPT,
   })
+  local blocked = ensure_watcher(facts)
+  if blocked then return blocked end
   local result = shell(command)
   if not result then
     verdict.ok, verdict.queued, verdict.status = false, nil, "sentinel_unreachable"
@@ -346,9 +459,15 @@ function M.run(options)
   end
   local output = tostring(result.stdout or "")
   verdict.request = output:match("requested[^:]*:%s*([^\r\n]+)")
+  verdict.existing_request = output:match("existing deploy request:%s*([^\r\n]+)")
   verdict.sentinel = trim(first_line(output))
-  if facts.sentinel_stopped then
-    verdict.warning = "the sentinel's stop file exists, so nothing will happen until it is started again (wa-sentinel start)"
+  if verdict.existing_request then
+    verdict.ok, verdict.queued, verdict.status = false, nil, "deploy_already_pending"
+    verdict.error = "deploy_already_pending"
+    verdict.observed = "an existing deploy request was preserved at " .. verdict.existing_request
+    verdict.message = "no new deploy was queued: an earlier deploy request is still pending."
+    verdict.next = "inspect that request in sentinel/requests or sentinel/claimed and its eventual done/failed record; /update did not replay it"
+    return verdict
   end
   verdict.next = "the sentinel performs it when this node is idle. The record lands in " ..
                  slashes(paths.config()) .. "/sentinel/done/ or failed/, and installed.txt records the commit it installed."
