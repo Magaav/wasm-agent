@@ -259,6 +259,18 @@ async function gate() {
     // A timeout or cancelled shell is not proof its descendants stopped. Keep
     // the acquisition/watchdog real until owner drain evidence settles it.
     laneNotice(`gate lane: execution error (${result.error.message}); reservation retained pending process drain`);
+    if (slot.obtained) {
+      const deferred=spawnSync(process.execPath,[LANE_SCRIPT,'defer','--id',String(slot.record.request),
+        '--gate-pid',String(result.pid || 0),'--detail',`finish execution error: ${result.error.message}; owner must prove descendant drain`],
+      {encoding:'utf8',windowsHide:true,timeout:20000});
+      if (deferred.status!==0) {
+        laneNotice(`gate lane: could not durably defer reservation: ${deferred.stderr || deferred.error?.message}`);
+        // Retain this holder as well: dropping it would let a legacy watchdog
+        // mistake a lost ancestry link for drain. Reconciliation needs this PID.
+        slot.child?.unref();slot.child?.stdout?.destroy();slot.child?.stderr?.destroy();
+        await new Promise(()=>{setInterval(()=>{},1000);});
+      }
+    }
     slot.child?.unref();slot.child?.stdout?.destroy();slot.child?.stderr?.destroy();
   } else {
     await laneRelease(slot,result.status,`finish gate in ${repo} exited ${result.status}`

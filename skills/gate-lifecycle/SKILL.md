@@ -37,6 +37,9 @@ uses stand-in commands; it never reserves the production gate.
 Cancellation of an agent is not process drain. A surviving gate remains work.
 Only the `acquire` holder's process tree releases its live lease. A timed-out
 shell retains the reservation for reconciliation because children may survive.
+The uncertainty is durable (`drain_required`); disappeared roots never prove
+detached grandchildren stopped. A cancelled running/acquired reservation needs
+explicit owner drain evidence even when its recorded roots are gone.
 After owner death, inspect exact PIDs, ancestry, lease and owned effect logs.
 Never stop by image name, free on a timer, or discard an unlanded candidate.
 

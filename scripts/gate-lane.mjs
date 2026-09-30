@@ -54,29 +54,14 @@
 // the queue, and - when it ends - why. `status` shows exactly that, `history` keeps every
 // transition, and a refusal names the holder, its elapsed time and the depth it gave up at.
 //
-// WHAT A DEATH FREES, AND WHAT IT DOES NOT. A holder that dies is `abandoned` and its slot is
-// freed - but only once nothing it started for that slot is still running. A holder whose *gate*
-// survives it (Windows does not kill children with their parent, and a plain `kill` on Linux does
-// not either) is `orphaned` and the slot stays held, because a gate still burning cores is
-// exactly what this lane must not run a second of. Which question answers that depends on what
-// the row records, and `acquire` records no gate pid:
-//   * `run` records the pid of the gate it spawned, and that pid decides. Recorded and dead is
-//     proof, so the slot is freed at once; recorded and alive holds it. The record is
-//     authoritative here on purpose: the lane's own children (its CPU sampler) must not be read
-//     as a surviving gate.
-//   * `acquire` records none, because the caller runs its own gate *after* the grant and the lane
-//     has no command of its own to compare against. This was a real hole: the lane settled such a
-//     row `abandoned` on the holder's death alone, freeing a slot while the caller's gate was
-//     still burning cores. So the lane asks the one question it can ask from any process - is a
-//     process the dead holder started for this slot still alive? On Windows the parent link
-//     outlives the parent, so an empty answer there is proof and a non-empty one is named in the
-//     row. Where that link does not survive the death (POSIX reparents an orphan to init the
-//     moment its holder dies) the lane cannot prove anything, does not guess, and holds the slot
-//     until `reconcile --evidence` says what was inspected.
-//   * Recording the gate pid instead - option (a) of the report, a CLI the consumer calls after
-//     it spawns - was rejected as *the* fix: it is racy (a consumer killed between spawning its
-//     gate and recording it is precisely the case to cover), and it would leave both consumers
-//     unguarded until files outside this one are wired. It is a fine refinement on top.
+// A cancelled holder does not prove descendant drain. A live recorded process
+// or observed survivor keeps the slot. Even when both roots disappear, detached
+// grandchildren may remain; the row stays orphaned until explicit owner drain
+// evidence settles it. Execution errors persist drain_required before exit.
+// PID age, agent cancellation, queue timers and direct-child absence never free
+// running work. A waiting process that loses its lease has started no gate and
+// can safely lose only its queue position. Normal owner completion releases its
+// own live acquisition through the source-bound consumer.
 //
 // Usage
 //   node scripts/gate-lane.mjs run [-- <command...>] [options]
@@ -137,7 +122,8 @@ CREATE TABLE IF NOT EXISTS requests(
   state TEXT NOT NULL, reason TEXT, waits_for INTEGER, depth INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER,
   exit_code INTEGER, gate_ms INTEGER, waited_ms INTEGER, log_path TEXT, log_sha256 TEXT,
-  skipped INTEGER, verdict TEXT, verdict_found INTEGER NOT NULL DEFAULT 0, cpu TEXT);
+  skipped INTEGER, verdict TEXT, verdict_found INTEGER NOT NULL DEFAULT 0, cpu TEXT,
+  drain_required INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS history(
   id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, request INTEGER NOT NULL,
   action TEXT NOT NULL, detail TEXT NOT NULL);
@@ -162,6 +148,13 @@ function openLane(dir) {
   // failing each other. Nothing here polls more often than poll-ms.
   db.exec('PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
   db.exec(SCHEMA);
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    if (!db.prepare('PRAGMA table_info(requests)').all().some(c=>c.name==='drain_required')) {
+      db.exec('ALTER TABLE requests ADD COLUMN drain_required INTEGER NOT NULL DEFAULT 0');
+    }
+    db.exec('COMMIT');
+  } catch(error) { db.exec('ROLLBACK'); throw error; }
   return db;
 }
 // The lease is the proof of life, and it is the repository's own primitive (resources.rs):
@@ -302,6 +295,11 @@ function survivorsOf(entry) {
 // matters is the *holder* - in `acquire` mode the lane process's own `pid` is the acquirer, and
 // the gate belongs to the caller it was granted to (`holder`).
 function gateStillRunning(entry) {
+  if (entry.drain_required) {
+    const look=survivorsOf(entry);
+    return {running:true,recorded:entry.gate_pid,survivors:look.survivors,authoritative:false,
+      how:'execution ended without proof of descendant drain; explicit owner evidence is required'};
+  }
   if (entry.gate_pid) return {running: pidAlive(entry.gate_pid), recorded: entry.gate_pid,
     survivors: [], authoritative: true,
     how: `the gate it started (pid ${entry.gate_pid}) is ${pidAlive(entry.gate_pid) ? 'still running' : 'gone'}`};
@@ -336,7 +334,7 @@ function abandonedReason(entry, live) {
 // never touched: only the process that holds it ends its own claim.
 function reconcileHolders(db, dir) {
   const moved = [];
-  for (const entry of rows(db, "SELECT * FROM requests WHERE state IN ('running','waiting')")) {
+  for (const entry of rows(db, "SELECT * FROM requests WHERE state IN ('running','waiting','orphaned')")) {
     if (held.has(entry.lease) || leaseHeld(dir, entry.lease)) continue;
     const holderAlive = pidAlive(entry.pid);
     if (entry.state === 'waiting') {
@@ -355,9 +353,11 @@ function reconcileHolders(db, dir) {
       if (entry.state !== 'orphaned') { setState(db, entry.id, 'orphaned', reason); moved.push({id: entry.id, state: 'orphaned', reason}); }
       continue;
     }
-    const reason = abandonedReason(entry, live);
-    setState(db, entry.id, 'abandoned', reason, {ended_at: now()});
-    moved.push({id: entry.id, state: 'abandoned', reason});
+    // Both recorded roots can be gone while detached grandchildren survive.
+    // Only an owned completion/drain receipt can settle that uncertainty.
+    const uncertain=`orphaned: holder pid ${entry.holder || entry.pid} and gate pid ${entry.gate_pid || '(unrecorded)'} no longer observed; automatic release withheld: owner drain evidence required`;
+    setState(db,entry.id,'orphaned',uncertain,{drain_required:1});
+    moved.push({id:entry.id,state:'orphaned',reason:uncertain});
   }
   return moved;
 }
@@ -424,6 +424,7 @@ function parseArgs(argv) {
       case '--limit': options.limit = Number(value()); break;
       case '--holder-pid': options.holderPid = Number(value()); break;
       case '--lease': options.lease = value(); break;
+      case '--gate-pid': options.gatePid = Number(value()); break;
       default: throw laneError(`unknown option ${arg}`);
     }
   }
@@ -581,7 +582,12 @@ async function runCommand({command, cwd, logPath, sampleSeconds, onSpawn}) {
   const hash = crypto.createHash('sha256');
   const child = spawn(command[0], command.slice(1), {cwd, stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true, env: process.env});
-  onSpawn(child.pid);
+  // Register before sampler setup: a fast command can exit during its startup.
+  const exited=new Promise(resolve=>{
+    child.once('exit',(code,signal)=>resolve({code,signal}));
+    child.once('error',error=>resolve({code:76,error}));
+  });
+  if (Number.isInteger(child.pid)) onSpawn(child.pid);
   const finished = Promise.all([child.stdout, child.stderr].map(stream => new Promise(resolve => {
     stream.on('data', chunk => {
       fs.writeSync(descriptor, chunk);
@@ -590,6 +596,7 @@ async function runCommand({command, cwd, logPath, sampleSeconds, onSpawn}) {
     });
     stream.on('end', resolve);
     stream.on('error', resolve);
+    stream.on('close', resolve);
   })));
   let sampler = null;
   let samplerFile = null;
@@ -611,7 +618,7 @@ async function runCommand({command, cwd, logPath, sampleSeconds, onSpawn}) {
     samplerKind = `in-process /proc walk, descendants of gate pid ${child.pid}, every ${intervalMs} ms`;
     posix = posixSampler(child.pid, intervalMs, stop);
   }
-  const exit = await new Promise(resolve => child.on('exit', (code, signal) => resolve({code, signal})));
+  const exit = await exited;
   stop.done = true;
   if (sampler) sampler.kill('SIGKILL');
   if (stop.finish) stop.finish();
@@ -626,7 +633,7 @@ async function runCommand({command, cwd, logPath, sampleSeconds, onSpawn}) {
   } else if (posix) {
     cpu = reduceSamples(await posix, intervalMs, samplerKind);
   }
-  return {exit_code: exit.code, signal: exit.signal, gate_ms: Date.now() - started,
+  return {exit_code: exit.code, signal: exit.signal, error:exit.error?.message,gate_ms: Date.now() - started,
     log_sha256: hash.digest('hex'), cpu, verdict: readVerdict(logPath)};
 }
 function receiptOf(db, id, dir, capacity, extra = {}) {
@@ -713,7 +720,8 @@ function commandRun(options, rest) {
       }
       const state = result.exit_code === 0 ? 'done' : 'failed';
       const detail = `exit ${result.exit_code}${result.signal ? ` (${result.signal})` : ''} in`
-        + ` ${result.gate_ms} ms${result.verdict.found ? `; "${result.verdict.line}"` : '; NO gate verdict line'}`;
+        + ` ${result.gate_ms} ms${result.verdict.found ? `; "${result.verdict.line}"` : '; NO gate verdict line'}`
+        + `${result.error ? `; spawn: ${result.error}` : ''}`;
       db.prepare(`UPDATE requests SET state=?,reason=?,ended_at=?,gate_ms=?,exit_code=?,skipped=?,
         verdict=?,verdict_found=?,cpu=?,log_sha256=?,gate_pid=NULL,waited_ms=? WHERE id=?`)
         .run(state, detail, now(), result.gate_ms, result.exit_code, result.verdict.skipped,
@@ -731,7 +739,7 @@ function commandRun(options, rest) {
     }
   })().catch(error => {
     try {
-      if (row(db, id)?.state === 'running') setState(db, id, 'failed', `lane error: ${error.message}`, {ended_at: now()});
+      if (row(db, id)?.state === 'running') setState(db, id, 'orphaned', `lane error: ${error.message}; drain evidence required`, {drain_required:1});
     } catch {}
     releaseLease(lease);
     throw error;
@@ -795,10 +803,8 @@ async function commandAcquire(options) {
       }
       continue;
     }
-    setState(db, id, 'abandoned', `abandoned: the process that held the slot (pid ${holderPid}) is gone`
-      + ` and ${live.how}, so the acquirer released the slot after ${elapsedS(entry.started_at)}s`,
-    {ended_at: now()});
-    break;
+    setState(db,id,'orphaned',`holder pid ${holderPid} is gone; ${live.how}; owner descendant drain evidence required`,
+      {drain_required:1});
   }
   releaseLease(lease);
   return {exit: 0, receipt: receiptOf(db, id, dir, capacity, {obtained: true})};
@@ -815,11 +821,22 @@ function commandRelease(options) {
     throw laneError(`refusing release #${entry.id}: only the acquire holder's process tree may settle it; use reconcile with drain evidence after owner death`, 1);
   }
   if (!leaseHeld(dir, entry.lease)) throw laneError(`refusing release #${entry.id}: its acquisition lease is gone; reconcile ownership first`, 1);
+  if (entry.drain_required) throw laneError(`refusing release #${entry.id}: explicit descendant drain evidence is required`,1);
   const detail = options.detail || `released by its holder with exit`
     + ` ${options.exit === null || options.exit === undefined ? 'unrecorded' : options.exit}`;
   setState(db, options.id, options.exit === 0 ? 'done' : 'failed', detail,
     {ended_at: now(), exit_code: options.exit ?? null});
   return {exit: 0, receipt: receiptOf(db, options.id, dir, capacityOf(options))};
+}
+function commandDefer(options) {
+  const dir=stateDir(options),db=openLane(dir),entry=row(db,options.id);
+  if (!entry || !['running','orphaned'].includes(entry.state) || entry.mode!=='acquire'
+      || !descendantOf(process.ppid,entry.holder) || !leaseHeld(dir,entry.lease)) {
+    throw laneError(`refusing defer #${options.id}: this caller does not own its live acquisition`,1);
+  }
+  setState(db,entry.id,'orphaned',options.detail || 'execution ended without descendant drain proof',
+    {drain_required:1,gate_pid:Number.isInteger(options.gatePid)&&options.gatePid>0?options.gatePid:null});
+  return {exit:0};
 }
 function commandValidate(options) {
   const dir=stateDir(options);
@@ -859,17 +876,17 @@ function commandReconcile(options) {
   // pass because the row is no longer live. Refusing here would leave an orphaned row with no way
   // out but killing the watchdog.
   const live = gateStillRunning(entry);
-  if (entry.gate_pid && live.running) {
+  if (entry.gate_pid && pidAlive(entry.gate_pid)) {
     throw laneError(`refusing to reconcile #${entry.id}: the gate it started (pid ${entry.gate_pid})`
       + ' is still running on the node. The lane must not free a slot that is still burning cores -'
       + ' stop that process, then reconcile it.', 1);
   }
-  if (!entry.gate_pid && live.survivors.length) {
+  if (live.survivors.length) {
     throw laneError(`refusing to reconcile #${entry.id}: no gate pid was recorded for it, and ${live.how}`
       + ' - a slot must not be freed while work the holder started is still burning cores. Stop that'
       + ' process, then reconcile it.', 1);
   }
-  setState(db, options.id, 'abandoned', `reconciled: ${String(options.evidence).trim()}`, {ended_at: now()});
+  setState(db, options.id, 'abandoned', `reconciled: ${String(options.evidence).trim()}`, {ended_at: now(),drain_required:0});
   return {exit: 0, receipt: receiptOf(db, options.id, dir, capacityOf(options))};
 }
 function commandStatus(options, readOnly = false) {
@@ -880,7 +897,7 @@ function commandStatus(options, readOnly = false) {
   const limit = Number.isFinite(options.limit) ? options.limit : 20;
   const busy = holders(db);
   const queue = waiters(db);
-  const recent = rows(db, `SELECT * FROM requests WHERE state NOT IN ('running','waiting') ORDER BY id DESC LIMIT ${limit}`);
+  const recent = rows(db, `SELECT * FROM requests WHERE state NOT IN ('running','waiting','orphaned') ORDER BY id DESC LIMIT ${limit}`);
   const lines = [`gate lane: ${busy.length} of ${capacity} slot(s) held (capacity from`
     + ` ${process.env.WA_GATE_LANE_CAPACITY ? 'WA_GATE_LANE_CAPACITY' : 'the default'}), ${queue.length} waiting`,
   `  state dir: ${dir}`];
@@ -936,6 +953,8 @@ async function main() {
     process.exitCode = commandValidate(options).exit;
   } else if (command === 'inspect') {
     process.exitCode = commandStatus(options, true).exit;
+  } else if (command === 'defer') {
+    process.exitCode = commandDefer(options).exit;
   } else if (command === 'release') {
     const result = commandRelease(options);
     emit(result.receipt, options);
@@ -949,7 +968,7 @@ async function main() {
   } else if (command === 'history') {
     process.exitCode = commandHistory(options).exit;
   } else {
-    throw laneError('usage: gate-lane.mjs run|acquire|release|status|history|reconcile [options]');
+    throw laneError('usage: gate-lane.mjs run|acquire|release|validate|defer|inspect|status|history|reconcile [options]');
   }
 }
 main().catch(error => {
