@@ -1,0 +1,53 @@
+=== control case tip-control  runner 51408369579925fca84a526e700b9110a468a33d82c9bcd0dbc699d03f722acd
+--- holder 52192  direct child (shell) 73096  grandchild 6320
+A (holder alive):
+{
+ "slots_held": 1,
+ "waiting": 0,
+ "held": [
+  {
+   "id": 1,
+   "label": "control holder",
+   "state": "running",
+   "pid": 81708,
+   "reason": "null"
+  }
+ ],
+ "settled": []
+}
+--- kill the holder only
+B (holder dead, direct child alive):
+{
+ "slots_held": 0,
+ "waiting": 0,
+ "held": [],
+ "settled": [
+  {
+   "id": 1,
+   "label": "control holder",
+   "state": "abandoned",
+   "pid": 81708,
+   "reason": "abandoned: holder pid 52192 gone, no gate pid was recorded and nothing the holder started for this slot is still running, lease f7a40f48-f449-42df-91cd-8c54c094a599 not held; slot released after 9s"
+  }
+ ]
+}
+  pid 73096 gone (ESRCH)
+  pid 6320 ALIVE
+--- kill the direct child as well (its grandchild keeps running)
+C (holder and direct child dead, grandchild alive):
+{
+ "slots_held": 0,
+ "waiting": 0,
+ "held": [],
+ "settled": [
+  {
+   "id": 1,
+   "label": "control holder",
+   "state": "abandoned",
+   "pid": 81708,
+   "reason": "abandoned: holder pid 52192 gone, no gate pid was recorded and nothing the holder started for this slot is still running, lease f7a40f48-f449-42df-91cd-8c54c094a599 not held; slot released after 9s"
+  }
+ ]
+}
+  pid 6320 ALIVE
+=== control done

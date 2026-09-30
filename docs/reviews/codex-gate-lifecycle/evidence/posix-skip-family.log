@@ -1,0 +1,13 @@
+Probe: force the non-Windows branch of scripts/test-gate-drain.cjs (mint at line 10, skip at
+line 11) and count the minted family in the OS temp dir. Wrapper (scratch, not the delivery):
+
+  Object.defineProperty(process, 'platform', {value: 'linux'});
+  require('.../scripts/test-gate-drain.cjs');
+
+families before: 0
+gate drain: 1 skipped (native Windows descendant fixture)
+exit=0
+families after the non-Windows branch: 1
+/c/Users/Victor/AppData/Local/Temp/wa-gate-drain-USEd6s
+=== cleaning up the family this probe left ===
+families now: 0

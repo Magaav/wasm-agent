@@ -1,0 +1,36 @@
+=== control case tip-control-sleep mode sleep  runner 51408369579925fca84a526e700b9110a468a33d82c9bcd0dbc699d03f722acd
+--- holder 38804  direct child shell 72136  grandchild none
+--- before any kill, is the direct child alive?
+  pid 72136 ALIVE
+--- process list children of the holder (pid 38804) as Windows reports them: 48188 node.exe 72136 bash.exe 
+A (holder alive):
+{
+ "slots_held": 1,
+ "waiting": 0,
+ "held": [
+  {
+   "id": 1,
+   "state": "running",
+   "pid": 48188,
+   "reason": "null"
+  }
+ ],
+ "settled": []
+}
+--- kill the holder only (38804)
+--- after the holder is gone: direct child   pid 72136 gone (ESRCH) / grandchild none
+B (holder dead, descendants as above):
+{
+ "slots_held": 0,
+ "waiting": 0,
+ "held": [],
+ "settled": [
+  {
+   "id": 1,
+   "state": "abandoned",
+   "pid": 48188,
+   "reason": "abandoned: holder pid 38804 gone, no gate pid was recorded and nothing the holder started for this slot is still running, lease 09ce9537-c091-4efb-b6df-3effb508df7c not held; slot released after 12s"
+  }
+ ]
+}
+=== control tip-control-sleep done

@@ -1,0 +1,77 @@
+gate lane wiring ok (38 checks, 0 skipped; real consumers, a real queue, a real
+fixture gate as a stand-in for scripts/test.sh, which this file never runs or changes)
+evidence: C:\Users\Victor\AppData\Local\Temp\wa-gate-lane-wiring-A2oS0J
+{
+ "holder": {
+  "id": 1,
+  "label": "finish holder",
+  "cwd": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-gate-lane-wiring-A2oS0J\\holder",
+  "mode": "acquire",
+  "command": "[\"(the caller runs its own gate)\"]",
+  "gate": "(the caller runs its own gate)",
+  "pid": 3576,
+  "lease": "f7a671d0-6cef-401e-a72d-0edadadbc7f6",
+  "holder": 63604,
+  "gate_pid": null,
+  "state": "running",
+  "reason": null,
+  "waits_for": null,
+  "depth": 0,
+  "created_at": 1790789135,
+  "started_at": 1790789135,
+  "ended_at": null,
+  "exit_code": null,
+  "gate_ms": null,
+  "waited_ms": null,
+  "log_path": null,
+  "log_sha256": null,
+  "skipped": null,
+  "verdict": null,
+  "verdict_found": 0
+ },
+ "waiter": {
+  "id": 2,
+  "label": "merge-lane 3b14082c1497",
+  "cwd": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-merge-lane-GZG6Ow",
+  "mode": "acquire",
+  "command": "[\"(the caller runs its own gate)\"]",
+  "gate": "(the caller runs its own gate)",
+  "pid": 12096,
+  "lease": "dc4687f5-5fe1-48ac-80f9-0a259d299041",
+  "holder": 76860,
+  "gate_pid": null,
+  "state": "waiting",
+  "reason": "capacity 1 of 1 in use; running #1 (finish holder, pid 3576, held 5s); queue depth 1 (next to run); waited 0s; also waiting: nobody",
+  "waits_for": 1,
+  "depth": 1,
+  "created_at": 1790789140,
+  "started_at": null,
+  "ended_at": null,
+  "exit_code": null,
+  "gate_ms": null,
+  "waited_ms": null,
+  "log_path": null,
+  "log_sha256": null,
+  "skipped": null,
+  "verdict": null,
+  "verdict_found": 0
+ },
+ "holder_history": [
+  "requested",
+  "running",
+  "done"
+ ],
+ "waiter_history": [
+  "requested",
+  "running",
+  "done"
+ ]
+}
+gate lane: 0 of 1 slot(s) held (capacity from the default), 0 waiting
+  state dir: C:\Users\Victor\AppData\Local\Temp\wa-gate-lane-wiring-A2oS0J\lane
+  nobody holds a slot and nobody is waiting
+  refused #4 merge-lane 3b14082c1497: refused after 2s waiting for a slot: capacity 1 of 1 in use; running #1 (finish holder, pid 3576, held 23s); queue depth 2 (1 ahead); waited 2s; also waiting: #2
+  refused #3 finish refused: refused after 2s waiting for a slot: capacity 1 of 1 in use; running #1 (finish holder, pid 3576, held 20s); queue depth 2 (1 ahead); waited 2s; also waiting: #2
+  done #2 merge-lane 3b14082c1497 exit 0: merge-lane gate in C:\Users\Victor\AppData\Local\Temp\wa-merge-lane-GZG6Ow exited 0
+  done #1 finish holder exit 0: finish gate in C:\Users\Victor\AppData\Local\Temp\wa-gate-lane-wiring-A2oS0J\holder exited 0; "smoke ok (2 skipped)"
+

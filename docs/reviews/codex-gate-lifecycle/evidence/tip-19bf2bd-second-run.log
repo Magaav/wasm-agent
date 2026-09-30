@@ -1,0 +1,95 @@
+=== case tip-orphancontrol  mode orphancontrol  tip C:/Users/Victor/.wasm-agent/wa-worktree-childdispatchcd2db7d4-cc61-449e-9962-36ce699caff6
+=== lane runner sha256: 51408369579925fca84a526e700b9110a468a33d82c9bcd0dbc699d03f722acd
+--- grant: {"id":1,"state":"running","mode":"acquire","holder_pid":51892,"pid":38368,"inheritance":{"id":1,"dir":"C:\\Users\\Victor\\AppData\\Local\\Temp\\glreview\\tip-orphancontrol\\lane","lease":"d2753407-cf2e-4fe9-8ae5-2ad30c652e70","holder_pid":51892}}
+--- nested gate inherited admission, validate said: {"pid":52684,"status":0,"stderr":"","stdout":"{\n\"valid\":true,\n\"id\":1,\n\"dir\":\"C:\\\\Users\\\\Victor\\\\AppData\\\\Local\\\\Temp\\\\glreview\\\\tip-orphancontrol\\\\lane\",\n\"holder_pid\":51892,\n\"lease\":\"d2753407-cf2e-4fe9-8ae5-2ad30c652e70\"\n}\n"}
+--- pids: nested gate 52684  gate shell not-yet-dead  holder 51892
+--- stage A: holder alive, its gate shell still running
+status exit=0
+{
+ "slots_held": 1,
+ "waiting": 0,
+ "held": [
+  {
+   "id": 1,
+   "label": "review holder",
+   "state": "running",
+   "pid": 38368,
+   "reason": null
+  }
+ ],
+ "queue": [],
+ "settled": []
+}
+--- killing the holder: 51892
+  pid 51892 gone (ESRCH)
+--- stage B: holder gone, shell alive
+status exit=0
+{
+ "slots_held": 0,
+ "waiting": 0,
+ "held": [],
+ "queue": [],
+ "settled": [
+  {
+   "id": 1,
+   "label": "review holder",
+   "state": "abandoned",
+   "pid": 38368,
+   "reason": "abandoned: holder pid 51892 gone, no gate pid was recorded and nothing the holder started for this slot is still running, lease d2753407-cf2e-4fe9-8ae5-2ad30c652e70 not held; slot released after 10s"
+  }
+ ]
+}
+--- the nested gate in flight:
+  pid 52684 ALIVE
+  nested.gate.finished exists? NO
+  nested validate at its start: { "valid": true, "id": 1, "dir": "C:\\Users\\Victor\\AppData\\Local\\Temp\\glreview\\tip-orphancontrol\\lane", "holder_pid": 51892, "lease": "d2753407-cf2e-4fe9-8ae5-2ad30c652e70" } 
+--- stage C: a second caller asks for the single slot
+  second caller holder pid (a live Windows process): 77564
+  pid 77564 ALIVE
+  second caller receipt: true
+  second caller stderr: gate lane: acquire #2 granted to holder pid 77564; this process now holds the slot and blocks. Run your own gate, then: gate-lane.mjs release --id 2 
+  the nested gate at the moment of the decision:
+  pid 52684 ALIVE
+{
+ "slots_held": 1,
+ "waiting": 0,
+ "held": [
+  {
+   "id": 2,
+   "label": "second caller",
+   "state": "running",
+   "pid": 51404,
+   "reason": null
+  }
+ ],
+ "queue": [],
+ "settled": [
+  {
+   "id": 1,
+   "label": "review holder",
+   "state": "abandoned",
+   "pid": 38368,
+   "reason": "abandoned: holder pid 51892 gone, no gate pid was recorded and nothing the holder started for this slot is still running, lease d2753407-cf2e-4fe9-8ae5-2ad30c652e70 not held; slot released after 10s"
+  }
+ ]
+}
+--- history of the review holder row:
+<anonymous_script>:7
+  },
+   ^
+
+SyntaxError: Unexpected non-whitespace character after JSON at position 169 (line 7 column 4)
+    at JSON.parse (<anonymous>)
+    at [eval]:2:15
+    at runScriptInThisContext (node:internal/vm:219:10)
+    at node:internal/process/execution:451:12
+    at [eval]-wrapper:6:24
+    at runScriptInContext (node:internal/process/execution:449:60)
+    at evalFunction (node:internal/process/execution:283:30)
+    at evalTypeScript (node:internal/process/execution:295:3)
+    at node:internal/main/eval_string:71:3
+
+Node.js v24.19.0
+--- timeline: nested gate started 2026-09-30T17:20:27.072Z ; nested gate finished NO ; second caller receipt at 2026-09-30 14:20:37.894996900 -0300
+./run-case.sh: line 64: 164121 Killed                     "$LANE" acquire --dir "$S/lane" --cwd "$S" --label "second caller" --holder-pid "$DUMMY" --wait-seconds 10 --poll-ms 200 > "$S/second.stdout" 2> "$S/second.stderr"
+=== case tip-orphancontrol done
