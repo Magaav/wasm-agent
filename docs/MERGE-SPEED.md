@@ -287,7 +287,7 @@ then died - it never ran `cli`, `memory-update`, `tools`, `sessions`, `recovery-
 825069 ms** - a saving of 800463 ms (13.3 min) per landing, about **2x**, essentially all of it in the
 build phase (797521 ms against 22635 ms). Two more runs on the same tree: a deliberate failing assertion
 in the merged tree made the warm gate go RED (`test result: FAILED. 36 passed; 1 failed`, gate exit 101,
-lane exit 3), and reverting it returned the gate to green (853... ms, `smoke ok (2 skipped)`).
+lane exit 3), and reverting it returned the gate to green (854594 ms, `smoke ok (2 skipped)`).
 
 The mechanism is still the delivery: the gate lane is capacity 1, so the landing's cost in the queue
 falls from ~27 minutes to ~14, and no fresh worktree is created to pay a cold build - the warm run's
