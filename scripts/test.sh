@@ -1568,6 +1568,21 @@ node scripts/test-openai-sub.cjs "$BIN"
 # placed at all - and a level no source names must still be refused by name rather than silently
 # replaced by a default.
 WA_SCRIPT=scripts/test-openai-sub-levels.lua "$BIN" --db "$DB.sub-levels" | grep "openai-sub levels ok"
+# The credential half of the subscription route, which used to be Pi's: our own store, our own
+# refresh, our own login, and the single-flight lock. Hermetic - a node fixture stands in for
+# auth.openai.com on 127.0.0.1, so the two-process proof that one rotating token is spent once is
+# measured rather than asserted, with no OpenAI account, no Pi package and no model. That fixture is
+# a node server, so a machine without node skips it visibly instead of passing it silently.
+if command -v node >/dev/null 2>&1; then
+  SUB_AUTH_OUT="$(WA_SCRIPT=scripts/test-openai-sub-auth.lua "$BIN" --db "$DB.sub-auth" 2>&1)" || {
+    echo "FAIL subscription credential tests"; printf '%s\n' "$SUB_AUTH_OUT" | tail -12; exit 1; }
+  printf '%s\n' "$SUB_AUTH_OUT" | grep "openai-sub auth ok"
+  # The same run prints its measured counts; keep them in the gate log beside the verdict.
+  printf '%s\n' "$SUB_AUTH_OUT" | grep "openai-sub concurrency evidence"
+else
+  echo "subscription credential tests SKIPPED - node not on PATH (the concurrency fixture is a node server)"
+  SKIPPED=$((SKIPPED + 1))
+fi
 node scripts/test-auth-sessions.cjs "$BIN"
 node scripts/test-fixture-verdict.cjs
 node scripts/test-suite-verdict.cjs
