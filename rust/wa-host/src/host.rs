@@ -2605,7 +2605,7 @@ mod stream_tests {
 mod heartbeat_tests {
     use super::*;
 
-    /// A bounded host call must not look like a wedged worker.
+    /// A bounded host call must not look like a wedged node-thread.
     ///
     /// This is the bug the user reported as "the node is offline": `ok` is `!stalled`, and `stalled`
     /// means no beat for WASM_AGENT_WORKER_STALL_SECONDS. A long `exec` beat nothing while it ran, so a

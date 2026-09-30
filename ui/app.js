@@ -176,13 +176,13 @@ function apiHeaders(extra) {
 // This used to return the first chat run on the node, whichever conversation it belonged to. Once two
 // conversations can run at once, that made a window watching conversation B see conversation A's run:
 // it disabled its own composer, announced "a run is in progress", and deferred its own reconcile until
-// a stranger's run finished. `/health` carries the conversation (`session`) on every worker and on
+// a stranger's run finished. `/health` carries the conversation (`session`) on every node-thread and on
 // `current`, so the match is exact. With no session known yet the window claims no run, which is the
 // safe default - it has no transcript to reconcile.
 function activeRun(health, session = chatSession) {
   const isChat = (entry) => /^POST \/chat(?:\?|$)/.test(entry?.label || "");
   const mine = (entry) => isChat(entry) && !!session && entry.session === session;
-  return (health?.workers || []).find(mine) || (mine(health?.current) ? health.current : null);
+  return (health?.node_threads || []).find(mine) || (mine(health?.current) ? health.current : null);
 }
 
 function nodeQuery() {
@@ -1081,7 +1081,7 @@ function formatBytes(count) {
 }
 
 // While a tool call is in flight, show what the operation behind it is doing. A foreground
-// `bash` blocks its worker and returns nothing until it settles, so the window otherwise shows
+// `bash` blocks its node-thread and returns nothing until it settles, so the window otherwise shows
 // only a clock - and a five-minute build is indistinguishable from a hang. The node already
 // publishes the running operation on /health (`operations[]`) and its output through
 // /operation; this reads both. `running` is the busy run for *this* window.
@@ -1094,12 +1094,17 @@ async function refreshOperationProgress(health, running) {
   const activeTrace = trace;
   if (!activeTrace || !activeTrace.pending || !running) return;
   // The owner is `run:<run_id>` - serve.rs sets it for the run before the interpreter starts,
-  // so an in-turn operation carries the run, not the worker. Older builds used the worker id;
-  // both are matched so the window works against whichever node it is attached to.
+  // so an in-turn operation carries the run, not the node-thread. An operation launched outside a run
+  // carries the node-thread instead. A node built before this rename reports that id as `worker_id`
+  // and an even older one as `id`, so all three spellings are read: the window works against
+  // whichever node it is attached to. The `worker:` *prefix* is the operation record's own durable
+  // value (rust/wa-operation), not a health field, so it keeps its name too.
   const owners = [];
   if (running.run_id != null) owners.push("run:" + running.run_id);
-  const workerId = running.worker_id != null ? running.worker_id : running.id;
-  if (workerId != null) owners.push("worker:" + workerId);
+  const nodeThreadId = running.node_thread_id != null
+    ? running.node_thread_id
+    : (running.worker_id != null ? running.worker_id : running.id);
+  if (nodeThreadId != null) owners.push("worker:" + nodeThreadId);
   const operation = (health.operations || []).find((entry) => owners.indexOf(entry.owner) >= 0);
   if (!operation) return;
   const bytes = Number(operation.output_bytes) || 0;
@@ -1687,7 +1692,7 @@ function setBusy(value) {
 // had no way to tell "still working" from "never coming back", which is exactly when they should be
 // told to stop it.
 //
-// The node already knows, and has done all along: `stalled_ms` (also `workers[].age_ms`) is the age
+// The node already knows, and has done all along: `stalled_ms` (also `node_threads[].age_ms`) is the age
 // of the last heartbeat. `host.exec` beats while a command runs, so a *fresh* number proves progress
 // and a number that keeps climbing proves a stall. That is the node's own evidence, reported rather
 // than guessed - no client-side timeout, no heuristic about how long things should take.
@@ -1728,7 +1733,9 @@ function startLiveness() {
       stalled,
       busy_ms: busyFor,
       climbing_ms: climbingSince ? Date.now() - climbingSince : 0,
-      worker: health.worker || "alive",
+      // `health.worker` is the node's aggregate execution state (alive/busy/stalled); the field keeps
+      // that name on the wire - see serve.rs - so it is read, not renamed, here.
+      node_thread_state: health.worker || "alive",
       queue: health.queue || 0,
       run_state: ownState,
       current_run_id: running.run_id,
@@ -1766,7 +1773,7 @@ function setLiveness(info) {
   } else {
     node.classList.add("stuck");
     node.textContent = "possibly stuck — no node beat for " + seconds(info.climbing_ms) + "s"
-      + " (worker: " + info.worker + ") · send to stop";
+      + " (node-thread state: " + info.node_thread_state + ") · send to stop";
   }
   pin();
 }
@@ -1897,7 +1904,7 @@ async function send(text, options = {}) {
     draftNow = snapshotDraft();
   }
   setStatus("wasm-agent is thinking…");
-  // /health is answered without waiting for a worker. Take the baseline before admitting this run
+  // /health is answered without waiting for a node-thread. Take the baseline before admitting this run
   // so later polls can tell its queued id from an older run in the same conversation.
   try {
     const before = await (await apiFetch("health", { headers: apiHeaders() })).json();
@@ -1929,7 +1936,7 @@ async function send(text, options = {}) {
     // that also lies about the record is worse than no alarm.
     //
     // The node is the authority, and its accept thread answers /health without the interpreter, so it
-    // can say whether the worker is alive while a run runs. Ask it, and act only on its answer.
+    // can say whether the node-thread is alive while a run runs. Ask it, and act only on its answer.
     let lastEvent = Date.now();
     let asking = false;
     // Whether this run finished under its own steam. Without it the watchdog cannot tell a run that
@@ -1961,7 +1968,7 @@ async function send(text, options = {}) {
         // Not running any more, and the run did not finish: the run is genuinely over, and the page
         // should say so and stop pretending it is still listening.
         clearInterval(watchdog);
-        streamNotice = add("assistant", "the node is no longer running this run (" + (health.worker || "no worker") +
+        streamNotice = add("assistant", "the node is no longer running this run (" + (health.worker || "no beat") +
           "). Checking the recorded result for recovery.");
         watchNode();
         lostRun = true;
@@ -3181,7 +3188,7 @@ async function sync(reason) {
     // Why it failed decides what to say. A reload during a run used to show "connecting…" and then
     // "node offline — retrying" on a node that was working perfectly, and the transcript stayed empty
     // because the restore never ran. It cannot run while the run holds the interpreter - that is
-    // physical on a single-worker node - but the message can be true, and the retry does the rest.
+    // physical when the node runs one node-thread - but the message can be true, and the retry does the rest.
     const health = await nodeHealth();
     if (activeRun(health)) {
       syncAttempts = 0;
@@ -3377,7 +3384,7 @@ async function syncLiveRun(current) {
 
     if (liveCheckpointSeq !== payload.checkpoint_seq) {
       // The checkpoint may have advanced after the preceding ledger poll. Read again before using
-      // its tail, and wait another cycle if the read worker has not exposed that row yet.
+      // its tail, and wait another cycle if the read node-thread has not exposed that row yet.
       if (Number(payload.checkpoint_message_seq) > (Number(followedSeq) || 0)) await followRun();
       if (Number(payload.checkpoint_message_seq) > (Number(followedSeq) || 0)) return;
       liveCheckpointSeq = payload.checkpoint_seq;
@@ -3406,8 +3413,8 @@ async function syncLiveRun(current) {
 }
 
 async function watchTurn() {
-  // One at a time: a poll that has not answered yet is not a reason to start another, and on a
-  // single-worker node that is the difference between asking and queueing.
+  // One at a time: a poll that has not answered yet is not a reason to start another, and when the
+  // node runs one node-thread that is the difference between asking and queueing.
   if (runPolling) { setTimeout(watchTurn, 3000); return; }
   runPolling = true;
   try {
@@ -4228,12 +4235,12 @@ function sessionMatches(session, query) {
 }
 
 // Which conversations the node is working on right now. /health carries an active owner per
-// conversation (`runs`), the conversation each worker holds, and the run in `current` - any of the
-// three means the thread is live, and reading it needs no worker of its own.
+// conversation (`runs`), the conversation each node-thread holds, and the run in `current` - any of the
+// three means the thread is live, and reading it needs no node-thread of its own.
 function runningSessions(health) {
   const ids = new Set();
   for (const run of health?.runs || []) if (run.conversation) ids.add(run.conversation);
-  for (const worker of health?.workers || []) if (worker.session) ids.add(worker.session);
+  for (const nodeThread of health?.node_threads || []) if (nodeThread.session) ids.add(nodeThread.session);
   if (health?.current?.session) ids.add(health.current.session);
   return ids;
 }
@@ -4360,8 +4367,8 @@ function renderSessions() {
 async function refreshSessions() {
   try {
     // Sessions and health together: the list says what this node has been doing, and health says
-    // which of those threads is being worked on right now. /health needs no worker, so this stays
-    // answerable while a run holds the run worker.
+    // which of those threads is being worked on right now. /health needs no node-thread, so this stays
+    // answerable while a run holds the run node-thread.
     const [listResponse, health] = await Promise.all([
       apiFetch("sessions", { headers: apiHeaders() }),
       apiFetch("health", { headers: apiHeaders() }).then((response) => response.json()).catch(() => null),
@@ -4492,8 +4499,8 @@ async function openSessionById(id) {
   }
 }
 
-// Topics that still need the run worker wait for the run to finish. Read-only topics such as nodes,
-// sessions, and skills use the host's read workers and can be inspected during a run.
+// Topics that still need the run node-thread wait for the run to finish. Read-only topics such as nodes,
+// sessions, and skills use the host's read node-threads and can be inspected during a run.
 const pendingTopics = new Set();
 
 const runWorkerTopics = new Set(['spells-box', 'tools-box']);
@@ -4625,8 +4632,8 @@ document.getElementById('jobs-box').addEventListener('job-controls', async (even
 function loadTopic(id) {
   const box = document.getElementById(id);
   if (busy && runWorkerTopics.has(id)) {
-    // These topics still use a route on the run worker. Do not issue a request that would time out;
-    // keep them queued and load them as soon as that worker is free.
+    // These topics still use a route on the run node-thread. Do not issue a request that would time out;
+    // keep them queued and load them as soon as that node-thread is free.
     pendingTopics.add(id);
     if (box) box.textContent = "the node is busy with a run — this loads when it finishes";
     return;

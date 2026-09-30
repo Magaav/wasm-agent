@@ -348,7 +348,7 @@ async function startDestination(node, service, mockPort) {
   }, 'the peer run is admitted as background');
   const holdHealth = (await request(primary.url + '/health')).value;
   const holdRow = runs(holdHealth).find((row) => row.conversation === holdThread);
-  check(holdRow.worker >= 2, 'the peer background run occupies a background worker, not one of the two interactive slots');
+  check(holdRow.node_thread >= 2, 'the peer background run occupies a background node-thread, not one of the two interactive slots');
   const chatA = request(primary.url + '/chat', 'POST', JSON.stringify({ text: 'answer with RUN-MARKER-A', thread: 'chat-a' }), { 'content-type': 'application/json', accept: 'text/event-stream' });
   const chatB = request(primary.url + '/chat', 'POST', JSON.stringify({ text: 'answer with RUN-MARKER-B', thread: 'chat-b' }), { 'content-type': 'application/json', accept: 'text/event-stream' });
   const [resultA, resultB] = await Promise.all([chatA, chatB]);
