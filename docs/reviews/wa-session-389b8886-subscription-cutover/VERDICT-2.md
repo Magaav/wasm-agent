@@ -161,6 +161,25 @@ All in `evidence-2/raw-item4-spotchecks.txt` / `evidence-2/raw-registry-identity
 * The poll-loop anomaly I flagged last round (polls reaching `0s left` and continuing) reappeared in
   my unreachable-host runs; I did not chase it again and it is still **not** a verdict driver.
 
+## Added after the verdict commit: the primary door path, end to end, with no Lua root
+
+`evidence-2/raw-door-device-noroot.txt` - `wa subscription login --device`, `env -u
+WASM_AGENT_LUA_ROOT`, against the delivery's own mock (`scripts/lib/openai-sub-auth-mock.mjs`):
+
+```
+openai-sub: open http://127.0.0.1:29550/codex/device and enter the code FIXTURE-CODE  (waiting up to 20s)
+openai-sub: device authorized after 3 polls; exchanging the authorization code
+openai-sub: logged in - account acct-fixture-0001, store ...\dev\credentials.json      exit=0
+$ wa subscription status   ->  openai-sub credential: valid for account acct-fixture-0001,
+                               expires in 3599s, refreshes 0, refresh 7082e0654e93
+$ wa subscription login    ->  the same describe() + "(logging in again replaces this credential: ...)" exit=0
+```
+
+So in the installed shape the door completes a real device login, writes the store, reports it
+valid, and takes the already-logged-in branch without starting a flow - the primary path, not just
+`--browser`. (The credential comes from the delivery's own mock, so this proves the door's plumbing
+end to end, not the provider's - same limit as the suite's 128 checks.)
+
 ## What I could NOT verify
 
 * **No independent fixture, again.** The door proof above uses the delivery's own stub for the

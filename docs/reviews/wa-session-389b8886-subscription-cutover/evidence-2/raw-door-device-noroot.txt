@@ -1,0 +1,23 @@
+### the PRIMARY door path end to end, NO Lua root, against the delivery's own mock (authorises on the 2nd poll)
+
+$ wa subscription login --device   (no WASM_AGENT_LUA_ROOT)
+openai-sub: open http://127.0.0.1:29550/codex/device and enter the code FIXTURE-CODE  (waiting up to 20s)
+openai-sub: device authorized after 3 polls; exchanging the authorization code
+openai-sub: logged in - account acct-fixture-0001, expires in 3599s
+openai-sub: logged in - account acct-fixture-0001, store C:/Users/Victor/orca/tmp-review-389b8886b/dev/credentials.json
+exit=0
+
+$ wa subscription status   (no root, right after)
+openai-sub credential: valid for account acct-fixture-0001, expires in 3599s, refreshes 0, refresh 7082e0654e93
+    store:  C:/Users/Victor/orca/tmp-review-389b8886b/dev/credentials.json
+
+$ wa subscription login   (no args: the already-logged-in branch, no root)
+openai-sub credential: valid for account acct-fixture-0001, expires in 3599s, refreshes 0, refresh 7082e0654e93
+(logging in again replaces this credential: run with --device or --browser)
+exit=0
+
+### the store file it wrote
+total 10
+drwxr-xr-x 1 Victor 197121   0 Sep 30 14:08 .
+drwxr-xr-x 1 Victor 197121   0 Sep 30 14:08 ..
+-rw-r--r-- 1 Victor 197121 487 Sep 30 14:08 credentials.json
