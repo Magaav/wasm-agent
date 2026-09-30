@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "delivery": "change/codex-gate-lifecycle",
+  "tip": "c8589c7f57dea40c0476c8984694fea7dc7b1770",
+  "tree": "b71e56efc505b133c0ef644707c51f3c9adcf953",
+  "producer": "term_2806604b-b664-48da-8aed-68b78b482bdd",
+  "reviewer": "term_3baca61f-5cd3-4e24-92d2-0a4eb0eb6f50",
+  "verdict": "narrowed",
+  "findings": [
+    {
+      "class": "summary_exceeds_code",
+      "status": "resolved",
+      "text": "The prior timed-shell descendant falsification now refuses the next private gate with exit 75 beside live owned work; drain_required=1 persists after owner exit and explicit owned stop/reconcile evidence resumes execution on the corrected tree. Prior refusal remains preserved in commit 97fd67973d50473a27b946bf9485b09775c3dbd2."
+    },
+    {
+      "class": "unverifiable_claim",
+      "status": "unresolved",
+      "text": "Full publisher/merged-tree smoke, native Linux/macOS coverage and installed-runner convergence remain pending; independent evidence uses narrow Windows scratch fixtures and fake gate commands."
+    },
+    {
+      "class": "boundary_gap",
+      "status": "unresolved",
+      "text": "Merge-lane adapter convergence is not included; the new Windows drain regression was invoked manually and is not wired into this tree's explicit scripts/test.sh test list."
+    }
+  ],
+  "reviewed_commits": [
+    "19bf2bdd2f434f48756a522cb2388923c3a02e5b",
+    "c8589c7f57dea40c0476c8984694fea7dc7b1770"
+  ]
+}
