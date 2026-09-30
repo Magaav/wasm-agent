@@ -270,8 +270,13 @@ elseif command == "subscription" then
   -- still outstanding, telling the reader to return with `--code`. Neither reports success for a
   -- credential it did not store, and the script exits non-zero with its taxonomy code when it cannot
   -- finish - which is what a script in front of this is meant to branch on.
-  dofile("scripts/openai-sub-login.lua")
-  os.exit(0)
+  --
+  -- `lua/core/openai_sub_login.lua`, not `scripts/openai-sub-login.lua`: this registry carries `lua/`
+  -- and nothing under `scripts/`, so a `dofile` of the script worked in a checkout and died in an
+  -- installed node with `embedded module missing`. The script of that name is now a wrapper over this
+  -- module, and `scripts/check-embedded-lua-closure.mjs` fails the gate if this line ever points
+  -- outside the registry again.
+  os.exit(dofile("lua/core/openai_sub_login.lua").run(args))
 elseif command == "help" then
   print("wa: chat [--continue|--session <id>] [prompt]  |  remember <text> | recall <query>")
   print("    memories | forget <id> | search <query> | conversation <id> | conversations")

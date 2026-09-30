@@ -1599,6 +1599,19 @@ else
   echo "subscription credential tests SKIPPED - node not on PATH (the concurrency fixture is a node server)"
   SKIPPED=$((SKIPPED + 1))
 fi
+# The mapping this binary loads Lua through: every literal `dofile` target reachable from an embedded
+# `lua/` file must itself be in the binary's EMBEDDED registry. It is a static check with no binary,
+# no network and no Node-in-the-loop, and it exists because the opposite is invisible here: a `dofile`
+# of a `scripts/` path resolves in a checkout - which is what the rest of this file exports a Lua root
+# for - and dies in an installed node with `embedded module missing`. `wa subscription login` shipped
+# exactly that way. Falsified by adding one such `dofile` and watching it fail by name.
+node scripts/check-embedded-lua-closure.mjs
+# And the login door in the shape an installed node actually runs, since that is the shape the check
+# above reasons about: every command is run twice, once with the Lua root deliberately removed (the
+# shipped shape) and once with it set, and the two are compared rather than assumed equal. Both
+# `wa subscription status` and `wa subscription login --browser` are exercised; the authorize URL is
+# built locally, so this needs no network, no credential and no model.
+env -u WASM_AGENT_LUA_ROOT bash scripts/test-subscription-login-door.sh "$BIN" "$DB.sub-login" | grep "subscription login door ok"
 node scripts/test-auth-sessions.cjs "$BIN"
 node scripts/test-fixture-verdict.cjs
 node scripts/test-suite-verdict.cjs

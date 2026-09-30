@@ -69,6 +69,13 @@ const EMBEDDED: &[(&str, &str)] = &[
     // asks for is shipped, embedded and unreachable - present in the registry, absent in every
     // request. These two strings are one decision, and the no-Lua-root proof is what executes it.
     ("lua/core/openai_sub_auth.lua", include_str!("../../../lua/core/openai_sub_auth.lua")),
+    // The login CLI itself, not only the module it drives: the door in `lua/core/init.lua` loads this
+    // from HERE. `scripts/` is not in this registry at all, so a `dofile` of a `scripts/` path resolves
+    // in a checkout and dies in an installed node - `embedded module missing:`
+    // `scripts/openai-sub-login.lua`, measured - which is the defect this entry closes. The script of
+    // that name stays on disk as a wrapper for the `WA_SCRIPT=` spelling the credential module's own
+    // `LOGIN_COMMAND` names, and it works in both shapes because it loads this entry.
+    ("lua/core/openai_sub_login.lua", include_str!("../../../lua/core/openai_sub_login.lua")),
     ("lua/core/openai_sub_catalogue.lua", include_str!("../../../lua/core/openai_sub_catalogue.lua")),
     ("lua/core/subscription_wire.lua", include_str!("../../../lua/core/subscription_wire.lua")),
     ("lua/core/model_window.lua", include_str!("../../../lua/core/model_window.lua")),
