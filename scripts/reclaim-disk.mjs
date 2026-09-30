@@ -16,6 +16,14 @@
 //      rule, not this pass's.
 //   3. Prunes `rust/target` inside a managed session worktree whose owning session has ended.
 //
+// AGE IS NOT EVIDENCE OF DISUSE (the repair). An entry past `--min-age-hours` is a *candidate*, not a
+// decision: a family a live process holds or works in is never removed, and neither is one whose
+// liveness cannot be established - both are left and named, in report mode too. The evidence is the
+// OS's own exclusive-access test on the family directory plus a live-process command-line scan that
+// names the pid; the measured cases are above `inUseEvidence` below. `fs.rmSync` removing a family a
+// live process holds a file inside is exactly what the reviewed pass did, so a removal that succeeds
+// is not evidence that the family was stale - which is why the decision is taken before it.
+//
 // WHAT IT NEVER TOUCHES (the refusal is the product). The canonical checkout (the only tree on `main`),
 // the node's own worktree, every lane/role tree, any live session's worktree, the tree this pass runs in,
 // any tree whose owning session cannot be proved ended, any tree a process holds, and anything a
@@ -143,11 +151,18 @@ function freeSpace(target) {
   const r = run('df', ['-Pk', target], { timeout: 60000 });
   if (!r.ok) return { error: `df -Pk ${target} failed: ${r.why} ${r.err.trim()}` };
   const line = r.out.trim().split('\n').pop() || '';
-  const fields = line.split(/\s+/);
-  // Filesystem 1024-blocks Used Available Capacity Mounted on - the mount may contain spaces.
-  const totalKb = Number(fields[1]), availKb = Number(fields[3]);
+  const fields = line.split(/\s+/).filter(Boolean);
+  // `df -Pk` prints `Filesystem 1024-blocks Used Available Capacity Mounted on`, and the Filesystem
+  // field may itself contain spaces - this machine's root mount is `C:/Program Files/Git` - so the
+  // fields are located from the capacity column (the only field that is a percentage) and counted
+  // from it, exactly as `scripts/check-disk-floor.sh` does. The same free space must yield the same
+  // verdict in both places.
+  const caps = fields.map((f, i) => (/^[0-9]+%$/.test(f) ? i : -1)).filter(i => i >= 0);
+  if (caps.length !== 1 || caps[0] < 4) return { error: `df said: ${line}` };
+  const cap = caps[0];
+  const totalKb = Number(fields[cap - 3]), availKb = Number(fields[cap - 1]);
   if (!Number.isFinite(totalKb) || !Number.isFinite(availKb)) return { error: `df said: ${line}` };
-  return { totalBytes: totalKb * 1024, availableBytes: availKb * 1024, mount: fields.slice(5).join(' ') || target };
+  return { totalBytes: totalKb * 1024, availableBytes: availKb * 1024, mount: fields.slice(cap + 1).join(' ') || target };
 }
 
 // ── the families this repository actually mints ──────────────────────────────────────────────────
@@ -193,13 +208,108 @@ function mintedFamilies(repo, entries) {
   return families;
 }
 
+// ── liveness: who is still using a temp family, decided from evidence ────────────────────────────
+// The reviewed pass expired an entry because the *directory* was old, and removed a family a live
+// process held a file inside: a long-running process that appends to a file inside its family keeps
+// the FILE's mtime fresh, not the directory's, so the directory ages while its owner is alive. So an
+// entry past `--min-age-hours` is only a candidate, and removal needs a second, negative result:
+//
+//   1. the OS's own exclusive-access test on the family directory. A rename - even to the same name -
+//      needs DELETE access on the directory and on what it holds, so it is refused while any process
+//      holds the directory or a file inside it, and succeeds once nothing does. Measured on this node
+//      (MSYS/MINGW64, 2026-09-30): an idle directory renames OK; a directory with a file held open by
+//      a live process refuses EPERM; a directory that is a live process's working directory refuses
+//      EBUSY; the same directory renames OK once the holder is killed.
+//   2. a live process whose command line names the family, which is what lets a refusal name the pid
+//      that holds it rather than only an error code.
+//
+// On a POSIX host a rename is metadata-only and would succeed with a file still held, so there the
+// evidence is /proc: a live process's cwd or open file inside the family. Where no evidence source
+// can answer - no probe, an entry that is not a directory, a /proc entry that cannot be inspected -
+// the entry is LEFT and named `liveness unproven`. Refusing to delete is a result, and the list of
+// what was not touched is this pass's product.
+
+// The probe: a same-name rename of the directory. It leaves the family exactly where it was, and its
+// refusal is the OS naming a holder.
+function renameProbe(dir) {
+  try { fs.renameSync(dir, dir); return null; }
+  catch (e) { return e.code || String(e.message || e); }
+}
+
+function matchKey(p) { return String(p || '').replace(/\\/g, '/').replace(/\/+/g, '/').toLowerCase(); }
+
+// One process scan per run, and only when there is a candidate to decide. This is the *pid* evidence;
+// the rename probe above decides on its own, so a scan that cannot run costs a name, not the rule.
+function liveProcesses() {
+  if (process.platform !== 'win32') return { error: 'the process scan is the Windows evidence source; on POSIX /proc is' };
+  const script = 'Get-CimInstance Win32_Process | ForEach-Object { [string]$_.ProcessId + " " + [string]$_.CommandLine }';
+  // -EncodedCommand: the script is handed over as base64 UTF-16LE, so no shell or `-Command` quoting
+  // can mangle it (this node's process names contain spaces and quotes).
+  const r = run('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { timeout: 120000 });
+  if (!r.ok) return { error: `the process scan failed: ${r.why} ${r.err.trim().slice(0, 120)}` };
+  const rows = [];
+  for (const line of r.out.split(/\r?\n/)) {
+    const m = /^\s*(\d+)\s+(.*)$/.exec(line);
+    if (m) rows.push({ pid: Number(m[1]), cmd: m[2] });
+  }
+  if (!rows.length) return { error: 'the process scan returned no rows' };
+  return { source: 'powershell Get-CimInstance Win32_Process', rows };
+}
+
+function pidNaming(dir, procs) {
+  if (!procs || !procs.rows) return null;
+  const key = matchKey(dir);
+  const hit = procs.rows.find(row => matchKey(row.cmd).includes(key));
+  return hit ? { pid: hit.pid, cmd: hit.cmd.trim().slice(0, 160) } : null;
+}
+
+// The POSIX evidence source: a live process's cwd or any open file inside the family. UNEXERCISED on
+// this node - it is Windows, where this branch is not reached - and labelled as such rather than
+// claimed. A /proc entry that cannot be inspected makes the answer unproven, never clean.
+function procUse(dir) {
+  let target;
+  try { target = fs.realpathSync(dir); } catch { return { unproven: `cannot resolve ${dir}` }; }
+  let pids;
+  try { pids = fs.readdirSync('/proc').filter(n => /^\d+$/.test(n)); } catch { return { unproven: 'no /proc on this platform' }; }
+  let unreadable = 0;
+  for (const pid of pids) {
+    let cwd;
+    try { cwd = fs.readlinkSync(`/proc/${pid}/cwd`); } catch { unreadable += 1; continue; }
+    if (cwd === target || cwd.startsWith(`${target}/`)) return { inUse: `pid ${pid} works in it (cwd ${cwd})` };
+    let fds = [];
+    try { fds = fs.readdirSync(`/proc/${pid}/fd`); } catch { unreadable += 1; continue; }
+    for (const fd of fds) {
+      let link = '';
+      try { link = fs.readlinkSync(`/proc/${pid}/fd/${fd}`); } catch { continue; }
+      if (link === target || link.startsWith(`${target}/`)) return { inUse: `pid ${pid} holds ${link} open` };
+    }
+  }
+  if (unreadable) return { unproven: `${unreadable} process(es) could not be inspected` };
+  return { clean: true };
+}
+
+// The decision for one aged candidate. `null` means removal is allowed; anything else is the record's
+// reason for staying, with the evidence that decided it.
+function inUseEvidence(full, isDir, procs) {
+  const named = pidNaming(full, procs);
+  if (named) return { kind: 'in_use', pid: named.pid, source: 'process command line', why: `in use: a live process names this family - pid ${named.pid} (${named.cmd})` };
+  if (!isDir) return { kind: 'liveness_unproven', pid: null, source: null, why: 'liveness unproven: the entry is not a directory, so the directory probe cannot answer for the open handles inside it' };
+  const code = renameProbe(full);
+  if (code) return { kind: 'in_use', pid: null, source: 'rename probe', why: `in use: the OS refused an exclusive rename of the family (${code}) - a process holds the directory or a file inside it` };
+  if (process.platform === 'win32') return null;
+  const proc = procUse(full);
+  if (proc.inUse) return { kind: 'in_use', pid: null, source: '/proc', why: `in use: ${proc.inUse}` };
+  if (proc.unproven) return { kind: 'liveness_unproven', pid: null, source: '/proc', why: `liveness unproven: ${proc.unproven}` };
+  return null;
+}
+
 function tempPass(opts) {
   let entries = [];
   try { entries = fs.readdirSync(opts.tempDir); } catch (e) { return { error: `cannot read ${opts.tempDir}: ${e.message}`, families: new Map() }; }
   const families = mintedFamilies(opts.repo, entries);
   const protectedFamilies = PROTECTED_TEMP_FAMILIES.map(entry => ({ ...entry, hits: 0, bytes: 0 }));
   const cutoff = Date.now() - opts.minAgeHours * 3600 * 1000;
-  const expired = [], kept = [];
+  const expired = [], kept = [], candidates = [];
   let unknown = 0;
   for (const name of entries) {
     const full = path.join(opts.tempDir, name);
@@ -212,10 +322,24 @@ function tempPass(opts) {
     const family = [...families.keys()].find(prefix => name.startsWith(prefix));
     if (!family) { unknown += 1; continue; }
     const ageMs = Date.now() - st.mtimeMs;
-    const record = { name, family, mintedBy: families.get(family), ageHours: Number((ageMs / 3600000).toFixed(1)), bytes: 0 };
+    const record = { name, family, mintedBy: families.get(family), ageHours: Number((ageMs / 3600000).toFixed(1)), bytes: 0, isDir: st.isDirectory() };
     if (st.mtimeMs > cutoff) { record.why = `fresh: younger than --min-age-hours ${opts.minAgeHours}`; kept.push(record); continue; }
+    candidates.push({ full, record });
+  }
+
+  // The age test has passed: these are candidates, and whether each may go is decided from evidence
+  // about who is still using it. This runs in report mode too, so a report cannot call a live family
+  // "would expire" and then be believed.
+  const procs = candidates.length ? liveProcesses() : null;
+  for (const { full, record } of candidates) {
     record.bytes = dirBytes(full).bytes;
+    const use = inUseEvidence(full, record.isDir, procs);
+    if (use) { record.why = use.why; record.kind = use.kind; record.pid = use.pid ?? null; record.source = use.source || null; kept.push(record); continue; }
     if (opts.apply && expired.length < opts.limit) {
+      // The proof is re-read at the moment of removal: a family that came into use between the
+      // decision and this line is refused here, not deleted and apologised for afterwards.
+      const again = renameProbe(full);
+      if (again) { record.removed = false; record.kind = 'in_use'; record.why = `in use: it came into use between the decision and the removal (the OS refused an exclusive rename: ${again})`; kept.push(record); continue; }
       try {
         // A refusal is a result: a file another process holds is reported, not forced.
         fs.rmSync(full, { recursive: true, force: false, maxRetries: 1 });
@@ -224,7 +348,7 @@ function tempPass(opts) {
     } else if (!opts.apply) record.removed = false;
     expired.push(record);
   }
-  return { families, candidates: families.candidates.size, expired, kept, unknown, protectedFamilies, cutoff };
+  return { families, candidates: families.candidates.size, expired, kept, unknown, protectedFamilies, cutoff, procs, decided: candidates.length };
 }
 
 // ── the session store: whose tree is it, and has that session ended ──────────────────────────────
@@ -403,9 +527,15 @@ function main() {
     for (const group of [...byFamily.values()].sort((a, b) => b.bytes - a.bytes).slice(0, 20)) {
       say(`     ${group.family}*  n=${group.n}  ${human(group.bytes)}  oldest=${group.oldest.toFixed(0)}h  minted by ${group.mintedBy}${opts.apply ? `  removed=${group.removed}` : ''}`);
     }
-    say(`   kept: ${temps.kept.length} entries (fresh, or never expired by rule) — named below`);
-    for (const record of temps.kept.slice(0, 10)) say(`     KEEP   ${record.name}  — ${record.why}`);
-    if (temps.kept.length > 10) say(`     ... and ${temps.kept.length - 10} more fresh entries of the same families`);
+    const evidence = temps.kept.filter(r => r.kind);
+    const rest = temps.kept.filter(r => !r.kind);
+    say(`   live-process scan (the pid evidence): ${temps.procs && temps.procs.rows ? `${temps.procs.source}, ${temps.procs.rows.length} processes` : (temps.decided ? `unavailable - ${(temps.procs && temps.procs.error) || 'unknown reason'}` : 'no aged candidate to decide')}`);
+    say(`   LEFT, in use or liveness unproven (evidence, not age): ${evidence.length} entries`);
+    for (const record of evidence.slice(0, 20)) say(`     LEFT   ${record.name}  — ${record.why}${record.bytes ? `  ${human(record.bytes)}` : ''}`);
+    if (evidence.length > 20) say(`     ... and ${evidence.length - 20} more in use or unproven`);
+    say(`   kept: ${temps.kept.length} entries (fresh, in use, or never expired by rule) — named below`);
+    for (const record of rest.slice(0, 10)) say(`     KEEP   ${record.name}  — ${record.why}`);
+    if (rest.length > 10) say(`     ... and ${rest.length - 10} more fresh entries of the same families`);
     for (const guard of temps.protectedFamilies) {
       if (guard.hits) say(`   KEEP   ${guard.prefix}*  n=${guard.hits}  — another lane's retention rule: ${guard.why}`);
     }
@@ -463,6 +593,9 @@ function main() {
     temp: temps.error ? { error: temps.error } : {
       expired: temps.expired.map(r => ({ name: r.name, family: r.family, ageHours: r.ageHours, bytes: r.bytes, removed: r.removed === true })),
       kept: temps.kept.map(r => ({ name: r.name, family: r.family || null, why: r.why })),
+      leftInUse: temps.kept.filter(r => r.kind === 'in_use').map(r => ({ name: r.name, family: r.family || null, pid: r.pid ?? null, source: r.source || null, bytes: r.bytes, why: r.why })),
+      livenessUnproven: temps.kept.filter(r => r.kind === 'liveness_unproven').map(r => ({ name: r.name, family: r.family || null, why: r.why })),
+      liveProcessScan: temps.procs && temps.procs.rows ? { source: temps.procs.source, processes: temps.procs.rows.length } : { error: (temps.procs && temps.procs.error) || null, candidatesDecided: temps.decided },
       protected: temps.protectedFamilies.filter(g => g.hits).map(g => ({ prefix: g.prefix, n: g.hits, why: g.why })),
       unknown: temps.unknown,
     },

@@ -19,7 +19,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert/strict');
-const { execFileSync, spawnSync } = require('node:child_process');
+const { execFileSync, spawn, spawnSync } = require('node:child_process');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-reclaim-fixture-'));
 const repo = path.join(root, 'canonical');
@@ -48,6 +48,8 @@ let checks = 0;
 const count = () => { checks += 1; };
 
 const run = (...args) => spawnSync(process.execPath, [path.join(__dirname, 'reclaim-disk.mjs'), ...args], { cwd: repo, encoding: 'utf8', timeout: 120000 });
+const sleep = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
 try {
   mkdir(stateDir); mkdir(tempDir);
@@ -129,7 +131,67 @@ CREATE TABLE runs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, ended_at REAL)
   assert.equal(fs.existsSync(fresh), true, 'the fresh family entry must survive'); count();
   assert.equal(fs.existsSync(unrelated), true, 'an entry no tracked script claims must survive'); count();
 
-  console.log(`reclaim pass ok (${checks} checks, 0 skipped; pruned an ended session's target, kept the live, unrecorded, canonical and lane targets)`);
+  // ── the liveness rule: a family a live process holds or works in is never a candidate ────────
+  // The reviewed pass removed exactly this shape - a family aged past the window with a live process
+  // holding a file inside it (33 B, oldest=7h) - because age was its only test. The holder here is a
+  // real process holding a real file, the directory is aged while the FILE stays fresh (a long-running
+  // writer keeps its file's mtime, not its directory's: the realistic shape), and the reason must name
+  // the pid that decided it.
+  const liveFamily = path.join(tempDir, 'wa-fixture-family-live01');
+  const heldFile = path.join(liveFamily, 'held.open');
+  mkdir(liveFamily);
+  const holder = spawn(process.execPath, ['-e', "const fs=require('node:fs');const fd=fs.openSync(process.argv[1],'w+');fs.writeSync(fd,'x'.repeat(33));fs.fsyncSync(fd);setInterval(()=>{},1000);", heldFile], { stdio: 'ignore' });
+  for (let i = 0; i < 100 && !fs.existsSync(heldFile); i += 1) sleep(100);
+  assert.equal(fs.existsSync(heldFile), true, 'the holder never created its file'); count();
+  assert.equal(alive(holder.pid), true, 'the holder should be alive'); count();
+  fs.utimesSync(liveFamily, old, old);
+
+  // the deferences the review found clean, aged, so only the rule can be keeping them
+  const deferences = [
+    ['wa-merge-lane-Aged01', "another lane's retention rule: a merge-lane clone"],
+    ['wa-gate-home-Aged01', "the gate's retained home: scripts/test.sh keeps it"],
+    ['wa-sentinel-Aged01', 'never expired by rule: the sentinel watches this path'],
+    ['wa-not-a-tracked-family-SomeId', 'not matched to a known family (left alone)'],
+  ];
+  for (const [name] of deferences) { mkdir(path.join(tempDir, name)); fs.utimesSync(path.join(tempDir, name), old, old); }
+
+  const withLive = run('--apply', ...common);
+  assert.equal(withLive.status, 0, withLive.stdout + withLive.stderr); count();
+  assert.equal(fs.existsSync(heldFile), true, 'the file a live process holds must survive --apply'); count();
+  assert.equal(fs.existsSync(liveFamily), true, 'the family a live process holds must survive --apply'); count();
+  assert.ok(withLive.stdout.includes('LEFT   wa-fixture-family-live01') && withLive.stdout.includes(`pid ${holder.pid}`), `the refusal must name the pid that decided it:\n${withLive.stdout}`); count();
+  const liveJson = JSON.parse(fs.readFileSync(path.join(root, 'report.json'), 'utf8'));
+  const held = liveJson.temp.leftInUse.find(r => r.name === 'wa-fixture-family-live01');
+  assert.ok(held, `the family is not in the report's leftInUse: ${JSON.stringify(liveJson.temp.leftInUse)}`); count();
+  assert.equal(held.pid, holder.pid, 'the report must name the pid that decided the refusal'); count();
+  assert.ok(liveJson.temp.liveProcessScan.processes > 0, 'the pid evidence comes from the live-process scan'); count();
+
+  // ── the same `df` line, read with the same anchored rule as check-disk-floor.sh ───────────────
+  // Every path on this machine is on `C:/Program Files/Git`, so the positional parse reported free
+  // space UNMEASURABLE for all of them. Cross-checked against an independent source (fs.statfsSync),
+  // not against the parse itself.
+  assert.equal(liveJson.free.before.error, undefined, `free space must be measurable: ${JSON.stringify(liveJson.free.before)}`); count();
+  assert.ok(liveJson.free.before.availableBytes > 0); count();
+  const statfs = fs.statfsSync(repo);
+  const statfsAvail = statfs.bavail * statfs.bsize;
+  assert.ok(Math.abs(statfsAvail - liveJson.free.before.availableBytes) / statfsAvail < 0.05, `the parsed free space (${liveJson.free.before.availableBytes} B) must agree with statfs (${statfsAvail} B)`); count();
+  for (const [name, why] of deferences) {
+    assert.equal(fs.existsSync(path.join(tempDir, name)), true, `${name} must survive --apply`); count();
+    assert.ok(withLive.stdout.includes(why), `${why} must still be recorded:\n${withLive.stdout}`); count();
+  }
+
+  // ── release: the same family, now genuinely stale, IS reclaimed ("leaves everything" cannot pass) ─
+  holder.kill();
+  for (let i = 0; i < 100 && alive(holder.pid); i += 1) sleep(100);
+  assert.equal(alive(holder.pid), false, 'the holder should be gone'); count();
+  fs.utimesSync(liveFamily, old, old);
+  const afterRelease = run('--apply', ...common);
+  assert.equal(afterRelease.status, 0, afterRelease.stdout + afterRelease.stderr); count();
+  assert.equal(fs.existsSync(liveFamily), false, 'a stale family whose holder is gone must be reclaimed'); count();
+  assert.ok(afterRelease.stdout.includes('expired: 1 entries') && afterRelease.stdout.includes('removed=1'), `the released family must be expired and removed:\n${afterRelease.stdout}`); count();
+
+  console.log(`reclaim pass ok (${checks} checks, 0 skipped; pruned an ended session's target, kept the live, unrecorded, canonical and lane targets; left a temp family a live pid held, then reclaimed it once released; free space measured against statfs)`);
 } finally {
+  if (typeof holder !== 'undefined') { try { holder.kill(); } catch { /* already gone */ } }
   fs.rmSync(root, { recursive: true, force: true });
 }
