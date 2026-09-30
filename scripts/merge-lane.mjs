@@ -31,6 +31,12 @@
 //   --timeout-seconds <n>  gate timeout (default 3600)
 //   --clone <path>         use this directory as the disposable clone
 //   --keep-clone           keep the clone even when the lane passes
+//
+// Retention is bounded, and the knob that bounds it is `WA_MERGE_LANE_KEEP` (a count, default 1).
+// A passing run removes its own clone; a failing run keeps its own; a sweep keeps the newest N
+// leftovers of the family and deletes the older ones. `all` keeps everything (the behaviour that
+// filled a 477 GB disk) and `0` keeps nothing (a red gate with no tree to re-run). Both are named
+// here because they are how the bound is falsified, not because they are settings to use.
 //   --no-hooks             do not arm this tree's .githooks in the clone
 //   --partial              on a conflict, continue with the independent inputs and gate
 //                          the accepted subset (exit stays nonzero)
@@ -58,6 +64,119 @@ const elapsedMs = start => Number((nowMs() - start).toFixed(3));
 const note = text => process.stderr.write(`${text}\n`);
 const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 
+// ---- BOUNDED RETENTION: a day of gates costs a fixed number of clones, not the disk ------------
+// The clone is a disposable tree that a real gate fills to ~1.1 GB (the gate builds `rust/target`
+// inside it), and this lane's rule for keeping one was "did this run pass?" - so every failed,
+// interrupted or killed run left its clone in the temp root forever. 135 of them were measured there
+// (sampled: 1114, 1105, 1104, 1104 MB) beside 278 gate homes, ~150 GB of a 477 GB disk, and a
+// comment-only change's merged-tree gate then died in 10.6 s: `error: failed to build archive ...
+// There is not enough space on the disk. (os error 112)`, its own clone named in the cargo errors
+// (the run is `.wasm-agent/merge-lane-batch14.json.gate.log`). The gate home is the other half of
+// the leak and is bounded the same way, in `scripts/test.sh`.
+//
+// THE POLICY, and why not the other two. Not "keep the most recent N runs' clones", because that
+// keeps passes, and a pass needs no clone: its verdict line, its exit status, its skip count and the
+// sha256-pinned log are the record, and the log is already copied beside `--json`. Not "delete
+// unless a flag asks to keep", because then an unattended red gate leaves nothing to re-run and a
+// 1.1 GB tree is replaced by a text file - the failure that matters is exactly the one nobody was
+// watching. It is: **a passing run removes its own clone; a failing run keeps its own; every run
+// sweeps the family, keeping the newest `WA_MERGE_LANE_KEEP` leftovers (default 1).** The newest
+// failure keeps its exact merged tree, its gate log and everything it printed; older failures keep
+// nothing; a day of gates costs one clone instead of one clone per failure.
+//
+// LIVENESS DECIDES WHAT MAY BE PRUNED, NOT AGE. The clone's directory name carries the pid of the
+// run that owns it (`wa-merge-lane-<pid>-XXXXXX`, the pid added to mktemp's template), and a
+// directory whose owning pid is alive is never a candidate: a retainer that deleted a live
+// sibling's tree would turn a passing neighbour into an unattributed red gate, which this repository
+// has already paid for once (scripts/test.sh, "the plugin staging directory ... was missing"). A
+// name with the pre-change shape has no pid to ask about, so it is pruned only once it is an hour
+// old - a rollout cannot delete the clone of a run the previous script started. Residual limit,
+// named rather than hidden: if this process is killed while its gate child keeps running, that
+// clone's lease reads as dead and the next run may prune it; the gate lane's slot row, not this
+// lease, is the authority on which gates are live.
+const CLONE_PREFIX = 'wa-merge-lane-';
+const CLONE_KEEP_VARIABLE = 'WA_MERGE_LANE_KEEP';
+const cloneName = /^wa-merge-lane-(\d+)-[A-Za-z0-9]{6}$/;
+const legacyCloneName = /^wa-merge-lane-[A-Za-z0-9]{6}$/;
+const LEGACY_GRACE_MS = 60 * 60 * 1000;
+
+function retentionKeep(raw, variable) {
+  const text = String(raw ?? '').trim().toLowerCase();
+  if (!text) return 1;
+  if (text === 'all') return 'all';
+  if (!/^\d+$/.test(text)) {
+    throw Object.assign(Error(`${variable} must be a non-negative whole number or 'all' (got ${JSON.stringify(raw)})`), {exit: 4});
+  }
+  return Number(text);
+}
+
+// What is this directory's owner doing? The lease is the pid in the name; only a directory whose
+// owner is gone is a candidate for deletion.
+function cloneOwner(name) {
+  const owned = cloneName.exec(name);
+  if (owned) {
+    const pid = Number(owned[1]);
+    if (pid === process.pid) return {state: 'own', pid};
+    try { process.kill(pid, 0); return {state: 'live', pid}; }
+    catch (error) { return {state: error.code === 'EPERM' ? 'live' : 'dead', pid}; }
+  }
+  return {state: legacyCloneName.test(name) ? 'legacy' : 'not_this_family', pid: null};
+}
+
+// The sweep. Best effort and never fatal: a directory it cannot remove is recorded, and the merge
+// this run exists for is not failed by a temp root it does not own. `currentKept` says whether this
+// run's own clone is one of the kept ones: the budget counts it, because it is the newest by
+// construction, and a budget of 1 spent on somebody else's clone keeps two. Exported because the
+// retention bound is a property worth testing on its own (scripts/test-merge-lane-retention.mjs).
+export function sweepClones({keep = 1, tmp = os.tmpdir(), current = null, currentKept = false, now = Date.now()} = {}) {
+  const held = Boolean(current) && fs.existsSync(current);
+  const record = {family: `${CLONE_PREFIX}*`, keep, current: current || null, current_kept: Boolean(currentKept && held),
+    policy: 'a passing run removes its own clone; a failing run keeps its own; the sweep keeps the newest `keep` prunable clones',
+    budget_for_others: null, removed: [], kept: [], live: [], recent_legacy: [], not_this_family: 0, errors: []};
+  let entries;
+  try { entries = fs.readdirSync(tmp, {withFileTypes: true}); }
+  catch (error) { record.errors.push({path: tmp, error: error.message}); return record; }
+  const candidates = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith(CLONE_PREFIX)) continue;
+    const dir = path.join(tmp, entry.name);
+    if (current && path.resolve(dir) === path.resolve(current)) continue;
+    const owner = cloneOwner(entry.name);
+    if (owner.state === 'live') { record.live.push(dir); continue; }
+    if (owner.state === 'own' || owner.state === 'not_this_family') { record.not_this_family += owner.state === 'not_this_family' ? 1 : 0; continue; }
+    let mtimeMs = 0;
+    try { mtimeMs = fs.statSync(dir).mtimeMs; }
+    catch (error) { record.errors.push({path: dir, error: error.message}); continue; }
+    if (owner.state === 'legacy' && now - mtimeMs < LEGACY_GRACE_MS) { record.recent_legacy.push(dir); continue; }
+    candidates.push({dir, mtimeMs, lease: owner.state, pid: owner.pid});
+  }
+  candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
+  const budget = keep === 'all' ? candidates.length
+    : Math.max(0, Number(keep) - (record.current_kept ? 1 : 0));
+  record.budget_for_others = budget;
+  candidates.forEach((candidate, index) => {
+    if (index < budget) { record.kept.push({path: candidate.dir, lease: candidate.lease, pid: candidate.pid}); return; }
+    try {
+      fs.rmSync(candidate.dir, {recursive: true, force: true});
+      record.removed.push({path: candidate.dir, lease: candidate.lease, pid: candidate.pid});
+    } catch (error) { record.errors.push({path: candidate.dir, error: error.message}); }
+  });
+  return record;
+}
+
+// One line per run that actually pruned something, because a bound that acts silently is a bound
+// nobody can tell from a bug. The full record is in the JSON (`retention.sweeps`).
+function retentionNotice(retention) {
+  for (const sweep of retention.sweeps) {
+    if (sweep.removed.length) {
+      note(`merge-lane: retention: removed ${sweep.removed.length} clone(s) beyond the newest ${sweep.keep}`
+        + ` (${CLONE_KEEP_VARIABLE}=${retention.keep}); kept ${sweep.kept.length}`
+        + (sweep.live.length ? `, left ${sweep.live.length} live clone(s) alone` : ''));
+    }
+    for (const error of sweep.errors) note(`merge-lane: retention: could not remove ${error.path}: ${error.error}`);
+  }
+}
+
 function run(program, args, options = {}) {
   const result = spawnSync(program, args, {encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024, ...options});
   return {status: result.status, stdout: result.stdout || '', stderr: result.error?.message || result.stderr || ''};
@@ -77,7 +196,8 @@ function resolveRef(cwd, ref) {
 
 export function parseArgs(argv) {
   const options = {tips: [], base: 'origin/main', allPending: false, jobs: '2', gateCommand: 'bash scripts/test.sh',
-    timeoutSeconds: 3600, clone: null, keepClone: false, hooks: true, partial: false, json: null, repo: null};
+    timeoutSeconds: 3600, clone: null, keepClone: false, hooks: true, partial: false, json: null, repo: null,
+    keepClones: retentionKeep(process.env[CLONE_KEEP_VARIABLE], CLONE_KEEP_VARIABLE)};
   const needs = new Set(['--repo', '--base', '--jobs', '--gate-command', '--timeout-seconds', '--clone', '--json']);
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -129,7 +249,10 @@ async function auditRepo(repo, base) {
 
 function cloneRepo(repo, base, options, laneBranch) {
   const started = nowMs();
-  const dir = options.clone ? path.resolve(options.clone) : fs.mkdtempSync(path.join(os.tmpdir(), 'wa-merge-lane-'));
+  // The pid in the name is the lease that a later sweep reads before it deletes anything (see
+  // "BOUNDED RETENTION" above): a clone whose owner is still running is never a candidate.
+  const dir = options.clone ? path.resolve(options.clone)
+    : fs.mkdtempSync(path.join(os.tmpdir(), `${CLONE_PREFIX}${process.pid}-`));
   if (options.clone && fs.existsSync(dir) && fs.readdirSync(dir).length) throw Error(`--clone ${dir} is not empty`);
   const cloned = run('git', ['clone', '--quiet', '--local', repo, dir]);
   if (cloned.status !== 0) throw Error(`clone failed: ${(cloned.stderr || cloned.stdout).trim()}`);
@@ -313,6 +436,9 @@ async function main() {
   const timings = {};
   const blocked = [];
   const skipped = [];
+  // Every sweep this run performs, kept in the JSON: a bound that acts is a bound that says so.
+  const retention = {variable: CLONE_KEEP_VARIABLE, keep: options.keepClones, prefix: CLONE_PREFIX, sweeps: [],
+    policy: 'a passing run removes its own clone; a failing run keeps its own; a sweep keeps the newest `keep` prunable clones (a clone whose owning pid is alive is never pruned)'};
 
   const top = run('git', ['-C', repo, 'rev-parse', '--show-toplevel']);
   if (top.status !== 0) throw Object.assign(Error(`not a git repository: ${repo}`), {exit: 4});
@@ -395,6 +521,10 @@ async function main() {
   const steps = [];
   const conflictStops = blocked.length && !options.partial;
   if (accepted.length && !conflictStops) {
+    // Bounded retention, before anything new is made. A previous run that was killed - or whose
+    // supervisor died - never reached the removal below, and its clone is what fills the disk.
+    retention.sweeps.push(sweepClones({keep: options.keepClones,
+      current: options.clone ? path.resolve(options.clone) : null}));
     clone = cloneRepo(gitDir, baseSha, options, laneBranch);
     for (const record of accepted) {
       const stepStarted = nowMs();
@@ -554,7 +684,8 @@ async function main() {
   const exitCode = verdict === 'pass' || verdict === 'nothing_to_merge' || verdict === 'merge_only' ? 0
     : verdict === 'blocked' ? 2 : verdict === 'gate_refused' ? 6 : 3;
 
-  const retainClone = Boolean(clone) && (options.keepClone || exitCode !== 0);
+  const retainClone = Boolean(clone) && (options.keepClone
+    || (exitCode !== 0 && options.keepClones !== 0));
   const result = {
     schema: 1, lane: 'merge-lane', verdict, exit_code: exitCode,
     repo: gitDir, base: {ref: options.base, sha: baseSha},
@@ -578,6 +709,7 @@ async function main() {
       requires: 'the reserved merger, holding the lane, re-reads origin/main, re-runs `audit.mjs verify <repo> origin/main`, and pushes this exact candidate tree; never a force-push',
     },
     timings_ms: timings,
+    retention,
     note: 'The spine never pushes and never moves main. A blocked input is named, and the exit is nonzero: no silent drop and no success.',
   };
   if (clone && !retainClone) {
@@ -585,6 +717,11 @@ async function main() {
     result.clone.removed = true;
     result.clone.path = null;
   }
+  // The bound, applied to what this run is leaving behind. Run after the decision above so the
+  // clone this run keeps is counted in its own budget - and never a candidate for deletion.
+  retention.sweeps.push(sweepClones({keep: options.keepClones, currentKept: retainClone,
+    current: clone ? clone.dir : (options.clone ? path.resolve(options.clone) : null)}));
+  retentionNotice(retention);
   if (options.json) fs.writeFileSync(path.resolve(options.json), `${JSON.stringify(result, null, 2)}\n`);
   note(`merge-lane: ${verdict} (exit ${exitCode}); candidate ${candidateTree}; gate ${gate.ran
     ? `exit ${gate.exit}, ${gate.skipped ?? '?'} skipped${gate.lane?.waited_ms >= 1000 ? ` after waiting ${(gate.lane.waited_ms / 1000).toFixed(0)}s for slot #${gate.lane.request}` : ''}`
