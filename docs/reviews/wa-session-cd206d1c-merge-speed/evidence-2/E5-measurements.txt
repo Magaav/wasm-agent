@@ -1,0 +1,53 @@
+# E5 - item 5: the receipt re-measured against the lane's own records
+
+## the candidate the gate receipts cover, and what it is
+8cefa35^{tree}            = 4c5cc536182ce1e6e0302c93c460df4893c6375d
+receipt candidate_tree    = 4c5cc536182ce1e6e0302c93c460df4893c6375d
+tip 82873b1^{tree}        = 72e807b3c1ccd6214df53ff71b3516b8692341e6
+
+## what separates the GATED candidate tree from the REVIEWED tree (3 files, docs + the test file):
+ .../merge-lane-tree-retention-merge.json           | 69 +++++++++++++++------
+ .../merge-lane-tree-vs-retention-probe.mjs         | 70 ++++++++++++++++++++++
+ scripts/test-merge-lane.mjs                        | 13 ++++
+ 3 files changed, 133 insertions(+), 19 deletions(-)
+
+## the runs' own JSON receipts (gate.ms is the lane's own measurement):
+cold gate.ms 1619933.554 | gate.exit 0 | skipped 2 | verdictline "smoke ok (2 skipped)"
+  phases source file | rows 13 | total_ms 1619428 | sum 1619428
+  retention sweeps [{"keep":1,"current":null,"current_kept":false,"budget_for_others":1,"kept":1,"removed":0,"live":1,"in_use":0},{"keep":1,"current":"C:\\Users\\Victor\\.wasm-agent\\merge-lane-tree-landing","current_kept":false,"budget_for_others":1,"kept":1,"removed":0,"live":0,"in_use":0}]
+warm gate.ms 858965.58 | gate.exit 0 | skipped 2 | verdictline "smoke ok (2 skipped)"
+  phases source file | rows 13 | total_ms 858431 | sum 858431
+  retention sweeps [{"keep":1,"current":null,"current_kept":false,"budget_for_others":1,"kept":1,"removed":0,"live":0,"in_use":0},{"keep":1,"current":"C:\\Users\\Victor\\.wasm-agent\\merge-lane-tree-landing","current_kept":false,"budget_for_others":1,"kept":1,"removed":0,"live":1,"in_use":0}]
+
+## the gate logs the runs retained, re-hashed against the log_sha256 each run recorded:
+\df6b6be2dd7f5950ee83f3caf69481fbb0588e4bfac36d95ad510aad98cca034 *C:\\Users\\Victor/.wasm-agent/merge-lane-retention-cold.json.gate.log
+\deefcccf4f0cd2f238ac67cd3e6ecbe10d37602473a16ba94ecac58fceac0550 *C:\\Users\\Victor/.wasm-agent/merge-lane-retention-warm.json.gate.log
+cold log_sha256 = df6b6be2dd7f5950ee83f3caf69481fbb0588e4bfac36d95ad510aad98cca034
+warm log_sha256 = deefcccf4f0cd2f238ac67cd3e6ecbe10d37602473a16ba94ecac58fceac0550
+
+## the gate lane's own rows for those two runs (status --json is read-only):
+#197 label=merge-lane 4c5cc536182c cwd=C:/Users/Victor/.wasm-agent/merge-lane-tree-landing state=done exit_code=0
+#198 label=merge-lane 4c5cc536182c cwd=C:/Users/Victor/.wasm-agent/merge-lane-tree-landing state=done exit_code=0
+   (gate_ms is null in the lane's rows: in acquire mode the CALLER runs the gate, so the lane does
+    not record gate_ms. The lane corroborates candidate, tree path and exit status only.)
+
+## the persistent tree's owner record (runs: 2 = the cold create + the warm reuse):
+{
+  "schema": 1,
+  "repo": "C:\\Users\\Victor\\orca\\projects\\wasm-agent",
+  "created_at": "2026-09-30T19:28:38.207Z",
+  "created_by_pid": 47804,
+  "toolchain": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "runs": 2,
+  "last_used_at": "2026-09-30T20:17:10.398Z",
+  "last_used_pid": 40044
+}
+
+## the receipt's cold phase table vs the cold run's own phase table
+cold run JSON gate.phases: rows 13 source file total_ms 1619428
+  names: build,instances,self-update,cli,memory-update,tools,sessions,recovery-cli,plugins,fixtures,subagents,ui-js,ui-browser
+  sum of rows: 1619428
+receipt cold phases_ms: rows 11 names: build,instances,self-update,cli,memory-update,tools,sessions,recovery-cli,plugins,fixtures,subagents
+  sum of receipt rows: 1595038
+  names in the run but NOT in the receipt: ui-js,ui-browser
+receipt saving_ms: 760967.974 = cold 1619933.554 - warm 858965.58

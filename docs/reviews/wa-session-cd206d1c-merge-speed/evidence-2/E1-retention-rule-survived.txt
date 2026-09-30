@@ -1,0 +1,39 @@
+# E1 - item 1: the retention rule survived the conflict, byte for byte
+
+## the diff hunks of scripts/merge-lane.mjs, ad3acad(main)..82873b1(tip): no hunk touches the
+## retention region (old lines 88-247 = holderProbe/legacyGraceMs/sweepClones)
+5:@@ -30,6 +30,10 @@
+16:@@ -276,8 +280,11 @@ function resolveRef(cwd, ref) {
+30:@@ -290,9 +297,11 @@ export function parseArgs(argv) {
+42:@@ -360,9 +369,311 @@ function cloneRepo(repo, base, options, laneBranch) {
+355:@@ -602,9 +913,13 @@ async function main() {
+370:@@ -669,7 +984,7 @@ async function main() {
+379:@@ -712,6 +1027,13 @@ async function main() {
+393:@@ -741,6 +1063,9 @@ async function main() {
+403:@@ -763,7 +1088,11 @@ async function main() {
+416:@@ -777,8 +1106,12 @@ async function main() {
+431:@@ -791,14 +1124,27 @@ async function main() {
+
+## the region main:113-247 vs tip:117-251, hashed
+main  scripts/merge-lane.mjs lines 113-247 : 2e634787fb3e35c66ea05c9085f3437f4a7a59af6b5dd781fd1d9418f423fa7d *-
+tip   scripts/merge-lane.mjs lines 117-251 : 2e634787fb3e35c66ea05c9085f3437f4a7a59af6b5dd781fd1d9418f423fa7d *-
+
+## the derived grace, still derived (tip lines 126-143)
+   126	const GATE_LANE_WAIT_DEFAULT_SECONDS = 7200;
+   127	const LANE_GATE_TIMEOUT_DEFAULT_SECONDS = 3600;
+   128	const LEGACY_GRACE_SLACK_SECONDS = 60;
+   129	
+   130	function budgetSeconds(raw, fallback) {
+   131	  if (raw === null || raw === undefined || raw === '') return fallback;
+   132	  const value = Number(raw);
+   133	  return Number.isFinite(value) && value >= 0 ? value : fallback;
+   134	}
+   135	
+   136	// With no knobs set: 7200 + 3600 + 60 = 10860 s. A pre-change name is left alone for that long, and
+   137	// kept for longer than that whenever the filesystem can still show that something holds it.
+   138	export function legacyGraceMs({waitSeconds = process.env.WA_GATE_LANE_WAIT_SECONDS,
+   139	  gateTimeoutSeconds = null} = {}) {
+   140	  const wait = budgetSeconds(waitSeconds, GATE_LANE_WAIT_DEFAULT_SECONDS);
+   141	  const gate = budgetSeconds(gateTimeoutSeconds, LANE_GATE_TIMEOUT_DEFAULT_SECONDS);
+   142	  return (wait + gate + LEGACY_GRACE_SLACK_SECONDS) * 1000;
+   143	}

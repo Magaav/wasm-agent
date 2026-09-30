@@ -1,0 +1,27 @@
+== 0. the real tree, as it is right now (READ ONLY) ==
+   path C:\Users\Victor\.wasm-agent\merge-lane-tree-landing
+   stat {"mtime":"2026-09-30T19:28:37.560Z","age_s":5410,"dir":true}
+   lock present: false
+   derived grace legacyGraceMs({}) = 10860000 ms = 10860 s
+   basename in the sweep family (wa-merge-lane-*)? false
+   os.tmpdir() = C:\Users\Victor\AppData\Local\Temp
+   inside os.tmpdir()? false
+
+== 1. the sweep run with the REAL tree own parent as its root (keep=1, real semantics) ==
+   (verified first: C:\Users\Victor\.wasm-agent holds no wa-merge-lane-* entry, so nothing can be pruned)
+   family entries there: 0
+   record {"grace_s":10860,"current":"merge-lane-tree-landing","current_kept":false,"budget_for_others":1,"kept":[],"removed":[],"in_use":[],"recent_legacy":[],"live":[],"not_this_family":0,"errors":0}
+   the real tree still exists: true | stat after: {"mtime":"2026-09-30T19:28:37.560Z","age_s":5410,"dir":true}
+
+== 2. a scratch root holding (a) a MIMIC of the tree by name, idle and 20x the grace old,
+      and (b) a real in-family LEFT OVER, idle and 20x the grace old ==
+   scratch C:\Users\Victor\.wasm-agent\review-82873b1\tmp\sweep-z03pX5
+   mimic age_s 20000 (grace is 10860 s)
+   record {"grace_s":10860,"current":"merge-lane-tree-landing","current_kept":false,"budget_for_others":1,"kept":["wa-merge-lane-999998-Ab3XyZ"],"removed":[],"in_use":[],"recent_legacy":[],"live":[],"not_this_family":1,"errors":0}
+   mimic survived: true | family leftover survived: true | wa-merge-lane-tree survived: true
+
+== 3. the decisive shape: an IDLE, OLD family member with the budget spent elsewhere ==
+   record {"grace_s":10860,"current":null,"current_kept":false,"budget_for_others":0,"kept":[],"removed":["wa-merge-lane-999998-Ab3XyZ"],"in_use":[],"recent_legacy":[],"live":[],"not_this_family":1,"errors":0}
+   mimic survived: true | family leftover survived: false
+
+   (scratch removed; the real tree was only read)

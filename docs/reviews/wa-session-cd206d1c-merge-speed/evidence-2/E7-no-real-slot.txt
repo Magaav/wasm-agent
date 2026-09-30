@@ -1,0 +1,11 @@
+# E7 - the review took no real gate slot
+
+## the REAL lane's newest row is still #200 (abandoned) after my runs:
+#199 (live landing) finished at 1790801910; slots_held 0, waiting 0, newest id 200.
+
+## where the fixture lanes' own slots went (WA_GATE_LANE_DIR was redirected to a scratch dir):
+gate lane: 0 of 1 slot(s) held (capacity from the default), 0 waiting
+  state dir: C:\Users\Victor\.wasm-agent\review-82873b1\lane
+  nobody holds a slot and nobody is waiting
+  done #13 merge-lane 4b4de9909340 exit 0: merge-lane gate in C:\Users\Victor\.wasm-agent\review-82873b1\tmp\wa-merge-lane-70836-SBxLVT exited 0
+my fixture lane rows: 13 {"done":11,"failed":2} (ids 1 - 13 )

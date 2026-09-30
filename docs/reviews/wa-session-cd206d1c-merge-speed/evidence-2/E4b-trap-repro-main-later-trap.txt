@@ -1,0 +1,4 @@
+  (main line 153: trap gate_home_release EXIT)
+  (main line 277/287: trap rm -f DB ... EXIT is set next)
+  (now a failure AFTER the second trap, as a passing/cli-region exit is)
+      [the rm -f DB trap RAN - this is main own later trap]
