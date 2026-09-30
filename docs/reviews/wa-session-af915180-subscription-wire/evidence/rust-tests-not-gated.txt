@@ -1,0 +1,46 @@
+Reviewer's run of the delivery's new Rust unit tests, and the reason they are not gate coverage.
+
+Command (reviewer's scratch source tree from `git archive ea2f201`, target dir a copy of the
+delivery's own so the dependency artifacts could be reused; the delivery's worktree was not written):
+  cd /tmp/rev-af915180/tree/rust
+  CARGO_TARGET_DIR=/tmp/rev-af915180/cargo-target CARGO_BUILD_JOBS=4 \
+    cargo test --release --offline -p wa-host sse_line_tests
+
+Result:
+    Finished `release` profile [optimized] target(s) in 4m 58s
+     Running unittests src\main.rs (.../cargo-target\release\deps\wa-...exe)
+running 4 tests
+test host::sse_line_tests::a_failing_callback_stops_the_read_at_that_line ... ok
+test host::sse_line_tests::a_truncated_stream_ends_where_it_ended ... ok
+test host::sse_line_tests::the_recorded_stream_is_handed_over_line_for_line ... ok
+test host::sse_line_tests::a_residual_line_at_eof_is_still_a_line ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 0.00s
+CARGO_EXIT=0
+
+So the producer's claim "4 passed; 0 failed" is true, and the tests cost ~0 ms.
+
+But `scripts/test.sh` on `ea2f201` never asks for them. Every cargo invocation in that file:
+  47  cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
+  50  cargo test ... -p wa-operation -p wa-jobs
+  51  cargo test ... -p wa-host file_search::tests
+  55  cargo test ... -p wa-host ticker_tests
+  58  cargo test ... -p wa-host terminal_tests
+  61  cargo test ... -p wa-host terminal_editor::tests
+  64  cargo test ... -p wa-graph
+  68  cargo test ... -p wa-host serve::
+  69  cargo test ... -p wa-host subagents::
+  73  cargo test ... -p wa-host deadline_note_tests
+  74  cargo test ... -p rust/wa-sentinel/Cargo.toml
+  78  CARGO_BUILD_JOBS=2 cargo build --release --offline --manifest-path rust/wa-sentinel/Cargo.toml
+  307 cargo test ... --bin wa client_diagnosis
+  1498 CARGO... wasm32-unknown-unknown build
+`grep -n sse_line scripts/test.sh` on that revision: no match.
+
+The gate's own log agrees: the wa-host filters it ran report `1 filtered out`-style partial runs
+(1, 7, 6, 1, 20, 19, 3 tests) and there is no "running 4 tests" anywhere in
+wa-finish-gate.json.log.
+
+The tests compile in the gate (a compile error would break every `-p wa-host` filter), so the only
+gap is wiring: `scripts/test.sh` should add, next to the other wa-host filters,
+  cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host sse_line_tests
+which this measurement shows costs ~0 ms and 4 assertions.

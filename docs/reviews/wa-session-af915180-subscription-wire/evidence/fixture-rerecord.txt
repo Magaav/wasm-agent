@@ -1,0 +1,24 @@
+Reviewer's fixture re-record (item 6). Both streams were recorded freshly through the delivery's own
+wire (`scripts/check-subscription-wire-live.lua`, real endpoint, Pi's package renamed aside) into the
+reviewer's scratch tree, then diffed against the committed files, normalising only the four named
+redactions plus the per-response identifiers the README says are deliberately not redacted:
+
+  normalise: (resp|msg|fc|call)_[A-Za-z0-9]+ -> \1_<ID>
+             "obfuscation":"..." -> "obfuscation":"<OBF>"
+             "created_at":<n> -> "created_at":<T>   (and completed_at)
+
+Result:
+  == tool mine lines 34 committed lines 34 identical: True
+  == text mine lines 73 committed lines 73 identical: True
+
+Sizes (bound is 1 MiB, enforced with a loud failure at check-subscription-wire-live.lua:64-70):
+  7407 /tmp/rev-af915180/tree/tests/fixtures/subscription/codex-responses-sse.txt
+ 11218 /tmp/rev-af915180/tree/tests/fixtures/subscription/codex-responses-sse-text.txt
+  2837 /tmp/rev-af915180/tree/tests/fixtures/subscription/live-check-output.txt
+
+Event names present in each committed fixture (no reasoning event in either):
+  codex-responses-sse.txt:      created, in_progress, output_item.added, 5x function_call_arguments.delta,
+                                function_call_arguments.done, output_item.done, completed
+  codex-responses-sse-text.txt: the same plus output_item.added(message), content_part.added,
+                                8x output_text.delta, output_text.done, content_part.done,
+                                output_item.done(phase commentary)

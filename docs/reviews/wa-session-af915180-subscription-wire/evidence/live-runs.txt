@@ -1,0 +1,62 @@
+Reviewer's live runs through the delivered binary (item 1, item 2, item 5, item 7).
+Scratch tree: `git archive ea2f201`; binary: the delivery's `rust/target/release/wa.exe`;
+`WASM_AGENT_HOME` and every `--db` scratch; the credential store is the operator's real one, named
+explicitly via `WASM_AGENT_OPENAI_SUB_STORE`.
+
+--- A. the delivered live check, Pi's package renamed aside, Pi's auth + models store unreachable ----
+pi-package-absent: ls: cannot access 'C:/Users/Victor/AppData/Roaming/npm/node_modules/@earendil-works': No such file or directory
+pi-agent-dir-absent: ls: cannot access '/tmp/rev-af915180/NO-PI-AGENT-DIR': No such file or directory
+pi-models-store: ls: cannot access '/tmp/rev-af915180/NO-PI-MODELS.json': No such file or directory
+fixture: tests/fixtures/subscription/codex-responses-sse.txt (33 lines)
+tool decision: complete=false call_id=call_IcuVrsmKfmaXo7YcWsQaQk3a|fc_02f6ca779eadfb9e016abd1805dc0087d2b62fcf848b624578 arguments_text={"
+tool decision: complete=true call_id=call_IcuVrsmKfmaXo7YcWsQaQk3a|fc_02f6ca779eadfb9e016abd1805dc0087d2b62fcf848b624578 arguments_text={"zone":"UTC"}
+pass 1: finish_reason=tool_calls ttft_ms=1100.8286 events=11 usage={"completion_tokens":18,"completion_tokens_details":{"reasoning_tokens":0},"prompt_tokens":80,"prompt_tokens_details":{"cached_tokens":0},"total_tokens":98} (1427ms)
+pass 1 tool call: id=call_IcuVrsmKfmaXo7YcWsQaQk3a|fc_02f6ca779eadfb9e016abd1805dc0087d2b62fcf848b624578 name=get_time arguments={"zone":"UTC"}
+fixture: tests/fixtures/subscription/codex-responses-sse-text.txt (72 lines)
+pass 2: finish_reason=tool_calls ttft_ms=1397.2395 events=24 answer="" commentary=1 usage={"completion_tokens":33,...,"prompt_tokens":93,"total_tokens":126} (2106ms)
+pass 2 streamed events: commentary=1 decision=2 pending_delta=8
+pass 2 samples: [{"pending_id":"4e3295b3-....:1","text":"I","type":"pending_delta"}, ... 8 total ...]
+subscription wire live check ok
+EXIT=0
+restore: C:/Users/Victor/AppData/Roaming/npm/node_modules/@earendil-works     <- restored and verified
+(no "credential: lua/core/subscription_auth.lua is absent; using the pi-auth stand-in" line: the seam answered)
+
+--- B. the route entry point (lua/core/openai_sub.lua), WASM_AGENT_SUBSCRIPTION_TRANSPORT=native ----
+ROUTE result keys=["commentary","commentary_streamed","content","events","final_phase","finish_reason","lines","model","reasoning","request_id","saw_terminal_event","stream_complete","termination","tool_calls","transport","ttft_ms","usage"]
+ROUTE streamed: decision=2
+ROUTE finish=tool_calls complete=true model=gpt-6-luna req=resp_00a491f7a35ead81016abd189e8aec87d2bc7e2d4623a99bda ttft=1168.4379 tool_calls=1 commentary=0 usage={"completion_tokens":18,"prompt_tokens":62,"total_tokens":80,...}
+
+--- C. the final answer streamed as `delta`, and a second prompt at `medium` -----------------------
+PLAIN events: delta=1
+PLAIN with pending_id:            <- the final answer streams as `delta`, not pending_delta
+PLAIN order: delta
+PLAIN finish=stop phase=final_answer content="OK" commentary=0 reasoning_chars=0 tool_calls=0 complete=true events=9
+THINK events: delta=3
+THINK finish=stop phase=final_answer content="0.05" commentary=0 reasoning_chars=0 tool_calls=0 complete=true events=13
+
+No `reasoning` event in any of the reviewer's live runs (reasoning_chars=0), and none in either
+committed fixture.
+
+--- D. the deadline bound, live, WASM_AGENT_SUBSCRIPTION_TIMEOUT=1 (Pi unreachable) -----------------
+(a first attempt passed opts.timeout_seconds=120, which takes precedence at subscription_wire.lua:872
+ and correctly did not time out - the bound below is the environment variable with no explicit opt)
+DEADLINE ok=false err=subscription_timeout: no completion within 1s (WASM_AGENT_SUBSCRIPTION_TIMEOUT); the stream was stopped after 6 line(s)
+
+--- E. out-of-range bound, before any request leaves ------------------------------------------------
+BOUND ok=false err=...al/Temp/rev-af915180/tree/lua/core/subscription_wire.lua:148: invalid_subscription_timeout: expected 1..86400 seconds
+
+--- F. catalogue and configured(), with WASM_AGENT_PI_MODELS_STORE naming a file that does not exist
+TRANSPORT native
+CONFIGURED true
+CATALOGUE known=table unknown=nil unknown_is_table=false
+WINDOW {"context_window":272000,"max_output":128000} unknown_window=nil
+SERVES gpt-6-luna=true gpt-9-nope=false
+
+--- G. the catalogue import path, both directions ---------------------------------------------------
+real store:     import: 9 openai-codex-responses entry/entries from C:/Users/Victor/.pi/agent/models-store.json
+                catalogue unchanged: lua/core/openai_sub_catalogue.lua already matches the store, so nothing was written
+                (exit 0; sha256 of the catalogue unchanged by the run)
+tampered block: import: 9 openai-codex-responses entry/entries from C:/Users/Victor/.pi/agent/models-store.json
+                catalogue update: added gpt-6-luna; dropped gpt-6-luna-TAMPERED (9 entries)
+                catalogue written: lua/core/openai_sub_catalogue.lua - review the diff before committing it
+                (the file it wrote hashes equal to the committed file)
