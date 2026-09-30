@@ -183,9 +183,16 @@ const LANE_SCRIPT = path.join(here, 'gate-lane.mjs');
 const LANE_OFF = String(process.env.WA_GATE_LANE ?? '').trim().toLowerCase() === 'off';
 // The gate runs `scripts/test.sh`, which runs `scripts/test-parallel-finish.mjs`, which runs
 // `finish.mjs gate` on fixture trees. Those nested gates are inside CPU this process has already
-// paid for, so they inherit this admission decision instead of queueing behind the slot this gate
-// holds - a second request there would deadlock the gate behind itself.
-const LANE_HELD = process.env.WA_GATE_LANE_HELD || '';
+// paid for, so they inherit this admission decision instead of asking for a slot of their own - a
+// second request there would wait behind the slot its own parent holds, and the parent would wait
+// for it.
+//
+// The marker is spelled `GATE_LANE_HELD` and not `WA_GATE_LANE_HELD` because the gate fences its own
+// environment before it runs anything: scripts/test.sh unsets every `WA_*` and `WASM_AGENT_*`
+// variable (its `compgen -e` loop, letting only WASM_AGENT_SKIP_UI_TESTS, WASM_AGENT_IN_TURN and
+// WA_GATE_JOBS through) so no caller's runtime state leaks into the gate - which is also why this
+// lane drops its own switches from the gate's environment below, on the same principle.
+const LANE_HELD = process.env.GATE_LANE_HELD || '';
 const laneNotice = text => note(text);
 
 // Ask the lane for a slot. Never throws: a lane that cannot be consulted is reported, not fatal.
@@ -435,7 +442,12 @@ async function main() {
 
   // The candidate tree must still be LF-only. A merge does not run `pre-commit`, which is the hook
   // that enforces this for every other commit, so the one invariant it protects would be unpoliced on
-  // exactly the path this lane exists for. Same command the gate uses (scripts/test.sh:1454), earlier.
+  // exactly the path this lane exists for. Same check the gate runs under "Line endings are an
+  // invariant, not a preference" (scripts/test.sh), and by the same command it runs there:
+  // `git grep --cached -I -l <CR>`, earlier. It is named by its words and its command rather than by a
+  // line number: the line this comment used to carry (1454) was already wrong when it was written
+  // (that check is at 1478 on the same tree) and every edit to the gate moves it again - a pointer
+  // whose truth depends on an unrelated file's length cannot be kept true by reading it.
   const crlf = clone ? crlfCheck(clone.dir) : {state: 'not_run', files: []};
   if (clone && crlf.state === 'offenders') {
     blocked.push({name: 'merged candidate tree', sha: candidateTree, files: crlf.files,
@@ -469,9 +481,11 @@ async function main() {
       if (environment.WA_GATE_JOBS !== undefined) { delete environment.WA_GATE_JOBS; dropped.push('WA_GATE_JOBS'); }
     } else environment.WA_GATE_JOBS = String(options.jobs);
     // The lane's own switches are not the gate's either, for the same reason: the gate must run in
-    // the environment it was written for. The one lane variable the gate does see is the admission
-    // marker set from the slot below, because that is what a nested gate (the `finish.mjs gate` runs
-    // inside scripts/test-parallel-finish.mjs) reads to inherit this decision instead of asking again.
+    // the environment it was written for (and scripts/test.sh unsets `WA_*` itself anyway). The one
+    // lane variable the gate does see is the admission marker set from the slot below - deliberately
+    // not a `WA_` name, so the gate's own environment fence leaves it alone - because that is what a
+    // nested gate (the `finish.mjs gate` runs inside scripts/test-parallel-finish.mjs) reads to
+    // inherit this decision instead of asking again.
     for (const name of ['WA_GATE_LANE', 'WA_GATE_LANE_DIR', 'WA_GATE_LANE_CAPACITY',
       'WA_GATE_LANE_WAIT_SECONDS', 'WA_GATE_LANE_SAMPLE_SECONDS']) {
       if (environment[name] !== undefined) { delete environment[name]; dropped.push(name); }
@@ -488,7 +502,7 @@ async function main() {
       gate.detail = `the merged tree was not gated: the gate lane granted no slot (${slot.record.reason})`;
       note(`merge-lane: the merged tree was NOT gated - the gate lane granted no slot: ${slot.record.reason}`);
     } else {
-      environment.WA_GATE_LANE_HELD = slot.marker;
+      environment.GATE_LANE_HELD = slot.marker;
       const gateStarted = nowMs();
       // The gate's own words are streamed to the file as they arrive, the way
       // `skills/parallel-evolution/scripts/finish.mjs` already does it: a holder that dies mid-gate then

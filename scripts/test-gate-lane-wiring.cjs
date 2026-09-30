@@ -49,7 +49,7 @@ const said = record => record === undefined ? '(not started)'
   : `status=${record.status} stdout=${String(record.stdout).slice(0, 900)}`
   + ` stderr=${String(record.stderr).slice(0, 900)}`;
 const diagnostics = () => ['holder: ' + said(live.holder), 'waiter: ' + said(live.waiter),
-  `env WA_GATE_LANE_HELD=${process.env.WA_GATE_LANE_HELD === undefined ? 'unset' : process.env.WA_GATE_LANE_HELD}`]
+  `env GATE_LANE_HELD=${process.env.GATE_LANE_HELD === undefined ? 'unset' : process.env.GATE_LANE_HELD}`]
   .join('\n');
 
 function run(program, args, {cwd = repo, env = laneEnv()} = {}) {
@@ -153,14 +153,31 @@ async function main() {
 
   // ---- 1. Two real consumers at once: one holds the slot, the other is named while it waits -----
   // The holder's own gate contains a nested gate (`finish.mjs gate` on another tree), which is what
-  // the repository gate does at scripts/test.sh:48 through scripts/test-parallel-finish.mjs.
+  // the repository gate does at scripts/test.sh:48 through scripts/test-parallel-finish.mjs - and the
+  // holder's stand-in gate applies the repository gate's own environment fence first, because that
+  // fence (scripts/test.sh unsets every WA_*/WASM_AGENT_* variable) is what the admission marker has
+  // to survive. The fence text is taken from the real file rather than copied, so a fence that grows
+  // to cover the marker fails this test instead of deadlocking a real gate behind its own suite.
   const nested = finishFixture('nested', "printf 'smoke ok (0 skipped)\\n'\n");
   const nestedOut = path.join(root, 'nested.json');
   const nestedErr = path.join(root, 'nested.err');
+  const fenceOut = path.join(root, 'fence.txt');
+  const fence = path.join(repo, 'scripts', 'test.sh');
   const holder = finishFixture('holder',
-    `sleep 15\n"${sh(process.execPath)}" "${sh(finishRunner)}" gate "${sh(nested.dir)}" "${nested.head}"`
+    'if [ -f "' + sh(fence) + '" ]; then\n'
+    + '  fence="$(sed -n \'/^while IFS= read -r variable; do$/,/^done < <(compgen -e)$/p\' "'
+    + sh(fence) + '")"\n'
+    + '  printf \'%s\' "$fence" | grep -q "unset" || { echo "wrong gate, not the repository one"; exit 9; }\n'
+    + '  eval "$fence"\n'
+    + 'fi\n'
+    + 'printf \'WA_GATE_LANE_DIR=%s GATE_LANE_HELD=%s WA_GATE_JOBS=%s\\n\' "${WA_GATE_LANE_DIR-unset}"'
+    + ' "${GATE_LANE_HELD-unset}" "${WA_GATE_JOBS-unset}" > "' + sh(fenceOut) + '"\n'
+    + `sleep 15\n"${sh(process.execPath)}" "${sh(finishRunner)}" gate "${sh(nested.dir)}" "${nested.head}"`
     + ` > "${sh(nestedOut)}" 2> "${sh(nestedErr)}"\nsleep 15\nprintf 'smoke ok (2 skipped)\\n'\n`);
-  const holderRun = background(process.execPath, [finishRunner, 'gate', holder.dir, holder.head]);
+  check(process.env.GATE_LANE_HELD === undefined,
+    'this test itself starts outside any gate, so the holder has to ask for its slot');
+  const holderRun = background(process.execPath, [finishRunner, 'gate', holder.dir, holder.head],
+    {env: laneEnv({WA_GATE_JOBS: '2'})});
   live.holder = holderRun;
   const heldRow = await until(async () => {
     const entry = rowOf(status(), 'finish holder');
@@ -195,10 +212,21 @@ async function main() {
   }, 'the nested gate to finish while its parent still holds the slot');
   check(nestedJson.gate_verified === true && nestedJson.gate_lane.mode === 'inherited'
     && nestedJson.gate_lane.request === null && nestedJson.gate_lane.waited_ms === 0,
-  'a gate inside a gate inherits the admission and asks for no slot',
-  JSON.stringify(nestedJson.gate_lane));
+  'a gate inside a gate inherits the admission and asks for no slot, through the repository gate\'s'
+    + ' own environment fence', JSON.stringify(nestedJson.gate_lane));
   check(/inherited slot:\d+/.test(fs.readFileSync(nestedErr, 'utf8')),
     'and it says which slot it inherited', fs.readFileSync(nestedErr, 'utf8').trim().split('\n')[0]);
+  // The positive control for the check above: the fence really ran (a WA_ variable that was set is
+  // gone, the knob the fence allows through survives) and the marker really survived it. Without
+  // this, an inherited nested gate would also read as a pass if the fence were a no-op - and a
+  // no-op fence is not what scripts/test.sh is.
+  const fenceText = await until(async () => (fs.existsSync(fenceOut) ? fs.readFileSync(fenceOut, 'utf8').trim() : null),
+    'the holder\'s gate to report the environment it fenced');
+  check(/WA_GATE_LANE_DIR=unset/.test(fenceText) && /WA_GATE_JOBS=2/.test(fenceText),
+    'the gate\'s own fence unset a WA_ variable the caller had set, and kept the knob it allows',
+    fenceText);
+  check(new RegExp(`GATE_LANE_HELD=slot:${heldRow.id}`).test(fenceText),
+    'and the admission marker survived it, which is what the nested gate reads', fenceText);
   check(rowOf(status(), 'finish nested') === undefined,
     'no lane request was ever made in the nested tree\'s name');
 

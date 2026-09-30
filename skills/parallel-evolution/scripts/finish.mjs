@@ -79,9 +79,19 @@ const LANE_OFF = String(process.env.WA_GATE_LANE ?? '').trim().toLowerCase() ===
 // A gate can contain gates: `scripts/test-parallel-finish.mjs` runs `finish.mjs gate` on fixture
 // trees, and the repository gate (scripts/test.sh) runs that suite. Those nested runs are inside
 // CPU this process has already paid for, so they inherit this admission decision instead of asking
-// for a slot of their own - a second request there would deadlock this gate behind itself. The
-// marker travels in the gate's environment, so it covers exactly the process tree that gate starts.
-const LANE_HELD = process.env.WA_GATE_LANE_HELD || '';
+// for a slot of their own - a second request there would wait behind the slot its own parent holds,
+// and the parent would wait for it.
+//
+// The marker is spelled `GATE_LANE_HELD` and not `WA_GATE_LANE_HELD` because the gate fences its own
+// environment before it runs anything: scripts/test.sh unsets every `WA_*` and `WASM_AGENT_*`
+// variable (its `compgen -e` loop, letting only WASM_AGENT_SKIP_UI_TESTS, WASM_AGENT_IN_TURN and
+// WA_GATE_JOBS through) so no caller's runtime state leaks into the gate. Measured on this tree: a
+// `WA_`-named marker is gone by the time the nested suite runs, the nested gate then asks for a slot
+// it can never get, and both gates wait for each other until the outer one is killed. The marker
+// therefore uses a name that fence does not unset, and scripts/test-gate-lane-wiring.cjs applies the
+// fence *text taken from the real gate* before it runs its nested gate, so a fence that grows to
+// cover this name fails that test instead of deadlocking a real gate.
+const LANE_HELD = process.env.GATE_LANE_HELD || '';
 const laneNotice = text => process.stderr.write(`${text}\n`);
 
 // Ask the lane for a slot. Never throws: a lane that cannot be consulted is reported, not fatal
@@ -165,7 +175,7 @@ async function laneAcquire({cwd,label}) {
 
 // The gate's environment, with the marker that tells a gate nested inside it whether it is inside
 // an admission decision at all: `slot:<id>` (held), `off`, or `unavailable`.
-const laneGateEnv = slot => ({...process.env,WA_GATE_LANE_HELD:slot.marker});
+const laneGateEnv = slot => ({...process.env,GATE_LANE_HELD:slot.marker});
 
 // Give the slot back and record what the gate did with it. Best effort: the row is the lane's, the
 // verdict is this file's, and a release that fails is reported rather than allowed to fail the gate.
