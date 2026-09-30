@@ -120,13 +120,22 @@ node scripts/merge-lane.mjs --repo <path> [tip ...] [--all-pending] [--jobs 2] [
 | prove | per input: `rev-list --left-right --count <base>...<tip>`, subject, `merge-tree --write-tree <base> <tip>` | resolve a conflict |
 | build | `git clone --local` into a temp dir, a `lane/merge-<utc>` branch, then `git merge --no-ff -m "merge(<branch>): …"` per accepted tip, in order | touch the source repository, or merge a tip it has not identity-checked |
 | check | `git grep --cached -I -l $'\r'` on the merged tree (the `pre-commit` rule, which a merge does not run) | — |
-| gate | `bash scripts/test.sh` in the clone with `WA_GATE_JOBS`; exit, wall ms, log + sha256, skip count from the gate's own `smoke ok (N skipped)` | call exit 0 without that line a pass |
+| gate | `bash scripts/test.sh` in the clone with `WA_GATE_JOBS`, inside a `scripts/gate-lane.mjs` slot (`acquire`/`release`); exit, wall ms, log + sha256, skip count from the gate's own `smoke ok (N skipped)` | call exit 0 without that line a pass |
 | report | one object: per-input state, the candidate tree and branch, gate exit/skips, timings, `push_precondition` | push |
 
 Exit codes: `0` pass (or nothing to merge), `2` a named blocked input, `3` the merged-tree gate
-failed, `4` usage/repository error, `5` discovery could not establish the base or an input. Two seams
-exist for tests and only for tests: `--gate-command` and `WA_MERGE_LANE_AUDIT`; both are recorded
-verbatim in the output, so a run that used them cannot be mistaken for a real gate.
+failed, `4` usage/repository error, `5` discovery could not establish the base or an input, `6` the gate
+lane granted no slot, so the merged tree was not gated. Two seams exist for tests and only for tests:
+`--gate-command` and `WA_MERGE_LANE_AUDIT`; both are recorded verbatim in the output, so a run that used
+them cannot be mistaken for a real gate.
+
+The gate runs inside the lane's reservation (`docs/CONCURRENCY.md`, "Lane reservations and the serial
+gate"): this script takes a slot with `acquire`, keeps its own runner and its own verdict, and calls
+`release` when the gate ends. A lane that cannot be consulted is **fail open** - a named notice on stderr,
+`gate.lane.mode: "unavailable"`, and the merged tree is gated anyway; `WA_GATE_LANE=off` produces the same
+outcome deliberately, by name. A lane that is *reached* and refuses is **fail closed and terminal**: the
+gate does not run, `gate.refused` is set, the verdict is `gate_refused` and the exit is `6` - never the
+`merge_only` that would read as "merged, nothing to gate" - and nothing is retried.
 
 Discovery errors are classified rather than swallowed: one that touches the base or a named input stops
 the run (`5`), while one that does not — a sibling's branch moving while this run reads the world, a
@@ -134,10 +143,12 @@ live `origin` head that differs from the fetched refs — is reported in `discov
 not block a candidate whose own inputs are re-proved by SHA. With `--all-pending`, discovery *is* the
 input list, so every discovery error is fatal there.
 
-Facts it always states, because the landing procedure needs them: the base ref before and after
+Facts it always states, because a landing needs them: the base ref before and after
 (`main_moved_by_this_run`), `pushed: false`, the exact SHA of every input, the merge commit each input
-produced, the candidate tree, and `push_precondition` — which is only `can_push: true` when the
-verdict passed *and* the base ref did not move while the candidate was built.
+produced, the candidate tree, the gate's own admission row (`gate.lane`, and `gate_lane` in the finish
+receipt: the slot it waited for and the wait `gate_ms` leaves out), and `push_precondition` — which is
+only `can_push: true` when the verdict passed *and* the base ref did not move while the candidate was
+built.
 
 ### One main-mover — the mechanism this repository already had
 
@@ -255,14 +266,17 @@ the lane is attributable without a trailer a merge cannot truthfully carry;
   allow-list) and who may hold it. The lane is a protocol plus a script; it does not install itself.
 - **The remote boundary.** Branch protection or a `pre-receive` check on `origin/main` is the only
   unskippable enforcement point, and it is a repository setting, not a file.
-- **Wire the lane's own test into the gate.** `scripts/test-merge-lane.mjs` (67 checks, ~12 s, no
-  build, no network) is not run by `scripts/test.sh`, which discovers tests explicitly rather than by
-  convention. Adding one line to the gate was left out on purpose: the gate script was out of scope
-  for this delivery and another delivery is editing it.
 - **The batch policy.** How many inputs per gate, when to prefer per-landing gating, and who is the
   reserved merger for a given batch.
 - **Whether the lane should push at all.** It does not, today: the push stays the merger's act, and the
   lane's job is to make the tested candidate and the preconditions impossible to misread.
+
+Done since this list was written: **the lane's own test runs in the gate.** Five tests tonight's
+deliveries shipped unrunnable are wired into `scripts/test.sh`, each next to the kind of check it is
+(`bcdda53`): `scripts/test-merge-lane.mjs` (`70` checks, not the 67 this list used to quote - counted by
+running it on this tree), the gate lane's own `scripts/test-gate-lane.cjs`,
+`scripts/test-delivery-admission.mjs`, `scripts/test-telemetry-lock.sh` and the `openai-sub` levels check.
+They add ~48 s, and the gate is green with them.
 
 ## Modules — a feature that is one directory (2026-09-29)
 
