@@ -30,7 +30,14 @@ no other worktree was touched; the canonical checkout was only ever read (`git -
   `git grep --cached -I -l "$(printf '\r')"` → **0 files** (a merge does not run pre-commit, so it is run here).
 * `git merge-base --is-ancestor origin/main HEAD` → YES, so an `--ff-only` move of `main` yields exactly this tree.
 
-## 3. Gate - GREEN, one run, alone in the slot
+## 3. Gate - GREEN, one run, alone in the slot (**superseded as the integration gate by §3b**)
+
+The coordinator's later correction is applied in §3b: this entry point is **producer closure, not the
+integration gate** - it refuses a candidate HEAD with no origin upstream, so a freshly assembled merged tree
+cannot gate through it. In this run it gated because the candidate branch was **genuinely published with its
+own upstream** (the corrected brief's option 2 allows exactly that), not by pretence; the smoke it produced is
+real and remains corroborating evidence for the exact tree, while §3b's merge-lane receipt is the one a
+publisher should cite.
 
 `node skills/parallel-evolution/scripts/finish.mjs gate <integration checkout> da8dc8918a34c880768956ff775d883802dcb7a7`
 invoked from the repository's own copy, whose sha256 is **`129fabc56c44256ae70986aa…`** (the fixed copy: it
@@ -131,6 +138,87 @@ outside this task.
 
 No published `main` sha and no published-tree equality proof exist, because nothing was published. The
 tree-equality argument that *would* hold is the ff-only one above; it is an argument, not a read-back.
+
+## 3b. Correction applied: the sanctioned integration gate (merge-lane), and the proof-reuse assessment
+
+Per the correction, the integration gate is `scripts/merge-lane.mjs`, run with the four exact frozen SHAs,
+base `ab827c88`, and the **default real gate command** (no `--gate-command`):
+
+```
+node scripts/merge-lane.mjs --repo /tmp/rev/frozen-repo --base origin/main \
+     --json /tmp/frozen-merge-lane.json --keep-clone 3290d327 1d5f7ca1 5ab4683 7e2ab2c3
+```
+
+* The script is the repository's own copy at the base tree: blob `40394de178d0c00aa666ad6bb702076f5fdca391`,
+  byte-identical to `ab827c88:scripts/merge-lane.mjs`. Where a command needed `bash`, it resolved to Git Bash
+  (`/usr/bin/bash`, GNU bash 5.3.15 x86_64-pc-cygwin) - never `System32\bash.exe`.
+* `--repo` is a **fresh `git clone --local` of the canonical checkout** made for this run
+  (`/tmp/rev/frozen-repo`, HEAD `ab827c88`, all four tips present), so the lane never wrote into any other
+  checkout. Cost of that choice, stated: its audit's PR-discovery dimension could not reach GitHub through a
+  local clone (`discovery_errors: 1`, `pushed: false`); base, tips, merge and gate are unaffected.
+* No merge-lane run held the slot when I acquired (the lane's history listed only `failed`/`refused`/
+  `abandoned` merge-lane slots); my run queued behind `#166` and was then granted `#167`.
+
+**The merge-lane receipt (the sanctioned one)**
+
+| fact | value |
+|---|---|
+| verdict / exit | **`pass`** / **0** |
+| base | `origin/main` = `ab827c88a6ac091318b5adb8be34e83e858c4e9a`; `base_ref_before == base_ref_after`; `main_moved_by_this_run: false`; `pushed: false` |
+| inputs | the four exact SHAs, all `accepted`, all merges **clean**, **no conflicts** (input 1's merge tree `961c9d358806326de70c5c4899c3aa836d8168f3` = the tree the review names for `3290d327`) |
+| candidate | branch `lane/merge-2026-09-30T15-09-11-526Z`, head **`0184ffff258a5ca1786ca8a3319c130868f0fb48`**, tree **`09ba73f1e087c8ca1e576deaac8d9a738fe85a46`**, `merges: 4`, `gated: true` |
+| gate | `bash scripts/test.sh` (default), `ran: true`, exit **0**, **2 skipped**, `ms: 1516819.26` (25.3 min), verdict line `smoke ok (2 skipped)` |
+| gate log | `C:\Users\Victor\AppData\Local\Temp\frozen-merge-lane.json.gate.log`, sha256 **`c8b830a730943c978c18e30cd3aa14a1dc6ef06cfca4133bb2676da67189c989`** (110,022 B, recomputed and matched) |
+| slot | `#167` granted after 631.5 s, `mode=slot`, label `merge-lane 09ba73f1e087` |
+| candidate retained | `--keep-clone`: `C:\Users\Victor\AppData\Local\Temp\wa-merge-lane-m9nMAJ` (1,138,470 KiB) holds the candidate branch, its objects and the gate log |
+| `push_precondition` | `can_push: true`, `base_ref_unchanged: true`, "the reserved merger, holding the lane, re-reads origin/main ... and pushes this exact candidate tree; never a force-push" |
+
+**Proof-reuse assessment (the coordinator's question): reuse is compatible; no rerun is required.**
+
+1. **Same exact tree, not a similar one.** Both receipts name tree `09ba73f1e087c8ca1e576deaac8d9a738fe85a46` -
+   the merge-lane candidate `0184ffff...` and my hand-assembled `da8dc891...`. Different commits,
+   *identical content*: independent confirmation that the hand assembly and the sanctioned assembly agree, and
+   that the evidence binds to the **tree** the protocol tests (`git -C <canonical> rev-parse HEAD^{tree}`).
+2. **Same host, toolchain, environment and command.** Both logs open with the identical line
+   `gate parallelism: cargo jobs=2 test threads=2 (WA_GATE_JOBS=2)`; both carry the same 239 compile/finish
+   markers; both end with `smoke ok (2 skipped)`; both name the same two skips (`termux launcher: 8 passed,
+   1 skipped (POSIX mode semantics unavailable on Windows); Android build and runtime skipped on this
+   non-Android host`); both ran under a genuinely held exclusive slot of the same reserved resource (`#164`
+   waited 734.8 s, `#167` waited 631.5 s); both on the same filesystem with healthy free space (64.4 GiB).
+3. **Landing does not change the tree.** `origin/main` is an ancestor of `da8dc891...`, so an `--ff-only` move
+   yields exactly tree `09ba73f1...` - a fast-forward cannot alter content, so the receipt still covers what
+   `main` becomes.
+
+**A rerun *would* be required only if** `origin/main` has moved (the tree then differs, and the lane's own
+`can_push` requires `main_moved === false`), or if the publisher insists on a receipt produced *inside the
+canonical checkout* - the protocol permits reuse when the trees are equal, so that is a preference, not a
+requirement. Neither receipt exercises the audit/PR-discovery pass against the live remote (the local-clone
+caveat above): a process dimension, not tree content, and it changed neither verdict nor skip count.
+
+**Duplicate work: already completed, not cancelled - nothing was drained and no agent was killed.** The
+merge-lane run the coordinator saw holding slot `#167` **finished on its own** at 15:45:02Z with exit 0 on the
+same tree, so the 25.7-minute gate is already spent and no rerun is outstanding. Its evidence is retained
+(clone, candidate branch/head, gate log above). Its lease reconciled cleanly: the lane reports
+`#167 ... done ... exit 0`, `0 of 1 slot(s) held, nobody holds a slot and nobody is waiting`, and my process
+tree is stopped - no `merge-lane` process and 0 `cargo`/`rustc` processes remain.
+
+**Handover (publication authority remains the coordinator's - I did not publish, and did not move `main`).**
+Base re-read after all of this: `origin/main` and remote `refs/heads/main` both
+`ab827c88a6ac091318b5adb8be34e83e858c4e9a`; both candidate commits still have tree `09ba73f1...`. The sole
+publisher can land either candidate; the pushed one is easiest:
+
+```
+git -C C:/Users/Victor/orca/projects/wasm-agent fetch origin
+git -C C:/Users/Victor/orca/projects/wasm-agent merge --ff-only da8dc8918a34c880768956ff775d883802dcb7a7
+git -C C:/Users/Victor/orca/projects/wasm-agent rev-parse HEAD^{tree}   # expect 09ba73f1e087c8ca1e576deaac8d9a738fe85a46
+git -C C:/Users/Victor/orca/projects/wasm-agent push origin main
+git -C C:/Users/Victor/orca/projects/wasm-agent ls-remote origin refs/heads/main   # must equal rev-parse HEAD
+```
+
+Receipts to cite: merge-lane `#167` (tree `09ba73f1...`, gate log sha256 `c8b830a7...`) as the integration
+gate, with finish.mjs `#164` (same tree, log sha256 `34308c29...`) as corroboration on the identical tree.
+Not used and not to be used: any evidence from `19bf` (independently refused) or `1939` (review pending) -
+neither is part of this batch.
 
 ## What I could not verify
 
