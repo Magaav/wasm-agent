@@ -19,18 +19,24 @@ Harnesses (mine, all in `verify/`): `liveness-node.mjs`, `gate-home-liveness.sh`
 
 ## Verdicts
 
-**D1 `c78ab731` — ACCEPT.** Every clause of its claim reproduced on real processes: a passing run deletes
-its own artifact, a failing run keeps its own, the family is bounded at the newest N, a live lease is never
-pruned (node sweeper *and* the shell gate-home sweep), a pre-lease name has an hour of grace, and the
-falsifier (`=all`) removes the bound. Two named limitations and one follow-up below; none of them makes a
-claimed sentence false.
+**D1 `c78ab731` — NEEDS-CHANGE.** Every *number* it claims reproduced on real processes: a passing run
+deletes its own artifact, a failing run keeps its own, the family is bounded at the newest N, a live lease is
+never pruned (node sweeper *and* the shell gate-home sweep), and the falsifier (`=all`) removes the bound. But
+the sentence that carries the safety argument — "A pre-lease name is pruned only once it is an hour old, so a
+rollout cannot delete the clone of a run the previous script started" — is **false on this machine, and I
+reproduced the failure three times**: a live pre-change lane run's clone WAS deleted by the sweep. The hour
+is shorter than the gate lane's own default wait budget (2 h), and the clone is made before the slot is
+waited for. Fix belongs in its own delivery; see "D1's pre-lease grace is shorter than the queue" below. The
+retention bound itself needs no change.
 
 **D2 `72530c58` — NEEDS-CHANGE.** The floor, the refusal, the reclaim pass and the leak check all work as
-described, and its own tests pass (28 + 7 + 23 checks). One real defect: the floor's free-space parse is
-positional and **hard-refuses every run (exit 3) when the measured path's `df` Filesystem field contains a
-space** — which is the Cygwin root mount on this very machine (`C:/Program Files/Git`), and which is where
-the script lands whenever it is invoked as a copy outside a repo. Fix belongs in its own delivery (below).
-Secondary: its job definition cannot be fired or installed by anything in the tree.
+described, and its own tests pass (28 + 7 + 23 checks). Two real defects, both reproduced: (1) the floor's
+free-space parse is positional and **hard-refuses every run (exit 3) when the measured path's `df`
+Filesystem field contains a space** — which is the Cygwin root mount on this very machine
+(`C:/Program Files/Git`), and which is where the script lands whenever it is invoked as a copy outside a
+repo; (2) the reclaim pass's temp rule is **age only** — with `--apply` it removed a temp directory a live
+process was holding open (reproduced). Fix belongs in its own delivery (below). Secondary: its job definition
+cannot be fired or installed by anything in the tree, and its action points at a script that is not installed.
 
 ## The contradiction check (the highest-value item)
 
@@ -214,18 +220,90 @@ waited 597 s for the slot before running unslotted — real proof of saturation,
 gate time from this window as clean. The two full-tree gate runs (item 7) are the remaining unverified item;
 see the running log at the end of this file.
 
+## D1's pre-lease grace is shorter than the queue (reproduced live-run deletion)
+
+The claim: "A name with the pre-change shape has no pid to ask about, so it is pruned only once it is an hour
+old - a rollout cannot delete the clone of a run the previous script started" (`scripts/merge-lane.mjs`,
+BOUNDED RETENTION comment; `LEGACY_GRACE_MS = 60 * 60 * 1000`).
+
+Three facts make that grace the wrong length for this machine, and one experiment shows the consequence:
+
+* the gate lane's own wait budget is longer than the grace — `scripts/merge-lane.mjs:377` names a budget of
+  `WA_GATE_LANE_WAIT_SECONDS`, **2 h by default**, against a 1 h grace;
+* a clone is made *before* the slot is waited for (`cloneRepo` runs at the top of the run; `laneAcquire`
+  happens inside the gate step), and a slot wait of **4909 s and 5399 s** is in today's `gate-lane status`;
+* nothing inside the clone refreshes the clone root's mtime while it waits — the sweep reads `fs.statSync(dir).mtimeMs`
+  of the clone directory itself.
+
+Evidence on the real machine, in the same pass: `os.tmpdir()` currently holds **87 pre-lease
+`wa-merge-lane-*` directories, 1910.3 MB, 69 of them older than an hour**, the newest created 2026-09-30T13:14Z
+— i.e. every other lane is running pre-change code right now, which is exactly the rollout window.
+
+`verify/legacy-grace-live-run.mjs` holds a REAL pre-change lane run alive (main's `merge-lane.mjs`, its gate
+sleeping), ages its clone to 2 h the way a long slot wait does, puts a newer dead leftover beside it (keep=1
+keeps the newest), and runs c78ab731's own `sweepClones` over that root. Three runs, same result:
+
+    sweep record: {"keep":1,"live":0,"kept":["wa-merge-lane-Cand01"],"removed":["wa-merge-lane-FTNh4X"],…,"errors":[]}
+    live run's clone after the sweep: exists=false
+    live run's exit: 4; its own gate reported: (no probe line)
+    RESULT: THE LIVE RUN'S CLONE WAS DELETED by the sweep while its owner was alive
+
+(the live run's pid was 70804 and it was inside its gate; the victim exited **4** - the lane's refusal path -
+with no gate verdict line, which is the unattributed failure this rule exists to prevent). Note the benign
+variant I first ran, for honesty: if the aged live clone happens to be the *newest* candidate, keep=1 keeps it
+and nothing is lost — the deletion needs one newer leftover, and the real temp root has 69 of them.
+
+Fix (not made here, belongs in its own delivery): stop using age as a stand-in for liveness for the pre-lease
+shape. The commit itself names the authority - "the gate lane's slot row, not this lease, is the authority on
+which gates are live" - so either consult the gate lane's live slot rows before pruning a pre-lease name, or
+skip the pre-lease shape entirely until the family holds none, and in any case set the grace above the lane's
+own wait budget (2 h default) rather than below it.
+
+## D2's reclaim pass: age decides for temp, and it deletes a live process's directory
+
+`verify/reclaim-falsify.sh` (scratch temp root; session store a scratch path with no rows, so the
+`rust/target` half refuses every candidate and cannot touch anyone's worktree) with `--apply`:
+
+| fixture (age) | outcome |
+|---|---|
+| `wa-subagent-test-Aged02` (15 h, dead) | **REMOVED** |
+| `wa-subagent-test-Fresh1` (10 min) | LEFT — `fresh: younger than --min-age-hours 6` |
+| `wa-merge-lane-Aged01` (7 h) | LEFT — `another lane's retention rule: a merge-lane clone: scripts/merge-lane.mjs owns its retention` |
+| `wa-gate-home-Aged01` (7 h) | LEFT — `the gate's retained home: scripts/test.sh keeps it…` |
+| `wa-sentinel-Aged01` (7 h) | LEFT — `never expired by rule: the sentinel watches this path while it runs` |
+| `wa-not-a-tracked-family-SomeId` (7 h) | LEFT — `not matched to a known family (left alone): 1 entries` |
+
+The pass is report-first, it names every decision, and it defers to D1's families in exactly the words above —
+this is the contradiction check's answer from the other side, and it is clean.
+
+The gap: **there is no liveness rule for temp families at all.** `NEVER_EXPIRE` holds one entry
+(`wa-sentinel-`). Second experiment: a directory `wa-subagent-test-Live01` created and written by a live
+process (pid 64792, `held.open` open and fsync'ed), whose mtime was then aged past the window -
+`--apply` reported `expired: 1 entries, 33 B … wa-subagent-test* n=1 33 B oldest=7h … removed=1` and both the
+directory and the file the live process held were gone. It is realistic rather than theoretical: a
+long-running process that appends to a file *inside* its family keeps the file's mtime fresh, not the
+directory's, so the directory ages while its owner is alive. Exposure today is low (report-only by default,
+and the job is disabled and unfireable), but if that job is ever enabled with `WA_RECLAIM_MODE=apply` it is a
+live-process deletion path. Fix (own delivery): the same lease discipline D1 uses for its families (a pid in
+the name, or the pass's own `--protect`), or skip a family whose owning pid is alive, as its `rust/target`
+half already refuses a live session's tree.
+
 ## What else I could not verify
 
 * A genuinely low disk (forbidden by the task): the floor's refusal was forced by raising the floor, never by
   filling the disk. The 3.98 GB constant itself — a one-run measurement on 2026-09-30 — I cannot re-derive
   without a 20-minute timed run on a tree with no `rust/target`, and it is their measurement, not mine.
-* The reclaim pass's `--apply` behaviour on a real live family, and whether D2 deletes temp belonging to a
-  *live* process older than `--min-age-hours` (its rule for temp is age, not liveness; no liveness check exists
-  there, and `NEVER_EXPIRE` covers only `wa-sentinel-`). Their 23 checks do not test that. See the running log.
+* ~~The reclaim pass's `--apply` behaviour on a real live family~~ — done, above: `verify/reclaim-falsify.sh`
+  plus the `wa-subagent-test-Live01` experiment. What remains unverified is the same behaviour on the real
+  machine's 13,075 other `wa-*` families (I did not run `--apply` against the real temp root or anyone's
+  worktree; the session half would have touched other lanes' trees).
 * `/health` over HTTP (the node's own endpoint), for the reason above.
 * The `disk-reclaim` job firing: its topic is emitted nowhere and the job is disabled; I did not emit it (that
   would be driving live state).
 
-## Running log (appended as the remaining tests finish)
+## Running log
 
-* 2026 review pass 1: everything above.
+* pass 1: convergence, D1's bound and liveness, D2's floor/refusal/leak check, `/health`, the job's live row.
+* pass 2: D1's pre-lease grace falsified three times against a live pre-change run; D2's temp expiry
+  falsified against a live process's directory; real temp-root inventory (99 pre-lease leftovers, 2.0 GB).
+* pass 3: the gate on D1's own tree — see "The gate" above.
