@@ -401,7 +401,14 @@ do
     local candidates = {}
     local explicit = native_getenv("WASM_AGENT_BIN")
     if explicit and explicit ~= "" then candidates[#candidates + 1] = explicit end
-    local roots = { lua_root(), (platform.cwd() or ""):gsub("\\", "/"):gsub("/+$", "") }
+    -- `ipairs` stops at the first nil, so an absent root must not be *placed* in the list: the
+    -- literal `{ lua_root(), cwd }` is an empty list whenever WASM_AGENT_LUA_ROOT is unset - which
+    -- is how the gate runs it - and then this file reports that it cannot find the binary it is
+    -- supposed to have just built. The root is appended only when there is one.
+    local roots = {}
+    local explicit_root = lua_root()
+    if explicit_root then roots[#roots + 1] = explicit_root end
+    roots[#roots + 1] = (platform.cwd() or ""):gsub("\\", "/"):gsub("/+$", "")
     for _, root in ipairs(roots) do
       if root and root ~= "" then
         candidates[#candidates + 1] = root .. "/rust/target/release/wa"
