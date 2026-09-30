@@ -1,0 +1,457 @@
+{
+  "schema": 1,
+  "at": "2026-09-30T01:31:49.829Z",
+  "note": "fixture shas are deterministic (fixed author/committer dates); the temp root is not recorded",
+  "cases": [
+    {
+      "name": "admitted",
+      "exit": 0,
+      "verdict": {
+        "delivery": "change/fixture-admitted",
+        "decision": "admitted",
+        "condition": "admitted",
+        "refusal": null,
+        "caveats": [],
+        "observed": {
+          "ref": "refs/remotes/origin/change/fixture-admitted",
+          "source": "pushed",
+          "tip": "a7494945d2751a121f52bb8582690e9ca23d4a43",
+          "tree": "d24dce23e6e9f2b82b5a9a20afc1ae6c84fd9b7d",
+          "review_commit_contains_tip": true
+        },
+        "review": {
+          "reviewer": "bbbbbbbb-0000-4000-8000-000000000002",
+          "commit": "fa6fd1f06174bc685219f8243375107aaa7897fe",
+          "tip": "a7494945d2751a121f52bb8582690e9ca23d4a43",
+          "tree": "d24dce23e6e9f2b82b5a9a20afc1ae6c84fd9b7d",
+          "verdict": "passed",
+          "findings": 0
+        },
+        "conditions": [
+          {
+            "name": "record_missing",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "branch_not_pushed",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "tip_moved_since_record",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_missing",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_not_independent",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_not_in_repository",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_not_published",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_anchor_names_another_session",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_names_a_different_tree",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_tip_is_the_tip",
+            "ok": true,
+            "blocking": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "no_review",
+      "exit": 2,
+      "verdict": {
+        "delivery": "change/fixture-no-review",
+        "decision": "refused",
+        "condition": "review_missing",
+        "refusal": "change/fixture-no-review: refused - review_missing. the record carries no review. a review by a lane that did not produce the delivery is required; nothing is admitted on a claim.",
+        "caveats": [],
+        "observed": {
+          "ref": "refs/remotes/origin/change/fixture-no-review",
+          "source": "pushed",
+          "tip": "602ee37143a23efb2b15cb9da22b7000ba617c58",
+          "tree": "5eb9b3123b70cd0143c0341afc912527970d5d6c",
+          "review_commit_contains_tip": null
+        },
+        "review": null,
+        "conditions": [
+          {
+            "name": "record_missing",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "branch_not_pushed",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "tip_moved_since_record",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_missing",
+            "ok": false,
+            "blocking": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "wrong_tree",
+      "exit": 2,
+      "verdict": {
+        "delivery": "change/fixture-wrong-tree",
+        "decision": "refused",
+        "condition": "review_names_a_different_tree",
+        "refusal": "change/fixture-wrong-tree: refused - review_names_a_different_tree. the review names tree 8130ca0d45d9eb187a38995eec91b9d81f53ac43, refs/remotes/origin/change/fixture-wrong-tree is tree 73a59a7446420894147e1c2974785b526fb45d46. a review of a different tree is not a review of this delivery - re-review the pushed tip, or push the tip that was reviewed.",
+        "caveats": [],
+        "observed": {
+          "ref": "refs/remotes/origin/change/fixture-wrong-tree",
+          "source": "pushed",
+          "tip": "b415e44aece8995b6f2e3c56eeaca5791c42d7d7",
+          "tree": "73a59a7446420894147e1c2974785b526fb45d46",
+          "review_commit_contains_tip": false
+        },
+        "review": {
+          "reviewer": "dddddddd-0000-4000-8000-000000000004",
+          "commit": "d6907d05428a13a0e961dcda695f954ba2ef0fea",
+          "tip": "583080e26c62d853cc9fb9f1548f7ae3f39d3f7e",
+          "tree": "8130ca0d45d9eb187a38995eec91b9d81f53ac43",
+          "verdict": "passed",
+          "findings": 0
+        },
+        "conditions": [
+          {
+            "name": "record_missing",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "branch_not_pushed",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "tip_moved_since_record",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_missing",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_not_independent",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_not_in_repository",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_not_published",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_anchor_names_another_session",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_names_a_different_tree",
+            "ok": false,
+            "blocking": true
+          },
+          {
+            "name": "review_tip_is_the_tip",
+            "ok": false,
+            "blocking": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "admitted_with_caveat",
+      "exit": 0,
+      "verdict": {
+        "delivery": "change/fixture-caveat",
+        "decision": "admitted_with_caveat",
+        "condition": "admitted",
+        "refusal": null,
+        "caveats": [
+          {
+            "class": "summary_exceeds_code",
+            "status": "resolved",
+            "text": "the doc said the retry always reuses the shell; it reuses it when the key matches"
+          },
+          {
+            "class": "unverifiable_claim",
+            "status": "unresolved",
+            "text": "the cross-node resolve hop was reasoned, not measured on this machine"
+          }
+        ],
+        "observed": {
+          "ref": "refs/remotes/origin/change/fixture-caveat",
+          "source": "pushed",
+          "tip": "1ae460e630a12be8617c8b36956162d77f297173",
+          "tree": "80d43737c249cb680e5e56c05c58155900538717",
+          "review_commit_contains_tip": true
+        },
+        "review": {
+          "reviewer": "ffffffff-0000-4000-8000-000000000006",
+          "commit": "57bc4e0d5211f20cdccb1beea47e543d6d4d0336",
+          "tip": "1ae460e630a12be8617c8b36956162d77f297173",
+          "tree": "80d43737c249cb680e5e56c05c58155900538717",
+          "verdict": "narrowed",
+          "findings": 2
+        },
+        "conditions": [
+          {
+            "name": "record_missing",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "branch_not_pushed",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "tip_moved_since_record",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_missing",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_not_independent",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_not_in_repository",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_not_published",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_anchor_names_another_session",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_names_a_different_tree",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_tip_is_the_tip",
+            "ok": true,
+            "blocking": false
+          },
+          {
+            "name": "finding:summary_exceeds_code:resolved",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "finding:unverifiable_claim:unresolved",
+            "ok": true,
+            "blocking": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "unresolved_excess_claim",
+      "exit": 2,
+      "verdict": {
+        "delivery": "change/fixture-excess-claim",
+        "decision": "refused",
+        "condition": "finding_unresolved:summary_exceeds_code",
+        "refusal": "change/fixture-excess-claim: refused - finding_unresolved:summary_exceeds_code. unresolved: the doc says the tick is capped; the loop is uncapped (orchestrator.lua:145-165).",
+        "caveats": [
+          {
+            "class": "summary_exceeds_code",
+            "status": "unresolved",
+            "text": "the doc says the tick is capped; the loop is uncapped (orchestrator.lua:145-165)"
+          }
+        ],
+        "observed": {
+          "ref": "refs/remotes/origin/change/fixture-excess-claim",
+          "source": "pushed",
+          "tip": "f811d8e17348331298188e8645d180b6f006aa9f",
+          "tree": "6a07e1fdddc60fa8fff0b61b296fe0ab32071c2a",
+          "review_commit_contains_tip": true
+        },
+        "review": {
+          "reviewer": "22222222-0000-4000-8000-000000000008",
+          "commit": "ce55bf6c8bb26351991f3bbf4463b6f18cbf68b9",
+          "tip": "f811d8e17348331298188e8645d180b6f006aa9f",
+          "tree": "6a07e1fdddc60fa8fff0b61b296fe0ab32071c2a",
+          "verdict": "passed",
+          "findings": 1
+        },
+        "conditions": [
+          {
+            "name": "record_missing",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "branch_not_pushed",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "tip_moved_since_record",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_missing",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_not_independent",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_not_in_repository",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_not_published",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_anchor_names_another_session",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_names_a_different_tree",
+            "ok": true,
+            "blocking": true
+          },
+          {
+            "name": "review_tip_is_the_tip",
+            "ok": true,
+            "blocking": false
+          },
+          {
+            "name": "finding_unresolved:summary_exceeds_code",
+            "ok": false,
+            "blocking": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "self_admission",
+      "exit": 2,
+      "verdict": {
+        "decision": "refused",
+        "condition": "self_admission_refused",
+        "refusal": "change/fixture-admitted: refused - self_admission_refused. the producer aaaaaaaa-0000-4000-8000-000000000001 is the one asking. a producer cannot admit its own work; an independent lane admits it."
+      }
+    },
+    {
+      "name": "independent_admission",
+      "exit": 0,
+      "verdict": {
+        "decision": "admitted",
+        "condition": "admitted",
+        "by": "bbbbbbbb-0000-4000-8000-000000000002"
+      }
+    },
+    {
+      "name": "trigger_rehearsal",
+      "exit": 0,
+      "verdict": {
+        "counts": {
+          "records": 5,
+          "admitted": 1,
+          "admitted_with_caveat": 1,
+          "refused": 3,
+          "emitted": 0,
+          "skipped": 0,
+          "unreadable": 0
+        },
+        "refused": [
+          {
+            "delivery": "change/fixture-excess-claim",
+            "condition": "finding_unresolved:summary_exceeds_code",
+            "refusal": "change/fixture-excess-claim: refused - finding_unresolved:summary_exceeds_code. unresolved: the doc says the tick is capped; the loop is uncapped (orchestrator.lua:145-165).",
+            "tip": "f811d8e17348331298188e8645d180b6f006aa9f",
+            "tree": "6a07e1fdddc60fa8fff0b61b296fe0ab32071c2a"
+          },
+          {
+            "delivery": "change/fixture-no-review",
+            "condition": "review_missing",
+            "refusal": "change/fixture-no-review: refused - review_missing. the record carries no review. a review by a lane that did not produce the delivery is required; nothing is admitted on a claim.",
+            "tip": "602ee37143a23efb2b15cb9da22b7000ba617c58",
+            "tree": "5eb9b3123b70cd0143c0341afc912527970d5d6c"
+          },
+          {
+            "delivery": "change/fixture-wrong-tree",
+            "condition": "review_names_a_different_tree",
+            "refusal": "change/fixture-wrong-tree: refused - review_names_a_different_tree. the review names tree 8130ca0d45d9eb187a38995eec91b9d81f53ac43, refs/remotes/origin/change/fixture-wrong-tree is tree 73a59a7446420894147e1c2974785b526fb45d46. a review of a different tree is not a review of this delivery - re-review the pushed tip, or push the tip that was reviewed.",
+            "tip": "b415e44aece8995b6f2e3c56eeaca5791c42d7d7",
+            "tree": "73a59a7446420894147e1c2974785b526fb45d46"
+          }
+        ]
+      }
+    },
+    {
+      "name": "falsification_no_tree_binding",
+      "exit": 0,
+      "verdict": {
+        "decision": "admitted",
+        "condition": "admitted",
+        "refusal": null
+      }
+    }
+  ]
+}
