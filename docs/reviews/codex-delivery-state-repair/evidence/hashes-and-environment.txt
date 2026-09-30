@@ -1,0 +1,46 @@
+# Environment and provenance for this verdict (independent review lane, no producer involvement)
+
+node v24.19.0
+git 2.55.0.windows.3
+host: windows x86_64, Git Bash at C:\Program Files\Git\bin\bash.exe
+
+## Exact tree the verdict names
+branch tip 43893c317b1698b79afecace42766cec56217f3f
+tree      1616036696d0c4da34fe4d2307251a2ab581003f
+base origin/main a6108eda7613976bf09cf592bf4f1aeca9c1f8c1
+
+## Commits on the tip above the refused tip b00f456 (3, linear) and above the review's second-round base 3290d32 (5)
+43893c3 test(delivery): the in-flight review/CAS acknowledgement race, and the repair evidence
+13c85e2 fix(delivery): reconcile prior-generation outbox intents instead of reporting a clean pass
+150dcd6 docs(reviews): record the repair status before the fix
+
+## Files the repair changes
+docs/reviews/codex-delivery-state-repair.md
+scripts/delivery-admission.md
+scripts/delivery-trigger.mjs
+scripts/test-delivery-intent-race.mjs
+
+## SHA-256 of the artifacts used
+f85de4ecfdce074dc6656769c4b1b21c150fbcba120b1b524a431a494f51dc18 *<scratch>/before/probe.mjs
+f85de4ecfdce074dc6656769c4b1b21c150fbcba120b1b524a431a494f51dc18 *<scratch>/after/probe.mjs
+eba781d9a63a982ca160e1a933a46ddfd7e07943ceea4a89f873bf8a392e064c *<scratch>/before/source/scripts/delivery-trigger.mjs
+54cd740fef83536c627011e5aba3b266e2f9732f08a202cfb0e1fe78ecd89850 *<scratch>/after/source/scripts/delivery-trigger.mjs
+5218d44e5c228486ae1a34f144c95aad061a96f97f0a5f1a418ee9b112b452e7 *<scratch>/before/source/scripts/lib/delivery-store.mjs
+5218d44e5c228486ae1a34f144c95aad061a96f97f0a5f1a418ee9b112b452e7 *<scratch>/after/source/scripts/lib/delivery-store.mjs
+9fde56b43322b5c74a43e979a98feefa83f0965ffcc6d671e1dd3ef9b4ecdb8f *<scratch>/before/source/scripts/lib/delivery-outbox.mjs
+9fde56b43322b5c74a43e979a98feefa83f0965ffcc6d671e1dd3ef9b4ecdb8f *<scratch>/after/source/scripts/lib/delivery-outbox.mjs
+23e1ad04f99eb3bd9c137d4bef16a82b68a514f48613cd6036ae182dce57b6d4 *<scratch>/after/source/scripts/delivery-admission.mjs
+4a7d048c520ed3357de0d0c00abedee822698e7850569f21964a64f8e9eff473 *<scratch>/tip-run/scripts/test-delivery-intent-race.mjs
+eba781d9a63a982ca160e1a933a46ddfd7e07943ceea4a89f873bf8a392e064c *<scratch>/falsify-revert/scripts/delivery-trigger.mjs
+c6acc8b46c1dd1324b226de7fdbcc8266cea7c96e4e12080c693867b7151d994 *<scratch>/falsify-reportonly/scripts/delivery-trigger.mjs
+a16ea302a0bcbf091a224d3eb10bdec661d39554741829ab714e872125c3ff75 *<scratch>/falsify-invent/scripts/delivery-trigger.mjs
+f9e308760b9a32100f113ad647a9ce1cc395da659b4b6f255fd624571ae999bf *<scratch>/residue/probe-residue.mjs
+
+## The reviewer's fixture, verbatim
+intent-race-probe.mjs sha256 f85de4ecfdce074dc6656769c4b1b21c150fbcba120b1b524a431a494f51dc18 (the hash in the refusing review's schema-1 manifest)
+reviewed trigger  eba781d9a63a982ca160e1a933a46ddfd7e07943ceea4a89f873bf8a392e064c (hash the review recorded)
+repaired trigger  54cd740fef83536c627011e5aba3b266e2f9732f08a202cfb0e1fe78ecd89850
+store/outbox/admission byte-identical in both legs, so the only variable is the trigger.
+
+## Line endings
+Evidence logs are stored LF-only (the repository's pre-commit hook refuses CRLF blobs). Files that node emitted with CRLF in the scratch root differ from the stored copy by CR bytes alone; every other byte is identical (compared explicitly). The .json evidence that carries the observed counts was already LF.

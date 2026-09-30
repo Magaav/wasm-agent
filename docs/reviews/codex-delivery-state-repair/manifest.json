@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "delivery": "change/codex-delivery-state-tail",
+  "tip": "43893c317b1698b79afecace42766cec56217f3f",
+  "tree": "1616036696d0c4da34fe4d2307251a2ab581003f",
+  "base": "a6108eda7613976bf09cf592bf4f1aeca9c1f8c1",
+  "verdict": "accept_with_named_residue",
+  "reviewer": "child:dispatch:85261111-9aa8-4b22-9e46-e6082bc4949c",
+  "reviewer_branch": "change/wa-session-childdispatch85261111-9aa8-4b22-9e46-e6082bc4949c",
+  "refused_tip": "b00f456681710b38f18a475047f8d3c31e6237fc",
+  "refused_tree": "16874083447182f118df5794a6c70226e3ab0aae",
+  "refusing_review": "9485f95b1f36d9bd5042d3c5d2c3544bc37c840f",
+  "evidence": "docs/reviews/codex-delivery-state-repair/VERDICT.md",
+  "findings": [
+    {
+      "class": "summary_exceeds_code",
+      "status": "resolved",
+      "text": "After an in-flight review change causes the enqueue acknowledgement write to lose CAS, the next reconciler exits 0 with pending_events=0 while an older outbox intent remains pending despite an exact durable queued effect. Reconcile or explicitly report prior-generation pending intents, including current refusal, without repeating an already-durable enqueue.",
+      "proof": "The refusing review's own unmodified probe (sha256 f85de4ec...) over the repaired tip: old intent=acknowledged, prior_generations_settled=1, pending_events=0, exit 0; emitter calls=1; the same probe over b00f456 still fails with 'unsettled old durable intent was silently omitted'. The settled intent's id is a different generation from the one the pass computes (sameGeneration=false, recomputed independently). A prior intent with no durable effect is reported (exit 4, prior_generation_pending), never invented into acknowledgement."
+    },
+    {
+      "class": "boundary_gap",
+      "status": "resolved",
+      "text": "Final provenance footer requires exactly one strict session token.",
+      "proof": "Unchanged by this repair and still passing: node scripts/test-delivery-admission.mjs exit 0, 58 checks."
+    },
+    {
+      "class": "unverifiable_claim",
+      "status": "unresolved",
+      "text": "Full workflow/installation, live sentinel/node receipt wiring, native Linux/macOS coverage and publisher/merged-tree smoke were not exercised.",
+      "proof": "Not attempted by this review either; everything ran on private Windows scratch through the legacy read-only --receipt-db seam."
+    },
+    {
+      "class": "boundary_gap",
+      "status": "unresolved",
+      "text": "New store/outbox tests and recovery spell are not standard-gate wired; the in-flight race regression is not wired either (scripts/test.sh runs only test-delivery-admission.mjs).",
+      "proof": "grep test-delivery scripts/test.sh matches only test-delivery-admission.mjs."
+    }
+  ],
+  "named_residue": [
+    {
+      "id": "limit_saturation_hides_pending_current_intent",
+      "severity": "deferral, not loss",
+      "text": "When --limit is consumed by earlier records, a pending intent for the generation this pass computes is skipped as 'current' with the emission branch never attempted: exit 0, pending_events=0, prior_generations_settled=0, intent still pending, and a misleading stderr note 'admitted (event already emitted)'. A later unsaturated pass sees the same id again.",
+      "evidence": "evidence/residue.log, evidence/residue.json (probe-residue.mjs)"
+    },
+    {
+      "id": "records_skipped_before_reconciliation",
+      "severity": "silent omission",
+      "text": "already_landed and other_repository records (and, read from source, unreadable and repository_unreadable) continue before the new loop, so a pending intent they hold is neither settled nor reported: exit 0, pending_events=0.",
+      "evidence": "evidence/residue.log, evidence/residue.json (probe-residue.mjs)"
+    },
+    {
+      "id": "no_emit_rehearsal",
+      "severity": "by design, documented",
+      "text": "--no-emit reports pending_events=0 while a prior intent is pending; it emits nothing and claims nothing about the queue, and emit:false is in the output.",
+      "evidence": "evidence/residue.log, evidence/residue.json"
+    }
+  ]
+}

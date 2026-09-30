@@ -1,0 +1,68 @@
+1. a reviewed delivery, review naming the tip tree
+  ok   decision admitted, exit 0
+  ok   the tip is read from the pushed ref, not from a seam
+  ok   the tip is the pushed commit and the tree is read from git
+  ok   the record names the reviewer and the published review commit
+  ok   every condition held
+  ok   no refusal is invented for a pass
+2. no review
+  ok   refused, exit 2
+  ok   the failed condition is named: review_missing
+  ok   the refusal names the delivery and the condition
+  ok   and the operator sees it on stderr
+  ok   the branch itself was pushed: only the review is missing
+3. a review of a different tree
+  ok   the record names the tip that is pushed
+  ok   the fixture really is two different trees
+  ok   refused, naming the tree binding
+  ok   the refusal text carries both trees
+  ok   and says why it matters
+  ok   the record and the observation disagree about the tree, which is the refusal
+  ok   the review commit does not even contain the pushed tip (recorded as evidence, not as a condition)
+4. a narrowed review, with what it left open
+  ok   admitted with caveat, exit 0
+  ok   both findings are carried as named caveats
+  ok   a resolved excess-claim finding and an unverifiable claim do not block
+5. an unresolved "the summary claims more than the code"
+  ok   refused, naming the class that blocks
+  ok   the refusal carries the finding text, so the reader can act on it
+6. the producer tries to admit its own delivery
+  ok   refused, naming self_admission_refused
+  ok   the refusal names the session that asked
+  ok   and nothing was written into the record
+  ok   a lane that is not the producer admits it, exit 0
+  ok   the admission is in the record, with who made it
+7. the deterministic pass
+  ok   the pass completes even though deliveries were refused
+  ok   it read every record
+  ok   three deliveries are refused on this store (no review, wrong tree, excess claim)
+  ok   the pass reports review_missing
+  ok   the pass reports review_names_a_different_tree
+  ok   the pass reports finding_unresolved:summary_exceeds_code
+  ok   nothing was emitted in a rehearsal
+  ok   a refusal is written into the record, never skipped
+  ok   a second pass is the same pass (idempotent)
+8. falsification - the tree binding removed
+  ok   the splice really removed the tree binding from the copy (the original is untouched)
+  ok   WITHOUT the tree binding the wrong-tree delivery is wrongly ADMITTED
+  ok   and the two trees still disagree in the same output - the check was the only thing refusing it
+  ok   the original is byte-identical after the falsification (nothing was edited in place)
+  ok   and with the tree binding in place the same delivery is refused again
+  ok   codex review keeps authentic harness provenance
+  ok   codex still refuses an unrelated reviewer identity
+  ok   pi review keeps authentic harness provenance
+  ok   pi still refuses an unrelated reviewer identity
+  ok   claude review keeps authentic harness provenance
+  ok   claude still refuses an unrelated reviewer identity
+  ok   a published Codex review with a refused verdict remains refused
+  ok   substring provenance cannot impersonate an explicit session token
+  ok   legacy provenance cannot impersonate an explicit session token
+  ok   ambiguous provenance cannot impersonate an explicit session token
+  ok   body-spoof provenance cannot impersonate an explicit session token
+9. the fixture repository is intact
+  ok   the fixture worktree is clean
+  ok   no fixture branch moved and no tree changed
+  ok   the reviewed tip is still the tip that was reviewed
+  ok   the record store is scratch, and it is where this test put it
+  ok   one file per delivery: the record is a durable, readable object
+delivery admission ok (58 checks)
