@@ -13,9 +13,9 @@
 // write is the same artifact on a second run. The recorded sample lives beside this file.
 //
 // Usage:  node scripts/test-delivery-admission.mjs [--record <path>]   (about 20 s, no network, no build)
-// NOTE: scripts/test.sh does not discover this file by convention, so the gate does not run it yet.
-// Adding `node scripts/test-delivery-admission.mjs` to the gate is a one-line change in a file this
-// delivery does not own (scripts/test.sh), so it was left to the coordinator.
+// NOTE: scripts/test.sh discovers tests explicitly rather than by convention, so a file no gate names runs
+// nowhere - this one ran nowhere until `bcdda53` wired `node scripts/test-delivery-admission.mjs` into the
+// gate's repository-tooling block, beside `test-gate-lane.cjs` and `test-merge-lane.mjs`.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
