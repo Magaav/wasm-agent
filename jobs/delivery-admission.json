@@ -1,0 +1,13 @@
+{
+  "id": "delivery-admission",
+  "name": "Admit reviewed deliveries into the merge lane",
+  "trigger": {
+    "kind": "schedule",
+    "every_seconds": 60
+  },
+  "action": {
+    "kind": "run",
+    "script": "PREPARED_BY_INSTALL/scripts/delivery-trigger.sh",
+    "timeout_seconds": 180
+  }
+}
