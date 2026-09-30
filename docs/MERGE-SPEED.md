@@ -147,17 +147,49 @@ in the table is paid *per landing*: a suite that costs `w` seconds of wall adds 
 future landing, and its CPU-s add to the gate's own CPU figure. That is the price of admission for a new
 suite, and it is now measurable before it lands (`scripts/lib/gate-suites.mjs`, one JSON object).
 
-## 4. What is not verified here
+## 4. What was observed, and what is not verified
 
-* The per-phase and per-suite tables for a cold gate and a warm gate of one tree are in
-  `docs/measurements/gate-phases-suites.json` (and rendered in section 5) **only if that file exists**;
-  the gate lane was held by other lanes' gates for the whole of this lane's window (status quoted at the
-  top of section 5), so the runs are labelled with the contention they ran under. A number taken while
-  another lane's gate is on the machine is not a clean number and is not presented as one.
-* The persistent tree's **end-to-end** saving is priced from the cold/warm pair in `docs/EVOLUTION.md`
-  (one tree, both runs cold-then-warm) rather than from two `merge-lane` runs of my own: the lane's
-  `gate_ms` before/after pair needs two lane slots and neither was granted in the window. What I did
-  verify about the mechanism is its refusals (section 3, option 2) and its recorded fields.
+The raw evidence is `docs/measurements/gate-instrument-evidence.json`. Two runs of the instrumented gate
+were completed inside the window, both **without a gate-lane slot** (the lane held 1 of 1 with a queue
+2 to 4 deep throughout - status quoted in that artifact), so their wall times are an **upper bound under
+contention**, not clean numbers:
+
+| run | gate exit | phases the instrument named | first suite |
+| --- | ---: | --- | --- |
+| cold tree, unslotted, contended | **1** | `build` 1 335 881 ms - and no other phase | `test-parallel-finish.mjs`, wall 727 092 ms, exit 1 |
+| **deliberately broken first suite**, warm tree | **1** | `build` 788 ms - and no other phase, no verdict | `test-parallel-finish.mjs`, wall 45 ms, exit 1 |
+
+The second row is the falsification the owner asked for: a test broken on purpose (a `process.exit(1)`
+prepended to `scripts/test-parallel-finish.mjs`, committed so the tree stayed clean, then restored with
+`git reset --hard` and a clean `git status`) makes the instrumented gate **red with the gate's own exit
+code**, and the instrument names only the phase that ran. It cannot report a phase that did not run, and
+it does not invent a verdict line.
+
+The first row is a finding in its own right, and it is the same 12-minute stall class the owner saw:
+**a gate run outside the lane pays the lane wait inside itself.** `scripts/test.sh` runs
+`scripts/test-parallel-finish.mjs` as its first suite; that suite's fixture gates ask `gate-lane.mjs` for
+a slot, and a nested gate only inherits admission through `GATE_LANE_HELD`, which a run that holds no
+slot cannot pass down. Unslotted, the fixture waited **722 s**, was told it would run without a slot, and
+then failed its own check on the nested call's exit status - `set -e` ended the gate inside `build`. The
+shim is not the cause: the same fixture gate through the same wrapper in isolation exits 0. The installed
+`~/.wasm-agent/skills/parallel-evolution/scripts/finish.mjs` was stale and did not pass `GATE_LANE_HELD`
+at all - it has since been replaced with this repository's copy (sha `129fabc5`), which does.
+
+Still not verified, and it is the whole of the cold/warm pair:
+
+* **No clean cold/warm pair of one tree was completed.** That needs a gate-lane slot twice, and the lane
+granted none in this window: my queued request (#151) sat at position 4 for ten minutes and was cancelled
+to free the queue for the lanes ahead, and a later `merge-lane` attempt (#159) had reached position 2.
+What exists instead: today's cold **build** in a fresh tree (`Finished release profile in 10m 08s`, from
+the first run's own log, under contention), the existing same-tree pair in `docs/EVOLUTION.md`
+(1145.9 s cold / 528.1 s warm, 253.0 CPU-s / 11.2 CPU-s), and the per-suite instrument itself, whose
+CPU figure was verified against a busy suite (250 ms for 3.059 s, labelled lower bound).
+* The per-suite table therefore has **no rows from a full gate** in this window: the only suite that ran
+to a record was the first one, twice. The collision declarations, which are read out of each suite's own
+source, were not produced for the rest.
+* The persistent tree's **end-to-end** saving is priced from the `docs/EVOLUTION.md` pair rather than from
+two `merge-lane` runs of my own (`gate_ms` before/after needs two slots). What I did verify about the
+mechanism is its refusals and its recorded fields (section 3, option 2).
 * `scripts/test-merge-lane.mjs` (the lane's own 83 checks, which pin the dirty-tree, live-lock,
   not-a-checkout and toolchain-cleared paths) was **not re-run in this window**: its fixtures ask the
   node-wide gate lane for slots, and the lane was 4 deep. It is designed to be run when the node is idle.
