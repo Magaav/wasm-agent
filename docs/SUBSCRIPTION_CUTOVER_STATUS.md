@@ -390,3 +390,46 @@ renames the operator's global npm directory, which is not something a fresh clon
   fails with `subscription_credentials_absent` instead of falling back to reading pi's `auth.json`.
   That is the intended direction (pi's file is not a credential source for this route) and it was not
   re-run live, because it needs the network and rewrites the recorded fixtures.
+
+## The installed-shape defect, found by the independent review (VERDICT needs-change)
+
+Reproduced first-hand on this branch's own tip `4b5a26e` before any repair, with **no**
+`WASM_AGENT_LUA_ROOT` - the shape `deploy.sh` ships and `wa-sentinel/src/instance.rs` protects:
+
+```
+$ wa subscription status                  (no Lua root)
+openai-sub credential: absent (subscription_credentials_absent) at ...
+    store:  ...
+    log in: wa subscription login             device code: prints the URL and the code,
+status exit=0
+
+$ wa subscription login --browser         (no Lua root)
+lua error: [string "bootstrap"]:1: embedded module missing: scripts/openai-sub-login.lua
+browser exit=1
+```
+
+**The cause, exactly.** `lua/core/init.lua:273` did `dofile("scripts/openai-sub-login.lua")`, and the
+`EMBEDDED` registry in `rust/wa-host/src/main.rs` has **zero** entries under `scripts/` (57 under
+`lua/`). With a Lua root set, the file is on disk and the door works; with no root - an installed node -
+`scripts/` is not in the registry at all, so the arm that exists to start a login is the one arm that
+cannot run in the shape it exists for. `wa subscription status` worked only because every one of its
+calls is already in `lua/` and therefore embedded, which is why the two subcommands disagreed.
+
+**Why my own door proof missed it.** `~/.wasm-agent/wa-cutover-proof/run-absent-and-door.sh` exported
+`WASM_AGENT_LUA_ROOT`, while its sibling `pi-aside-run.sh` deliberately unsets it - so the door was
+proven in the checkout shape and the live request was proven in the installed shape, and neither run
+covered both. That was a proof-design error, not a build accident, and the mechanical check below is
+what makes the next one of these visible without a reviewer.
+
+**The repair, in three parts.** (1) The login CLI moves into `lua/core/openai_sub_login.lua`, which is
+in `EMBEDDED`; `scripts/openai-sub-login.lua` stays as a checkout wrapper, because the credential
+module's own `LOGIN_COMMAND` and its tests name that path and that file is used as delivered. `status`
+and `login` must behave identically in both shapes. (2) A gate-visible check that fails, by name, when
+a literal `dofile("...")` target reachable from an embedded `lua/` file is not in `EMBEDDED` -
+falsified by adding such a `dofile`, shown failing by name, removed. (3) A gate-visible test of the
+login door with **no** Lua root, plus an equality check of `status` output between the two shapes.
+
+Evidence for all three follows in the commits after this one. This section is committed first, so a
+lost lane still leaves the finding and the plan rather than only the defect.
+
+Agent: wasm-agent node=wasm_the_first role=child session=child:dispatch:389b8886-2cfb-45bc-be85-64f4357931f9
