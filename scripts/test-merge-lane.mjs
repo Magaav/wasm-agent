@@ -346,6 +346,19 @@ export function audit(repo,{target='main'}={}) {
     'a directory that is not a checkout is refused by name', String(stray.json?.clone?.reuse_refused));
   ok(stray.json?.verdict === 'pass', 'and the candidate is still gated, so a refusal never blocks a landing');
   ok(fs.existsSync(path.join(notARepository, 'stray.txt')), 'and nothing in the refused directory was touched');
+  // The retention sweep (scripts/reclaim-disk.mjs, scripts/check-temp-retention.mjs) deletes the temp
+  // root's `wa-merge-lane-*` leftovers, and a tree idle between landings is a directory nobody holds -
+  // which is exactly what its rename probe allows. So an in-temp path that carries the clone prefix must
+  // never become the persistent tree, whatever the sweep does today: the refusal is by name, stricter
+  // than the sweep's current candidate regexes, and the run still gates in a disposable clone.
+  const sweepable = path.join(root, 'wa-merge-lane-tree');
+  const sweepTree = lane(repo, ['--base', 'main', 'change/one', '--gate-command', gatePass, '--reuse-tree', sweepable], env);
+  ok(sweepTree.json?.clone?.reused === false && /retention sweep prunes/.test(sweepTree.json?.clone?.reuse_refused || ''),
+    'a tree inside the temp root named like the sweepable family is refused by name',
+    String(sweepTree.json?.clone?.reuse_refused));
+  ok(sweepTree.json?.verdict === 'pass' && sweepTree.json?.clone?.path !== sweepable && !fs.existsSync(sweepable),
+    'and that run clones instead, leaving no tree for a sweep to find',
+    JSON.stringify({verdict: sweepTree.json?.verdict, path: sweepTree.json?.clone?.path, created: fs.existsSync(sweepable)}));
 
   // ---- 10. a repository the lane cannot identify -------------------------------------------------------
   console.log('10. no repository named');
