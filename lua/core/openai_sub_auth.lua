@@ -457,6 +457,12 @@ local function read_flow()
   if text == nil then return nil end
   local ok, value = pcall(json.decode, text)
   if not ok or type(value) ~= "table" or value.pending ~= true then return nil end
+  -- A pending flow that has outlived its own window is not pending any more: resuming one would
+  -- poll a device_auth_id the server has forgotten, and report *that* instead of the honest
+  -- "there is no login in flight". The provider's own ceiling is 900s (Pi's
+  -- DEVICE_CODE_TIMEOUT_SECONDS), and it is written into the file when the flow starts.
+  local expires_at = tonumber(value.expires_at)
+  if expires_at and now_ms() > expires_at then return nil end
   return value
 end
 
@@ -810,6 +816,9 @@ local function login_device(opts)
   if pending and pending.flow == "device" and pending.device_auth_id and pending.user_code then
     device_auth_id, user_code = pending.device_auth_id, pending.user_code
     interval = tonumber(pending.interval) or 5
+    -- A resumed flow cannot be waited on longer than its own window, whatever the caller asked for.
+    local left = (tonumber(pending.expires_at) or 0) - now_ms()
+    if left > 0 then budget_seconds = math.min(budget_seconds, math.floor(left / 1000)) end
     emit("resume", { line = "openai-sub: resuming the pending device login from " .. flow_path() })
   else
     local response, request_failure = post_json(device_user_code_url(), { client_id = CLIENT_ID })
