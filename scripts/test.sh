@@ -985,6 +985,20 @@ WA_SCRIPT="$DB.sessions.lua" "$BIN" --db "$DB" | grep "sessions ok"
 # transaction in `append_turn` makes it fail with a duplicate seq.
 WA_BIN="$BIN" bash scripts/test-append-race.sh | grep "append race ok"
 rm -f "$DB.sessions.lua"
+# The node database has several writers, and telemetry is the one write path that must never be able to
+# fail a run: two runs tonight died on `lua/core/telemetry.lua:12: database is locked`, a child's run
+# mid-edit and then the coordinator's message to that session. The contention here is real - a second OS
+# process holds the database's write lock inside an open transaction before the subject starts - but the
+# fixture owns its database and its home, and needs no model, no network, no port and no build, so it
+# belongs in this gate rather than on the on-demand suite. Both halves of the retry budget are asserted,
+# because either one alone is passable by the wrong code: with one attempt the record is lost *visibly*
+# and the run survives, and with the lock released inside the budget the record is stored (a longer wait
+# for death would satisfy the first half). Its output is retained rather than piped, so a failure here
+# names this file instead of leaving one line with no author - the same reason the concurrency fixture
+# below keeps its log.
+WA_BIN="$BIN" bash scripts/test-telemetry-lock.sh > "$DB.telemetry-lock.log" 2>&1 || {
+  echo "the telemetry lock fixture failed; its output:"; tail -30 "$DB.telemetry-lock.log"; exit 1; }
+grep "telemetry lock ok" "$DB.telemetry-lock.log"
 
 # Session recovery. The contract - what an unfinished thread is, what is recorded
 # and what the agent is told - lives in scripts/test-recovery.lua, because the
@@ -1504,7 +1518,25 @@ bash scripts/test-main-guard.sh
 node scripts/test-command-parity.cjs
 node scripts/test-verify-install.mjs
 node scripts/test-merge-audit.mjs
+# The factory's lanes, tested where their answers are known in advance. Each of these was written and
+# then not run: scripts/test.sh discovers tests explicitly, so a delivery whose scope stopped short of
+# this file shipped a check that no gate executes - a test nobody runs is a comment. All three are
+# hermetic, model-free and need no build, and none of them runs a real gate: `test-gate-lane.cjs` stands
+# a fake command in for it (what is under test is *when* a command runs, not what it is), and
+# `test-merge-lane.mjs` takes its gate through `--gate-command`, so the lane's spine costs seconds and a
+# real gate on real branches stays a merge-lane run. `test-delivery-admission.mjs` is the rule that
+# decides what may reach the lane at all, on fixtures whose fixed author/committer dates make the
+# recorded shas identical on a second run.
+node scripts/test-gate-lane.cjs
+node scripts/test-merge-lane.mjs
+node scripts/test-delivery-admission.mjs
 node scripts/test-openai-sub.cjs "$BIN"
+# And the levels that route declares, read from the catalogue it publishes: the fixture writes the entry
+# pi.dev serves for that id where the real store lives, so the answer is asserted with no HTTP, no
+# credentials and no model. A level the catalogue adds must be admissible - otherwise no child can be
+# placed at all - and a level no source names must still be refused by name rather than silently
+# replaced by a default.
+WA_SCRIPT=scripts/test-openai-sub-levels.lua "$BIN" --db "$DB.sub-levels" | grep "openai-sub levels ok"
 node scripts/test-auth-sessions.cjs "$BIN"
 node scripts/test-fixture-verdict.cjs
 node scripts/test-suite-verdict.cjs
