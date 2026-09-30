@@ -52,7 +52,11 @@ commit. The guard enforces this case and no other.
    bound to - because a merge changes the tree and the branch's receipt covers only the branch (no
    effect before its proof - invariant 2);
 3. the **provenance trailer** on every commit, and a merge whose subject names the branch it merged;
-4. the **ref read back from the remote** after the push, never the push's own output.
+4. the **ref read back from the remote** after the push, never the push's own output;
+5. the **delivery's record** (`scripts/delivery-record.mjs`): a landing starts from the delivery's record,
+   and the admission rule (`scripts/delivery-admission.mjs check`) is what says a delivery may enter the
+   lane. The record holds the reviewer's verdict on that exact tree and the admission decision, and the
+   lane writes its own outcome and the landing sha back into it.
 
 **What the guard does, exactly.** `.githooks/pre-commit` and `.githooks/commit-msg` decide the
 *direct commit* case from the host's provenance - `WASM_AGENT_PROVENANCE=orchestrator` for a run of a

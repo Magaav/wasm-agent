@@ -13,9 +13,9 @@
 // on real branches is a merge-lane run, not this test.
 //
 // Usage:  node scripts/test-merge-lane.mjs      (about 20 s, no network, no build)
-// NOTE: scripts/test.sh does not discover this file by convention, so the gate does not run it yet.
-// Adding `node scripts/test-merge-lane.mjs` to the gate is a one-line change in the file another
-// delivery is editing (docs/FACTORY.md, "The merge lane") and was left to the owner on purpose.
+// NOTE: scripts/test.sh discovers tests explicitly rather than by convention, so a file no gate names runs
+// nowhere - this one ran nowhere until `bcdda53` wired `node scripts/test-merge-lane.mjs` into the gate's
+// repository-tooling block, beside `test-gate-lane.cjs` and `test-delivery-admission.mjs`.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
