@@ -311,6 +311,7 @@ try {
     ['substring','Agent: codex nosession=external'],
     ['legacy','Agent: codex external'],
     ['ambiguous','Agent: codex session=external session=external'],
+    ['body-spoof','Agent: codex session=external\n\nA quoted identity is not the footer.\n\nAgent: codex session=another-reviewer'],
   ]) {
     const branch=`change/fixture-${kind}-session`;
     const source=delivery(branch,{file:`${kind}.txt`,text:kind,producer:sessions.producerA});

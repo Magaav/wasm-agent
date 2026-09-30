@@ -76,7 +76,7 @@ function git(cwd, args, label, allowFailure = false) {
 /// record can say any session id, and this says whose commit the review actually is.
 function anchorSession(repo, commit) {
   const body = git(repo, ['show', '--no-patch', '--format=%B', commit], 'review commit body');
-  const match = (body || '').match(AGENT_TRAILER);
+  const match = (body || '').trimEnd().split(/\r?\n/).pop().match(AGENT_TRAILER);
   if (!match) return null;
   const sessions=[...match[1].matchAll(/(?:^|[ \t])session=([^ \t\r\n]+)(?=$|[ \t])/g)];
   return sessions.length===1 ? sessions[0][1] : null;
