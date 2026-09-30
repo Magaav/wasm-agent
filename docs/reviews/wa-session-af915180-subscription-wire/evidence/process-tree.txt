@@ -1,0 +1,39 @@
+Reviewer's process-tree proof (item 2). Samples taken every ~430-500 ms with
+`Get-CimInstance Win32_Process` while the request was in flight; the tree below is computed from the
+request's own wa.exe PID in each sample.
+
+Request process row (from B.s1..B.s7):
+"41204","67860","wa.exe","C:\Users\Victor\.wasm-agent\wa-worktree-childdispatchaf915180-d6da-4eb4-a505-b41a7a36a52f\rust\target\release\wa.exe --db C:/Users/Victor/AppData/Local/Temp/rev-af915180/proof/inflight.db"
+
+Sample timestamps and the closure of that PID:
+
+B.s1.csv alive; ancestors= [('wa.exe', 67860), ('bash.exe', 82040), ('bash.exe', 68872)] descendants= 0 []
+B.s2.csv alive; ancestors= [('wa.exe', 67860), ('bash.exe', 82040), ('bash.exe', 68872)] descendants= 0 []
+B.s3.csv alive; ancestors= [('wa.exe', 67860), ('bash.exe', 82040), ('bash.exe', 68872)] descendants= 0 []
+B.s4.csv alive; ancestors= [('wa.exe', 67860), ('bash.exe', 82040), ('bash.exe', 68872)] descendants= 0 []
+B.s5.csv alive; ancestors= [('wa.exe', 67860), ('bash.exe', 82040), ('bash.exe', 68872)] descendants= 0 []
+B.s6.csv alive; ancestors= [('wa.exe', 67860), ('bash.exe', 82040), ('bash.exe', 68872)] descendants= 0 []
+B.s7.csv alive; ancestors= [('wa.exe', 67860), ('bash.exe', 82040), ('bash.exe', 68872)] descendants= 0 []
+B.s8.csv -> pid gone   (the process had exited; its own print said INFLIGHT_END ... 3199 ms)
+
+The in-flight request itself printed, from the delivery's own wire:
+INFLIGHT_START 0
+INFLIGHT_END 3199 finish=stop lines=267 events=89 content_chars=115 transport=native-codex-responses ttft_ms=1523.1307
+
+Control - the sampler is not blind (same command, while a spawned `node -e "setTimeout(...)"` was alive):
+control rows: 329
+"27020","10444","node.exe","""C:\Program Files\nodejs\node.exe"" C:\Users\Victor\AppData\Roaming\npm/node_modules/@openai/codex/bin/codex.js ..."
+"75748","70544","node.exe","""C:\Program Files\nodejs\node.exe"" scripts/merge-lane.mjs --repo C:/Users/Victor/.wasm-agent/gate-lab-tree-2 ..."
+"29212","75748","node.exe","""C:\Program Files\nodejs\node.exe"" C:\Users\Victor\.wasm-agent\wa-worktree-childdispatch3392ff10-.../scripts/gate-lane.mjs acquire ..."
+
+Unrelated node.exe rows inside the same in-flight samples (owned by other lanes, not this tree):
+"65340","51960","node.exe","""C:\Program Files\nodejs\node.exe"" scripts/test-gate-lane-wiring.cjs"
+"75748","70544","node.exe","""C:\Program Files\nodejs\node.exe"" scripts/merge-lane.mjs --repo C:/Users/Victor/.wasm-agent/gate-lab-tree-2 ..."
+"42604","31664","node.exe","""C:\Program Files\nodejs\node.exe"" .../Codex-3/scripts/gate-lane.mjs acquire ..."
+
+Rows matching "earendil-works" in the in-flight samples are the reviewer's own bash command line
+(it names the path in the `ls -d` proving the package is gone):
+"43960","41052","bash.exe","""C:\Program Files\Git\..\usr\bin\bash.exe"" ""-c"" ""cd .../wa-worktree-childdispatchc5606d25-... && bash /tmp/rev-af915180/proof.sh ..."
+
+So: the request ran with zero child processes, therefore no node and no Pi package in the tree that
+served it - while node processes belonging to other work were visible to the same sampler.
