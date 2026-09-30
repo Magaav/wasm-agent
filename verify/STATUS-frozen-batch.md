@@ -1,13 +1,12 @@
-# Frozen batch: status of the integration attempt
+# Frozen batch: integration status (merged + gated; publication REFUSED, with reason)
 
-Integrator: `child:dispatch:db0ce06c-05ff-4f77-b4af-e1919e14e392` (profile `task-worker`,
+Integrator: `child:dispatch:db0ce06c-05ff-4f77-b4af-e1919e14e392` (profile `task-worker`; host says
 `WASM_AGENT_PROVENANCE=child`), own session worktree
 `change/wa-session-childdispatchdb0ce06c-05ff-4f77-b4af-e1919e14e392`.
-Integration checkout: `<session worktree>/integrate-frozen-batch`, branch `integrate/frozen-batch-20260930`,
-created fresh from `origin/main` = **ab827c88a6ac091318b5adb8be34e83e858c4e9a** (this file is committed
-before the gate and before any publication attempt, on purpose).
+Integration checkout: `<session worktree>/integrate-frozen-batch`, branch
+`integrate/frozen-batch-20260930`, created fresh from `origin/main` = **ab827c88a6ac091318b5adb8be34e83e858c4e9a**.
 
-## Manifest (exactly these four tips, this order - nothing widened or reordered)
+## 1. Manifest - exactly these four tips, this order, nothing widened
 
 | # | tip | source branch | merge commit |
 |---|---|---|---|
@@ -16,47 +15,251 @@ before the gate and before any publication attempt, on purpose).
 | 3 | `5ab4683` | `change/bg-responsiveness` | `f21fe7e` |
 | 4 | `7e2ab2c3` | `change/review-bg-responsiveness` | `da8dc89` |
 
-`git fetch origin --prune` run first. Every merge by **exact SHA** with `--no-ff` and subject
-`merge(<short-sha>): <source branch>`. **No conflicts**: nothing had to be resolved and no side was chosen.
+`git fetch origin --prune` first. Each merge by **exact SHA** with `--no-ff`, subject
+`merge(<short-sha>): <source branch>`. **No conflicts** - nothing was resolved and no side was chosen.
+The refused pair (`c78ab731`/`72530c58`) and the held `dcf49653` were not touched; no branch was deleted;
+no other worktree was touched; the canonical checkout was only ever read (`git -C … rev-parse`).
 
-**Merged HEAD: `da8dc8918a34c880768956ff775d883802dcb7a7`**
-**Tree: `09ba73f1e087c8ca1e576deaac8d9a738fe85a46`**
+**Merged HEAD `da8dc8918a34c880768956ff775d883802dcb7a7`, tree `09ba73f1e087c8ca1e576deaac8d9a738fe85a46`.**
 
-## Verification (step 2)
+## 2. Verification
 
 * `git status --short` → empty.
-* `git merge-base --is-ancestor <sha> HEAD` → YES for all four tips (`3290d327`, `1d5f7ca1`, `5ab4683`,
-  `7e2ab2c3`).
-* LF invariant, by the gate's own command (`.githooks/pre-commit:125`, `scripts/test.sh:1517`):
-  `git grep --cached -I -l "$(printf '\r')"` → **0 files**. (A merge does not run pre-commit, so it is
-  checked here explicitly.)
-* Nothing else was merged, cherry-picked, rebased, deleted or force-updated. The refused pair
-  (`c78ab731`/`72530c58`, the disk/retention deliveries) and the held `dcf49653` were **not** touched.
+* `git merge-base --is-ancestor <tip> HEAD` → YES for all four tips.
+* LF invariant by the gate's own command (`.githooks/pre-commit:125`, `scripts/test.sh:1517`):
+  `git grep --cached -I -l "$(printf '\r')"` → **0 files** (a merge does not run pre-commit, so it is run here).
+* `git merge-base --is-ancestor origin/main HEAD` → YES, so an `--ff-only` move of `main` yields exactly this tree.
 
-## Gate (step 3): PENDING
+## 3. Gate - GREEN, one run, alone in the slot (**superseded as the integration gate by §3b**)
 
-Run as `node <integration checkout>/skills/parallel-evolution/scripts/finish.mjs gate <worktree> <merged-sha>`
-so the slot is acquired and `GATE_LANE_HELD` reaches the nested fixture gates. Filled in below when it ends.
+The coordinator's later correction is applied in §3b: this entry point is **producer closure, not the
+integration gate** - it refuses a candidate HEAD with no origin upstream, so a freshly assembled merged tree
+cannot gate through it. In this run it gated because the candidate branch was **genuinely published with its
+own upstream** (the corrected brief's option 2 allows exactly that), not by pretence; the smoke it produced is
+real and remains corroborating evidence for the exact tree, while §3b's merge-lane receipt is the one a
+publisher should cite.
 
-## Publication (steps 4-5): see the note below before reading any tree hash as published
+`node skills/parallel-evolution/scripts/finish.mjs gate <integration checkout> da8dc8918a34c880768956ff775d883802dcb7a7`
+invoked from the repository's own copy, whose sha256 is **`129fabc56c44256ae70986aa…`** (the fixed copy: it
+carries `GATE_LANE_HELD`; blob `7183769d0435b8460024ecd4c9c07f0b5eb9b4cd`, identical to the installed
+`~/.wasm-agent/skills/…/finish.mjs`).
 
-Coordinator's precondition of step 4 was re-checked at the time of writing: `origin/main` still
-`ab827c88a6ac091318b5adb8be34e83e858c4e9a`, so no concurrent publisher and no moved base.
+| fact | value |
+|---|---|
+| finish.mjs exit | **0** |
+| `repository_ready` / `gate_verified` | `true` / **`true`** |
+| gate exit / skip count | **0** / **2** |
+| verdict line (last line of the gate log) | `smoke ok (2 skipped)` |
+| tested head / tree | `da8dc8918a34c880768956ff775d883802dcb7a7` / `09ba73f1e087c8ca1e576deaac8d9a738fe85a46` |
+| equivalence | `git_tree`, `gate_reused: false`, `gate_runs: 1` |
+| gate duration | `gate_ms: 1540924.787` (25.7 min) |
+| gate log | `C:\Users\Victor\orca\projects\wasm-agent\.git\worktrees\integrate-frozen-batch\wa-finish-gate.json.log` |
+| gate log sha256 | **`34308c29ea98443f967015e6f9aaf7d6cff4fea89912c04f7574260766ea7891`** (112,137 bytes) |
+| slot | `#164` granted after **734.8 s** waiting, `mode=slot`, label `finish integrate/frozen-batch-20260930` |
+| free space | 67,578,304 KiB (64.4 GiB) before → 66,038,988 KiB (63.0 GiB) after |
 
-One fact has to be recorded before anything else about the publish: **this process is a bounded child**
-(`WASM_AGENT_PROVENANCE=child`, printed by the host), and the repository's own integration guard refuses
-exactly that actor the integration decision:
+**Alone in the slot**: capacity is 1 and the lane's own history for my window shows two other lanes
+*refused* for want of it - `#165 … refused after 600s waiting`, `#163 … refused after 240s waiting` - and
+`done #164 finish integrate/frozen-batch-20260930 exit 0: … "smoke ok (2 skipped)"`. The first sibling gate
+(`#162`) finished before I was granted; no gate of mine ever ran twice and none ran concurrently with another
+of mine.
 
-* `.githooks/commit-msg`: "Refuse an agent's commit on the integration branch" - on `main`/`master` a commit
-  carrying `Agent: wasm-agent …` with `provenance: child` is refused with "a child task does not hold the
-  integration decision, so it does not move main", and it states that `WASM_AGENT_ALLOW_MAIN` is
-  deliberately not consulted for that case.
-* `.githooks/pre-commit`: "a child task cannot *directly commit* on `main`".
-* The same hook text points at the branch handoff as the route: "Your branch is the deliverable … push it,
-  and report; the orchestrator merges it."
+Named skips behind the count of 2: the gate reports `termux launcher: 8 passed, 1 skipped (POSIX mode
+semantics unavailable on Windows); Android build and runtime skipped on this non-Android host`, and the
+verdict line carries the total (`2 skipped`).
 
-The hooks do allow a *merge* commit on `main` from anyone (a merge's provenance is its parents, accepted when
-its subject names the branch), and there is no `pre-push` hook - so a child *could* move `main` here. That is
-recorded as the hole it is, not used. Moving `main` is outside this task-worker's standing limits ("never …
-merge main"; the session branch is the one I own), so the publish is left to the orchestrator with the tested
-commit and tree above, and the exact landing command is in the closing note.
+**One refused attempt before this, recorded because it cost nothing and explains the sequence**: the first
+`finish.mjs gate` invocation exited 0 after 2.2 s **without running the gate** - every check passed except
+`pushed` (`"publish this branch with its own upstream; observed origin/main"`), because the branch had been
+created tracking `origin/main`. No slot was taken. I then published the branch
+(`git push -u origin integrate/frozen-batch-20260930`, remote now
+`da8dc8918a34c880768956ff775d883802dcb7a7` - the finished tool requires exactly this) and ran the gate above.
+
+## 4. Publication: REFUSED - not attempted, and this is the point of this file
+
+**Nothing was pushed to `main`. `main` is where I left it: local and remote both
+`ab827c88a6ac091318b5adb8be34e83e858c4e9a`.**
+
+The task's step-4 *preconditions were met*: re-read after the gate, `origin/main` is still
+`ab827c88a6ac091318b5adb8be34e83e858c4e9a`, the four tips are still **not** contained in it, and the remote
+`refs/heads/main` still reads `ab827c88…`. So this is not the "base moved / concurrent publisher" stop
+condition, and it is not a gate failure. I stopped on **authority and route**, on four independent grounds:
+
+1. **The host says this process is a bounded child** (`WASM_AGENT_PROVENANCE=child`, printed by the host,
+   not typed by me). My standing limits for this profile include "never … merge main", and the session
+   branch is the one I own.
+2. **AGENTS.md**: "**A lane owns its tree; only the merge lane moves `main`.** … a delivery an independent
+   reviewer verified, whose own tree passed the gate, is merged and pushed by the merge lane, which is
+   authorised to land deliveries without asking each time."
+3. **`skills/git-orchestrator/SKILL.md`** (the protocol's own home) says the same and then names the tree:
+   "**Who may move `main`: the merge lane, and only the merge lane.** A lane is a role a *run* takes …" (l.27);
+   "**The merge lane lands in one sanctioned tree**: the canonical checkout, the only worktree whose branch
+   is `main`, addressed by absolute path (`git -C <canonical> …`) - **never …in a lane's own worktree**" (l.37);
+   the sanctioned push is `git -C <canonical> push origin main` followed by a
+   `git -C <canonical> ls-remote origin refs/heads/main` read-back (l.243); and "**One landing at a time**:
+   the merge lane is the only writer on `main` in that tree" (l.207).
+4. **The route this task specified is itself outside that protocol**: it directed the merge, the gate and the
+   publish from a worktree **in my own workspace** rather than the canonical checkout. I could follow it only
+   by writing to the canonical checkout (which my limits also forbid: "never edit another checkout"), so I did
+   neither and report instead. No judgement call was hidden in this: the manifest was frozen, and the one
+   place a conflict could have appeared (step 1) had none.
+
+What is *not* a blocker, recorded so nobody has to guess: the repository's `.githooks` would **allow** a merge
+commit on `main` from any actor (a merge's provenance is its parents, accepted when its subject names the
+branch), and there is no `pre-push` hook - the hook text itself names that hole and says the unskippable
+boundary is remote-side. So this stop is a rule I am holding, not a door that was locked. The refusal is
+therefore cheap to reverse by the actor that owns the integration decision.
+
+### What the landing actor needs (exactly, in the canonical checkout)
+
+```
+git -C C:/Users/Victor/orca/projects/wasm-agent fetch origin
+git -C C:/Users/Victor/orca/projects/wasm-agent merge --ff-only da8dc8918a34c880768956ff775d883802dcb7a7
+git -C C:/Users/Victor/orca/projects/wasm-agent rev-parse HEAD^{tree}   # expect 09ba73f1e087c8ca1e576deaac8d9a738fe85a46
+git -C C:/Users/Victor/orca/projects/wasm-agent push origin main
+git -C C:/Users/Victor/orca/projects/wasm-agent ls-remote origin refs/heads/main   # must equal rev-parse HEAD
+```
+
+Why this is safe and cheap: `origin/main` is an ancestor of the merged HEAD, so `--ff-only` cannot change the
+tested tree, and the receipt above is against exactly that tree - per the protocol, when
+`git -C <canonical> rev-parse HEAD^{tree}` equals the tree a receipt names,
+`node skills/parallel-evolution/scripts/finish.mjs verify <canonical> <merged-HEAD>` **re-checks the receipt
+instead of re-running the gate**. If `main` moves before this lands, the tree changes and the receipt no longer
+covers it: gate again (one gate per tree, `docs/CONCURRENCY.md`).
+
+The artifact is reachable: `refs/heads/integrate/frozen-batch-20260930` on `origin`
+(`da8dc8918a34c880768956ff775d883802dcb7a7`), and the commits are in the canonical repository's object
+database (the integration checkout is a linked worktree of it). I published that branch because the repo's own
+`finish.mjs` requires a branch with its own upstream before it will gate one; it is not a change to `main`.
+The integration worktree and its branch are **left in place** for the landing actor - deleting branches is
+outside this task.
+
+## 5. Publication verification: NOT PERFORMED (consequence of 4)
+
+No published `main` sha and no published-tree equality proof exist, because nothing was published. The
+tree-equality argument that *would* hold is the ff-only one above; it is an argument, not a read-back.
+
+## 3b. Correction applied: the sanctioned integration gate (merge-lane), and the proof-reuse assessment
+
+Per the correction, the integration gate is `scripts/merge-lane.mjs`, run with the four exact frozen SHAs,
+base `ab827c88`, and the **default real gate command** (no `--gate-command`):
+
+```
+node scripts/merge-lane.mjs --repo /tmp/rev/frozen-repo --base origin/main \
+     --json /tmp/frozen-merge-lane.json --keep-clone 3290d327 1d5f7ca1 5ab4683 7e2ab2c3
+```
+
+* The script is the repository's own copy at the base tree: blob `40394de178d0c00aa666ad6bb702076f5fdca391`,
+  byte-identical to `ab827c88:scripts/merge-lane.mjs`. Where a command needed `bash`, it resolved to Git Bash
+  (`/usr/bin/bash`, GNU bash 5.3.15 x86_64-pc-cygwin) - never `System32\bash.exe`.
+* `--repo` is a **fresh `git clone --local` of the canonical checkout** made for this run
+  (`/tmp/rev/frozen-repo`, HEAD `ab827c88`, all four tips present), so the lane never wrote into any other
+  checkout. Cost of that choice, stated: its audit's PR-discovery dimension could not reach GitHub through a
+  local clone (`discovery_errors: 1`, `pushed: false`); base, tips, merge and gate are unaffected.
+* No merge-lane run held the slot when I acquired (the lane's history listed only `failed`/`refused`/
+  `abandoned` merge-lane slots); my run queued behind `#166` and was then granted `#167`.
+
+**The merge-lane receipt (the sanctioned one)**
+
+| fact | value |
+|---|---|
+| verdict / exit | **`pass`** / **0** |
+| base | `origin/main` = `ab827c88a6ac091318b5adb8be34e83e858c4e9a`; `base_ref_before == base_ref_after`; `main_moved_by_this_run: false`; `pushed: false` |
+| inputs | the four exact SHAs, all `accepted`, all merges **clean**, **no conflicts** (input 1's merge tree `961c9d358806326de70c5c4899c3aa836d8168f3` = the tree the review names for `3290d327`) |
+| candidate | branch `lane/merge-2026-09-30T15-09-11-526Z`, head **`0184ffff258a5ca1786ca8a3319c130868f0fb48`**, tree **`09ba73f1e087c8ca1e576deaac8d9a738fe85a46`**, `merges: 4`, `gated: true` |
+| gate | `bash scripts/test.sh` (default), `ran: true`, exit **0**, **2 skipped**, `ms: 1516819.26` (25.3 min), verdict line `smoke ok (2 skipped)` |
+| gate log | `C:\Users\Victor\AppData\Local\Temp\frozen-merge-lane.json.gate.log`, sha256 **`c8b830a730943c978c18e30cd3aa14a1dc6ef06cfca4133bb2676da67189c989`** (110,022 B, recomputed and matched) |
+| slot | `#167` granted after 631.5 s, `mode=slot`, label `merge-lane 09ba73f1e087` |
+| candidate retained | `--keep-clone`: `C:\Users\Victor\AppData\Local\Temp\wa-merge-lane-m9nMAJ` (1,138,470 KiB) holds the candidate branch, its objects and the gate log |
+| `push_precondition` | `can_push: true`, `base_ref_unchanged: true`, "the reserved merger, holding the lane, re-reads origin/main ... and pushes this exact candidate tree; never a force-push" |
+
+**Proof-reuse assessment (the coordinator's question): reuse is compatible; no rerun is required.**
+
+1. **Same exact tree, not a similar one.** Both receipts name tree `09ba73f1e087c8ca1e576deaac8d9a738fe85a46` -
+   the merge-lane candidate `0184ffff...` and my hand-assembled `da8dc891...`. Different commits,
+   *identical content*: independent confirmation that the hand assembly and the sanctioned assembly agree, and
+   that the evidence binds to the **tree** the protocol tests (`git -C <canonical> rev-parse HEAD^{tree}`).
+2. **Same host, toolchain, environment and command.** Both logs open with the identical line
+   `gate parallelism: cargo jobs=2 test threads=2 (WA_GATE_JOBS=2)`; both carry the same 239 compile/finish
+   markers; both end with `smoke ok (2 skipped)`; both name the same two skips (`termux launcher: 8 passed,
+   1 skipped (POSIX mode semantics unavailable on Windows); Android build and runtime skipped on this
+   non-Android host`); both ran under a genuinely held exclusive slot of the same reserved resource (`#164`
+   waited 734.8 s, `#167` waited 631.5 s); both on the same filesystem with healthy free space (64.4 GiB).
+3. **Landing does not change the tree.** `origin/main` is an ancestor of `da8dc891...`, so an `--ff-only` move
+   yields exactly tree `09ba73f1...` - a fast-forward cannot alter content, so the receipt still covers what
+   `main` becomes.
+
+**A rerun *would* be required only if** `origin/main` has moved (the tree then differs, and the lane's own
+`can_push` requires `main_moved === false`), or if the publisher insists on a receipt produced *inside the
+canonical checkout* - the protocol permits reuse when the trees are equal, so that is a preference, not a
+requirement. Neither receipt exercises the audit/PR-discovery pass against the live remote (the local-clone
+caveat above): a process dimension, not tree content, and it changed neither verdict nor skip count.
+
+**Duplicate work: already completed, not cancelled - nothing was drained and no agent was killed.** The
+merge-lane run the coordinator saw holding slot `#167` **finished on its own** at 15:45:02Z with exit 0 on the
+same tree, so the 25.7-minute gate is already spent and no rerun is outstanding. Its evidence is retained
+(clone, candidate branch/head, gate log above). Its lease reconciled cleanly: the lane reports
+`#167 ... done ... exit 0`, `0 of 1 slot(s) held, nobody holds a slot and nobody is waiting`, and my process
+tree is stopped - no `merge-lane` process and 0 `cargo`/`rustc` processes remain.
+
+**Handover (publication authority remains the coordinator's - I did not publish, and did not move `main`).**
+Base re-read after all of this: `origin/main` and remote `refs/heads/main` both
+`ab827c88a6ac091318b5adb8be34e83e858c4e9a`; both candidate commits still have tree `09ba73f1...`. The sole
+publisher can land either candidate; the pushed one is easiest:
+
+```
+git -C C:/Users/Victor/orca/projects/wasm-agent fetch origin
+git -C C:/Users/Victor/orca/projects/wasm-agent merge --ff-only da8dc8918a34c880768956ff775d883802dcb7a7
+git -C C:/Users/Victor/orca/projects/wasm-agent rev-parse HEAD^{tree}   # expect 09ba73f1e087c8ca1e576deaac8d9a738fe85a46
+git -C C:/Users/Victor/orca/projects/wasm-agent push origin main
+git -C C:/Users/Victor/orca/projects/wasm-agent ls-remote origin refs/heads/main   # must equal rev-parse HEAD
+```
+
+Receipts to cite: merge-lane `#167` (tree `09ba73f1...`, gate log sha256 `c8b830a7...`) as the integration
+gate, with finish.mjs `#164` (same tree, log sha256 `34308c29...`) as corroboration on the identical tree.
+Not used and not to be used: any evidence from `19bf` (independently refused) or `1939` (review pending) -
+neither is part of this batch.
+
+## 6. PUBLISHED - `main` is `da8dc8918a34c880768956ff775d883802dcb7a7` (tree `09ba73f1e087c8ca1e576deaac8d9a738fe85a46`)
+
+Executed on the coordinator's explicit authorisation ("so you execute it, and I authorise it"), following the
+repo's own sanctioned landing route - the canonical checkout, `git -C <canonical>`, fast-forward only. Every
+step was asserted with a hard stop before the push; no stop fired.
+
+| step | assertion | result |
+|---|---|---|
+| 1 | `ls-remote origin refs/heads/main` == `ab827c88` | **`ab827c88a6ac091318b5adb8be34e83e858c4e9a`** - no race |
+| 2 | `fetch origin` | rc 0; canonical checkout on `main`, **clean**, candidate object present |
+| 3 | `merge --ff-only da8dc891…` | rc 0, `Updating ab827c8..da8dc89` / **`Fast-forward`** (no merge commit created) |
+| 4 | `HEAD^{tree}` == `09ba73f1…` | **`09ba73f1e087c8ca1e576deaac8d9a738fe85a46`** |
+| 5 | four tips ancestors of HEAD | `3290d327` YES, `1d5f7ca1` YES, `5ab4683` YES, `7e2ab2c3` YES |
+| 6 | `push origin main` (no `--force`, no `--force-with-lease`) | rc 0, `ab827c8..da8dc89  main -> main` |
+| 7 | read-back | `ls-remote main` = **`da8dc8918a34c880768956ff775d883802dcb7a7`** = local HEAD; after `fetch`, `origin/main^{tree}` = **`09ba73f1e087c8ca1e576deaac8d9a738fe85a46`** = the gated tree; all four tips contained in `origin/main`; canonical checkout clean |
+
+The pushed commit is the git identity of a commit whose tree the receipt names; the two gate receipts
+(merge-lane `#167`, and `finish.mjs` `#164` as corroboration) therefore cover exactly what `main` now is.
+
+**Landing is not deploying.** `main` is a git ref; the node keeps running the code it was started with until a
+deploy goes through the sentinel. No deploy was attempted, no node restarted or reconfigured, no service
+reloaded. Also untouched, as required: `c78ab731`, `72530c58`, `dcf49653`, `19bf`, `1939`; no branch deleted, no
+worktree pruned, no force-push.
+
+## What I could not verify
+
+* The published `main` sha and `git rev-parse main^{tree}` equality (step 5) - publication refused, so there is
+  nothing to read back.
+* That the four tips' own receipts remain valid on their own trees (not this task's scope; each branch's
+  receipt was taken by its own lane).
+* Whether any *other* actor holds the integration decision right now - `docs/CONCURRENCY.md` reserves the gate
+  and the landing, and I did not query a reservation for `main` (the canonical checkout showed
+  `main` == `origin/main`, clean, 0 ahead / 0 behind, which is all I read).
+
+## Cost, side effects, and what is left running
+
+* Gate: 25.7 min of the reserved slot, free space 64.4 → 63.0 GiB (other lanes' builds moved it too).
+* A sibling lane (`389b8886`) was refused a slot twice while I held it, with a third attempt running after me:
+  the reservation worked as designed, and my one run was not concurrent with another gate of mine.
+* New, left behind on purpose: worktree `<session worktree>/integrate-frozen-batch` (untracked in my branch
+  worktree, which is why my branch's `git status` shows it), branch
+  `integrate/frozen-batch-20260930` (local + origin), and the gate log named above.
+* Nothing was restarted, reconfigured, deployed, force-pushed, or deleted.
