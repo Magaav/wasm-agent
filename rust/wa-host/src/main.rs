@@ -62,6 +62,12 @@ const EMBEDDED: &[(&str, &str)] = &[
     // The subscription credential: our own store, refresh and login, which the transport lane
     // reaches through `M.token()`. It is here because this list is what a deployed node can load -
     // a module absent from it exists in the working tree and not in the shipped binary.
+    //
+    // The *key* is not free, and this is the cutover fact the two lanes disagreed about: the wire
+    // loads the credential as `dofile(M.CREDENTIAL_MODULE)` and nothing else, so this exact string
+    // is the path a deployed binary resolves. A credential registered under a name the wire never
+    // asks for is shipped, embedded and unreachable - present in the registry, absent in every
+    // request. These two strings are one decision, and the no-Lua-root proof is what executes it.
     ("lua/core/openai_sub_auth.lua", include_str!("../../../lua/core/openai_sub_auth.lua")),
     ("lua/core/openai_sub_catalogue.lua", include_str!("../../../lua/core/openai_sub_catalogue.lua")),
     ("lua/core/subscription_wire.lua", include_str!("../../../lua/core/subscription_wire.lua")),

@@ -125,6 +125,14 @@ overhead worth 3x, which is the claim a single reading would have supported.
 | `scripts/test-openai-sub.cjs` (in `test.sh:1564`) | `native subscription operations ok (15 checks)` + `PASS` |
 | `cargo test -p wa-host sse_line_tests` | `4 passed; 0 failed` |
 
+**Correction, added by the cutover lane when it merged this branch.** The last row of that table was
+not true of *this file's own claim*. Four tests exist in `rust/wa-host/src/host.rs` and four pass by
+hand, but **no `cargo test` line in `scripts/test.sh` ran them**: `grep sse_line scripts/test.sh` was
+empty, every `-p wa-host` invocation filtered by a different module name, and the gate log carried no
+`running 4 tests` for them. A suite that no gate line executes is a comment with a `.rs` extension -
+and "measured by hand" is a branch receipt, not gate coverage. The line is now in `scripts/test.sh`
+beside the other `-p wa-host` filters, so the four execute in the gate rather than in a report.
+
 ### 7. The catalogue's update path exists and reproduces it - PROVEN
 
 Item 6 asks for "an update path documented". It was documented and **did not exist**: the catalogue

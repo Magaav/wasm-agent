@@ -221,6 +221,77 @@ package dir UNCHANGED
 The rename is done inside a script whose `trap ... EXIT` restores both paths, so an interrupted run
 puts Pi back rather than leaving the operator's installation moved.
 
+### Follow-up: the transport half's review (VERDICT needs-change), folded in here
+
+These three landed inside this delivery because it is already merging exactly these files.
+
+**1. A test nobody runs is a comment.** The transport half added `mod sse_line_tests` to
+`rust/wa-host/src/host.rs` (4 tests), reported them passing by hand, and **no `cargo test` line in
+`scripts/test.sh` executed them**: `grep sse_line scripts/test.sh` was empty, every `-p wa-host`
+invocation named a different module (`file_search::tests`, `ticker_tests`, `terminal_tests`,
+`terminal_editor::tests`, `serve::`, `subagents::`, `deadline_note_tests`), and the gate log had no
+`running 4 tests` for them. Corrected in two places:
+
+* `scripts/test.sh` - the line added, immediately after the `file_search::tests` filter and before the
+  `ticker_tests` comment, beside the other `-p wa-host` filters:
+
+  ```
+  cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host sse_line_tests
+  ```
+
+  with a comment above it saying why it belongs there (the line boundaries `host.http_sse` hands the
+  wire are half of that route's contract, and the recorded fixtures under
+  `tests/fixtures/subscription/` are what it reads).
+* `docs/SUBSCRIPTION_WIRE_STATUS.md` §6 - that table listed the filter as if it were "in the gate's
+  own terms" while three rows above it carried a `test.sh:<line>` annotation and this one could not.
+  A correction is now in the file, in the file's own voice, saying what was true: four tests existed,
+  four passed by hand, and no gate line ran one of them - a branch receipt cannot cover a suite.
+
+Neither this file nor any status file here had claimed gate coverage of those four before; silence was
+the problem, and the row that implied it is the one corrected.
+
+**2. The `EMBEDDED` key and the wire's `dofile` name.** After the merge these are one string, and it
+is worth stating exactly:
+
+```
+rust/wa-host/src/main.rs:65   ("lua/core/openai_sub_auth.lua", include_str!("../../../lua/core/openai_sub_auth.lua")),
+lua/core/subscription_wire.lua:130   M.CREDENTIAL_MODULE = 'lua/core/openai_sub_auth.lua'
+```
+
+The reviewer's reading was of the two halves *before* the seam fix (the wire then asked for
+`subscription_auth.lua`, which is the defect this delivery exists to close) - but the reason to care
+survives the fix, so the entry's comment now says that the key is not free: the wire loads the
+credential as `dofile(M.CREDENTIAL_MODULE)` and nothing else, so a credential registered under a name
+the wire never asks for is embedded and unreachable. And the proof was re-run in the shape production
+has - **`WASM_AGENT_LUA_ROOT` unset**, so `dofile` resolves every module from the binary's own
+embedded registry and no file in this worktree can rescue a wrong name. The binary says so itself:
+
+```
+lua root unset: using embedded modules; edits under lua/ are NOT under test
+transport:              native
+configured():           true
+credential module the wire names: lua/core/openai_sub_auth.lua   lua root: nil
+```
+
+Everything in the proof sections **above** reproduced in that shape, in the same order (proofs 1, 2
+and 3), with Pi's package directory renamed aside and `auth.json` unreachable: `configured()` true, 8
+`pending_delta` -> 1 `commentary`, `arguments={"zone":"UTC"}`, usage `{prompt 93, completion 33,
+total 126}`, `stream_complete=true`, `token POSTs=0` on the absent-store path, and Pi's hashes
+unchanged (`c60f5747…` / `9f8111c6…`). Those transcripts above are the root-set run; the no-root run
+is the same assertions with the same values, and the only difference between the two runs is which
+copy of the Lua answered - which is the point. A successful request with no Lua root *is* the
+agreement proof: a stale embedded wire would `dofile` a name the embedded registry does not carry, and
+there would be no request to report.
+
+**3. The `reasoning` field: UNPROVEN, and now said out loud.** The wire implements three
+`response.reasoning_*` events (`lua/core/subscription_wire.lua:671-685`) and returns
+`result.reasoning`; no live run has ever shown the endpoint sending one. Re-measured here rather than
+argued: `reasoning events: 0   result.reasoning=""` on the `low`-level run above, and the reviewer's
+two prompts (`low` and `medium`) found none either - and neither recorded fixture contains a
+`response.reasoning_*` event. So the honest statement is: **the reasoning event and `result.reasoning`
+are implemented and never observed to fire; treat them as unproven.** The `reasoning_tokens:0` in the
+usage block is a different thing (the endpoint's own token accounting), and it is present.
+
 ### The closing gate
 
 Run after every commit above, with the **worktree's own copy** of the closing script

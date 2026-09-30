@@ -49,6 +49,14 @@ node scripts/test-parallel-finish.mjs
 # The execution and automation contracts have native, model-free adversarial tests.
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host file_search::tests
+# The line boundaries `host.http_sse` hands to the subscription wire are half of that route's
+# contract: this reader re-framing or dropping a line would mean the Lua parser is tested against a
+# stream that never existed. It was written, reported passing by hand, and run by *no* `cargo test`
+# line in this file - every filter above names its own module, and `sse_line_tests` was named by
+# none, so four tests existed and the gate never executed one of them. The recorded fixtures under
+# `tests/fixtures/subscription/` are what it reads, so it belongs here beside the other wa-host
+# filters and not in a report.
+cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host sse_line_tests
 # The ticker's clock is the twin of `cli_view.duration` on the Lua side: the elapsed time of a
 # call that has not finished can only be computed by the host, so both sides pin the same three
 # values and a one-sided change fails here rather than on a screen.
