@@ -30,6 +30,10 @@
 //                          A test seam: it is recorded verbatim in the output.
 //   --timeout-seconds <n>  gate timeout (default 3600)
 //   --clone <path>         use this directory as the disposable clone
+//   --reuse-tree <path>    the persistent tree to gate in, instead of a fresh clone per run (default:
+//                          WA_MERGE_LANE_TREE, else ~/.wasm-agent/merge-lane-tree). Reused only when it
+//                          is provably clean; any refusal is named, recorded, and falls back to a clone
+//   --no-reuse-tree        never reuse: always clone. A fixture or a test uses this
 //   --keep-clone           keep the clone even when the lane passes
 //   --no-hooks             do not arm this tree's .githooks in the clone
 //   --partial              on a conflict, continue with the independent inputs and gate
@@ -77,8 +81,11 @@ function resolveRef(cwd, ref) {
 
 export function parseArgs(argv) {
   const options = {tips: [], base: 'origin/main', allPending: false, jobs: '2', gateCommand: 'bash scripts/test.sh',
-    timeoutSeconds: 3600, clone: null, keepClone: false, hooks: true, partial: false, json: null, repo: null};
-  const needs = new Set(['--repo', '--base', '--jobs', '--gate-command', '--timeout-seconds', '--clone', '--json']);
+    timeoutSeconds: 3600, clone: null, keepClone: false, hooks: true, partial: false, json: null, repo: null,
+    reuse: true, reuseTreeNamed: false,
+    reuseTree: String(process.env.WA_MERGE_LANE_TREE || '').trim() || path.join(os.homedir(), '.wasm-agent', 'merge-lane-tree')};
+  if (String(process.env.WA_MERGE_LANE_TREE || '').trim()) options.reuseTreeNamed = true;
+  const needs = new Set(['--repo', '--base', '--jobs', '--gate-command', '--timeout-seconds', '--clone', '--json', '--reuse-tree']);
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (needs.has(arg)) {
@@ -91,9 +98,11 @@ export function parseArgs(argv) {
       else if (arg === '--gate-command') options.gateCommand = value;
       else if (arg === '--timeout-seconds') options.timeoutSeconds = Number(value);
       else if (arg === '--clone') options.clone = value;
+      else if (arg === '--reuse-tree') { options.reuseTree = value; options.reuseTreeNamed = true; }
       else options.json = value;
     } else if (arg === '--all-pending') options.allPending = true;
     else if (arg === '--keep-clone') options.keepClone = true;
+    else if (arg === '--no-reuse-tree') options.reuse = false;
     else if (arg === '--no-hooks') options.hooks = false;
     else if (arg === '--partial') options.partial = true;
     else if (arg.startsWith('-')) throw Error(`unknown option ${arg}`);
@@ -158,8 +167,294 @@ function cloneRepo(repo, base, options, laneBranch) {
   // rather than whatever the clone inherited: `core.hooksPath` is relative, so a clone has none.
   if (options.hooks) requireGit(dir, ['config', 'core.hooksPath', '.githooks'], 'arm hooks');
   else requireGit(dir, ['config', 'core.hooksPath', ''], 'disarm hooks');
-  return {dir, clone_ms: cloneMs, core_autocrlf: autocrlf};
+  return {dir, git_dir: gitDirAbs(dir) || path.join(dir, '.git'), clone_ms: cloneMs, core_autocrlf: autocrlf, reused: false};
 }
+
+// ---- THE PERSISTENT TREE THE GATE RUNS IN ------------------------------------------------------
+// A fresh `git clone --local` costs under a second, but it also hands the gate an EMPTY `rust/target`,
+// and the gate is where a landing's wall time goes: this lane's own records put the gate at 96.6% of
+// lane wall time (median 15.0 min of which clone+merge is ~2 s), and the repository's measurement is
+// that ~620 s of a solo cold gate is recompilation - 253.0 CPU-s charged inside the cold gate's own
+// process tree against 11.2 CPU-s warm, on the same tree (docs/EVOLUTION.md, "Gate parallelism"). A
+// disposable tree is therefore always cold, and this lane paid that once per landing.
+//
+// So the tree the gate runs in is persistent: one path per node, reused across runs with `git fetch` +
+// a forced reset instead of a fresh clone. Its `rust/target` stays warm because cargo's fingerprints are
+// keyed by the source path, which no longer changes between runs.
+//
+// WHAT GUARANTEES CLEANLINESS. Reuse is REFUSED, named, and falls back to a disposable clone (cold
+// gate, correct result, recorded as `clone.reuse_refused`) unless every one of these holds:
+//   * the directory is a git checkout whose toplevel is exactly that directory (not a linked worktree);
+//   * its `origin` resolves to the repository being landed, and its owner record names that repository -
+//     so a tree is never reused for another repository, which is also what keeps a test fixture from
+//     ever creating or resetting the node's tree (a fixture's repository lives under the temp directory
+//     and the default tree is never created for one);
+//   * the reuse lock is free, or held by a process that is provably dead;
+//   * after `git clean -xdf -e target`, a pinned `core.autocrlf`, `git switch --detach --force` and
+//     `git reset --hard` onto the integration target, `git status --porcelain` is EMPTY - so what is
+//     left is exactly the committed content plus cargo's own output directories, nothing else. What the
+//     reset discarded (another run's leftovers, or an operator's stray edit) is NAMED in the log and in
+//     `clone.reuse_dirt_discarded`: the guarantee is the reset, and the record is what it was applied to.
+//
+// THE RISK IT CARRIES, AND THE RECOVERY: stale state surviving in the tree, and a cargo output
+// directory poisoned by a different toolchain. Two answers, both mechanical:
+//   * stale state is what the checks above refuse on, and the falsification is deliberate - a candidate
+//     that MUST fail is run through the reused tree (a failing test, a CRLF tree) and reported red;
+//   * the toolchain is recorded in the owner file when the tree is created, and if `rustc -vV` differs
+//     on reuse, every cargo output directory under the tree is removed before the gate runs, by name in
+//     the record (`toolchain_cleared`). That is the poisoning answer, and it costs one cold gate rather
+//     than risking an artifact built by another compiler.
+// A tree that is wedged for any other reason (a foreign lock, a stolen directory, a filesystem error) is
+// reported with its own reason, and the recovery is named in the log: `rm -rf <dir>`.
+const REUSE_OWNER_FILE = 'wa-merge-lane-tree.json';
+const REUSE_LOCK_FILE = 'wa-merge-lane-tree.lock';
+
+// Compare two paths as the same location. Windows is case-insensitive and `git clone --local` records
+// the path it was given, so a real path and a spelled-differently one are the same tree.
+function samePath(left, right) {
+  const norm = value => {
+    let resolved = path.resolve(String(value));
+    for (const resolve of [fs.realpathSync.native, fs.realpathSync].filter(item => typeof item === 'function')) {
+      try { resolved = resolve(path.resolve(String(value))); break; } catch { /* keep what we have */ }
+    }
+    const folded = path.resolve(resolved).replace(/\\/g, '/').replace(/\/+$/, '');
+    return process.platform === 'win32' ? folded.toLowerCase() : folded;
+  };
+  if (!left || !right) return false;
+  return norm(left) === norm(right);
+}
+
+function gitDirAbs(dir) {
+  const result = git(dir, 'rev-parse', '--absolute-git-dir');
+  return result.status === 0 ? result.stdout.trim() : null;
+}
+
+function insideTemp(value) {
+  const norm = item => path.resolve(String(item)).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const parent = norm(os.tmpdir());
+  const child = norm(value);
+  return child === parent || child.startsWith(`${parent}/`);
+}
+
+function rustcFingerprint() {
+  const result = run('rustc', ['-vV']);
+  if (result.status !== 0) return null;
+  return (result.stdout.trim().split('\n')[0] || '').trim() || null;
+}
+
+// A live pid, or provably gone. `process.kill(pid, 0)` answers this on Windows too (ESRCH when gone);
+// EPERM means it exists and belongs to someone else.
+function processAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
+}
+
+// Every cargo output directory in the tree, by cargo's own marker, so clearing them is a measurement
+// and not a guess at the layout.
+function cargoTargetDirs(root) {
+  const found = [];
+  const walk = (dir, level) => {
+    if (level > 4) return;
+    let entries = [];
+    try { entries = fs.readdirSync(dir, {withFileTypes: true}); } catch { return; }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name === 'target') {
+        if (fs.existsSync(path.join(dir, entry.name, 'CACHEDIR.TAG'))) found.push(path.join(dir, entry.name));
+        continue;
+      }
+      if (entry.name === '.git' || entry.name === 'node_modules') continue;
+      walk(path.join(dir, entry.name), level + 1);
+    }
+  };
+  walk(root, 0);
+  return found;
+}
+
+// The lock is what stops two lane runs resetting one tree under each other's gate. A crashed holder is
+// proof-of-death, not a timeout: its lease dies with its pid, so a stale lock cannot disable reuse.
+function holdReuseLock(lockPath) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fd = fs.openSync(lockPath, 'wx');
+      fs.writeSync(fd, `${JSON.stringify({pid: process.pid, started_at: new Date().toISOString()})}\n`);
+      const lock = {fd, path: lockPath, reclaimed: attempt > 0};
+      process.once('exit', () => { try { fs.closeSync(fd); } catch {} try { fs.rmSync(lockPath, {force: true}); } catch {} });
+      return {ok: true, lock};
+    } catch (error) {
+      if (error.code !== 'EEXIST') return {ok: false, reason: `its lock could not be taken: ${error.message}`};
+      let holder = null;
+      try { holder = JSON.parse(fs.readFileSync(lockPath, 'utf8')); } catch { holder = null; }
+      if (holder && processAlive(holder.pid)) {
+        return {ok: false, reason: `it is in use by pid ${holder.pid}`
+          + `${holder.started_at ? ` (holding since ${holder.started_at})` : ''}`};
+      }
+      note(`merge-lane: the reuse lock ${lockPath} was held by pid ${holder?.pid ?? 'an unrecorded process'},`
+        + ' which is gone; taking it over (proof of death, not a timeout).');
+      try { fs.rmSync(lockPath, {force: true}); } catch { /* the retry reports it */ }
+    }
+  }
+  return {ok: false, reason: 'its lock could not be settled: a holder kept taking it'};
+}
+
+function releaseReuseLock(lock) {
+  if (!lock || lock.released) return;
+  lock.released = true;
+  try { fs.closeSync(lock.fd); } catch {}
+  try { fs.rmSync(lock.path, {force: true}); } catch {}
+}
+
+// Bring the persistent tree to exactly the state the clone path would have produced for this candidate.
+function prepareReusedTree(dir, repo, base, options, laneBranch) {
+  const started = nowMs();
+  const failures = [];
+  // What the tree held before the reset, so discarding another run's leftovers is REPORTED rather than
+  // silent. The reset is the guarantee; this is the record of what it was applied to.
+  const before = git(dir, 'status', '--porcelain');
+  const dirt = before.status === 0 ? before.stdout.trim().split('\n').filter(Boolean) : [];
+  const step = (label, args) => {
+    const result = git(dir, ...args);
+    if (result.status !== 0) failures.push(`${label}: ${(result.stderr || result.stdout).trim() || `exit ${result.status}`}`);
+    return result;
+  };
+  const source = git(repo, 'config', '--get', 'core.autocrlf');
+  const autocrlf = source.status === 0 && source.stdout.trim() ? source.stdout.trim() : 'false';
+  // Ignored files go too, EXCEPT cargo's output directories: `-e target` is what keeps the warmth, and it
+  // is also why the tree holds nothing a previous candidate left behind except build output.
+  step('clearing untracked and ignored files', ['clean', '-xdf', '-e', 'target']);
+  step('fetching the repository', ['fetch', '--no-tags', '--quiet', repo]);
+  if (git(dir, 'cat-file', '-e', `${base}^{commit}`).status !== 0) {
+    step('fetching every branch', ['fetch', '--no-tags', '--quiet', repo, '+refs/heads/*:refs/remotes/origin/*']);
+  }
+  if (!failures.length && git(dir, 'cat-file', '-e', `${base}^{commit}`).status !== 0) {
+    failures.push(`the tree does not have the integration target ${base} after fetching; the repository must have it`);
+  }
+  if (!failures.length) {
+    // Pin line-ending handling to the source's BEFORE anything is re-materialised, exactly as the clone
+    // path does: a worktree whose bytes do not match the pinned value reads as dirty, and a dirty tree is
+    // what a merge and the deploy gate both refuse.
+    step('pinning line-ending handling', ['config', 'core.autocrlf', autocrlf]);
+    step('checking out the integration target', ['switch', '--detach', '--force', base]);
+    step('re-materialising the worktree', ['reset', '--hard', base]);
+  }
+  if (failures.length) return {refused: failures.join('; ')};
+  const status = git(dir, 'status', '--porcelain');
+  if (status.status !== 0 || status.stdout.trim()) {
+    return {refused: `its worktree is not clean after a forced reset: ${(status.stdout.trim() || status.stderr.trim()).slice(0, 200)}`};
+  }
+  // This tree's own lane branches, from earlier runs: never pushed, never reused, and a long-lived tree
+  // should not accumulate one ref per landing.
+  const stale = git(dir, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/lane/');
+  if (stale.status === 0) {
+    for (const ref of stale.stdout.trim().split('\n').filter(Boolean)) git(dir, 'update-ref', '-d', `refs/heads/${ref}`);
+  }
+  step('candidate branch', ['switch', '--create', laneBranch, base]);
+  step('pinning origin/main', ['update-ref', 'refs/remotes/origin/main', base]);
+  if (options.hooks) step('arming hooks', ['config', 'core.hooksPath', '.githooks']);
+  else step('disarming hooks', ['config', 'core.hooksPath', '']);
+  if (failures.length) return {refused: failures.join('; ')};
+  return {clone_ms: elapsedMs(started), core_autocrlf: autocrlf, dirt_discarded: dirt.slice(0, 10),
+    dirt_discarded_count: dirt.length};
+}
+
+// The tree to gate in: the persistent one when it is provably safe to reuse, and a disposable clone
+// otherwise. Every refusal is named and recorded; none of them is silent, and none of them decides
+// anything about the candidate - the gate still runs on a tree that is correct.
+function openIntegrationTree(repo, base, options, laneBranch) {
+  const fallback = (reason, extra = {}) => {
+    note(`merge-lane: the persistent tree at ${path.resolve(options.reuseTree)} was NOT reused: ${reason}`);
+    note('merge-lane: this run gates in a disposable clone instead - cold, correct, and slower.'
+      + ` Recovery for a tree that stays unusable: rm -rf "${path.resolve(options.reuseTree)}"`);
+    return {...cloneRepo(repo, base, options, laneBranch), reused: false,
+      reuse_path: path.resolve(options.reuseTree), reuse_refused: reason, ...extra};
+  };
+  if (options.clone) return cloneRepo(repo, base, options, laneBranch);
+  if (!options.reuse) {
+    return {...cloneRepo(repo, base, options, laneBranch), reused: false,
+      reuse_refused: 'reuse was not requested (--no-reuse-tree)'};
+  }
+  const dir = path.resolve(options.reuseTree);
+  if (!options.reuseTreeNamed && insideTemp(repo)) {
+    return fallback('the repository being landed is inside the temp directory, which is where a'
+      + ' disposable fixture lives; the default tree is never created or reset for one', {reuse_created: false});
+  }
+  if (!fs.existsSync(dir)) {
+    const started = nowMs();
+    fs.mkdirSync(path.dirname(dir), {recursive: true});
+    const fresh = cloneRepo(repo, base, {...options, clone: dir}, laneBranch);
+    const owner = {schema: 1, repo: path.resolve(repo), created_at: new Date().toISOString(),
+      created_by_pid: process.pid, toolchain: rustcFingerprint(), runs: 1};
+    fs.writeFileSync(path.join(fresh.git_dir, REUSE_OWNER_FILE), `${JSON.stringify(owner, null, 2)}\n`);
+    note(`merge-lane: created the persistent tree ${dir} (first run: this gate is cold); it is reused from here on`);
+    return {...fresh, reused: false, reuse_created: true, disposable: false, owner, reuse_path: dir,
+      clone_ms: elapsedMs(started), core_autocrlf: fresh.core_autocrlf};
+  }
+  const top = git(dir, 'rev-parse', '--show-toplevel');
+  if (top.status !== 0) return fallback(`it is not a git checkout (${(top.stderr || top.stdout).trim() || `exit ${top.status}`})`);
+  if (!samePath(top.stdout.trim(), dir)) {
+    return fallback(`it is a linked worktree of ${top.stdout.trim()}, not a tree of its own at ${dir}`);
+  }
+  const gitDir = gitDirAbs(dir);
+  if (!gitDir) return fallback('its git directory could not be resolved');
+  const origin = git(dir, 'config', '--get', 'remote.origin.url');
+  if (origin.status !== 0 || !samePath(origin.stdout.trim(), repo)) {
+    return fallback(`its origin is ${origin.stdout.trim() || 'unset'}, not the repository being landed`
+      + ` (${path.resolve(repo)})`);
+  }
+  let owner = null;
+  try { owner = JSON.parse(fs.readFileSync(path.join(gitDir, REUSE_OWNER_FILE), 'utf8')); } catch { owner = null; }
+  if (!owner || !owner.repo || !samePath(owner.repo, repo)) {
+    return fallback(`its owner record (${path.join(gitDir, REUSE_OWNER_FILE)}) is missing or names`
+      + ` ${owner?.repo ? path.resolve(owner.repo) : 'nothing'}; this lane only reuses a tree it created`
+      + ' for the repository being landed');
+  }
+  const held = holdReuseLock(path.join(gitDir, REUSE_LOCK_FILE));
+  if (!held.ok) return fallback(held.reason);
+  const toolchain = rustcFingerprint();
+  const cleared = [];
+  if (owner.toolchain && toolchain && owner.toolchain !== toolchain) {
+    // The poisoning answer: an output directory built by another compiler is not trusted, it is removed.
+    // The cost is one cold gate, and it is named here rather than paid silently.
+    for (const target of cargoTargetDirs(dir)) {
+      try { fs.rmSync(target, {recursive: true, force: true}); cleared.push(path.relative(dir, target).replace(/\\/g, '/')); }
+      catch (error) { note(`merge-lane: could not remove ${target}: ${error.message}; NOT reusing the tree`); }
+    }
+    note(`merge-lane: rustc changed since this tree was built (${owner.toolchain} -> ${toolchain});`
+      + ` removed ${cleared.length} cargo output director${cleared.length === 1 ? 'y' : 'ies'}: ${cleared.join(', ') || 'none'}`);
+    if (cleared.length === 0) { releaseReuseLock(held.lock); return fallback('the recorded toolchain changed and no cargo output directory could be cleared'); }
+  }
+  const prepared = prepareReusedTree(dir, repo, base, options, laneBranch);
+  if (prepared.refused) { releaseReuseLock(held.lock); return fallback(prepared.refused); }
+  if (prepared.dirt_discarded_count) {
+    note(`merge-lane: the persistent tree held ${prepared.dirt_discarded_count} modified or untracked path(s)`
+      + ` from an earlier run; the forced reset to ${base.slice(0, 12)} discarded them:`
+      + ` ${prepared.dirt_discarded.join(', ')}${prepared.dirt_discarded_count > prepared.dirt_discarded.length ? ', ...' : ''}`);
+  }
+  fs.writeFileSync(path.join(gitDir, REUSE_OWNER_FILE), `${JSON.stringify({...owner, repo: path.resolve(repo),
+    toolchain, last_used_at: new Date().toISOString(), last_used_pid: process.pid, runs: (owner.runs || 1) + 1}, null, 2)}\n`);
+  note(`merge-lane: reusing the persistent tree ${dir} (warm build, no clone); lock pid ${process.pid}`);
+  return {dir, git_dir: gitDir, clone_ms: prepared.clone_ms, core_autocrlf: prepared.core_autocrlf, reused: true,
+    disposable: false, reuse_path: dir, owner, lock: held.lock, toolchain_cleared: cleared,
+    reuse_dirt_discarded: prepared.dirt_discarded, reuse_dirt_discarded_count: prepared.dirt_discarded_count};
+}
+
+// The gate's phase table (scripts/lib/gate-phases.sh), read from the file this lane told the gate to
+// write, and from the line it printed into its own log when that file is missing (a holder that died
+// mid-gate). Absent is reported as absent: this lane never invents a duration, and a missing table is
+// NOT a gate failure - the verdict line is what decides that.
+function gatePhases(phasesPath, log) {
+  let parsed = null;
+  let source = null;
+  try { parsed = JSON.parse(fs.readFileSync(phasesPath, 'utf8')); source = 'file'; } catch { parsed = null; }
+  if (!parsed || !Array.isArray(parsed.phases)) {
+    const match = /^gate phases json: (\{.*\})$/m.exec(log);
+    if (match) { try { parsed = JSON.parse(match[1]); source = 'log'; } catch { parsed = null; } }
+  }
+  if (!parsed || !Array.isArray(parsed.phases)) return null;
+  return {source, phases: parsed.phases, total_ms: parsed.total_ms ?? null, skipped: parsed.skipped ?? null,
+    cargo_jobs: parsed.cargo_jobs ?? null, test_threads: parsed.test_threads ?? null};
+}
+
 
 function crlfCheck(cwd) {
   const result = git(cwd, 'grep', '--cached', '-I', '-l', '\r');
@@ -395,7 +690,7 @@ async function main() {
   const steps = [];
   const conflictStops = blocked.length && !options.partial;
   if (accepted.length && !conflictStops) {
-    clone = cloneRepo(gitDir, baseSha, options, laneBranch);
+    clone = openIntegrationTree(gitDir, baseSha, options, laneBranch);
     for (const record of accepted) {
       const stepStarted = nowMs();
       const step = {name: record.name, sha: record.sha, state: 'merged', ms: null, conflicts: [], detail: null};
@@ -460,7 +755,7 @@ async function main() {
   if (clone && crlf.state !== 'offenders' && (!blocked.length || options.partial)) {
     // Inside `.git`, not the worktree: the gate asks for a clean tree (scripts/test-deploy-downgrade.sh
     // refuses on dirt), so the lane's own log must not be the dirt it reports.
-    const logPath = path.join(clone.dir, '.git', 'wa-merge-lane-gate.log');
+    const logPath = path.join(clone.git_dir, 'wa-merge-lane-gate.log');
     const environment = {...process.env};
     const dropped = [];
     // The gate is the repository's, and it must run in the environment it was written for. This lane's
@@ -503,6 +798,13 @@ async function main() {
       note(`merge-lane: the merged tree was NOT gated - the gate lane granted no slot: ${slot.record.reason}`);
     } else {
       environment.GATE_LANE_HELD = slot.marker;
+      // Phase timing is the gate's own instrumentation (scripts/lib/gate-phases.sh); this lane only names
+      // where the machine-readable copy goes and reads it back. The file is removed first, because a
+      // previous run's table must never be read as this run's - the same reason
+      // scripts/test-node-instances.sh deletes its verdict file before it runs the suite.
+      const phasesPath = path.join(clone.git_dir, 'wa-merge-lane-phases.json');
+      fs.rmSync(phasesPath, {force: true});
+      environment.GATE_PHASES_JSON = phasesPath;
       const gateStarted = nowMs();
       // The gate's own words are streamed to the file as they arrive, the way
       // `skills/parallel-evolution/scripts/finish.mjs` already does it: a holder that dies mid-gate then
@@ -532,6 +834,9 @@ async function main() {
       gate.skipped = verdict.skipped;
       gate.verdict_line = verdict.line;
       gate.verdict_found = verdict.found;
+      gate.phases_file = phasesPath;
+      gate.phases = gatePhases(phasesPath, log);
+      gate.phases_total_ms = gate.phases ? gate.phases.total_ms : null;
     }
     gate.environment_dropped = dropped;
   }
@@ -554,7 +859,10 @@ async function main() {
   const exitCode = verdict === 'pass' || verdict === 'nothing_to_merge' || verdict === 'merge_only' ? 0
     : verdict === 'blocked' ? 2 : verdict === 'gate_refused' ? 6 : 3;
 
-  const retainClone = Boolean(clone) && (options.keepClone || exitCode !== 0);
+  // A persistent tree is NEVER removed by this lane, whether it was just created or reused: it is the
+  // thing that makes the next gate warm, and a lane that deletes its own cache on success is a lane that
+  // pays the cold gate forever. Only a disposable clone is cleaned up.
+  const retainClone = Boolean(clone) && (clone.disposable === false || options.keepClone || exitCode !== 0);
   const result = {
     schema: 1, lane: 'merge-lane', verdict, exit_code: exitCode,
     repo: gitDir, base: {ref: options.base, sha: baseSha},
@@ -567,8 +875,12 @@ async function main() {
     candidate: {branch: laneBranch, head: candidateHead, tree: candidateTree, merges: candidateMerges,
       gated: gate.ran, stopped_before_merge: Boolean(accepted.length && !clone), steps},
     checks: {crlf, merge_subjects_judged_by: options.hooks && clone ? `${clone.dir}/.githooks` : null},
-    gate, clone: clone ? {path: clone.dir, clone_ms: clone.clone_ms, core_autocrlf: clone.core_autocrlf,
-      retained: retainClone, cleanup: retainClone ? `rm -rf "${clone.dir}"` : null} : null,
+    gate, clone: clone ? {path: clone.dir, git_dir: clone.git_dir, clone_ms: clone.clone_ms,
+      core_autocrlf: clone.core_autocrlf, reused: clone.reused === true, reuse_created: clone.reuse_created === true,
+      reuse_path: clone.reuse_path || null, reuse_refused: clone.reuse_refused || null, owner: clone.owner || null,
+      toolchain_cleared: clone.toolchain_cleared || [],
+      reuse_dirt_discarded: clone.reuse_dirt_discarded || [], retained: retainClone,
+      cleanup: clone.disposable === false ? null : retainClone ? `rm -rf "${clone.dir}"` : null} : null,
     discovery: {complete: discovery.discovery_complete, errors: discovery.errors, warnings,
       pending_tips: discovery.pending_tips, counts: discovery.counts, timings_ms: discovery.timings_ms},
     identity: IDENTITY,
@@ -580,7 +892,8 @@ async function main() {
     timings_ms: timings,
     note: 'The spine never pushes and never moves main. A blocked input is named, and the exit is nonzero: no silent drop and no success.',
   };
-  if (clone && !retainClone) {
+  if (clone && clone.reused === true) releaseReuseLock(clone.lock);
+  if (clone && !retainClone && clone.disposable !== false) {
     fs.rmSync(clone.dir, {recursive: true, force: true});
     result.clone.removed = true;
     result.clone.path = null;
