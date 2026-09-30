@@ -217,6 +217,32 @@
           </button>
           <div class="engine-content" id="jobs-box" hidden><wa-jobs></wa-jobs></div>
         </div>
+        <!-- The bell for THIS device. Its state lives in this window's own storage, so it is per
+             machine by construction and not a node setting: the node cannot know which device is
+             awake, and a device the operator is not sitting at must not decide for this one. The
+             state is on the topic row itself, so it is readable without expanding the card. -->
+        <div class="engine-topic">
+          <button class="engine-head" type="button" data-target="notify-box">
+            <span class="engine-caret">▸</span><span class="engine-name">notifications</span>
+            <span class="engine-note" id="notify-state">off on this device</span>
+          </button>
+          <div class="engine-content" id="notify-box" hidden>
+            <label class="notify-toggle" for="notify-bell">
+              <input id="notify-bell" type="checkbox" />
+              <span class="notify-bell" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5a5 5 0 0 0-5 5v3.1L5.4 15.2h13.2L17 11.6V8.5a5 5 0 0 0-5-5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9.8 18a2.3 2.3 0 0 0 4.4 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+              <span class="notify-label">Notify this device when a child task settles and needs evaluation</span>
+            </label>
+            <p class="notify-detail" id="notify-detail">Stored in this window's own storage, so it is per device.</p>
+            <div class="notify-actions">
+              <button id="notify-test" class="notify-test" type="button">Send a test notification</button>
+              <span class="notify-result" id="notify-result" role="status" aria-live="polite"></span>
+            </div>
+            <p class="notify-detail notify-diagnostic">Shell-level check, with no window page involved:
+              <code>wa-window.exe --notify-test "title" "body"</code> — exits 0 when Windows accepted the
+              toast and 3 when it did not, and writes the result to
+              <code>%LOCALAPPDATA%\wasm-agent\wa-window.log</code>.</p>
+          </div>
+        </div>
       </div>
     </section>
 

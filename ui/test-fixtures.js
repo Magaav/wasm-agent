@@ -15,6 +15,21 @@ window.__makeShell = () => ({
   expand() { window.__shellCalls.push({ call: "expand" }); },
   compact() { window.__shellCalls.push({ call: "compact" }); },
   maximize() { window.__shellCalls.push({ call: "maximize" }); },
+  // The shell is the only thing that can raise a Windows notification, so the fake one answers like the
+  // real one: a result object, recorded so a check can assert an *absent* call instead of a rendered
+  // effect. `__notifyDenied` models the shell that is present but cannot raise (see rust/wa-window).
+  notify(options) {
+    window.__shellCalls.push({ call: "notify", title: options?.title, body: options?.body, diagnostic: options?.diagnostic === true });
+    return Promise.resolve(window.__notifyDenied
+      ? { supported: false, delivered: false, reason: "fixture: the platform refused the identity" }
+      : { supported: true, delivered: true, identity: "WasmAgent.Window", app_name: "wasm-agent",
+          reason: "accepted by the Windows notification platform" });
+  },
+  notifySupport() {
+    window.__shellCalls.push({ call: "notifySupport" });
+    return Promise.resolve({ supported: true, delivered: false, identity: "WasmAgent.Window", app_name: "wasm-agent",
+      reason: "ready: notifications are enabled for WasmAgent.Window" });
+  },
 });
 window.__shellCalls = [];
 

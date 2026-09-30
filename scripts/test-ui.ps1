@@ -86,6 +86,14 @@ $harness = @'
     check(stalePending === 0 && !window.__toolTickerActive(),
       "a repainted tool must not invent a new 300-second execution clock, saw " + stalePending +
       " pending line(s) and ticker=" + window.__toolTickerActive());
+    // The device-local notification choice, read back after a real navigation. This is the whole point
+    // of keeping it in this window's storage rather than in a node setting: a reload is what a device
+    // does, and the choice has to be there afterwards, showing its state.
+    check(localStorage.getItem("wa.notify.settlement") === "on" &&
+      document.getElementById("notify-bell").checked === true &&
+      document.getElementById("notify-state").textContent === "on for this device",
+      "the device-local bell must survive a real reload, saw: " + localStorage.getItem("wa.notify.settlement") +
+      " / " + document.getElementById("notify-state").textContent);
     var unrecordedCount = restored.querySelectorAll("wa-trace .tool-line.unrecorded").length;
     check(unrecordedCount === 2,
       "a real reload must close historical as well as current missing tool calls, saw " + unrecordedCount);
@@ -2324,10 +2332,69 @@ $harness = @'
   check(!!incompleteCommentary && incompleteCommentary.querySelector('.commentary-body').textContent==='Partial commentary',
     'interrupted streamed commentary remains visible and marked incomplete');
   document.title = "stage: end";
-  // The main conversation still *sends*, and it sends through the shared shell. The run itself is
-  // covered above (a picture's own body, Stop, steering); what is proven here is that the shell is
-  // the surface the app's send path is reached through - the user turn lands in the transcript the
-  // shell renders and the field is cleared, which happens only inside send().
+  // ---- the notification bell, and the toast only the shell can raise -----------------------------
+  // What the operator asked for: a bell in the engine menu, per device, and a real OS notification
+  // when a settlement needs a judgement. The wake `lua/core/completions.lua` starts is the only thing
+  // that notifies - its row is written into this thread exactly where `review.needs_wake` was true, and
+  // the classes the outbox skips (a self-reporting responder, a cancelled child with a clean checkout)
+  // never write one, so there is nothing here to raise for them.
+  var notifyBell = document.getElementById("notify-bell");
+  var notifyHead = document.querySelector('#engine .engine-head[data-target="notify-box"]');
+  var notifyState = document.getElementById("notify-state");
+  check(!!notifyHead && !!notifyBell && notifyHead.contains(notifyState) &&
+    document.getElementById("engine").contains(notifyBell),
+    "the engine menu must carry the notification bell");
+  check(notifyState.textContent === "off on this device" && notifyBell.checked === false &&
+    localStorage.getItem("wa.notify.settlement") === null,
+    "a device that was never switched on must show the bell off, saw: " + notifyState.textContent);
+  check(document.getElementById("notify-test").disabled === true,
+    "with the bell off the test control must be off too: nothing is raised on this device");
+  var notifyCalls = function () {
+    return window.__shellCalls.filter(function (call) { return call.call === "notify"; });
+  };
+  var wakeNotice = "[Child completion notice] Task 3e0011d1-child settled. Reported state: " +
+    JSON.stringify({ state: "completed", session_id: "11111111-child", error: null }) +
+    ". Evaluation packet, assembled from its receipt when it settled";
+  window.__setShell(window.__makeShell());
+  window.__repaintMessages([
+    { seq: 1, role: "user", content: "an ordinary question" },
+    { seq: 2, role: "user", content: wakeNotice },
+  ]);
+  for (var offTick = 0; offTick < 20; offTick++) { await tick(); }
+  check(notifyCalls().length === 0,
+    "with the bell off a settlement must raise nothing at all (not raised-then-hidden), saw " +
+    notifyCalls().length + " notify call(s)");
+  // On: the same kind of row, one the device has not seen, raises exactly one toast whose text names
+  // the child and the state the wake itself reported.
+  notifyBell.checked = true;
+  notifyBell.dispatchEvent(new Event("change"));
+  check(notifyState.textContent === "on for this device" && notifyBell.checked === true &&
+    localStorage.getItem("wa.notify.settlement") === "on",
+    "switching the bell on must be stored on this device and shown on the topic row");
+  window.__repaintMessages([
+    { seq: 3, role: "user", content: "another ordinary question" },
+    { seq: 4, role: "user", content: wakeNotice.replace("3e0011d1-child", "3e0011d1-second") },
+  ]);
+  for (var onTick = 0; onTick < 20; onTick++) { await tick(); }
+  var raised = notifyCalls();
+  check(raised.length === 1, "with the bell on the settlement must raise exactly one notification, saw " + raised.length);
+  check(raised.length === 1 && raised[0].title === "Evaluation owed" &&
+    raised[0].body.indexOf("3e0011d1-second") >= 0 && raised[0].body.indexOf("completed") >= 0,
+    "and it must name the child and the state the wake reported, saw: " + JSON.stringify(raised[0] || null));
+  var deliveredNote = document.getElementById("notify-result");
+  check(deliveredNote.dataset.delivered === "true" && /wasm-agent/.test(deliveredNote.textContent),
+    "and the card must show the shell's own delivered result, saw: " + deliveredNote.textContent);
+  // A repaint of the same rows is not a second settlement.
+  window.__repaintMessages([{ seq: 4, role: "user", content: wakeNotice.replace("3e0011d1-child", "3e0011d1-second") }]);
+  for (var againTick = 0; againTick < 20; againTick++) { await tick(); }
+  check(notifyCalls().length === 1, "a repeated repaint of one settlement must not raise it twice, saw " + notifyCalls().length);
+  // The on-demand path from the menu: the shell raises, and the answer is the shell's.
+  document.getElementById("notify-test").click();
+  for (var testTick = 0; testTick < 20; testTick++) { await tick(); }
+  var diagnostic = notifyCalls().filter(function (call) { return call.diagnostic === true; });
+  check(diagnostic.length === 1, "the menu's test control must ask the shell for one notification, saw " + diagnostic.length);
+  window.__setShell(null);
+  // The bell stays ON into the reload below, which is where its persistence is asserted.
   window.__setBusy(false);
   var mainBox=document.getElementById('input');
   var userTurnsBefore=document.querySelectorAll('wa-message.user').length;
