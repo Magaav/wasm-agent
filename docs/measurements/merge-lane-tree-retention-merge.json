@@ -1,24 +1,55 @@
 {
   "schema": 1,
-  "what": "re-merging the new origin/main into the persistent-tree landing, and answering whether the new retention sweep and the persistent tree can coexist",
-  "status": "IN PROGRESS",
+  "what": "the persistent gate tree re-merged onto the new main (ad3acad6), with the retention sweep, and whether the two mechanisms coexist",
+  "status": "COMPLETE for the merge, the coexistence proof and the gate receipt; two suite legs are LIMITED and are named under 'not_verified'",
   "branch": "change/wa-session-childdispatchcd206d1c-287c-46fa-919d-703ff645dc5e",
-  "my_tip_before_this_merge": "7ed53a38e057b3aab88c7d56f185f057c8561290",
-  "new_main": "ad3acad6a2c242cc678ffd303911efa2e7ec33c6",
-  "my_base_before_this_merge": "da8dc8918a34c880768956ff775d883802dcb7a7",
-  "why": "the merge lane refused the five-tip landing honestly: 7ed53a38 conflict in scripts/merge-lane.mjs. The sibling is the disk-reclaim/retention delivery (90766a96): it adds a bounded retention sweep of the wa-merge-lane-* family in the temp root, a derived pre-lease grace (gate-lane wait 7200 + this lane's gate timeout 3600 + 60 = 10860 s), and a rename probe before any deletion. My mechanism adds the persistent reusable tree in the same file.",
-  "the_question_that_decides": "can a tree that is meant to survive between landings be a candidate for a sweep whose whole purpose is to delete trees like it? The sweep enumerates os.tmpdir() entries whose name starts with 'wa-merge-lane-'. The default persistent tree is outside the temp root (~/.wasm-agent/merge-lane-tree, or WA_MERGE_LANE_TREE). The proof has to be about the path and the name, not about the intent.",
-  "plan": [
-    "merge origin/main into this branch, resolve scripts/merge-lane.mjs preserving BOTH intents",
-    "prove the sweep's candidate set excludes the persistent tree, and name the one configuration in which it would not",
-    "re-run scripts/test-merge-lane.mjs and scripts/test-merge-lane-retention.mjs on the merged tree",
-    "re-measure cold and warm gate.ms on the merged tree, because main adds five suites to scripts/test.sh",
-    "commit the proof, then push the branch"
+  "pushed_tip": "144810842777bc0cc4565b903cfef028feea440c",
+  "merge": {
+    "base": "ad3acad6a2c242cc678ffd303911efa2e7ec33c6",
+    "merge_commit": "8cefa3532c48f5c66f9bb85c4748df11005af234",
+    "conflict": "ONE file: scripts/merge-lane.mjs. scripts/test.sh auto-merged.",
+    "hunks_and_resolution": [
+      "parseArgs(): both sides added defaults to the same literal. Kept main's `keepClones: retentionKeep(process.env[CLONE_KEEP_VARIABLE], ...)` AND this branch's `reuse`/`reuseTree`/`reuseTreeNamed`, plus `--reuse-tree` in the `needs` set (this branch's only new option; main's set was otherwise unchanged).",
+      "main() step 3: main's pre-clone retention sweep AND this branch's `openIntegrationTree(...)` instead of `cloneRepo(...)`. The sweep still runs FIRST, which is what main's own comment requires ('before anything new is made'); it reads the temp root, and the tree this branch reuses is not in it, so its ordering does not wait on the reuse decision.",
+      "the retain decision: main's bound (`exitCode !== 0 && options.keepClones !== 0`) applies to a DISPOSABLE clone, and this branch's rule (`clone.disposable === false` is always retained) keeps the persistent tree. Both terms are present; neither delivery's rule was dropped. The removal guard below it (`clone.disposable !== false`) had already auto-merged."
+    ]
+  },
+  "two_closures_the_textual_merge_could_not_make": {
+    "why": "both are the same question - can a tree meant to survive between landings be a candidate for a sweep whose purpose is to delete leftovers like it?",
+    "guard": "openIntegrationTree() refuses, by name, a reuse path that is inside the temp root and whose own basename starts with `wa-merge-lane-` (CLONE_PREFIX), and falls back to a disposable clone. A tree idle between landings is a directory nobody holds, which is exactly what the sweep's rename probe allows, so this is the one configuration in which the sweep could have deleted it. The check is deliberately STRICTER than the sweep's current candidate regexes (a name it cannot see a reason to prune today is not a promise about tomorrow's sweep). Cost of refusing: a named cold clone in clone.reuse_refused.",
+    "budget": "the final sweep's `currentKept` no longer counts the persistent tree against the retention budget: `currentKept: retainClone && clone.disposable !== false`. A persistent tree is not in the family the sweep can prune, so counting it spends the budget on an invisible path and prunes the newest leftover anyway - i.e. a passing WARM landing would delete the newest failing run's clone, which is the tree the retention rule keeps so a red gate can be re-run. `current` still names the tree the run gated in."
+  },
+  "sweep_candidate_probe": {
+    "command": "node docs/measurements/merge-lane-tree-vs-retention-probe.mjs",
+    "read_only": "fabricated fixture temp root for A/B; part C sweeps the real temp root with keep=1000 so nothing may be pruned and only the record's candidate lists are read",
+    "A_currentKept_true_the_old_budget_read": "budget_for_others 0, kept [], removed [wa-merge-lane-abc123], leftover survived: false - the interaction the fix closes",
+    "B_currentKept_false_what_the_merged_lane_passes": "budget_for_others 1, kept [wa-merge-lane-abc123], removed [], leftover survived: true",
+    "C_real_temp_root": "family wa-merge-lane-*, candidates seen 2, removed 0, persistent tree among them: false, persistent tree inside the swept root at all: false",
+    "grace": "legacyGraceMs({}) = 10860 s (7200 gate-lane wait + 3600 gate timeout + 60 slack), as main derives it",
+    "answer": "the persistent tree is never a deletion candidate: the sweep enumerates os.tmpdir() entries only, the default tree (WA_MERGE_LANE_TREE, else ~/.wasm-agent/merge-lane-tree) is outside that root, and the one configuration that would have put a tree inside the family is now refused by name."
+  },
+  "gate_receipt_merged_tree": {
+    "command": "node scripts/merge-lane.mjs --repo C:/Users/Victor/orca/projects/wasm-agent --reuse-tree C:/Users/Victor/.wasm-agent/merge-lane-tree-landing --json <out> 8cefa3532c48f5c66f9bb85c4748df11005af234",
+    "gate_command": "bash scripts/test.sh (the lane's default; never overridden)",
+    "candidate_tree": "4c5cc536182ce1e6e0302c93c460df4893c6375d (the same tree for both runs)",
+    "cold": {"json": "C:/Users/Victor/.wasm-agent/merge-lane-retention-cold.json", "gate_ms": 1619933.554, "gate_exit": 0, "verdict_line": "smoke ok (2 skipped)", "skipped": 2, "clone": {"reused": false, "reuse_created": true, "clone_ms": 1287.526}, "phases_ms": {"build": 756971, "instances": 70628, "self-update": 67512, "cli": 4467, "memory-update": 26188, "tools": 70547, "sessions": 182600, "recovery-cli": 2447, "plugins": 173732, "fixtures": 6116, "subagents": 233830}, "lane": "slot #197 granted after waiting 1254.9 s (a landing held it; the wait is gate.lane.waited_ms, not gate.ms)"},
+    "warm": {"json": "C:/Users/Victor/.wasm-agent/merge-lane-retention-warm.json", "gate_ms": 858965.58, "gate_exit": 0, "verdict_line": "smoke ok (2 skipped)", "skipped": 2, "clone": {"reused": true, "clone_ms": 576.502, "reuse_dirt_discarded": [], "toolchain_cleared": []}, "phases_ms": {"build": 22731, "instances": 54575, "self-update": 66718, "cli": 4629, "memory-update": 25907, "tools": 69944, "sessions": 182493, "recovery-cli": 2660, "plugins": 165286, "fixtures": 5605, "subagents": 233730, "ui-js": 15966, "ui-browser": 8187}, "lane": "slot #198 granted at once"},
+    "saving_ms": 760967.974,
+    "saving_note": "12.68 min per landing on the merged tree, against the pre-merge pair's 800463 ms. The saving shrank because main added five suites to scripts/test.sh: the warm gate grew (825069 -> 858966) as well as the cold one (1625532 -> 1619934). It is still essentially all build: 756971 ms cold against 22731 ms warm.",
+    "retention_record_in_the_warm_run": {"pre_sweep": {"kept": 1, "removed": 0, "current": null, "current_kept": false, "budget_for_others": 1}, "post_sweep": {"kept": 1, "removed": 0, "live": 1, "in_use": 0, "current": "C:\\\\Users\\\\Victor\\\\.wasm-agent\\\\merge-lane-tree-landing", "current_kept": false, "budget_for_others": 1}, "reading": "a real warm landing's own record: the persistent tree appears only as `current`, is never in removed/kept, and current_kept is false - the budget fix is what a real run shows, not only the probe"},
+    "tree": "C:/Users/Victor/.wasm-agent/merge-lane-tree-landing, rust/target 852M before and after the warm run; no wa-merge-lane-* worktree of its own"
+  },
+  "focused_proofs": {
+    "scripts/test-merge-lane.mjs": "NOT FINISHED on the merged tree: killed by my own 900 s bound in block 1 (`FAIL exit 0 - exit 143`), the fixture lane process still waiting for the gate slot - other lanes were gating throughout (slots #194-#199). It passed 83/83 on the pre-merge tree earlier today. It now also carries the check that pins the new in-temp refusal, which is therefore ALSO UNVERIFIED.",
+    "scripts/test-merge-lane-retention.mjs": "2/15 ok, 13 FAILED - and the failure is main's, not this merge's: the suite's first block slices scripts/test.sh from line 1 to the `# ---- end of the bounded gate-home block` marker and runs it in a fixture cwd, and that slice now contains main's `bash scripts/check-disk-floor.sh` (line 19), which exits 127 there (`bash: scripts/check-disk-floor.sh: No such file or directory`). Evidence: the first 60 lines of my scripts/test.sh and of `git show origin/main:scripts/test.sh` are byte-identical, that line is in both, and my phase markers are at lines 159-161, OUTSIDE the slice (which ends at the line 153 trap / its marker). So a two-delivery interaction inside main (disk floor + temp retention) is red on main itself.",
+    "reuse_and_refusal": "the probe above plus the real warm run's clone record (reused true, clone_ms 576.502, reuse_dirt_discarded [], toolchain_cleared []) are the reuse evidence on the merged tree; the refusal paths are the suite's block 9b, which this window could not finish."
+  },
+  "not_verified": [
+    "scripts/test-merge-lane.mjs on the merged tree (killed at 900 s by admission, not by a failing check) - so the new in-temp refusal check is written and committed but has not been observed passing.",
+    "the retention suite as a green suite: its 13 failures are attributed to main's slice/disk-floor interaction by text identity, NOT by a run against a bare origin/main worktree.",
+    "no concurrent gate was run against the same tree; every run here held the slot serially (#197, #198).",
+    "the release-profile invalidation probe from the earlier delivery was not re-run on the merged tree (still only the cfg(test) probe of 56920b8).",
+    "cold and warm were measured once each on the merged tree, under other lanes' load, with a 1255 s cold wait for the slot."
   ],
-  "still_unproven_at_this_commit": [
-    "the conflict resolution",
-    "whether the persistent tree can be swept",
-    "the merged tree's cold/warm gate.ms",
-    "the focused suites on the merged tree"
-  ]
+  "limits_and_recovery": "run artifacts: C:/Users/Victor/.wasm-agent/merge-lane-retention-{cold,warm}.json (+ .gate.log). The persistent tree is C:/Users/Victor/.wasm-agent/merge-lane-tree-landing (1.1G, 852M of it rust/target); the lane never deletes it, and `rm -rf` forces a cold gate. This lane did not move main, did not push main, did not force or rewrite the branch, and did not touch any file of the retention/disk-floor deliveries."
 }
