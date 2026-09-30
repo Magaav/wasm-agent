@@ -149,6 +149,15 @@ page and Lua reads by 610..611 ms. The 600 ms barrier intentionally sets the obs
 delay; these small controlled samples locate bottlenecks and cannot choose production
 timeouts or establish production throughput.
 
+With the dispatcher and read selection fix, three fresh scratch verifications took
+3.63..3.67 seconds including a pressure phase. Reads stayed at 1..7 ms; depth-2 queue
+overflow returned `admission_busy` in 1..2 ms. The active holder and two staggered waiters
+expired in 1801..1809 ms under a fixture deadline of 1800 ms. After release, expired
+tokens never entered Lua or run handlers, and recovery completed without inference.
+Normal verification includes this phase; `--phase pressure` selects it alone.
+The 8-second watchdog starts cleanup; child-exit verification has its own 1.2-second
+bound. These are controlled fixture measurements, not production latency promises.
+
 ## The admission rules
 
 1. **One writer per conversation, from admission to completion.** A conversation is

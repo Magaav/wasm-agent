@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 // Hermetic listener/admission and background/read routing probes. No builds or live node access.
 // node scripts/test-bg-responsiveness.cjs <wa-binary> [--expect-reproduction]
-//   [--phase all|routing|admission] [--compiled-serve-sha256 <build-time serve.rs hash>]
+//   [--phase all|routing|admission|pressure] [--compiled-serve-sha256 <build-time serve.rs hash>]
 //   [--report <JSON path>] [--keep]
 // Default: post-fix verification. Baseline mode requires reproduction in each selected phase.
+// Admission pressure runs only in verification (all or pressure), with queue depth 2 and a
+// 1.8s deadline. A timed-out holder keeps Lua busy until explicitly released; expired queued
+// tokens must never enter Lua, take run ownership, or invoke the local provider afterwards.
 // The caller-supplied compiled hash is an external build attestation, not extracted from wa.
 // An installed binary without that attestation is historical evidence, never current-source proof.
 // Minimal Lua fixtures replace application logic, retaining the binary's real serve/scheduler/
@@ -32,7 +35,8 @@ for (let i = 2; i < process.argv.length; i++) {
   } else if (!arg.startsWith('--') && !options.binary) options.binary = arg;
   else throw new Error('Unknown argument: ' + arg);
 }
-assert.ok(['all', 'routing', 'admission'].includes(options.phase), 'invalid --phase');
+assert.ok(['all', 'routing', 'admission', 'pressure'].includes(options.phase), 'invalid --phase');
+assert.ok(!(options.expect && options.phase === 'pressure'), 'pressure is a verify-only phase');
 if (options['compiled-serve-sha256']) assert.match(options['compiled-serve-sha256'], /^[a-f0-9]{64}$/i);
 const binary = path.resolve(options.binary || path.join(root, 'rust/target/release', process.platform === 'win32' ? 'wa.exe' : 'wa'));
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-bg-responsiveness-'));
@@ -42,11 +46,14 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const elapsed = () => Math.round(performance.now() - started);
 const children = [], reservations = [], sockets = new Set();
 let mock, backgroundResponse, backgroundReleased = false, backgroundSeen = false;
+let mockRequests = 0;
 let stopping = false, stopPromise, fatal;
 const report = {
   schema: 1, mode: options.expect ? 'expect-reproduction' : 'verify', phase: options.phase,
   work, binary: { path: binary }, phases: {}, childPids: [],
-  bounds: { totalMs: 12000, barrierMs: 600, requestMs: 2200, admissionTimeoutMs: 1800 },
+  bounds: { totalMs: 8000, barrierMs: 600, requestMs: 2200, admissionTimeoutMs: 1800,
+    admissionQueueDepth: 2, pressureReadMs: 300, pressureDeadlineSlackMs: 300 },
+  skippedPhases: options.expect ? ['pressure: verify-only'] : [],
 };
 
 // Remove provider configuration, proxies, and all node/test knobs; never print their values.
@@ -94,6 +101,7 @@ function request(port, route, { method = 'GET', body = '', session = '', headers
     });
     req.on('socket', (socket) => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
     req.on('error', (error) => settle({ error: error.message }));
+    req.on('finish', () => { measurement.sentMs = elapsed(); });
     const timer = setTimeout(() => { settle({ timedOut: true }); req.destroy(); }, timeout);
     req.end(body);
   });
@@ -158,6 +166,12 @@ function wa_sessions(session) return read(session) end
 function wa_identity() return json.encode({user={id='fixture-owner'}}) end
 function wa_admission(session, node, body)
   local args = json.decode(body)
+  if args.probe == 'pressure' then
+    assert(type(args.token) == 'string' and args.token:match('^[a-z0-9%-]+$'))
+    assert(host.write_file(scratch .. '/' .. args.token .. '.entered', instance))
+    if args.token == 'pressure-holder' then barrier('pressure') end
+    if args.token == 'pressure-recovery' then return json.encode({error='fixture_pressure_recovered'}) end
+  end
   if args.probe == 'admission' then
     barrier('admission')
     return json.encode({error='fixture_admission_released'})
@@ -165,6 +179,10 @@ function wa_admission(session, node, body)
   return json.encode({conversation=args.thread, user={id='fixture-owner'}})
 end
 function wa_reply(body)
+  local args = json.decode(body)
+  if args.probe == 'pressure' then
+    assert(host.write_file(scratch .. '/' .. args.token .. '.run-entered', instance))
+  end
   local answer = host.http_stream('POST', assert(host.getenv('WASM_AGENT_LLM_BASE_URL')) .. '/v1/chat/completions', '{}', body)
   if type(answer) == 'string' then answer = json.decode(answer) end
   assert(not answer.error and answer.status == 200, json.encode(answer))
@@ -270,12 +288,101 @@ async function admissionProbe(port) {
   phase.passed = options.expect ? phase.reproduced : phase.pendingWhileHeld.length === 0;
 }
 
+async function pressureProbe(port) {
+  const phase = report.phases.pressure = {
+    queueDepth: report.bounds.admissionQueueDepth, deadlineMs: report.bounds.admissionTimeoutMs,
+    responsive: [], inferenceBefore: mockRequests,
+  };
+  const tokenEntered = (token) => fs.existsSync(path.join(work, token + '.entered'));
+  const ownsPressure = (health) => (health.runs || []).some((run) => run.conversation.startsWith('pressure-'));
+  const pressureIds = (health) => (health.run_ids || []).filter((run) => run.conversation.startsWith('pressure-'));
+  const submit = (token) => request(port, '/chat', { method: 'POST', session: token,
+    timeout: phase.deadlineMs + report.bounds.pressureDeadlineSlackMs + 200,
+    body: JSON.stringify({ probe: 'pressure', token, thread: token }) });
+  const timelyReads = async (label) => {
+    const probes = [request(port, '/health', { timeout: report.bounds.pressureReadMs }),
+      request(port, '/', { timeout: report.bounds.pressureReadMs }),
+      request(port, '/me', { session: 'pressure-read-' + label, timeout: report.bounds.pressureReadMs })];
+    await Promise.all(probes.map((probe) => probe.promise));
+    phase.responsive.push({ label, probes: probes.map(json) });
+    for (const probe of probes) healthy(probe);
+    const health = probes[0].value;
+    assert.ok(!ownsPressure(health), 'pressure requests must not own run lanes');
+    assert.equal(pressureIds(health).length, 0, 'pressure requests must not create even settled run IDs');
+    assert.equal(probes[2].value.session, 'pressure-read-' + label);
+    return health;
+  };
+
+  const before = await timelyReads('before');
+  assert.equal((before.runs || []).length, 0, 'pressure must start with no active run');
+  phase.before = snapshot(before);
+  const holder = submit('pressure-holder');
+  await until(() => tokenEntered('pressure-holder') && tokenEntered('pressure'), 'pressure resolver holder');
+
+  // Stagger enqueue times so each waiting job reaches the dispatcher with remaining budget.
+  // That also tests expired jobs already queued on the separate Lua resolver, not only jobs
+  // dropped in the outer admission queue. Finish + read fences keep overflow behind both jobs.
+  await sleep(200);
+  const waitingA = submit('pressure-wait-a');
+  await until(() => waitingA.sentMs !== undefined, 'first pressure request sent', 300);
+  await timelyReads('waiting-a');
+  await sleep(200);
+  const waitingB = submit('pressure-wait-b');
+  await until(() => waitingB.sentMs !== undefined, 'second pressure request sent', 300);
+  await timelyReads('waiting-b');
+  assert.ok(!holder.done && !waitingA.done && !waitingB.done, 'queue must be held before overflow');
+
+  const overflow = submit('pressure-overflow');
+  await overflow.promise;
+  phase.overflow = json(overflow);
+  assert.equal(overflow.status, 503, JSON.stringify(phase.overflow));
+  assert.equal(overflow.value?.error, 'admission_busy', 'overflow must have a named admission_busy refusal');
+  assert.ok(overflow.ms < report.bounds.pressureReadMs, 'overflow must refuse promptly without waiting for resolver');
+  assert.ok(!tokenEntered('pressure-overflow'), 'overflow must never execute Lua');
+  await timelyReads('overflow');
+
+  await Promise.all([holder.promise, waitingA.promise, waitingB.promise]);
+  phase.expired = [holder, waitingA, waitingB].map(json);
+  for (const expired of [holder, waitingA, waitingB]) {
+    assert.equal(expired.status, 503, JSON.stringify(json(expired)));
+    assert.equal(expired.value?.error, 'admission_timeout', 'waiting requests must expire with a named admission_timeout');
+    assert.ok(expired.ms >= phase.deadlineMs - 100, 'must wait for the admission deadline, not refuse early');
+    assert.ok(expired.ms <= phase.deadlineMs + report.bounds.pressureDeadlineSlackMs,
+      'queue residence must count toward the deadline; resolver must not get a fresh budget');
+  }
+  assert.ok(!fs.existsSync(path.join(work, 'pressure.release')), 'resolver must remain held after caller timeouts');
+  phase.beforeRelease = snapshot(await timelyReads('expired-still-held'));
+  phase.enteredBeforeRelease = ['pressure-holder', 'pressure-wait-a', 'pressure-wait-b', 'pressure-overflow'].filter(tokenEntered);
+  assert.deepEqual(phase.enteredBeforeRelease, ['pressure-holder']);
+  assert.equal(mockRequests, phase.inferenceBefore, 'expired requests must not invoke provider');
+
+  phase.releaseMs = elapsed();
+  releaseFile('pressure');
+  const recovery = submit('pressure-recovery');
+  await recovery.promise;
+  phase.recovery = json(recovery);
+  assert.equal(recovery.status, 400, JSON.stringify(phase.recovery));
+  assert.equal(recovery.value?.error, 'fixture_pressure_recovered', 'resolver must recover after draining expired jobs');
+  assert.ok(tokenEntered('pressure-recovery'), 'recovery must actually execute Lua after expired resolver jobs');
+  phase.enteredAfterRecovery = ['pressure-holder', 'pressure-wait-a', 'pressure-wait-b', 'pressure-overflow', 'pressure-recovery'].filter(tokenEntered);
+  assert.deepEqual(phase.enteredAfterRecovery, ['pressure-holder', 'pressure-recovery'], 'expired queued resolver jobs must never execute Lua later');
+  phase.runEnteredTokens = ['pressure-holder', 'pressure-wait-a', 'pressure-wait-b', 'pressure-overflow'].filter((token) =>
+    fs.existsSync(path.join(work, token + '.run-entered')));
+  assert.equal(phase.runEnteredTokens.length, 0, 'expired requests must never enter run Lua');
+  phase.inferenceAfter = mockRequests;
+  assert.equal(phase.inferenceAfter, phase.inferenceBefore, 'pressure requests must not trigger inference, even after release');
+  phase.afterRecovery = snapshot(await timelyReads('recovered'));
+  phase.attribution = 'depth-2 dispatcher overflow; queue plus resolver wait use one deadline; recovery passed expired resolver jobs without Lua entry, run IDs or inference';
+  phase.passed = true;
+}
+
 function stop() {
   if (stopPromise) return stopPromise;
   stopping = true;
   stopPromise = (async () => {
     releaseFile('reader');
     releaseFile('admission');
+    releaseFile('pressure');
     releaseBackground();
     for (const socket of sockets) socket.destroy();
     // Kill only exact children owned by this invocation; never process names or trees.
@@ -312,6 +419,7 @@ async function main() {
     let body = '';
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', () => {
+      mockRequests++;
       if (!body.includes('fixture-background') || backgroundSeen) { res.writeHead(400); res.end(); return; }
       backgroundSeen = true;
       backgroundResponse = res;
@@ -332,7 +440,8 @@ async function main() {
     WASM_AGENT_LLM_API_KEY: 'fixture-only', WASM_AGENT_WORKERS: '3', WASM_AGENT_WORKERS_MAX: '4',
     WASM_AGENT_INTERACTIVE_RESERVE: '2', WASM_AGENT_CONTROL_WORKERS: '1',
     WASM_AGENT_WORKERS_IDLE_SECONDS: '60', WASM_AGENT_WORKER_STALL_SECONDS: '30',
-    WASM_AGENT_WORKER_STALL_EXIT_SECONDS: '0', WASM_AGENT_ADMISSION_TIMEOUT_MS: '1800' };
+    WASM_AGENT_WORKER_STALL_EXIT_SECONDS: '0', WASM_AGENT_ADMISSION_TIMEOUT_MS: String(report.bounds.admissionTimeoutMs),
+    WASM_AGENT_ADMISSION_QUEUE_DEPTH: String(report.bounds.admissionQueueDepth) };
   await nodePort.release();
   await clientPort.release();
   const log = fs.openSync(path.join(work, 'serve.log'), 'w');
@@ -351,8 +460,9 @@ async function main() {
   await until(async () => threads(healthy(await request(nodePort.port, '/health').promise)).length >= 4, 'warm readers');
   assert.equal(healthy(await request(nodePort.port, '/me', { session: 'fixture-check' }).promise).fixture, true,
     'must load scratch Lua, not embedded application logic');
-  if (options.phase !== 'admission') await routingProbe(nodePort.port);
-  if (options.phase !== 'routing') await admissionProbe(nodePort.port);
+  if (['all', 'routing'].includes(options.phase)) await routingProbe(nodePort.port);
+  if (['all', 'admission'].includes(options.phase)) await admissionProbe(nodePort.port);
+  if (!options.expect && ['all', 'pressure'].includes(options.phase)) await pressureProbe(nodePort.port);
   for (const [name, phase] of Object.entries(report.phases)) {
     assert.ok(phase.passed, name + ': ' + (options.expect ? 'expected reproduction absent' : 'requests delayed while barrier held'));
   }
@@ -360,7 +470,7 @@ async function main() {
 }
 
 const watchdog = setTimeout(() => {
-  fatal = new Error('fixture exceeded 12-second runtime bound');
+  fatal = new Error('fixture exceeded ' + report.bounds.totalMs + 'ms runtime bound');
   stop().catch((error) => { report.cleanupError = error.message; });
 }, report.bounds.totalMs);
 process.once('SIGINT', () => { fatal = new Error('interrupted'); stop().catch(() => {}); });
@@ -374,6 +484,7 @@ process.once('SIGTERM', () => { fatal = new Error('terminated'); stop().catch(()
     report.elapsedMs = elapsed();
     report.retained = options.keep;
     report.mockProviderEntered = backgroundSeen;
+    report.mockProviderRequests = mockRequests;
     if (!report.cleanup?.childPidsExited) report.passed = false;
     const text = JSON.stringify(report, null, 2) + '\n';
     fs.writeFileSync(path.join(work, 'measurement.json'), text);
