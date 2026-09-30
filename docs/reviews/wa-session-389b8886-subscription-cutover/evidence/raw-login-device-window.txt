@@ -1,0 +1,11 @@
+### wa subscription login --device against the lane's own mock, tree-rooted, 3s budget
+openai-sub: open http://127.0.0.1:30859/codex/device and enter the code FIXTURE-CODE  (waiting up to 3s)
+[lua] openai-sub: open http://127.0.0.1:30859/codex/device and enter the code FIXTURE-CODE  (waiting up to 3s)
+openai-sub: device authorized after 3 polls; exchanging the authorization code
+[lua] openai-sub: device authorized after 3 polls; exchanging the authorization code
+openai-sub: logged in - account acct-fixture-0001, expires in 3599s
+[lua] openai-sub: logged in - account acct-fixture-0001, expires in 3599s
+openai-sub: logged in - account acct-fixture-0001, store C:/Users/Victor/orca/tmp-review-389b8886/door/credentials.json
+exit=0
+
+### the pending flow file it left

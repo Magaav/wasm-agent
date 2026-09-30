@@ -1,0 +1,32 @@
+### $ sha256sum wa-finish-gate.json.log
+7b3e01b57fdb09a1d0bdf6f8d10021ae8591f5fcacc068703d31cb5aee13b8d3 */c/Users/Victor/orca/projects/wasm-agent/.git/worktrees/wa-worktree-childdispatch389b8886-2cfb-45bc-be85-64f4357931f9/wa-finish-gate.json.log
+
+### $ cat wa-finish-gate.json
+{"schema":1,"repo":"C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatch389b8886-2cfb-45bc-be85-64f4357931f9","head":"be21c8613a53c3adab32b73d0f290ad0aebcaf7e","tree":"0bc8bb4d8791c62f7b91dacada8ad0ed4ba9767b","passed":true,"skipped":2,"gate_ms":847454.151,"gate_runs":1,"gate_exit":0,"log":"C:\\Users\\Victor\\orca\\projects\\wasm-agent\\.git\\worktrees\\wa-worktree-childdispatch389b8886-2cfb-45bc-be85-64f4357931f9\\wa-finish-gate.json.log","log_sha256":"7b3e01b57fdb09a1d0bdf6f8d10021ae8591f5fcacc068703d31cb5aee13b8d3","gate_lane":{"lane":"gate","mode":"slot","request":166,"label":"finish change/wa-session-childdispatch389b8886-2cfb-45bc-be85-64f4357931f9","dir":"C:\\Users\\Victor\\.wasm-agent\\gate-lane","waited_ms":686719,"reason":"slot #166 granted after waiting 686.7s"},"at":"2026-09-30T15:19:45.525Z"}
+
+### the four Rust tests inside that log (lines 556-563)
+
+running 4 tests
+test host::sse_line_tests::a_residual_line_at_eof_is_still_a_line ... ok
+test host::sse_line_tests::a_failing_callback_stops_the_read_at_that_line ... ok
+test host::sse_line_tests::a_truncated_stream_ends_where_it_ended ... ok
+test host::sse_line_tests::the_recorded_stream_is_handed_over_line_for_line ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 0.00s
+
+### the subscription suites inside that log (2445-2451)
+  done #1 finish holder exit 0: finish gate in C:\Users\Victor\AppData\Local\Temp\wa-gate-lane-wiring-tHBD1X\holder exited 0; "smoke ok (2 skipped)"
+
+native subscription operations ok (15 checks)
+PASS OpenAI subscription bridge: messages, images, tools, stream, usage, limits and visible failures
+openai-sub levels ok (22 checks)
+subscription wire ok (135 checks)
+openai-sub auth ok (128 checks)
+
+### the verdict line (2505-2512)
+source ensure ok (9 checks, 0 failed, 0 skipped; scratch ports, no browser, no model)
+evidence: C:\Users\Victor\AppData\Local\Temp\wa-source-K3Qr50
+termux launcher: 8 passed, 1 skipped (POSIX mode semantics unavailable on Windows); Android build and runtime skipped on this non-Android host
+ui tests ok
+  ok   UI structure, mid-run reload, and startup recovery
+smoke ok (2 skipped)

@@ -1,0 +1,27 @@
+### the new login door, BOTH shapes, same binary, same store path
+
+--- A) WASM_AGENT_LUA_ROOT UNSET (the installed node's shape; main.rs: 'an installed node runs without a root by design')
+$ wa subscription login --browser
+lua error: [string "bootstrap"]:1: embedded module missing: scripts/openai-sub-login.lua
+exit=1
+
+--- B) WASM_AGENT_LUA_ROOT=<tree> (the gate's shape; scripts/test.sh:158 exports it)
+$ wa subscription login --browser
+openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=iIz8_ZsoMdGV2YuGZutF8hCpE5S1vAL747ncsjOir1U&code_challenge_method=S256&state=ebf0687434314466bbf66979550d2b5c&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+[lua] openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+exit=0
+
+--- C) status arm, root unset (this one works: it loads lua/core/openai_sub_auth.lua, which IS embedded)
+openai-sub credential: absent (subscription_credentials_absent) at C:/Users/Victor/orca/tmp-review-389b8886/door2/credentials.json
+    store:  C:/Users/Victor/orca/tmp-review-389b8886/door2/credentials.json
+    log in: wa subscription login             device code: prints the URL and the code,
+                                              then waits for you to enter it
+            wa subscription login --browser    sign in in a browser, come back with --code <url>
+exit=0
+
+--- D) the only dofile of a scripts/ path anywhere in lua/core
+tree/lua/core/init.lua:273:  dofile("scripts/openai-sub-login.lua")
+
+--- E) is anything under scripts/ in the binary's EMBEDDED registry?
+0
