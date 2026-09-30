@@ -1,0 +1,14 @@
+
+=== case msys | fix | C:\Users\Victor\.wasm-agent\wa-review-054d4d9b\fix
+  tree under test: C:\Users\Victor\.wasm-agent\wa-review-054d4d9b\fix
+  fenced temp:     C:\Users\Victor\.wasm-agent\wa-review-054d4d9b\cases\case-msys-7Oo2sx\temp
+  MSYS bash that cd-ed in:       pid 31432 (cwd = C:\Users\Victor\.wasm-agent\wa-review-054d4d9b\cases\case-msys-7Oo2sx\temp\wa-merge-lane-Cd0001), dir aged 3.5 h
+  MSYS bash spawned with cwd in: pid 81856 (cwd = C:\Users\Victor\.wasm-agent\wa-review-054d4d9b\cases\case-msys-7Oo2sx\temp\wa-merge-lane-Sp0001), dir aged 3.5 h
+  SWEEP keep=0 {"tree":"C:\\Users\\Victor\\.wasm-agent\\wa-review-054d4d9b\\fix","env_wait":null,"grace_seconds":10860,"keep":0,"budget_for_others":0,"before":["wa-merge-lane-Cd0001","wa-merge-lane-Sp0001"],"after":["wa-merge-lane-Sp0001"],"removed":[["C:\\Users\\Victor\\.wasm-agent\\wa-review-054d4d9b\\cases\\case-msys-7Oo2sx\\temp\\wa-merge-lane-Cd0001","rename allowed"]],"kept":[],"recent_legacy":[],"live":[],"in_use":[["C:\\Users\\Victor\\.wasm-agent\\wa-review-054d4d9b\\cases\\case-msys-7Oo2sx\\temp\\wa-merge-lane-Sp0001","rename refused (EBUSY)"]],"not_this_family":0,"errors":[]}
+  AFTER: ["wa-merge-lane-Sp0001"]
+  cd-ed-in holder dir (C:\Users\Victor\.wasm-agent\wa-review-054d4d9b\cases\case-msys-7Oo2sx\temp\wa-merge-lane-Cd0001) exists = false; shell alive = true
+  spawned-in holder dir (C:\Users\Victor\.wasm-agent\wa-review-054d4d9b\cases\case-msys-7Oo2sx\temp\wa-merge-lane-Sp0001) exists = true; shell alive = true
+  cleanup: taskkill pid 31432: exit 0; SUCCESS: The process with PID 78724 (child process of PID 31432) has been terminated. / SUCCESS: The process with PID 31432 (child process of PID 71432) has been terminated. | taskkill pid 81856: exit 0; SUCCESS: The process with PID 22704 (child process of PID 81856) has been terminated. / SUCCESS: The process with PID 81856 (child process of PID 71432) has been terminated.
+  cleanup: scratch root removed = true
+RESULT {"label":"fix","tree":"C:\\Users\\Victor\\.wasm-agent\\wa-review-054d4d9b\\fix","cd_survived":false,"spawn_survived":true,"removed":[["C:\\Users\\Victor\\.wasm-agent\\wa-review-054d4d9b\\cases\\case-msys-7Oo2sx\\temp\\wa-merge-lane-Cd0001","rename allowed"]],"in_use":[["C:\\Users\\Victor\\.wasm-agent\\wa-review-054d4d9b\\cases\\case-msys-7Oo2sx\\temp\\wa-merge-lane-Sp0001","rename refused (EBUSY)"]],"recent_legacy":[],"errors":[]}
+  harness cleanup: every child this harness started
