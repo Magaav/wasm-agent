@@ -1,0 +1,14 @@
+### registry bytes, NO Lua root (the installed shape)
+lua root unset: using embedded modules; edits under lua/ are NOT under test
+lua root (getenv): nil
+wire.CREDENTIAL_MODULE: lua/core/openai_sub_auth.lua
+LOADED_SOURCES lua/core/subscription_wire.lua: 480a2d6133f09257299ab97fd3c73b2fffb31b7415de282b1422b54253b79cfa
+LOADED_SOURCES lua/core/openai_sub_auth.lua: 7949dc6f548f3ee03f4fe3da4386d86e991c9d03b33da3c3275685202d09daa9
+LOADED_SOURCES lua/core/openai_sub_catalogue.lua: 3ddb0859b6997b5c79ac78082fe4c4088407932d0faa3e0ea3deef003b311be5
+LOADED_SOURCES lua/core/openai_sub_login.lua: 07cc7db6f7b5429c17dc7746204f3fe8ecd69ac8fbb156cb1f1fbc25f11b32d9
+
+### on-disk sha256 of the same files
+480a2d6133f09257299ab97fd3c73b2fffb31b7415de282b1422b54253b79cfa *lua/core/subscription_wire.lua
+7949dc6f548f3ee03f4fe3da4386d86e991c9d03b33da3c3275685202d09daa9 *lua/core/openai_sub_auth.lua
+3ddb0859b6997b5c79ac78082fe4c4088407932d0faa3e0ea3deef003b311be5 *lua/core/openai_sub_catalogue.lua
+07cc7db6f7b5429c17dc7746204f3fe8ecd69ac8fbb156cb1f1fbc25f11b32d9 *lua/core/openai_sub_login.lua

@@ -1,0 +1,10 @@
+### $ node scripts/check-embedded-lua-closure.mjs
+embedded registry: 55 entries, all 55 include_str! accounted for (52 .lua)
+traversed: 52 embedded file(s), 215 literal dofile target(s), 0 non-literal (not checkable statically)
+module names reached by following literals: 52
+embedded lua closure ok: every literal dofile target reachable from the registry is in the registry
+exit=0
+
+### $ bash scripts/test-subscription-login-door.sh <tip binary> <scratch db>
+subscription login door ok (9 checks, no Lua root and Lua root, no network, no credential)
+exit=0

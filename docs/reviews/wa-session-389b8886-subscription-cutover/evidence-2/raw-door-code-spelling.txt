@@ -1,0 +1,18 @@
+### --code <url> alone, no Lua root, auth base pointed at an unreachable port (no network)
+$ wa subscription login --code 'http://localhost:1455/auth/callback?code=X&state=Y'
+openai-sub login failed: unreachable
+  io: Connection refused
+exit=1
+
+### --browser --code <url> (the spelling that completes a browser flow), same shape
+openai-sub login failed: flow_expired
+  there is no pending browser login to complete; run the login again to get a fresh authorize URL
+exit=1
+
+### and the device flow against an unreachable host (does the door ever claim success?)
+openai-sub login failed: unreachable
+  io: Connection refused
+exit=1
+
+### the store afterwards (must not exist)
+ls: cannot access '/c/Users/Victor/orca/tmp-review-389b8886b/c1/': No such file or directory

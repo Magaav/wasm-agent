@@ -1,0 +1,36 @@
+### tree under review: git rev-parse a19c64bf^{tree}
+e3a599233eee7821b58780369164c684e6e6c037
+
+### A) WASM_AGENT_LUA_ROOT UNSET (the installed shape)
+$ wa subscription status
+openai-sub credential: absent (subscription_credentials_absent) at C:/Users/Victor/orca/tmp-review-389b8886b/door-noroot/credentials.json
+    store:  C:/Users/Victor/orca/tmp-review-389b8886b/door-noroot/credentials.json
+    log in: wa subscription login             device code: prints the URL and the code,
+                                              then waits for you to enter it
+            wa subscription login --browser    sign in in a browser, come back with --code <url>
+exit=0
+
+$ wa subscription login --browser
+openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=G6H2KoFj9STRYplmbf_xmhd1lbZA6rQJ04iM5by0dFE&code_challenge_method=S256&state=ee6e2451f2b9407caed4567581e4df4e&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+[lua] openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=G6H2KoFj9STRYplmbf_xmhd1lbZA6rQJ04iM5by0dFE&code_challenge_method=S256&state=ee6e2451f2b9407caed4567581e4df4e&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+openai-sub: waiting for the browser step - re-run with --code <the address you landed on>
+exit=0
+
+### B) WASM_AGENT_LUA_ROOT SET (the gate/checkout shape)
+$ wa subscription status
+openai-sub credential: absent (subscription_credentials_absent) at C:/Users/Victor/orca/tmp-review-389b8886b/door-root/credentials.json
+    store:  C:/Users/Victor/orca/tmp-review-389b8886b/door-root/credentials.json
+    log in: wa subscription login             device code: prints the URL and the code,
+                                              then waits for you to enter it
+            wa subscription login --browser    sign in in a browser, come back with --code <url>
+exit=0
+
+$ wa subscription login --browser
+openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=UNMujF4WX_5OdPgrPh8gTsu77mlzenEK9aKa7m_Ol4A&code_challenge_method=S256&state=2916a6587a9040ffa70734b1da86950d&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+[lua] openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=UNMujF4WX_5OdPgrPh8gTsu77mlzenEK9aKa7m_Ol4A&code_challenge_method=S256&state=2916a6587a9040ffa70734b1da86950d&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+openai-sub: waiting for the browser step - re-run with --code <the address you landed on>
+exit=0

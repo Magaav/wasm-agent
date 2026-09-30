@@ -1,0 +1,1 @@
+### A) the door module's bytes in the NO-ROOT shape (probe v2, no network)

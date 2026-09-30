@@ -1,0 +1,19 @@
+### item 4 spot checks at a19c64bf
+
+$ rg -n 'sse_line_tests|check-embedded-lua-closure|test-subscription-login-door' scripts/test.sh
+55:# line in this file - every filter above names its own module, and `sse_line_tests` was named by
+59:cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host sse_line_tests
+1608:node scripts/check-embedded-lua-closure.mjs
+1614:env -u WASM_AGENT_LUA_ROOT bash scripts/test-subscription-login-door.sh "$BIN" "$DB.sub-login" | grep "subscription login door ok"
+
+$ cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host sse_line_tests
+running 4 tests
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 0.00s
+
+$ WA_SCRIPT=scripts/test-subscription-wire.lua $BIN  (root set)
+subscription wire ok (135 checks)
+$ wa subscription status + login --browser with NO root (the door, again, shortform)
+openai-sub credential: absent (subscription_credentials_absent) at C:/Users/Victor/orca/tmp-review-389b8886b/s1/credentials.json
+$ WA_SCRIPT=scripts/test-openai-sub-auth.lua $BIN  (128 checks, ~44s)
+openai-sub concurrency evidence: token POSTs=1, refreshed=1, adopted=1, rotation 52bad29d8d47 -> 3ba936f0c515, second spend of the same token=refresh_rejected:400
+openai-sub auth ok (128 checks)
