@@ -529,4 +529,69 @@ ignore it. And it was **falsified by name** before being trusted, in the sequenc
   audited for the same defect beyond what the closure check covers (it covers every literal `dofile`
   reachable from the registry; the `WA_SCRIPT=` files are not in that set).
 
+## The door's printed instruction, and the behaviour it named (second review)
+
+The door printed `re-run with --code <the address you landed on>`. That standalone spelling reached
+`M.login("device")`, which ignores the pasted address and **overwrites the pending browser flow** - so a
+user who followed the sentence lost the login the sentence had just started. This is the installed-shape
+door, the thing this delivery exists for, so it was the one thing worth blocking on.
+
+Measured on tip `a19c64b`, installed shape (no Lua root), against the credential lane's stand-in for the
+auth host, on the pre-fix binary:
+
+```
+flow file while the browser flow is pending:      "flow":"browser"
+$ wa subscription login --code <the pasted address>          (the printed sentence, verbatim)
+openai-sub: open http://127.0.0.1:…/codex/device and enter the code FIXTURE-CODE  (waiting up to 5s)
+openai-sub: device authorized after 3 polls; exchanging the authorization code
+openai-sub: logged in - account acct-fixture-0001, store …/credentials.json
+store source after: "source":"login:device"      ← a device login replaced the browser one
+```
+
+**The fix is the reviewer's smaller option, (a):** `M.options` reads `--code` as a browser-flow
+argument - with no explicit mode, a pasted address means "complete the flow that is waiting for it". The
+printed sentence is left exactly as it was and now does what it says; `--browser --code <url>` keeps
+working too, because both spellings reach the same mode. With nothing pending, the credential module's
+own `flow_expired` sentence comes back and **no device flow is started** - so the destructive branch is
+gone rather than merely unadvertised. Nothing in `lua/core/openai_sub_auth.lua` was touched to do this
+(it is used as delivered).
+
+**The printed sentence, run verbatim, with no Lua root (the shipped shape):**
+
+```
+$ wa subscription login --browser
+openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+http://127.0.0.1:21805/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&…&state=406dea93fe374317bed33d17b95e9103
+openai-sub: waiting for the browser step - re-run with --code <the address you landed on>
+flow file while pending: "flow":"browser"
+
+$ wa subscription login --code "http://localhost:1455/auth/callback?code=PASTED-CODE&state=406dea93fe374317bed33d17b95e9103"
+openai-sub: logged in - account acct-fixture-0001
+openai-sub: logged in - account acct-fixture-0001, store …/credentials.json      exit 0
+store source now: "source":"login:browser"      ← the BROWSER flow completed
+
+$ wa subscription status
+openai-sub credential: valid for account acct-fixture-0001, expires in 3599s, refreshes 0, refresh 348b45a2e5a6
+
+$ wa subscription login --code "http://localhost:1455/auth/callback?code=X&state=deadbeef"    (nothing pending)
+openai-sub login failed: flow_expired
+  there is no pending browser login to complete; run the login again to get a fresh authorize URL
+no store, no flow file written, no device-code line
+```
+
+**Added to `scripts/test-subscription-login-door.sh`** (gate-visible, and the line the reviewer already
+ran), so the sentence and the behaviour cannot drift apart again: the door must print that exact
+instruction; the pending flow file must read `browser`; running the sentence verbatim must exit 0 and
+leave `"source":"login:browser"` in the store; and a bare `--code` with nothing pending must fail
+naming `flow_expired` while printing no `codex/device` line. That section needs the auth stand-in (a
+node server), so without node it prints a visible SKIPPED line instead of passing quietly. The suite is
+now `subscription login door ok (17 checks, no Lua root and Lua root, no network beyond the local
+stand-in for the auth host, no credential)`, exit 0.
+
+Two things this section does not claim: `scripts/test.sh` was still not run and no gate slot was taken,
+so these 17 checks have only ever run exactly as invoked by hand; and the door test's own first draft
+of the `browser`/`login:browser` assertions compared a single-quoted pattern containing backslashes
+against unescaped bytes and failed - the same mistake as the defect it guards - which is why those two
+patterns are now quote-free regexes.
+
 Agent: wasm-agent node=wasm_the_first role=child session=child:dispatch:389b8886-2cfb-45bc-be85-64f4357931f9

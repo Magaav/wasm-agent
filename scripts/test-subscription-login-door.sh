@@ -114,4 +114,51 @@ check "$([ "$NOROOT_STATUS" = 2 ] && [ "$STATUS" = 2 ] && echo yes)" \
 check "$([ "$NOROOT_OUT" = "$OUT" ] && echo yes)" \
   "and says the same thing in both shapes: no-root [$NOROOT_OUT] root [$OUT]"
 
-echo "subscription login door ok ($CHECKS checks, no Lua root and Lua root, no network, no credential)"
+# --- the printed instruction and the behaviour must agree -----------------------------------------
+# The door prints: `re-run with --code <the address you landed on>`. Before this section existed, that
+# spelling was a trap: a bare `--code` reached `M.login("device")`, which ignores the pasted address
+# and overwrites the pending browser flow - so the user who followed the sentence lost the login the
+# sentence had just started. Measured in the installed shape (no Lua root): the pending flow file read
+# `"flow":"browser"`, and after the printed sentence ran the stored credential said
+# `"source":"login:device"`, i.e. a different login had replaced it. This runs the sentence itself and
+# requires the BROWSER flow to complete, against the credential lane's own stand-in for the auth host -
+# that fixture is a node server, so without node this part is skipped visibly rather than passing.
+if ! command -v node >/dev/null 2>&1; then
+  echo "subscription login door: the printed-sentence check SKIPPED - node not on PATH (the auth stand-in is a node server)"
+else
+  MOCK_DIR="$WORK/mock"; mkdir -p "$MOCK_DIR"
+  node "$ROOT/scripts/lib/openai-sub-auth-mock.mjs" --dir "$MOCK_DIR" >"$WORK/mock.log" 2>&1 &
+  MOCK_PID=$!
+  for _ in $(seq 1 50); do grep -q '^ready ' "$WORK/mock.log" && break; sleep 0.2; done
+  export WASM_AGENT_OPENAI_SUB_AUTH_BASE="http://127.0.0.1:$(sed -n 's/^ready //p' "$WORK/mock.log" | head -1)"
+  shape noroot "$WORK/sentence" login --browser
+  check "$([ "$STATUS" = 0 ] && echo yes)" "the door starts a browser login with no Lua root (got $STATUS): $OUT"
+  check "$([ "$(printf '%s' "$OUT" | grep -c 're-run with --code <the address you landed on>')" -ge 1 ] && echo yes)" \
+    "the door prints the instruction this section is about: $OUT"
+  # Quote-free regexes on purpose: a pattern written as '\"flow\":\"browser\"' inside single quotes is a
+  # literal backslash-quote and never equals the bytes it is compared with - the first draft of this
+  # check failed on exactly that, which is the same class of mistake as the defect it is testing for.
+  grep -qE 'flow.{1,4}browser' "$WORK/sentence/login-flow.json" && PENDING=browser || PENDING=other
+  check "$([ "$PENDING" = browser ] && echo yes)" "and what is pending is the browser flow (flow file: $PENDING)"
+  PASTED="http://localhost:1455/auth/callback?code=PASTED-CODE&state=$(printf '%s' "$OUT" | sed -n 's/.*[?&]state=\([0-9a-f]\{32\}\).*/\1/p' | head -1)"
+  # The sentence, verbatim: `wa subscription login --code <the address you landed on>`.
+  shape noroot "$WORK/sentence" login --code "$PASTED"
+  check "$([ "$STATUS" = 0 ] && echo yes)" "the printed sentence exits 0 in the installed shape (got $STATUS): $OUT"
+  grep -qE 'source.{1,4}login:browser' "$WORK/sentence/credentials.json" && SOURCE=login:browser \
+    || SOURCE="$(grep -oE 'source.{1,4}[a-z:]+' "$WORK/sentence/credentials.json" | head -1)"
+  check "$([ "$SOURCE" = login:browser ] && echo yes)" \
+    "and the BROWSER flow completed: the stored credential says $SOURCE, not login:device"
+  # And a bare --code with nothing pending is refused by name, not turned into a device login.
+  shape noroot "$WORK/nothing-pending" login --code "http://localhost:1455/auth/callback?code=X&state=deadbeef"
+  check "$([ "$STATUS" != 0 ] && echo yes)" "a bare --code with no pending browser flow fails (got $STATUS): $OUT"
+  check "$([ "$(printf '%s' "$OUT" | grep -c 'flow_expired')" -ge 1 ] && echo yes)" \
+    "and it names flow_expired: $OUT"
+  check "$([ "$(printf '%s' "$OUT" | grep -c 'codex/device')" = 0 ] && echo yes)" \
+    "and printed no device-code line, so no device login was started: $OUT"
+  unset WASM_AGENT_OPENAI_SUB_AUTH_BASE
+  kill $MOCK_PID 2>/dev/null
+  wait $MOCK_PID 2>/dev/null
+fi
+
+echo "subscription login door ok ($CHECKS checks, no Lua root and Lua root, no network beyond the local
+stand-in for the auth host, no credential)"

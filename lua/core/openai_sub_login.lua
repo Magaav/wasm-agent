@@ -31,6 +31,17 @@ function M.options(argv)
     elseif value == "--import" then options.import = true
     elseif value == "--code" then options.code = argv[index + 1] end
   end
+  -- `--code` is a browser-flow argument and only a browser-flow argument: `M.login("device")` ignores it
+  -- entirely. Without this line the sentence this door prints - "re-run with --code <the address you
+  -- landed on>" - is a trap: the standalone spelling starts a *device* login, discards the pasted
+  -- address, and overwrites the pending browser flow file, so the user who follows the instruction
+  -- loses the login the instruction just started. Measured in the installed shape before this fix
+  -- (see `scripts/test-subscription-login-door.sh`, which now runs the printed sentence itself). A
+  -- bare `--code` therefore means "complete the flow that is waiting for it", and with no browser flow
+  -- pending it answers the credential module's own `flow_expired` sentence rather than starting a
+  -- device flow nobody asked for. The sentence and the behaviour are one decision, so they are kept in
+  -- one place - here - rather than corrected in prose.
+  if options.code and not options.mode then options.mode = "browser" end
   return options
 end
 
