@@ -110,6 +110,9 @@ if [ "$SENTINEL_GOT" = "1" ]; then
   # the same defect as a node in the wrong directory: the service keeps running the old copy, and everything
   # that reports success is reading the one nobody runs. Name both paths, place it where the service looks
   # when that directory is writable, and refuse to claim success when it is not.
+  #
+  # This comes first: the restart below asks the manager to bring the unit up, and the unit's `ExecStart=` is
+  # the path this puts the new binary at. Restarting before placing would start the copy nobody replaced.
   SENTINEL_SERVICE_DIR="$(node_service_dir)"
   if [ -n "$SENTINEL_SERVICE_DIR" ] && ! wa_same_dir "$SENTINEL_SERVICE_DIR" "$DIR"; then
     warn "the sentinel service runs $SENTINEL_SERVICE_DIR/wa-sentinel, not $DIR/wa-sentinel"
@@ -121,7 +124,21 @@ if [ "$SENTINEL_GOT" = "1" ]; then
       die "$SENTINEL_SERVICE_DIR is not writable by $(id -un): install it with sudo (install -m 755 $DIR/wa-sentinel $SENTINEL_SERVICE_DIR/wa-sentinel), or point the unit at $DIR/wa-sentinel; this installer will not report success while the service and the installed supervisor disagree"
     fi
   fi
-  "$DIR/wa-sentinel" restart >/dev/null 2>&1 || true
+  # The supervisor has to *start*, and its refusal must not be swallowed: `|| true` here printed a
+  # successful install while the manager refused to bring the unit up - `Interactive authentication
+  # required` for a system unit from an unprivileged shell, a unit that no longer exists, a control group
+  # it cannot create - and the operator found out when nothing could restart their node. The sentinel's own
+  # words are where the manager's reason is, so they are printed, not discarded.
+  if SENTINEL_START="$("$DIR/wa-sentinel" restart 2>&1)"; then
+    SENTINEL_SAID="$(printf '%s\n' "$SENTINEL_START" | sed 's/^  *//' | sed -n '/./p')"
+    ok "sentinel: $(printf '%s\n' "$SENTINEL_SAID" | head -1)"
+    printf '%s\n' "$SENTINEL_SAID" | tail -n +2 | sed 's/^/     /'
+  else
+    printf '\n   the sentinel did not start, and nothing else here can restart or upgrade this node:\n' >&2
+    printf '%s\n' "$SENTINEL_START" | sed 's/^/     /' >&2
+    printf '   fix the cause, then run: %s restart\n\n' "$DIR/wa-sentinel" >&2
+    exit 1
+  fi
 else
   warn "no sentinel: this node cannot restart or upgrade itself. Set WASM_AGENT_REPO to a checkout, or install wa-sentinel by hand."
 fi
