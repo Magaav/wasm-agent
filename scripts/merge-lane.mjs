@@ -84,21 +84,59 @@ const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 // failure keeps its exact merged tree, its gate log and everything it printed; older failures keep
 // nothing; a day of gates costs one clone instead of one clone per failure.
 //
-// LIVENESS DECIDES WHAT MAY BE PRUNED, NOT AGE. The clone's directory name carries the pid of the
-// run that owns it (`wa-merge-lane-<pid>-XXXXXX`, the pid added to mktemp's template), and a
+// LIVENESS DECIDES WHAT MAY BE PRUNED, NOT AGE - and where liveness cannot be read out of the name,
+// it is asked of the filesystem (`holderProbe` below). The clone's directory name carries the pid of
+// the run that owns it (`wa-merge-lane-<pid>-XXXXXX`, the pid added to mktemp's template), and a
 // directory whose owning pid is alive is never a candidate: a retainer that deleted a live
 // sibling's tree would turn a passing neighbour into an unattributed red gate, which this repository
-// has already paid for once (scripts/test.sh, "the plugin staging directory ... was missing"). A
-// name with the pre-change shape has no pid to ask about, so it is pruned only once it is an hour
-// old - a rollout cannot delete the clone of a run the previous script started. Residual limit,
-// named rather than hidden: if this process is killed while its gate child keeps running, that
-// clone's lease reads as dead and the next run may prune it; the gate lane's slot row, not this
-// lease, is the authority on which gates are live.
+// has already paid for once (scripts/test.sh, "the plugin staging directory ... was missing").
+//
+// A NAME WITH THE PRE-CHANGE SHAPE HAS NO PID, and the first version of this sweep pruned that name
+// once it was an hour old. The hour was SHORTER THAN THE GATE LANE'S OWN WAIT BUDGET
+// (`WA_GATE_LANE_WAIT_SECONDS`, 7200 s by default) and the clone is made at the top of the run,
+// BEFORE the slot is asked for - so a run that is merely QUEUED for the gate has a clone older than
+// an hour, and a live run's clone was deleted by this rule (reproduced by an independent review, D1
+// of `verify/REVIEW-disk-temp.md`, and by `verify/prelease-grace.mjs` here). The grace is therefore
+// DERIVED from the two budgets a live run can spend while it still holds its clone, not chosen:
+//
+//   gate lane wait (7200) + this lane's gate timeout (`--timeout-seconds`, 3600) + 60 s slack
+//     = 10860 s = 3 h 1 min     - the flat hour it replaces was 7260 s short of the wait alone.
+//
+// And the grace is the FALLBACK, not the test: before anything is deleted, this run asks the
+// filesystem whether the directory is in use, and a directory that is held is kept whatever its age
+// and whatever minted it. Residual limits, named rather than hidden: (1) an MSYS/Cygwin process that
+// reached the directory by `cd` is invisible to that ask (measured, `verify/probe-msys-cwd.mjs`), so
+// a clone older than the grace above and held only that way can still be pruned; (2) if this process
+// is killed while its gate child keeps running, the lease reads as dead - the filesystem ask is what
+// still protects that tree, and the gate lane's slot row, not this lease, is the authority on which
+// gates are live.
 const CLONE_PREFIX = 'wa-merge-lane-';
 const CLONE_KEEP_VARIABLE = 'WA_MERGE_LANE_KEEP';
 const cloneName = /^wa-merge-lane-(\d+)-[A-Za-z0-9]{6}$/;
 const legacyCloneName = /^wa-merge-lane-[A-Za-z0-9]{6}$/;
-const LEGACY_GRACE_MS = 60 * 60 * 1000;
+// The arithmetic above, in one place, so the number cannot drift away from the budgets it is made of.
+// Both terms are budgets of a run that is still alive: the wait for the gate lane's slot (mirrored
+// from `waitSecondsOf` in scripts/gate-lane.mjs) and the gate's own timeout (mirrored from this
+// file's `--timeout-seconds`). The slack covers releasing the slot and exiting after a gate that
+// used its whole timeout.
+const GATE_LANE_WAIT_DEFAULT_SECONDS = 7200;
+const LANE_GATE_TIMEOUT_DEFAULT_SECONDS = 3600;
+const LEGACY_GRACE_SLACK_SECONDS = 60;
+
+function budgetSeconds(raw, fallback) {
+  if (raw === null || raw === undefined || raw === '') return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+// With no knobs set: 7200 + 3600 + 60 = 10860 s. A pre-change name is left alone for that long, and
+// kept for longer than that whenever the filesystem can still show that something holds it.
+export function legacyGraceMs({waitSeconds = process.env.WA_GATE_LANE_WAIT_SECONDS,
+  gateTimeoutSeconds = null} = {}) {
+  const wait = budgetSeconds(waitSeconds, GATE_LANE_WAIT_DEFAULT_SECONDS);
+  const gate = budgetSeconds(gateTimeoutSeconds, LANE_GATE_TIMEOUT_DEFAULT_SECONDS);
+  return (wait + gate + LEGACY_GRACE_SLACK_SECONDS) * 1000;
+}
 
 function retentionKeep(raw, variable) {
   const text = String(raw ?? '').trim().toLowerCase();
@@ -123,16 +161,46 @@ function cloneOwner(name) {
   return {state: legacyCloneName.test(name) ? 'legacy' : 'not_this_family', pid: null};
 }
 
+// Is this directory in use? A lease - the pid in the name - answers that for a name that has one; a
+// name from before the lease has none, so the filesystem is asked directly instead of the clock. The
+// ask is a rename within the same parent, which on this machine is refused while a native process's
+// working directory is this directory or one below it (EBUSY, EPERM measured) and while a native
+// process holds an open file inside it (EPERM measured) - and `rm -rf` SUCCEEDS in every one of
+// those cases, so nothing else would have stopped the deletion. A refused rename is therefore
+// evidence of use and the directory is kept; an allowed rename is the evidence that lets it go.
+// Measured blind spot, not hidden: an MSYS/Cygwin process that reached the directory by `cd` leaves
+// the rename free (verify/probe-msys-cwd.mjs), while one spawned with the directory as its own
+// working directory - the way this lane spawns its gate - is refused (EBUSY).
+function holderProbe(dir) {
+  const probePath = `${dir}.in-use-${process.pid}`;
+  try {
+    fs.renameSync(dir, probePath);
+  } catch (error) {
+    if (error.code === 'ENOENT') return {gone: true, in_use: false, evidence: 'gone'};
+    return {gone: false, in_use: true, evidence: `rename refused (${error.code})`};
+  }
+  try {
+    fs.renameSync(probePath, dir);
+    return {gone: false, in_use: false, evidence: 'rename allowed'};
+  } catch (error) {
+    return {gone: false, in_use: true, probe_path: probePath,
+      evidence: `rename allowed but the name could not be restored (${error.code})`};
+  }
+}
+
 // The sweep. Best effort and never fatal: a directory it cannot remove is recorded, and the merge
 // this run exists for is not failed by a temp root it does not own. `currentKept` says whether this
 // run's own clone is one of the kept ones: the budget counts it, because it is the newest by
 // construction, and a budget of 1 spent on somebody else's clone keeps two. Exported because the
 // retention bound is a property worth testing on its own (scripts/test-merge-lane-retention.mjs).
-export function sweepClones({keep = 1, tmp = os.tmpdir(), current = null, currentKept = false, now = Date.now()} = {}) {
+export function sweepClones({keep = 1, tmp = os.tmpdir(), current = null, currentKept = false, now = Date.now(),
+  waitSeconds = process.env.WA_GATE_LANE_WAIT_SECONDS, gateTimeoutSeconds = null} = {}) {
+  const graceMs = legacyGraceMs({waitSeconds, gateTimeoutSeconds});
   const held = Boolean(current) && fs.existsSync(current);
   const record = {family: `${CLONE_PREFIX}*`, keep, current: current || null, current_kept: Boolean(currentKept && held),
-    policy: 'a passing run removes its own clone; a failing run keeps its own; the sweep keeps the newest `keep` prunable clones',
-    budget_for_others: null, removed: [], kept: [], live: [], recent_legacy: [], not_this_family: 0, errors: []};
+    grace_ms: graceMs, grace_seconds: graceMs / 1000,
+    policy: 'a passing run removes its own clone; a failing run keeps its own; the sweep keeps the newest `keep` prunable clones, and never prunes one whose owning pid is alive or that this machine can prove is in use',
+    budget_for_others: null, removed: [], kept: [], live: [], in_use: [], recent_legacy: [], not_this_family: 0, errors: []};
   let entries;
   try { entries = fs.readdirSync(tmp, {withFileTypes: true}); }
   catch (error) { record.errors.push({path: tmp, error: error.message}); return record; }
@@ -147,7 +215,7 @@ export function sweepClones({keep = 1, tmp = os.tmpdir(), current = null, curren
     let mtimeMs = 0;
     try { mtimeMs = fs.statSync(dir).mtimeMs; }
     catch (error) { record.errors.push({path: dir, error: error.message}); continue; }
-    if (owner.state === 'legacy' && now - mtimeMs < LEGACY_GRACE_MS) { record.recent_legacy.push(dir); continue; }
+    if (owner.state === 'legacy' && now - mtimeMs < graceMs) { record.recent_legacy.push(dir); continue; }
     candidates.push({dir, mtimeMs, lease: owner.state, pid: owner.pid});
   }
   candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
@@ -156,9 +224,19 @@ export function sweepClones({keep = 1, tmp = os.tmpdir(), current = null, curren
   record.budget_for_others = budget;
   candidates.forEach((candidate, index) => {
     if (index < budget) { record.kept.push({path: candidate.dir, lease: candidate.lease, pid: candidate.pid}); return; }
+    // The last question before anything is deleted, answered by the filesystem rather than the clock:
+    // whatever minted this name, and however old it is, a directory that can be shown to be in use is
+    // not this sweep's to remove.
+    const probe = holderProbe(candidate.dir);
+    if (probe.gone) return;                                  // it went away on its own; nothing to do
+    if (probe.in_use) {
+      record.in_use.push({path: candidate.dir, lease: candidate.lease, pid: candidate.pid, evidence: probe.evidence});
+      if (probe.probe_path) record.errors.push({path: candidate.dir, error: probe.evidence});
+      return;
+    }
     try {
       fs.rmSync(candidate.dir, {recursive: true, force: true});
-      record.removed.push({path: candidate.dir, lease: candidate.lease, pid: candidate.pid});
+      record.removed.push({path: candidate.dir, lease: candidate.lease, pid: candidate.pid, evidence: probe.evidence});
     } catch (error) { record.errors.push({path: candidate.dir, error: error.message}); }
   });
   return record;
@@ -171,7 +249,8 @@ function retentionNotice(retention) {
     if (sweep.removed.length) {
       note(`merge-lane: retention: removed ${sweep.removed.length} clone(s) beyond the newest ${sweep.keep}`
         + ` (${CLONE_KEEP_VARIABLE}=${retention.keep}); kept ${sweep.kept.length}`
-        + (sweep.live.length ? `, left ${sweep.live.length} live clone(s) alone` : ''));
+        + (sweep.live.length ? `, left ${sweep.live.length} live clone(s) alone` : '')
+        + (sweep.in_use.length ? `, left ${sweep.in_use.length} clone(s) in use alone` : ''));
     }
     for (const error of sweep.errors) note(`merge-lane: retention: could not remove ${error.path}: ${error.error}`);
   }
@@ -523,7 +602,7 @@ async function main() {
   if (accepted.length && !conflictStops) {
     // Bounded retention, before anything new is made. A previous run that was killed - or whose
     // supervisor died - never reached the removal below, and its clone is what fills the disk.
-    retention.sweeps.push(sweepClones({keep: options.keepClones,
+    retention.sweeps.push(sweepClones({keep: options.keepClones, gateTimeoutSeconds: options.timeoutSeconds,
       current: options.clone ? path.resolve(options.clone) : null}));
     clone = cloneRepo(gitDir, baseSha, options, laneBranch);
     for (const record of accepted) {
@@ -720,6 +799,7 @@ async function main() {
   // The bound, applied to what this run is leaving behind. Run after the decision above so the
   // clone this run keeps is counted in its own budget - and never a candidate for deletion.
   retention.sweeps.push(sweepClones({keep: options.keepClones, currentKept: retainClone,
+    gateTimeoutSeconds: options.timeoutSeconds,
     current: clone ? clone.dir : (options.clone ? path.resolve(options.clone) : null)}));
   retentionNotice(retention);
   if (options.json) fs.writeFileSync(path.resolve(options.json), `${JSON.stringify(result, null, 2)}\n`);

@@ -49,13 +49,19 @@ echo "gate parallelism: cargo jobs=${CARGO_BUILD_JOBS:-cargo default} test threa
 # WA_GATE_HOME_KEEP failures (default 1) and deletes the older ones, so a day of gates costs one home
 # instead of one per run.
 #
-# LIVENESS DECIDES WHAT MAY BE PRUNED, NOT AGE. The pid of the run is part of the directory name, so a
-# sweep never touches a home whose process is still alive: on a machine running more than one gate - the
-# plugin-staging note below is what deleting a live sibling's temp already cost this repository - that
-# would turn a passing neighbour into an unattributed red gate. A home whose name carries no pid is from
-# before this change: it is pruned only once it is an hour old, so a rollout cannot delete the home of a
-# gate the previous script started. Residual limit, named: a gate killed by a signal it does not trap
-# leaves its home behind - the next gate's sweep is what removes it, and that sweep bounds the family.
+# LIVENESS DECIDES WHAT MAY BE PRUNED, NOT AGE, and where the name carries no pid the window is a
+# fallback with its arithmetic stated rather than a claim about rollouts. The pid of the run is part of
+# the directory name, so a sweep never touches a home whose process is still alive: on a machine running
+# more than one gate - the plugin-staging note below is what deleting a live sibling's temp already cost
+# this repository - that would turn a passing neighbour into an unattributed red gate. A home whose name
+# carries no pid is from before this change: it is pruned only once it is an hour old, and that hour is
+# the lane's own gate timeout (`--timeout-seconds`, 3600 s by default) and not comfortably more than it.
+# Unlike the clone family, no queue arithmetic enters here: the lane waits for its slot BEFORE this block
+# runs, so a home cannot be aged by a wait - but a gate started by hand, or by a lane whose timeout was
+# raised, can still be running at that boundary and is then a candidate. Residual limits, named: the
+# predicate here is Cygwin `kill -0`, which cannot see a native Windows pid; and a gate killed by a
+# signal it does not trap leaves its home behind - the next gate's sweep is what removes it, and that
+# sweep bounds the family.
 #
 # A PASSING RUN'S TRAP IS SILENT, and that is not a style choice: `scripts/merge-lane.mjs` reads this
 # gate's LAST line as its verdict (`smoke ok`), so a notice printed after it - even on stderr, which the

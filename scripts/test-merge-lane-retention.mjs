@@ -5,7 +5,9 @@
 //   * scripts/merge-lane.mjs: a passing run removes its own clone; a failing run keeps its own; a run
 //     sweeps the family and keeps the newest WA_MERGE_LANE_KEEP leftovers (default 1). A clone whose
 //     directory name carries a LIVE pid is never a candidate (the lease), and a name from before the
-//     lease is not pruned until it is an hour old.
+//     lease is left alone for a grace DERIVED from the two budgets a live run can spend while it holds
+//     its clone (gate lane wait + this lane's gate timeout + slack, 10860 s by default) - and past
+//     that grace it is still kept whenever this machine can prove the directory is in use.
 //   * scripts/test.sh: the same policy for the gate's isolated home, in an EXIT trap that must not
 //     change the gate's exit status and must not print one byte after the `smoke ok` verdict line.
 //
@@ -20,7 +22,7 @@
 // Every run is fenced into a temp root of this file's own (TEMP/TMP/TMPDIR), so it counts its own
 // artifacts and can delete nothing of anyone else's.
 //
-// Usage:  node scripts/test-merge-lane-retention.mjs      (about 30 s, no network, no build)
+// Usage:  node scripts/test-merge-lane-retention.mjs      (about 40 s, no network, no build)
 // NOTE: scripts/test.sh discovers its tests explicitly, and this change was not allowed to alter its
 // invocations, so this file is not named by the gate yet: wiring `node scripts/test-merge-lane-retention.mjs`
 // beside `node scripts/test-merge-lane.mjs` in scripts/test.sh is what puts it in the gate.
@@ -28,7 +30,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {spawn, spawnSync} from 'node:child_process';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const LANE = path.join(here, 'merge-lane.mjs');
@@ -247,6 +249,50 @@ try {
   ok(fs.existsSync(foreign), 'the fixture family wa-merge-lane-test-* is not this lane\'s to delete');
   ok(fs.existsSync(deadClone) === false, 'a clone whose owner is gone is pruned');
   try { sweeper.kill(); } catch { /* it is a probe */ }
+
+  // 9. the pre-lease grace: DERIVED from the budgets it must beat, and never the only evidence.
+  //    D1 of the review (verify/REVIEW-disk-temp.md) reproduced the defect this pins: the flat hour
+  //    was shorter than the gate lane's own 2 h wait budget (7200 s) while a clone is made BEFORE the
+  //    slot is waited for, so a LIVE pre-change run's clone was deleted by the sweep.
+  const laneModule = await import(pathToFileURL(LANE).href);
+  const DERIVED = (7200 + 3600 + 60) * 1000;
+  ok(laneModule.legacyGraceMs({waitSeconds: 7200, gateTimeoutSeconds: 3600}) === DERIVED,
+    'the pre-lease grace is the gate lane wait (7200) + the gate timeout (3600) + 60 s slack = 10860 s',
+    String(laneModule.legacyGraceMs({waitSeconds: 7200, gateTimeoutSeconds: 3600})));
+  ok(laneModule.legacyGraceMs({waitSeconds: 60, gateTimeoutSeconds: 30}) === 150 * 1000,
+    'and it follows the budgets it is made of instead of being a round number',
+    String(laneModule.legacyGraceMs({waitSeconds: 60, gateTimeoutSeconds: 30})));
+  ok(laneModule.legacyGraceMs({waitSeconds: 7200, gateTimeoutSeconds: 60}) === (7200 + 60 + 60) * 1000,
+    'this lane own --timeout-seconds moves it',
+    String(laneModule.legacyGraceMs({waitSeconds: 7200, gateTimeoutSeconds: 60})));
+  ok(run1.json?.retention?.sweeps?.length &&
+    run1.json.retention.sweeps.every(sweep => sweep.grace_ms > 3600 * 1000),
+    'every sweep a real run made recorded a grace longer than a gate alone can live',
+    JSON.stringify(run1.json?.retention?.sweeps?.map(sweep => sweep.grace_seconds)));
+  const idleOld = path.join(temp, 'wa-merge-lane-Idle09');
+  const heldOld = path.join(temp, 'wa-merge-lane-Held09');
+  fs.mkdirSync(idleOld); fs.mkdirSync(heldOld);
+  fs.writeFileSync(path.join(heldOld, 'target.bin'), 'the tree a live run is building in\n');
+  for (const dir of [idleOld, heldOld]) {
+    const when = new Date(Date.now() - 3.5 * 60 * 60 * 1000);   // past EVERY grace, old and new
+    fs.utimesSync(dir, when, when);
+  }
+  // A native process whose working directory is that clone: measured EBUSY for a same-parent rename,
+  // and `rm -rf` is refused by Windows in that state only sometimes - which is why the sweep asks.
+  const worker = spawn(process.execPath,
+    ['-e', `process.chdir(${JSON.stringify(heldOld)}); setTimeout(() => {}, 8000)`], {stdio: 'ignore', env: fenced()});
+  worker.unref();
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  const evidenceSweep = laneModule.sweepClones({keep: 0, tmp: temp});
+  ok(!fs.existsSync(idleOld), 'an idle pre-lease clone past the grace is still pruned: the bound is not gone',
+    JSON.stringify(family('wa-merge-lane-')));
+  ok(fs.existsSync(heldOld),
+    'a pre-lease clone a live process is WORKING IN is not pruned, whatever its age',
+    JSON.stringify(family('wa-merge-lane-')));
+  ok(evidenceSweep.in_use.some(entry => entry.path.includes('Held09') && /EBUSY|EPERM/.test(entry.evidence)),
+    'and the record names the evidence instead of the clock',
+    JSON.stringify(evidenceSweep.in_use.map(entry => entry.evidence)));
+  try { worker.kill(); } catch { /* it is a probe */ }
 } catch (error) {
   failed += 1;
   console.log(`  FAIL harness - ${error.message}`);
