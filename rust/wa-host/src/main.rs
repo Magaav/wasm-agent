@@ -59,6 +59,10 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/provider.lua", include_str!("../../../lua/core/provider.lua")),
     ("lua/core/openai_sub.lua", include_str!("../../../lua/core/openai_sub.lua")),
     ("lua/core/openai_sub_bridge.lua", include_str!("../../../lua/core/openai_sub_bridge.lua")),
+    // The subscription credential: our own store, refresh and login, which the transport lane
+    // reaches through `M.token()`. It is here because this list is what a deployed node can load -
+    // a module absent from it exists in the working tree and not in the shipped binary.
+    ("lua/core/openai_sub_auth.lua", include_str!("../../../lua/core/openai_sub_auth.lua")),
     ("lua/core/openai_sub_catalogue.lua", include_str!("../../../lua/core/openai_sub_catalogue.lua")),
     ("lua/core/subscription_wire.lua", include_str!("../../../lua/core/subscription_wire.lua")),
     ("lua/core/model_window.lua", include_str!("../../../lua/core/model_window.lua")),
