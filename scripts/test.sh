@@ -49,7 +49,18 @@ echo "gate isolated home: $WASM_AGENT_HOME (retained for diagnostics)"
 # this log before the verdict line (which must stay last) and written as JSON. scripts/lib/gate-phases.sh
 # carries the contract. Until this landed, a 21-minute gate log had no durations in it at all.
 . scripts/lib/gate-phases.sh
+. scripts/lib/gate-suites.sh
 trap gate_phase_summary EXIT
+# Per-suite measurement: every suite below is its own process, so each one's wall time and the CPU
+# charged inside its own process tree are recorded through the shims in scripts/lib/gate-shims (first on
+# PATH for the rest of this run). Measurement only - the commands, their order, their arguments and
+# their environment are unchanged, stdio is inherited, and nothing is rescheduled or parallelised.
+GATE_SUITE_DIR="$(pwd)/scripts/lib/gate-shims"
+: "${GATE_SUITES_JSONL:=}"   # a caller may name it, so the raw per-invocation records are retained
+GATE_SUITES_JSONL="${GATE_SUITES_JSONL:-$(mktemp -u "${TMPDIR:-/tmp}/wa-gate-suites-XXXXXX.jsonl")}"
+rm -f "$GATE_SUITES_JSONL"
+export GATE_SUITES_JSONL
+export PATH="$GATE_SUITE_DIR:$PATH"
 gate_phase_begin build
 cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 node scripts/test-parallel-finish.mjs
@@ -93,6 +104,14 @@ SKIPPED=$((SKIPPED + INSTANCE_SKIPPED))
 rm -f "$INSTANCE_VERDICT"
 gate_phase_begin self-update
 BIN=rust/target/release/wa
+# The Lua suites ARE this binary (one per WA_SCRIPT), so measuring them means running it through the same
+# wrapper as the other suites. The shim execs this exact path with the same argv, so what runs is
+# unchanged; the gate's own string comparisons of $BIN are the only thing that could notice.
+if [ -x "$GATE_SUITE_DIR/wa" ]; then
+  WA_GATE_REAL_BIN="$BIN"
+  BIN="$GATE_SUITE_DIR/wa"
+  export WA_GATE_REAL_BIN BIN
+fi
 # A turn cannot deploy the process serving that same turn. The marker crosses
 # the Rust host's shell boundary; both entry points must refuse before waiting
 # for idle or touching an installed binary.
@@ -1705,6 +1724,7 @@ else
   SKIPPED=$((SKIPPED + 1))
 fi
 gate_phase_summary
+gate_suites_summary
 if [ "$SKIPPED" -gt 0 ]; then
   echo "smoke ok ($SKIPPED skipped)"
 else
