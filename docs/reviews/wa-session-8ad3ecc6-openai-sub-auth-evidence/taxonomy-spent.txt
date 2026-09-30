@@ -1,0 +1,4 @@
+--- an already-spent rotating token ---
+VERIFY error code=refresh_rejected:400 status=400
+--- posts ---
+{"path":"/oauth/token","grant_type":"refresh_token","presented_fp":"fd4c0b3da716","body_len":119}

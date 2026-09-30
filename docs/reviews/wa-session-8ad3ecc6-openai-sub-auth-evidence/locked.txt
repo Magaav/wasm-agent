@@ -1,0 +1,21 @@
+{"store":"C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch2ae38a56-f124-4b25-8732-cdeaf05f09d1/.review-scratch/run-locked/store.json","seed_fp":"c2c405864391"}
+MOCK pid=82008 port=28465
+lua root unset: using embedded modules; edits under lua/ are NOT under test
+HOLDER claimed=true run=verify-holder-9a0a5244-4b7d-4356-89b9-c6a4116d8ba9
+VERIFY error code=locked status=nil
+--- counts while the lock was held ---
+{
+ "token_posts": 0,
+ "refresh_posts": 0,
+ "device_posts": 0,
+ "refresh_posts_by_presented_fp": [],
+ "issued_count": 0,
+ "issued_fps": [],
+ "seed_fp": "c2c405864391",
+ "store_refresh_fp": "c2c405864391",
+ "store_refresh_matches_seed": true,
+ "store_refreshes": 0,
+ "store_last_error": null,
+ "store_has_access_token_field": true,
+ "store_source": "reviewer-fixture"
+}

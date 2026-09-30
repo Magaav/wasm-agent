@@ -1,0 +1,36 @@
+{"store":"C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch2ae38a56-f124-4b25-8732-cdeaf05f09d1/.review-scratch/run-singleflight/store.json","seed_fp":"a66998323358"}
+MOCK pid=81958 port=18162 delay_ms=3000 workers=6
+launched 6 workers:  81967 81968 81969 81970 81971 81972
+--- worker lines ---
+VERIFY ok refreshed=true adopted=false account=acct-reviewer-0001 access_fp=352cf5fa9b09 refresh_fp=b165c6782116 expires=1790780526066
+VERIFY pi_auth_path=C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch2ae38a56-f124-4b25-8732-cdeaf05f09d1/.review-scratch/run-singleflight/home/.pi/agent/auth.json
+VERIFY ok refreshed=false adopted=true account=acct-reviewer-0001 access_fp=352cf5fa9b09 refresh_fp=b165c6782116 expires=1790780526066
+VERIFY pi_auth_path=C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch2ae38a56-f124-4b25-8732-cdeaf05f09d1/.review-scratch/run-singleflight/home/.pi/agent/auth.json
+VERIFY ok refreshed=false adopted=true account=acct-reviewer-0001 access_fp=352cf5fa9b09 refresh_fp=b165c6782116 expires=1790780526066
+VERIFY pi_auth_path=C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch2ae38a56-f124-4b25-8732-cdeaf05f09d1/.review-scratch/run-singleflight/home/.pi/agent/auth.json
+VERIFY ok refreshed=false adopted=true account=acct-reviewer-0001 access_fp=352cf5fa9b09 refresh_fp=b165c6782116 expires=1790780526066
+VERIFY pi_auth_path=C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch2ae38a56-f124-4b25-8732-cdeaf05f09d1/.review-scratch/run-singleflight/home/.pi/agent/auth.json
+VERIFY ok refreshed=false adopted=true account=acct-reviewer-0001 access_fp=352cf5fa9b09 refresh_fp=b165c6782116 expires=1790780526066
+VERIFY pi_auth_path=C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch2ae38a56-f124-4b25-8732-cdeaf05f09d1/.review-scratch/run-singleflight/home/.pi/agent/auth.json
+VERIFY ok refreshed=false adopted=true account=acct-reviewer-0001 access_fp=352cf5fa9b09 refresh_fp=b165c6782116 expires=1790780526066
+VERIFY pi_auth_path=C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch2ae38a56-f124-4b25-8732-cdeaf05f09d1/.review-scratch/run-singleflight/home/.pi/agent/auth.json
+--- counts (reviewer's own instrument) ---
+{
+ "token_posts": 1,
+ "refresh_posts": 1,
+ "device_posts": 0,
+ "refresh_posts_by_presented_fp": [
+  "a66998323358"
+ ],
+ "issued_count": 1,
+ "issued_fps": [
+  "b165c6782116"
+ ],
+ "seed_fp": "a66998323358",
+ "store_refresh_fp": "b165c6782116",
+ "store_refresh_matches_seed": false,
+ "store_refreshes": 1,
+ "store_last_error": null,
+ "store_has_access_token_field": true,
+ "store_source": "reviewer-fixture"
+}

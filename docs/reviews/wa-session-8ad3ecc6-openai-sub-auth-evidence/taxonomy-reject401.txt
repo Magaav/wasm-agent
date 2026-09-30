@@ -1,0 +1,23 @@
+--- refresh refused with 401 ---
+VERIFY error code=refresh_rejected:401 status=401
+--- posts (must be one, not a retry) ---
+{"path":"/oauth/token","grant_type":"refresh_token","presented_fp":"ca23896454f6","body_len":119}
+{
+ "token_posts": 1,
+ "refresh_posts": 1,
+ "device_posts": 0,
+ "refresh_posts_by_presented_fp": [
+  "ca23896454f6"
+ ],
+ "issued_count": 0,
+ "issued_fps": [],
+ "seed_fp": "ca23896454f6",
+ "store_refresh_fp": "ca23896454f6",
+ "store_refresh_matches_seed": true,
+ "store_refreshes": 0,
+ "store_last_error": "refresh_rejected:401",
+ "store_has_access_token_field": true,
+ "store_source": "reviewer-fixture"
+}
+--- does any output echo the hostile body? ---
+no hostile-body echo in C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch2ae38a56-f124-4b25-8732-cdeaf05f09d1/.review-scratch/run-reject401

@@ -1,0 +1,14 @@
+--- browser login, phase 1 (pending) ---
+lua root unset: using embedded modules; edits under lua/ are NOT under test
+openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+http://127.0.0.1:5140/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=kS_-1oOQ43cOx6J4khTtz3cBvfblX1ee6xxNuuBCJYc&code_challenge_method=S256&state=9cb46ed35acc4c4d9d2fc20e8f8c958b&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+[lua] openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+http://127.0.0.1:5140/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=kS_-1oOQ43cOx6J4khTtz3cBvfblX1ee6xxNuuBCJYc&code_challenge_method=S256&state=9cb46ed35acc4c4d9d2fc20e8f8c958b&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+LOGIN ok mode=browser account=nil source=nil pending=true
+LOGIN url=http://127.0.0.1:5140/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=kS_-1oOQ43cOx6J4khTtz3cBvfblX1ee6xxNuuBCJYc&code_challenge_method=S256&state=9cb46ed35acc4c4d9d2fc20e8f8c958b&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+STATE=9cb46ed35acc4c4d9d2fc20e8f8c958b
+--- browser login, phase 2 (the pasted callback, complete+wrong-state) ---
+LOGIN error mode=browser code=flow_state_mismatch
+LOGIN ok mode=browser account=acct-reviewer-0001 source=login:browser pending=nil
+--- posts ---
+{"path":"/oauth/token","grant_type":"authorization_code","presented_fp":"5ee9f49d9739","body_len":203}

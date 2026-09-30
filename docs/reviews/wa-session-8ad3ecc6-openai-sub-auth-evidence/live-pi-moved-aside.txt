@@ -1,0 +1,15 @@
+### independence: Pi's package dir AND ~/.pi/agent/auth.json renamed aside, then a real request
+date: 2026-09-30T14:02:29Z
+auth.json sha256 before: c60f57470aa1b63d13077bf11c1f7fd4f8cd19ee710ac8fc74259055f4014d74
+live store sha256 before: f59c9b022d3cc408b5ff1b7e434d777c465482f87b49db31adc51fdc5fc3b21e
+ls auth.json: ls: cannot access 'C:/Users/Victor/.pi/agent/auth.json': No such file or directory
+ls pi package: ls: cannot access 'C:/Users/Victor/AppData/Roaming/npm/node_modules/@earendil-works': No such file or directory
+lua root unset: using embedded modules; edits under lua/ are NOT under test
+LIVE store=C:\Users\Victor/.wasm-agent/openai-sub/credentials.json
+LIVE pi_auth=C:\Users\Victor/.pi/agent/auth.json readable=false
+LIVE token account=14c747d9-6514-4792-97f7-bee01c49cbae access_fp=9c2278285978 refreshed=false adopted=false
+LIVE usage status=200 body_len=1293 error=nil
+restored pi package: C:/Users/Victor/AppData/Roaming/npm/node_modules/@earendil-works
+restored auth.json: C:/Users/Victor/.pi/agent/auth.json
+auth.json sha256 after:  c60f57470aa1b63d13077bf11c1f7fd4f8cd19ee710ac8fc74259055f4014d74
+live store sha256 after: f59c9b022d3cc408b5ff1b7e434d777c465482f87b49db31adc51fdc5fc3b21e

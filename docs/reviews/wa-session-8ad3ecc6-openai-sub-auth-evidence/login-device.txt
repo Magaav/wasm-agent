@@ -1,0 +1,33 @@
+--- device login (two pending answers, then authorized) ---
+lua root unset: using embedded modules; edits under lua/ are NOT under test
+openai-sub: open http://127.0.0.1:30653/codex/device and enter the code MOCK-CODE  (waiting up to 20s)
+[lua] openai-sub: open http://127.0.0.1:30653/codex/device and enter the code MOCK-CODE  (waiting up to 20s)
+openai-sub: device authorized after 3 polls; exchanging the authorization code
+[lua] openai-sub: device authorized after 3 polls; exchanging the authorization code
+openai-sub: logged in - account acct-reviewer-0001, expires in 3599s
+[lua] openai-sub: logged in - account acct-reviewer-0001, expires in 3599s
+LOGIN ok mode=device account=acct-reviewer-0001 source=login:device pending=nil
+--- posts ---
+{"path":"/api/accounts/deviceauth/usercode","body_len":44}
+{"path":"/api/accounts/deviceauth/token","poll":1}
+{"path":"/api/accounts/deviceauth/token","poll":2}
+{"path":"/api/accounts/deviceauth/token","poll":3}
+{"path":"/oauth/token","grant_type":"authorization_code","presented_fp":"318d6fa98f65","body_len":184}
+--- store after login ---
+{
+ "token_posts": 1,
+ "refresh_posts": 0,
+ "device_posts": 4,
+ "refresh_posts_by_presented_fp": [],
+ "issued_count": 1,
+ "issued_fps": [
+  "cccd681d8b28"
+ ],
+ "seed_fp": "dabe2f667adc",
+ "store_refresh_fp": "cccd681d8b28",
+ "store_refresh_matches_seed": false,
+ "store_refreshes": 0,
+ "store_last_error": null,
+ "store_has_access_token_field": true,
+ "store_source": "login:device"
+}
