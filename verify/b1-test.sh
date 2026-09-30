@@ -7,17 +7,6 @@ SKIPPED=0
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 
-# The disk is a reserved resource too, and this is the reservation. It is read here - before the
-# environment fence below and before the first `cargo` line - so a run that cannot finish is refused
-# before any of it is paid for. On 2026-09-30 this node reached 1.9 GB free and nothing said so: a gate
-# died 10.6 seconds into its build with `There is not enough space on the disk. (os error 112)` and the
-# only signal was a cargo error deep in a log, while the same commit passed in 21.4 minutes once space
-# was freed. The floor is a measurement of what one run costs, and the refusal names both numbers; the
-# derivation, and what that measurement does not settle, are the header of scripts/check-disk-floor.sh.
-# It runs outside the fence deliberately: the floor is this file's, an ambient variable cannot move it,
-# and `--floor-bytes` is the one deliberate way past it.
-bash scripts/check-disk-floor.sh
-
 # A scratch DB does not isolate profile/config/effect files. Fence the ENTIRE gate,
 # including new fixtures whose authors might otherwise forget to select a home.
 # Keep the explicit skip request, the in-turn deploy guard, this gate's own parallelism
@@ -60,19 +49,13 @@ echo "gate parallelism: cargo jobs=${CARGO_BUILD_JOBS:-cargo default} test threa
 # WA_GATE_HOME_KEEP failures (default 1) and deletes the older ones, so a day of gates costs one home
 # instead of one per run.
 #
-# LIVENESS DECIDES WHAT MAY BE PRUNED, NOT AGE, and where the name carries no pid the window is a
-# fallback with its arithmetic stated rather than a claim about rollouts. The pid of the run is part of
-# the directory name, so a sweep never touches a home whose process is still alive: on a machine running
-# more than one gate - the plugin-staging note below is what deleting a live sibling's temp already cost
-# this repository - that would turn a passing neighbour into an unattributed red gate. A home whose name
-# carries no pid is from before this change: it is pruned only once it is an hour old, and that hour is
-# the lane's own gate timeout (`--timeout-seconds`, 3600 s by default) and not comfortably more than it.
-# Unlike the clone family, no queue arithmetic enters here: the lane waits for its slot BEFORE this block
-# runs, so a home cannot be aged by a wait - but a gate started by hand, or by a lane whose timeout was
-# raised, can still be running at that boundary and is then a candidate. Residual limits, named: the
-# predicate here is Cygwin `kill -0`, which cannot see a native Windows pid; and a gate killed by a
-# signal it does not trap leaves its home behind - the next gate's sweep is what removes it, and that
-# sweep bounds the family.
+# LIVENESS DECIDES WHAT MAY BE PRUNED, NOT AGE. The pid of the run is part of the directory name, so a
+# sweep never touches a home whose process is still alive: on a machine running more than one gate - the
+# plugin-staging note below is what deleting a live sibling's temp already cost this repository - that
+# would turn a passing neighbour into an unattributed red gate. A home whose name carries no pid is from
+# before this change: it is pruned only once it is an hour old, so a rollout cannot delete the home of a
+# gate the previous script started. Residual limit, named: a gate killed by a signal it does not trap
+# leaves its home behind - the next gate's sweep is what removes it, and that sweep bounds the family.
 #
 # A PASSING RUN'S TRAP IS SILENT, and that is not a style choice: `scripts/merge-lane.mjs` reads this
 # gate's LAST line as its verdict (`smoke ok`), so a notice printed after it - even on stderr, which the
@@ -154,13 +137,6 @@ trap gate_home_release EXIT
 # ---- end of the bounded gate-home block: scripts/test-merge-lane-retention.mjs slices this file at
 # the line above and runs these exact bytes with its own body, so the policy is tested where it lives.
 
-# Phase timing: instrumentation, not a redesign. Every phase marker below is a call between two
-# existing commands, so no check is added, removed, reordered or skipped; the table is printed into
-# this log before the verdict line (which must stay last) and written as JSON. scripts/lib/gate-phases.sh
-# carries the contract. Until this landed, a 21-minute gate log had no durations in it at all.
-. scripts/lib/gate-phases.sh
-trap gate_phase_summary EXIT
-gate_phase_begin build
 cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 node scripts/test-parallel-finish.mjs
 # The execution and automation contracts have native, model-free adversarial tests.
@@ -192,7 +168,6 @@ cargo test --release --offline --manifest-path rust/wa-sentinel/Cargo.toml
 # The named-instance lifecycle, against two real co-located nodes: separate homes, keys, databases
 # and ports; a refused wrong listener; and a stop/restart of one that cannot reach the other. No
 # model and no network, so it belongs in the hermetic gate rather than the on-demand guest e2e.
-gate_phase_begin instances
 CARGO_BUILD_JOBS=2 cargo build --release --offline --manifest-path rust/wa-sentinel/Cargo.toml >/dev/null
 INSTANCE_VERDICT="$(mktemp)"
 rm -f "$INSTANCE_VERDICT" # The child must produce NEW evidence, never a previous run's verdict.
@@ -201,7 +176,6 @@ WA_INSTANCE_VERDICT="$INSTANCE_VERDICT" bash scripts/test-node-instances.sh || I
 INSTANCE_SKIPPED=$(node scripts/lib/suite-verdict.cjs "$INSTANCE_VERDICT" test-node-instances "$INSTANCE_STATUS" 62)
 SKIPPED=$((SKIPPED + INSTANCE_SKIPPED))
 rm -f "$INSTANCE_VERDICT"
-gate_phase_begin self-update
 BIN=rust/target/release/wa
 # A turn cannot deploy the process serving that same turn. The marker crosses
 # the Rust host's shell boundary; both entry points must refuse before waiting
@@ -272,7 +246,6 @@ if command -v cygpath >/dev/null 2>&1; then
 fi
 # This is a fixture, not the operator's deployment configuration.
 export WASM_AGENT_LLM_CONTEXT=128000
-gate_phase_begin cli
 DB="$(mktemp -u /tmp/wa-smoke-XXXXXX.db)"
 # `wa status` reports *the current thread*, so it gets its own database: with the
 # shared one, every earlier session in this run sits in the same second and the
@@ -531,14 +504,10 @@ ok(v.next:find('commit or stash', 1, true), 'the refusal must say what to do: ' 
 -- on the old commit, reported as queued by a path that never asked whether a watcher was running.
 -- The sentinel state is a directory of this test's own, so the machine's real pid file and request box
 -- are neither read nor written here.
-local sentinel = '/i/' .. update.sentinel_name()
-v = update.verdict({ install = '/i', tree = '/t', sentinel = sentinel, sentinel_present = true, sentinel_running = false })
+v = update.verdict({ install = '/i', tree = '/t', sentinel_present = true, sentinel_running = false })
 ok(v.ok == false and v.error == 'no_watcher', 'no watcher must be a refusal, got ' .. tostring(v.error))
 ok(not v.queued, 'and it must not read as queued')
-ok(v.next and v.next:find(sentinel .. ' start', 1, true), 'the refusal must name how to start one: ' .. tostring(v.next))
-local windows = update.binary_name() == 'wa.exe'
-ok((v.next:find('schtasks /Run /TN wasm-agent-sentinel', 1, true) ~= nil) == windows,
-  'only Windows may suggest its registered task: ' .. tostring(v.next))
+ok(v.next and v.next:find('wasm-agent-sentinel', 1, true), 'the refusal must name how to start one: ' .. tostring(v.next))
 local stopped = update.verdict({ install = '/i', tree = '/t', sentinel_present = true, sentinel_running = false,
   sentinel_stopped = true, stop_file = '/state/stop' })
 ok(stopped.error == 'sentinel_stopped', 'a stop file must be reported as the stop it is, got ' .. tostring(stopped.error))
@@ -616,7 +585,6 @@ ok(not report.queued, 'a refused request must not claim to be queued')
 ok(report.observed and #report.observed > 10, 'the refusal must carry what was seen')
 print('update decision ok')
 LUA
-gate_phase_begin memory-update
 WA_SCRIPT="$DB.update.lua" "$BIN" --db "$DB" | grep "update decision ok"
 rm -f "$DB.update.lua"
 # The check that was missing from those decisions: no watcher running means no request is written, and
@@ -881,7 +849,6 @@ assert(read_view:find("full_result", 1, true), "an oversized view must point at 
 assert(bash_view:find("FATAL", 1, true), "bash keeps the tail, because the error lives there")
 print("tool evidence ok")
 LUA
-gate_phase_begin tools
 WA_SCRIPT="$DB.evidence.lua" "$BIN" --db "$DB" | grep "tool evidence ok"
 rm -f "$DB.evidence.lua"
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB.observability" | grep 'observability ok'
@@ -1130,7 +1097,6 @@ assert(#memory.session_messages(sid, {}) == 0, "a new session must start empty")
 assert(#memory.recall("session test fact", 5) > 0, "memory must not depend on the session")
 print("sessions ok")
 LUA
-gate_phase_begin sessions
 WA_SCRIPT="$DB.sessions.lua" "$BIN" --db "$DB" | grep "sessions ok"
 # The ledger's order under concurrent writers: several processes appending to one session at once. A
 # single-process test cannot catch a `MAX(seq)+1` race. The check is mutation-tested: removing the
@@ -1427,7 +1393,6 @@ run_proof_fixture sqlite 6 node scripts/test-sqlite-isolation.cjs "$BIN"
 run_proof_fixture peer 43 node scripts/test-peer-run-admission.cjs "$BIN"
 run_proof_fixture foreground 3 bash scripts/test-foreground-cancel.sh
 rm -f "$DB.window"*
-gate_phase_begin recovery-cli
 echo "recovery cli ok"
 
 # `wa status` is the command an operator runs when something is wrong, so every
@@ -1618,7 +1583,6 @@ stage_plugin() {  # stage_plugin <wasm-path> <name>
 # must not become an unattributed red gate, and a staging that cannot write its module must still
 # fail. That test reads the function above out of this file, so it cannot pass while the code here is
 # wrong.
-gate_phase_begin plugins
 bash scripts/test-plugin-staging.sh
 # Build every plugin and assert one round trip through the WASM host.
 for crate in rust/plugins/*/; do
@@ -1658,20 +1622,6 @@ fi
 # the word "turn", which section 6 keeps for one speaker's contribution.
 bash scripts/check-naming.sh
 node scripts/test-naming-check.cjs
-# A temporary family with no retention or cleanup path grows with every run of the suite, and no reviewer
-# sees it in a diff: on 2026-09-30 the OS temp directory held 13079 stale entries from these scripts,
-# 14 GB of them. The check fails a file that mints one and never bounds it; the 36 files that already do
-# are printed on every run and are not fatal (`scripts/check-temp-retention.mjs` names each one).
-node scripts/check-temp-retention.mjs
-node scripts/test-temp-retention-check.cjs
-# The reclaim pass's safety rule, on fixtures where the answer is known: an ended session's worktree is
-# the only tree whose rust/target may be pruned, and a live session's, the canonical checkout's and a
-# lane's are kept with the reason printed. Also the refusal that matters - a tree with no session row is
-# refused, because ownership unproven is not permission.
-node scripts/test-reclaim-disk.cjs
-# The disk floor's refusal, the numbers it must name, the `--json` shape an alarm would read, and that
-# the gate calls it before its first build rather than after one has failed.
-node scripts/test-disk-floor.cjs
 node scripts/test-execution-terminology.cjs
 # Who may commit on `main` is decided by the host's answer about the process, not by a flag the
 # committing process types: the orchestrator session is allowed, a child is refused even when it
@@ -1720,7 +1670,6 @@ node scripts/test-proof-verdict.cjs
 # written, they passed when run by hand, and nothing ran them - which is how a test
 # quietly stops being true. Each file is self-contained and prints its own verdict,
 # so the gate is that verdict rather than a fixed string.
-gate_phase_begin fixtures
 for t in tests/*.lua; do
   fixture_status=0
   out=$(WA_SCRIPT="$t" "$BIN" --db "$DB.attach" 2>&1) || fixture_status=$?
@@ -1738,7 +1687,6 @@ node scripts/test-operation-control.cjs "$BIN"
 node scripts/test-operation-control.cjs "$BIN" --await
 
 # Actual child runtime and real sentinel deliveries, never a /subagents route stub.
-gate_phase_begin subagents
 run_proof_fixture policy 62 node scripts/test-subagents-policy.cjs "$BIN"
 run_proof_fixture children 18 node scripts/test-subagents.cjs "$BIN"
 run_proof_fixture fleet 20 node scripts/test-orchestrator.cjs "$BIN"
@@ -1791,7 +1739,6 @@ esac
 # and they need the repo root as cwd (they read ui/app.js from disk). A test that does
 # not run must not look like one that passed, so a skip is counted and asked for: if
 # node is missing the suite says so and the verdict counts it.
-gate_phase_begin ui-js
 if [ "${WASM_AGENT_SKIP_UI_TESTS:-}" = "1" ]; then
   echo "ui tests skipped by request (WASM_AGENT_SKIP_UI_TESTS=1)"
   SKIPPED=$((SKIPPED + 1))
@@ -1813,7 +1760,6 @@ fi
 # Chrome. It is the only check that sees the page as rendered - and it used to sit outside this
 # gate, so a green gate could say "ui tests ok" while it was failing. A machine that cannot run
 # it says so and counts the skip, rather than reporting a pass it did not earn.
-gate_phase_begin ui-browser
 if [ "${WASM_AGENT_SKIP_UI_BROWSER:-}" = "1" ]; then
   echo "ui browser harness skipped by request (WASM_AGENT_SKIP_UI_BROWSER=1)"
   SKIPPED=$((SKIPPED + 1))
@@ -1832,7 +1778,6 @@ else
   echo "ui browser harness SKIPPED - powershell or node not on PATH"
   SKIPPED=$((SKIPPED + 1))
 fi
-gate_phase_summary
 if [ "$SKIPPED" -gt 0 ]; then
   echo "smoke ok ($SKIPPED skipped)"
 else

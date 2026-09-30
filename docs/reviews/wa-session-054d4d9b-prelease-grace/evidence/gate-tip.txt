@@ -1,0 +1,15 @@
+
+=== case gate | tip | C:\Users\Victor\.wasm-agent\wa-review-054d4d9b\tip
+  tree under test: C:\Users\Victor\.wasm-agent\wa-review-054d4d9b\tip
+  fenced temp:     C:\Users\Victor\.wasm-agent\wa-review-054d4d9b\cases\case-gate-hOHZ7k\temp
+  pre-change lane run pid 39892, WA_GATE_LANE=off: inside its gate, gate child cwd = the clone
+  GATE RUNNING: clone=wa-merge-lane-ZLCX3H aged to 2.0 h, beside a newer dead leftover (90 min)
+  BEFORE: ["wa-merge-lane-Cand02","wa-merge-lane-ZLCX3H"]
+  SWEEP {"tree":"C:\\Users\\Victor\\.wasm-agent\\wa-review-054d4d9b\\tip","env_wait":null,"keep":1,"budget_for_others":1,"before":["wa-merge-lane-Cand02","wa-merge-lane-ZLCX3H"],"after":["wa-merge-lane-Cand02"],"removed":[["C:\\Users\\Victor\\.wasm-agent\\wa-review-054d4d9b\\cases\\case-gate-hOHZ7k\\temp\\wa-merge-lane-ZLCX3H",null]],"kept":[["C:\\Users\\Victor\\.wasm-agent\\wa-review-054d4d9b\\cases\\case-gate-hOHZ7k\\temp\\wa-merge-lane-Cand02","legacy"]],"recent_legacy":[],"live":[],"in_use":[],"not_this_family":0,"errors":[]}
+  the LIVE run's clone exists after the sweep: false
+  the run's exit: 4  verdict=refused exit_code=4 error=ENOENT: no such file or directory, open 'C:\Users\Victor\.wasm-agent\wa-review-054d4d9b\cases\case-gate-hOHZ7k\temp\wa-merge-lane-ZLCX3H\.git\wa-merge-lane-gate.log'
+  the run's last words: ["gate lane: WA_GATE_LANE=off: the gate runs with no slot, by name","{\"schema\":1,\"lane\":\"merge-lane\",\"verdict\":\"refused\",\"exit_code\":4,\"error\":\"ENOENT: no such file or directory, open 'C:\\\\Users\\\\Victor\\\\.wasm-agent\\\\wa-review-054d4d9b\\\\cases\\\\case-gate-hOHZ7k\\\\temp\\\\wa-merge-lane-ZLCX3H\\\\.git\\\\wa-merge-lane-gate.log'\"}"]
+  cleanup: taskkill pid 39892: exit 128; ERROR: The process "39892" not found.
+  cleanup: scratch root removed = true
+RESULT {"label":"tip","tree":"C:\\Users\\Victor\\.wasm-agent\\wa-review-054d4d9b\\tip","clone":"wa-merge-lane-ZLCX3H","survived":false,"exit":4,"last_words":["gate lane: WA_GATE_LANE=off: the gate runs with no slot, by name","{\"schema\":1,\"lane\":\"merge-lane\",\"verdict\":\"refused\",\"exit_code\":4,\"error\":\"ENOENT: no such file or directory, open 'C:\\\\Users\\\\Victor\\\\.wasm-agent\\\\wa-review-054d4d9b\\\\cases\\\\case-gate-hOHZ7k\\\\temp\\\\wa-merge-lane-ZLCX3H\\\\.git\\\\wa-merge-lane-gate.log'\"}"],"run_pid":39892,"sweep":{"removed":[["C:\\Users\\Victor\\.wasm-agent\\wa-review-054d4d9b\\cases\\case-gate-hOHZ7k\\temp\\wa-merge-lane-ZLCX3H",null]],"kept":[["C:\\Users\\Victor\\.wasm-agent\\wa-review-054d4d9b\\cases\\case-gate-hOHZ7k\\temp\\wa-merge-lane-Cand02","legacy"]],"recent_legacy":[],"in_use":[],"errors":[]}}
+  harness cleanup: every child this harness started

@@ -1,0 +1,13 @@
+{
+  "id": "disk-reclaim",
+  "name": "Reclaim disk: report free space, expire stale temp families, prune ended sessions' rust/target (reports by default; WA_RECLAIM_MODE=apply to remove)",
+  "trigger": {
+    "kind": "event",
+    "topic": "disk.reclaim"
+  },
+  "action": {
+    "kind": "run",
+    "script": "PREPARED_BY_INSTALL/scripts/reclaim-disk.sh",
+    "timeout_seconds": 900
+  }
+}

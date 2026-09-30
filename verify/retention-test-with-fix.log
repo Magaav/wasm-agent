@@ -1,0 +1,57 @@
+gate home (scripts/test.sh, the sliced block)
+  ok   the slice marker is in scripts/test.sh
+  ok   the sliced block ends with the EXIT trap it is testing (the fixture cannot drift from the code)
+  ok   the slice carries the pid lease and the bound
+  ok   the trap preserves the exit status it was given
+  ok   a failing run keeps exactly one home (its own)
+  ok   the home name carries the pid of the run that owns it (the lease)
+  ok   and the failing run says where its evidence is
+  ok   a passing run exits 0
+  ok   it did make a home (the next check is not vacuous)
+  ok   the verdict line is the LAST line of a passing run: the lane reads a trailing notice as gate_failed
+  ok   a passing run prints nothing on stderr either
+  ok   the passing run removed its own home and left the failure it did not create
+  ok   three more failing runs, each keeping its own at first
+  ok   after four failing runs the family holds exactly one home
+  ok   a failing run narrates the home the bound took away (the bound is observable)
+  ok   the first failure is the one the bound dropped
+  ok   WA_GATE_HOME_KEEP=all runs
+  ok   WA_GATE_HOME_KEEP=all keeps every home again (three more, beside the bounded one)
+  ok   WA_GATE_HOME_KEEP=0 leaves a red gate with no home to point at
+  ok   and it removes the family it can remove
+  ok   the sweep ran while a sibling was alive
+  ok   a home whose pid is still running is never pruned, not even by WA_GATE_HOME_KEEP=0
+  ok   a pre-lease home younger than the grace window is left alone (a rollout cannot delete a live gate's home)
+  ok   a pre-lease home older than an hour is pruned
+  ok   a knob that is neither a count nor `all` is refused, not guessed
+merge-lane clones (a real sequence of lane runs)
+  ok   the lane gates the merged tree and the gate fails
+  ok   the failing run keeps its own clone, named with its lease
+  ok   the record says what it kept and what the bound is
+  ok   run 2 of 4: one clone retained, not 2
+  ok   run 3 of 4: one clone retained, not 3
+  ok   run 4 of 4: one clone retained, not 4
+       bounded:  1: 1 clone, 20.0 MB | 2: 1 clones, 20.0 MB | 3: 1 clones, 20.0 MB | 4: 1 clones, 20.0 MB
+  ok   a passing run is a pass
+  ok   a passing run removes its own clone
+  ok   and it left the failure that was already there exactly as it was
+  ok   keep-everything run 1 still gates and fails
+  ok   keep-everything run 2 still gates and fails
+  ok   keep-everything run 3 still gates and fails
+  ok   keep-everything run 4 still gates and fails
+       unbounded: 1: 2 clones, 40.1 MB | 2: 3 clones, 60.1 MB | 3: 4 clones, 80.1 MB | 4: 5 clones, 100.1 MB
+  ok   WA_MERGE_LANE_KEEP=all reproduces the leak: every failing run keeps its clone forever
+  ok   WA_MERGE_LANE_KEEP=0 removes even the failing run's clone
+  ok   and the family is empty: nothing left to re-run or inspect
+  ok   the sweep ran
+  ok   a clone of a live run is never a candidate, whatever the bound says
+  ok   the fixture family wa-merge-lane-test-* is not this lane's to delete
+  ok   a clone whose owner is gone is pruned
+  ok   the pre-lease grace is the gate lane wait (7200) + the gate timeout (3600) + 60 s slack = 10860 s
+  ok   and it follows the budgets it is made of instead of being a round number
+  ok   this lane own --timeout-seconds moves it
+  ok   every sweep a real run made recorded a grace longer than a gate alone can live
+  ok   an idle pre-lease clone past the grace is still pruned: the bound is not gone
+  ok   a pre-lease clone a live process is WORKING IN is not pruned, whatever its age
+  ok   and the record names the evidence instead of the clock
+temp retention ok (52 checks)
