@@ -90,7 +90,21 @@ if [ "$SENTINEL_GOT" = "0" ] && [ -n "$ROOT" ] && [ -d "$ROOT/rust/wa-sentinel" 
 fi
 if [ "$SENTINEL_GOT" = "1" ]; then
   ok "$DIR/wa-sentinel"
-  "$DIR/wa-sentinel" restart >/dev/null 2>&1 || true
+  # The supervisor has to *start*, and its refusal must not be swallowed: `|| true` here printed a
+  # successful install while the manager refused to bring the unit up - `Interactive authentication
+  # required` for a system unit from an unprivileged shell, a unit that no longer exists, a control group
+  # it cannot create - and the operator found out when nothing could restart their node. The sentinel's own
+  # words are where the manager's reason is, so they are printed, not discarded.
+  if SENTINEL_START="$("$DIR/wa-sentinel" restart 2>&1)"; then
+    SENTINEL_SAID="$(printf '%s\n' "$SENTINEL_START" | sed 's/^  *//' | sed -n '/./p')"
+    ok "sentinel: $(printf '%s\n' "$SENTINEL_SAID" | head -1)"
+    printf '%s\n' "$SENTINEL_SAID" | tail -n +2 | sed 's/^/     /'
+  else
+    printf '\n   the sentinel did not start, and nothing else here can restart or upgrade this node:\n' >&2
+    printf '%s\n' "$SENTINEL_START" | sed 's/^/     /' >&2
+    printf '   fix the cause, then run: %s restart\n\n' "$DIR/wa-sentinel" >&2
+    exit 1
+  fi
 else
   warn "no sentinel: this node cannot restart or upgrade itself. Set WASM_AGENT_REPO to a checkout, or install wa-sentinel by hand."
 fi

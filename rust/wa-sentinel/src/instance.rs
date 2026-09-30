@@ -1256,9 +1256,12 @@ mod tests {
     use super::*;
 
     /// These tests set process-wide environment variables, and the test harness runs them in
-    /// parallel threads of one process. Serialise them so one test's registry cannot be read or
-    /// cleared by another's setup.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// parallel threads of one process. Serialise them on the **crate's** lock, not a module-local one:
+    /// a module-local lock serialises these tests against each other and leaves them free to clobber the
+    /// environment of a test in another module. That happened - `WASM_AGENT_HOME` set by a test here was
+    /// removed underneath a test in `deploy_visibility_tests`, which then read and asserted against the
+    /// operator's real state directory (and failed, in the full suite, while passing alone).
+    use crate::ENV_LOCK;
 
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())

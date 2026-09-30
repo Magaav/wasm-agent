@@ -42,6 +42,15 @@ mod jobs;
 mod cdp;
 mod instance;
 
+// Who owns the watcher's role: the supervisor a deploy must not fight, and the one a kill switch must ask.
+// The decision is a pure function over facts about *the watcher* - the supervisor it was told about, its
+// own control group, what it recorded when it took the role - gathered by `identity()` below and decided
+// in `role::owner_of`, so it is reachable and testable everywhere, without systemd and without a Linux
+// node; only the exec half is POSIX, and on Windows the answer is always "ourselves" because there is no
+// unit manager to ask.
+#[cfg_attr(windows, allow(dead_code))]
+mod role;
+
 // Stopping and starting a node through the Win32 API instead of through a spawned shell. The safety
 // rule it must preserve - act on a pid the OS gave us, never on an image name - lives in the caller,
 // and is what `SENTINEL.md` requires; see the module header for why the mechanism cannot weaken it.
@@ -93,6 +102,108 @@ fn pid_path() -> PathBuf {
 
 fn stop_path() -> PathBuf {
     sentinel_dir().join("stop")
+}
+
+/// Where the watcher records who owns its lifecycle, in the words `WA_SENTINEL_SUPERVISOR` uses.
+fn recorded_owner_path() -> PathBuf {
+    sentinel_dir().join("supervisor")
+}
+
+/// The facts `role::owner_of` decides from. Every one of them is about *the watcher*, so an operator's
+/// shell outside the unit reaches the same answer as the unit's own process - which is the whole point:
+/// deciding from the caller's control group made a shell's `stop` a no-op under `Restart=always` and a
+/// shell's `restart` a second watcher beside the unit's own.
+pub(crate) fn identity() -> role::Identity {
+    role::Identity {
+        declared: std::env::var("WA_SENTINEL_SUPERVISOR")
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
+        watcher: running_watcher_cgroup(),
+        recorded: std::fs::read_to_string(recorded_owner_path())
+            .ok()
+            .filter(|text| !text.trim().is_empty()),
+        caller: std::fs::read_to_string("/proc/self/cgroup").ok(),
+    }
+}
+
+/// Who owns the running watcher's lifecycle, from this process's own vantage point.
+pub(crate) fn owner() -> role::Owner {
+    role::owner_of(&identity())
+}
+
+/// The running watcher's control group, read from the pid the watcher itself wrote down.
+///
+/// Two checks before it is believed, because a pid file outlives the process it names: `pid_alive` (a
+/// recycled number is not a watcher) and `pid_is_watching` (the pid must still be a *watching sentinel*).
+/// Without the second, a recycled pid sitting in some other service would make `stop` stop that service.
+fn running_watcher_cgroup() -> Option<String> {
+    let pid = std::fs::read_to_string(pid_path()).ok()?.trim().parse::<u32>().ok()?;
+    if !pid_alive(pid) {
+        return None;
+    }
+    let (comm, argv) = (
+        std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default(),
+        std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default(),
+    );
+    let mine = std::env::current_exe()
+        .ok()
+        .and_then(|me| me.file_stem().map(|stem| stem.to_string_lossy().to_string()))
+        .unwrap_or_default();
+    if !is_watching(comm.trim(), &argv, &mine) {
+        return None;
+    }
+    std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()
+}
+
+/// Is `pid` a watching sentinel? Answered by the program's *name and verb*, never by its path.
+///
+/// The **name**, because the same build is installed twice on the node: `/usr/local/bin/wa-sentinel` is what
+/// the unit starts (`ExecStart=`, measured on the node) and `~/.local/bin/wa-sentinel` is what `$PATH` puts
+/// first and what `deploy.sh` replaces - the same sha256 in both places. Comparing paths would therefore
+/// refuse the truth on the machine this decision exists for, and an operator's `wa-sentinel stop` would fall
+/// back to a stop file under `Restart=always` - the bug this file was changed to fix. `/proc/<pid>/comm` is
+/// the kernel's own copy of the executable's file name, and both it and `/proc/<pid>/cmdline` are readable
+/// for a process of *any* owner (measured on the node against pid 1), so a root-owned watcher is still
+/// identifiable from an operator's unprivileged shell - which `/proc/<pid>/exe` is not.
+///
+/// The **verb**, because a recycled number taken by another `wa-sentinel` - a `restart`, a `once` - is not
+/// the watcher whose lifecycle is in question.
+///
+/// There is no `/proc` on Windows (both reads are empty, and there is no unit manager to ask either), so this
+/// is false there and the answer stays `Ourselves`.
+pub(crate) fn is_watching(comm: &str, argv: &[u8], my_name: &str) -> bool {
+    // The kernel truncates `comm` to 15 characters; compare like for like.
+    let mine = &my_name[..my_name.len().min(15)];
+    if mine.is_empty() || comm != mine {
+        return false;
+    }
+    argv.split(|byte| *byte == 0).any(|argument| argument == b"watch")
+}
+
+/// Write down who owns this watcher, from the watcher's own answer, when it takes the role.
+///
+/// This is what makes `wa-sentinel stop` work from an operator's shell in the window where the unit's
+/// watcher is dead and `Restart=always` has not brought it back yet (`RestartSec=5`), and what lets an
+/// unprivileged shell ask the manager about a root-owned watcher whose `/proc` entries it cannot inspect.
+/// A watcher inside a unit it cannot claim removes the record instead: a record naming a unit that is not
+/// the watcher's supervisor is a worse answer than none, and it is one an operator cannot see.
+pub(crate) fn record_owner() {
+    let who = owner();
+    match role::describe(&who) {
+        Some(text) => match std::fs::write(recorded_owner_path(), format!("{text}\n")) {
+            Ok(()) => say(&format!("supervisor: {text} recorded for the next stop or restart")),
+            Err(error) => say(&format!("could not record the supervisor ({text}): {error}")),
+        },
+        None => {
+            let _ = std::fs::remove_file(recorded_owner_path());
+            if let role::Owner::Unrecognised { unit } = &who {
+                say(&format!(
+                    "inside {unit}, which this cannot claim as its supervisor - lifecycle verbs will refuse \
+                     until WA_SENTINEL_SUPERVISOR says otherwise"
+                ));
+            }
+        }
+    }
 }
 
 /// The node's port: what the operator set, else the default the installer uses.
@@ -316,9 +427,30 @@ pub(crate) fn activity_of(value: &Value) -> Option<bool> {
 /// Whether a verb that replaces the node may proceed now. A busy node holds the request; a down
 /// node is startable (nothing to interrupt); a node that answers but cannot prove its state holds.
 pub(crate) fn safe_to_start_maintenance() -> bool {
-    match node_activity() {
-        Some(idle) => idle,
-        None => !node_is_up(),
+    // The classification itself is `hold_for`, so that the reason a request is held is a value the caller
+    // can log instead of a boolean that disappears into a `continue`. Every verb that waits for idle
+    // answers this question the same way, and `restart` is one of them.
+    hold_for("restart", node_activity(), node_is_up).is_none()
+}
+
+/// Why a request that replaces the node is being held right now, or `None` because it may proceed.
+///
+/// Split from the probes so the decision is testable without a live node, and so the hold has a *reason*
+/// to log. The hold used to be silent - a bare `continue` - which made "waiting for idle"
+/// indistinguishable from "nothing happened": the request sat in the box, nothing was written anywhere,
+/// and the only way to tell was to wait for a deploy that never came.
+///
+/// A node that is *down* is still startable: there is nothing to interrupt, and refusing that would make
+/// `restart` unable to fix a dead node, which is the failure it exists for.
+pub(crate) fn hold_for<F: FnOnce() -> bool>(verb: &str, activity: Option<bool>, node_up: F) -> Option<&'static str> {
+    if !waits_for_idle(verb) {
+        return None;
+    }
+    match activity {
+        Some(true) => None,
+        Some(false) => Some("the node is busy: a run, a subagent or an operation is in flight"),
+        None if node_up() => Some("the node answers /health but cannot prove it is idle"),
+        None => None,
     }
 }
 
@@ -943,7 +1075,14 @@ pub(crate) fn verb_upgrade(binary: &str, reason: &str) -> Result<String> {
 /// signal is the continuation wake, which the *new* watcher performs.
 pub(crate) fn verb_deploy(session: &str, prompt: &str, reason: &str) -> Result<String> {
     let script = resolve_deploy_script()?;
-    let (interpreter, script_arg) = shell_for(&script);
+    let capture = deploy_capture_path();
+    verb_deploy_script(&script, session, prompt, reason, &capture)
+}
+
+/// The deploy itself, with the script and the capture named by the caller - which is what lets the evidence
+/// be proved on a machine that does not deploy (`deploy_visibility_tests`).
+pub(crate) fn verb_deploy_script(script: &Path, session: &str, prompt: &str, reason: &str, capture: &Path) -> Result<String> {
+    let (interpreter, script_arg) = shell_for(script);
     let mut args = vec![script_arg, "--reason".to_string(), reason.to_string()];
     if !session.is_empty() {
         args.push("--session".to_string());
@@ -953,34 +1092,166 @@ pub(crate) fn verb_deploy(session: &str, prompt: &str, reason: &str) -> Result<S
         args.push("--prompt".to_string());
         args.push(prompt.to_string());
     }
-    #[cfg(windows)]
-    let pid = winproc::start_detached(Path::new(&interpreter), &args)
-        .context("start the deploy script detached")?;
-    // POSIX: spawn without waiting and without inheriting our stdio. There is no DETACHED_PROCESS to ask
-    // for, so the process outlives us by virtue of not being waited on - which is all this needs, because
-    // the deploy restarts the watcher itself.
-    #[cfg(not(windows))]
-    let pid = {
-        use std::process::Stdio;
-        std::process::Command::new(&interpreter)
-            .args(&args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("start the deploy script detached")?
-            .id()
-    };
-    audit("deploy", &script.display().to_string(), reason);
+    let started = start_deploy_detached(script, capture, reason, &interpreter, &args)?;
+    audit("deploy", &format!("{} {started}", script.display()), reason);
     let continuation = if session.is_empty() {
         "no continuation was requested (no --session)".to_string()
     } else {
         format!("{session} will be woken when it finishes")
     };
     Ok(format!(
-        "deploy started detached (pid {pid}) from {}; it waits for idle, installs the node, the UI and the sentinel, and {continuation}",
+        "deploy started detached ({started}) from {}; it waits for idle, installs the node, the UI and the sentinel, and {continuation}",
         script.display()
     ))
+}
+
+/// Where a deploy's own words go. A **file**, and the reason is the defect this fixes: the sentinel is
+/// detached, so "inherited stdio" means "a place nobody reads". On the node every word a deploy said -
+/// including the refusal reason that named the actual problem - was thrown away, and three deploys died
+/// with no output anywhere while the cause (a unit with no `cargo` on PATH) had to be re-derived from
+/// nothing. A file survives the parent, the terminal and the deploy's own death, it is readable over ssh,
+/// and it is the same evidence for an operator and for the agent that asked for the deploy.
+pub(crate) fn deploy_capture_path() -> PathBuf {
+    sentinel_dir().join("deploy.out")
+}
+
+/// One line that makes a capture attributable: which script, which reason, started how, and when. Epoch
+/// seconds, the same clock as `sentinel.log`, so the two files line up.
+pub(crate) fn deploy_capture_header(script: &Path, reason: &str, started_as: &str, at: u64) -> String {
+    format!(
+        "--- deploy {started_as} at {at} script {} reason {} ---\n",
+        script.display(),
+        if reason.is_empty() { "(no reason given)" } else { reason }
+    )
+}
+
+/// Open the capture for one more deploy, positioned at its end.
+///
+/// Not `append(true)`, and the reason is a measurement rather than a preference: on Windows `append` opens
+/// the file with `FILE_APPEND_DATA` and no write access, and an MSYS program - the deploy script runs under
+/// Git Bash there - cannot write to such an *inherited* handle. It fails with no trace anywhere, which is
+/// the very defect this file exists to fix: a probe run against the same stub wrote its refusal reason with
+/// a plain write handle and wrote nothing at all with an append handle. A write handle positioned at the end
+/// appends for sequential writers, and the writers here are sequential by construction - the header before
+/// the deploy, the ending line after it, and nothing of ours in between.
+fn open_capture(capture: &Path) -> Result<std::fs::File> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(capture)
+        .with_context(|| format!("open the deploy capture {}", capture.display()))?;
+    file.seek(SeekFrom::End(0))
+        .with_context(|| format!("position the deploy capture {} at its end", capture.display()))?;
+    Ok(file)
+}
+
+fn write_to_capture(file: &mut std::fs::File, text: &str) {
+    use std::io::Write;
+    let _ = file.write_all(text.as_bytes());
+}
+
+fn append_to_capture(path: &Path, text: &str) {
+    if let Ok(mut file) = open_capture(path) {
+        write_to_capture(&mut file, text);
+    }
+}
+
+/// Start the deploy script detached, keeping every word it says in a file the operator can read.
+///
+/// Detached on both platforms, by different means and for the same reason. On POSIX the child outlives us
+/// by not being waited on (there is no `DETACHED_PROCESS` to ask for); on Windows `DETACHED_PROCESS` gives
+/// it no console and no tie to this process. What is the same on both is where its words go: `null` stdio
+/// was the defect, because a detached process's inherited stdout belongs to a terminal nobody is watching -
+/// and a refusal reason that reaches nobody is not a refusal anybody can act on. (Windows used the Win32
+/// spawn here, which deliberately inherits no handles at all; redirecting the child's output is what the
+/// standard spawn can do and that one cannot, so the flags moved to `winproc::detached_flags`.)
+fn start_deploy_detached(script: &Path, capture: &Path, reason: &str, interpreter: &str, args: &[String]) -> Result<String> {
+    use std::process::{Command, Stdio};
+    let mut file = open_capture(capture)?;
+    // Where the deploy may run is decided from who owns the *watcher* (`role::placement`), never from where
+    // this process happens to sit: under a supervisor the deploy becomes its own transient unit, so
+    // restarting the watcher's unit does not signal it; with nobody outside owning the role it is a
+    // detached child, which is also the only shape Windows has.
+    match role::placement(&owner()) {
+        role::Placement::OwnUnit { unit, user } => {
+            let name = role::deploy_unit_name(now_epoch(), std::process::id());
+            // The deploy gets its own unit, so its cgroup no longer names the watcher's unit - hand that fact
+            // down, or the deploy cannot tell which unit it must ask to restart.
+            let supervisor = if user { format!("user:{unit}") } else { unit.clone() };
+            write_to_capture(&mut file, &deploy_capture_header(script, reason, &format!("unit {name}"), now_epoch()));
+            match role::start_deploy_unit(&name, capture, interpreter, args, user, &supervisor) {
+                Ok(started) => {
+                    write_to_capture(
+                        &mut file,
+                        &format!("--- started by systemd, outside the watcher's control group; how it ended: systemctl status {started}\n"),
+                    );
+                    return Ok(format!("unit {started}, output appended to {}", capture.display()));
+                }
+                Err(error) => {
+                    // No fallback to the branch below. A deploy started inside the control group of the unit
+                    // it is about to restart is signalled with that unit, mid-swap, before it has recorded
+                    // its result or woken the session that asked - so the refusal an operator can read is
+                    // the safe half of the choice, and this is the branch that used to take the unsafe one.
+                    let why = format!(
+                        "{unit} owns this watcher and the deploy could not be started outside its control \
+                         group ({error}): a deploy that restarts the unit it runs in is killed mid-swap, so \
+                         nothing was started"
+                    );
+                    write_to_capture(&mut file, &format!("--- refused: {why}\n"));
+                    bail!("{why}");
+                }
+            }
+        }
+        role::Placement::Refuse { unit } => {
+            let why = format!(
+                "this watcher is inside {unit}, which cannot be shown to own it: no deploy was started, \
+                 because as its own unit it needs that unit's identity (WA_SENTINEL_SUPERVISOR={unit}) and \
+                 as a child of this watcher it would be killed by the restart it performs; if nothing \
+                 outside owns the watcher, WA_SENTINEL_SUPERVISOR=none"
+            );
+            write_to_capture(&mut file, &format!("--- refused: {why}\n"));
+            bail!("{why}");
+        }
+        role::Placement::Detached => {}
+    }
+    write_to_capture(&mut file, &deploy_capture_header(script, reason, "detached", now_epoch()));
+    let mut command = Command::new(interpreter);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(file.try_clone().context("duplicate the capture handle for stdout")?))
+        .stderr(Stdio::from(file));
+    // DETACHED_PROCESS, so the deploy does not die with the console that started the watcher - the property
+    // `winproc::start_detached` gave this call before it needed a capture file.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(winproc::detached_flags());
+    }
+    let child = command.spawn().context("start the deploy script detached")?;
+    let pid = child.id();
+    watch_deploy_exit(child, capture.to_path_buf(), Instant::now());
+    Ok(format!("pid {pid}, output appended to {}", capture.display()))
+}
+
+/// A deploy nobody can see the end of is a deploy nobody can call finished, so one thread waits for it and
+/// appends how it ended. That line is the difference between "it ran" and "it died immediately", which is
+/// the question the capture exists to answer. It costs a thread per deploy (deploys are rare), and it is
+/// best-effort by nature: if this process exits first - a `once` run, or the watcher being replaced - the
+/// ending is missing, and the absence of any later line is then the evidence.
+fn watch_deploy_exit(mut child: std::process::Child, capture: PathBuf, started: Instant) {
+    std::thread::spawn(move || {
+        let pid = child.id();
+        let ending = match child.wait() {
+            Ok(status) => format!(
+                "--- deploy pid {pid} exited with {status} after {:.1}s\n",
+                started.elapsed().as_secs_f32()
+            ),
+            Err(error) => format!("--- deploy pid {pid} could not be waited on: {error}\n"),
+        };
+        append_to_capture(&capture, &ending);
+    });
 }
 
 /// Where `scripts/upgrade.sh` is.
@@ -1194,7 +1465,45 @@ fn newest_upgrade_in(entries: &[PathBuf]) -> Option<PathBuf> {
         .max().cloned()
 }
 
-fn process_requests(background: bool) -> Result<u32> {
+/// The deferral announcements already made, so a held request is announced once and not once per tick.
+///
+/// It is re-announced when the *reason* changes, because "busy" becoming "cannot prove it is idle" is a
+/// different fact about the same request. Nothing here removes, claims or rewrites a request: a hold is
+/// still retried next tick and never becomes a failure.
+#[derive(Default)]
+pub(crate) struct Held {
+    announced: Vec<(String, String)>,
+}
+
+impl Held {
+    /// The line for a request being held, or `None` while it stays held for the same reason.
+    pub(crate) fn announcement(&mut self, key: &str, verb: &str, why: &str, asked: &str) -> Option<String> {
+        match self.announced.iter_mut().find(|(held, _)| held == key) {
+            Some((_, reason)) if reason == why => return None,
+            Some((_, reason)) => *reason = why.to_string(),
+            None => self.announced.push((key.to_string(), why.to_string())),
+        }
+        // The reason the *request* carries is in the line too: "held - but why was it asked for?" is the
+        // very next question, and the request is no longer in the box to answer it once it is performed.
+        Some(format!("{verb} held: {why} (the request's reason: {asked})"))
+    }
+
+    /// Forget a request that is no longer held, so a later hold is announced again.
+    pub(crate) fn settled(&mut self, key: &str) {
+        self.announced.retain(|(held, _)| held != key);
+    }
+}
+
+/// Make a held request visible: one line in the log and one on the console, once per request. It is not a
+/// failure and it is not a claim: the request stays where it is and is retried next tick.
+fn announce_hold(held: &mut Held, key: &str, verb: &str, why: &str, asked: &str) {
+    if let Some(line) = held.announcement(key, verb, why, asked) {
+        audit("maintenance-deferred", &format!("{verb} {key}"), &line);
+        say(&format!("{line} - retried next tick"));
+    }
+}
+
+fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
     let dir = sentinel_dir().join("requests");
     let mut handled = 0;
     let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -1226,12 +1535,29 @@ fn process_requests(background: bool) -> Result<u32> {
             }
             continue;
         }
-        let capacity=if preview["verb"]=="recover" {5}else{4};
-        if background && REQUEST_ACTIVE.load(Ordering::Acquire)>=capacity {continue;}
-        let management=is_management_verb(preview["verb"].as_str().unwrap_or(""));
-        if management && MAINTENANCE_ACTIVE.load(Ordering::Acquire) {continue;}
-        // Maintenance stays queued; observing it never monopolizes the recovery/control loop.
-        if waits_for_idle(preview["verb"].as_str().unwrap_or("")) && !safe_to_start_maintenance() {continue;}
+        let verb=preview["verb"].as_str().unwrap_or("");
+        // One key per request file, so the announcement below is made once per request and not once per
+        // tick - the watcher ticks every 200ms, and a line per tick would bury the log it exists to make
+        // readable.
+        let key=path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let asked=preview["reason"].as_str().unwrap_or("(no reason given)");
+        let capacity=if verb=="recover" {5}else{4};
+        if background && REQUEST_ACTIVE.load(Ordering::Acquire)>=capacity {
+            announce_hold(held,&key,verb,"the watcher is at its request capacity",asked);
+            continue;
+        }
+        let management=is_management_verb(verb);
+        if management && MAINTENANCE_ACTIVE.load(Ordering::Acquire) {
+            announce_hold(held,&key,verb,"another maintenance verb is already running",asked);
+            continue;
+        }
+        // Maintenance stays queued; observing it never monopolizes the recovery/control loop. The hold is
+        // announced with its reason instead of being silent, and the request is still retried next tick.
+        if let Some(why)=hold_for(verb,node_activity(),node_is_up) {
+            announce_hold(held,&key,verb,why,asked);
+            continue;
+        }
+        held.settled(&key);
         // Claim before working, not after. This used to read the request, do the work, and only then
         // remove the file - so a second runner (the watcher and a stray `once`, which is exactly what
         // happened) could pick up the same file while the first was still inside it, and run the
@@ -1450,6 +1776,9 @@ fn watch() -> Result<()> {
     let mut automations=jobs::Runner::new();
     let _ = std::fs::remove_file(stop_path());
     std::fs::write(pid_path(), std::process::id().to_string())?;
+    // Who owns this watcher, written down by the watcher itself: the fact a `stop` from an operator's shell
+    // needs, and the only one that survives this process dying under `Restart=always`.
+    record_owner();
     audit("watch", &format!("pid {}", std::process::id()), "sentinel started");
     // Record what this watcher was told, durably, so the *next* start reads it instead of guessing. The
     // launcher carries the reservation in the environment and a deploy's `restart` inherits it, but a
@@ -1469,6 +1798,7 @@ fn watch() -> Result<()> {
     }
     say(&format!("watching: node on port {}, requests in {}", node_port(), sentinel_dir().join("requests").display()));
     say(&format!("stop it with: wa-sentinel stop   (or create {})", stop_path().display()));
+    let mut held = Held::default();
     let mut down_since: Option<Instant> = None;
     let mut announced = false;
     let mut triggers = TriggerState::default();
@@ -1482,7 +1812,7 @@ fn watch() -> Result<()> {
             let _ = std::fs::remove_file(pid_path());
             return Ok(());
         }
-        if let Err(error) = process_requests(true) {
+        if let Err(error) = process_requests(true, &mut held) {
             audit("box-error", "requests", &error.to_string());
         }
         check_triggers(&mut triggers);
@@ -1508,7 +1838,39 @@ fn watch() -> Result<()> {
     }
 }
 
+/// Hand a lifecycle verb to the manager, which is the one thing that can stop or replace a unit-owned
+/// watcher. The audit line and the sentence both name the unit, so "who answered" is never a guess.
+fn ask_manager(command: &[String], unit: &str, what: &str) -> Result<()> {
+    role::run_command(command)?;
+    audit(&format!("supervisor-{what}"), unit, &format!("sentinel {what} went to the unit manager"));
+    say(&format!("{unit} {what}ed by its manager (the manager owns this watcher)"));
+    Ok(())
+}
+
+/// The sentence a refusal says: which unit, and the ways an operator can settle it. A lifecycle verb that
+/// cannot identify the watcher's owner changes nothing and says why - the alternative it used to take was a
+/// competitor watcher inside a control group this process did not choose.
+fn refusal(unit: &str) -> String {
+    format!(
+        "inside {unit}, which cannot be shown to own this watcher: nothing was handed to that unit, and no \
+         watcher was started inside its control group. If {unit} is the watcher's supervisor, say so: \
+         WA_SENTINEL_SUPERVISOR={unit}. If nothing outside owns the watcher: WA_SENTINEL_SUPERVISOR=none"
+    )
+}
+
 fn start_self() -> Result<()> {
+    // A supervisor that already owns this role is asked, not emulated. This used to do the opposite - spawn
+    // a second watcher beside the unit's own - and the unit lost: its watcher could not take the runner
+    // lock, exited, and `Restart=always` started it again (observed as `activating`, `MainPID 0`,
+    // `NRestarts 20`).
+    match role::step(&owner(), role::Lifecycle::Start) {
+        role::Step::Manager { command, unit, .. } => {
+            let _ = std::fs::remove_file(stop_path());
+            return ask_manager(&command, &unit, "start");
+        }
+        role::Step::Refuse { unit } => bail!("{}", refusal(&unit)),
+        role::Step::Direct => {}
+    }
     if let Ok(text) = std::fs::read_to_string(pid_path()) {
         if let Ok(pid) = text.trim().parse::<u32>() {
             if pid_alive(pid) {
@@ -1548,12 +1910,40 @@ fn start_self() -> Result<()> {
 }
 
 fn stop_self() -> Result<()> {
+    // The file records the request - a deploy reads it before deciding to start a watcher - but the stop
+    // itself belongs to the manager whenever one owns the watcher: under `Restart=always` a stop file is not
+    // a stop, because the watcher exits on it and the manager immediately starts it again. That is a flap,
+    // and it is how a unit was seen at `activating`, `MainPID 0`, `NRestarts 20`.
     std::fs::write(stop_path(), format!("{}\n", now_epoch()))?;
-    say("asked the sentinel to stop");
-    Ok(())
+    match role::step(&owner(), role::Lifecycle::Stop) {
+        role::Step::Manager { command, unit, .. } => {
+            ask_manager(&command, &unit, "stop")?;
+            say("the stop file records the request");
+            Ok(())
+        }
+        role::Step::Refuse { unit } => {
+            // Say what was seen, and change nothing: adopting a unit this cannot identify is how the wrong
+            // thing gets stopped, which is worse than not knowing. It is an error, because under
+            // `Restart=always` the stop file on its own is a restart five seconds later.
+            audit("supervisor-unrecognised", &unit, "sentinel stop: not treated as my supervisor");
+            bail!("{}", refusal(&unit))
+        }
+        role::Step::Direct => {
+            say("asked the sentinel to stop");
+            Ok(())
+        }
+    }
 }
 
 fn restart_self() -> Result<()> {
+    match role::step(&owner(), role::Lifecycle::Restart) {
+        role::Step::Manager { command, unit, .. } => {
+            let _ = std::fs::remove_file(stop_path());
+            return ask_manager(&command, &unit, "restart");
+        }
+        role::Step::Refuse { unit } => bail!("{}", refusal(&unit)),
+        role::Step::Direct => {}
+    }
     let old = std::fs::read_to_string(pid_path()).ok().and_then(|t| t.trim().parse::<u32>().ok());
     if let Some(pid) = old {
         if pid_alive(pid) {
@@ -1592,6 +1982,20 @@ fn status() -> Result<()> {
     say(&format!("sentinel:  {}", match std::fs::read_to_string(pid_path()).ok().and_then(|t| t.trim().parse::<u32>().ok()) {
         Some(pid) if pid_alive(pid) => format!("watching (pid {pid})"),
         _ => "not running".into(),
+    }));
+    // Who owns this watcher's lifecycle, in the words the verbs decide from: the operator question this
+    // answers is "will `stop` stop it, or is it a five-second restart", and the answer must not be
+    // re-derived from the log afterwards. (The line deliberately does not contain the text `sentinel:` -
+    // `scripts/verify-install.sh` reads that of the watcher's own line with `grep`.)
+    say(&format!("supervisor: {}", match owner() {
+        role::Owner::Systemd { unit, user } => format!(
+            "{unit} owns this watcher (systemd{}); stop and restart are asked of it",
+            if user { " --user" } else { "" }
+        ),
+        role::Owner::Unrecognised { unit } => format!(
+            "inside {unit}, which cannot be shown to own this watcher - lifecycle verbs refuse"
+        ),
+        role::Owner::Ourselves => "none: nothing outside owns this watcher, so the stop file is a real stop".to_string(),
     }));
     let pending = std::fs::read_dir(sentinel_dir().join("requests")).map(|d| d.count()).unwrap_or(0);
     let done = std::fs::read_dir(sentinel_dir().join("done")).map(|d| d.count()).unwrap_or(0);
@@ -1704,7 +2108,7 @@ fn main() -> Result<()> {
         "instance" => instance::cli(rest),
         "recover" => verb_recover(rest.first().map(String::as_str).unwrap_or("explicit operator recovery")).map(|s|say(&s)),
         "watch" => watch(),
-        "once" => {let _lock=jobs::lock()?;process_requests(false).map(|n| say(&format!("{n} request(s) handled")))},
+        "once" => {let _lock=jobs::lock()?;process_requests(false,&mut Held::default()).map(|n| say(&format!("{n} request(s) handled"))) },
         "status" => status(),
         "start" => start_self(),
         // Replacing the binary does not change a running process: the watcher keeps executing the image
@@ -1724,6 +2128,25 @@ fn main() -> Result<()> {
     }
     Ok(())
 }
+
+/// Serialises the tests that mutate this process's environment. `set_var` is process-global, so two tests
+/// running in parallel would otherwise see each other's deploy script, home or port - and a test that cannot
+/// be trusted to be alone with its own fixtures fails for reasons that have nothing to do with the code.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The evidence a deploy leaves behind, and the line a held request leaves while it waits. A file of its
+/// own so the two claims can be read together, apart from the suite's other concerns.
+#[cfg(test)]
+#[path = "deploy_visibility_tests.rs"]
+mod deploy_visibility_tests;
+
+/// Who owns the watcher's lifecycle, and where a deploy may therefore run. A file of its own because it is
+/// the rule a shell's `stop`/`restart` and a deploy's placement all decide from, and because every case in
+/// it has to be falsifiable on a machine with no systemd.
+#[cfg(test)]
+#[path = "role_tests.rs"]
+mod role_tests;
 
 #[cfg(test)]
 mod self_update_tests {
@@ -1793,6 +2216,9 @@ mod self_update_tests {
     /// the process it replaces is the one that would have been its parent.
     #[test]
     fn a_deploy_request_spawns_the_script_and_returns() {
+        // Alone with the process environment: `WA_SENTINEL_DEPLOY` is global to this process, and another
+        // test setting it at the same moment would point this one at a different script.
+        let _alone = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = std::env::temp_dir().join(format!("wa-deploy-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");

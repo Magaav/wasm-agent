@@ -137,20 +137,53 @@ when you need it most.
 - **Waking is budgeted.** `WA_SENTINEL_WAKE_BUDGET` per hour (6 by default) because it is the only verb
   that costs money. Over budget, it refuses and says so.
 - **`run` is disabled** unless `WA_SENTINEL_SCRIPTS` names the directories it may execute from.
-- **A kill switch:** `wa-sentinel stop`, or create `<config>/sentinel/stop`.
+- **A kill switch:** `wa-sentinel stop`. Where a service manager owns the watcher it is the *manager*
+  that stops it (`systemctl stop wa-sentinel.service`), because `Restart=always` turns a stop file into a
+  restart five seconds later. Managing a system unit needs the manager's authority: on a machine whose
+  unit user is not authorised by polkit for `org.freedesktop.systemd1.manage-units` (measured on this
+  project's node: `pkcheck` answers "Authorization requires authentication" for an ssh shell), run
+  `sudo wa-sentinel stop`. A refusal is loud and names the manager's reason and the unit - never a quiet
+  stop file.
 
 ## Operating
 
 ```
-wa-sentinel status   # the node, the watcher, the box, the wake budget, the job lanes' reservation, the last actions
-wa-sentinel start    # start watching (detached); passes the resolved child-capacity reservation on to it
-wa-sentinel stop     # ask it to stop
+wa-sentinel status   # the node, the watcher, who owns the watcher's lifecycle, the box, the wake budget, the job lanes' reservation, the last actions
+wa-sentinel start    # start watching; where a unit owns the watcher this is the manager's restart of it
+wa-sentinel stop     # stop it: the manager's stop when a unit owns the watcher, the stop file otherwise
+wa-sentinel restart  # replace the running image: the manager's restart when a unit owns the watcher
 wa-sentinel once     # handle the box once and exit - for tests and for cron
 ```
 
 It is started by the installer. On a machine that runs a node for other people, run it under the
 service manager alongside the node — it is the thing that has to survive the node, so it should not be
 a child of it.
+
+### Who owns the watcher
+
+A lifecycle verb asks **who owns the running watcher**, never where the command was typed. The facts are
+the running watcher's own control group (`/proc/<pid>/cgroup` for the pid in
+`<config>/sentinel/sentinel.pid`), what the watcher recorded about itself when it took the role
+(`<config>/sentinel/supervisor`), and `WA_SENTINEL_SUPERVISOR` — which states the fact when none of that
+can be seen: `none` for a watcher started by hand on a machine that happens to run systemd, `user:<unit>`
+for a user unit, or a unit name. So `wa-sentinel stop` in an operator's shell stops the *unit's* watcher,
+and `wa-sentinel restart` there asks the manager instead of spawning a second watcher beside the unit's
+own.
+
+The unit is matched by what it is — the unit that owns the sentinel process — and never by its name: a
+sentinel installed under any name is found, and `wa-supervisor.service` is not adopted for sounding
+supervisory. A verb that finds itself inside a unit it cannot show owns the watcher **refuses**, names the
+unit and changes nothing (a competitor watcher inside somebody else's control group is the flap this
+exists to avoid); `WA_SENTINEL_SUPERVISOR=<unit>` hands that unit the role, and
+`WA_SENTINEL_SUPERVISOR=none` says nothing outside owns the watcher. For the same reason a deploy is never
+started inside the control group it must restart: it is started as a unit of its own, or it is refused
+with the reason in its capture.
+
+The **stop file** is the other mechanism, and it is a *request* rather than a stop: the running watcher
+reads it and exits. Under `Restart=always` that is a restart, not a stop - the manager brings the watcher
+back within `RestartSec` and the fresh watcher deletes the file as it starts. Reach for the file for a
+watcher nothing outside owns (a `nohup`, a logon task); use `wa-sentinel stop` for a unit. It is also what
+`deploy.sh` reads before deciding whether to start a watcher nobody asked for (`docs/JOBS.md`).
 
 ## What it deliberately does not do
 
