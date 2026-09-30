@@ -1,0 +1,6 @@
+pass0 (both intents durable, emitter refuses): {"exit":4,"records":2,"admitted":2,"refused":0,"pending":2,"settled_prior":0,"emitted":0,"skipped":0,"reasons":["event_pending","event_pending"],"zzzSrc":["change/zzz: event pending - event_not_acknowledged: expected subscription has no exact durable enqueue effect"],"refusals":[]} {"aaa":["ad3e0b1a:pending"],"zzz":["8c9508f4:pending"]}
+RESIDUE limit-exhaustion: {"exit":0,"pending_events":0,"prior_generations_settled":0,"notes":["change/zzz: admitted (event already emitted)"],"intents":{"aaa":["ad3e0b1a:acknowledged"],"zzz":["8c9508f4:pending"]}}
+RESIDUE no-emit: {"exit":0,"pending_events":0,"intents":{"zzz":["8c9508f4:pending"]}}
+RESIDUE already-landed record: {"exit":0,"pending_events":0,"reasons":["already_landed"],"intents":{"lll":["ffffffff:pending"]}}
+RESIDUE other_repository filter: {"exit":0,"pending_events":0,"reasons":["other_repository","other_repository","other_repository"],"intents":{"lll":["ffffffff:pending"]}}
+emitter calls=2, durable queue rows=2

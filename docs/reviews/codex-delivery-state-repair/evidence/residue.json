@@ -1,0 +1,130 @@
+{
+  "pass0": {
+    "exit": 4,
+    "records": 2,
+    "admitted": 2,
+    "refused": 0,
+    "pending": 2,
+    "settled_prior": 0,
+    "emitted": 0,
+    "skipped": 0,
+    "reasons": [
+      "event_pending",
+      "event_pending"
+    ],
+    "zzzSrc": [
+      "change/zzz: event pending - event_not_acknowledged: expected subscription has no exact durable enqueue effect"
+    ],
+    "refusals": []
+  },
+  "pass0_intents": {
+    "aaa": [
+      "ad3e0b1a:pending"
+    ],
+    "zzz": [
+      "8c9508f4:pending"
+    ]
+  },
+  "pass1_limit1": {
+    "exit": 0,
+    "records": 2,
+    "admitted": 2,
+    "refused": 0,
+    "pending": 0,
+    "settled_prior": 0,
+    "emitted": 1,
+    "skipped": 0,
+    "reasons": [],
+    "zzzSrc": [
+      "change/zzz: admitted (event already emitted)"
+    ],
+    "refusals": []
+  },
+  "pass1_intents": {
+    "aaa": [
+      "ad3e0b1a:acknowledged"
+    ],
+    "zzz": [
+      "8c9508f4:pending"
+    ]
+  },
+  "pass2_noemit": {
+    "exit": 0,
+    "records": 2,
+    "admitted": 2,
+    "refused": 0,
+    "pending": 0,
+    "settled_prior": 0,
+    "emitted": 0,
+    "skipped": 0,
+    "reasons": [],
+    "zzzSrc": [
+      "change/zzz: admitted - emission suppressed (--no-emit)"
+    ],
+    "refusals": []
+  },
+  "pass2_intents": {
+    "zzz": [
+      "8c9508f4:pending"
+    ]
+  },
+  "pass3_clear": {
+    "exit": 0,
+    "records": 2,
+    "admitted": 2,
+    "refused": 0,
+    "pending": 0,
+    "settled_prior": 0,
+    "emitted": 1,
+    "skipped": 0,
+    "reasons": [],
+    "zzzSrc": [],
+    "refusals": []
+  },
+  "pass4_landed": {
+    "exit": 0,
+    "records": 3,
+    "admitted": 2,
+    "refused": 0,
+    "pending": 0,
+    "settled_prior": 0,
+    "emitted": 0,
+    "skipped": 1,
+    "reasons": [
+      "already_landed"
+    ],
+    "zzzSrc": [
+      "change/zzz: admitted (unchanged; no new event)"
+    ],
+    "refusals": []
+  },
+  "pass4_intents": {
+    "lll": [
+      "ffffffff:pending"
+    ]
+  },
+  "pass5_otherrepo": {
+    "exit": 0,
+    "records": 3,
+    "admitted": 0,
+    "refused": 0,
+    "pending": 0,
+    "settled_prior": 0,
+    "emitted": 0,
+    "skipped": 3,
+    "reasons": [
+      "other_repository",
+      "other_repository",
+      "other_repository"
+    ],
+    "zzzSrc": [],
+    "refusals": []
+  },
+  "pass5_intents": {
+    "lll": [
+      "ffffffff:pending"
+    ]
+  },
+  "emitterCalls": 2,
+  "settledRowCount": 2
+}

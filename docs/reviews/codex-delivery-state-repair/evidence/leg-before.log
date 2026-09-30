@@ -1,0 +1,17 @@
+in-flight changed review preserves the new review and reports stale acknowledgement writer with exit 4
+reconcile after changed review: exit=0, reported pending=0, old intent=pending, queued exact effect exists=true, emitter calls=1
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+AssertionError [ERR_ASSERTION]: unsettled old durable intent was silently omitted from the reconciliation result
+    at file:///C:/Users/Victor/AppData/Local/Temp/wa-verdict-43893c3/before/probe.mjs:66:8 {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+
+Node.js v24.19.0

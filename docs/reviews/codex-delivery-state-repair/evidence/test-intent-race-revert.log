@@ -1,0 +1,19 @@
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+AssertionError [ERR_ASSERTION]: unsettled prior-generation intent is settled from its durable effect or reported, never silently omitted
+    at check (file:///C:/Users/Victor/AppData/Local/Temp/wa-verdict-43893c3/falsify-revert/scripts/test-delivery-intent-race.mjs:33:35)
+    at file:///C:/Users/Victor/AppData/Local/Temp/wa-verdict-43893c3/falsify-revert/scripts/test-delivery-intent-race.mjs:87:3
+    at ModuleJob.run (node:internal/modules/esm/module_job:439:25)
+    at async node:internal/modules/esm/loader:643:26
+    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+
+Node.js v24.19.0

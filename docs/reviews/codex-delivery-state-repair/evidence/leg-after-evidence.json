@@ -1,0 +1,121 @@
+{
+  "tip": "ce37e3b6e2d074d3b748141f98857188ccf689bf",
+  "tree": "e9b54656960d661246f1dbbf71a680cbe309de44",
+  "review": "e59929b11284e0737c50bef212e19fef3b84c3ae",
+  "review2": "682534dcb00912b2980afccca56eb9abde6395a1",
+  "firstExit": 4,
+  "firstCounts": {
+    "records": 1,
+    "admitted": 1,
+    "admitted_with_caveat": 0,
+    "pending_events": 0,
+    "prior_generations_settled": 0,
+    "write_errors": 1,
+    "refused": 0,
+    "emitted": 1,
+    "skipped": 0,
+    "unreadable": 0
+  },
+  "secondExit": 0,
+  "secondCounts": {
+    "records": 1,
+    "admitted": 0,
+    "admitted_with_caveat": 0,
+    "pending_events": 0,
+    "prior_generations_settled": 1,
+    "write_errors": 0,
+    "refused": 1,
+    "emitted": 0,
+    "skipped": 0,
+    "unreadable": 0
+  },
+  "eventId": "delivery:27383f4ed9d229f126520df42c5301095a53f8c2392a873300992aed09eacb61",
+  "oldIntent": {
+    "id": "delivery:27383f4ed9d229f126520df42c5301095a53f8c2392a873300992aed09eacb61",
+    "subscription": {
+      "id": "delivery-lane",
+      "revision": 1
+    },
+    "state": "acknowledged",
+    "attempts": 0,
+    "at": "2026-09-30T23:12:45.141Z",
+    "payload": {
+      "delivery": "change/delivery",
+      "branch": "change/delivery",
+      "repository": "C:/Users/Victor/AppData/Local/Temp/wa-verdict-43893c3/after/intent-race/repo",
+      "tip": "ce37e3b6e2d074d3b748141f98857188ccf689bf",
+      "tree": "e9b54656960d661246f1dbbf71a680cbe309de44",
+      "producer": "producer",
+      "review": {
+        "reviewer": "reviewer",
+        "commit": "e59929b11284e0737c50bef212e19fef3b84c3ae",
+        "tip": "ce37e3b6e2d074d3b748141f98857188ccf689bf",
+        "tree": "e9b54656960d661246f1dbbf71a680cbe309de44",
+        "verdict": "passed",
+        "findings": 0
+      },
+      "caveats": [],
+      "decision": "admitted",
+      "record": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-verdict-43893c3\\after\\intent-race\\store\\change-delivery.json",
+      "lane": {
+        "command": "node scripts/merge-lane.mjs --repo C:/Users/Victor/AppData/Local/Temp/wa-verdict-43893c3/after/intent-race/repo ce37e3b6e2d074d3b748141f98857188ccf689bf",
+        "note": "the lane gates the merged tree in a disposable clone and never pushes; installing its job is an operator act."
+      }
+    },
+    "payload_file": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-verdict-43893c3\\after\\intent-race\\store\\events\\delivery-27383f4ed9d229f126520df42c5301095a53f8c2392a873300992aed09eacb61.json",
+    "receipt": {
+      "mechanism": "legacy_readonly_schema",
+      "acknowledged": true,
+      "job_id": "delivery-lane",
+      "revision": 1,
+      "event_id": "delivery:27383f4ed9d229f126520df42c5301095a53f8c2392a873300992aed09eacb61",
+      "effect_id": 1
+    },
+    "acknowledged_at": "2026-09-30T23:12:45.497Z"
+  },
+  "currentReview": {
+    "reviewer": "reviewer",
+    "commit": "682534dcb00912b2980afccca56eb9abde6395a1",
+    "tip": "ce37e3b6e2d074d3b748141f98857188ccf689bf",
+    "tree": "e9b54656960d661246f1dbbf71a680cbe309de44",
+    "verdict": "refused",
+    "findings": [
+      {
+        "class": "summary_exceeds_code",
+        "status": "unresolved",
+        "text": "independent changed review during enqueue"
+      }
+    ]
+  },
+  "currentAdmission": {
+    "state": "refused",
+    "condition": "review_verdict_not_accepted",
+    "refusal": "change/delivery: refused - review_verdict_not_accepted. the review verdict is refused. obtain a passed or narrowed independent review; a refusal cannot enter the merge lane.",
+    "by": "delivery-trigger",
+    "tip": "ce37e3b6e2d074d3b748141f98857188ccf689bf",
+    "tree": "e9b54656960d661246f1dbbf71a680cbe309de44",
+    "caveats": [
+      {
+        "class": "summary_exceeds_code",
+        "status": "unresolved",
+        "text": "independent changed review during enqueue"
+      }
+    ],
+    "event": null,
+    "at": "2026-09-30T23:12:45.494Z"
+  },
+  "effect": {
+    "id": 1,
+    "job_id": "delivery-lane",
+    "revision": 1,
+    "event_id": "delivery:27383f4ed9d229f126520df42c5301095a53f8c2392a873300992aed09eacb61",
+    "payload": "{\"delivery\":\"change/delivery\",\"branch\":\"change/delivery\",\"repository\":\"C:/Users/Victor/AppData/Local/Temp/wa-verdict-43893c3/after/intent-race/repo\",\"tip\":\"ce37e3b6e2d074d3b748141f98857188ccf689bf\",\"tree\":\"e9b54656960d661246f1dbbf71a680cbe309de44\",\"producer\":\"producer\",\"review\":{\"reviewer\":\"reviewer\",\"commit\":\"e59929b11284e0737c50bef212e19fef3b84c3ae\",\"tip\":\"ce37e3b6e2d074d3b748141f98857188ccf689bf\",\"tree\":\"e9b54656960d661246f1dbbf71a680cbe309de44\",\"verdict\":\"passed\",\"findings\":0},\"caveats\":[],\"decision\":\"admitted\",\"record\":\"C:\\\\Users\\\\Victor\\\\AppData\\\\Local\\\\Temp\\\\wa-verdict-43893c3\\\\after\\\\intent-race\\\\store\\\\change-delivery.json\",\"lane\":{\"command\":\"node scripts/merge-lane.mjs --repo C:/Users/Victor/AppData/Local/Temp/wa-verdict-43893c3/after/intent-race/repo ce37e3b6e2d074d3b748141f98857188ccf689bf\",\"note\":\"the lane gates the merged tree in a disposable clone and never pushes; installing its job is an operator act.\"}}",
+    "state": "queued"
+  },
+  "emitCalls": 1,
+  "sourceHashes": {
+    "scripts/delivery-trigger.mjs": "54cd740fef83536c627011e5aba3b266e2f9732f08a202cfb0e1fe78ecd89850",
+    "scripts/lib/delivery-store.mjs": "5218d44e5c228486ae1a34f144c95aad061a96f97f0a5f1a418ee9b112b452e7",
+    "scripts/lib/delivery-outbox.mjs": "9fde56b43322b5c74a43e979a98feefa83f0965ffcc6d671e1dd3ef9b4ecdb8f"
+  }
+}

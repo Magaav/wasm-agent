@@ -1,0 +1,3 @@
+in-flight changed review preserves the new review and reports stale acknowledgement writer with exit 4
+reconcile after changed review: exit=0, reported pending=0, old intent=acknowledged, queued exact effect exists=true, emitter calls=1
+in-flight intent reconciliation ok
