@@ -312,11 +312,13 @@ setTimeout(() => {}, 600000);
   console.log(`note: killing the acquire caller pid ${victim.child.pid} left its own gate pid`
     + ` ${victim.gate} ${victimGateSurvived ? 'ALIVE, so the slot stays held' : 'gone, so the slot frees'}`
     + ` (${process.platform})`);
-  checkO(settledVictim.entry.state === (victimGateSurvived ? 'orphaned' : 'abandoned'),
-    `the acquire row follows the gate's real liveness: ${settledVictim.entry.state}`);
+  //  The property first, then the row's words: a guard-removed run has to fail on the property
+  //  (a free slot beside a live gate), not on one of the sentences that describe it.
   if (victimGateSurvived) {
     checkO(settledVictim.snapshot.slots_held === 1,
       'the slot is NOT free while the gate the killed caller started still runs');
+    checkO(settledVictim.entry.state === 'orphaned',
+      `the row follows the gate's real liveness: ${settledVictim.entry.state}`);
     checkO(settledVictim.entry.reason.includes(`pid ${victim.child.pid}`)
       && settledVictim.entry.reason.includes(`pid ${victim.gate}`) && /slot stays held/.test(settledVictim.entry.reason),
     `the row names the dead holder and the process it is holding the slot for: ${settledVictim.entry.reason}`);
@@ -326,7 +328,8 @@ setTimeout(() => {}, 600000);
     `a reconcile is refused while a process the holder started is alive: ${refused.stderr.trim()}`);
     killTree(victim.gate);
   } else {
-    checkO(settledVictim.snapshot.slots_held === 0, 'a caller whose gate died with it frees its slot at once');
+    checkO(settledVictim.entry.state === 'abandoned' && settledVictim.snapshot.slots_held === 0,
+      `a caller whose gate died with it frees its slot at once: ${settledVictim.entry.state}`);
   }
   const freed = await until(async () => {
     const snapshot = status();
