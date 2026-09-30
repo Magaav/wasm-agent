@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "delivery": "change/codex-delivery-state",
+  "tip": "b00f456681710b38f18a475047f8d3c31e6237fc",
+  "tree": "16874083447182f118df5794a6c70226e3ab0aae",
+  "producer": "term_2806604b-b664-48da-8aed-68b78b482bdd",
+  "reviewer": "term_3baca61f-5cd3-4e24-92d2-0a4eb0eb6f50",
+  "verdict": "refused",
+  "findings": [
+    {
+      "class": "summary_exceeds_code",
+      "status": "unresolved",
+      "text": "After an in-flight review change causes the enqueue acknowledgement write to lose CAS, the next reconciler exits 0 with pending_events=0 while an older outbox intent remains pending despite an exact durable queued effect. Reconcile or explicitly report prior-generation pending intents, including current refusal, without repeating an already durable enqueue."
+    },
+    {
+      "class": "boundary_gap",
+      "status": "resolved",
+      "text": "Final provenance footer now requires exactly one strict session token; independent source admission checks refuse nosession, legacy fallback, duplicate sessions and body-spoof provenance."
+    },
+    {
+      "class": "unverifiable_claim",
+      "status": "unresolved",
+      "text": "Actual workflow, installation, live receipt wiring, native Linux/macOS coverage and full publisher/merged-tree smoke remain pending; evidence is narrow private Windows fixtures plus one focused Rust receipt test."
+    },
+    {
+      "class": "boundary_gap",
+      "status": "unresolved",
+      "text": "New store/outbox tests and recovery spell are not standard-gate wired; the race fixture uses the explicit legacy read-only schema seam and receipt API deployment remains pending."
+    }
+  ],
+  "reviewed_commits": [
+    "3290d32727fcfc77e0646039f6322b0821a408c2",
+    "1939ff46d5a7bc15abd8ce3a44c8d53c53ff35e2",
+    "b00f456681710b38f18a475047f8d3c31e6237fc"
+  ]
+}
