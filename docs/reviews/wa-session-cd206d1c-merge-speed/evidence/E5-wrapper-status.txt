@@ -1,0 +1,58 @@
+# E5 - item 4: what instrumentation this tip would land, and what is left of the dropped wrapper.
+
+$ git ls-tree -r --name-only 7ed53a38 -- scripts/lib   (the wrapper's files are ABSENT at the tip)
+scripts/lib/delivery-store.mjs
+scripts/lib/experiment-edit-verify.cjs
+scripts/lib/experiment-verify.lua
+scripts/lib/first-run.ps1
+scripts/lib/gate-lane-sample.ps1
+scripts/lib/gate-phases.sh
+scripts/lib/managed-guest.ps1
+scripts/lib/proof-verdict.cjs
+scripts/lib/release-package.ps1
+scripts/lib/service-target.sh
+scripts/lib/sqlite-python.cjs
+scripts/lib/suite-verdict.cjs
+scripts/lib/test-verdict.cjs
+scripts/lib/token-audit.cjs
+scripts/lib/websocket-runtime.mjs
+
+$ git diff da8dc891 7ed53a38 -- scripts/test.sh | rg '^[-+]' | rg -v '^[-+][-+][-+]'
+---- added lines that are NOT a comment / phase marker / summary call (expect: none):
+---- removed lines (expect: none):
+---- new file, 98 lines, is it idempotent and inert? the guards:
+14:#     short-circuited or made parallel: the verdict line, the skip count and every exit code are the
+20:#     exiting; the EXIT trap only reports, and reports once.
+35:GATE_PHASE_WRITTEN=""
+72:gate_phase_summary() {
+74:  [ -n "$GATE_PHASE_WRITTEN" ] && return 0
+84:  GATE_PHASE_WRITTEN=1
+97:  return 0
+
+$ git grep -n 'gate-shims|gate-suite' 7ed53a38   (surviving references: docs only)
+7ed53a38:docs/MERGE-SPEED.md:5:`scripts/lib/gate-phases.sh` (per-phase wall time), `scripts/lib/gate-suite.mjs` +
+7ed53a38:docs/MERGE-SPEED.md:6:`scripts/lib/gate-suites.mjs` + `scripts/lib/gate-shims/` (per-suite wall time and the CPU charged inside
+7ed53a38:docs/MERGE-SPEED.md:43:| `scripts/lib/gate-suites.cjs` is an ES module named `.cjs` | `node scripts/lib/gate-suites.cjs summarize ...` exits 1, "Cannot use import statement outside a module": the gate's own summary could never be produced. Renamed `.mjs` |
+7ed53a38:docs/MERGE-SPEED.md:148:suite, and it is now measurable before it lands (`scripts/lib/gate-suites.mjs`, one JSON object).
+7ed53a38:docs/MERGE-SPEED.md:159:PATH="$PWD/scripts/lib/gate-shims:$PATH" GATE_SUITES_JSONL=/tmp/x.jsonl \
+7ed53a38:docs/MERGE-SPEED.md:191:and the two falsified reader defects are in `scripts/lib/gate-phases.sh`, `scripts/lib/gate-suite.mjs`
+7ed53a38:docs/MERGE-SPEED.md:192:and `scripts/lib/gate-suites.mjs`. The machine-readable artifacts are
+7ed53a38:docs/MERGE-SPEED.md:272:PATH=<scratch>/gate-shims:$PATH GATE_SUITES_JSONL=/tmp/s.jsonl \
+7ed53a38:docs/measurements/gate-instrument-evidence.json:11:  "suite": "scripts/lib/gate-shims/{bash,node,powershell,wa} -> scripts/lib/gate-suite.mjs, one record per suite invocation into GATE_SUITES_JSONL",
+7ed53a38:docs/measurements/gate-phases-suites.json:82:  "measured_by": "scripts/lib/gate-suite.mjs via the shims in scripts/lib/gate-shims",
+7ed53a38:docs/measurements/merge-lane-tree-landing.json:23:      "scripts/lib/gate-shims/_suite-shim.sh",
+7ed53a38:docs/measurements/merge-lane-tree-landing.json:24:      "scripts/lib/gate-shims/bash",
+7ed53a38:docs/measurements/merge-lane-tree-landing.json:25:      "scripts/lib/gate-shims/node",
+7ed53a38:docs/measurements/merge-lane-tree-landing.json:26:      "scripts/lib/gate-shims/powershell",
+
+$ git show 7ed53a38:docs/MERGE-SPEED.md | sed -n '3,7p;188,192p'   (stale header / §3c still point at dropped files)
+**This is a measurement and a recommendation. No behaviour was changed to produce it, and none of the
+options below is implemented here.** The companion artifact is the gate's own instrumentation:
+`scripts/lib/gate-phases.sh` (per-phase wall time), `scripts/lib/gate-suite.mjs` +
+`scripts/lib/gate-suites.mjs` + `scripts/lib/gate-shims/` (per-suite wall time and the CPU charged inside
+each suite's own process tree), and `scripts/lib/gate-lane-sample.ps1` (the sampler all three reuse).
+## 3c. Reference: the wrapper's contracts
+
+The phase and per-suite contracts, the lower-bound caveat, the "undetermined rather than isolated" rule
+and the two falsified reader defects are in `scripts/lib/gate-phases.sh`, `scripts/lib/gate-suite.mjs`
+and `scripts/lib/gate-suites.mjs`. The machine-readable artifacts are

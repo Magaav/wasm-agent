@@ -1,0 +1,39 @@
+# E1 - identity: tip, tree, base, containment, remote. All read-only.
+$ git rev-parse 7ed53a38 ; git rev-parse 7ed53a38^{tree}
+7ed53a38e057b3aab88c7d56f185f057c8561290
+73668558022b7c7820741974166228f0f2c95dd6
+$ git diff --name-status da8dc891 7ed53a38
+A	docs/MERGE-SPEED.md
+A	docs/measurements/gate-instrument-evidence.json
+A	docs/measurements/gate-phases-suites.json
+A	docs/measurements/merge-lane-tree-landing.json
+A	scripts/lib/gate-phases.sh
+M	scripts/merge-lane.mjs
+M	scripts/test-merge-lane.mjs
+M	scripts/test.sh
+$ git diff --stat da8dc891 7ed53a38 | tail -3
+ scripts/test-merge-lane.mjs                     |  61 +-
+ scripts/test.sh                                 |  20 +
+ 8 files changed, 1792 insertions(+), 10 deletions(-)
+$ git merge-base --is-ancestor ac79d716 7ed53a38 && echo 'ac79d716 IS an ancestor of the tip'
+ac79d716 IS an ancestor of the tip
+$ git ls-remote origin refs/heads/change/wa-session-childdispatchcd206d1c-287c-46fa-919d-703ff645dc5e
+7ed53a38e057b3aab88c7d56f185f057c8561290	refs/heads/change/wa-session-childdispatchcd206d1c-287c-46fa-919d-703ff645dc5e
+$ git log --oneline da8dc891..7ed53a38
+7ed53a3 docs(merge-speed): name the restored run's own gate.ms instead of a placeholder
+62572e1 docs(merge-speed): what landed, the wrapper's measured blast radius, and the corrected pair
+41ae5c9 revert(falsification): restore the tree, so the same warm gate passes again
+56920b8 test(falsification): a deliberate break, so a warm gate that cannot fail is caught
+9b4adfa fix(merge-lane): land the persistent gate tree, drop the per-suite wrapper that changes one suite
+ad6c142 docs(merge-lane): the landing's status file first, so a window that runs out leaves the decision
+2ef973e merge(origin/main): da8dc891 the merge lane's persistent tree on tonight's integration target
+ac79d71 fix(measure): the pair artifact had the warm run only - both halves now, with their phase totals
+584298c perf(gate): the cold/warm pair of one tree - 1030.1 s against 139.0 s, on tonight's tree
+8b58eea docs(merge-speed): the slotted run's table belongs in section 4, and the warm half is one run away
+c92c3ab docs(merge-speed): the wrapper is not transparent for one suite - do not land it as it stands
+5af6594 perf(gate): the slotted cold gate's phase and per-suite table, and the reuse that carried it
+ddeea19 docs(merge-speed): the two completed instrumented runs, and why there is no clean pair
+bfbcd5e docs(merge-speed): price the persistent tree, name what the numbers do not cover
+6c823bf perf(gate): measure every suite, and fix the wrapper that could not measure any
+7314b89 perf(merge-lane): gate in a persistent tree, so a landing stops paying a cold build
+96daaee perf(gate): time every phase, so a cold gate can be attributed

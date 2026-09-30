@@ -1,0 +1,53 @@
+# E3 - item 1: is the tip's headline saving ("1145.9 s -> 528.1 s on ONE tree", 617.8 s) a same-tree
+# measurement? The tip cites docs/EVOLUTION.md; the runs behind those rows are the gate lane's own
+# retained request records in ~/.wasm-agent/wa-gate-measure/<tag>.json (each names the cwd it gated in).
+
+$ git show 7ed53a38:docs/MERGE-SPEED.md | sed -n '21p;27,30p;89,92p'   (the claims, with line numbers)
+| the cold/warm gap on ONE tree | **1145.9 s cold vs 528.1 s warm** (528.1 and 523.4 in the warm pair) | `docs/EVOLUTION.md`, "Gate parallelism" - same tree, `smoke ok (2 skipped)` both |
+The decisive number is the fourth row: **on one tree, the same gate costs 617.8 s more when the tree is
+cold than when it is warm**, and 241.8 CPU-s of that difference is compilation charged inside the gate's
+own tree. A landing that gates a fresh clone pays it every time; that is the whole of the "merge speed"
+problem, and it is why the persistent tree (option 2) is the one with a measured payoff rather than a
+**617.8 s per landing** (1145.9 s -> 528.1 s on one tree; the warm pair's own runs were 528.1 s and
+523.4 s), with 241.8 CPU-s less charged inside the gate's tree, plus ~1-6 s of cloning and fetch not
+repeated. On tonight's median 15.0-minute gate that is a landing's gate falling to roughly 7-9 minutes,
+which is the largest single number available to this decision.
+
+$ git show 7ed53a38:docs/MERGE-SPEED.md | sed -n '284,290p'   (§6, where the same-tree pair is corrected)
+then died - it never ran `cli`, `memory-update`, `tools`, `sessions`, `recovery-cli`, `plugins`,
+`fixtures`, `subagents`, `ui-js` or `ui-browser`. On one tree, one candidate tree
+(`028380ac6d7d2c12d8f925d3629c55e3c5f4609e`), minutes apart, complete gates: **cold 1625532 ms, warm
+825069 ms** - a saving of 800463 ms (13.3 min) per landing, about **2x**, essentially all of it in the
+build phase (797521 ms against 22635 ms). Two more runs on the same tree: a deliberate failing assertion
+in the merged tree made the warm gate go RED (`test result: FAILED. 36 passed; 1 failed`, gate exit 101,
+lane exit 3), and reverting it returned the gate to green (854594 ms, `smoke ok (2 skipped)`).
+
+$ git show da8dc891:docs/EVOLUTION.md | sed -n '70,86p'   (the cited source rows)
+sample. The lane's own rows are the evidence (`scripts/gate-lane.mjs status`):
+
+| run | gate (`gate_ms`) | CPU in the gate's tree | wait for a slot | exit / verdict |
+| --- | --- | --- | --- | --- |
+| solo, cold (row `pair-at-once-w1`) | 1145.9 s | 253.0 CPU-s | none | 0, `smoke ok (2 skipped)` |
+| pair, cold, first (`capacity 2`) | 1093.5 s | 227.0 CPU-s | none | 0, `smoke ok (2 skipped)` |
+| pair, cold, second (`capacity 2`) | 1096.8 s | 217.8 CPU-s | 25 ms | 0, `smoke ok (2 skipped)` |
+| pair, warm, first (`capacity 1`) | 528.1 s | 11.2 CPU-s | none | 0, `smoke ok (2 skipped)` |
+| pair, warm, second (`capacity 1`) | 523.4 s | 9.7 CPU-s | 518.9 s | 0, `smoke ok (2 skipped)` |
+
+The solo run is the cold baseline rather than one of a pair: it was granted a slot with 0 of 2 in use, and
+it ended 3.6 minutes before the other two started. The warm pair is serial by construction - the second
+request waited for the first's slot - so 528.1 s and 523.4 s are what the lane does at the default, not a
+contention sample.
+
+Verdict: **the pair does not reproduce the thrash.** Two cold gates at once took 1093.5 s and 1096.8 s
+against a solo 1145.9 s, and each charged less CPU inside its own tree than the solo run did (227.0 and
+
+$ python -c "..." over C:/Users/Victor/.wasm-agent/wa-gate-measure/{c-w1,pair-cold-w2,pair-cold-w3,pair-warm-serial-w2,pair-warm-serial-w3}.json
+c-w1                   label=pair-at-once-w1        gated_in=w1   capacity=2 gate_ms=1145938   exit=0 waited_ms=1
+pair-cold-w2           label=pair-cold-w2           gated_in=w2   capacity=2 gate_ms=1093542   exit=0 waited_ms=1
+pair-cold-w3           label=pair-cold-w3           gated_in=w3   capacity=2 gate_ms=1096781   exit=0 waited_ms=25
+pair-warm-serial-w2    label=pair-warm-serial-w2    gated_in=w2   capacity=1 gate_ms=528114    exit=0 waited_ms=1
+pair-warm-serial-w3    label=pair-warm-serial-w3    gated_in=w3   capacity=1 gate_ms=523405    exit=0 waited_ms=518935
+
+doc's number  1145.9 - 528.1 = 617824 ms   (c-w1 cold in w1, pair-warm-serial-w2 warm in w2)
+same tree w2  1093542 - 528114 = 565428 ms
+same tree w3  1096781 - 523405 = 573376 ms

@@ -1,0 +1,31 @@
+# E2 - the saving's receipts: the five retained merge-lane runs behind the tip's §6/artifact pair.
+# Nothing here runs a gate: the run JSONs and their .gate.log siblings are read, and each log is
+# re-hashed against the sha256 the run recorded for it.
+$ python docs/reviews/wa-session-cd206d1c-merge-speed/evidence/check-receipts.py
+run        gate.ms      g.exit lane.exit slot          reused   tree   log ok   dirt/toolchain
+cold       1625532.454  0      0        #181          False    028380ac6d7d True     dirt=[] toolchain=[]
+warm       825069.004   0      0        #189          True     028380ac6d7d True     dirt=[] toolchain=[]
+broken     24756.612    101    3        #191          True     4f67582f3b46 True     dirt=[] toolchain=[]
+restored1  704723.385   1      3        #192          True     028380ac6d7d True     dirt=[] toolchain=[]
+restored2  854594.233   0      0        #193          True     028380ac6d7d True     dirt=[] toolchain=[]
+
+$ sha256sum <each .gate.log>   (raw hashes, same values as above 'log ok=True')
+merge-lane-landing-cold            4ae34be528cb255a75b8b14f8e11afa3a7eb59505d734e9a5a6c4b8404c84e7d
+merge-lane-landing-warm            12935254a90dffd370dade6dacb7f473a417dc35799f05758d2d0e8a850ff06e
+merge-lane-landing-broken          0f6112694fbea6daf2e50c89960e13e87994174ecee7ee8ad2ec4a111c6c4e2b
+merge-lane-landing-restored        2a7b945481051c6cb8a9af6bb97195d095e62a7b899e3f12a8afa30e457f238a
+merge-lane-landing-restored2       65dd709dafb7b6f0f501b3ace3877eb7733a4ef68f7742b6ea1fec4c63f7176c
+
+$ node scripts/gate-lane.mjs status   # READ-ONLY status; no slot acquired, held or stolen (slot #194 is another landing's)
+gate lane: 1 of 1 slot(s) held (capacity from the default), 0 waiting
+  state dir: C:\Users\Victor\.wasm-agent\gate-lane
+  slot #194 running mode=acquire: merge-lane a63f442d65e1 pid 48704 held 399s
+      command: (the caller runs its own gate)
+      why: capacity 1 of 1 in use; running #193 (merge-lane 028380ac6d7d, pid 40488, held 853s); queue depth 1 (next to run); waited 390s; also waiting: nobody
+  done #193 merge-lane 028380ac6d7d exit 0: merge-lane gate in C:\Users\Victor\.wasm-agent\merge-lane-tree-landing exited 0
+  failed #192 merge-lane 028380ac6d7d exit 1: merge-lane gate in C:\Users\Victor\.wasm-agent\merge-lane-tree-landing exited 1
+  failed #191 merge-lane 4f67582f3b46 exit 101: merge-lane gate in C:\Users\Victor\.wasm-agent\merge-lane-tree-landing exited 101
+  abandoned #190 merge-lane 91f535f964d3: abandoned while waiting: pid 84700 is gone, lease ac00291e-523a-4f66-a3a5-b762d289bf66 not held; its place in the queue is released, not inherited (it had waited 168s)
+  done #189 merge-lane 028380ac6d7d exit 0: merge-lane gate in C:\Users\Victor\.wasm-agent\merge-lane-tree-landing exited 0
+  done #188 merge-lane 91f535f964d3 exit 0: merge-lane gate in C:\Users\Victor\AppData\Local\Temp\wa-retention-test-MO0hgO\temp\wa-merge-lane-72060-Me8CjG exited 0
+  done #187 merge-lane 91f535f964d3 exit 0: merge-lane gate in C:\Users\Victor\AppData\Local\Temp\wa-retention-test-MO0hgO\temp\wa-merge-lane-13880-k4NjTU exited 0
