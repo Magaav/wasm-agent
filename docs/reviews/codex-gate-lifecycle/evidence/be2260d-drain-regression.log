@@ -1,0 +1,13 @@
+while owner is alive: slot 1 running; owned surviving work 81164 alive
+independent inspect: request rows and history unchanged
+no-wait contender refused while owner retains acquisition
+after timed shell and owner exit: slot 1 orphaned; surviving work alive=true; next private command admitted=false
+timeout drain check ok: attempted free-slot falsification refused; source/lease runner identity verified; exact source unchanged
+[gate-drain] drain-finish.stdout
+{"repository_ready":true,"repo":"C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-gate-drain-91bJPe\\drain-work","head":"547611789f3973b260de31b60d9e4bc629e1fa9b","tree":"929a33927313d476b849236a92d80b503dd98ca4","branch":"change/drain-probe","checks":[{"name":"revision","ok":true,"detail":"547611789f3973b260de31b60d9e4bc629e1fa9b"},{"name":"source_tree","ok":true,"detail":"929a33927313d476b849236a92d80b503dd98ca4"},{"name":"branch","ok":true,"detail":"change/drain-probe"},{"name":"clean","ok":true,"detail":true},{"name":"fresh_remote_refs","ok":true,"detail":""},{"name":"current","ok":true,"detail":true},{"name":"pushed","ok":true,"detail":"origin/change/drain-probe"},{"name":"merge_proof","ok":true,"detail":"929a33927313d476b849236a92d80b503dd98ca4"}],"runner":{"path":"C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchcd2db7d4-cc61-449e-9962-36ce699caff6\\skills\\parallel-evolution\\scripts\\finish.mjs","sha256":"b5b268b4e84ee23dd6cd2cfb436b751637e795e4f2e7023f396d845744f6126f","platform":"win32"},"inference_required":["one concern and patch review","impact audit and its coverage","integration/deployment when requested"],"gate_verified":false,"gate_error":"spawnSync C:\\Program Files\\Git\\bin\\bash.exe ETIMEDOUT","gate_log":"C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-gate-drain-91bJPe\\drain-work\\.git\\wa-finish-gate.json.log","gate_ms":2504.314,"gate_runs":1,"gate_run_count":1,"gate_exit":null,"gate_lane":{"lane":"gate","mode":"slot","request":1,"label":"finish change/drain-probe","dir":"C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-gate-drain-91bJPe\\drain-lane","waited_ms":97,"reason":"slot #1 granted at once","runner":{"path":"C:\\Users\\Victor\\.wasm-agent\\wa-worktree-childdispatchcd2db7d4-cc61-449e-9962-36ce699caff6\\scripts\\gate-lane.mjs","sha256":"1094b422ea9571c92f10b2d4456c2c65b9d013c9362b1f2dfd0e8520879077ea"}}}
+
+[gate-drain] drain-finish.stderr
+gate lane: slot #1 granted at once; this process runs the gate and releases the slot when it ends.
+probe seam: native gate-shell timeout 2500 ms instead of 3500000 ms
+gate lane: execution error (spawnSync C:\Program Files\Git\bin\bash.exe ETIMEDOUT); reservation retained pending process drain
+

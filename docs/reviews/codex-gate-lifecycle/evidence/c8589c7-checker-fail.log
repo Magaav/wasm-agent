@@ -1,0 +1,198 @@
+check-temp-retention: a temp family needs a retention or cleanup path in the same file
+  root: C:\Users\Victor\.wasm-agent\wa-worktree-childdispatchcd2db7d4-cc61-449e-9962-36ce699caff6
+  scanned 223 tracked files under scripts/
+  ok    scripts/agent-benchmark-ui-observe.mjs (mint at 97; removes via node-rm)
+  ok    scripts/agent-benchmark.mjs (mint at 158; removes via node-rm)
+  ok    scripts/bench-tool-views.cjs (mint at 14; removes via node-rm)
+  ok    scripts/deploy.sh (mint at 314; removes via rm)
+  DEFERRED scripts/experiment-tool-choice.cjs (wa-experiment-)
+             minted: 112:mkdtemp const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-experiment-'));
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  ok    scripts/handoff.sh (mint at 200; removes via rm, trap-rm)
+  ok    scripts/lib/experiment-edit-verify.cjs (mint at 17; removes via node-rm)
+  ok    scripts/merge-lane.mjs (mint at 132; removes via rm, node-rm)
+  DEFERRED scripts/review-placement-leak.cjs (wa-review-leak-)
+             minted: 14:mkdtemp const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-review-leak-'));
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  DEFERRED scripts/screenshot.ps1 (wa-desktop.png)
+             minted: 13:New-TemporaryFile / GetTempPath param([string]$Out = (Join-Path $env:TEMP "wa-desktop.png"))
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  ok    scripts/test-append-race.sh (mint at 24; removes via rm)
+  ok    scripts/test-auth-sessions.cjs (mint at 9; removes via node-rm)
+  ok    scripts/test-behavior.sh (mint at 15; removes via rm, trap-rm)
+  DEFERRED scripts/test-changeset.lua (changeset.db)
+             minted: 10:a litered family under a temp root --   WA_SCRIPT=scripts/test-changeset.lua wa --db /tmp/changeset.db
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  DEFERRED scripts/test-cli-terminal.mjs (wa-cli-terminal-)
+             minted: 11:mkdtemp const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-cli-terminal-'));
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  DEFERRED scripts/test-completion-wake.cjs (wa-completion-)
+             minted: 5:mkdtemp const home=fs.mkdtempSync(path.join(os.tmpdir(),'wa-completion-'));
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  DEFERRED scripts/test-context-budget.lua (x.db)
+             minted: 5:a litered family under a temp root --   WASM_AGENT_CONTEXT_BUDGET=2000 WA_SCRIPT=scripts/test-context-budget.lua wa --db /tmp/x.db
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  ok    scripts/test-delivery-admission.mjs (mint at 31; removes via node-rm)
+  ok    scripts/test-deploy-downgrade.sh (mint at 48; removes via rm)
+  ok    scripts/test-deploy-service-target.sh (mint at 73; removes via rm)
+  ok    scripts/test-deploy-ship.sh (mint at 37; removes via rm, trap-rm)
+  DEFERRED scripts/test-efficiency-report.lua (x.db)
+             minted: 7:a litered family under a temp root -- Run: WA_SCRIPT=scripts/test-efficiency-report.lua wa --db /tmp/x.db
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  ok    scripts/test-efficiency.cjs (mint at 5; removes via node-rm)
+  DEFERRED scripts/test-empty-reply.lua (x.db)
+             minted: 18:a litered family under a temp root -- Run from the repo root:  WA_SCRIPT=scripts/test-empty-reply.lua wa --db /tmp/x.db
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  ok    scripts/test-foreground-cancel.sh (mint at 19; removes via rm)
+  FAIL  scripts/test-gate-drain.cjs mints a temp family and never bounds it in this file
+           10:mkdtemp const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-gate-drain-'));
+           add the removal path, or a `temp-retention: <reason>` line if keeping it is the decision
+  ok    scripts/test-gate-lane-wiring.cjs (mint at 33; removes via node-rm)
+  DEFERRED scripts/test-gate-lane.cjs (wa-gate-lane-)
+             minted: 31:mkdtemp const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-gate-lane-'));
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  ok    scripts/test-guest-e2e.sh (mint at 46; removes via rm)
+  DEFERRED scripts/test-guest.lua (x.db)
+             minted: 20:a litered family under a temp root --   WASM_AGENT_HOME=/tmp/guest-home WA_SCRIPT=scripts/test-guest.lua wa --db /tmp/x.db
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  DEFERRED scripts/test-job-pipeline.cjs (wa-pipeline-)
+             minted: 22:mkdtemp const root = fs.mkdtempSync(path.join(os.tmpdir(), "wa-pipeline-"));
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  DEFERRED scripts/test-job-subagents.cjs (wa-subagents-)
+             minted: 29:mkdtemp const root = fs.mkdtempSync(path.join(os.tmpdir(), "wa-subagents-"));
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  DEFERRED scripts/test-jobs.cjs (wa-jobs-proof-)
+             minted: 6:mkdtemp const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-jobs-proof-'));
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  DEFERRED scripts/test-lua-root-notice.cjs (wa-lua-root-)
+             minted: 18:mkdtemp const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-lua-root-'));
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  ok    scripts/test-main-guard.sh (mint at 32; removes via rm, trap-rm)
+  ok    scripts/test-managed-network.cjs (mint at 11; removes via node-rm)
+  DEFERRED scripts/test-memory-window.lua (x.db)
+             minted: 14:a litered family under a temp root -- Run from the repo root:  WA_SCRIPT=scripts/test-memory-window.lua wa --db /tmp/x.db
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  DEFERRED scripts/test-merge-audit.mjs (wa-merge-audit-)
+             minted: 9:mkdtemp const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-merge-audit-'));
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  ok    scripts/test-merge-lane.mjs (mint at 27; removes via node-rm)
+  ok    scripts/test-modules-removal.sh (mint at 73; removes via rm)
+  ok    scripts/test-modules-route.sh (mint at 71; removes via rm)
+  ok    scripts/test-naming-check.cjs (mint at 6; removes via node-rm)
+  ok    scripts/test-node-instances.sh (mint at 36; removes via rm)
+  ok    scripts/test-openai-sub.cjs (mint at 7; removes via node-rm)
+  DEFERRED scripts/test-operation-control.cjs (the family name is not readable from this line (see the mint line above))
+             minted: 3:mkdtemp const {spawn}=require('node:child_process');const repo=path.resolve(__dirname,'..');const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-oper
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  DEFERRED scripts/test-operation-recovery.cjs (the family name is not readable from this line (see the mint line above))
+             minted: 4:mkdtemp const repo=path.resolve(__dirname,'..'),root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-recovery-proof-'));
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  DEFERRED scripts/test-orchestration-e2e.cjs (wa-orchestration-e2e-)
+             minted: 12:mkdtemp const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-orchestration-e2e-'));
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  DEFERRED scripts/test-orchestrator.cjs (wa-orchestrator-)
+             minted: 8:mkdtemp const work=fs.mkdtempSync(path.join(os.tmpdir(),'wa-orchestrator-'));
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  ok    scripts/test-parallel-finish.mjs (mint at 7; removes via node-rm)
+  ok    scripts/test-peer-run-admission.cjs (mint at 34; removes via node-rm)
+  ok    scripts/test-placed-child-workspace.cjs (mint at 16; removes via node-rm)
+  ok    scripts/test-plugin-staging.sh (mint at 7; removes via rm)
+  DEFERRED scripts/test-prefix-stability.lua (x.db)
+             minted: 8:a litered family under a temp root -- Run: WASM_AGENT_AGENTS_MD=<tmp> WA_SCRIPT=scripts/test-prefix-stability.lua wa --db /tmp/x.db
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  DEFERRED scripts/test-recovery.lua (wa-recovery.db)
+             minted: 3:a litered family under a temp root --   WA_SCRIPT=scripts/test-recovery.lua wa --db /tmp/wa-recovery.db
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  DEFERRED scripts/test-resource-claims.cjs (wa-resource-claims-)
+             minted: 4:mkdtemp const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-resource-claims-')),ready=path.join(root,'ready');
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  ok    scripts/test-run-isolation.sh (mint at 24; removes via rm)
+  DEFERRED scripts/test-run-recovery.cjs (wa-run-recovery-)
+             minted: 12:mkdtemp const root = fs.mkdtempSync(path.join(os.tmpdir(),'wa-run-recovery-'));
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  ok    scripts/test-sentinel-e2e.sh (mint at 121; removes via rm)
+  ok    scripts/test-serve-concurrency.sh (mint at 21; removes via rm)
+  DEFERRED scripts/test-session-title.lua (x.db)
+             minted: 7:a litered family under a temp root -- Run from the repo root:  WA_SCRIPT=scripts/test-session-title.lua wa --db /tmp/x.db
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  ok    scripts/test-session-workspaces.cjs (mint at 11; removes via node-rm)
+  DEFERRED scripts/test-source-ensure.cjs (wa-source-)
+             minted: 16:mkdtemp const root = fs.mkdtempSync(path.join(os.tmpdir(), "wa-source-"));
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  DEFERRED scripts/test-sqlite-isolation.cjs (wa-sqlite-workers-)
+             minted: 7:mkdtemp const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-sqlite-workers-')),source=path.join(root,'source');
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  DEFERRED scripts/test-sqlite-lifecycle.cjs (wa-sqlite-life-)
+             minted: 13:mkdtemp const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-sqlite-life-')), source = path.join(root, 'source');
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  DEFERRED scripts/test-subagents-policy.cjs (wa-subagent-policy-)
+             minted: 6:mkdtemp const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-subagent-policy-'));
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  DEFERRED scripts/test-subagents.cjs (wa-subagents-)
+             minted: 14:mkdtemp const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-subagents-'));
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  ok    scripts/test-suite-verdict.cjs (mint at 11; removes via node-rm)
+  ok    scripts/test-telemetry-lock.sh (mint at 35; removes via rm)
+  ok    scripts/test-termux.sh (mint at 4; removes via rm, trap-rm)
+  ok    scripts/test-token-audit.cjs (mint at 196; removes via node-rm)
+  ok    scripts/test-ui.ps1 (mint at 1092; removes via powershell-remove)
+  DEFERRED scripts/test-update-watcher.lua (wa-update-watcher.db)
+             minted: 14:a litered family under a temp root --   WA_SCRIPT=scripts/test-update-watcher.lua wa --db /tmp/wa-update-watcher.db
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  ok    scripts/test-update.sh (mint at 17; removes via rm, trap-rm)
+  ok    scripts/test-upgrade-idle.sh (mint at 15; removes via rm, trap-rm)
+  ok    scripts/test-verify-install.mjs (mint at 8; removes via node-rm)
+  DEFERRED scripts/test-whatsapp-cursor.cjs (wa-cursor-)
+             minted: 75:mkdtemp const root = fs.mkdtempSync(path.join(os.tmpdir(), "wa-cursor-"));
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  DEFERRED scripts/test-whatsapp-subagent-e2e.cjs (wa-whatsapp-e2e-)
+             minted: 20:mkdtemp const root = fs.mkdtempSync(path.join(os.tmpdir(), "wa-whatsapp-e2e-"));
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  DEFERRED scripts/test-whatsapp-transcribe.cjs (wa-voice-)
+             minted: 15:mkdtemp const root = fs.mkdtempSync(path.join(os.tmpdir(), "wa-voice-"));
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  ok    scripts/test.sh (mint at 36; removes via rm, trap-rm)
+  ok    scripts/upgrade.sh (mint at 160; removes via rm)
+  DEFERRED scripts/wa-ui.ps1 (the family name is not readable from this line (see the mint line above))
+             minted: 108:a litered family under a temp root & ssh -o BatchMode=yes -o ConnectTimeout=8 $HostAlias "setsid nohup wasm-agent serve --port $Port --ui $RemoteUi >/tmp/wa-ui.log 2>&1 </dev/
+             a fixture created per case and never removed: add the removal where it is created
+             owner: not this delivery's file - it is named in the delivery that added this check
+  ok    scripts/whatsapp-copilot-read.sh (mint at 54; removes via rm)
+
+check-temp-retention: FAIL (223 files, 82 mint temp paths, 0 declared, 36 deferred, 0 resolved)
+  failed: scripts/test-gate-drain.cjs mints a temp family with no retention or cleanup path in this file

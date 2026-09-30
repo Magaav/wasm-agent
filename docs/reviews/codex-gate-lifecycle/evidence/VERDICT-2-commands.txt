@@ -1,0 +1,54 @@
+Re-check of change/codex-gate-lifecycle @ be2260d. Three questions, the commands, the pinned bytes.
+
+TREES
+  c8589c7^{tree} = b71e56efc505b133c0ef644707c51f3c9adcf953
+  be2260d^{tree} = 5cd6effd3e48f0a9f838973d68310e4cf44440c9   <- the tree this verdict covers
+  git diff --stat c8589c7 be2260d      -> 1 file, 11 insertions(+), 4 deletions(-)
+  git diff --name-status c8589c7 be2260d -> M scripts/test-gate-drain.cjs    (nothing else)
+  blob scripts/test-gate-drain.cjs @ c8589c7 = e36a5420facfb03d12ea8639ca17706c808211f532d409f398fde44b86ebae01
+  blob scripts/test-gate-drain.cjs @ be2260d = cb7459f168d261b25f67def70470a7207300f89b3d908cbef6673edc4ef058b4
+  change/codex-gate-lifecycle = origin/change/codex-gate-lifecycle = be2260d8f2a239e7764e0a2cf75717412ce52d35
+
+1. DELTA SCOPE  (delta-c8589c7-be2260d.diff)
+  Only the outer finally of main() changed: the three stopOwned calls moved into a nested try,
+  whose own finally writes the two captured streams to this reporter's stderr and then runs
+  fs.rmSync(root,{recursive:true,force:true,maxRetries:5,retryDelay:200});
+
+2. THE LEAK IS GONE (run, not read)
+  ls -d $TMP/wa-gate-drain-*                     -> 0 before
+  node scripts/test-gate-drain.cjs               -> exit 0
+     "timeout drain check ok: attempted free-slot falsification refused; source/lease runner
+      identity verified; exact source unchanged"
+  ls -d $TMP/wa-gate-drain-*                     -> 0 after       (be2260d-drain-regression.log)
+  ls -d $TMP/wa-gate-drain-*                     -> 0 after a FAILING run too
+                                                                   (drain-negative-control-prefix-pair.log)
+  The checker, by the invocation scripts/test.sh uses (90766a96 tree, scripts/test.sh line 1547:
+  `node scripts/check-temp-retention.mjs`; checker sha256 91343346f630f5ff5ee8e8cf43e5e5d10838c1759644476603ab5cc56ad8876c
+  taken from the sibling tip 90766a96, because that file is not in this delivery's ancestry):
+    be2260d blob: ok    scripts/test-gate-drain.cjs (mint at 10; removes via node-rm)
+                  check-temp-retention: PASS (223 files, 82 mint temp paths, 0 declared, 36 deferred, 0 resolved)  exit 0
+    c8589c7 blob: FAIL  scripts/test-gate-drain.cjs mints a temp family and never bounds it in this file
+                           10:mkdtemp const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-gate-drain-'));
+                  check-temp-retention: FAIL (223 files, 82 mint temp paths, 0 declared, 36 deferred, 0 resolved)  exit 1
+                    failed: scripts/test-gate-drain.cjs mints a temp family with no retention or cleanup path in this file
+  My totals are 223/82/0/36 because that tree carries neither the other five landing tips nor the
+  checker itself (I copied the checker in); the landing reported 231/88/1/36. Same 36 deferred, and
+  the drain file's own line is the discriminator.
+
+3. NOTHING VERIFIED EARLIER REGRESSED
+  Lines 20 (`sourceHashes = {lane: sha(lane), finish: sha(finish)}`), 116
+  (`assert.deepEqual({lane:sha(lane),finish:sha(finish)},sourceHashes)`) and 117 (the success line)
+  are byte-identical in both blobs; git diff shows them as context only.
+  Negative control in a scratch tree with the pre-fix pair (19bf2bd lane sha256
+  51408369579925fca84a526e700b9110a468a33d82c9bcd0dbc699d03f722acd, 19bf2bd finish sha256
+  2f62f0725e623501a920c68e7e4f8f00f816bfc676db13613d8817e6bca3b3b7): exit 1 with
+    FALSIFIED: a new private command ran while timed-shell descendant remained alive
+    AssertionError [ERR_ASSERTION]: unsafe drain: a surviving descendant did not retain its
+      reservation   at main (.../test-gate-drain.cjs:108:12)
+  Fixed pair (be2260d): exit 0 with the success line above.
+
+RESIDUE PROBE (posix-skip-family.log): the cleanup lives in main()'s finally, but the file mints
+its root at line 10 and the non-Windows branch exits at line 11, before main() - so that path
+leaves one wa-gate-drain-* family per run. Forced and counted: 0 before, 1 after.
+
+No scripts/test.sh run, no gate slot taken; every lane dir used was the regression's own scratch dir.
