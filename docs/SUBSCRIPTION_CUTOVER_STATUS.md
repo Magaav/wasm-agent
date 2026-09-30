@@ -294,39 +294,65 @@ usage block is a different thing (the endpoint's own token accounting), and it i
 
 ### The closing gate
 
-Run after every commit above, with the **worktree's own copy** of the closing script
-(`skills/parallel-evolution/scripts/finish.mjs`, whose lane path resolves to this tree's
-`scripts/gate-lane.mjs` - the installed copy under `~/.wasm-agent/skills/` resolves that path one
-directory too high and cannot consult the gate lane at all, which is how the first attempt came to run
-without a slot and was cancelled rather than accepted).
+Run twice, and the second run is the one that counts, because the first was refused and the tree
+changed in between. The lane serializes these runs; both facts below are the lane's own words.
+
+**Run 1 - refused, and correctly so.** With a bounded wait (`WA_GATE_LANE_WAIT_SECONDS=600`) the lane
+granted no slot: `acquire #165 refused after 600s (terminal, not a retry). capacity 1 of 1 in use;
+running #164 (finish integrate/frozen-batch-20260930, pid 38044, held 824s); queue depth 1; waited
+600s`. The script reported `gate_verified: false` with that refusal as `gate_error` and
+the gate did **not** run: `scripts/test.sh` was not executed without a slot, which is the one thing
+the lane exists to prevent. It covers nothing and is recorded here so the record is not "one run,
+passed".
+
+(An earlier attempt, before this file's first gate section, used the *installed* copy of the closing
+script under `~/.wasm-agent/skills/`, whose lane path resolves one directory too high; the lane could
+not be consulted at all, so that run went ahead without a slot. It was cancelled rather than accepted,
+and the worktree's own copy - `skills/parallel-evolution/scripts/finish.mjs`, whose lane path resolves
+this tree's `scripts/gate-lane.mjs` - is what both runs above used.)
+
+**Run 2 - passed, on `be21c86`.**
 
 ```
 repository_ready true, all 8 checks ok (revision, source_tree, branch, clean, fresh_remote_refs,
   current, pushed, merge_proof)
-gate_verified true, tested_head 483ee4018037f2f63c884a637a11d146610a7faf, equivalence git_tree,
-  skipped 2, gate_ms 945756.394, gate_runs 1, gate_exit 0, gate_reused false
-gate_lane: slot #162 granted after waiting 104.2s (mode slot, request 162)
+gate_verified true, tested_head be21c8613a53c3adab32b73d0f290ad0aebcaf7e, equivalence git_tree,
+  skipped 2, gate_ms 847454.151, gate_runs 1, gate_exit 0, gate_reused false
+gate_lane: slot #166 granted after waiting 686.7s (mode slot, request 166)
 verdict line: "smoke ok (2 skipped)"
 ```
 
-The two subscriptions suites are in that log on this tree:
+The four Rust tests item 1 of the review is about are **inside that log**, which is the whole point of
+adding the line:
+
+```
+running 4 tests
+test host::sse_line_tests::a_residual_line_at_eof_is_still_a_line ... ok
+test host::sse_line_tests::a_failing_callback_stops_the_read_at_that_line ... ok
+test host::sse_line_tests::a_truncated_stream_ends_where_it_ended ... ok
+test host::sse_line_tests::the_recorded_stream_is_handed_over_line_for_line ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 0.00s
+```
+
+and so are the subscription suites:
 
 ```
 openai-sub levels ok (22 checks)
 subscription wire ok (135 checks)
 openai-sub auth ok (128 checks)
-openai-sub concurrency evidence: token POSTs=1, refreshed=1, adopted=1, rotation 5e77514ff2b3 -> 086e91c3d88f, second spend of the same token=refresh_rejected:400
+openai-sub concurrency evidence: token POSTs=1, refreshed=1, adopted=1, rotation 50250ab6e946 -> 3626c3721573, second spend of the same token=refresh_rejected:400
 ```
 
 The 2 skips are the suite's own: `termux launcher: 8 passed, 1 skipped (POSIX mode semantics
 unavailable on Windows)` and Android build/runtime skipped on this non-Android host. Free space was
-65 GiB available before the run and 65 GiB after it. `finish.mjs verify` at the same HEAD agrees:
-all eight checks ok, `gate_verified true`, no gate error.
+64 GiB available before run 2 and 63 GiB after it. `finish.mjs verify` at the same HEAD agrees: all
+eight checks ok, `gate_verified true`, no gate error.
 
-**What this gate covers, exactly:** the tree `7b844a03a59c7e36f840ddc682413e844e7751b3` at `483ee40`.
-The one commit after it changes only this file (documentation), so the code tree the gate passed is
-the code tree this branch ships - and a later commit that is *not* documentation-only is not covered
-by it.
+**What run 2 covers, exactly:** the tree `0bc8bb4d8791c62f7b91dacada8ad0ed4ba9767b` at `be21c86`. The
+commit after it changes only this file (documentation), so the code tree the gate passed is the code
+tree this branch ships - and a later commit that is *not* documentation-only is not covered by it.
+(Run 2 supersedes the earlier `483ee40` gate recorded in this file's history: that tree did not yet
+contain the `sse_line_tests` line, which is exactly the gap the review found.)
 
 The harness behind proofs 1-3 and the login door is outside the repository, at
 `C:/Users/Victor/.wasm-agent/wa-cutover-proof/` (`01-configured.lua`, `02-live.lua`,
@@ -336,6 +362,10 @@ renames the operator's global npm directory, which is not something a fresh clon
 
 ### What is unproven, and what was not done
 
+* **The `reasoning` field.** UNPROVEN, and marked so in the review follow-up above: the wire
+  implements three `response.reasoning_*` events and returns `result.reasoning`, and no live run -
+  mine, or the reviewer's two prompts - has ever seen the endpoint send one. `reasoning_tokens` in
+  the usage block is a different field, and that one is present.
 * **Nothing about the gate is claimed beyond the line above.** The credential lane's *live* test
   (`scripts/test-openai-sub-auth-live.lua`) and the wire's *live* recording check
   (`scripts/check-subscription-wire-live.lua`) are not in the gate by design - they need the network
