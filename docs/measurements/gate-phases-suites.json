@@ -1,45 +1,39 @@
 {
  "schema": 1,
- "what": "One slotted gate run (the gate lane granted the slot, so admission was inherited by the gate's own nested fixtures), measured by the gate's own instrumentation and read back by scripts/merge-lane.mjs.",
- "slot": {
-  "held": true,
-  "lane": {
-   "lane": "gate",
-   "mode": "slot",
-   "request": 161,
-   "label": "merge-lane 3aa4f248e6e6",
-   "dir": "C:\\Users\\Victor\\.wasm-agent\\gate-lane",
-   "waited_ms": 59,
-   "reason": "slot #161 granted at once"
-  }
- },
- "gate": {
-  "command": "bash scripts/test.sh",
-  "ran": true,
-  "exit": 1,
-  "ms": 138987.572,
+ "what": "The cold/warm pair of ONE tree, same content, same instrumentation. Both runs held the gate-lane slot (so the gate's own nested fixtures inherited admission through GATE_LANE_HELD) and both gated the persistent tree this branch's merge-lane created.",
+ "tree": "C:/Users/Victor/.wasm-agent/merge-lane-tree-measure (created on the first attempt, reused by both runs: clone.reused = true)",
+ "method": "WA_MERGE_LANE_TREE naming the persistent tree; node scripts/merge-lane.mjs --repo <clone of this branch> --base ab827c8 bfbcd5e; the gate ran bash scripts/test.sh inside that tree; phases read back by the lane from the gate's own GATE_PHASES_JSON.",
+ "cold": {
+  "tree_reused": true,
+  "tree_created": false,
+  "clone_ms": 2705.227,
+  "gate_exit": 1,
+  "gate_ms": 1030126.449,
   "skipped": null,
   "verdict_line": null,
-  "verdict_found": false,
-  "phases_total_ms": 138798
+  "phases": [
+   {
+    "name": "build",
+    "ms": 839638
+   },
+   {
+    "name": "instances",
+    "ms": 120653
+   },
+   {
+    "name": "self-update",
+    "ms": 69611
+   }
+  ]
  },
- "clone": {
-  "path": "C:\\Users\\Victor\\.wasm-agent\\merge-lane-tree-measure",
-  "reused": true,
-  "reuse_created": false,
-  "reuse_refused": null,
+ "warm": {
+  "tree_reused": true,
+  "tree_created": false,
   "clone_ms": 558.201,
-  "toolchain_cleared": [],
-  "reuse_dirt_discarded": []
- },
- "timings_ms": {
-  "discovery_ms": 3386.819,
-  "merge_ms": 951.108,
+  "gate_exit": 1,
   "gate_ms": 138987.572,
-  "total_ms": 145201.032
- },
- "phases": {
-  "source": "file",
+  "skipped": null,
+  "verdict_line": null,
   "phases": [
    {
     "name": "build",
@@ -53,27 +47,693 @@
     "name": "self-update",
     "ms": 61899
    }
-  ],
-  "total_ms": 138798,
-  "skipped": 1,
-  "cargo_jobs": "2",
-  "test_threads": "2"
+  ]
  },
- "suites": null,
- "suites_summary_from_the_log": "  --> wa-host\\src\\lua.rs:18:11\n  --> wa-host\\src\\lua.rs:19:11\n  --> wa-host\\src\\lua.rs:20:11\n  --> wa-host\\src\\lua.rs:21:11\n  --> wa-host\\src\\lua.rs:22:11\n  --> wa-host\\src\\lua.rs:50:12\n  --> wa-host\\src\\lua.rs:52:12\n  --> wa-host\\src\\lua.rs:55:12\n  --> wa-host\\src\\lua.rs:63:12\n  --> wa-host\\src\\lua.rs:65:12\n  --> wa-host\\src\\lua.rs:66:12\n  --> wa-host\\src\\lua.rs:67:12\n  --> wa-host\\src\\lua.rs:68:12\n  --> wa-host\\src\\lua.rs:74:12\n  --> wa-host\\src\\lua.rs:75:12\n  --> wa-host\\src\\lua.rs:78:12\n  --> wa-host\\src\\plugins.rs:34:5\n  --> wa-host\\src\\lua.rs:18:11\n  --> wa-host\\src\\lua.rs:19:11\n  --> wa-host\\src\\lua.rs:20:11\n  --> wa-host\\src\\lua.rs:21:11\n  --> wa-host\\src\\lua.rs:22:11\n  --> wa-host\\src\\lua.rs:50:12\n  --> wa-host\\src\\lua.rs:52:12\n  --> wa-host\\src\\lua.rs:55:12\n  --> wa-host\\src\\lua.rs:63:12\n  --> wa-host\\src\\lua.rs:65:12\n  --> wa-host\\src\\lua.rs:66:12\n  --> wa-host\\src\\lua.rs:67:12\n  --> wa-host\\src\\lua.rs:68:12\n  --> wa-host\\src\\lua.rs:74:12\n  --> wa-host\\src\\lua.rs:75:12\n  --> wa-host\\src\\lua.rs:78:12\n  --> wa-host\\src\\plugins.rs:34:5\n  --> wa-host\\src\\lua.rs:18:11\n  --> wa-host\\src\\lua.rs:19:11\n  --> wa-host\\src\\lua.rs:20:11\n  --> wa-host\\src\\lua.rs:21:11\n  --> wa-host\\src\\lua.rs:22:11\n  --> wa-host\\src\\lua.rs:50:12\n  --> wa-host\\src\\lua.rs:52:12\n  --> wa-host\\src\\lua.rs:55:12\n  --> wa-host\\src\\lua.rs:63:12\n  --> wa-host\\src\\lua.rs:65:12\n  --> wa-host\\src\\lua.rs:66:12\n  --> wa-host\\src\\lua.rs:67:12\n  --> wa-host\\src\\lua.rs:68:12\n  --> wa-host\\src\\lua.rs:74:12\n  --> wa-host\\src\\lua.rs:75:12\n  --> wa-host\\src\\lua.rs:78:12\n  --> wa-host\\src\\plugins.rs:34:5\n  --> wa-host\\src\\lua.rs:18:11\n  --> wa-host\\src\\lua.rs:19:11\n  --> wa-host\\src\\lua.rs:20:11\n  --> wa-host\\src\\lua.rs:21:11\n  --> wa-host\\src\\lua.rs:22:11\n  --> wa-host\\src\\lua.rs:50:12\n  --> wa-host\\src\\lua.rs:52:12\n  --> wa-host\\src\\lua.rs:55:12\n  --> wa-host\\src\\lua.rs:63:12\n  --> wa-host\\src\\lua.rs:65:12\n  --> wa-host\\src\\lua.rs:66:12\n  --> wa-host\\src\\lua.rs:67:12\n  --> wa-host\\src\\lua.rs:68:12\n  --> wa-host\\src\\lua.rs:74:12\n  --> wa-host\\src\\lua.rs:75:12\n  --> wa-host\\src\\lua.rs:78:12\n  --> wa-host\\src\\plugins.rs:34:5\n  --> wa-host\\src\\lua.rs:18:11\n  --> wa-host\\src\\lua.rs:19:11\n  --> wa-host\\src\\lua.rs:20:11\n  --> wa-host\\src\\lua.rs:21:11\n  --> wa-host\\src\\lua.rs:22:11\n  --> wa-host\\src\\lua.rs:50:12\n  --> wa-host\\src\\lua.rs:52:12\n  --> wa-host\\src\\lua.rs:55:12\n  --> wa-host\\src\\lua.rs:63:12\n  --> wa-host\\src\\lua.rs:65:12\n  --> wa-host\\src\\lua.rs:66:12\n  --> wa-host\\src\\lua.rs:67:12\n  --> wa-host\\src\\lua.rs:68:12\n  --> wa-host\\src\\lua.rs:74:12\n  --> wa-host\\src\\lua.rs:75:12\n  --> wa-host\\src\\lua.rs:78:12\n  --> wa-host\\src\\plugins.rs:34:5\n  --> wa-host\\src\\lua.rs:18:11\n  --> wa-host\\src\\lua.rs:19:11\n  --> wa-host\\src\\lua.rs:20:11\n  --> wa-host\\src\\lua.rs:21:11\n  --> wa-host\\src\\lua.rs:22:11\n  --> wa-host\\src\\lua.rs:50:12\n  --> wa-host\\src\\lua.rs:52:12\n  --> wa-host\\src\\lua.rs:55:12\n  --> wa-host\\src\\lua.rs:63:12\n  --> wa-host\\src\\lua.rs:65:12\n  --> wa-host\\src\\lua.rs:66:12\n  --> wa-host\\src\\lua.rs:67:12\n  --> wa-host\\src\\lua.rs:68:12\n  --> wa-host\\src\\lua.rs:74:12\n  --> wa-host\\src\\lua.rs:75:12\n  --> wa-host\\src\\lua.rs:78:12\n  --> wa-host\\src\\plugins.rs:34:5\n  --> wa-host\\src\\lua.rs:18:11\n  --> wa-host\\src\\lua.rs:19:11\n  --> wa-host\\src\\lua.rs:20:11\n  --> wa-host\\src\\lua.rs:21:11\n  --> wa-host\\src\\lua.rs:22:11\n  --> wa-host\\src\\lua.rs:50:12\n  --> wa-host\\src\\lua.rs:52:12\n  --> wa-host\\src\\lua.rs:55:12\n  --> wa-host\\src\\lua.rs:63:12\n  --> wa-host\\src\\lua.rs:65:12\n  --> wa-host\\src\\lua.rs:66:12\n  --> wa-host\\src\\lua.rs:67:12\n  --> wa-host\\src\\lua.rs:68:12\n  --> wa-host\\src\\lua.rs:74:12\n  --> wa-host\\src\\lua.rs:75:12\n  --> wa-host\\src\\lua.rs:78:12\n  --> wa-host\\src\\plugins.rs:34:5\n  --> wa-host\\src\\lua.rs:18:11\n  --> wa-host\\src\\lua.rs:19:11\n  --> wa-host\\src\\lua.rs:20:11\n  --> wa-host\\src\\lua.rs:21:11\n  --> wa-host\\src\\lua.rs:22:11\n  --> wa-host\\src\\lua.rs:50:12\n  --> wa-host\\src\\lua.rs:52:12\n  --> wa-host\\src\\lua.rs:55:12\n  --> wa-host\\src\\lua.rs:63:12\n  --> wa-host\\src\\lua.rs:65:12\n  --> wa-host\\src\\lua.rs:66:12\n  --> wa-host\\src\\lua.rs:67:12\n  --> wa-host\\src\\lua.rs:68:12\n  --> wa-host\\src\\lua.rs:74:12\n  --> wa-host\\src\\lua.rs:75:12\n  --> wa-host\\src\\lua.rs:78:12\n  --> wa-host\\src\\plugins.rs:34:5\n  --> src\\jobs.rs:18:4\n  --> src\\jobs.rs:18:4\n  ports: op 21484/21485  guest 21486/21487  foreign 21488\n  setting up two named instances with separate homes, keys, databases and ports\n  ok   sentinel add succeeds for the operator (see add-op.* artifacts)\n  ok   the operator instance has its own home and role file\n  ok   sentinel add succeeds for the guest (see add-guest.* artifacts)\n  ok   the guest instance records its role\n  ok   the guest is explicitly bound to a remote master node id\n  ok   a guest without a remote master is refused\n  ok   a master alias is not accepted as a node id\n  ok   a second instance cannot claim the operator's node port\n  ok   a node port cannot collide with another instance's client port\n  ok   a home inside another instance's home is refused\n  ok   a named home cannot be the operator home\n  ok   a nonempty foreign home is never overwritten\n  ok   the foreign home is left intact\n  ok   a share cannot set the node role\n  ok   a share cannot set the node home\n  ok   a protected share smuggled into the registry does not spawn a master guest\n  ok   the malicious instance did not start\n  starting the operator and the guest through the sentinel lifecycle\n  ok   both sentinel start commands succeed (see *-initial-start.* artifacts)\n  ok   both nodes return valid HTTP 200 JSON identities from /sync/head\n  ok   the two nodes have different identities\n  ok   each node has its own database file\n  ok   each node has its own identity key\n  ok   each instance has its own supervisor lifecycle record\n  ok   the two nodes are different processes\n  checking the guest cannot see the operator's sessions or memory\n  ok   the operator's session is not in the guest's database\n  ok   guest /sessions returns valid HTTP JSON without the operator session\n  ok   guest /session returns valid HTTP JSON denying the operator session\n  ok   the guest home carries no operator secret\n  skip the unit test proves the construction\n  checking a foreign listener on an instance port is refused\n  ok   a foreign process is listening on the foreign port\n  ok   the sentinel refuses to stop a listener it did not start\n  ok   a stale lifecycle record is refused\n  ok   a corrupt lifecycle record is refused\n  ok   a start on an occupied port is refused\n  mutating the operator's lifecycle record; the sentinel must refuse, not kill\n  ok   a corrupt operator record does not stop the node\n  ok   the operator is still running after the corrupt record\n  ok   a forged legacy serve.pid is refused\n  ok   the operator is still running after the forged pid\n  ok   a record naming a different home is refused\n  ok   the operator is still running after the wrong-home record\n  ok   a record with a forged node_id is refused\n  ok   the operator is still running after the forged identity\n  ok   a record with a stale process marker is refused\n  ok   the operator is still running after the stale marker\n  ok   a stale record with a matching serve.pid is adopted and stopped\n  ok   the operator restarts with the same identity after stale-record adoption\n  ok   the record is gone before adoption\n  ok   a proven legacy node is adopted and stopped\n  ok   the operator restarts with the same identity\n  stopping and restarting the operator; the guest must not move\n  ok   the operator is stopped\n  ok   the guest is untouched by the operator's stop\n  ok   the operator restarts with the same identity\n  ok   the guest is untouched by the operator's restart\n  corrupting the registry; load must fail and the file must not change\n  ok   a corrupt registry is an error, not an empty registry\n  ok   add refuses to overwrite a corrupt registry\n  ok   the corrupt registry is byte-for-byte unchanged\n  checking remove --purge safety\n  ok   purge refuses a running instance\n  ok   purge refuses a home without an owned marker\n  ok   the markerless home is left in place\n  ok   purge removes an owned home\n  ok   the owned guest home is gone\n  ok   test-owned operator and guest processes are stopped safely\n  ok   a tree that does not contain the installed commit is refused, for that reason\n  ok   the refusal says what it is\n  ok   it names the installed commit\n  ok   it names this tree's commit\n  ok   and it is the downgrade check that refused, not the turn guard\n  ok   the refusal is recorded in deploy.log\n  ok   the installed binary was not touched\n  ok   and nothing was built\n  ok   an ancestor in the record is not a downgrade\n  ok   it got past the check and reached the build\n  ok   the installed binary is still untouched\n  ok   a missing record is not a downgrade\n  ok   it says which case it is\n  ok   a record without commit= is not a downgrade\n  ok   it says the record does not say\n  ok   and the note is recorded, so a blind gate is visible afterwards\n  ok   an unresolvable commit is not a downgrade\n  ok   it names the case (shallow clone, other repo, unfetched branch)\n  ok   and it is recorded as a note, not as a refusal\n  ok   a tree ahead of main is refused on the live install, naming the rule\n  ok   and it refused before the build\n  ok   the live install's binary is unchanged\n  ok   and so is its record\n  ok   a deploy pointed away from the install the service runs is refused\n  ok   the refusal names the path the service runs\n  FAIL the refusal names the path the deploy would write\n  ok   and it refused before the build\n  ok   the refusal is recorded in the install it refused to write\n  ok   and nothing was installed or recorded\n  ok   with no service definition the check disappears and the deploy proceeds\n  ok   and that it could not ask, so a blind gate is visible afterwards\n  ok   the note is durable, not only on stdout\n  ok   the deploy as it was before this check installs beside the running install without a word\n  ok   a unit whose drop-in repoints ExecStart is read, and the same deploy proceeds\n  FAIL and it says the target came from the service rather than from a default\n  ok   removing the drop-in brings the refusal back - the falsification was the missing evidence\n  note no /proc for pid 55912: the process naming is staged in /tmp/wa-service-target-HbPFS8/proc (the port holder is real)\n  ok   a deploy whose port is held by another process is refused\n  ok   the refusal names the process holding the port\n  ok   it names the holder's parent\n  FAIL and the install it disagrees with\n  ok   and it refused before the build\n  ok   the stray is named by parent pid and by image, as the two-install case was\n  ok   the deploy as it was before this check builds and installs with a stray on the port\n  ok   with no unit the deploy follows the node on the port and installs into that install\n  ok   and it is not refused, because that node is the target\n  FAIL with the unit and the target agreeing, the deploy says so at the start\n  ok   and it says the port is free before it goes near the install\n  ok   and it proceeds - the agreeing case is not refused\n  ok   and no blind-gate note is recorded when the machine answered\n  ok   the verifier fails when the install it read is not the one the service runs\n  FAIL naming both paths\n  ok   the verifier passes when they agree\n  ok   the verifier as it was before this check has no opinion about it at all - the same disagreement verifies clean\n  ok   a deploy writing skills outside the node's scan root is reported, not compared one-sided\n  FAIL naming where the deploy writes and where the node reads -   FAIL the skills a deploy writes are the skills the node reads - a deploy writes C:/Users/Victor/AppData/Local/Temp/wa-service-ta\n  ok   with WASM_AGENT_HOME unset the durable trace is still found, not read off this shell\n  ok   with nothing outside the scan root the two expressions name one directory, and the check says so\n  build                 19047\n  instances             57852\n  self-update           61899\n  total                138798",
- "log_tail": [
-  "  FAIL naming where the deploy writes and where the node reads -   FAIL the skills a deploy writes are the skills the node reads - a deploy writes C:/Users/Victor/AppData/Local/Temp/wa-service-ta",
-  "  ok   with WASM_AGENT_HOME unset the durable trace is still found, not read off this shell",
-  "  ok   with nothing outside the scan root the two expressions name one directory, and the check says so",
-  "",
-  "deploy service-target FAILED (6 of 34)",
-  "FAIL: the deploy service-target fixture did not pass (exit 1)",
-  "gate phases (ms, in order; each row is the segment that starts at its marker):",
-  "  build                 19047",
-  "  instances             57852",
-  "  self-update           61899",
-  "  total                138798",
-  "gate phases json: {\"schema\":1,\"gate\":\"scripts/test.sh\",\"phases\":[{\"name\":\"build\",\"ms\":19047},{\"name\":\"instances\",\"ms\":57852},{\"name\":\"self-update\",\"ms\":61899}],\"total_ms\":138798,\"skipped\":1,\"cargo_jobs\":\"2\",\"test_threads\":\"2\"}"
- ],
- "contention": "Taken while the node's gate lane held 1 of 1; this run is the holder, so it is serial with every other gate on the node, but other lanes' non-gate work (builds, agent processes) was still on the machine."
+ "per_phase_ms": {
+  "build": {
+   "cold": 839638,
+   "warm": 19047
+  },
+  "instances": {
+   "cold": 120653,
+   "warm": 57852
+  },
+  "self-update": {
+   "cold": 69611,
+   "warm": 61899
+  },
+  "total": {
+   "cold": 1029902,
+   "warm": 138798
+  }
+ },
+ "pair": {
+  "gate_ms_saving_ms": 891138.8770000001,
+  "gate_ms_saving_min": 14.9,
+  "build_ms_saving_ms": 820591,
+  "instances_ms_saving_ms": 62801,
+  "self_update_ms_saving_ms": 7712
+ },
+ "same_stopping_point": "Both runs END inside the self-update phase, in the wrapper defect of docs/MERGE-SPEED.md section 3b (scripts/test-deploy-service-target.sh fails 6 of 34 THROUGH the shims, exit 0 without them), so neither has a verdict line and both tables stop at the same phase. That is what makes the pair comparable phase-for-phase on one tree, and it is why the wrapper must not land as it stands.",
+ "per_suite_table_from_the_cold_run": {
+  "schema": 1,
+  "gate": "scripts/test.sh",
+  "measured": "per-suite wall time from the wrapper; CPU charged inside the suite's own process tree by scripts/lib/gate-lane-sample.ps1 walking parent links from the suite pid every 500 ms, summed as user + kernel ticks - a LOWER BOUND, because a process that starts and exits between two samples contributes only what was seen while it ran",
+  "measured_by": "scripts/lib/gate-suite.mjs via the shims in scripts/lib/gate-shims",
+  "declaration_basis": "read out of each suite's own source, with the lines that were read; a clean scan is NOT proof of isolation and is reported as undetermined",
+  "suite_invocations": 45,
+  "distinct_suites": 20,
+  "total_wall_ms": 232106,
+  "total_cpu_ms": 1078,
+  "cpu_lower_bound": true,
+  "undetermined_isolation": 13,
+  "top5_by_wall": [
+   {
+    "name": "test-node-instances.sh",
+    "runs": 1,
+    "wall_ms": 83649,
+    "cpu_ms": 781,
+    "cpu_ratio": 0.009,
+    "bound": "wait",
+    "collision_kinds": null
+   },
+   {
+    "name": "test-deploy-service-target.sh",
+    "runs": 1,
+    "wall_ms": 61170,
+    "cpu_ms": 47,
+    "cpu_ratio": 0.001,
+    "bound": "wait",
+    "collision_kinds": null
+   },
+   {
+    "name": "verify-install.sh",
+    "runs": 5,
+    "wall_ms": 40221,
+    "cpu_ms": null,
+    "cpu_ratio": null,
+    "bound": "undetermined",
+    "collision_kinds": null
+   },
+   {
+    "name": "test-parallel-finish.mjs",
+    "runs": 1,
+    "wall_ms": 9983,
+    "cpu_ms": 78,
+    "cpu_ratio": 0.008,
+    "bound": "wait",
+    "collision_kinds": null
+   },
+   {
+    "name": "inline:require(\"net\").createServer().listen(Number(process.argv[1]),",
+    "runs": 1,
+    "wall_ms": 8734,
+    "cpu_ms": null,
+    "cpu_ratio": null,
+    "bound": "undetermined",
+    "collision_kinds": null
+   }
+  ],
+  "top5": [
+   {
+    "name": "test-node-instances.sh",
+    "runs": 1,
+    "wall_ms": 83649,
+    "cpu_ms": 781,
+    "cpu_ratio": 0.009,
+    "bound": "wait",
+    "collisions": [
+     {
+      "kind": "temp-dir",
+      "evidence": [
+       "test-node-instances.sh:36: BASE=\"$(mktemp -d \"${TMPDIR:-/tmp}/wa-instances-XXXXXX\")\""
+      ]
+     },
+     {
+      "kind": "node-state-dir",
+      "evidence": [
+       "test-node-instances.sh:116: local name=\"$1\" port=\"$2\" client=\"$3\" role=\"$4\" home=\"$BASE/.wasm-agent/instances/$1\"",
+       "test-node-instances.sh:128: WASM_AGENT_HOME=\"$(winpath \"$home\")\" WASM_AGENT_PORT=\"$port\" \\",
+       "test-node-instances.sh:146: OP_RECORD=\"$BASE/.wasm-agent/instances/op/.wasm-agent/sentinel/node.json\""
+      ]
+     },
+     {
+      "kind": "network-or-model",
+      "evidence": [
+       "test-node-instances.sh:88: code=\"$(curl --silent --show-error --max-time 1 -o \"$body\" -w '%{http_code}' \"http://127.0.0.1:$port/sync/head\" 2>/dev/n",
+       "test-node-instances.sh:364: if http_json_200 \"http://127.0.0.1:$GUEST_PORT/sessions\" \"$BASE/guest-sessions.json\" \\",
+       "test-node-instances.sh:370: if http_json_200 \"http://127.0.0.1:$GUEST_PORT/session?id=op-secret-session\" \"$BASE/guest-session.json\" \\"
+      ]
+     },
+     {
+      "kind": "filesystem-mutation",
+      "evidence": [
+       "test-node-instances.sh:171: rm -rf \"$BASE\" 2>/dev/null || true",
+       "test-node-instances.sh:173: rm -rf \"$BASE\" 2>/dev/null || true",
+       "test-node-instances.sh:174: [ \"$ARTIFACT_DIR_CUSTOM\" -eq 1 ] || rm -rf \"$ARTIFACTS\" 2>/dev/null || true"
+      ]
+     }
+    ],
+    "isolation": "declared above",
+    "isolation_undetermined": false
+   },
+   {
+    "name": "test-deploy-service-target.sh",
+    "runs": 1,
+    "wall_ms": 61170,
+    "cpu_ms": 47,
+    "cpu_ratio": 0.001,
+    "bound": "wait",
+    "collisions": [
+     {
+      "kind": "temp-dir",
+      "evidence": [
+       "test-deploy-service-target.sh:73: W=\"$(mktemp -d \"${TMPDIR:-/tmp}/wa-service-target-XXXXXX\")\" || fail_hard \"no scratch directory\""
+      ]
+     },
+     {
+      "kind": "node-state-dir",
+      "evidence": [
+       "test-deploy-service-target.sh:120: last_out=\"$(cd \"$TREE\" && env -u WASM_AGENT_IN_TURN -u WASM_AGENT_HOME \\",
+       "test-deploy-service-target.sh:253: ( cd \"$TREE\" && env -u WASM_AGENT_IN_TURN -u WASM_AGENT_HOME \\",
+       "test-deploy-service-target.sh:254: HOME=\"$2\" USERPROFILE=\"$2\" WASM_AGENT_HOME=\"${3:-}\" \\"
+      ]
+     },
+     {
+      "kind": "filesystem-mutation",
+      "evidence": [
+       "test-deploy-service-target.sh:79: rm -rf \"$W\"",
+       "test-deploy-service-target.sh:168: rm -rf \"$unit_service.d\"",
+       "test-deploy-service-target.sh:299: rm -rf \"$SKILL_HOME/skills\""
+      ]
+     }
+    ],
+    "isolation": "declared above",
+    "isolation_undetermined": false
+   },
+   {
+    "name": "verify-install.sh",
+    "runs": 5,
+    "wall_ms": 40221,
+    "cpu_ms": null,
+    "cpu_ratio": null,
+    "bound": "undetermined",
+    "collisions": [
+     {
+      "kind": "fixed-port",
+      "evidence": [
+       "verify-install.sh:21: PORT=\"${WA_PORT:-8799}\""
+      ]
+     },
+     {
+      "kind": "node-state-dir",
+      "evidence": [
+       "verify-install.sh:30: CONFIG=\"${WASM_AGENT_HOME:-${USERPROFILE:-$HOME}}\"; CONFIG=\"$CONFIG/.wasm-agent\"",
+       "verify-install.sh:95: # or written beside the node instead of in it, which is how `~/.wasm-agent/installed.txt` came to exist,",
+       "verify-install.sh:186: # `HOME_DIR=\"${WASM_AGENT_HOME:-$HOME/.wasm-agent}\"`, treating that variable as the config directory when it"
+      ]
+     },
+     {
+      "kind": "network-or-model",
+      "evidence": [
+       "verify-install.sh:212: HEALTH=\"$(curl -s -m 6 \"http://127.0.0.1:$PORT/health\" 2>/dev/null || true)\""
+      ]
+     }
+    ],
+    "isolation": "declared above",
+    "isolation_undetermined": false
+   },
+   {
+    "name": "test-parallel-finish.mjs",
+    "runs": 1,
+    "wall_ms": 9983,
+    "cpu_ms": 78,
+    "cpu_ratio": 0.008,
+    "bound": "wait",
+    "collisions": [
+     {
+      "kind": "temp-dir",
+      "evidence": [
+       "test-parallel-finish.mjs:7: const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-finish checks '));",
+       "test-parallel-finish.mjs:81: assert.equal(path.dirname(path.resolve(root)),path.resolve(os.tmpdir()));"
+      ]
+     },
+     {
+      "kind": "filesystem-mutation",
+      "evidence": [
+       "test-parallel-finish.mjs:31: check(!finish('check').repository_ready,'untracked work blocks completion');fs.unlinkSync(path.join(repo,'untracked'));",
+       "test-parallel-finish.mjs:83: fs.rmSync(root,{recursive:true,force:true});"
+      ]
+     },
+     {
+      "kind": "process-spawn",
+      "evidence": [
+       "test-parallel-finish.mjs:5: import {spawnSync} from 'node:child_process';",
+       "test-parallel-finish.mjs:11: const r=spawnSync(program,args,{cwd,encoding:'utf8',windowsHide:true});",
+       "test-parallel-finish.mjs:41: const auditVerified=spawnSync(process.execPath,[fixtureAudit,'verify',repo,'origin/main'],{cwd:process.cwd(),encoding:'u"
+      ]
+     },
+     {
+      "kind": "git-state",
+      "evidence": [
+       "test-parallel-finish.mjs:23: git('add','.');git('commit','-qm','fixture');git('remote','add','origin',remote);git('push','-q','-u','origin','main');",
+       "test-parallel-finish.mjs:26: git('push','-q','-u','origin','lane');",
+       "test-parallel-finish.mjs:62: git('commit','--allow-empty','-qm','same source, new metadata');"
+      ]
+     }
+    ],
+    "isolation": "declared above",
+    "isolation_undetermined": false
+   },
+   {
+    "name": "inline:require(\"net\").createServer().listen(Number(process.argv[1]),",
+    "runs": 1,
+    "wall_ms": 8734,
+    "cpu_ms": null,
+    "cpu_ratio": null,
+    "bound": "undetermined",
+    "collisions": [],
+    "isolation": "no fixed port, shared temp dir, node state directory, network or model call, process spawn, gate-lane state or git write found in its source; isolation otherwise UNVERIFIED",
+    "isolation_undetermined": true
+   }
+  ],
+  "suites": [
+   {
+    "name": "test-node-instances.sh",
+    "runs": 1,
+    "wall_ms": 83649,
+    "cpu_ms": 781,
+    "cpu_ratio": 0.009,
+    "bound": "wait",
+    "kinds": [
+     {
+      "kind": "temp-dir",
+      "evidence": [
+       "test-node-instances.sh:36: BASE=\"$(mktemp -d \"${TMPDIR:-/tmp}/wa-instances-XXXXXX\")\""
+      ]
+     },
+     {
+      "kind": "node-state-dir",
+      "evidence": [
+       "test-node-instances.sh:116: local name=\"$1\" port=\"$2\" client=\"$3\" role=\"$4\" home=\"$BASE/.wasm-agent/instances/$1\"",
+       "test-node-instances.sh:128: WASM_AGENT_HOME=\"$(winpath \"$home\")\" WASM_AGENT_PORT=\"$port\" \\",
+       "test-node-instances.sh:146: OP_RECORD=\"$BASE/.wasm-agent/instances/op/.wasm-agent/sentinel/node.json\""
+      ]
+     },
+     {
+      "kind": "network-or-model",
+      "evidence": [
+       "test-node-instances.sh:88: code=\"$(curl --silent --show-error --max-time 1 -o \"$body\" -w '%{http_code}' \"http://127.0.0.1:$port/sync/head\" 2>/dev/n",
+       "test-node-instances.sh:364: if http_json_200 \"http://127.0.0.1:$GUEST_PORT/sessions\" \"$BASE/guest-sessions.json\" \\",
+       "test-node-instances.sh:370: if http_json_200 \"http://127.0.0.1:$GUEST_PORT/session?id=op-secret-session\" \"$BASE/guest-session.json\" \\"
+      ]
+     },
+     {
+      "kind": "filesystem-mutation",
+      "evidence": [
+       "test-node-instances.sh:171: rm -rf \"$BASE\" 2>/dev/null || true",
+       "test-node-instances.sh:173: rm -rf \"$BASE\" 2>/dev/null || true",
+       "test-node-instances.sh:174: [ \"$ARTIFACT_DIR_CUSTOM\" -eq 1 ] || rm -rf \"$ARTIFACTS\" 2>/dev/null || true"
+      ]
+     }
+    ],
+    "clean": null,
+    "undetermined": false,
+    "declared_from": "scripts/test-node-instances.sh"
+   },
+   {
+    "name": "test-deploy-service-target.sh",
+    "runs": 1,
+    "wall_ms": 61170,
+    "cpu_ms": 47,
+    "cpu_ratio": 0.001,
+    "bound": "wait",
+    "kinds": [
+     {
+      "kind": "temp-dir",
+      "evidence": [
+       "test-deploy-service-target.sh:73: W=\"$(mktemp -d \"${TMPDIR:-/tmp}/wa-service-target-XXXXXX\")\" || fail_hard \"no scratch directory\""
+      ]
+     },
+     {
+      "kind": "node-state-dir",
+      "evidence": [
+       "test-deploy-service-target.sh:120: last_out=\"$(cd \"$TREE\" && env -u WASM_AGENT_IN_TURN -u WASM_AGENT_HOME \\",
+       "test-deploy-service-target.sh:253: ( cd \"$TREE\" && env -u WASM_AGENT_IN_TURN -u WASM_AGENT_HOME \\",
+       "test-deploy-service-target.sh:254: HOME=\"$2\" USERPROFILE=\"$2\" WASM_AGENT_HOME=\"${3:-}\" \\"
+      ]
+     },
+     {
+      "kind": "filesystem-mutation",
+      "evidence": [
+       "test-deploy-service-target.sh:79: rm -rf \"$W\"",
+       "test-deploy-service-target.sh:168: rm -rf \"$unit_service.d\"",
+       "test-deploy-service-target.sh:299: rm -rf \"$SKILL_HOME/skills\""
+      ]
+     }
+    ],
+    "clean": null,
+    "undetermined": false,
+    "declared_from": "scripts/test-deploy-service-target.sh"
+   },
+   {
+    "name": "verify-install.sh",
+    "runs": 5,
+    "wall_ms": 40221,
+    "cpu_ms": null,
+    "cpu_ratio": null,
+    "bound": "undetermined",
+    "kinds": [
+     {
+      "kind": "fixed-port",
+      "evidence": [
+       "verify-install.sh:21: PORT=\"${WA_PORT:-8799}\""
+      ]
+     },
+     {
+      "kind": "node-state-dir",
+      "evidence": [
+       "verify-install.sh:30: CONFIG=\"${WASM_AGENT_HOME:-${USERPROFILE:-$HOME}}\"; CONFIG=\"$CONFIG/.wasm-agent\"",
+       "verify-install.sh:95: # or written beside the node instead of in it, which is how `~/.wasm-agent/installed.txt` came to exist,",
+       "verify-install.sh:186: # `HOME_DIR=\"${WASM_AGENT_HOME:-$HOME/.wasm-agent}\"`, treating that variable as the config directory when it"
+      ]
+     },
+     {
+      "kind": "network-or-model",
+      "evidence": [
+       "verify-install.sh:212: HEALTH=\"$(curl -s -m 6 \"http://127.0.0.1:$PORT/health\" 2>/dev/null || true)\""
+      ]
+     }
+    ],
+    "clean": null,
+    "undetermined": false,
+    "declared_from": "scripts/verify-install.sh"
+   },
+   {
+    "name": "test-parallel-finish.mjs",
+    "runs": 1,
+    "wall_ms": 9983,
+    "cpu_ms": 78,
+    "cpu_ratio": 0.008,
+    "bound": "wait",
+    "kinds": [
+     {
+      "kind": "temp-dir",
+      "evidence": [
+       "test-parallel-finish.mjs:7: const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-finish checks '));",
+       "test-parallel-finish.mjs:81: assert.equal(path.dirname(path.resolve(root)),path.resolve(os.tmpdir()));"
+      ]
+     },
+     {
+      "kind": "filesystem-mutation",
+      "evidence": [
+       "test-parallel-finish.mjs:31: check(!finish('check').repository_ready,'untracked work blocks completion');fs.unlinkSync(path.join(repo,'untracked'));",
+       "test-parallel-finish.mjs:83: fs.rmSync(root,{recursive:true,force:true});"
+      ]
+     },
+     {
+      "kind": "process-spawn",
+      "evidence": [
+       "test-parallel-finish.mjs:5: import {spawnSync} from 'node:child_process';",
+       "test-parallel-finish.mjs:11: const r=spawnSync(program,args,{cwd,encoding:'utf8',windowsHide:true});",
+       "test-parallel-finish.mjs:41: const auditVerified=spawnSync(process.execPath,[fixtureAudit,'verify',repo,'origin/main'],{cwd:process.cwd(),encoding:'u"
+      ]
+     },
+     {
+      "kind": "git-state",
+      "evidence": [
+       "test-parallel-finish.mjs:23: git('add','.');git('commit','-qm','fixture');git('remote','add','origin',remote);git('push','-q','-u','origin','main');",
+       "test-parallel-finish.mjs:26: git('push','-q','-u','origin','lane');",
+       "test-parallel-finish.mjs:62: git('commit','--allow-empty','-qm','same source, new metadata');"
+      ]
+     }
+    ],
+    "clean": null,
+    "undetermined": false,
+    "declared_from": "scripts/test-parallel-finish.mjs"
+   },
+   {
+    "name": "inline:require(\"net\").createServer().listen(Number(process.argv[1]),",
+    "runs": 1,
+    "wall_ms": 8734,
+    "cpu_ms": null,
+    "cpu_ratio": null,
+    "bound": "undetermined",
+    "kinds": [],
+    "clean": "no fixed port, shared temp dir, node state directory, network or model call, process spawn, gate-lane state or git write found in its source; isolation otherwise UNVERIFIED",
+    "undetermined": true,
+    "declared_from": "no source found (a suite built on the fly, or the binary itself)"
+   },
+   {
+    "name": "verify-baseline.sh",
+    "runs": 1,
+    "wall_ms": 6895,
+    "cpu_ms": null,
+    "cpu_ratio": null,
+    "bound": "undetermined",
+    "kinds": [],
+    "clean": "no fixed port, shared temp dir, node state directory, network or model call, process spawn, gate-lane state or git write found in its source; isolation otherwise UNVERIFIED",
+    "undetermined": true,
+    "declared_from": "no source found (a suite built on the fly, or the binary itself)"
+   },
+   {
+    "name": "test-deploy-downgrade.sh",
+    "runs": 1,
+    "wall_ms": 6565,
+    "cpu_ms": 47,
+    "cpu_ratio": 0.007,
+    "bound": "wait",
+    "kinds": [
+     {
+      "kind": "temp-dir",
+      "evidence": [
+       "test-deploy-downgrade.sh:48: S=\"$(mktemp -d)\""
+      ]
+     },
+     {
+      "kind": "filesystem-mutation",
+      "evidence": [
+       "test-deploy-downgrade.sh:54: rm -rf \"$S\""
+      ]
+     }
+    ],
+    "clean": null,
+    "undetermined": false,
+    "declared_from": "scripts/test-deploy-downgrade.sh"
+   },
+   {
+    "name": "deploy.sh",
+    "runs": 8,
+    "wall_ms": 6341,
+    "cpu_ms": 125,
+    "cpu_ratio": 0.02,
+    "bound": "wait",
+    "kinds": [
+     {
+      "kind": "fixed-port",
+      "evidence": [
+       "deploy.sh:60: PORT=\"${WA_PORT:-8799}\""
+      ]
+     },
+     {
+      "kind": "temp-dir",
+      "evidence": [
+       "deploy.sh:314: SCRATCH_HOME=\"$(mktemp -d)\""
+      ]
+     },
+     {
+      "kind": "node-state-dir",
+      "evidence": [
+       "deploy.sh:74: SENTINEL_CONFIG=\"${WASM_AGENT_HOME:-${USERPROFILE:-$HOME}}/.wasm-agent\"",
+       "deploy.sh:315: WASM_AGENT_HOME=\"$SCRATCH_HOME\" \"$NEW\" serve --port \"$SCRATCH\" --client-port \"$((SCRATCH + 1))\" --ui \"$ROOT/ui\" >\"$SCRAT",
+       "deploy.sh:596: # `~/.wasm-agent/installed.txt`, empty on the node this rule was written for, is what guessing looks like."
+      ]
+     },
+     {
+      "kind": "network-or-model",
+      "evidence": [
+       "deploy.sh:320: if curl -fsS -o /dev/null -m 2 \"http://127.0.0.1:$SCRATCH/health\" 2>/dev/null && curl -fsS -o /dev/null -m 2 \"http://127",
+       "deploy.sh:605: echo \"deploy: /health -> $(curl -s -m 5 \"http://127.0.0.1:$PORT/health\" | head -c 260)\""
+      ]
+     },
+     {
+      "kind": "filesystem-mutation",
+      "evidence": [
+       "deploy.sh:325: rm -rf \"$SCRATCH_HOME\""
+      ]
+     }
+    ],
+    "clean": null,
+    "undetermined": false,
+    "declared_from": "scripts/deploy.sh"
+   },
+   {
+    "name": "inline:require('net').createServer().listen(29980,'127.0.0.1')",
+    "runs": 1,
+    "wall_ms": 4048,
+    "cpu_ms": null,
+    "cpu_ratio": null,
+    "bound": "undetermined",
+    "kinds": [],
+    "clean": "no fixed port, shared temp dir, node state directory, network or model call, process spawn, gate-lane state or git write found in its source; isolation otherwise UNVERIFIED",
+    "undetermined": true,
+    "declared_from": "no source found (a suite built on the fly, or the binary itself)"
+   },
+   {
+    "name": "inline:\ntry\nconst\nprocess.stdout.write(id);\n}",
+    "runs": 12,
+    "wall_ms": 2802,
+    "cpu_ms": null,
+    "cpu_ratio": null,
+    "bound": "undetermined",
+    "kinds": [],
+    "clean": "no fixed port, shared temp dir, node state directory, network or model call, process spawn, gate-lane state or git write found in its source; isolation otherwise UNVERIFIED",
+    "undetermined": true,
+    "declared_from": "no source found (a suite built on the fly, or the binary itself)"
+   },
+   {
+    "name": "deploy-baseline.sh",
+    "runs": 2,
+    "wall_ms": 1033,
+    "cpu_ms": null,
+    "cpu_ratio": null,
+    "bound": "undetermined",
+    "kinds": [],
+    "clean": "no fixed port, shared temp dir, node state directory, network or model call, process spawn, gate-lane state or git write found in its source; isolation otherwise UNVERIFIED",
+    "undetermined": true,
+    "declared_from": "no source found (a suite built on the fly, or the binary itself)"
+   },
+   {
+    "name": "inline:\nconst\nd.node_id=\"00000000000000000000000000000000\";",
+    "runs": 1,
+    "wall_ms": 120,
+    "cpu_ms": null,
+    "cpu_ratio": null,
+    "bound": "undetermined",
+    "kinds": [],
+    "clean": "no fixed port, shared temp dir, node state directory, network or model call, process spawn, gate-lane state or git write found in its source; isolation otherwise UNVERIFIED",
+    "undetermined": true,
+    "declared_from": "no source found (a suite built on the fly, or the binary itself)"
+   },
+   {
+    "name": "inline:const",
+    "runs": 2,
+    "wall_ms": 88,
+    "cpu_ms": null,
+    "cpu_ratio": null,
+    "bound": "undetermined",
+    "kinds": [],
+    "clean": "no fixed port, shared temp dir, node state directory, network or model call, process spawn, gate-lane state or git write found in its source; isolation otherwise UNVERIFIED",
+    "undetermined": true,
+    "declared_from": "no source found (a suite built on the fly, or the binary itself)"
+   },
+   {
+    "name": "inline:try",
+    "runs": 2,
+    "wall_ms": 84,
+    "cpu_ms": null,
+    "cpu_ratio": null,
+    "bound": "undetermined",
+    "kinds": [],
+    "clean": "no fixed port, shared temp dir, node state directory, network or model call, process spawn, gate-lane state or git write found in its source; isolation otherwise UNVERIFIED",
+    "undetermined": true,
+    "declared_from": "no source found (a suite built on the fly, or the binary itself)"
+   },
+   {
+    "name": "suite-verdict.cjs",
+    "runs": 1,
+    "wall_ms": 83,
+    "cpu_ms": null,
+    "cpu_ratio": null,
+    "bound": "undetermined",
+    "kinds": [],
+    "clean": "no fixed port, shared temp dir, node state directory, network or model call, process spawn, gate-lane state or git write found in its source; isolation otherwise UNVERIFIED",
+    "undetermined": true,
+    "declared_from": "no source found (a suite built on the fly, or the binary itself)"
+   },
+   {
+    "name": "inline:\nconst\nd.home=process.argv[2];",
+    "runs": 1,
+    "wall_ms": 75,
+    "cpu_ms": null,
+    "cpu_ratio": null,
+    "bound": "undetermined",
+    "kinds": [],
+    "clean": "no fixed port, shared temp dir, node state directory, network or model call, process spawn, gate-lane state or git write found in its source; isolation otherwise UNVERIFIED",
+    "undetermined": true,
+    "declared_from": "no source found (a suite built on the fly, or the binary itself)"
+   },
+   {
+    "name": "inline:\nconst\nd.pid=999999;",
+    "runs": 1,
+    "wall_ms": 70,
+    "cpu_ms": null,
+    "cpu_ratio": null,
+    "bound": "undetermined",
+    "kinds": [],
+    "clean": "no fixed port, shared temp dir, node state directory, network or model call, process spawn, gate-lane state or git write found in its source; isolation otherwise UNVERIFIED",
+    "undetermined": true,
+    "declared_from": "no source found (a suite built on the fly, or the binary itself)"
+   },
+   {
+    "name": "inline:\nconst\nd.process_start=1;",
+    "runs": 1,
+    "wall_ms": 56,
+    "cpu_ms": null,
+    "cpu_ratio": null,
+    "bound": "undetermined",
+    "kinds": [],
+    "clean": "no fixed port, shared temp dir, node state directory, network or model call, process spawn, gate-lane state or git write found in its source; isolation otherwise UNVERIFIED",
+    "undetermined": true,
+    "declared_from": "no source found (a suite built on the fly, or the binary itself)"
+   },
+   {
+    "name": "upgrade.sh",
+    "runs": 1,
+    "wall_ms": 50,
+    "cpu_ms": null,
+    "cpu_ratio": null,
+    "bound": "undetermined",
+    "kinds": [
+     {
+      "kind": "fixed-port",
+      "evidence": [
+       "upgrade.sh:29: PORT=\"${WA_PORT:-8799}\""
+      ]
+     },
+     {
+      "kind": "temp-dir",
+      "evidence": [
+       "upgrade.sh:160: SCRATCH_HOME=\"$(mktemp -d)\""
+      ]
+     },
+     {
+      "kind": "node-state-dir",
+      "evidence": [
+       "upgrade.sh:40: HOME_DIR=\"${WASM_AGENT_HOME:-$USERPROFILE/.wasm-agent}\"",
+       "upgrade.sh:44: HOME_DIR=\"${WASM_AGENT_HOME:-$HOME/.wasm-agent}\"",
+       "upgrade.sh:184: WASM_AGENT_HOME=\"$SCRATCH_HOME\" \"$NEW\" serve --port \"$SCRATCH_PORT\" --client-port \"$SCRATCH_CLIENT\" --db \"$SCRATCH_DB\" >"
+      ]
+     },
+     {
+      "kind": "network-or-model",
+      "evidence": [
+       "upgrade.sh:116: health() { curl -s -m 5 \"http://127.0.0.1:$PORT/health\" 2>/dev/null || true; }",
+       "upgrade.sh:194: if curl -s -m 2 \"http://127.0.0.1:$SCRATCH_PORT/health\" >/dev/null 2>&1; then ok=1; break; fi"
+      ]
+     },
+     {
+      "kind": "filesystem-mutation",
+      "evidence": [
+       "upgrade.sh:202: rm -rf \"$SCRATCH_HOME\"",
+       "upgrade.sh:205: rm -rf \"$SCRATCH_HOME\""
+      ]
+     },
+     {
+      "kind": "process-spawn",
+      "evidence": [
+       "upgrade.sh:312: powershell.exe -NoProfile -Command \"\\$deployChild = Start-Process -FilePath '$win_binary' -ArgumentList @('serve','--por"
+      ]
+     }
+    ],
+    "clean": null,
+    "undetermined": false,
+    "declared_from": "scripts/upgrade.sh"
+   },
+   {
+    "name": "inline:\nconst\nconst\nconst\ndoc.instances[\"evil\"]\nnode_port:\nmaster:\nfs.writeFileSync(path,",
+    "runs": 1,
+    "wall_ms": 39,
+    "cpu_ms": null,
+    "cpu_ratio": null,
+    "bound": "undetermined",
+    "kinds": [],
+    "clean": "no fixed port, shared temp dir, node state directory, network or model call, process spawn, gate-lane state or git write found in its source; isolation otherwise UNVERIFIED",
+    "undetermined": true,
+    "declared_from": "no source found (a suite built on the fly, or the binary itself)"
+   }
+  ]
+ },
+ "what_the_cpu_says": "the cold run charged 1.1 CPU-s inside the 20 suites' own process trees (none compute-bound: they wait); the CPU difference between the pair is in the build phase - docs/EVOLUTION.md's independent same-tree pair measured 253.0 CPU-s cold against 11.2 warm",
+ "contention": "both runs held the lane's only slot (serial with every other gate on the node); other lanes' non-gate work was still on the machine"
 }
