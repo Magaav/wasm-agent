@@ -1,18 +1,4 @@
 use super::*;
-// DELIBERATE, TEMPORARY BREAK - the false-green falsification for the persistent gate tree.
-//
-// The mechanism this branch lands runs the gate in a tree whose `rust/target` survives between
-// landings, so cargo is the only thing that can decide the tree it is given is not the tree it built.
-// If that did not hold, a warm gate would pass a tree it never rebuilt - a fast gate that cannot fail.
-// This commit makes the merged tree provably different from the one the warm artifacts were built
-// for, and the gate must go RED while it is here. It is reverted in the next commit.
-#[test]
-fn deliberate_falsification_probe_the_warm_gate_must_fail_on_this() {
-    assert!(
-        false,
-        "deliberate falsification probe: a warm gate that passes this tree never rebuilt it"
-    );
-}
 fn fixture() -> (Manager, PathBuf) {
     let root = std::env::temp_dir().join(format!(
         "wa-operation-test-{}-{}",
