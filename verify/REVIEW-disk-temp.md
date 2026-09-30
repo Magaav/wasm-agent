@@ -242,8 +242,32 @@ dead owner - consistent with the sibling gate that held slot #145 having ended, 
 Pre-lease leftovers fell 99 → 94 across the run, i.e. 11 removed and ~6 minted again by sibling lanes running
 pre-change code in the same window.
 
-**Attempt 2, same tree, 13:45Z, `GATE_LANE_HELD=1`** (the marker a held gate inherits, so the nested fixture
-gate does not queue behind a sibling): result in the running log below.
+**Attempt 2, same tree, 13:45:45Z → 14:04:39Z (1134 s, 18.9 min), `GATE_LANE_HELD=1` (the marker a held
+gate inherits, so the nested fixture gate does not queue behind a sibling): exit 0, verdict line
+`smoke ok (2 skipped)`, free space 70,089,028 KiB → 69,577,284 KiB (66.8 → 66.4 GiB).** The gate lane still
+showed `1 of 1 slot(s) held, 0 waiting` afterwards, i.e. a sibling gate held the slot across my run, so this
+is a real result but **not a clean isolated timing** (the machine had two gates on it). Skips, named: the
+gate's own count is **2** (`smoke ok (2 skipped)`); the run also reports `node instances ok (62 checks,
+1 skipped)` and `termux launcher: 8 passed, 1 skipped`.
+
+Two things this real gate showed that the sliced harness could not:
+
+1. **D1's own retention suite did not run in it**: `grep -c test-merge-lane-retention gate-B1-run2.log` → **0**.
+   The policy ships unguarded by the gate, confirmed end to end rather than by reading `test.sh`.
+2. **The passing gate did not remove its own home.** Run 2's own home is named in its log
+   (`wa-gate-home-65888-PIyjpM`, `birthtime 13:45:45.575Z` = the run's start) and it was **still on disk 22
+   minutes after exit 0**: `du -sk` → **22,446 KiB (21.9 MB**, which also confirms their "gate home 21 MiB"
+   measurement), contents `.rustup` and `.wasm-agent`. A hand `rm -rf` of it a moment later **succeeded
+   immediately (exit 0)**, so the failure was transient - a descendant of the suite still holding a handle
+   inside the home when the EXIT trap ran, which Windows refuses to unlink, and the passing path is silent on
+   purpose (`rm -rf "$home" 2>/dev/null`, and a pass prints nothing). Their own comment anticipates the
+   fallout ("a home that survives this is one whose pid is already dead, so the next sweep removes it"), but
+   the claim as written - "a passing run removes its own artifact" - is **best-effort on a real gate, and
+   silently so**. Cost per occurrence: up to 22 MB, bounded by the next gate's sweep. The same run also
+   pruned the family **silently** (a pass narrates nothing): `wa-gate-home-*` went 96 dirs (13:47Z, 94
+   pre-lease + 2 leased) → **10** (14:07Z, 8 pre-lease + 2 leased), i.e. ~86 stale pre-lease homes removed by
+   one passing gate, keeping the newest candidate and the homes inside the hour's grace. That is the bound
+   doing real work on the real leak, at the cost of being invisible in the log unless the run failed.
 
 Per the coordinator's note this review does not depend on a gate: the merged candidate gets one at the merge
 gate. Everything above stands on real runs of the delivered code.
@@ -325,6 +349,9 @@ half already refuses a live session's tree.
   plus the `wa-subagent-test-Live01` experiment. What remains unverified is the same behaviour on the real
   machine's 13,075 other `wa-*` families (I did not run `--apply` against the real temp root or anyone's
   worktree; the session half would have touched other lanes' trees).
+* only one gate ran on one tree (D1's). D2's tree was not gated: its three new suites (28 + 7 + 23 checks) and
+  its floor were run individually instead, and the merge gate will cover the merged candidate. No gate time
+  here is a clean measurement - a sibling gate held the lane's only slot across both of my attempts.
 * `/health` over HTTP (the node's own endpoint), for the reason above.
 * The `disk-reclaim` job firing: its topic is emitted nowhere and the job is disabled; I did not emit it (that
   would be driving live state).
