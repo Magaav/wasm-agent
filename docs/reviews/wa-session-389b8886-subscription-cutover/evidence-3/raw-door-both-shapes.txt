@@ -1,0 +1,55 @@
+# item 3a - the door in both shapes (status and login --browser, with and without a Lua root)
+# command: bash docs/reviews/wa-session-389b8886-subscription-cutover/evidence-3/run-door-both-shapes.sh $PWD/rust/target/release/wa.exe
+
+--- [noroot] wa subscription status -> exit=0
+openai-sub credential: absent (subscription_credentials_absent) at C:/Users/Victor/AppData/Local/Temp/tmp.7DLutRUyPS/status/credentials.json
+    store:  C:/Users/Victor/AppData/Local/Temp/tmp.7DLutRUyPS/status/credentials.json
+    log in: wa subscription login             device code: prints the URL and the code,
+                                              then waits for you to enter it
+            wa subscription login --browser    sign in in a browser, come back with --code <url>
+--- [root] wa subscription status -> exit=0
+openai-sub credential: absent (subscription_credentials_absent) at C:/Users/Victor/AppData/Local/Temp/tmp.7DLutRUyPS/status/credentials.json
+    store:  C:/Users/Victor/AppData/Local/Temp/tmp.7DLutRUyPS/status/credentials.json
+    log in: wa subscription login             device code: prints the URL and the code,
+                                              then waits for you to enter it
+            wa subscription login --browser    sign in in a browser, come back with --code <url>
+status byte-identical in both shapes: yes
+--- [noroot] wa subscription login --browser -> exit=0
+openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=<fresh>&code_challenge_method=S256&state=<fresh>&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+[lua] openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=<fresh>&code_challenge_method=S256&state=<fresh>&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+openai-sub: waiting for the browser step - re-run with --code <the address you landed on>
+--- [root] wa subscription login --browser -> exit=0
+openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=<fresh>&code_challenge_method=S256&state=<fresh>&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+[lua] openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=<fresh>&code_challenge_method=S256&state=<fresh>&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+openai-sub: waiting for the browser step - re-run with --code <the address you landed on>
+
+normalised login --browser, no root (unique lines):
+  oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=<fresh>&code_challenge_method=S256&state=<fresh>&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+[lua] openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+openai-sub: waiting for the browser step - re-run with --code <the address you landed on>
+normalised login --browser, with root (unique lines):
+  oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=<fresh>&code_challenge_method=S256&state=<fresh>&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+[lua] openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+openai-sub: waiting for the browser step - re-run with --code <the address you landed on>
+
+--- the WA_SCRIPT= spelling, both shapes (scripts/openai-sub-login.lua wrapper, --browser)
+    (a bare 'status' through this spelling would run the wrapper's own login policy, so the
+     spelling is exercised the way the credential lane's LOGIN_COMMAND names it: --browser)
+[noroot] WA_SCRIPT --browser -> exit=0
+lua root unset: using embedded modules; edits under lua/ are NOT under test
+openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=<fresh>&code_challenge_method=S256&state=<fresh>&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=<fresh>&code_challenge_method=S256&state=<fresh>&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+openai-sub: waiting for the browser step - re-run with --code <the address you landed on>
+[root] WA_SCRIPT --browser -> exit=0
+openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=<fresh>&code_challenge_method=S256&state=<fresh>&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=<fresh>&code_challenge_method=S256&state=<fresh>&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+openai-sub: waiting for the browser step - re-run with --code <the address you landed on>
+script exit=0

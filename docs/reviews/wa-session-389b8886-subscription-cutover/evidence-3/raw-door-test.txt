@@ -1,0 +1,7 @@
+# item 2 - the delivery's door test, run exactly as scripts/test.sh:1614 invokes it,
+# except WASM_AGENT_HOME is pointed at a scratch dir so the live node's home is not read/written.
+# command: env -u WASM_AGENT_LUA_ROOT WASM_AGENT_HOME=<scratch> bash scripts/test-subscription-login-door.sh $PWD/rust/target/release/wa.exe /tmp/tmp.6Ow0kE6Wb1/db.sub-login
+
+subscription login door ok (17 checks, no Lua root and Lua root, no network beyond the local
+stand-in for the auth host, no credential)
+TEST_EXIT=0

@@ -1,0 +1,36 @@
+# item 1 - the door's printed sentence, run verbatim, WASM_AGENT_LUA_ROOT unset (installed shape)
+# binary: rust/target/release/wa.exe built from tree 987f4faff2e81c05d1de5e80d549b308556615cd at 2026-09-30T21:59:41Z
+# command: bash docs/reviews/wa-session-389b8886-subscription-cutover/evidence-3/run-printed-sentence.sh $PWD/rust/target/release/wa.exe
+
+auth stand-in: http://127.0.0.1:58100   (WASM_AGENT_OPENAI_SUB_AUTH_BASE; not the live provider)
+
+### step 1: wa subscription login --browser   (no Lua root)
+openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+http://127.0.0.1:58100/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=lU-oMRYn1UwJWDUBIKrT02FenOPBUr6lTMcKPWmIbh0&code_challenge_method=S256&state=5a14f4fa79fa4800ad0086fe2591e43f&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+[lua] openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+http://127.0.0.1:58100/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=lU-oMRYn1UwJWDUBIKrT02FenOPBUr6lTMcKPWmIbh0&code_challenge_method=S256&state=5a14f4fa79fa4800ad0086fe2591e43f&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+openai-sub: waiting for the browser step - re-run with --code <the address you landed on>
+exit=0
+
+the printed sentence, verbatim: [re-run with --code <the address you landed on>]
+state from the printed authorize URL: 5a14f4fa79fa4800ad0086fe2591e43f
+flow file while pending: {"expires_at":1790806482068,"flow":"browser","pending":true,"redirect_uri":"http://localhost:1455/auth/callback","started_at":1790805582068,"state":"5a14f4fa79fa4800ad0086fe2591e43f","url":"http://127.0.0.1:58100/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=lU-oMRYn1UwJWDUBIKrT02FenOPBUr6lTMcKPWmIbh0&code_challenge_method=S256&state=5a14f4fa79fa4800ad0086fe2591e43f&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent","verifier":"qZxcUBbcQkikf-vtyTIACtsMzU1nRklOlT9y52k5-nk","version":1}
+
+### step 2: the printed sentence, verbatim -> wa subscription login --code <the address you landed on>
+     with <the address you landed on> = http://localhost:1455/auth/callback?code=PASTED-CODE&state=5a14f4fa79fa4800ad0086fe2591e43f
+openai-sub: logged in - account acct-fixture-0001
+[lua] openai-sub: logged in - account acct-fixture-0001
+openai-sub: logged in - account acct-fixture-0001, store C:/Users/Victor/AppData/Local/Temp/tmp.O6yuOcb3yI/sentence/credentials.json
+exit=0
+
+### step 3: what the store now holds, and what the door says
+credentials.json source: source":"login:browser
+device-code line printed anywhere above: 0
+openai-sub credential: valid for account acct-fixture-0001, expires in 3599s, refreshes 0, refresh 850843a410ed
+    store:  C:/Users/Victor/AppData/Local/Temp/tmp.O6yuOcb3yI/sentence/credentials.json
+    log in: wa subscription login             device code: prints the URL and the code,
+                                              then waits for you to enter it
+            wa subscription login --browser    sign in in a browser, come back with --code <url>
+exit=0
+
+script exit=0
