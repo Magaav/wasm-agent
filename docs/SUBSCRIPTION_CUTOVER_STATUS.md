@@ -429,7 +429,104 @@ a literal `dofile("...")` target reachable from an embedded `lua/` file is not i
 falsified by adding such a `dofile`, shown failing by name, removed. (3) A gate-visible test of the
 login door with **no** Lua root, plus an equality check of `status` output between the two shapes.
 
-Evidence for all three follows in the commits after this one. This section is committed first, so a
-lost lane still leaves the finding and the plan rather than only the defect.
+Evidence for all three now follows in this file; the commits are `5158666` (the repair) and the one
+that carries this text.
+
+### What the repair changed
+
+| file | change |
+| --- | --- |
+| `lua/core/openai_sub_login.lua` | **new**: the login CLI as a module (`run(argv)` returns the exit code, `main(argv)` ends the process with it). In `EMBEDDED`. |
+| `scripts/openai-sub-login.lua` | now a wrapper over that module - kept because the credential module's `LOGIN_COMMAND` and its tests name this path, and that module is used as delivered. It works in both shapes because the module it loads is embedded. |
+| `lua/core/init.lua` | `os.exit(dofile("lua/core/openai_sub_login.lua").run(args))` - a registry path, not a `scripts/` one. |
+| `rust/wa-host/src/main.rs` | one `EMBEDDED` entry for the new module, with the reason it must be the *registry* name. |
+| `scripts/check-embedded-lua-closure.mjs` | **new** gate check: every literal `dofile("x")` reachable from an embedded `lua/` file must be a registry key. |
+| `scripts/test-subscription-login-door.sh` | **new** gate test: every door command in both shapes, compared. |
+| `scripts/test.sh` | both wired in; the door test runs under `env -u WASM_AGENT_LUA_ROOT`. |
+
+### The two-shape proof of the door
+
+```
+$ bash scripts/test-subscription-login-door.sh <binary> <db>
+subscription login door ok (9 checks, no Lua root and Lua root, no network, no credential)
+   exit 0
+```
+
+That is `status` byte-for-byte equal in both shapes (so the two subcommands can no longer disagree),
+`login --browser` in both shapes ending at the same endpoint with the same outstanding-human sentence
+(fresh `state` and `code_challenge` normalised), `status` naming the door that fixes an absent
+credential, and an unknown subcommand refused with exit 2 in both. The installed shape by hand, the
+exact command that used to die:
+
+```
+$ env -u WASM_AGENT_LUA_ROOT wa ... subscription login --browser        (before this commit)
+lua error: [string "bootstrap"]:1: embedded module missing: scripts/openai-sub-login.lua    exit 1
+$ env -u WASM_AGENT_LUA_ROOT wa ... subscription login --browser        (after)
+openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&...   exit 0
+```
+
+And the `WA_SCRIPT=` spelling the credential module's message names, with no Lua root - the other half
+of "the door is reachable in both shapes":
+
+```
+$ env -u WASM_AGENT_LUA_ROOT WA_SCRIPT=scripts/openai-sub-login.lua wa --status
+<the credential status JSON and sentence>    exit 0
+```
+
+### The blind-spot check, failing then passing by name
+
+```
+$ node scripts/check-embedded-lua-closure.mjs
+embedded registry: 55 entries, all 55 include_str! accounted for (52 .lua)
+traversed: 52 embedded file(s), 215 literal dofile target(s), 0 non-literal (not checkable statically)
+embedded lua closure ok: every literal dofile target reachable from the registry is in the registry
+   exit 0
+
+$ # falsification: one unembedded literal dofile appended to lua/core/init.lua
+$ node scripts/check-embedded-lua-closure.mjs
+MISSING lua/core/this_module_is_not_embedded.lua  (required by lua/core/init.lua:296: not in EMBEDDED)
+check-embedded-lua-closure: 1 dofile target(s) are not in the binary's EMBEDDED registry:
+lua/core/this_module_is_not_embedded.lua - an installed node has no Lua root, so each of these is
+readable in a checkout and absent where it ships
+   exit 1
+
+$ # probe removed
+$ node scripts/check-embedded-lua-closure.mjs
+embedded lua closure ok: every literal dofile target reachable from the registry is in the registry
+   exit 0
+```
+
+Three things about that check are deliberate. A **partial parse is a failure** (55 of 55
+`include_str!` accounted for), because a check that silently reads half a registry is how this class of
+defect survives. **Comments and strings are stripped first** - its own first draft failed on this
+delivery's explanation of the defect, which is a false positive that would teach the next reader to
+ignore it. And it was **falsified by name** before being trusted, in the sequence above.
+
+### Run by hand for this repair (no `scripts/test.sh`, no gate slot, as instructed)
+
+| what | result |
+| --- | --- |
+| `node scripts/check-embedded-lua-closure.mjs` | pass, then `MISSING lua/core/this_module_is_not_embedded.lua (required by lua/core/init.lua:296)` exit 1, then pass |
+| `bash scripts/test-subscription-login-door.sh <binary> <db>` | `subscription login door ok (9 checks, no Lua root and Lua root, no network, no credential)`, exit 0 |
+| the installed shape by hand, `login --browser` and the `WA_SCRIPT=` wrapper | URL + exit 0; wrapper `--status` exit 0 |
+| `scripts/test-subscription-wire.lua` | `subscription wire ok (135 checks)` |
+| `scripts/test-openai-sub-auth.lua` | `openai-sub auth ok (128 checks)`, `token POSTs=1` |
+| `wa help`, `wa subscription status` | lists the door; answers |
+| `bash -n scripts/test.sh` | parses |
+
+### What is still not verified for this repair
+
+* **The gate has not seen any of it.** No slot was taken (reserved for the merge lane, and instructed),
+  so the tip `5158666` is **not gate-covered**: the two new gate lines are edges of the suite that have
+  never run inside `scripts/test.sh`, only exactly as invoked by hand above. The next merge-lane gate is
+  what executes them.
+* **The gate's own Lua root is not the only place this could hide.** The closure check reasons about
+  `dofile` literals only: a target built at runtime (`dofile('lua/core/' .. name .. '.lua')`) is counted
+  and printed (0 today) rather than resolved, and a module reached only through a shell script or a
+  `WA_SCRIPT=` path is outside its scope by construction.
+* **`lua/core/openai_sub_bridge.lua` load paths** and other `scripts/*.lua` entry points were not
+  audited for the same defect beyond what the closure check covers (it covers every literal `dofile`
+  reachable from the registry; the `WA_SCRIPT=` files are not in that set).
 
 Agent: wasm-agent node=wasm_the_first role=child session=child:dispatch:389b8886-2cfb-45bc-be85-64f4357931f9
