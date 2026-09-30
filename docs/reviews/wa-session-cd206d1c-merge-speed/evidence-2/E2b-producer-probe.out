@@ -1,0 +1,9 @@
+legacy grace as merged: 10860 s
+persistent tree exists: true (C:\Users\Victor\.wasm-agent\merge-lane-tree-landing)
+B currentKept=false (what the merged lane passes for a persistent tree): {"family":"wa-merge-lane-*","grace_s":10860,"current":"merge-lane-tree-landing","current_kept":false,"budget_for_others":1,"kept":["wa-merge-lane-abc123"],"removed":[],"in_use":[],"recent_legacy":[],"live":[],"not_this_family":0,"errors":0}
+   the leftover clone survived B: true
+A currentKept=true (the budget read the persistent tree as this run's clone): {"family":"wa-merge-lane-*","grace_s":10860,"current":"merge-lane-tree-landing","current_kept":true,"budget_for_others":0,"kept":[],"removed":["wa-merge-lane-abc123"],"in_use":[],"recent_legacy":[],"live":[],"not_this_family":0,"errors":0}
+   the leftover clone survived A: false
+C real temp root, keep=1000 (deletes nothing): family wa-merge-lane-* | candidates seen 1 | removed 0
+   is the persistent tree among them: false
+   is the persistent tree inside the swept root at all: false

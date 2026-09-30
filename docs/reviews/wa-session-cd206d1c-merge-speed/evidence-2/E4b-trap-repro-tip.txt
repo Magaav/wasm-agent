@@ -1,0 +1,7 @@
+  (main's line 153 trap is set: trap gate_home_release EXIT)
+  (the delivery's line 162 trap is set: trap gate_phase_summary EXIT)
+  (gate_phase_begin build called; now a command in the build phase fails)
+gate phases (ms, in order; each row is the segment that starts at its marker):
+  build                    38
+  total                    38
+gate phases json: {"schema":1,"gate":"scripts/test.sh","phases":[{"name":"build","ms":38}],"total_ms":38,"skipped":0,"cargo_jobs":"cargo default","test_threads":"harness default"}

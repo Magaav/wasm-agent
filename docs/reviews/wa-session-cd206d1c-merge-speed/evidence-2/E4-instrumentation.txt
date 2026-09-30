@@ -1,0 +1,34 @@
+# E4 - item 4: the wrapper is ABSENT; the remaining instrumentation and its one side effect
+
+## scripts/lib at the tip (no gate-shims/, no gate-suite.mjs, no wrapper)
+scripts/lib/delivery-store.mjs
+scripts/lib/experiment-edit-verify.cjs
+scripts/lib/experiment-verify.lua
+scripts/lib/first-run.ps1
+scripts/lib/gate-lane-sample.ps1
+scripts/lib/gate-phases.sh
+scripts/lib/managed-guest.ps1
+scripts/lib/proof-verdict.cjs
+scripts/lib/release-package.ps1
+scripts/lib/service-target.sh
+scripts/lib/sqlite-python.cjs
+scripts/lib/suite-verdict.cjs
+scripts/lib/test-verdict.cjs
+scripts/lib/token-audit.cjs
+scripts/lib/websocket-runtime.mjs
+
+## any wrapper/shim path anywhere in the tip tree (grep -Ei 'shim|wrapper'):
+   (no match - absent)
+
+## every trap in scripts/test.sh at the tip, in file order
+153:trap gate_home_release EXIT
+162:trap gate_phase_summary EXIT
+287:trap 'rm -f "$DB" "$DB"-wal "$DB"-shm "$SDB" "$SDB"-wal "$SDB"-shm "$RDB" "$RDB"-wal "$RDB"-shm "$QDB" "$QDB"-wal "$QDB"-shm "$DB.title"
+
+## and the same lines in main (ad3acad)
+153:trap gate_home_release EXIT
+277:trap 'rm -f "$DB" "$DB"-wal "$DB"-shm "$SDB" "$SDB"-wal "$SDB"-shm "$RDB" "$RDB"-wal "$RDB"-shm "$QDB" "$QDB"-wal "$QDB"-shm "$DB.title"
+
+## the whole test.sh diff main..tip, filtered to added lines that are NOT a comment, the source
+## line, the phase trap, a phase marker or the summary call (the check-neutrality proof):
+   (nothing left: every added line is a comment, the source, the trap, a marker or the summary)
