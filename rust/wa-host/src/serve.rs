@@ -244,8 +244,7 @@ fn is_control_route(request: &Request) -> bool {
     split_path(&request.path).0 == "/subagents"
 }
 
-/// How long the accept thread will wait for the resolver before refusing, so a busy SQLite lock or a
-/// slow Lua call cannot stop the node accepting connections.
+/// The admission deadline, including queue residence and resolver wait. It never holds the listener.
 fn admission_timeout_ms() -> u64 {
     env_usize("WASM_AGENT_ADMISSION_TIMEOUT_MS", 8000) as u64
 }
@@ -572,10 +571,15 @@ fn choose_node_thread(request: &Request) -> usize {
         return control_floor();
     }
     let read = is_read_route(request);
+    // Snapshot before locking the pool: scheduler admission takes its own lock before the pool.
+    // An admitted run owns its slot even before its busy label appears at dequeue.
+    let claimed: std::collections::HashSet<usize> = scheduler::global()
+        .map(|scheduler| scheduler.snapshot().into_iter().map(|(_, index, _, _)| index).collect())
+        .unwrap_or_default();
     // Nothing to gain while the run node-thread is idle - for a read as much as for a write. This is the rule
     // that keeps an idle node at exactly one interpreter, and it is also why a read does not spawn a node-thread
     // that would then sit there doing nothing: the pool appears only when a request would otherwise wait.
-    if turn_node_thread_is_idle() {
+    if turn_node_thread_is_idle() && (!read || !claimed.contains(&0)) {
         return 0;
     }
     let Ok(mut slots) = pool.slots.lock() else { return 0 };
@@ -589,7 +593,8 @@ fn choose_node_thread(request: &Request) -> usize {
     // Read node-threads live in the run lanes, below the control floor: a read must not occupy control
     // capacity, and a control node-thread must not be counted as a read node-thread.
     let live: Vec<usize> = (1..slots.len().min(run_capacity()))
-        .filter(|index| slots[*index].is_some() && !node_thread_is_wedged(*index))
+        .filter(|index| slots[*index].is_some() && !claimed.contains(index)
+            && node_thread_busy_label(*index).is_none() && !node_thread_is_wedged(*index))
         .collect();
     if !live.is_empty() {
         let start = pool.next.fetch_add(1, Ordering::Relaxed);
@@ -993,11 +998,12 @@ fn ok_json(body: String) -> Reply {
 /// named thread belongs to its author, so only Lua can answer it. Doing it here means an invalid
 /// nonempty credential never reaches a node-thread as the default user, and a foreign thread is refused
 /// before a slot is taken.
-/// A pre-admission resolution request. The accept thread hands the raw request to the resolver
-/// thread and waits with a bound, so a busy SQLite lock cannot stop the node accepting connections.
+/// A pre-admission resolution request. The admission dispatcher waits with a deadline while the
+/// accept thread continues serving unrelated requests.
 struct ResolveRequest {
     function: &'static str,
     args: Vec<String>,
+    deadline: std::time::Instant,
     reply: std::sync::mpsc::SyncSender<Result<serde_json::Value, (u16, String, String)>>,
 }
 
@@ -1026,33 +1032,40 @@ fn resolve_sync(
     Ok(value)
 }
 
-/// Ask the resolver thread, waiting no longer than `admission_timeout_ms`. The accept thread never
-/// blocks unbounded on SQLite or on a slow interpreter.
+/// Ask the resolver within the remaining admission deadline, including earlier queue residence.
 fn resolve_with(
     tx: &std::sync::mpsc::SyncSender<ResolveRequest>,
     function: &'static str,
     args: Vec<String>,
+    deadline: std::time::Instant,
 ) -> Result<serde_json::Value, (u16, String, String)> {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() { return Err(admission_timeout()); }
     let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-    tx.try_send(ResolveRequest { function, args, reply: reply_tx }).map_err(|_| {
+    tx.try_send(ResolveRequest { function, args, deadline, reply: reply_tx }).map_err(|_| {
         (503, "admission_busy".to_string(), "the admission resolver is busy; retry shortly".to_string())
     })?;
-    match reply_rx.recv_timeout(std::time::Duration::from_millis(admission_timeout_ms())) {
-        Ok(result) => result,
-        Err(_) => Err((503, "admission_timeout".to_string(), "the admission resolver did not answer in time; retry shortly".to_string())),
+    match reply_rx.recv_timeout(remaining) {
+        Ok(result) if std::time::Instant::now() < deadline => result,
+        _ => Err(admission_timeout()),
     }
+}
+
+fn admission_timeout() -> (u16, String, String) {
+    (503, "admission_timeout".into(), "the admission deadline expired; retry shortly".into())
 }
 
 /// The `(conversation, owner)` for a run, resolved before it is admitted.
 fn resolve_admission(
     tx: &std::sync::mpsc::SyncSender<ResolveRequest>,
     request: &Request,
+    deadline: std::time::Instant,
 ) -> Result<(String, String), (u16, String, String)> {
     let (_, query) = split_path(&request.path);
     let from_query = query_value(&query, "node");
     let node = if !from_query.is_empty() { from_query } else { header_of(&request.node_headers, "x-wa-node") };
     let body = String::from_utf8_lossy(&request.body).to_string();
-    let value = resolve_with(tx, "wa_admission", vec![request.session.clone(), node, body])?;
+    let value = resolve_with(tx, "wa_admission", vec![request.session.clone(), node, body], deadline)?;
     let conversation = value.get("conversation").and_then(|value| value.as_str()).unwrap_or_default().to_string();
     let owner = value
         .get("user")
@@ -1067,8 +1080,9 @@ fn resolve_admission(
 fn resolve_identity(
     tx: &std::sync::mpsc::SyncSender<ResolveRequest>,
     session: &str,
+    deadline: std::time::Instant,
 ) -> Result<String, (u16, String, String)> {
-    let value = resolve_with(tx, "wa_identity", vec![session.to_string()])?;
+    let value = resolve_with(tx, "wa_identity", vec![session.to_string()], deadline)?;
     Ok(value
         .get("user")
         .and_then(|user| user.get("id"))
@@ -1084,6 +1098,7 @@ fn resolve_peer(
     tx: &std::sync::mpsc::SyncSender<ResolveRequest>,
     headers: &[(String, String)],
     body: &str,
+    deadline: std::time::Instant,
 ) -> Result<(String, String, String), (u16, String, String)> {
     let value = resolve_with(
         tx,
@@ -1095,6 +1110,7 @@ fn resolve_peer(
             header_of(headers, "x-wa-sig"),
             body.to_string(),
         ],
+        deadline,
     )?;
     let node_id = value.get("node_id").and_then(|value| value.as_str()).unwrap_or_default().to_string();
     let role = value.get("role").and_then(|value| value.as_str()).unwrap_or("master").to_string();
@@ -1118,12 +1134,13 @@ fn peer_conversation(request: &Request, verified_node_id: &str) -> String {
 
 /// `POST /runs`: owner-scoped status and cancellation for a foreground conversation.
 ///
-/// Answered on the accept thread from the scheduler's own state, so it never queues behind the very
-/// run it is trying to cancel. The response never claims a run stopped: `cancel` sets a request and
+/// Answered on the admission dispatcher from the scheduler's own state, so it never queues behind
+/// the run it is trying to cancel. Identity resolution shares the admission deadline and queue.
+/// The response never claims a run stopped: `cancel` sets a request and
 /// reports the state it was in, and the caller polls `status` until the run settles as `cancelled`
 /// or `completed`.
-fn handle_runs(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<ResolveRequest>) -> Reply {
-    let owner = match resolve_identity(resolve_tx, &request.session) {
+fn handle_runs(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<ResolveRequest>, deadline: std::time::Instant) -> Reply {
+    let owner = match resolve_identity(resolve_tx, &request.session, deadline) {
         Ok(owner) => owner,
         Err((status, error, hint)) => {
             let body = format!("{{\"error\":\"{error}\",\"hint\":\"{hint}\"}}");
@@ -1204,7 +1221,7 @@ fn handle_runs(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<Resol
 /// Return the active run's uncommitted stream tail to its owner. Durable transcript rows are marked
 /// with checkpoints in the event log, so a reconnect can repaint the ledger through that point and
 /// then apply only events that have not reached the ledger yet.
-fn handle_run_events(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<ResolveRequest>) -> Reply {
+fn handle_run_events(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender<ResolveRequest>, deadline: std::time::Instant) -> Reply {
     let parsed: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null);
     let conversation = parsed.get("thread").and_then(|value| value.as_str()).unwrap_or_default();
     let Some(run_id) = parsed.get("run_id").and_then(|value| value.as_u64()) else {
@@ -1213,7 +1230,7 @@ fn handle_run_events(request: &Request, resolve_tx: &std::sync::mpsc::SyncSender
     if conversation.is_empty() {
         return (400, "application/json", b"{\"error\":\"conversation_required\"}".to_vec());
     }
-    let owner = match resolve_identity(resolve_tx, &request.session) {
+    let owner = match resolve_identity(resolve_tx, &request.session, deadline) {
         Ok(owner) => owner,
         Err((status, error, hint)) => {
             return (status, "application/json", serde_json::json!({"error": error, "hint": hint}).to_string().into_bytes());
@@ -1314,17 +1331,35 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     let warm = warm_read_node_threads().min(ceiling);
     let queue_depth = env_usize("WASM_AGENT_QUEUE_DEPTH", 256);
     // The control interpreter, owned by the resolver thread. Admission resolves the credential and
-    // the conversation in Lua *before* a node-thread is reserved; running it on its own thread lets the
-    // accept thread bound the wait, so a busy SQLite lock or a slow interpreter cannot stop the node
-    // accepting connections. It never runs a model.
+    // the conversation in Lua *before* a node-thread is reserved. The admission dispatcher bounds its
+    // wait without holding the accept thread. This interpreter never runs a model.
     let control = factory();
     let (resolve_tx, resolve_rx) = std::sync::mpsc::sync_channel::<ResolveRequest>(4);
     std::thread::spawn(move || {
         while let Ok(request) = resolve_rx.recv() {
-            let result = resolve_sync(&control, request.function, &request.args);
+            let result = if std::time::Instant::now() >= request.deadline {
+                Err(admission_timeout())
+            } else {
+                resolve_sync(&control, request.function, &request.args)
+            };
             let _ = request.reply.send(result);
         }
     });
+    // One bounded admission dispatcher preserves HTTP admission order without tying the listener
+    // to resolver latency. Queue residence and resolver wait share the same deadline; expired jobs
+    // are refused before calling Lua or acquiring scheduler ownership. No thread is spawned per socket.
+    let admission_depth = env_usize("WASM_AGENT_ADMISSION_QUEUE_DEPTH", 4).clamp(1, 256);
+    let (admission_tx, admission_rx) = std::sync::mpsc::sync_channel::<(TcpStream, Request, std::time::Instant)>(admission_depth);
+    let admission_resolver = resolve_tx.clone();
+    std::thread::Builder::new().name("wa-admission".into()).spawn(move || {
+        while let Ok((mut stream, request, deadline)) = admission_rx.recv() {
+            if std::time::Instant::now() >= deadline {
+                let _ = respond(&mut stream, 503, "application/json", b"{\"error\":\"admission_timeout\"}");
+                continue;
+            }
+            dispatch_http(stream, request, &admission_resolver, deadline);
+        }
+    }).expect("admission dispatcher");
     // Admission bounds. `background_max` is how many background conversations may run at once and
     // `background_backlog` how many more may wait; together they keep a wake storm from growing
     // without limit. `session_queue_depth` bounds one conversation's own backlog so a single
@@ -1423,7 +1458,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
         let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
-        let mut request = match read_request(&mut stream) {
+        let request = match read_request(&mut stream) {
             Ok(Some(request)) => request,
             _ => continue,
         };
@@ -1449,196 +1484,222 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
             let _ = respond(&mut stream, status, content_type, &body);
             continue;
         }
-        // `POST /runs` is answered here, without a node-thread: cancellation and status must stay prompt
-        // even while every control slot is awaiting a subagent, and the run's state and cancel flag
-        // live in the scheduler, not in an interpreter. Only identity resolution touches Lua, and it
-        // is bounded by the resolver thread.
-        if split_path(&request.path).0 == "/runs" && request.method == "POST" {
-            let (status, content_type, body) = handle_runs(&request, &resolve_tx);
-            let _ = respond(&mut stream, status, content_type, &body);
-            continue;
-        }
-        if split_path(&request.path).0 == "/run-events" && request.method == "POST" {
-            let (status, content_type, body) = handle_run_events(&request, &resolve_tx);
-            let _ = respond(&mut stream, status, content_type, &body);
-            continue;
-        }
-        // Admission. A run goes through the scheduler, which owns its conversation from admission
-        // through completion and picks its lane; everything else keeps the old routing. The scheduler
-        // decides *and reserves* in one step, so two back-to-back admissions for one conversation
-        // cannot both be handed a fresh node-thread - the hole that let a conversation be written twice.
-        let is_run = is_run_route(&request);
-        let target = if is_run {
-            if split_path(&request.path).0 == "/node/chat" {
-                // A peer run is authenticated by its signature, verified ONCE here, before admission,
-                // so the conversation and owner come from the verified author and not from a header
-                // the caller supplied. The run half uses `wa_node_chat_verified` and does not re-check.
-                let body = String::from_utf8_lossy(&request.body).to_string();
-                match resolve_peer(&resolve_tx, &request.node_headers, &body) {
-                    Ok((node_id, role, name)) => {
-                        request.routing_session = peer_conversation(&request, &node_id);
-                        request.run_class = scheduler::RunClass::Background;
-                        request.owner = node_id.clone();
-                        request.peer_verified = Some((node_id, role, name));
-                    }
-                    Err((status, error, hint)) => {
-                        let body = format!("{{\"error\":\"{error}\",\"hint\":\"{hint}\"}}");
-                        let _ = respond(&mut stream, status, "application/json", body.as_bytes());
-                        continue;
-                    }
-                }
-            } else {
-                match resolve_admission(&resolve_tx, &request) {
-                    Ok((conversation, owner)) => {
-                        request.routing_session = conversation;
-                        request.owner = owner;
-                    }
-                    Err((status, error, hint)) => {
-                        let body = format!("{{\"error\":\"{error}\",\"hint\":\"{hint}\"}}");
-                        let _ = respond(&mut stream, status, "application/json", body.as_bytes());
-                        continue;
-                    }
-                }
-            }
-            match scheduler::admit(&request.routing_session, &request.owner, request.run_class, pick_run_node_thread) {
-                scheduler::Decision::Run { run_id, node_thread, cancel, sockets }
-                | scheduler::Decision::Behind { run_id, node_thread, cancel, sockets } => {
-                    if let Some(scheduler) = scheduler::global() {
-                        if scheduler.record_request(run_id,&String::from_utf8_lossy(&request.body)).is_err() {
-                            scheduler.complete_run(run_id);
-                            let _ = respond(&mut stream,503,"application/json",b"{\"error\":\"run_journal_unavailable\"}");
-                            continue;
-                        }
-                    }
-                    request.run_id = run_id;
-                    request.run_cancel = Some(cancel);
-                    request.run_sockets = Some(sockets);
-                    node_thread
-                }
-                scheduler::Decision::Refused(refusal) => {
-                    let (code, hint) = refusal.as_error();
-                    let body = format!("{{\"error\":\"{code}\",\"hint\":\"{hint}\"}}");
-                    let _ = respond(&mut stream, 503, "application/json", body.as_bytes());
-                    continue;
+        // Only resolver-dependent requests enter this bounded FIFO. The accept thread keeps
+        // serving unrelated reads and static replies while authentication waits on Lua/SQLite.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(admission_timeout_ms());
+        if is_run_route(&request) || (request.method == "POST"
+            && matches!(split_path(&request.path).0.as_str(), "/runs" | "/run-events")) {
+            match admission_tx.try_send((stream, request, deadline)) {
+                Ok(()) => {},
+                Err(std::sync::mpsc::TrySendError::Full((mut stream, _, _)))
+                | Err(std::sync::mpsc::TrySendError::Disconnected((mut stream, _, _))) => {
+                    let _ = respond(&mut stream, 503, "application/json",
+                        b"{\"error\":\"admission_busy\",\"hint\":\"the admission queue is full or unavailable; retry shortly\"}");
                 }
             }
         } else {
-            choose_node_thread(&request)
-        };
-        let age_ms = node_thread_age_ms(target);
-        if age_ms >= stall_seconds() * 1000 {
-            // The node-thread this request needs has not reported progress for longer than any healthy
-            // operation takes. Saying so is the whole point: the alternative was an open socket, no bytes,
-            // and a client that waits forever.
-            let now = STARTED.get().map(|s| s.elapsed().as_millis() as u64).unwrap_or(0);
-            let last = STALL_LOGGED_MS.load(Ordering::Relaxed);
-            if now.saturating_sub(last) > 30_000 {
-                STALL_LOGGED_MS.store(now, Ordering::Relaxed);
-                eprintln!(
-                    "[serve] node-thread {target} has not reported progress for {}s - replying 503",
-                    age_ms / 1000
-                );
-            }
-            // Exit only when *every* node-thread that is running is stalled: a wedged lane must not take the
-            // healthy ones with it, and with a single interpreter this is exactly the old behaviour.
-            let all_stalled = live_node_thread_ids()
-                .iter()
-                .all(|index| node_thread_age_ms(*index) >= stall_exit_seconds() * 1000);
-            if stall_exit_seconds() > 0 && all_stalled {
-                eprintln!(
-                    "[serve] every node-thread has been stalled for {}s: exiting so the service manager can restart the node",
-                    stall_exit_seconds()
-                );
-                std::process::exit(3);
-            }
-            if is_run {
-                // The admission is already claimed; the run is not going to start, so give the
-                // conversation's place back before refusing.
-                scheduler::complete_run(request.run_id);
-            }
-            let body = format!(
-                "{{\"error\":\"node_thread_stalled\",\"node_thread\":{target},\"stalled_ms\":{age_ms},\"hint\":\"the interpreter has not reported progress; see the node log, and restart it if the run is lost\"}}"
-            );
-            let _ = respond(&mut stream, 503, "application/json", body.as_bytes());
-            continue;
+            dispatch_http(stream, request, &resolve_tx, deadline);
         }
-        QUEUED.fetch_add(1, Ordering::Relaxed);
-        // A node-thread can retire between being chosen and being sent to, so the send is attempted against the
-        // slot's current sender and falls back to node-thread 0. `try_send` hands the request back on failure,
-        // which is what makes the retry possible rather than a lost request.
-        let mut attempt = 0;
-        let mut target = target;
-        let admitted_run_id = request.run_id;
-        let mut pending = Some((stream, request));
-        loop {
-            let sender = POOL
-                .get()
-                .and_then(|pool| pool.slots.lock().ok().and_then(|slots| slots.get(target).cloned().flatten()));
-            let (mut stream, request) = match pending.take() {
-                Some(pair) => pair,
-                None => break,
-            };
-            let sender = match sender {
-                Some(sender) => sender,
-                None => {
-                    if is_run {
-                        // The conversation's owner retired between admission and delivery. Release
-                        // the place rather than hand the run to a node-thread that does not own it.
-                        scheduler::complete_run(admitted_run_id);
-                        QUEUED.fetch_sub(1, Ordering::Relaxed);
-                        let body = b"{\"error\":\"node_busy\",\"hint\":\"the node-thread retired before the run could start; retry shortly\"}";
-                        let _ = respond(&mut stream, 503, "application/json", body);
-                        break;
+    }
+}
+
+/// Dispatch one parsed request. Resolver waits happen only on the admission thread; ordinary reads
+/// call this directly. The scheduler still authenticates before claiming, journaling or executing.
+fn dispatch_http(
+    mut stream: TcpStream,
+    mut request: Request,
+    resolve_tx: &std::sync::mpsc::SyncSender<ResolveRequest>,
+    deadline: std::time::Instant,
+) {
+    // `POST /runs` is answered here, without a node-thread: cancellation and status must stay prompt
+    // even while every control slot is awaiting a subagent, and the run's state and cancel flag
+    // live in the scheduler, not in an interpreter. Only identity resolution touches Lua, and it
+    // is bounded by the resolver thread.
+    if split_path(&request.path).0 == "/runs" && request.method == "POST" {
+        let (status, content_type, body) = handle_runs(&request, resolve_tx, deadline);
+        let _ = respond(&mut stream, status, content_type, &body);
+        return;
+    }
+    if split_path(&request.path).0 == "/run-events" && request.method == "POST" {
+        let (status, content_type, body) = handle_run_events(&request, resolve_tx, deadline);
+        let _ = respond(&mut stream, status, content_type, &body);
+        return;
+    }
+    // Admission. A run goes through the scheduler, which owns its conversation from admission
+    // through completion and picks its lane; everything else keeps the old routing. The scheduler
+    // decides *and reserves* in one step, so two back-to-back admissions for one conversation
+    // cannot both be handed a fresh node-thread - the hole that let a conversation be written twice.
+    let is_run = is_run_route(&request);
+    let target = if is_run {
+        if split_path(&request.path).0 == "/node/chat" {
+            // A peer run is authenticated by its signature, verified ONCE here, before admission,
+            // so the conversation and owner come from the verified author and not from a header
+            // the caller supplied. The run half uses `wa_node_chat_verified` and does not re-check.
+            let body = String::from_utf8_lossy(&request.body).to_string();
+            match resolve_peer(resolve_tx, &request.node_headers, &body, deadline) {
+                Ok((node_id, role, name)) => {
+                    request.routing_session = peer_conversation(&request, &node_id);
+                    request.run_class = scheduler::RunClass::Background;
+                    request.owner = node_id.clone();
+                    request.peer_verified = Some((node_id, role, name));
+                }
+                Err((status, error, hint)) => {
+                    let body = format!("{{\"error\":\"{error}\",\"hint\":\"{hint}\"}}");
+                    let _ = respond(&mut stream, status, "application/json", body.as_bytes());
+                    return;
+                }
+            }
+        } else {
+            match resolve_admission(resolve_tx, &request, deadline) {
+                Ok((conversation, owner)) => {
+                    request.routing_session = conversation;
+                    request.owner = owner;
+                }
+                Err((status, error, hint)) => {
+                    let body = format!("{{\"error\":\"{error}\",\"hint\":\"{hint}\"}}");
+                    let _ = respond(&mut stream, status, "application/json", body.as_bytes());
+                    return;
+                }
+            }
+        }
+        match scheduler::admit(&request.routing_session, &request.owner, request.run_class, pick_run_node_thread) {
+            scheduler::Decision::Run { run_id, node_thread, cancel, sockets }
+            | scheduler::Decision::Behind { run_id, node_thread, cancel, sockets } => {
+                if let Some(scheduler) = scheduler::global() {
+                    if scheduler.record_request(run_id,&String::from_utf8_lossy(&request.body)).is_err() {
+                        scheduler.complete_run(run_id);
+                        let _ = respond(&mut stream,503,"application/json",b"{\"error\":\"run_journal_unavailable\"}");
+                        return;
                     }
-                    // A read/write node-thread is gone (retired). Node-thread 0 always exists, so it is the honest fallback.
-                    if target != 0 && attempt < 2 {
-                        attempt += 1;
-                        target = 0;
-                        pending = Some((stream, request));
-                        continue;
-                    }
+                }
+                request.run_id = run_id;
+                request.run_cancel = Some(cancel);
+                request.run_sockets = Some(sockets);
+                node_thread
+            }
+            scheduler::Decision::Refused(refusal) => {
+                let (code, hint) = refusal.as_error();
+                let body = format!("{{\"error\":\"{code}\",\"hint\":\"{hint}\"}}");
+                let _ = respond(&mut stream, 503, "application/json", body.as_bytes());
+                return;
+            }
+        }
+    } else {
+        choose_node_thread(&request)
+    };
+    let age_ms = node_thread_age_ms(target);
+    if age_ms >= stall_seconds() * 1000 {
+        // The node-thread this request needs has not reported progress for longer than any healthy
+        // operation takes. Saying so is the whole point: the alternative was an open socket, no bytes,
+        // and a client that waits forever.
+        let now = STARTED.get().map(|s| s.elapsed().as_millis() as u64).unwrap_or(0);
+        let last = STALL_LOGGED_MS.load(Ordering::Relaxed);
+        if now.saturating_sub(last) > 30_000 {
+            STALL_LOGGED_MS.store(now, Ordering::Relaxed);
+            eprintln!(
+                "[serve] node-thread {target} has not reported progress for {}s - replying 503",
+                age_ms / 1000
+            );
+        }
+        // Exit only when *every* node-thread that is running is stalled: a wedged lane must not take the
+        // healthy ones with it, and with a single interpreter this is exactly the old behaviour.
+        let all_stalled = live_node_thread_ids()
+            .iter()
+            .all(|index| node_thread_age_ms(*index) >= stall_exit_seconds() * 1000);
+        if stall_exit_seconds() > 0 && all_stalled {
+            eprintln!(
+                "[serve] every node-thread has been stalled for {}s: exiting so the service manager can restart the node",
+                stall_exit_seconds()
+            );
+            std::process::exit(3);
+        }
+        if is_run {
+            // The admission is already claimed; the run is not going to start, so give the
+            // conversation's place back before refusing.
+            scheduler::complete_run(request.run_id);
+        }
+        let body = format!(
+            "{{\"error\":\"node_thread_stalled\",\"node_thread\":{target},\"stalled_ms\":{age_ms},\"hint\":\"the interpreter has not reported progress; see the node log, and restart it if the run is lost\"}}"
+        );
+        let _ = respond(&mut stream, 503, "application/json", body.as_bytes());
+        return;
+    }
+    QUEUED.fetch_add(1, Ordering::Relaxed);
+    // A node-thread can retire between being chosen and being sent to, so the send is attempted against the
+    // slot's current sender and falls back to node-thread 0. `try_send` hands the request back on failure,
+    // which is what makes the retry possible rather than a lost request.
+    let mut attempt = 0;
+    let mut target = target;
+    let admitted_run_id = request.run_id;
+    let mut pending = Some((stream, request));
+    loop {
+        let sender = POOL
+            .get()
+            .and_then(|pool| pool.slots.lock().ok().and_then(|slots| slots.get(target).cloned().flatten()));
+        let (mut stream, request) = match pending.take() {
+            Some(pair) => pair,
+            None => break,
+        };
+        let sender = match sender {
+            Some(sender) => sender,
+            None => {
+                if is_run {
+                    // The conversation's owner retired between admission and delivery. Release
+                    // the place rather than hand the run to a node-thread that does not own it.
+                    scheduler::complete_run(admitted_run_id);
                     QUEUED.fetch_sub(1, Ordering::Relaxed);
-                    let body = b"{\"error\":\"node_busy\",\"hint\":\"the node is answering other requests; retry shortly\"}";
+                    let body = b"{\"error\":\"node_busy\",\"hint\":\"the node-thread retired before the run could start; retry shortly\"}";
                     let _ = respond(&mut stream, 503, "application/json", body);
                     break;
                 }
-            };
-            match sender.try_send(Work::Http(stream, request)) {
-                Ok(()) => break,
-                Err(std::sync::mpsc::TrySendError::Full(work)) => {
-                    let (mut stream, _request) = unwrap_http(work);
-                    if is_run {
-                        scheduler::complete_run(admitted_run_id);
-                    }
-                    QUEUED.fetch_sub(1, Ordering::Relaxed);
-                    // A bounded queue: refusing loudly beats an unbounded backlog that every client waits in.
-                    let body = b"{\"error\":\"node_busy\",\"hint\":\"the node is answering other requests; retry shortly\"}";
-                    let _ = respond(&mut stream, 503, "application/json", body);
-                    break;
+                // A read/write node-thread is gone (retired). Node-thread 0 always exists, so it is the honest fallback.
+                if target != 0 && attempt < 2 {
+                    attempt += 1;
+                    target = 0;
+                    pending = Some((stream, request));
+                    continue;
                 }
-                Err(std::sync::mpsc::TrySendError::Disconnected(work)) => {
-                    let pair = unwrap_http(work);
-                    if is_run {
-                        scheduler::complete_run(admitted_run_id);
-                        QUEUED.fetch_sub(1, Ordering::Relaxed);
-                        let (mut stream, _request) = pair;
-                        let body = b"{\"error\":\"node_busy\",\"hint\":\"the node-thread retired before the run could start; retry shortly\"}";
-                        let _ = respond(&mut stream, 503, "application/json", body);
-                        break;
-                    }
-                    // Retired while this request was on its way. Try node-thread 0 once, then refuse.
-                    if target != 0 && attempt < 2 {
-                        attempt += 1;
-                        target = 0;
-                        pending = Some(pair);
-                        continue;
-                    }
+                QUEUED.fetch_sub(1, Ordering::Relaxed);
+                let body = b"{\"error\":\"node_busy\",\"hint\":\"the node is answering other requests; retry shortly\"}";
+                let _ = respond(&mut stream, 503, "application/json", body);
+                break;
+            }
+        };
+        match sender.try_send(Work::Http(stream, request)) {
+            Ok(()) => break,
+            Err(std::sync::mpsc::TrySendError::Full(work)) => {
+                let (mut stream, _request) = unwrap_http(work);
+                if is_run {
+                    scheduler::complete_run(admitted_run_id);
+                }
+                QUEUED.fetch_sub(1, Ordering::Relaxed);
+                // A bounded queue: refusing loudly beats an unbounded backlog that every client waits in.
+                let body = b"{\"error\":\"node_busy\",\"hint\":\"the node is answering other requests; retry shortly\"}";
+                let _ = respond(&mut stream, 503, "application/json", body);
+                break;
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(work)) => {
+                let pair = unwrap_http(work);
+                if is_run {
+                    scheduler::complete_run(admitted_run_id);
                     QUEUED.fetch_sub(1, Ordering::Relaxed);
                     let (mut stream, _request) = pair;
-                    let body = b"{\"error\":\"node_busy\",\"hint\":\"the node is answering other requests; retry shortly\"}";
+                    let body = b"{\"error\":\"node_busy\",\"hint\":\"the node-thread retired before the run could start; retry shortly\"}";
                     let _ = respond(&mut stream, 503, "application/json", body);
                     break;
                 }
+                // Retired while this request was on its way. Try node-thread 0 once, then refuse.
+                if target != 0 && attempt < 2 {
+                    attempt += 1;
+                    target = 0;
+                    pending = Some(pair);
+                    continue;
+                }
+                QUEUED.fetch_sub(1, Ordering::Relaxed);
+                let (mut stream, _request) = pair;
+                let body = b"{\"error\":\"node_busy\",\"hint\":\"the node is answering other requests; retry shortly\"}";
+                let _ = respond(&mut stream, 503, "application/json", body);
+                break;
             }
         }
     }
