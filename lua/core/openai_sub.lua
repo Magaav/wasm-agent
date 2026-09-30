@@ -21,6 +21,29 @@ function M.models_store_path()
   return host.getenv('WASM_AGENT_PI_MODELS_STORE')
     or (paths.home() .. '/.pi/agent/models-store.json')
 end
+-- The thinking levels a single id is published with. pi's store carries a per-model
+-- `thinkingLevelMap` - level -> the value Pi puts in the Responses body's `reasoning.effort` -
+-- and it is the only thing that can say what *this* id honours; a route-wide table can only say
+-- what the route accepts. Read the entries this route is and nothing else: provider
+-- `openai-codex` over `openai-codex-responses`, the same pair the bridge resolves the id
+-- against. Read-only, and nil - not `{}` - when the store is absent, silent about the id, or
+-- publishes no map for it: "the catalogue cannot answer" has to stay distinguishable from "this
+-- id has no levels", or a node without a store would report a model with no reasoning instead
+-- of a route that cannot describe it.
+function M.thinking_level_map(model)
+  local text = host.read_file(M.models_store_path())
+  if not text then return nil end
+  local ok, store = pcall(json.decode, text)
+  if not ok or type(store) ~= 'table' then return nil end
+  local profile = store['openai-codex']
+  for _, entry in pairs(type(profile) == 'table' and profile.models or {}) do
+    if type(entry) == 'table' and entry.id == model and entry.api == 'openai-codex-responses'
+      and type(entry.thinkingLevelMap) == 'table' then
+      return entry.thinkingLevelMap
+    end
+  end
+  return nil
+end
 function M.configured()
   local raw = host.read_file(M.auth_path())
   local ok, auth = pcall(json.decode, raw or '')

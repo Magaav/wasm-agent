@@ -508,8 +508,26 @@ end
 function M.capabilities(model)
   local provider_id = M.active().id
   if provider_id == "openai-sub" then
+    -- The route's shipped declaration, and what the catalogue publishes for this id on top of
+    -- it. Both, not the catalogue alone: Pi marks a level an id does not honour with `null` in
+    -- the map, and this decoder drops a null (lua/vendor/json.lua: literal_map null=nil), so a
+    -- `null` mapping is indistinguishable here from a level the map simply does not list - which
+    -- Pi honours by passing it through. Deciding from the map alone would refuse levels this
+    -- route accepts today (gpt-5.6-luna publishes only {minimal,xhigh,max} and honours the
+    -- rest). The union cannot refuse a level either source names, and it can never come out
+    -- empty - an empty set is what refuses *every* level a child can be given, and a child
+    -- always carries one. The store is read, never written, and the same file the bridge
+    -- resolves ids against and the preflight decides servability from.
     local levels={low="low",medium="medium",high="high",xhigh="xhigh",max="max"}
     if model~="gpt-6-astra" then levels.off="none" end
+    local published = subscription.thinking_level_map(model)
+    if published then
+      for level, value in pairs(published) do
+        if type(value)=="string" then levels[level]=value end
+      end
+      return {reasoning=true, levels=levels, compat={}, max_output=128000,
+        source="pi-openai-codex-store"}
+    end
     return {reasoning=true, levels=levels, compat={}, max_output=128000,
       source="pi-openai-codex"}
   end
