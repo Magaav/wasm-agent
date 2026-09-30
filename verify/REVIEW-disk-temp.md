@@ -19,9 +19,11 @@ Harnesses (mine, all in `verify/`): `liveness-node.mjs`, `gate-home-liveness.sh`
 
 ## Verdicts
 
-**D1 `c78ab731` — NEEDS-CHANGE.** Every *number* it claims reproduced on real processes: a passing run
-deletes its own artifact, a failing run keeps its own, the family is bounded at the newest N, a live lease is
-never pruned (node sweeper *and* the shell gate-home sweep), and the falsifier (`=all`) removes the bound. But
+**D1 `c78ab731` — NEEDS-CHANGE.** Every *number* it claims reproduced on real processes: a failing run keeps
+its own artifact, the family is bounded at the newest N, a live lease is never pruned (node sweeper *and* the
+shell gate-home sweep), and the falsifier (`=all`) removes the bound; a passing run removes its own clone in
+the lane half, and its own home in the sliced gate-home half (on a real gate that removal was **best-effort
+and silent** — see attempt 2 below). But
 the sentence that carries the safety argument — "A pre-lease name is pruned only once it is an hour old, so a
 rollout cannot delete the clone of a run the previous script started" — is **false on this machine, and I
 reproduced the failure three times**: a live pre-change lane run's clone WAS deleted by the sweep. The hour
