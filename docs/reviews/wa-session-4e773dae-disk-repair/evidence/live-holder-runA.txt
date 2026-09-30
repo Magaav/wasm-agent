@@ -1,0 +1,35 @@
+== runA-full ==
+CHDIR-HOLDER pid=82564 cwd=C:\Users\Victor\AppData\Local\Temp\rev4e\runA\temp\wa-subagent-test-Cwd01
+HOLDER pid=74732 holds C:/Users/Victor/AppData/Local/Temp/rev4e/runA/temp/wa-subagent-test-Live01/held.open (path in argv)
+node:fs:622
+   all fixtures have mtime 7 h old (files written BEFORE the aging touch)
+== --apply with the full environment (the pid scan is available) ==
+1. bounded temp families (1 families named by this repository's scripts and present in C:/Users/Victor/AppData/Local/Temp/rev4e/runA/temp, of 123 names read)
+   expired: 2 entries, 46 B — removed (families, oldest first):
+     wa-subagent-test*  n=2  46 B  oldest=7h  minted by scripts/check-temp-retention.mjs  removed=2
+   live-process scan (the pid evidence): powershell Get-CimInstance Win32_Process, 267 processes
+   LEFT, in use or liveness unproven (evidence, not age): 2 entries
+     LEFT   wa-subagent-test-Cwd01  — in use: a live process names this family - pid 82564 ("C:\Program Files\nodejs\node.exe" -e "process.chdir(process.argv[1]);console.error(\"CHDIR-HOLDER pid=\"+process.pid+\" cwd=\"+process.cwd());setInterval(()=>{)  16 B
+     LEFT   wa-subagent-test-Live01  — in use: a live process names this family - pid 74732 ("C:\Program Files\nodejs\node.exe" -e "const fs=require(\"fs\");const fd=fs.openSync(process.argv[1],\"a\");fs.writeSync(fd,\"held\n\");console.error(\"HOLDER p)  35 B
+   kept: 4 entries (fresh, in use, or never expired by rule) — named below
+     KEEP   wa-sentinel-Aged01  — never expired by rule: the sentinel watches this path while it runs
+     KEEP   wa-subagent-test-Fresh1  — fresh: younger than --min-age-hours 6
+   not matched to a known family (left alone): 0 entries
+
+2. rust/target in ended sessions' worktrees
+exit=1
+== filesystem truth ==
+  wa-subagent-test-Live01      LEFT     held.open:present
+  wa-subagent-test-Probe01     REMOVED  held.open:absent
+  wa-subagent-test-Cwd01       LEFT     held.open:absent
+  wa-subagent-test-Stale01     REMOVED  held.open:absent
+  wa-sentinel-Aged01           LEFT     held.open:absent
+  wa-subagent-test-Fresh1      LEFT     held.open:absent
+== holder identities ==
+CHDIR-HOLDER pid=82564 cwd=C:\Users\Victor\AppData\Local\Temp\rev4e\runA\temp\wa-subagent-test-Cwd01
+HOLDER pid=74732 holds C:/Users/Victor/AppData/Local/Temp/rev4e/runA/temp/wa-subagent-test-Live01/held.open (path in argv)
+node:fs:622
+== killing only my pids ==
+  pid 141662   gone
+  pid 141667   gone
+  pid 141671   gone

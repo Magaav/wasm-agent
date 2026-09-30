@@ -1,0 +1,10 @@
+== the three suites on the tree under review (90766a96, tree 361e5414) ==
+--- scripts/test-disk-floor.cjs
+disk floor ok (43 checks, 0 skipped; refusal names 63197044736 B free against a 3987386368 B floor; a Filesystem field with a space parses to the same numbers)
+exit=0
+--- scripts/test-reclaim-disk.cjs
+reclaim pass ok (47 checks, 0 skipped; pruned an ended session's target, kept the live, unrecorded, canonical and lane targets; left a temp family a live pid held, then reclaimed it once released; free space measured against statfs)
+exit=0
+--- scripts/test-temp-retention-check.cjs
+temp-retention check ok (7 checks, 0 skipped; the marker hole is asserted, not hidden)
+exit=0
