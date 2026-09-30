@@ -1,0 +1,17 @@
+scratch root: C:\Users\Victor\.wasm-agent\wa-repair-c78ab73\probe2-VtjkZm
+
+7. bash spawned with cwd = the directory (the lane's own shape)
+  child pid 8356
+  rename probe: NOT renamable: EBUSY
+  MSYS /proc says:
+    /proc/8356/cwd ->
+  rm -rf refused: EPERM
+
+8. bash that cd-ed inside the directory from elsewhere (the review's shape)
+  child pid 67784
+  rename probe: renamable (looks idle to a rename probe)
+  MSYS /proc says:
+    /proc/67784/cwd ->
+
+left: wa-merge-lane-Gate00, wa-merge-lane-Gate01
+scratch root removed: true

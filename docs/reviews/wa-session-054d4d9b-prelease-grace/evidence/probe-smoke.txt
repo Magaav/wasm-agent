@@ -1,0 +1,13 @@
+
+=== case probe | fix | C:\Users\Victor\.wasm-agent\wa-review-054d4d9b\fix
+  tree under test: C:\Users\Victor\.wasm-agent\wa-review-054d4d9b\fix
+  fenced temp:     C:\Users\Victor\.wasm-agent\wa-review-054d4d9b\cases\case-probe-DFT3ND\temp
+  one stale pre-lease clone (5 h). The probe's own rename target <dir>.in-use-<pid> is created
+  NON-EMPTY inside the sweeping child, so the rename cannot be answered at all:
+  first sweep (rename unanswerable):  {"pid":81284,"mode":"leftover","grace_seconds":10860,"removed":[],"in_use":[["C:\\Users\\Victor\\.wasm-agent\\wa-review-054d4d9b\\cases\\case-probe-DFT3ND\\temp\\wa-merge-lane-Probe1","rename refused (EPERM)"]],"errors":[],"not_this_family":1,"after":["wa-merge-lane-Probe1","wa-merge-lane-Probe1.in-use-81284"]}
+  AFTER: ["wa-merge-lane-Probe1","wa-merge-lane-Probe1.in-use-81284"]
+  second sweep (rename answerable):   {"pid":35896,"mode":"plain","grace_seconds":10860,"removed":[["C:\\Users\\Victor\\.wasm-agent\\wa-review-054d4d9b\\cases\\case-probe-DFT3ND\\temp\\wa-merge-lane-Probe1","rename allowed"]],"in_use":[],"errors":[],"not_this_family":1,"after":["wa-merge-lane-Probe1.in-use-81284"]}
+  AFTER: ["wa-merge-lane-Probe1.in-use-81284"]
+  cleanup: scratch root removed = true
+RESULT {"label":"fix","tree":"C:\\Users\\Victor\\.wasm-agent\\wa-review-054d4d9b\\fix","first":{"pid":81284,"mode":"leftover","grace_seconds":10860,"removed":[],"in_use":[["C:\\Users\\Victor\\.wasm-agent\\wa-review-054d4d9b\\cases\\case-probe-DFT3ND\\temp\\wa-merge-lane-Probe1","rename refused (EPERM)"]],"errors":[],"not_this_family":1,"after":["wa-merge-lane-Probe1","wa-merge-lane-Probe1.in-use-81284"]},"second":{"pid":35896,"mode":"plain","grace_seconds":10860,"removed":[["C:\\Users\\Victor\\.wasm-agent\\wa-review-054d4d9b\\cases\\case-probe-DFT3ND\\temp\\wa-merge-lane-Probe1","rename allowed"]],"in_use":[],"errors":[],"not_this_family":1,"after":["wa-merge-lane-Probe1.in-use-81284"]}}
+  harness cleanup: every child this harness started

@@ -1,0 +1,8 @@
+       10860  s  <- no knobs (defaults)
+       10860  s  <- node default wait, default gate timeout
+     1003660  s  <- a caller exporting WA_GATE_LANE_WAIT_SECONDS=1000000
+        7260  s  <- --timeout-seconds 0 (spawnSync timeout 0 = NO gate timeout)
+          60  s  <- wait 0 and gate timeout 0
+       10860  s  <- a non-numeric wait budget (typo in the env)
+       10860  s  <- a negative wait budget
+       10860  s  <- empty-string wait budget
