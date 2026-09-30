@@ -151,6 +151,12 @@ emits one event per genuinely new item, and a job turns that event into one wake
   `delivery.admitted` with the stable id `<delivery>@<tree>`. The record's `emitted_events` is the cursor
   and the sentinel's `UNIQUE(job_id, revision, event_id)` is the second, durable dedupe, so a re-run emits
   nothing new and a missed pass is recovered by the next one.
+- The pass computes one generation, but it reconciles every intent the record holds. A review, tip or
+  subscription change during an emission leaves an older intent pending while its exact effect is
+  already durable - and the changed generation is why nothing else would look at it. The pass observes
+  that intent's exact effect (the emitter is never invoked for it again) or reports it as an unsettled
+  pending event (`prior_generation_pending`, exit 4), so it never reports `pending_events: 0` over a
+  durable pending intent. `--no-emit` emits nothing and claims nothing about the queue.
 - The wake is the only part that costs a model turn and the only part that is budgeted (the sentinel's
   `WA_SENTINEL_WAKE_BUDGET`, 6/hour by default). Nothing above it spends a token: reading, diffing,
   comparing two trees and admitting are decidable, and decidable work must not cost a turn. The judgement

@@ -22,6 +22,11 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
+import {DatabaseSync} from 'node:sqlite';
+
+const snapshot = Symbol('delivery read snapshot');
+const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 
 /// The sentinel's store root, resolved the way `rust/wa-sentinel` resolves it: `WASM_AGENT_HOME`,
 /// else `%USERPROFILE%` on Windows, else `$HOME`, each under `.wasm-agent/sentinel`.
@@ -53,10 +58,12 @@ export function recordPath(dir, delivery) {
 export function readRecord(dir, delivery) {
   const file = recordPath(dir, delivery);
   if (!fs.existsSync(file)) return null;
-  const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const bytes = fs.readFileSync(file, 'utf8');
+  const record = JSON.parse(bytes);
   if (record.delivery !== delivery) {
     throw Error(`delivery_store_collision: ${file} holds ${record.delivery}, not ${delivery}`);
   }
+  Object.defineProperty(record,snapshot,{value:hash(bytes),configurable:true});
   return record;
 }
 
@@ -67,7 +74,11 @@ export function listRecords(dir) {
     .sort()
     .map(name => {
       const file = path.join(dir, name);
-      try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+      try {
+        const record=JSON.parse(fs.readFileSync(file,'utf8'));
+        if (recordPath(dir,record.delivery)!==file) throw Error('delivery_store_collision');
+        return readRecord(dir,record.delivery);
+      }
       catch (error) { return {delivery: name, unreadable: String(error.message), path: file}; }
     });
 }
@@ -77,11 +88,38 @@ export function listRecords(dir) {
 export function writeRecord(dir, record) {
   fs.mkdirSync(dir, {recursive: true});
   const target = recordPath(dir, record.delivery);
-  const temp = `${target}.${process.pid}.tmp`;
-  record.updated_at = new Date().toISOString();
-  fs.writeFileSync(temp, `${JSON.stringify(record, null, 2)}\n`);
-  fs.renameSync(temp, target);
-  return record;
+  const temp = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  // This file only serializes this JSON store. It never opens jobs.db or owns
+  // the sentinel's schema. SQLite releases the lock when a writer crashes.
+  const lock = new DatabaseSync(path.join(dir,'.record-writer.sqlite'));
+  try {
+    lock.exec('PRAGMA busy_timeout=5000; BEGIN IMMEDIATE');
+    const current=readRecord(dir,record.delivery);
+    const expected=record.revision ?? 0;
+    if ((current?.revision ?? 0)!==expected || (current && !record.revision && !record[snapshot])
+        || (record[snapshot] && record[snapshot]!==current?.[snapshot])) {
+      throw Error(`delivery_record_conflict: ${record.delivery} expected revision ${expected}; reload and reconcile the intended change`);
+    }
+    if (current?.landing?.sha && current.landing.sha!==record.landing?.sha) {
+      throw Error(`delivery_landing_immutable: ${record.delivery} was published as ${current.landing.sha}`);
+    }
+    const next={...record,revision:expected+1,updated_at:new Date().toISOString()};
+    const bytes=`${JSON.stringify(next,null,2)}\n`;
+    const fd=fs.openSync(temp,'wx');
+    try { fs.writeFileSync(fd,bytes);fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    fs.renameSync(temp,target);
+    if (process.platform!=='win32') {
+      const fd=fs.openSync(dir,'r');try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
+    }
+    lock.exec('COMMIT');
+    Object.assign(record,next);
+    Object.defineProperty(record,snapshot,{value:hash(bytes),configurable:true});
+    return record;
+  } finally {
+    try { lock.exec('ROLLBACK'); } catch {}
+    lock.close();
+    if (fs.existsSync(temp)) fs.unlinkSync(temp);
+  }
 }
 
 /// Read-modify-write in one call, so a verb cannot forget the read or the write.
