@@ -121,7 +121,30 @@ overhead worth 3x, which is the claim a single reading would have supported.
 | --- | --- |
 | `scripts/test-subscription-wire.lua` (in `test.sh:1578`) | `subscription wire ok (132 checks)` |
 | `scripts/test-openai-sub-levels.lua` (nil-vs-empty, level admission) | `openai-sub levels ok (22 checks)` |
+| `scripts/test-openai-sub.cjs` (in `test.sh:1564`) | `native subscription operations ok (15 checks)` + `PASS` |
 | `cargo test -p wa-host sse_line_tests` | `4 passed; 0 failed` |
+
+### 7. The catalogue's update path exists and reproduces it - PROVEN
+
+Item 6 asks for "an update path documented". It was documented and **did not exist**: the catalogue
+pointed at `scripts/import-openai-sub-catalogue.lua`, and there was no such file, so the one-way door
+had no door. The script is now written, and running it against the real
+`~/.pi/agent/models-store.json` proves two things at once:
+
+```
+import: 9 openai-codex-responses entry/entries from ~/.pi/agent/models-store.json
+catalogue unchanged: lua/core/openai_sub_catalogue.lua already matches the store, so nothing was written
+```
+
+* the checked-in catalogue **is** a faithful import - `git diff` is empty, so the ids, windows, image
+  support and thinking levels in the file are the store's, not hand-written drift; nothing under
+  `lua/` reads `~/.pi` at request time, and this is the only reader there is;
+* and it is not a no-op that would print that either way: with one id tampered in the block, the
+  same command reports `added gpt-6-luna; dropped gpt-6-luna-TAMPERED` and writes, so "unchanged" is
+  a comparison and not a constant.
+
+It belongs beside the live check rather than in the gate: it needs Pi's store, which the gate's
+isolated home does not have. It writes nothing when there is nothing to write.
 
 ## What running it found that reading it had not
 
@@ -153,20 +176,44 @@ Still reading `~/.pi` on this route, and deliberately not changed here: `M.auth_
 route, `model_window.lua:167` and `provider.lua:162` also fall back to Pi's model store - other
 providers' business, not this lane's to move.
 
+**(c) The catalogue's documented update path did not exist.** `lua/core/openai_sub_catalogue.lua`
+told a maintainer to run `WA_SCRIPT=scripts/import-openai-sub-catalogue.lua`, and there was no such
+file: `M.import_from_pi()` and `M.render()` were both written, each with a comment saying "the refresh
+script" decides what to do with the result, and the script that was supposed to was never landed. A
+documented one-way door with no door. Written now, and verified both ways (item 7): it reproduces the
+committed catalogue with an empty diff, and it does not report "unchanged" for a block that differs.
+
+Note on the ordering of this commit and the gate evidence: the gate result below covers
+`20a3d77`. This fix is the commit after it, so the gate does **not** cover the final revision, and
+the status file says so rather than letting a verified tree and a verified branch read as the same
+thing.
+
 ## What is NOT verified
 
-* **The gate was never run.** The gate lane is a serial resource with capacity 1; at every check
-  during this session the sibling lane held it (slot #141
-  `finish change/wa-session-childdispatch95d6189a-...`, held 1001s) with two queued behind it, one of
-  which is a finish gate for the predecessor's branch (#145, waiting 815s). Two gates must not run at
-  once, so this lane did not acquire a slot. Treat the gate as outstanding; what *was* run is above.
+* **The gate has not passed.** This is measured, not assumed. `finish.mjs gate` was invoked on the
+  committed tree with a bounded wait;
+  the gate lane **refused after 900s** with no slot ever granted:
+
+  ```
+  gate lane: acquire #150 refused after 900s (terminal, not a retry). capacity 1 of 1 in use;
+  running #149 (finish change/wa-session-childdispatch8ad3ecc6-...), held 24s; queue depth 1
+  (next to run); waited 900s; also waiting: #153
+  ```
+
+  For the whole window the single slot was held by other lanes (#141/#145, then #149 - the sibling
+  credential lane's own finish gate), with a queue behind. `gate_verified: false`,
+  `gate_error: "the gate did not run: the gate lane granted no slot"`. Running `scripts/test.sh`
+  anyway is the one thing the lane exists to prevent (its own comment records the measurement: the
+  same candidate passed alone and failed twice while four gates competed), so it was not done. The
+  three subscription suites plus the Rust line-reader tests *inside* that gate were run by hand and
+  are in item 6; the rest of the gate is outstanding.
+* **The gate covers `20a3d77`, not the final commit** - see the note at the end of "What running it
+  found".
 * **Cancellation against a real long-running stream** is not exercised live, and neither is a real
   truncated stream - the latter would need an endpoint that cuts the response, i.e. a local server.
   Both are covered offline against the recorded bytes. Only the *deadline* half of item 4 is proven
   live.
 * **`M.limits()`** (the `wham/usage` windows) was not called live in this session.
-* **The full `scripts/test.sh` gate** was not run; the three subscription-relevant suites inside it
-  were, by hand (item 6).
 * **`--db` scratch databases and a scratch `WASM_AGENT_HOME`** were used for every Lua run here, so
   no run touched the operator's ledger.
 
