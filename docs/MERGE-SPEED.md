@@ -259,3 +259,40 @@ mechanism is its refusals and its recorded fields (section 3, option 2).
   not-a-checkout and toolchain-cleared paths) was **not re-run in this window**: its fixtures ask the
   node-wide gate lane for slots, and the lane was 4 deep. It is designed to be run when the node is idle.
 * No option was implemented. `WA_GATE_LANE_CAPACITY` and `docs/CONCURRENCY.md` were not touched.
+
+## 6. What landed, and the one number that had to be corrected
+
+This section is written by the landing lane, and the sections above are its source and are left as they
+were written. The mechanism landed (`scripts/merge-lane.mjs`, `scripts/test-merge-lane.mjs`, 7314b89);
+the per-suite wrapper did not, because section 3b is right and was re-measured here rather than read:
+
+```
+cd <tree>
+bash scripts/test-deploy-service-target.sh                   -> exit 0, "deploy service-target ok (34 checks)"     58 s
+PATH=<scratch>/gate-shims:$PATH GATE_SUITES_JSONL=/tmp/s.jsonl \
+  bash scripts/test-deploy-service-target.sh                 -> exit 1, "deploy service-target FAILED (6 of 34)"  59 s
+```
+
+Same suite, same tree, same minute, with and without the wrapper extracted from 6c823bf - so the
+wrapper is dropped, not fixed, and `scripts/test.sh` differs from `origin/main` only by the phase
+markers of 96daaee. Those markers stand on their own evidence: a COMPLETE cold gate and a COMPLETE warm
+gate both ended on the same verdict line and the same skip count as the rest of tonight's green gates
+(`smoke ok (2 skipped)`).
+
+**The 7.4x does not survive as a full-gate number.** Both runs behind it (1030126 ms and 138988 ms)
+stopped inside `self-update` on the wrapper defect, so 138.99 s is the first ~2.5 minutes of a gate that
+then died - it never ran `cli`, `memory-update`, `tools`, `sessions`, `recovery-cli`, `plugins`,
+`fixtures`, `subagents`, `ui-js` or `ui-browser`. On one tree, one candidate tree
+(`028380ac6d7d2c12d8f925d3629c55e3c5f4609e`), minutes apart, complete gates: **cold 1625532 ms, warm
+825069 ms** - a saving of 800463 ms (13.3 min) per landing, about **2x**, essentially all of it in the
+build phase (797521 ms against 22635 ms). Two more runs on the same tree: a deliberate failing assertion
+in the merged tree made the warm gate go RED (`test result: FAILED. 36 passed; 1 failed`, gate exit 101,
+lane exit 3), and reverting it returned the gate to green (853... ms, `smoke ok (2 skipped)`).
+
+The mechanism is still the delivery: the gate lane is capacity 1, so the landing's cost in the queue
+falls from ~27 minutes to ~14, and no fresh worktree is created to pay a cold build - the warm run's
+`clone` is `reused: true, clone_ms: 545.704`, with `rust/target` 852M before and after.
+
+Per-file, machine-readable, with every command and the limitations (including one load-sensitive
+`test-job-subagents.cjs` failure on the restored tree that did not reproduce): see
+`docs/measurements/merge-lane-tree-landing.json`.

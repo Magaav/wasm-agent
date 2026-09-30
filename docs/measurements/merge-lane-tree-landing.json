@@ -1,26 +1,26 @@
 {
   "schema": 1,
-  "what": "landing the merge lane's persistent gate tree (7314b89) without the per-suite measurement wrapper (6c823bf)",
-  "status": "IN PROGRESS",
+  "what": "the persistent gate tree of the merge lane (7314b89), landed WITHOUT the per-suite measurement wrapper (6c823bf)",
+  "status": "COMPLETE, with the limitations named under 'not_verified'",
   "branch": "change/wa-session-childdispatchcd206d1c-287c-46fa-919d-703ff645dc5e",
   "source_delivery": {
     "branch": "change/wa-session-childdispatch3392ff10-bf3f-4b68-bb4a-3411ee5dec8a",
     "tip": "ac79d716d5d697bb9c9d2616ac2f8020e4e7a78b",
     "fork_point": "ab827c88a6ac091318b5adb8be34e83e858c4e9a",
     "merged_base": "da8dc8918a34c880768956ff775d883802dcb7a7",
-    "merge": "real merge (not a rebase): the lane forked from ab827c88 and main moved to da8dc891"
+    "integration": "a real merge of origin/main into the lane's history (the lane forked 22 commits back), commit 30c9f7f"
   },
   "per_file_classification": {
     "kept_mechanism": [
-      "scripts/merge-lane.mjs (from 7314b89: the persistent reuse tree, its refuse-and-fall-back-to-a-clone paths, the reuse lock, the toolchain fingerprint)",
-      "scripts/test-merge-lane.mjs (from 7314b89: the refusal paths pinned)"
+      "scripts/merge-lane.mjs (7314b89) - the persistent reuse tree, the refuse-by-name fallbacks, the reuse lock, the toolchain fingerprint",
+      "scripts/test-merge-lane.mjs (7314b89) - 83 checks, green on this tree, section 9b pins reuse and the refusals"
     ],
     "kept_instrumentation": [
-      "scripts/lib/gate-phases.sh (from 96daaee: phase markers only; no check added, removed, reordered or skipped)",
-      "scripts/test.sh (from 96daaee: gate_phase_begin markers + one summary line before the verdict line)"
+      "scripts/lib/gate-phases.sh (96daaee) - phase markers only",
+      "scripts/test.sh (96daaee) - gate_phase_begin markers plus one summary line printed before the verdict line; scripts/test.sh's only difference from origin/main is these markers"
     ],
     "dropped_wrapper": [
-      "scripts/lib/gate-shims/_suite-shim.sh (from 6c823bf)",
+      "scripts/lib/gate-shims/_suite-shim.sh",
       "scripts/lib/gate-shims/bash",
       "scripts/lib/gate-shims/node",
       "scripts/lib/gate-shims/powershell",
@@ -28,16 +28,104 @@
       "scripts/lib/gate-suite.mjs",
       "scripts/lib/gate-suites.mjs",
       "scripts/lib/gate-suites.sh",
-      "scripts/test.sh (from 6c823bf: the PATH shim install, the $BIN -> shim rewrite, gate_suites_summary)"
+      "scripts/test.sh (6c823bf hunks): the PATH shim install, the $BIN -> shim rewrite, gate_suites_summary"
     ]
   },
-  "why_dropped": "docs/MERGE-SPEED.md section 3b: the per-suite wrapper is not transparent for scripts/test-deploy-service-target.sh - 34 checks pass without it and 6 of 34 fail with it, same tree, same minute. Re-measured in this lane, below.",
-  "still_unproven_at_this_commit": [
-    "cold gate.ms of a real merge-lane run in the reused tree",
-    "warm gate.ms of the same candidate",
-    "the false-green falsification (a broken merged tree must make the warm gate fail)",
-    "the dropped wrapper's blast radius, re-measured here"
+  "runs": {
+    "how": "node scripts/merge-lane.mjs --repo C:/Users/Victor/orca/projects/wasm-agent --reuse-tree C:/Users/Victor/.wasm-agent/merge-lane-tree-landing --json <out> <sha>  - the gate command is the lane's DEFAULT (bash scripts/test.sh); no --gate-command was ever passed",
+    "knob": "--reuse-tree names the persistent tree. The default path is WA_MERGE_LANE_TREE, else ~/.wasm-agent/merge-lane-tree; a named tree was used so the node's default tree, already warm from earlier lanes, was not disturbed.",
+    "cold": {
+      "json": "C:/Users/Victor/.wasm-agent/merge-lane-landing-cold.json",
+      "gate_log": "C:/Users/Victor/.wasm-agent/merge-lane-landing-cold.json.gate.log",
+      "candidate_sha": "9b4adfa1543001594454a5368b4c8c238ec3779e",
+      "candidate_tree": "028380ac6d7d2c12d8f925d3629c55e3c5f4609e",
+      "tree_state": "created by this run (clone.reuse_created true); rust/target did not exist",
+      "clone_ms": 898.964,
+      "gate_ms": 1625532.454,
+      "gate_exit": 0,
+      "gate_command": "bash scripts/test.sh",
+      "verdict_line": "smoke ok (2 skipped)",
+      "skipped": 2,
+      "total_ms": 1645939.335,
+      "phases_ms": {"build": 797521, "instances": 70446, "self-update": 65004, "cli": 4440, "memory-update": 25695, "tools": 65349, "sessions": 180105, "recovery-cli": 2448, "plugins": 155064, "fixtures": 5211, "subagents": 230700, "ui-js": 15722, "ui-browser": 7614}
+    },
+    "warm": {
+      "json": "C:/Users/Victor/.wasm-agent/merge-lane-landing-warm.json",
+      "gate_log": "C:/Users/Victor/.wasm-agent/merge-lane-landing-warm.json.gate.log",
+      "candidate_sha": "9b4adfa1543001594454a5368b4c8c238ec3779e",
+      "candidate_tree": "028380ac6d7d2c12d8f925d3629c55e3c5f4609e",
+      "tree_state": "reused (clone.reused true, reuse_dirt_discarded [], toolchain_cleared [])",
+      "clone_ms": 545.704,
+      "gate_ms": 825069.004,
+      "gate_exit": 0,
+      "gate_command": "bash scripts/test.sh",
+      "verdict_line": "smoke ok (2 skipped)",
+      "skipped": 2,
+      "total_ms": 844497.245,
+      "phases_ms": {"build": 22635, "instances": 54300, "self-update": 70657, "cli": 4430, "memory-update": 25453, "tools": 66417, "sessions": 181001, "recovery-cli": 2528, "plugins": 145291, "fixtures": 5208, "subagents": 223630, "ui-js": 15841, "ui-browser": 7465}
+    },
+    "same_candidate": "cold and warm gated the SAME candidate tree 028380ac6d7d2c12d8f925d3629c55e3c5f4609e - the merge lane's own tree sha for base da8dc891 + tip 9b4adfa, 13 minutes apart, on one persistent tree",
+    "saving_ms": 800463,
+    "saving_note": "the saving is the build phase: 797521 ms cold against 22635 ms warm, i.e. 774886 ms of the 800463. Everything after build costs the same in both directions."
+  },
+  "does_the_7x_hold": {
+    "claim": "docs/MERGE-SPEED.md: cold 1030126 ms against warm 138988 ms (7.4x)",
+    "found": "NO, not as a full-gate comparison. Both of those runs stopped inside self-update on the wrapper defect (section 3b), so 'warm 138.99 s' is the first ~2.5 minutes of a gate that then died - it never ran cli, memory-update, tools, sessions, recovery-cli, plugins, fixtures, subagents, ui-js or ui-browser. On this tree tonight a COMPLETE cold gate is 1625532 ms and a COMPLETE warm gate 825069 ms: a saving of 800463 ms (13.3 min) per landing, about 2x, not 7x. The mechanism is worth landing on that number: the gate lane is capacity 1, so the landing's cost in the queue falls from ~27 min to ~14 min.",
+    "also": "the cold gate's own duration is machine-dependent (797.5 s build here against 839.6 s in the delivery's run); the pair above is the trustworthy comparison because the two runs are minutes apart on one tree and one candidate."
+  },
+  "false_green_falsification": {
+    "why": "a persistent tree that fails to invalidate produces a gate that passes a tree it never rebuilt",
+    "break": "commit 56920b8 added a failing assertion to rust/wa-operation/src/tests.rs - a Rust test the gate runs at scripts/test.sh line 57 (cargo test -p wa-operation -p wa-jobs) - in the MERGED tree the lane gates",
+    "broken_run": {
+      "json": "C:/Users/Victor/.wasm-agent/merge-lane-landing-broken.json",
+      "candidate_tree": "4f67582f3b466b77ff38a6f83eab31b218d90017",
+      "tree_state": "reused (the warm tree, same rust/target)",
+      "gate_ms": 24756.612,
+      "gate_exit": 101,
+      "merge_lane_exit": 3,
+      "evidence_line": "test tests::deliberate_falsification_probe_the_warm_gate_must_fail_on_this ... FAILED",
+      "evidence_line2": "test result: FAILED. 36 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.69s",
+      "verdict": "the warm gate went RED. It rebuilt the test target from the merged tree's own source and ran the new assertion; it did not reuse the previous run's passing test binary."
+    },
+    "restore": "commit 41ae5c9 reverts the break; its candidate tree is 028380ac6d7d2c12d8f925d3629c55e3c5f4609e - byte-identical to the tree the cold and warm runs passed",
+    "restored_run_1": {
+      "json": "C:/Users/Victor/.wasm-agent/merge-lane-landing-restored.json",
+      "gate_ms": 704723.385,
+      "gate_exit": 1,
+      "outcome": "FAILED, for a DIFFERENT reason: 'AssertionError: the node reported busy while the subagent ran (reserved capacity)' at scripts/test-job-subagents.cjs:38, i.e. the jobs proof. Not an invalidation failure and not a verdict line."
+    },
+    "restored_run_2": {
+      "json": "C:/Users/Victor/.wasm-agent/merge-lane-landing-restored2.json",
+      "gate_ms": 854594.233,
+      "gate_exit": 0,
+      "verdict_line": "smoke ok (2 skipped)",
+      "skipped": 2,
+      "outcome": "PASS on the same candidate tree, warm tree reused"
+    },
+    "conclusion": "the mechanism is not a false-green machine: a content change in the merged tree reaches the warm gate as a red verdict, and removing it returns the gate to green."
+  },
+  "wrapper_blast_radius": {
+    "suite": "scripts/test-deploy-service-target.sh",
+    "without_the_wrapper": {"command": "bash scripts/test-deploy-service-target.sh", "exit": 0, "verdict_line": "deploy service-target ok (34 checks)", "wall_s": 58},
+    "with_the_wrapper": {"command": "PATH=<scratch>/gate-shims:$PATH GATE_SUITES_JSONL=/tmp/suites.jsonl bash scripts/test-deploy-service-target.sh", "exit": 1, "verdict_line": "deploy service-target FAILED (6 of 34)", "wall_s": 59, "shims_from": "commit 6c823bf, extracted to C:/Users/Victor/.wasm-agent/wrapper-blast-radius (scripts/lib layout: gate-shims/ beside gate-suite.mjs)", "records_written": 17},
+    "reading": "the same suite, same tree, same minute: 34 checks pass unmeasured and 6 of 34 fail when measured. The failing check is the path-spelling comparison at scripts/test-deploy-service-target.sh:135. Re-measured here, not taken from the doc.",
+    "decision": "dropped. If it were kept it would have to be behaviour-identical here, and it is not."
+  },
+  "no_new_cold_build": {
+    "tree": "C:/Users/Victor/.wasm-agent/merge-lane-tree-landing",
+    "tree_size_before_warm_run": "1.1G total, rust/target 852M",
+    "tree_size_after_warm_run": "1.1G total, rust/target 852M",
+    "clone_on_warm_run": "reused true, clone_ms 545.704 (fetch + forced reset, not a clone)",
+    "disposable_clone": "none was created for the warm, broken or restored runs; no wa-merge-lane-* directory under the temp directory holds a rust/target of its own (checked), and the warm run's gate log and phases file live inside the persistent tree's .git",
+    "gate_ran_in": "C:/Users/Victor/.wasm-agent/merge-lane-tree-landing (gate.phases_file, and the gate lane's own record for slot #189)"
+  },
+  "not_verified": [
+    "the release-profile artifact invalidation specifically: the falsification probe is in cfg(test) code, so it exercised the rebuild of the test target (wa-operation's test harness) rather than a rebuild of the release rlibs. A probe that changes non-test source was not run: each full warm gate costs ~13.5 minutes and the window did not allow a fifth one.",
+    "the restored gate failed once on the same candidate tree with 'the node reported busy while the subagent ran (reserved capacity)' (scripts/test-job-subagents.cjs:38) and passed on the re-run. That assertion reads node capacity under load, and the machine had other lanes' fixtures gating during that window (gate lane #186-#190). One run cannot separate a flaky capacity assertion from a persistent-tree effect, and the suite's behaviour under the warm tree is therefore exercised but not settled.",
+    "no concurrent gate was run against the same tree: every run here held the gate lane's slot serially (#181, #189, #191, #192, #193). The reuse lock's refusal path under a live holder is covered by scripts/test-merge-lane.mjs section 9b, not by a second real gate.",
+    "suites other than scripts/test-deploy-service-target.sh were not compared with and without the wrapper; that suite is the one the delivery's own doc names, and the wrapper is dropped, so no other suite's behaviour under it was exercised.",
+    "the persistent tree's behaviour under a rustc change (toolchain_cleared) was not exercised: this machine's rustc did not change during the window.",
+    "the cold/warm pair was measured once each, on one machine, under the load of other lanes."
   ],
-  "evidence": {},
-  "note": "Committed first, before the change, so a lane that dies at the window leaves the state and the decision where the next one can read them."
+  "how_to_recover": "the run artifacts are C:/Users/Victor/.wasm-agent/merge-lane-landing-{cold,warm,broken,restored,restored2}.json with their .gate.log siblings; the tree is C:/Users/Victor/.wasm-agent/merge-lane-tree-landing (1.1G, ~852M of it rust/target) and is never deleted by the lane - rm -rf it to force a cold gate."
 }
