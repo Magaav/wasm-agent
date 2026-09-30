@@ -737,6 +737,34 @@ impl Store {
         let stored = self.put(&imported["definition"])?;
         Ok(json!({"job": stored, "bound": imported["bound"], "artifact": imported["artifact"]}))
     }
+    /// Observe one exact enqueue effect without opening the writer/schema path.
+    /// A zero enqueue count is ambiguous; this receipt also reconciles a crash
+    /// after enqueue but before the producer records acknowledgement.
+    pub fn event_receipt(&self, id: &str, revision: i64, event_id: &str, payload: &Value) -> Result<Value> {
+        let mut db = Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        db.busy_timeout(Duration::from_secs(5))?;
+        let tx = db.transaction()?;
+        let job = tx.query_row("SELECT revision,enabled,definition FROM jobs WHERE id=?", [id],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?, r.get::<_, String>(2)?))).optional()?;
+        let effect = tx.query_row("SELECT id,state,payload FROM deliveries WHERE job_id=?1 AND revision=?2 AND event_id=?3",
+            params![id,revision,event_id],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))).optional()?;
+        let current = job.as_ref().is_some_and(|(rev,enabled,_)| *enabled && *rev == revision);
+        let trigger = match job.as_ref() {
+            Some((_,_,definition)) => serde_json::from_str::<Value>(definition)?["trigger"].clone(),
+            None => Value::Null,
+        };
+        let receipt = match effect {
+            Some((delivery_id,state,stored)) => {
+                let matched = serde_json::from_str::<Value>(&stored)? == *payload;
+                json!({"delivery_id":delivery_id,"state":state,"payload_match":matched,
+                    "acknowledged":current && matched && state != "cancelled"})
+            },
+            None => json!({"acknowledged":false,"reason":"effect_missing"}),
+        };
+        Ok(json!({"job_id":id,"revision":revision,"event_id":event_id,"current":current,
+            "trigger":trigger,"receipt":receipt,"read_only":true}))
+    }
     pub fn history(&self) -> Result<Value> {
         let db = self.db()?;
         let mut stmt =

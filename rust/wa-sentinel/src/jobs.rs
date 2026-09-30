@@ -82,6 +82,13 @@ pub fn cli(args: &[String]) -> Result<()> {
     let value = match action {
         "list" => s.list(),
         "history" => s.history(),
+        "receipt" => {
+            let id=args.get(1).context("job receipt <job-id> <revision> <event-id> <payload.json>")?;
+            let revision=args.get(2).context("job revision required")?.parse::<i64>()?;
+            let event=args.get(3).context("stable event id required")?;
+            let file=args.get(4).context("event payload file required")?;
+            s.event_receipt(id,revision,event,&serde_json::from_slice(&std::fs::read(file)?)?)
+        },
         "put" => {
             let file = args.get(1).context("job put <definition.json>")?;
             s.put(&serde_json::from_slice(&std::fs::read(file)?)?)

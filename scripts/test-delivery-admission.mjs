@@ -91,12 +91,12 @@ function delivery(branch, {file, text, producer, reviewedTip = null}) {
 
 /// A review: a published commit on its own branch, whose `Agent:` trailer names the reviewer - the
 /// artifact the rule reads, not the record's sentence about it.
-function review(branch, {reviewer, tip, verdict = 'passed', findings = [], harness = 'wasm-agent'}) {
+function review(branch, {reviewer, tip, verdict = 'passed', findings = [], harness = 'wasm-agent', trailer = null}) {
   const name = `review/${branch.replace(/[^A-Za-z0-9-]/g, '-')}`;
   git(work, 'switch', '-q', '-c', name, tip);
   write(path.join(work, 'REVIEW.md'), `# Review of ${branch}\n\nReviewed tip ${tip}.\n`);
   git(work, 'add', 'REVIEW.md');
-  git(work, 'commit', '-q', '-m', `review(${branch}): fixture verdict\n\nReview of ${branch} (${tip}).\n\nAgent: ${harness} node=fixture session=${reviewer}`);
+  git(work, 'commit', '-q', '-m', `review(${branch}): fixture verdict\n\nReview of ${branch} (${tip}).\n\n${trailer || `Agent: ${harness} node=fixture session=${reviewer}`}`);
   const commit = git(work, 'rev-parse', 'HEAD');
   git(work, 'push', '-q', '-u', 'origin', name);
   const args = ['review', branch, '--repo', work, '--store', store, '--reviewer', reviewer,
@@ -306,6 +306,18 @@ try {
   const refusedReview = check(refusedBranch);
   ok(refusedReview.status === 2 && refusedReview.json?.condition === 'review_verdict_not_accepted',
     'a published Codex review with a refused verdict remains refused');
+
+  for (const [kind,trailer] of [
+    ['substring','Agent: codex nosession=external'],
+    ['legacy','Agent: codex external'],
+    ['ambiguous','Agent: codex session=external session=external'],
+  ]) {
+    const branch=`change/fixture-${kind}-session`;
+    const source=delivery(branch,{file:`${kind}.txt`,text:kind,producer:sessions.producerA});
+    review(branch,{reviewer:'external',tip:source.tip,trailer});
+    const refusal=check(branch);
+    ok(refusal.status===2 && refusal.json?.condition==='review_anchor_names_another_session',`${kind} provenance cannot impersonate an explicit session token`);
+  }
 
   // ---- 9. nothing was changed anywhere but the scratch store ---------------------------------------
   console.log('9. the fixture repository is intact');

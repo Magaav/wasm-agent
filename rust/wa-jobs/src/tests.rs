@@ -23,6 +23,22 @@ fn definition() -> Value {
     json!({"id":"messages","name":"Message received","trigger":{"kind":"event","topic":"whatsapp.message"},"action":{"kind":"wake","session":"thread-id","prompt":"Apply the reviewed response policy.","skill":"reply-policy"}})
 }
 #[test]
+fn exact_event_receipt_reconciles_enqueue_and_refuses_stale_or_different_effects() {
+    let s=store();s.put(&definition()).unwrap();s.enable("messages",true).unwrap();
+    let rev=s.list().unwrap()[0]["revision"].as_i64().unwrap();
+    let payload=json!({"tip":"exact","review":"independent"});
+    assert_eq!(s.event_receipt("messages",rev,"event",&payload).unwrap()["receipt"]["acknowledged"],false);
+    assert!(s.enqueue("messages",rev,"event",&payload,1).unwrap());
+    assert!(!s.enqueue("messages",rev,"event",&payload,2).unwrap());
+    let receipt=s.event_receipt("messages",rev,"event",&payload).unwrap();
+    assert_eq!(receipt["receipt"]["acknowledged"],true);
+    assert_eq!(receipt["read_only"],true);
+    assert_eq!(s.event_receipt("messages",rev,"event",&json!({"tip":"different"})).unwrap()["receipt"]["acknowledged"],false);
+    assert_eq!(s.event_receipt("messages",rev+1,"event",&payload).unwrap()["receipt"]["acknowledged"],false);
+    s.enable("messages",false).unwrap();
+    assert_eq!(s.event_receipt("messages",rev,"event",&payload).unwrap()["receipt"]["acknowledged"],false);
+}
+#[test]
 fn history_does_not_force_queue_and_budget_table_scans() {
     let s = store();
     let db = s.db().unwrap();

@@ -78,8 +78,8 @@ function anchorSession(repo, commit) {
   const body = git(repo, ['show', '--no-patch', '--format=%B', commit], 'review commit body');
   const match = (body || '').match(AGENT_TRAILER);
   if (!match) return null;
-  const session = match[1].match(/session=([^\s]+)/);
-  return session ? session[1] : match[1].trim().split(/\s+/)[0];
+  const sessions=[...match[1].matchAll(/(?:^|[ \t])session=([^ \t\r\n]+)(?=$|[ \t])/g)];
+  return sessions.length===1 ? sessions[0][1] : null;
 }
 
 function refusal(delivery, condition, detail, remedy) {
