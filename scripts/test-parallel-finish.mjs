@@ -5,10 +5,14 @@ import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 const runner=path.resolve('skills/parallel-evolution/scripts/finish.mjs');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-finish checks '));
+// A stand-in gate has no production reservation to inherit. Fence the queue as
+// well as Git, even when invoked directly by a measurement or review test.sh.
+const fixtureEnv={...process.env,WA_GATE_LANE_DIR:path.join(root,'gate-lane'),
+  GATE_LANE_HELD:'',GATE_LANE_ORIGIN:'',WA_GATE_LANE_WAIT_SECONDS:'15',WA_GATE_LANE_SAMPLE_SECONDS:'0'};
 const repo=path.join(root,'lane'),remote=path.join(root,'origin.git');
 let checks=0;
 function run(program,args,cwd=repo) {
-  const r=spawnSync(program,args,{cwd,encoding:'utf8',windowsHide:true});
+  const r=spawnSync(program,args,{cwd,encoding:'utf8',windowsHide:true,env:fixtureEnv,timeout:60000});
   assert.equal(r.status,0,r.stderr || r.stdout); return r.stdout.trim();
 }
 const git=(...args)=>run('git',args);

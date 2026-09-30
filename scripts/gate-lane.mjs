@@ -194,6 +194,32 @@ function pidAlive(pid) {
   try { process.kill(pid, 0); return true; }
   catch (error) { return error.code === 'EPERM' || error.code === 'EACCES'; }
 }
+// Release and inheritance are effects of the live holder, not of whoever knows
+// the row number. Fail closed if this host cannot observe the caller's ancestry.
+function descendantOf(pid, ancestor) {
+  if (!pidAlive(ancestor)) return false;
+  if (pid === ancestor) return true;
+  const parents = new Map();
+  if (process.platform === 'win32') {
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-Command',
+      'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress'],
+    {encoding:'utf8', windowsHide:true, timeout:15000});
+    if (result.status !== 0) return false;
+    try { for (const p of JSON.parse(result.stdout)) parents.set(p.ProcessId,p.ParentProcessId); }
+    catch { return false; }
+  }
+  const seen = new Set();
+  while (pid > 1 && !seen.has(pid)) {
+    seen.add(pid);
+    if (process.platform !== 'win32') {
+      try { const stat=fs.readFileSync(`/proc/${pid}/stat`,'utf8'); parents.set(pid,Number(stat.slice(stat.lastIndexOf(')')+2).split(' ')[1])); }
+      catch { return false; }
+    }
+    pid=parents.get(pid);
+    if (pid === ancestor) return true;
+  }
+  return false;
+}
 const row = (db, id) => db.prepare('SELECT * FROM requests WHERE id=?').get(id);
 const rows = (db, sql, ...args) => db.prepare(sql).all(...args);
 const holders = db => rows(db, "SELECT * FROM requests WHERE state IN ('running','orphaned') ORDER BY id");
@@ -397,6 +423,7 @@ function parseArgs(argv) {
       case '--detail': options.detail = value(); break;
       case '--limit': options.limit = Number(value()); break;
       case '--holder-pid': options.holderPid = Number(value()); break;
+      case '--lease': options.lease = value(); break;
       default: throw laneError(`unknown option ${arg}`);
     }
   }
@@ -449,7 +476,7 @@ function tryGrant(db, dir, capacity, id) {
     const earlier = rows(db, "SELECT id FROM requests WHERE state='waiting' AND id<?", id).length;
     if (!mine || mine.state !== 'waiting') { db.exec('ROLLBACK'); return {lost: true}; }
     if (busy.length < capacity && earlier === 0) {
-      db.prepare("UPDATE requests SET state='running',started_at=?,waits_for=NULL WHERE id=? AND state='waiting'")
+      db.prepare("UPDATE requests SET state='running',started_at=?,waits_for=NULL,depth=0,reason=NULL WHERE id=? AND state='waiting'")
         .run(now(), id);
       history(db, id, 'running', `granted a slot after ${now() - mine.created_at}s of waiting;`
         + ` ${busy.length} of ${capacity} were in use at that moment`);
@@ -608,6 +635,8 @@ function receiptOf(db, id, dir, capacity, extra = {}) {
     lane: 'gate', dir, capacity, obtained: false,
     id: entry.id, label: entry.label, mode: entry.mode, state: entry.state, reason: entry.reason,
     cwd: entry.cwd, command: entry.gate, pid: entry.pid, holder_pid: entry.holder,
+    runner: {path:SELF, sha256:crypto.createHash('sha256').update(fs.readFileSync(SELF)).digest('hex')},
+    inheritance: {id:entry.id,dir,lease:entry.lease,holder_pid:entry.holder},
     gate_pid: entry.gate_pid, waits_for: entry.waits_for, queue_position: entry.depth,
     requested_at: entry.created_at, started_at: entry.started_at, ended_at: entry.ended_at,
     waited_ms: entry.waited_ms, gate_ms: entry.gate_ms, exit_code: entry.exit_code,
@@ -782,11 +811,29 @@ function commandRelease(options) {
   if (!/^(running|orphaned)$/.test(entry.state)) {
     throw laneError(`request #${options.id} is ${entry.state}, not a live slot`, 1);
   }
+  if (entry.mode !== 'acquire' || !descendantOf(process.ppid, entry.holder)) {
+    throw laneError(`refusing release #${entry.id}: only the acquire holder's process tree may settle it; use reconcile with drain evidence after owner death`, 1);
+  }
+  if (!leaseHeld(dir, entry.lease)) throw laneError(`refusing release #${entry.id}: its acquisition lease is gone; reconcile ownership first`, 1);
   const detail = options.detail || `released by its holder with exit`
     + ` ${options.exit === null || options.exit === undefined ? 'unrecorded' : options.exit}`;
   setState(db, options.id, options.exit === 0 ? 'done' : 'failed', detail,
     {ended_at: now(), exit_code: options.exit ?? null});
   return {exit: 0, receipt: receiptOf(db, options.id, dir, capacityOf(options))};
+}
+function commandValidate(options) {
+  const dir=stateDir(options);
+  const db=new DatabaseSync(path.join(dir,'lane.sqlite'),{readOnly:true});
+  try {
+    const entry=row(db,options.id);
+    if (!entry || entry.state !== 'running' || entry.lease !== options.lease
+        || options.holderPid !== process.ppid || !descendantOf(process.ppid,entry.holder)
+        || !pidAlive(entry.pid) || !leaseHeld(dir,entry.lease)) {
+      throw laneError(`invalid_inheritance: #${options.id} has no live lease owned by this caller's ancestor`,1);
+    }
+    emit({valid:true,id:entry.id,dir,holder_pid:entry.holder,lease:entry.lease},options);
+    return {exit:0};
+  } finally { db.close(); }
 }
 function commandReconcile(options) {
   const dir = stateDir(options);
@@ -825,11 +872,11 @@ function commandReconcile(options) {
   setState(db, options.id, 'abandoned', `reconciled: ${String(options.evidence).trim()}`, {ended_at: now()});
   return {exit: 0, receipt: receiptOf(db, options.id, dir, capacityOf(options))};
 }
-function commandStatus(options) {
+function commandStatus(options, readOnly = false) {
   const dir = stateDir(options);
-  const db = openLane(dir);
+  const db = readOnly ? new DatabaseSync(path.join(dir, 'lane.sqlite'), {readOnly:true}) : openLane(dir);
   const capacity = capacityOf(options);
-  const moved = reconcileHolders(db, dir);
+  const moved = readOnly ? [] : reconcileHolders(db, dir);
   const limit = Number.isFinite(options.limit) ? options.limit : 20;
   const busy = holders(db);
   const queue = waiters(db);
@@ -861,7 +908,7 @@ function commandStatus(options) {
     emit({lane: 'gate', dir, capacity, slots_held: busy.length, waiting: queue.length,
       held: busy.map(entry => ({...entry, cpu: undefined})),
       queue: queue.map(entry => ({...entry, cpu: undefined})),
-      recent: recent.map(entry => ({...entry, cpu: undefined})), reconciled: moved}, options);
+      recent: recent.map(entry => ({...entry, cpu: undefined})), reconciled: moved, read_only:readOnly}, options);
   } else console.log(lines.join('\n'));
   return {exit: 0, held: busy.length, queue: queue.length};
 }
@@ -885,6 +932,10 @@ async function main() {
   } else if (command === 'acquire') {
     const result = await commandAcquire(options);
     process.exitCode = result.exit;
+  } else if (command === 'validate') {
+    process.exitCode = commandValidate(options).exit;
+  } else if (command === 'inspect') {
+    process.exitCode = commandStatus(options, true).exit;
   } else if (command === 'release') {
     const result = commandRelease(options);
     emit(result.receipt, options);
