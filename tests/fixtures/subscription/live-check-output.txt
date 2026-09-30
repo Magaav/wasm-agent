@@ -5,14 +5,14 @@ pi-absent-check: ls: cannot access 'C:\Users\Victor\AppData\Roaming/npm/node_mod
 pi-agent-dir-absent-check: ls: cannot access '/tmp/wa-native-proof/tree/NO-PI-AGENT-DIR': No such file or directory
 === two real requests through the native wire ===
 fixture: tests/fixtures/subscription/codex-responses-sse.txt (33 lines)
-tool decision: complete=false call_id=call_agt2HiBjEzoo7GSMy1AVl1Nx|fc_0b35d8fe3bf6e58b016abd05c1485887d2a1d2dfd3d2fd4747 arguments_text={"
-tool decision: complete=true call_id=call_agt2HiBjEzoo7GSMy1AVl1Nx|fc_0b35d8fe3bf6e58b016abd05c1485887d2a1d2dfd3d2fd4747 arguments_text={"zone":"UTC"}
-pass 1: finish_reason=tool_calls ttft_ms=1138.4481 events=11 usage={"completion_tokens":18,"completion_tokens_details":{"reasoning_tokens":0},"prompt_tokens":80,"prompt_tokens_details":{"cached_tokens":0},"total_tokens":98} (1356ms)
-pass 1 tool call: id=call_agt2HiBjEzoo7GSMy1AVl1Nx|fc_0b35d8fe3bf6e58b016abd05c1485887d2a1d2dfd3d2fd4747 name=get_time arguments={"zone":"UTC"}
+tool decision: complete=false call_id=call_cxOpET2BuLc7fWyhEpbtr2wT|fc_099b24836359082e016abd06e7053487d2862eae07332fea61 arguments_text={"
+tool decision: complete=true call_id=call_cxOpET2BuLc7fWyhEpbtr2wT|fc_099b24836359082e016abd06e7053487d2862eae07332fea61 arguments_text={"zone":"UTC"}
+pass 1: finish_reason=tool_calls ttft_ms=1573.4321 events=11 usage={"completion_tokens":18,"completion_tokens_details":{"reasoning_tokens":0},"prompt_tokens":80,"prompt_tokens_details":{"cached_tokens":0},"total_tokens":98} (1873ms)
+pass 1 tool call: id=call_cxOpET2BuLc7fWyhEpbtr2wT|fc_099b24836359082e016abd06e7053487d2862eae07332fea61 name=get_time arguments={"zone":"UTC"}
 fixture: tests/fixtures/subscription/codex-responses-sse-text.txt (72 lines)
-pass 2: finish_reason=tool_calls ttft_ms=1086.865 events=24 answer="" commentary=1 usage={"completion_tokens":33,"completion_tokens_details":{"reasoning_tokens":0},"prompt_tokens":93,"prompt_tokens_details":{"cached_tokens":0},"total_tokens":126} (1880ms)
+pass 2: finish_reason=tool_calls ttft_ms=1071.7808 events=24 answer="" commentary=1 usage={"completion_tokens":33,"completion_tokens_details":{"reasoning_tokens":0},"prompt_tokens":93,"prompt_tokens_details":{"cached_tokens":0},"total_tokens":126} (1834ms)
 pass 2 streamed events: commentary=1 decision=2 pending_delta=8
-pass 2 samples: [{"pending_id":"d364dc82-0e34-4a33-bdfb-68d4cae65473:1","text":"I","type":"pending_delta"},{"pending_id":"d364dc82-0e34-4a33-bdfb-68d4cae65473:1","text":"’m","type":"pending_delta"},{"pending_id":"d364dc82-0e34-4a33-bdfb-68d4cae65473:1","text":" checking","type":"pending_delta"},{"pending_id":"d364dc82-0e34-4a33-bdfb-68d4cae65473:1","text":" the","type":"pending_delta"},{"pending_id":"d364dc82-0e34-4a33-bdfb-68d4cae65473:1","text":" current","type":"pending_delta"},{"pending_id":"d364dc82-0e34-4a33-bdfb-68d4cae65473:1","text":" UTC","type":"pending_delta"},{"pending_id":"d364dc82-0e34-4a33-bdfb-68d4cae65473:1","text":" time","type":"pending_delta"},{"pending_id":"d364dc82-0e34-4a33-bdfb-68d4cae65473:1","text":".","type":"pending_delta"}]
+pass 2 samples: [{"pending_id":"dfa711ed-f3d4-44cf-be9a-0859a15f43d8:1","text":"I","type":"pending_delta"},{"pending_id":"dfa711ed-f3d4-44cf-be9a-0859a15f43d8:1","text":"’m","type":"pending_delta"},{"pending_id":"dfa711ed-f3d4-44cf-be9a-0859a15f43d8:1","text":" checking","type":"pending_delta"},{"pending_id":"dfa711ed-f3d4-44cf-be9a-0859a15f43d8:1","text":" the","type":"pending_delta"},{"pending_id":"dfa711ed-f3d4-44cf-be9a-0859a15f43d8:1","text":" current","type":"pending_delta"},{"pending_id":"dfa711ed-f3d4-44cf-be9a-0859a15f43d8:1","text":" UTC","type":"pending_delta"},{"pending_id":"dfa711ed-f3d4-44cf-be9a-0859a15f43d8:1","text":" time","type":"pending_delta"},{"pending_id":"dfa711ed-f3d4-44cf-be9a-0859a15f43d8:1","text":".","type":"pending_delta"}]
 subscription wire live check ok
 === live check exit: 0 ===
 === pi restored: C:\Users\Victor\AppData\Roaming/npm/node_modules/@earendil-works ===

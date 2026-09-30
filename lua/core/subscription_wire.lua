@@ -884,6 +884,14 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
   local line = session.line
   local counted = 0
   local observe = opts.on_line    -- a diagnostic/recording seam; nothing in the runtime path sets it
+  -- The callback's own stop, remembered so it can be re-raised as itself. Raising inside the
+  -- callback is what ends the read, but the transport reports a callback failure as
+  -- `subscription_transport_line_callback_failed` with a Lua traceback that carries a local file
+  -- path and line number - measured on a real request cut by `WASM_AGENT_SUBSCRIPTION_TIMEOUT=1`,
+  -- which raised `.../subscription_wire.lua:897: subscription_timeout: ...` rather than the
+  -- `subscription_timeout` this route documents. A caller matching on the documented name would
+  -- not find it, so the two names are raised from here instead.
+  local stopped_by = nil
   local outcome = host.http_sse('POST', M.ENDPOINT, json.encode(headers), json.encode(body),
     function(text)
       -- Cancellation and the deadline are checked here, on every line, because this is inside the
@@ -891,21 +899,23 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
       -- rather than letting it finish a stream nobody is waiting for.
       if host.run_cancelled then
         local cancelled = json.decode(host.run_cancelled())
-        if cancelled.cancelled then error('run_cancelled') end
+        if cancelled.cancelled then stopped_by = 'run_cancelled'; error(stopped_by, 0) end
       end
       if host.monotonic_ms and host.monotonic_ms() - started > timeout_ms then
-        error(string.format(
+        stopped_by = string.format(
           'subscription_timeout: no completion within %ds (WASM_AGENT_SUBSCRIPTION_TIMEOUT); the ' ..
-          'stream was stopped after %d line(s)', math.floor(timeout_ms / 1000), counted))
+          'stream was stopped after %d line(s)', math.floor(timeout_ms / 1000), counted)
+        error(stopped_by, 0)
       end
       counted = counted + 1
       if host.beat then host.beat() end
       if observe then observe(text) end
       line(text)
     end)
+  if stopped_by then error(stopped_by, 0) end
   local decoded = json.decode(outcome)
   if decoded.error then
-    if decoded.error == 'run_cancelled' then error('run_cancelled') end
+    if decoded.error == 'run_cancelled' then error('run_cancelled', 0) end
     error(string.format('subscription_transport_%s: %s (after %s line(s))',
       tostring(decoded.termination or 'failed'), tostring(decoded.error),
       tostring(decoded.lines or counted)), 0)

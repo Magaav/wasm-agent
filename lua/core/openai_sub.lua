@@ -70,6 +70,21 @@ function M.transport()
   error('invalid_subscription_transport: expected pi or native, got ' .. value)
 end
 function M.configured()
+  if M.transport() == 'native' then
+    -- The credential is the seam's question, not Pi's disk. Measured, and the reason this branch
+    -- exists: with Pi's `auth.json` unreachable - which is exactly what a machine without Pi looks
+    -- like - this function returned false while the route's own credential was present and usable,
+    -- so `wa status` said the route was unconfigured and the agent refused the turn at its own
+    -- `provider.configured()` gate. A route with no Pi on disk must not answer a credential question
+    -- by reading a third-party package's file.
+    --
+    -- Cost, stated: asking the seam is a real `token()` call, so a hard-expired token makes this
+    -- answer mint one. That is not a side effect invented here - it is the same call, with the same
+    -- refresh rule, that the request this route is about to make would have performed.
+    local ok, credential = pcall(function() return wire.credential_provider() end)
+    return ok and type(credential) == 'table' and type(credential.access) == 'string'
+      and credential.access ~= ''
+  end
   local raw = host.read_file(M.auth_path())
   local ok, auth = pcall(json.decode, raw or '')
   local credential = ok and type(auth)=='table' and auth['openai-codex']

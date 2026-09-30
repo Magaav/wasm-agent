@@ -284,8 +284,9 @@ check(not http_ok and tostring(http_error):find('subscription_http_401', 1, true
 replay('', {error = 'run_cancelled', termination = 'cancelled'})
 local cancel_ok, cancel_error = pcall(wire.complete, 'gpt-6-luna', messages, tools, false,
   {session_id = 'replay'}, {selected = 'low'})
-check(not cancel_ok and tostring(cancel_error):find('run_cancelled', 1, true) ~= nil,
-  'a cancelled read surfaces as run_cancelled, got ' .. tostring(cancel_error))
+check(not cancel_ok and tostring(cancel_error):find('^run_cancelled') ~= nil,
+  'a cancelled read surfaces as run_cancelled - as the name, not buried in a transport ' ..
+  'traceback, got ' .. tostring(cancel_error))
 
 -- 5. Cancellation and the deadline are checked *while reading*, not after the stream ends.
 replay(text_fixture)
@@ -293,8 +294,9 @@ local native_cancelled = host.run_cancelled
 host.run_cancelled = function() return json.encode({cancelled = true}) end
 local running_ok, running_error = pcall(wire.complete, 'gpt-6-luna', messages, tools, false,
   {session_id = 'replay'}, {selected = 'low'})
-check(not running_ok and tostring(running_error):find('run_cancelled', 1, true) ~= nil,
-  'a run cancelled mid-stream stops at the next line, got ' .. tostring(running_error))
+check(not running_ok and tostring(running_error):find('^run_cancelled') ~= nil,
+  'a run cancelled mid-stream stops at the next line, as the name, got ' ..
+  tostring(running_error))
 check(frames < select(2, text_fixture:gsub('\n', '\n')),
   'and does not read the rest of the stream: read ' .. tostring(frames) .. ' of ' ..
   tostring(select(2, text_fixture:gsub('\n', '\n'))))
@@ -307,6 +309,18 @@ local deadline_ok, deadline_error = pcall(wire.complete, 'gpt-6-luna', messages,
   {session_id = 'replay', timeout_seconds = 5}, {selected = 'low'})
 check(not deadline_ok and tostring(deadline_error):find('subscription_timeout', 1, true) ~= nil,
   'the WASM_AGENT_SUBSCRIPTION_TIMEOUT bound stops the read, got ' .. tostring(deadline_error))
+-- And it is the *name* the caller can match on, not a substring of a transport traceback. Measured
+-- on a real request cut by `WASM_AGENT_SUBSCRIPTION_TIMEOUT=1`: the stop arrived as
+-- `subscription_transport_line_callback_failed: .../subscription_wire.lua:897: subscription_timeout:
+-- ...`, so `find('subscription_timeout')` passed while an operator reading the error - or a caller
+-- matching on the documented name - saw both a local path and the wrong leading name. A check that
+-- only searches for the substring cannot tell those two apart; this one anchors.
+check(tostring(deadline_error):find('^subscription_timeout') ~= nil,
+  'the deadline error must BE subscription_timeout, not carry it inside a wrapped callback ' ..
+  'failure, got ' .. tostring(deadline_error))
+check(tostring(deadline_error):find('subscription_wire.lua', 1, true) == nil,
+  'and must not leak a filesystem path or line number into the message, got ' ..
+  tostring(deadline_error))
 host.monotonic_ms = native_ms
 
 -- 6. An id the catalogue does not publish is refused before any request leaves.
@@ -316,6 +330,43 @@ local unknown_ok, unknown_error = pcall(wire.complete, 'not-a-model', messages, 
 check(not unknown_ok and tostring(unknown_error):find('subscription_model_unknown', 1, true) ~= nil,
   'an id this route does not publish is refused by name, got ' .. tostring(unknown_error))
 check(frames == 0, 'and no bytes leave for it')
+
+-- 7. "Is this route configured?" is a credential question, and on the native transport the answer
+-- is the seam's - not a third-party package's file. Measured before this check existed, with Pi's
+-- `auth.json` unreachable (which is what a machine without Pi looks like): `M.configured()` answered
+-- false while this route's own credential was present and usable, so `wa status` reported the route
+-- unconfigured and the agent refused the turn at `provider.configured()`. The route's whole point is
+-- that it runs with no Pi on disk, so this is a property of the transport, not of the credential -
+-- hence a check here rather than in the credential lane's own fixture.
+local subscription = dofile('lua/core/openai_sub.lua')
+local seam_wire = subscription.wire()
+local native_getenv, native_read = host.getenv, host.read_file
+local function as(transport, credential)
+  host.getenv = function(key)
+    if key == 'WASM_AGENT_SUBSCRIPTION_TRANSPORT' then return transport end
+    if key == 'PI_CODING_AGENT_DIR' then return '/nonexistent-pi-agent-dir' end
+    return native_getenv(key)
+  end
+  host.read_file = function(path)
+    if tostring(path):find('nonexistent-pi-agent-dir', 1, true) then return nil end
+    return native_read(path)
+  end
+  if credential then seam_wire.credential_provider = credential end
+end
+as('native', function() return {access = 'seam-access', account_id = 'seam-account'} end)
+check(subscription.transport() == 'native', 'the transport override is the one under test')
+check(subscription.configured() == true,
+  'on native, a usable seam credential configures the route with no Pi on disk at all')
+as('native', function() return nil end)
+check(subscription.configured() == false,
+  'and a seam that yields no credential does not, rather than claiming a route that cannot run')
+as('native', function() error('subscription_credentials_absent') end)
+check(subscription.configured() == false,
+  'and a seam that raises is an unconfigured route, not a crash: status must stay answerable')
+as('pi', nil)
+check(subscription.configured() == false,
+  'the Pi transport still asks Pi\'s auth file, which is not there in this fixture')
+host.getenv, host.read_file = native_getenv, native_read
 
 host.stream = native_stream
 print('subscription wire ok (' .. checks .. ' checks)')

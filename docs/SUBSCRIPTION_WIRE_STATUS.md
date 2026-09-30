@@ -83,20 +83,92 @@ come from Pi: it came from `lua/core/subscription_auth.lua`, over the seam, from
 proves the seam *contract* works - name, shape, `token()` -> `{access, account_id}` - not that the
 two branches as pushed are wired. That last step is the coordinator's.**
 
+### 4. The deadline bound stops a real in-flight stream - PROVEN
+
+Item 4 asks that cancellation and `WASM_AGENT_SUBSCRIPTION_TIMEOUT` keep working. Live, against a
+real stream asked to count to fifty, with the bound set to 1s:
+
+```
+deadline: boundary=1s ok=false elapsed=1328ms
+error=subscription_timeout: no completion within 1s (WASM_AGENT_SUBSCRIPTION_TIMEOUT);
+      the stream was stopped after 6 line(s)
+```
+
+Stopped after 6 lines, not after the stream ended, and not reported as a short answer. An
+out-of-range bound (`0`) is still refused up front with `invalid_subscription_timeout: expected
+1..86400 seconds`.
+
+### 5. Parity against the Pi-backed route - PROVEN, measured twice
+
+`scripts/check-subscription-wire-parity.lua`, the same prompt through both routes, exit 0 both times:
+
+```
+pass A: text   content/finish_reason/final_phase/prompt/cached/completion/reasoning/tool_calls  all SAME
+pass B: tool   ... plus tool name get_time and arguments {"zone":"UTC"}                        all SAME
+subscription wire parity ok
+```
+
+The one field that differs is wall-clock time, and it is worth naming because one sample would have
+libelled the transport: run 1 measured native *slower* (`text` 6406ms vs pi's 2034ms), run 2 measured
+native *faster* (`text` 1168ms vs 1346ms; `tool` 1375ms vs 1683ms). The slow sample was the first
+native call in a fresh process - connection setup - not a per-line cost that grows with the stream.
+Two samples is not a benchmark; what it does establish is that there is no systematic per-token
+overhead worth 3x, which is the claim a single reading would have supported.
+
+### 6. Offline, in the gate's own terms - PROVEN
+
+| suite | result |
+| --- | --- |
+| `scripts/test-subscription-wire.lua` (in `test.sh:1578`) | `subscription wire ok (132 checks)` |
+| `scripts/test-openai-sub-levels.lua` (nil-vs-empty, level admission) | `openai-sub levels ok (22 checks)` |
+| `cargo test -p wa-host sse_line_tests` | `4 passed; 0 failed` |
+
+## What running it found that reading it had not
+
+Two defects, both on paths a MUST-BE-TRUE item names, both fixed in this session:
+
+**(a) The deadline error was not its own name.** `WASM_AGENT_SUBSCRIPTION_TIMEOUT` did stop the
+stream, but the stop arrived wrapped by the transport as
+`subscription_transport_line_callback_failed: .../subscription_wire.lua:897: subscription_timeout:
+...` - the documented name buried in a Lua traceback that also leaked a local file path and line
+number into a user-facing error. `M.complete` now remembers the callback's own stop and re-raises it
+with `error(name, 0)`, so the two names this route documents (`subscription_timeout`,
+`run_cancelled`) arrive as themselves.
+The offline test could not have caught this: every assertion searched for the substring, and a
+substring is present in the wrapped form too. The assertions are now anchored (`find('^name')`),
+plus one that the message carries no `subscription_wire.lua` path - which is how the wrapping would
+be caught if it came back.
+
+**(b) "Is this route configured?" still read Pi's disk.** Measured with Pi's `auth.json`
+unreachable - exactly a machine without Pi - and native selected: `subscription.configured()`
+returned **false** while this route's own credential was present and usable. `provider.configured()`
+is the gate the agent refuses a turn at (`agent.lua:1083`) and what `wa status` prints, so the route
+was claimed unavailable on the very machine the whole change is for. On the native transport
+`configured()` now asks the seam, exactly as the request would; the Pi transport's answer is
+unchanged. After the fix, same absent Pi: `native -> configured() = true`, `pi -> configured() =
+false`. Cost, stated in the code: asking the seam is a real `token()` call, so a hard-expired token
+makes this answer mint one - the same call, with the same refresh rule, the request was about to make.
+Still reading `~/.pi` on this route, and deliberately not changed here: `M.auth_path()` and
+`M.models_store_path()` in `lua/core/openai_sub.lua`, which the **Pi** transport needs. Outside this
+route, `model_window.lua:167` and `provider.lua:162` also fall back to Pi's model store - other
+providers' business, not this lane's to move.
+
 ## What is NOT verified
 
 * **The gate was never run.** The gate lane is a serial resource with capacity 1; at every check
-  during this session the sibling lane held it (slot #141 `finish change/wa-session-childdispatch95d6189a-...`,
-  held 1001s) with two queued behind it, one of which is a finish gate for the predecessor's branch
-  (#145, waiting 815s). Two gates must not run at once, so this lane did not acquire a slot. What
-  *was* run is written below; treat the gate as outstanding.
-* **Parity against the Pi-backed route was not re-measured in this session.** The predecessor's
-  claim (same content, `finish_reason`, `final_phase` and token counts) is repeated here only as a
-  claim from `320c0fcd`, not as this lane's observation. The script that measures it is
-  `scripts/check-subscription-wire-parity.lua`.
-* **Cancellation against a real long-running stream** is not exercised live; it is covered offline
-  against the recorded streams (the read stops at the next line).
+  during this session the sibling lane held it (slot #141
+  `finish change/wa-session-childdispatch95d6189a-...`, held 1001s) with two queued behind it, one of
+  which is a finish gate for the predecessor's branch (#145, waiting 815s). Two gates must not run at
+  once, so this lane did not acquire a slot. Treat the gate as outstanding; what *was* run is above.
+* **Cancellation against a real long-running stream** is not exercised live, and neither is a real
+  truncated stream - the latter would need an endpoint that cuts the response, i.e. a local server.
+  Both are covered offline against the recorded bytes. Only the *deadline* half of item 4 is proven
+  live.
 * **`M.limits()`** (the `wham/usage` windows) was not called live in this session.
+* **The full `scripts/test.sh` gate** was not run; the three subscription-relevant suites inside it
+  were, by hand (item 6).
+* **`--db` scratch databases and a scratch `WASM_AGENT_HOME`** were used for every Lua run here, so
+  no run touched the operator's ledger.
 
 ## The seam defect between the two lanes - the coordinator's cutover item
 
@@ -107,11 +179,14 @@ credential.** This is not a bug in either half; it is the one name the two halve
 is deliberately *not* fixed here by copying, renaming or shimming the sibling's file - that would be
 this lane duplicating a module it does not own.
 
-Second, smaller mismatch: the sibling's documented seam returns **two** values,
+Second, smaller mismatch, **reported and not fixed here**: the sibling's documented seam returns
+**two** values,
 `local token, failure = M.token()`, with a failure taxonomy (`subscription_credentials_absent`,
 `refresh_rejected:<status>`, ...). The wire reads only the first value, so an absent or rejected
 credential surfaces as `subscription_credential_missing: token() returned no access token` instead of
-the sibling's `code` and operator-facing `message`.
+the sibling's `code` and operator-facing `message`. It is left as-is because the sibling lane is still
+running and its failure shape is still moving; it is a three-line change to `M.credential()` once the
+cutover name is agreed.
 
 ## What this tree contains
 
