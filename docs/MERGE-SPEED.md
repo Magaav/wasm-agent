@@ -195,10 +195,30 @@ and `scripts/lib/gate-suites.mjs`. The machine-readable artifacts are
 
 ## 4. What was observed, and what is not verified
 
-The raw evidence is `docs/measurements/gate-instrument-evidence.json`. Two runs of the instrumented gate
-were completed inside the window, both **without a gate-lane slot** (the lane held 1 of 1 with a queue
-2 to 4 deep throughout - status quoted in that artifact), so their wall times are an **upper bound under
-contention**, not clean numbers:
+### 4.1 The SLOTTED run (the gate lane granted the slot, so its nested fixtures inherited admission)
+
+One gate run **held the slot** and gated the persistent tree merge-lane created for this branch's tip.
+It is the mechanism proof and the per-suite evidence at the same time
+(`docs/measurements/gate-phases-suites.json`):
+
+| what | value |
+| --- | --- |
+| persistent tree | **reused** (`clone.reused = true`, `clone_ms` 2705 - not created, not cloned again) |
+| `gate.ms` (the lane's own clock) | 1 030 126 ms, **cold** (the tree had never been built; the target was empty) |
+| phases the gate named | `build` 839 638 ms, `instances` 120 653 ms, `self-update` 69 611 ms, total 1 029 902 ms, `skipped 1` |
+| outcome | **exit 1, no verdict line** - it died inside `self-update`, in the defect of section 3b, not in a candidate check |
+| per-suite table | 45 invocations, 20 distinct suites, 232.1 s of suite wall time, 1.1 CPU-s (lower bound), 13 declared `undetermined` |
+| the table's shape | **not one suite is compute-bound**: `test-node-instances.sh` 83.6 s wall / 0.8 CPU-s, `test-deploy-service-target.sh` 61.2 s / 0.0, `verify-install.sh` 5 runs / 40.2 s / n-a. The CPU is in the build phase |
+
+That is the cold half of the comparison the owner asked for, measured on this branch: **839.6 s of a
+1 029.9 s gate is the build**, against the existing same-tree warm figure of 528.1 s
+(`docs/EVOLUTION.md`). The warm half of *this* tree was not run; the tree is now warm, so the next
+slotted run in it measures it.
+
+### 4.2 The two UNSLOTTED runs (contended - wall times are an upper bound, not clean numbers)
+
+The raw evidence is `docs/measurements/gate-instrument-evidence.json`. Both ran while the lane held 1 of
+1 with a queue 2 to 4 deep:
 
 | run | gate exit | phases the instrument named | first suite |
 | --- | ---: | --- | --- |
@@ -223,16 +243,15 @@ at all - it has since been replaced with this repository's copy (sha `129fabc5`)
 
 Still not verified, and it is the whole of the cold/warm pair:
 
-* **No clean cold/warm pair of one tree was completed.** That needs a gate-lane slot twice, and the lane
-granted none in this window: my queued request (#151) sat at position 4 for ten minutes and was cancelled
-to free the queue for the lanes ahead, and a later `merge-lane` attempt (#159) had reached position 2.
-What exists instead: today's cold **build** in a fresh tree (`Finished release profile in 10m 08s`, from
-the first run's own log, under contention), the existing same-tree pair in `docs/EVOLUTION.md`
-(1145.9 s cold / 528.1 s warm, 253.0 CPU-s / 11.2 CPU-s), and the per-suite instrument itself, whose
-CPU figure was verified against a busy suite (250 ms for 3.059 s, labelled lower bound).
-* The per-suite table therefore has **no rows from a full gate** in this window: the only suite that ran
-to a record was the first one, twice. The collision declarations, which are read out of each suite's own
-source, were not produced for the rest.
+* **The warm half of the cold/warm pair of ONE tree is still not run.** The slotted run above gives the
+  cold half (`build` 839.6 s of a 1 029.9 s gate, in the reused tree); the same tree is now warm, so one
+  more slotted run measures the pair - but each run needs a slot, and in this window the lane granted
+exactly one. What also exists: today's cold build in a fresh, unslotted tree (`Finished release profile
+in 10m 08s` from that run's own log) and the existing same-tree pair in `docs/EVOLUTION.md`
+(1145.9 s cold / 528.1 s warm, 253.0 CPU-s / 11.2 CPU-s).
+* The per-suite table exists for the slotted run only (20 suites, all waiting rather than computing, 13
+  `undetermined`); **no second run's rows** exist to compare against, and none of the rows comes from a
+  gate that reached its verdict line, because that run died in section 3b's defect.
 * The persistent tree's **end-to-end** saving is priced from the `docs/EVOLUTION.md` pair rather than from
 two `merge-lane` runs of my own (`gate_ms` before/after needs two slots). What I did verify about the
 mechanism is its refusals and its recorded fields (section 3, option 2).
