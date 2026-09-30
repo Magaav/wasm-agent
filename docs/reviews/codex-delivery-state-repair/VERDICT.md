@@ -118,10 +118,12 @@ id is skipped) it observes that intent's exact effect via `acknowledged()` and s
 it into `pending_events`, pushes `reason=prior_generation_pending` and exits 4 through the existing
 `exit 4 if pending_events` rule.
 
-It is **not** limited to the fixture's shape. It runs for every record whose decision is evaluated —
-refused, admitted, or admitted-with-caveat, and irrespective of `--limit` — and it handles *any
-number* of other intents and any prior `subscription.revision`. What it does not cover, demonstrated
-with the tip's own modules (`evidence/probe-residue.mjs`, `evidence/residue.log`; each line ends with
+It is **not** limited to the fixture's shape. The new loop is reached for every record whose decision
+is evaluated — refused, admitted, or admitted-with-caveat — it visits *every* other intent in the
+record rather than only one, whatever each one's prior `subscription.revision`, and it is not gated by
+`--limit` (only the current generation's own emission is). The one intent it deliberately never visits
+is the current generation's own (`id === eventId` is skipped), which is what residue (1) below turns
+on. What it does not cover, demonstrated with the tip's own modules (`evidence/probe-residue.mjs`, `evidence/residue.log`; each line ends with
 the intent state read back from the store):
 
 1. **`--limit` saturation hides a pending current-generation intent.** Precondition: an intent is
