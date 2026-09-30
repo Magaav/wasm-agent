@@ -15,6 +15,10 @@
 //     does not run later, on any tick;
 //   * `acquire`/`release` lets a caller keep its own runner, and a live lease is never
 //     reconciled by anyone else;
+//   * a killed `acquire` caller whose own gate survives it does NOT free the slot: the lane names
+//     the process the dead holder started, refuses to reconcile that row while it runs, and frees
+//     the slot - by the watchdog or by `reconcile --evidence` - only once it is gone (its own
+//     suite below, so the 30 checks above stay the record they were);
 //   * an exit 0 with no gate verdict line is recorded as un-verdicted, never as a pass.
 const fs = require('node:fs');
 const os = require('node:os');
@@ -30,8 +34,15 @@ const longGate = ['node', '-e', 'setTimeout(()=>{},60000)'];
 const skippedGate = ['node', '-e', "process.stdout.write('smoke ok (2 skipped)\\n')"];
 const silentGate = ['node', '-e', "process.stdout.write('nothing was tested\\n')"];
 const children = new Set();
+// Processes the lane does not own and the test must still not leave behind: the detached gates the
+// acquire mode scenario starts, plus their acquirers.
+const strays = new Set();
 let checks = 0;
 const check = (value, label) => { assert.ok(value, label); checks += 1; };
+// The acquire-mode orphan suite counts itself, so the line above stays "30 checks" whatever this
+// section grows to: the pair's numbers are each other's evidence.
+let orphanChecks = 0;
+const checkO = (value, label) => { assert.ok(value, label); orphanChecks += 1; };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function cli(args, {env = {}, detached = false} = {}) {
   const child = spawn(process.execPath, [lane, ...args], {
@@ -72,6 +83,10 @@ function killTree(pid) {
   if (process.platform === 'win32') spawnSync('taskkill', ['/F', '/T', '/PID', String(pid)], {windowsHide: true});
   else { try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch {} } }
 }
+// The kill the reported defect is about: one process, no tree (no `/T`).
+const killOne = pid => (process.platform === 'win32'
+  ? spawnSync('taskkill', ['/F', '/PID', String(pid)], {windowsHide: true})
+  : (() => { try { process.kill(pid, 'SIGKILL'); } catch {} return null; })());
 
 async function main() {
   // 1. A single request runs, and its own words are the record.
@@ -215,6 +230,158 @@ async function main() {
   check(/no gate verdict line/.test(silentResult.stderr),
     'and it says so on stderr rather than passing quietly');
 
+  // 7. The `acquire` mode hole, closed with real processes. A caller takes a slot, spawns its own
+  //    gate, and is killed while that gate survives it - the asymmetry this lane is not allowed to
+  //    get wrong (`acquire` records no gate pid: the caller runs its gate *after* the grant, so the
+  //    row cannot name it). The slot must NOT be free while a process the dead holder started for
+  //    it is alive; the row must name what it is holding the slot for; and the documented
+  //    reconcile path must settle it once that process is gone. A caller that dies having started
+  //    nothing must still give its slot back at once: a guard that holds every death is not a fix.
+  //
+  //    This node's runtime reaps a *non-detached* child together with its parent (measured with a
+  //    probe before this test was written), so the consumer starts its gate detached - that is what
+  //    reproduces "a kill does not take the gate". Which of the two this machine does is read from
+  //    the machine, not assumed, exactly as section 3 does.
+  const consumerScript = path.join(root, 'acquire-consumer.cjs');
+  fs.writeFileSync(consumerScript, `
+const {spawn} = require('node:child_process');
+const acquirer = spawn(process.execPath, [process.env.LANE, 'acquire', '--label', process.env.LABEL,
+  '--holder-pid', String(process.pid), '--poll-ms', '300', '--wait-seconds', '60'],
+  {stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true, env: process.env});
+let out = '';
+acquirer.stdout.on('data', chunk => {
+  out += chunk;
+  const start = out.indexOf('{');
+  if (start < 0) return;
+  let grant; try { grant = JSON.parse(out.slice(start)); } catch { return; }
+  const gate = process.env.GATE === 'none' ? null
+    : spawn(process.execPath, ['-e', 'const t=Date.now();while(Date.now()-t<600000){}'],
+      {stdio: 'ignore', windowsHide: true, detached: true});
+  console.log(JSON.stringify({acquirer: acquirer.pid, grant: grant.id, gate: gate ? gate.pid : null}));
+});
+acquirer.stderr.on('data', chunk => process.stderr.write(chunk));
+setTimeout(() => {}, 600000);
+`);
+  async function caller(label, gate = 'cpu') {
+    const child = spawn(process.execPath, [consumerScript], {cwd: repo, windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {...process.env, WA_GATE_LANE_DIR: state, LANE: lane, LABEL: label, GATE: gate}});
+    children.add(child);
+    let out = '', err = '';
+    child.stdout.on('data', chunk => { out += chunk; });
+    child.stderr.on('data', chunk => { err += chunk; });
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      const open = out.indexOf('{');
+      if (open >= 0) {
+        try {
+          const record = {child, ...JSON.parse(out.slice(open))};
+          child.on('close', () => children.delete(child));
+          if (record.gate) strays.add(record.gate);
+          strays.add(record.acquirer);
+          return record;
+        } catch { /* the receipt is still arriving */ }
+      }
+      await sleep(150);
+    }
+    throw Error(`caller ${label} never got a slot: ${out} ${err}`);
+  }
+  const stateOf = async label => until(async () => {
+    const snapshot = status();
+    const entry = snapshot.recent.concat(snapshot.held, snapshot.queue)
+      .find(item => item.label === label && item.mode === 'acquire');
+    return entry ? {snapshot, entry} : null;
+  }, `the row of ${label}`);
+
+  const victim = await caller('acquire-victim');
+  checkO(Number.isInteger(victim.grant) && Number.isInteger(victim.gate) && Number.isInteger(victim.acquirer),
+    'the caller took a slot through acquire and started a gate of its own');
+  const victimHeld = await stateOf('acquire-victim');
+  checkO(victimHeld.entry.state === 'running' && victimHeld.snapshot.slots_held === 1,
+    `the slot is held before the kill: ${victimHeld.entry.state}`);
+  checkO(victimHeld.entry.gate_pid === null || victimHeld.entry.gate_pid === undefined,
+    'acquire records no gate pid, which is the hole this suite is about');
+  killOne(victim.child.pid);
+  await sleep(700);
+  const victimGateSurvived = pidAlive(victim.gate);
+  const settledVictim = await until(async () => {
+    const snapshot = status();
+    const entry = entryOf(snapshot, victim.grant);
+    return entry && /^(orphaned|abandoned)$/.test(entry.state) ? {snapshot, entry} : null;
+  }, 'the killed caller\'s row to be settled by proof of death');
+  console.log(`note: killing the acquire caller pid ${victim.child.pid} left its own gate pid`
+    + ` ${victim.gate} ${victimGateSurvived ? 'ALIVE, so the slot stays held' : 'gone, so the slot frees'}`
+    + ` (${process.platform})`);
+  checkO(settledVictim.entry.state === (victimGateSurvived ? 'orphaned' : 'abandoned'),
+    `the acquire row follows the gate's real liveness: ${settledVictim.entry.state}`);
+  if (victimGateSurvived) {
+    checkO(settledVictim.snapshot.slots_held === 1,
+      'the slot is NOT free while the gate the killed caller started still runs');
+    checkO(settledVictim.entry.reason.includes(`pid ${victim.child.pid}`)
+      && settledVictim.entry.reason.includes(`pid ${victim.gate}`) && /slot stays held/.test(settledVictim.entry.reason),
+    `the row names the dead holder and the process it is holding the slot for: ${settledVictim.entry.reason}`);
+    const refused = laneSync(['reconcile', '--id', String(victim.grant), '--evidence', 'it looked idle']);
+    checkO(refused.code === 1 && refused.stderr.includes(`pid ${victim.gate}`)
+      && /still burning cores/.test(refused.stderr),
+    `a reconcile is refused while a process the holder started is alive: ${refused.stderr.trim()}`);
+    killTree(victim.gate);
+  } else {
+    checkO(settledVictim.snapshot.slots_held === 0, 'a caller whose gate died with it frees its slot at once');
+  }
+  const freed = await until(async () => {
+    const snapshot = status();
+    return snapshot.slots_held === 0 ? snapshot : null;
+  }, 'the slot to be released once nothing the holder started runs');
+  const freedRow = entryOf(freed, victim.grant);
+  checkO(freedRow.state === 'abandoned' && /released/.test(freedRow.reason),
+    `the slot is freed by proof of death and the row says what it saw: ${freedRow.reason}`);
+
+  // 7b. The watchdog itself killed: the same question asked from a fresh process, and the
+  //     documented reconcile path as the only way out of the row it leaves.
+  const unwatched = await caller('acquire-no-watchdog');
+  killOne(alone.child.pid);
+  killOne(unwatched.acquirer);
+  await sleep(900);
+  checkO(pidAlive(unwatched.gate), 'the second gate outlived its caller as well');
+  const readUnwatched = status();
+  const unwatchedRow = entryOf(readUnwatched, unwatched.grant);
+  checkO(unwatchedRow.state === 'orphaned' && readUnwatched.slots_held === 1,
+    `a fresh reconciler holds the slot while the gate survives: ${unwatchedRow.state},`
+    + ` ${readUnwatched.slots_held} held`);
+  checkO(unwatchedRow.reason.includes(`pid ${unwatched.gate}`),
+    `the row names the process the slot is held for: ${unwatchedRow.reason}`);
+  const refusedUnwatched = laneSync(['reconcile', '--id', String(unwatched.grant), '--evidence', 'it looked idle']);
+  checkO(refusedUnwatched.code === 1 && /still burning cores/.test(refusedUnwatched.stderr),
+    `the documented reconcile path refuses while that process runs: ${refusedUnwatched.stderr.trim()}`);
+  killTree(unwatched.gate);
+  await sleep(500);
+  const reconciled = laneSync(['reconcile', '--id', String(unwatched.grant), '--evidence',
+    'tasklist shows nothing the killed caller started is running; its gate was killed']);
+  checkO(reconciled.code === 0, `the documented reconcile path settles it once the gate is gone:`
+    + ` ${reconciled.stderr.trim() || 'exit 0'}`);
+  const afterReconcile = status();
+  const reconciledRow = entryOf(afterReconcile, unwatched.grant);
+  checkO(reconciledRow.state === 'abandoned' && /^reconciled:/.test(reconciledRow.reason)
+    && afterReconcile.slots_held === 0,
+  `the row records the evidence and the slot is free: ${reconciledRow.reason}`);
+
+  // 7c. A caller that dies having started nothing gives its slot back within seconds: the guard
+  //     must not turn every death into a held slot.
+  const quiet = await caller('acquire-no-gate', 'none');
+  const quietRow = entryOf(status(), quiet.grant);
+  checkO(quietRow?.state === 'running' && quiet.gate === null,
+    'a caller that started no gate of its own holds the slot');
+  killOne(quiet.child.pid);
+  const emptied = await until(async () => {
+    const snapshot = status();
+    return snapshot.slots_held === 0 ? snapshot : null;
+  }, 'the slot of a caller that started nothing to be freed', 20000);
+  checkO(entryOf(emptied, quiet.grant).state === 'abandoned',
+    `nothing to wait for, so the slot is freed: ${entryOf(emptied, quiet.grant).reason}`);
+
+  console.log(`gate lane acquire-mode orphan suite ok (${orphanChecks} checks, 0 skipped; a real`
+    + ' caller, a real gate, a kill that does not take it, the lane\'s own watchdog and its'
+    + ' documented reconcile path)');
   console.log(`gate lane ok (${checks} checks, 0 skipped; real processes, a real kill, real OS leases,`
     + ' fake gate commands, the repository gate itself not run)');
   console.log(`evidence: ${root}`);
@@ -224,6 +391,7 @@ main().catch(error => {
   process.exitCode = 1;
 }).finally(() => {
   for (const child of children) { try { killTree(child.pid); } catch {} }
+  for (const pid of strays) { try { killTree(pid); } catch {} }
   const unresolved = laneSync(['status']);
   console.error(unresolved.stdout);
 });
