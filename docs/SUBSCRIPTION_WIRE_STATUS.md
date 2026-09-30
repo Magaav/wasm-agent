@@ -21,7 +21,8 @@ bash /tmp/wa-native-proof/run.sh <this-worktree>
 
 Run twice, both exit 0. The first run is quoted below; the second run - the one whose full text is
 committed at `tests/fixtures/subscription/live-check-output.txt` - repeated it with Pi's credential
-file unreachable as well (see item 3), at `ttft_ms=1138.4481` / `1086.865`.
+file unreachable as well (see item 3), at `ttft_ms=1573.4321` / `1071.7808` - the values in that
+file, not from memory.
 
 ```
 === pi renamed aside for this run: .../npm/node_modules/@earendil-works -> ....PI-ASIDE-FOR-PROOF ===
@@ -146,6 +147,51 @@ catalogue unchanged: lua/core/openai_sub_catalogue.lua already matches the store
 It belongs beside the live check rather than in the gate: it needs Pi's store, which the gate's
 isolated home does not have. It writes nothing when there is nothing to write.
 
+### 8. The gate - PASSED on `f627a15`
+
+`finish.mjs gate`, invoked from **this worktree's** copy
+(`skills/parallel-evolution/scripts/finish.mjs`, sha256 prefix `129fabc56c44256a` - the one that sets
+`GATE_LANE_HELD` so a nested fixture gate inherits its parent's admission instead of waiting on the
+slot its parent holds). It acquired the single lane slot after waiting 1108.5s and ran
+`bash scripts/test.sh` once:
+
+```
+"gate_verified": true, "tested_head": "f627a15...", "equivalence": "git_tree",
+"skipped": 2, "gate_ms": 1195856.394, "gate_runs": 1, "gate_exit": 0, "gate_reused": false
+gate lane: slot #154 granted after waiting 1108.5s
+smoke ok (2 skipped)          <- the gate's own verdict line, from its log
+parallel finish checks ok (26 checks, 0 skipped)   <- the nested fixture gate, inside it
+```
+
+* **Exit 0.** Real skip count **2**, named rather than hidden; free space at the start of the run
+  **68G** of 477G.
+* **Alone in the slot.** Capacity is 1, the lane granted this lane #154, and `gate_runs: 1` with
+  `gate_reused: false` say this is one real run rather than a reused receipt. I did not measure
+  whether other lanes were doing CPU work *outside* the gate lane, so "alone" means alone in the
+  gate, not an idle box.
+* The nested fixture gate completing at 0 skipped is the specific thing that deadlocks when a
+  `finish.mjs` fails to pass its admission down; it completed here.
+* **The closing check agrees, re-read independently.** `finish.mjs verify` against the clean gated
+  revision returns `repository_ready: true`, **`gate_verified: true`**, `tested_head: f627a15`,
+  `equivalence: git_tree`, `skipped: 2`, `gate_ms: 1195856.394`, `gate_runs: 1` and no `gate_error` -
+  with all eight repository checks (revision, source_tree, branch, clean, fresh_remote_refs, current,
+  pushed, merge_proof) reported ok. `verify` re-reads the receipt and re-hashes the gate log against
+  it rather than trusting the `gate` mode's own exit line.
+
+**Two attempts, and the first is worth recording.** With a bounded 900s wait the lane *refused* - no
+slot was ever granted:
+
+```
+acquire #150 refused after 900s (terminal, not a retry). capacity 1 of 1 in use;
+running #149 (finish change/wa-session-childdispatch8ad3ecc6-...); queue depth 1; waited 900s
+```
+
+For that whole window the one slot was held by other lanes with a queue behind this one. That is the
+structural reason this family of lanes keeps running out of window, and it is why this report exists
+as a committed file. Running `scripts/test.sh` without a slot is the one thing the lane exists to
+prevent - its own comment records the measurement that the same candidate passed alone and failed
+twice while four gates competed - so it was not done.
+
 ## What running it found that reading it had not
 
 Two defects, both on paths a MUST-BE-TRUE item names, both fixed in this session:
@@ -183,32 +229,15 @@ script" decides what to do with the result, and the script that was supposed to 
 documented one-way door with no door. Written now, and verified both ways (item 7): it reproduces the
 committed catalogue with an empty diff, and it does not report "unchanged" for a block that differs.
 
-Note on the ordering of this commit and the gate evidence: the gate result below covers
-`20a3d77`. This fix is the commit after it, so the gate does **not** cover the final revision, and
-the status file says so rather than letting a verified tree and a verified branch read as the same
-thing.
+Note on coverage, and it is the honest boundary of the evidence above: the gate covers `f627a15`,
+the last commit on this branch that changes code or tests. The only commit after it is documentation
+(this file). So the code tree the gate passed is the code tree this branch ships - and if a later
+commit here is not documentation-only, it is not gate-covered.
 
 ## What is NOT verified
 
-* **The gate has not passed.** This is measured, not assumed. `finish.mjs gate` was invoked on the
-  committed tree with a bounded wait;
-  the gate lane **refused after 900s** with no slot ever granted:
-
-  ```
-  gate lane: acquire #150 refused after 900s (terminal, not a retry). capacity 1 of 1 in use;
-  running #149 (finish change/wa-session-childdispatch8ad3ecc6-...), held 24s; queue depth 1
-  (next to run); waited 900s; also waiting: #153
-  ```
-
-  For the whole window the single slot was held by other lanes (#141/#145, then #149 - the sibling
-  credential lane's own finish gate), with a queue behind. `gate_verified: false`,
-  `gate_error: "the gate did not run: the gate lane granted no slot"`. Running `scripts/test.sh`
-  anyway is the one thing the lane exists to prevent (its own comment records the measurement: the
-  same candidate passed alone and failed twice while four gates competed), so it was not done. The
-  three subscription suites plus the Rust line-reader tests *inside* that gate were run by hand and
-  are in item 6; the rest of the gate is outstanding.
-* **The gate covers `20a3d77`, not the final commit** - see the note at the end of "What running it
-  found".
+* **The gate passed** (item 8) - exit 0, 2 real skips, one run, on `f627a15`. Not on this file's own
+  commit, which is documentation only; the coverage boundary is stated in item 8.
 * **Cancellation against a real long-running stream** is not exercised live, and neither is a real
   truncated stream - the latter would need an endpoint that cuts the response, i.e. a local server.
   Both are covered offline against the recorded bytes. Only the *deadline* half of item 4 is proven
