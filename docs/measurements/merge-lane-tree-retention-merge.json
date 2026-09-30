@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "what": "re-merging the new origin/main into the persistent-tree landing, and answering whether the new retention sweep and the persistent tree can coexist",
+  "status": "IN PROGRESS",
+  "branch": "change/wa-session-childdispatchcd206d1c-287c-46fa-919d-703ff645dc5e",
+  "my_tip_before_this_merge": "7ed53a38e057b3aab88c7d56f185f057c8561290",
+  "new_main": "ad3acad6a2c242cc678ffd303911efa2e7ec33c6",
+  "my_base_before_this_merge": "da8dc8918a34c880768956ff775d883802dcb7a7",
+  "why": "the merge lane refused the five-tip landing honestly: 7ed53a38 conflict in scripts/merge-lane.mjs. The sibling is the disk-reclaim/retention delivery (90766a96): it adds a bounded retention sweep of the wa-merge-lane-* family in the temp root, a derived pre-lease grace (gate-lane wait 7200 + this lane's gate timeout 3600 + 60 = 10860 s), and a rename probe before any deletion. My mechanism adds the persistent reusable tree in the same file.",
+  "the_question_that_decides": "can a tree that is meant to survive between landings be a candidate for a sweep whose whole purpose is to delete trees like it? The sweep enumerates os.tmpdir() entries whose name starts with 'wa-merge-lane-'. The default persistent tree is outside the temp root (~/.wasm-agent/merge-lane-tree, or WA_MERGE_LANE_TREE). The proof has to be about the path and the name, not about the intent.",
+  "plan": [
+    "merge origin/main into this branch, resolve scripts/merge-lane.mjs preserving BOTH intents",
+    "prove the sweep's candidate set excludes the persistent tree, and name the one configuration in which it would not",
+    "re-run scripts/test-merge-lane.mjs and scripts/test-merge-lane-retention.mjs on the merged tree",
+    "re-measure cold and warm gate.ms on the merged tree, because main adds five suites to scripts/test.sh",
+    "commit the proof, then push the branch"
+  ],
+  "still_unproven_at_this_commit": [
+    "the conflict resolution",
+    "whether the persistent tree can be swept",
+    "the merged tree's cold/warm gate.ms",
+    "the focused suites on the merged tree"
+  ]
+}
