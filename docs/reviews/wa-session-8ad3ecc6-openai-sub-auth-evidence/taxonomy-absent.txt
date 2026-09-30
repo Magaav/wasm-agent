@@ -1,0 +1,18 @@
+--- absent store (path does not exist) ---
+VERIFY error code=subscription_credentials_absent status=nil
+--- fixture saw ---
+{
+ "token_posts": 0,
+ "refresh_posts": 0,
+ "device_posts": 0,
+ "refresh_posts_by_presented_fp": [],
+ "issued_count": 0,
+ "issued_fps": [],
+ "seed_fp": "f1d71913bb2a",
+ "store_refresh_fp": null,
+ "store_refresh_matches_seed": null,
+ "store_refreshes": null,
+ "store_last_error": null,
+ "store_has_access_token_field": null,
+ "store_source": null
+}

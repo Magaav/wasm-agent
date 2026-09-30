@@ -1,0 +1,16 @@
+# trimmed: the device poll loop prints one line per poll (the raw file was 37 KB)
+--- device flow nobody finishes (timeout_seconds=1) ---
+lua root unset: using embedded modules; edits under lua/ are NOT under test
+openai-sub: open http://127.0.0.1:36206/codex/device and enter the code MOCK-CODE  (waiting up to 1s)
+[lua] openai-sub: open http://127.0.0.1:36206/codex/device and enter the code MOCK-CODE  (waiting up to 1s)
+openai-sub: still waiting for the code MOCK-CODE (6 polls, 0s left)
+[lua] openai-sub: still waiting for the code MOCK-CODE (6 polls, 0s left)
+[... poll lines removed ...]
+{"path":"/api/accounts/deviceauth/token","poll":478}
+{"path":"/api/accounts/deviceauth/token","poll":479}
+{"path":"/api/accounts/deviceauth/token","poll":480}
+{"path":"/api/accounts/deviceauth/token","poll":481}
+{"path":"/api/accounts/deviceauth/token","poll":482}
+{"path":"/api/accounts/deviceauth/token","poll":483}
+--- pending flow kept for a resume? ---
+flow pending=true keys=device_auth_id,expires_at,flow,interval,pending,started_at,user_code,version

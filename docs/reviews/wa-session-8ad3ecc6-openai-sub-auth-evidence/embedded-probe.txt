@@ -1,0 +1,11 @@
+### embedded-module proof: cwd has no lua/, WASM_AGENT_LUA_ROOT unset, binary built from a6e111d by the reviewer
+$ pwd: .review-scratch (ls lua => none)
+lua root unset: using embedded modules; edits under lua/ are NOT under test
+PROBE ok the module is in the embedded registry
+PROBE ok an unregistered module is refused by name
+PROBE ok dofile serves the module with no lua root
+PROBE ok the load was recorded with its sha256
+PROBE ok the embedded copy is byte-identical to the working tree
+PROBE ok the embedded module answers the taxonomy, not a crash
+PROBE verdict failures=0
+exit=0
