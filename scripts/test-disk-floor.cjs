@@ -8,6 +8,7 @@
 // alarm would read is stable, and the gate calls this *before* its first `cargo` line so a refusal happens
 // before any work is paid for.
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
@@ -73,4 +74,53 @@ assert.ok(preflight > 0, 'scripts/test.sh does not call scripts/check-disk-floor
 assert.ok(preflight < firstBuild, 'the preflight must run before the gate\'s first build'); count();
 assert.ok(preflight < fence, 'the preflight must run before the environment fence, not under it'); count();
 
-console.log(`disk floor ok (${checks} checks, 0 skipped; refusal names ${parsed.available_bytes} B free against a ${declaredFloor} B floor)`);
+// 8. THE FALSE REFUSAL, FIXED. The parse used to read the Filesystem field as one word, so a path on a
+// mount whose name contains a space - this machine's root is `C:/Program Files/Git` - gave
+// `cannot measure free space`, exit 3, with 69 GiB free. The fields are now located from the Capacity
+// field and counted from it, and the line is fed to the script exactly as `df` prints it here.
+const stubFile = path.join(os.tmpdir(), `wa-df-stub-${process.pid}.sh`);
+// A `df` shell *function* read from BASH_ENV: a PATH entry cannot win here, because this machine's
+// bash puts `/usr/bin` ahead of anything a caller prepends, and the point is to feed the script the
+// line `df` prints rather than to bend the script for the test.
+const stub = (line) => {
+  fs.writeFileSync(stubFile, `df() { printf '%s\\n' 'Filesystem   1024-blocks Used Available Capacity Mounted on' '${line}'; }\n`);
+};
+const floorWithDf = (...args) => spawnSync(bash, ['scripts/check-disk-floor.sh', ...args], {
+  cwd: root, encoding: 'utf8', timeout: 30000,
+  env: { ...process.env, BASH_ENV: stubFile },
+});
+const SPACED = 'C:/Program Files/Git   499987452 430894512  69092940      87% /';
+const PLAIN = 'C:/                  499987452 430894512  69092940      87% /';
+stub(SPACED);
+const spaced = floorWithDf('--json', '--floor-bytes', '1');
+assert.equal(spaced.status, 0, spaced.stdout + spaced.stderr); count();
+const spacedJson = JSON.parse(spaced.stdout);
+assert.equal(spacedJson.available_bytes, 69092940 * 1024, 'the free space is the 5th field, not the 4th'); count();
+assert.equal(spacedJson.total_bytes, 499987452 * 1024); count();
+assert.equal(spacedJson.mount, '/'); count();
+stub(PLAIN);
+const plainJson = JSON.parse(floorWithDf('--json', '--floor-bytes', '1').stdout);
+assert.equal(plainJson.available_bytes, spacedJson.available_bytes, 'the same free space must give the same verdict with and without a space in the Filesystem field'); count();
+assert.equal(plainJson.total_bytes, spacedJson.total_bytes); count();
+stub('C:/Program Files/Git   499987452 430894512  69092940      87% /cygdrive/c/Program Files');
+assert.equal(JSON.parse(floorWithDf('--json', '--floor-bytes', '1').stdout).mount, '/cygdrive/c/Program Files', 'a mount whose own name contains a space is read whole'); count();
+
+// the refusal is still the floor's, not the parse's: a genuinely low disk refuses with its numbers
+stub('C:/Program Files/Git   499987452 430894512  1999999      87% /');
+const low = floorWithDf('--json', '--floor-bytes', String(declaredFloor));
+assert.equal(low.status, 1, low.stdout + low.stderr); count();
+assert.equal(JSON.parse(low.stdout).ok, false); count();
+const lowPlain = floorWithDf('--floor-bytes', String(declaredFloor));
+assert.equal(lowPlain.status, 1); count();
+assert.match(lowPlain.stderr, /needs ~[\d.]+ GiB free space and has [\d.]+ GiB \(\d+ B needed, \d+ B available on /); count();
+
+// and a line with no readable numbers at all is still refused (exit 3), never assumed healthy
+stub('no numbers here at all');
+const unreadable = floorWithDf('--json');
+assert.equal(unreadable.status, 3, unreadable.stdout + unreadable.stderr); count();
+assert.match(unreadable.stderr, /cannot measure free space at /); count();
+stub('499987452 430894512 69092940 87% 87% /');
+assert.equal(floorWithDf('--json').status, 3, 'an ambiguous capacity field must not be guessed at'); count();
+fs.rmSync(stubFile, { force: true }); count();
+
+console.log(`disk floor ok (${checks} checks, 0 skipped; refusal names ${parsed.available_bytes} B free against a ${declaredFloor} B floor; a Filesystem field with a space parses to the same numbers)`);

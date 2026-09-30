@@ -83,13 +83,28 @@ case "$FLOOR_BYTES" in
 esac
 [ -d "$path" ] || { echo "check-disk-floor: --path is not a directory: $path" >&2; exit 2; }
 
-# One line from `df -Pk`, in 1024-byte blocks. `-P` is the portable single-line format; the available
-# field is the fourth. A disk whose numbers cannot be read is refused rather than assumed: this file
-# exists because "it looked fine" was wrong.
+# One line from `df -Pk`, in 1024-byte blocks. The fields are located from the *Capacity* field - the
+# only field that is a percentage - and counted from it. `df -Pk` prints `Filesystem 1024-blocks Used
+# Available Capacity Mounted on`, and the Filesystem field may itself contain spaces: this machine's
+# root mount is `C:/Program Files/Git`, so a positional parse reads `$2` = `Files/git` and refuses a
+# disk with 69 GiB free (`cannot measure free space at /`, exit 3). The numbers are the same ones;
+# only the way they are found changes. A line whose capacity field cannot be found, or is not unique,
+# is still refused rather than assumed: this file exists because "it looked fine" was wrong.
 df_line="$(df -Pk "$path" 2>/dev/null | tail -n 1)"
-total_kb="$(printf '%s' "$df_line" | awk '{print $2}')"
-avail_kb="$(printf '%s' "$df_line" | awk '{print $4}')"
-mount="$(printf '%s' "$df_line" | awk '{print $6}')"
+# total is three fields before the capacity, avail the field before it, and the mount everything after
+# it - so a space in the Filesystem name (or in the mount) cannot shift the numbers.
+df_field() {
+  printf '%s' "$1" | awk -v want="$2" '
+    { cap = 0; for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+%$/) { if (cap) exit 1; cap = i } }
+    cap < 5 { exit 1 }
+    want == "total" { print $(cap - 3) }
+    want == "avail" { print $(cap - 1) }
+    want == "mount" { s = ""; for (i = cap + 1; i <= NF; i++) s = s (s == "" ? "" : " ") $i; print s }
+  '
+}
+total_kb="$(df_field "$df_line" total)"
+avail_kb="$(df_field "$df_line" avail)"
+mount="$(df_field "$df_line" mount)"
 [ -n "$mount" ] || mount="$path"
 case "${total_kb}:${avail_kb}" in
   ''|*[!0-9:]*|:*|*:) echo "check-disk-floor: cannot measure free space at $path (df said: '${df_line:-nothing}')" >&2; exit 3 ;;
