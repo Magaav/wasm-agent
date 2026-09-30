@@ -221,14 +221,54 @@ package dir UNCHANGED
 The rename is done inside a script whose `trap ... EXIT` restores both paths, so an interrupted run
 puts Pi back rather than leaving the operator's installation moved.
 
+### The closing gate
+
+Run after every commit above, with the **worktree's own copy** of the closing script
+(`skills/parallel-evolution/scripts/finish.mjs`, whose lane path resolves to this tree's
+`scripts/gate-lane.mjs` - the installed copy under `~/.wasm-agent/skills/` resolves that path one
+directory too high and cannot consult the gate lane at all, which is how the first attempt came to run
+without a slot and was cancelled rather than accepted).
+
+```
+repository_ready true, all 8 checks ok (revision, source_tree, branch, clean, fresh_remote_refs,
+  current, pushed, merge_proof)
+gate_verified true, tested_head 483ee4018037f2f63c884a637a11d146610a7faf, equivalence git_tree,
+  skipped 2, gate_ms 945756.394, gate_runs 1, gate_exit 0, gate_reused false
+gate_lane: slot #162 granted after waiting 104.2s (mode slot, request 162)
+verdict line: "smoke ok (2 skipped)"
+```
+
+The two subscriptions suites are in that log on this tree:
+
+```
+openai-sub levels ok (22 checks)
+subscription wire ok (135 checks)
+openai-sub auth ok (128 checks)
+openai-sub concurrency evidence: token POSTs=1, refreshed=1, adopted=1, rotation 5e77514ff2b3 -> 086e91c3d88f, second spend of the same token=refresh_rejected:400
+```
+
+The 2 skips are the suite's own: `termux launcher: 8 passed, 1 skipped (POSIX mode semantics
+unavailable on Windows)` and Android build/runtime skipped on this non-Android host. Free space was
+65 GiB available before the run and 65 GiB after it. `finish.mjs verify` at the same HEAD agrees:
+all eight checks ok, `gate_verified true`, no gate error.
+
+**What this gate covers, exactly:** the tree `7b844a03a59c7e36f840ddc682413e844e7751b3` at `483ee40`.
+The one commit after it changes only this file (documentation), so the code tree the gate passed is
+the code tree this branch ships - and a later commit that is *not* documentation-only is not covered
+by it.
+
+The harness behind proofs 1-3 and the login door is outside the repository, at
+`C:/Users/Victor/.wasm-agent/wa-cutover-proof/` (`01-configured.lua`, `02-live.lua`,
+`03-absent.lua`, `pi-aside-run.sh`, `run-absent-and-door.sh`), and is deliberately not committed: it
+renames the operator's global npm directory, which is not something a fresh clone should do. Re-running
+`bash pi-aside-run.sh` reproduces proofs 1, 2 and the Pi hash comparison end to end.
+
 ### What is unproven, and what was not done
 
-* **The full gate.** `scripts/test.sh` was not run on this branch by me at the time this file was
-  written - see the closing section of this branch's own report for the gate result if it ran. What
-  *was* run, on the merged tree at `9e015d6`, is `scripts/test-subscription-wire.lua` (offline,
-  hermetic: **135 checks, exit 0**) and the credential lane's `scripts/test-openai-sub-auth.lua`
-  (**128 checks, exit 0**, `token POSTs=1` in its concurrency evidence) - the two files this change
-  could break, plus the live proof above.
+* **Nothing about the gate is claimed beyond the line above.** The credential lane's *live* test
+  (`scripts/test-openai-sub-auth-live.lua`) and the wire's *live* recording check
+  (`scripts/check-subscription-wire-live.lua`) are not in the gate by design - they need the network
+  and one of them rewrites the recorded fixtures - and were not run here.
 * **The route through an agent turn.** Not exercised, and cannot be on this node as it stands: the
   provider refuses `gpt-6-*` (`model_not_servable`). Everything above is a direct call to
   `lua/core/openai_sub.lua`.
