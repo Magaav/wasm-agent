@@ -7,7 +7,10 @@
 // a conflict between two inputs in the clone; that the gate runs on the MERGED tree and its own
 // verdict line is what makes a pass; that a gate which exits 0 without saying so is not a pass; that
 // a CRLF candidate stops before the gate; and that `--partial` gates the accepted subset while still
-// refusing to call a batch with a blocked input a success.
+// refusing to call a batch with a blocked input a success. It also pins the PERSISTENT TREE the gate runs
+// in (the cold-gate fix): that the default tree is never created for a repository under the temp
+// directory, that a named tree is created once and reused after, that what a reuse discards is reported,
+// and that a tree which cannot be used is refused BY NAME and gated in a disposable clone instead.
 //
 // The gate is the seam (--gate-command), so this file costs seconds and needs no build. A real gate
 // on real branches is a merge-lane run, not this test.
@@ -287,6 +290,75 @@ export function audit(repo,{target='main'}={}) {
   ok(partial.json?.candidate.merges === 2, 'the two independent tips are in the candidate',
     String(partial.json?.candidate.merges));
   ok(partial.json?.push_precondition.can_push === false, 'and the push precondition refuses it');
+
+  // ---- 9b. the persistent tree: reused when provably clean, refused by name when it is not ----------
+  // The mechanism that stops the lane paying a cold gate on every landing (docs/EVOLUTION.md, "A cold
+  // gate, attributed"). A fixture repository lives under the temp directory, which is exactly why the
+  // DEFAULT tree is never created for one - asserted first, because that is what keeps this test from
+  // ever creating, resetting or owning the node's own tree.
+  console.log('9b. the persistent tree');
+  const noTree = lane(repo, ['--base', 'main', 'change/one', '--gate-command', gatePass], env);
+  ok(noTree.status === 0 && noTree.json?.clone?.reused === false && /temp directory/.test(noTree.json?.clone?.reuse_refused || ''),
+    'a repository under the temp directory never gets the default tree, and says why',
+    String(noTree.json?.clone?.reuse_refused));
+  const tree = path.join(root, 'tree');
+  const created = lane(repo, ['--base', 'main', 'change/one', '--gate-command', gatePass, '--reuse-tree', tree], env);
+  ok(created.status === 0 && created.json?.verdict === 'pass' && created.json?.clone?.reuse_created === true,
+    'a named tree is created on the first run, and that run gates normally',
+    JSON.stringify({exit: created.status, verdict: created.json?.verdict, created: created.json?.clone?.reuse_created}));
+  const reused = lane(repo, ['--base', 'main', 'change/one', '--gate-command', gatePass, '--reuse-tree', tree], env);
+  ok(reused.json?.clone?.reused === true && reused.json?.clone?.path === tree,
+    'the second run reuses that tree', JSON.stringify({reused: reused.json?.clone?.reused, path: reused.json?.clone?.path}));
+  ok(reused.json?.verdict === 'pass' && reused.json?.gate?.skipped === 2 && created.json?.gate?.skipped === 2,
+    'and the verdict and the skip count are the same as the first run produced',
+    JSON.stringify({first: created.json?.gate?.skipped, second: reused.json?.gate?.skipped}));
+  ok(git(tree, 'status', '--porcelain') === '' && git(tree, 'rev-parse', 'HEAD^') === targetSha,
+    'the reused tree ends clean, as a merge of the integration target',
+    `${git(tree, 'status', '--porcelain').slice(0, 60)} HEAD^=${git(tree, 'rev-parse', 'HEAD^')}`);
+  ok(!fs.existsSync(path.join(tree, '.git', 'wa-merge-lane-tree.lock')), 'the reuse lock was released');
+  // Stale state: a modified tracked file and an untracked one. The reset is the guarantee, and what it
+  // discarded has to be REPORTED - a tree that is silently wiped or silently believed is the risk.
+  write(path.join(tree, 'a.txt'), 'dirty\n');
+  write(path.join(tree, 'stray.txt'), 'stray\n');
+  const dirty = lane(repo, ['--base', 'main', 'change/one', '--gate-command', gatePass, '--reuse-tree', tree], env);
+  ok(dirty.json?.clone?.reused === true && dirty.json?.clone?.reuse_dirt_discarded?.length === 2,
+    'a dirty tree is reset, and what it discarded is named',
+    JSON.stringify(dirty.json?.clone?.reuse_dirt_discarded));
+  ok(dirty.json?.verdict === 'pass' && dirty.json?.candidate.merges === 1 && git(tree, 'status', '--porcelain') === '',
+    'and the run gates the same candidate, with the tree clean afterwards',
+    JSON.stringify({verdict: dirty.json?.verdict, merges: dirty.json?.candidate.merges}));
+  // A tree that CANNOT be used: refused by name, and the candidate is still gated - in a disposable
+  // clone, which is cold and correct. Neither a foreign lock nor a foreign directory is walked past.
+  const lockPath = path.join(tree, '.git', 'wa-merge-lane-tree.lock');
+  write(lockPath, `${JSON.stringify({pid: process.pid, started_at: new Date().toISOString()})}\n`);
+  const locked = lane(repo, ['--base', 'main', 'change/one', '--gate-command', gatePass, '--reuse-tree', tree], env);
+  ok(locked.json?.clone?.reused === false && /in use by pid/.test(locked.json?.clone?.reuse_refused || ''),
+    'a tree another process holds is refused by name, with the holder named',
+    String(locked.json?.clone?.reuse_refused));
+  ok(locked.json?.verdict === 'pass' && locked.json?.clone?.path !== tree && fs.existsSync(lockPath),
+    'and the run gates in a disposable clone, leaving the refused tree and its lock alone',
+    JSON.stringify({verdict: locked.json?.verdict, path: locked.json?.clone?.path}));
+  fs.rmSync(lockPath, {force: true});
+  const notARepository = path.join(root, 'not-a-repository');
+  fs.mkdirSync(notARepository); write(path.join(notARepository, 'stray.txt'), 'stray\n');
+  const stray = lane(repo, ['--base', 'main', 'change/one', '--gate-command', gatePass, '--reuse-tree', notARepository], env);
+  ok(stray.json?.clone?.reused === false && /not a git checkout/.test(stray.json?.clone?.reuse_refused || ''),
+    'a directory that is not a checkout is refused by name', String(stray.json?.clone?.reuse_refused));
+  ok(stray.json?.verdict === 'pass', 'and the candidate is still gated, so a refusal never blocks a landing');
+  ok(fs.existsSync(path.join(notARepository, 'stray.txt')), 'and nothing in the refused directory was touched');
+  // The retention sweep (scripts/reclaim-disk.mjs, scripts/check-temp-retention.mjs) deletes the temp
+  // root's `wa-merge-lane-*` leftovers, and a tree idle between landings is a directory nobody holds -
+  // which is exactly what its rename probe allows. So an in-temp path that carries the clone prefix must
+  // never become the persistent tree, whatever the sweep does today: the refusal is by name, stricter
+  // than the sweep's current candidate regexes, and the run still gates in a disposable clone.
+  const sweepable = path.join(root, 'wa-merge-lane-tree');
+  const sweepTree = lane(repo, ['--base', 'main', 'change/one', '--gate-command', gatePass, '--reuse-tree', sweepable], env);
+  ok(sweepTree.json?.clone?.reused === false && /retention sweep prunes/.test(sweepTree.json?.clone?.reuse_refused || ''),
+    'a tree inside the temp root named like the sweepable family is refused by name',
+    String(sweepTree.json?.clone?.reuse_refused));
+  ok(sweepTree.json?.verdict === 'pass' && sweepTree.json?.clone?.path !== sweepable && !fs.existsSync(sweepable),
+    'and that run clones instead, leaving no tree for a sweep to find',
+    JSON.stringify({verdict: sweepTree.json?.verdict, path: sweepTree.json?.clone?.path, created: fs.existsSync(sweepable)}));
 
   // ---- 10. a repository the lane cannot identify -------------------------------------------------------
   console.log('10. no repository named');

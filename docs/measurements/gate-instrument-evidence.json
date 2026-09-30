@@ -1,0 +1,124 @@
+{
+ "schema": 1,
+ "lane": {
+  "before_the_unslotted_run": "=== gate lane status AT THE START of the unconditioned run ===",
+  "before_the_slotted_attempt": "gate lane: 1 of 1 slot(s) held (capacity from the default), 1 waiting",
+  "policy": "Gates are a reserved serial resource: the runs above were taken while other lanes held the lane, and their wall times are therefore an UPPER BOUND under contention, not clean numbers. The per-suite CPU figures are charged inside each suite's own process tree and are not a machine-wide count."
+ },
+ "what": "What the gate's per-phase and per-suite instrumentation actually observed, and the falsifications of the instrumentation itself. The complete cold/warm pair of one tree was NOT obtained inside this window: see \"why_not\" and \"lane\" below.",
+ "instrument": {
+  "phase": "scripts/lib/gate-phases.sh, called from scripts/test.sh at each phase boundary (instrumentation only; the same checks, order, verdict line, skip counts and exit codes)",
+  "suite": "scripts/lib/gate-shims/{bash,node,powershell,wa} -> scripts/lib/gate-suite.mjs, one record per suite invocation into GATE_SUITES_JSONL",
+  "cpu": "scripts/lib/gate-lane-sample.ps1 walks parent links from the suite's pid every 500 ms and sums user + kernel ticks (100 ns); a LOWER BOUND (a process that starts and exits between two samples contributes only what was seen; reported as null, never 0, when nothing was sampled)"
+ },
+ "runs": [
+  {
+   "name": "cold, unslotted, contended - the gate ran WITHOUT a gate-lane slot while other lanes held it",
+   "tree": "C:/Users/Victor/.wasm-agent/gate-lab-tree-2 at bfbcd5e (a clone of this branch at its committed tip)",
+   "gate_exit": 1,
+   "phases": {
+    "schema": 1,
+    "gate": "scripts/test.sh",
+    "phases": [
+     {
+      "name": "build",
+      "ms": 1335881
+     }
+    ],
+    "total_ms": 1335881,
+    "skipped": 0,
+    "cargo_jobs": "2",
+    "test_threads": "2"
+   },
+   "verdict_line": null,
+   "observed_in_log": [
+    "  code: 'ERR_ASSERTION',",
+    "  actual: 4294967295,",
+    "  expected: 0,",
+    "  operator: 'strictEqual',",
+    "  diff: 'simple'",
+    "}",
+    "",
+    "Node.js v24.19.0",
+    "gate phases (ms, in order; each row is the segment that starts at its marker):",
+    "  build               1335881",
+    "  total               1335881",
+    "gate phases json: {\"schema\":1,\"gate\":\"scripts/test.sh\",\"phases\":[{\"name\":\"build\",\"ms\":1335881}],\"total_ms\":1335881,\"skipped\":0,\"cargo_jobs\":\"2\",\"test_threads\":\"2\"}"
+   ],
+   "wait_inside_the_gate_ms": 722000,
+   "measured": {
+    "cargo_build_finished": "Finished `release` profile [optimized] target(s) in 10m 08s (the gate log)",
+    "first_suite": {
+     "name": "test-parallel-finish.mjs",
+     "wall_ms": 727092,
+     "exit": 1,
+     "cpu_ms": 203
+    },
+    "why_red": "the first suite (scripts/test-parallel-finish.mjs, invoked from scripts/test.sh) asks the node-wide gate lane for a slot for its nested fixture gate; unslotted, the outer gate had no admission marker to pass down, so the fixture waited 722 s, was told it would run without a slot, and then failed its own check on the nested call's exit status (4294967295 !== 0) - scripts/test.sh is `set -e`, so the gate ended inside the build phase",
+    "not_the_shim": "the same fixture gate run through the same shims in isolation exits 0 (\"smoke ok (1 skipped)\", record exit 0); the wrapper is not the cause"
+   }
+  },
+  {
+   "name": "deliberately broken first suite, warm tree - the falsification of the instrument",
+   "tree": "C:/Users/Victor/.wasm-agent/gate-lab-tree-2, warm (the cold run above had already built the workspace)",
+   "broken_commit": "a0ac3d7bb928f7a0ced9921aa7ac0610d6599462 (process.exit(1) prepended to scripts/test-parallel-finish.mjs), restored to bfbcd5e afterwards with `git reset --hard` and a clean `git status`",
+   "gate_exit": 1,
+   "phases": {
+    "schema": 1,
+    "gate": "scripts/test.sh",
+    "phases": [
+     {
+      "name": "build",
+      "ms": 788
+     }
+    ],
+    "total_ms": 788,
+    "skipped": 0,
+    "cargo_jobs": "2",
+    "test_threads": "2"
+   },
+   "verdict_line": null,
+   "observed_in_log": [
+    "warning: `wa-host` (bin \"wa\") generated 23 warnings",
+    "    Finished `release` profile [optimized] target(s) in 0.22s",
+    "gate phases (ms, in order; each row is the segment that starts at its marker):",
+    "  build                   788",
+    "  total                   788",
+    "gate phases json: {\"schema\":1,\"gate\":\"scripts/test.sh\",\"phases\":[{\"name\":\"build\",\"ms\":788}],\"total_ms\":788,\"skipped\":0,\"cargo_jobs\":\"2\",\"test_threads\":\"2\"}"
+   ],
+   "suite_record": [
+    {
+     "name": "test-parallel-finish.mjs",
+     "command": "C:\\Program Files\\nodejs\\node.exe scripts/test-parallel-finish.mjs",
+     "pid": 37668,
+     "wall_ms": 45,
+     "cpu_ms": null,
+     "cpu_bound": "lower bound",
+     "exit": 1,
+     "sampled": true,
+     "started_at": "2026-09-30T13:43:46.656Z"
+    }
+   ],
+   "shows": "a deliberately failing test makes the instrumented gate red with the gate's own exit code (1), and the instrument names ONLY the phase that ran (build, 788 ms) - it cannot report a phase as having run when it did not, and it does not invent a verdict line"
+  }
+ ],
+ "reuse_refusal_observed": {
+  "source": "C:/Users/Victor/.wasm-agent/refusal-probe.json (WA_MERGE_LANE_TREE pointed at a directory that is not a checkout, WA_GATE_LANE_WAIT_SECONDS=1)",
+  "verdict": "gate_refused",
+  "exit_code": 6,
+  "reuse_refused": "it is not a git checkout (fatal: not a git repository (or any of the parent directories): .git)",
+  "reused": false,
+  "clone_ms_fallback": 281.779,
+  "gate": {
+   "ran": false,
+   "refused": true,
+   "lane": "refused",
+   "waited_ms": 2390
+  },
+  "shows": "a refusal is a named record, never a silence: the tree refusal names the reason and the recovery, the run falls back to a disposable clone, and a gate lane that grants no slot is terminal (exit 6, gate.ran=false) rather than a silent unslotted gate"
+ },
+ "why_not": {
+  "clean_pair": "A slotted cold/warm pair needs a gate-lane slot twice. The lane held 1 of 1 with a queue that ranged from 2 to 4 deep for the whole window (status quoted above); my queued request #151 sat at position 4 for 10 minutes and was cancelled to free the queue, and a later merge-lane attempt (#159) reached position 2 before this run was written up.",
+  "the_waiter_cost": "Independently of my runs: a gate run without a slot pays the nested fixture's lane wait INSIDE itself (722 s measured above), which is the same 12-minute class of stall the owner saw in sibling lanes."
+ }
+}
