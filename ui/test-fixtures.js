@@ -130,15 +130,25 @@ window.__fixtures = {
   me: { user: { id: "master", name: "master" }, role: "master" },
   // What the node says about right now. The window asks this before believing a run is over, so a
   // notice can be taken down when the thread is settled - and a run that completed is not "unfinished".
-  health: { current: null, operations: [], ok: true, queue: 0, stalled_ms: 0, worker: "alive" },
+  health: { current: null, operations: [], ok: true, queue: 0, stalled_ms: 0, worker: "alive",
+    // The node's own subagent view, which the orchestrator shows verbatim beside the rows: the local
+    // runtime's live counts and what it has settled. Shaped like /health (rust/wa-host/src/serve.rs).
+    subagents: { running: 2, queued: 1, active: 3 },
+    subagents_detail: { running: 2, queued: 1, active: 3, recovery_error: null,
+      settled: { cancelled: 1, completed: 4, failed: 1, unknown: 0 } } },
   // `POST /runs` is the node-side cancel/status route. Keep an explicit acknowledgment in the
   // fixture so Stop must prove the node accepted cancellation before changing its UI state.
   runs: { ok: true, conversation: "fixture", runs: [], cancelled: false },
   runsCancelRefuse: false,
   subagents: {subagents:[{subagent_id:'child-a',session_id:'child-session-a',parent_session_id:'aaaaaaaa-0000-0000-0000-000000000001',
-    profile:'explore',prompt:'<img src=x onerror=alert(1)> investigate A',state:'running',settled:false},
+    profile:'explore',execution_node:'local',title:'investigate A',prompt:'<img src=x onerror=alert(1)> investigate A',state:'running',settled:false},
     {subagent_id:'child-b',session_id:'child-session-b',parent_session_id:'aaaaaaaa-0000-0000-0000-000000000001',
-    profile:'explore',prompt:'investigate B',state:'cancelled',settled:true}]},
+    profile:'explore',title:'investigate B',prompt:'investigate B',state:'cancelled',settled:true}]},
+  // The dispatcher's own view of the fleet: the placement policy plus one row per machine, so a
+  // child's `execution_node` can be shown as the peer's *name* rather than its 32-hex id.
+  fleet: {policy:{enabled:false,nodes:[]},nodes:[
+    {id:'aaaaaaaa-1111-2222-3333-444444444444',node_id:'aaaaaaaa-1111-2222-3333-444444444444',name:'foundation',kind:'host',local_node:true,online:true},
+    {id:'bbbbbbbb-5555-6666-7777-888888888888',node_id:'bbbbbbbb-5555-6666-7777-888888888888',name:'openclaw',kind:'peer',local_node:false,online:true}]},
   taskProfiles:{profiles:[{id:'explore',description:'Read-only investigation',available:true}]},
   'session/fork':{ok:true,session_id:'fork-fixture',workspace:{state:'allocated'}},
   // `POST /operation` with `action:'read'`: the running operation's output page. The progress
@@ -294,6 +304,7 @@ window.fetch = function (input, init) {
     if (request.action==='start' && window.__holdTaskStart) return new Promise(resolve=>{window.__releaseTaskStart=()=>resolve({ok:true,status:200,json:()=>Promise.resolve({subagent_id:'new-child',state:'queued'})});});
     const value=request.action==='steer_session' || request.action==='steer' ? {id:'steering-fixture',state:'queued'} : request.action==='profiles' ? window.__fixtures.taskProfiles :
       request.action==='list' ? window.__fixtures.subagents :
+      request.action==='fleet' ? window.__fixtures.fleet :
       request.action==='result' ? {subagent_id:request.subagent_id,state:'completed',settled:true,result:{text:'verified fixture result'}} :
       {subagent_id:request.subagent_id || 'new-child',state:'accepted',settled:false};
     return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve(value)});

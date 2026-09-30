@@ -1948,7 +1948,7 @@ class WaAgentSession extends HTMLElement {
     const previous=this._task;
     this._task=value;
     this.querySelector('strong').textContent=agentTaskTitle(value);
-    this.querySelector('.agent-pane-head span').textContent=[value.profile,value.model,value.reasoning || 'reasoning unknown',value.execution_node || 'local',value.state].filter(Boolean).join(' · ');
+    this.querySelector('.agent-pane-head span').textContent=[value.profile,value.model,value.reasoning || 'reasoning unknown',value.node_name || value.execution_node || 'local',value.state].filter(Boolean).join(' · ');
     // The model strip is the shared one: the readout every shell has, plus a picker built from facts,
     // because a child runs with the model it was delegated rather than one this panel can choose.
     const model=[value.model || 'model unknown',value.reasoning || 'reasoning unknown'].join(' · ');
@@ -1957,7 +1957,7 @@ class WaAgentSession extends HTMLElement {
     this.shell.setModelPicker([{label:'model',value:value.model || 'model unknown'},
       {label:'reasoning',value:value.reasoning || 'reasoning unknown'},
       {label:'profile',value:value.profile || 'profile unknown'},
-      {label:'node',value:value.execution_node || 'local'},
+      {label:'node',value:value.node_name || value.execution_node || 'local'},
       {label:'state',value:value.state || 'unknown'}], value.model || 'model unknown');
     this.querySelector('[data-action="cancel"]').disabled=!!value.settled || value.state==='unknown';
     this.querySelector('[data-action="steer"]').disabled=!!value.settled || value.state==='unknown';
@@ -2094,7 +2094,10 @@ customElements.define('wa-agent-session',WaAgentSession);
 class WaOrchestrator extends HTMLElement {
   connectedCallback() {
     if(this.sidebar)return;
-    this.innerHTML='<header class="orchestrator-head"><strong>Orchestrator</strong><span class="orchestrator-status" role="status"></span><button type="button" data-action="refresh">Refresh</button><button type="button" data-action="close">Back to main chat</button></header><div class="orchestrator-body"><aside class="orchestrator-sidebar"><details class="placement"><summary>Node order and limits</summary><p>Fill in order. A limit of 0 keeps a device out of background execution.</p><label><input type="checkbox" class="placement-enabled"> Use ordered placement</label><div class="placement-nodes"></div><button type="button" data-action="save-placement">Save placement</button></details><nav aria-label="Agents"></nav></aside><main class="orchestrator-canvas"><p class="orchestrator-empty">Agents appear here when delegated from the main chat. Select a card to follow its conversation.</p></main></div>';
+    // The live list comes first because it is the answer to "what is running": the dispatch table
+    // below it holds the placement records, and a child with no placement record appears only here
+    // (see the note the host writes into it, and app.js's liveChildRows).
+    this.innerHTML='<header class="orchestrator-head"><strong>Orchestrator</strong><span class="orchestrator-status" role="status"></span><button type="button" data-action="refresh">Refresh</button><button type="button" data-action="close">Back to main chat</button></header><div class="orchestrator-body"><aside class="orchestrator-sidebar"><details class="live-children" open><summary>Live children</summary><p class="live-children-counts" role="status"></p><div class="live-children-list"></div><p class="live-children-foot"></p></details><details class="placement"><summary>Node order and limits</summary><p>Fill in order. A limit of 0 keeps a device out of background execution.</p><label><input type="checkbox" class="placement-enabled"> Use ordered placement</label><div class="placement-nodes"></div><button type="button" data-action="save-placement">Save placement</button></details><nav aria-label="Agents"></nav></aside><main class="orchestrator-canvas"><p class="orchestrator-empty">Agents appear here when delegated from the main chat. Select a card to follow its conversation.</p></main></div>';
     this.sidebar=this.querySelector('nav'); this.canvas=this.querySelector('main'); this.panes=new Map(); this.drafts=new Map();
     // Promoted conversations: each is a <wa-window> reading the same task as the pane it came from.
     this.windows=new Map();
@@ -2108,6 +2111,54 @@ class WaOrchestrator extends HTMLElement {
     });
   }
   set message(text) { this.connectedCallback(); this.querySelector('.orchestrator-status').textContent=text; }
+  // Every child the node reports as not settled, from either source, with the machine it runs on.
+  //
+  // `payload` is {rows, counts, note} from the host. The rows carry the state and the detail in the
+  // node's own words, the node's name (never a bare id), and the session id - which is the handle a
+  // reader needs, because a child with no dispatch record cannot be addressed by a subagent id at
+  // all. A row that came from a dispatch record is clickable, because that is a child this node can
+  // steer and cancel; a row that came from the ledger alone is not, and says so, rather than
+  // offering a control that would fail.
+  set live(payload) {
+    this.connectedCallback();
+    const rows=payload?.rows || [], counts=payload?.counts || '', note=payload?.note || '';
+    this.liveRows=rows;
+    this.querySelector('.live-children-counts').textContent=counts;
+    this.querySelector('.live-children-foot').textContent=note;
+    const list=this.querySelector('.live-children-list');
+    if(!rows.length) {
+      const empty=document.createElement('p'); empty.className='live-children-empty';
+      empty.textContent='No child is running or unfinished that this node reports.';
+      list.replaceChildren(empty);
+      return;
+    }
+    list.replaceChildren(...rows.map(row=>{
+      const element=document.createElement(row.task ? 'button' : 'div');
+      if(row.task) element.type='button';
+      element.className='live-child';
+      element.dataset.state=row.state || 'unknown';
+      element.dataset.session=row.session_id || '';
+      element.dataset.node=row.node || '';
+      element.dataset.source=row.source || '';
+      if(row.subagent_id)element.dataset.subagent=row.subagent_id;
+      const mission=document.createElement('span');mission.className='live-child-title';
+      mission.textContent=row.title || row.session_id || 'Untitled child';
+      mission.title=mission.textContent;
+      const head=document.createElement('span');head.className='live-child-head';
+      const state=document.createElement('span');state.className='live-child-state';state.textContent=row.state || 'unknown';
+      const node=document.createElement('span');node.className='live-child-node';
+      node.textContent=row.node_name || row.node || 'node unknown';
+      node.title=(row.node_peer ? 'peer' : 'local')+' · '+row.node_source;
+      head.append(state,node);
+      const id=document.createElement('span');id.className='live-child-id';id.textContent=row.session_id || 'no session id';
+      id.title='session id';
+      element.append(head,mission,id);
+      if(row.detail) { const detail=document.createElement('span');detail.className='live-child-detail';detail.textContent=row.detail; element.append(detail); }
+      element.setAttribute('aria-label',`${mission.textContent} · ${state.textContent} on ${node.textContent} · ${id.textContent}`);
+      if(row.task) element.addEventListener('click',()=>this.pin(row.task));
+      return element;
+    }));
+  }
   set data(tasks) {
     this.connectedCallback();
     // Follow-up tasks share a session. One card per conversation, newest run.
@@ -2139,7 +2190,15 @@ class WaOrchestrator extends HTMLElement {
     });
     this.sidebar.replaceChildren(...cards);
   }
+  // A pane must say which machine it is reading, by name. The task travels unchanged apart from that
+  // one display field, so nothing downstream (steer, cancel, the model strip) sees a different task.
+  named(task) {
+    if(!task || !this.nodeNames) return task;
+    const name=this.nodeNames.get(task.execution_node || 'local');
+    return name ? {...task,node_name:name} : task;
+  }
   pin(task) {
+    task=this.named(task);
     const existing=[...this.panes.values()].find(pane=>pane.task.subagent_id===task.subagent_id ||
       (task.session_id && pane.task.session_id===task.session_id && pane.task.execution_node===task.execution_node));
     if(existing) { existing.input.focus(); return existing; }
@@ -2168,7 +2227,7 @@ class WaOrchestrator extends HTMLElement {
     promoted.dataset.key=key;
     promoted.promoted=true;
     frame.append(promoted);
-    if(pane.task)promoted.task=pane.task;
+    if(pane.task)promoted.task=this.named(pane.task);
     frame.title=agentTaskTitle(pane.task);
     frame.open=true;
     frame.addEventListener('close',()=>{
@@ -2199,6 +2258,10 @@ class WaOrchestrator extends HTMLElement {
   configure(fleet) {
     if(this.configured)return;
     this.configured=true; this.querySelector('.placement-enabled').checked=!!fleet.policy?.enabled;
+    // The machine a child runs on is a name, not an id: a peer's 32-hex id told a reader nothing.
+    // Kept here so a pane that this panel opens can name its node too.
+    this.nodeNames=new Map([['local',(fleet.nodes||[]).find(node=>node.local_node)?.name || 'local']]);
+    for(const node of fleet.nodes || []) { this.nodeNames.set(node.node_id || node.id,node.name); if(node.id)this.nodeNames.set(node.id,node.name); }
     const selected=fleet.policy?.nodes || [];
     const nodes=selected.map(item=>({...item,name:fleet.nodes?.find(n=>n.node_id===item.node)?.name || item.node}));
     for(const node of fleet.nodes || []) {

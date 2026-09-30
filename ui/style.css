@@ -30,6 +30,25 @@ wa-orchestrator { display:flex; flex-direction:column; width:100%; height:100%; 
 .orchestrator-body { display:flex; flex:1; min-height:0; }
 .orchestrator-sidebar { width:250px; min-width:200px; max-width:40%; overflow:auto; resize:horizontal; border-right:1px solid var(--line); padding:var(--space); }
 .orchestrator-sidebar nav { display:flex; flex-direction:column; gap:var(--gap); }
+/* The live list: what is running, by machine. A row is compact on purpose - the sidebar has to hold
+   several of them next to the dispatch cards, and a reader scans the state, the node and the id. */
+.live-children { padding:var(--space); margin-bottom:var(--space); }
+.live-children summary { cursor:pointer; font-weight:600; }
+.live-children-counts { margin:var(--space) 0 0; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+.live-children-list { display:flex; flex-direction:column; gap:var(--gap); margin-top:var(--space); }
+.live-child { display:flex; flex-direction:column; gap:2px; width:100%; min-width:0; text-align:left; padding:var(--space); border:1px solid var(--line); border-left:3px solid var(--muted); border-radius:var(--radius-sm); background:var(--panel); color:var(--text); font-size:12px; }
+.live-child-head { display:flex; align-items:baseline; gap:var(--gap); min-width:0; }
+.live-child-state { flex:none; text-transform:capitalize; font-weight:600; }
+.live-child-node { flex:1; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; text-align:right; color:var(--muted); }
+.live-child-title { display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.live-child-id, .live-child-detail { display:block; color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; overflow-wrap:anywhere; }
+.live-child[data-state="running"], .live-child[data-state="accepted"] { border-left-color:var(--ok); }
+.live-child[data-state="queued"], .live-child[data-state="placing"] { border-left-color:var(--warn); }
+.live-child[data-state="unfinished"] { border-left-color:#f0a; }
+.live-child[data-state="unknown"], .live-child[data-state="failed"] { border-left-color:#f77; }
+button.live-child:hover, button.live-child:focus-visible { background:var(--panel-2); border-color:var(--accent); }
+.live-children-empty { margin:0; color:var(--muted); font-size:12px; }
+.live-children-foot { margin:var(--space) 0 0; color:var(--muted); font-size:11px; }
 .agent-card { display:flex; flex-direction:column; gap:0; width:100%; min-width:0; text-align:left; padding:var(--space); border:1px solid var(--line); border-left:3px solid var(--muted); border-radius:var(--radius-sm); background:var(--panel); color:var(--text); }
 .agent-card-mission { display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-weight:600; }
 .agent-card-details { display:flex; align-items:center; gap:var(--gap); min-width:0; color:var(--muted); font-size:12px; }

@@ -4015,13 +4015,96 @@ function saveOrchestratorLayout() {
   const panes=[...orchestratorPanel.panes.values()].map(pane=>({id:pane.task.subagent_id,draft:pane.input.value}));
   try { localStorage.setItem('wa-orchestrator-layout:'+session,JSON.stringify({panes,drafts:[...orchestratorPanel.drafts]})); } catch(error) { orchestratorPanel.message='Layout could not be saved: '+error.message; }
 }
+// A read this view can live without. It hands back the error instead of throwing, because one
+// unavailable source must not take the whole panel down - and the view then says which part it could
+// not read, rather than showing a short list that reads as "nothing is running".
+async function orchestratorRead(path) {
+  try {
+    const response=await apiFetch(path,{headers:apiHeaders()});
+    const value=await response.json();
+    if(!response.ok || value.error) throw new Error(value.detail || value.error || `HTTP ${response.status}`);
+    return {value};
+  } catch(error) { return {error:path+': '+error.message}; }
+}
+// The orchestrator lists children, not dispatches.
+//
+// A dispatch row is a placement: it exists because the dispatcher sent a child somewhere, and it
+// carries the destination and the state. It is not the whole truth about what is running. A child
+// started outside placement has no row there at all - it exists only as a session with a worktree -
+// and a child the dispatcher has settled drops off the list while its session is still unfinished.
+// Either way the child is invisible, and a child you cannot see is one you cannot cancel or reach.
+//
+// So a row is built from one of two records, and says which: the dispatcher's own live rows
+// (`settled: false`), or this node's session ledger (`state: "unfinished"` on a child session, the
+// node's own statement that the thread still has work). Nothing is inferred. A row exists only
+// because one of those records says the child is not settled, its state is the word the node used,
+// and its detail is the node's own detail string (which carries its own age - "2h ago" is how a
+// thread abandoned hours ago is told from one running now, without this view inventing a threshold).
+const LOCAL_NODE='local';
+function namedNode(nodes, id) {
+  if(!id || id===LOCAL_NODE) return nodes.find(node=>node.local_node) || null;
+  return nodes.find(node=>node.id===id || node.node_id===id) || null;
+}
+function subagentCounts(localName, health) {
+  const counts=health && health.subagents;
+  if(!counts) return localName+': the node did not report its subagent counts';
+  const settled=(health.subagents_detail && health.subagents_detail.settled) || {};
+  const rest=Object.keys(settled).sort().map(name=>settled[name]+' '+name);
+  return localName+': '+counts.running+' running · '+counts.queued+' queued · '+counts.active+' active'
+    +(rest.length ? ' · settled: '+rest.join(', ') : '');
+}
+function liveChildRows({sessions=[], dispatches=[], fleet={}, health={}, errors=[]} = {}) {
+  const nodes=(fleet.nodes || []).filter(node=>node.kind!=='client');
+  const localName=(nodes.find(node=>node.local_node) || {}).name || 'this node';
+  const byId=new Map(sessions.map(session=>[session.id,session]));
+  const claimed=new Set();
+  const rows=[];
+  for(const task of dispatches) {
+    if(task.settled) continue; // a settled dispatch is history, not a running child
+    const session=byId.get(task.session_id);
+    const id=task.execution_node || LOCAL_NODE;
+    const node=namedNode(nodes,id);
+    claimed.add(task.session_id);
+    rows.push({key:'dispatch:'+task.subagent_id,source:'dispatch',task,
+      subagent_id:task.subagent_id || '',session_id:task.session_id || '',
+      title:task.title || (session && session.title) || task.prompt || 'Untitled child',
+      state:task.state || 'unknown',detail:(session && session.state_detail) || '',
+      node:id,node_name:node ? node.name : id,node_peer:node ? !node.local_node : id!==LOCAL_NODE,
+      node_source:node ? 'the machine the dispatcher sent this child to'
+        : 'the dispatch record names a machine this node does not know'});
+  }
+  for(const session of sessions) {
+    if(claimed.has(session.id) || session.state!=='unfinished') continue;
+    const child=!!session.parent_session_id || String(session.id).indexOf('child:')===0 || !!session.worktree;
+    if(!child) continue;
+    rows.push({key:'session:'+session.id,source:'session',task:null,subagent_id:'',session_id:session.id,
+      title:session.title || session.id,state:session.state,detail:session.state_detail || '',
+      node:LOCAL_NODE,node_name:localName,node_peer:false,node_online:true,
+      node_source:'no dispatch record: read from the ledger of the node that holds this session'});
+  }
+  const peers=rows.filter(row=>row.node_peer).length;
+  const note=[peers ? peers+' row(s) are on another node: this window shows the dispatcher\'s record of them, because a peer\'s own live children are not reachable from here.'
+    : 'A peer\'s own live children are not reachable from here.'];
+  note.push('A row with a dispatch record names the machine the dispatcher chose; a row with no record is read from the ledger of the node that holds it.');
+  if(errors.length) note.push('Not everything could be read: '+errors.join('; ')+'.');
+  return {rows,counts:subagentCounts(localName,health),note:note.join(' ')};
+}
+
 async function refreshOrchestrator() {
   if(!orchestratorPanel || orchestratorPolling)return;
   orchestratorPolling=true;
   try {
-    if(!orchestratorPanel.configured)orchestratorPanel.configure(await orchestratorRequest({action:'fleet'}));
+    const fleet=await orchestratorRequest({action:'fleet'});
+    if(!orchestratorPanel.configured)orchestratorPanel.configure(fleet);
     const list=await orchestratorRequest({action:'list'});
     orchestratorPanel.data=list.subagents || [];
+    // The dispatches are not the whole truth about what is running: read the session ledger and the
+    // node's own subagent view too, and hand the panel every child with the source of each fact.
+    const [sessions,health]=await Promise.all([orchestratorRead('sessions'),orchestratorRead('health')]);
+    const live=liveChildRows({sessions:(sessions.value && sessions.value.sessions) || [],
+      dispatches:list.subagents || [],fleet,health:health.value || {},
+      errors:[sessions.error,health.error].filter(Boolean)});
+    orchestratorPanel.live=live;
     if(!orchestratorPanel.restored) {
       orchestratorPanel.restored=true;
       let saved={};try { saved=JSON.parse(localStorage.getItem('wa-orchestrator-layout:'+session) || '{}'); } catch(error) { /* layout only */ }
@@ -4034,7 +4117,7 @@ async function refreshOrchestrator() {
       orchestratorPanel.restoring=false;
     }
     for(const pane of orchestratorPanel.allPanes()) await refreshAgentPane(pane);
-    orchestratorPanel.message=`${orchestratorPanel.tasks.length} agent sessions · closing this window keeps work running`;
+    orchestratorPanel.message=`${live.rows.length} live child(ren) · ${orchestratorPanel.tasks.length} dispatch record(s) · closing this window keeps work running`;
   } catch(error) { orchestratorPanel.message='Orchestration unavailable: '+error.message; }
   finally {
     orchestratorPolling=false;
