@@ -1,0 +1,172 @@
+== cleanup of the review's scratch (all under C:/Users/Victor/AppData/Local/Temp/rev4e) ==
+before: 9.7M in /tmp/rev4e; 20 entries
+after : ls: cannot access '/tmp/rev4e': No such file or directory (no such directory = gone)
+
+-- no worktree of mine is left registered --
+  C:/Users/Victor/orca/projects/wasm-agent                                                                         da8dc89 [main]
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-2026-09-26T10-59-16-132Z/worktrees/control-1                bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-2026-09-26T10-59-16-132Z/worktrees/graph-first-1            bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-2026-09-26T10-59-16-132Z/worktrees/source-first-1           bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-2026-09-26T11-28-02-932Z/worktrees/control-1                bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-2026-09-26T11-28-02-932Z/worktrees/graph-first-1            bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-2026-09-26T11-28-02-932Z/worktrees/source-first-1           bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-2026-09-26T11-31-43-136Z/worktrees/control-1                bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-2026-09-26T11-31-43-136Z/worktrees/graph-first-1            bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-2026-09-26T11-31-43-136Z/worktrees/source-first-1           bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-2026-09-26T11-38-37-618Z/worktrees/control-1                bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-2026-09-26T11-38-37-618Z/worktrees/graph-first-1            bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-2026-09-26T11-38-37-618Z/worktrees/source-first-1           bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-codex-interrupt-20260925/worktrees/control-1                bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-codex-interrupt-20260925/worktrees/graph-first-1            bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-codex-interrupt-20260925/worktrees/source-first-1           bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-codex-mock-20260925/worktrees/control-1                     bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-codex-mock-20260925/worktrees/graph-first-1                 bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-codex-mock-20260925/worktrees/source-first-1                bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-pilot-20260925/worktrees/control-1                          bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-pilot-20260925/worktrees/graph-first-1                      bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-pilot-20260925/worktrees/source-first-1                     bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-pilot2-20260925/worktrees/control-1                         bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-pilot2-20260925/worktrees/graph-first-1                     bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/benchmarks/edit-workflow-pilot2-20260925/worktrees/source-first-1                    bad2cdc (detached HEAD)
+  C:/Users/Victor/.wasm-agent/recovery-integration-df71                                                            71537dd [change/recovery-integration-df71]
+  C:/Users/Victor/.wasm-agent/verify-1f6d20b                                                                       1f6d20b (detached HEAD)
+  C:/Users/Victor/.wasm-agent/wa-verify-ccb4616                                                                    ccb4616 (detached HEAD)
+  C:/Users/Victor/.wasm-agent/wa-worktree-07eb89f2-2058-4b16-9f0b-be52ac0eb3d4                                     0567065 [change/wa-session-07eb89f2-2058-4b16-9f0b-be52ac0eb3d4]
+  C:/Users/Victor/.wasm-agent/wa-worktree-08cb06ff-e09a-4fdc-9679-458189ae74e1                                     380e168 [change/wa-session-08cb06ff-e09a-4fdc-9679-458189ae74e1]
+  C:/Users/Victor/.wasm-agent/wa-worktree-0b04866a-311c-4f75-981e-0f8b7eab9d6f                                     24f5bcf [change/wa-session-0b04866a-311c-4f75-981e-0f8b7eab9d6f]
+  C:/Users/Victor/.wasm-agent/wa-worktree-14d57d47-9cde-44d6-827c-043ba21760c5                                     28c233d [change/wa-session-14d57d47-9cde-44d6-827c-043ba21760c5]
+  C:/Users/Victor/.wasm-agent/wa-worktree-1ba5218b-7d56-494a-a6e3-20d0717806c3                                     0cee3aa [change/wa-session-1ba5218b-7d56-494a-a6e3-20d0717806c3]
+  C:/Users/Victor/.wasm-agent/wa-worktree-1faec398-13e0-432d-b62c-e1184089bed6                                     7180d68 [change/wa-session-1faec398-13e0-432d-b62c-e1184089bed6]
+  C:/Users/Victor/.wasm-agent/wa-worktree-1fe9f8cc-acba-40ff-90d2-3c5049831da2                                     0b38927 [change/wa-session-1fe9f8cc-acba-40ff-90d2-3c5049831da2]
+  C:/Users/Victor/.wasm-agent/wa-worktree-2e124691-ec49-4669-99b0-a9e42e0df757                                     c696a9b [change/wa-session-2e124691-ec49-4669-99b0-a9e42e0df757]
+  C:/Users/Victor/.wasm-agent/wa-worktree-317cca79-bef4-4608-9bbc-04dedad6853c                                     d789b52 [change/wa-session-317cca79-bef4-4608-9bbc-04dedad6853c]
+  C:/Users/Victor/.wasm-agent/wa-worktree-31b73acd-c94a-4a3f-8124-6cdbf7049189                                     71537dd [change/wa-session-31b73acd-c94a-4a3f-8124-6cdbf7049189]
+  C:/Users/Victor/.wasm-agent/wa-worktree-33b4e818-0278-47a1-823a-b756517ec787                                     0e8d811 [change/wa-session-33b4e818-0278-47a1-823a-b756517ec787]
+  C:/Users/Victor/.wasm-agent/wa-worktree-349bbcb6-21ed-489b-9e5b-3321678f8446                                     1e20301 [change/wa-session-349bbcb6-21ed-489b-9e5b-3321678f8446]
+  C:/Users/Victor/.wasm-agent/wa-worktree-36f9132f-5e51-4a26-abbc-fd2fad84f0ec                                     4c24323 [change/wa-session-36f9132f-5e51-4a26-abbc-fd2fad84f0ec]
+  C:/Users/Victor/.wasm-agent/wa-worktree-3966ceb8-4738-4dee-bd9b-63e459cde90c                                     97b08b6 [change/wa-session-3966ceb8-4738-4dee-bd9b-63e459cde90c]
+  C:/Users/Victor/.wasm-agent/wa-worktree-39b16b02-30fb-4176-b13e-4000332bc8b2                                     747449e [change/wa-session-39b16b02-30fb-4176-b13e-4000332bc8b2]
+  C:/Users/Victor/.wasm-agent/wa-worktree-3e0011d1-da88-4658-91a7-ed673ba9f01c                                     03117ed [change/wa-session-3e0011d1-da88-4658-91a7-ed673ba9f01c]
+  C:/Users/Victor/.wasm-agent/wa-worktree-40fb36ff-c797-4b2f-ac46-bf49abea0b9c                                     55293aa [change/wa-session-40fb36ff-c797-4b2f-ac46-bf49abea0b9c]
+  C:/Users/Victor/.wasm-agent/wa-worktree-457ab1b0-2a92-478e-86f8-dfd7c514e7a9                                     0cee3aa [change/wa-session-457ab1b0-2a92-478e-86f8-dfd7c514e7a9]
+  C:/Users/Victor/.wasm-agent/wa-worktree-4858d591-0708-4750-887c-7f3c195da92c                                     c860b39 [change/wa-session-4858d591-0708-4750-887c-7f3c195da92c]
+  C:/Users/Victor/.wasm-agent/wa-worktree-490e6d15-8f6c-413a-8fce-8e1a6251e1d4                                     71537dd [change/wa-session-490e6d15-8f6c-413a-8fce-8e1a6251e1d4]
+  C:/Users/Victor/.wasm-agent/wa-worktree-4e064712-e1a6-47c5-9911-ce1cabbcac12                                     380e168 (detached HEAD)
+  C:/Users/Victor/.wasm-agent/wa-worktree-581f7975-6499-4275-b625-a195ef9cc521                                     9e09a97 [change/wa-session-581f7975-6499-4275-b625-a195ef9cc521]
+  C:/Users/Victor/.wasm-agent/wa-worktree-58659efc-c886-4733-80e8-d2d8a62ef9f7                                     04d2696 [change/wa-session-58659efc-c886-4733-80e8-d2d8a62ef9f7]
+  C:/Users/Victor/.wasm-agent/wa-worktree-5ca35997-0a16-4c9f-8bac-92846c82e854                                     0567065 [change/wa-session-5ca35997-0a16-4c9f-8bac-92846c82e854]
+  C:/Users/Victor/.wasm-agent/wa-worktree-663603e1-9208-49d7-b9c5-0306b16d248f                                     0567065 [change/wa-session-663603e1-9208-49d7-b9c5-0306b16d248f]
+  C:/Users/Victor/.wasm-agent/wa-worktree-6a1133c7-990c-4ca3-84db-442339ab2727                                     71537dd [change/wa-session-6a1133c7-990c-4ca3-84db-442339ab2727]
+  C:/Users/Victor/.wasm-agent/wa-worktree-6ad52e99-dcf4-4427-af86-54f1a291758f                                     4c24323 [change/wa-session-6ad52e99-dcf4-4427-af86-54f1a291758f]
+  C:/Users/Victor/.wasm-agent/wa-worktree-74e2b2ec-d818-4063-9683-d02b6495a682                                     71537dd [change/wa-session-74e2b2ec-d818-4063-9683-d02b6495a682]
+  C:/Users/Victor/.wasm-agent/wa-worktree-7af5f311-54e8-464b-91d4-bd60872bc58c                                     6bb3149 [change/wa-session-7af5f311-54e8-464b-91d4-bd60872bc58c]
+  C:/Users/Victor/.wasm-agent/wa-worktree-7bacf15e-5b95-4c98-8824-6ff2dd191445                                     2b24563 [change/wa-session-7bacf15e-5b95-4c98-8824-6ff2dd191445]
+  C:/Users/Victor/.wasm-agent/wa-worktree-7da3d034-75a8-48e9-bd71-176555039d06                                     1fe6018 [change/wa-session-7da3d034-75a8-48e9-bd71-176555039d06]
+  C:/Users/Victor/.wasm-agent/wa-worktree-7db14e40-0209-4938-a36d-cea73bb8c6d1                                     f6284aa [change/wa-session-7db14e40-0209-4938-a36d-cea73bb8c6d1]
+  C:/Users/Victor/.wasm-agent/wa-worktree-7e0e7b76-e750-4c8a-a5cb-6d5c2b284cd3                                     71537dd [change/wa-session-7e0e7b76-e750-4c8a-a5cb-6d5c2b284cd3]
+  C:/Users/Victor/.wasm-agent/wa-worktree-7e2f80fa-8e86-4174-93b8-9b7eb2f2de2f                                     0567065 [change/wa-session-7e2f80fa-8e86-4174-93b8-9b7eb2f2de2f]
+  C:/Users/Victor/.wasm-agent/wa-worktree-80835615-b910-4b4e-8e1e-804bf8cfa22e                                     1fe6018 [change/wa-session-80835615-b910-4b4e-8e1e-804bf8cfa22e]
+  C:/Users/Victor/.wasm-agent/wa-worktree-8cea45df-0954-4cd1-87ad-776ce3e767d4                                     4c24323 [change/wa-session-8cea45df-0954-4cd1-87ad-776ce3e767d4]
+  C:/Users/Victor/.wasm-agent/wa-worktree-90fa28b2-77bc-42cf-afd1-afbd533c7fa2                                     5588b7b [change/wa-session-90fa28b2-77bc-42cf-afd1-afbd533c7fa2]
+  C:/Users/Victor/.wasm-agent/wa-worktree-91ce3725-3c1d-4034-9b1d-989343344bee                                     7e52fb2 [change/wa-session-91ce3725-3c1d-4034-9b1d-989343344bee]
+  C:/Users/Victor/.wasm-agent/wa-worktree-920d848d-8d7c-488d-89ea-215d74306c0c                                     0b2fb63 [change/wa-session-920d848d-8d7c-488d-89ea-215d74306c0c]
+  C:/Users/Victor/.wasm-agent/wa-worktree-9353c734-e269-49b1-98d3-2c24b0a579fd                                     71537dd [change/wa-session-9353c734-e269-49b1-98d3-2c24b0a579fd]
+  C:/Users/Victor/.wasm-agent/wa-worktree-95e62f72-1bd9-4ff7-b8b5-fc80416d0730                                     5e45bdf [change/wa-session-95e62f72-1bd9-4ff7-b8b5-fc80416d0730]
+  C:/Users/Victor/.wasm-agent/wa-worktree-9dd8bb4c-5363-49de-8ab4-9b469bf9caf9                                     0567065 [change/wa-session-9dd8bb4c-5363-49de-8ab4-9b469bf9caf9]
+  C:/Users/Victor/.wasm-agent/wa-worktree-9eccaa66-a6ad-4ff0-a01d-0d1a31db88a1                                     5d93838 [change/wa-session-9eccaa66-a6ad-4ff0-a01d-0d1a31db88a1]
+  C:/Users/Victor/.wasm-agent/wa-worktree-a1b38e98-9e53-4993-bb37-6528d2fc2c53                                     dcf4965 [change/wa-session-a1b38e98-9e53-4993-bb37-6528d2fc2c53]
+  C:/Users/Victor/.wasm-agent/wa-worktree-ad7c23de-235d-4fb4-b8e4-cf1e7ad880b2                                     0cee3aa [change/wa-session-ad7c23de-235d-4fb4-b8e4-cf1e7ad880b2]
+  C:/Users/Victor/.wasm-agent/wa-worktree-b6c15357-f3ea-4e7a-b876-9a4bc21ee232                                     0567065 [change/wa-session-b6c15357-f3ea-4e7a-b876-9a4bc21ee232]
+  C:/Users/Victor/.wasm-agent/wa-worktree-b733b21e-c748-44e9-995d-60dc8e079a33                                     b03e8be [change/wa-session-b733b21e-c748-44e9-995d-60dc8e079a33]
+  C:/Users/Victor/.wasm-agent/wa-worktree-b7d7c59d-21c0-4209-bc58-1681f212a79b                                     58176ad [change/wa-session-b7d7c59d-21c0-4209-bc58-1681f212a79b]
+  C:/Users/Victor/.wasm-agent/wa-worktree-b808ebad-7a0d-42d2-8f42-ec1d0be898aa                                     8b29f8e [change/wa-session-b808ebad-7a0d-42d2-8f42-ec1d0be898aa]
+  C:/Users/Victor/.wasm-agent/wa-worktree-ba98ffd4-5627-4c42-9f29-7fa126beb7e3                                     0567065 [change/wa-session-ba98ffd4-5627-4c42-9f29-7fa126beb7e3]
+  C:/Users/Victor/.wasm-agent/wa-worktree-bea2cc27-d070-48f6-9669-60cb4f86ee32                                     69f6b8e [change/wa-session-bea2cc27-d070-48f6-9669-60cb4f86ee32]
+  C:/Users/Victor/.wasm-agent/wa-worktree-c1176929-aa20-4dea-bd34-c0ee8320595f                                     0c08569 [change/wa-session-c1176929-aa20-4dea-bd34-c0ee8320595f]
+  C:/Users/Victor/.wasm-agent/wa-worktree-c1f9b78a-1218-48c1-b0d3-ae754e8aee7f                                     850739c [change/wa-session-c1f9b78a-1218-48c1-b0d3-ae754e8aee7f]
+  C:/Users/Victor/.wasm-agent/wa-worktree-c33ad36b-cb67-448b-b9ed-de234881f0d1                                     4813d9d [change/wa-session-c33ad36b-cb67-448b-b9ed-de234881f0d1]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch13557e49-7767-4831-9c0a-40d32e671790                        5e013be [change/wa-session-childdispatch13557e49-7767-4831-9c0a-40d32e671790]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch1a55bf45-e7cb-471c-97c6-ebe9fe417d98                        0b3b64a [change/wa-session-childdispatch1a55bf45-e7cb-471c-97c6-ebe9fe417d98]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch215b938a-26ac-405d-8d42-aa585e37ac62                        a256887 [change/wa-session-childdispatch215b938a-26ac-405d-8d42-aa585e37ac62]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch2ae38a56-f124-4b25-8732-cdeaf05f09d1                        f0ebab3 [change/wa-session-childdispatch2ae38a56-f124-4b25-8732-cdeaf05f09d1]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch3392ff10-bf3f-4b68-bb4a-3411ee5dec8a                        ac79d71 [change/wa-session-childdispatch3392ff10-bf3f-4b68-bb4a-3411ee5dec8a]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch372a3c45-4696-425e-b2ed-1280678a2018                        a8514de [change/wa-session-childdispatch372a3c45-4696-425e-b2ed-1280678a2018]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch389b8886-2cfb-45bc-be85-64f4357931f9                        a19c64b [change/wa-session-childdispatch389b8886-2cfb-45bc-be85-64f4357931f9]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch433655ea-8f17-459b-8f13-fc26b070c3d2                        c7e7206 [change/wa-session-childdispatch433655ea-8f17-459b-8f13-fc26b070c3d2]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch4e773dae-d31f-43db-8d08-59e0cf154ec9                        90766a9 [change/wa-session-childdispatch4e773dae-d31f-43db-8d08-59e0cf154ec9]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch503d0b8c-fcf0-42ca-a029-412571cd6e60                        b5fbf15 [change/wa-session-childdispatch503d0b8c-fcf0-42ca-a029-412571cd6e60]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch6b8a0fe5-c65d-4125-9799-7700ef6ff15b                        b707947 [change/wa-session-childdispatch6b8a0fe5-c65d-4125-9799-7700ef6ff15b]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch75e2cd68-4c39-4132-9b62-53c13bc4b32f                        320c0fc [change/wa-session-childdispatch75e2cd68-4c39-4132-9b62-53c13bc4b32f]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch8927b8ac-138e-4d50-a9c7-f78b046d11cb                        51c2f16 [change/wa-session-childdispatch8927b8ac-138e-4d50-a9c7-f78b046d11cb]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch8ad3ecc6-e2a6-4149-be78-635de95be93f                        a6e111d [change/wa-session-childdispatch8ad3ecc6-e2a6-4149-be78-635de95be93f]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch95d6189a-b98b-4d6e-bc45-f12e97ef35a5                        24fb23c [change/wa-session-childdispatch95d6189a-b98b-4d6e-bc45-f12e97ef35a5]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch9b9fe32b-dc1b-434b-bd16-2c1c7a1a9d86                        7314b89 [change/wa-session-childdispatch9b9fe32b-dc1b-434b-bd16-2c1c7a1a9d86]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch9c14d8c8-e100-45d8-9575-79cd8e85859a                        bf18bb9 [change/wa-session-childdispatch9c14d8c8-e100-45d8-9575-79cd8e85859a]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch9c3349b5-9c0a-4f8d-8543-d34121d331c6                        d7bb2d6 [change/wa-session-childdispatch9c3349b5-9c0a-4f8d-8543-d34121d331c6]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch9e5536f7-a544-4f39-ad9f-49f22b2e23ad                        ab827c8 [change/wa-session-childdispatch9e5536f7-a544-4f39-ad9f-49f22b2e23ad]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatchaf915180-d6da-4eb4-a505-b41a7a36a52f                        ea2f201 [change/wa-session-childdispatchaf915180-d6da-4eb4-a505-b41a7a36a52f]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatchc5606d25-1e49-452e-862c-9576c39081c7                        6de9fc0 [change/wa-session-childdispatchc5606d25-1e49-452e-862c-9576c39081c7]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatchc66e86ed-0184-40b7-b2db-d98b90d82e3d                        72530c5 [change/wa-session-childdispatchc66e86ed-0184-40b7-b2db-d98b90d82e3d]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatchcb6768dd-144f-436f-a95e-c3f50c54a2b7                        d612f6f [change/wa-session-childdispatchcb6768dd-144f-436f-a95e-c3f50c54a2b7]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatchcd206d1c-287c-46fa-919d-703ff645dc5e                        9b4adfa [change/wa-session-childdispatchcd206d1c-287c-46fa-919d-703ff645dc5e]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatchdb0ce06c-05ff-4f77-b4af-e1919e14e392                        3c5f7d8 [change/wa-session-childdispatchdb0ce06c-05ff-4f77-b4af-e1919e14e392]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatchdb0ce06c-05ff-4f77-b4af-e1919e14e392/integrate-frozen-batch da8dc89 [integrate/frozen-batch-20260930]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatche09a538a-ed62-478c-862d-bfe75d2ea5fa                        aef9b04 [change/wa-session-childdispatche09a538a-ed62-478c-862d-bfe75d2ea5fa]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatchea24f2e6-ad6d-4f52-92da-0c73a69c8930                        b99b0b6 [change/wa-session-childdispatchea24f2e6-ad6d-4f52-92da-0c73a69c8930]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatchf1b75bd4-4376-475d-a9c5-323c0159733d                        9f3e717 [change/wa-session-childdispatchf1b75bd4-4376-475d-a9c5-323c0159733d]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatchf4926cc3-0d16-4073-89c6-9791de7f134a                        72530c5 [change/wa-session-childdispatchf4926cc3-0d16-4073-89c6-9791de7f134a]
+  C:/Users/Victor/.wasm-agent/wa-worktree-childdispatchfdbfecc8-d5a7-4681-8eed-4d56490fa394                        c78ab73 [change/wa-session-childdispatchfdbfecc8-d5a7-4681-8eed-4d56490fa394]
+  C:/Users/Victor/.wasm-agent/wa-worktree-d162dcc1-26ad-4fe0-b71c-0a0ef9c7f27d                                     0b38927 [change/wa-session-d162dcc1-26ad-4fe0-b71c-0a0ef9c7f27d]
+  C:/Users/Victor/.wasm-agent/wa-worktree-d219ce62-786f-4c0b-a595-9d222c2cae85                                     0cee3aa [change/wa-session-d219ce62-786f-4c0b-a595-9d222c2cae85]
+  C:/Users/Victor/.wasm-agent/wa-worktree-e0116fcc-1d0e-429f-b5d5-3f5076e51c48                                     71537dd [change/wa-session-e0116fcc-1d0e-429f-b5d5-3f5076e51c48]
+  C:/Users/Victor/.wasm-agent/wa-worktree-e6bfc741-7cab-44ad-a42a-4b4d8cfc30de                                     ee15da2 [change/wa-session-e6bfc741-7cab-44ad-a42a-4b4d8cfc30de]
+  C:/Users/Victor/.wasm-agent/wa-worktree-e818c575-f7a6-447a-8938-a813527fefd1                                     f962844 [change/wa-session-e818c575-f7a6-447a-8938-a813527fefd1]
+  C:/Users/Victor/.wasm-agent/wa-worktree-e843b90f-c2c6-4bbf-ba07-83b380982438                                     8370795 [change/wa-session-e843b90f-c2c6-4bbf-ba07-83b380982438]
+  C:/Users/Victor/.wasm-agent/wa-worktree-e878e5ea-b729-4420-b85e-9fad256e8203                                     8fb40c4 [change/wa-session-e878e5ea-b729-4420-b85e-9fad256e8203]
+  C:/Users/Victor/.wasm-agent/wa-worktree-f65f4b4d-71ac-4f0c-9f2e-e9a44017f997                                     0b38927 [change/wa-session-f65f4b4d-71ac-4f0c-9f2e-e9a44017f997]
+  C:/Users/Victor/.wasm-agent/wa-worktree-f9f3f951-601c-41f5-9d0d-afea8df6ca6b                                     658ee77 [change/wa-session-f9f3f951-601c-41f5-9d0d-afea8df6ca6b]
+  C:/Users/Victor/.wasm-agent/wa-worktree-ff834d2c-3b48-4ee5-beae-fbb0083c70ef                                     71537dd [change/wa-session-ff834d2c-3b48-4ee5-beae-fbb0083c70ef]
+  C:/Users/Victor/orca/tmp-gate-eyes                                                                               5b4e722 (detached HEAD)
+  C:/Users/Victor/orca/tmp-gate-land2                                                                              878b60b (detached HEAD)
+  C:/Users/Victor/orca/tmp-gate-modules                                                                            f962844 (detached HEAD)
+  C:/Users/Victor/orca/tmp-gate-packet                                                                             ba5f82f (detached HEAD)
+  C:/Users/Victor/orca/tmp-gate-ui                                                                                 5dce037 (detached HEAD)
+  C:/Users/Victor/orca/tmp-wa-920d848d/tree                                                                        f269b97 (detached HEAD)
+  C:/Users/Victor/orca/workspaces/wasm-agent/bg-responsiveness-review                                              7e2ab2c [change/review-bg-responsiveness]
+  C:/Users/Victor/orca/workspaces/wasm-agent/branch-prune-policy                                                   a3958f4 [change/main-only-branch-invariant]
+  C:/Users/Victor/orca/workspaces/wasm-agent/change-client-claim                                                   330677b [change/client-claim-timeout]
+  C:/Users/Victor/orca/workspaces/wasm-agent/change-parallel-tools                                                 60e31a6 [change-parallel-tools]
+  C:/Users/Victor/orca/workspaces/wasm-agent/cli-terminal-fix                                                      fc5704f [cli-terminal-fix]
+  C:/Users/Victor/orca/workspaces/wasm-agent/codex                                                                 c5fd101 [change/orchestrator-workspace]
+  C:/Users/Victor/orca/workspaces/wasm-agent/Codex-2                                                               5f59561 [Codex-2]
+  C:/Users/Victor/orca/workspaces/wasm-agent/Codex-3                                                               da8dc89 [change/codex-root-workspace]
+  C:/Users/Victor/orca/workspaces/wasm-agent/Codex-4                                                               29f99cf [change/openai-commentary-phase]
+  C:/Users/Victor/orca/workspaces/wasm-agent/codex-admission-review                                                9485f95 [change/review-codex-delivery-state]
+  C:/Users/Victor/orca/workspaces/wasm-agent/codex-delivery-state                                                  b00f456 [change/codex-delivery-state]
+  C:/Users/Victor/orca/workspaces/wasm-agent/codex-frozen-pipeline                                                 3290d32 [change/codex-frozen-pipeline]
+  C:/Users/Victor/orca/workspaces/wasm-agent/codex-integration-prep                                                ab827c8 [codex-integration-prep]
+  C:/Users/Victor/orca/workspaces/wasm-agent/codex-multi-agent-ui                                                  afb1e85 [change/foundation-integration]
+  C:/Users/Victor/orca/workspaces/wasm-agent/generalson-2                                                          53607ae [change/generalson-openai-message-ids]
+  C:/Users/Victor/orca/workspaces/wasm-agent/merge-all-20260928                                                    3936ee0 [change/merge-all-20260928]
+  C:/Users/Victor/orca/workspaces/wasm-agent/ui-effective-timeout                                                  60e31a6 [ui-effective-timeout]
+  C:/Users/Victor/orca/workspaces/wasm-agent/wasm_cli                                                              8a6cc46 [wasm_cli]
+  C:/Users/Victor/orca/workspaces/wasm-agent/wasm_the_first                                                        97b08b6 [wasm_the_first]
+  (grep for rev4e: '0')
+
+-- no process of mine is left --
+  node.exe: 1
+  bash.exe: 19  (this shell counts itself)
+
+-- disk --
+C:/Program Files/Git   499987452 437456068  62531384      88% /
+
+== at the end of the review: which node.exe is running? ==
+81872  "C:\Program Files\nodejs\node.exe" scripts/merge-lane.mjs --repo C:/Users/Victor/orca/projects/wasm-agent --reuse-tree C:/Users/Victor/.wasm-agent/merge-lane-tree-landing --json C:/Users/Victor/.wasm-agent/merge-lane-landing-cold.json 9b4adfa1543001594454a5368b4c8c238ec3779e
+84092  "C:\Program Files\nodejs\node.exe" C:\Users\Victor\.wasm-agent\wa-worktree-childdispatchcd206d1c-287c-46fa-919d-703ff645dc5e\scripts\gate-lane.mjs acquire --cwd C:\Users\Victor\.wasm-agent\merge-lane-tree-landing --label "merge-lane 028380ac6d7d" --holder-pid 81872
+-- my scratch root is gone:
+ls: cannot access '/tmp/rev4e': No such file or directory
+-- cleanup head:
+== cleanup of the review's scratch (all under C:/Users/Victor/AppData/Local/Temp/rev4e) ==
+before: 9.7M in /tmp/rev4e; 20 entries
+after : ls: cannot access '/tmp/rev4e': No such file or directory (no such directory = gone)
+

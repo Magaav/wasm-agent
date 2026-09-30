@@ -207,12 +207,32 @@ Read: `docs/STATUS-disk-reclaim-temp-liveness.md` at `90766a96`. I falsified/con
 To stop one of my own holder processes early in the review I ran `taskkill //F //IM node.exe`, which kills
 **every** `node.exe` on the machine, not just mine. My own output was truncated by `tail -1`, so I can
 confirm only the pid it printed (`35760`), not the rest of what it killed. What I could establish
-afterwards: no `node.exe` remains; the gate lane reads `0 of 1 slot(s) held, 0 waiting` with `#167` as the
+immediately afterwards: `node.exe` count 0; the gate lane reads `0 of 1 slot(s) held, 0 waiting` with `#167` as the
 newest row and no dangling running row; and the live node's own processes (`wa-sentinel.exe`,
 `wa-window.exe`) are unaffected (the node does not run as `node.exe`). I cannot rule out that a sibling
 lane's `node.exe` died in that instant. Everything after that used `taskkill //F //PID <pid>` and `kill`
 on pids I started. `evidence/gate-lane-after.txt`. This is my error, and it is not evidence about the
 delivery.
+
+## What the repair kept, re-checked (the deferences that carry the incident's family)
+
+Aged 7 h, `--apply`, my own scratch temp root (`evidence/deferences.txt`): `wa-merge-lane-Aged01`,
+`wa-gate-home-Aged01`, `wa-lane-Aged01` and `wa-sentinel-Aged01` are **left**, each with its named
+reason (`another lane's retention rule: a merge-lane clone: scripts/merge-lane.mjs owns its retention`,
+`the gate's retained home: scripts/test.sh keeps it ...`, `never expired by rule: the sentinel watches
+this path while it runs`), an unknown family is `not matched to a known family (left alone)`, and the
+only removal is the stale `wa-subagent-test-Stale04` control. The deferences the earlier review found
+clean are unchanged — which is exactly why D1's open defect (item 3) still owns those two families.
+
+## Scratch and cleanup
+
+Everything I created lived under `C:/Users/Victor/AppData/Local/Temp/rev4e` (~9.7 MB peak, of which the
+eight log files shipped here are the only survivors) plus the detached worktree of the reviewed tip at
+`.../rev4e/tree`. Both are removed and the worktree is no longer registered:
+`git worktree list | grep -c rev4e` = **0**, `ls -d /tmp/rev4e` = no such directory, `node.exe` = 0 at that
+moment (one `node.exe` was running again by the time the cleanup note was written; its command line is
+recorded in `evidence/cleanup.txt` and it is not one of mine — my two leftovers, 51172 and 67128, were
+killed by pid while I worked). Disk free at the end: 62.5 GiB of 476.83 GiB. `evidence/cleanup.txt`.
 
 ## What I could NOT verify
 

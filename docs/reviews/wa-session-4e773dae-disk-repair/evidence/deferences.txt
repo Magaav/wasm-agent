@@ -1,0 +1,21 @@
+== --apply over D1's families, the sentinel, an unknown family and one stale control (all aged 7 h) ==
+1. bounded temp families (3 families named by this repository's scripts and present in C:/Users/Victor/AppData/Local/Temp/rev4e/runG/temp, of 123 names read)
+   expired: 1 entries, 1 B — removed (families, oldest first):
+     wa-subagent-test*  n=1  1 B  oldest=7h  minted by scripts/check-temp-retention.mjs  removed=1
+   live-process scan (the pid evidence): powershell Get-CimInstance Win32_Process, 266 processes
+   LEFT, in use or liveness unproven (evidence, not age): 0 entries
+   kept: 1 entries (fresh, in use, or never expired by rule) — named below
+     KEEP   wa-sentinel-Aged01  — never expired by rule: the sentinel watches this path while it runs
+   KEEP   wa-gate-home*  n=1  — another lane's retention rule: the gate's retained home: scripts/test.sh keeps it for diagnostics, and the lane that bounds gate homes owns that rule
+   KEEP   wa-merge-lane*  n=1  — another lane's retention rule: a merge-lane clone: scripts/merge-lane.mjs owns its retention
+   KEEP   wa-lane-*  n=1  — another lane's retention rule: a merge/gate lane scratch tree: its lane owns its retention
+   not matched to a known family (left alone): 1 entries
+
+2. rust/target in ended sessions' worktrees
+== filesystem truth ==
+  wa-merge-lane-Aged01                 LEFT
+  wa-gate-home-Aged01                  LEFT
+  wa-lane-Aged01                       LEFT
+  wa-sentinel-Aged01                   LEFT
+  wa-not-a-tracked-family-SomeId       LEFT
+  wa-subagent-test-Stale04             REMOVED
