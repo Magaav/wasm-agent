@@ -411,10 +411,14 @@ ok(v.next:find('commit or stash', 1, true), 'the refusal must say what to do: ' 
 -- on the old commit, reported as queued by a path that never asked whether a watcher was running.
 -- The sentinel state is a directory of this test's own, so the machine's real pid file and request box
 -- are neither read nor written here.
-v = update.verdict({ install = '/i', tree = '/t', sentinel_present = true, sentinel_running = false })
+local sentinel = '/i/' .. update.sentinel_name()
+v = update.verdict({ install = '/i', tree = '/t', sentinel = sentinel, sentinel_present = true, sentinel_running = false })
 ok(v.ok == false and v.error == 'no_watcher', 'no watcher must be a refusal, got ' .. tostring(v.error))
 ok(not v.queued, 'and it must not read as queued')
-ok(v.next and v.next:find('wasm-agent-sentinel', 1, true), 'the refusal must name how to start one: ' .. tostring(v.next))
+ok(v.next and v.next:find(sentinel .. ' start', 1, true), 'the refusal must name how to start one: ' .. tostring(v.next))
+local windows = update.binary_name() == 'wa.exe'
+ok((v.next:find('schtasks /Run /TN wasm-agent-sentinel', 1, true) ~= nil) == windows,
+  'only Windows may suggest its registered task: ' .. tostring(v.next))
 local stopped = update.verdict({ install = '/i', tree = '/t', sentinel_present = true, sentinel_running = false,
   sentinel_stopped = true, stop_file = '/state/stop' })
 ok(stopped.error == 'sentinel_stopped', 'a stop file must be reported as the stop it is, got ' .. tostring(stopped.error))
