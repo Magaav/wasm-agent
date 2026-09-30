@@ -86,6 +86,14 @@ $harness = @'
     check(stalePending === 0 && !window.__toolTickerActive(),
       "a repainted tool must not invent a new 300-second execution clock, saw " + stalePending +
       " pending line(s) and ticker=" + window.__toolTickerActive());
+    // The device-local notification choice, read back after a real navigation. This is the whole point
+    // of keeping it in this window's storage rather than in a node setting: a reload is what a device
+    // does, and the choice has to be there afterwards, showing its state.
+    check(localStorage.getItem("wa.notify.settlement") === "on" &&
+      document.getElementById("notify-bell").checked === true &&
+      document.getElementById("notify-state").textContent === "on for this device",
+      "the device-local bell must survive a real reload, saw: " + localStorage.getItem("wa.notify.settlement") +
+      " / " + document.getElementById("notify-state").textContent);
     var unrecordedCount = restored.querySelectorAll("wa-trace .tool-line.unrecorded").length;
     check(unrecordedCount === 2,
       "a real reload must close historical as well as current missing tool calls, saw " + unrecordedCount);
@@ -126,7 +134,7 @@ $harness = @'
       finished.body.textContent.includes("0:04"),
       "the later answered run must retain its own four-second footer");
 
-    // The stream belongs to the old page, so the new page must notice the worker become idle
+    // The stream belongs to the old page, so the new page must notice the node-thread become idle
     // and repaint the answer from the durable ledger, not open the engine's session view.
     window.__fixtures.session.state = { state: "answered", detail: "the last message is a reply" };
     // `messages`, not `turns`: the wire key was renamed (10326b4 renamed it in the fixtures and in
@@ -137,7 +145,7 @@ $harness = @'
       { seq: 7, role: "tool", tool_call_id: "reload-tool", tool_name: "bash", content: "done", created_at: 1790000013, tool_calls: [] },
       { seq: 8, role: "assistant", content: "RELOAD-MID-RUN-ANSWER", created_at: 1790000014, tool_calls: [] });
     window.__fixtures.health.current = null;
-    window.__fixtures.health.workers = [];
+    window.__fixtures.health.node_threads = [];
     await window.__watchTurn();
     for (var settled = 0; settled < 100; settled++) await tick();
     check(restored.textContent.includes("RELOAD-MID-RUN-ANSWER"),
@@ -1085,13 +1093,13 @@ $harness = @'
   // A chat run for a *different* conversation is not this window's run. Before `activeRun` was
   // scoped to the conversation, it returned the first chat run on the node, so a window watching
   // conversation B disabled its own composer and deferred its reconcile for conversation A's run.
-  window.__fixtures.health.workers = [{ label: "POST /chat", busy_ms: 4000, session: "another-conversation" }];
+  window.__fixtures.health.node_threads = [{ label: "POST /chat", busy_ms: 4000, session: "another-conversation" }];
   await window.__restoreSession();
   var foreignNotice = document.querySelector(".unfinished-notice");
   check(!!foreignNotice && /effects may have happened/.test(foreignNotice.textContent) && !!foreignNotice.querySelector("button"),
     "another conversation's run must not be treated as this window's run, saw: " +
       (foreignNotice ? foreignNotice.textContent.slice(0, 120) : "no notice"));
-  window.__fixtures.health.workers = [];
+  window.__fixtures.health.node_threads = [];
 
   // Enter while a run is busy means "keep this draft for the next turn", not "cancel the run". The
   // red button is the explicit Stop control. Conflating them made a reader typing ahead kill a healthy
@@ -1230,20 +1238,20 @@ $harness = @'
   check(!!diffTopic && !!(diffTopic.dataset.messageId || diffTopic.messageId),
     "and the message id the undo route is asked about, saw: " + (diffTopic ? JSON.stringify(diffTopic.dataset.messageId) : "no topic"));
 
-  // Read-only topics use host read workers, so they must remain available while the run worker is
-  // occupied. Topics that still need the run worker must queue clearly and load after the run.
+  // Read-only topics use host read node-threads, so they must remain available while the run node-thread is
+  // occupied. Topics that still need the run node-thread must queue clearly and load after the run.
   window.__setBusy(true);
   window.__loadTopic("sessions-box");
   for (var tb = 0; tb < 5; tb++) { await tick(); }
   var busyBox = document.getElementById("sessions-box");
   check(!/busy with a run/.test(busyBox.textContent) && !!busyBox.querySelector(".session-title"),
-    "sessions must load from the read worker during a run, saw: " + busyBox.textContent.slice(0, 70));
+    "sessions must load from the read node-thread during a run, saw: " + busyBox.textContent.slice(0, 70));
   check(!/AbortError/.test(busyBox.textContent), "and must not report an abort as if the UI were broken");
   window.__loadTopic("spells-box");
   for (var tw = 0; tw < 5; tw++) { await tick(); }
   var waitingBox = document.getElementById("spells-box");
   check(/busy with a run/.test(waitingBox.textContent),
-    "a topic that needs the run worker must say it is queued, saw: " + waitingBox.textContent.slice(0, 70));
+    "a topic that needs the run node-thread must say it is queued, saw: " + waitingBox.textContent.slice(0, 70));
   // And it must load by itself when the turn ends - nobody should have to reopen it.
   window.__setBusy(false);
   for (var tc = 0; tc < 40; tc++) { await tick(); }
@@ -1536,7 +1544,7 @@ $harness = @'
   // reachable, because a display that can only ever say "working" is decoration.
   (function () {
     window.__stopLiveness();
-    window.__setLiveness({ working: true, stalled: 46, busy_ms: 25369, climbing_ms: 0, worker: "alive", queue: 0 });
+    window.__setLiveness({ working: true, stalled: 46, busy_ms: 25369, climbing_ms: 0, node_thread_state: "alive", queue: 0 });
     var ok = document.getElementById("liveness");
     check(!!ok, "liveness: no line rendered while working");
     if (ok) {
@@ -1546,7 +1554,7 @@ $harness = @'
       check(ok.textContent.indexOf("46 ms") >= 0, "liveness: the beat age must be shown, got: " + ok.textContent);
       check(ok.textContent.indexOf("25") >= 0, "liveness: the elapsed time must be shown, got: " + ok.textContent);
     }
-    window.__setLiveness({ working: false, stalled: 9000, busy_ms: 60000, climbing_ms: 9000, worker: "alive", queue: 0 });
+    window.__setLiveness({ working: false, stalled: 9000, busy_ms: 60000, climbing_ms: 9000, node_thread_state: "alive", queue: 0 });
     var stuck = document.getElementById("liveness");
     check(!!stuck, "liveness: the line vanished when it turned into a stall");
     if (stuck) {
@@ -1907,7 +1915,7 @@ $harness = @'
   // the verdict was computed, and a check that never runs looks exactly like one that passes.
   var followThread = window.__chatThread();
   check(!!followThread, "follow: the window must know which thread it is in");
-  window.__fixtures.health.workers = [{ label: "POST /chat", busy_ms: 5000, session: followThread }];
+  window.__fixtures.health.node_threads = [{ label: "POST /chat", busy_ms: 5000, session: followThread }];
   window.__fixtures.health.current = { label: "POST /chat", ms: 5000, session: followThread };
   window.__fixtures.sessions = { sessions: [{ id: followThread, title: "followed", user_id: "master",
     mode: "chat", message_count: 3, last_seq: 4242, updated_at: Math.floor(Date.now() / 1000),
@@ -2324,10 +2332,69 @@ $harness = @'
   check(!!incompleteCommentary && incompleteCommentary.querySelector('.commentary-body').textContent==='Partial commentary',
     'interrupted streamed commentary remains visible and marked incomplete');
   document.title = "stage: end";
-  // The main conversation still *sends*, and it sends through the shared shell. The run itself is
-  // covered above (a picture's own body, Stop, steering); what is proven here is that the shell is
-  // the surface the app's send path is reached through - the user turn lands in the transcript the
-  // shell renders and the field is cleared, which happens only inside send().
+  // ---- the notification bell, and the toast only the shell can raise -----------------------------
+  // What the operator asked for: a bell in the engine menu, per device, and a real OS notification
+  // when a settlement needs a judgement. The wake `lua/core/completions.lua` starts is the only thing
+  // that notifies - its row is written into this thread exactly where `review.needs_wake` was true, and
+  // the classes the outbox skips (a self-reporting responder, a cancelled child with a clean checkout)
+  // never write one, so there is nothing here to raise for them.
+  var notifyBell = document.getElementById("notify-bell");
+  var notifyHead = document.querySelector('#engine .engine-head[data-target="notify-box"]');
+  var notifyState = document.getElementById("notify-state");
+  check(!!notifyHead && !!notifyBell && notifyHead.contains(notifyState) &&
+    document.getElementById("engine").contains(notifyBell),
+    "the engine menu must carry the notification bell");
+  check(notifyState.textContent === "off on this device" && notifyBell.checked === false &&
+    localStorage.getItem("wa.notify.settlement") === null,
+    "a device that was never switched on must show the bell off, saw: " + notifyState.textContent);
+  check(document.getElementById("notify-test").disabled === true,
+    "with the bell off the test control must be off too: nothing is raised on this device");
+  var notifyCalls = function () {
+    return window.__shellCalls.filter(function (call) { return call.call === "notify"; });
+  };
+  var wakeNotice = "[Child completion notice] Task 3e0011d1-child settled. Reported state: " +
+    JSON.stringify({ state: "completed", session_id: "11111111-child", error: null }) +
+    ". Evaluation packet, assembled from its receipt when it settled";
+  window.__setShell(window.__makeShell());
+  window.__repaintMessages([
+    { seq: 1, role: "user", content: "an ordinary question" },
+    { seq: 2, role: "user", content: wakeNotice },
+  ]);
+  for (var offTick = 0; offTick < 20; offTick++) { await tick(); }
+  check(notifyCalls().length === 0,
+    "with the bell off a settlement must raise nothing at all (not raised-then-hidden), saw " +
+    notifyCalls().length + " notify call(s)");
+  // On: the same kind of row, one the device has not seen, raises exactly one toast whose text names
+  // the child and the state the wake itself reported.
+  notifyBell.checked = true;
+  notifyBell.dispatchEvent(new Event("change"));
+  check(notifyState.textContent === "on for this device" && notifyBell.checked === true &&
+    localStorage.getItem("wa.notify.settlement") === "on",
+    "switching the bell on must be stored on this device and shown on the topic row");
+  window.__repaintMessages([
+    { seq: 3, role: "user", content: "another ordinary question" },
+    { seq: 4, role: "user", content: wakeNotice.replace("3e0011d1-child", "3e0011d1-second") },
+  ]);
+  for (var onTick = 0; onTick < 20; onTick++) { await tick(); }
+  var raised = notifyCalls();
+  check(raised.length === 1, "with the bell on the settlement must raise exactly one notification, saw " + raised.length);
+  check(raised.length === 1 && raised[0].title === "Evaluation owed" &&
+    raised[0].body.indexOf("3e0011d1-second") >= 0 && raised[0].body.indexOf("completed") >= 0,
+    "and it must name the child and the state the wake reported, saw: " + JSON.stringify(raised[0] || null));
+  var deliveredNote = document.getElementById("notify-result");
+  check(deliveredNote.dataset.delivered === "true" && /wasm-agent/.test(deliveredNote.textContent),
+    "and the card must show the shell's own delivered result, saw: " + deliveredNote.textContent);
+  // A repaint of the same rows is not a second settlement.
+  window.__repaintMessages([{ seq: 4, role: "user", content: wakeNotice.replace("3e0011d1-child", "3e0011d1-second") }]);
+  for (var againTick = 0; againTick < 20; againTick++) { await tick(); }
+  check(notifyCalls().length === 1, "a repeated repaint of one settlement must not raise it twice, saw " + notifyCalls().length);
+  // The on-demand path from the menu: the shell raises, and the answer is the shell's.
+  document.getElementById("notify-test").click();
+  for (var testTick = 0; testTick < 20; testTick++) { await tick(); }
+  var diagnostic = notifyCalls().filter(function (call) { return call.diagnostic === true; });
+  check(diagnostic.length === 1, "the menu's test control must ask the shell for one notification, saw " + diagnostic.length);
+  window.__setShell(null);
+  // The bell stays ON into the reload below, which is where its persistence is asserted.
   window.__setBusy(false);
   var mainBox=document.getElementById('input');
   var userTurnsBefore=document.querySelectorAll('wa-message.user').length;

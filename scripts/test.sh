@@ -743,6 +743,10 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-tool-cues.lua" "$BIN" --db "$DB.too
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-worktree.lua" "$BIN" --db "$DB.session-worktree" | grep 'session worktree ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-fork.lua" "$BIN" --db "$DB.session-fork" | grep 'session fork ok'
 node scripts/test-session-workspaces.cjs "$BIN"
+# A placed child arrives at a node that never saw its parent, so the source it forks from is the tree
+# *that* node runs from - and a node with no usable checkout of its own must refuse by name rather
+# than leave a session shell behind. Two disposable checkouts, no model.
+node scripts/test-placed-child-workspace.cjs "$BIN"
 node scripts/test-run-recovery.cjs "$BIN"
 node scripts/test-resource-claims.cjs "$BIN"
 # The tool-choice experiment's verifier must reject a plausible-looking wrong answer, and
@@ -1428,13 +1432,33 @@ LUA
 WA_SCRIPT="$DB.skills.lua" "$BIN" --db "$DB" | grep "skills ok"
 rm -f "$DB.skills.lua"
 
+# The plugins are staged in a directory this section owns, and it owns it where it is *used*. The
+# directory is created near the top of the run and used ~1300 lines later, and in between nothing
+# keeps it: on a machine running more than one gate, an empty `mktemp -d` directory in the shared
+# temp root can be gone by the time the first module is copied into it. Measured - candidate tree
+# 55e04252, gate exit 1 after 763 s with no verdict line, its last line
+# `cp: cannot create regular file '/tmp/tmp.PZulxpI9l4/echo.wasm': No such file or directory` - that
+# is an unattributed red gate, which is what makes unattended landing unsafe. The copy is still the
+# assertion: a module that cannot be written where the node reads it fails the gate, as it must.
+stage_plugin() {  # stage_plugin <wasm-path> <name>
+  if [ ! -d "$PLUGINS" ]; then
+    echo "note: the plugin staging directory $PLUGINS was missing; re-creating it to stage $2" >&2
+  fi
+  mkdir -p "$PLUGINS"
+  cp "$1" "$PLUGINS/$2.wasm"
+}
+# The staging contract is a test before it is a habit: a directory taken out from under this section
+# must not become an unattributed red gate, and a staging that cannot write its module must still
+# fail. That test reads the function above out of this file, so it cannot pass while the code here is
+# wrong.
+bash scripts/test-plugin-staging.sh
 # Build every plugin and assert one round trip through the WASM host.
 for crate in rust/plugins/*/; do
   [ -f "$crate/Cargo.toml" ] || continue
   name="$(basename "$crate")"
   cargo build --manifest-path "$crate/Cargo.toml" --target wasm32-unknown-unknown --release --offline >/dev/null
   wasm="$(ls "$crate"/target/wasm32-unknown-unknown/release/*.wasm | head -1)"
-  cp "$wasm" "$PLUGINS/$name.wasm"
+  stage_plugin "$wasm" "$name"
 done
 cat > "$DB.plugin.lua" <<'LUA'
 local raw = host.invoke("echo", '{"text":"hi"}')
@@ -1527,6 +1551,10 @@ run_proof_fixture cursor 47 node scripts/test-whatsapp-cursor.cjs "$BIN"
 # Local audio bytes, WASM formatting, durable reservation, and exactly-once
 # verified sends. These use fake WhatsApp/STT adapters and no paid model.
 node scripts/test-whatsapp-audio.mjs
+# Staged here, at its use, for the same reason as the plugin loop above: this module is read about
+# ninety sections after it was built, and the section does not assume the staging directory it
+# created earlier is still there. The copy is still fatal if the module cannot be staged.
+stage_plugin "$(ls rust/plugins/whatsapp-transcript/target/wasm32-unknown-unknown/release/*.wasm | head -1)" whatsapp-transcript
 node scripts/test-whatsapp-transcribe.cjs "$BIN" "$PLUGINS/whatsapp-transcript.wasm"
 # The pipeline seam: a `returns` list reaches the foreach, a step that produced nothing fails the
 # delivery, and a no-op run is distinguishable from a dropped result. Real sentinel, mock store, no model.

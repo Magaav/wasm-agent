@@ -122,6 +122,12 @@ local function classify(state,profile_id,settlement,facts)
   if current=="failed" or current=="unknown" then
     return true,"recovery","child_"..current.."_needs_recovery_decision"
   end
+  -- A refused attempt is not a settled child: no run of it was ever started, so the coordinator owes
+  -- a decision (place it elsewhere, fix the node, or drop the task) and must not be told the work
+  -- was done. It is reported like a failure, never covered by a profile's own `self_reported`.
+  if current=="refused" then
+    return true,"recovery","child_refused_needs_placement_decision"
+  end
   local review,why=artifacts_need_review(facts)
   if current=="cancelled" then
     if review then return true,"recovery","cancelled_with_artifacts: "..why end

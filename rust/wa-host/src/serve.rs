@@ -28,7 +28,7 @@ mod scheduler;
 mod journal;
 
 /// Milliseconds since the process started, written by anything that is making
-/// progress: every event the worker emits, and every run or tool boundary the Lua loop
+/// progress: every event the node-thread emits, and every run or tool boundary the Lua loop
 /// reports through host.beat.
 ///
 /// This is the only way to tell a slow run from a wedged node. A wedged node answers
@@ -37,14 +37,14 @@ mod journal;
 /// interpreter is not running anything, and that is a fact worth reporting.
 static BEAT_MS: AtomicU64 = AtomicU64::new(0);
 static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-/// Rate-limits the "the worker is stalled" line so a wedged node cannot fill a log.
+/// Rate-limits the "the node-thread is stalled" line so a wedged node cannot fill a log.
 static STALL_LOGGED_MS: AtomicU64 = AtomicU64::new(0);
 
-/// What the worker is doing right now, as (label, started_ms). A stall is only
+/// What the node-thread is doing right now, as (label, started_ms). A stall is only
 /// diagnosable if it says *what* it is stuck on: a local run, a relayed peer request, or
 /// housekeeping are three different bugs with one symptom.
 static IN_FLIGHT: Mutex<Option<(String, u64)>> = Mutex::new(None);
-/// Requests waiting for the worker. Housekeeping waits until this is zero.
+/// Requests waiting for the node-thread. Housekeeping waits until this is zero.
 static QUEUED: AtomicUsize = AtomicUsize::new(0);
 /// When the last request was taken off the queue, so the tick can wait for a quiet moment.
 static LAST_SERVED_MS: AtomicU64 = AtomicU64::new(0);
@@ -133,25 +133,28 @@ fn record_run_event(run_id: u64, payload: &str) {
 
 /// How many interpreters a node runs, and how it decides.
 ///
-/// Worker 0 is the run worker and always exists: it owns every route that changes something - runs,
+/// Node-thread 0 is the run node-thread and always exists: it owns every route that changes something - runs,
 /// writes, sync, node calls - so "one writer per session" and per-session order hold by construction
 /// rather than by locking.
 ///
-/// The read workers are **hot-swappable**. There is no fixed pool to configure: a read worker is spawned at
-/// the moment a read would otherwise wait behind a busy worker 0, and it retires itself once it has been
+/// The read node-threads are **hot-swappable**. There is no fixed pool to configure: a read node-thread is spawned at
+/// the moment a read would otherwise wait behind a busy node-thread 0, and it retires itself once it has been
 /// idle long enough. An idle node therefore runs exactly one interpreter and costs exactly what it did
 /// before any of this existed; a node under load grows to meet the load and shrinks back. That also settles
 /// the question a fixed pool raises and cannot answer - how many is right - by not answering it in advance.
 ///
-/// `WASM_AGENT_WORKERS` is how many read workers to keep *warm* (default 0: spawn on demand),
+/// `WASM_AGENT_WORKERS` is how many read node-threads to keep *warm* (default 0: spawn on demand),
 /// `WASM_AGENT_WORKERS_MAX` is the ceiling (default 4), and `WASM_AGENT_WORKERS_IDLE_SECONDS` is how long an
-/// idle read worker waits before retiring (default 60).
+/// idle read node-thread waits before retiring (default 60).
+///
+/// The env var *names* keep the older `WORKER` spelling on purpose: they are the operator's names in
+/// `~/.wasm-agent/env`, so renaming one is an operator change and not a code change (see the report).
 ///
 /// The read-route list is a **routing hint, not a source of truth**: a path that is not in it goes to
-/// worker 0, which is why a missing entry is a performance question and never a correctness one.
+/// node-thread 0, which is why a missing entry is a performance question and never a correctness one.
 struct Pool {
-    /// One slot per possible worker, index 0 first. `None` means that worker is not running. Slots rather
-    /// than a list, because a worker retires itself and a list would renumber everyone under it.
+    /// One slot per possible node-thread, index 0 first. `None` means that node-thread is not running. Slots rather
+    /// than a list, because a node-thread retires itself and a list would renumber everyone under it.
     slots: Mutex<Vec<Option<std::sync::mpsc::SyncSender<Work>>>>,
     /// Builds a fresh interpreter. It lives here as a boxed closure because the boot sequence belongs to
     /// main.rs - a second copy of it in the pool is how the two would drift.
@@ -165,18 +168,18 @@ struct Pool {
 }
 
 static POOL: OnceLock<Pool> = OnceLock::new();
-static WORKER_BEATS: OnceLock<Vec<AtomicU64>> = OnceLock::new();
-static WORKER_BUSY: OnceLock<Vec<Mutex<Option<(String, u64)>>>> = OnceLock::new();
-/// Which session each worker is currently running, if any.
+static NODE_THREAD_BEATS: OnceLock<Vec<AtomicU64>> = OnceLock::new();
+static NODE_THREAD_BUSY: OnceLock<Vec<Mutex<Option<(String, u64)>>>> = OnceLock::new();
+/// Which session each node-thread is currently running, if any.
 ///
 /// This is what makes concurrent *runs* safe. A run is routed by session: the same session always goes to
-/// the worker already running it, so its runs stay ordered and "one writer per session" holds by routing
-/// rather than by a lock. A session nobody is running goes to an idle worker - which is the whole point, two
+/// the node-thread already running it, so its runs stay ordered and "one writer per session" holds by routing
+/// rather than by a lock. A session nobody is running goes to an idle node-thread - which is the whole point, two
 /// conversations at once - and only a session with nowhere to go waits.
-static WORKER_SESSION: OnceLock<Vec<Mutex<Option<String>>>> = OnceLock::new();
-/// The admission id of the run each worker is executing right now, if any. `/health` reports it so a
+static NODE_THREAD_SESSION: OnceLock<Vec<Mutex<Option<String>>>> = OnceLock::new();
+/// The admission id of the run each node-thread is executing right now, if any. `/health` reports it so a
 /// run is identifiable by id and not only by the conversation it writes.
-static WORKER_RUN: OnceLock<Vec<Mutex<Option<u64>>>> = OnceLock::new();
+static NODE_THREAD_RUN: OnceLock<Vec<Mutex<Option<u64>>>> = OnceLock::new();
 
 /// A deploy launched by a tool in a live run cannot wait for that same run
 /// to go idle. This is a boolean, not the x-wa-session credential.
@@ -193,11 +196,11 @@ fn env_usize(name: &str, fallback: usize) -> usize {
     std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(fallback)
 }
 
-fn warm_read_workers() -> usize {
+fn warm_read_node_threads() -> usize {
     env_usize("WASM_AGENT_WORKERS", 0)
 }
 
-fn max_workers() -> usize {
+fn max_node_threads() -> usize {
     env_usize("WASM_AGENT_WORKERS_MAX", 4).clamp(1, 16)
 }
 
@@ -205,38 +208,38 @@ fn read_idle_seconds() -> u64 {
     env_usize("WASM_AGENT_WORKERS_IDLE_SECONDS", 60) as u64
 }
 
-/// How many worker slots are reserved for interactive runs. A background run may not use a worker
+/// How many node-thread slots are reserved for interactive runs. A background run may not use a node-thread
 /// with an index below this, so a burst of wakes cannot take the capacity a person's next run needs.
 /// Two, not one: the operator requires two concurrent chats even while background work saturates the
-/// rest, and worker 0 alone cannot both run a chat and absorb a slow mutation.
+/// rest, and node-thread 0 alone cannot both run a chat and absorb a slow mutation.
 fn interactive_reserve() -> usize {
     env_usize("WASM_AGENT_INTERACTIVE_RESERVE", 2).clamp(1, 8)
 }
 
-/// How many worker slots are reserved for the control lane (reads, engine control, `/subagents`).
-/// They sit at the *top* of the worker index range, above the run lanes, so control work can never
+/// How many node-thread slots are reserved for the control lane (reads, engine control, `/subagents`).
+/// They sit at the *top* of the node-thread index range, above the run lanes, so control work can never
 /// occupy an interactive or background run slot and a long `/subagents await` cannot hold a run
-/// worker. Two by default: one control slot may be blocked in an await while cancel/status/health
-/// stay answerable on the other (and `/runs` and `/health` do not use a worker at all).
-fn control_workers() -> usize {
+/// node-thread. Two by default: one control slot may be blocked in an await while cancel/status/health
+/// stay answerable on the other (and `/runs` and `/health` do not use a node-thread at all).
+fn control_node_threads() -> usize {
     env_usize("WASM_AGENT_CONTROL_WORKERS", 2).clamp(1, 8)
 }
 
-/// The first worker index the control lane owns. Run lanes are `0..run_capacity`, control is
-/// `run_capacity..=max_workers`.
+/// The first node-thread index the control lane owns. Run lanes are `0..run_capacity`, control is
+/// `run_capacity..=max_node_threads`.
 fn control_floor() -> usize {
     run_capacity()
 }
 
-/// How many workers may serve runs (interactive + background). The control reserve is taken off the
+/// How many node-threads may serve runs (interactive + background). The control reserve is taken off the
 /// top of the index range so the two capacities are independent rather than merely differently
 /// prioritised.
 fn run_capacity() -> usize {
-    (max_workers() + 1).saturating_sub(control_workers()).max(1)
+    (max_node_threads() + 1).saturating_sub(control_node_threads()).max(1)
 }
 
 /// Is this a route served by the independent control lane rather than a run or a plain read?
-/// `/subagents` is the one that can block for seconds, so it must never use worker 0.
+/// `/subagents` is the one that can block for seconds, so it must never use node-thread 0.
 fn is_control_route(request: &Request) -> bool {
     split_path(&request.path).0 == "/subagents"
 }
@@ -248,9 +251,9 @@ fn admission_timeout_ms() -> u64 {
 }
 
 thread_local! {
-    /// Which worker this thread is. `beat()` is called from inside Lua and had no way to say *which*
-    /// interpreter had made progress, so per-worker liveness was impossible until this existed.
-    static WORKER_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Which node-thread this thread is. `beat()` is called from inside Lua and had no way to say *which*
+    /// interpreter had made progress, so per-node-thread liveness was impossible until this existed.
+    static NODE_THREAD_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CURRENT_RUN_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static IN_RUN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The cancel flag of the run this thread is executing right now. The runtime's provider reader
@@ -261,7 +264,7 @@ thread_local! {
 
 /// Has the owner of the run on this thread requested cancellation?
 ///
-/// This is the serve-side half of cancellation: the runtime worker polls it in the provider reader
+/// This is the serve-side half of cancellation: the runtime node-thread polls it in the provider reader
 /// and the agent loop, combined with its own `subagents::cancel_requested()`. It is deliberately
 /// per-run: the flag belongs to one admitted run, so cancelling a running run does not also cancel
 /// the run queued behind it. A `false` here means "not requested", never "not cancelled" - a run is
@@ -272,14 +275,14 @@ pub fn run_cancel_requested() -> bool {
     })
 }
 
-/// Install (or clear) the current-run cancel flag for this worker thread.
+/// Install (or clear) the current-run cancel flag for this node-thread thread.
 fn set_current_run_cancel(flag: Option<Arc<AtomicBool>>) {
     CURRENT_RUN_CANCEL.with(|cell| {
         *cell.borrow_mut() = flag;
     });
 }
 
-/// Install (or clear) the whole current-run IO context for this worker thread: the run's cancel
+/// Install (or clear) the whole current-run IO context for this node-thread thread: the run's cancel
 /// flag and its own socket slot. The transport registers the socket it connects on into this slot,
 /// so a cancel on the accept thread can `shutdown` it and wake a silent provider read at once. The
 /// slot belongs to one admitted run, so a later cancel can never close the next queued run's socket.
@@ -303,44 +306,44 @@ fn set_current_run_io(
     }
 }
 
-pub(crate) fn worker_id() -> usize {
-    WORKER_ID.with(|cell| cell.get())
+pub(crate) fn node_thread_id() -> usize {
+    NODE_THREAD_ID.with(|cell| cell.get())
 }
 
-/// Is this a route that only reads, and may therefore be served by a read worker instead of worker
+/// Is this a route that only reads, and may therefore be served by a read node-thread instead of node-thread
 /// 0? A GET always is; the controls named below are POSTs answered by runtimes that hold no agent
-/// state. The rest of the method space is a write and stays pinned to worker 0.
+/// state. The rest of the method space is a write and stays pinned to node-thread 0.
 fn is_read_route(request: &Request) -> bool {
     // These controls use independent synchronized runtimes, never agent state. A blocked run must
     // not queue its own cancellation or the operator's disable behind itself.
     if matches!(split_path(&request.path).0.as_str(), "/jobs" | "/operations" | "/operation") {return true;}
     // A GET is a read, by default. This was an allow-list, and that was backwards: a route nobody
-    // remembered to add fell through to worker 0 and queued behind whatever run held it. It cost
+    // remembered to add fell through to node-thread 0 and queued behind whatever run held it. It cost
     // several incidents - `/sync/head`, `/tools`, and `/efficiency` - and each looked like the node
     // being wedged: with a run in flight, `/health` answered in 2ms while `GET /tools` returned no
     // bytes within 6s, the page's fetches filled the browser's connection pool, its own heartbeat
     // could not get through, and the window reloaded it in a loop. A rule that cannot rot is the
-    // HTTP one: a GET does not change state, so worker 0's one-writer guarantee does not apply to it
-    // and a read worker may always answer. A new read route is correct without anyone adding it here.
+    // HTTP one: a GET does not change state, so node-thread 0's one-writer guarantee does not apply to it
+    // and a read node-thread may always answer. A new read route is correct without anyone adding it here.
     request.method == "GET"
 }
 
-/// Milliseconds since a particular worker last reported progress. A worker that has never beaten is as
+/// Milliseconds since a particular node-thread last reported progress. A node-thread that has never beaten is as
 /// old as the process, which is not a stall - the same rule the aggregate age uses.
-fn worker_age_ms(index: usize) -> u64 {
+fn node_thread_age_ms(index: usize) -> u64 {
     let started = match STARTED.get() {
         Some(started) => started,
         None => return 0,
     };
     let now = started.elapsed().as_millis() as u64;
-    match WORKER_BEATS.get().and_then(|beats| beats.get(index)) {
+    match NODE_THREAD_BEATS.get().and_then(|beats| beats.get(index)) {
         Some(slot) => {
             let beat = slot.load(Ordering::Relaxed);
-            // Never beaten: the worker has just been created, which is not the same as having gone quiet. A
-            // worker that was spawned a moment ago must not be refused as if it had been silent for a
+            // Never beaten: the node-thread has just been created, which is not the same as having gone quiet. A
+            // node-thread that was spawned a moment ago must not be refused as if it had been silent for a
             // minute - which is exactly what happened the first time the pool grew, because "no beat" read
-            // as "as old as the process". Each worker beats at the top of its own loop, so this lasts
-            // microseconds and the detector keeps its teeth for a worker that *stops* reporting.
+            // as "as old as the process". Each node-thread beats at the top of its own loop, so this lasts
+            // microseconds and the detector keeps its teeth for a node-thread that *stops* reporting.
             if beat == u64::MAX {
                 0
             } else {
@@ -351,17 +354,17 @@ fn worker_age_ms(index: usize) -> u64 {
     }
 }
 
-/// Has this worker gone quiet long enough that handing it work is a lie?
+/// Has this node-thread gone quiet long enough that handing it work is a lie?
 ///
-/// A wedged worker is not idle. Routing a fresh read to one is how a healthy node answered
-/// `503 worker_stalled` for a plain `/sessions` - the request inherited a stall that belonged to the
-/// dead worker the slot used to hold. Selection must treat a stalled slot as unavailable, so a request
-/// lands on a live worker or grows a new one instead of inheriting someone else's stall.
-fn worker_is_wedged(index: usize) -> bool {
-    worker_age_ms(index) >= stall_seconds() * 1000
+/// A wedged node-thread is not idle. Routing a fresh read to one is how a healthy node answered
+/// `503 node_thread_stalled` for a plain `/sessions` - the request inherited a stall that belonged to the
+/// dead node-thread the slot used to hold. Selection must treat a stalled slot as unavailable, so a request
+/// lands on a live node-thread or grows a new one instead of inheriting someone else's stall.
+fn node_thread_is_wedged(index: usize) -> bool {
+    node_thread_age_ms(index) >= stall_seconds() * 1000
 }
 
-fn live_worker_ids() -> Vec<usize> {
+fn live_node_thread_ids() -> Vec<usize> {
     match POOL.get().and_then(|pool| pool.slots.lock().ok().map(|slots| {
         slots
             .iter()
@@ -375,7 +378,7 @@ fn live_worker_ids() -> Vec<usize> {
     }
 }
 
-fn worker_count() -> usize {
+fn node_thread_count() -> usize {
     match POOL.get() {
         Some(pool) => pool
             .slots
@@ -387,41 +390,41 @@ fn worker_count() -> usize {
     }
 }
 
-/// The label a worker is currently busy with, if any. This is how the dispatcher asks "is the run worker
+/// The label a node-thread is currently busy with, if any. This is how the dispatcher asks "is the run node-thread
 /// idle?" without holding the interpreter or guessing from a timestamp.
-fn worker_busy_label(index: usize) -> Option<String> {
-    WORKER_BUSY
+fn node_thread_busy_label(index: usize) -> Option<String> {
+    NODE_THREAD_BUSY
         .get()
         .and_then(|slots| slots.get(index))
         .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()))
         .map(|(label, _)| label)
 }
 
-/// The conversation a worker holds, if any. `/health` reports it, and the window uses it to
+/// The conversation a node-thread holds, if any. `/health` reports it, and the window uses it to
 /// scope an in-flight run to its own conversation instead of assuming any chat run is its own.
-fn worker_session(index: usize) -> Option<String> {
-    WORKER_SESSION
+fn node_thread_session(index: usize) -> Option<String> {
+    NODE_THREAD_SESSION
         .get()
         .and_then(|slots| slots.get(index))
         .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()))
 }
 
-/// The admission id a worker is running, if any.
-fn worker_run_id(index: usize) -> Option<u64> {
-    WORKER_RUN
+/// The admission id a node-thread is running, if any.
+fn node_thread_run_id(index: usize) -> Option<u64> {
+    NODE_THREAD_RUN
         .get()
         .and_then(|slots| slots.get(index))
         .and_then(|slot| slot.lock().ok().and_then(|guard| *guard))
 }
 
-/// Start one more read worker, and return its index. Called while holding the slots lock.
+/// Start one more read node-thread, and return its index. Called while holding the slots lock.
 ///
 /// The interpreter is built *before* the lock is taken in spirit but inside it in practice, which is why
 /// the caller must not be a hot path: this happens once per growth, not once per request.
-fn spawn_worker(slots: &mut Vec<Option<std::sync::mpsc::SyncSender<Work>>>, min_index: usize, max_index: usize) -> Option<usize> {
+fn spawn_node_thread(slots: &mut Vec<Option<std::sync::mpsc::SyncSender<Work>>>, min_index: usize, max_index: usize) -> Option<usize> {
     let pool = POOL.get()?;
-    // `min_index`/`max_index` keep a spawned worker inside its lane. Background work starts at the
-    // interactive reserve, and run workers stop below the control floor; gaps are `None`, which is
+    // `min_index`/`max_index` keep a spawned node-thread inside its lane. Background work starts at the
+    // interactive reserve, and run node-threads stop below the control floor; gaps are `None`, which is
     // exactly what an unused slot is.
     let index = (min_index..slots.len().min(max_index + 1))
         .find(|index| slots[*index].is_none())
@@ -434,47 +437,47 @@ fn spawn_worker(slots: &mut Vec<Option<std::sync::mpsc::SyncSender<Work>>>, min_
     while slots.len() <= index {
         slots.push(None);
     }
-    // A retired worker's last beat, label and conversation survive in these slots, keyed by index. A
+    // A retired node-thread's last beat, label and conversation survive in these slots, keyed by index. A
     // replacement is spawned into the *same* index (the first empty slot), so without this reset it
-    // inherits the dead worker's age: the dispatcher reads a `stalled_ms` from before the new worker
-    // existed and answers `503 worker_stalled` for a worker that has simply not had time to beat yet.
-    // Reset every per-index fact before publishing the new sender, so nothing can observe the new worker
+    // inherits the dead node-thread's age: the dispatcher reads a `stalled_ms` from before the new node-thread
+    // existed and answers `503 node_thread_stalled` for a node-thread that has simply not had time to beat yet.
+    // Reset every per-index fact before publishing the new sender, so nothing can observe the new node-thread
     // through the old one's state.
-    if let Some(beats) = WORKER_BEATS.get() {
+    if let Some(beats) = NODE_THREAD_BEATS.get() {
         if let Some(slot) = beats.get(index) { slot.store(u64::MAX, Ordering::Relaxed); }
     }
-    if let Some(busy) = WORKER_BUSY.get() {
+    if let Some(busy) = NODE_THREAD_BUSY.get() {
         if let Some(slot) = busy.get(index) { if let Ok(mut guard) = slot.lock() { *guard = None; } }
     }
-    if let Some(sessions) = WORKER_SESSION.get() {
+    if let Some(sessions) = NODE_THREAD_SESSION.get() {
         if let Some(slot) = sessions.get(index) { if let Ok(mut guard) = slot.lock() { *guard = None; } }
     }
-    if let Some(runs) = WORKER_RUN.get() {
+    if let Some(runs) = NODE_THREAD_RUN.get() {
         if let Some(slot) = runs.get(index) { if let Ok(mut guard) = slot.lock() { *guard = None; } }
     }
     slots[index] = Some(sender);
-    let worker_ui = pool.ui.clone();
+    let node_thread_ui = pool.ui.clone();
     pool.spawned.fetch_add(1, Ordering::Relaxed);
     std::thread::spawn(move || {
-        WORKER_ID.with(|cell| cell.set(index));
-        worker_loop(state, index, receiver, worker_ui);
+        NODE_THREAD_ID.with(|cell| cell.set(index));
+        node_thread_loop(state, index, receiver, node_thread_ui);
     });
     Some(index)
 }
 
-/// Is the run worker free to take a request right now?
+/// Is the run node-thread free to take a request right now?
 ///
-/// Idle means *both*: nothing in its hands, and it has reported progress recently. A worker that is not
+/// Idle means *both*: nothing in its hands, and it has reported progress recently. A node-thread that is not
 /// beating is not idle, whatever its label says - which is the case that matters, because a wedged run
-/// worker must not be handed more work, and a read must not be told the node is fine when it is not.
-fn turn_worker_is_idle() -> bool {
-    if worker_busy_label(0).is_some() {
+/// node-thread must not be handed more work, and a read must not be told the node is fine when it is not.
+fn turn_node_thread_is_idle() -> bool {
+    if node_thread_busy_label(0).is_some() {
         return false;
     }
-    match WORKER_BEATS.get().and_then(|beats| beats.get(0)) {
+    match NODE_THREAD_BEATS.get().and_then(|beats| beats.get(0)) {
         // Never beaten: the process has just started, which is not the same as busy.
         Some(slot) if slot.load(Ordering::Relaxed) == u64::MAX => true,
-        _ => worker_age_ms(0) < 1000,
+        _ => node_thread_age_ms(0) < 1000,
     }
 }
 
@@ -484,31 +487,31 @@ fn is_run_route(request: &Request) -> bool {
     request.method == "POST" && matches!(split_path(&request.path).0.as_str(), "/chat" | "/node/chat")
 }
 
-/// Choose a worker for a run. `class` picks the lane and `claimed` are workers already reserved by
-/// another admitted run, so a worker reserved for a run that has not started is not offered twice.
+/// Choose a node-thread for a run. `class` picks the lane and `claimed` are node-threads already reserved by
+/// another admitted run, so a node-thread reserved for a run that has not started is not offered twice.
 ///
-/// Worker 0 and worker 1 are the interactive reserve (see `interactive_reserve`): a background run may
+/// Node-thread 0 and node-thread 1 are the interactive reserve (see `interactive_reserve`): a background run may
 /// not use either, so a burst of wakes cannot take the capacity a person's next run needs. Interactive
-/// prefers worker 0 when it is free, so an idle node stays at one interpreter, and spreads across the
-/// others round-robin so parallel sessions are not always pinned to the same worker.
-fn pick_run_worker(class: scheduler::RunClass, claimed: &std::collections::HashSet<usize>) -> Option<usize> {
+/// prefers node-thread 0 when it is free, so an idle node stays at one interpreter, and spreads across the
+/// others round-robin so parallel sessions are not always pinned to the same node-thread.
+fn pick_run_node_thread(class: scheduler::RunClass, claimed: &std::collections::HashSet<usize>) -> Option<usize> {
     let pool = POOL.get()?;
     let background = class == scheduler::RunClass::Background;
-    // Background work may not occupy the interactive reserve: worker indices below `floor` are kept
+    // Background work may not occupy the interactive reserve: node-thread indices below `floor` are kept
     // for runs a person is waiting on, whatever the background backlog looks like.
     let floor = if background { interactive_reserve() } else { 0 };
     // Run lanes stop below the control floor: the control reserve is independent, not merely a
-    // different priority, so a run is never admitted to a worker the control lane owns.
+    // different priority, so a run is never admitted to a node-thread the control lane owns.
     let ceiling = run_capacity().saturating_sub(1);
-    let beats = WORKER_BEATS.get()?;
-    let mut idle: Vec<usize> = live_worker_ids()
+    let beats = NODE_THREAD_BEATS.get()?;
+    let mut idle: Vec<usize> = live_node_thread_ids()
         .into_iter()
-        .filter(|index| *index >= floor && *index <= ceiling && !claimed.contains(index) && worker_busy_label(*index).is_none() && !worker_is_wedged(*index))
+        .filter(|index| *index >= floor && *index <= ceiling && !claimed.contains(index) && node_thread_busy_label(*index).is_none() && !node_thread_is_wedged(*index))
         .filter(|index| {
-            // A worker that has not beaten is as idle as one that never existed; a worker that has gone
+            // A node-thread that has not beaten is as idle as one that never existed; a node-thread that has gone
             // quiet is not idle, whatever its label says.
             beats.get(*index).map(|slot| slot.load(Ordering::Relaxed) != u64::MAX).unwrap_or(false)
-                && worker_age_ms(*index) < 1000
+                && node_thread_age_ms(*index) < 1000
         })
         .collect();
     idle.sort_unstable();
@@ -519,22 +522,22 @@ fn pick_run_worker(class: scheduler::RunClass, claimed: &std::collections::HashS
         let start = pool.next.fetch_add(1, Ordering::Relaxed);
         return Some(idle[start % idle.len()]);
     }
-    // No idle worker: grow the pool if the ceiling allows. `spawn_worker` never reuses worker 0 (it is
-    // always running), so a spawned worker is always outside the interactive reserve.
+    // No idle node-thread: grow the pool if the ceiling allows. `spawn_node_thread` never reuses node-thread 0 (it is
+    // always running), so a spawned node-thread is always outside the interactive reserve.
     if let Ok(mut slots) = pool.slots.lock() {
-        if let Some(index) = spawn_worker(&mut slots, floor, run_capacity().saturating_sub(1)) {
+        if let Some(index) = spawn_node_thread(&mut slots, floor, run_capacity().saturating_sub(1)) {
             if index >= floor {
                 return Some(index);
             }
         }
     }
-    // Saturated. Interactive waits on worker 0's bounded queue; background waits on a background
-    // worker's bounded queue. Either send may still be refused when that queue is full - which is the
+    // Saturated. Interactive waits on node-thread 0's bounded queue; background waits on a background
+    // node-thread's bounded queue. Either send may still be refused when that queue is full - which is the
     // bound, because refusing loudly beats an unbounded backlog every client waits in.
     if background {
-        let candidates: Vec<usize> = live_worker_ids()
+        let candidates: Vec<usize> = live_node_thread_ids()
             .into_iter()
-            .filter(|index| *index >= floor && *index <= ceiling && !worker_is_wedged(*index))
+            .filter(|index| *index >= floor && *index <= ceiling && !node_thread_is_wedged(*index))
             .collect();
         if candidates.is_empty() {
             return None;
@@ -546,55 +549,55 @@ fn pick_run_worker(class: scheduler::RunClass, claimed: &std::collections::HashS
     }
 }
 
-/// Which worker a non-run request goes to, growing the pool if that is what it takes. Runs are admitted
-/// by the scheduler (`pick_run_worker`), never here, so this has no run branch to keep in sync.
-fn choose_worker(request: &Request) -> usize {
+/// Which node-thread a non-run request goes to, growing the pool if that is what it takes. Runs are admitted
+/// by the scheduler (`pick_run_node_thread`), never here, so this has no run branch to keep in sync.
+fn choose_node_thread(request: &Request) -> usize {
     let Some(pool) = POOL.get() else { return 0 };
     // The control lane is independent of both run lanes: `/subagents` may block for seconds, so it
-    // never uses worker 0 and never a run slot. It lives at the top of the index range and grows on
-    // demand. `/runs` and `/health` are answered without a worker at all, so cancel and health stay
+    // never uses node-thread 0 and never a run slot. It lives at the top of the index range and grows on
+    // demand. `/runs` and `/health` are answered without a node-thread at all, so cancel and health stay
     // prompt even when every control slot is awaiting.
     if is_control_route(request) {
         let Ok(mut slots) = pool.slots.lock() else { return control_floor() };
         let live: Vec<usize> = (control_floor()..slots.len())
-            .filter(|index| slots[*index].is_some() && worker_busy_label(*index).is_none() && !worker_is_wedged(*index))
+            .filter(|index| slots[*index].is_some() && node_thread_busy_label(*index).is_none() && !node_thread_is_wedged(*index))
             .collect();
         if !live.is_empty() {
             let start = pool.next.fetch_add(1, Ordering::Relaxed);
             return live[start % live.len()];
         }
-        if let Some(index) = spawn_worker(&mut slots, control_floor(), max_workers()) {
+        if let Some(index) = spawn_node_thread(&mut slots, control_floor(), max_node_threads()) {
             return index;
         }
         return control_floor();
     }
     let read = is_read_route(request);
-    // Nothing to gain while the run worker is idle - for a read as much as for a write. This is the rule
-    // that keeps an idle node at exactly one interpreter, and it is also why a read does not spawn a worker
+    // Nothing to gain while the run node-thread is idle - for a read as much as for a write. This is the rule
+    // that keeps an idle node at exactly one interpreter, and it is also why a read does not spawn a node-thread
     // that would then sit there doing nothing: the pool appears only when a request would otherwise wait.
-    if turn_worker_is_idle() {
+    if turn_node_thread_is_idle() {
         return 0;
     }
     let Ok(mut slots) = pool.slots.lock() else { return 0 };
-    // Only reads may go to a read worker. A write goes to worker 0 even when read workers exist, because
+    // Only reads may go to a read node-thread. A write goes to node-thread 0 even when read node-threads exist, because
     // that is the whole reason one writer per session holds without a lock - and the first version of this
-    // returned a read worker for a write, which the test caught by getting a 200 where it expected the
-    // stalled worker's 503.
+    // returned a read node-thread for a write, which the test caught by getting a 200 where it expected the
+    // stalled node-thread's 503.
     if !read {
         return 0;
     }
-    // Read workers live in the run lanes, below the control floor: a read must not occupy control
-    // capacity, and a control worker must not be counted as a read worker.
+    // Read node-threads live in the run lanes, below the control floor: a read must not occupy control
+    // capacity, and a control node-thread must not be counted as a read node-thread.
     let live: Vec<usize> = (1..slots.len().min(run_capacity()))
-        .filter(|index| slots[*index].is_some() && !worker_is_wedged(*index))
+        .filter(|index| slots[*index].is_some() && !node_thread_is_wedged(*index))
         .collect();
     if !live.is_empty() {
         let start = pool.next.fetch_add(1, Ordering::Relaxed);
         return live[start % live.len()];
     }
-    // A read, the run worker is busy, and there is no read worker: this is the moment the pool earns its
+    // A read, the run node-thread is busy, and there is no read node-thread: this is the moment the pool earns its
     // keep. Everything else waits, which is what a node with one interpreter has always done.
-    if let Some(index) = spawn_worker(&mut slots, 1, run_capacity().saturating_sub(1)) {
+    if let Some(index) = spawn_node_thread(&mut slots, 1, run_capacity().saturating_sub(1)) {
         return index;
     }
     0
@@ -605,16 +608,16 @@ fn now_ms() -> u64 {
 }
 
 fn begin_work(label: String) {
-    // Only worker 0 sets `IN_FLIGHT`. That field is what the window reads to decide whether a *run* is
+    // Only node-thread 0 sets `IN_FLIGHT`. That field is what the window reads to decide whether a *run* is
     // running - so a read being served on another interpreter must not make the UI think a run is in
     // flight, which would disable the composer for a status request.
-    let index = worker_id();
+    let index = node_thread_id();
     if index == 0 {
         if let Ok(mut slot) = IN_FLIGHT.lock() {
             *slot = Some((label.clone(), now_ms()));
         }
     }
-    if let Some(slots) = WORKER_BUSY.get() {
+    if let Some(slots) = NODE_THREAD_BUSY.get() {
         if let Some(slot) = slots.get(index) {
             if let Ok(mut guard) = slot.lock() {
                 *guard = Some((label, now_ms()));
@@ -624,13 +627,13 @@ fn begin_work(label: String) {
 }
 
 fn end_work() {
-    let index = worker_id();
+    let index = node_thread_id();
     if index == 0 {
         if let Ok(mut slot) = IN_FLIGHT.lock() {
             *slot = None;
         }
     }
-    if let Some(slots) = WORKER_BUSY.get() {
+    if let Some(slots) = NODE_THREAD_BUSY.get() {
         if let Some(slot) = slots.get(index) {
             if let Ok(mut guard) = slot.lock() {
                 *guard = None;
@@ -642,11 +645,11 @@ fn end_work() {
 pub fn beat() {
     let started = STARTED.get_or_init(std::time::Instant::now);
     let now = started.elapsed().as_millis() as u64;
-    // The aggregate is the *newest* beat of any worker: the node is alive if any interpreter is making
-    // progress. Which worker is quiet is a per-worker question, answered in the health body.
+    // The aggregate is the *newest* beat of any node-thread: the node is alive if any interpreter is making
+    // progress. Which node-thread is quiet is a per-node-thread question, answered in the health body.
     BEAT_MS.store(now, Ordering::Relaxed);
-    if let Some(beats) = WORKER_BEATS.get() {
-        if let Some(slot) = beats.get(worker_id()) {
+    if let Some(beats) = NODE_THREAD_BEATS.get() {
+        if let Some(slot) = beats.get(node_thread_id()) {
             slot.store(now, Ordering::Relaxed);
         }
     }
@@ -655,7 +658,7 @@ pub fn beat() {
 /// Proof of life for the duration of a host call that is known to be in progress and
 /// known to be bounded.
 ///
-/// The stall detector exists to catch a worker that has stopped making progress: an
+/// The stall detector exists to catch a node-thread that has stopped making progress: an
 /// unbounded Lua loop, a provider that accepted the connection and went quiet. A long
 /// `exec` is not that - it has a deadline and is killed when the deadline passes - but it
 /// beat nothing while it ran, so a node *working correctly* reported `ok:false`,
@@ -665,7 +668,7 @@ pub fn beat() {
 /// the node then killed itself in the middle of that command.
 ///
 /// So: while waiting on something with a deadline, say so. The detector keeps its teeth
-/// for the case it was built for - a worker stuck with no deadline in sight still stops
+/// for the case it was built for - a node-thread stuck with no deadline in sight still stops
 /// beating, and still exits.
 pub struct Heartbeat {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -675,14 +678,14 @@ impl Heartbeat {
     pub fn start() -> Self {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = stop.clone();
-        let owner = worker_id();
+        let owner = node_thread_id();
         std::thread::spawn(move || {
             // Thread-local state does not inherit across spawn. Without this a
-            // request on worker 1 beats worker 0, hiding a real stall and inventing another.
-            WORKER_ID.with(|cell| cell.set(owner));
+            // request on node-thread 1 beats node-thread 0, hiding a real stall and inventing another.
+            NODE_THREAD_ID.with(|cell| cell.set(owner));
             while !flag.load(Ordering::Relaxed) {
                 beat();
-                // Once a second, not once every few: `worker` reads "alive" only while the age is
+                // Once a second, not once every few: `node-thread` reads "alive" only while the age is
                 // under a second, and a five-second tick made a running command look merely "busy"
                 // - which the first version of this test caught by measuring a 4.5s age.
                 std::thread::sleep(std::time::Duration::from_secs(1));
@@ -714,7 +717,7 @@ fn env_seconds(name: &str, fallback: u64) -> u64 {
     std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(fallback)
 }
 
-/// How long a request may sit behind a worker that has shown no progress before it is
+/// How long a request may sit behind a node-thread that has shown no progress before it is
 /// told so instead of waiting. Long enough that a slow run is not mistaken for a
 /// wedge; short enough that a client is not left holding an open socket for minutes.
 fn stall_seconds() -> u64 {
@@ -731,13 +734,13 @@ fn stall_exit_seconds() -> u64 {
 /// The honest health body. `ok` is false when the interpreter has stopped reporting,
 /// which is the one thing this endpoint is uniquely placed to say.
 fn health_body() -> Vec<u8> {
-    // The aggregate answers one question: *can this node do work?* Work happens on worker 0 - runs and
-    // every route that changes something - so the aggregate is worker 0's age, and a wedged run worker is
-    // still reported as the node being stalled even while a read worker answers reads. Which lane is wedged
-    // is a per-worker question, answered by the array below.
+    // The aggregate answers one question: *can this node do work?* Work happens on node-thread 0 - runs and
+    // every route that changes something - so the aggregate is node-thread 0's age, and a wedged run node-thread is
+    // still reported as the node being stalled even while a read node-thread answers reads. Which lane is wedged
+    // is a per-node-thread question, answered by the array below.
     let operations = crate::operations::health();
     let operation_overdue = operations.as_array().is_some_and(|items|items.iter().any(|s|s["overdue"]==true));
-    let age_ms = live_worker_ids().into_iter().map(worker_age_ms).max().unwrap_or(0);
+    let age_ms = live_node_thread_ids().into_iter().map(node_thread_age_ms).max().unwrap_or(0);
     let stalled = age_ms >= stall_seconds() * 1000 || operation_overdue;
     let state = if stalled { "stalled" } else if age_ms < 1000 { "alive" } else { "busy" };
     let mut current = IN_FLIGHT.lock().ok().and_then(|slot| {
@@ -748,37 +751,37 @@ fn health_body() -> Vec<u8> {
             serde_json::json!({
                 "label": label,
                 "ms": now_ms().saturating_sub(*started),
-                "session": worker_session(0),
-                "run_id": worker_run_id(0),
+                "session": node_thread_session(0),
+                "run_id": node_thread_run_id(0),
             })
         })
     });
-    // Per-worker detail, so "which one is busy, and with what" is answerable without reading a log. The
+    // Per-node-thread detail, so "which one is busy, and with what" is answerable without reading a log. The
     // aggregate fields above are kept exactly as they were: the window and the sentinel read them, and a
     // new field must not move an old one.
-    let mut workers = Vec::new();
+    let mut node_threads = Vec::new();
     if let Some(pool) = POOL.get() {
         if let Ok(slots) = pool.slots.lock() {
             for (index, slot) in slots.iter().enumerate() {
                 if slot.is_none() {
                     continue;
                 }
-                let age = worker_age_ms(index);
-                let busy = WORKER_BUSY
+                let age = node_thread_age_ms(index);
+                let busy = NODE_THREAD_BUSY
                     .get()
                     .and_then(|slots| slots.get(index))
                     .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()));
                 let run = busy.as_ref().is_some_and(|(label, _)| label.starts_with("POST /chat"));
                 if current.is_none() && run {
                     if let Some((label, started)) = &busy {
-                        current = Some(serde_json::json!({"label":label,"ms":now_ms().saturating_sub(*started),"worker_id":index,"session":worker_session(index),"run_id":worker_run_id(index)}));
+                        current = Some(serde_json::json!({"label":label,"ms":now_ms().saturating_sub(*started),"node_thread_id":index,"session":node_thread_session(index),"run_id":node_thread_run_id(index)}));
                     }
                 }
-                workers.push(serde_json::json!({
+                node_threads.push(serde_json::json!({
                     "id": index,
                     "role": if index == 0 || run { "runs" } else { "reads" },
-                    "session": worker_session(index),
-                    "run_id": worker_run_id(index),
+                    "session": node_thread_session(index),
+                    "run_id": node_thread_run_id(index),
                     "state": if age >= stall_seconds() * 1000 { "stalled" } else if age < 1000 { "alive" } else { "busy" },
                     "age_ms": age,
                     "busy_ms": busy.as_ref().map(|(_, started)| now_ms().saturating_sub(*started)),
@@ -809,10 +812,14 @@ fn health_body() -> Vec<u8> {
     // the one endpoint that must never be the thing that lies.
     serde_json::json!({
         // Versioned execution surface: a client that sees schema 1 may rely on the fields below
-        // (`subagents`, `runs`, `run_ids`, `current`, `queue`, `workers`) existing. A client that does
+        // (`subagents`, `runs`, `run_ids`, `current`, `queue`, `node_threads`) existing. A client that does
         // not see it must fall back to the legacy fields explicitly.
         "execution_schema": 1,
         "ok": !stalled,
+        // The node's aggregate execution state (alive/busy/stalled) - not a thread and not a subagent.
+        // It keeps its old name because `scripts/upgrade.sh` reads it as the progress signal while
+        // waiting for an idle node, and that script also has to read *older* nodes: renaming the key is
+        // a coordinated change, not this one (see the report).
         "worker": state,
         "stalled_ms": age_ms,
         "queue": QUEUED.load(Ordering::Relaxed),
@@ -823,16 +830,22 @@ fn health_body() -> Vec<u8> {
         "operations": operations,
         "operation_overdue": operation_overdue,
         "current": current,
-        "workers_count": worker_count(),
-        "workers": workers,
-        // Admission state: every conversation currently owned, the worker holding it, its lane and how
+        "node_threads_count": node_thread_count(),
+        "node_threads": node_threads.clone(),
+        // `workers` is the pre-rename spelling of `node_threads`, kept for the one consumer this rename
+        // cannot reach: the installed supervisor. `rust/wa-sentinel`'s `activity_of` requires `workers`
+        // and reads an absent or malformed one as *ambiguous*, which its graceful maintenance treats as
+        // busy - so a `wa-sentinel.exe` built before this change would never see the node as idle again.
+        // The key can go once the sentinel reads `node_threads`.
+        "workers": node_threads,
+        // Admission state: every conversation currently owned, the node-thread holding it, its lane and how
         // many runs are pending behind it. This is what makes "one writer per conversation" and the
         // lane bounds observable from outside the process rather than only from a log.
         "runs": scheduler::global().map(|scheduler| {
-            scheduler.snapshot().into_iter().map(|(conversation, worker, class, pending)| {
+            scheduler.snapshot().into_iter().map(|(conversation, node_thread, class, pending)| {
                 serde_json::json!({
                     "conversation": conversation,
-                    "worker": worker,
+                    "node_thread": node_thread,
                     "class": if class == scheduler::RunClass::Background { "background" } else { "interactive" },
                     "pending": pending,
                 })
@@ -845,7 +858,7 @@ fn health_body() -> Vec<u8> {
                 "background_max": config.background_max,
                 "background_backlog": config.background_backlog,
                 "interactive_reserve": interactive_reserve(),
-                "control_workers": control_workers(),
+                "control_node_threads": control_node_threads(),
             })
         }),
         // The admitted run ids, by conversation and state, so a client can show and poll a run it is
@@ -860,8 +873,8 @@ fn health_body() -> Vec<u8> {
         // contains a prompt or a credential.
         "subagents": subagent_counts,
         "subagents_detail": subagent_health,
-        "workers_spawned": POOL.get().map(|pool| pool.spawned.load(Ordering::Relaxed)).unwrap_or(0),
-        "workers_retired": POOL.get().map(|pool| pool.retired.load(Ordering::Relaxed)).unwrap_or(0),
+        "node_threads_spawned": POOL.get().map(|pool| pool.spawned.load(Ordering::Relaxed)).unwrap_or(0),
+        "node_threads_retired": POOL.get().map(|pool| pool.retired.load(Ordering::Relaxed)).unwrap_or(0),
         // Milliseconds since a UI page last polled. `null` means no page has ever asked - a node that has
         // never been opened, which is not the same as one whose window has died.
         "ui_error": UI_ERROR.lock().ok().and_then(|slot| slot.as_ref().map(|(text, _)| text.clone())),
@@ -885,7 +898,7 @@ fn health_body() -> Vec<u8> {
 ///
 /// This used to be two process-wide statics (`CLIENT`, `EVENT_SINK`) because there was
 /// one interpreter and therefore one run at a time. Once runs were routed by session,
-/// two workers could stream at once and the last one to set `CLIENT` silently owned both
+/// two node-threads could stream at once and the last one to set `CLIENT` silently owned both
 /// streams: the other run's events were written into a socket that belonged to a different
 /// conversation, or to nobody. A sink that lives with the run cannot be shared by mistake.
 enum Sink {
@@ -896,15 +909,15 @@ enum Sink {
 }
 
 thread_local! {
-    /// The sink of the run this worker thread is executing right now. `host.stream` runs
-    /// on the worker's own thread, so a thread-local resolves the run without a global
+    /// The sink of the run this node-thread thread is executing right now. `host.stream` runs
+    /// on the node-thread's own thread, so a thread-local resolves the run without a global
     /// lookup and cannot resolve to a different run's sink.
     static ACTIVE_SINK: RefCell<Option<Sink>> = const { RefCell::new(None) };
 }
 
 /// Installs a sink for the current run and restores the previous one on drop. A guard,
 /// not a set/clear pair, so an early return or a Lua error cannot leave a run's sink
-/// installed for the next request on that worker.
+/// installed for the next request on that node-thread.
 struct SinkGuard {
     previous: Option<Sink>,
 }
@@ -932,7 +945,7 @@ impl Drop for SinkGuard {
 /// stalled provider read shows up here as silence long before anyone notices a hang.
 ///
 /// With no sink there is no event. A non-streaming run (the CLI's `/chat`) has no
-/// client, and a run whose worker is between requests has no client either - and that is
+/// client, and a run whose node-thread is between requests has no client either - and that is
 /// the point: there is deliberately no process-wide fallback to leak into.
 pub fn write_event(payload: &str) {
     if crate::subagents::capture_event(payload) { return; }
@@ -973,12 +986,12 @@ fn ok_json(body: String) -> Reply {
     (200, "application/json", body.into_bytes())
 }
 
-/// Resolve the authenticated identity and the conversation for a run, in Lua, before any worker is
+/// Resolve the authenticated identity and the conversation for a run, in Lua, before any node-thread is
 /// reserved. Returns the conversation on success, or `(status, error, hint)` to refuse at the boundary.
 ///
 /// This is the one place authority is decided for a run: the credential is a DB-backed token and a
 /// named thread belongs to its author, so only Lua can answer it. Doing it here means an invalid
-/// nonempty credential never reaches a worker as the default user, and a foreign thread is refused
+/// nonempty credential never reaches a node-thread as the default user, and a foreign thread is refused
 /// before a slot is taken.
 /// A pre-admission resolution request. The accept thread hands the raw request to the resolver
 /// thread and waits with a bound, so a busy SQLite lock cannot stop the node accepting connections.
@@ -1297,11 +1310,11 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
             return;
         }
     };
-    let ceiling = max_workers();
-    let warm = warm_read_workers().min(ceiling);
+    let ceiling = max_node_threads();
+    let warm = warm_read_node_threads().min(ceiling);
     let queue_depth = env_usize("WASM_AGENT_QUEUE_DEPTH", 256);
     // The control interpreter, owned by the resolver thread. Admission resolves the credential and
-    // the conversation in Lua *before* a worker is reserved; running it on its own thread lets the
+    // the conversation in Lua *before* a node-thread is reserved; running it on its own thread lets the
     // accept thread bound the wait, so a busy SQLite lock or a slow interpreter cannot stop the node
     // accepting connections. It never runs a model.
     let control = factory();
@@ -1315,12 +1328,12 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     // Admission bounds. `background_max` is how many background conversations may run at once and
     // `background_backlog` how many more may wait; together they keep a wake storm from growing
     // without limit. `session_queue_depth` bounds one conversation's own backlog so a single
-    // conversation cannot fill a worker's queue and starve another. The interactive reserve is
-    // `WASM_AGENT_INTERACTIVE_RESERVE` workers (default two), and background runs never use one.
+    // conversation cannot fill a node-thread's queue and starve another. The interactive reserve is
+    // `WASM_AGENT_INTERACTIVE_RESERVE` node-threads (default two), and background runs never use one.
     if let Err(error) = scheduler::install(scheduler::Config {
         session_queue_depth: env_usize("WASM_AGENT_SESSION_QUEUE_DEPTH", 4).max(1),
         // The interactive reserve is subtracted from the run capacity, so background work is bounded
-        // to the workers the reserve does not own.
+        // to the node-threads the reserve does not own.
         background_max: env_usize("WASM_AGENT_BACKGROUND_MAX", (ceiling + 1).saturating_sub(interactive_reserve())).max(1),
         background_backlog: env_usize("WASM_AGENT_BACKGROUND_BACKLOG", 8),
     }) {
@@ -1339,15 +1352,15 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
             eprintln!("[placement] {error}");
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
-    }).expect("placement worker");
-    // Sized to the ceiling once, so a worker's liveness slot never has to be created later: the arrays are
-    // indexed by worker id, and a slot whose sender is None is simply not running.
-    // u64::MAX, not 0, for "never beaten": a worker beats at the top of its own loop, which can happen
+    }).expect("placement node-thread");
+    // Sized to the ceiling once, so a node-thread's liveness slot never has to be created later: the arrays are
+    // indexed by node-thread id, and a slot whose sender is None is simply not running.
+    // u64::MAX, not 0, for "never beaten": a node-thread beats at the top of its own loop, which can happen
     // inside the first millisecond of the process, so 0 would be ambiguous between "never" and "at time 0".
-    let _ = WORKER_BEATS.set((0..=ceiling).map(|_| AtomicU64::new(u64::MAX)).collect());
-    let _ = WORKER_BUSY.set((0..=ceiling).map(|_| Mutex::new(None)).collect());
-    let _ = WORKER_SESSION.set((0..=ceiling).map(|_| Mutex::new(None)).collect());
-    let _ = WORKER_RUN.set((0..=ceiling).map(|_| Mutex::new(None)).collect());
+    let _ = NODE_THREAD_BEATS.set((0..=ceiling).map(|_| AtomicU64::new(u64::MAX)).collect());
+    let _ = NODE_THREAD_BUSY.set((0..=ceiling).map(|_| Mutex::new(None)).collect());
+    let _ = NODE_THREAD_SESSION.set((0..=ceiling).map(|_| Mutex::new(None)).collect());
+    let _ = NODE_THREAD_RUN.set((0..=ceiling).map(|_| Mutex::new(None)).collect());
     let _ = POOL.set(Pool {
         slots: Mutex::new(Vec::new()),
         factory,
@@ -1359,27 +1372,27 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
     });
     let pool = POOL.get().expect("pool");
 
-    // Worker 0, always: the run worker. It is the state main.rs already booted, so a node that never
-    // grows a read worker boots exactly one interpreter, as it always did.
+    // Node-thread 0, always: the run node-thread. It is the state main.rs already booted, so a node that never
+    // grows a read node-thread boots exactly one interpreter, as it always did.
     let (sender, receiver) = std::sync::mpsc::sync_channel::<Work>(queue_depth);
     if let Ok(mut slots) = pool.slots.lock() {
         slots.push(Some(sender));
     }
-    let worker_ui = ui.clone();
+    let node_thread_ui = ui.clone();
     std::thread::spawn(move || {
-        WORKER_ID.with(|cell| cell.set(0));
-        worker_loop(first, 0, receiver, worker_ui);
+        NODE_THREAD_ID.with(|cell| cell.set(0));
+        node_thread_loop(first, 0, receiver, node_thread_ui);
     });
-    // Read workers only if asked for: the point of the pool is to appear when a read would otherwise wait,
+    // Read node-threads only if asked for: the point of the pool is to appear when a read would otherwise wait,
     // so the default is to have none until that happens.
     for _ in 0..warm {
         if let Ok(mut slots) = pool.slots.lock() {
-            spawn_worker(&mut slots, 1, run_capacity().saturating_sub(1));
+            spawn_node_thread(&mut slots, 1, run_capacity().saturating_sub(1));
         }
     }
     eprintln!(
-        "[serve] one run worker{} (reads: {warm} warm, up to {ceiling}, spawned on demand)",
-        if warm == 0 { String::new() } else { format!(" + {warm} read worker(s)") }
+        "[serve] one run node-thread{} (reads: {warm} warm, up to {ceiling}, spawned on demand)",
+        if warm == 0 { String::new() } else { format!(" + {warm} read node-thread(s)") }
     );
     // A node whose ui directory has no index.html serves 404 for every UI route and looks healthy doing
     // it - the failure that made a window show "not found" for an afternoon. It says so at startup instead,
@@ -1399,7 +1412,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
         }
     }
 
-    // Each worker owns an interpreter and reads its own queue, so requests still run one at a time *per
+    // Each node-thread owns an interpreter and reads its own queue, so requests still run one at a time *per
     // interpreter* - what changed is that a running run no longer stops the node answering anything at all.
     // `/health`, `/version` and the UI files were already answered on the accept thread; the reads that need
     // Lua (sessions, models, nodes) now have an interpreter of their own, created when they need one.
@@ -1436,7 +1449,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
             let _ = respond(&mut stream, status, content_type, &body);
             continue;
         }
-        // `POST /runs` is answered here, without a worker: cancellation and status must stay prompt
+        // `POST /runs` is answered here, without a node-thread: cancellation and status must stay prompt
         // even while every control slot is awaiting a subagent, and the run's state and cancel flag
         // live in the scheduler, not in an interpreter. Only identity resolution touches Lua, and it
         // is bounded by the resolver thread.
@@ -1453,7 +1466,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
         // Admission. A run goes through the scheduler, which owns its conversation from admission
         // through completion and picks its lane; everything else keeps the old routing. The scheduler
         // decides *and reserves* in one step, so two back-to-back admissions for one conversation
-        // cannot both be handed a fresh worker - the hole that let a conversation be written twice.
+        // cannot both be handed a fresh node-thread - the hole that let a conversation be written twice.
         let is_run = is_run_route(&request);
         let target = if is_run {
             if split_path(&request.path).0 == "/node/chat" {
@@ -1487,9 +1500,9 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
                     }
                 }
             }
-            match scheduler::admit(&request.routing_session, &request.owner, request.run_class, pick_run_worker) {
-                scheduler::Decision::Run { run_id, worker, cancel, sockets }
-                | scheduler::Decision::Behind { run_id, worker, cancel, sockets } => {
+            match scheduler::admit(&request.routing_session, &request.owner, request.run_class, pick_run_node_thread) {
+                scheduler::Decision::Run { run_id, node_thread, cancel, sockets }
+                | scheduler::Decision::Behind { run_id, node_thread, cancel, sockets } => {
                     if let Some(scheduler) = scheduler::global() {
                         if scheduler.record_request(run_id,&String::from_utf8_lossy(&request.body)).is_err() {
                             scheduler.complete_run(run_id);
@@ -1500,7 +1513,7 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
                     request.run_id = run_id;
                     request.run_cancel = Some(cancel);
                     request.run_sockets = Some(sockets);
-                    worker
+                    node_thread
                 }
                 scheduler::Decision::Refused(refusal) => {
                     let (code, hint) = refusal.as_error();
@@ -1510,11 +1523,11 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
                 }
             }
         } else {
-            choose_worker(&request)
+            choose_node_thread(&request)
         };
-        let age_ms = worker_age_ms(target);
+        let age_ms = node_thread_age_ms(target);
         if age_ms >= stall_seconds() * 1000 {
-            // The worker this request needs has not reported progress for longer than any healthy
+            // The node-thread this request needs has not reported progress for longer than any healthy
             // operation takes. Saying so is the whole point: the alternative was an open socket, no bytes,
             // and a client that waits forever.
             let now = STARTED.get().map(|s| s.elapsed().as_millis() as u64).unwrap_or(0);
@@ -1522,18 +1535,18 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
             if now.saturating_sub(last) > 30_000 {
                 STALL_LOGGED_MS.store(now, Ordering::Relaxed);
                 eprintln!(
-                    "[serve] worker {target} has not reported progress for {}s - replying 503",
+                    "[serve] node-thread {target} has not reported progress for {}s - replying 503",
                     age_ms / 1000
                 );
             }
-            // Exit only when *every* worker that is running is stalled: a wedged lane must not take the
+            // Exit only when *every* node-thread that is running is stalled: a wedged lane must not take the
             // healthy ones with it, and with a single interpreter this is exactly the old behaviour.
-            let all_stalled = live_worker_ids()
+            let all_stalled = live_node_thread_ids()
                 .iter()
-                .all(|index| worker_age_ms(*index) >= stall_exit_seconds() * 1000);
+                .all(|index| node_thread_age_ms(*index) >= stall_exit_seconds() * 1000);
             if stall_exit_seconds() > 0 && all_stalled {
                 eprintln!(
-                    "[serve] every worker has been stalled for {}s: exiting so the service manager can restart the node",
+                    "[serve] every node-thread has been stalled for {}s: exiting so the service manager can restart the node",
                     stall_exit_seconds()
                 );
                 std::process::exit(3);
@@ -1544,14 +1557,14 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
                 scheduler::complete_run(request.run_id);
             }
             let body = format!(
-                "{{\"error\":\"worker_stalled\",\"worker\":{target},\"stalled_ms\":{age_ms},\"hint\":\"the interpreter has not reported progress; see the node log, and restart it if the run is lost\"}}"
+                "{{\"error\":\"node_thread_stalled\",\"node_thread\":{target},\"stalled_ms\":{age_ms},\"hint\":\"the interpreter has not reported progress; see the node log, and restart it if the run is lost\"}}"
             );
             let _ = respond(&mut stream, 503, "application/json", body.as_bytes());
             continue;
         }
         QUEUED.fetch_add(1, Ordering::Relaxed);
-        // A worker can retire between being chosen and being sent to, so the send is attempted against the
-        // slot's current sender and falls back to worker 0. `try_send` hands the request back on failure,
+        // A node-thread can retire between being chosen and being sent to, so the send is attempted against the
+        // slot's current sender and falls back to node-thread 0. `try_send` hands the request back on failure,
         // which is what makes the retry possible rather than a lost request.
         let mut attempt = 0;
         let mut target = target;
@@ -1570,14 +1583,14 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
                 None => {
                     if is_run {
                         // The conversation's owner retired between admission and delivery. Release
-                        // the place rather than hand the run to a worker that does not own it.
+                        // the place rather than hand the run to a node-thread that does not own it.
                         scheduler::complete_run(admitted_run_id);
                         QUEUED.fetch_sub(1, Ordering::Relaxed);
-                        let body = b"{\"error\":\"node_busy\",\"hint\":\"the worker retired before the run could start; retry shortly\"}";
+                        let body = b"{\"error\":\"node_busy\",\"hint\":\"the node-thread retired before the run could start; retry shortly\"}";
                         let _ = respond(&mut stream, 503, "application/json", body);
                         break;
                     }
-                    // A read/write worker is gone (retired). Worker 0 always exists, so it is the honest fallback.
+                    // A read/write node-thread is gone (retired). Node-thread 0 always exists, so it is the honest fallback.
                     if target != 0 && attempt < 2 {
                         attempt += 1;
                         target = 0;
@@ -1609,11 +1622,11 @@ pub fn run(first: Lua, factory: Box<dyn Fn() -> Lua + Send + Sync>, port: u16, u
                         scheduler::complete_run(admitted_run_id);
                         QUEUED.fetch_sub(1, Ordering::Relaxed);
                         let (mut stream, _request) = pair;
-                        let body = b"{\"error\":\"node_busy\",\"hint\":\"the worker retired before the run could start; retry shortly\"}";
+                        let body = b"{\"error\":\"node_busy\",\"hint\":\"the node-thread retired before the run could start; retry shortly\"}";
                         let _ = respond(&mut stream, 503, "application/json", body);
                         break;
                     }
-                    // Retired while this request was on its way. Try worker 0 once, then refuse.
+                    // Retired while this request was on its way. Try node-thread 0 once, then refuse.
                     if target != 0 && attempt < 2 {
                         attempt += 1;
                         target = 0;
@@ -1640,18 +1653,18 @@ fn unwrap_http(work: Work) -> (TcpStream, Request) {
     }
 }
 
-/// One interpreter's loop. Worker 0 also does the housekeeping - relayed work and the sync tick - because
-/// that work is a conversation with a peer and belongs where the runs are; a read worker does nothing but
+/// One interpreter's loop. Node-thread 0 also does the housekeeping - relayed work and the sync tick - because
+/// that work is a conversation with a peer and belongs where the runs are; a read node-thread does nothing but
 /// answer reads.
-fn worker_loop(
+fn node_thread_loop(
     lua: Lua,
     index: usize,
     receiver: std::sync::mpsc::Receiver<Work>,
     agent_ui: PathBuf,
 ) {
     let mut next_sync = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    // A deterministic wedge, for the regression test: the hook stalls worker 0 on its first request, which
-    // is exactly the shape that was found in the wild. Only worker 0, or a node with read workers would
+    // A deterministic wedge, for the regression test: the hook stalls node-thread 0 on its first request, which
+    // is exactly the shape that was found in the wild. Only node-thread 0, or a node with read node-threads would
     // stall all of them and the test would be measuring itself.
     let test_stall = index == 0 && std::env::var("WASM_AGENT_TEST_STALL_WORKER").is_ok();
     let mut stalled_once = false;
@@ -1666,10 +1679,10 @@ fn worker_loop(
                 QUEUED.fetch_sub(1, Ordering::Relaxed);
                 begin_work("child completion".into());
                 let args: serde_json::Value=serde_json::from_str(&body).unwrap_or_default();
-                if let Some(slot)=WORKER_SESSION.get().and_then(|slots|slots.get(index)) {
+                if let Some(slot)=NODE_THREAD_SESSION.get().and_then(|slots|slots.get(index)) {
                     if let Ok(mut value)=slot.lock() {*value=args["session_id"].as_str().map(str::to_string);}
                 }
-                if let Some(slot)=WORKER_RUN.get().and_then(|slots|slots.get(index)) {
+                if let Some(slot)=NODE_THREAD_RUN.get().and_then(|slots|slots.get(index)) {
                     if let Ok(mut value)=slot.lock() {*value=Some(run_id);}
                 }
                 IN_RUN.with(|flag| flag.set(true));
@@ -1687,10 +1700,10 @@ fn worker_loop(
                 set_current_run_io(None,None,String::new());
                 IN_RUN.with(|flag| flag.set(false));
                 scheduler::complete_run(run_id);
-                if let Some(slot)=WORKER_SESSION.get().and_then(|slots|slots.get(index)) {
+                if let Some(slot)=NODE_THREAD_SESSION.get().and_then(|slots|slots.get(index)) {
                     if let Ok(mut value)=slot.lock() {*value=None;}
                 }
-                if let Some(slot)=WORKER_RUN.get().and_then(|slots|slots.get(index)) {
+                if let Some(slot)=NODE_THREAD_RUN.get().and_then(|slots|slots.get(index)) {
                     if let Ok(mut value)=slot.lock() {*value=None;}
                 }
                 end_work();beat();idle_since=std::time::Instant::now();
@@ -1699,19 +1712,19 @@ fn worker_loop(
             Ok(Work::Http(mut stream, request)) => {
                 if test_stall && !stalled_once {
                     stalled_once = true;
-                    eprintln!("[serve] test hook: stalling worker 0 on purpose");
+                    eprintln!("[serve] test hook: stalling node-thread 0 on purpose");
                     std::thread::sleep(std::time::Duration::from_secs(3600));
                 }
                 QUEUED.fetch_sub(1, Ordering::Relaxed);
                 LAST_SERVED_MS.store(now_ms(), Ordering::Relaxed);
                 begin_work(format!("{} {}", request.method, request.path));
-                // Which session this worker holds, so a second run in the same session finds it and queues
+                // Which session this node-thread holds, so a second run in the same session finds it and queues
                 // behind it instead of starting a second writer on the same conversation.
-                if let Some(slots) = WORKER_SESSION.get() {
+                if let Some(slots) = NODE_THREAD_SESSION.get() {
                     if let Some(slot) = slots.get(index) {
                         if let Ok(mut guard) = slot.lock() {
                             // Only a run holds a conversation. A read or a write does not, and reporting
-                            // one would make a read worker look like a run worker in `/health`.
+                            // one would make a read node-thread look like a run node-thread in `/health`.
                             *guard = if is_run_route(&request) && !request.routing_session.is_empty() {
                                 Some(request.routing_session.clone())
                             } else {
@@ -1720,7 +1733,7 @@ fn worker_loop(
                         }
                     }
                 }
-                if let Some(slots) = WORKER_RUN.get() {
+                if let Some(slots) = NODE_THREAD_RUN.get() {
                     if let Some(slot) = slots.get(index) {
                         if let Ok(mut guard) = slot.lock() {
                             *guard = if is_run_route(&request) { Some(request.run_id) } else { None };
@@ -1761,14 +1774,14 @@ fn worker_loop(
                 if is_run_route(&request) {
                     scheduler::complete_run(request.run_id);
                 }
-                if let Some(slots) = WORKER_SESSION.get() {
+                if let Some(slots) = NODE_THREAD_SESSION.get() {
                     if let Some(slot) = slots.get(index) {
                         if let Ok(mut guard) = slot.lock() {
                             *guard = None;
                         }
                     }
                 }
-                if let Some(slots) = WORKER_RUN.get() {
+                if let Some(slots) = NODE_THREAD_RUN.get() {
                     if let Some(slot) = slots.get(index) {
                         if let Ok(mut guard) = slot.lock() {
                             *guard = None;
@@ -1803,17 +1816,17 @@ fn worker_loop(
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
         }
         if index != 0 {
-            // A read worker retires itself once it has been idle long enough and the pool is above the warm
+            // A read node-thread retires itself once it has been idle long enough and the pool is above the warm
             // minimum. Two things make that safe: it clears its own slot *before* returning, so the
-            // dispatcher stops choosing it, and a request already on its way to a retired worker is not
-            // lost - `try_send` reports Disconnected and the accept thread retries on worker 0.
-            if idle_since.elapsed().as_secs() >= read_idle_seconds() && worker_count() > warm_read_workers() + 1 {
+            // dispatcher stops choosing it, and a request already on its way to a retired node-thread is not
+            // lost - `try_send` reports Disconnected and the accept thread retries on node-thread 0.
+            if idle_since.elapsed().as_secs() >= read_idle_seconds() && node_thread_count() > warm_read_node_threads() + 1 {
                 if let Some(pool) = POOL.get() {
                     if let Ok(mut slots) = pool.slots.lock() {
                         if slots.get(index).is_some() {
                             slots[index] = None;
                             pool.retired.fetch_add(1, Ordering::Relaxed);
-                            eprintln!("[serve] read worker {index} retired after {}s idle", idle_since.elapsed().as_secs());
+                            eprintln!("[serve] read node-thread {index} retired after {}s idle", idle_since.elapsed().as_secs());
                         }
                     }
                 }
@@ -1822,7 +1835,7 @@ fn worker_loop(
             continue;
         }
         // Relayed peer work goes through the same admission as a direct request. A peer run must not
-        // bypass the scheduler by arriving on worker 0's housekeeping path; `/node/chat` is a run and is
+        // bypass the scheduler by arriving on node-thread 0's housekeeping path; `/node/chat` is a run and is
         // forced into the background lane, while the other relay routes are control calls and stay here.
         for job in crate::relay_client::take_jobs() {
             let route = split_path(&job.path).0;
@@ -1845,9 +1858,9 @@ fn worker_loop(
             };
             let conversation = relay_conversation(&job, &verified.0);
             let owner = verified.0.clone();
-            match scheduler::admit(&conversation, &owner, scheduler::RunClass::Background, pick_run_worker) {
-                scheduler::Decision::Run { run_id, worker, cancel, sockets }
-                | scheduler::Decision::Behind { run_id, worker, cancel, sockets } => {
+            match scheduler::admit(&conversation, &owner, scheduler::RunClass::Background, pick_run_node_thread) {
+                scheduler::Decision::Run { run_id, node_thread, cancel, sockets }
+                | scheduler::Decision::Behind { run_id, node_thread, cancel, sockets } => {
                     if let Some(scheduler) = scheduler::global() {
                         if scheduler.record_request(run_id,&job.body).is_err() {
                             scheduler.complete_run(run_id);
@@ -1857,7 +1870,7 @@ fn worker_loop(
                     }
                     let sender = POOL
                         .get()
-                        .and_then(|pool| pool.slots.lock().ok().and_then(|slots| slots.get(worker).cloned().flatten()));
+                        .and_then(|pool| pool.slots.lock().ok().and_then(|slots| slots.get(node_thread).cloned().flatten()));
                     match sender {
                         Some(sender) => match sender.try_send(Work::Relay(RelayWork { job, run_id, cancel, sockets, verified: Some(verified) })) {
                             Ok(()) => {}
@@ -1883,7 +1896,7 @@ fn worker_loop(
             }
         }
         // Housekeeping last, and only when nobody is waiting and the node has been quiet: the sync tick
-        // talks to a peer over the network, and on worker 0 that means this interpreter stops answering
+        // talks to a peer over the network, and on node-thread 0 that means this interpreter stops answering
         // while it does.
         let quiet = now_ms().saturating_sub(LAST_SERVED_MS.load(Ordering::Relaxed)) >= 2000;
         if std::time::Instant::now() >= next_sync && QUEUED.load(Ordering::Relaxed) == 0 && quiet {
@@ -1917,8 +1930,8 @@ fn relay_conversation(job: &crate::relay_client::RelayJob, verified_node_id: &st
     }
 }
 
-/// Verify a peer's signature on the worker that owns the relay housekeeping path. The result is the
-/// verified author, carried to whichever worker runs the job so the run never re-verifies.
+/// Verify a peer's signature on the node-thread that owns the relay housekeeping path. The result is the
+/// verified author, carried to whichever node-thread runs the job so the run never re-verifies.
 fn verify_peer_sync(
     lua: &Lua,
     headers: &[(String, String)],
@@ -2062,12 +2075,12 @@ struct Request {
     run_class: scheduler::RunClass,
     /// The admission id assigned when this request is admitted as a run (0 for anything else).
     /// It is the run's identity in `/health` and in the node log, so "which run is on which
-    /// worker" is answerable without reading a conversation.
+    /// node-thread" is answerable without reading a conversation.
     run_id: u64,
     /// The authenticated owner of this run, resolved before admission. `/runs cancel` is scoped by
     /// it, so one user can never cancel another's run.
     owner: String,
-    /// This run's own cancel flag. Installed as the worker's current-run context so the runtime's
+    /// This run's own cancel flag. Installed as the node-thread's current-run context so the runtime's
     /// provider reader can observe a cancellation request on the thread blocked in the model call.
     run_cancel: Option<Arc<AtomicBool>>,
     /// A peer run's verified author `(node_id, role, name)`. Set only when the signature was verified
@@ -2093,12 +2106,12 @@ pub(crate) fn enqueue_completion(body: &str) -> serde_json::Value {
     if session.is_empty() || owner.is_empty() || POOL.get().is_none() {
         return serde_json::json!({"error":"completion_runtime_unavailable","not_started":true});
     }
-    match scheduler::admit(session,owner,scheduler::RunClass::Background,pick_run_worker) {
-        scheduler::Decision::Run {run_id,worker,cancel,sockets}
-        | scheduler::Decision::Behind {run_id,worker,cancel,sockets} => {
+    match scheduler::admit(session,owner,scheduler::RunClass::Background,pick_run_node_thread) {
+        scheduler::Decision::Run {run_id,node_thread,cancel,sockets}
+        | scheduler::Decision::Behind {run_id,node_thread,cancel,sockets} => {
             let recorded=scheduler::global().is_some_and(|s| s.record_request(run_id,body).is_ok());
             if !recorded {scheduler::complete_run(run_id);return serde_json::json!({"error":"run_journal_unavailable","not_started":true});}
-            let sender=POOL.get().and_then(|pool| pool.slots.lock().ok().and_then(|slots| slots.get(worker).cloned().flatten()));
+            let sender=POOL.get().and_then(|pool| pool.slots.lock().ok().and_then(|slots| slots.get(node_thread).cloned().flatten()));
             QUEUED.fetch_add(1,Ordering::Relaxed);
             if sender.is_some_and(|s| s.try_send(Work::Completion {body:body.to_string(),run_id,cancel,sockets}).is_ok()) {
                 serde_json::json!({"accepted":true,"run_id":run_id})
@@ -2111,9 +2124,9 @@ pub(crate) fn enqueue_completion(body: &str) -> serde_json::Value {
     }
 }
 
-/// One unit of work a worker can be handed. HTTP requests and relayed peer requests travel the same
+/// One unit of work a node-thread can be handed. HTTP requests and relayed peer requests travel the same
 /// queue and the same admission, so a peer run can no longer bypass the scheduler by arriving on
-/// worker 0's housekeeping path.
+/// node-thread 0's housekeeping path.
 enum Work {
     Completion { body: String, run_id: u64, cancel: Arc<AtomicBool>, sockets: crate::subagents::SocketSlot },
     Http(TcpStream, Request),
@@ -2417,7 +2430,7 @@ fn dispatch(
         // session. No model call, so it is a plain read route. This line was dropped by a merge that
         // applied cleanly and recorded its branch as a parent while bringing none of its content - the
         // gate stayed green because nothing asserted the route. `scripts/test-serve-concurrency.sh`
-        // now fetches it while worker 0 is wedged, which catches both a missing handler (404) and a
+        // now fetches it while node-thread 0 is wedged, which catches both a missing handler (404) and a
         // handler that is not a read.
         "/efficiency" => (200, "application/json", call("wa_efficiency", &[query_value(&query, "session_id").as_str(), session]).into_bytes()),
         "/session/fork" if method == "POST" => (200, "application/json", call("wa_session_fork", &[body, session]).into_bytes()),
@@ -2726,7 +2739,7 @@ mod read_route_tests {
     }
 
     /// The regression that cost two incidents: a read route not on the hand-maintained list was
-    /// pinned to worker 0, and queued behind a run. A GET must be a read without anyone remembering.
+    /// pinned to node-thread 0, and queued behind a run. A GET must be a read without anyone remembering.
     #[test]
     fn a_get_is_a_read_without_being_listed() {
         assert!(is_read_route(&request("GET", "/a-route-invented-after-this-test")));
@@ -2737,7 +2750,7 @@ mod read_route_tests {
     }
 
     /// The controls answered by independent runtimes are reads too. They are POSTs, so the method
-    /// rule alone would pin them to worker 0 - where a run could block its own cancellation.
+    /// rule alone would pin them to node-thread 0 - where a run could block its own cancellation.
     #[test]
     fn a_control_post_is_a_read() {
         assert!(is_read_route(&request("POST", "/operation")));

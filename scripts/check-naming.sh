@@ -35,6 +35,18 @@ const names = [
   // These labels falsely described a tool/configuration preview as a provider request.
   'raw envelope', 'envelope the model sees', 'exact envelope sent',
   'each turn is one HTTP request', 'envelope-raw',
+  // A node's execution threads are node-threads, not workers: "worker" is the delegated child
+  // session (a subagent). These are spellings of the *thread*, so they must not come back. The word
+  // "worker" is deliberately absent - it still means a subagent - and the four names that keep it on
+  // purpose are named where they live: the `workers[]` alias for the installed sentinel, the
+  // operator's `WASM_AGENT_WORKER*` env vars, the node-wide state key `worker` (serve.rs), and the
+  // durable `worker:` operation-owner prefix (ui/app.js). `choose_worker` is not listed either:
+  // `skills/code-graph/SKILL.md` uses it as an *example* query name, and a skill is out of scope.
+  'workers_count', 'workers_spawned', 'workers_retired', 'control_workers', 'worker_count', 'worker_stalled',
+  'live_worker_ids', 'worker_age_ms', 'worker_is_wedged', 'worker_busy_label', 'worker_session',
+  'worker_run_id', 'spawn_worker', 'pick_run_worker', 'warm_read_workers', 'max_workers',
+  'turn_worker_is_idle', 'worker_loop', 'worker_ui',
+  'WORKER_BEATS', 'WORKER_BUSY', 'WORKER_SESSION', 'WORKER_RUN', 'WORKER_ID',
 ];
 let scanned = 0, hits = 0;
 const files = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }).split('\0').filter(Boolean);

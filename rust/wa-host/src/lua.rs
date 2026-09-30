@@ -118,7 +118,7 @@ impl Lua {
     /// Roll back any transaction this interpreter's own connection left open.
     ///
     /// A Lua error can abandon a `BEGIN` that no later statement closes; on a
-    /// persistent worker that transaction would hold the write lock until the
+    /// persistent node-thread that transaction would hold the write lock until the
     /// process exits, stalling every other interpreter. The caller invokes this
     /// when a Lua call returned an error, so the failure cannot outlive the request.
     pub fn rollback_if_open(&self) {

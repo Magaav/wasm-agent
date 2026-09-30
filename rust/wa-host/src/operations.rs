@@ -98,7 +98,7 @@ pub fn foreground(
             command,
             cwd,
             seconds,
-            format!("worker:{}", crate::serve::worker_id()),
+            format!("worker:{}", crate::serve::node_thread_id()),
             true,
         ))
         .map_err(|e| e.to_string())?;

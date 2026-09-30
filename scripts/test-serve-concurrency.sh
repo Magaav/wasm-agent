@@ -93,7 +93,7 @@ TURN=$!
 sleep 2
 # A page reloaded in the middle of this turn needs /me, /models, /sessions,
 # /session and /health. /health and the assets bypass Lua, but the other reads
-# need a worker; checking only static files would miss a blank, "connecting" UI.
+# need a node-thread; checking only static files would miss a blank, "connecting" UI.
 reload_started="$(date +%s%3N)"
 for route in me models sessions; do
   read_code="$(curl -s -m 2 -o "$WORK/$route.json" -w '%{http_code}' "http://127.0.0.1:$PORT/$route" 2>/dev/null)"
@@ -147,12 +147,12 @@ wait "$SERVER" 2>/dev/null
 
 # ---------------------------------------------------------------------------
 # The other half of the same design, and why /health cannot be trusted alone: the
-# accept thread answers /health WITHOUT the interpreter, so a node whose Lua worker is
+# accept thread answers /health WITHOUT the interpreter, so a node whose Lua node-thread is
 # stuck reports healthy forever while every endpoint that needs Lua hangs with zero
 # bytes. Not hypothetical - a run found a node wedged for nine hours, with the
 # write-ahead log's last write as the timestamp proving when it stopped.
 #
-# So: stall the worker on purpose, shrink the threshold to a second, and require the
+# So: stall the node-thread on purpose, shrink the threshold to a second, and require the
 # node to say so instead of going quiet.
 WEDGE_PORT=$((PORT + 10))
 WEDGE_CLIENT=$((WEDGE_PORT + 1))
@@ -180,9 +180,9 @@ kill "$WEDGE" 2>/dev/null
 
 echo
 echo "  wedged node: /health -> $health"
-echo "  wedged node: a write that needs worker 0 -> $code $body"
+echo "  wedged node: a write that needs node-thread 0 -> $code $body"
 case "$health" in
-  *'"ok":false'*'"worker":"stalled"'*) echo "  ok: /health admits the worker is stalled" ;;
+  *'"ok":false'*'"worker":"stalled"'*) echo "  ok: /health admits the node-thread is stalled" ;;
   *) echo "  FAIL: /health kept claiming the node was fine"; exit 1 ;;
 esac
 # The bound an in-flight `bash`/`shell` call is shown against. It must be the number the host
@@ -193,16 +193,19 @@ case "$health" in
   *) echo "  FAIL: /health must report exec_timeout_seconds=300, got: $health"; exit 1 ;;
 esac
 case "$code:$body" in
-  503:*worker_stalled*) echo "  ok: a blocked request is refused with a reason, not left hanging" ;;
-  *) echo "  FAIL: expected 503 worker_stalled, got $code $body"; exit 1 ;;
+  503:*node_thread_stalled*) echo "  ok: a blocked request is refused with a reason, not left hanging" ;;
+  *) echo "  FAIL: expected 503 node_thread_stalled, got $code $body"; exit 1 ;;
 esac
+# The phrase below keeps the older spelling of the noun on purpose: `scripts/test.sh` greps this
+# exact line out of this script's log, and that file is not part of this rename (see the report).
+# The node-thread it reports is a node-thread; only the gate's search string is old.
 echo "  ok: a stalled worker is visible, and survivable"
 
 # ---------------------------------------------------------------------------
 # The pool, hot-swappable: a read must not wait for a turn, and the interpreter that made that possible
 # must not stay behind once the load is gone.
 #
-# No warm read workers are asked for (the default), so the worker that answers the read below does not exist
+# No warm read node-threads are asked for (the default), so the node-thread that answers the read below does not exist
 # until the read needs it. That is the whole design: an idle node runs one interpreter, and a node under load
 # grows to meet the load and shrinks back.
 POOL_PORT=$((PORT + 20))
@@ -221,50 +224,50 @@ for _ in $(seq 1 40); do
 done
 if [ "${code:-}" != "200" ]; then echo "  FAIL: the pool server did not come up (see $WORK/pool.log)"; exit 1; fi
 
-# Trip the hook on worker 0 with a request that is not a read. /diff is a write route, and an unknown turn
+# Trip the hook on node-thread 0 with a request that is not a read. /diff is a write route, and an unknown turn
 # makes it do nothing - which is all this needs, because the hook stalls before the route runs.
 curl -s -o /dev/null -m 3 -X POST -H 'content-type: application/json' -d '{}' "http://127.0.0.1:$POOL_PORT/diff" 2>/dev/null
 sleep 2
 
 before_health="$(curl -s -m 3 "http://127.0.0.1:$POOL_PORT/health" 2>/dev/null)"
 read_code="$(curl -s -m 5 -o "$WORK/pool-read.json" -w '%{http_code}' "http://127.0.0.1:$POOL_PORT/sessions" 2>/dev/null)"
-# `/tools` is a read too, and it was not on the read-route list: with a run holding worker 0 it
+# `/tools` is a read too, and it was not on the read-route list: with a run holding node-thread 0 it
 # returned no bytes, which is how the engine's tool panel hung behind a turn. A missing entry here is
 # a performance bug, so it is measured rather than assumed.
 tools_code="$(curl -s -m 5 -o "$WORK/pool-tools.json" -w '%{http_code}' "http://127.0.0.1:$POOL_PORT/tools" 2>/dev/null)"
 # `/efficiency` is the route the window's `/efficiency_report` calls. It was dropped by a merge that
 # applied cleanly and recorded its branch as a parent while bringing none of its content, and the gate
-# stayed green because nothing asserted it. A 404 here is that bug; a non-200 under a wedged worker 0
+# stayed green because nothing asserted it. A 404 here is that bug; a non-200 under a wedged node-thread 0
 # is the read-route bug.
 efficiency_code="$(curl -s -m 5 -o "$WORK/pool-efficiency.json" -w '%{http_code}' "http://127.0.0.1:$POOL_PORT/efficiency" 2>/dev/null)"
 write_code="$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{}' "http://127.0.0.1:$POOL_PORT/diff" 2>/dev/null)"
 grown_health="$(curl -s -m 3 "http://127.0.0.1:$POOL_PORT/health" 2>/dev/null)"
-# Now leave it alone: the worker that answered that read has nothing to do, and must go away again.
+# Now leave it alone: the node-thread that answered that read has nothing to do, and must go away again.
 sleep 6
 shrunk_health="$(curl -s -m 3 "http://127.0.0.1:$POOL_PORT/health" 2>/dev/null)"
-# The worker that just retired is replaced by a *new* interpreter in the same index. It must not
-# inherit the dead worker's last beat: selection would read that stale age, call the fresh worker
-# wedged, and answer a plain read `503 worker_stalled`. This is the pool's whole promise - a read is
+# The node-thread that just retired is replaced by a *new* interpreter in the same index. It must not
+# inherit the dead node-thread's last beat: selection would read that stale age, call the fresh node-thread
+# wedged, and answer a plain read `503 node_thread_stalled`. This is the pool's whole promise - a read is
 # served without waiting - so a respawn must start the replacement's liveness clock at zero.
 respawn_code="$(curl -s -m 5 -o "$WORK/pool-respawn.json" -w '%{http_code}' "http://127.0.0.1:$POOL_PORT/sessions" 2>/dev/null)"
 kill "$POOL" 2>/dev/null
 
 echo
 echo "  pool: before any read -> $before_health"
-echo "  pool: read /sessions while worker 0 is stalled -> $read_code"
-echo "  pool: write /diff, which needs worker 0 -> $write_code"
+echo "  pool: read /sessions while node-thread 0 is stalled -> $read_code"
+echo "  pool: write /diff, which needs node-thread 0 -> $write_code"
 echo "  pool: after the read -> $grown_health"
 echo "  pool: after 6s idle -> $shrunk_health"
 case "$before_health" in
-  *'"workers_count":1'*) echo "  ok: an idle node runs one interpreter, as it always did" ;;
+  *'"node_threads_count":1'*) echo "  ok: an idle node runs one interpreter, as it always did" ;;
   *) echo "  FAIL: the pool existed before it was needed"; exit 1 ;;
 esac
 case "$read_code" in
-  200) echo "  ok: a read is answered while a turn holds worker 0" ;;
+  200) echo "  ok: a read is answered while a turn holds node-thread 0" ;;
   *) echo "  FAIL: the read queued behind the turn (got ${read_code:-none})"; exit 1 ;;
 esac
 case "$tools_code" in
-  200) echo "  ok: /tools is answered while a turn holds worker 0" ;;
+  200) echo "  ok: /tools is answered while a turn holds node-thread 0" ;;
   *) echo "  FAIL: /tools queued behind the turn (got ${tools_code:-none}) - it is a read"; exit 1 ;;
 esac
 case "$efficiency_code" in
@@ -273,26 +276,26 @@ case "$efficiency_code" in
   *) echo "  FAIL: /efficiency was not answered as a read (got ${efficiency_code:-none})"; exit 1 ;;
 esac
 case "$write_code" in
-  503) echo "  ok: a request that needs the stalled worker is refused, not left hanging" ;;
-  *) echo "  FAIL: expected 503 for the stalled worker, got ${write_code:-none}"; exit 1 ;;
+  503) echo "  ok: a request that needs the stalled node-thread is refused, not left hanging" ;;
+  *) echo "  FAIL: expected 503 for the stalled node-thread, got ${write_code:-none}"; exit 1 ;;
 esac
 case "$grown_health" in
-  *'"workers_count":2'*'"workers_spawned":1'*|*'"workers_spawned":1'*'"workers_count":2'*)
-    echo "  ok: the read worker was created on demand, and /health says so" ;;
+  *'"node_threads_count":2'*'"node_threads_spawned":1'*|*'"node_threads_spawned":1'*'"node_threads_count":2'*)
+    echo "  ok: the read node-thread was created on demand, and /health says so" ;;
   *) echo "  FAIL: expected a second interpreter, spawned once, got: $grown_health"; exit 1 ;;
 esac
 case "$shrunk_health" in
-  *'"workers_count":1'*) echo "  ok: the idle read worker retired itself" ;;
+  *'"node_threads_count":1'*) echo "  ok: the idle read node-thread retired itself" ;;
   *) echo "  FAIL: the pool did not shrink back, got: $shrunk_health"; exit 1 ;;
 esac
 case "$shrunk_health" in
-  *'"workers_retired":1'*) echo "  ok: and the retirement is visible, not silent" ;;
+  *'"node_threads_retired":1'*) echo "  ok: and the retirement is visible, not silent" ;;
   *) echo "  FAIL: the retirement was not reported, got: $shrunk_health"; exit 1 ;;
 esac
-echo "  pool: a read after that worker retired -> $respawn_code"
+echo "  pool: a read after that node-thread retired -> $respawn_code"
 case "$respawn_code" in
-  200) echo "  ok: the replacement did not inherit the retired worker's stall" ;;
-  *) echo "  FAIL: a fresh read worker was mistaken for the dead one it replaced (got ${respawn_code:-none})"; exit 1 ;;
+  200) echo "  ok: the replacement did not inherit the retired node-thread's stall" ;;
+  *) echo "  FAIL: a fresh read node-thread was mistaken for the dead one it replaced (got ${respawn_code:-none})"; exit 1 ;;
 esac
 echo "  ok: the pool grows on demand and shrinks when the load is gone"
 
@@ -300,10 +303,10 @@ echo "  ok: the pool grows on demand and shrinks when the load is gone"
 # ---------------------------------------------------------------------------
 # Concurrent turns, routed by session.
 #
-# The pool protected reads first. Turns stayed on worker 0, which is what made "one writer per session" true
+# The pool protected reads first. Turns stayed on node-thread 0, which is what made "one writer per session" true
 # without a lock - and also meant two conversations could not run at once. A turn is now routed by session:
-# the same session goes to the worker already running it (so its turns stay ordered and it keeps one writer),
-# and a session nobody is running goes to an idle worker or gets one. Two conversations at once, and never
+# the same session goes to the node-thread already running it (so its turns stay ordered and it keeps one writer),
+# and a session nobody is running goes to an idle node-thread or gets one. Two conversations at once, and never
 # two writers on one conversation.
 TURN_PORT=$((PORT + 30))
 TURN_CLIENT=$((TURN_PORT + 1))
@@ -328,16 +331,16 @@ for _ in $(seq 1 40); do
 done
 if [ "${code:-}" != "200" ]; then echo "  FAIL: the turn-test server did not come up"; exit 1; fi
 
-# Occupy worker 0 with the hook, using a write route so the hook trips on it.
+# Occupy node-thread 0 with the hook, using a write route so the hook trips on it.
 curl -s -o /dev/null -m 3 -X POST -H 'content-type: application/json' -d '{}' "http://127.0.0.1:$TURN_PORT/diff" 2>/dev/null
 sleep 2
 
-# A turn for a session nobody is running: it must not wait behind the wedged worker.
+# A turn for a session nobody is running: it must not wait behind the wedged node-thread.
 curl -s -N -m 20 -X POST -H 'content-type: application/json' \
   --data '{"text":"reply with the single word: ok","thread":"turn-session-a"}' "http://127.0.0.1:$TURN_PORT/chat" > "$WORK/turn-a.txt" 2>&1 &
 sleep 3
 turns_health="$(curl -s -m 3 "http://127.0.0.1:$TURN_PORT/health" 2>/dev/null)"
-# The same session again: it must land on the worker already running it, not on a third one.
+# The same session again: it must land on the node-thread already running it, not on a third one.
 curl -s -N -m 20 -X POST -H 'content-type: application/json' \
   --data '{"text":"reply with the single word: ok","thread":"turn-session-a"}' "http://127.0.0.1:$TURN_PORT/chat" > "$WORK/turn-a2.txt" 2>&1 &
 sleep 3
@@ -357,22 +360,22 @@ echo "  turns: after the same session again -> $affinity_health"
 echo "  turns: after a turn for session B -> $concurrent_health"
 case "$turns_health" in
   *'"session":"turn-session-a"'*)
-    echo "  ok: a turn for a new session got its own worker, while worker 0 was wedged" ;;
-  *) echo "  FAIL: the turn did not get a worker of its own"; exit 1 ;;
+    echo "  ok: a turn for a new session got its own node-thread, while node-thread 0 was wedged" ;;
+  *) echo "  FAIL: the turn did not get a node-thread of its own"; exit 1 ;;
 esac
 if printf '%s' "$turns_health" | grep -q '"current":null'; then
-  echo '  FAIL: health must not advertise idle while a secondary worker runs a turn'; exit 1
+  echo '  FAIL: health must not advertise idle while a secondary node-thread runs a turn'; exit 1
 fi
 case "$affinity_health" in
-  *'"workers_count":2'*)
-    echo "  ok: the same session did not open a second worker" ;;
-  *) echo "  FAIL: the same session opened another worker - two writers on one conversation"; exit 1 ;;
+  *'"node_threads_count":2'*)
+    echo "  ok: the same session did not open a second node-thread" ;;
+  *) echo "  FAIL: the same session opened another node-thread - two writers on one conversation"; exit 1 ;;
 esac
 # Require an actual mock answer, not merely a routed request or a nonempty error.
-# Worker 0 remains wedged throughout; the turn must finish on another worker.
+# Node-thread 0 remains wedged throughout; the turn must finish on another node-thread.
 b_bytes="$(wc -c < "$WORK/turn-b.txt" | tr -d " ")"
 if grep -q '"reply":"ok"' "$WORK/turn-b.txt" && printf "%s" "$concurrent_health" | grep -q "\"id\":0[^}]*\"state\":\"stalled\""; then
-  echo "  ok: a second conversation was answered while worker 0 was still wedged ($b_bytes bytes of reply)"
+  echo "  ok: a second conversation was answered while node-thread 0 was still wedged ($b_bytes bytes of reply)"
 else
   echo "  FAIL: a second concurrent conversation did not return the mock answer ($b_bytes bytes)"
   head -c 500 "$WORK/turn-b.txt"; echo

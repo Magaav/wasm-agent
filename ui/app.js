@@ -176,13 +176,13 @@ function apiHeaders(extra) {
 // This used to return the first chat run on the node, whichever conversation it belonged to. Once two
 // conversations can run at once, that made a window watching conversation B see conversation A's run:
 // it disabled its own composer, announced "a run is in progress", and deferred its own reconcile until
-// a stranger's run finished. `/health` carries the conversation (`session`) on every worker and on
+// a stranger's run finished. `/health` carries the conversation (`session`) on every node-thread and on
 // `current`, so the match is exact. With no session known yet the window claims no run, which is the
 // safe default - it has no transcript to reconcile.
 function activeRun(health, session = chatSession) {
   const isChat = (entry) => /^POST \/chat(?:\?|$)/.test(entry?.label || "");
   const mine = (entry) => isChat(entry) && !!session && entry.session === session;
-  return (health?.workers || []).find(mine) || (mine(health?.current) ? health.current : null);
+  return (health?.node_threads || []).find(mine) || (mine(health?.current) ? health.current : null);
 }
 
 function nodeQuery() {
@@ -1081,7 +1081,7 @@ function formatBytes(count) {
 }
 
 // While a tool call is in flight, show what the operation behind it is doing. A foreground
-// `bash` blocks its worker and returns nothing until it settles, so the window otherwise shows
+// `bash` blocks its node-thread and returns nothing until it settles, so the window otherwise shows
 // only a clock - and a five-minute build is indistinguishable from a hang. The node already
 // publishes the running operation on /health (`operations[]`) and its output through
 // /operation; this reads both. `running` is the busy run for *this* window.
@@ -1094,12 +1094,17 @@ async function refreshOperationProgress(health, running) {
   const activeTrace = trace;
   if (!activeTrace || !activeTrace.pending || !running) return;
   // The owner is `run:<run_id>` - serve.rs sets it for the run before the interpreter starts,
-  // so an in-turn operation carries the run, not the worker. Older builds used the worker id;
-  // both are matched so the window works against whichever node it is attached to.
+  // so an in-turn operation carries the run, not the node-thread. An operation launched outside a run
+  // carries the node-thread instead. A node built before this rename reports that id as `worker_id`
+  // and an even older one as `id`, so all three spellings are read: the window works against
+  // whichever node it is attached to. The `worker:` *prefix* is the operation record's own durable
+  // value (rust/wa-operation), not a health field, so it keeps its name too.
   const owners = [];
   if (running.run_id != null) owners.push("run:" + running.run_id);
-  const workerId = running.worker_id != null ? running.worker_id : running.id;
-  if (workerId != null) owners.push("worker:" + workerId);
+  const nodeThreadId = running.node_thread_id != null
+    ? running.node_thread_id
+    : (running.worker_id != null ? running.worker_id : running.id);
+  if (nodeThreadId != null) owners.push("worker:" + nodeThreadId);
   const operation = (health.operations || []).find((entry) => owners.indexOf(entry.owner) >= 0);
   if (!operation) return;
   const bytes = Number(operation.output_bytes) || 0;
@@ -1396,6 +1401,180 @@ function finishReplayedRun(isLast = false, options = {}) {
   if (!statusLine) setStatus(label);
   finishRunStatus(label);
 }
+// ---- device notifications: the engine bell, and the native toast it turns on --------
+//
+// A settled child that owes a judgement reaches the operator as the wake the node already runs:
+// `lua/core/completions.lua` decides `review.needs_wake`, and *only* where a judgement is owed does it
+// start a coordinator run in this thread - whose first user row is the notice below. Nothing else
+// writes that row, so this inherits that decision exactly: the classes the outbox skips (a
+// self-reporting responder profile with nothing left to review, a cancelled child whose checkout is
+// clean) never wake, so there is nothing here to notify about. No new polling loop either: this reads
+// the transcript the page is already repainting (`restoreSession` on boot and `followRun` while a run
+// is in flight), which is the same place the wake appears.
+//
+// The page does not raise the toast: a page has no process identity on the Windows notification
+// platform. It asks the window shell, which raises it and answers (§window.wasmAgent.notify).
+//
+// The preference is device-local on purpose. Whether *this* machine should make a noise is a fact
+// about this machine, not about the node, and a node setting would decide for the laptop and the
+// phone at once.
+const COMPLETION_NOTICE = "[Child completion notice]";
+const NOTIFY_PREFERENCE_KEY = "wa.notify.settlement";
+const NOTIFY_WATERMARK_KEY = "wa.notify.settlement.seen";
+
+let notifyStorageAvailable = true;
+let notifyShellState = "";
+let lastNotifyResult = null;
+// The engine card's own nodes, assigned where the engine is wired. `let` and guarded: a repaint that
+// notifies must never be the thing that throws because a card is missing from the DOM.
+let notifyBellEl = null;
+let notifyStateNoteEl = null;
+let notifyDetailEl = null;
+let notifyResultEl = null;
+let notifyTestEl = null;
+
+/// "on" only when this device's own storage says so. Anything unreadable is **off**: a device that
+/// cannot remember the choice has not been told to make a noise.
+function notifyPreference() {
+  try {
+    return localStorage.getItem(NOTIFY_PREFERENCE_KEY) === "on" ? "on" : "off";
+  } catch (error) {
+    notifyStorageAvailable = false;
+    return "off";
+  }
+}
+
+function setNotifyPreference(on) {
+  try {
+    localStorage.setItem(NOTIFY_PREFERENCE_KEY, on ? "on" : "off");
+    notifyStorageAvailable = true;
+  } catch (error) {
+    notifyStorageAvailable = false;
+  }
+}
+
+/// A notice is marked seen whether or not the bell is on, so switching the bell on tells the operator
+/// about the *next* settlement instead of replaying every one it slept through.
+function rememberNotifyWatermark(session, seq) {
+  try { localStorage.setItem(NOTIFY_WATERMARK_KEY, JSON.stringify({ session, seq })); }
+  catch (error) { notifyStorageAvailable = false; }
+}
+
+function readNotifyWatermark(session) {
+  try {
+    const stored = JSON.parse(localStorage.getItem(NOTIFY_WATERMARK_KEY) || "null");
+    if (stored && typeof stored === "object" && String(stored.session || "") === session) {
+      const seq = Number(stored.seq);
+      return Number.isFinite(seq) ? seq : -Infinity;
+    }
+  } catch (error) { /* unreadable or belonging to another thread: nothing has been seen in this one */ }
+  return -Infinity;
+}
+
+/// The wake notices in a transcript, in ledger order.
+function evaluationNotices(rows) {
+  return (rows || []).filter((row) => row && row.role === "user" && typeof row.content === "string" &&
+    row.content.startsWith(COMPLETION_NOTICE));
+}
+
+/// What the toast says, read out of the wake's own sentence. A notice whose shape is not the one
+/// `completions.lua` writes still notifies - the wake is the evidence - but nothing about the child is
+/// invented: the id and the reported state appear when they can be read, and are left out when they
+/// cannot.
+function settlementNotice(row) {
+  const text = String(row.content || "");
+  const id = (/^\[Child completion notice\] Task (\S+) settled\./.exec(text) || [])[1] || "";
+  const state = (/Reported state: \{.*?"state":"([^"]*)"/.exec(text) || [])[1] || "";
+  const what = id ? `Task ${id}${state ? ` settled (${state})` : " settled"}` : "a child task settled and owes an evaluation";
+  return { title: "Evaluation owed", body: what };
+}
+
+/// Ask the window shell for a native notification. The shell answers with its own result
+/// (`{supported, delivered, reason, identity, app_name}`); a surface with no shell answers with a
+/// refusal that says so, because that is what happened - the page raised nothing itself.
+async function raiseNotification({ title, body, diagnostic = false }) {
+  const shell = native;
+  if (!shell || typeof shell.notify !== "function") {
+    lastNotifyResult = { supported: false, delivered: false,
+      reason: "this surface has no window shell, so a page cannot raise a Windows notification" };
+    return lastNotifyResult;
+  }
+  try {
+    lastNotifyResult = await shell.notify({ title, body, diagnostic });
+  } catch (error) {
+    lastNotifyResult = { supported: false, delivered: false,
+      reason: "the shell call failed: " + String((error && error.message) || error) };
+  }
+  return lastNotifyResult;
+}
+
+/// One toast for each settlement that owes an evaluation - and nothing at all when the bell is off.
+/// Returns the notices it acted on, which is what a test asserts against.
+function announceSettlements(rows) {
+  const notices = evaluationNotices(rows);
+  if (!notices.length) return [];
+  const session = chatSession || "";
+  const seq = (row) => (Number.isFinite(Number(row.seq)) ? Number(row.seq) : -Infinity);
+  const seen = readNotifyWatermark(session);
+  const fresh = notices.filter((row) => seq(row) > seen).sort((a, b) => seq(a) - seq(b));
+  if (!fresh.length) return [];
+  rememberNotifyWatermark(session, Math.max(...notices.map(seq)));
+  // Off means nothing is raised, not "raised and then hidden": there is no call to make.
+  if (notifyPreference() !== "on") return [];
+  const toast = settlementNotice(fresh[fresh.length - 1]);
+  raiseNotification(toast).then((result) => {
+    paintNotifyResult(result);
+    console.info("settlement notification", toast.title, toast.body, result.delivered ? "delivered" : "not delivered: " + result.reason);
+  });
+  return fresh;
+}
+
+function paintNotifyResult(result) {
+  lastNotifyResult = result || lastNotifyResult;
+  if (!notifyResultEl) return;
+  const value = lastNotifyResult;
+  if (!value) { notifyResultEl.textContent = ""; notifyResultEl.removeAttribute("data-delivered"); return; }
+  notifyResultEl.dataset.delivered = String(value.delivered === true);
+  notifyResultEl.textContent = value.delivered
+    ? `delivered to Windows as "${value.app_name || "unknown app name"}" (${value.identity || "identity unknown"}) - delivery, not proof that it was seen`
+    : `not delivered: ${value.reason || "the shell gave no reason"}`;
+}
+
+/// The one place the bell's state is drawn: the topic row's note, the switch, the test control and the
+/// explanation are painted together, so they cannot show three different states.
+function paintNotifyState() {
+  const on = notifyPreference() === "on";
+  if (notifyBellEl) { notifyBellEl.checked = on; notifyBellEl.disabled = !notifyStorageAvailable; }
+  if (notifyTestEl) notifyTestEl.disabled = !on || !notifyStorageAvailable;
+  if (notifyStateNoteEl) notifyStateNoteEl.textContent = on ? "on for this device" : "off on this device";
+  if (notifyDetailEl) {
+    const lines = [on
+      ? "A child task that settles owing an evaluation raises a Windows notification on this device."
+      : "Nothing is raised on this device while this is off, including the test below."];
+    lines.push("The choice is stored in this window's own storage, so it is per device: the node is not told and no other device is affected.");
+    if (!notifyStorageAvailable) {
+      lines.push("This window refuses local storage, so the choice cannot be kept here and notifications stay off.");
+    }
+    if (notifyShellState) lines.push(notifyShellState);
+    notifyDetailEl.textContent = lines.join(" ");
+  }
+}
+
+/// Whether the shell can raise a toast at all, without raising one. Runs when the card is opened:
+/// "the shell cannot" and "the bell is off" look identical from the outside otherwise.
+async function refreshNotifySupport() {
+  const shell = native;
+  if (!shell || typeof shell.notifySupport !== "function") {
+    notifyShellState = "No window shell in this surface (a browser page cannot raise a Windows notification), so the bell has nothing to switch on here.";
+  } else {
+    const support = await shell.notifySupport();
+    notifyShellState = support.supported
+      ? `Shell ready: Windows accepted the identity "${support.identity || "unknown"}", which it shows as "${support.app_name || "unknown"}".`
+      : `This shell cannot raise notifications: ${support.reason}`;
+  }
+  paintNotifyState();
+}
+
 function repaintMessages(rows, options = {}) {
   // A repaint is a view of durable rows, not a resumed event stream. In particular, an
   // assistant tool call without a result must never inherit a live timer from this page.
@@ -1494,6 +1673,13 @@ function repaintMessages(rows, options = {}) {
   pin(true);
   if (failed) {
     add("assistant", `repaint: ${rendered} of ${rows.length} messages drawn, ${failed} failed — first: ${firstFailure}`);
+  }
+  // The rows just drawn are the only place a settlement wake appears. Anything thrown here is the
+  // notification's problem, never the transcript's: a toast that fails must not cost the reader a reply.
+  try {
+    announceSettlements(rows);
+  } catch (error) {
+    console.error("settlement notification failed", error);
   }
   return { rendered, failed, firstFailure };
 }
@@ -1687,7 +1873,7 @@ function setBusy(value) {
 // had no way to tell "still working" from "never coming back", which is exactly when they should be
 // told to stop it.
 //
-// The node already knows, and has done all along: `stalled_ms` (also `workers[].age_ms`) is the age
+// The node already knows, and has done all along: `stalled_ms` (also `node_threads[].age_ms`) is the age
 // of the last heartbeat. `host.exec` beats while a command runs, so a *fresh* number proves progress
 // and a number that keeps climbing proves a stall. That is the node's own evidence, reported rather
 // than guessed - no client-side timeout, no heuristic about how long things should take.
@@ -1728,7 +1914,9 @@ function startLiveness() {
       stalled,
       busy_ms: busyFor,
       climbing_ms: climbingSince ? Date.now() - climbingSince : 0,
-      worker: health.worker || "alive",
+      // `health.worker` is the node's aggregate execution state (alive/busy/stalled); the field keeps
+      // that name on the wire - see serve.rs - so it is read, not renamed, here.
+      node_thread_state: health.worker || "alive",
       queue: health.queue || 0,
       run_state: ownState,
       current_run_id: running.run_id,
@@ -1766,7 +1954,7 @@ function setLiveness(info) {
   } else {
     node.classList.add("stuck");
     node.textContent = "possibly stuck — no node beat for " + seconds(info.climbing_ms) + "s"
-      + " (worker: " + info.worker + ") · send to stop";
+      + " (node-thread state: " + info.node_thread_state + ") · send to stop";
   }
   pin();
 }
@@ -1897,7 +2085,7 @@ async function send(text, options = {}) {
     draftNow = snapshotDraft();
   }
   setStatus("wasm-agent is thinking…");
-  // /health is answered without waiting for a worker. Take the baseline before admitting this run
+  // /health is answered without waiting for a node-thread. Take the baseline before admitting this run
   // so later polls can tell its queued id from an older run in the same conversation.
   try {
     const before = await (await apiFetch("health", { headers: apiHeaders() })).json();
@@ -1929,7 +2117,7 @@ async function send(text, options = {}) {
     // that also lies about the record is worse than no alarm.
     //
     // The node is the authority, and its accept thread answers /health without the interpreter, so it
-    // can say whether the worker is alive while a run runs. Ask it, and act only on its answer.
+    // can say whether the node-thread is alive while a run runs. Ask it, and act only on its answer.
     let lastEvent = Date.now();
     let asking = false;
     // Whether this run finished under its own steam. Without it the watchdog cannot tell a run that
@@ -1961,7 +2149,7 @@ async function send(text, options = {}) {
         // Not running any more, and the run did not finish: the run is genuinely over, and the page
         // should say so and stop pretending it is still listening.
         clearInterval(watchdog);
-        streamNotice = add("assistant", "the node is no longer running this run (" + (health.worker || "no worker") +
+        streamNotice = add("assistant", "the node is no longer running this run (" + (health.worker || "no beat") +
           "). Checking the recorded result for recovery.");
         watchNode();
         lostRun = true;
@@ -3181,7 +3369,7 @@ async function sync(reason) {
     // Why it failed decides what to say. A reload during a run used to show "connecting…" and then
     // "node offline — retrying" on a node that was working perfectly, and the transcript stayed empty
     // because the restore never ran. It cannot run while the run holds the interpreter - that is
-    // physical on a single-worker node - but the message can be true, and the retry does the rest.
+    // physical when the node runs one node-thread - but the message can be true, and the retry does the rest.
     const health = await nodeHealth();
     if (activeRun(health)) {
       syncAttempts = 0;
@@ -3377,7 +3565,7 @@ async function syncLiveRun(current) {
 
     if (liveCheckpointSeq !== payload.checkpoint_seq) {
       // The checkpoint may have advanced after the preceding ledger poll. Read again before using
-      // its tail, and wait another cycle if the read worker has not exposed that row yet.
+      // its tail, and wait another cycle if the read node-thread has not exposed that row yet.
       if (Number(payload.checkpoint_message_seq) > (Number(followedSeq) || 0)) await followRun();
       if (Number(payload.checkpoint_message_seq) > (Number(followedSeq) || 0)) return;
       liveCheckpointSeq = payload.checkpoint_seq;
@@ -3406,8 +3594,8 @@ async function syncLiveRun(current) {
 }
 
 async function watchTurn() {
-  // One at a time: a poll that has not answered yet is not a reason to start another, and on a
-  // single-worker node that is the difference between asking and queueing.
+  // One at a time: a poll that has not answered yet is not a reason to start another, and when the
+  // node runs one node-thread that is the difference between asking and queueing.
   if (runPolling) { setTimeout(watchTurn, 3000); return; }
   runPolling = true;
   try {
@@ -4228,12 +4416,12 @@ function sessionMatches(session, query) {
 }
 
 // Which conversations the node is working on right now. /health carries an active owner per
-// conversation (`runs`), the conversation each worker holds, and the run in `current` - any of the
-// three means the thread is live, and reading it needs no worker of its own.
+// conversation (`runs`), the conversation each node-thread holds, and the run in `current` - any of the
+// three means the thread is live, and reading it needs no node-thread of its own.
 function runningSessions(health) {
   const ids = new Set();
   for (const run of health?.runs || []) if (run.conversation) ids.add(run.conversation);
-  for (const worker of health?.workers || []) if (worker.session) ids.add(worker.session);
+  for (const nodeThread of health?.node_threads || []) if (nodeThread.session) ids.add(nodeThread.session);
   if (health?.current?.session) ids.add(health.current.session);
   return ids;
 }
@@ -4360,8 +4548,8 @@ function renderSessions() {
 async function refreshSessions() {
   try {
     // Sessions and health together: the list says what this node has been doing, and health says
-    // which of those threads is being worked on right now. /health needs no worker, so this stays
-    // answerable while a run holds the run worker.
+    // which of those threads is being worked on right now. /health needs no node-thread, so this stays
+    // answerable while a run holds the run node-thread.
     const [listResponse, health] = await Promise.all([
       apiFetch("sessions", { headers: apiHeaders() }),
       apiFetch("health", { headers: apiHeaders() }).then((response) => response.json()).catch(() => null),
@@ -4492,8 +4680,8 @@ async function openSessionById(id) {
   }
 }
 
-// Topics that still need the run worker wait for the run to finish. Read-only topics such as nodes,
-// sessions, and skills use the host's read workers and can be inspected during a run.
+// Topics that still need the run node-thread wait for the run to finish. Read-only topics such as nodes,
+// sessions, and skills use the host's read node-threads and can be inspected during a run.
 const pendingTopics = new Set();
 
 const runWorkerTopics = new Set(['spells-box', 'tools-box']);
@@ -4625,8 +4813,8 @@ document.getElementById('jobs-box').addEventListener('job-controls', async (even
 function loadTopic(id) {
   const box = document.getElementById(id);
   if (busy && runWorkerTopics.has(id)) {
-    // These topics still use a route on the run worker. Do not issue a request that would time out;
-    // keep them queued and load them as soon as that worker is free.
+    // These topics still use a route on the run node-thread. Do not issue a request that would time out;
+    // keep them queued and load them as soon as that node-thread is free.
     pendingTopics.add(id);
     if (box) box.textContent = "the node is busy with a run — this loads when it finishes";
     return;
@@ -4639,6 +4827,7 @@ function loadTopic(id) {
   else if (id === "tools-box") refreshTools();
   else if (id === "jobs-box") refreshJobs();
   else if (id === "tasks-box") refreshTasks();
+  else if (id === "notify-box") refreshNotifySupport();
 }
 
 /// Everything the engine was asked for while the node was busy, plus whatever is open, once it is free.
@@ -4659,6 +4848,30 @@ document.querySelectorAll(".engine-head").forEach((head) => {
     if (opening) loadTopic(head.dataset.target);
   });
 });
+
+// ---- engine: the notification bell (device-local, not a node setting) ----------------
+// The card is the only switch for the OS notification, and its state comes from this window's own
+// storage. It also carries the on-demand path: "send a test notification" is how the shell's identity
+// and the raise path are checked without waiting for a real settlement (`wa-window.exe --notify-test`,
+// printed in the card, does the same with no page involved at all).
+notifyBellEl = document.getElementById("notify-bell");
+notifyStateNoteEl = document.getElementById("notify-state");
+notifyDetailEl = document.getElementById("notify-detail");
+notifyResultEl = document.getElementById("notify-result");
+notifyTestEl = document.getElementById("notify-test");
+notifyBellEl.addEventListener("change", () => {
+  setNotifyPreference(notifyBellEl.checked);
+  paintNotifyResult(null);
+  paintNotifyState();
+});
+notifyTestEl.addEventListener("click", async () => {
+  notifyTestEl.disabled = true;
+  notifyResultEl.dataset.delivered = "pending";
+  notifyResultEl.textContent = "asking the shell…";
+  paintNotifyResult(await raiseNotification({ title: "wasm-agent", body: "test notification from the wasm-agent window", diagnostic: true }));
+  paintNotifyState();
+});
+paintNotifyState();
 
 function setEngine(open) {
   document.body.classList.toggle("engine", open);

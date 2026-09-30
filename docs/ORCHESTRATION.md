@@ -68,7 +68,8 @@ One limit is closed, and one is not:
    interpreters on one transcript. Use `POST /chat` to the node so turns queue, or wait
    until the other writer is idle. The ledger's "N seconds ago" is the reliable signal
    for whether a turn is in flight; the process list is not.
-4. **The agent's self-report is evidence, not verification.** It committed to `main`
+4. **The agent's self-report is evidence, not verification** (`docs/FACTORY.md`, invariant 1).
+   It committed to `main`
    believing it was finished, and its own bug-hunt reported its stub's faults as
    possible product bugs. Review the artefact: run the tests, break the gate, measure
    the claim.
@@ -93,7 +94,8 @@ AGENTS.md · scripts/worktrees.sh · .githooks/* · git log --oneline -12
 <the properties, as counts/facts/behaviours, not adjectives>
 
 ## Constraints
-- commit as you go, push the branch, do NOT merge — the human merges
+- commit as you go, push the branch, do NOT merge: your branch is your deliverable and the
+  merge lane lands it (`skills/git-orchestrator/SKILL.md`)
 - if you cannot prove something, say so in the report
 - write findings to a file and keep individual commands narrow (a previous run died with
   a turn full of process tables)

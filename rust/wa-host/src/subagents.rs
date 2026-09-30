@@ -15,7 +15,7 @@
 //! Nothing here calls a model or polls one. A waiter blocks on a native
 //! condition variable; the child runs on its own pool, so a parent waiting for a
 //! child never occupies the capacity that runs the child, and child work never
-//! consumes a reserved interactive HTTP worker.
+//! consumes a reserved interactive HTTP node-thread.
 
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -111,7 +111,7 @@ pub fn shutdown_sockets(sockets: &SocketSlot) {
 
 /// Which kind of process a thread is running, as the *host* knows it rather than as the
 /// process claims. The distinction is the one the git guard needs: `Orchestrator` is a run of a
-/// session (the worker thread serve.rs admits and drives), which is where an integration
+/// session (the node-thread thread serve.rs admits and drives), which is where an integration
 /// decision is made; `Child` is a bounded subagent task on its own thread. It crosses the shell
 /// boundary as `WASM_AGENT_PROVENANCE` (see `operations::configure_spec`), so a guard can decide
 /// who may commit on `main` from the host's answer instead of from a variable the committing
@@ -147,7 +147,7 @@ pub struct TaskContext {
     pub deadline: Option<Instant>,
     pub sockets: SocketSlot,
     /// The child's session id, so an operation it starts is owned by the child
-    /// session/run rather than by the interpreter's worker slot.
+    /// session/run rather than by the interpreter's node-thread slot.
     pub owner: String,
     /// Whether this thread is a session's own run or a child task. A run's shell is told
     /// `orchestrator`, a child's shell `child`; a thread with no task context is neither (a
@@ -856,7 +856,7 @@ fn write_record(directory: &Path, record: &Value) -> Result<(), String> {
 /// The body of a child task's own thread. Capacity is acquired here, not in
 /// `start`, so admission is a durable receipt and execution is bounded.
 fn run_child(inner: Arc<Inner>, runner: Runner, id: String, cancel: Arc<AtomicBool>, sockets: SocketSlot) {
-    // A queued conversation turn must not occupy a worker while its predecessor
+    // A queued conversation turn must not occupy a node-thread while its predecessor
     // still owns that session. Unknown effects stop the chain visibly.
     {
         let mut tasks = inner.tasks.lock().expect("subagents tasks");
@@ -1055,7 +1055,7 @@ pub fn control(action: &str, args: &Value) -> Result<Value, String> {
 
 /// Public runtime summary for `/health`, without transcripts or prompts.
 /// Public runtime summary for `/health`, with one strict shape so every reader
-/// and every worker's summary agree: `{queued, running, active}`, where `active`
+/// and every node-thread's summary agree: `{queued, running, active}`, where `active`
 /// is `queued + running`. `settled` is the optional retained count.
 pub fn health() -> Value {
     manager().summary()

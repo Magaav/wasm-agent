@@ -133,6 +133,15 @@ from the engine button in the topbar. Do not mix the two.
 - A view must never hide the control that opens it. Hiding the only way back is
   a defect, not a style choice.
 
+**A device-local control lives in the engine, and says so.** The engine manages the machine and the
+fabric; the one thing it must not pretend to manage centrally is a choice that belongs to the device
+in front of you. The notification bell is the first of these: an engine topic whose state is in this
+window's own storage, so switching it on at the desktop says nothing about the laptop. Its topic row
+states the choice (`on for this device` / `off on this device`) so the state is readable without
+opening the card, the node is never asked and does not know, and *off* means nothing is raised at all
+— not raised and then hidden. Any other fact about one device (a sound, a window geometry) has the
+same shape, and the same rule: the row says which device the choice belongs to.
+
 
 ## 10. Component registry
 

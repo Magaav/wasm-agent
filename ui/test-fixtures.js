@@ -15,6 +15,21 @@ window.__makeShell = () => ({
   expand() { window.__shellCalls.push({ call: "expand" }); },
   compact() { window.__shellCalls.push({ call: "compact" }); },
   maximize() { window.__shellCalls.push({ call: "maximize" }); },
+  // The shell is the only thing that can raise a Windows notification, so the fake one answers like the
+  // real one: a result object, recorded so a check can assert an *absent* call instead of a rendered
+  // effect. `__notifyDenied` models the shell that is present but cannot raise (see rust/wa-window).
+  notify(options) {
+    window.__shellCalls.push({ call: "notify", title: options?.title, body: options?.body, diagnostic: options?.diagnostic === true });
+    return Promise.resolve(window.__notifyDenied
+      ? { supported: false, delivered: false, reason: "fixture: the platform refused the identity" }
+      : { supported: true, delivered: true, identity: "WasmAgent.Window", app_name: "wasm-agent",
+          reason: "accepted by the Windows notification platform" });
+  },
+  notifySupport() {
+    window.__shellCalls.push({ call: "notifySupport" });
+    return Promise.resolve({ supported: true, delivered: false, identity: "WasmAgent.Window", app_name: "wasm-agent",
+      reason: "ready: notifications are enabled for WasmAgent.Window" });
+  },
 });
 window.__shellCalls = [];
 
@@ -83,7 +98,7 @@ window.__fixtures = {
   },
   // The transcript the standalone page restores at boot: this is what the observed page shows, so a
   // screenshot of `ui/` is a chat rather than a "no fixture for session" retry banner - a banner a
-  // worker reads as a broken layout and has no way to tell from one. The rows use every shape a
+  // a worker (a subagent) reads as a broken layout and has no way to tell from one. The rows use every shape a
   // bubble can take (a turn with reasoning and one call whose result is shown, an answer with its run
   // duration, and a change with its diff topic), because that is what the layout has to be judged on.
   //
@@ -235,17 +250,17 @@ if (sessionStorage.getItem("wa-ui-reload-stage") === "active" ||
     ],
   };
   window.__fixtures.health = {
-    // A UI read can occupy worker 0 while a chat turn runs on another worker.
+    // A UI read can occupy node-thread 0 while a chat turn runs on another node-thread.
     current: { label: "GET /models", ms: 30 },
     // The run belongs to *this* window's conversation. `activeRun` matches the conversation, so a
-    // worker with no `session` would (correctly) not be claimed as this window's run - and this
+    // node-thread with no `session` would (correctly) not be claimed as this window's run - and this
     // fixture exists to prove the reload sees its own run, so it must name it.
-    workers: [{ label: "POST /chat", busy_ms: 15000, session: id }], ok: true, queue: 0,
+    node_threads: [{ label: "POST /chat", busy_ms: 15000, session: id }], ok: true, queue: 0,
     stalled_ms: 20, worker: "alive", exec_timeout_seconds: 300,
   };
   if (sessionStorage.getItem("wa-ui-startup-stage") === "active") {
     window.__fixtures.health.current = null;
-    window.__fixtures.health.workers = [];
+    window.__fixtures.health.node_threads = [];
     window.__failSessionReads = 1;
     window.__stallRenderer = true;
     window.__failVersion = true;

@@ -371,6 +371,28 @@ body.engine .engine { display: flex; }
 .engine-name { font-weight: 500; }
 .engine-note { margin-left: auto; color: var(--muted); font-size: 11px; }
 .engine-content { padding: var(--pad); border-top: 1px solid var(--line); max-height: 46vh; overflow-y: auto; }
+
+/* The notification bell: a device-local switch, and the same shape as a job toggle (§10) rather
+   than a third kind of switch on a third surface. The bell itself carries the state as well as the
+   row's note, so it reads as a bell whether it is on or off. */
+.notify-toggle { display: flex; align-items: center; gap: var(--gap); cursor: pointer; }
+.notify-toggle input { flex: none; }
+.notify-bell { display: inline-flex; color: var(--muted); }
+.notify-toggle input:checked ~ .notify-bell { color: var(--accent); }
+.notify-bell svg { width: 15px; height: 15px; display: block; }
+.notify-label { color: var(--text); }
+.notify-detail { margin: var(--space) 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+.notify-diagnostic code { color: var(--text); }
+.notify-actions { display: flex; align-items: center; gap: var(--gap); margin-top: var(--space); }
+.notify-test {
+  font: inherit; padding: var(--space); color: var(--text); background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer;
+}
+.notify-test:hover:not(:disabled) { border-color: var(--accent); }
+.notify-test:disabled { opacity: .5; cursor: default; }
+.notify-result { color: var(--muted); font-size: 11px; }
+.notify-result[data-delivered="true"] { color: var(--ok); }
+.notify-result[data-delivered="false"] { color: var(--warn); }
 .request-preview { margin-top: var(--pad); }
 .request-preview summary { cursor: pointer; color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px; }
 .request-preview pre {
