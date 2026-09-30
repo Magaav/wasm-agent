@@ -91,12 +91,12 @@ function delivery(branch, {file, text, producer, reviewedTip = null}) {
 
 /// A review: a published commit on its own branch, whose `Agent:` trailer names the reviewer - the
 /// artifact the rule reads, not the record's sentence about it.
-function review(branch, {reviewer, tip, verdict = 'passed', findings = []}) {
+function review(branch, {reviewer, tip, verdict = 'passed', findings = [], harness = 'wasm-agent'}) {
   const name = `review/${branch.replace(/[^A-Za-z0-9-]/g, '-')}`;
   git(work, 'switch', '-q', '-c', name, tip);
   write(path.join(work, 'REVIEW.md'), `# Review of ${branch}\n\nReviewed tip ${tip}.\n`);
   git(work, 'add', 'REVIEW.md');
-  git(work, 'commit', '-q', '-m', `review(${branch}): fixture verdict\n\nReview of ${branch} (${tip}).\n\nAgent: wasm-agent node=fixture session=${reviewer}`);
+  git(work, 'commit', '-q', '-m', `review(${branch}): fixture verdict\n\nReview of ${branch} (${tip}).\n\nAgent: ${harness} node=fixture session=${reviewer}`);
   const commit = git(work, 'rev-parse', 'HEAD');
   git(work, 'push', '-q', '-u', 'origin', name);
   const args = ['review', branch, '--repo', work, '--store', store, '--reviewer', reviewer,
@@ -282,6 +282,30 @@ try {
   const afterFalsification = check(branches.C);
   ok(afterFalsification.status === 2 && afterFalsification.json?.decision === 'refused',
     'and with the tree binding in place the same delivery is refused again');
+
+  // Outside harnesses must retain their real provenance, including session IDs with colons.
+  for (const harness of ['codex', 'pi', 'claude']) {
+    const branch = `change/fixture-${harness}-review`;
+    const produced = delivery(branch, {file: `${harness}.txt`, text: `${harness}\n`, producer: sessions.producerA});
+    const reviewer = `${harness}:review:independent`;
+    review(branch, {reviewer, tip: produced.tip, harness});
+    const accepted = check(branch);
+    ok(accepted.status === 0 && accepted.json?.decision === 'admitted', `${harness} review keeps authentic harness provenance`);
+    const file = path.join(store, `${branch.replace(/[^A-Za-z0-9._-]/g, '-')}.json`);
+    const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+    record.review.reviewer = 'another-session';
+    write(file, JSON.stringify(record));
+    const mismatch = check(branch);
+    ok(mismatch.status === 2 && mismatch.json?.condition === 'review_anchor_names_another_session',
+      `${harness} still refuses an unrelated reviewer identity`);
+  }
+
+  const refusedBranch = 'change/fixture-refused-review';
+  const refusedDelivery = delivery(refusedBranch, {file: 'refused.txt', text: 'refused\n', producer: sessions.producerA});
+  review(refusedBranch, {reviewer: sessions.reviewerA, tip: refusedDelivery.tip, verdict: 'refused', harness: 'codex'});
+  const refusedReview = check(refusedBranch);
+  ok(refusedReview.status === 2 && refusedReview.json?.condition === 'review_verdict_not_accepted',
+    'a published Codex review with a refused verdict remains refused');
 
   // ---- 9. nothing was changed anywhere but the scratch store ---------------------------------------
   console.log('9. the fixture repository is intact');

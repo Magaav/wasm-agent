@@ -88,9 +88,18 @@ marker-echoing provider) and the UI check in `scripts/test-ui.ps1`.
 `X-WA-Session` is an authenticated **credential**; the chat body's `thread` is the
 **conversation**. They are separate, and the conversation is never taken from the header.
 
-The accept thread owns one **control interpreter**, and it runs on its own **resolver
-thread** so the accept thread can bound the wait (`WASM_AGENT_ADMISSION_TIMEOUT_MS`,
-default 8000) - a busy SQLite lock or a slow interpreter must not stop the node accepting.
+One **resolver thread** owns the identity interpreter. Parsed `/chat`, `/node/chat`,
+`POST /runs` and `POST /run-events` requests enter a separate **admission dispatcher**;
+the listener continues accepting unrelated reads and static requests during resolution.
+The dispatcher has one active request and a bounded FIFO
+(`WASM_AGENT_ADMISSION_QUEUE_DEPTH`, default 4, range 1..256). Overflow or an unavailable
+dispatcher returns `503 admission_busy`. Queue residence and resolver waiting share
+one deadline (`WASM_AGENT_ADMISSION_TIMEOUT_MS`, default 8000 ms), after HTTP parsing.
+Expired queued requests return `503 admission_timeout` without being resolved or admitted.
+An already executing Lua resolver is not interrupted by the deadline; its caller times
+out and its result cannot admit a run. Subsequent identity-dependent requests can still
+time out behind that resolver. Cancellation authenticates through this same bounded
+queue; it bypasses model workers, but has no separate authentication capacity.
 The resolver calls `wa_admission(session, node, body)` before any node-thread is reserved and
 returns the authenticated user and the real conversation id, or an error:
 
@@ -102,6 +111,52 @@ returns the authenticated user and the real conversation id, or an error:
   the scheduler owns a real id instead of an empty key.
 
 This matches [EXECUTION.md](EXECUTION.md#seven-concepts-seven-different-identities).
+
+## Responsiveness under background work
+
+`choose_node_thread` excludes busy workers and slots claimed by the scheduler when
+routing reads. A claim matters before a run starts, while its busy label is still empty.
+The scheduler snapshot is taken before the pool lock to preserve the admission lock
+order. Reads still use run slots below `control_floor`, and writes still use slot 0.
+Pool growth and bounded overload behavior retain their existing limits.
+
+Risk: worker labels and scheduler snapshots are observations, not an atomic reservation
+for each read. This change avoids a known busy or claimed worker when idle capacity is
+available; it does not guarantee a read latency bound under total saturation or a race
+with new work. HTTP parsing, interpreter creation, journal/SQLite writes and socket writes
+can still delay the listener. Ordinary requests may now pass a request awaiting identity;
+run ownership and per-conversation admission order remain enforced by the scheduler.
+
+Run the standalone scratch tier with a freshly built binary:
+
+```
+node scripts/test-bg-responsiveness.cjs <wa-binary> --compiled-serve-sha256 <build-time-serve.rs-sha256> --report <report.json>
+```
+
+`--expect-reproduction` verifies the original failure against a baseline binary.
+The script uses random scratch ports, a private database/home, deterministic Lua
+barriers, a local mock provider and exact child PID cleanup. It exercises the real Rust
+listener/scheduler/provider host with minimal Lua handlers; it does not exercise the
+full application or a paid provider. The compiled-source hash is caller-attested.
+No capacity stress is directed at a live node, and this test does not add gate time in
+`test.sh` pending the factory's measured tier decision.
+
+Baseline at `ab827c88`: three fresh ARM64 Linux scratch runs reproduced both causes in
+1.38..1.47 seconds per run. Some reads waited 610..612 ms for background worker 2 while
+other read workers answered in 3..7 ms; their interpreter identities attributed the
+delay to routing. A separate held resolver, with no admitted run, delayed health,
+page and Lua reads by 610..611 ms. The 600 ms barrier intentionally sets the observed
+delay; these small controlled samples locate bottlenecks and cannot choose production
+timeouts or establish production throughput.
+
+With the dispatcher and read selection fix, three fresh scratch verifications took
+3.63..3.67 seconds including a pressure phase. Reads stayed at 1..8 ms; depth-2 queue
+overflow returned `admission_busy` in 1..2 ms. The active holder and two staggered waiters
+expired in 1801..1809 ms under a fixture deadline of 1800 ms. After release, expired
+tokens never entered Lua or run handlers, and recovery completed without inference.
+Normal verification includes this phase; `--phase pressure` selects it alone.
+The 8-second watchdog starts cleanup; child-exit verification has its own 1.2-second
+bound. These are controlled fixture measurements, not production latency promises.
 
 ## The admission rules
 
@@ -200,8 +255,9 @@ separately as `gate_lane.waited_ms` - so a duration still means the gate and not
 ## Cancellation
 
 `POST /runs {action:"status"|"cancel", thread|conversation:"<id>", run_id?}` is answered on
-the accept thread from the scheduler's own state, so it never queues behind the run it is
-cancelling. Identity comes from `wa_identity`; an invalid credential is `401`, and a run
+the admission dispatcher from the scheduler's own state, so it never queues behind the
+run it is cancelling. It shares the bounded identity queue and deadline described above.
+Identity comes from `wa_identity`; an invalid credential is `401`, and a run
 owned by another user is `403` (with a run id) or `404` (without). A run has its **own**
 cancel flag, so cancelling a running run does not cancel the run queued behind it.
 

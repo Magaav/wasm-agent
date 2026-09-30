@@ -43,13 +43,15 @@ const SCHEMA = 1;
 /// information for the merger, and refusing on it would turn every honest "I could not verify X" into
 /// a delivery that never lands.
 const BLOCKING_CLASS = 'summary_exceeds_code';
-const AGENT_TRAILER = /^Agent:\s*wasm-agent\s+(.*)$/m;
+// Harness names are provenance, not identity: the session is the review anchor.
+const AGENT_TRAILER = /^Agent:[ \t]*[^\s]+[ \t]+([^\r\n]+)$/m;
 
 const REMEDY = {
   record_missing: 'create one with scripts/delivery-record.mjs before the delivery can be admitted.',
   branch_not_pushed: 'push the branch; the reviewed tip on origin is the delivery.',
   tip_moved_since_record: 'record the tip that is pushed, and have it reviewed there.',
   review_missing: 'a review by a lane that did not produce the delivery is required; nothing is admitted on a claim.',
+  review_verdict_not_accepted: 'obtain a passed or narrowed independent review; a refusal cannot enter the merge lane.',
   review_not_independent: 'a producer cannot review or admit its own work; ask another lane.',
   review_not_in_repository: 'the review must be a commit in this repository; a verdict that lives only in a message is not an artifact.',
   review_not_published: 'publish the review (merge or push it); an unpublished commit is not evidence another lane can read.',
@@ -122,6 +124,8 @@ export function evaluate({repo, record, tipRef = null}) {
     review ? `review by ${review.reviewer} of tip ${review.tip} (tree ${review.tree})`
       : 'the record carries no review');
   if (review) {
+    add('review_verdict_not_accepted', ['passed', 'narrowed'].includes(review.verdict),
+      `the review verdict is ${review.verdict || '(missing)'}`);
     add('review_not_independent', Boolean(review.reviewer) && review.reviewer !== record.producer,
       `reviewer ${review.reviewer || '(nobody)'}, producer ${record.producer}`);
     const commit = review.commit

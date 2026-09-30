@@ -1,0 +1,745 @@
+{
+  "schema": 1,
+  "at": "2026-09-30T13:45:49.108Z",
+  "main": "ab827c88a6ac091318b5adb8be34e83e858c4e9a",
+  "scope": "11 remote non-main heads plus local-only sentinel WIP; not an admission",
+  "cloud": {
+    "observed_head": "4f192e7e0b24595275ecf6d759e48a06c78d2e85",
+    "branch": "main",
+    "clean": true,
+    "mutated": false
+  },
+  "ownership": {
+    "publisher": "wasm-agent df71ee84",
+    "codex": [
+      "admission",
+      "delivery records/events",
+      "new frozen-batch files",
+      "test.sh update fixture only"
+    ],
+    "gate_lifecycle": "Codex (corrected agreement: sol has no live identity)",
+    "warm": "3392ff10",
+    "retention_review": "db0ce06c",
+    "whatsapp": "existing owner unchanged",
+    "independent_review": "one Orca reviewer approved, no gate access"
+  },
+  "rows": [
+    {
+      "branch": "change/bg-responsiveness",
+      "tip": "5ab46834330602ffc913278cf30b3ddf9e8e492d",
+      "owner": "Codex",
+      "purpose": "responsiveness",
+      "review": "passed 7e2ab2c; Linux gate failed",
+      "next": "gate with portable fixture",
+      "ahead_behind": "4\t0",
+      "files": [
+        "docs/CONCURRENCY.md",
+        "rust/wa-host/src/serve.rs",
+        "scripts/test-bg-responsiveness.cjs"
+      ],
+      "merge": {
+        "exit": 0,
+        "output": "8a6ebb9a46a724d1cf3da29448ca01fb41c4a508"
+      }
+    },
+    {
+      "branch": "change/review-bg-responsiveness",
+      "tip": "7e2ab2c35c23cdbd283d184d56c71ad7b9bb84fc",
+      "owner": "Codex reviewer",
+      "purpose": "responsiveness review",
+      "review": "evidence artifact",
+      "next": "carry with reviewed delivery",
+      "ahead_behind": "1\t0",
+      "files": [
+        "docs/reviews/bg-responsiveness-review.md"
+      ],
+      "merge": {
+        "exit": 0,
+        "output": "94a05886d6136e6031b430a713c854bd9b491772"
+      }
+    },
+    {
+      "branch": "change/wa-session-childdispatch3392ff10-bf3f-4b68-bb4a-3411ee5dec8a",
+      "tip": "bfbcd5e3799f04c5898180d8b577aa91d3b95e66",
+      "owner": "3392ff10",
+      "purpose": "warm tree + phase/suite timings",
+      "review": "active verification; not accepted",
+      "next": "finish independent review and repeated cold/warm measurements",
+      "ahead_behind": "4\t0",
+      "files": [
+        "docs/MERGE-SPEED.md",
+        "scripts/lib/gate-phases.sh",
+        "scripts/lib/gate-shims/_suite-shim.sh",
+        "scripts/lib/gate-shims/bash",
+        "scripts/lib/gate-shims/node",
+        "scripts/lib/gate-shims/powershell",
+        "scripts/lib/gate-shims/wa",
+        "scripts/lib/gate-suite.mjs",
+        "scripts/lib/gate-suites.mjs",
+        "scripts/lib/gate-suites.sh",
+        "scripts/merge-lane.mjs",
+        "scripts/test-merge-lane.mjs",
+        "scripts/test.sh"
+      ],
+      "merge": {
+        "exit": 0,
+        "output": "3aa4f248e6e6a09f086d487ebedc090fb52f8f2f"
+      }
+    },
+    {
+      "branch": "change/wa-session-childdispatch75e2cd68-4c39-4132-9b62-53c13bc4b32f",
+      "tip": "320c0fcd9e4940a02733dcd5d1d15d0c13c6dbbe",
+      "owner": "75e2cd68",
+      "purpose": "SSE predecessor",
+      "review": "contained in f627a158",
+      "next": "land via continuation, preserve ref",
+      "ahead_behind": "1\t0",
+      "files": [
+        "docs/HOST.md",
+        "lua/core/openai_sub.lua",
+        "lua/core/openai_sub_catalogue.lua",
+        "lua/core/provider.lua",
+        "lua/core/subscription_wire.lua",
+        "rust/wa-host/src/host.rs",
+        "rust/wa-host/src/main.rs",
+        "scripts/check-subscription-wire-live.lua",
+        "scripts/check-subscription-wire-parity.lua",
+        "scripts/test-openai-sub-levels.lua",
+        "scripts/test-subscription-wire.lua",
+        "scripts/test.sh",
+        "tests/fixtures/subscription/README.md",
+        "tests/fixtures/subscription/codex-responses-sse-text.txt",
+        "tests/fixtures/subscription/codex-responses-sse.txt"
+      ],
+      "merge": {
+        "exit": 0,
+        "output": "ce1eab5000ab3e3b4f790811736e54eb0a124501"
+      }
+    },
+    {
+      "branch": "change/wa-session-childdispatch8ad3ecc6-e2a6-4149-be78-635de95be93f",
+      "tip": "2db7e5fd07334c48ea37578f08e12a398e2a1c71",
+      "owner": "8ad3ecc6",
+      "purpose": "credential continuation",
+      "review": "gate just ran; verdict not yet established",
+      "next": "independent review then candidate gate",
+      "ahead_behind": "4\t0",
+      "files": [
+        "lua/core/openai_sub_auth.lua",
+        "rust/wa-host/src/main.rs",
+        "scripts/lib/openai-sub-auth-mock.mjs",
+        "scripts/openai-sub-auth-worker.lua",
+        "scripts/openai-sub-login.lua",
+        "scripts/test-openai-sub-auth-live.lua",
+        "scripts/test-openai-sub-auth.lua",
+        "scripts/test.sh"
+      ],
+      "merge": {
+        "exit": 0,
+        "output": "b0ba92b603124baf40e5bc80b80fdf632368f804"
+      }
+    },
+    {
+      "branch": "change/wa-session-childdispatch95d6189a-b98b-4d6e-bc45-f12e97ef35a5",
+      "tip": "24fb23ca431255af29279c39f9173f49a8817371",
+      "owner": "95d6189a",
+      "purpose": "credential predecessor",
+      "review": "contained in 2db7e5fd",
+      "next": "land via continuation, preserve ref",
+      "ahead_behind": "3\t0",
+      "files": [
+        "lua/core/openai_sub_auth.lua",
+        "rust/wa-host/src/main.rs",
+        "scripts/lib/openai-sub-auth-mock.mjs",
+        "scripts/openai-sub-auth-worker.lua",
+        "scripts/openai-sub-login.lua",
+        "scripts/test-openai-sub-auth-live.lua",
+        "scripts/test-openai-sub-auth.lua",
+        "scripts/test.sh"
+      ],
+      "merge": {
+        "exit": 0,
+        "output": "6ee8d5d62865a79858efc4f92851659328b75b40"
+      }
+    },
+    {
+      "branch": "change/wa-session-childdispatch9b9fe32b-dc1b-434b-bd16-2c1c7a1a9d86",
+      "tip": "7314b8909f26227fce56bacd28fc9f74dbc2a9e3",
+      "owner": "9b9fe32b",
+      "purpose": "warm tree predecessor",
+      "review": "contained in bfbcd5e",
+      "next": "land via reviewed continuation",
+      "ahead_behind": "2\t0",
+      "files": [
+        "scripts/lib/gate-phases.sh",
+        "scripts/merge-lane.mjs",
+        "scripts/test-merge-lane.mjs",
+        "scripts/test.sh"
+      ],
+      "merge": {
+        "exit": 0,
+        "output": "9a2df29d87b3cbed345af9aed998fa815427e95d"
+      }
+    },
+    {
+      "branch": "change/wa-session-childdispatchaf915180-d6da-4eb4-a505-b41a7a36a52f",
+      "tip": "f627a1589180251cb9197c6b83bb7498a2eec4e5",
+      "owner": "af915180",
+      "purpose": "SSE continuation",
+      "review": "gate #154 running at 13:39Z",
+      "next": "independent review then candidate gate",
+      "ahead_behind": "4\t0",
+      "files": [
+        "docs/HOST.md",
+        "docs/SUBSCRIPTION_WIRE_STATUS.md",
+        "lua/core/openai_sub.lua",
+        "lua/core/openai_sub_catalogue.lua",
+        "lua/core/provider.lua",
+        "lua/core/subscription_wire.lua",
+        "rust/wa-host/src/host.rs",
+        "rust/wa-host/src/main.rs",
+        "scripts/check-subscription-wire-live.lua",
+        "scripts/check-subscription-wire-parity.lua",
+        "scripts/import-openai-sub-catalogue.lua",
+        "scripts/test-openai-sub-levels.lua",
+        "scripts/test-subscription-wire.lua",
+        "scripts/test.sh",
+        "tests/fixtures/subscription/README.md",
+        "tests/fixtures/subscription/codex-responses-sse-text.txt",
+        "tests/fixtures/subscription/codex-responses-sse.txt",
+        "tests/fixtures/subscription/live-check-output.txt"
+      ],
+      "merge": {
+        "exit": 0,
+        "output": "82ebb4caa6afa109787aeb0b1112b5b083f4cf56"
+      }
+    },
+    {
+      "branch": "change/wa-session-childdispatchc66e86ed-0184-40b7-b2db-d98b90d82e3d",
+      "tip": "72530c583de343d42023f72117b0893509f945ff",
+      "owner": "c66e86ed",
+      "purpose": "disk floor/reclaim",
+      "review": "NEEDS-CHANGE review 9c959034",
+      "next": "repair df-space parsing and live temp deletion under owner",
+      "ahead_behind": "1\t0",
+      "files": [
+        "jobs/disk-reclaim.json",
+        "scripts/check-disk-floor.sh",
+        "scripts/check-temp-retention.mjs",
+        "scripts/reclaim-disk.mjs",
+        "scripts/reclaim-disk.sh",
+        "scripts/test-disk-floor.cjs",
+        "scripts/test-reclaim-disk.cjs",
+        "scripts/test-temp-retention-check.cjs",
+        "scripts/test.sh"
+      ],
+      "merge": {
+        "exit": 0,
+        "output": "65c97bc4dd2d7cccf5646bfb718b146244a25999"
+      }
+    },
+    {
+      "branch": "change/wa-session-childdispatchdb0ce06c-05ff-4f77-b4af-e1919e14e392",
+      "tip": "9c9590340dc2fcbd0b75bb6098021280699fb682",
+      "owner": "db0ce06c",
+      "purpose": "disk/retention independent review",
+      "review": "live deletion falsifications; no pass",
+      "next": "retain findings with repaired exact-tip reviews",
+      "ahead_behind": "2\t0",
+      "files": [
+        "verify/REVIEW-disk-temp.md",
+        "verify/b1-merge-lane.mjs",
+        "verify/b1-test.sh",
+        "verify/gate-home-liveness.sh",
+        "verify/legacy-grace-live-run.mjs",
+        "verify/liveness-node.mjs",
+        "verify/reclaim-falsify.sh",
+        "verify/refusal-chain.sh",
+        "verify/retention-sequence.mjs",
+        "verify/slice-gate-home.mjs",
+        "verify/slice.sh"
+      ],
+      "merge": {
+        "exit": 0,
+        "output": "cd2ff8f520eba345b6a145ec63a5312fcd44dd40"
+      }
+    },
+    {
+      "branch": "change/wa-session-childdispatchfdbfecc8-d5a7-4681-8eed-4d56490fa394",
+      "tip": "c78ab73130b13c0da967b5ce7ce7d1f96d3f0301",
+      "owner": "fdbfecc8",
+      "purpose": "retention",
+      "review": "NEEDS-CHANGE review 9c959034",
+      "next": "repair legacy live clone sweep under owner",
+      "ahead_behind": "1\t0",
+      "files": [
+        "scripts/merge-lane.mjs",
+        "scripts/test-merge-lane-retention.mjs",
+        "scripts/test.sh"
+      ],
+      "merge": {
+        "exit": 0,
+        "output": "db4d3658d2011a738ee030a082bc3b238d8ae3ba"
+      }
+    },
+    {
+      "branch": "change/wa-session-a1b38e98-9e53-4993-bb37-6528d2fc2c53",
+      "tip": "dcf49653c42375f5e7c32cadc28a83405d88527c",
+      "owner": "a1b38e98",
+      "purpose": "local-only sentinel/update WIP",
+      "review": "unreviewed semantic overlap with newer main",
+      "next": "publisher names sentinel recovery owner; preserve WIP",
+      "ahead_behind": "1\t116",
+      "files": [
+        "lua/core/update.lua",
+        "rust/wa-sentinel/src/main.rs"
+      ],
+      "merge": {
+        "exit": 1,
+        "output": "86603cfaee4070e8d171ff897211bcb0af8e6084\n100644 15a462a90d45a228ce40cdf60fd550d5b59234a4 1\tlua/core/update.lua\n100644 76642377fbea015a65b5c9f368a300673d74f000 2\tlua/core/update.lua\n100644 cc31794003bdc711757bc40e2921a88088251ae4 3\tlua/core/update.lua\n100644 a8e7c90633b9f960c626ffc27c49bc5f4adcf583 1\trust/wa-sentinel/src/main.rs\n100644 54fe8210f7d98557dff4f561a2b58a9f5e78e1aa 2\trust/wa-sentinel/src/main.rs\n100644 dfaab3eb41bc39f6bc717aec9a93421259e9b9d9 3\trust/wa-sentinel/src/main.rs\n\nAuto-merging lua/core/update.lua\nCONFLICT (content): Merge conflict in lua/core/update.lua\nAuto-merging rust/wa-sentinel/src/main.rs\nCONFLICT (content): Merge conflict in rust/wa-sentinel/src/main.rs"
+      }
+    }
+  ],
+  "batches": [
+    {
+      "name": "responsiveness",
+      "inputs": [
+        "5ab4683",
+        "7e2ab2c"
+      ],
+      "steps": [
+        {
+          "input": "5ab46834330602ffc913278cf30b3ddf9e8e492d",
+          "base": "ab827c88a6ac091318b5adb8be34e83e858c4e9a",
+          "exit": 0,
+          "output": "8a6ebb9a46a724d1cf3da29448ca01fb41c4a508"
+        },
+        {
+          "input": "7e2ab2c35c23cdbd283d184d56c71ad7b9bb84fc",
+          "base": "bb47a623730fc29557b5a018c2adf6cb0e127be3",
+          "exit": 0,
+          "output": "e0b9fd1875c1439c7506f0db8fdb67589efbb76b"
+        }
+      ],
+      "head": "02fe0b83306275f7b0a0d16d39766b89cf59d977",
+      "complete": true
+    },
+    {
+      "name": "warm-retention-disk",
+      "inputs": [
+        "bfbcd5e",
+        "c78ab73",
+        "72530c5"
+      ],
+      "steps": [
+        {
+          "input": "bfbcd5e3799f04c5898180d8b577aa91d3b95e66",
+          "base": "ab827c88a6ac091318b5adb8be34e83e858c4e9a",
+          "exit": 0,
+          "output": "3aa4f248e6e6a09f086d487ebedc090fb52f8f2f"
+        },
+        {
+          "input": "c78ab73130b13c0da967b5ce7ce7d1f96d3f0301",
+          "base": "0091609d424e65143aed1b6beaebeb3b154db610",
+          "exit": 1,
+          "output": "43a6b83cc1ef2ba5e3b1e405ac0f5b82b5ebb5cc\n100644 40394de178d0c00aa666ad6bb702076f5fdca391 1\tscripts/merge-lane.mjs\n100644 f214b4745fb3fd2e6e89f88e135c491bf061db35 2\tscripts/merge-lane.mjs\n100644 9baf37b5e5146dca686dde60e9b480d358996f4f 3\tscripts/merge-lane.mjs\n\nAuto-merging scripts/merge-lane.mjs\nCONFLICT (content): Merge conflict in scripts/merge-lane.mjs\nAuto-merging scripts/test.sh"
+        }
+      ],
+      "head": "0091609d424e65143aed1b6beaebeb3b154db610",
+      "complete": false
+    },
+    {
+      "name": "auth-sse",
+      "inputs": [
+        "2db7e5f",
+        "f627a15"
+      ],
+      "steps": [
+        {
+          "input": "2db7e5fd07334c48ea37578f08e12a398e2a1c71",
+          "base": "ab827c88a6ac091318b5adb8be34e83e858c4e9a",
+          "exit": 0,
+          "output": "b0ba92b603124baf40e5bc80b80fdf632368f804"
+        },
+        {
+          "input": "f627a1589180251cb9197c6b83bb7498a2eec4e5",
+          "base": "33c1abde545346c406fe17a6700d4ebfad5eeb02",
+          "exit": 1,
+          "output": "82f4ec100e84851fff031c83fa6382cf00e37649\n100644 b23468f5b8e8977d7e036712f7718f7deef5bae3 1\trust/wa-host/src/main.rs\n100644 8a700e68c4ec581be318f03e4db1dac3044591b8 2\trust/wa-host/src/main.rs\n100644 408e1528ce1ca4816bf30603702c27890ded94b9 3\trust/wa-host/src/main.rs\n100644 9ddbec05431f39bf2cf0d0ff443c3991f45246b5 1\tscripts/test.sh\n100644 4479a013962defe8a13352bd0980049a52f0ca46 2\tscripts/test.sh\n100644 f6d70f27589d0d62b33ba45b025f3e53c3f7b38c 3\tscripts/test.sh\n\nAuto-merging rust/wa-host/src/main.rs\nCONFLICT (content): Merge conflict in rust/wa-host/src/main.rs\nAuto-merging scripts/test.sh\nCONFLICT (content): Merge conflict in scripts/test.sh"
+        }
+      ],
+      "head": "33c1abde545346c406fe17a6700d4ebfad5eeb02",
+      "complete": false
+    },
+    {
+      "name": "frontier",
+      "inputs": [
+        "bfbcd5e",
+        "c78ab73",
+        "72530c5",
+        "2db7e5f",
+        "f627a15",
+        "5ab4683",
+        "7e2ab2c",
+        "9c95903"
+      ],
+      "steps": [
+        {
+          "input": "bfbcd5e3799f04c5898180d8b577aa91d3b95e66",
+          "base": "ab827c88a6ac091318b5adb8be34e83e858c4e9a",
+          "exit": 0,
+          "output": "3aa4f248e6e6a09f086d487ebedc090fb52f8f2f"
+        },
+        {
+          "input": "c78ab73130b13c0da967b5ce7ce7d1f96d3f0301",
+          "base": "6c80783e412aa785fa17e193610d0601b8f92889",
+          "exit": 1,
+          "output": "c380c839fd3264dc65a6954d3f9fec022297f7b9\n100644 40394de178d0c00aa666ad6bb702076f5fdca391 1\tscripts/merge-lane.mjs\n100644 f214b4745fb3fd2e6e89f88e135c491bf061db35 2\tscripts/merge-lane.mjs\n100644 9baf37b5e5146dca686dde60e9b480d358996f4f 3\tscripts/merge-lane.mjs\n\nAuto-merging scripts/merge-lane.mjs\nCONFLICT (content): Merge conflict in scripts/merge-lane.mjs\nAuto-merging scripts/test.sh"
+        }
+      ],
+      "head": "6c80783e412aa785fa17e193610d0601b8f92889",
+      "complete": false
+    }
+  ],
+  "pairs": [
+    {
+      "a": "bfbcd5e3799f04c5898180d8b577aa91d3b95e66",
+      "b": "320c0fcd9e4940a02733dcd5d1d15d0c13c6dbbe",
+      "overlap": [
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "4fd31ad0d673a23948bde9eb556cabb3226351d9"
+    },
+    {
+      "a": "bfbcd5e3799f04c5898180d8b577aa91d3b95e66",
+      "b": "2db7e5fd07334c48ea37578f08e12a398e2a1c71",
+      "overlap": [
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "32f02abab7f1739c4cde494238ce03ad110bbcd9"
+    },
+    {
+      "a": "bfbcd5e3799f04c5898180d8b577aa91d3b95e66",
+      "b": "24fb23ca431255af29279c39f9173f49a8817371",
+      "overlap": [
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "8392e8d21fe7a76cbbb5c49019cf476afeb60058"
+    },
+    {
+      "a": "bfbcd5e3799f04c5898180d8b577aa91d3b95e66",
+      "b": "7314b8909f26227fce56bacd28fc9f74dbc2a9e3",
+      "overlap": [
+        "scripts/lib/gate-phases.sh",
+        "scripts/merge-lane.mjs",
+        "scripts/test-merge-lane.mjs",
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "3aa4f248e6e6a09f086d487ebedc090fb52f8f2f"
+    },
+    {
+      "a": "bfbcd5e3799f04c5898180d8b577aa91d3b95e66",
+      "b": "f627a1589180251cb9197c6b83bb7498a2eec4e5",
+      "overlap": [
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "267a05c6b281ed3804635b23ef179a482cc3297f"
+    },
+    {
+      "a": "bfbcd5e3799f04c5898180d8b577aa91d3b95e66",
+      "b": "72530c583de343d42023f72117b0893509f945ff",
+      "overlap": [
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "d542b16190c1d4495c905c9a6492fb1dc89a3f07"
+    },
+    {
+      "a": "bfbcd5e3799f04c5898180d8b577aa91d3b95e66",
+      "b": "c78ab73130b13c0da967b5ce7ce7d1f96d3f0301",
+      "overlap": [
+        "scripts/merge-lane.mjs",
+        "scripts/test.sh"
+      ],
+      "exit": 1,
+      "output": "76081ed7418803f0b9ff1baff102152417078046\n100644 40394de178d0c00aa666ad6bb702076f5fdca391 1\tscripts/merge-lane.mjs\n100644 f214b4745fb3fd2e6e89f88e135c491bf061db35 2\tscripts/merge-lane.mjs\n100644 9baf37b5e5146dca686dde60e9b480d358996f4f 3\tscripts/merge-lane.mjs\n\nAuto-merging scripts/merge-lane.mjs\nCONFLICT (content): Merge conflict in scripts/merge-lane.mjs\nAuto-merging scripts/test.sh"
+    },
+    {
+      "a": "320c0fcd9e4940a02733dcd5d1d15d0c13c6dbbe",
+      "b": "2db7e5fd07334c48ea37578f08e12a398e2a1c71",
+      "overlap": [
+        "rust/wa-host/src/main.rs",
+        "scripts/test.sh"
+      ],
+      "exit": 1,
+      "output": "3a47205c2bb7278422c45babdd607365124aa94e\n100644 b23468f5b8e8977d7e036712f7718f7deef5bae3 1\trust/wa-host/src/main.rs\n100644 408e1528ce1ca4816bf30603702c27890ded94b9 2\trust/wa-host/src/main.rs\n100644 8a700e68c4ec581be318f03e4db1dac3044591b8 3\trust/wa-host/src/main.rs\n100644 9ddbec05431f39bf2cf0d0ff443c3991f45246b5 1\tscripts/test.sh\n100644 f6d70f27589d0d62b33ba45b025f3e53c3f7b38c 2\tscripts/test.sh\n100644 4479a013962defe8a13352bd0980049a52f0ca46 3\tscripts/test.sh\n\nAuto-merging rust/wa-host/src/main.rs\nCONFLICT (content): Merge conflict in rust/wa-host/src/main.rs\nAuto-merging scripts/test.sh\nCONFLICT (content): Merge conflict in scripts/test.sh"
+    },
+    {
+      "a": "320c0fcd9e4940a02733dcd5d1d15d0c13c6dbbe",
+      "b": "24fb23ca431255af29279c39f9173f49a8817371",
+      "overlap": [
+        "rust/wa-host/src/main.rs",
+        "scripts/test.sh"
+      ],
+      "exit": 1,
+      "output": "9aa99b5cd186de1e7efed045d23594d66942d84d\n100644 b23468f5b8e8977d7e036712f7718f7deef5bae3 1\trust/wa-host/src/main.rs\n100644 408e1528ce1ca4816bf30603702c27890ded94b9 2\trust/wa-host/src/main.rs\n100644 8a700e68c4ec581be318f03e4db1dac3044591b8 3\trust/wa-host/src/main.rs\n100644 9ddbec05431f39bf2cf0d0ff443c3991f45246b5 1\tscripts/test.sh\n100644 f6d70f27589d0d62b33ba45b025f3e53c3f7b38c 2\tscripts/test.sh\n100644 4479a013962defe8a13352bd0980049a52f0ca46 3\tscripts/test.sh\n\nAuto-merging rust/wa-host/src/main.rs\nCONFLICT (content): Merge conflict in rust/wa-host/src/main.rs\nAuto-merging scripts/test.sh\nCONFLICT (content): Merge conflict in scripts/test.sh"
+    },
+    {
+      "a": "320c0fcd9e4940a02733dcd5d1d15d0c13c6dbbe",
+      "b": "7314b8909f26227fce56bacd28fc9f74dbc2a9e3",
+      "overlap": [
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "d300698d9d4717f7a019608dd636e1d15e2e99cc"
+    },
+    {
+      "a": "320c0fcd9e4940a02733dcd5d1d15d0c13c6dbbe",
+      "b": "f627a1589180251cb9197c6b83bb7498a2eec4e5",
+      "overlap": [
+        "docs/HOST.md",
+        "lua/core/openai_sub.lua",
+        "lua/core/openai_sub_catalogue.lua",
+        "lua/core/provider.lua",
+        "lua/core/subscription_wire.lua",
+        "rust/wa-host/src/host.rs",
+        "rust/wa-host/src/main.rs",
+        "scripts/check-subscription-wire-live.lua",
+        "scripts/check-subscription-wire-parity.lua",
+        "scripts/test-openai-sub-levels.lua",
+        "scripts/test-subscription-wire.lua",
+        "scripts/test.sh",
+        "tests/fixtures/subscription/README.md",
+        "tests/fixtures/subscription/codex-responses-sse-text.txt",
+        "tests/fixtures/subscription/codex-responses-sse.txt"
+      ],
+      "exit": 0,
+      "output": "82ebb4caa6afa109787aeb0b1112b5b083f4cf56"
+    },
+    {
+      "a": "320c0fcd9e4940a02733dcd5d1d15d0c13c6dbbe",
+      "b": "72530c583de343d42023f72117b0893509f945ff",
+      "overlap": [
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "4294ef8a0c68a72e91ec56b5eaf4dc857ba5b7a0"
+    },
+    {
+      "a": "320c0fcd9e4940a02733dcd5d1d15d0c13c6dbbe",
+      "b": "c78ab73130b13c0da967b5ce7ce7d1f96d3f0301",
+      "overlap": [
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "aae34ce8d5d494ab743929ce189a4f15d256d09e"
+    },
+    {
+      "a": "2db7e5fd07334c48ea37578f08e12a398e2a1c71",
+      "b": "24fb23ca431255af29279c39f9173f49a8817371",
+      "overlap": [
+        "lua/core/openai_sub_auth.lua",
+        "rust/wa-host/src/main.rs",
+        "scripts/lib/openai-sub-auth-mock.mjs",
+        "scripts/openai-sub-auth-worker.lua",
+        "scripts/openai-sub-login.lua",
+        "scripts/test-openai-sub-auth-live.lua",
+        "scripts/test-openai-sub-auth.lua",
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "b0ba92b603124baf40e5bc80b80fdf632368f804"
+    },
+    {
+      "a": "2db7e5fd07334c48ea37578f08e12a398e2a1c71",
+      "b": "7314b8909f26227fce56bacd28fc9f74dbc2a9e3",
+      "overlap": [
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "ff95dc146e3cadb8f1599ccc8ef8959b81e00e39"
+    },
+    {
+      "a": "2db7e5fd07334c48ea37578f08e12a398e2a1c71",
+      "b": "f627a1589180251cb9197c6b83bb7498a2eec4e5",
+      "overlap": [
+        "rust/wa-host/src/main.rs",
+        "scripts/test.sh"
+      ],
+      "exit": 1,
+      "output": "af83e3056878ca331f9e90cfe2f8bcddffc3f8ba\n100644 b23468f5b8e8977d7e036712f7718f7deef5bae3 1\trust/wa-host/src/main.rs\n100644 8a700e68c4ec581be318f03e4db1dac3044591b8 2\trust/wa-host/src/main.rs\n100644 408e1528ce1ca4816bf30603702c27890ded94b9 3\trust/wa-host/src/main.rs\n100644 9ddbec05431f39bf2cf0d0ff443c3991f45246b5 1\tscripts/test.sh\n100644 4479a013962defe8a13352bd0980049a52f0ca46 2\tscripts/test.sh\n100644 f6d70f27589d0d62b33ba45b025f3e53c3f7b38c 3\tscripts/test.sh\n\nAuto-merging rust/wa-host/src/main.rs\nCONFLICT (content): Merge conflict in rust/wa-host/src/main.rs\nAuto-merging scripts/test.sh\nCONFLICT (content): Merge conflict in scripts/test.sh"
+    },
+    {
+      "a": "2db7e5fd07334c48ea37578f08e12a398e2a1c71",
+      "b": "72530c583de343d42023f72117b0893509f945ff",
+      "overlap": [
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "7c64a0b5a4aa243bb2a7477e797bdf62f4fe6663"
+    },
+    {
+      "a": "2db7e5fd07334c48ea37578f08e12a398e2a1c71",
+      "b": "c78ab73130b13c0da967b5ce7ce7d1f96d3f0301",
+      "overlap": [
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "943b96cf0d4ee35582618d8f72d0443cec97d1e2"
+    },
+    {
+      "a": "24fb23ca431255af29279c39f9173f49a8817371",
+      "b": "7314b8909f26227fce56bacd28fc9f74dbc2a9e3",
+      "overlap": [
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "e0d25faa3aacdc5e91b8c2a1509a8b71ba737350"
+    },
+    {
+      "a": "24fb23ca431255af29279c39f9173f49a8817371",
+      "b": "f627a1589180251cb9197c6b83bb7498a2eec4e5",
+      "overlap": [
+        "rust/wa-host/src/main.rs",
+        "scripts/test.sh"
+      ],
+      "exit": 1,
+      "output": "1d1114a8641d625a703be40d188eb93817b87a35\n100644 b23468f5b8e8977d7e036712f7718f7deef5bae3 1\trust/wa-host/src/main.rs\n100644 8a700e68c4ec581be318f03e4db1dac3044591b8 2\trust/wa-host/src/main.rs\n100644 408e1528ce1ca4816bf30603702c27890ded94b9 3\trust/wa-host/src/main.rs\n100644 9ddbec05431f39bf2cf0d0ff443c3991f45246b5 1\tscripts/test.sh\n100644 4479a013962defe8a13352bd0980049a52f0ca46 2\tscripts/test.sh\n100644 f6d70f27589d0d62b33ba45b025f3e53c3f7b38c 3\tscripts/test.sh\n\nAuto-merging rust/wa-host/src/main.rs\nCONFLICT (content): Merge conflict in rust/wa-host/src/main.rs\nAuto-merging scripts/test.sh\nCONFLICT (content): Merge conflict in scripts/test.sh"
+    },
+    {
+      "a": "24fb23ca431255af29279c39f9173f49a8817371",
+      "b": "72530c583de343d42023f72117b0893509f945ff",
+      "overlap": [
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "b55bb0449a4a6d6886f4c5546944fb4cbd8f59aa"
+    },
+    {
+      "a": "24fb23ca431255af29279c39f9173f49a8817371",
+      "b": "c78ab73130b13c0da967b5ce7ce7d1f96d3f0301",
+      "overlap": [
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "fd1b5e953424fb2ceaf42c9b3c3327984a76316f"
+    },
+    {
+      "a": "7314b8909f26227fce56bacd28fc9f74dbc2a9e3",
+      "b": "f627a1589180251cb9197c6b83bb7498a2eec4e5",
+      "overlap": [
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "cd00512f5bb7df8fb90dea245f18f9bc6bfcdbf0"
+    },
+    {
+      "a": "7314b8909f26227fce56bacd28fc9f74dbc2a9e3",
+      "b": "72530c583de343d42023f72117b0893509f945ff",
+      "overlap": [
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "9a8f49f36f9dfdec787172bfe66bd5b5f1ab91ed"
+    },
+    {
+      "a": "7314b8909f26227fce56bacd28fc9f74dbc2a9e3",
+      "b": "c78ab73130b13c0da967b5ce7ce7d1f96d3f0301",
+      "overlap": [
+        "scripts/merge-lane.mjs",
+        "scripts/test.sh"
+      ],
+      "exit": 1,
+      "output": "0440639c36f3fbd735e7f4e00613094e2cc98d52\n100644 40394de178d0c00aa666ad6bb702076f5fdca391 1\tscripts/merge-lane.mjs\n100644 f214b4745fb3fd2e6e89f88e135c491bf061db35 2\tscripts/merge-lane.mjs\n100644 9baf37b5e5146dca686dde60e9b480d358996f4f 3\tscripts/merge-lane.mjs\n\nAuto-merging scripts/merge-lane.mjs\nCONFLICT (content): Merge conflict in scripts/merge-lane.mjs\nAuto-merging scripts/test.sh"
+    },
+    {
+      "a": "f627a1589180251cb9197c6b83bb7498a2eec4e5",
+      "b": "72530c583de343d42023f72117b0893509f945ff",
+      "overlap": [
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "ba9410f4043802391afe84d709cf40450c68f205"
+    },
+    {
+      "a": "f627a1589180251cb9197c6b83bb7498a2eec4e5",
+      "b": "c78ab73130b13c0da967b5ce7ce7d1f96d3f0301",
+      "overlap": [
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "3b55283f659960b34a038ebd85830990a441be4e"
+    },
+    {
+      "a": "72530c583de343d42023f72117b0893509f945ff",
+      "b": "c78ab73130b13c0da967b5ce7ce7d1f96d3f0301",
+      "overlap": [
+        "scripts/test.sh"
+      ],
+      "exit": 0,
+      "output": "4f480c53f26c887a944207f92608c27a5484af85"
+    }
+  ],
+  "installed_drift": [
+    {
+      "path": "agent-benchmark/SKILL.md",
+      "source_sha256": "f2aa9cb1b2e63b3ab73db1e61811f077f7a7d05e52df2ace48554d0a1b8cf3da",
+      "installed_sha256": null
+    },
+    {
+      "path": "automation-jobs/SKILL.md",
+      "source_sha256": "a91bc3b3586518f7b36da5b302af4c6d37db67ff95eda62cba065e7496bbce3c",
+      "installed_sha256": null
+    },
+    {
+      "path": "client-controls/SKILL.md",
+      "source_sha256": "b156b764324027b0c5793b8d018abf542e7296b5894ed102762553cf1c6e4352",
+      "installed_sha256": null
+    },
+    {
+      "path": "code-graph/SKILL.md",
+      "source_sha256": "ee427cbc76beb8493250f39f50cd7e35d3f7e416fe7decd8fa9c5752820331ba",
+      "installed_sha256": null
+    },
+    {
+      "path": "git-orchestrator/scripts/audit.mjs",
+      "source_sha256": "a40b74a5ea99387470123f402c61c6937fa870a4ab93853fa6cd24c34558f1c7",
+      "installed_sha256": "75638767221ffab07ef009ddc748156eed79946852a6199d11932545f1c5dbba"
+    },
+    {
+      "path": "git-orchestrator/SKILL.md",
+      "source_sha256": "282ca6385b713cfd71daea54c32004aa52f85fe6b33f2fdd1aa6175c5d68a7aa",
+      "installed_sha256": "949e38d67c3446a2cb31afb303d09dbbed461eafe9d8191011d4fc166543e3ac"
+    },
+    {
+      "path": "parallel-evolution/SKILL.md",
+      "source_sha256": "c74ae0c89f662d2c2751d764bae8e3cf0ee4d205b6aba8866ef0fa9dc4c66c75",
+      "installed_sha256": "b73ca53f3f00075074d181dacb281781ad4068ea3021ae74ba07c2aedfa56642"
+    },
+    {
+      "path": "see-your-output/SKILL.md",
+      "source_sha256": "418984809f87208bf44e1fd7ad9144dd93a3b6546897cda5b867a442147e08ec",
+      "installed_sha256": null
+    },
+    {
+      "path": "vm-windows/SKILL.md",
+      "source_sha256": "fd87b31c29f53ca83451a898bddbc2c3439e0fc13602005367a9f8aeebcfeeec",
+      "installed_sha256": null
+    },
+    {
+      "path": "whatsapp-module-inspection/SKILL.md",
+      "source_sha256": "a2ab93fb5e427ffc15eba967bfd2b34fd03d5c700f04c6fca4945d053deb6128",
+      "installed_sha256": null
+    },
+    {
+      "path": "whatsapp-reply/SKILL.md",
+      "source_sha256": "b2a0a9323100346db4fad2280cb5f501b05bd65321f34b71dfdbe4fe2edfca85",
+      "installed_sha256": null
+    }
+  ]
+}
