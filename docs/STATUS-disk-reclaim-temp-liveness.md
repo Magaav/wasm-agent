@@ -54,19 +54,65 @@ exists here and its `[System.IO.File]::Open($p,'Open','ReadWrite','None')` probe
 a held file from a free one, but the rename probe above is cheap, needs no platform tool, and is
 non-destructive, so it is the one used.
 
-## Unproven (unmeasured, and labelled as such)
+## Proven by measurement, after the fixes (the evidence)
 
-* The fixes themselves do not exist yet at this commit. Nothing above is a claim about them.
-* `df`'s `--output=` form is rejected here (`df: options -P and --output are mutually exclusive`),
-  so the parse is anchored on the Capacity field (`NN%`) instead - it must be asserted against
-  the real Cygwin/MSYS root line, which this file does not yet do.
-* A process that holds *no* handle on a family and names it only on its command line is not
-  detected by the rename probe. The pid evidence for a refusal comes from a command-line scan
-  (planned), whose matching is textual: an 8.3 short-path form (`C:/Users/VICTOR~1/...`) would
-  not match, and that limit will be stated rather than papered over.
-* On a POSIX host the rename probe is expected to succeed even while a file inside is held (POSIX
-  renames are metadata-only), so on POSIX the probe alone would not be the rule. This delivery is
-  measured on this Windows node only; the POSIX half is labelled unexercised.
+The fixes are `6067c35` (the liveness rule, and the mjs half of the parse) and `31a818f` (the
+check's parse). Each block below is output, not a summary of output.
+
+**The live-holder case.** A scratch temp root, a real child process holding `held.open` (33 B)
+inside `wa-subagent-test-Live01`, its directory aged to 7 h, then `--apply`:
+
+    LEFT   wa-subagent-test-Live01  — in use: a live process names this family - pid 49552 ("C:/Program
+           Files/nodejs/node.exe" -e "const fs=require('node:fs');const fd=fs.openSync(...)…)  34 B
+    expired: 1 entries, 1 B — removed …   wa-subagent-test*  n=1  1 B  oldest=7h  removed=1
+    [disk] live family present: true, stale family present: false
+
+The family, and the file the holder had open, survived; the genuinely stale `wa-subagent-test-Stale01`
+(7 h, no holder) was removed in the same run, so the rule is not "leave everything". After the
+holder was killed the same command reclaimed the family:
+
+    expired: 1 entries, 34 B — removed …   wa-subagent-test*  n=1  34 B  oldest=7h  removed=1
+    [disk] live family present after run 2: false
+
+The deferences in those same runs, unchanged and still named: `wa-sentinel-Aged01` ("never expired by
+rule: the sentinel watches this path while it runs"), `wa-gate-home*` and `wa-merge-lane*` ("another
+lane's retention rule: …"), and `wa-not-a-tracked-family-SomeId` ("not matched to a known family
+(left alone): 1 entries"). The pid evidence line is `live-process scan (the pid evidence): powershell
+Get-CimInstance Win32_Process, 289 processes`.
+
+**The `df` case, the same numbers on both sides.** Both sides read
+`C:/Program Files/Git   499987452 430894512  69092940      87% /` (64.36 GiB free, floor 3.71 GiB):
+
+    before (tip 72530c58):  exit 3   cannot measure free space at / (df said: 'C:/Program Files/Git … 87% /')
+    after:                  exit 0   free: 65.89 GiB of 476.83 GiB on /   ok: 65.89 GiB >= the 3.71 GiB a run needs
+    after, --json:          available_bytes 70751170560  (= 69092940 KiB exactly), mount "/", ok true
+    after, floor above it:  exit 1   ok false — the refusal is the floor's, not the parse's
+
+With the real `df -Pk /` on this node, un-stubbed: before exit 3 `cannot measure free space at /`,
+after exit 0 `free: 64.06 GiB of 476.83 GiB on /`.
+
+**The tests.** `node scripts/test-reclaim-disk.cjs` -> exit 0, `reclaim pass ok (47 checks, 0 skipped;
+…)` (23 before); `node scripts/test-disk-floor.cjs` -> exit 0, `disk floor ok (43 checks, 0 skipped;
+…)` (28 before); `node scripts/test-temp-retention-check.cjs` -> exit 0 (7 checks).
+
+## Still unproven, or not measured here
+
+* The `/proc` branch of the liveness source is **unexercised**: this node is Windows and the branch
+  is not reached. It is written to the POSIX rule (a live process's cwd, or an open file inside the
+  family) and a /proc entry that cannot be inspected yields `liveness unproven`, never "clean" - but
+  that is code, not a measurement.
+* The rename probe's coverage is the OS's own: it refused here for a held file (EPERM) and for a
+  working directory (EBUSY), and allowed an idle directory. A holder that shares nothing, and a
+  family on a filesystem with different semantics, were not measured.
+* The pid match is textual - the family path as a substring of a command line, backslashes and case
+  normalised. A process that names the family only in an 8.3 short form would not match; the rename
+  probe is what still decides such a case.
+* A family entry that is not a directory is left with `liveness unproven`, because the directory
+  probe cannot answer for the open handles inside a file. That is a deliberate behaviour change from
+  the reviewed pass, named rather than hidden.
+* Cost: one process scan per run when there are candidates (289 processes, about a second here) and
+  one same-name rename per candidate. Not measured against a temp directory holding thousands of
+  aged entries.
 * Free space on this node is ~66 GiB. The refusal path is exercised with `--floor-bytes`, never by
   provoking a genuinely low disk.
 
@@ -77,15 +123,14 @@ against the gate lane's `WA_GATE_LANE_WAIT_SECONDS` default of 7200 s, with 4909
 waits observed - belongs to a delivery being verified against that file. If this repair seems to
 need a change there, that is a stop-and-say-so, not an edit.
 
-## Next, in order
+## State at this commit
 
-1. The liveness rule in `scripts/reclaim-disk.mjs`: an in-use family is never a candidate, decided
-   by the rename probe (and the pid from the command-line scan), in report mode too; where
-   liveness cannot be established, leave it and say so.
-2. The anchored `df` parse in `scripts/check-disk-floor.sh` and in `freeSpace()`, with the same
-   numbers on both sides before and after.
-3. Proof: the live-holder case left alone with pid evidence, then released and reclaimed; the `df`
-   case before and after with the same numbers; the deferences still recorded.
-4. This file updated with what was actually observed, and the closing gate on the committed tree.
+1. The liveness rule: done, in `6067c35`, with the evidence above.
+2. The anchored `df` parse in `scripts/check-disk-floor.sh` and in `freeSpace()`: done, in `6067c35`
+   and `31a818f`, with the same numbers on both sides before and after.
+3. Proof: above - the live-holder case left alone with pid evidence and then reclaimed, the `df` case
+   before and after, and the deferences still recorded.
+4. This file, and the closing gate on the committed tree: the gate's result is the last line of this
+   section when it is run, and it is not claimed before then.
 
 Agent: wasm-agent node=wasm_the_first role=child session=child:dispatch:4e773dae-d31f-43db-8d08-59e0cf154ec9
