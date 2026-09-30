@@ -190,3 +190,30 @@ Auth review (`f0ebab33`):
   where the seam or the door touched them; this is not a whole-diff review.
 * Anything about the operator's live credential store: every run of mine used a scratch
   `WASM_AGENT_HOME` and a scratch `WASM_AGENT_OPENAI_SUB_STORE`, and no token value was printed.
+
+## Flagged anomaly, unexplained, NOT a verdict driver
+
+While attacking the login expiry window I wrote my own never-authorizing stub
+(`evidence/probe-login-stub.mjs`: a user code, then `deviceauth_authorization_pending` forever - the
+shape the delivery's own mock cannot produce, because it authorizes on its second poll) and drove the
+door against it. Two things came out of that run and I am reporting them because I cannot explain
+them, not because I can attribute them:
+
+* the expiry path itself behaves as documented: `openai-sub login failed: flow_expired`, exit 1,
+the sentence names the code and how to resume, and the pending flow is **kept** - I read it back:
+`{"flow":"device","interval":1,"pending":true,"user_code":"STUB-CODE-1"}` with
+`window_ms = 900000` exactly, i.e. the 900 s device window is real and carried across a resume
+(`evidence/raw-login-flow-expired.txt`). The documented `WA_SCRIPT=scripts/openai-sub-login.lua`
+entry also works with **no** Lua root, which is worth noting: the host reads `WA_SCRIPT` from disk, so
+the credential lane's script never needed the root - only the `init.lua` arm does (`dofile`).
+* the poll loop's own counter reached **3504 polls** inside a **4 s** budget, with "(N polls, 0s left)"
+from N=6 onward and 2302 `still waiting` lines in the capture. A second, instrumented run measured
+**4115 `host.http` calls in 2070 ms** and sleep arguments summing to **2,001,196 ms** - numbers that
+cannot all be true together, since `host.sleep` really does wait (measured: a probe calling
+`host.sleep(3000)` takes 3052 ms wall clock, baseline 50 ms; `evidence/raw-sleep-wallclock.txt`) and
+the wrapper I used for the count does not break it (`evidence/raw-sleep-wrapper-control.txt`). Either
+the loop stops obeying its own `deadline` once reached, or my instrumented capture is wrong; I could
+not settle which, so I am **not** calling it a defect and it does not affect the verdict. It matters
+if it is real: an unbounded poll loop would hammer `auth.openai.com` instead of honouring the
+server's `interval`. Files: `evidence/raw-login-flow-expired.txt`, `evidence/raw-poll-loop.txt`
+(4118 lines, bounded output), `evidence/probe-poll-loop.lua`.
