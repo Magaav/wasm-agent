@@ -165,6 +165,38 @@ What this section owns is how many of them fit, and what is serial.
   unlanded editor per hot file - `skills/git-orchestrator/SKILL.md` says which file counts as hot and
   why the hot file's change lands first.
 
+The reservation above is now enforced by a queue rather than by convention: `scripts/gate-lane.mjs` is a
+durable, node-wide admission lane for the CPU-heavy commands the serial resource runs. It decides *when*,
+never *what*: the command is the caller's, unchanged, `scripts/test.sh` is untouched - the gate is still
+the gate - and a skip count is still read out of the gate's own verdict line rather than counted by the
+lane. One state directory per node (`<home>/.wasm-agent/gate-lane`, `WA_GATE_LANE_DIR` to move it) holds
+one durable row per request: who asked, what it will run and where, which slot it is behind, how long
+that slot has been held, its depth in the queue, and - when it ends - why. `status` answers "who holds
+the gate" from those rows and `history` keeps every transition. `WA_GATE_LANE_CAPACITY` is how many gates
+fit at once, and its default is **1**. Two entry points, because the runner differs: `run` spawns the
+command and is the only supervisor, while `acquire` grants the slot to a caller that already owns the
+gate process - `skills/parallel-evolution/scripts/finish.mjs`, or `scripts/merge-lane.mjs` in its
+disposable clone - blocks while it holds it, spawns nothing, and leaves `release --id <n>` to end the
+claim. Liveness is this repository's own primitive from `rust/wa-host/src/resources.rs`: an exclusive
+SQLite lease the OS releases on death, never a PID timeout. A holder that dies is `abandoned` and its
+slot frees; a holder whose *gate* survives it is `orphaned` and the slot stays held, because a gate still
+burning cores is exactly what must not run twice. A dead claim is reconcilable from the record's own
+evidence (`reconcile --id <n> --evidence <text>`), and a request that cannot be satisfied ends `refused` -
+terminal, named with the holder, its elapsed time and the depth it gave up at, never re-dispatched. That
+last clause is the one that matters: a non-terminal refusal that came back every tick once created ~1322
+worktrees on this machine.
+
+Both consumers take a slot around the gate they run, and neither may overrule the lane. Unreachable - no
+script, an unreadable store, a version skew that rejects the call - is **fail open**: a named notice, and
+the gate runs without a slot; `WA_GATE_LANE=off` produces the same outcome on purpose, by name. Reached
+and *refusing* is **fail closed and terminal**: the gate does not run, the finish receipt records
+`gate_verified: false` with the holder named, and `scripts/merge-lane.mjs` exits `6` with verdict
+`gate_refused` rather than the `merge_only` that reads as "merged, nothing to gate" (`docs/FACTORY.md`,
+"The spine"). A gate started inside a gate inherits its parent's admission instead of asking for a second
+slot: the marker travels in the gate's environment as `GATE_LANE_HELD`, a name `scripts/test.sh`'s own
+`WA_*` fence does not unset. `gate_ms` stays the gate's own duration - the wait for a slot is recorded
+separately as `gate_lane.waited_ms` - so a duration still means the gate and not the queue.
+
 ## Cancellation
 
 `POST /runs {action:"status"|"cancel", thread|conversation:"<id>", run_id?}` is answered on

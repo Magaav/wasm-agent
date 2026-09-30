@@ -53,11 +53,44 @@ a comparison: the node is shared, and a second worktree built inside both window
 that other build, not this gate; the uncapped run's 16-rustc peak is its own opening cold build,
 which is clean (no foreign build output exists on the machine before 09:42).
 
-Verdict: **the default stays uncapped.** This is one pair of runs, so it settles that the knob
-works and that the cap is not free - it cost 32% more wall time in this pair, on a machine that was
-not idle - and it settles nothing about a default. The number that actually decides it is
-contention between two concurrent gates, and that was not measured. Measure that (two children
-gating at once, idle box, more than one sample per setting) before changing the default.
+Verdict: **the `WA_GATE_JOBS` default stays uncapped.** This is one pair of runs, so it settles that
+the knob works and that the cap is not free - it cost 32% more wall time in this pair, on a machine that
+was not idle - and it settles nothing about a default. The number that actually decides it is contention
+between two concurrent gates; the pair measured below covers that once per setting, which is enough to say
+what happened in it and not enough to move a default either.
+
+The pair the verdict above named as missing has since been measured: two gates at once on this node, each
+request a `node scripts/gate-lane.mjs run` started ten seconds apart in its own tree
+(`wa-gate-measure/w2`, `w3`; the first at `--capacity 2`, then the same pair again at the default 1), one
+pair alone in its window. Method: the gate's **own process tree**, not the machine -
+`Get-CimInstance Win32_Process` every 4 s, walking the parent links down from the pid the lane started and
+summing per-pid user + kernel deltas (`scripts/lib/gate-lane-sample.ps1`), so a build that starts and exits
+between two samples contributes only what was seen while it was on the tree, and the CPU figure is a lower
+bound. Unlike the machine-wide count above, this cannot charge a foreign build to the gate it did not
+sample. The lane's own rows are the evidence (`scripts/gate-lane.mjs status`):
+
+| run | gate (`gate_ms`) | CPU in the gate's tree | wait for a slot | exit / verdict |
+| --- | --- | --- | --- | --- |
+| solo, cold (row `pair-at-once-w1`) | 1145.9 s | 253.0 CPU-s | none | 0, `smoke ok (2 skipped)` |
+| pair, cold, first (`capacity 2`) | 1093.5 s | 227.0 CPU-s | none | 0, `smoke ok (2 skipped)` |
+| pair, cold, second (`capacity 2`) | 1096.8 s | 217.8 CPU-s | 25 ms | 0, `smoke ok (2 skipped)` |
+| pair, warm, first (`capacity 1`) | 528.1 s | 11.2 CPU-s | none | 0, `smoke ok (2 skipped)` |
+| pair, warm, second (`capacity 1`) | 523.4 s | 9.7 CPU-s | 518.9 s | 0, `smoke ok (2 skipped)` |
+
+The solo run is the cold baseline rather than one of a pair: it was granted a slot with 0 of 2 in use, and
+it ended 3.6 minutes before the other two started. The warm pair is serial by construction - the second
+request waited for the first's slot - so 528.1 s and 523.4 s are what the lane does at the default, not a
+contention sample.
+
+Verdict: **the pair does not reproduce the thrash.** Two cold gates at once took 1093.5 s and 1096.8 s
+against a solo 1145.9 s, and each charged less CPU inside its own tree than the solo run did (227.0 and
+217.8 against 253.0), so on this box the second gate cost the first neither wall time nor CPU that could
+be attributed to it. That is n=1 for the pair, one sample per setting, and it is too weak to raise the
+number: **`WA_GATE_LANE_CAPACITY` stays 1** (`docs/CONCURRENCY.md`, "Lane reservations and the serial
+gate"). The tail is what that number buys: at one slot the eighth
+child finishing at once waits ~7 gate-times - about an hour at the warm numbers above - before its gate
+starts, which is what batching (`docs/FACTORY.md`, "The merge lane") is for. Anything else needs more
+samples per setting, on an idle box, with the same tree.
 
 ## The loop
 
