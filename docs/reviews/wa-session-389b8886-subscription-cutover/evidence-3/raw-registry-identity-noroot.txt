@@ -1,0 +1,19 @@
+# item 3b - registry identity in the no-root shape: the module the CLI loads is the module the
+# binary ships (VERDICT-2 proved 07cc7db6... for lua/core/openai_sub_login.lua; that file changed
+# in c86891c5, so the invariant is re-checked, not the old digest).
+# command: env -u WASM_AGENT_LUA_ROOT WASM_AGENT_HOME=<scratch> WA_SCRIPT=docs/reviews/wa-session-389b8886-subscription-cutover/evidence-3/probe-registry-identity.lua $PWD/rust/target/release/wa.exe --db <scratch>
+
+lua root unset: using embedded modules; edits under lua/ are NOT under test
+lua root (getenv): nil
+wire.CREDENTIAL_MODULE: lua/core/openai_sub_auth.lua
+LOADED_SOURCES lua/core/subscription_wire.lua: 480a2d6133f09257299ab97fd3c73b2fffb31b7415de282b1422b54253b79cfa
+LOADED_SOURCES lua/core/openai_sub_auth.lua: 7949dc6f548f3ee03f4fe3da4386d86e991c9d03b33da3c3275685202d09daa9
+LOADED_SOURCES lua/core/openai_sub_catalogue.lua: 3ddb0859b6997b5c79ac78082fe4c4088407932d0faa3e0ea3deef003b311be5
+LOADED_SOURCES lua/core/openai_sub_login.lua: cd60453da346fbd96cf8a87b5ad9f8f57329121143c645c8d169f88a1b02649b
+probe exit=0
+
+--- sha256sum of the same files on disk in the reviewed checkout
+480a2d6133f09257299ab97fd3c73b2fffb31b7415de282b1422b54253b79cfa *lua/core/subscription_wire.lua
+7949dc6f548f3ee03f4fe3da4386d86e991c9d03b33da3c3275685202d09daa9 *lua/core/openai_sub_auth.lua
+3ddb0859b6997b5c79ac78082fe4c4088407932d0faa3e0ea3deef003b311be5 *lua/core/openai_sub_catalogue.lua
+cd60453da346fbd96cf8a87b5ad9f8f57329121143c645c8d169f88a1b02649b *lua/core/openai_sub_login.lua

@@ -1,0 +1,26 @@
+# the delta and the identity of the reviewed tree
+
+$ git rev-parse c86891c5^{tree}
+987f4faff2e81c05d1de5e80d549b308556615cd
+
+$ git diff --name-status a19c64bf c86891c5
+M	docs/SUBSCRIPTION_CUTOVER_STATUS.md
+M	lua/core/openai_sub_login.lua
+M	scripts/test-subscription-login-door.sh
+
+$ git diff --numstat a19c64bf c86891c5
+65	0	docs/SUBSCRIPTION_CUTOVER_STATUS.md
+11	0	lua/core/openai_sub_login.lua
+48	1	scripts/test-subscription-login-door.sh
+
+$ git log --format='%H %T %P %s' a19c64bf..c86891c5
+c86891c5d2e1608b9cff0dd8ff4e543adfd15f25 987f4faff2e81c05d1de5e80d549b308556615cd a19c64bf807c36fb6067183dfc0ae339d7fb8553 fix(subscription): the door's printed sentence now does what it says
+
+$ git rev-parse origin/main  (base, moved twice since the last review)
+9d3061734442e542b562871a2774f652ecfd3cc3
+
+$ git merge-base c86891c5 origin/main
+ab827c88a6ac091318b5adb8be34e83e858c4e9a
+
+$ git status --porcelain (reviewed worktree, delivery files untouched by me)
+?? docs/reviews/wa-session-389b8886-subscription-cutover/

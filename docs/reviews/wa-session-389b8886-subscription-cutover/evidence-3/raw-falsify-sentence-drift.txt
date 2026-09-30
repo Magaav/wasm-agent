@@ -1,0 +1,40 @@
+# item 2b - falsification: do the new checks fail if the sentence and the behaviour drift apart?
+# mutations are made on git-archive exports of the reviewed tree, never on the checkout.
+
+exported from HEAD=c86891c5d2e1608b9cff0dd8ff4e543adfd15f25
+the fix line in the export: [44:  if options.code and not options.mode then options.mode = "browser" end]
+
+--- M1: wa subscription login --browser
+openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+http://127.0.0.1:39481/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=Yw6h-fJBzz1nb5NdeVoEg08vO_2pGw4SznCaJwp3mOA&code_challenge_method=S256&state=b999b3ea407746a3b4d21dbf6e3ced15&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+[lua] openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+http://127.0.0.1:39481/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=Yw6h-fJBzz1nb5NdeVoEg08vO_2pGw4SznCaJwp3mOA&code_challenge_method=S256&state=b999b3ea407746a3b4d21dbf6e3ced15&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+openai-sub: waiting for the browser step - re-run with --code <the address you landed on>
+  check 2 (the door prints the instruction this section is about): 1 match(es)
+  check 3 (what is pending): flow":"browser
+--- M1: the sentence that door printed, run verbatim
+openai-sub: open http://127.0.0.1:39481/codex/device and enter the code FIXTURE-CODE  (waiting up to 300s)
+[lua] openai-sub: open http://127.0.0.1:39481/codex/device and enter the code FIXTURE-CODE  (waiting up to 300s)
+openai-sub: device authorized after 3 polls; exchanging the authorization code
+[lua] openai-sub: device authorized after 3 polls; exchanging the authorization code
+openai-sub: logged in - account acct-fixture-0001, expires in 3599s
+[lua] openai-sub: logged in - account acct-fixture-0001, expires in 3599s
+openai-sub: logged in - account acct-fixture-0001, store C:/Users/Victor/AppData/Local/Temp/tmp.VC02Z52LOF/M1/credentials.json
+  check 5 (the BROWSER flow completed): source=source":"login:device  [login:browser would pass]
+  check 8 (no device-code line): 2 device-code line(s)  [0 would pass]
+
+--- M2: wa subscription login --browser
+openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+http://127.0.0.1:39481/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=8wRAfugPLmKYAdwQ_KrdjdUhEtTT2PajR9_JuTrtqkQ&code_challenge_method=S256&state=da33b9e0c8784ff5aa852250895db96c&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+[lua] openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+http://127.0.0.1:39481/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=8wRAfugPLmKYAdwQ_KrdjdUhEtTT2PajR9_JuTrtqkQ&code_challenge_method=S256&state=da33b9e0c8784ff5aa852250895db96c&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+openai-sub: waiting for the browser step - re-run with --browser --code <the address you landed on>
+  check 2 (the door prints the instruction this section is about): 0 match(es)
+  check 3 (what is pending): flow":"browser
+--- M2: the sentence that door printed, run verbatim
+openai-sub: logged in - account acct-fixture-0001
+[lua] openai-sub: logged in - account acct-fixture-0001
+openai-sub: logged in - account acct-fixture-0001, store C:/Users/Victor/AppData/Local/Temp/tmp.VC02Z52LOF/M2/credentials.json
+  check 5 (the BROWSER flow completed): source=source":"login:browser  [login:browser would pass]
+  check 8 (no device-code line): 0 device-code line(s)  [0 would pass]
+script exit=0
