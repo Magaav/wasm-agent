@@ -210,15 +210,43 @@ In `treeCombined`: `bash -n scripts/test.sh` OK; the file carries **both** chang
 concurrently rewriting `scripts/test.sh`; that is a fact about the sibling's work, not a conflict between these
 two commits, and I did not test against the sibling's tree.)
 
-## The gate (item 7): NOT run cleanly, and why
+## The gate (item 7): one attempt, polluted and interrupted, and why
 
-`node scripts/gate-lane.mjs status` before my attempts: `gate lane: 1 of 1 slot(s) held … 3 waiting`, slot #141
-held 1576 s, queue positions 1–3 with waits of 282–1390 s, and a tail of abandoned slots whose holders died.
-The machine is under two-plus concurrent gate runs (free space moved 72.0 → 68.66 GiB during my work, witness
-of sibling builds). My own mistake and its evidence: I ran one `merge-lane` without `WA_GATE_LANE=off` and it
-waited 597 s for the slot before running unslotted — real proof of saturation, and why I will not present a
-gate time from this window as clean. The two full-tree gate runs (item 7) are the remaining unverified item;
-see the running log at the end of this file.
+Gate-lane status was checked before and after, both attempts ran one at a time (never two of mine), and the
+lane was already occupied by a sibling for the whole window:
+
+* before attempt 1 (13:19Z): `1 of 1 slot(s) held … 3 waiting`, slot #145 running mode=acquire held 1013 s.
+* before attempt 2 (13:45Z): `1 of 1 slot(s) held … 1 waiting`.
+* free space: **71,531,380 KiB (68.2 GiB) before attempt 1**, **70,089,224 KiB (66.8 GiB) before attempt 2**
+  (the fall is other lanes' builds; D2's 3.71 GiB floor was never in question).
+
+**Attempt 1, D1's tree (`/tmp/rev/treeB1`, its own commit c78ab731), 13:19:02Z → 13:39:46Z (1244 s): exit
+127, no suite verdict, no skip count.** The log's last productive line is the Rust build completing after
+10 m 16 s, and the next command in `scripts/test.sh` (`node scripts/test-parallel-finish.mjs`, the nested
+fixture gate) is where the run stopped. Cause, and it is an environment fault rather than a delivery fault:
+the installed `~/.wasm-agent/skills/parallel-evolution/scripts/finish.mjs` was stale and did not pass
+`GATE_LANE_HELD` into the gate it spawns, so a nested fixture gate waited on the slot its own parent held. I
+reproduced that wait independently in the same tree: `node scripts/test-parallel-finish.mjs` ran **300 s with
+zero output** before I killed it. The coordinator has since replaced the skill with the repo's copy
+(sha `129fabc56c44256a`). So attempt 1 is **not** evidence about either delivery: it never reached a suite.
+
+What attempt 1 *does* show, as real behaviour of D1's policy on this machine rather than on a fixture: the
+EXIT trap ran on the 127, kept its own home (`/tmp/wa-gate-home-61110-z9DePd (kept: this run exited 127,
+WA_GATE_HOME_KEEP=1)` - a failing run keeps its own), and pruned **11 real homes** in the OS temp root: ten
+pre-lease names (`wa-gate-home-uF5H92`, `-M1dcfj`, `-g0t3zE`, `-9E5psF`, `-h6lnLJ`, `-sblnzK`, `-ObeYur`,
+`-v3pTZN`, `-sGNROX`, `-uVzY6F`) and one lease-shaped name whose owner was already dead
+(`wa-gate-home-1212-KowbJ2`). Exactly one leased removal was logged, and the sweep only logs a removal for a
+candidate whose pid read as dead, so the liveness rule held here; my 13:17 inventory had seen a single live
+lease (its pid was not recorded), and by 13:47 no live lease remains while every lease-shaped home now has a
+dead owner - consistent with the sibling gate that held slot #145 having ended, not with a live removal.
+Pre-lease leftovers fell 99 → 94 across the run, i.e. 11 removed and ~6 minted again by sibling lanes running
+pre-change code in the same window.
+
+**Attempt 2, same tree, 13:45Z, `GATE_LANE_HELD=1`** (the marker a held gate inherits, so the nested fixture
+gate does not queue behind a sibling): result in the running log below.
+
+Per the coordinator's note this review does not depend on a gate: the merged candidate gets one at the merge
+gate. Everything above stands on real runs of the delivered code.
 
 ## D1's pre-lease grace is shorter than the queue (reproduced live-run deletion)
 
