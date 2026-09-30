@@ -1,0 +1,24 @@
+== the awk the repair added, against crafted df lines, and the mjs rule beside it ==
+-- real line (space in Filesystem):
+C:/Program Files/Git   499987452 437445416  62542036      88% /
+-- what the shell parses out of it (total/avail/mount):
+   total=499987452 avail=62542036 mount=everything after the capacity field
+-- same line with Capacity = '-':
+   no capacity field -> guard fires -> check-disk-floor exits 3
+-- header line (df with no argument):
+   no capacity field -> exit 3
+-- a mount whose path has a space (the mount join):
+   total=100 avail=50 mount=[/mnt/my share]
+
+== mounts on this box (df -Pk, all) ==
+Filesystem           1024-blocks      Used Available Capacity Mounted on
+C:/Program Files/Git   499987452 438272308  61715144      88% /
+(one mount: a space in the Filesystem field, no '-' capacity anywhere)
+
+== does an env block size override -k? (the parse multiplies by 1024) ==
+plain      : C:/Program Files/Git   499987452 438272308  61715144      88% /
+BS512      : C:/Program Files/Git   499987452 438272308  61715144      88% /
+POSIXLY    : C:/Program Files/Git   499987452 438272308  61715144      88% /
+
+== exit code of the pass in my --apply runs (node's own status, PIPESTATUS[0] of a node|sed pipe) ==
+runA=1 runD=1 attack2=1 (each removed exactly the intended families and left the live ones)

@@ -1,0 +1,18 @@
+== (a) rmSync against a live holder ==
+  rmSync(file held open) OK  -> the family is GONE while the holder is alive
+  rmSync(live cwd) REFUSED EPERM
+  held dir still there? NO   cwdir still there? yes
+== (b) a process that is ABOUT to hold the family (knows the path, nothing open yet) ==
+SOON pid=44152 will write C:\Users\Victor\AppData\Local\Temp\rev4e\runF\tmp\wa-subagent-test-Soon01\late.txt in 4 s (nothing open yet, cmdline clean)
+1. bounded temp families (1 families named by this repository's scripts and present in C:/Users/Victor/AppData/Local/Temp/rev4e/runF/tmp, of 123 names read)
+   expired: 2 entries, 1 B — removed (families, oldest first):
+     wa-subagent-test*  n=2  1 B  oldest=7h  minted by scripts/check-temp-retention.mjs  removed=2
+   live-process scan (the pid evidence): powershell Get-CimInstance Win32_Process, 284 processes
+   LEFT, in use or liveness unproven (evidence, not age): 0 entries
+   kept: 0 entries (fresh, in use, or never expired by rule) — named below
+   not matched to a known family (left alone): 0 entries
+
+2. rust/target in ended sessions' worktrees
+  filesystem truth: Soon01=REMOVED  Stale03=REMOVED
+SOON FAILED: ENOENT - the family was gone before it could be used
+  what the about-to-hold process reported:

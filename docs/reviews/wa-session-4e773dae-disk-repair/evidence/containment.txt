@@ -1,0 +1,25 @@
+== the exact tree under review ==
+tip : 90766a9641b21685c4ff315710c1339a10ecc134
+tree: 361e5414386780866cd16be3dab250c645baaa95
+base: 72530c583de343d42023f72117b0893509f945ff   origin/main: da8dc8918a34c880768956ff775d883802dcb7a7
+merge-base(90766a96, origin/main)=ab827c88a6ac091318b5adb8be34e83e858c4e9a
+
+== containment of the two candidate defects ==
+  is-ancestor c78ab731 90766a96 -> exit=1  (1 = NOT contained)
+  is-ancestor 72530c58 90766a96 -> exit=0  (0 = contained: this is a repair of it)
+  branches containing c78ab731:
+    + change/wa-session-childdispatchfdbfecc8-d5a7-4681-8eed-4d56490fa394
+      remotes/origin/change/wa-session-childdispatchfdbfecc8-d5a7-4681-8eed-4d56490fa394
+
+== commits on the repair ==
+  90766a9 docs(status): the gate did not run - the lane granted no slot, and no skip count is invented
+  0597205 docs(status): the repair's results - the live-holder case, the df case on both sides, the deferences
+  31a818f fix(disk-floor): the free-space parse is anchored on the Capacity field, so a mount with a space in its name no longer false-refuses
+  6067c35 fix(reclaim-disk): a temp family a live process holds or works in is never a candidate
+  4cd4e8d docs(status): the repair's status file, committed before its first fix
+
+== assertions REMOVED from the two test files by the repair (grep of deleted lines) ==
+-console.log(`disk floor ok (${checks} checks, 0 skipped; refusal names ${parsed.available_bytes} B free against a ${declaredFloor} B floor)`);
+-const { execFileSync, spawnSync } = require('node:child_process');
+-  console.log(`reclaim pass ok (${checks} checks, 0 skipped; pruned an ended session's target, kept the live, unrecorded, canonical and lane targets)`);
+(end)

@@ -1,0 +1,17 @@
+== check-disk-floor.sh --path / on the pre-repair tip 72530c58 (a copy, md5 below) ==
+d0098a3cc9cb5d0ed0893f7a242b6fa2 *check-disk-floor.sh
+Filesystem           1024-blocks      Used Available Capacity Mounted on
+C:/Program Files/Git   499987452 438270764  61716688      88% /
+check-disk-floor: cannot measure free space at / (df said: 'C:/Program Files/Git   499987452 438270748  61716704      88% /')
+exit=3
+
+== the same path on the tree under review, 90766a96 (tree 361e5414...) ==
+b4e0de089b6bcf32fa19b39a1f702a1e *scripts/check-disk-floor.sh
+disk floor check
+  floor: 3.71 GiB (3987386368 B) - measured 2026-09-30 on ab827c8: free space fell 3,893,932 KiB across one run of scripts/test.sh, which then passed (smoke ok, 1119 s); target after 1,045,916,377 B, clone 37 MiB, gate home 21 MiB, run temp 1.2 GiB
+  free:  58.86 GiB of 476.83 GiB on /
+  ok:    58.86 GiB >= the 3.71 GiB a run needs
+exit=0
+
+{"floor_bytes":3987386368,"available_bytes":63197900800,"total_bytes":511987150848,"mount":"/","path":"/","ok":true,"method":"measured 2026-09-30 on ab827c8: free space fell 3,893,932 KiB across one run of scripts/test.sh, which then passed (smoke ok, 1119 s); target after 1,045,916,377 B, clone 37 MiB, gate home 21 MiB, run temp 1.2 GiB"}
+exit=0

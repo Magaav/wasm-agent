@@ -1,0 +1,26 @@
+== the probe against each kind of holder (all dirs aged 7 h, scratch root C:\Users\Victor\AppData\Local\Temp\rev4e\runE) ==
+E1 idle directory
+   probe: rename(dir,dir) OK  -> would be REMOVED
+E2 a file inside held open by a live node process (pid 142109, cmdline clean)
+   probe: rename(dir,dir) REFUSED EPERM  -> left alone
+E3 a live Windows process's working directory (node pid 142116)
+   probe: rename(dir,dir) REFUSED EBUSY  -> left alone
+E4 a live MSYS process's working directory (bash+sleep pid 142123)
+   probe: rename(dir,dir) OK  -> would be REMOVED
+   (for E4: what the pid scan would see of that holder's command line:)
+== end to end: --apply with only the E4-style holder aged, and a stale control ==
+1. bounded temp families (1 families named by this repository's scripts and present in C:/Users/Victor/AppData/Local/Temp/rev4e/runE/tmp, of 123 names read)
+   expired: 2 entries, 1 B — removed (families, oldest first):
+     wa-subagent-test*  n=2  1 B  oldest=7h  minted by scripts/check-temp-retention.mjs  removed=2
+   live-process scan (the pid evidence): powershell Get-CimInstance Win32_Process, 284 processes
+   LEFT, in use or liveness unproven (evidence, not age): 0 entries
+   kept: 0 entries (fresh, in use, or never expired by rule) — named below
+   not matched to a known family (left alone): 0 entries
+
+2. rust/target in ended sessions' worktrees
+   filesystem truth: Msys01=REMOVED (holder pid 142134 ALIVE)  Stale02=REMOVED
+== killing only the pids this script started: 142109 142116 142123 142134 ==
+  pid 142109   gone
+  pid 142116   gone
+  pid 142123   gone
+  pid 142134   gone

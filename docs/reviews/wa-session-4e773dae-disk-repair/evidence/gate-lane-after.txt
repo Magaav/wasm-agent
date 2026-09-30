@@ -1,0 +1,13 @@
+== the gate lane, read after my taskkill (see VERDICT.md 'An external effect I caused') ==
+gate lane: 0 of 1 slot(s) held (capacity from the default), 0 waiting
+  state dir: C:\Users\Victor\.wasm-agent\gate-lane
+  nobody holds a slot and nobody is waiting
+  abandoned #180 merge-lane 028380ac6d7d: abandoned: holder pid 51172 gone, no gate pid was recorded and nothing the holder started for this slot is still running, lease 88450118-efe8-432a-9489-3d120ce40db0 not held; slot released after 550s
+  done #179 merge-lane 4b4de9909340 exit 0: merge-lane gate in C:\Users\Victor\AppData\Local\Temp\wa-merge-lane-FSwGQs exited 0
+  done #178 merge-lane 4b4de9909340 exit 0: merge-lane gate in C:\Users\Victor\AppData\Local\Temp\wa-merge-lane-TmmPX5 exited 0
+
+== node.exe at that moment ==
+INFO: No tasks are running which match the specified criteria.
+== the live node's own processes ==
+wa-window.exe                23848 Console                    6     20,932 K
+wa-sentinel.exe              18952 Console                    6     10,172 K

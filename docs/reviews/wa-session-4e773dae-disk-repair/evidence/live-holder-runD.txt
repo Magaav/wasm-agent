@@ -1,0 +1,36 @@
+== runD-probe-only ==
+CHDIR-HOLDER pid=23952 cwd=C:\Users\Victor\AppData\Local\Temp\rev4e\runD\temp\wa-subagent-test-Cwd01
+HOLDER pid=18552 holds C:/Users/Victor/AppData/Local/Temp/rev4e/runD/temp/wa-subagent-test-Live01/held.open (path in argv)
+HOLDER pid=9748 holds C:\Users\Victor\AppData\Local\Temp\rev4e\runD\temp\wa-subagent-test-Probe01\held.open (path from stdin, cmdline is clean)
+   all fixtures have mtime 7 h old (files written BEFORE the aging touch)
+== --apply with the pid scan UNAVAILABLE (PATH has no powershell.exe): only the rename probe decides ==
+1. bounded temp families (1 families named by this repository's scripts and present in C:/Users/Victor/AppData/Local/Temp/rev4e/runD/temp, of 123 names read)
+   expired: 1 entries, 16 B — removed (families, oldest first):
+     wa-subagent-test*  n=1  16 B  oldest=7h  minted by scripts/check-temp-retention.mjs  removed=1
+   live-process scan (the pid evidence): unavailable - the process scan failed: spawnSync powershell.exe ENOENT 
+   LEFT, in use or liveness unproven (evidence, not age): 3 entries
+     LEFT   wa-subagent-test-Cwd01  — in use: the OS refused an exclusive rename of the family (EBUSY) - a process holds the directory or a file inside it  16 B
+     LEFT   wa-subagent-test-Live01  — in use: the OS refused an exclusive rename of the family (EPERM) - a process holds the directory or a file inside it  35 B
+     LEFT   wa-subagent-test-Probe01  — in use: the OS refused an exclusive rename of the family (EPERM) - a process holds the directory or a file inside it  35 B
+   kept: 5 entries (fresh, in use, or never expired by rule) — named below
+     KEEP   wa-sentinel-Aged01  — never expired by rule: the sentinel watches this path while it runs
+     KEEP   wa-subagent-test-Fresh1  — fresh: younger than --min-age-hours 6
+   not matched to a known family (left alone): 0 entries
+
+2. rust/target in ended sessions' worktrees
+exit=1
+== filesystem truth ==
+  wa-subagent-test-Live01      LEFT     held.open:present
+  wa-subagent-test-Probe01     LEFT     held.open:present
+  wa-subagent-test-Cwd01       LEFT     held.open:absent
+  wa-subagent-test-Stale01     REMOVED  held.open:absent
+  wa-sentinel-Aged01           LEFT     held.open:absent
+  wa-subagent-test-Fresh1      LEFT     held.open:absent
+== holder identities ==
+CHDIR-HOLDER pid=23952 cwd=C:\Users\Victor\AppData\Local\Temp\rev4e\runD\temp\wa-subagent-test-Cwd01
+HOLDER pid=18552 holds C:/Users/Victor/AppData/Local/Temp/rev4e/runD/temp/wa-subagent-test-Live01/held.open (path in argv)
+HOLDER pid=9748 holds C:\Users\Victor\AppData\Local\Temp\rev4e\runD\temp\wa-subagent-test-Probe01\held.open (path from stdin, cmdline is clean)
+== killing only my pids ==
+  pid 141960   gone
+  pid 141965   gone
+  pid 141970   gone
