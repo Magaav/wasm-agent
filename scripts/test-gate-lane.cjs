@@ -95,6 +95,10 @@ async function main() {
   const aloneResult = await alone.done;
   check(aloneResult.code === 0, `a lone request must run and exit 0: ${aloneResult.stderr}`);
   const aloneReceipt = receipt(aloneResult.stdout);
+  const fast=await cli(['run','--label','fast-sampled','--sample-seconds','1','--json','--',
+    process.execPath,'-e',"console.log('smoke ok (0 skipped)')"]).done;
+  check(fast.code===0 && receipt(fast.stdout).verdict_found,
+    'a command exiting before sampler startup is still observed and settled');
   check(aloneReceipt.state === 'done' && aloneReceipt.obtained === true, 'the lone request is recorded as done');
   check(aloneReceipt.skipped === 2 && aloneReceipt.verdict_found === true,
     'the skip count comes from the gate\'s own verdict line');
@@ -123,6 +127,7 @@ async function main() {
   await sleep(1200); // a wait that is long enough to be a wait.
   killTree(holder.pid);
   const holderDone = await holder.done;
+  laneSync(['reconcile','--id',String(holderEntry.id),'--evidence','owned fixture process tree stopped with killTree and owner exit observed']);
   const waitingResult = await until(async () => (waiting.code === null ? null : waiting), 'the waiter to finish');
   check(holderDone.code === null || holderDone.code !== 0, 'the killed holder does not report a gate pass');
   check(waitingResult.code === 0, `the waiter runs after the slot frees: ${waitingResult.stderr}`);
@@ -154,12 +159,12 @@ async function main() {
     return entry && /^(orphaned|abandoned)$/.test(entry.state) ? entry : null;
   }, 'the killed holder to be settled by proof of death');
   console.log(`note: killing holder pid ${doomed.pid} left its gate pid ${doomedEntry.gate_pid}`
-    + ` ${gateSurvived ? 'ALIVE, so the slot stays held' : 'gone, so the slot frees at once'}`
+    + ` ${gateSurvived ? 'ALIVE, so the slot stays held' : 'gone; explicit owner drain evidence still required'}`
     + ` (${process.platform})`);
-  check(settled.state === (gateSurvived ? 'orphaned' : 'abandoned'),
+  check(settled.state === 'orphaned',
     `the recorded state follows the gate's real liveness: ${settled.state}`);
   check(settled.reason.includes(`pid ${doomed.pid}`) && settled.reason.includes(`pid ${doomedEntry.gate_pid}`)
-    && /gone|died/.test(settled.reason),
+    && /gone|died|no longer observed/.test(settled.reason),
   `the record names the dead holder and the gate it started: ${settled.reason}`);
   if (gateSurvived) {
     check(status().queue.length === 1 && survivor.code === null,
@@ -169,12 +174,13 @@ async function main() {
       'a reconcile is refused while the recorded gate process is alive');
     process.kill(settled.gate_pid, 'SIGKILL');
   } else {
-    check(status().slots_held === 0, 'a claim whose gate died with it frees its slot');
+    check(status().slots_held === 1, 'dead roots retain uncertain descendant ownership');
   }
+  laneSync(['reconcile','--id',String(settled.id),'--evidence','owned fixture gate and holder stopped; single-process fixture descendants observed absent']);
   const survivorResult = await until(async () => (survivor.code === null ? null : survivor), 'the survivor to run');
   check(survivorResult.code === 0, `the next request runs once the slot is free: ${survivorResult.stderr}`);
   const abandoned = status().recent.find(entry => entry.id === settled.id);
-  check(abandoned.state === 'abandoned' && abandoned.reason.includes('slot released'),
+  check(abandoned.state === 'abandoned' && abandoned.reason.includes('reconciled'),
     `the abandoned claim is reconcilable after the death: ${abandoned.reason}`);
 
   // 4. A request that can never be satisfied ends visibly, and never runs later.
@@ -195,6 +201,8 @@ async function main() {
     '--no-wait refuses immediately with its reason recorded');
   killTree(stuck.pid);
   await stuck.done;
+  const stoppedEntry=status().held.find(r=>r.label==='stuck-holder');
+  if(stoppedEntry) laneSync(['reconcile','--id',String(stoppedEntry.id),'--evidence','owned stuck fixture process tree stopped and owner exit observed']);
   await sleep(1200);
   const afterRefusals = status();
   check(!afterRefusals.recent.some(entry => entry.label === 'hopeless' && /running|done/.test(entry.state)),
@@ -328,15 +336,17 @@ setTimeout(() => {}, 600000);
     `a reconcile is refused while a process the holder started is alive: ${refused.stderr.trim()}`);
     killTree(victim.gate);
   } else {
-    checkO(settledVictim.entry.state === 'abandoned' && settledVictim.snapshot.slots_held === 0,
-      `a caller whose gate died with it frees its slot at once: ${settledVictim.entry.state}`);
+    checkO(settledVictim.entry.state === 'orphaned' && settledVictim.snapshot.slots_held === 1,
+      `dead roots still require explicit owner drain evidence: ${settledVictim.entry.state}`);
   }
+  const drainedVictim=laneSync(['reconcile','--id',String(victim.grant),'--evidence','owned victim gate and caller stopped; fixture descendants observed absent']);
+  checkO(drainedVictim.code===0,'explicit owner drain evidence settles a cancelled acquisition');
   const freed = await until(async () => {
     const snapshot = status();
     return snapshot.slots_held === 0 ? snapshot : null;
   }, 'the slot to be released once nothing the holder started runs');
   const freedRow = entryOf(freed, victim.grant);
-  checkO(freedRow.state === 'abandoned' && /released/.test(freedRow.reason),
+  checkO(freedRow.state === 'abandoned' && /reconciled/.test(freedRow.reason),
     `the slot is freed by proof of death and the row says what it saw: ${freedRow.reason}`);
 
   // 7b. The watchdog itself killed: the same question asked from a fresh process, and the
@@ -368,13 +378,16 @@ setTimeout(() => {}, 600000);
     && afterReconcile.slots_held === 0,
   `the row records the evidence and the slot is free: ${reconciledRow.reason}`);
 
-  // 7c. A caller that dies having started nothing gives its slot back within seconds: the guard
-  //     must not turn every death into a held slot.
+  // 7c. This owner knows its quiet fixture started nothing. The observer cannot
+  // infer that fact from disappeared roots; explicit owner evidence settles it.
   const quiet = await caller('acquire-no-gate', 'none');
   const quietRow = entryOf(status(), quiet.grant);
   checkO(quietRow?.state === 'running' && quiet.gate === null,
     'a caller that started no gate of its own holds the slot');
   killOne(quiet.child.pid);
+  await until(async()=>!pidAlive(quiet.child.pid),'the quiet owner to exit');
+  const quietDrain=laneSync(['reconcile','--id',String(quiet.grant),'--evidence','owned quiet fixture started no gate and its caller exit was observed']);
+  checkO(quietDrain.code===0,'a known quiet owner settles its own drain evidence');
   const emptied = await until(async () => {
     const snapshot = status();
     return snapshot.slots_held === 0 ? snapshot : null;

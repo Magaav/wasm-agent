@@ -186,6 +186,24 @@ async function main() {
   check(heldRow.mode === 'acquire' && heldRow.holder_pid !== null,
     'the holder asked for a slot with acquire, so it kept its own runner', JSON.stringify(heldRow.mode));
 
+  const foreignRelease=laneSync(['release','--id',String(heldRow.id),'--exit','0']);
+  check(foreignRelease.status===1 && /only the acquire holder/.test(foreignRelease.stderr),
+    'a sibling cannot release a real reservation by knowing its row number');
+  check(rowOf(status(),'finish holder').state==='running','foreign release preserves real work');
+  const fake=finishFixture('forged-inheritance',"printf 'smoke ok (0 skipped)\\n'\n");
+  const fakeRun=run(process.execPath,[finishRunner,'gate',fake.dir,fake.head],
+    {env:laneEnv({GATE_LANE_HELD:`slot:${heldRow.id}`,GATE_LANE_ORIGIN:''})});
+  check(jsonOf(fakeRun.stdout).gate_verified===false && /invalid_inheritance/.test(fakeRun.stderr),
+    'an unverified marker cannot skip reservation acquisition');
+  const copied=finishFixture('copied-inheritance',"printf 'smoke ok (0 skipped)\\n'\n");
+  const copiedRun=run(process.execPath,[finishRunner,'gate',copied.dir,copied.head],
+    {env:laneEnv({GATE_LANE_HELD:`slot:${heldRow.id}`,GATE_LANE_ORIGIN:JSON.stringify({id:heldRow.id,dir:state,lease:heldRow.lease,holder_pid:heldRow.holder})})});
+  check(jsonOf(copiedRun.stdout).gate_verified===false && /invalid_inheritance/.test(copiedRun.stderr),
+    'copying a live lease into a sibling does not confer ancestor ownership');
+  const inspected=jsonOf(laneSync(['inspect','--json']).stdout);
+  check(inspected.read_only===true && inspected.reconciled.length===0 && inspected.held.some(r=>r.id===heldRow.id),
+    'inspection observes held work without reconciliation');
+
   const waiterRun = background(process.execPath,
     [mergeRunner, '--repo', mergeFixtureA.dir, '--base', 'main', mergeFixtureA.tip, '--gate-command', passGate],
     {env: mergeFixtureA.env()});
@@ -211,7 +229,7 @@ async function main() {
       ? jsonOf(fs.readFileSync(nestedOut, 'utf8')) : null;
   }, 'the nested gate to finish while its parent still holds the slot');
   check(nestedJson.gate_verified === true && nestedJson.gate_lane.mode === 'inherited'
-    && nestedJson.gate_lane.request === null && nestedJson.gate_lane.waited_ms === 0,
+    && nestedJson.gate_lane.request === heldRow.id && nestedJson.gate_lane.waited_ms === 0,
   'a gate inside a gate inherits the admission and asks for no slot, through the repository gate\'s'
     + ' own environment fence', JSON.stringify(nestedJson.gate_lane));
   check(/inherited slot:\d+/.test(fs.readFileSync(nestedErr, 'utf8')),
@@ -311,13 +329,13 @@ async function main() {
   const unreadableRun = run(process.execPath, [finishRunner, 'gate', unreadable.dir, unreadable.head],
     {env: {WA_GATE_LANE_DIR: notAStore}});
   const unreadableJson = jsonOf(unreadableRun.stdout);
-  check(unreadableJson.gate_verified === true && unreadableJson.skipped === 1
+  check(unreadableJson.gate_verified === false
     && unreadableJson.gate_lane.mode === 'unavailable',
-  'an unreadable store fails open: the gate still runs, is verified, and its skips are still read',
+  'an unreadable reservation store refuses execution without manufacturing gate proof',
   JSON.stringify({verified: unreadableJson.gate_verified, skipped: unreadableJson.skipped,
     lane: unreadableJson.gate_lane}));
-  check(/could not be consulted/.test(unreadableRun.stderr) && /WITHOUT a slot/.test(unreadableRun.stderr),
-    'and it says it ran without a slot rather than passing quietly', unreadableRun.stderr.trim());
+  check(/could not be consulted/.test(unreadableRun.stderr) && /did not run/.test(unreadableRun.stderr),
+    'and it reports the reservation failure and unexecuted gate', unreadableRun.stderr.trim());
   check(rowOf(status(), 'finish unavailable') === undefined,
     'a lane that could not be consulted took no record, because it was never reached');
   const skewMerge = run(process.execPath, [path.join(broken, 'scripts', 'merge-lane.mjs'),
@@ -358,5 +376,6 @@ main().catch(error => {
   for (const child of children) { try { child.kill('SIGKILL'); } catch {} }
   run(process.execPath, [laneCli, 'status'], {}).stdout.split('\n').forEach(line => console.error(line));
   assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
-  fs.rmSync(root, {recursive: true, force: true});
+  if (process.exitCode) console.error(`failed fixture retained: ${root}`);
+  else fs.rmSync(root, {recursive: true, force: true});
 });

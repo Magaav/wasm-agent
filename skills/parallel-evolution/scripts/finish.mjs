@@ -9,6 +9,10 @@ const [mode, directory, expectedHead] = process.argv.slice(2);
 const repo = path.resolve(directory || process.cwd());
 const runner = fileURLToPath(import.meta.url);
 const sha = text => crypto.createHash('sha256').update(text).digest('hex');
+const runnerIdentity = {path:runner,sha256:sha(fs.readFileSync(runner)),platform:process.platform};
+// Native Windows paths require native Git Bash; System32 bash launches WSL.
+const gateShell=process.platform==='win32'
+  ? path.join(process.env.ProgramFiles || 'C:/Program Files','Git','bin','bash.exe') : 'bash';
 const quote = text => "'" + text.replaceAll("'", "'\"'\"'") + "'";
 function git(...args) {
   const result = spawnSync('git', args, {cwd:repo, encoding:'utf8', windowsHide:true,
@@ -44,7 +48,7 @@ function inspect() {
     return upstream;
   });
   check('merge_proof', () => git('merge-tree','--write-tree','origin/main','HEAD'));
-  return {repository_ready:checks.every(item => item.ok),repo,head,tree,branch,checks,
+  return {repository_ready:checks.every(item => item.ok),repo,head,tree,branch,checks,runner:runnerIdentity,
     inference_required:['one concern and patch review','impact audit and its coverage','integration/deployment when requested']};
 }
 function receiptPath() { return path.resolve(repo, git('rev-parse','--git-path','wa-finish-gate.json')); }
@@ -94,8 +98,8 @@ const LANE_OFF = String(process.env.WA_GATE_LANE ?? '').trim().toLowerCase() ===
 const LANE_HELD = process.env.GATE_LANE_HELD || '';
 const laneNotice = text => process.stderr.write(`${text}\n`);
 
-// Ask the lane for a slot. Never throws: a lane that cannot be consulted is reported, not fatal
-// (see the failure-mode note on the unavailable path below).
+// Ask once through this source's lane runner. Unavailable or unverified
+// reservations refuse execution; an explicit administrative override is recorded.
 async function laneAcquire({cwd,label}) {
   const record = {lane:'gate',mode:'slot',request:null,label:label || null,dir:null,waited_ms:0,reason:null};
   if (LANE_OFF) {
@@ -105,10 +109,21 @@ async function laneAcquire({cwd,label}) {
     return {obtained:false,refused:false,marker:'off',record};
   }
   if (LANE_HELD) {
-    record.mode = 'inherited';
-    record.reason = `inherited ${LANE_HELD}: this gate runs inside a gate that already has its admission`;
+    let origin;
+    try { origin=JSON.parse(process.env.GATE_LANE_ORIGIN || ''); } catch {}
+    const validation=origin && LANE_HELD===`slot:${origin.id}`
+      ? spawnSync(process.execPath,[LANE_SCRIPT,'validate','--dir',origin.dir,'--id',String(origin.id),
+        '--lease',origin.lease,'--holder-pid',String(process.pid)],
+      {encoding:'utf8',windowsHide:true,timeout:20000}) : null;
+    if (!validation || validation.status !== 0) {
+      record.mode='refused';record.reason=`invalid_inheritance: ${LANE_HELD} has no verified live ancestor lease`;
+      laneNotice(`gate lane: ${record.reason}`);
+      return {obtained:false,refused:true,marker:null,record};
+    }
+    record.mode='inherited';record.request=origin.id;record.dir=origin.dir;
+    record.reason=`inherited ${LANE_HELD}: verified live ancestor lease`;
     laneNotice(`gate lane: ${record.reason}; no second slot is requested`);
-    return {obtained:false,refused:false,marker:LANE_HELD,record};
+    return {obtained:false,refused:false,marker:LANE_HELD,origin,record};
   }
   const started = Date.now();
   let child;
@@ -119,8 +134,8 @@ async function laneAcquire({cwd,label}) {
   } catch (error) {
     record.mode = 'unavailable';
     record.reason = `could not start ${LANE_SCRIPT}: ${error.message}`;
-    laneNotice(`gate lane: ${record.reason}; this gate runs WITHOUT a slot - gates are not serialized for this run.`);
-    return {obtained:false,refused:false,marker:'unavailable',record};
+    laneNotice(`gate lane: ${record.reason}; this gate did not run.`);
+    return {obtained:false,refused:true,marker:null,record};
   }
   const outcome = await new Promise(resolve => {
     let out = '', err = '', settled = false;
@@ -146,7 +161,8 @@ async function laneAcquire({cwd,label}) {
     record.reason = `slot #${outcome.grant.id} granted`
       + (record.waited_ms >= 1000 ? ` after waiting ${(record.waited_ms / 1000).toFixed(1)}s` : ' at once');
     laneNotice(`gate lane: ${record.reason}; this process runs the gate and releases the slot when it ends.`);
-    return {obtained:true,refused:false,marker:`slot:${outcome.grant.id}`,child,record};
+    record.runner=outcome.grant.runner;
+    return {obtained:true,refused:false,marker:`slot:${outcome.grant.id}`,origin:outcome.grant.inheritance,child,record};
   }
   const words = String(outcome.error?.message || outcome.err || '').trim().split('\n').filter(Boolean).pop()
     || 'no reason given';
@@ -161,21 +177,18 @@ async function laneAcquire({cwd,label}) {
     laneNotice(`gate lane: no slot was granted and this is terminal, not a retry: ${words}`);
     return {obtained:false,refused:true,marker:null,record};
   }
-  // Not a decision: the lane could not be consulted at all (no script, an unreadable store, a
-  // version skew that rejected the call) or the acquirer died before it settled. The gate is what
-  // proves the work, so it runs and says so. Refusing here would turn one unreadable store into a
-  // factory that can verify nothing, which is worse than the contention this lane removes;
-  // `WA_GATE_LANE=off` produces this same outcome deliberately, by name.
+  // Missing script, unreadable store and version skew are observable refusals.
+  // They never grant a speculative second gate on the same host.
   record.mode = 'unavailable';
   record.reason = words;
-  laneNotice(`gate lane: could not be consulted (${words}); this gate runs WITHOUT a slot - gates are`);
-  laneNotice('gate lane: not serialized for this run. Set WA_GATE_LANE=off to say so on purpose.');
-  return {obtained:false,refused:false,marker:'unavailable',record};
+  laneNotice(`gate lane: could not be consulted (${words}); this gate did not run.`);
+  return {obtained:false,refused:true,marker:null,record};
 }
 
 // The gate's environment, with the marker that tells a gate nested inside it whether it is inside
-// an admission decision at all: `slot:<id>` (held), `off`, or `unavailable`.
-const laneGateEnv = slot => ({...process.env,GATE_LANE_HELD:slot.marker});
+// a verified reservation: slot plus its originating store and live lease.
+const laneGateEnv = slot => ({...process.env,GATE_LANE_HELD:slot.marker,
+  GATE_LANE_ORIGIN:slot.origin ? JSON.stringify(slot.origin) : ''});
 
 // Give the slot back and record what the gate did with it. Best effort: the row is the lane's, the
 // verdict is this file's, and a release that fails is reported rather than allowed to fail the gate.
@@ -194,6 +207,8 @@ async function laneRelease(slot,exit,detail) {
     laneNotice(`gate lane: releasing slot #${request} reported:`
       + ` ${(released.stderr || released.stdout || '').trim() || `exit ${released.status}`}`
       + ' - the lane row is still the record of it.');
+    slot.child?.unref();slot.child?.stdout?.destroy();slot.child?.stderr?.destroy();
+    return;
   }
   // The acquirer holds the claim in its own process and stops once its row ends; if it cannot (a
   // lane that could not settle the row), it is stopped here. A lease dies with the process that
@@ -227,26 +242,46 @@ async function gate() {
   // Remove old proof before execution: a failed rerun must never leave a passing receipt.
   if (fs.existsSync(receipt)) fs.unlinkSync(receipt);
   const fd = fs.openSync(log,'w');
+  const executionStarted=process.hrtime.bigint();
   let result;
   try {
-    result = spawnSync('bash',['scripts/test.sh'],{cwd:repo,stdio:['ignore',fd,fd],
+    result = spawnSync(gateShell,['scripts/test.sh'],{cwd:repo,stdio:['ignore',fd,fd],
       windowsHide:true,timeout:3500*1000,env:laneGateEnv(slot)});
   } finally { fs.closeSync(fd); }
   const bytes = fs.readFileSync(log);
   // The queue is not the gate: `gate_ms` excludes the time this run spent waiting for a slot (the
   // lane's own record of that wait is `gate_lane.waited_ms`), so a duration still means the same
   // thing whatever else the node was doing when it was taken.
-  const gateMs = Number((Number(process.hrtime.bigint() - gateStarted) / 1e6 - slot.record.waited_ms).toFixed(3));
+  const gateMs = Number((Number(process.hrtime.bigint() - executionStarted) / 1e6).toFixed(3));
   const verdict = /(?:^|\n)smoke ok(?: \((\d+) skipped\))?\r?\n?$/u.exec(bytes.toString('utf8'));
   const after = inspect();
-  await laneRelease(slot,result.status,`finish gate in ${repo} exited ${result.status}`
-    + `${verdict ? `; "${verdict[0].trim()}"` : '; no verdict line'}`);
+  if (result.error) {
+    // A timeout or cancelled shell is not proof its descendants stopped. Keep
+    // the acquisition/watchdog real until owner drain evidence settles it.
+    laneNotice(`gate lane: execution error (${result.error.message}); reservation retained pending process drain`);
+    if (slot.obtained) {
+      const deferred=spawnSync(process.execPath,[LANE_SCRIPT,'defer','--id',String(slot.record.request),
+        '--gate-pid',String(result.pid || 0),'--detail',`finish execution error: ${result.error.message}; owner must prove descendant drain`],
+      {encoding:'utf8',windowsHide:true,timeout:20000});
+      if (deferred.status!==0) {
+        laneNotice(`gate lane: could not durably defer reservation: ${deferred.stderr || deferred.error?.message}`);
+        // Retain this holder as well: dropping it would let a legacy watchdog
+        // mistake a lost ancestry link for drain. Reconciliation needs this PID.
+        slot.child?.unref();slot.child?.stdout?.destroy();slot.child?.stderr?.destroy();
+        await new Promise(()=>{setInterval(()=>{},1000);});
+      }
+    }
+    slot.child?.unref();slot.child?.stdout?.destroy();slot.child?.stderr?.destroy();
+  } else {
+    await laneRelease(slot,result.status,`finish gate in ${repo} exited ${result.status}`
+      + `${verdict ? `; "${verdict[0].trim()}"` : '; no verdict line'}`);
+  }
   if (result.error || result.status !== 0 || !verdict || !after.repository_ready || after.tree !== before.tree)
     return {...after,gate_verified:false,gate_error:result.error?.message || `gate exit=${result.status}; verdict=${Boolean(verdict)}`,
       gate_log:log,gate_ms:gateMs,gate_runs:1,gate_run_count:1,gate_exit:result.status,gate_lane:slot.record};
   fs.writeFileSync(receipt,JSON.stringify({schema:1,repo,head:before.head,tree:before.tree,passed:true,
     skipped:Number(verdict[1] || 0),gate_ms:gateMs,gate_runs:1,gate_exit:result.status,log,log_sha256:sha(bytes),
-    gate_lane:slot.record,at:new Date().toISOString()}));
+    gate_lane:slot.record,runner:runnerIdentity,shell:gateShell,at:new Date().toISOString()}));
   return {...verify(after),gate_reused:false,gate_run_count:1,gate_exit:result.status,gate_lane:slot.record};
 }
 function spellDefinitions() {
@@ -260,7 +295,7 @@ function spellDefinitions() {
       steps:[observation('check',{repository_ready:true})],post:[observation('check',{repository_ready:true})]},
     {name:'parallel-evolution-gate',description:'Run the gate and verify its source-bound evidence',target,params,
       pre:[observation('check',{repository_ready:true})],
-      steps:[{...observation('gate',{gate_verified:true}),timeout_seconds:3600}],
+      steps:[{...observation('gate',{gate_verified:true}),timeout_seconds:10800}],
       post:[observation('verify',{repository_ready:true,gate_verified:true})]}
   ],composition:{name:'parallel-evolution-finish',description:'Verify repository readiness, run the gate, and recheck completion evidence',
     parts:[{name:'parallel-evolution-ready'},{name:'parallel-evolution-gate'}]}};
