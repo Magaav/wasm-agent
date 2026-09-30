@@ -150,7 +150,7 @@ delay; these small controlled samples locate bottlenecks and cannot choose produ
 timeouts or establish production throughput.
 
 With the dispatcher and read selection fix, three fresh scratch verifications took
-3.63..3.67 seconds including a pressure phase. Reads stayed at 1..7 ms; depth-2 queue
+3.63..3.67 seconds including a pressure phase. Reads stayed at 1..8 ms; depth-2 queue
 overflow returned `admission_busy` in 1..2 ms. The active holder and two staggered waiters
 expired in 1801..1809 ms under a fixture deadline of 1800 ms. After release, expired
 tokens never entered Lua or run handlers, and recovery completed without inference.
@@ -255,8 +255,9 @@ separately as `gate_lane.waited_ms` - so a duration still means the gate and not
 ## Cancellation
 
 `POST /runs {action:"status"|"cancel", thread|conversation:"<id>", run_id?}` is answered on
-the accept thread from the scheduler's own state, so it never queues behind the run it is
-cancelling. Identity comes from `wa_identity`; an invalid credential is `401`, and a run
+the admission dispatcher from the scheduler's own state, so it never queues behind the
+run it is cancelling. It shares the bounded identity queue and deadline described above.
+Identity comes from `wa_identity`; an invalid credential is `401`, and a run
 owned by another user is `403` (with a run id) or `404` (without). A run has its **own**
 cancel flag, so cancelling a running run does not cancel the run queued behind it.
 
