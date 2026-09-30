@@ -1,0 +1,26 @@
+Raw transcript (items 3 and the invalid-inheritance negatives), lane runner
+sha256 51408369579925fca84a526e700b9110a468a33d82c9bcd0dbc699d03f722acd (19bf2bd),
+state dir C:/Users/Victor/AppData/Local/Temp/glreview/refuse/lane (scratch):
+
+holder pid 27676
+--- holder receipt obtained: true
+--- lease 0d0d6b9d-764d-43fc-88aa-f19e84d4d8ab
+=== ITEM 3: a second caller with a 2s budget
+acquire exit=75
+gate lane: acquire #2 waiting (1s). capacity 1 of 1 in use; running #1 (holder, pid 70620, held 3s); queue depth 1 (next to run); waited 1s; also waiting: nobody
+gate lane: acquire #2 refused after 2s (terminal, not a retry). capacity 1 of 1 in use; running #1 (holder, pid 70620, held 3s); queue depth 1 (next to run); waited 2s; also waiting: nobody
+--- refused.out bytes: 0
+=== ITEM 1 negative: validate from a caller that is not the holder's descendant, with the live lease
+gate lane: invalid_inheritance: #1 has no live lease owned by this caller's ancestor
+validate exit=1
+=== ITEM 1 negative: validate with a live descendant but the wrong id
+gate lane: invalid_inheritance: #99 has no live lease owned by this caller's ancestor
+validate exit=1
+=== rows after the refusal
+{
+ "slots_held": 1,
+ "waiting": 0,
+ "held": [ { "id": 1, "state": "running", "label": "holder" } ],
+ "settled": [ { "id": 2, "state": "refused", "label": "refused-caller",
+   "reason": "refused after 2s waiting for a slot: capacity 1 of 1 in use; running #1 (holder, pid 70620, held 3s); queue depth 1 (next to run); waited 2s; also wai" } ]
+}

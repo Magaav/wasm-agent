@@ -1,0 +1,115 @@
+CHECK 1 this test itself starts outside any gate, so the holder has to ask for its slot
+CHECK 2 the holder asked for a slot with acquire, so it kept its own runner
+CHECK 3 a sibling cannot release a real reservation by knowing its row number
+CHECK 4 foreign release preserves real work
+CHECK 5 an unverified marker cannot skip reservation acquisition
+CHECK 6 copying a live lease into a sibling does not confer ancestor ownership
+CHECK 7 inspection observes held work without reconciliation
+CHECK 8 the waiting record names the slot it waits behind and its depth
+CHECK 9 the reason names the holder and how long it has held the slot
+CHECK 10 the second consumer is still waiting, not running its gate
+CHECK 11 a gate inside a gate inherits the admission and asks for no slot, through the repository gate's own environment fence
+CHECK 12 and it says which slot it inherited
+CHECK 13 the gate's own fence unset a WA_ variable the caller had set, and kept the knob it allows
+CHECK 14 and the admission marker survived it, which is what the nested gate reads
+CHECK 15 no lane request was ever made in the nested tree's name
+CHECK 16 a refused slot leaves finish.mjs visibly unverified, naming the refusal
+CHECK 17 the refusal names the holder, its elapsed hold and the depth
+CHECK 18 and the gate did not run: a refusal is terminal, not a retry
+CHECK 19 the merge lane exits 6 and reports the merged tree as NOT gated, naming the holder
+CHECK 20 the merge lane's refusal record names the holder, its hold and the depth
+CHECK 21 the holder ran its own gate and its own verdict and skip count are what it reports
+CHECK 22 the holder took the slot at once, and its gate duration is the gate's, not the queue's
+CHECK 23 the gate receipt keeps the lane row that admitted it
+CHECK 24 the waiter gated the merged tree after the slot freed, with its own verdict untouched
+CHECK 25 and it records that it waited for a named slot
+CHECK 26 WA_GATE_LANE=off runs the gate with no slot and records exactly that
+CHECK 27 and it says so on stderr
+CHECK 28 the override takes no record in the lane
+CHECK 29 the merge lane honours the same override and still gates the merged tree
+CHECK 30 and says so on stderr
+CHECK 31 an unreadable reservation store refuses execution without manufacturing gate proof
+CHECK 32 and it reports the reservation failure and unexecuted gate
+CHECK 33 a lane that could not be consulted took no record, because it was never reached
+CHECK 34 a version skew between the lane and its consumer fails open too, and names the skew
+CHECK 35 the holder's row moved requested -> running -> done
+CHECK 36 the waiter's row moved the same way, in that order
+CHECK 37 the lane is empty again after both settle
+CHECK 38 the whole run left exactly one slot per outer gate and none for the gates inside them
+gate lane wiring ok (38 checks, 0 skipped; real consumers, a real queue, a real
+fixture gate as a stand-in for scripts/test.sh, which this file never runs or changes)
+evidence: C:\Users\Victor\AppData\Local\Temp\wa-gate-lane-wiring-acUEl2
+{
+ "holder": {
+  "id": 1,
+  "label": "finish holder",
+  "cwd": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-gate-lane-wiring-acUEl2\\holder",
+  "mode": "acquire",
+  "command": "[\"(the caller runs its own gate)\"]",
+  "gate": "(the caller runs its own gate)",
+  "pid": 71116,
+  "lease": "bf9a38d1-35a7-425a-9a6d-f3ad106a0ae3",
+  "holder": 27124,
+  "gate_pid": null,
+  "state": "running",
+  "reason": null,
+  "waits_for": null,
+  "depth": 0,
+  "created_at": 1790789304,
+  "started_at": 1790789304,
+  "ended_at": null,
+  "exit_code": null,
+  "gate_ms": null,
+  "waited_ms": null,
+  "log_path": null,
+  "log_sha256": null,
+  "skipped": null,
+  "verdict": null,
+  "verdict_found": 0
+ },
+ "waiter": {
+  "id": 2,
+  "label": "merge-lane 3b14082c1497",
+  "cwd": "C:\\Users\\Victor\\AppData\\Local\\Temp\\wa-merge-lane-s31Qj7",
+  "mode": "acquire",
+  "command": "[\"(the caller runs its own gate)\"]",
+  "gate": "(the caller runs its own gate)",
+  "pid": 23788,
+  "lease": "91a2a0b9-710c-4796-bfc9-ec955b31e0c1",
+  "holder": 16772,
+  "gate_pid": null,
+  "state": "waiting",
+  "reason": "capacity 1 of 1 in use; running #1 (finish holder, pid 71116, held 5s); queue depth 1 (next to run); waited 0s; also waiting: nobody",
+  "waits_for": 1,
+  "depth": 1,
+  "created_at": 1790789309,
+  "started_at": null,
+  "ended_at": null,
+  "exit_code": null,
+  "gate_ms": null,
+  "waited_ms": null,
+  "log_path": null,
+  "log_sha256": null,
+  "skipped": null,
+  "verdict": null,
+  "verdict_found": 0
+ },
+ "holder_history": [
+  "requested",
+  "running",
+  "done"
+ ],
+ "waiter_history": [
+  "requested",
+  "running",
+  "done"
+ ]
+}
+gate lane: 0 of 1 slot(s) held (capacity from the default), 0 waiting
+  state dir: C:\Users\Victor\AppData\Local\Temp\wa-gate-lane-wiring-acUEl2\lane
+  nobody holds a slot and nobody is waiting
+  refused #4 merge-lane 3b14082c1497: refused after 2s waiting for a slot: capacity 1 of 1 in use; running #1 (finish holder, pid 71116, held 23s); queue depth 2 (1 ahead); waited 2s; also waiting: #2
+  refused #3 finish refused: refused after 2s waiting for a slot: capacity 1 of 1 in use; running #1 (finish holder, pid 71116, held 20s); queue depth 2 (1 ahead); waited 2s; also waiting: #2
+  done #2 merge-lane 3b14082c1497 exit 0: merge-lane gate in C:\Users\Victor\AppData\Local\Temp\wa-merge-lane-s31Qj7 exited 0
+  done #1 finish holder exit 0: finish gate in C:\Users\Victor\AppData\Local\Temp\wa-gate-lane-wiring-acUEl2\holder exited 0; "smoke ok (2 skipped)"
+

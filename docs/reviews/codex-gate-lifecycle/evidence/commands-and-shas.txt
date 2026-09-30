@@ -1,0 +1,25 @@
+Subjects, pinned by content hash (the review ran each tree through a pinned copy of the
+lane runner, saved under C:/Users/Victor/AppData/Local/Temp/glreview/runners/):
+
+19bf2bdd2f434f48756a522cb2388923c3a02e5b  tree 8e305e5b1428113deb1024c9cd9902ecdca0d20b
+  scripts/gate-lane.mjs                        sha256 51408369579925fca84a526e700b9110a468a33d82c9bcd0dbc699d03f722acd
+  scripts/test-gate-lane-wiring.cjs            (as committed)
+  skills/parallel-evolution/scripts/finish.mjs (as committed)
+c8589c7f57dea40c0476c8984694fea7dc7b1770  tree b71e56efc505b133c0ef644707c51f3c9adcf953  (branch tip, one commit later)
+  scripts/gate-lane.mjs                        sha256 1094b422ea9571c92f10b2d4456c2c65b9d013c9362b1f2dfd0e8520879077ea
+  skills/parallel-evolution/scripts/finish.mjs sha256 b5b268b4e84ee23dd6cd2cfb436b751637e795e4f2e7023f396d845744f6126f
+
+Commands (all lane state under C:/Users/Victor/AppData/Local/Temp/glreview/<case>/lane,
+via WA_GATE_LANE_DIR or --dir; scripts/test.sh was never run; no slot was taken in the
+production lane; the only read of the live store was a copy):
+
+  bash run-case.sh tip-deadshell  <tree-19bf2bd> deadshell    > tip-19bf2bd-nested-drain.log
+  bash run-case.sh tip-orphancontrol <tree-19bf2bd> orphancontrol
+  bash run-case.sh next-deadshell runners/gate-lane-c8589c7.mjs deadshell
+  bash run-control.sh tip-control runners/gate-lane-19bf2bd.mjs background
+  bash run-control.sh tip-control-sleep runners/gate-lane-19bf2bd.mjs sleep
+  node scripts/test-gate-lane-wiring.cjs            (x3; a, b concurrent, c alone)
+  node scripts/.scratch-wiring-instrumented.cjs     (x2 concurrent; scratch copy, deleted)
+  WA_GATE_LANE_DIR=<trap> node scripts/test-parallel-finish.mjs
+  node runners/gate-lane-19bf2bd.mjs inspect --dir <copied live store> --json
+  cp ~/.wasm-agent/gate-lane/lane.sqlite* <copied live store>/      (read-only)
