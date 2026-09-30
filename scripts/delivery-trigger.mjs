@@ -13,6 +13,14 @@
 // Reconciliation reads the existing effect before retrying the idempotent enqueue.
 // This acknowledges queue arrival, not review, gate execution or publication.
 //
+// Reconciliation is not only for the generation this pass computes. If the review, the tip or the
+// subscription changes while an emission is in flight, the acknowledgement write loses the CAS and
+// the next pass computes a DIFFERENT event id - so the older intent would never be looked at again
+// and the pass would report `pending_events: 0` over a durable pending intent. Every other
+// non-acknowledged intent in the record is therefore reconciled too: its exact durable effect is
+// observed (the emitter is never called again for it) or the intent is reported unsettled. A
+// --no-emit rehearsal emits nothing and claims nothing about the queue, so it leaves them alone.
+//
 // Usage:
 //   node scripts/delivery-trigger.mjs [--store <dir>] [--repo <path>] [--limit <n>] [--no-emit]
 //                                     [--emit-command <exe>] [--subscriber <id>] [--json <path>]
@@ -109,8 +117,10 @@ function main() {
 
   const result = {schema: SCHEMA, generated_at: nowIso(), store, topic: TOPIC,
     emit: options.emit, emit_command: options.emitCommand, repository_filter: repositoryFilter,
-    limit: options.limit, counts: {records: records.length, admitted: 0, admitted_with_caveat: 0,pending_events:0,write_errors:0,
-    refused: 0, emitted: 0, skipped: 0, unreadable: 0}, admitted: [], refused: [], skipped: [], emitted: []};
+    limit: options.limit, counts: {records: records.length, admitted: 0, admitted_with_caveat: 0,pending_events:0,
+    prior_generations_settled:0,write_errors:0,
+    refused: 0, emitted: 0, skipped: 0, unreadable: 0}, admitted: [], refused: [], skipped: [], emitted: [],
+    settled_prior: []};
   let eventAttempts=0;
 
   for (const record of records) {
@@ -216,6 +226,36 @@ function main() {
         review_commit: decision.review?.commit ?? null, caveats: decision.caveats,
         event: record.admission.event ? record.admission.event.id : null, newly_admitted: newlyAdmitted});
     }
+    // The generation this pass computed is not the only intent this record can hold. A review, tip
+    // or subscription change during an emission leaves the older intent pending while its exact
+    // effect is already durable, and the changed generation is why nothing else here looks at it.
+    // Observe that effect - never the emitter again - or report the intent as unsettled, so a pass
+    // cannot exit 0 saying `pending_events: 0` over a durable pending intent.
+    if (options.emit) {
+      for (const [id, intent] of Object.entries(record.outbox || {})) {
+        if (id === eventId || intent.state === 'acknowledged') continue;
+        let receipt=null,unsettled=null;
+        if (intent.subscription && intent.payload_file && fs.existsSync(intent.payload_file)) {
+          try {
+            receipt=acknowledged({command:options.emitCommand,subscription:intent.subscription,id,
+              payloadFile:intent.payload_file,receiptDb:options.receiptDb});
+          } catch (error) { unsettled=`prior_generation_effect_unreadable: ${error.message}`; }
+        } else unsettled='prior_generation_without_observable_subscription: no subscriber revision or payload to observe';
+        if (receipt?.acknowledged) {
+          intent.receipt=receipt;intent.state='acknowledged';intent.acknowledged_at=nowIso();delete intent.error;
+          record.emitted_events=[...(record.emitted_events || []),id];
+          result.counts.prior_generations_settled++;
+          result.settled_prior.push({delivery:record.delivery,event:id,receipt:receipt.mechanism,effect_id:receipt.effect_id ?? null});
+          note(`${record.delivery}: prior-generation intent ${id} settled from its exact durable effect (no emission)`);
+        } else {
+          intent.error=unsettled || 'prior_generation_unsettled: the queue holds no exact durable effect for this intent';
+          result.counts.pending_events++;
+          result.skipped.push({delivery:record.delivery,reason:'prior_generation_pending',detail:intent.error,event:id});
+          note(`${record.delivery}: prior-generation intent ${id} unsettled - ${intent.error}`);
+        }
+      }
+    }
+
     try { writeRecord(store, record); }
     catch(error) {
       result.counts.write_errors++;
