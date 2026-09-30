@@ -21,6 +21,15 @@ try {
     }};}
   }`);
   put('pi/node_modules/@earendil-works/pi-ai/package.json', '{"type":"module"}');
+  // The installed package knows only the id it shipped with; the route's catalogue is the store
+  // below, which the bridge reads for an id newer than the installed package.
+  const store = put('models-store.json', JSON.stringify({'openai-codex':{models:[
+    {id:'gpt-6.1-sol',provider:'openai-codex',api:'openai-codex-responses',
+      contextWindow:272000,maxTokens:128000},
+    {id:'sol-store-foreign',provider:'opencode-go',api:'openai-codex-responses'},
+    {id:'sol-store-protocol',provider:'openai-codex',api:'openai-responses'}]},
+    'opencode-go':{models:[{id:'sol-store-wrongroute',provider:'opencode-go',
+      api:'openai-completions'}]}}));
   put('pi/node_modules/@earendil-works/pi-ai/dist/providers/openai-codex.js',
     'export function openaiCodexProvider() {return {id:"openai-codex"};}');
   put('pi/node_modules/@earendil-works/pi-ai/dist/models.js', `
@@ -40,7 +49,7 @@ try {
       return {
         setProvider(p) {assert.equal(p.id,'openai-codex');},
         async getAuth(provider) {assert.equal(provider,'openai-codex'); return {auth:{apiKey:'fixture-access-token'}};},
-        getModel(provider,id) {return id==='missing' ? undefined : {id,provider,api:'openai-codex-responses'};},
+        getModel(provider,id) {return id==='gpt-6-luna' ? {id,provider,api:'openai-codex-responses'} : undefined;},
         stream(model,context,options) {
           if (context.tools[0].name === 'large_fixture') {
             const text = context.messages.at(-1).content[0].text;
@@ -144,6 +153,28 @@ try {
   const missing=run({...request,model:'missing'});
   assert.equal(missing.status,1);
   assert.match(missing.events[0].error,/absent from Pi catalog/);
+  // An id the installed package predates but the route's catalogue publishes resolves from the
+  // store rather than failing at request time. This is what a newly published model looks like:
+  // configured, and unusable until the catalogue is read. The resolved model is the one used -
+  // the result names it, so a request cannot silently run the wrong id.
+  const stored=run({...request,model:'gpt-6.1-sol',models_store:store});
+  assert.equal(stored.status,0,stored.stderr||stored.stdout);
+  assert.equal(stored.events.at(-1).result.model,'gpt-6.1-sol');
+  // No catalogue, an unreadable one, or one that does not publish the id: the refusal is
+  // unchanged, so the store can only ever add ids - it can never answer for a route it is not.
+  for (const catalogue of [undefined,path.join(root,'no-such-store.json'),
+      put('empty-store.json','{}')]) {
+    const refused=run({...request,model:'gpt-6.1-sol',models_store:catalogue});
+    assert.equal(refused.status,1,`a catalogue of ${catalogue} must not resolve an unpublished id`);
+    assert.match(refused.events[0].error,/absent from Pi catalog/);
+  }
+  // Another route's entry, and an id published for this route over a protocol this bridge does
+  // not speak, stay absent instead of being sent to the wrong edge.
+  for (const foreign of ['sol-store-foreign','sol-store-protocol','sol-store-wrongroute']) {
+    const refused=run({...request,model:foreign,models_store:store});
+    assert.equal(refused.status,1,`${foreign} must not resolve on this route`);
+    assert.match(refused.events[0].error,/absent from Pi catalog/);
+  }
   const large=run({...request,tools:[{function:{name:'large_fixture',parameters:{type:'object'}}}],
     messages:[...request.messages,{role:'user',content:largeArgs}]});
   assert.equal(large.status,0,large.stderr);
@@ -187,6 +218,12 @@ end
 assert(adapter.limits().rolling.percent==23,'native limits bridge must settle')
 local ok,why=pcall(adapter.complete,'missing',request.messages,request.tools,false,{}, {selected='off'})
 assert(not ok and tostring(why):find('absent from Pi catalog',1,true),'provider errors remain visible')
+-- The catalogue travels with the request: an id the installed package predates resolves from
+-- the store the Lua layer named, and another route id does not.
+local stored=adapter.complete('gpt-6.1-sol',request.messages,request.tools,false,{session_id='native-fixture'},{selected='off'})
+assert(stored.content=='fixture answer' and stored.model=='gpt-6.1-sol','the store-published id must resolve through the bridge')
+local refused=pcall(adapter.complete,'sol-store-wrongroute',request.messages,request.tools,false,{}, {selected='off'})
+assert(not refused,'another route id must not resolve on the subscription route')
 local rejected=json.decode(host.operation('start',json.encode({program='node',args={},command='echo must-not-run'})))
 assert(rejected.error=='program_and_command_are_exclusive','ambiguous launch must be refused')
 print('native subscription operations ok (15 checks)')
@@ -195,6 +232,7 @@ print('native subscription operations ok (15 checks)')
     for(const key of Object.keys(env))if(/^(WA_|WASM_AGENT_)/.test(key))delete env[key];
     const nativeTemp=path.join(root,'native temp');fs.mkdirSync(nativeTemp);
     Object.assign(env,{TEMP:nativeTemp,TMP:nativeTemp,TMPDIR:nativeTemp,WASM_AGENT_HOME:root,WASM_AGENT_LUA_ROOT:process.cwd(),WASM_AGENT_PI_PACKAGE:path.join(root,'pi'),
+      WASM_AGENT_PI_MODELS_STORE:store,
       WASM_AGENT_SHELL:path.join(root,'nonexistent-shell'),WASM_AGENT_RELAY:'',WASM_AGENT_RENDEZVOUS:'',
       WA_SCRIPT:fixture,WA_SUB_REQUEST:nativeInput});
     const native=spawnSync(path.resolve(process.argv[2]),['--db',path.join(root,'native.db')],{env,encoding:'utf8',timeout:60000,windowsHide:true});

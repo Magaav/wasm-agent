@@ -28,7 +28,7 @@ host.http_stream = host.http
 local store_path = paths.temp() .. '/wa-route-servability-store.json'
 local function entry(id, api) return {id=id, api=api, provider='fixture', reasoning=true, maxTokens=128000} end
 local codex = {'gpt-5.3-codex-spark', 'gpt-5.5', 'gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra',
-  'gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol'}
+  'gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol'}
 local function catalogue()
   local models = {{'opencode-go', 'deepseek-v4.1-flash', 'openai-completions'},
     {'opencode-go', 'glm-5.3', 'openai-completions'}, {'opencode-go', 'gpt-6-luna', 'openai-responses'},
@@ -130,7 +130,34 @@ check(bridge_result and bridge_result.content == 'bridge answer',
 check(bridge_calls == 1, 'the subscription route serves the id, got ' .. bridge_calls .. ' transport call(s)')
 check(provider.unservable('gpt-5.5', sub) == nil and provider.unservable('gpt-6-sol', sub) == nil,
   'every id in the route catalogue passes the preflight')
+
+-- "sol 6.1" is the owner's name for `gpt-6.1-sol`, the id the catalogue publishes: the name and
+-- the id are not the same string, and only the id routes. Serving it takes both halves - the
+-- route must *offer* it (the picker, this repository's file) and the catalogue must publish it
+-- over this route's protocol (pi's store, the live config). Either half alone is a model that
+-- looks configured and fails: a picked id nothing catalogs, or a catalogued id nothing offers.
+local offered = false
+for _, id in ipairs(subscription.models or {}) do if id == 'gpt-6.1-sol' then offered = true end end
+check(offered, 'the subscription picker must offer gpt-6.1-sol: ' ..
+  table.concat(subscription.models or {}, ','))
+check(provider.serves('gpt-6.1-sol', sub) == true and provider.unservable('gpt-6.1-sol', sub) == nil,
+  'and this route must serve it: ' .. tostring(provider.unservable('gpt-6.1-sol', sub)))
+check(provider.serves('sol 6.1', sub) == nil and provider.unservable('sol 6.1', sub) == nil,
+  'the spoken name is not the id: an id the catalogue never mentions stays undecided, not mapped')
+
+-- The wrong route still refuses it, and still for the true reason: opencode-go posts
+-- /chat/completions and this id is served over openai-codex-responses. An id that is reachable
+-- on the right route must not become reachable everywhere.
 provider.provider_override = 'opencode-go'
+local wrong_route = provider.unservable('gpt-6.1-sol')
+check(wrong_route ~= nil and wrong_route:find('model_not_servable', 1, true) ~= nil and
+  wrong_route:find('provider=opencode-go', 1, true) ~= nil and
+  wrong_route:find('model=gpt-6.1-sol', 1, true) ~= nil and
+  wrong_route:find('openai-codex-responses', 1, true) ~= nil,
+  'gpt-6.1-sol must stay refused on the opencode-go route: ' .. tostring(wrong_route))
+check(#sent == 0, 'and that refusal costs no request')
+check(provider.serves('gpt-6.1-sol', public_api) == false,
+  'the public-API route cannot serve a subscription id either, and says so')
 
 -- A model the route can serve still runs unchanged: same model, same route, one request.
 sent = {}

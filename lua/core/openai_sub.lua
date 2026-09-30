@@ -3,10 +3,23 @@
 local json = dofile('lua/vendor/json.lua')
 local paths = dofile('lua/core/paths.lua')
 local M = {}
-M.models = {'gpt-6-luna','gpt-6-sol','gpt-6-astra'}
+-- The *picker* list: what this route offers a reader to choose. It is not this route's
+-- catalogue - five ids the route serves are absent from it (gpt-5.5, gpt-5.6-luna,
+-- gpt-5.6-sol, gpt-5.6-terra, gpt-5.3-codex-spark) and refusing from it is the defect
+-- provider.lua documents. An id belongs here to be *offered*; it must also be in the
+-- catalogue below, or selecting it fails at request time instead of at selection.
+M.models = {'gpt-6-luna','gpt-6-sol','gpt-6.1-sol','gpt-6-astra'}
 function M.auth_path()
   local directory = host.getenv('PI_CODING_AGENT_DIR') or (paths.home() .. '/.pi/agent')
   return directory .. '/auth.json'
+end
+-- The route's catalogue: pi's local model store, the file provider.lua's pi_store() decides
+-- servability from and model_window.lua's from_pi_store() reads windows from. Same name,
+-- same override, same default as those two, because one file has to answer for all three -
+-- a second opinion about where the catalogue lives is how the picker-list version shipped.
+function M.models_store_path()
+  return host.getenv('WASM_AGENT_PI_MODELS_STORE')
+    or (paths.home() .. '/.pi/agent/models-store.json')
 end
 function M.configured()
   local raw = host.read_file(M.auth_path())
@@ -80,6 +93,7 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
   local script, input = stem .. '.mjs', stem .. '.json'
   host.write_file(script, dofile('lua/core/openai_sub_bridge.lua'))
   host.write_file(input, json.encode({home=paths.home(), auth_path=M.auth_path(),
+    models_store=M.models_store_path(),
     model=model, messages=messages, tools=tools, session_id=opts.session_id, stream_id=stream_id,
     reasoning=reasoning.selected=='provider' and 'medium' or reasoning.selected=='off' and 'none' or reasoning.selected,
     max_output=opts.max_output}))
