@@ -1,0 +1,20 @@
+### $ git rev-parse 4b5a26ef^{tree}  (in C:/Users/Victor/orca/projects/wasm-agent)
+b7117642f1558d4f1f01deb57184c6e521854d58
+
+### tree under review: scratch export of 4b5a26ef at C:/Users/Victor/orca/tmp-review-389b8886/tree
+### $ cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host sse_line_tests
+running 4 tests
+test host::sse_line_tests::a_residual_line_at_eof_is_still_a_line ... ok
+test host::sse_line_tests::a_failing_callback_stops_the_read_at_that_line ... ok
+test host::sse_line_tests::a_truncated_stream_ends_where_it_ended ... ok
+test host::sse_line_tests::the_recorded_stream_is_handed_over_line_for_line ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 0.00s
+### $ WA_SCRIPT=scripts/test-subscription-wire.lua $BIN  (WASM_AGENT_LUA_ROOT set)
+subscription wire ok (135 checks)
+### same, WASM_AGENT_LUA_ROOT unset
+lua root unset: using embedded modules; edits under lua/ are NOT under test
+subscription wire ok (135 checks)
+### levels + native ops
+openai-sub levels ok (22 checks)
+native subscription operations ok (15 checks)
+PASS OpenAI subscription bridge: messages, images, tools, stream, usage, limits and visible failures

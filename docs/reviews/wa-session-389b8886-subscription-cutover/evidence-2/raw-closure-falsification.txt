@@ -1,0 +1,51 @@
+=== baseline ===
+--- baseline (unmutated copy)
+embedded registry: 55 entries, all 55 include_str! accounted for (52 .lua)
+traversed: 52 embedded file(s), 215 literal dofile target(s), 0 non-literal (not checkable statically)
+module names reached by following literals: 52
+embedded lua closure ok: every literal dofile target reachable from the registry is in the registry
+exit=0
+baseline exit=0
+
+=== M1: a real dofile target that is not embedded (the defect class) ===
+--- M1 added dofile("lua/core/this_module_is_not_embedded.lua") to lua/core/init.lua
+traversed: 52 embedded file(s), 216 literal dofile target(s), 0 non-literal (not checkable statically)
+module names reached by following literals: 52
+MISSING lua/core/this_module_is_not_embedded.lua  (required by lua/core/init.lua:295: not in EMBEDDED)
+check-embedded-lua-closure: 1 dofile target(s) are not in the binary's EMBEDDED registry: lua/core/this_module_is_not_embedded.lua - an installed node has no Lua root, so each of these is readable in a checkout and absent where it ships
+exit=1
+M1 restored exit=0
+
+=== M2: the same name only inside a comment (must NOT fail) ===
+--- M2 comment naming dofile("lua/core/comment_only_target.lua")
+embedded registry: 55 entries, all 55 include_str! accounted for (52 .lua)
+traversed: 52 embedded file(s), 215 literal dofile target(s), 0 non-literal (not checkable statically)
+module names reached by following literals: 52
+embedded lua closure ok: every literal dofile target reachable from the registry is in the registry
+exit=0
+
+=== M3: the same name inside a Lua long-bracket STRING (not a call) ===
+--- M3 long-bracket string containing dofile("lua/core/string_only_target.lua")
+traversed: 52 embedded file(s), 216 literal dofile target(s), 0 non-literal (not checkable statically)
+module names reached by following literals: 52
+MISSING lua/core/string_only_target.lua  (required by lua/core/init.lua:295: not in EMBEDDED)
+check-embedded-lua-closure: 1 dofile target(s) are not in the binary's EMBEDDED registry: lua/core/string_only_target.lua - an installed node has no Lua root, so each of these is readable in a checkout and absent where it ships
+exit=1
+
+=== M4: the same name inside a levelled long-bracket COMMENT --[==[ ]==] (not a call) ===
+--- M4 --[==[ ... ]==] comment naming dofile("lua/core/levelled_comment_target.lua")
+embedded registry: 55 entries, all 55 include_str! accounted for (52 .lua)
+traversed: 52 embedded file(s), 215 literal dofile target(s), 0 non-literal (not checkable statically)
+module names reached by following literals: 52
+embedded lua closure ok: every literal dofile target reachable from the registry is in the registry
+exit=0
+
+=== M5: a NON-literal dofile target, wrong on purpose (the defect that started this) ===
+130:M.CREDENTIAL_MODULE = 'lua/core/subscription_auth.lua'
+--- M5 subscription_wire.lua asks for the never-shipped lua/core/subscription_auth.lua
+embedded registry: 55 entries, all 55 include_str! accounted for (52 .lua)
+traversed: 52 embedded file(s), 215 literal dofile target(s), 0 non-literal (not checkable statically)
+module names reached by following literals: 52
+embedded lua closure ok: every literal dofile target reachable from the registry is in the registry
+exit=0
+M5 restored exit=0

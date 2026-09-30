@@ -1,0 +1,25 @@
+### the documented two-step browser flow, no Lua root, against the reviewer's stub (device endpoints live, oauth/token 404)
+
+STEP 1  wa subscription login --browser
+openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+http://127.0.0.1:30998/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access&code_challenge=NVcXBtxF4dS7gK_rA5aHE3ky0P4FIk4qq_ByZ3fAwcw&code_challenge_method=S256&state=18c533adc5104c08a074d71ec59a4683&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=wasm-agent
+exit=0
+
+the pending browser flow it stored:
+"flow":"browser
+"state":"18c533adc5104c08a074d71ec59a4683
+state starts 18c533ad
+c5104c08
+a074d71e
+c59a4683
+
+STEP 2  wa subscription login --code <the address you landed on>   (the spelling the door's own text gives)
+openai-sub: open http://127.0.0.1:30998/codex/device and enter the code STUB-CODE-1  (waiting up to 2s)
+openai-sub: still waiting for the code STUB-CODE-1 (6 polls, 0s left)
+openai-sub: still waiting for the code STUB-CODE-1 (12 polls, 0s left)
+exit=127
+
+STEP 2b wa subscription login --browser --code <same address>   (the spelling that works)
+openai-sub login failed: flow_expired
+  there is no pending browser login to complete; run the login again to get a fresh authorize URL
+exit=1

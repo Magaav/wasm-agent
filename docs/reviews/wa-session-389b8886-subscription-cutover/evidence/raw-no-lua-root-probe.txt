@@ -1,0 +1,19 @@
+lua root unset: using embedded modules; edits under lua/ are NOT under test
+lua root (getenv): nil
+store path in force: C:/Users/Victor/orca/tmp-review-389b8886/absent/credentials.json
+wire dofile ok: true
+wire.CREDENTIAL_MODULE: lua/core/openai_sub_auth.lua
+wire source sha256 (LOADED_SOURCES): 480a2d6133f09257299ab97fd3c73b2fffb31b7415de282b1422b54253b79cfa
+dofile(CREDENTIAL_MODULE) ok: true
+credential is table: table
+credential.token is function: function
+credential source sha256 (LOADED_SOURCES): 7949dc6f548f3ee03f4fe3da4386d86e991c9d03b33da3c3275685202d09daa9
+negative control ok (must be false): false
+negative control error: [string "bootstrap"]:1: embedded module missing: lua/core/definitely-not-registered.lua
+credential() first value type: nil
+credential() second value code: subscription_credentials_absent
+credential() second value sentence: subscription_credentials_absent: no ChatGPT-subscription credential at C:/Users/Victor/orca/tmp-review-389b8886/absent/credentials.json and no credential to import from C:/Users/Victor/orca/tmp-review-389b8886/home/.pi/agent/auth.json; log in with: WA_SCRIPT=scripts/openai-sub-login.lua wa (device code), then retry
+limits() first value is empty table: true
+limits() second value: subscription_credentials_absent: no ChatGPT-subscription credential at C:/Users/Victor/orca/tmp-review-389b8886/absent/credentials.json and no credential to import from C:/Users/Victor/orca/tmp-review-389b8886/home/.pi/agent/auth.json; log in with: WA_SCRIPT=scripts/openai-sub-login.lua wa (device code), then retry
+complete(known model, no credential) ok: false
+complete(known model, no credential) error: subscription_credentials_absent: no ChatGPT-subscription credential at C:/Users/Victor/orca/tmp-review-389b8886/absent/credentials.json and no credential to import from C:/Users/Victor/orca/tmp-review-389b8886/home/.pi/agent/auth.json; log in with: WA_SCRIPT=scripts/openai-sub-login.lua wa (device code), then retry

@@ -1,0 +1,17 @@
+### wa subscription status (store absent)
+openai-sub credential: absent (subscription_credentials_absent) at C:/Users/Victor/orca/tmp-review-389b8886/absent/credentials.json
+    store:  C:/Users/Victor/orca/tmp-review-389b8886/absent/credentials.json
+    log in: wa subscription login             device code: prints the URL and the code,
+                                              then waits for you to enter it
+            wa subscription login --browser    sign in in a browser, come back with --code <url>
+exit=0
+
+### wa subscription login --browser (no network)
+lua error: [string "bootstrap"]:1: embedded module missing: scripts/openai-sub-login.lua
+exit=1
+
+### wa subscription login --device (mock, 5s budget)
+lua error: [string "bootstrap"]:1: embedded module missing: scripts/openai-sub-login.lua
+exit=1
+
+### the flow file

@@ -1,0 +1,3 @@
+direct host.sleep(300): 300.1
+through a saved-reference wrapper(300): 300.4
+host.sleep replaced by wrapper(300): 300.5

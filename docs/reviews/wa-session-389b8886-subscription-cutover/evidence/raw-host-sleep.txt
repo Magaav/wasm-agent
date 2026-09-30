@@ -1,0 +1,8 @@
+### host.sleep in the CLI host (root set)
+host.sleep(1000) advanced monotonic_ms by: 1000.3214
+host.sleep(50) advanced monotonic_ms by: 50.0715
+
+### same, no lua root (embedded: probe must resolve lua/core/* from the binary; the probe itself is read from disk by WA_SCRIPT)
+lua root unset: using embedded modules; edits under lua/ are NOT under test
+host.sleep(1000) advanced monotonic_ms by: 1000.3625
+host.sleep(50) advanced monotonic_ms by: 50.2079

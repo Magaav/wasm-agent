@@ -1,0 +1,16 @@
+lua root unset: using embedded modules; edits under lua/ are NOT under test
+lua root (getenv): nil
+openai_sub.lua dofile ok: true
+  embedded sha256 lua/core/openai_sub.lua: 8455bdc7012a20593b0d105ee566e3a7807ac48617be9e3f55b0f910f308e39c
+  embedded sha256 lua/core/subscription_wire.lua: 480a2d6133f09257299ab97fd3c73b2fffb31b7415de282b1422b54253b79cfa
+  embedded sha256 lua/core/openai_sub_auth.lua: nil
+  embedded sha256 lua/core/openai_sub_catalogue.lua: 3ddb0859b6997b5c79ac78082fe4c4088407932d0faa3e0ea3deef003b311be5
+  embedded sha256 lua/core/provider.lua: nil
+  embedded sha256 lua/vendor/json.lua: 264ad546166bd3de19b4382bf0cc14d26dfeffff55c7682b72a475cd99dfd1b5
+transport: native
+configured() with no credential: false
+limits() with no credential: nil
+complete() with no credential ok: false
+complete() with no credential error: subscription_credentials_absent: no ChatGPT-subscription credential at C:/Users/Victor/orca/tmp-review-389b8886/absent/credentials.json and no credential to import from C:/Users/Victor/orca/tmp-review-389b8886/home/.pi/agent/auth.json; log in with: WA_SCRIPT=scripts/openai-sub-login.lua wa (device code), then retry
+provider.lua dofile ok: true
+provider active id: opencode-go

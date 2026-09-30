@@ -1,0 +1,12 @@
+### wall-clock: baseline probe (no sleep)
+
+real	0m0.050s
+user	0m0.000s
+sys	0m0.000s
+
+### wall-clock: probe that calls host.sleep(3000) once
+virtual: 3000.1
+
+real	0m3.052s
+user	0m0.000s
+sys	0m0.000s
