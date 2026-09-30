@@ -43,6 +43,21 @@ try {
   const credentials = AuthStorage.create(request.auth_path);
   const models = createModels({ credentials });
   models.setProvider(openaiCodexProvider());
+  // Pi's *installed package* catalogues the ids it shipped with. The route's catalogue is the
+  // store below - the same file wasm-agent's preflight decides servability from - and Pi's own
+  // runtime overlays it too. An id newer than the installed Pi resolves here rather than being
+  // reported absent: `Model is absent from Pi catalog; update Pi: <id>` at request time is what
+  // a newly published model looked like before this, i.e. configured and unusable. Read-only:
+  // the store is pi's file and wasm-agent neither writes nor extends it.
+  const storedModel = id => {
+    try {
+      const store = JSON.parse(readFileSync(request.models_store, 'utf8'));
+      const published = (store && store['openai-codex'] && store['openai-codex'].models) || [];
+      return published.find(candidate => candidate && candidate.id === id &&
+        candidate.provider === 'openai-codex' && candidate.api === 'openai-codex-responses')
+        || undefined;
+    } catch { return undefined; }
+  };
   if (request.action === 'limits') {
     // Ask Pi to resolve/refresh OAuth under its own credential-store lock. The
     // access token stays in this child and is never returned to Lua or persisted
@@ -78,7 +93,7 @@ try {
     await send({type:'limits', limits});
     return;
   }
-  const model = models.getModel('openai-codex', request.model);
+  const model = models.getModel('openai-codex', request.model) || storedModel(request.model);
   if (!model) throw new Error('Model is absent from Pi catalog; update Pi: ' + request.model);
   const zeroUsage = { input:0, output:0, cacheRead:0, cacheWrite:0, totalTokens:0,
     cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0} };
