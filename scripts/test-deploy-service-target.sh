@@ -17,9 +17,21 @@
 #   (c) the agreeing case -> proceeds to the build.
 #
 # Each one is falsified rather than asserted in isolation, because a check that fires for the wrong reason is
-# as wrong as one that never fires: (a) with the unit file gone, (b) and (a) with the *code on main* instead
-# of this branch, (c) with the port free and with the unit's drop-in repointing ExecStart - the operator's
-# repair in the real incident - after which the same refusal comes back.
+# as wrong as one that never fires: (a) with the unit file gone, (b) and (a) with the *code as it was before
+# the check this file is about* (the pinned baseline below), (c) with the port free and with the unit's
+# drop-in repointing ExecStart - the operator's repair in the real incident - after which the refusal returns.
+#
+# That baseline is pinned by blob sha, and never read from `origin/main`. A baseline that is a branch makes
+# this file's truth depend on when someone else merges: the day the check landed on main, "main has no opinion
+# about it" stopped being true, and the check that says so went red with nothing wrong in the tree under test -
+# and stayed red, because main will not lose the check again. A blob sha is the bytes themselves, so the
+# comparison cannot drift, and the two below are scripts/deploy.sh and scripts/verify-install.sh as of
+# 8f13258^ (2026-09-29), the revision immediately before "fix(deploy): one source of truth for where the node
+# lives" added the check. Nothing in the comparison depends on where those bytes sit in history - and the
+# pre-fix deploy.sh names no helper this test's scratch tree would have to have beside it, so the copy it runs
+# is that code rather than today's code missing a module it now expects. `pin_blob` refuses to run a
+# falsification whose baseline is absent or already contains the check, so the pin can neither go quiet nor
+# invert.
 #
 # Hermetic: one temp directory per run, a fake install, a fake systemd unit, one listener created by `node`
 # and killed on exit. No node binary is started, no build is run (the scratch tree has no `rust/`, so a run
@@ -39,6 +51,20 @@ fail_hard() { echo "test-deploy-service-target: $*" >&2; exit 1; }
 [ -f "$LIB" ] || fail_hard "no $LIB - the one expression for where the node lives"
 command -v node >/dev/null 2>&1 || { echo "test-deploy-service-target SKIPPED - needs node for the stray holder"; exit 3; }
 . "$LIB"
+
+# The baseline the two falsifications below compare against: the two scripts as they were before the check
+# (8f13258^, 2026-09-29), pinned by blob sha because a branch is not a fixed point - see the header. The
+# blobs are in the repository's own object store, so a full clone has them and a shallow one does not.
+BASELINE_DEPLOY_BLOB=4537d08576b42c1637a377a46e59c546b3618af3
+BASELINE_VERIFY_BLOB=87bc0ded2e8b333e256c2b0819d5e501a89c54a6
+pin_blob() { # blob dest check-string what
+  git -C "$ROOT" cat-file blob "$1" > "$2" 2>/dev/null \
+    || fail_hard "pinned baseline $4 (blob $1) is not in this repository's object store; a shallow, filtered or exported checkout cannot show the code as it was before the check - run git fetch --unshallow rather than let this read as a pass"
+  [ -s "$2" ] || fail_hard "pinned baseline $4 (blob $1) came back empty"
+  if grep -qF "$3" "$2"; then
+    fail_hard "pinned baseline $4 (blob $1) already contains \"$3\": it is not the code before the check, and every falsification against it would be inverted"
+  fi
+}
 
 checks=0; failed=0
 ok() { checks=$((checks + 1)); if [ "$1" = "1" ]; then printf '  ok   %s\n' "$2"; else failed=$((failed + 1)); printf '  FAIL %s%s\n' "$2" "${3:+ - $3}"; fi; }
@@ -122,16 +148,12 @@ ok "$(grep -q 'the target only because nothing contradicted it' <<<"$last_out" &
 ok "$(grep -q 'note: no service definition' "$INSTALL_TARGET/deploy.log" 2>/dev/null && echo 1 || echo 0)" \
   "the note is durable, not only on stdout"
 
-# Falsification 2: the same disagreement, against the code as it is on main. This is the outcome the cloud
-# node paid 61,117 restarts for: two installs, one port, and a deploy that reported success.
-git -C "$ROOT" show origin/main:scripts/deploy.sh > "$W/deploy-main.sh" 2>/dev/null
-if [ -s "$W/deploy-main.sh" ]; then
-  run_deploy "$unit_service" "$INSTALL_TARGET" "$W/deploy-main.sh"
-  ok "$(grep -q 'deploy: building' <<<"$last_out" && grep -q 'different installs' <<<"$last_out" && echo 0 || echo 1)" \
-    "the code on main installs beside the running install without a word" "exit $last_exit"
-else
-  echo "  note origin/main has no deploy.sh to compare against - this falsification was skipped"
-fi
+# Falsification 2: the same disagreement, against the code as it was before the check existed. This is the
+# outcome the cloud node paid 61,117 restarts for: two installs, one port, and a deploy that reported success.
+pin_blob "$BASELINE_DEPLOY_BLOB" "$W/deploy-baseline.sh" 'different installs' "scripts/deploy.sh"
+run_deploy "$unit_service" "$INSTALL_TARGET" "$W/deploy-baseline.sh"
+ok "$(grep -q 'deploy: building' <<<"$last_out" && grep -q 'different installs' <<<"$last_out" && echo 0 || echo 1)" \
+  "the deploy as it was before this check installs beside the running install without a word" "exit $last_exit"
 
 # The operator's repair, and the reason it works: a drop-in that repoints ExecStart is what the coordinator
 # did on the cloud node, and it is the one thing that makes the two paths agree.
@@ -194,12 +216,10 @@ if [ -n "$PROC_ROOT_FIXTURE" ]; then
     "the stray is named by parent pid and by image, as the two-install case was"
 fi
 
-# Falsification 3: the same stray, against the code on main.
-if [ -s "$W/deploy-main.sh" ]; then
-  run_deploy "$unit_target" "$INSTALL_TARGET" "$W/deploy-main.sh"
-  ok "$(grep -q 'deploy: building' <<<"$last_out" && grep -q 'cannot bind' <<<"$last_out" && echo 0 || echo 1)" \
-    "the code on main builds and installs with a stray on the port" "exit $last_exit"
-fi
+# Falsification 3: the same stray, against the same pinned baseline.
+run_deploy "$unit_target" "$INSTALL_TARGET" "$W/deploy-baseline.sh"
+ok "$(grep -q 'deploy: building' <<<"$last_out" && grep -q 'cannot bind' <<<"$last_out" && echo 0 || echo 1)" \
+  "the deploy as it was before this check builds and installs with a stray on the port" "exit $last_exit"
 
 # --- (c) no unit at all: the running process is the statement, and it is used ---------------------------
 # The witness branch: on a machine with no unit this is the only place the answer can come from (it is the
@@ -246,13 +266,12 @@ V_OUT="$(run_verify "$unit_target" "$INSTALL_HOME")"
 ok "$(grep -q '^  ok   the install is where the service runs it' <<<"$V_OUT" && echo 1 || echo 0)" \
   "the verifier passes when they agree" "$(grep -F 'the install is where the service runs it' <<<"$V_OUT" | head -1 | cut -c1-110)"
 
-if [ -s "$W/verify-main.sh" ] || git -C "$ROOT" show origin/main:scripts/verify-install.sh > "$W/verify-main.sh" 2>/dev/null; then
-  OLD_OUT="$( ( cd "$TREE" && env -u WASM_AGENT_IN_TURN HOME="$INSTALL_HOME" USERPROFILE="$INSTALL_HOME" \
-      WA_DEPLOY_ROOT="$TREE" WA_INSTALL_DIR="$INSTALL_TARGET" WA_PORT="$PORT" \
-      WA_SERVICE_UNIT_FILE="$unit_service" bash "$W/verify-main.sh" 2>&1 ) )"
-  ok "$(grep -q 'where the service runs' <<<"$OLD_OUT" && echo 0 || echo 1)" \
-    "the verifier on main has no opinion about it at all - the same disagreement verifies clean"
-fi
+pin_blob "$BASELINE_VERIFY_BLOB" "$W/verify-baseline.sh" 'where the service runs' "scripts/verify-install.sh"
+OLD_OUT="$( ( cd "$TREE" && env -u WASM_AGENT_IN_TURN HOME="$INSTALL_HOME" USERPROFILE="$INSTALL_HOME" \
+    WA_DEPLOY_ROOT="$TREE" WA_INSTALL_DIR="$INSTALL_TARGET" WA_PORT="$PORT" \
+    WA_SERVICE_UNIT_FILE="$unit_service" bash "$W/verify-baseline.sh" 2>&1 ) )"
+ok "$(grep -q 'where the service runs' <<<"$OLD_OUT" && echo 0 || echo 1)" \
+  "the verifier as it was before this check has no opinion about it at all - the same disagreement verifies clean"
 
 # --- the skills question is the same class, and the verifier now names both paths -----------------------
 # Two directories, one of which the node reads: `<home>/.wasm-agent/skills` (paths.config() .. "/skills") and

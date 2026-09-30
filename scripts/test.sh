@@ -1520,16 +1520,22 @@ node scripts/test-verify-install.mjs
 node scripts/test-merge-audit.mjs
 # The factory's lanes, tested where their answers are known in advance. Each of these was written and
 # then not run: scripts/test.sh discovers tests explicitly, so a delivery whose scope stopped short of
-# this file shipped a check that no gate executes - a test nobody runs is a comment. All three are
+# this file shipped a check that no gate executes - a test nobody runs is a comment. All four are
 # hermetic, model-free and need no build, and none of them runs a real gate: `test-gate-lane.cjs` stands
 # a fake command in for it (what is under test is *when* a command runs, not what it is), and
 # `test-merge-lane.mjs` takes its gate through `--gate-command`, so the lane's spine costs seconds and a
 # real gate on real branches stays a merge-lane run. `test-delivery-admission.mjs` is the rule that
 # decides what may reach the lane at all, on fixtures whose fixed author/committer dates make the
-# recorded shas identical on a second run.
+# recorded shas identical on a second run. `test-gate-lane-wiring.cjs` drives both of those consumers
+# through the same stand-in gates, and it is handed a clean environment because that is one of the things
+# it checks: its holder has to *ask* for the slot whose queue it then asserts, while a gate's own fence
+# deliberately leaves the admission marker alone for the gates nested inside it - so this gate, which
+# holds a slot and passes the marker on, has to say the marker is not there for this one file. Without
+# `env -u GATE_LANE_HELD` the run inherits a slot and fails on its first check.
 node scripts/test-gate-lane.cjs
 node scripts/test-merge-lane.mjs
 node scripts/test-delivery-admission.mjs
+env -u GATE_LANE_HELD node scripts/test-gate-lane-wiring.cjs
 node scripts/test-openai-sub.cjs "$BIN"
 # And the levels that route declares, read from the catalogue it publishes: the fixture writes the entry
 # pi.dev serves for that id where the real store lives, so the answer is asserted with no HTTP, no
