@@ -166,6 +166,14 @@ node scripts/test-parallel-finish.mjs
 # The execution and automation contracts have native, model-free adversarial tests.
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
 cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host file_search::tests
+# The line boundaries `host.http_sse` hands to the subscription wire are half of that route's
+# contract: this reader re-framing or dropping a line would mean the Lua parser is tested against a
+# stream that never existed. It was written, reported passing by hand, and run by *no* `cargo test`
+# line in this file - every filter above names its own module, and `sse_line_tests` was named by
+# none, so four tests existed and the gate never executed one of them. The recorded fixtures under
+# `tests/fixtures/subscription/` are what it reads, so it belongs here beside the other wa-host
+# filters and not in a report.
+cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host sse_line_tests
 # The ticker's clock is the twin of `cli_view.duration` on the Lua side: the elapsed time of a
 # call that has not finished can only be computed by the host, so both sides pin the same three
 # values and a one-sided change fails here rather than on a screen.
@@ -1705,12 +1713,48 @@ node scripts/test-merge-lane.mjs
 node scripts/test-delivery-admission.mjs
 env -u GATE_LANE_HELD node scripts/test-gate-lane-wiring.cjs
 node scripts/test-openai-sub.cjs "$BIN"
-# And the levels that route declares, read from the catalogue it publishes: the fixture writes the entry
-# pi.dev serves for that id where the real store lives, so the answer is asserted with no HTTP, no
-# credentials and no model. A level the catalogue adds must be admissible - otherwise no child can be
-# placed at all - and a level no source names must still be refused by name rather than silently
-# replaced by a default.
+# And the levels that route declares, read from the catalogue this repo owns
+# (`lua/core/openai_sub_catalogue.lua`) rather than from a third-party store at request time: the
+# fixture writes a *disagreeing* store where pi's store lives and none of it may reach the answer, so
+# "the store is no longer consulted for this route" is a property and not a hope. A level the
+# catalogue adds must be admissible - otherwise no child can be placed at all - and a level no source
+# names must still be refused by name rather than silently replaced by a default.
 WA_SCRIPT=scripts/test-openai-sub-levels.lua "$BIN" --db "$DB.sub-levels" | grep "openai-sub levels ok"
+# The subscription wire itself, offline: SSE framing, the event mapping, the phase contract
+# (`pending_delta` resolved to commentary or to the answer), the tool-decision telemetry, the usage
+# mapping and the rule that a stream ending without a terminal event is an error - replayed from the
+# two real streams recorded under `tests/fixtures/subscription/`. No network, no credential, no model
+# and no Node; the bytes are the endpoint's, and re-recording them is what
+# `scripts/check-subscription-wire-live.lua` does (it is not in this gate: it needs the network).
+WA_SCRIPT=scripts/test-subscription-wire.lua "$BIN" --db "$DB.sub-wire" | grep "subscription wire ok"
+# The credential half of the subscription route, which used to be Pi's: our own store, our own
+# refresh, our own login, and the single-flight lock. Hermetic - a node fixture stands in for
+# auth.openai.com on 127.0.0.1, so the two-process proof that one rotating token is spent once is
+# measured rather than asserted, with no OpenAI account, no Pi package and no model. That fixture is
+# a node server, so a machine without node skips it visibly instead of passing it silently.
+if command -v node >/dev/null 2>&1; then
+  SUB_AUTH_OUT="$(WA_SCRIPT=scripts/test-openai-sub-auth.lua "$BIN" --db "$DB.sub-auth" 2>&1)" || {
+    echo "FAIL subscription credential tests"; printf '%s\n' "$SUB_AUTH_OUT" | tail -12; exit 1; }
+  printf '%s\n' "$SUB_AUTH_OUT" | grep "openai-sub auth ok"
+  # The same run prints its measured counts; keep them in the gate log beside the verdict.
+  printf '%s\n' "$SUB_AUTH_OUT" | grep "openai-sub concurrency evidence"
+else
+  echo "subscription credential tests SKIPPED - node not on PATH (the concurrency fixture is a node server)"
+  SKIPPED=$((SKIPPED + 1))
+fi
+# The mapping this binary loads Lua through: every literal `dofile` target reachable from an embedded
+# `lua/` file must itself be in the binary's EMBEDDED registry. It is a static check with no binary,
+# no network and no Node-in-the-loop, and it exists because the opposite is invisible here: a `dofile`
+# of a `scripts/` path resolves in a checkout - which is what the rest of this file exports a Lua root
+# for - and dies in an installed node with `embedded module missing`. `wa subscription login` shipped
+# exactly that way. Falsified by adding one such `dofile` and watching it fail by name.
+node scripts/check-embedded-lua-closure.mjs
+# And the login door in the shape an installed node actually runs, since that is the shape the check
+# above reasons about: every command is run twice, once with the Lua root deliberately removed (the
+# shipped shape) and once with it set, and the two are compared rather than assumed equal. Both
+# `wa subscription status` and `wa subscription login --browser` are exercised; the authorize URL is
+# built locally, so this needs no network, no credential and no model.
+env -u WASM_AGENT_LUA_ROOT bash scripts/test-subscription-login-door.sh "$BIN" "$DB.sub-login" | grep "subscription login door ok"
 node scripts/test-auth-sessions.cjs "$BIN"
 node scripts/test-fixture-verdict.cjs
 node scripts/test-suite-verdict.cjs

@@ -1,0 +1,14 @@
+-- The checkout spelling of the login door, kept because the credential lane's own
+-- `LOGIN_COMMAND` (`WA_SCRIPT=scripts/openai-sub-login.lua wa`) and its tests name this path, and
+-- that module is used as delivered.
+--
+--   WA_SCRIPT=scripts/openai-sub-login.lua wa                 # device code: the one that works headless
+--   WA_SCRIPT=scripts/openai-sub-login.lua wa --browser       # prints an authorize URL to open
+--   WA_SCRIPT=scripts/openai-sub-login.lua wa --code <paste>  # completes the --browser flow
+--   WA_SCRIPT=scripts/openai-sub-login.lua wa --status        # what the store holds, without a credential
+--   WA_SCRIPT=scripts/openai-sub-login.lua wa --import        # the one-time move out of Pi's store
+--
+-- The behaviour is not here: it is in `lua/core/openai_sub_login.lua`, which the binary embeds, so
+-- this spelling and `wa subscription login` are one policy in both shapes (a checkout, and an
+-- installed node with no Lua root - where this file resolves the module from the registry).
+dofile("lua/core/openai_sub_login.lua").main(args)

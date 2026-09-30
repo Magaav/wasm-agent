@@ -369,6 +369,33 @@ second, 80 last.
   caller draws. A redirected stdout (a transcript, a log) therefore gets `nil`, which is
   the honest answer: there is no width to wrap to.
 
+## Streaming a provider's own protocol
+
+`host.http_sse(method, url, headers_json, body, on_line)` POSTs to an endpoint that answers
+`text/event-stream` and hands **each response line** to the Lua callback `on_line(text)` as it
+arrives, then returns `{status, lines, termination}` - or `{status, body, termination:"http_error"}`
+for a non-200, or `{error, termination}` when the read failed.
+
+It exists because `host.http_stream` reads exactly *one* SSE dialect: OpenAI-compatible chunks whose
+content lives at `choices[0].delta`, which it maps to the UI's `delta`/`reasoning` events itself. A
+provider whose event names, phase semantics and completion rule are different cannot be expressed as
+that dialect without flattening it - and ChatGPT's subscription endpoint is that provider. So the
+capability is a **line reader**, and the protocol is the caller's: `lua/core/subscription_wire.lua`
+ows the endpoint, the headers, the SSE framing, the event mapping and the rule that a stream ending
+without a terminal event is an error rather than a short answer. The line reader knows none of it.
+
+- The callback runs while the socket is open, so a live stream reaches the UI as it arrives; nothing
+  is buffered. A Lua error raised in `on_line` - a cancelled run, an expired deadline - ends the read
+  at that line and comes back as `{error, termination:"line_callback_failed"}`.
+- `on_line` is required: a call without one is refused, not read into nothing.
+- Cancellation is checked per line and the request uses the same shutdown-aware transport as
+  `host.http`/`host.http_stream`. `termination` says how the read ended (`eof`, `cancelled`,
+  `http_error`, `request_failed`, `read_failed`, `line_callback_failed`); EOF is not an error here,
+  because only the protocol's owner can say which event completes a response.
+- A line ending at EOF is still a line: the recorded fixture in `tests/fixtures/subscription/` shows
+  this endpoint ends at EOF with no `data: [DONE]` sentinel, so a reader waiting for one would call a
+  finished stream truncated.
+
 ## Adding a capability
 
 `host.operation('start', args_json)` accepts either a shell `command` or a native

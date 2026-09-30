@@ -59,6 +59,25 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/provider.lua", include_str!("../../../lua/core/provider.lua")),
     ("lua/core/openai_sub.lua", include_str!("../../../lua/core/openai_sub.lua")),
     ("lua/core/openai_sub_bridge.lua", include_str!("../../../lua/core/openai_sub_bridge.lua")),
+    // The subscription credential: our own store, refresh and login, which the transport lane
+    // reaches through `M.token()`. It is here because this list is what a deployed node can load -
+    // a module absent from it exists in the working tree and not in the shipped binary.
+    //
+    // The *key* is not free, and this is the cutover fact the two lanes disagreed about: the wire
+    // loads the credential as `dofile(M.CREDENTIAL_MODULE)` and nothing else, so this exact string
+    // is the path a deployed binary resolves. A credential registered under a name the wire never
+    // asks for is shipped, embedded and unreachable - present in the registry, absent in every
+    // request. These two strings are one decision, and the no-Lua-root proof is what executes it.
+    ("lua/core/openai_sub_auth.lua", include_str!("../../../lua/core/openai_sub_auth.lua")),
+    // The login CLI itself, not only the module it drives: the door in `lua/core/init.lua` loads this
+    // from HERE. `scripts/` is not in this registry at all, so a `dofile` of a `scripts/` path resolves
+    // in a checkout and dies in an installed node - `embedded module missing:`
+    // `scripts/openai-sub-login.lua`, measured - which is the defect this entry closes. The script of
+    // that name stays on disk as a wrapper for the `WA_SCRIPT=` spelling the credential module's own
+    // `LOGIN_COMMAND` names, and it works in both shapes because it loads this entry.
+    ("lua/core/openai_sub_login.lua", include_str!("../../../lua/core/openai_sub_login.lua")),
+    ("lua/core/openai_sub_catalogue.lua", include_str!("../../../lua/core/openai_sub_catalogue.lua")),
+    ("lua/core/subscription_wire.lua", include_str!("../../../lua/core/subscription_wire.lua")),
     ("lua/core/model_window.lua", include_str!("../../../lua/core/model_window.lua")),
     ("lua/core/changeset.lua", include_str!("../../../lua/core/changeset.lua")),
     ("lua/core/patch_audit.lua", include_str!("../../../lua/core/patch_audit.lua")),
@@ -368,6 +387,9 @@ fn main() {
     lua.register_with_upvalue("client_status", host::client_status, host_ptr);
     lua.register("http", host::http);
     lua.register("http_stream", host::http_stream);
+    // A second streaming dialect: the subscription route reads its own SSE event names in Lua,
+    // so the capability hands over response lines and the protocol stays the caller's.
+    lua.register("http_sse", host::http_sse);
     lua.register("beat", host::beat);
     // The one capability that draws: the CLI's status line keeps moving while the interpreter
     // is blocked inside a call, which nothing on the Lua side can do for itself.
