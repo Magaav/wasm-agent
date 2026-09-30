@@ -7,6 +7,17 @@ SKIPPED=0
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 
+# The disk is a reserved resource too, and this is the reservation. It is read here - before the
+# environment fence below and before the first `cargo` line - so a run that cannot finish is refused
+# before any of it is paid for. On 2026-09-30 this node reached 1.9 GB free and nothing said so: a gate
+# died 10.6 seconds into its build with `There is not enough space on the disk. (os error 112)` and the
+# only signal was a cargo error deep in a log, while the same commit passed in 21.4 minutes once space
+# was freed. The floor is a measurement of what one run costs, and the refusal names both numbers; the
+# derivation, and what that measurement does not settle, are the header of scripts/check-disk-floor.sh.
+# It runs outside the fence deliberately: the floor is this file's, an ambient variable cannot move it,
+# and `--floor-bytes` is the one deliberate way past it.
+bash scripts/check-disk-floor.sh
+
 # A scratch DB does not isolate profile/config/effect files. Fence the ENTIRE gate,
 # including new fixtures whose authors might otherwise forget to select a home.
 # Keep the explicit skip request, the in-turn deploy guard and this gate's own parallelism
@@ -1529,6 +1540,20 @@ fi
 # the word "turn", which section 6 keeps for one speaker's contribution.
 bash scripts/check-naming.sh
 node scripts/test-naming-check.cjs
+# A temporary family with no retention or cleanup path grows with every run of the suite, and no reviewer
+# sees it in a diff: on 2026-09-30 the OS temp directory held 13079 stale entries from these scripts,
+# 14 GB of them. The check fails a file that mints one and never bounds it; the 36 files that already do
+# are printed on every run and are not fatal (`scripts/check-temp-retention.mjs` names each one).
+node scripts/check-temp-retention.mjs
+node scripts/test-temp-retention-check.cjs
+# The reclaim pass's safety rule, on fixtures where the answer is known: an ended session's worktree is
+# the only tree whose rust/target may be pruned, and a live session's, the canonical checkout's and a
+# lane's are kept with the reason printed. Also the refusal that matters - a tree with no session row is
+# refused, because ownership unproven is not permission.
+node scripts/test-reclaim-disk.cjs
+# The disk floor's refusal, the numbers it must name, the `--json` shape an alarm would read, and that
+# the gate calls it before its first build rather than after one has failed.
+node scripts/test-disk-floor.cjs
 node scripts/test-execution-terminology.cjs
 # Who may commit on `main` is decided by the host's answer about the process, not by a flag the
 # committing process types: the orchestrator session is allowed, a child is refused even when it
