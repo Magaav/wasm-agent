@@ -116,10 +116,17 @@ let held=false;process.on('beforeExit',()=>{if(!held){held=true;setTimeout(()=>{
     assert.deepEqual({lane:sha(lane),finish:sha(finish)},sourceHashes);
     console.log('timeout drain check ok: attempted free-slot falsification refused; source/lease runner identity verified; exact source unchanged');
   } finally {
-    if(survivorRecord) stopOwned(survivorRecord.pid);
-    if(alive(child.pid)) stopOwned(child.pid);
-    if(row && alive(row.pid)) stopOwned(row.pid);
-    fs.writeFileSync(path.join(root,'drain-finish.stdout'),out);fs.writeFileSync(path.join(root,'drain-finish.stderr'),err);
+    try {
+      if(survivorRecord) stopOwned(survivorRecord.pid);
+      if(alive(child.pid)) stopOwned(child.pid);
+      if(row && alive(row.pid)) stopOwned(row.pid);
+    } finally {
+      // The minted family must not outlive the run: the two captured streams go to
+      // this reporter's stderr where they survive, then the root is removed - even
+      // when one of the stops above threw.
+      process.stderr.write('[gate-drain] drain-finish.stdout\n'+out+'\n[gate-drain] drain-finish.stderr\n'+err+'\n');
+      fs.rmSync(root,{recursive:true,force:true,maxRetries:5,retryDelay:200});
+    }
   }
 }
 main().catch(error=>{console.error(error.stack);process.exitCode=1;});
