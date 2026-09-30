@@ -993,8 +993,12 @@ rm -f "$DB.sessions.lua"
 # belongs in this gate rather than on the on-demand suite. Both halves of the retry budget are asserted,
 # because either one alone is passable by the wrong code: with one attempt the record is lost *visibly*
 # and the run survives, and with the lock released inside the budget the record is stored (a longer wait
-# for death would satisfy the first half).
-WA_BIN="$BIN" bash scripts/test-telemetry-lock.sh | grep "telemetry lock ok"
+# for death would satisfy the first half). Its output is retained rather than piped, so a failure here
+# names this file instead of leaving one line with no author - the same reason the concurrency fixture
+# below keeps its log.
+WA_BIN="$BIN" bash scripts/test-telemetry-lock.sh > "$DB.telemetry-lock.log" 2>&1 || {
+  echo "the telemetry lock fixture failed; its output:"; tail -30 "$DB.telemetry-lock.log"; exit 1; }
+grep "telemetry lock ok" "$DB.telemetry-lock.log"
 
 # Session recovery. The contract - what an unfinished thread is, what is recorded
 # and what the agent is told - lives in scripts/test-recovery.lua, because the
