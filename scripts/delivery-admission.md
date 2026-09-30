@@ -160,9 +160,12 @@ emits one event per genuinely new item, and a job turns that event into one wake
 - A refusal is an answer: the pass exits 0 with its counts even when every delivery was refused, so the
   job's history means something.
 
-`scripts/test.sh` does **not** discover `scripts/test-delivery-admission.mjs` by convention (the same
-status `scripts/test-merge-lane.mjs` has), so the gate does not run it yet; adding the one line is a
-change in a file this delivery does not own.
+`scripts/test.sh` discovers tests explicitly rather than by convention, so a new file runs nowhere until
+someone names it in the gate. That was this test's status when this delivery landed, and
+`scripts/test-merge-lane.mjs`'s too; both are wired now: `bcdda53` added
+`node scripts/test-delivery-admission.mjs` to the gate's repository-tooling block, beside
+`test-gate-lane.cjs` and `test-merge-lane.mjs`, and `9f3e717` added `test-gate-lane-wiring.cjs` to the
+same block.
 
 ## 5. Evidence
 
@@ -196,20 +199,13 @@ change in a file this delivery does not own.
 
 ## 6. What the coordinator has to place, and what is left undone
 
-**Documentation to place (this file is the only home of it for now):**
+**Documentation, placed (2026-09-30).** This file was the only home of the two paragraphs handed to the
+coordinator until then, so it points at them now rather than keeping a second copy that can drift:
 
-- `docs/FACTORY.md`, in "The landing procedure" or "The merge lane": *"A delivery enters the lane through
-  its record: one JSON file per delivery in the sentinel's `deliveries` store, holding the branch, tip,
-  tree, producer, the reviewer's verdict on that exact tree, the admission decision, the lane's outcome
-  and the landing sha. `node scripts/delivery-admission.mjs check <delivery>` answers whether it may
-  enter - branch pushed, an independent review naming the same tree, no unresolved `summary_exceeds_code`
-  finding - and refuses by naming the failed condition. `delivery-admission` (schedule, deterministic)
-  emits one `delivery.admitted` event per newly-admitted delivery; `delivery-lane` wakes on that event.
-  See `scripts/delivery-admission.md`."*
-- `skills/git-orchestrator/SKILL.md`, in "What a landing must carry": *"A landing starts from the
-  delivery's record (`scripts/delivery-record.mjs`), and the admission rule
-  (`scripts/delivery-admission.mjs check`) is what says a delivery may enter the lane; the lane writes
-  its own outcome and the landing sha back into that record."*
+- `docs/FACTORY.md`, "The merge lane" -> its subsection "The front of the lane: the record, the rule,
+  the trigger (2026-09-30)": the store, the rule and the two jobs, word for word as it was quoted here.
+- `skills/git-orchestrator/SKILL.md`, "What a landing must carry" -> its item 5: the record a landing
+  starts from, and the rule that says a delivery may enter the lane.
 
 **Left to the coordinator, with the exact reason:**
 
@@ -227,7 +223,10 @@ change in a file this delivery does not own.
 4. **`jobs/delivery-lane.json` is not installed**: its `wake` needs the coordinator's conversation id
    (`"session": "COORDINATOR_SESSION_ID"` is a placeholder). Nothing about it was exercised, so nothing
    about it is claimed.
-5. **Wiring the test into the gate** - one line in `scripts/test.sh`, which this delivery does not own.
+5. **Wiring the test into the gate - done** (`bcdda53`, 2026-09-30). It was one line in `scripts/test.sh`,
+   a file this delivery did not own; the gate now runs `node scripts/test-delivery-admission.mjs` in its
+   repository-tooling block, with the four other hermetic tests `bcdda53` wired, and
+   `scripts/test-gate-lane-wiring.cjs` joining them in `9f3e717`.
 6. **Whether the wake should instead be a `subagent` action with a reserved child capacity** rather than a
    wake into the operator's conversation. Both are budgeted; the wake is what the brief asked for.
 

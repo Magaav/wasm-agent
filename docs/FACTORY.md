@@ -41,6 +41,11 @@ Two invariants hold the whole thing up:
 | peer shell survives a missing cwd | (in flight) | producing | — |
 | a script against embedded Lua says so | (in flight) | producing | — |
 
+The `state` column is the batch's working state **on 2026-09-29, not a live status**: the table was written
+before the batch's first landing, and its last three rows were still moving then. What each of them ended
+as is the landing table in the "Batch 1" section below: the two `(in flight)` rows are landing 2
+(`878b60b`, the peer-cwd fix and the embedded-Lua notice) and `f269b97` is in landing 1 (`d192fdf`).
+
 Superseded: the first `/update` draft (a luna worker's WIP) — kept, not merged, because a
 later branch solved the same concern with tests.
 
@@ -102,6 +107,16 @@ the gate. A merge costs a second; the gate on the merged tree costs ~15 minutes 
 `WA_GATE_JOBS=2`, so **~4 landings/hour is the ceiling no matter how many producers run**, and
 batching is the only lever that moves it (batch 1 gated seven verified branches in one run,
 `d192fdf`).
+
+### The front of the lane: the record, the rule, the trigger (2026-09-30)
+
+A delivery enters the lane through its record: one JSON file per delivery in the sentinel's `deliveries`
+store, holding the branch, tip, tree, producer, the reviewer's verdict on that exact tree, the admission
+decision, the lane's outcome and the landing sha. `node scripts/delivery-admission.mjs check <delivery>`
+answers whether it may enter - branch pushed, an independent review naming the same tree, no unresolved
+`summary_exceeds_code` finding - and refuses by naming the failed condition. `delivery-admission`
+(schedule, deterministic) emits one `delivery.admitted` event per newly-admitted delivery; `delivery-lane`
+wakes on that event. See `scripts/delivery-admission.md`.
 
 ### The spine — `scripts/merge-lane.mjs`
 

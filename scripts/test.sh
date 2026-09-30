@@ -118,6 +118,31 @@ elif [ "$GATE_STATUS" != "0" ]; then
   echo "FAIL: the deploy downgrade gate did not pass (exit $GATE_STATUS)" >&2
   exit 1
 fi
+# And the deploy's two other refusals, from the cloud node's own incident: it must refuse to install
+# somewhere the service does not run - the unit ran a ten-day-old install while two other directories
+# existed and the process exited 0 into 61,117 restarts - and refuse a port a stray process already
+# holds. The fixture runs the real `scripts/deploy.sh` against a fake install, a fake unit and a listener
+# of its own, all inside one temp directory: no build is reached (the scratch tree has no `rust/`) and no
+# network, no model and no node binary are used. What makes it a check rather than a story is the
+# falsification - the same cases are re-run against `scripts/deploy.sh` and `scripts/verify-install.sh`
+# pinned by *blob sha* as they were before the check, and there they must proceed, so the file cannot pass
+# by the check never firing. That pin is why it can be in the gate at all: its first version compared
+# against `origin/main`, so the day the check landed on main the comparison went red on a clean tree and
+# would have stayed red. The port is found free at run time rather than fixed, so it cannot collide with
+# the two port suites above; the two pinned blobs have to be in this repository's object store, and a
+# shallow checkout fails here by name instead of reading as a pass.
+set +e
+bash scripts/test-deploy-service-target.sh
+SERVICE_TARGET_STATUS=$?
+set -e
+if [ "$SERVICE_TARGET_STATUS" = "3" ]; then
+  # Exit 3 is "this tree cannot reach the check": the fixture needs `node` for the listener that stands in
+  # for a stray. Counted, not hidden - a skipped check is not a passing check.
+  SKIPPED=$((SKIPPED + 1))
+elif [ "$SERVICE_TARGET_STATUS" != "0" ]; then
+  echo "FAIL: the deploy service-target fixture did not pass (exit $SERVICE_TARGET_STATUS)" >&2
+  exit 1
+fi
 # The suite must exercise the Lua in the working tree. cargo rebuilds the binary when a
 # Lua file changes (they are include_str!-ed), so this is belt as well as braces - but it
 # is the difference between testing the tree and testing a build artefact, and it went
