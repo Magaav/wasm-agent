@@ -15,10 +15,10 @@
 --   WASM_AGENT_LUA_ROOT=<repo> WA_SCRIPT=scripts/check-subscription-wire-live.lua \
 --     <repo>/rust/target/release/wa --db <scratch>.db
 --
--- The credential: this lane owns the wire, not the credential, so the stand-in below reads pi's
--- auth file the way the credential lane's `lua/core/subscription_auth.lua` will *not* - nothing under
--- `lua/` reads that file, and this is a diagnostic that has to run before that file lands. When
--- `lua/core/subscription_auth.lua` exists, the stand-in stops being used and the real seam is called.
+-- The credential: this lane owns the wire, not the credential. The stand-in below reads pi's auth
+-- file, which nothing under `lua/` does, and it is used only when the credential lane's module
+-- cannot be loaded at all. That module is `lua/core/openai_sub_auth.lua`: in a tree that has it the
+-- real seam answers, and a live run then needs a credential in *our* store - the taxonomy says so.
 local json = dofile('lua/vendor/json.lua')
 local paths = dofile('lua/core/paths.lua')
 local wire = dofile('lua/core/subscription_wire.lua')
@@ -28,14 +28,14 @@ local LEVEL = host.getenv('WA_WIRE_LEVEL') or 'low'
 local BOUND = 1024 * 1024
 
 -- The stand-in for the credential lane's seam. Read-only, and never printed.
-if not pcall(function() return dofile('lua/core/subscription_auth.lua').token() end) then
+if not pcall(function() return dofile('lua/core/openai_sub_auth.lua').token() end) then
   wire.credential_provider = function()
     local directory = host.getenv('PI_CODING_AGENT_DIR') or (paths.home() .. '/.pi/agent')
     local auth = json.decode(host.read_file(directory .. '/auth.json') or '{}')
     local oauth = auth['openai-codex'] or {}
     return {access = oauth.access, account_id = oauth.accountId, expires = oauth.expires}
   end
-  print('credential: lua/core/subscription_auth.lua is absent; using the pi-auth stand-in')
+  print('credential: lua/core/openai_sub_auth.lua is absent; using the pi-auth stand-in')
 end
 
 -- Every event the wire sends to the UI, captured instead of drawn: a run's evidence, without a

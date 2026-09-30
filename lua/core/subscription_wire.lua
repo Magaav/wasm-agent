@@ -15,9 +15,11 @@
 --                  chatgpt.com.
 --   * lua/core/openai_sub_catalogue.lua - which ids this route serves and how each one maps a
 --                  thinking level onto `reasoning.effort`. No pi read at request time.
---   * lua/core/subscription_auth.lua    - the credential (owned by another lane). This file calls
---                  exactly one thing on it: `token()` -> `{access, account_id, expires}`. It never
---                  reads pi's auth file, and it never returns a token to a caller.
+--   * lua/core/openai_sub_auth.lua     - the credential (owned by another lane, and named what
+--                  that lane named and verified it). This file calls exactly one thing on it:
+--                  `token()` -> `{access, account_id, expires}, failure`, and it reads *both*
+--                  returns - see the seam below. It never reads pi's auth file, and it never
+--                  returns a token to a caller.
 --   * host.http_sse (rust/wa-host/src/host.rs) - the socket, the read, cancellation and the
 --                  timeouts. It hands over response lines and knows nothing about this protocol.
 --
@@ -119,20 +121,50 @@ end
 -- The credential seam
 -- ---------------------------------------------------------------------------------------------
 
+-- The credential module's own name, and the one place this file names it. The lane that owns the
+-- credential shipped `openai_sub_auth.lua` and verified it - its own store, single-flight refresh
+-- counted across processes, rotation, its failure taxonomy, no secrets in what it prints - so this
+-- file adopts that name. Renaming the verified artifact to match its caller, or shipping a second
+-- module (or a shim) that re-exports it, would make the two halves agree about a *name* while
+-- leaving two files that can disagree about a *credential*, which is the defect this closes.
+M.CREDENTIAL_MODULE = 'lua/core/openai_sub_auth.lua'
+
+-- A failure of this file's own making, in the credential lane's shape: a `code` to branch on plus a
+-- sentence, and a `tostring` that reads like that lane's own sentence. Used only for the two cases
+-- the credential module cannot report for itself - its file missing/unloadable, or `token()`
+-- answering with neither a credential nor a failure.
+local function credential_failure(code, message)
+  return setmetatable({ code = code, message = message },
+    { __tostring = function(self)
+      return tostring(self.code) .. (self.message and (': ' .. tostring(self.message)) or '')
+    end })
+end
+M.credential_failure = credential_failure
+
 -- `{access, account_id, expires}` from the lane that owns the credential. Called per request, never
 -- cached here: whoever owns the token owns its refresh, and a copy in this process is a second
 -- opinion about when it expired.
+--
+-- The seam returns **two** values and this file reads both. `token()` answers an absent store
+-- (`subscription_credentials_absent`, naming the login to run), a rejected refresh
+-- (`refresh_rejected:<status>`), a live lock (`locked`) and an expired flow (`flow_expired`) as
+-- `nil, {code, message}`. Reading only the first value collapsed all four into the same bare nil,
+-- and a caller cannot act on that: "log in", "another process is refreshing, wait" and "the server
+-- refused the refresh token" need three different answers. The second value is passed through
+-- unchanged - the code is the callable part, the message is what a log should show.
 function M.credential()
-  local ok, module = pcall(dofile, 'lua/core/subscription_auth.lua')
+  local ok, module = pcall(dofile, M.CREDENTIAL_MODULE)
   if not ok or type(module) ~= 'table' or type(module.token) ~= 'function' then
-    error('subscription_credential_unavailable: lua/core/subscription_auth.lua must return ' ..
-      '{token = function() -> {access, account_id, expires}}')
+    return nil, credential_failure('subscription_credential_unavailable',
+      M.CREDENTIAL_MODULE .. ' must return {token = function() -> {access, account_id, expires}}')
   end
-  local value = module.token()
-  if type(value) ~= 'table' or type(value.access) ~= 'string' or value.access == '' then
-    error('subscription_credential_missing: token() returned no access token')
+  local value, failure = module.token()
+  if type(value) == 'table' and type(value.access) == 'string' and value.access ~= '' then
+    return value
   end
-  return value
+  if type(failure) == 'table' and type(failure.code) == 'string' then return nil, failure end
+  return nil, credential_failure('subscription_credential_missing',
+    'token() returned no access token and no failure of its own')
 end
 
 -- The seam itself. `M.complete` calls through this, so a test or a diagnostic can answer without
@@ -867,7 +899,16 @@ function M.complete(model, messages, tools, stream, opts, reasoning)
     error('subscription_model_unknown: this route\'s catalogue does not publish ' .. tostring(model) ..
       '; update lua/core/openai_sub_catalogue.lua', 0)
   end
-  local credential = M.credential_provider()
+  -- Both values from the seam. `absent` is the credential lane's taxonomy - `subscription_
+  -- credentials_absent`, `refresh_rejected:<status>`, `locked`, `flow_expired` - and it is what the
+  -- turn fails with, so the person reading the error is told which of the four happened instead of
+  -- reading that a credential was `nil`. `error(..., 0)` keeps the code first in the text with no
+  -- `file:line:` prepended: the code is the thing a caller greps and a human recognises.
+  local credential, absent = M.credential_provider()
+  if not credential then
+    error(tostring(absent or credential_failure('subscription_credential_missing',
+      'the credential seam returned no credential and no failure of its own')), 0)
+  end
   local stream_id = opts.stream_id or (host.uuid and host.uuid() or 'stream')
   local timeout_ms = (tonumber(opts.timeout_seconds) or M.request_timeout()) * 1000
   -- `reasoning` is what the run asked for: a level name, or a table with `selected` (what
@@ -943,7 +984,15 @@ end
 -- `{status, percent, resetsAt}`. Ported from the bridge it replaces - same keys, same fallbacks,
 -- same ISO-8601 instants - because the UI reads those names.
 function M.limits()
-  local credential = M.credential_provider()
+  local credential, absent = M.credential_provider()
+  -- Limits are display data, so an absent credential stays `{}` - the same answer this file already
+  -- gives for an account with no id, and provider.lua's caller already treats as "nothing to show".
+  -- The taxonomy leaves by the second return value instead of being swallowed, so a caller that
+  -- prints it can say which of the four it was.
+  if not credential then
+    return {}, tostring(absent or credential_failure('subscription_credential_missing',
+      'the credential seam returned no credential and no failure of its own'))
+  end
   if not credential.account_id or credential.account_id == '' then return {} end
   local response = json.decode(host.http('GET', M.USAGE_ENDPOINT, json.encode({
     ['Accept'] = 'application/json',

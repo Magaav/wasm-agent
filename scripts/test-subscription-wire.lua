@@ -162,11 +162,32 @@ eq(catalogue.import_from_pi(paths.temp() .. '/wa-wire-no-store.json'), nil,
 check(catalogue.render(imported.models):find("id = 'gpt-6-luna'", 1, true) ~= nil,
   'and the import renders back into the catalogue file the same way it is written')
 
--- The credential seam is called by name and fails visibly when the real file is absent: a missing
--- credential lane must not look like an unauthenticated request or an empty answer.
-local seam_ok, seam_error = pcall(wire.credential)
-check(not seam_ok and tostring(seam_error):find('subscription_auth', 1, true) ~= nil,
-  'a missing lua/core/subscription_auth.lua is a named failure, got ' .. tostring(seam_error))
+-- The credential seam is called *by the credential lane's own name* and answers with the lane's own
+-- taxonomy. The defect this closes: the wire asked for `lua/core/subscription_auth.lua`, a file the
+-- credential lane never shipped, so the two verified halves could not see each other at all - and an
+-- absent credential must never look like an unauthenticated request or an empty answer.
+eq(wire.CREDENTIAL_MODULE, 'lua/core/openai_sub_auth.lua',
+  'the seam names the module the credential lane actually shipped')
+local module_ok, credential_module = pcall(dofile, wire.CREDENTIAL_MODULE)
+check(module_ok and type(credential_module) == 'table' and type(credential_module.token) == 'function',
+  'and that module loads from this tree with a token() on it: ' .. tostring(credential_module))
+-- Force the absent store instead of hoping this machine's home is empty: the question is what the
+-- seam says when there is no credential, and the answer must not depend on whose disk runs the
+-- suite. `WASM_AGENT_OPENAI_SUB_STORE` is the credential module's own documented override.
+local native_getenv_for_seam = host.getenv
+host.getenv = function(key)
+  if key == 'WASM_AGENT_OPENAI_SUB_STORE' then
+    return paths.temp() .. '/wa-wire-absent-store/credential.json'
+  end
+  return native_getenv_for_seam(key)
+end
+local seam_credential, seam_failure = wire.credential()
+host.getenv = native_getenv_for_seam
+check(seam_credential == nil and type(seam_failure) == 'table'
+  and seam_failure.code == 'subscription_credentials_absent',
+  'an absent store is the lane\'s own code, not a nil: got ' .. tostring(seam_failure and seam_failure.code))
+check(tostring(seam_failure):find('subscription_credentials_absent', 1, true) ~= nil,
+  'and it reads as the code with its sentence, got ' .. tostring(seam_failure))
 
 -- ---------------------------------------------------------------------------------------------
 -- The recorded streams, replayed line by line through the transport

@@ -21,11 +21,12 @@ local LEVEL = host.getenv('WA_PARITY_LEVEL') or 'low'
 local SESSION = host.getenv('WA_PARITY_SESSION') or 'wa-parity-fixture'
 local TIMEOUT = 300
 
--- The credential: the native route needs the lane's seam, which does not exist yet. The pi route
--- resolves its own. Stand-in, read-only, never printed - see the live check for the same note.
+-- The credential: the native route needs the credential lane's seam, whose name is
+-- `lua/core/openai_sub_auth.lua`. The pi route resolves its own. Stand-in, read-only, never
+-- printed - see the live check for the same note.
 local wire_credential
 do
-  local ok, module = pcall(dofile, 'lua/core/subscription_auth.lua')
+  local ok, module = pcall(dofile, 'lua/core/openai_sub_auth.lua')
   if ok and type(module) == 'table' then
     wire_credential = module.token
   else

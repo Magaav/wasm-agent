@@ -239,6 +239,39 @@ elseif command == "network" then
 elseif command == "access" then
   local access = dofile("lua/core/enrollment.lua")
   print(json.encode(args[2] == "log" and access.events() or access.status()))
+elseif command == "subscription" then
+  -- The person-facing door to the ChatGPT-subscription credential. Until this arm existed, `lua/core`
+  -- had none: the login lived only as `WA_SCRIPT=scripts/openai-sub-login.lua wa`, a spelling nobody
+  -- who installed a node would guess - while the route's own "no credential" failure tells people to
+  -- run exactly that. A capability no reader can reach is not shipped.
+  --
+  -- This is a *route*, not a second policy: it loads the credential lane's own script, so "already
+  -- logged in", "import Pi's credential once", "print the verification URL and the user code, then
+  -- wait for the human" and the exit codes are that lane's tested behaviour and cannot drift from a
+  -- copy kept here. `args` is handed through as it stands, which is the shape that script parses.
+  local auth = dofile("lua/core/openai_sub_auth.lua")
+  local subcommand = args[2]
+  if subcommand == nil or subcommand == "status" then
+    -- What this node holds, without spending anything: fingerprints, never a credential.
+    print(auth.describe())
+    print("    store:  " .. auth.store_path())
+    print("    log in: wa subscription login             device code: prints the URL and the code,")
+    print("                                              then waits for you to enter it")
+    print("            wa subscription login --browser    sign in in a browser, come back with --code <url>")
+    os.exit(0)
+  end
+  if subcommand ~= "login" then
+    print("wa: unknown subscription subcommand '" .. tostring(subcommand) .. "'")
+    print("    wa subscription [status | login [--device | --browser | --code <callback-url>]]")
+    os.exit(2)
+  end
+  -- A flow that needs a human says so and stops: the device flow prints the verification URL and the
+  -- user code and waits inside its own budget, and the browser flow comes back with the human step
+  -- still outstanding, telling the reader to return with `--code`. Neither reports success for a
+  -- credential it did not store, and the script exits non-zero with its taxonomy code when it cannot
+  -- finish - which is what a script in front of this is meant to branch on.
+  dofile("scripts/openai-sub-login.lua")
+  os.exit(0)
 elseif command == "help" then
   print("wa: chat [--continue|--session <id>] [prompt]  |  remember <text> | recall <query>")
   print("    memories | forget <id> | search <query> | conversation <id> | conversations")
@@ -247,6 +280,8 @@ elseif command == "help" then
   print("    paths  where this node keeps its files, and the config file it would read")
   print("    network role <node-id> master|guest  administrator-controlled network role")
   print("    access [log]  managed-access status or recent local audit events (no model)")
+  print("    subscription [status | login [--device|--browser|--code <url>]]  this node's ChatGPT")
+  print("        subscription credential: print the verification URL and code, then wait for you")
 else
   print("unknown command: " .. tostring(command))
   os.exit(2)
