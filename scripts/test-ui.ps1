@@ -901,6 +901,60 @@ $harness = @'
   check(showroom.panes.size===3 && showroom.sidebar.children.length===4,'collapse must keep the running agent in the sidebar');
   showroom.configure({policy:{enabled:true,nodes:[{node:'cloud',max_tasks:2},{node:'local',max_tasks:0}]},nodes:[]});
   check(showroom.policy.nodes[0].node==='cloud' && showroom.policy.nodes[1].max_tasks===0,'node order and zero-capacity devices must round trip');
+  // WHAT IS RUNNING, ON WHICH MACHINE. The dispatch table is a placement record, so a child started
+  // outside placement has no row there at all - that is how four running children were invisible.
+  // These rows come from the app's own builder (window.__liveChildRows) over the node's own answers:
+  // the dispatcher's live records, and this node's session ledger for a child with no record. A row
+  // whose execution_node is a peer id is the measured shape of a row on this node - the peer id here
+  // is the same one POST /subagents with action= list returned for openclaw. The recordless child is
+  // the measured shape of a direct-path child session: in this node's ledger, unfinished, a worktree
+  // and a parent, and no dispatch row anywhere. It is added to the sessions fixture only for these
+  // checks (swapped back below), because the engine sessions view has its own two-session fixture.
+  var peerRow={subagent_id:'child-peer',session_id:'child-session-peer',parent_session_id:'aaaaaaaa-0000-0000-0000-000000000001',
+    profile:'explore',execution_node:'bbbbbbbb-5555-6666-7777-888888888888',title:'investigate on the peer',
+    state:'running',settled:false};
+  var directChild={id:'child-direct-0001',title:'direct child with no placement row',
+    parent_session_id:'aaaaaaaa-0000-0000-0000-000000000001',mode:'chat',message_count:18,
+    worktree:'C:/fixtures/wa-worktree-direct-0001',workspace_branch:'change/fixture-direct',
+    state:'unfinished',state_detail:'1 tool call(s) with no recorded result: bash, 12s ago'};
+  var withDirectChild={sessions:window.__fixtures.sessions.sessions.concat([directChild])};
+  showroom.live=window.__liveChildRows({sessions:withDirectChild.sessions,
+    dispatches:window.__fixtures.subagents.subagents.concat([peerRow]),fleet:window.__fixtures.fleet,health:window.__fixtures.health});
+  var liveRows=Array.prototype.slice.call(showroom.querySelectorAll('.live-child'));
+  var liveRowFor=function(id){return liveRows.find(function(row){return row.dataset.session===id;});};
+  check(liveRows.length===3,'the live list must carry the running child, the peer child and the recordless child, saw '+liveRows.length);
+  check(!liveRowFor('child-b'),'a settled dispatch must not be shown as a live child');
+  check(!!liveRowFor('child-session-a') && liveRowFor('child-session-a').tagName==='BUTTON' &&
+    /running/.test(liveRowFor('child-session-a').textContent) && /foundation/.test(liveRowFor('child-session-a').textContent),
+    'a running child must show its state and name the machine it runs on, saw: '+(liveRowFor('child-session-a')||{}).textContent);
+  check(!!liveRowFor('child-session-peer') && liveRowFor('child-session-peer').dataset.node==='bbbbbbbb-5555-6666-7777-888888888888' &&
+    /openclaw/.test(liveRowFor('child-session-peer').textContent) && !/bbbbbbbb/.test(liveRowFor('child-session-peer').textContent),
+    'a child on a peer must be named, not shown as its id, saw: '+(liveRowFor('child-session-peer')||{}).textContent);
+  check(!!liveRowFor('child-direct-0001') && /unfinished/.test(liveRowFor('child-direct-0001').textContent) &&
+    liveRowFor('child-direct-0001').textContent.indexOf('child-direct-0001')>=0 &&
+    /bash, 12s ago/.test(liveRowFor('child-direct-0001').textContent) && liveRowFor('child-direct-0001').tagName==='DIV',
+    'a child with no placement row must still appear with its session id and the node own detail, saw: '+(liveRowFor('child-direct-0001')||{}).textContent);
+  check(/2 running/.test(showroom.querySelector('.live-children-counts').textContent) &&
+    /1 queued/.test(showroom.querySelector('.live-children-counts').textContent),
+    'the node own subagent counts must be shown as they were reported, saw: '+showroom.querySelector('.live-children-counts').textContent);
+  check(/not reachable/.test(showroom.querySelector('.live-children-foot').textContent),
+    'the view must say what it cannot show (a peer own live children), saw: '+showroom.querySelector('.live-children-foot').textContent);
+  // And through the app own refresh, not only the builder: the panel must be fed by the node answers.
+  var sessionsFixture=window.__fixtures.sessions;
+  window.__fixtures.sessions=withDirectChild;
+  var livePanel=document.createElement('wa-orchestrator');
+  document.body.append(livePanel);
+  window.__setOrchestratorPanel(livePanel);
+  await window.__refreshOrchestrator();
+  for(var lr=0;lr<200 && !livePanel.querySelector('.live-child');lr++) await tick();
+  var refreshedRows=Array.prototype.slice.call(livePanel.querySelectorAll('.live-child'));
+  check(refreshedRows.length===2 && refreshedRows.some(function(row){return row.dataset.session==='child-direct-0001';}),
+    'the orchestrator refresh must feed the live list from the node own answers, saw '+refreshedRows.length);
+  check(window.__calls.some(function(call){return call.url==='health' && call.method==='GET';}) &&
+    window.__calls.some(function(call){return call.url==='sessions' && call.method==='GET';}),
+    'the live list must rest on the node health view and the session ledger');
+  livePanel.remove();
+  window.__fixtures.sessions=sessionsFixture;
   showroom.remove();
 
   document.title = "stage: node block done";
@@ -2448,6 +2502,8 @@ Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConn
 Add-Content -Path $app -Value "`nwindow.__cancelRunForTest = cancelRun;"
 
 Add-Content -Path $app -Value "`nwindow.__resetFollow = () => { followedSeq = 0; lastFollowAt = 0; }; window.__followRun = followRun; window.__repaintMessages = repaintMessages; window.__ensureMeta = ensureMeta;"
+
+Add-Content -Path $app -Value "`nwindow.__liveChildRows = liveChildRows; window.__refreshOrchestrator = refreshOrchestrator; window.__setOrchestratorPanel = (panel) => { orchestratorPanel = panel; };"
 
 $server = $null
 $edge = @(
