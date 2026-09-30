@@ -53,9 +53,30 @@
 // process asked, which slot it is behind, how long that slot has been held, its position in
 // the queue, and - when it ends - why. `status` shows exactly that, `history` keeps every
 // transition, and a refusal names the holder, its elapsed time and the depth it gave up at.
-// A holder that dies is `abandoned` and its slot is freed. A holder whose *gate* survives it
-// (Windows does not kill children with their parent) is `orphaned` and the slot stays held,
-// because a gate still burning cores is exactly what this lane must not run a second of.
+//
+// WHAT A DEATH FREES, AND WHAT IT DOES NOT. A holder that dies is `abandoned` and its slot is
+// freed - but only once nothing it started for that slot is still running. A holder whose *gate*
+// survives it (Windows does not kill children with their parent, and a plain `kill` on Linux does
+// not either) is `orphaned` and the slot stays held, because a gate still burning cores is
+// exactly what this lane must not run a second of. Which question answers that depends on what
+// the row records, and `acquire` records no gate pid:
+//   * `run` records the pid of the gate it spawned, and that pid decides. Recorded and dead is
+//     proof, so the slot is freed at once; recorded and alive holds it. The record is
+//     authoritative here on purpose: the lane's own children (its CPU sampler) must not be read
+//     as a surviving gate.
+//   * `acquire` records none, because the caller runs its own gate *after* the grant and the lane
+//     has no command of its own to compare against. This was a real hole: the lane settled such a
+//     row `abandoned` on the holder's death alone, freeing a slot while the caller's gate was
+//     still burning cores. So the lane asks the one question it can ask from any process - is a
+//     process the dead holder started for this slot still alive? On Windows the parent link
+//     outlives the parent, so an empty answer there is proof and a non-empty one is named in the
+//     row. Where that link does not survive the death (POSIX reparents an orphan to init the
+//     moment its holder dies) the lane cannot prove anything, does not guess, and holds the slot
+//     until `reconcile --evidence` says what was inspected.
+//   * Recording the gate pid instead - option (a) of the report, a CLI the consumer calls after
+//     it spawns - was rejected as *the* fix: it is racy (a consumer killed between spawning its
+//     gate and recording it is precisely the case to cover), and it would leave both consumers
+//     unguarded until files outside this one are wired. It is a fine refinement on top.
 //
 // Usage
 //   node scripts/gate-lane.mjs run [-- <command...>] [options]
@@ -79,8 +100,20 @@
 //   --json=<path>         print the receipt as JSON and write it there
 //
 // `acquire` prints its grant as JSON and then BLOCKS, holding the slot in its own lease, until
-// the slot is released (`release --id <n>`) or the holder process is gone. Run the gate that
-// owns the process yourself, then release; kill it and the claim is abandoned, not orphaned.
+// the slot is released (`release --id <n>`) or the holder process is gone. Run the gate that owns
+// the process yourself, then release. A holder that dies does not free the slot by itself: the
+// lane frees it once nothing that holder started for the slot is still running, and holds it
+// (`orphaned`, with the reasons in the row) while something is - because a caller's gate outlives
+// the caller on Windows and on a plain `kill`, and a second gate on the same cores is what this
+// lane exists to prevent.
+//
+// `reconcile --evidence <text>` is the one way a person ends a row the lane will not decide for
+// itself. It refuses while the gate (or, in a row with no recorded gate pid, a process the holder
+// started) is still running, and it is the way out wherever this node cannot answer that question
+// at all - on POSIX the parent link dies with the holder, so there the lane holds the slot until
+// evidence says what was inspected. What blocks it is a *live holder*, not the lane process
+// watching the row: if the caller a slot was granted to is gone, that row is a person's to end,
+// and the watchdog stops on its own next pass because the row is no longer live.
 //
 // Exit codes: the gate's own exit code is passed through unchanged, so a caller sees what the
 // gate said. A run the lane could not grant is NOT a gate result and is distinguishable:
@@ -180,6 +213,99 @@ function setState(db, id, state, reason, extra = {}) {
 const holderText = entry => `#${entry.id} (${entry.label}, pid ${entry.pid}, held`
   + ` ${elapsedS(entry.started_at)}s${entry.state === 'orphaned' ? ', holder dead' : ''})`;
 
+// ---- Is anything the holder started still running? ------------------------------------------
+// A row with a recorded gate pid is decided by that pid and by nothing else (see the header). A
+// row without one - every `acquire` row - is decided by the one question this lane can ask from
+// any process: does a process the dead holder started for this slot still exist? Windows keeps a
+// process's parent link after the parent is gone, so an empty answer there is proof; POSIX
+// reparents an orphan to init, so there the lane cannot prove anything and does not guess.
+const CONSOLE_HOSTS = /^(conhost|openconsole|conhostv2)\.exe$/i;
+const survivorText = list => list.map(child => `pid ${child.pid} (${child.name})`).join(', ');
+function win32HolderChildren(holderPid) {
+  const script = `Get-CimInstance Win32_Process -Filter "ParentProcessId=${holderPid}"`
+    + ' | ForEach-Object { "{0} {1} {2}" -f $_.ProcessId, $_.Name,'
+    + ' [DateTimeOffset]::new($_.CreationDate).ToUnixTimeSeconds() }';
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass',
+    '-Command', script], {encoding: 'utf8', windowsHide: true, timeout: 30000});
+  if (result.error) return {ok: false, reason: `powershell.exe could not be run: ${result.error.message}`};
+  if (result.status !== 0) {
+    const last = String(result.stderr).split('\n').map(line => line.trim()).filter(Boolean).pop();
+    return {ok: false, reason: `reading the process list exited ${result.status}${last ? `: ${last}` : ''}`};
+  }
+  const children = [];
+  for (const line of String(result.stdout).split('\n')) {
+    const [pid, name, createdAt] = line.trim().split(/\s+/);
+    if (!/^\d+$/.test(pid || '') || !/^\d+$/.test(createdAt || '')) continue;
+    children.push({pid: Number(pid), name, created_at: Number(createdAt)});
+  }
+  return {ok: true, children};
+}
+// Whoever is asking, the answer is about the row: the holder's own children, created no earlier
+// than the moment the row asked for a slot (a gate the caller starts after its grant, never
+// before), still alive, minus the two processes that are *this lane* rather than work - the
+// asker itself and the row's recorded lane process (`pid`, which in `acquire` mode is the
+// acquirer watching the row, a child of the holder too) - and minus console hosts, which are the
+// OS's window on a process, not that process's work. A pid that was recycled between a death and
+// this read can only make the lane hold a slot too long, which `reconcile --evidence` ends - never
+// the other way round.
+function survivorsOf(entry) {
+  const holderPid = entry.holder || entry.pid;
+  if (!Number.isInteger(holderPid) || holderPid <= 0) {
+    return {authoritative: false, survivors: [], note: `row #${entry.id} records no holder pid to check`};
+  }
+  if (process.platform !== 'win32') {
+    return {authoritative: false, survivors: [], note: 'this platform reparents an orphan as soon as'
+      + ' its holder dies, so the parent link is gone with the holder and the lane cannot ask here'
+      + ' whether what the holder started is still running'};
+  }
+  const listed = win32HolderChildren(holderPid);
+  if (!listed.ok) {
+    return {authoritative: false, survivors: [],
+      note: `the node's process list could not be read for row #${entry.id} (${listed.reason})`};
+  }
+  const survivors = listed.children.filter(child => child.pid !== process.pid
+    && child.pid !== entry.pid && child.pid !== holderPid
+    && !CONSOLE_HOSTS.test(String(child.name))
+    && child.created_at >= entry.created_at - 1 && pidAlive(child.pid));
+  return {authoritative: true, survivors, note: survivors.length
+    ? `process(es) the holder started for this slot are still alive: ${survivorText(survivors)}`
+    : 'nothing the holder started for this slot is still running'};
+}
+// One decision, used by the reconciler, by the acquirer's own watchdog and by `reconcile`, so the
+// three cannot drift apart: is the gate this row was granted for still running? The pid that
+// matters is the *holder* - in `acquire` mode the lane process's own `pid` is the acquirer, and
+// the gate belongs to the caller it was granted to (`holder`).
+function gateStillRunning(entry) {
+  if (entry.gate_pid) return {running: pidAlive(entry.gate_pid), recorded: entry.gate_pid,
+    survivors: [], authoritative: true,
+    how: `the gate it started (pid ${entry.gate_pid}) is ${pidAlive(entry.gate_pid) ? 'still running' : 'gone'}`};
+  const look = survivorsOf(entry);
+  const running = look.survivors.length > 0 || !look.authoritative;
+  return {running, recorded: null, survivors: look.survivors, authoritative: look.authoritative,
+    how: look.survivors.length ? look.note : (look.authoritative ? look.note
+      : `this node cannot say whether what the holder started is gone: ${look.note}`)};
+}
+// The two endings a dead holder's row can have, worded once. The recorded-pid wording is the
+// original one and is unchanged: it is the `run` record and the tests pin it.
+function orphanReason(entry, holderAlive, live) {
+  const holderPid = entry.holder || entry.pid;
+  const died = holderAlive ? 'is alive but holds no lease' : 'died';
+  return entry.gate_pid
+    ? `orphaned: pid ${holderPid} ${died} and the gate it started (pid ${entry.gate_pid}) is still`
+      + ' running; the slot stays held while that process runs, and is released when it exits or by'
+      + ' `reconcile` with evidence'
+    : `orphaned: pid ${holderPid} ${died} and no gate pid was recorded for it, so the slot stays held`
+      + ` while ${live.how}; it is released when that stops, or by \`reconcile --evidence\` saying`
+      + ' what was inspected';
+}
+function abandonedReason(entry, live) {
+  const holderPid = entry.holder || entry.pid;
+  return entry.gate_pid
+    ? `abandoned: holder pid ${holderPid} gone, its gate pid ${entry.gate_pid} gone, lease`
+      + ` ${entry.lease} not held; slot released after ${elapsedS(entry.started_at)}s`
+    : `abandoned: holder pid ${holderPid} gone, no gate pid was recorded and ${live.how}, lease`
+      + ` ${entry.lease} not held; slot released after ${elapsedS(entry.started_at)}s`;
+}
 // What a death left behind, before any decision is taken from the queue. A live lease is
 // never touched: only the process that holds it ends its own claim.
 function reconcileHolders(db, dir) {
@@ -196,17 +322,14 @@ function reconcileHolders(db, dir) {
       moved.push({id: entry.id, state: 'abandoned', reason});
       continue;
     }
-    if (pidAlive(entry.gate_pid)) {
-      // Windows does not kill a child with its parent: a dead holder can leave a live gate.
-      const reason = `orphaned: pid ${entry.pid} ${holderAlive ? 'is alive but holds no lease' : 'died'}`
-        + ` and the gate it started (pid ${entry.gate_pid}) is still running; the slot stays held`
-        + ' while that process runs, and is released when it exits or by `reconcile` with evidence';
+    const live = gateStillRunning(entry);
+    if (live.running) {
+      // Windows does not kill a child with its parent: a dead holder can leave a live gate behind.
+      const reason = orphanReason(entry, holderAlive, live);
       if (entry.state !== 'orphaned') { setState(db, entry.id, 'orphaned', reason); moved.push({id: entry.id, state: 'orphaned', reason}); }
       continue;
     }
-    const reason = `abandoned: holder pid ${entry.pid} gone, its gate pid`
-      + ` ${entry.gate_pid ?? 'unrecorded'} gone, lease ${entry.lease} not held; slot released`
-      + ` after ${elapsedS(entry.started_at)}s`;
+    const reason = abandonedReason(entry, live);
     setState(db, entry.id, 'abandoned', reason, {ended_at: now()});
     moved.push({id: entry.id, state: 'abandoned', reason});
   }
@@ -629,11 +752,24 @@ async function commandAcquire(options) {
     await sleep(2000);
     const entry = row(db, id);
     if (!entry || !/^(running|orphaned)$/.test(entry.state)) break;
-    if (!pidAlive(holderPid)) {
-      setState(db, id, 'abandoned', `abandoned: the process that held the slot (pid ${holderPid})`
-        + ` is gone, so the acquirer released it after ${elapsedS(entry.started_at)}s`, {ended_at: now()});
-      break;
+    if (pidAlive(holderPid)) continue;
+    // The holder is gone. Its gate may not be: on Windows (and on a plain `kill` anywhere) the
+    // caller's own gate survives the caller, and this row records no gate pid to check. So the
+    // slot is let go only once nothing the holder started for it is still running, and the row
+    // says which it is either way.
+    const live = gateStillRunning(entry);
+    if (live.running) {
+      if (entry.state !== 'orphaned') {
+        const reason = orphanReason(entry, false, live);
+        setState(db, id, 'orphaned', reason);
+        console.error(`gate lane: acquire #${id} ${reason}`);
+      }
+      continue;
     }
+    setState(db, id, 'abandoned', `abandoned: the process that held the slot (pid ${holderPid}) is gone`
+      + ` and ${live.how}, so the acquirer released the slot after ${elapsedS(entry.started_at)}s`,
+    {ended_at: now()});
+    break;
   }
   releaseLease(lease);
   return {exit: 0, receipt: receiptOf(db, id, dir, capacity, {obtained: true})};
@@ -656,21 +792,35 @@ function commandReconcile(options) {
   const dir = stateDir(options);
   if (!options.evidence || !String(options.evidence).trim()) {
     throw laneError('reconcile needs --evidence saying what was inspected', 1);
-  }
-  const db = openLane(dir);
+  }  const db = openLane(dir);
   const entry = row(db, options.id);
   if (!entry) throw laneError(`no request #${options.id}`);
   if (!/^(running|orphaned|waiting)$/.test(entry.state)) {
     throw laneError(`request #${options.id} is ${entry.state}; nothing to reconcile`, 1);
   }
-  if (leaseHeld(dir, entry.lease)) {
-    throw laneError(`refusing to reconcile #${entry.id}: its lease is held, so its holder is alive.`
-      + ' A live owner is never reconciled by someone else.', 1);
+  // A live owner is never reconciled by someone else. For an `acquire` row the owner is the caller
+  // the slot was granted to (`holder`), not the lane process watching it: that caller's own gate
+  // is the thing being guarded, and if it is gone the row is a person's to end - the watchdog
+  // stops on its next pass because the row is no longer live.
+  const owner = entry.holder || entry.pid;
+  if (leaseHeld(dir, entry.lease) && pidAlive(owner)) {
+    throw laneError(`refusing to reconcile #${entry.id}: its lease is held and its holder (pid`
+      + ` ${owner}) is alive. A live owner is never reconciled by someone else.`, 1);
   }
-  if (pidAlive(entry.gate_pid)) {
+  // A lease that is still held while the *holder* is gone belongs to the acquirer's own watchdog,
+  // which is watching the same row: evidence may end the row, and the watchdog stops on its next
+  // pass because the row is no longer live. Refusing here would leave an orphaned row with no way
+  // out but killing the watchdog.
+  const live = gateStillRunning(entry);
+  if (entry.gate_pid && live.running) {
     throw laneError(`refusing to reconcile #${entry.id}: the gate it started (pid ${entry.gate_pid})`
       + ' is still running on the node. The lane must not free a slot that is still burning cores -'
       + ' stop that process, then reconcile it.', 1);
+  }
+  if (!entry.gate_pid && live.survivors.length) {
+    throw laneError(`refusing to reconcile #${entry.id}: no gate pid was recorded for it, and ${live.how}`
+      + ' - a slot must not be freed while work the holder started is still burning cores. Stop that'
+      + ' process, then reconcile it.', 1);
   }
   setState(db, options.id, 'abandoned', `reconciled: ${String(options.evidence).trim()}`, {ended_at: now()});
   return {exit: 0, receipt: receiptOf(db, options.id, dir, capacityOf(options))};
