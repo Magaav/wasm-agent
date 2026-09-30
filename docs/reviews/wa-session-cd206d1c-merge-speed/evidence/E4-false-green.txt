@@ -1,0 +1,49 @@
+# E4 - item 2, the false-green falsification, from retained evidence only (no gate was run).
+
+$ git show --stat --oneline 56920b8 ; git show --stat --oneline 41ae5c9
+56920b8 test(falsification): a deliberate break, so a warm gate that cannot fail is caught
+ rust/wa-operation/src/tests.rs | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+41ae5c9 revert(falsification): restore the tree, so the same warm gate passes again
+ rust/wa-operation/src/tests.rs | 14 --------------
+ 1 file changed, 14 deletions(-)
+$ git diff --stat 56920b8^ 41ae5c9   (empty output = the tree really is restored)
+$ git rev-parse 56920b8^^{tree} ; git rev-parse 41ae5c9^{tree}
+028380ac6d7d2c12d8f925d3629c55e3c5f4609e
+028380ac6d7d2c12d8f925d3629c55e3c5f4609e
+$ git diff --name-status da8dc891 7ed53a38 -- rust/   (empty = no trace of the break survives in the tip's content)
+$ git show 56920b8 -- rust/wa-operation/src/tests.rs | tail -14   (what was broken)
++// landings, so cargo is the only thing that can decide the tree it is given is not the tree it built.
++// If that did not hold, a warm gate would pass a tree it never rebuilt - a fast gate that cannot fail.
++// This commit makes the merged tree provably different from the one the warm artifacts were built
++// for, and the gate must go RED while it is here. It is reverted in the next commit.
++#[test]
++fn deliberate_falsification_probe_the_warm_gate_must_fail_on_this() {
++    assert!(
++        false,
++        "deliberate falsification probe: a warm gate that passes this tree never rebuilt it"
++    );
++}
+ fn fixture() -> (Manager, PathBuf) {
+     let root = std::env::temp_dir().join(format!(
+         "wa-operation-test-{}-{}",
+
+$ rg -n 'Compiling wa-operation|deliberate_falsification|test result: FAILED|panicked at' C:/Users/Victor/.wasm-agent/merge-lane-landing-broken.json.gate.log
+180:   Compiling wa-operation v0.1.0 (C:\Users\Victor\.wasm-agent\merge-lane-tree-landing\rust\wa-operation)
+244:test tests::deliberate_falsification_probe_the_warm_gate_must_fail_on_this ... FAILED
+264:---- tests::deliberate_falsification_probe_the_warm_gate_must_fail_on_this stdout ----
+266:thread 'tests::deliberate_falsification_probe_the_warm_gate_must_fail_on_this' (66964) panicked at wa-operation\src\tests.rs:11:5:
+272:    tests::deliberate_falsification_probe_the_warm_gate_must_fail_on_this
+274:test result: FAILED. 36 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.69s
+$ tail -5 C:/Users/Victor/.wasm-agent/merge-lane-landing-broken.json.gate.log   (died in build; no verdict line)
+error: test failed, to rerun pass `-p wa-operation --lib`
+gate phases (ms, in order; each row is the segment that starts at its marker):
+  build                 24590
+  total                 24590
+gate phases json: {"schema":1,"gate":"scripts/test.sh","phases":[{"name":"build","ms":24590}],"total_ms":24590,"skipped":0,"cargo_jobs":"2","test_threads":"2"}
+
+$ rg -n 'gate phases json|smoke ok' C:/Users/Victor/.wasm-agent/merge-lane-landing-restored2.json.gate.log | tail -2   (the restored run ends on the verdict)
+2549:gate phases json: {"schema":1,"gate":"scripts/test.sh","phases":[{"name":"build","ms":22028},{"name":"instances","ms":54012},{"name":"self-update","ms":67419},{"name":"cli","ms":4369},{"name":"memory-update","ms":25281},{"name":"tools","ms":64914},{"name":"sessions","ms":180967},{"name":"recovery-cli","ms":3474},{"name":"plugins","ms":154892},{"name":"fixtures","ms":5308},{"name":"subagents","ms":246857},{"name":"ui-js","ms":15873},{"name":"ui-browser","ms":8994}],"total_ms":854388,"skipped":2,"cargo_jobs":"2","test_threads":"2"}
+2550:smoke ok (2 skipped)
+$ rg -n 'the node reported busy' C:/Users/Victor/.wasm-agent/merge-lane-landing-restored.json.gate.log | head -3   (restored run 1: red for an UNRELATED reason)
+2509:AssertionError [ERR_ASSERTION]: the node reported busy while the subagent ran (reserved capacity)

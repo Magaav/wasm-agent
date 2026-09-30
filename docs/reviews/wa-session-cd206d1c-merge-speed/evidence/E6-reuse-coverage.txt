@@ -1,0 +1,108 @@
+# E6 - coverage of the reuse: what is proven by the code and by what is on disk, and what is not.
+
+$ ls -la C:/Users/Victor/.wasm-agent/ | rg 'merge-lane-tree'   (read-only; no git command is run inside the live tree)
+drwxr-xr-x 1 Victor 197121         0 09-30/08:20 merge-lane-tree
+drwxr-xr-x 1 Victor 197121         0 09-30/13:42 merge-lane-tree-landing
+drwxr-xr-x 1 Victor 197121         0 09-30/10:43 merge-lane-tree-measure
+$ cat <each tree>/.git/wa-merge-lane-tree.json   (the owner record the lane requires before reuse)
+--- merge-lane-tree
+{
+  "schema": 1,
+  "repo": "C:\\Users\\Victor\\orca\\projects\\wasm-agent",
+  "created_at": "2026-09-30T11:20:26.225Z",
+  "created_by_pid": 22072,
+  "toolchain": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "runs": 4,
+  "last_used_at": "2026-09-30T12:27:26.476Z",
+  "last_used_pid": 19712
+}
+--- merge-lane-tree-landing
+{
+  "schema": 1,
+  "repo": "C:\\Users\\Victor\\orca\\projects\\wasm-agent",
+  "created_at": "2026-09-30T16:42:19.510Z",
+  "created_by_pid": 81872,
+  "toolchain": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "runs": 5,
+  "last_used_at": "2026-09-30T17:40:21.103Z",
+  "last_used_pid": 27340
+}
+$ ls <named tree>/rust/target/release | head -5   (the warmth is a real, retained cargo output dir)
+build
+deps
+examples
+incremental
+libwa_graph.d
+$ ls -d C:/Users/Victor/.wasm-agent/merge-lane-tree-landing/.git/wa-merge-lane-tree.lock   (absent = released)
+ls: cannot access 'C:/Users/Victor/.wasm-agent/merge-lane-tree-landing/.git/wa-merge-lane-tree.lock': No such file or directory
+
+$ git show 7ed53a38:scripts/merge-lane.mjs | sed -n '890,899p'   (the reuse lock is released AFTER the gate)
+      requires: 'the reserved merger, holding the lane, re-reads origin/main, re-runs `audit.mjs verify <repo> origin/main`, and pushes this exact candidate tree; never a force-push',
+    },
+    timings_ms: timings,
+    note: 'The spine never pushes and never moves main. A blocked input is named, and the exit is nonzero: no silent drop and no success.',
+  };
+  if (clone && clone.reused === true) releaseReuseLock(clone.lock);
+  if (clone && !retainClone && clone.disposable !== false) {
+    fs.rmSync(clone.dir, {recursive: true, force: true});
+    result.clone.removed = true;
+    result.clone.path = null;
+$ git show 7ed53a38:scripts/merge-lane.mjs | sed -n '316,336p'   (clean -xdf -e target, pinned autocrlf, switch/reset)
+    const result = git(dir, ...args);
+    if (result.status !== 0) failures.push(`${label}: ${(result.stderr || result.stdout).trim() || `exit ${result.status}`}`);
+    return result;
+  };
+  const source = git(repo, 'config', '--get', 'core.autocrlf');
+  const autocrlf = source.status === 0 && source.stdout.trim() ? source.stdout.trim() : 'false';
+  // Ignored files go too, EXCEPT cargo's output directories: `-e target` is what keeps the warmth, and it
+  // is also why the tree holds nothing a previous candidate left behind except build output.
+  step('clearing untracked and ignored files', ['clean', '-xdf', '-e', 'target']);
+  step('fetching the repository', ['fetch', '--no-tags', '--quiet', repo]);
+  if (git(dir, 'cat-file', '-e', `${base}^{commit}`).status !== 0) {
+    step('fetching every branch', ['fetch', '--no-tags', '--quiet', repo, '+refs/heads/*:refs/remotes/origin/*']);
+  }
+  if (!failures.length && git(dir, 'cat-file', '-e', `${base}^{commit}`).status !== 0) {
+    failures.push(`the tree does not have the integration target ${base} after fetching; the repository must have it`);
+  }
+  if (!failures.length) {
+    // Pin line-ending handling to the source's BEFORE anything is re-materialised, exactly as the clone
+    // path does: a worktree whose bytes do not match the pinned value reads as dirty, and a dirty tree is
+    // what a merge and the deploy gate both refuse.
+    step('pinning line-ending handling', ['config', 'core.autocrlf', autocrlf]);
+$ git show 7ed53a38:scripts/merge-lane.mjs | rg -n -A4 'function rustcFingerprint'
+239:function rustcFingerprint() {
+240-  const result = run('rustc', ['-vV']);
+241-  if (result.status !== 0) return null;
+242-  return (result.stdout.trim().split('\n')[0] || '').trim() || null;
+243-}
+$ git ls-tree 7ed53a38 --name-only | rg -i 'vendor|cargo'   (empty: no in-tree vendored dependency the clean could destroy)
+$ ls -d <temp>/wa-merge-lane-* | head ; then a depth-2 look for a rust/target of their own
+C:/Users/Victor/AppData/Local/Temp/wa-merge-lane-0eqCre
+C:/Users/Victor/AppData/Local/Temp/wa-merge-lane-19248-GDorUH
+C:/Users/Victor/AppData/Local/Temp/wa-merge-lane-1RLpY0
+C:/Users/Victor/AppData/Local/Temp/wa-merge-lane-42076-5jgJQW
+C:/Users/Victor/AppData/Local/Temp/wa-merge-lane-4CkRVo
+HAS target: C:/Users/Victor/AppData/Local/Temp/wa-merge-lane-OggNib/
+(no 'HAS target' line above = no disposable clone is holding a cold target of its own)
+
+$ cat C:/Users/Victor/.wasm-agent/refusal-probe.json | head -20   (the refused-reuse receipt: fallback to a disposable clone)
+{
+  "schema": 1,
+  "lane": "merge-lane",
+  "verdict": "gate_refused",
+  "exit_code": 6,
+  "repo": "C:/Users/Victor/.wasm-agent/gate-lab-tree",
+  "base": {
+    "ref": "7314b8909f26227fce56bacd28fc9f74dbc2a9e3",
+    "sha": "7314b8909f26227fce56bacd28fc9f74dbc2a9e3"
+  },
+  "base_ref_before": "7314b8909f26227fce56bacd28fc9f74dbc2a9e3",
+  "base_ref_after": "7314b8909f26227fce56bacd28fc9f74dbc2a9e3",
+  "main_moved_by_this_run": false,
+  "pushed": false,
+  "inputs": [
+    {
+      "name": "6c823bfb00143c68b79f2874fc3cf1824b796ad6",
+      "sha": "6c823bfb00143c68b79f2874fc3cf1824b796ad6",
+      "state": "accepted",
+      "reason": null,
