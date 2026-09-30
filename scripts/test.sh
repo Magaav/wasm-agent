@@ -44,6 +44,13 @@ export WASM_AGENT_LLM_BASE_URL=http://127.0.0.1:1 WASM_AGENT_LLM_API_KEY=fixture
 export HTTP_PROXY="" HTTPS_PROXY="" ALL_PROXY="" NO_PROXY=127.0.0.1,localhost,::1
 echo "gate isolated home: $WASM_AGENT_HOME (retained for diagnostics)"
 
+# Phase timing: instrumentation, not a redesign. Every phase marker below is a call between two
+# existing commands, so no check is added, removed, reordered or skipped; the table is printed into
+# this log before the verdict line (which must stay last) and written as JSON. scripts/lib/gate-phases.sh
+# carries the contract. Until this landed, a 21-minute gate log had no durations in it at all.
+. scripts/lib/gate-phases.sh
+trap gate_phase_summary EXIT
+gate_phase_begin build
 cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 node scripts/test-parallel-finish.mjs
 # The execution and automation contracts have native, model-free adversarial tests.
@@ -75,6 +82,7 @@ cargo test --release --offline --manifest-path rust/wa-sentinel/Cargo.toml
 # The named-instance lifecycle, against two real co-located nodes: separate homes, keys, databases
 # and ports; a refused wrong listener; and a stop/restart of one that cannot reach the other. No
 # model and no network, so it belongs in the hermetic gate rather than the on-demand guest e2e.
+gate_phase_begin instances
 CARGO_BUILD_JOBS=2 cargo build --release --offline --manifest-path rust/wa-sentinel/Cargo.toml >/dev/null
 INSTANCE_VERDICT="$(mktemp)"
 rm -f "$INSTANCE_VERDICT" # The child must produce NEW evidence, never a previous run's verdict.
@@ -83,6 +91,7 @@ WA_INSTANCE_VERDICT="$INSTANCE_VERDICT" bash scripts/test-node-instances.sh || I
 INSTANCE_SKIPPED=$(node scripts/lib/suite-verdict.cjs "$INSTANCE_VERDICT" test-node-instances "$INSTANCE_STATUS" 62)
 SKIPPED=$((SKIPPED + INSTANCE_SKIPPED))
 rm -f "$INSTANCE_VERDICT"
+gate_phase_begin self-update
 BIN=rust/target/release/wa
 # A turn cannot deploy the process serving that same turn. The marker crosses
 # the Rust host's shell boundary; both entry points must refuse before waiting
@@ -153,6 +162,7 @@ if command -v cygpath >/dev/null 2>&1; then
 fi
 # This is a fixture, not the operator's deployment configuration.
 export WASM_AGENT_LLM_CONTEXT=128000
+gate_phase_begin cli
 DB="$(mktemp -u /tmp/wa-smoke-XXXXXX.db)"
 # `wa status` reports *the current thread*, so it gets its own database: with the
 # shared one, every earlier session in this run sits in the same second and the
@@ -492,6 +502,7 @@ ok(not report.queued, 'a refused request must not claim to be queued')
 ok(report.observed and #report.observed > 10, 'the refusal must carry what was seen')
 print('update decision ok')
 LUA
+gate_phase_begin memory-update
 WA_SCRIPT="$DB.update.lua" "$BIN" --db "$DB" | grep "update decision ok"
 rm -f "$DB.update.lua"
 # The check that was missing from those decisions: no watcher running means no request is written, and
@@ -756,6 +767,7 @@ assert(read_view:find("full_result", 1, true), "an oversized view must point at 
 assert(bash_view:find("FATAL", 1, true), "bash keeps the tail, because the error lives there")
 print("tool evidence ok")
 LUA
+gate_phase_begin tools
 WA_SCRIPT="$DB.evidence.lua" "$BIN" --db "$DB" | grep "tool evidence ok"
 rm -f "$DB.evidence.lua"
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-observability.lua" "$BIN" --db "$DB.observability" | grep 'observability ok'
@@ -1004,6 +1016,7 @@ assert(#memory.session_messages(sid, {}) == 0, "a new session must start empty")
 assert(#memory.recall("session test fact", 5) > 0, "memory must not depend on the session")
 print("sessions ok")
 LUA
+gate_phase_begin sessions
 WA_SCRIPT="$DB.sessions.lua" "$BIN" --db "$DB" | grep "sessions ok"
 # The ledger's order under concurrent writers: several processes appending to one session at once. A
 # single-process test cannot catch a `MAX(seq)+1` race. The check is mutation-tested: removing the
@@ -1300,6 +1313,7 @@ run_proof_fixture sqlite 6 node scripts/test-sqlite-isolation.cjs "$BIN"
 run_proof_fixture peer 43 node scripts/test-peer-run-admission.cjs "$BIN"
 run_proof_fixture foreground 3 bash scripts/test-foreground-cancel.sh
 rm -f "$DB.window"*
+gate_phase_begin recovery-cli
 echo "recovery cli ok"
 
 # `wa status` is the command an operator runs when something is wrong, so every
@@ -1490,6 +1504,7 @@ stage_plugin() {  # stage_plugin <wasm-path> <name>
 # must not become an unattributed red gate, and a staging that cannot write its module must still
 # fail. That test reads the function above out of this file, so it cannot pass while the code here is
 # wrong.
+gate_phase_begin plugins
 bash scripts/test-plugin-staging.sh
 # Build every plugin and assert one round trip through the WASM host.
 for crate in rust/plugins/*/; do
@@ -1577,6 +1592,7 @@ node scripts/test-proof-verdict.cjs
 # written, they passed when run by hand, and nothing ran them - which is how a test
 # quietly stops being true. Each file is self-contained and prints its own verdict,
 # so the gate is that verdict rather than a fixed string.
+gate_phase_begin fixtures
 for t in tests/*.lua; do
   fixture_status=0
   out=$(WA_SCRIPT="$t" "$BIN" --db "$DB.attach" 2>&1) || fixture_status=$?
@@ -1594,6 +1610,7 @@ node scripts/test-operation-control.cjs "$BIN"
 node scripts/test-operation-control.cjs "$BIN" --await
 
 # Actual child runtime and real sentinel deliveries, never a /subagents route stub.
+gate_phase_begin subagents
 run_proof_fixture policy 62 node scripts/test-subagents-policy.cjs "$BIN"
 run_proof_fixture children 18 node scripts/test-subagents.cjs "$BIN"
 run_proof_fixture fleet 20 node scripts/test-orchestrator.cjs "$BIN"
@@ -1646,6 +1663,7 @@ esac
 # and they need the repo root as cwd (they read ui/app.js from disk). A test that does
 # not run must not look like one that passed, so a skip is counted and asked for: if
 # node is missing the suite says so and the verdict counts it.
+gate_phase_begin ui-js
 if [ "${WASM_AGENT_SKIP_UI_TESTS:-}" = "1" ]; then
   echo "ui tests skipped by request (WASM_AGENT_SKIP_UI_TESTS=1)"
   SKIPPED=$((SKIPPED + 1))
@@ -1667,6 +1685,7 @@ fi
 # Chrome. It is the only check that sees the page as rendered - and it used to sit outside this
 # gate, so a green gate could say "ui tests ok" while it was failing. A machine that cannot run
 # it says so and counts the skip, rather than reporting a pass it did not earn.
+gate_phase_begin ui-browser
 if [ "${WASM_AGENT_SKIP_UI_BROWSER:-}" = "1" ]; then
   echo "ui browser harness skipped by request (WASM_AGENT_SKIP_UI_BROWSER=1)"
   SKIPPED=$((SKIPPED + 1))
@@ -1685,6 +1704,7 @@ else
   echo "ui browser harness SKIPPED - powershell or node not on PATH"
   SKIPPED=$((SKIPPED + 1))
 fi
+gate_phase_summary
 if [ "$SKIPPED" -gt 0 ]; then
   echo "smoke ok ($SKIPPED skipped)"
 else
