@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "what": "landing the merge lane's persistent gate tree (7314b89) without the per-suite measurement wrapper (6c823bf)",
+  "status": "IN PROGRESS",
+  "branch": "change/wa-session-childdispatchcd206d1c-287c-46fa-919d-703ff645dc5e",
+  "source_delivery": {
+    "branch": "change/wa-session-childdispatch3392ff10-bf3f-4b68-bb4a-3411ee5dec8a",
+    "tip": "ac79d716d5d697bb9c9d2616ac2f8020e4e7a78b",
+    "fork_point": "ab827c88a6ac091318b5adb8be34e83e858c4e9a",
+    "merged_base": "da8dc8918a34c880768956ff775d883802dcb7a7",
+    "merge": "real merge (not a rebase): the lane forked from ab827c88 and main moved to da8dc891"
+  },
+  "per_file_classification": {
+    "kept_mechanism": [
+      "scripts/merge-lane.mjs (from 7314b89: the persistent reuse tree, its refuse-and-fall-back-to-a-clone paths, the reuse lock, the toolchain fingerprint)",
+      "scripts/test-merge-lane.mjs (from 7314b89: the refusal paths pinned)"
+    ],
+    "kept_instrumentation": [
+      "scripts/lib/gate-phases.sh (from 96daaee: phase markers only; no check added, removed, reordered or skipped)",
+      "scripts/test.sh (from 96daaee: gate_phase_begin markers + one summary line before the verdict line)"
+    ],
+    "dropped_wrapper": [
+      "scripts/lib/gate-shims/_suite-shim.sh (from 6c823bf)",
+      "scripts/lib/gate-shims/bash",
+      "scripts/lib/gate-shims/node",
+      "scripts/lib/gate-shims/powershell",
+      "scripts/lib/gate-shims/wa",
+      "scripts/lib/gate-suite.mjs",
+      "scripts/lib/gate-suites.mjs",
+      "scripts/lib/gate-suites.sh",
+      "scripts/test.sh (from 6c823bf: the PATH shim install, the $BIN -> shim rewrite, gate_suites_summary)"
+    ]
+  },
+  "why_dropped": "docs/MERGE-SPEED.md section 3b: the per-suite wrapper is not transparent for scripts/test-deploy-service-target.sh - 34 checks pass without it and 6 of 34 fail with it, same tree, same minute. Re-measured in this lane, below.",
+  "still_unproven_at_this_commit": [
+    "cold gate.ms of a real merge-lane run in the reused tree",
+    "warm gate.ms of the same candidate",
+    "the false-green falsification (a broken merged tree must make the warm gate fail)",
+    "the dropped wrapper's blast radius, re-measured here"
+  ],
+  "evidence": {},
+  "note": "Committed first, before the change, so a lane that dies at the window leaves the state and the decision where the next one can read them."
+}
