@@ -147,6 +147,52 @@ in the table is paid *per landing*: a suite that costs `w` seconds of wall adds 
 future landing, and its CPU-s add to the gate's own CPU figure. That is the price of admission for a new
 suite, and it is now measurable before it lands (`scripts/lib/gate-suites.mjs`, one JSON object).
 
+## 3b. DEFECT: the per-suite wrapper is NOT transparent for one suite, and it can turn a passing gate red
+
+This is the most important line in this note, and it is a falsification that found a defect rather than
+confirming the instrument. `scripts/test-deploy-service-target.sh` passes without the wrapper and **fails
+with it**, on the same tree, in the same minute:
+
+```
+cd <tree>
+bash scripts/test-deploy-service-target.sh                     -> exit 0, "deploy service-target ok (34 checks)"
+PATH="$PWD/scripts/lib/gate-shims:$PATH" GATE_SUITES_JSONL=/tmp/x.jsonl \
+  bash scripts/test-deploy-service-target.sh                   -> exit 1, "deploy service-target FAILED (6 of 34)"
+```
+
+The six failures are all the same comparison, in `scripts/test-deploy-service-target.sh:135`:
+`grep -qF "$INSTALL_TARGET" <<<"$REFUSAL"` - the deploy's refusal must name the path the deploy would
+write. Through the wrapper the refusal still names the path the service *runs* (line 134 passes) but not
+the path it would *write*, so the difference is in how a path reaches the nested process, not in what the
+deploy decided. The chain under the wrapper is `msys bash -> node (the wrapper) -> the suite`, and a path
+that MSYS converts at a bash-to-native boundary is instead handed on unchanged by a native-to-native
+`spawn`; the nested `deploy.sh` then reports the path in the other spelling. The wrapper's own argv,
+environment, stdio and exit code are otherwise identical (verified byte-for-byte on
+`scripts/test-proof-verdict.cjs` and on a Lua suite), so this is a **path-representation defect of the
+wrapper chain**, not of the suite and not of the gate.
+
+**Consequences.** In the slotted run above the instrumented gate went RED inside `self-update` for this
+reason alone, with no verdict line and no later phase. So until it is fixed the per-suite wrapper does
+change behaviour for at least one suite, which is exactly what the owner's "instrumentation only, same
+checks, same exit codes" constraint forbids. Do not land the wrapper as it stands. The three candidate
+fixes, cheapest first: (1) drop the `bash` shim and measure only the `node`/`powershell`/`wa` suites
+(the `*.sh` suites keep running unmeasured, which costs rows but changes nothing); (2) have the wrapper
+`cygpath`-convert POSIX-looking arguments the way MSYS does, which is a guess about a heuristic and must
+be falsified against this very fixture before it is trusted; (3) fix the fixture to compare paths in one
+spelling, which is a change to a test rather than to the instrument and needs the owner's consent.
+
+What the wrapper did **not** do: it did not break the fixtures whose exit codes it passes through
+(verified on three suites), it cannot report a phase that did not run, and it never invented a verdict
+line - the red run above printed none.
+
+## 3c. Reference: the wrapper's contracts
+
+The phase and per-suite contracts, the lower-bound caveat, the "undetermined rather than isolated" rule
+and the two falsified reader defects are in `scripts/lib/gate-phases.sh`, `scripts/lib/gate-suite.mjs`
+and `scripts/lib/gate-suites.mjs`. The machine-readable artifacts are
+`docs/measurements/gate-phases-suites.json` (the slotted run) and
+`docs/measurements/gate-instrument-evidence.json` (the unslotted and falsification runs).
+
 ## 4. What was observed, and what is not verified
 
 The raw evidence is `docs/measurements/gate-instrument-evidence.json`. Two runs of the instrumented gate
