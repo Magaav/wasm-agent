@@ -130,7 +130,22 @@ need a change there, that is a stop-and-say-so, not an edit.
    and `31a818f`, with the same numbers on both sides before and after.
 3. Proof: above - the live-holder case left alone with pid evidence and then reclaimed, the `df` case
    before and after, and the deferences still recorded.
-4. This file, and the closing gate on the committed tree: the gate's result is the last line of this
-   section when it is run, and it is not claimed before then.
+4. This file: done. The closing gate on the committed tree: **not run** - the lane was held, and it is
+   not claimed. `finish.mjs gate` on `05972055b85498f229cbb96353057d79ea8ace32` (with
+   `WA_GATE_LANE_WAIT_SECONDS=240`, so it gives up visibly instead of queueing for hours) passed every
+   precondition - `repository_ready: true`, all 8 checks ok (`clean`, `fresh_remote_refs`, `current`,
+   `pushed` = `origin/change/wa-session-childdispatch4e773dae-d31f-43db-8d08-59e0cf154ec9`,
+   `merge_proof` = tree `72aacaba`) - and then
+
+       gate_error: the gate did not run: the gate lane granted no slot (acquire #163 refused after 240s
+       (terminal, not a retry). capacity 1 of 1 in use; running #162 (finish
+       change/wa-session-childdispatch389b8886-2cfb-45bc-be85-64f4357931f9, pid 48476, held 318s);
+       queue depth 1 (next to run); waited 240s; also waiting: #164)
+       gate_verified: false
+
+   So there is **no skip count and no gate exit status to report**: the gate did not execute, and
+   inventing either would be the lie this whole delivery is about. What is reported instead is the
+   lane's own record of why, and the three test suites above, which did run and did pass. Free space
+   when the attempt was made: 64.54 GiB (67677504 KiB free of 499987452 KiB, 13%).
 
 Agent: wasm-agent node=wasm_the_first role=child session=child:dispatch:4e773dae-d31f-43db-8d08-59e0cf154ec9
