@@ -8,7 +8,10 @@ Built from: the transport tip `ea2f2011` (`subscription_wire.lua`, the catalogue
 This file is written and committed **before** the seam fixes, on purpose: a cancelled run that
 leaves a truthful status file still delivers, and the sibling delivery was marked needs-change
 precisely because its status file was never committed. It is updated, not rewritten, as the work
-lands; the last section says which state you are reading.
+lands.
+
+**Read "What works, what is proven, what is unproven" at the end for the state of this branch.**
+The section immediately below is the state at the merge commit, kept as it was written.
 
 ## State at this commit (`merge(credential+transport)`)
 
@@ -69,7 +72,180 @@ list. Kept both; nothing was dropped and nothing was reordered beyond grouping.
 `git merge-tree --write-tree ea2f2011 a6e111d7` reported exactly these two conflicts before the
 merge was performed; no other file conflicted.
 
-## What works / what is proven / what is unproven
+## What works, what is proven, what is unproven
 
-Filled in by the commits after this one. Read the **last** section for the state of this branch as
-it stands.
+### The three seam defects, fixed (`9e015d6`)
+
+1. **The name.** `M.credential()` now names `M.CREDENTIAL_MODULE = 'lua/core/openai_sub_auth.lua'`
+   - the credential lane's tested artifact. The credential module was not renamed and no shim or
+   second module was added. The same stale literal was fixed in the three files that call the seam
+   by that name: `scripts/test-subscription-wire.lua` (which asserted the old name),
+   `scripts/check-subscription-wire-parity.lua` and `scripts/check-subscription-wire-live.lua`
+   (both of which would otherwise have silently fallen back to reading pi's `auth.json`).
+2. **The second return value.** `M.credential()` returns `token, failure` - the credential lane's
+   `code`/`message` passed through unchanged - and `M.complete` raises it with `error(..., 0)` so the
+   code is first in the text. `M.limits()` returns it as a second value instead of swallowing it.
+   Two cases the credential lane cannot report itself (its file unloadable, `token()` answering with
+   neither value) get codes of this file's own, in the same shape.
+3. **The login door.** `wa subscription [status | login ...]` in `lua/core/init.lua`. It is a route,
+   not a second policy: it loads the credential lane's own `scripts/openai-sub-login.lua` and hands
+   `args` through, so "already logged in", the one-time import out of Pi, the printed URL and code
+   and the exit codes stay that lane's tested behaviour.
+
+### Proof 1 - `configured()` is true on native with Pi unreachable (the gate at `agent.lua:1083`)
+
+Pi's package directory (`.../npm/node_modules/@earendil-works`) and `~/.pi/agent/auth.json` were both
+renamed aside first; `ls` on each reported "No such file or directory".
+
+```
+transport:             native
+pi auth path:          C:\Users\Victor/.pi/agent/auth.json
+pi auth readable:      false   (must be false)
+our store:             C:\Users\Victor/.wasm-agent/openai-sub/credentials.json
+configured():          true   (must be true)
+provider.configured(): true
+openai-sub credential: valid for account 14c747d9-6514-4792-97f7-bee01c49cbae, expires in 858839s, refreshes 2, refresh 5d9c89658161
+proof 1 ok: configured() is true on native with no Pi on disk
+```
+
+### Proof 2 - a real request through the wire, credential through the credential module
+
+Same run, Pi still aside. **The call is direct** - `lua/core/openai_sub.lua`'s own `complete`, not an
+agent turn - because this node's provider refuses `gpt-6-*` as `model_not_servable` from its
+servability store, so a turn through `provider.lua` cannot carry this model here. The credential was
+taken through the seam itself (`wire.credential()`, both return values); no stub and no fixture token
+was installed anywhere in the process.
+
+```
+transport:              native
+pi auth readable:       false   (must be false)
+configured():           true
+credential from the seam: account=14c747d9-6514-4792-97f7-bee01c49cbae access_fingerprint=9c2278285978 expires_in_s=858839
+events:                 pending_delta=8 commentary=1 unresolved_pending=0
+  pending_delta  pending_id=a3d9933a-...:1 text="I"
+  pending_delta  pending_id=a3d9933a-...:1 text="’m"
+  ... (6 more deltas, same pending_id)
+  pending_delta  pending_id=a3d9933a-...:1 text="."
+  commentary     pending_id=a3d9933a-...:1 message_id=acff086a-2602-42d3-bc6b-a2d708c68237 phase=nil text="I’m checking the current UTC time."
+result.commentary (the resolved commentary the route returns): [{"content":"I’m checking the current UTC time.","id":"acff086a-...","pending_id":"a3d9933a-...:1"}]
+result.content (the answer, which must not contain it):         ""
+tool_calls: 1
+  call id=call_zGfK1kyuK0VWLEWTcAeG9SIK|fc_0165d136a958599b016abd19f317e887d28e1d62fc7791f26c name=get_time arguments={"zone":"UTC"}
+  arguments parsed back: {"zone":"UTC"}
+usage:            {"completion_tokens":33,"completion_tokens_details":{"reasoning_tokens":0},"prompt_tokens":93,"prompt_tokens_details":{"cached_tokens":0},"total_tokens":126}
+finish_reason:    tool_calls  stream_complete=true  events=24  ttft_ms=1179.7148  request_id=resp_0165d136a958599b016abd19f1c74487d295e65b525dbc7d98  elapsed_ms=1829
+store afterwards: present=true state=valid source=import:pi refreshes=2 access_fingerprint=9c2278285978
+proof 2 ok: a real stream through the wire, credential from the credential module, commentary resolved, tool call with arguments, usage
+```
+
+Read it as: eight `pending_delta` events on one `pending_id` resolved to exactly one `commentary`
+event (0 unresolved), the resolved commentary is what the route returns and it is **not** in
+`result.content`, the tool call's arguments are parsed (`{"zone":"UTC"}` re-decoded from what the
+wire published, not raw model text), and usage is the endpoint's numbers. The store afterwards still
+reports the same `access_fingerprint` as the credential the seam served, `source=import:pi`,
+`refreshes=2` - the credential is ours, imported once from Pi by the credential lane, and **nothing
+read Pi's files to get it**: they were renamed aside for the whole run.
+
+### Proof 3 - missing credential: the taxonomy reaches the surface, and 0 token POSTs
+
+Our store absent (`WASM_AGENT_OPENAI_SUB_STORE` at a path that does not exist) and the auth host
+replaced by the credential lane's counting stand-in (`scripts/lib/openai-sub-auth-mock.mjs`), which
+appends one line per POST to `posts.jsonl`.
+
+```
+store:               /tmp/waproof/absent/credentials.json   readable=false (must be false)
+pi auth:             C:\Users\Victor/.pi/agent/auth.json   readable=true
+seam credential:     nil
+seam failure.code:   subscription_credentials_absent
+seam as a sentence:  subscription_credentials_absent: no ChatGPT-subscription credential at /tmp/waproof/absent/credentials.json and no credential to import from C:\Users\Victor/.pi/agent/auth.json; log in with: WA_SCRIPT=scripts/openai-sub-login.lua wa (device code), then retry
+complete ok:         false
+complete raised:     subscription_credentials_absent: no ChatGPT-subscription credential at ...
+configured():        false (must be false: no credential, no turn)
+proof 3 ok: the taxonomy reaches the surface, and no turn is attempted without a credential
+token POSTs to the auth host: 0  (mock log lines: 1)
+```
+
+Note what is *stronger* here than the brief asked for: pi's `auth.json` was readable in this run
+(it had already been restored), the store was not, and nothing consulted it - `readable=false` for
+our store is the only thing that changed the answer. The single mock log line is `ready <port>`; the
+counter recorded no request at all, so "0 token POSTs" is a measurement, not an assertion.
+
+### Proof 4 - the login door, and how a person reaches it
+
+```
+$ wa subscription status
+openai-sub credential: valid for account 14c747d9-6514-4792-97f7-bee01c49cbae, expires in 858817s, refreshes 2, refresh 5d9c89658161
+    store:  C:\Users\Victor/.wasm-agent/openai-sub/credentials.json
+    log in: wa subscription login             device code: prints the URL and the code,
+                                              then waits for you to enter it
+            wa subscription login --browser    sign in in a browser, come back with --code <url>
+
+$ wa subscription login --browser        (with no Pi credential in reach)
+openai-sub: open this URL, sign in, then paste the address you land on (it starts with http://localhost:1455/auth/callback):
+https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&...&originator=wasm-agent
+openai-sub: waiting for the browser step - re-run with --code <the address you landed on>
+  exit 0
+
+$ wa subscription login --device         (real endpoint, 12s human budget)
+openai-sub: open https://auth.openai.com/codex/device and enter the code 6L1K-35D8K  (waiting up to 12s)
+openai-sub: still waiting for the code 6L1K-35D8K (6 polls, 0s left)
+openai-sub login failed: flow_expired
+  the device login for code 6L1K-35D8K expired after 12s without authorization; the pending flow is kept at /tmp/waproof/door2/login-flow.json - re-run the login to resume, or open https://auth.openai.com/codex/device and enter 6L1K-35D8K
+  exit 1
+
+$ wa help
+    subscription [status | login [--device|--browser|--code <url>]]  this node's ChatGPT
+        subscription credential: print the verification URL and code, then wait for you
+```
+
+So the two ways a person reaches a login are `wa subscription login` (device code: prints the real
+verification URL and a real user code, then waits) and `wa subscription login --browser` followed by
+`wa subscription login --code <the address you landed on>`. Both print what a human has to do; the
+12 s device run ends at `flow_expired`, says which code is still valid and how to resume, and exits
+non-zero rather than claiming a credential it did not store. `WASM_AGENT_OPENAI_SUB_LOGIN_TIMEOUT`
+set the 12 s budget for this run (the human is not available in an agent's window). With no such
+override the same command waits 300 s by default (`DEFAULT_LOGIN_TIMEOUT_SECONDS`), and never longer
+than the device flow's own 900 s window.
+
+### Pi's files: restored, and unchanged
+
+```
+auth.json sha256 before: c60f57470aa1b63d13077bf11c1f7fd4f8cd19ee710ac8fc74259055f4014d74
+auth.json sha256 after:  c60f57470aa1b63d13077bf11c1f7fd4f8cd19ee710ac8fc74259055f4014d74
+package dir listing before: 9f8111c609785f392feebd73eb97e8712593b9fce13e1d2e3093dcfe0c742a74
+package dir listing after:  9f8111c609785f392feebd73eb97e8712593b9fce13e1d2e3093dcfe0c742a74
+auth.json UNCHANGED
+package dir UNCHANGED
+```
+
+The rename is done inside a script whose `trap ... EXIT` restores both paths, so an interrupted run
+puts Pi back rather than leaving the operator's installation moved.
+
+### What is unproven, and what was not done
+
+* **The full gate.** `scripts/test.sh` was not run on this branch by me at the time this file was
+  written - see the closing section of this branch's own report for the gate result if it ran. What
+  *was* run, on the merged tree at `9e015d6`, is `scripts/test-subscription-wire.lua` (offline,
+  hermetic: **135 checks, exit 0**) and the credential lane's `scripts/test-openai-sub-auth.lua`
+  (**128 checks, exit 0**, `token POSTs=1` in its concurrency evidence) - the two files this change
+  could break, plus the live proof above.
+* **The route through an agent turn.** Not exercised, and cannot be on this node as it stands: the
+  provider refuses `gpt-6-*` (`model_not_servable`). Everything above is a direct call to
+  `lua/core/openai_sub.lua`.
+* **Reaching an authorized login.** The browser flow needs a human at a browser and the device flow
+  needs a human to enter the code; neither was completed, so "a fresh login stores a usable
+  credential" is the credential lane's proof, not re-proven here. What is proven here is that a
+  person can *start* both and is told the human step is outstanding.
+* **The default route.** Still `pi`; nothing here switches it. That is the coordinator's cutover and
+  it is what `WASM_AGENT_SUBSCRIPTION_TRANSPORT=native` in the proof stands in for.
+* **`lua/core/openai_sub.lua:13`** still describes the seam as `lua/core/subscription_auth.lua` in a
+  comment. One line, no behaviour, and outside this delivery's scope - left for the coordinator, who
+  owns that file next, rather than touched here.
+* **No REPL `/login`.** The door is the `wa subscription` CLI arm. A blocking device login inside the
+  REPL would block the REPL, and this delivery does not add a background login; the credential lane's
+  own script is the same entry point a REPL command would have to call.
+* **`scripts/check-subscription-wire-live.lua`'s fallback** now triggers only when the credential
+  module cannot be loaded at all, so a live run against a tree that has the module but no credential
+  fails with `subscription_credentials_absent` instead of falling back to reading pi's `auth.json`.
+  That is the intended direction (pi's file is not a credential source for this route) and it was not
+  re-run live, because it needs the network and rewrites the recorded fixtures.
