@@ -1562,12 +1562,20 @@ node scripts/test-merge-lane.mjs
 node scripts/test-delivery-admission.mjs
 env -u GATE_LANE_HELD node scripts/test-gate-lane-wiring.cjs
 node scripts/test-openai-sub.cjs "$BIN"
-# And the levels that route declares, read from the catalogue it publishes: the fixture writes the entry
-# pi.dev serves for that id where the real store lives, so the answer is asserted with no HTTP, no
-# credentials and no model. A level the catalogue adds must be admissible - otherwise no child can be
-# placed at all - and a level no source names must still be refused by name rather than silently
-# replaced by a default.
+# And the levels that route declares, read from the catalogue this repo owns
+# (`lua/core/openai_sub_catalogue.lua`) rather than from a third-party store at request time: the
+# fixture writes a *disagreeing* store where pi's store lives and none of it may reach the answer, so
+# "the store is no longer consulted for this route" is a property and not a hope. A level the
+# catalogue adds must be admissible - otherwise no child can be placed at all - and a level no source
+# names must still be refused by name rather than silently replaced by a default.
 WA_SCRIPT=scripts/test-openai-sub-levels.lua "$BIN" --db "$DB.sub-levels" | grep "openai-sub levels ok"
+# The subscription wire itself, offline: SSE framing, the event mapping, the phase contract
+# (`pending_delta` resolved to commentary or to the answer), the tool-decision telemetry, the usage
+# mapping and the rule that a stream ending without a terminal event is an error - replayed from the
+# two real streams recorded under `tests/fixtures/subscription/`. No network, no credential, no model
+# and no Node; the bytes are the endpoint's, and re-recording them is what
+# `scripts/check-subscription-wire-live.lua` does (it is not in this gate: it needs the network).
+WA_SCRIPT=scripts/test-subscription-wire.lua "$BIN" --db "$DB.sub-wire" | grep "subscription wire ok"
 node scripts/test-auth-sessions.cjs "$BIN"
 node scripts/test-fixture-verdict.cjs
 node scripts/test-suite-verdict.cjs

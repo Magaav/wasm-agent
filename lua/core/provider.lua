@@ -187,7 +187,11 @@ end
 -- What this client actually sends over each transport, for the refusal to name.
 local TRANSPORT_WIRE = {
   ["openai-completions"] = "POST /chat/completions",
-  ["openai-codex-responses"] = "Pi's subscription bridge (codex/responses)",
+  -- The subscription route's transport is wasm-agent's own Responses wire
+  -- (lua/core/subscription_wire.lua) unless WASM_AGENT_SUBSCRIPTION_TRANSPORT=pi, in which case it
+  -- is still Pi's adapter. The refusal names the wire, because which client speaks a protocol is
+  -- part of the reason a model was refused.
+  ["openai-codex-responses"] = "the subscription Responses wire (codex/responses)",
 }
 
 -- Can `provider` (default: the active route) serve `model`? `true` = this route's own catalogue
@@ -521,15 +525,21 @@ function M.capabilities(model)
     local levels={low="low",medium="medium",high="high",xhigh="xhigh",max="max"}
     if model~="gpt-6-astra" then levels.off="none" end
     local published = subscription.thinking_level_map(model)
+    -- The windows come from the same catalogue, per id: an id the route serves at a different
+    -- output ceiling must not be described by the route's largest one.
+    local window = subscription.catalogue().window(model)
+    local max_output = window and window.max_output or 128000
     if published then
       for level, value in pairs(published) do
         if type(value)=="string" then levels[level]=value end
       end
-      return {reasoning=true, levels=levels, compat={}, max_output=128000,
-        source="pi-openai-codex-store"}
+      return {reasoning=true, levels=levels, compat={}, max_output=max_output,
+        source="openai-sub-catalogue"}
     end
-    return {reasoning=true, levels=levels, compat={}, max_output=128000,
-      source="pi-openai-codex"}
+    -- nil from the catalogue is "cannot answer", not "no levels": the shipped declaration stands,
+    -- so a route that cannot describe an id still describes itself.
+    return {reasoning=true, levels=levels, compat={}, max_output=max_output,
+      source="openai-sub-route"}
   end
   local store = pi_store()
   local profile = store and store[provider_id]
@@ -754,8 +764,15 @@ function M.complete_with(model, messages, tools, stream, opts)
     estimation="text bytes/4 + 1200 per image estimate; provider usage is authoritative",
     runtime=telemetry.runtime(),context=opts.context}
   if provider.id=="openai-sub" then
-    request_meta.transport="pi-openai-codex-responses"
-    request_meta.request_hash_source="bridge input; Pi assembles the provider wire request"
+    -- Which client assembled the wire request, recorded per request: a hash of the body means
+    -- something different when the body is ours and when Pi built it from the same input.
+    if subscription.transport()=="native" then
+      request_meta.transport="native-codex-responses"
+      request_meta.request_hash_source="lua/core/subscription_wire.lua builds the provider request"
+    else
+      request_meta.transport="pi-openai-codex-responses"
+      request_meta.request_hash_source="bridge input; Pi assembles the provider wire request"
+    end
   end
   local span=telemetry.start(opts,opts.kind or "model_call",request_meta)
   local ok,result=pcall(function()

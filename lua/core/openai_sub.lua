@@ -1,7 +1,20 @@
--- Subscription transport through Pi's maintained adapter. Risk: this provider
--- requires Node and a compatible installed Pi; missing dependencies fail visibly.
+-- The ChatGPT-subscription route. Two transports meet here, and the default is still Pi's adapter:
+--
+--   * `pi` (default) - Pi's maintained adapter, through Node. Requires an installed Pi, and its
+--     dependencies fail visibly. This is what the route does today.
+--   * `native` - wasm-agent's own wire (`lua/core/subscription_wire.lua`): our endpoint, our
+--     headers, our SSE client over `host.http_sse`, with no Node and no Pi in the runtime at all.
+--     `WASM_AGENT_SUBSCRIPTION_TRANSPORT=native` selects it.
+--
+-- Both answer the same event contract, the same result shape and the same cancellation, deadline and
+-- truncation rules, so the route can be cut over - and rolled back - with one environment variable
+-- while both are verified. The catalogue and the credential are shared, not duplicated: the ids and
+-- thinking levels come from `lua/core/openai_sub_catalogue.lua`, and the credential from
+-- `lua/core/subscription_auth.lua` (owned by the credential lane; this file only calls `token()`).
 local json = dofile('lua/vendor/json.lua')
 local paths = dofile('lua/core/paths.lua')
+local catalogue = dofile('lua/core/openai_sub_catalogue.lua')
+local wire = dofile('lua/core/subscription_wire.lua')
 local M = {}
 -- The *picker* list: what this route offers a reader to choose. It is not this route's
 -- catalogue - five ids the route serves are absent from it (gpt-5.5, gpt-5.6-luna,
@@ -9,6 +22,18 @@ local M = {}
 -- provider.lua documents. An id belongs here to be *offered*; it must also be in the
 -- catalogue below, or selecting it fails at request time instead of at selection.
 M.models = {'gpt-6-luna','gpt-6-sol','gpt-6.1-sol','gpt-6-astra'}
+-- This route's catalogue (`lua/core/openai_sub_catalogue.lua`), so a caller that needs more than one
+-- field - windows as well as levels - asks the same source this file reads. Checked in and owned by
+-- us: no request-time read of a third-party package's store.
+function M.catalogue()
+  return catalogue
+end
+-- The wire this route uses when `native` is selected, for the same reason: a diagnostic that has to
+-- answer for the credential before the credential lane's file exists replaces
+-- `credential_provider` on *this* instance, not on a second copy of the module.
+function M.wire()
+  return wire
+end
 function M.auth_path()
   local directory = host.getenv('PI_CODING_AGENT_DIR') or (paths.home() .. '/.pi/agent')
   return directory .. '/auth.json'
@@ -21,28 +46,28 @@ function M.models_store_path()
   return host.getenv('WASM_AGENT_PI_MODELS_STORE')
     or (paths.home() .. '/.pi/agent/models-store.json')
 end
--- The thinking levels a single id is published with. pi's store carries a per-model
--- `thinkingLevelMap` - level -> the value Pi puts in the Responses body's `reasoning.effort` -
--- and it is the only thing that can say what *this* id honours; a route-wide table can only say
--- what the route accepts. Read the entries this route is and nothing else: provider
--- `openai-codex` over `openai-codex-responses`, the same pair the bridge resolves the id
--- against. Read-only, and nil - not `{}` - when the store is absent, silent about the id, or
--- publishes no map for it: "the catalogue cannot answer" has to stay distinguishable from "this
--- id has no levels", or a node without a store would report a model with no reasoning instead
--- of a route that cannot describe it.
+-- The thinking levels a single id is published with, from the catalogue this repo owns. Per id and
+-- not route-wide, because only the id can say what *it* honours. nil - not `{}` - when the
+-- catalogue cannot answer, i.e. it does not publish the id: "the catalogue cannot answer" has to
+-- stay distinguishable from "this id has no levels", or a reader would be shown a model with no
+-- reasoning instead of a route that cannot describe it.
+--
+-- This used to read pi's local store at request time (`~/.pi/agent/models-store.json`), which made
+-- the route's own catalogue a fact about a third-party package's disk. It now reads
+-- `lua/core/openai_sub_catalogue.lua`, whose entries were imported from that store once - see that
+-- file for the import and for the nil-vs-empty rule's full statement.
 function M.thinking_level_map(model)
-  local text = host.read_file(M.models_store_path())
-  if not text then return nil end
-  local ok, store = pcall(json.decode, text)
-  if not ok or type(store) ~= 'table' then return nil end
-  local profile = store['openai-codex']
-  for _, entry in pairs(type(profile) == 'table' and profile.models or {}) do
-    if type(entry) == 'table' and entry.id == model and entry.api == 'openai-codex-responses'
-      and type(entry.thinkingLevelMap) == 'table' then
-      return entry.thinkingLevelMap
-    end
-  end
-  return nil
+  return catalogue.thinking_level_map(model)
+end
+
+-- Which transport this route uses. `pi` - Pi's adapter through Node - is the default and stays the
+-- default; `native` is wasm-agent's own wire. Anything else is refused rather than guessed: a typo
+-- that silently kept using Pi would look like a working cutover.
+function M.transport()
+  local value = (host.getenv('WASM_AGENT_SUBSCRIPTION_TRANSPORT') or ''):lower()
+  if value == '' or value == 'pi' then return 'pi' end
+  if value == 'native' or value == 'wire' then return 'native' end
+  error('invalid_subscription_transport: expected pi or native, got ' .. value)
 end
 function M.configured()
   local raw = host.read_file(M.auth_path())
@@ -56,6 +81,7 @@ local function operation(action, args)
   return value
 end
 function M.limits()
+  if M.transport() == 'native' then return wire.limits() end
   local stem = paths.temp() .. '/wa-openai-sub-limits-' .. host.uuid()
   local script, input = stem .. '.mjs', stem .. '.json'
   host.write_file(script, dofile('lua/core/openai_sub_bridge.lua'))
@@ -111,6 +137,11 @@ function M.request_timeout()
   return seconds
 end
 function M.complete(model, messages, tools, stream, opts, reasoning)
+  if M.transport() == 'native' then
+    -- Same arguments, same result. The wire owns its own deadline check but reads the same
+    -- WASM_AGENT_SUBSCRIPTION_TIMEOUT bound, so the budget does not change with the transport.
+    return wire.complete(model, messages, tools, stream, opts, reasoning)
+  end
   local stem = paths.temp() .. '/wa-openai-sub-' .. host.uuid()
   local stream_id = host.uuid()
   local script, input = stem .. '.mjs', stem .. '.json'

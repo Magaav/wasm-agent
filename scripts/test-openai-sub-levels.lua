@@ -14,14 +14,19 @@
 --     default - and a route that genuinely has no levels for an id still refuses every level a
 --     child can be given. The empty set is a *statement*, and this change must not soften it.
 --
--- Hermetic: no HTTP, no credentials, no model. The catalogue is a fixture written where the real
--- one lives (`WASM_AGENT_PI_MODELS_STORE`), carrying the entry pi.dev publishes for this id
--- verbatim - including `"off":null`, which is the id saying it does not honour `off`.
+-- Where the levels come from, as of the catalogue change: `lua/core/openai_sub_catalogue.lua`, the
+-- file this repo owns and checks in. The store under `WASM_AGENT_PI_MODELS_STORE` is *not* consulted
+-- for this route any more, and the fixture below is written specifically to say so: it carries a
+-- level the real catalogue does not (`ultra`) and omits ones it does, and none of it may reach the
+-- answer. What the store still decides is the *other* routes' protocol check, which is why the last
+-- section writes an absent store and asks a different route.
+--
+-- Hermetic: no HTTP, no credentials, no model.
 local json = dofile('lua/vendor/json.lua')
 local paths = dofile('lua/core/paths.lua')
 
--- One override point, because the fixture has to move the catalogue and the route under test and
--- a shared home is not this file's to change.
+-- One override point, because the fixture has to move the store under test and a shared home is not
+-- this file's to change.
 local native_getenv = host.getenv
 local overrides = {WASM_AGENT_PROVIDER='openai-sub'}
 host.getenv = function(key)
@@ -29,19 +34,17 @@ host.getenv = function(key)
   return native_getenv(key)
 end
 
--- Written as text, not encoded from a table: lua/vendor/json.lua decodes `null` to nil
--- (`literal_map`), so a table round-trip would silently drop the `"off":null` that makes this
--- entry different from gpt-6-luna's.
-local CATALOGUE = [[{"openai-codex":{"models":[
+-- A store that disagrees with our catalogue on purpose: one level ours does not publish, and a map
+-- that would *remove* levels ours publishes. If any of it shows up in an answer, something is still
+-- reading pi's store at request time.
+local STORE = [[{"openai-codex":{"models":[
 {"id":"gpt-6.1-sol","provider":"openai-codex","api":"openai-codex-responses","reasoning":true,
- "thinkingLevelMap":{"off":null,"minimal":"low","low":"low","medium":"medium","high":"high",
- "xhigh":"xhigh","max":"max"},"maxTokens":128000,
+ "thinkingLevelMap":{"off":null,"ultra":"ultra","minimal":"low"},"maxTokens":128000,
  "compat":{"supportsOpenAIGrammarTools":true,"supportsAdditionalTools":true}}
-]}}
-]]
+]}}]]
 local store = paths.temp() .. '/wa-openai-sub-levels-store.json'
 local absent = paths.temp() .. '/wa-openai-sub-levels-absent.json'
-assert(host.write_file(store, CATALOGUE), 'the catalogue fixture must be written')
+assert(host.write_file(store, STORE), 'the store fixture must be written')
 overrides.WASM_AGENT_PI_MODELS_STORE = store
 
 -- A profile with a budget of one token: it is a *later* gate than the reasoning gate, so "the
@@ -74,7 +77,7 @@ end
 -- ---- the subscription route ---------------------------------------------------------------
 local info, set = levels_of('gpt-6.1-sol')
 check(info.supported == true, 'the subscription route must offer this id a level, not none')
-check(info.source == 'pi-openai-codex-store',
+check(info.source == 'openai-sub-catalogue',
   'the declaration must say the catalogue answered, got ' .. tostring(info.source))
 check(set.minimal == true, 'the level the catalogue publishes for this id must be selectable')
 check(set.low and set.medium and set.high and set.xhigh and set.max,
@@ -83,6 +86,9 @@ check(info.selected == 'high', 'with six levels, a default of high: got ' .. tos
 check(set.off == true,
   "the shipped floor still answers for `off`: the catalogue's `off:null` cannot be told apart " ..
   'from an absent level through this decoder, so the route keeps the level it accepted before')
+check(set.ultra ~= true,
+  'a level that exists only in the store fixture must not reach the answer: the catalogue is read, ' ..
+  'not the store')
 
 -- A child carries a level, and one of them has to be admitted, or no child can be placed at all.
 local high = placed('gpt-6.1-sol', 'high')
@@ -118,14 +124,20 @@ local nothing_carried = placed('gpt-6.1-sol', 'provider')
 check(tostring(nothing_carried.error or ''):find('reasoning_not_supported', 1, true) == nil,
   'a request that carries no level is not refused for one: ' .. tostring(nothing_carried.error))
 
--- ---- a silent catalogue is not a route with no levels -------------------------------------
--- The cloud node has no model store; a node like it must keep the route's shipped declaration
--- rather than reporting a model with no reasoning.
+-- ---- a catalogue that cannot answer is not a route with no levels --------------------------
+-- The subscription route answers from its own catalogue, so an id that catalogue does not publish
+-- is the "cannot answer" case now. A route that cannot describe this id must keep its own shipped
+-- declaration rather than reporting a model with no reasoning - which is what a node with no pi
+-- store used to look like, and no longer is, because there is nothing left to be absent.
 overrides.WASM_AGENT_PROVIDER = 'openai-sub'
-local unsaid, unsaid_set = levels_of('gpt-6.1-sol')
-check(unsaid.supported == true and unsaid.source == 'pi-openai-codex',
-  'a machine with no clue still answers from the route, got ' .. tostring(unsaid.source))
+local unsaid, unsaid_set = levels_of('gpt-9-unpublished')
+check(unsaid.supported == true and unsaid.source == 'openai-sub-route',
+  'an id the catalogue cannot describe still answers from the route, got ' .. tostring(unsaid.source))
 check(unsaid_set.high == true and unsaid_set.minimal == nil,
   'and answers with the shipped set, not an invented one')
+local also_unsaid = levels_of('gpt-6.1-sol')
+check(also_unsaid.supported == true and also_unsaid.source == 'openai-sub-catalogue',
+  'while a published id answers from the catalogue even with no store on disk, got ' ..
+  tostring(also_unsaid.source))
 
 print('openai-sub levels ok (' .. checks .. ' checks)')

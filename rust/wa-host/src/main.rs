@@ -59,6 +59,8 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("lua/core/provider.lua", include_str!("../../../lua/core/provider.lua")),
     ("lua/core/openai_sub.lua", include_str!("../../../lua/core/openai_sub.lua")),
     ("lua/core/openai_sub_bridge.lua", include_str!("../../../lua/core/openai_sub_bridge.lua")),
+    ("lua/core/openai_sub_catalogue.lua", include_str!("../../../lua/core/openai_sub_catalogue.lua")),
+    ("lua/core/subscription_wire.lua", include_str!("../../../lua/core/subscription_wire.lua")),
     ("lua/core/model_window.lua", include_str!("../../../lua/core/model_window.lua")),
     ("lua/core/changeset.lua", include_str!("../../../lua/core/changeset.lua")),
     ("lua/core/patch_audit.lua", include_str!("../../../lua/core/patch_audit.lua")),
@@ -368,6 +370,9 @@ fn main() {
     lua.register_with_upvalue("client_status", host::client_status, host_ptr);
     lua.register("http", host::http);
     lua.register("http_stream", host::http_stream);
+    // A second streaming dialect: the subscription route reads its own SSE event names in Lua,
+    // so the capability hands over response lines and the protocol stays the caller's.
+    lua.register("http_sse", host::http_sse);
     lua.register("beat", host::beat);
     // The one capability that draws: the CLI's status line keeps moving while the interpreter
     // is blocked inside a call, which nothing on the Lua side can do for itself.

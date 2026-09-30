@@ -1747,6 +1747,156 @@ pub extern "C" fn http_stream(l: *mut LuaState) -> c_int {
     1
 }
 
+/// host.http_sse(method, url, headers_json, body, on_line) -> {status, lines, termination}
+///
+/// POSTs to an endpoint that answers `text/event-stream` and hands **each response line** to the
+/// Lua callback `on_line(text)` as it arrives, so a caller can parse a provider's own SSE dialect
+/// while it streams. The framing stays Lua's on purpose: `host.http_stream` below reads *one*
+/// dialect (OpenAI-compatible `data: {...}` chunks with a `choices[0].delta` body) and turns it
+/// into UI events, and a second provider whose event names and completion semantics differ cannot
+/// be expressed as that dialect without flattening it. A line reader is the capability; the
+/// protocol is the caller's.
+///
+/// - **A line at a time, never the whole body.** The callback runs while the socket is open and
+///   the response is still being read, so a live provider stream reaches the UI as it arrives
+///   instead of after it ends. Nothing is buffered here.
+/// - **`on_line` is a function, and a Lua error in it stops the read.** The error crosses back as
+///   `{error, termination:"line_callback_failed"}` after the socket is dropped; a caller that
+///   raises `run_cancelled` or its own deadline from the callback therefore ends the read at that
+///   line rather than at the end of the stream.
+/// - **A non-200 is not a stream.** The status and a bounded body come back exactly as
+///   `host.http` reports them, so an auth or quota refusal is visible rather than an empty stream
+///   that looks like a provider with nothing to say.
+/// - **Cancellation is checked per line**, and the request uses the same shutdown-aware transport
+///   as `host.http`/`host.http_stream`, so a cancelled child stops reading at the next chunk.
+///   `termination` says how the read ended: `eof`, `cancelled`, `http_error`, `request_failed`,
+///   `read_failed`, `line_callback_failed`. EOF is *not* an error here: whether a stream that
+///   ended with no terminal event is a failure is a question only the protocol's owner can answer
+///   (its event mapping is what knows which event completes a response).
+/// - Returns `nil` for nothing: the callback is required, and a call without one is refused, not
+///   read into nothing.
+pub extern "C" fn http_sse(l: *mut LuaState) -> c_int {
+    let method = arg_string(l, 1).unwrap_or_else(|| "POST".into()).to_uppercase();
+    let url = arg_string(l, 2).unwrap_or_default();
+    let headers_json = arg_string(l, 3).unwrap_or_else(|| "{}".into());
+    let body = arg_string(l, 4).unwrap_or_default();
+    let headers = parse_headers(&headers_json);
+    if unsafe { crate::lua::lua_type(l, 5) } == crate::lua::LUA_TNIL {
+        push_json(l, &json!({"error": "http_sse_requires_on_line"}));
+        return 1;
+    }
+    if method != "POST" {
+        push_json(l, &json!({"error": "method_not_supported"}));
+        return 1;
+    }
+    if run_cancel_requested() {
+        crate::subagents::clear_active_socket();
+        push_json(l, &json!({"error": "run_cancelled", "termination": "cancelled"}));
+        return 1;
+    }
+    let _heartbeat = crate::serve::Heartbeat::start();
+    let mut request = agent_for_call().post(&url);
+    for (key, value) in &headers {
+        request = request.header(key, value);
+    }
+    let response = match request.send(body.as_bytes()) {
+        Ok(response) => response,
+        Err(error) => {
+            crate::subagents::clear_active_socket();
+            push_json(l, &json!({"error": error.to_string(), "termination": "request_failed"}));
+            return 1;
+        }
+    };
+    let status = response.status().as_u16();
+    if status != 200 {
+        let text = response.into_body().read_to_string().unwrap_or_default();
+        crate::subagents::clear_active_socket();
+        let head: String = text.chars().take(2048).collect();
+        push_json(l, &json!({"status": status, "body": head, "termination": "http_error"}));
+        return 1;
+    }
+    let reader = std::io::BufReader::new(response.into_body().into_reader());
+    let outcome = read_sse_lines(reader, |line| call_lua_string(l, 5, line));
+    crate::subagents::clear_active_socket();
+    let value = match outcome {
+        Ok(lines) => json!({"status": status, "lines": lines, "termination": "eof"}),
+        Err(failure) => json!({"error": failure.message, "termination": failure.termination,
+            "status": status, "lines": failure.lines}),
+    };
+    push_json(l, &value);
+    1
+}
+
+/// How an SSE read ended, and how much of it arrived.
+#[derive(Debug)]
+struct SseFailure {
+    message: String,
+    termination: &'static str,
+    lines: u64,
+}
+
+/// Read a response one line at a time, handing each line to `on_line` as it arrives.
+///
+/// Split out from `http_sse` so the two properties that matter can be tested without a socket: the
+/// lines arrive **in order and unmodified**, and any failure - a cancel, a read error, or a Lua
+/// error raised by the callback - stops the read at that line instead of at the end of the body.
+/// A residual line at EOF is handed over like any other (a stream whose last frame has no trailing
+/// newline is a real ending), and a read that leaves the body empty is not an error here: whether
+/// an empty stream is a failure is the protocol owner's question.
+fn read_sse_lines<R, F>(reader: R, mut on_line: F) -> Result<u64, SseFailure>
+where
+    R: std::io::BufRead,
+    F: FnMut(&str) -> Result<(), String>,
+{
+    let mut lines = 0u64;
+    for line in reader.lines() {
+        if run_cancel_requested() {
+            return Err(SseFailure { message: "run_cancelled".into(), termination: "cancelled", lines });
+        }
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                return Err(SseFailure { message: error.to_string(), termination: "read_failed", lines })
+            }
+        };
+        lines += 1;
+        if let Err(failure) = on_line(&line) {
+            return Err(SseFailure { message: failure, termination: "line_callback_failed", lines });
+        }
+    }
+    Ok(lines)
+}
+
+/// Call a Lua function with one string argument and no results.
+///
+/// The one place a host capability calls back into the interpreter, so it is small and total: the
+/// callee is anchored in the *caller's* frame (it is an argument of the C function that is
+/// running), the stack is restored on both paths, and a Lua error becomes `Err(text)` instead of
+/// unwinding through the C boundary. The text is redacted and bounded: it crosses into a provider
+/// error path where a token must never appear.
+fn call_lua_string(l: *mut LuaState, index: c_int, payload: &str) -> Result<(), String> {
+    use crate::lua::{lua_gettop, lua_pcallk, lua_settop, lua_tolstring, LUA_OK};
+    unsafe {
+        let base = lua_gettop(l);
+        crate::lua::lua_pushvalue(l, index);
+        lua_pushlstring(l, payload.as_ptr() as *const c_char, payload.len());
+        let status = lua_pcallk(l, 1, 0, 0, 0, std::ptr::null_mut());
+        if status == LUA_OK {
+            lua_settop(l, base);
+            return Ok(());
+        }
+        let mut len = 0usize;
+        let pointer = lua_tolstring(l, -1, &mut len);
+        let message = if pointer.is_null() {
+            "lua error".to_string()
+        } else {
+            String::from_utf8_lossy(std::slice::from_raw_parts(pointer as *const u8, len)).into_owned()
+        };
+        lua_settop(l, base);
+        Err(redact(&message).chars().take(512).collect())
+    }
+}
+
 /// host.relay(url, headers_json, body) -> {status}
 ///
 /// POSTs to a peer and forwards every SSE `data:` line straight to our UI
@@ -1963,6 +2113,94 @@ fn stream_completion(method: &str, url: &str, headers: &[(String, String)], body
         "last_delta_to_end_ms": last_delta_ms.map(|ms| started.elapsed().as_millis() as u64 - ms),
         "ended_silent": last_delta_ms.map(|ms| started.elapsed().as_millis() as u64 - ms >= 10_000).unwrap_or(false),
     }))
+}
+
+#[cfg(test)]
+mod sse_line_tests {
+    use super::*;
+
+    /// The recorded stream the subscription wire is parsed from - one frame per line of the real
+    /// wire bytes, kept in the repository so `lua/core/subscription_wire.lua` is tested against
+    /// what the endpoint actually sent. The Rust side is tested against the same bytes because the
+    /// line boundaries it hands over are half of that contract: if this reader re-frames or drops a
+    /// line, the Lua parser is being tested on a stream that never existed.
+    fn recorded(name: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/subscription")
+            .join(name);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("recorded fixture {} is unreadable: {error}", path.display()))
+    }
+
+    fn collect(body: &str) -> (Vec<String>, u64) {
+        let mut seen: Vec<String> = Vec::new();
+        let lines = read_sse_lines(std::io::Cursor::new(body), |line| {
+            seen.push(line.to_string());
+            Ok(())
+        })
+        .expect("a body with no failing callback reads to EOF");
+        (seen, lines)
+    }
+
+    #[test]
+    fn the_recorded_stream_is_handed_over_line_for_line() {
+        let body = recorded("codex-responses-sse.txt");
+        let (seen, lines) = collect(&body);
+        assert_eq!(seen, body.lines().map(str::to_string).collect::<Vec<String>>());
+        assert_eq!(lines as usize, seen.len(), "the count is the lines handed over");
+        assert!(seen.iter().any(|line| line.contains("response.completed")));
+        // This endpoint does not end with the `data: [DONE]` sentinel: `response.completed` is the
+        // last frame and the stream ends at EOF. Measured, and pinned here because a reader that
+        // waits for a sentinel would read a finished stream as a truncated one.
+        assert!(!seen.iter().any(|line| line.trim() == "data: [DONE]"));
+        assert_eq!(seen.last().map(String::as_str), Some(""), "the body ends on the frame's blank line");
+        assert_eq!(seen[seen.len() - 3], "event: response.completed",
+            "and the last frame carries the terminal event");
+        assert!(seen[seen.len() - 2].starts_with("data: "),
+            "whose payload is the next line, handed over as it was received");
+    }
+
+    /// A truncated stream is handed over as the lines that arrived, and the terminal event is
+    /// simply absent. Deciding that this is a failure belongs to the protocol's owner (Lua), which
+    /// is why the reader reports how it ended rather than judging it.
+    #[test]
+    fn a_truncated_stream_ends_where_it_ended() {
+        let body = recorded("codex-responses-sse.txt");
+        let terminal = body.lines().position(|line| line.contains("response.completed"))
+            .expect("the recorded fixture has a terminal event");
+        let truncated = body.lines().take(terminal).collect::<Vec<&str>>().join("\n");
+        let (seen, lines) = collect(&truncated);
+        assert_eq!(lines as usize, seen.len());
+        assert!(seen.len() < body.lines().count());
+        assert!(!seen.iter().any(|line| line.contains("response.completed")));
+    }
+
+    #[test]
+    fn a_failing_callback_stops_the_read_at_that_line() {
+        let body = recorded("codex-responses-sse.txt");
+        let mut handed = 0u64;
+        let failure = read_sse_lines(std::io::Cursor::new(&body), |_line| {
+            handed += 1;
+            if handed == 3 { Err("run_cancelled".to_string()) } else { Ok(()) }
+        })
+        .expect_err("a callback that fails must end the read");
+        assert_eq!(failure.termination, "line_callback_failed");
+        assert_eq!(failure.lines, 3);
+        assert_eq!(failure.message, "run_cancelled");
+        assert_eq!(handed, 3, "no line after the failure is read");
+    }
+
+    /// EOF terminates the residual line: a stream that ends without a trailing newline still
+    /// delivers its last bytes rather than swallowing them as an incomplete read.
+    #[test]
+    fn a_residual_line_at_eof_is_still_a_line() {
+        let (seen, lines) = collect("event: x\ndata: {\"a\":1}");
+        assert_eq!(lines, 2);
+        assert_eq!(seen, vec!["event: x".to_string(), "data: {\"a\":1}".to_string()]);
+        // An empty body is an empty read, not a failure: a provider that answers with no body at
+        // all is a fact to report, not an error to invent here.
+        assert_eq!(collect("").1, 0);
+    }
 }
 
 /// host.now() -> seconds since epoch
