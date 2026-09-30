@@ -220,6 +220,30 @@ gate, with finish.mjs `#164` (same tree, log sha256 `34308c29...`) as corroborat
 Not used and not to be used: any evidence from `19bf` (independently refused) or `1939` (review pending) -
 neither is part of this batch.
 
+## 6. PUBLISHED - `main` is `da8dc8918a34c880768956ff775d883802dcb7a7` (tree `09ba73f1e087c8ca1e576deaac8d9a738fe85a46`)
+
+Executed on the coordinator's explicit authorisation ("so you execute it, and I authorise it"), following the
+repo's own sanctioned landing route - the canonical checkout, `git -C <canonical>`, fast-forward only. Every
+step was asserted with a hard stop before the push; no stop fired.
+
+| step | assertion | result |
+|---|---|---|
+| 1 | `ls-remote origin refs/heads/main` == `ab827c88` | **`ab827c88a6ac091318b5adb8be34e83e858c4e9a`** - no race |
+| 2 | `fetch origin` | rc 0; canonical checkout on `main`, **clean**, candidate object present |
+| 3 | `merge --ff-only da8dc891…` | rc 0, `Updating ab827c8..da8dc89` / **`Fast-forward`** (no merge commit created) |
+| 4 | `HEAD^{tree}` == `09ba73f1…` | **`09ba73f1e087c8ca1e576deaac8d9a738fe85a46`** |
+| 5 | four tips ancestors of HEAD | `3290d327` YES, `1d5f7ca1` YES, `5ab4683` YES, `7e2ab2c3` YES |
+| 6 | `push origin main` (no `--force`, no `--force-with-lease`) | rc 0, `ab827c8..da8dc89  main -> main` |
+| 7 | read-back | `ls-remote main` = **`da8dc8918a34c880768956ff775d883802dcb7a7`** = local HEAD; after `fetch`, `origin/main^{tree}` = **`09ba73f1e087c8ca1e576deaac8d9a738fe85a46`** = the gated tree; all four tips contained in `origin/main`; canonical checkout clean |
+
+The pushed commit is the git identity of a commit whose tree the receipt names; the two gate receipts
+(merge-lane `#167`, and `finish.mjs` `#164` as corroboration) therefore cover exactly what `main` now is.
+
+**Landing is not deploying.** `main` is a git ref; the node keeps running the code it was started with until a
+deploy goes through the sentinel. No deploy was attempted, no node restarted or reconfigured, no service
+reloaded. Also untouched, as required: `c78ab731`, `72530c58`, `dcf49653`, `19bf`, `1939`; no branch deleted, no
+worktree pruned, no force-push.
+
 ## What I could not verify
 
 * The published `main` sha and `git rev-parse main^{tree}` equality (step 5) - publication refused, so there is
