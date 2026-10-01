@@ -716,16 +716,41 @@ $harness = @'
     providerPicker.value + ' / ' + settingsPicks.value);
   check(settingsPicks.textContent.indexOf('gpt-6-luna')<0 && limitsBox.textContent.indexOf('61%')>=0,
     'and the model list and LIMITS must be re-read from the same answer, saw ' + limitsBox.textContent);
-  check(settingsErrBox.textContent.indexOf('not applied')>=0 && settingsErrBox.textContent.indexOf('aborted')>=0,
-    'the change that was not applied must be reported, saw: ' + settingsErrBox.textContent);
+  // The note is derived from the node's re-read answer, never from the write outcome alone: the
+  // exact wording is part of this case, because a note that reads as a denial next to a screen that
+  // shows the change is the note the operator acts on. dash is the em dash the app writes.
+  var dash=String.fromCharCode(8212);
+  check(settingsErrBox.textContent==='not confirmed '+dash+' no answer within 8s (the request was aborted); the node now reports opencode-go / deepseek-v4.1-flash',
+    'an unanswered change must be reported as unconfirmed with the node answer, never as not applied, saw: ' +
+    settingsErrBox.textContent);
+  // 1b. The write is never answered and the node has applied it anyway (its own queue, or another
+  //     window): the screen and the note must both say what the node reports. A note derived from
+  //     the write outcome alone reads as a denial here - "not applied" next to the applied pair -
+  //     which is the wording the operator would act on.
+  window.__fixtures.models=Object.assign({},nodeAnswer,{provider:'openai-sub',model:'gpt-6-luna'});
+  settings=Object.assign({},settings,{provider:'opencode-go',model:'deepseek-v4.1-flash'});
+  renderControls();
+  providerPicker.value='openai-sub'; providerPicker.dispatchEvent(new Event('change'));
+  for(var lateTick=0;lateTick<60;lateTick++) await tick();
+  check(providerPosts().length===2 && providerPicker.value==='openai-sub' &&
+    settingsPicks.value==='gpt-6-luna' && settingsPicks.options.length===2,
+    'a write the node applied after the abort must show the node answer, saw ' +
+    providerPicker.value + ' / ' + settingsPicks.value);
+  check(settingsErrBox.textContent==='in effect '+dash+' no answer within 8s (the request was aborted); the node reports openai-sub / gpt-6-luna, which is what was asked for',
+    'and the note must say it is in effect, not deny an applied change, saw: ' + settingsErrBox.textContent);
+  window.__fixtures.settingsAbort=false;
+  window.__fixtures.models=nodeAnswer;
+  settings=Object.assign({},settings,{provider:'opencode-go',model:'deepseek-v4.1-flash'});
+  renderControls();
   // 2. The node refuses the write, in its own words.
-  window.__fixtures.settingsAbort=false; window.__fixtures.settingsRefuse=true;
+  window.__fixtures.settingsRefuse=true;
   providerPicker.value='openai-sub'; providerPicker.dispatchEvent(new Event('change'));
   for(var refuseTick=0;refuseTick<60;refuseTick++) await tick();
-  check(providerPosts().length===2 && providerPicker.value==='opencode-go' &&
-    settingsErrBox.textContent.indexOf('not applied')>=0 &&
-    settingsErrBox.textContent.indexOf('settings_refused_by_fixture')>=0,
-    'a refused settings change must be reported in the node words and leave the node answer on screen, saw ' +
+  check(providerPosts().length===3 && providerPicker.value==='opencode-go' &&
+    settingsErrBox.textContent.indexOf('not confirmed')>=0 &&
+    settingsErrBox.textContent.indexOf('settings_refused_by_fixture')>=0 &&
+    settingsErrBox.textContent.indexOf('opencode-go / deepseek-v4.1-flash')>=0,
+    'a refused settings change must be reported in the node words with the node answer, saw ' +
     providerPicker.value + ' / ' + settingsErrBox.textContent);
   window.__fixtures.settingsRefuse=false;
   // 3. The node accepts it and answers with its refreshed payload: the three controls move together
