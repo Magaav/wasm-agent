@@ -184,3 +184,13 @@ The final combined integration candidate must contain and execute these fixtures
 Focused UI admission includes them when available; missing/unsupported critical
 integration coverage falls back to complete verification. The additional wiring
 and review fixes need new exact-tree verification and cannot reuse bootstrap 214.
+
+The exact held tip `dcf49653` is also a semantic merge parent, so closure can prove
+its ancestry without force-deleting an unmerged ref. Conflict decisions preserve
+current supervisor delegation, health-free JSON lifetime ownership, short queue
+locks, durable-path proof, and explicit operator resume. Obsolete status-based
+preflight/automatic watcher start are superseded; they would call the node being
+served and retain recycled-PID uncertainty. The held lifetime/start/dedupe intent
+and its useful classifier/pending-preservation tests remain. Unknown inventory
+now refuses instead of preserving the held test's old silent malformed-record
+skip. Per-conflict decisions are archived in `throughput-held-semantic-decisions.json`.
