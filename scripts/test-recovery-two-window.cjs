@@ -1,10 +1,11 @@
 // Two isolated real Chromium pages, actual node/Lua/SQLite and owned mock provider.
 // A proxy delays only the settings acknowledgement, after the node has applied it.
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),http=require('node:http');
-const {spawn}=require('node:child_process');const {once}=require('node:events');const assert=require('node:assert/strict');
+const {spawn,spawnSync}=require('node:child_process');const {once}=require('node:events');const assert=require('node:assert/strict');
 const repo=path.resolve(__dirname,'..'),binary=path.resolve(process.argv[2]||'rust/target/release/wa.exe');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-two-window-'));const report={schema:1,root,checks:[],requests:[],models:[]};
 const embedded=process.argv.includes('--embedded');
+const keep=process.argv.includes('--keep');
 report.lua=embedded?'embedded candidate modules':'explicit source Lua root';
 report.binary={path:binary,sha256:require('node:crypto').createHash('sha256').update(fs.readFileSync(binary)).digest('hex')};
 const delay=ms=>new Promise(r=>setTimeout(r,ms));const children=[],sockets=new Set();let node,provider,proxy,chrome,ws;
@@ -93,7 +94,31 @@ function finish(res,text){event(res,{choices:[{delta:{content:text},finish_reaso
   for(const server of [proxy,provider])if(server){server.closeAllConnections();await new Promise(r=>server.close(r));}
   report.cleanup={ownedPids:children.map(c=>({pid:c.pid,exited:c.exitCode!==null||c.signalCode!==null})),browserClosed};
   if(!report.cleanup.ownedPids.every(c=>c.exited)||!browserClosed){report.passed=false;report.cleanup.error='owned process shutdown unverified';process.exitCode=1;}
-  fs.writeFileSync(path.join(root,'report.json'),JSON.stringify(report,null,2)+'\n');console.log('evidence: '+path.join(root,'report.json'));
+  // Successful fixture homes/browser caches must not grow with every gate.
+  // Preserve the complete ledger/home/log evidence in shared Git metadata so
+  // retiring this producer tree cannot erase it; failed/export-only runs stay
+  // explicit --keep evidence for diagnosis, without being called cleaned.
+  let evidence=root;
+  const common=spawnSync('git',['rev-parse','--path-format=absolute','--git-common-dir'],{cwd:repo,encoding:'utf8',windowsHide:true});
+  if(report.passed&&!keep&&common.status===0){
+    evidence=path.join(common.stdout.trim(),'wa-recovery-evidence',path.basename(root));
+    fs.mkdirSync(path.dirname(evidence),{recursive:true});
+    if(fs.existsSync(evidence))throw new Error('refusing to overwrite prior fixture evidence');
+    fs.cpSync(root,evidence,{recursive:true,filter:source=>path.relative(root,source).split(path.sep)[0]!=='browser'});
+    function verifyCopy(relative=''){
+      for(const entry of fs.readdirSync(path.join(root,relative),{withFileTypes:true})){
+        const name=path.join(relative,entry.name);if(name.split(path.sep)[0]==='browser')continue;
+        if(entry.isDirectory())verifyCopy(name);
+        else{const original=fs.readFileSync(path.join(root,name)),copied=fs.readFileSync(path.join(evidence,name));assert.ok(original.equals(copied),'fixture evidence copy differs: '+name);}
+      }
+    }
+    verifyCopy();
+    assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir())+path.sep)&&path.basename(root).startsWith('wa-two-window-'),'owned scratch cleanup stays in temporary root');
+    fs.rmSync(root,{recursive:true,force:true});
+    report.cleanup.fixture_home_removed=true;
+  }else report.cleanup.fixture_home_removed=false;
+  report.evidence=evidence;
+  fs.writeFileSync(path.join(evidence,'report.json'),JSON.stringify(report,null,2)+'\n');console.log('evidence: '+path.join(evidence,'report.json'));
   if(report.passed)console.log('two-window recovery ok ('+report.checks.length+' checks, 0 skipped; real browser/node, owned mock inference)');
  }
 })().catch(e=>{console.error(e.stack);process.exitCode=1;});
