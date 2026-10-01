@@ -14,8 +14,15 @@ function fixture(name) {
   const dir=path.join(root,name),repo=path.join(dir,'canonical'),remote=path.join(dir,'remote.git'),executor=path.join(dir,'executor'),store=path.join(dir,'state');
   fs.mkdirSync(executor,{recursive:true});fs.mkdirSync(repo);
   git(repo,['init','-b','main']);git(repo,['config','user.name','wave-fixture']);git(repo,['config','user.email','wave@invalid']);
-  fs.writeFileSync(path.join(repo,'seed'),'fixture\n');git(repo,['add','seed']);git(repo,['commit','-m','baseline']);
+  fs.writeFileSync(path.join(repo,'seed'),'fixture\n');
+  // A stand-in gate receipt is not enough now: the shared full-gate proof binds a real
+  // tracked runner and input scope, so the fixture commits them and runs the real gate.
+  fs.mkdirSync(path.join(repo,'scripts'),{recursive:true});fs.mkdirSync(path.join(repo,'skills','parallel-evolution','scripts'),{recursive:true});
+  fs.writeFileSync(path.join(repo,'skills','parallel-evolution','scripts','finish.mjs'),'// wave lifecycle fixture gate driver\n');
+  fs.writeFileSync(path.join(repo,'scripts','test.sh'),'#!/bin/sh\nprintf "smoke ok\\n"\n');
+  git(repo,['add','.']);git(repo,['commit','-m','baseline and gate fixture']);
   git(dir,['init','--bare',remote]);git(repo,['remote','add','origin',remote]);git(repo,['push','-u','origin','main']);
+  const gateHead=git(repo,['rev-parse','HEAD']),gateTree=git(repo,['rev-parse','HEAD^{tree}']);
   const driver=path.join(executor,'driver.cjs');
   fs.writeFileSync(driver,`const fs=require('fs'); const mode=process.argv[2];
     if(mode==='step') { fs.appendFileSync(process.argv[3],process.env.WA_WAVE_OPERATION_ID+'\\n'); console.log(JSON.stringify({ok:true,settled:true,cleanup:'self_exited',operation_id:process.env.WA_WAVE_OPERATION_ID})); }
@@ -31,7 +38,11 @@ function fixture(name) {
   const log=path.join(executor,'gate.log'),receipt=path.join(executor,'gate.json');
   fs.writeFileSync(log,'smoke ok\n');
   const hash=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-  fs.writeFileSync(receipt,JSON.stringify({schema:1,passed:true,kind:'full',gate_ms:1,repo,gate_exit:0,gate_runs:1,tree:git(repo,['rev-parse','HEAD^{tree}']),skipped:0,log,log_sha256:hash(log),runner:{path:driver,sha256:hash(driver)}}));
+  const shell=process.platform==='win32'?path.join(process.env.ProgramFiles||'C:/Program Files','Git','bin','bash.exe'):'bash';
+  fs.writeFileSync(receipt,JSON.stringify({schema:1,passed:true,kind:'full',gate_ms:1,repo,head:gateHead,tree:gateTree,gate_exit:0,gate_runs:1,skipped:0,log,log_sha256:hash(log),shell,
+    host:{hostname:os.hostname(),platform:process.platform,arch:os.arch()},
+    runner:{path:path.join(repo,'skills','parallel-evolution','scripts','finish.mjs'),sha256:hash(path.join(repo,'skills','parallel-evolution','scripts','finish.mjs')),platform:process.platform},
+    input_scope:{tree:gateTree,command:'bash scripts/test.sh',gate_sha256:hash(path.join(repo,'scripts','test.sh'))}}));
   const manifest={id:name,owner:'fixture-owner',repo,executor_cwd:executor,bootstrap:true,
     gate_receipt:receipt,
     steps:['land','deploy','retire'].map(name=>({name,argv:[process.execPath,driver,'step',effects],post:{argv:[process.execPath,driver,'post']}})),
