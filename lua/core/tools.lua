@@ -1066,15 +1066,29 @@ end
 -- guideline tells it to group independent actions; writes and commands with dependencies must
 -- remain in separate responses. Every command still passes through normal bash validation and
 -- patch review before the operation manager starts it. At most eight can be active in one batch.
+-- Does dispatching `name` change something outside this run?
+--
+-- The steering fence exists because steering cannot undo an effect that has already happened, so
+-- a call needs stopping only when it has one. A read-only allowlist, not an effectful one: a tool
+-- this file has never heard of (a plugin's) keeps the fence, which is the safe direction.
+local READ_ONLY = {
+  read = true, read_many = true, grep = true, ls = true, tool_result = true, skill = true,
+  graph = true, diagnose = true, capabilities = true, nodes = true,
+  recall = true, memories = true, sessions = true, session = true,
+  search_messages = true, search_ledger = true, conversation = true, list_conversations = true,
+  spell_list = true, spell_get = true,
+}
+
+function M.has_effect(name) return READ_ONLY[name] ~= true end
+
 function M.start_parallel_bash(calls, memory, role, ctx)
   if not is_master(role) or (ctx and ctx.subagent
       and (not ctx.subagent.allowed or not ctx.subagent.allowed.operation))
       or type(calls) ~= "table" or #calls < 2 then return nil end
-  local read_only = { read=true, read_many=true, grep=true, ls=true, tool_result=true, skill=true }
   local pending, count = {}, 0
   for _, call in ipairs(calls) do
     local fn = type(call) == "table" and call["function"] or nil
-    if type(fn) ~= "table" or (fn.name ~= "bash" and not read_only[fn.name]) then return nil end
+    if type(fn) ~= "table" or (fn.name ~= "bash" and M.has_effect(fn.name)) then return nil end
     if fn.name == "bash" and type(call.id) == "string" and call.id ~= "" then
       local ok, args = pcall(json.decode, fn.arguments or "")
       if ok and type(args) == "table" and type(args.command) == "string" and args.command ~= "" then

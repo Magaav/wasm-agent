@@ -610,6 +610,40 @@ $harness = @'
     'a missing subscription login points to Pi');
   settings=savedModelSettings;
   window.renderProviders(); window.renderModels();
+  // A stale Go model must remain visible, not masquerade as the first choice.
+  settings=Object.assign({},savedModelSettings,{provider:'opencode-go',model:'gpt-6-sol',
+    model_error:'model_not_servable: choose a supported Go model',
+    providers:[{id:'opencode-go',label:'opencode-go',configured:true,models:['deepseek-v4.1-flash']}],
+    reasoning:{supported:false,levels:[],selected:'provider'}});
+  window.renderProviders(); window.renderModels();
+  check(modelPicker.value==='gpt-6-sol' && modelPicker.selectedOptions[0].disabled &&
+    /unavailable on this route/.test(modelPicker.selectedOptions[0].textContent),
+    'stale Go selection stays visible instead of silently showing DeepSeek');
+  check(/model_not_servable/.test(document.getElementById('settings-error').textContent),
+    'stale model refusal is visible before the next failed chat');
+  window.__fixtures.model=Object.assign({},settings,{model:'deepseek-v4.1-flash',model_error:null,
+    reasoning:{supported:true,levels:['low','high','max'],selected:'high'}});
+  modelPicker.value='deepseek-v4.1-flash'; modelPicker.dispatchEvent(new Event('change'));
+  for(var goTick=0;goTick<20;goTick++) await tick();
+  var goReasoning=document.getElementById('reasoning-select');
+  check(modelPicker.value==='deepseek-v4.1-flash' && !goReasoning.disabled &&
+    Array.from(goReasoning.options).map(o=>o.value).join(',')==='low,high,max',
+    'explicit supported Go model recovery enables catalogue reasoning');
+  window.__fixtures.reasoning=Object.assign({},window.__fixtures.model,
+    {reasoning:{supported:true,levels:['low','high','max'],selected:'low'}});
+  goReasoning.value='low'; goReasoning.dispatchEvent(new Event('change'));
+  for(var goTick=0;goTick<20;goTick++) await tick();
+  check(goReasoning.value==='low' && settings.reasoning.selected==='low' &&
+    document.getElementById('settings-error').textContent==='',
+    'Go reasoning selection roundtrips through the status balloon');
+  window.__fixtures.model={error:'model_not_servable'};
+  await window.setModel('gpt-6-sol');
+  check(modelPicker.value==='deepseek-v4.1-flash' && goReasoning.value==='low',
+    'refused model selection restores persisted controls');
+  delete window.__fixtures.model;
+  window.__fixtures.reasoning={error:'unsupported_reasoning_level'};
+  settings=savedModelSettings;
+  window.renderProviders(); window.renderModels();
   var diagnostics=document.getElementById('harness-status');
   check(diagnostics.querySelectorAll('details').length===4,'harness diagnostics have four progressively disclosed categories');
   check(/different configuration/.test(diagnostics.textContent),'model drift must be disclosed');
@@ -632,6 +666,30 @@ $harness = @'
   reasoningPicker.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));
   document.dispatchEvent(new PointerEvent('pointerup',{bubbles:true}));
   check(statusBalloon.open,'a press inside a native picker released outside must stay open');
+  // Turn sovereignty: a run in flight owns the settings it started with, so the pickers lock and
+  // the balloon says when a change lands - a control that moves under a running turn misreports
+  // what that turn actually used.
+  window.setBusy(true);
+  check(document.getElementById('provider-select').disabled &&
+    document.getElementById('model-select').disabled &&
+    document.getElementById('reasoning-select').disabled,
+    'the model controls must lock while a run is in flight');
+  check(/applies at the next turn/.test(document.getElementById('settings-note').textContent),
+    'the balloon must say when a change applies, saw: ' +
+    document.getElementById('settings-note').textContent);
+  var callsWhileBusy=window.__calls.length;
+  await window.setModel('deepseek-v4.1-flash');
+  check(window.__calls.length===callsWhileBusy,
+    'a settings change must not be sent while a run is in flight');
+  check(/applies at the next turn/.test(document.getElementById('settings-error').textContent),
+    'the refused change must be visible, saw: ' +
+    document.getElementById('settings-error').textContent);
+  window.setBusy(false);
+  check(!document.getElementById('provider-select').disabled &&
+    !document.getElementById('model-select').disabled,
+    'the model controls must unlock when the run ends');
+  check(document.getElementById('settings-note').textContent==='',
+    'the note must clear when there is no run to protect');
   document.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));
   document.dispatchEvent(new PointerEvent('pointerup',{bubbles:true}));
   check(!statusBalloon.open && statusButton.getAttribute('aria-expanded')==='false',

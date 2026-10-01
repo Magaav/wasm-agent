@@ -89,11 +89,37 @@ function M.active()
   return list[1]
 end
 
+-- The model a route remembers, and whether it came from the environment.
+--
+-- `model.<provider>` and the in-memory override belong to the route they were chosen on, and
+-- there is one node-wide provider switch, so a value left behind by the route you left is the
+-- ordinary case rather than a broken file. `WASM_AGENT_LLM_MODEL` is separated out because it
+-- is an operator pin, not a remembered selection: a pin that cannot run must stay a loud
+-- pre-request refusal (M.unservable), never something quietly replaced.
+local function remembered_model(provider)
+  local remembered = (M.overrides and M.overrides[provider.id]) or read_state("model." .. provider.id)
+  if remembered then return remembered, false end
+  if provider.id == "opencode-go" then
+    local pinned = env("WASM_AGENT_LLM_MODEL")
+    if pinned then return pinned, true end
+  end
+  return nil, false
+end
+
 function M.settings()
   if M._pinned then return M._pinned.settings end
   local provider = M.active()
-  local model = (M.overrides and M.overrides[provider.id]) or read_state("model." .. provider.id)
-  if not model and provider.id == "opencode-go" then model = env("WASM_AGENT_LLM_MODEL") end
+  local model, from_env = remembered_model(provider)
+  -- A model the active route cannot serve is reported and not used. Presenting it would make
+  -- every reader - the picker, the reasoning levels, the next request - describe the route the
+  -- selection came from, which is how "switched to opencode-go" still showed a subscription
+  -- model and reasoning. The route falls back to its own default, and `model_error` names the
+  -- value that was refused so the operator can see and repair it.
+  local model_error
+  if model and not from_env and M.serves(model, provider) == false then
+    model_error = M.unservable(model, provider)
+    model = nil
+  end
   model = model or provider.default_model
   return {
     provider = provider.id,
@@ -101,6 +127,7 @@ function M.settings()
     base_url = provider.base_url,
     api_key = provider.api_key,
     model = model,
+    model_error = model_error,
     default_model = provider.default_model,
   }
 end
@@ -117,16 +144,24 @@ function M.set_provider(id)
     if provider.id == id then
       M.provider_override = id
       write_state("provider", id)
+      -- The selection cache is process memory, not part of the route: dropping it here is what
+      -- makes a switch read the new route's own persisted value, and what lets a repair of the
+      -- state file become visible to an interpreter that had cached the old one.
+      M.overrides = nil
       return true
     end
   end
-  return false
+  return false, "unknown_provider"
 end
 
 function M.set_model(name)
   name = trim(name)
-  if name == "" then return false end
+  if name == "" then return false, "empty_model" end
   local provider = M.active()
+  -- Reject a known protocol mismatch before persisting it. Unknown catalogue
+  -- entries remain allowed, exactly as on the request path.
+  local problem = M.unservable(name, provider)
+  if problem then return false, problem end
   M.overrides = M.overrides or {}
   M.overrides[provider.id] = name
   write_state("model." .. provider.id, name)
@@ -156,14 +191,23 @@ end
 -- over a protocol it previously did not, pi's store is what has to be updated - which is the
 -- point of reading it here instead of re-listing it.
 
--- pi's local model store, keyed by pi's own provider id. Read, never written.
+-- pi's local model store, keyed by pi's own provider id. Read, never written. Kept briefly: the
+-- picker asks the servability question once per offered id, and every answer reads this file, so
+-- an uncached store would be tens of file reads per refresh. A missing or unreadable store is
+-- never cached, so a transient failure cannot stick, and a refresh is picked up within the window.
+local store_cache
 local function pi_store()
   local file = env("WASM_AGENT_PI_MODELS_STORE")
     or (dofile("lua/core/paths.lua").home() .. "/.pi/agent/models-store.json")
+  local now = (host and host.now and host.now()) or 0
+  if store_cache and store_cache.file == file and (now - store_cache.at) < 5 then
+    return store_cache.store
+  end
   local text = host.read_file(file)
   if not text then return nil end
   local ok, store = pcall(json.decode, text)
   if not ok or type(store) ~= "table" then return nil end
+  store_cache = { file = file, at = now, store = store }
   return store
 end
 
@@ -365,7 +409,10 @@ function M.list_models(id)
         local ok, payload = pcall(json.decode, response.body)
         if ok and type(payload) == "table" and type(payload.data) == "table" then
           for _, item in ipairs(payload.data) do
-            if type(item) == "table" and item.id then models[#models + 1] = item.id end
+            if type(item) == "table" and type(item.id) == "string"
+                and M.serves(item.id, provider) ~= false then
+              models[#models + 1] = item.id
+            end
           end
         end
       end
