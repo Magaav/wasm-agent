@@ -2,14 +2,14 @@
 name: git-orchestrator
 description: >-
   The merge lane's runbook and the one home of the integration protocol: who may
-  move main, the lifecycle (produce -> verify -> accept -> land -> deploy), the lanes
+  move main, the lifecycle (produce -> verify -> accept -> land -> deploy -> converge), the lanes
   and their reservations, and the landing steps. It runs continuously - a delivery an
   independent reviewer verified, whose own tree passed the gate and whose branch is
   current with origin/main, is landed without asking - and /merge and /merge all are
   manual entry points into the same procedure that widen its input scope, /merge all
   explicitly including open PRs and outside contributions. Discover exact tips,
-  review, integrate, gate, push and re-audit in one run. Preserve every worktree and
-  local ref; verify source alignment.
+  review, integrate, gate, push and re-audit in one run. Preserve live, dirty, unmerged and uncertain work; close an authorized wave through
+  durable main-only convergence and verify the next-wave baseline.
 ---
 
 # The git orchestrator - the merge lane's runbook
@@ -29,7 +29,7 @@ not a person and not a session - the run the owner is talking to when it lands, 
 `/merge`, and any run opened for integration all take the same lane, and taking it is what
 authorises reviewed merges and the push to `main`. **Merging a delivery is authorised without
 asking each time**: a delivery an independent reviewer verified, whose branch is current with
-`origin/main`, and whose own tree carries a passing gate receipt, is landed by the lane on its own.
+`origin/main`, and whose own tree carries the producer proof required by admission, is admitted by the lane on its own. Narrow changes may carry a focused receipt plus independent review; unknown/shared runtime changes require the full gate. The actual combined integration candidate always carries a complete exact-tree gate before publication and deployment.
 A coordinator merging each delivery by hand is the bottleneck this lane removes.
 
 - **A producer or reviewer lane never moves `main`.** Its branch is its deliverable, and handoff is
@@ -75,7 +75,7 @@ change required, and making it is not this lane's call.
 ### The lifecycle, stated once
 
 ```
-produce -> verify -> accept -> land -> deploy
+produce -> verify -> accept -> land -> deploy -> converge
 ```
 
 - **produce** - a producer lane: its own worktree, its own `change/<name>` from current `origin/main`,
@@ -84,13 +84,14 @@ provenance trailer and pushed. Its branch is its deliverable.
 - **verify** - a reviewer lane that did **not** produce the branch: read the diff and its intent,
   attack the claim on the exact tree, re-run what proves it, and report what it broke.
 - **accept** - the delivery carries evidence bound to one exact tree: the reviewer's verdict plus a
-  gate receipt naming that tree. Nothing proceeds on a claim.
+  producer receipt naming that tree. `finish.mjs admit <repo> <head>` produces the focused receipt; `delivery-admission.mjs check/admit --producer-proof <receipt>` validates it. It records `admission_verified=true`, `gate_verified=false`, and `requires_combined_gate=true`; admission never claims full verification. Activate this policy only after its bootstrap combined tree passes the prior full gate.
 - **land** - the merge lane: merge the reviewed tip onto the sanctioned tree, gate the **merged**
   tree, push `origin/main` under the sole lock, read the ref back, prove integration, then clean up.
 - **deploy** - the sentinel, queued from inside a run and never run in that run's own turn:
   `wa-sentinel request upgrade` for the node and UI, `wa-sentinel request deploy` when the change is
   in the sentinel itself, each with `--session`/`--prompt`, then read `installed.txt` and
   `deploy-result.json` rather than the request's receipt (`skills/self-update/SKILL.md`).
+- **converge** - an explicitly authorized external finisher: pin exact inputs and owner settlements, reconcile operations/claims and runtime/Orca bindings, retire only proven integrated refs, then verify fresh main-only Git, exact installed source/artifact/skills, functional recovery and complete registries. `scripts/wave-lifecycle.mjs` persists this continuation and refuses next-wave admission on a stale/blocked baseline (see `docs/WAVE-CONVERGENCE.md`). No routine permission ping separates these already authorized stages.
 
 ### The lanes and what each may do
 
@@ -99,7 +100,7 @@ provenance trailer and pushed. Its branch is its deliverable.
 | producer | edit, commit, push `change/<name>`, run the gate on its own tree, ask to be landed | move `main`, merge, deploy, accept or review its own delivery, move another actor's tree or ref |
 | reviewer | read the diff and the tree, re-run fixtures and the gate, falsify the claim, report | change the producer's branch, land, accept its own work |
 | gate | run `scripts/test.sh` / `finish.mjs gate` on one tree at a time and record the receipt | run against the same tree as another gate, or claim evidence for a tree it did not test |
-| merge | merge reviewed tips, gate the merged tree, push `origin/main`, read the ref back, prove integration, clean up the branch it landed | force-push, merge an unreviewed or unverified tip, delete another actor's refs or worktrees, deploy, move `main` from a producer's tree |
+| merge | merge reviewed tips, gate the merged tree, push `origin/main`, read the ref back, prove integration, retire explicitly handed-over settled wave inputs | force-push, merge an unreviewed or unverified tip, move an active actor's tree, deploy, move `main` from a producer's tree |
 
 How many lanes run at once, and why the gate is a reserved serial resource, is
 `docs/CONCURRENCY.md` ("Lane reservations and the serial gate"): the target is 16-32 lanes with a
@@ -148,13 +149,13 @@ convergence escalation is addressed to you; this file is the last mile.
   Listing a PR is not permission to merge it. Never broaden scope silently.
 - Uncommitted files are not branch tips. Never commit, stash, reset or discard
   someone else's unfinished files to satisfy this command. Preserve all worktrees,
-  including detached benchmark worktrees, from synchronization and cleanup.
+  including detached benchmark worktrees, until exact owner settlement and preservation evidence authorize retirement. An explicit wave includes safe local retirement; a manual merge alone does not move an unrelated active checkout.
 
 The audit and the final gate are the slowest expensive phases. Use their measured times and counts to decide whether later work should reduce redundant review/proof, parallelize independent review, or serialize only the short shared-write phase. Do not claim speedup from one run; retain baseline/candidate JSON from the same fixture set and compare medians, conflict counts, and gate reruns. Historical phase times are unknown unless an actual artifact records them.
 
 A suitable bounded workflow is: parallelize read-only review of independent tips, then serialize exact integration of overlapping tips on the sanctioned tree. Never run multiple writers against the same checkout, main, a shared ref, or the same staging index. Preserve source-bound gate evidence only when the exact Git tree matches; any changed tree requires a new gate.
 
-`/merge` and `/merge all` authorize integrating reviewed commit tips and enforcing the remote main-only invariant below. Delete only exact non-main remote refs after proving they are integrated and no open PR depends on them. Preserve every local ref and worktree, including dirty drafts, detached benches and worktrees where the branch is already merged; do not synchronize or delete local refs/worktrees.
+`/merge` and `/merge all` authorize integrating reviewed commit tips and enforcing the remote main-only invariant below. Delete only exact non-main remote refs after proving they are integrated and no open PR depends on them. Live work stays owned. For an explicitly authorized wave, local refs and finished worktrees are retired only through the convergence procedure after accepted settlement; dirty drafts, unmerged tips and uncertain effects remain durable blockers. A manual merge alone does not broaden that authority.
 
 ## The landing steps
 
@@ -275,55 +276,61 @@ and remote layout; compare `timings_ms`, `counts`, `gate_ms`, `skipped`, and
 `gate_exit`. This measures wall time and work avoided, not correctness by itself.
 No historical baseline is implied by adding telemetry.
 
-### 4. Prove integration, then clean up the branch you landed
+### 4. Close the authorized wave with an external finisher
 
-After the tested candidate is published and the final audit is clean, `origin`
-must have exactly one branch: `main`. This is a required postcondition of `/merge`
-and `/merge all`. Read the exact remote `refs/heads/*` tips; for each non-main
-remote branch, prove its exact tip is an ancestor of the tested `origin/main`,
-confirm no open PR still depends on it, and recheck that its remote tip has not
-moved immediately before deleting that exact remote ref with a normal, non-force
-deletion. Never wildcard-delete or delete `main`. If any tip moves, arrives late,
-is not integrated, or belongs to an unresolved PR, stop cleanup and re-audit/review
-it. `verify` checks without changing refs and succeeds only when the current
-source tree has exact-tree gate evidence and fresh `git ls-remote --heads origin`
-shows `refs/heads/main` at the tested SHA and nothing else.
+An explicit main-only wave supersedes the historical permanent-local-ref retention
+policy. Establish the external finisher before closing the producer's own branch
+or tree. Only the canonical checkout owns `main`; idle finished terminals and
+benchmarks may be safely parked detached after their valuable work is reconciled.
+No active, dirty, unmerged, locked or uncertain checkout is moved or discarded.
+Age, zero output, an absent PID, cancellation and a UI card are not settlement.
 
-The remote invariant does **not** authorize local cleanup. Preserve all local
-branch refs and worktrees—including dirty drafts, live, locked, detached and clean
-merged worktrees. Do not synchronize, retire, delete, or move any worktree; report
-its state separately. Never discard unfinished files. A separate cleanup request
-is required for local ref or worktree changes.
+Use `scripts/wave-audit.mjs` for a new read-only diagnostic artifact, preserving
+manual `state.json.before-reconcile-*` originals. Complete discovery, independent
+review and integration before retirement. Resource claims are reconciled through
+the existing resource API with exact owner/run and inspected effects. Operations
+use durable effective cwd/boot identity and the indexed relevant/reconcile API;
+legacy identity uncertainty is explicit, never rewritten as execution success.
 
-Cleaning up is after the fact, never instead of it, and it is limited to the branch this landing
-produced:
+Use `scripts/wave-retire.mjs apply <exact-plan> <private-state>` only after the
+fresh owner, dependency, operation and claim proofs in that plan pass. Its journal
+records each effect before it runs and refuses to replay an ambiguous action.
+Every exact tip must be an ancestor of accepted `main`; local deletion uses
+`git update-ref -d <ref> <expected-tip>` after no worktree checks it out. A normal
+non-force remote deletion uses a private pre-push guard, after existing pre-push
+checks, to validate the remote SHA from that push's own advertisement. Receive-pack
+then checks the old OID atomically; moving tips are refused and preserved. No
+wildcards, force flags, reset, PR dependency bypass or image-name termination.
+Runtime/Orca reconciliation has separate verified postconditions; deleting Git
+refs alone cannot establish release.
 
-- **Prove the branch is integrated before deleting it.** `git -C <canonical> branch --merged main`
-  lists `change/<name>`, or `git -C <canonical> merge-base --is-ancestor <tip> main` exits 0. Do
-  **not** use `git branch -d` as that proof: measured on git 2.55, a branch whose tip is in its own
-  upstream (`refs/remotes/origin/change/<name>`) but not in `main` is deleted by `-d` after a warning,
-  not refused.
-- **Let git refuse to give up unfinished work.** `git -C <canonical> worktree remove <path>` refuses a
-  worktree with modified or untracked files (`contains modified or untracked files, use --force`), and
-  that refusal is the check, so never reach for `--force`. `git worktree prune` is only for a worktree
-  whose directory was already deleted by hand.
-- **The producer's session releases its own worktree** - clean, inactive, merged - and keeps its branch
-  and transcript. The merge lane never removes, switches or prunes another actor's worktree, and a
-  `/merge` run leaves every local ref alone.
+`scripts/wave-lifecycle.mjs` owns ordered land/deploy/retire progress, operation
+IDs, an OS-held boot lease, completion-triggered continuation, restart recovery,
+bounded observation retry/backoff and an actionable blocked state. Effect commands
+run through a real external operation driver (`scripts/wave-executor.lua`), never
+through a node turn or a worktree being removed. Launch receipt, command exit,
+zero resources released and queued deploy are not completion. A crash/uncertain
+effect requires exact drain/effect evidence and observation before continuation;
+no unknown effect is replayed automatically.
 
-## Report three independent outcomes
+The final receipt proves, with fresh readback: only `main` in remote and shared
+local refs; clean canonical main equal to origin/main; only clean integrated
+released/detached finished trees; no unresolved deliveries, relevant operations,
+claims or owners; runtime/Orca/Git agreement; exact combined full gate tree/log
+hash and counted skips; installed accepted main/artifact/skills, healthy runtime
+and verified functional recovery. Preserve canonical ignored build caches.
+The next wave re-verifies this baseline; a previous passing receipt alone cannot
+admit it. The manifest and proof adapter contracts are in
+`docs/WAVE-CONVERGENCE.md`; missing adapters/inventories fail closed.
 
-1. **Integration:** complete or blocked, scope (`internal` or `all`), final main
-   SHA, merged/excluded/blocked exact inputs, review and gate verdict/skips.
-2. **Worktree synchronization:** none by default; list observed worktrees as
-   preserved and any separately requested sync as a distinct task.
-3. **Branch cleanup:** remote non-main refs removed only under the explicit rule
-   above; all local refs/worktrees retained with concrete reasons.
+## Report independent outcomes
 
-Say `Integration complete; local workspace synchronization deferred for ...`
-when in-scope commits reached tested/pushed main and the remote invariant passes,
-even when local drafts or worktrees remain. Never call integration complete if a
-real in-scope commit, PR review requirement or discovery error is unresolved.
+Report integration (exact accepted main/review/combined gate and skips), deployment
+(exact installed source/artifact/skills and functional evidence), and convergence
+(main-only refs, actual worktrees/registries, operation/claim/owner state and durable
+receipt). A blocked wave retains an owner, exact reason and recovery path; it is
+not called complete or left silently stalled. A branch delivery can be complete
+while independent review/merge/deploy/convergence remain owned by the coordinator.
 
 ### What is measured, and what is policy
 

@@ -1,4 +1,68 @@
 use super::*;
+#[test]
+fn effective_cwd_prevents_self_blocking_unrelated_workspace() {
+    let (m, root) = fixture();
+    let id = m.start(shell("sleep 30")).unwrap();
+    let state = m.snapshot(&id).unwrap();
+    assert_eq!(state["cwd_requested"], "");
+    assert!(!state["cwd"].as_str().unwrap().is_empty());
+    assert!(state["owner_process_id"].is_number());
+    assert!(state["owner_boot"].as_str().unwrap().starts_with("boot-"));
+    let unrelated = root.join("unrelated");
+    assert!(m.relevant(&unrelated.to_string_lossy(), "", 1).unwrap()["operations"].as_array().unwrap().is_empty());
+    assert_eq!(m.relevant(state["effective_cwd"].as_str().unwrap(), "", 1).unwrap()["operations"][0]["operation_id"], id);
+    m.cancel(&id).unwrap(); settled(&m, &id);
+    drop(m); remove_fixture(root);
+}
+#[test]
+fn migration_preserves_uncertain_originals_and_is_bounded_after_import() {
+    let (m, root) = fixture();
+    fs::create_dir_all(root.join("op-legacy")).unwrap();
+    let original = json!({"cwd":"","settled":false,"cleanup":"unknown"});
+    atomic_json(&root.join("op-legacy/state.json.before-reconcile-1"), &original).unwrap();
+    atomic_json(&root.join("op-legacy/state.json"), &json!({"settled":true,"cleanup":"never_spawned"})).unwrap();
+    for i in 0..1000 {
+        fs::create_dir_all(root.join(format!("op-history-{i}"))).unwrap();
+        atomic_json(&root.join(format!("op-history-{i}/state.json")), &json!({"settled":true,"cleanup":"terminated","cwd":"elsewhere"})).unwrap();
+    }
+    assert!(m.relevant("target", "", 1).unwrap_err().to_string().contains("import_required"));
+    assert!(m.import_index("").is_err());
+    assert_eq!(m.import_index("Fixture legacy writers stopped; inspected original states").unwrap()["imported"], 1001);
+    let result = m.relevant("target", "", 1).unwrap();
+    assert_eq!(result["operations"].as_array().unwrap().len(), 1);
+    assert_eq!(result["operations"][0]["operation_id"], "op-legacy");
+    assert_eq!(result["operations"][0]["originals"][0]["state"], original);
+    let legacy: Value=serde_json::from_slice(&fs::read(root.join("op-legacy/state.json")).unwrap()).unwrap();
+    let decision=json!({"id":"op-legacy","expected_state":legacy,"owner_boot":"boot-fiction","evidence":"zero output","drain_evidence":"mtime","effect_evidence":"age"});
+    assert!(m.reconcile(&decision).unwrap_err().to_string().contains("legacy_operation_owner_identity_unknown"));
+    // Query does not open settled files again. Missing historical evidence cannot
+    // become an apparent empty operation directory or trigger a full release scan.
+    fs::remove_file(root.join("op-history-0/state.json")).unwrap();
+    assert_eq!(m.relevant("target", "", 1).unwrap()["operations"][0]["operation_id"], "op-legacy");
+    drop(m); remove_fixture(root);
+}
+#[test]
+fn reconciliation_requires_dead_owner_exact_state_and_effect_evidence() {
+    let (m, root) = fixture();
+    let id = m.start(Spec::command("no-such-executable-reconcile", vec![])).unwrap();
+    settled(&m, &id);
+    let state: Value = serde_json::from_slice(&fs::read(root.join(&id).join("state.json")).unwrap()).unwrap();
+    let other = Manager::new(&root);
+    let mut args = json!({"id":id,"owner_boot":state["owner_boot"],"expected_state":state,"evidence":"fixture inspection","drain_evidence":"spawn failed before child existed","effect_evidence":"no effect: nonexistent program"});
+    assert!(other.reconcile(&args).unwrap_err().to_string().contains("owner_live"));
+    args["effect_evidence"] = json!("");
+    assert!(other.reconcile(&args).unwrap_err().to_string().contains("effect_evidence_required"));
+    args["effect_evidence"] = json!("no effect: nonexistent program");
+    let before = fs::read(root.join(&id).join("state.json")).unwrap();
+    drop(m);
+    args["expected_state"]["owner"] = json!("wrong-owner");
+    assert!(other.reconcile(&args).unwrap_err().to_string().contains("state_moved"));
+    args["expected_state"] = serde_json::from_slice(&before).unwrap();
+    assert_eq!(other.reconcile(&args).unwrap()["reconciled"], true);
+    assert_eq!(fs::read(root.join(&id).join("state.json")).unwrap(), before);
+    assert!(other.relevant(args["expected_state"]["effective_cwd"].as_str().unwrap(), "", 1).unwrap()["operations"].as_array().unwrap().is_empty());
+    drop(other); remove_fixture(root);
+}
 fn fixture() -> (Manager, PathBuf) {
     let root = std::env::temp_dir().join(format!(
         "wa-operation-test-{}-{}",
@@ -22,15 +86,14 @@ fn settled(m: &Manager, id: &str) -> Value {
     assert_eq!(value["settled"], true, "{value}");
     value
 }
-#[cfg(windows)]
-fn remove_executable_fixture(root: PathBuf) {
+fn remove_fixture(root: PathBuf) {
     // Windows may retain an image mapping briefly after the process is signalled.
     // Retry only the fixture deletion, never the operation or its assertions.
     let deadline=Instant::now()+Duration::from_secs(2);
     loop {
         match fs::remove_dir_all(&root) {
             Ok(())=>return,
-            Err(error) if error.kind()==std::io::ErrorKind::PermissionDenied && Instant::now()<deadline=>{
+            Err(error) if (error.kind()==std::io::ErrorKind::PermissionDenied || error.raw_os_error()==Some(32)) && Instant::now()<deadline=>{
                 std::thread::sleep(Duration::from_millis(20));
             }
             Err(error)=>panic!("fixture cleanup {}: {error}",root.display()),
@@ -54,7 +117,8 @@ fn settlement_wakes_all_observers_without_relaunch_or_lost_notification() {
     assert_eq!(m.wait(&id,Duration::from_secs(5)).unwrap()["settled"],true);
     assert!(before.elapsed()<Duration::from_secs(1),"settled state must not wait for another event");
     assert_eq!(m.list().as_array().unwrap().len(),1);
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn output_and_exit_are_distinct() {
@@ -68,7 +132,8 @@ fn output_and_exit_are_distinct() {
     assert_eq!(s["output_complete"], true);
     assert_eq!(s["stdout"], "hello");
     assert_eq!(s["stderr"], "warning");
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn normal_command_succeeds_and_closes_stdin() {
@@ -87,7 +152,8 @@ fn normal_command_succeeds_and_closes_stdin() {
     assert_eq!(timing["measured_ms"],measured,"{s}");
     assert_eq!(timing["total_ms"].as_u64().unwrap(),measured+timing["unattributed_ms"].as_u64().unwrap(),"{s}");
     assert_eq!(s["elapsed_ms"],timing["total_ms"],"{s}");
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn exited_shell_cannot_leave_descendant_or_lose_output() {
@@ -110,7 +176,8 @@ fn exited_shell_cannot_leave_descendant_or_lose_output() {
         .as_str()
         .unwrap()
         .contains("background_descendants"));
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn deadline_covers_both_streams_without_serial_graces() {
@@ -127,7 +194,8 @@ fn deadline_covers_both_streams_without_serial_graces() {
     // shell prints; both empty output and the complete prefix are valid.
     assert!(s["stdout"] == "" || s["stdout"] == "before", "{s}");
     assert_eq!(s["output_complete"], true);
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn cancel_is_independent_of_waiter_and_preserves_prefix() {
@@ -149,7 +217,8 @@ fn cancel_is_independent_of_waiter_and_preserves_prefix() {
     assert_eq!(s["state"], "cancelled");
     assert_eq!(s["stdout"], "ready");
     assert_eq!(s["cleanup"], "terminated");
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn flood_is_bounded_and_cannot_starve_control() {
@@ -161,7 +230,8 @@ fn flood_is_bounded_and_cannot_starve_control() {
     assert_eq!(s["error"], "output_limit_exceeded");
     assert_eq!(s["output_bytes"], 12000);
     assert_eq!(s["output_complete"], false);
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn quiet_operation_is_not_misdiagnosed() {
@@ -169,7 +239,8 @@ fn quiet_operation_is_not_misdiagnosed() {
     let id = m.start(shell("sleep 0.2; printf done")).unwrap();
     let s = settled(&m, &id);
     assert_eq!(s["ok"], true, "{s}");
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn cursor_read_and_restart_do_not_reexecute() {
@@ -191,7 +262,8 @@ fn cursor_read_and_restart_do_not_reexecute() {
         reopened.snapshot("op-interrupted").unwrap()["state"],
         "outcome_unknown"
     );
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn split_utf8_and_binary_pages_retain_exact_bytes() {
@@ -230,7 +302,8 @@ fn split_utf8_and_binary_pages_retain_exact_bytes() {
     assert_eq!(recovered, bytes);
     fs::write(root.join(&id).join("stdout"), "�").unwrap();
     assert_eq!(m.read(&id, "stdout", 0, 3).unwrap()["text_lossy"], false);
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn parallel_launches_do_not_inherit_each_others_pipes() {
@@ -244,7 +317,8 @@ fn parallel_launches_do_not_inherit_each_others_pipes() {
     }
     m.cancel(&long).unwrap();
     settled(&m, &long);
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[cfg(windows)]
 #[test]
@@ -274,7 +348,8 @@ fn native_shells_preserve_quoted_arguments() {
     let s = settled(&m, &ps);
     assert_eq!(s["ok"], true, "{s}");
     assert!(s["stdout"].as_str().unwrap().contains("hello world"), "{s}");
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn descendant_cannot_write_after_foreground_completion() {
@@ -290,7 +365,8 @@ fn descendant_cannot_write_after_foreground_completion() {
         !root.join("orphan-proof").exists(),
         "owned descendant survived settlement"
     );
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 
 #[test]
@@ -309,7 +385,8 @@ fn redirected_background_descendant_is_not_silent_success() {
             .contains("background_descendants"),
         "{s}"
     );
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 
 #[test]
@@ -351,7 +428,8 @@ fn promoted_descendants_are_adopted_not_failed() {
         !root.join("orphan-proof").exists(),
         "a cancelled adopted descendant survived"
     );
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 
 #[test]
@@ -372,7 +450,8 @@ fn adopted_tree_settles_when_it_exits_and_keeps_its_output() {
         out.contains("done"),
         "the adopted descendant's output must not be lost: {s}"
     );
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 
 #[test]
@@ -398,7 +477,8 @@ fn output_after_shell_exit_restarts_the_command_idle_window() {
     m.cancel(&id).unwrap();
     let result = settled(&m, &id);
     assert_eq!(result["state"], "cancelled", "{result}");
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 
 #[cfg(windows)]
@@ -443,7 +523,8 @@ fn compiler_telemetry_cannot_keep_a_completed_build_running() {
     assert!(result["auxiliary_cleanup"].as_array().unwrap().iter()
         .any(|image| image.as_str().unwrap().to_ascii_lowercase().ends_with("vctip.exe")));
     assert!(result["stdout"].as_str().unwrap().contains("build_done"), "{result}");
-    remove_executable_fixture(root);
+    drop(m);
+    remove_fixture(root);
 }
 
 #[cfg(windows)]
@@ -457,7 +538,8 @@ fn compiler_helper_cleanup_waits_for_real_work() {
     let result = settled(&m, &id);
     assert_eq!(result["ok"], true, "{result}");
     assert!(result["stdout"].as_str().unwrap().contains("actual_work_done"), "{result}");
-    remove_executable_fixture(root);
+    drop(m);
+    remove_fixture(root);
 }
 
 #[cfg(windows)]
@@ -471,7 +553,8 @@ fn a_process_named_vctip_outside_msvc_stays_adopted() {
     let result = settled(&m, &id);
     assert_eq!(result["state"], "cancelled", "{result}");
     assert!(result.get("auxiliary_cleanup").is_none());
-    remove_executable_fixture(root);
+    drop(m);
+    remove_fixture(root);
 }
 
 #[test]
@@ -494,7 +577,8 @@ fn launch_failure_is_visible() {
     let restored=Manager::new(&root).snapshot(&id).unwrap();
     assert_eq!(restored["state"],"failed");
     assert_eq!(restored["error"],s["error"]);
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 
 /// A command can print the node's own key. The transcript has its own redactor; this proves
@@ -515,7 +599,8 @@ fn a_secret_in_operation_output_is_redacted_on_disk_and_in_the_view() {
     let on_disk = fs::read_to_string(root.join(&id).join("stdout")).unwrap();
     assert!(!on_disk.contains("SECRETVALUE"), "the file holds the secret: {on_disk}");
     assert!(on_disk.contains("<redacted>"), "{on_disk}");
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 
 /// The 8 KiB read boundary can fall inside the key. Filler before it forces that split, and
@@ -538,7 +623,8 @@ fn a_secret_split_across_the_read_buffer_is_redacted() {
     assert!(stdout.contains("<redacted>"), "{stdout}");
     let on_disk = fs::read_to_string(root.join(&id).join("stdout")).unwrap();
     assert!(!on_disk.contains("SECRETVALUE"), "the split secret is on disk");
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 
 // ---- the starting directory ---------------------------------------------------------------
@@ -584,7 +670,8 @@ fn a_deleted_starting_directory_is_substituted_and_stated_in_the_result() {
     let note = s["cwd_note"].as_str().unwrap_or("");
     assert!(note.contains(&recorded_text), "the note must name what was asked for: {note}");
     assert!(note.contains(&fallback_text), "the note must name where it ran: {note}");
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 
 /// (c) a directory that exists is unchanged: the shell starts in it, the recorded path is
@@ -611,7 +698,8 @@ fn a_usable_starting_directory_is_unchanged() {
     assert_eq!(s["cwd_requested"], kept_text.as_str(), "{s}");
     assert!(s["cwd_substitution"].is_null(), "an unchanged call claimed a substitution: {s}");
     assert!(s["cwd_note"].is_null(), "{s}");
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 
 /// The peer shape from the field report: the call names no directory, so the shell inherits the
@@ -644,7 +732,7 @@ fn an_unavailable_node_working_directory_is_substituted() {
     );
     // An ordinary call, with a node directory that exists, keeps today's behaviour exactly.
     let unchanged = resolve_start_directory("", Some(&here), Some(&fallback));
-    assert_eq!(unchanged.used, "");
+    assert_eq!(unchanged.used, here.to_string_lossy());
     assert!(unchanged.substitution.is_none());
     fs::remove_dir_all(root).unwrap();
 }

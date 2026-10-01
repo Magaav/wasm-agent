@@ -268,7 +268,7 @@ function M.ensure(memory, session_id, source_session_id, options)
   end
   local workspace = memory.require_session_workspace(session_id)
   if not workspace then return nil, "workspace_requirement_failed" end
-  if workspace.state=="released" or workspace.state=="releasing" or workspace.state=="release_unknown" then
+  if workspace.state=="released" or workspace.state=="releasing" or workspace.state=="release_unknown" or workspace.state=="parked" then
     return nil,"workspace_released_or_release_unresolved"
   end
   if workspace.state == "allocated" then
@@ -516,23 +516,18 @@ function M.release(memory,id,user_id)
       local merged=run('git merge-base --is-ancestor HEAD refs/remotes/origin/main',expected)
       if not merged or merged.code~=0 then return nil,'workspace_release_unmerged_commits' end
     end
-    -- Older records lack cwd attribution and conservatively block cleanup while
-    -- unresolved. Attributed operations in other workspaces do not block this one.
-    local operations=json.decode(host.list_dir(paths.data()..'/operations'))
-    if type(operations)~='table' or operations.error or type(operations.entries)~='table' then return nil,'workspace_release_operations_unavailable' end
-    for _,entry in ipairs(operations.entries) do
-      if entry.kind~='dir' and entry.kind~='file' then return nil,'workspace_release_operation_unreadable:'..tostring(entry.name) end
-      if entry.kind=='dir' then
-        local raw=host.read_file(paths.data()..'/operations/'..entry.name..'/state.json')
-        local ok,state=pcall(json.decode,raw or '')
-        if not ok or type(state)~='table' then return nil,'workspace_release_operation_unreadable:'..entry.name end
-        local cwd=normalized(state.cwd)
-        local target=normalized(expected)
-        local relevant=cwd=='' or cwd==target or cwd:sub(1,#target+1)==target..'/'
-        if relevant and (state.settled~=true or state.cleanup=='unknown') then
-          return nil,'workspace_release_operation_unresolved:'..entry.name
-        end
-      end
+    -- The supervisor indexes admission before spawn and settlement afterwards.
+    -- Only unresolved operations relevant to the actual canonical cwd are read;
+    -- unknown legacy attribution remains a blocker, never a cleanup exemption.
+    if not host.operation then return nil,'workspace_release_operations_unavailable' end
+    local lookup_ok,raw=pcall(host.operation,'relevant',json.encode({cwd=canonical,limit=1}))
+    local decoded_ok,operations=pcall(json.decode,raw or '')
+    if not lookup_ok or not decoded_ok or type(operations)~='table' or operations.ok~=true then
+      return nil,'workspace_release_operations_unavailable:'..tostring(type(operations)=='table' and operations.error or raw)
+    end
+    if type(operations.operations)~='table' then return nil,'workspace_release_operations_unavailable' end
+    if #operations.operations>0 then
+      return nil,'workspace_release_operation_unresolved:'..tostring(operations.operations[1].operation_id)
     end
     workspace.state,workspace.error='releasing',''
     memory.set_session_workspace(id,workspace)
@@ -550,6 +545,107 @@ function M.release(memory,id,user_id)
   if not released.ok then return nil,'workspace_release_claim_failed',released end
   if not ok then return nil,'workspace_release_exception: '..tostring(result) end
   return result,why,detail
+end
+
+-- A missing directory is an observation, not proof that its operation effects
+-- or branch were settled. This explicit path reconciles a lost removal receipt
+-- only after the same session fence, operation index and ancestry proof pass.
+function M.reconcile_release(memory,id,user_id,evidence)
+  if type(evidence)~='string' or evidence:match('^%s*$') then return nil,'workspace_reconcile_evidence_required' end
+  local session=memory.session(id)
+  if not session then return nil,'unknown_session' end
+  if session.user_id~=user_id then return nil,'forbidden' end
+  local workspace=memory.session_workspace(id)
+  if not workspace or not workspace.required then return nil,'workspace_not_managed' end
+  if workspace.state=='released' then return workspace end
+  local clean_id=tostring(id):gsub('[^%w-]','')
+  local expected=paths.data()..'/wa-worktree-'..clean_id
+  if clean_id=='' or normalized(workspace.worktree)~=normalized(expected) or workspace.branch~='change/wa-session-'..clean_id then
+    return nil,'workspace_release_binding_mismatch'
+  end
+  local ctx={user_id=user_id,session_id=id..':reconcile-release',run_id=host.uuid()}
+  local claimed=resources.claim(ctx,{'session:'..id})
+  if not claimed.ok then return nil,claimed.error,claimed end
+  local function body()
+    if not host.canonical_path or host.canonical_path(expected) then return nil,'workspace_reconcile_tree_present_or_unverifiable' end
+    local parent=json.decode(host.list_dir(paths.data()))
+    if type(parent)~='table' or parent.error or type(parent.entries)~='table' then return nil,'workspace_reconcile_parent_unverifiable' end
+    for _,entry in ipairs(parent.entries) do
+      if entry.name=='wa-worktree-'..clean_id then return nil,'workspace_reconcile_tree_present_or_unverifiable' end
+    end
+    local source=workspace.start_state.source_root
+    if not source or source=='' then return nil,'workspace_release_source_missing' end
+    local listing,why=run('git worktree list --porcelain',source)
+    if not listing then return nil,'workspace_release_registry_unavailable:'..tostring(why) end
+    for path in tostring(listing.stdout):gmatch('worktree ([^\r\n]+)') do
+      if normalized(path)==normalized(expected) then return nil,'workspace_reconcile_still_registered' end
+    end
+    local branch=run('git show-ref --verify --hash '..assert(quote('refs/heads/'..workspace.branch)),source)
+    if branch then
+      local merged=run('git merge-base --is-ancestor '..assert(quote(trimmed(branch.stdout)))..' refs/remotes/origin/main',source)
+      if not merged then return nil,'workspace_release_unmerged_commits' end
+    else
+      -- Only Git's exact missing-ref exit code is absence; storage/ref failures
+      -- must not be mistaken for a branch that has safely disappeared.
+      local probe=host.exec('git show-ref --verify --quiet '..assert(quote('refs/heads/'..workspace.branch)),source,120)
+      local state=json.decode(probe)
+      if tonumber(state.code)~=1 then return nil,'workspace_reconcile_ref_unverifiable' end
+    end
+    local lookup=json.decode(host.operation('relevant',json.encode({cwd=expected,limit=1})))
+    if type(lookup)~='table' or lookup.ok~=true or type(lookup.operations)~='table' then return nil,'workspace_release_operations_unavailable' end
+    if #lookup.operations>0 then return nil,'workspace_release_operation_unresolved:'..tostring(lookup.operations[1].operation_id) end
+    workspace.state,workspace.error='released',''
+    workspace.start_state.release_reconciliation={evidence=evidence,at=host.now(),executor=host.runtime_info and host.runtime_info() or {}}
+    return memory.set_session_workspace(id,workspace)
+  end
+  local ok,result,why=pcall(body)
+  local finished=resources.finish(ctx)
+  if not finished.ok then return nil,'workspace_release_claim_failed',finished end
+  if not ok then return nil,'workspace_release_exception:'..tostring(result) end
+  return result,why
+end
+
+function M.reconcile_park(memory,id,user_id,expected_head,evidence)
+  if type(evidence)~='string' or evidence:match('^%s*$') or type(expected_head)~='string' or not expected_head:match('^%x+$') then
+    return nil,'workspace_park_exact_head_and_evidence_required'
+  end
+  local session=memory.session(id)
+  if not session then return nil,'unknown_session' end
+  if session.user_id~=user_id then return nil,'forbidden' end
+  local workspace=memory.session_workspace(id)
+  if not workspace or not workspace.required then return nil,'workspace_not_managed' end
+  local clean_id=tostring(id):gsub('[^%w-]','')
+  local expected=paths.data()..'/wa-worktree-'..clean_id
+  if clean_id=='' or normalized(workspace.worktree)~=normalized(expected) then return nil,'workspace_release_binding_mismatch' end
+  if workspace.state~='parked' and workspace.branch~='change/wa-session-'..clean_id then return nil,'workspace_release_binding_mismatch' end
+  local ctx={user_id=user_id,session_id=id..':reconcile-park',run_id=host.uuid()}
+  local claimed=resources.claim(ctx,{'session:'..id})
+  if not claimed.ok then return nil,claimed.error,claimed end
+  local function body()
+    local canonical=host.canonical_path and host.canonical_path(expected)
+    local root=host.canonical_path and host.canonical_path(paths.data())
+    if not canonical or not root or normalized(canonical)~=normalized(root..'/wa-worktree-'..clean_id) then return nil,'workspace_release_path_unverified' end
+    local status=run('git status --porcelain --untracked-files=all --ignored',expected)
+    if not status or tostring(status.stdout or '')~='' then return nil,'workspace_release_dirty_or_ignored_files' end
+    local detached=json.decode(host.exec('git symbolic-ref --quiet HEAD',expected,120))
+    if tonumber(detached.code)~=1 then return nil,'workspace_park_not_detached_or_unverifiable' end
+    local head=run('git rev-parse HEAD',expected)
+    if not head or trimmed(head.stdout)~=expected_head then return nil,'workspace_park_head_moved' end
+    local merged=run('git merge-base --is-ancestor '..assert(quote(expected_head))..' refs/remotes/origin/main',expected)
+    if not merged then return nil,'workspace_release_unmerged_commits' end
+    local lookup=json.decode(host.operation('relevant',json.encode({cwd=canonical,limit=1})))
+    if type(lookup)~='table' or lookup.ok~=true or type(lookup.operations)~='table' then return nil,'workspace_release_operations_unavailable' end
+    if #lookup.operations>0 then return nil,'workspace_release_operation_unresolved:'..tostring(lookup.operations[1].operation_id) end
+    workspace.start_state.parked_branch=workspace.start_state.parked_branch or workspace.branch
+    workspace.start_state.park_reconciliation={evidence=evidence,head=expected_head,at=host.now(),executor=host.runtime_info and host.runtime_info() or {}}
+    workspace.state,workspace.branch,workspace.error='parked','',''
+    return memory.set_session_workspace(id,workspace)
+  end
+  local ok,result,why=pcall(body)
+  local finished=resources.finish(ctx)
+  if not finished.ok then return nil,'workspace_release_claim_failed',finished end
+  if not ok then return nil,'workspace_release_exception:'..tostring(result) end
+  return result,why
 end
 
 return M

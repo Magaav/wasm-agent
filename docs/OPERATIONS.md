@@ -161,6 +161,17 @@ limits are not a total disk quota. Do not log or publish raw output by default.
 
 ## Recovery and visibility
 
+Workspace retirement reads a bounded relevant-operation index instead of every
+historical state file. Admissions record actual cwd (including an omitted requested
+cwd), canonical effective cwd, process/boot identity and an OS-held lease before
+spawn. Existing stores require explicit import after legacy writers quiesce;
+uncertain `state.json.before-reconcile-*` originals remain blockers even when a
+manual rewrite claims settlement. Reconciliation records separate exact-state,
+dead-owner, drain and effect evidence and preserves original outcomes. Legacy
+identity uncertainty is never inferred away from age or zero output. The actions,
+migration boundary, durable wave lifecycle and real fixture limits are in
+[WAVE-CONVERGENCE.md](WAVE-CONVERGENCE.md).
+
 `/health` includes operation id, owner, state, elapsed time, execution and cleanup
 budgets, observed output bytes and overdue state, without command/output bodies.
 Health observes every worker, not just worker zero. Output activity is not proof

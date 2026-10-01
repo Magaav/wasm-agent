@@ -47,6 +47,7 @@ function runAsync(script, extras={}) {
     git(['config','user.name','workspace-fixture']);git(['config','user.email','workspace-fixture@invalid']);
     fs.writeFileSync(path.join(source,'seed.txt'),'clean baseline\n');
     git(['add','seed.txt']);git(['commit','-m','baseline']);
+    git(['update-ref','refs/remotes/origin/main','HEAD']); // private integrated baseline for release reconciliation
     fs.writeFileSync(path.join(install,'runtime-worktree.txt'),`${source.replaceAll('/', '\\')}\n`);
     const seeded=run('test-session-workspaces.lua',{WASM_AGENT_TEST_SOURCE:source});
     check(seeded.status===0,`allocator/fail-closed fixture exit ${seeded.status}: ${seeded.stderr}\n${seeded.stdout}`);
@@ -64,7 +65,7 @@ function runAsync(script, extras={}) {
       `fresh-process binding recovery failed (${restarted.status}): ${restarted.stderr}\n${restarted.stdout}`);
     checks+=4;
     const released=run('test-workspace-release.lua',{WASM_AGENT_TEST_SOURCE:source});
-    check(released.status===0 && released.stdout.includes('workspace release ok (21 checks)'),
+    check(released.status===0 && released.stdout.includes('workspace release ok (34 checks)'),
       `workspace release failed (${released.status}): ${released.stderr}\n${released.stdout}`);
     console.log(released.stdout.trim());
     console.log(`session workspaces integration ok (${checks} checks; real git worktrees, two concurrent processes, restart, no inference)`);

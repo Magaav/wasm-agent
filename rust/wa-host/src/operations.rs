@@ -195,6 +195,13 @@ pub fn control(action: &str, args: &Value, shell: &(String, String)) -> Result<V
             );
         }
         "list" => return Ok(manager().list()),
+        "relevant" => manager().relevant(
+            args["cwd"].as_str().unwrap_or(""),
+            args["after"].as_str().unwrap_or(""),
+            args["limit"].as_u64().unwrap_or(64).min(256) as usize,
+        ),
+        "index" => manager().import_index(args["evidence"].as_str().unwrap_or("")),
+        "reconcile" => manager().reconcile(args),
         "status" => manager().snapshot(id),
         "await" => {
             // Foreground bash can complete while its adopted descendants remain supervised.

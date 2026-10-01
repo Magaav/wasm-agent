@@ -2,6 +2,7 @@
 //! not a process. See docs/OPERATIONS.md. No model, Lua state, HTTP or UI is needed to supervise it.
 mod process;
 mod redact;
+mod index;
 use process::Process;
 use redact::Redactor;
 use serde_json::{json, Value};
@@ -12,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Condvar, Mutex,
+        Arc, Condvar, Mutex, OnceLock,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -51,6 +52,7 @@ impl Spec {
     }
 }
 struct Entry {
+    index: Arc<index::Index>,
     cancel: AtomicBool,
     state: Mutex<Value>,
     settled: Condvar,
@@ -61,6 +63,7 @@ struct Entry {
 }
 #[derive(Clone)]
 pub struct Manager {
+    index: Arc<OnceLock<Arc<index::Index>>>,
     root: PathBuf,
     entries: Arc<Mutex<HashMap<String, Arc<Entry>>>>,
     /// The node's own secret values, redacted from every operation's output before it is
@@ -168,7 +171,7 @@ fn resolve_start_directory(
     }
     match node_cwd {
         Some(path) if is_usable_directory(path) => StartDirectory {
-            used: String::new(),
+            used: path.to_string_lossy().to_string(),
             requested: String::new(),
             substitution: None,
         },
@@ -279,6 +282,7 @@ pub fn atomic_json(path: &Path, value: &Value) -> io::Result<()> {
 impl Manager {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
+            index: Arc::new(OnceLock::new()),
             root: root.into(),
             entries: Arc::new(Mutex::new(HashMap::new())),
             secrets: Arc::new(Vec::new()),
@@ -314,8 +318,8 @@ impl Manager {
         }
         // The starting directory is decided before the accepted record is written, so the record,
         // the output and the result all carry where the shell really ran rather than what was
-        // asked for. A caller that named nothing keeps naming nothing when the node's own
-        // directory is usable: an unchanged call stays byte-for-byte unchanged.
+        // asked for. An omitted cwd records the usable actual node directory;
+        // cwd_requested retains the distinction between explicit and inherited cwd.
         let node_cwd = std::env::current_dir().ok();
         let start_directory = resolve_start_directory(
             &spec.cwd,
@@ -323,6 +327,7 @@ impl Manager {
             self.fallback.as_deref(),
         );
         spec.cwd = start_directory.used.clone();
+        let index = self.index()?;
         let mut entries = self.entries.lock().map_err(error)?;
         if entries
             .values()
@@ -354,11 +359,16 @@ impl Manager {
         );
         let dir = self.root.join(&id);
         let mut state = json!({"operation_id":id,"owner":spec.owner,"cwd":spec.cwd,"cwd_requested":start_directory.requested,"state":"accepted","settled":false,"timeout_ms":spec.timeout.as_millis() as u64,"cleanup_budget_ms":CLEANUP_MS,"containment":Process::containment(),"stdout_path":dir.join("stdout").to_string_lossy(),"stderr_path":dir.join("stderr").to_string_lossy(),"output_bytes":0,"timing":timing_payload()});
+        state["owner_boot"] = json!(index.boot);
+        state["owner_process_id"] = json!(std::process::id());
+        state["effective_cwd"] = json!(fs::canonicalize(&spec.cwd)?.to_string_lossy().replace('\\', "/"));
+        index.record(&state)?; // Admission is indexed durably before any process can run.
         if let Some(substitution) = &start_directory.substitution {
             state["cwd_substitution"] = substitution.clone();
             state["cwd_note"] = json!(substitution_note(substitution));
         }
         let entry = Arc::new(Entry {
+            index,
             cancel: AtomicBool::new(false),
             state: Mutex::new(state),
             settled: Condvar::new(),
@@ -418,6 +428,9 @@ impl Manager {
                     if let Err(e) = atomic_json(&dir.join("state.json"), &s) {
                         s["persistence_error"] = json!(e.to_string());
                     }
+                    if let Err(e) = entry.index.record(&s) {
+                        s["persistence_error"] = json!(e.to_string());
+                    }
                     *entry.state.lock().unwrap_or_else(|e| e.into_inner()) = s;
                     entry.settled.notify_all();
                 }
@@ -428,6 +441,19 @@ impl Manager {
         }
         Ok(id)
     }
+    fn index(&self) -> io::Result<Arc<index::Index>> {
+        // Competing first admissions may each create a lease; only one index is
+        // retained. SQLite serializes schema creation and admission transactions.
+        if let Some(index) = self.index.get() { return Ok(index.clone()); }
+        let opened = Arc::new(index::Index::open(&self.root)?);
+        let _ = self.index.set(opened);
+        Ok(self.index.get().unwrap().clone())
+    }
+    pub fn import_index(&self, evidence: &str) -> io::Result<Value> { self.index()?.import(evidence) }
+    pub fn relevant(&self, cwd: &str, after: &str, limit: usize) -> io::Result<Value> {
+        self.index()?.relevant(cwd, after, limit)
+    }
+    pub fn reconcile(&self, args: &Value) -> io::Result<Value> { self.index()?.reconcile(args) }
     pub fn snapshot(&self, id: &str) -> io::Result<Value> {
         validate_id(id)?;
         if let Some(entry) = self.entries.lock().map_err(error)?.get(id).cloned() {
@@ -795,6 +821,11 @@ fn execute(spec: &Spec, dir: &Path, entry: &Entry, secrets: &[Vec<u8>]) -> io::R
     if let Err(e) = atomic_json(&dir.join("state.json"), &state) {
         state["ok"] = json!(false);
         state["error"] = json!(format!("operation_record_failed:{e}"));
+        state["persistence_error"] = json!(e.to_string());
+    }
+    if let Err(e) = entry.index.record(&state) {
+        state["ok"] = json!(false);
+        state["persistence_error"] = json!(e.to_string());
     }
     *entry.state.lock().unwrap() = state;
     entry.settled.notify_all();
