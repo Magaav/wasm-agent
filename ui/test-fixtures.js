@@ -334,6 +334,23 @@ window.fetch = function (input, init) {
     if (job) job.enabled = request.action === 'enable';
     return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve(job || {error:'not_found'})});
   }
+  // A settings write has three outcomes the window must tell apart, and each is a different code
+  // path in it: a success payload, an error payload, and a fetch that throws. The stub offers a hook
+  // for the last two. `settingsAbort` rejects with the very DOMException the window's own 8-second
+  // deadline raises (`apiFetch`, ui/app.js): headless virtual time does not advance timers, so a
+  // case that waited for the real deadline would hang the whole harness instead of failing it.
+  if ((init && init.method) === 'POST' && (path === 'provider' || path === 'model' || path === 'reasoning')) {
+    if (window.__fixtures.settingsRefuse) {
+      return Promise.resolve({ ok: false, status: 500,
+        json: () => Promise.resolve({ error: 'settings_refused_by_fixture' }) });
+    }
+    if (window.__fixtures.settingsAbort) {
+      return Promise.reject(new DOMException('signal is aborted without reason', 'AbortError'));
+    }
+    const accepted = window.__fixtures[path];
+    if (accepted) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(accepted) });
+    return Promise.reject(new Error('no fixture for ' + url + ' - the harness does not reach the real node'));
+  }
   // `/version` is the page's once-a-second liveness loop. `__failVersion` makes it fail so a test can
   // prove the shell heartbeat does not depend on the node answering.
   if (path === 'version') {

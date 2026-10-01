@@ -35,6 +35,14 @@ $harness = @'
   try {
   var tick = function () { return Promise.resolve(); };
   function check(ok, label) { if (!ok) problems.push(label); }
+  // The provider, reasoning and model controls have one renderer now (renderControls): they are
+  // three views of one settings payload, so the harness draws them through it - and through the two
+  // it replaced when this page is an older app.js, so a case added for it fails on the behaviour
+  // rather than on a missing function.
+  var renderControls = function () {
+    if (typeof window.renderControls === "function") return window.renderControls();
+    window.renderProviders(); window.renderModels();
+  };
   if (sessionStorage.getItem("wa-ui-startup-stage") === "active") {
     sessionStorage.removeItem("wa-ui-startup-stage");
     for (var initial = 0; initial < 200 && window.__failSessionReads > 0; initial++) await tick();
@@ -577,12 +585,12 @@ $harness = @'
   var contextText = document.getElementById("context-box").textContent;
   check(/last measured input/.test(contextText) && /128/.test(contextText),
     "context must show measured last request and selected capacity, saw: " + contextText);
-  window.renderUsage(); window.renderModels();
+  window.renderUsage(); renderControls();
   var savedModelSettings = settings;
   settings = Object.assign({}, settings, {provider:'openai-sub',model:'gpt-6-luna',
     providers:[{id:'openai-sub',label:'OpenAI subscription',auth:'subscription',configured:true,
       models:['gpt-6-luna','gpt-6-sol','gpt-6-astra']}]});
-  window.renderProviders(); window.renderModels();
+  renderControls();
   check(document.getElementById('provider-select').selectedOptions[0].textContent==='OpenAI subscription',
     'a configured subscription is shown without an API-key requirement');
   check(document.getElementById('model-select').value==='gpt-6-luna' &&
@@ -605,17 +613,17 @@ $harness = @'
     'choosing a model must not dismiss the status balloon on an unmatched release');
   delete window.__fixtures.model;
   settings.providers[0].configured=false;
-  window.renderProviders();
+  renderControls();
   check(document.getElementById('provider-select').textContent.includes('login in Pi'),
     'a missing subscription login points to Pi');
   settings=savedModelSettings;
-  window.renderProviders(); window.renderModels();
+  renderControls();
   // A stale Go model must remain visible, not masquerade as the first choice.
   settings=Object.assign({},savedModelSettings,{provider:'opencode-go',model:'gpt-6-sol',
     model_error:'model_not_servable: choose a supported Go model',
     providers:[{id:'opencode-go',label:'opencode-go',configured:true,models:['deepseek-v4.1-flash']}],
     reasoning:{supported:false,levels:[],selected:'provider'}});
-  window.renderProviders(); window.renderModels();
+  renderControls();
   check(modelPicker.value==='gpt-6-sol' && modelPicker.selectedOptions[0].disabled &&
     /unavailable on this route/.test(modelPicker.selectedOptions[0].textContent),
     'stale Go selection stays visible instead of silently showing DeepSeek');
@@ -636,14 +644,19 @@ $harness = @'
   check(goReasoning.value==='low' && settings.reasoning.selected==='low' &&
     document.getElementById('settings-error').textContent==='',
     'Go reasoning selection roundtrips through the status balloon');
+  // The controls are drawn from the node's answer now, so the fixture has to be the node's own:
+  // the refused write answered nothing about where the route is.
+  var baseModelsFixture = window.__fixtures.models;
   window.__fixtures.model={error:'model_not_servable'};
+  window.__fixtures.models=Object.assign({},settings,{model:'deepseek-v4.1-flash'});
   await window.setModel('gpt-6-sol');
   check(modelPicker.value==='deepseek-v4.1-flash' && goReasoning.value==='low',
-    'refused model selection restores persisted controls');
+    'a refused model selection leaves the controls on the node answer, not on the refused value');
   delete window.__fixtures.model;
+  window.__fixtures.models=baseModelsFixture;
   window.__fixtures.reasoning={error:'unsupported_reasoning_level'};
   settings=savedModelSettings;
-  window.renderProviders(); window.renderModels();
+  renderControls();
   var diagnostics=document.getElementById('harness-status');
   check(diagnostics.querySelectorAll('details').length===4,'harness diagnostics have four progressively disclosed categories');
   check(/different configuration/.test(diagnostics.textContent),'model drift must be disclosed');
@@ -666,6 +679,66 @@ $harness = @'
   reasoningPicker.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));
   document.dispatchEvent(new PointerEvent('pointerup',{bubbles:true}));
   check(statusBalloon.open,'a press inside a native picker released outside must stay open');
+  // A settings change must be confirmed or visibly refused, never silently dropped. The defect this
+  // pins is the one the operator saw: the provider select kept "OpenAI subscription" while the model
+  // dropdown still listed opencode-go's ids and the LIMITS rows were opencode-go's - a pair no
+  // payload from the node ever contained. The POST had failed with nothing watching it, so nothing
+  // re-rendered and the select kept what the operator had chosen. The node's own answer is the only
+  // truth here: a request this window aborted may still be applied by the node afterwards.
+  var nodeAnswer = { provider:'opencode-go', model:'deepseek-v4.1-flash', model_error:null,
+    providers:[{id:'opencode-go',label:'opencode-go',configured:true,
+      models:['deepseek-v4.1-flash','longcat-2.5-preview-free']},
+      {id:'openai-sub',label:'OpenAI Subscription',auth:'subscription',configured:true,
+      models:['gpt-6-luna','gpt-6-sol']}],
+    limits:{rolling:{percent:61,resetsAt:'2026-10-01T18:47:17.000Z'},
+      weekly:{percent:54,resetsAt:'2026-10-05T00:00:00.000Z'}},
+    reasoning:{supported:true,levels:['low','high','max'],selected:'high'}};
+  window.__fixtures.models=nodeAnswer;
+  settings=Object.assign({},settings,nodeAnswer,{limits:{rolling:{percent:7,resetsAt:'2026-10-01T19:00:00.000Z'}}});
+  renderControls(); window.renderLimits(); window.renderUsage();
+  var providerPicker=document.getElementById('provider-select');
+  var settingsPicks=document.getElementById('model-select');
+  var limitsBox=document.getElementById('limits-box');
+  var settingsErrBox=document.getElementById('settings-error');
+  var providerPosts=function(){ return window.__calls.filter(function(c){ return c.url==='provider' && c.method==='POST'; }); };
+  check(providerPicker.value==='opencode-go' && limitsBox.textContent.indexOf('7%')>=0,
+    'the case must start on the node answer, with the window showing something else for LIMITS, saw ' +
+    limitsBox.textContent);
+  // 1. The write is never answered. The fetch rejects the way apiFetch's own deadline aborts it -
+  //    the same DOMException, delivered directly because headless virtual time does not advance the
+  //    8-second timer, so waiting for the real deadline would hang the harness instead of failing it.
+  window.__fixtures.settingsAbort=true;
+  providerPicker.value='openai-sub'; providerPicker.dispatchEvent(new Event('change'));
+  for(var abortTick=0;abortTick<60;abortTick++) await tick();
+  check(providerPosts().length===1,'the provider change must reach the node, saw '+providerPosts().length);
+  check(providerPicker.value==='opencode-go' && settingsPicks.value==='deepseek-v4.1-flash',
+    'an unanswered settings change must leave the controls on the node answer, saw ' +
+    providerPicker.value + ' / ' + settingsPicks.value);
+  check(settingsPicks.textContent.indexOf('gpt-6-luna')<0 && limitsBox.textContent.indexOf('61%')>=0,
+    'and the model list and LIMITS must be re-read from the same answer, saw ' + limitsBox.textContent);
+  check(settingsErrBox.textContent.indexOf('not applied')>=0 && settingsErrBox.textContent.indexOf('aborted')>=0,
+    'the change that was not applied must be reported, saw: ' + settingsErrBox.textContent);
+  // 2. The node refuses the write, in its own words.
+  window.__fixtures.settingsAbort=false; window.__fixtures.settingsRefuse=true;
+  providerPicker.value='openai-sub'; providerPicker.dispatchEvent(new Event('change'));
+  for(var refuseTick=0;refuseTick<60;refuseTick++) await tick();
+  check(providerPosts().length===2 && providerPicker.value==='opencode-go' &&
+    settingsErrBox.textContent.indexOf('not applied')>=0 &&
+    settingsErrBox.textContent.indexOf('settings_refused_by_fixture')>=0,
+    'a refused settings change must be reported in the node words and leave the node answer on screen, saw ' +
+    providerPicker.value + ' / ' + settingsErrBox.textContent);
+  window.__fixtures.settingsRefuse=false;
+  // 3. The node accepts it and answers with its refreshed payload: the three controls move together
+  //    to that one answer.
+  window.__fixtures.provider=Object.assign({},nodeAnswer,{provider:'openai-sub',model:'gpt-6-luna'});
+  providerPicker.value='openai-sub'; providerPicker.dispatchEvent(new Event('change'));
+  for(var acceptTick=0;acceptTick<60;acceptTick++) await tick();
+  check(providerPicker.value==='openai-sub' && settingsPicks.value==='gpt-6-luna' &&
+    settingsPicks.options.length===2 && settingsErrBox.textContent==='',
+    'an accepted settings change must be confirmed from the node answer, saw ' +
+    providerPicker.value + ' / ' + settingsPicks.value);
+  delete window.__fixtures.provider;
+  window.__fixtures.models=baseModelsFixture;
   // Turn sovereignty: a run in flight owns the settings it started with, so the pickers lock and
   // the balloon says when a change lands - a control that moves under a running turn misreports
   // what that turn actually used.
@@ -677,10 +750,21 @@ $harness = @'
   check(/applies at the next turn/.test(document.getElementById('settings-note').textContent),
     'the balloon must say when a change applies, saw: ' +
     document.getElementById('settings-note').textContent);
-  var callsWhileBusy=window.__calls.length;
+  // A change during a run is refused with its note *and* reconciled, so the control must not keep
+  // the value the operator moved it to. A read is not a change, so only a settings POST counts as a
+  // change that was sent.
+  var settingsPostCount=function(){ return window.__calls.filter(function(c){ return c.method==='POST' &&
+    ['provider','model','reasoning'].indexOf(c.url)>=0; }).length; };
+  var postsWhileBusy=settingsPostCount();
+  var busyProvider=document.getElementById('provider-select');
+  var busyNodeProvider=window.__fixtures.models.provider;
+  busyProvider.value='openai-sub';
   await window.setModel('deepseek-v4.1-flash');
-  check(window.__calls.length===callsWhileBusy,
+  check(settingsPostCount()===postsWhileBusy,
     'a settings change must not be sent while a run is in flight');
+  check(busyProvider.value===busyNodeProvider,
+    'a change refused during a run must leave the control on the node answer (' + busyNodeProvider +
+    '), saw ' + busyProvider.value);
   check(/applies at the next turn/.test(document.getElementById('settings-error').textContent),
     'the refused change must be visible, saw: ' +
     document.getElementById('settings-error').textContent);
