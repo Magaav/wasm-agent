@@ -48,6 +48,7 @@ $harness = @'
     for (var initial = 0; initial < 200 && window.__failSessionReads > 0; initial++) await tick();
     check(window.__failSessionReads === 0, "startup must begin transcript restore without renderer or version");
     window.__failVersion = false;
+    window.__expireRecoveryBackoff();
     await window.__watch();
     for (var attempt = 0; attempt < 200 && !document.getElementById("messages").textContent.includes("RELOAD-MID-RUN-QUESTION"); attempt++) await tick();
     check(window.__modelsRejected > 0, "startup fixture must fail the model catalogue");
@@ -56,6 +57,7 @@ $harness = @'
     check(!window.__calls.some(function (call) { return call.url === "chat" && call.method === "POST"; }),
       "an unrecorded tool call must not be started again by automatic recovery");
     window.__failModels = false;
+    window.__expireRecoveryBackoff();
     await window.__ensureMeta();
     check(!document.getElementById("chip-model").textContent.includes("retrying"),
       "model metadata must recover after a transient startup failure");
@@ -716,8 +718,8 @@ $harness = @'
     providerPicker.value + ' / ' + settingsPicks.value);
   check(settingsPicks.textContent.indexOf('gpt-6-luna')<0 && limitsBox.textContent.indexOf('61%')>=0,
     'and the model list and LIMITS must be re-read from the same answer, saw ' + limitsBox.textContent);
-  check(settingsErrBox.textContent.indexOf('not applied')>=0 && settingsErrBox.textContent.indexOf('aborted')>=0,
-    'the change that was not applied must be reported, saw: ' + settingsErrBox.textContent);
+  check(settingsErrBox.textContent.indexOf('change unconfirmed')>=0 && settingsErrBox.textContent.indexOf('aborted')>=0,
+    'an unanswered write must describe uncertainty rather than assert it was not applied, saw: ' + settingsErrBox.textContent);
   // 2. The node refuses the write, in its own words.
   window.__fixtures.settingsAbort=false; window.__fixtures.settingsRefuse=true;
   providerPicker.value='openai-sub'; providerPicker.dispatchEvent(new Event('change'));
@@ -738,6 +740,28 @@ $harness = @'
     'an accepted settings change must be confirmed from the node answer, saw ' +
     providerPicker.value + ' / ' + settingsPicks.value);
   delete window.__fixtures.provider;
+  // A delayed write belongs to its original node even if this window changes
+  // destination before the acknowledgement arrives. Versions order same-node reads.
+  var beforeVersionedSettings=settings, beforeSettingsNode=activeNode;
+  settings=Object.assign({},settings,{settings_revision:40});
+  check(acceptSettings(Object.assign({},settings,{settings_revision:39,model:'obsolete-model'}))===false &&
+    settings.model!=='obsolete-model','an older settings snapshot must not overwrite a newer acknowledgement');
+  var savedSettingsFetch=window.fetch, settleOldWrite=null;
+  window.fetch=function(url,options){
+    if(url==='provider' && options?.method==='POST') return new Promise(function(resolve){settleOldWrite=resolve;});
+    return savedSettingsFetch(url,options);
+  };
+  var oldWrite=window.setProvider('openai-sub');
+  check(!!settleOldWrite,'the stale-target case must actually hold a settings write');
+  activeNode='other-fixture-node';
+  settings=Object.assign({},settings,{provider:'other-provider',model:'other-model',settings_revision:2});
+  settleOldWrite({ok:true,status:200,json:()=>Promise.resolve(Object.assign({},beforeVersionedSettings,
+    {provider:'openai-sub',model:'gpt-6-luna',settings_revision:41}))});
+  await oldWrite;
+  check(settings.provider==='other-provider' && settings.model==='other-model',
+    'a POST response after a node switch must not replace the new node settings');
+  window.fetch=savedSettingsFetch;activeNode=beforeSettingsNode;settings=beforeVersionedSettings;
+  renderControls();
   window.__fixtures.models=baseModelsFixture;
   // Turn sovereignty: a run in flight owns the settings it started with, so the pickers lock and
   // the balloon says when a change lands - a control that moves under a running turn misreports
@@ -2114,7 +2138,7 @@ $harness = @'
   window.__fixtures.health.node_threads = [{ label: "POST /chat", busy_ms: 5000, session: followThread }];
   window.__fixtures.health.current = { label: "POST /chat", ms: 5000, session: followThread };
   window.__fixtures.sessions = { sessions: [{ id: followThread, title: "followed", user_id: "master",
-    mode: "chat", message_count: 3, last_seq: 4242, updated_at: Math.floor(Date.now() / 1000),
+    mode: "chat", message_count: 3, last_seq: 2, updated_at: Math.floor(Date.now() / 1000),
     state: "unfinished", state_detail: "a run is in flight" }] };
   window.__fixtures.session = {
     session: { id: followThread, title: "followed" },
@@ -2136,14 +2160,36 @@ $harness = @'
   // Seeing a new sequence is not the same as repainting it. A transient failure after the list read
   // used to advance `followedSeq` anyway, so the same sequence was never retried and the page stayed
   // stale for the entire next tool call.
-  window.__fixtures.sessions.sessions[0].last_seq = 4243;
+  window.__fixtures.sessions.sessions[0].last_seq = 4;
   window.__fixtures.session.messages.push(
     { seq: 3, role: "assistant", content: "FOLLOW-RETRY-PROOF", tool_calls: [] });
   window.__failSessionReads = 1;
   await window.__followRun();
+  var retryCalls = window.__calls.filter(c=>c.url.startsWith('session?')).length;
+  await window.__followRun();
+  check(window.__calls.filter(c=>c.url.startsWith('session?')).length===retryCalls,
+    'transcript recovery must back off instead of issuing another read immediately');
+  check(document.getElementById('messages').textContent.includes('FOLLOWED-PARTIAL'),
+    'a failed refresh must preserve the last confirmed transcript');
+  window.__expireRecoveryBackoff();
   await window.__followRun();
   check(document.body.innerText.indexOf("FOLLOW-RETRY-PROOF") >= 0,
     "follow: a failed transcript read must retry the same ledger sequence");
+  check(window.__followedSeq()===3, 'the follower cursor must cover only actually loaded rows, not a newer session list sequence');
+  window.__fixtures.sessions.sessions[0].last_seq = 3;
+  var savedRecoveryFetch=window.fetch, settleTranscript=null, heldTranscriptReads=0;
+  window.fetch=function(url,options){
+    if(String(url).startsWith('session?')) {
+      heldTranscriptReads++;
+      return new Promise(function(resolve){settleTranscript=()=>resolve(savedRecoveryFetch(url,options));});
+    }
+    return savedRecoveryFetch(url,options);
+  };
+  var restoreA=window.__restoreSession(),restoreB=window.__restoreSession(),restoreC=window.__restoreSession();
+  check(heldTranscriptReads===1,'simultaneous recovery callers must share one transcript request');
+  settleTranscript();await Promise.all([restoreA,restoreB,restoreC]);window.fetch=savedRecoveryFetch;
+  check(!document.getElementById('messages').textContent.includes('transcript refresh failed'),
+    'successful recovery must clear its stale failure notice');
   // ONE BUBBLE PER RUN, however many times the model speaks inside it.
   // Measured live: a run whose model wrote a one-line preamble before each tool batch produced three
   // assistant messages in one run, and the window drew THREE bubbles - because the `reply` handler
@@ -2643,7 +2689,7 @@ Add-Content -Path $app -Value "`nwindow.__refreshSessionsForRelease=refreshSessi
 Add-Content -Path $app -Value "`nwindow.handleEvent = handleEvent; window.isConnectionLoss = isConnectionLoss; window.connectionMessage = connectionMessage; window.rendererReady = () => !!renderer; window.renderContext = renderContext; window.__applyUiVersion = applyUiVersion; window.__native = native; window.__openControl = openControl; window.__renameNode = saveNodeName; window.__setReload = (fn) => { reload = fn; }; window.__uiVersion = () => version; window.__setBusy = setBusy; window.__setLiveness = setLiveness; window.__stopLiveness = stopLiveness; window.__setShell = (shell) => { native = shell; }; window.__rememberPlace = rememberPlace; window.__restorePlace = restorePlace; window.__restoreSession = restoreSession; window.__watchTurn = watchTurn; window.__loadTopic = loadTopic; window.__reloadTopics = reloadTopics; window.__reconcile = reconcile; window.__clearStreamNotice = clearStreamNotice; window.__attachMany = (n) => { attachments.length = 0; for (let i = 0; i < n; i += 1) attachments.push({ kind: 'image', name: 'shot-' + i + '.png', mime: 'image/png', data: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==' }); renderAttachments(); }; window.__commandInput = () => input; window.__commandMenu = () => commandMenu; window.__typeCommand = (value) => { input.value = value; input.dispatchEvent(new Event('input')); }; window.__chatThread = () => chatSession; window.__composed = (text) => composedBody(text); window.__cancelActiveRun = cancelActiveRun; window.__setToolAge = (s, b) => { if (trace) trace.setAge(s, b); }; window.__toolTickerActive = () => !!toolTicker; window.__updateNotice = updateNotice; window.__refreshOperationProgress = refreshOperationProgress; window.__watch = watch;"
 Add-Content -Path $app -Value "`nwindow.__cancelRunForTest = cancelRun;"
 
-Add-Content -Path $app -Value "`nwindow.__resetFollow = () => { followedSeq = 0; lastFollowAt = 0; }; window.__followRun = followRun; window.__repaintMessages = repaintMessages; window.__ensureMeta = ensureMeta;"
+Add-Content -Path $app -Value "`nwindow.__resetFollow = () => { followedSeq = 0; lastFollowAt = 0; }; window.__followRun = followRun; window.__repaintMessages = repaintMessages; window.__ensureMeta = ensureMeta; window.__expireRecoveryBackoff = () => { transcriptRetryAt=0; metadataRetryAt=0; }; window.__followedSeq = () => followedSeq;"
 
 Add-Content -Path $app -Value "`nwindow.__liveChildRows = liveChildRows; window.__refreshOrchestrator = refreshOrchestrator; window.__setOrchestratorPanel = (panel) => { orchestratorPanel = panel; };"
 

@@ -46,6 +46,15 @@ static STALL_LOGGED_MS: AtomicU64 = AtomicU64::new(0);
 static IN_FLIGHT: Mutex<Option<(String, u64)>> = Mutex::new(None);
 /// Requests waiting for the node-thread. Housekeeping waits until this is zero.
 static QUEUED: AtomicUsize = AtomicUsize::new(0);
+// A non-run request reserves its destination before enqueue. Busy labels alone
+// leave a gap between selection and dequeue, admitting a burst behind one read.
+static READ_RESERVED: OnceLock<Vec<AtomicBool>> = OnceLock::new();
+fn read_reservations() -> &'static Vec<AtomicBool> {
+    READ_RESERVED.get_or_init(|| (0..=max_node_threads()).map(|_| AtomicBool::new(false)).collect())
+}
+fn release_read_destination(index: usize) {
+    if let Some(slot) = read_reservations().get(index) { slot.store(false, Ordering::Release); }
+}
 /// When the last request was taken off the queue, so the tick can wait for a quiet moment.
 static LAST_SERVED_MS: AtomicU64 = AtomicU64::new(0);
 
@@ -241,7 +250,8 @@ fn run_capacity() -> usize {
 /// Is this a route served by the independent control lane rather than a run or a plain read?
 /// `/subagents` is the one that can block for seconds, so it must never use node-thread 0.
 fn is_control_route(request: &Request) -> bool {
-    split_path(&request.path).0 == "/subagents"
+    let path = split_path(&request.path).0;
+    path == "/subagents" || (request.method == "POST" && matches!(path.as_str(), "/provider" | "/model" | "/reasoning"))
 }
 
 /// The admission deadline, including queue residence and resolver wait. It never holds the listener.
@@ -550,62 +560,29 @@ fn pick_run_node_thread(class: scheduler::RunClass, claimed: &std::collections::
 
 /// Which node-thread a non-run request goes to, growing the pool if that is what it takes. Runs are admitted
 /// by the scheduler (`pick_run_node_thread`), never here, so this has no run branch to keep in sync.
-fn choose_node_thread(request: &Request) -> usize {
-    let Some(pool) = POOL.get() else { return 0 };
-    // The control lane is independent of both run lanes: `/subagents` may block for seconds, so it
-    // never uses node-thread 0 and never a run slot. It lives at the top of the index range and grows on
-    // demand. `/runs` and `/health` are answered without a node-thread at all, so cancel and health stay
-    // prompt even when every control slot is awaiting.
-    if is_control_route(request) {
-        let Ok(mut slots) = pool.slots.lock() else { return control_floor() };
-        let live: Vec<usize> = (control_floor()..slots.len())
-            .filter(|index| slots[*index].is_some() && node_thread_busy_label(*index).is_none() && !node_thread_is_wedged(*index))
-            .collect();
-        if !live.is_empty() {
-            let start = pool.next.fetch_add(1, Ordering::Relaxed);
-            return live[start % live.len()];
+fn choose_node_thread(request: &Request) -> Option<usize> {
+    if !is_read_route(request) && !is_control_route(request) { return Some(0); }
+    let pool = POOL.get()?;
+    let mut slots = pool.slots.lock().ok()?;
+    // Reads/control never enter run capacity, including when the pool is full.
+    // Reserve before enqueue; a busy or already reserved slot is overload, not
+    // a reason to leave a transcript socket parked behind unrelated work.
+    let start = pool.next.fetch_add(1, Ordering::Relaxed);
+    let count = max_node_threads() + 1 - control_floor();
+    for offset in 0..count {
+        let index = control_floor() + (start + offset) % count;
+        if slots.get(index).and_then(|slot| slot.as_ref()).is_some() && node_thread_busy_label(index).is_none()
+            && !node_thread_is_wedged(index)
+            && read_reservations()[index].compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            return Some(index);
         }
-        if let Some(index) = spawn_node_thread(&mut slots, control_floor(), max_node_threads()) {
-            return index;
+    }
+    if let Some(index) = spawn_node_thread(&mut slots, control_floor(), max_node_threads()) {
+        if read_reservations()[index].compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            return Some(index);
         }
-        return control_floor();
     }
-    let read = is_read_route(request);
-    // Snapshot before locking the pool: scheduler admission takes its own lock before the pool.
-    // An admitted run owns its slot even before its busy label appears at dequeue.
-    let claimed: std::collections::HashSet<usize> = scheduler::global()
-        .map(|scheduler| scheduler.snapshot().into_iter().map(|(_, index, _, _)| index).collect())
-        .unwrap_or_default();
-    // Nothing to gain while the run node-thread is idle - for a read as much as for a write. This is the rule
-    // that keeps an idle node at exactly one interpreter, and it is also why a read does not spawn a node-thread
-    // that would then sit there doing nothing: the pool appears only when a request would otherwise wait.
-    if turn_node_thread_is_idle() && (!read || !claimed.contains(&0)) {
-        return 0;
-    }
-    let Ok(mut slots) = pool.slots.lock() else { return 0 };
-    // Only reads may go to a read node-thread. A write goes to node-thread 0 even when read node-threads exist, because
-    // that is the whole reason one writer per session holds without a lock - and the first version of this
-    // returned a read node-thread for a write, which the test caught by getting a 200 where it expected the
-    // stalled node-thread's 503.
-    if !read {
-        return 0;
-    }
-    // Read node-threads live in the run lanes, below the control floor: a read must not occupy control
-    // capacity, and a control node-thread must not be counted as a read node-thread.
-    let live: Vec<usize> = (1..slots.len().min(run_capacity()))
-        .filter(|index| slots[*index].is_some() && !claimed.contains(index)
-            && node_thread_busy_label(*index).is_none() && !node_thread_is_wedged(*index))
-        .collect();
-    if !live.is_empty() {
-        let start = pool.next.fetch_add(1, Ordering::Relaxed);
-        return live[start % live.len()];
-    }
-    // A read, the run node-thread is busy, and there is no read node-thread: this is the moment the pool earns its
-    // keep. Everything else waits, which is what a node with one interpreter has always done.
-    if let Some(index) = spawn_node_thread(&mut slots, 1, run_capacity().saturating_sub(1)) {
-        return index;
-    }
-    0
+    None
 }
 
 fn now_ms() -> u64 {
@@ -1585,8 +1562,15 @@ fn dispatch_http(
             }
         }
     } else {
-        choose_node_thread(&request)
+        match choose_node_thread(&request) {
+            Some(index) => index,
+            None => {
+                let _ = respond(&mut stream, 503, "application/json", b"{\"error\":\"read_capacity_busy\",\"hint\":\"read/control capacity is occupied; retry with backoff\"}");
+                return;
+            }
+        }
     };
+    let independent = !is_run && (is_read_route(&request) || is_control_route(&request));
     let age_ms = node_thread_age_ms(target);
     if age_ms >= stall_seconds() * 1000 {
         // The node-thread this request needs has not reported progress for longer than any healthy
@@ -1618,6 +1602,7 @@ fn dispatch_http(
             // conversation's place back before refusing.
             scheduler::complete_run(request.run_id);
         }
+        if independent { release_read_destination(target); }
         let body = format!(
             "{{\"error\":\"node_thread_stalled\",\"node_thread\":{target},\"stalled_ms\":{age_ms},\"hint\":\"the interpreter has not reported progress; see the node log, and restart it if the run is lost\"}}"
         );
@@ -1653,11 +1638,14 @@ fn dispatch_http(
                     break;
                 }
                 // A read/write node-thread is gone (retired). Node-thread 0 always exists, so it is the honest fallback.
-                if target != 0 && attempt < 2 {
+                if independent { release_read_destination(target); }
+                if independent && attempt < 2 {
                     attempt += 1;
-                    target = 0;
-                    pending = Some((stream, request));
-                    continue;
+                    if let Some(index) = choose_node_thread(&request) {
+                        target = index;
+                        pending = Some((stream, request));
+                        continue;
+                    }
                 }
                 QUEUED.fetch_sub(1, Ordering::Relaxed);
                 let body = b"{\"error\":\"node_busy\",\"hint\":\"the node is answering other requests; retry shortly\"}";
@@ -1669,6 +1657,7 @@ fn dispatch_http(
             Ok(()) => break,
             Err(std::sync::mpsc::TrySendError::Full(work)) => {
                 let (mut stream, _request) = unwrap_http(work);
+                if independent { release_read_destination(target); }
                 if is_run {
                     scheduler::complete_run(admitted_run_id);
                 }
@@ -1689,11 +1678,14 @@ fn dispatch_http(
                     break;
                 }
                 // Retired while this request was on its way. Try node-thread 0 once, then refuse.
-                if target != 0 && attempt < 2 {
+                if independent { release_read_destination(target); }
+                if independent && attempt < 2 {
                     attempt += 1;
-                    target = 0;
-                    pending = Some(pair);
-                    continue;
+                    if let Some(index) = choose_node_thread(&pair.1) {
+                        target = index;
+                        pending = Some(pair);
+                        continue;
+                    }
                 }
                 QUEUED.fetch_sub(1, Ordering::Relaxed);
                 let (mut stream, _request) = pair;
@@ -1779,6 +1771,7 @@ fn node_thread_loop(
                 QUEUED.fetch_sub(1, Ordering::Relaxed);
                 LAST_SERVED_MS.store(now_ms(), Ordering::Relaxed);
                 begin_work(format!("{} {}", request.method, request.path));
+                if is_read_route(&request) || is_control_route(&request) { release_read_destination(index); }
                 // Which session this node-thread holds, so a second run in the same session finds it and queues
                 // behind it instead of starting a second writer on the same conversation.
                 if let Some(slots) = NODE_THREAD_SESSION.get() {
