@@ -31,6 +31,10 @@ backoff capped at 30 seconds. Successful recovery clears its failure state. The
 follower advances only through rows actually loaded, before reconciling checkpoint
 and event cursors. Reconnect never re-executes a tool; existing guarded continuation
 requires a complete recorded batch and an unchanged durable sequence.
+Every awaited recovery branch also rechecks node/thread/epoch identity, including
+the idle-tail second read, health reconciliation and checkpoint ledger refresh.
+Node selection advances the epoch and resets node-specific follower state. A
+replay response also belongs to its captured run and polling owner.
 
 ## Focused evidence, before integration
 
@@ -38,6 +42,10 @@ requires a complete recorded batch and an unchanged durable sequence.
 startup failure, single-flight/backoff, preserved view, loaded-row cursor, stale
 settings and cross-target response checks. Against the earlier adopted UI, the
 added checks fail for ambiguous wording, immediate retry and cursor advancement.
+Independent delayed-response attacks then found three late-target leaks; the
+added real-browser regressions fail all three on the earlier primary tip and pass
+after the per-await fences. The fixture includes a newer already-loaded target
+cursor, so incidental cursor bounds cannot hide the old checkpoint's leakage.
 
 `scripts/test-selection-state.cjs <wa>` runs real concurrent processes and SQLite
 connections with an explicit tree Lua root. It verifies persisted state, a held
@@ -71,6 +79,6 @@ fixture samples establish the repaired paths, not freedom from every overload.
 Graph impact initially found 28 resolved caller leads. After reading agent pinning,
 spell state and model-route callers, the follow-up found zero unread resolved
 leads, with 217 coverage gaps and 476 relevant unresolved calls (truncated).
-the audit is an omission detector, not a correctness certificate. Full combined
+The audit is an omission detector, not a correctness certificate. Full combined
 gate, independent exact-tip review, installed evidence and wave convergence are
 separate required proofs and are not claimed by these focused results.

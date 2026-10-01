@@ -134,6 +134,16 @@ function rememberSession(id) {
   return true;
 }
 
+function rememberNode(node) {
+  if (node === activeNode) return false;
+  detachConversationView();
+  activeNode = node;
+  conversationEpoch += 1;
+  resetConversationFollowState();
+  metaReady = false;
+  return true;
+}
+
 function rememberBlankSession(id) {
   blankSession = id || "";
   try {
@@ -1741,25 +1751,27 @@ let transcriptFailures = 0;
 let transcriptFailure = "";
 async function restoreSession(target = chatSession, retry = false) {
   const epoch = conversationEpoch;
-  if (restoringSession && restoringSession.target === target && restoringSession.epoch === epoch) {
+  const node = activeNode;
+  if (restoringSession && restoringSession.target === target && restoringSession.epoch === epoch && restoringSession.node === node) {
     return restoringSession.promise;
   }
   if (retry && Date.now() < transcriptRetryAt) return false;
-  const pending = { target, epoch, promise: restoreSessionOnce(target, epoch) };
+  const pending = { target, epoch, node, promise: restoreSessionOnce(target, epoch, node) };
   restoringSession = pending;
   try { return await pending.promise; }
   finally { if (restoringSession === pending) restoringSession = null; }
 }
 
-async function restoreSessionOnce(target, epoch) {
+async function restoreSessionOnce(target, epoch, node = activeNode) {
   let phase = "session discovery";
+  const viewing = () => chatSession === target && conversationEpoch === epoch && activeNode === node;
   try {
     // A known thread is already enough to read its authorized ledger. Discovery
     // is only needed for a new window, never a prerequisite on every reconnect.
     const payload = target && blankSession !== target ? {sessions:[{id:target}]} : await (await apiFetch("sessions", { headers: apiHeaders() })).json();
     const sessions = payload.sessions || [];
     if (payload.error) throw new Error(payload.error);
-    if (chatSession !== target || conversationEpoch !== epoch) return false;
+    if (!viewing()) return false;
     if (!sessions.length) { transcriptReady = true; return true; }
     const mine = sessions.filter((s) => !me.user || !s.user_id || s.user_id === me.user.id);
     let wanted = target ? sessions.find((s) => s.id === target) : (mine[0] || sessions[0]);
@@ -1775,9 +1787,14 @@ async function restoreSessionOnce(target, epoch) {
     if (!wanted) wanted = mine[0] || sessions[0];
     if (!wanted) { transcriptReady = true; return true; }
     if (!target || wanted.id !== target) {
+      const originalTarget=target, originalEpoch=epoch;
       rememberSession(wanted.id);
       target = wanted.id;
       epoch = conversationEpoch;
+      if (restoringSession?.target===originalTarget && restoringSession.epoch===originalEpoch && restoringSession.node===node) {
+        restoringSession.target=target;
+        restoringSession.epoch=epoch;
+      }
     }
     if (blankSession === wanted.id) rememberBlankSession("");
     const route = "session?id=" + encodeURIComponent(wanted.id);
@@ -1786,7 +1803,7 @@ async function restoreSessionOnce(target, epoch) {
       apiFetch(route, { headers: apiHeaders() }).then((response) => response.json()),
       nodeHealth(),
     ]);
-    if (chatSession !== target || conversationEpoch !== epoch) return false;
+    if (!viewing()) return false;
     if (!full || full.error || !Array.isArray(full.messages)) {
       throw new Error(full?.error || "invalid session response");
     }
@@ -1796,11 +1813,13 @@ async function restoreSessionOnce(target, epoch) {
     // briefly be displayed as a lost tool call.
     if (outcome.name === "unfinished" && health && !activeRun(health, wanted.id)) {
       const latest = await (await apiFetch(route, { headers: apiHeaders() })).json();
+      if (!viewing()) return false;
       if (latest && !latest.error && Array.isArray(latest.messages)) {
         full = latest;
         outcome = sessionOutcome(full);
       }
     }
+    const loadedSeq = (full.messages || []).reduce((last, row) => Math.max(last, Number(row.seq) || 0), 0);
     if (full && Array.isArray(full.messages) && full.messages.length) {
       repaintMessages(full.messages, { state: outcome.name, stateAt: full.state?.at,
         active: !!activeRun(health, wanted.id) });
@@ -1844,14 +1863,14 @@ async function restoreSessionOnce(target, epoch) {
     }
     // Advance only through rows actually read. A list or checkpoint observed
     // later cannot prove its newer messages were included in this snapshot.
-    followedSeq = (full.messages || []).reduce((last, row) => Math.max(last, Number(row.seq) || 0), 0);
+    followedSeq = loadedSeq;
     transcriptReady = true;
     transcriptFailures = 0;
     transcriptRetryAt = 0;
     if (transcriptFailure && statusLabel?.textContent.startsWith("transcript")) clearStatus();
     transcriptFailure = "";
     if (autoResumeSeq !== null) {
-      const key = wanted.id + ":" + autoResumeSeq;
+      const key = node + ":" + wanted.id + ":" + autoResumeSeq;
       if (!autoResumedTails.has(key)) {
         autoResumedTails.add(key);
         void resumeSession(wanted.id, autoResumeSeq);
@@ -1859,7 +1878,7 @@ async function restoreSessionOnce(target, epoch) {
     }
     return true;
   } catch (error) {
-    if (chatSession !== target || conversationEpoch !== epoch) return false;
+    if (!viewing()) return false;
     transcriptReady = false;
     transcriptFailures += 1;
     const delay = Math.min(30000, 500 * (2 ** Math.min(transcriptFailures - 1, 6)));
@@ -2300,7 +2319,7 @@ function renderNodeSelect() {
   // Drop a stale selection (a node that is no longer a chat target) instead of
   // silently sending it as X-WA-Node and keying sessions under a phantom name.
   if (activeNode && !options.some((node) => node.name === activeNode)) {
-    activeNode = "";
+    rememberNode("");
     try { localStorage.removeItem("wa-node"); } catch (error) { /* ignore */ }
   }
   nodeSelect.replaceChildren();
@@ -3119,7 +3138,7 @@ harnessStatus.addEventListener('export',async event=>{
 nodeSelect.addEventListener("change", async () => {
   const value = nodeSelect.value;
   const local = nodeList.find((node) => node.name === value && node.local_node && node.kind === "host");
-  activeNode = local ? "" : value;
+  rememberNode(local ? "" : value);
   localStorage.setItem("wa-node", activeNode);
   await refreshMeta();
   renderControls();
@@ -3594,8 +3613,10 @@ let reconciledAt = 0;
 async function reconcile() {
   if (reconciling || !synced) return;
   reconciling = true;
+  const node=activeNode, target=chatSession, epoch=conversationEpoch;
   try {
     const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
+    if (node!==activeNode || target!==chatSession || epoch!==conversationEpoch) return;
     if (health && !activeRun(health)) {
       // What the live DOM still believes is worth checking *before* clearing it: if the page thought a message was
       // running, then whatever it is still showing - a tool topic waiting for a result that already arrived,
@@ -3614,7 +3635,7 @@ async function reconcile() {
       if (wasLive) restoreSession();
     }
   } catch (error) { /* the node is away; watchNode says so in the chat */ }
-  reconciling = false;
+  finally { reconciling = false; }
 }
 
 async function watch() {
@@ -3695,19 +3716,20 @@ function detachConversationView() {
 async function followRun() {
   const target = chatSession;
   const epoch = conversationEpoch;
+  const node = activeNode;
   if (!target) return;
   // /sessions is small and carries the thread's `last_seq`; the 1.5 MB /session read happens only
   // when there is something new. Redrawing an unchanged transcript would cost a megabyte every
   // three seconds and fight the reader's scroll for nothing.
   const list = await (await apiFetch("sessions", { headers: apiHeaders() })).json();
-  if (chatSession !== target || conversationEpoch !== epoch) return;
+  if (chatSession !== target || conversationEpoch !== epoch || activeNode !== node) return;
   const mine = (list.sessions || []).find((entry) => entry.id === target);
   if (!mine) return;
   const seq = Number(mine.last_seq) || 0;
   if (seq === followedSeq) return;
   rememberPlace();
   if (await restoreSession(target, true)) {
-    if (chatSession !== target || conversationEpoch !== epoch) return;
+    if (chatSession !== target || conversationEpoch !== epoch || activeNode !== node) return;
     restorePlace();
   }
 }
@@ -3719,10 +3741,13 @@ async function syncLiveRun(current) {
   if (busy || !chatSession || !current || current.run_id == null || liveRunPolling) return;
   const target = chatSession;
   const epoch = conversationEpoch;
+  const node = activeNode;
   if (current.session && current.session !== target) return;
-  const poll = { target, epoch };
+  const poll = { target, epoch, node };
   liveRunPolling = poll;
   const id = Number(current.run_id);
+  const viewing = () => chatSession === target && conversationEpoch === epoch && activeNode === node
+    && liveRunId === id && liveRunPolling === poll && !busy;
   if (liveRunId !== id) {
     liveRunId = id;
     liveEventSeq = 0;
@@ -3735,12 +3760,14 @@ async function syncLiveRun(current) {
       body: JSON.stringify({ thread: target, run_id: id, after: liveEventSeq }),
     });
     const payload = await response.json();
-    if (chatSession !== target || conversationEpoch !== epoch) return;
+    if (!viewing()) return;
     if (!response.ok) {
       if (response.status === 404) {
         const latest = await nodeHealth();
+        if (!viewing()) return;
         if (!activeRun(latest)) {
           await followRun();
+          if (!viewing()) return;
           liveRunId = null;
           return;
         }
@@ -3756,6 +3783,7 @@ async function syncLiveRun(current) {
       // The checkpoint may have advanced after the preceding ledger poll. Read again before using
       // its tail, and wait another cycle if the read node-thread has not exposed that row yet.
       if (Number(payload.checkpoint_message_seq) > (Number(followedSeq) || 0)) await followRun();
+      if (!viewing()) return;
       if (Number(payload.checkpoint_message_seq) > (Number(followedSeq) || 0)) return;
       liveCheckpointSeq = payload.checkpoint_seq;
       liveEventSeq = Number(payload.checkpoint_seq) || 0;
@@ -3774,7 +3802,7 @@ async function syncLiveRun(current) {
       liveEventSeq = seq;
     }
   } catch (error) {
-    if (chatSession !== target || conversationEpoch !== epoch) return;
+    if (!viewing()) return;
     liveSyncFailed = true;
     setStatus("live sync retrying: " + String(error.message || error));
   } finally {
@@ -3787,9 +3815,12 @@ async function watchTurn() {
   // node runs one node-thread that is the difference between asking and queueing.
   if (runPolling) { setTimeout(watchTurn, 3000); return; }
   runPolling = true;
+  const node=activeNode, target=chatSession, epoch=conversationEpoch;
+  const viewing=()=>node===activeNode && target===chatSession && epoch===conversationEpoch;
   try {
     const response = await apiFetch("health");
     const health = await response.json();
+    if (!viewing()) return;
     // Keep the session list's live badges in step with the run this loop is already watching, with
     // no extra request: a thread turns "running" the moment a run is admitted and back when it ends.
     if (document.body.classList.contains("engine")) applySessionHealth(health);
@@ -3802,6 +3833,7 @@ async function watchTurn() {
         if (!followedSeq || Date.now() - lastFollowAt >= 3000) {
           lastFollowAt = Date.now();
           await followRun();
+          if (!viewing()) return;
         }
         await syncLiveRun(current);
       }
@@ -3814,12 +3846,15 @@ async function watchTurn() {
         clearStatus();
         rememberPlace();
         await restoreSession();
+        if (!viewing()) return;
         restorePlace();
       }
     }
   } catch (error) { /* the node is down; watchNode handles that */ }
-  runPolling = false;
-  setTimeout(watchTurn, 1000);
+  finally {
+    runPolling = false;
+    setTimeout(watchTurn, 1000);
+  }
 }
 
 // ---- native companion window (wa-window / WebView2) ----------------------
@@ -4324,7 +4359,7 @@ async function refreshAgentPane(pane,before_seq) {
   } catch(error) { pane.notice.textContent='Conversation unavailable: '+error.message; }
 }
 function mountOrchestrator() {
-  activeNode=''; // This node owns the dispatcher; each task carries its destination.
+  rememberNode(''); // This node owns the dispatcher; each task carries its destination.
   orchestratorPanel=document.createElement('wa-orchestrator');
   document.body.append(orchestratorPanel);
   if(native?.maximize)native.maximize();
@@ -4396,7 +4431,7 @@ function applyViewMode() {
   const target = parts[1] && parts[1] !== "this-node" ? parts.slice(1).join(":") : "";
   if (kind === "orchestrator") { mountOrchestrator(); return true; }
   if (kind === "control") {
-    if (target) activeNode = target;
+    if (target) rememberNode(target);
     document.body.append(control);
     openControl(target);
   }

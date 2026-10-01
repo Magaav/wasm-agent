@@ -2220,6 +2220,59 @@ $harness = @'
   var restoreA=window.__restoreSession(),restoreB=window.__restoreSession(),restoreC=window.__restoreSession();
   check(heldTranscriptReads===1,'simultaneous recovery callers must share one transcript request');
   settleTranscript();await Promise.all([restoreA,restoreB,restoreC]);window.fetch=savedRecoveryFetch;
+  // Switch at each asynchronous recovery boundary. A first-response fence does
+  // not protect the idle-tail reread or checkpoint's subsequent ledger await.
+  var raceThread=chatSession,raceNode=activeNode,raceHealth=window.__fixtures.health;
+  var raceFetch=window.fetch,lateTail=null,tailReads=0;
+  var racePayload={session:{id:raceThread},state:{state:'unfinished',role:'user',pending:[]},
+    messages:[{seq:99,role:'user',content:'OLD-IDLE-TAIL-RACE',tool_calls:[]}]};
+  window.__fixtures.health={ok:true,runs:[],node_threads:[],current:null};
+  window.fetch=function(url,options){
+    if(String(url).startsWith('session?')) {
+      tailReads++;
+      if(tailReads===2)return new Promise(resolve=>{lateTail=resolve;});
+      return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve(racePayload)});
+    }
+    return raceFetch(url,options);
+  };
+  var tailRestore=restoreSessionOnce(chatSession,conversationEpoch);
+  for(var tr=0;tr<50&&!lateTail;tr++)await tick();
+  check(!!lateTail,'the idle-tail case must pause the actual second transcript read');
+  rememberSession('late-tail-target');
+  lateTail({ok:true,status:200,json:()=>Promise.resolve(racePayload)});await tailRestore;
+  check(!document.getElementById('messages').textContent.includes('OLD-IDLE-TAIL-RACE') && followedSeq===null,
+    'a session switch during idle-tail reread must reject its old rows and cursor');
+  window.fetch=raceFetch;rememberSession(raceThread);
+  var lateNodeRead=null;
+  window.fetch=function(url,options){
+    if(String(url).startsWith('session?'))return new Promise(resolve=>{lateNodeRead=resolve;});
+    return raceFetch(url,options);
+  };
+  var nodeRestore=restoreSessionOnce(chatSession,conversationEpoch);
+  if(typeof rememberNode==='function')rememberNode('other-race-node');else activeNode='other-race-node';
+  var nodeRacePayload={session:{id:raceThread},state:{state:'failed'},
+    messages:[{seq:88,role:'user',content:'OLD-NODE-RACE',tool_calls:[]}]};
+  lateNodeRead({ok:true,status:200,json:()=>Promise.resolve(nodeRacePayload)});await nodeRestore;
+  check(!document.getElementById('messages').textContent.includes('OLD-NODE-RACE'),
+    'a node switch must fence an old transcript even when the session id stays the same');
+  window.fetch=raceFetch;
+  if(typeof rememberNode==='function')rememberNode(raceNode);else activeNode=raceNode;
+  var raceFollow=followRun,lateCheckpoint=null;
+  followRun=()=>new Promise(resolve=>{lateCheckpoint=resolve;});
+  window.fetch=function(url,options){
+    if(url==='run-events')return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve({
+      checkpoint_seq:5,checkpoint_message_seq:200,events:[{seq:6,event:{type:'delta',text:'OLD-CHECKPOINT-RACE'}}]})});
+    return raceFetch(url,options);
+  };
+  var checkpointRestore=syncLiveRun({session:chatSession,run_id:551});
+  for(var cp=0;cp<50&&!lateCheckpoint;cp++)await tick();
+  check(!!lateCheckpoint,'checkpoint case must pause its ledger reconciliation await');
+  rememberSession('late-checkpoint-target');followedSeq=999;
+  lateCheckpoint();await checkpointRestore;
+  check(!document.getElementById('messages').textContent.includes('OLD-CHECKPOINT-RACE') && liveEventSeq===0,
+    'a session switch during checkpoint read must reject its old events and live cursor');
+  followRun=raceFollow;window.fetch=raceFetch;window.__fixtures.health=raceHealth;
+  rememberSession(raceThread);await window.__restoreSession();
   check(!document.getElementById('messages').textContent.includes('transcript refresh failed'),
     'successful recovery must clear its stale failure notice');
   // ONE BUBBLE PER RUN, however many times the model speaks inside it.
