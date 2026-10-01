@@ -207,7 +207,7 @@ store or fresh automatic bootstrap. A registered missing/unreadable module is a
 refusal; unregistered legacy/isolated bootstrap is explicitly unverified. The
 convergence-owned helper controls freeze/baseline and bounded continuation. A
 private eight-check fixture drives the real hot entrypoints under registered
-freeze. Wave scripts and their literal relative dependency closure ship beside
+freeze. Wave scripts (including wave-observe.lua) and their literal relative dependency closure ship beside
 the sentinel, and verification compares shipped wave files to accepted source.
 Dynamic source references continue to use the recorded canonical runtime tree.
 

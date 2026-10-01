@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 const [rootArg,installArg]=process.argv.slice(2),root=path.resolve(rootArg),install=path.resolve(installArg);
-const scripts=path.join(root,'scripts'),files=new Set(),pending=fs.readdirSync(scripts).filter(name=>/^wave-.*\.(mjs|sh|json)$/.test(name)).map(name=>path.join(scripts,name));
+const scripts=path.join(root,'scripts'),files=new Set(),pending=fs.readdirSync(scripts).filter(name=>/^wave-.*\.(mjs|sh|json|lua)$/.test(name)).map(name=>path.join(scripts,name));
 for(const name of ['lib/wave-guard.mjs','lib/full-gate-proof.mjs','lib/service-target.sh'])if(fs.existsSync(path.join(scripts,name)))pending.push(path.join(scripts,name));
 while(pending.length){
  const file=pending.pop(),real=fs.realpathSync(file);
