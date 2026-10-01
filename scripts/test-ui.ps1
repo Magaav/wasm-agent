@@ -610,6 +610,40 @@ $harness = @'
     'a missing subscription login points to Pi');
   settings=savedModelSettings;
   window.renderProviders(); window.renderModels();
+  // A stale Go model must remain visible, not masquerade as the first choice.
+  settings=Object.assign({},savedModelSettings,{provider:'opencode-go',model:'gpt-6-sol',
+    model_error:'model_not_servable: choose a supported Go model',
+    providers:[{id:'opencode-go',label:'opencode-go',configured:true,models:['deepseek-v4.1-flash']}],
+    reasoning:{supported:false,levels:[],selected:'provider'}});
+  window.renderProviders(); window.renderModels();
+  check(modelPicker.value==='gpt-6-sol' && modelPicker.selectedOptions[0].disabled &&
+    /unavailable on this route/.test(modelPicker.selectedOptions[0].textContent),
+    'stale Go selection stays visible instead of silently showing DeepSeek');
+  check(/model_not_servable/.test(document.getElementById('settings-error').textContent),
+    'stale model refusal is visible before the next failed chat');
+  window.__fixtures.model=Object.assign({},settings,{model:'deepseek-v4.1-flash',model_error:null,
+    reasoning:{supported:true,levels:['low','high','max'],selected:'high'}});
+  modelPicker.value='deepseek-v4.1-flash'; modelPicker.dispatchEvent(new Event('change'));
+  for(var goTick=0;goTick<20;goTick++) await tick();
+  var goReasoning=document.getElementById('reasoning-select');
+  check(modelPicker.value==='deepseek-v4.1-flash' && !goReasoning.disabled &&
+    Array.from(goReasoning.options).map(o=>o.value).join(',')==='low,high,max',
+    'explicit supported Go model recovery enables catalogue reasoning');
+  window.__fixtures.reasoning=Object.assign({},window.__fixtures.model,
+    {reasoning:{supported:true,levels:['low','high','max'],selected:'low'}});
+  goReasoning.value='low'; goReasoning.dispatchEvent(new Event('change'));
+  for(var goTick=0;goTick<20;goTick++) await tick();
+  check(goReasoning.value==='low' && settings.reasoning.selected==='low' &&
+    document.getElementById('settings-error').textContent==='',
+    'Go reasoning selection roundtrips through the status balloon');
+  window.__fixtures.model={error:'model_not_servable'};
+  await window.setModel('gpt-6-sol');
+  check(modelPicker.value==='deepseek-v4.1-flash' && goReasoning.value==='low',
+    'refused model selection restores persisted controls');
+  delete window.__fixtures.model;
+  window.__fixtures.reasoning={error:'unsupported_reasoning_level'};
+  settings=savedModelSettings;
+  window.renderProviders(); window.renderModels();
   var diagnostics=document.getElementById('harness-status');
   check(diagnostics.querySelectorAll('details').length===4,'harness diagnostics have four progressively disclosed categories');
   check(/different configuration/.test(diagnostics.textContent),'model drift must be disclosed');

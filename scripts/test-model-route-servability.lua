@@ -16,6 +16,11 @@ host.getenv = function(key) if overrides[key] ~= nil then return overrides[key] 
 local sent = {}
 host.http = function(method, url, headers, body)
   sent[#sent + 1] = {method=method, url=url, body=body}
+  if method == 'GET' and url:match('/models$') then
+    return json.encode({status=200, body=json.encode({data={
+      {id='gpt-6-sol'}, {id='gpt-6-luna'}, {id='minimax-m3'},
+      {id='deepseek-v4.1-flash'}, {id='new-uncatalogued-model'}}})})
+  end
   return json.encode({status=200, body=json.encode({
     model='stub-model',
     choices={{message={role='assistant', content='stub answer'}, finish_reason='stop'}},
@@ -26,7 +31,14 @@ host.http_stream = host.http
 -- The catalogue: pi's local model store, keyed by pi's provider id, each entry carrying the `api`
 -- that id is served over. These are the ids the verifier executed against the live store.
 local store_path = paths.temp() .. '/wa-route-servability-store.json'
-local function entry(id, api) return {id=id, api=api, provider='fixture', reasoning=true, maxTokens=128000} end
+local function entry(id, api)
+  local e = {id=id, api=api, provider='fixture', reasoning=true, maxTokens=128000}
+  if id == 'deepseek-v4.1-flash' then
+    e.compat = {thinkingFormat='deepseek', maxTokensField='max_tokens'}
+    e.thinkingLevelMap = {low='low', high='high', max='max'}
+  end
+  return e
+end
 local codex = {'gpt-5.3-codex-spark', 'gpt-5.5', 'gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra',
   'gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol'}
 local function catalogue()
@@ -225,5 +237,62 @@ check(control_error:find('model_not_servable', 1, true) == nil,
   'a served model must not be refused at launch: ' .. control_error)
 check(control_error:find('subagent_token_budget', 1, true) ~= nil,
   'and it must reach the next real check: ' .. control_error)
+
+-- Picker/setter recovery: the provider can be selected with an old invalid
+-- saved model, but it must not silently substitute or accept a new mismatch.
+local state = dofile('lua/core/state.lua')
+provider.provider_override = 'opencode-go'
+provider.overrides = nil
+state.write('model.opencode-go', 'gpt-6-sol')
+check(provider.set_provider('opencode-go') == true, 'allow entering a stale route to repair its model')
+check(provider.settings().model == 'gpt-6-sol', 'provider switch must not silently replace the saved model')
+local offered_go = provider.list_models('opencode-go')
+check(table.concat(offered_go, ',') == 'deepseek-v4.1-flash,new-uncatalogued-model',
+  'picker filters only known mismatches: ' .. table.concat(offered_go, ','))
+local changed, selection_error = provider.set_model('gpt-6-luna')
+check(not changed and selection_error:find('model_not_servable', 1, true), 'reject mismatched selection')
+check(provider.settings().model == 'gpt-6-sol' and state.read('model.opencode-go') == 'gpt-6-sol',
+  'rejected selection leaves memory and persisted selection untouched')
+check(provider.set_model('deepseek-v4.1-flash') == true, 'explicit supported selection repairs stale state')
+check(state.read('model.opencode-go') == 'deepseek-v4.1-flash', 'persist the explicit repair')
+check(provider.reasoning().supported and table.concat(provider.reasoning().levels, ',') == 'low,high,max',
+  'the repaired Go model exposes its catalogue reasoning levels')
+check(provider.set_reasoning('low') == true and provider.reasoning().selected == 'low', 'reasoning selection roundtrip')
+local fields = provider.request_options('deepseek-v4.1-flash', messages, {})
+check(fields.thinking.type == 'enabled' and fields.reasoning_effort == 'low', 'send chosen DeepSeek reasoning')
+provider.overrides = nil
+check(provider.settings().model == 'deepseek-v4.1-flash' and provider.reasoning().selected == 'low',
+  'model/reasoning survive an in-memory settings reset')
+local refused_reasoning = provider.set_reasoning('medium')
+check(not refused_reasoning and provider.reasoning().selected == 'low', 'unsupported reasoning does not change state')
+check(not provider.set_model('') and not provider.set_provider('bogus-provider'), 'empty/unknown settings refuse')
+check(provider.set_model('new-uncatalogued-model') == true, 'unknown catalogue entries still allow explicit selection')
+provider.set_model('deepseek-v4.1-flash')
+
+-- Exercise the actual server routes, not only the setters. Keep HTTP stubbed
+-- and return the same provider module so state and in-memory observations agree.
+dofile = function(path)
+  if path == 'lua/core/provider.lua' then return provider end
+  return original_dofile(path)
+end
+original_dofile('lua/core/server.lua')
+dofile = original_dofile
+local rejected_route = json.decode(wa_set_model('gpt-6-sol', '', ''))
+check(rejected_route.error and rejected_route.error:find('model_not_servable', 1, true),
+  'the local model route surfaces rejection instead of reporting success')
+check(state.read('model.opencode-go') == 'deepseek-v4.1-flash', 'route rejection does not persist the bad model')
+check(json.decode(wa_set_provider('bogus-provider', '', '')).error == 'unknown_provider',
+  'the provider route surfaces unknown providers')
+local repaired_route = json.decode(wa_set_model('deepseek-v4.1-flash', '', ''))
+check(not repaired_route.error and not repaired_route.model_error and repaired_route.reasoning.supported,
+  'the real route returns usable model/reasoning after repair')
+local reasoning_route = json.decode(wa_set_reasoning('high', '', ''))
+check(not reasoning_route.error and reasoning_route.reasoning.selected == 'high', 'actual reasoning route roundtrip')
+state.write('model.opencode-go', 'gpt-6-sol')
+provider.overrides = nil
+local stale_route = json.decode(wa_model('', ''))
+check(stale_route.model == 'gpt-6-sol' and stale_route.model_error:find('model_not_servable', 1, true),
+  'actual status payload discloses a stale persisted model without replacing it')
+provider.set_model('deepseek-v4.1-flash')
 
 print('model route servability ok ('..checks..' checks)')

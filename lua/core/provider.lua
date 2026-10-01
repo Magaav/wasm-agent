@@ -120,13 +120,17 @@ function M.set_provider(id)
       return true
     end
   end
-  return false
+  return false, "unknown_provider"
 end
 
 function M.set_model(name)
   name = trim(name)
-  if name == "" then return false end
+  if name == "" then return false, "empty_model" end
   local provider = M.active()
+  -- Reject a known protocol mismatch before persisting it. Unknown catalogue
+  -- entries remain allowed, exactly as on the request path.
+  local problem = M.unservable(name, provider)
+  if problem then return false, problem end
   M.overrides = M.overrides or {}
   M.overrides[provider.id] = name
   write_state("model." .. provider.id, name)
@@ -365,7 +369,10 @@ function M.list_models(id)
         local ok, payload = pcall(json.decode, response.body)
         if ok and type(payload) == "table" and type(payload.data) == "table" then
           for _, item in ipairs(payload.data) do
-            if type(item) == "table" and item.id then models[#models + 1] = item.id end
+            if type(item) == "table" and type(item.id) == "string"
+                and M.serves(item.id, provider) ~= false then
+              models[#models + 1] = item.id
+            end
           end
         end
       end

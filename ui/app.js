@@ -2303,6 +2303,17 @@ function renderModels() {
   modelSelect.replaceChildren();
   const provider = activeProvider();
   const models = (provider && provider.models) || [];
+  // Do not display the first available model as if it were the persisted one.
+  // Keep stale selections visible so the operator can explicitly repair them.
+  if (settings.model && !models.includes(settings.model)) {
+    const option = document.createElement('option');
+    option.value = settings.model;
+    option.textContent = settings.model + ' (unavailable on this route; choose a model)';
+    option.selected = true;
+    option.disabled = true;
+    modelSelect.append(option);
+  }
+  if (settings.model_error) settingsError.textContent = settings.model_error;
   for (const name of models) {
     const option = document.createElement("option");
     option.value = name;
@@ -2436,8 +2447,12 @@ async function post(path, body) {
     body: body,
   });
   const payload = await response.json();
-  settingsError.textContent=payload.error || '';
-  if (!payload.error) {
+  settingsError.textContent=payload.error || payload.model_error || '';
+  if (payload.error) {
+    renderProviders();
+    renderModels();
+    settingsError.textContent=payload.error;
+  } else {
     settings = { ...settings, ...payload };
     updateNodeLabel(settings.node_name, settings.node_worktree);
     updateChip();

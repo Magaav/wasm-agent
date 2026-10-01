@@ -528,10 +528,12 @@ local function node_capability(capability, args, caller)
     if enrollment.managed() then return enrollment.status() end
     return json.decode(wa_model("", ""))
   elseif capability == "set_provider" then
-    provider.set_provider(args.id or "")
+    local ok, problem = provider.set_provider(args.id or "")
+    if not ok then return {error=problem} end
     return json.decode(wa_model("", ""))
   elseif capability == "set_model" then
-    provider.set_model(args.name or "")
+    local ok, problem = provider.set_model(args.name or "")
+    if not ok then return {error=problem} end
     return json.decode(wa_model("", ""))
   elseif capability == "chat" then
     local bot, agent_problem = node_agent(caller)
@@ -1058,6 +1060,7 @@ function wa_model(node, session, chat_session)
     usage = agentlib.usage(),
     observability=observation,
     reasoning=provider.reasoning(settings.model),
+    model_error=provider.unservable(settings.model),
     output_limit=tonumber(host.getenv("WASM_AGENT_LLM_MAX_OUTPUT")) or provider.capabilities(settings.model).max_output,
     compact_reserve=budget.reserve,
     compact_keep=budget.keep,
@@ -1093,7 +1096,8 @@ function wa_set_provider(id, node, session)
     if result and not result.error then return json.encode(result) end
     return json.encode({ error = (result and result.error) or "remote_error" })
   end
-  provider.set_provider(id or "")
+  local ok, problem = provider.set_provider(id or "")
+  if not ok then return json.encode({error=problem}) end
   if agent then agent.model = provider.settings().model end
   return wa_model("", session)
 end
@@ -1119,7 +1123,8 @@ function wa_set_model(name, node, session)
     if result and not result.error then return json.encode(result) end
     return json.encode({ error = (result and result.error) or "remote_error" })
   end
-  provider.set_model(name or "")
+  local ok, problem = provider.set_model(name or "")
+  if not ok then return json.encode({error=problem}) end
   if agent then agent.model = provider.settings().model end
   return wa_model("", session)
 end
