@@ -16,7 +16,13 @@ export function location(repo){return path.join(fs.realpathSync(git(repo,'rev-pa
 export function isolated(repo) {
   const common=git(repo,'rev-parse','--path-format=absolute','--git-common-dir');
   const origin=spawnSync('git',['-C',repo,'remote','get-url','origin'],{encoding:'utf8',windowsHide:true});
-  return key(common).startsWith(key(os.tmpdir())+'/') && (origin.status!==0 || fs.existsSync(origin.stdout.trim()));
+  // A repository with no `origin` cannot be the shared integration repository, so it
+  // is a throwaway fixture whatever directory it lives in. A fixture that remaps TMPDIR
+  // (to isolate its own home) is no longer under `os.tmpdir()` here, so the temp-dir
+  // heuristic alone is too narrow. Production always has an `origin`, where the wave
+  // authority guard still applies.
+  if(origin.status!==0)return true;
+  return key(common).startsWith(key(os.tmpdir())+'/');
 }
 function registration(repo) {
   const store=location(repo),file=path.join(store,'registration.json');

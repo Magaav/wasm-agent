@@ -43,9 +43,15 @@ end
 local function wave_admission(root,phase)
   local lua_root=host.getenv('WASM_AGENT_LUA_ROOT')
   local entry=(lua_root and lua_root~='') and (lua_root..'/scripts/wave-entry.mjs') or (dofile('lua/core/update.lua').install_dir()..'/scripts/wave-entry.mjs')
-  local result=run('node '..assert(quote(entry))..' check '..assert(quote(root))..' '..phase,root)
-  local decoded=result and json.decode(result.stdout or '{}')
-  return decoded and decoded.ok==true,decoded and decoded.reason or 'wave entrypoint unavailable'
+  local ok,raw=pcall(host.exec,'node '..assert(quote(entry))..' check '..assert(quote(root))..' '..phase,root,120)
+  if not ok then return false,'wave entrypoint unavailable: '..tostring(raw) end
+  local envelope_ok,envelope=pcall(json.decode,raw)
+  if not envelope_ok or type(envelope)~='table' then return false,'wave entrypoint unreadable' end
+  -- The entrypoint encodes a refusal as JSON with an actionable reason even when it exits
+  -- non-zero, so decode its verdict rather than collapsing it into 'unavailable'.
+  local decoded_ok,decoded=pcall(json.decode,envelope.stdout or '{}')
+  if not decoded_ok or type(decoded)~='table' then return false,'wave entrypoint wrote no verdict: '..tostring(envelope.stderr or ''):sub(1,200) end
+  return decoded.ok==true,decoded.reason or decoded.mode or ('wave admission refused (exit '..tostring(envelope.code)..')')
 end
 
 local function mark(memory, id, current, state, error)
