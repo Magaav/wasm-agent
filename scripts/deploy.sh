@@ -616,6 +616,13 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
   note "shipped $PIPELINE pipeline file(s) into $INSTALL_DIR/scripts"
 fi
 
+# Ship wave continuation/entry scripts with their literal module closure.
+WAVE_SHIP="$ROOT/scripts/ship-wave.mjs"; WAVE_ROOT="$ROOT"; WAVE_INSTALL="$INSTALL_DIR"
+if command -v cygpath >/dev/null 2>&1; then
+  WAVE_SHIP="$(cygpath -w "$WAVE_SHIP")"; WAVE_ROOT="$(cygpath -w "$WAVE_ROOT")"; WAVE_INSTALL="$(cygpath -w "$WAVE_INSTALL")"
+fi
+node "$WAVE_SHIP" "$WAVE_ROOT" "$WAVE_INSTALL" || fail "node installed, but wave continuation scripts are not import-closed"
+
 RECORD_TMP="$INSTALL_DIR/.installed.txt.deploy.$$"
 REASON_LINE="$(printf '%s' "$REASON" | tr '\r\n' '  ')"
 # `install_dir=` is the record's own statement of where it was written, and of which directory the machine

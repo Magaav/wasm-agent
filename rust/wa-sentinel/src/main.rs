@@ -1734,11 +1734,13 @@ fn request(args: &[String]) -> Result<()> {
         if verb!="deploy" {bail!("--if-no-pending is supported only for deploy");}
         if stop_path().exists() {bail!("sentinel intentionally stopped; no request written");}
         if watcher_state()?!=WatcherState::Running {bail!("no verified watcher lifetime lock; no request written");}
+        let mut pending=Vec::new();
         for folder in ["requests","claimed"] {
-            if let Some(existing)=deploy_requests_in(&sentinel_dir().join(folder))?.first() {
-                say(&format!("existing deploy request: {}",existing.display()));
-                say("no duplicate request was written");return Ok(());
-            }
+            pending.extend(deploy_requests_in(&sentinel_dir().join(folder))?);
+        }
+        if let Some(existing)=pending.first() {
+            say(&format!("existing deploy request: {}",existing.display()));
+            say("no duplicate request was written");return Ok(());
         }
     }
     static REQUEST_SEQUENCE:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
@@ -2109,9 +2111,11 @@ fn restart_self() -> Result<()> {
             if pid_alive(pid) {
                 bail!("the watcher (pid {pid}) did not stop - not starting a second one");
             }
+            // This restart wrote the stop marker itself. Remove only that marker, after proving the
+            // previous watcher exited. A pre-existing intentional stop was refused above.
+            let _ = std::fs::remove_file(stop_path());
         }
     }
-    let _ = std::fs::remove_file(stop_path());
     start_self_unlocked()
 }
 
@@ -2181,6 +2185,7 @@ fn print_help() {
 const HELP: &str = r#"wa-sentinel - the process outside the node.
 
   request restart  [--reason TEXT]     (graceful; queued while busy)
+  request deploy   [--if-no-pending] [--reason TEXT] (optionally deduplicate deploys)
   request recover  [--reason TEXT]     (explicit interruption; never waits for idle)
   job list | history | put <file.json> | enable <id> | disable <id>
   job emit <topic> <stable-event-id> <payload.json>
@@ -2304,6 +2309,31 @@ mod role_tests;
 #[cfg(test)]
 mod self_update_tests {
     use super::*;
+
+    #[test]
+    fn watcher_probe_fails_closed_for_running_legacy_pid_and_distinguishes_stopped() {
+        assert_eq!(classify_watcher(true, Some(22), true), WatcherState::Running);
+        assert_eq!(classify_watcher(false, Some(22), true), WatcherState::LegacyUnverified(22));
+        assert_eq!(classify_watcher(false, Some(22), false), WatcherState::NotRunning);
+        assert_eq!(classify_watcher(false, None, false), WatcherState::NotRunning);
+    }
+
+    #[test]
+    fn deploy_dedupe_lists_only_deploys_and_preserves_pending_files() {
+        let dir = std::env::temp_dir().join(format!("wa-deploy-dedupe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        std::fs::write(dir.join("ignored.txt"), "{}").expect("other file");
+        std::fs::write(dir.join("broken.json"), "not json").expect("malformed file");
+        std::fs::write(dir.join("old.json"), serde_json::to_vec(&json!({"verb":"restart"})).unwrap()).unwrap();
+        std::fs::write(dir.join("deploy.json"), serde_json::to_vec(&json!({"verb":"deploy"})).unwrap()).unwrap();
+        assert!(format!("{:#}",deploy_requests_in(&dir).unwrap_err()).contains("unknown_inventory"));
+        std::fs::remove_file(dir.join("broken.json")).expect("remove manufactured unexecuted malformed fixture");
+        let found = deploy_requests_in(&dir).expect("scan requests");
+        assert_eq!(found, vec![dir.join("deploy.json")]);
+        assert!(dir.join("deploy.json").exists(), "dedupe must never claim, delete or replay the existing request");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn wake_requires_a_real_terminal_event_and_bounds_capture() {

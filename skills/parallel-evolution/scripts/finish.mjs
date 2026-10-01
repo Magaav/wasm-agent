@@ -51,6 +51,19 @@ function inspect() {
   return {repository_ready:checks.every(item => item.ok),repo,head,tree,branch,checks,runner:runnerIdentity,
     inference_required:['one concern and patch review','impact audit and its coverage','integration/deployment when requested']};
 }
+function waveAdmission(phase) {
+  const helper=path.join(repo,'scripts','lib','wave-guard.mjs');
+  if(fs.existsSync(helper)) {
+    const result=spawnSync(process.execPath,[helper,repo,phase],{encoding:'utf8',windowsHide:true,timeout:20000});
+    let proof;try{proof=JSON.parse(result.stdout.trim());}catch{}
+    if(!proof||result.status!==0||proof.ok!==true)throw Error(proof?.reason||result.stderr||'wave admission unverifiable');
+    return proof;
+  }
+  const common=path.resolve(repo,git('rev-parse','--path-format=absolute','--git-common-dir'));
+  try {fs.lstatSync(path.join(common,'wa-waves','registration.json'));throw Error('registered wave guard module missing');}
+  catch(error){if(error.code!=='ENOENT')throw error;}
+  return {ok:true,wave_verified:false,reason:'unregistered legacy/bootstrap or isolated fixture; no store created'};
+}
 function receiptPath() { return path.resolve(repo, git('rev-parse','--git-path','wa-finish-gate.json')); }
 function verify(state) {
   if (!state.repository_ready) return {...state,gate_verified:false};
@@ -302,6 +315,7 @@ function spellDefinitions() {
 }
 try {
   let result;
+  const wave=['check','gate','admit'].includes(mode)?waveAdmission(mode==='admit'?'admit':'produce'):null;
   if (mode === 'spell') result = spellDefinitions();
   else if (mode === 'check') result = inspect();
   else if (mode === 'admit') {
@@ -315,5 +329,6 @@ try {
   else if (mode === 'gate') result = await gate();
   else if (mode === 'verify') result = verify(inspect());
   else throw Error('usage: finish.mjs spell|check|admit|gate|verify <absolute-repo> <expected-HEAD>');
+  if(wave)result.wave=wave;
   console.log(JSON.stringify(result));
 } catch (error) { console.log(JSON.stringify({repository_ready:false,gate_verified:false,error:error.message})); process.exitCode=1; }

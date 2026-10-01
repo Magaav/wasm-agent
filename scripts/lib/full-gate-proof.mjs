@@ -10,7 +10,7 @@ export function fullProof(receipt,tree) {
     const bytes=fs.readFileSync(receipt.log),digest=crypto.createHash('sha256').update(bytes).digest('hex');
     const match=/(?:^|\n)smoke ok(?: \((\d+) skipped\))?\r?\n?$/.exec(bytes.toString());
     if(digest!==receipt.log_sha256||!match||Number(match[1]||0)!==receipt.skipped)throw Error('invalid full log or skips');
-    return {verified:true,tree,head:receipt.head,log:receipt.log,log_sha256:digest,skipped:receipt.skipped,gate_ms:receipt.gate_ms,verdict_line:match[0].trim()};
+    return {verified:true,tree,head:receipt.head,tested_repo:receipt.repo,owner_repo:receipt.owner_repo||receipt.repo,log:receipt.log,log_sha256:digest,skipped:receipt.skipped,gate_ms:receipt.gate_ms,verdict_line:match[0].trim()};
   } catch(error){return {verified:false,reason:error.message};}
 }
 export function findFullProof(repo,tree) {
@@ -23,7 +23,8 @@ export function findFullProof(repo,tree) {
         const located=run(root,['rev-parse','--git-path',name]);if(located.status!==0)continue;
         const file=path.resolve(root,located.stdout.trim());
         let receipt;try{receipt=JSON.parse(fs.readFileSync(file,'utf8'));}catch{continue;}
-        if(path.resolve(receipt.repo)!==path.resolve(root))continue;
+        const storageOwner=name==='wa-combined-gate.json'?receipt.owner_repo:receipt.repo;
+        if(!storageOwner||path.resolve(storageOwner)!==path.resolve(root))continue;
         const proof=fullProof(receipt,tree);if(proof.verified)return {...proof,receipt:file};
       }
     } catch { /* Missing/unreadable evidence requires execution; it never authorizes reuse. */ }

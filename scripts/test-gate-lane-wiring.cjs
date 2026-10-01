@@ -325,7 +325,7 @@ async function main() {
   fs.mkdirSync(path.join(broken, 'scripts'), {recursive: true});
   fs.copyFileSync(mergeRunner, path.join(broken, 'scripts', 'merge-lane.mjs'));
   fs.mkdirSync(path.join(broken,'scripts','lib'),{recursive:true});
-  for(const file of ['delivery-admission.mjs','producer-admission.mjs','gate-check.mjs','gate-checks.mjs','lib/full-gate-proof.mjs','lib/delivery-store.mjs','lib/test-verdict.cjs'])
+  for(const file of ['delivery-admission.mjs','producer-admission.mjs','gate-check.mjs','gate-checks.mjs','lib/full-gate-proof.mjs','lib/delivery-store.mjs','lib/test-verdict.cjs','lib/wave-guard.mjs'])
     fs.copyFileSync(path.join(repo,'scripts',file),path.join(broken,'scripts',file));
   fs.writeFileSync(path.join(broken, 'scripts', 'gate-lane.mjs'),
     'process.stderr.write("gate lane: unknown option --holder-pid\\n");\nprocess.exit(76);\n');

@@ -528,11 +528,11 @@ local function node_capability(capability, args, caller)
     if enrollment.managed() then return enrollment.status() end
     return json.decode(wa_model("", ""))
   elseif capability == "set_provider" then
-    local ok, problem = provider.set_provider(args.id or "")
+    local ok, problem = provider.set_provider(args.id or "", args.revision)
     if not ok then return {error=problem} end
     return json.decode(wa_model("", ""))
   elseif capability == "set_model" then
-    local ok, problem = provider.set_model(args.name or "")
+    local ok, problem = provider.set_model(args.name or "", args.revision)
     if not ok then return {error=problem} end
     return json.decode(wa_model("", ""))
   elseif capability == "chat" then
@@ -1027,6 +1027,7 @@ function wa_sync_status()
 end
 
 function wa_model(node, session, chat_session)
+  return provider.with_selection(function()
   if remote_target(node) then
     local result = nodeslib.remote_call(node, "status", {})
     if result and not result.error then return json.encode(result) end
@@ -1053,6 +1054,7 @@ function wa_model(node, session, chat_session)
   local limits, limits_error = provider.limits()
   return json.encode({
     provider = settings.provider,
+    settings_revision = provider.selection_revision(),
     model = settings.model,
     base_url = settings.base_url,
     configured = provider.configured(),
@@ -1086,17 +1088,31 @@ function wa_model(node, session, chat_session)
     stats = memory.stats(),
     database = host.getenv("WASM_AGENT_DB") or "",
   })
+  end)
+end
+
+local function selection_input(body)
+  if type(body) == 'string' and body:sub(1,1) == '{' then
+    local ok, parsed = pcall(json.decode, body)
+    if not ok or type(parsed) ~= 'table' or type(parsed.value) ~= 'string'
+        or type(parsed.revision) ~= 'number' then return nil, nil, 'invalid_settings_request' end
+    return parsed.value, parsed.revision
+  end
+  return body or '', nil
 end
 
 -- Switch provider/model at runtime; returns the refreshed settings payload.
 function wa_set_provider(id, node, session)
   if not require_master(session) then return json.encode({error="forbidden"}) end
+  local revision, input_error
+  id, revision, input_error = selection_input(id)
+  if input_error then return json.encode({error=input_error}) end
   if remote_target(node) then
-    local result = nodeslib.remote_call(node, "set_provider", { id = id or "" })
+    local result = nodeslib.remote_call(node, "set_provider", { id = id or "", revision=revision })
     if result and not result.error then return json.encode(result) end
     return json.encode({ error = (result and result.error) or "remote_error" })
   end
-  local ok, problem = provider.set_provider(id or "")
+  local ok, problem = provider.set_provider(id or "", revision)
   if not ok then return json.encode({error=problem}) end
   if agent then agent.model = provider.settings().model end
   return wa_model("", session)
@@ -1118,12 +1134,15 @@ end
 
 function wa_set_model(name, node, session)
   if not require_master(session) then return json.encode({error="forbidden"}) end
+  local revision, input_error
+  name, revision, input_error = selection_input(name)
+  if input_error then return json.encode({error=input_error}) end
   if remote_target(node) then
-    local result = nodeslib.remote_call(node, "set_model", { name = name or "" })
+    local result = nodeslib.remote_call(node, "set_model", { name = name or "", revision=revision })
     if result and not result.error then return json.encode(result) end
     return json.encode({ error = (result and result.error) or "remote_error" })
   end
-  local ok, problem = provider.set_model(name or "")
+  local ok, problem = provider.set_model(name or "", revision)
   if not ok then return json.encode({error=problem}) end
   if agent then agent.model = provider.settings().model end
   return wa_model("", session)
@@ -1131,8 +1150,11 @@ end
 
 function wa_set_reasoning(level,node,session)
   if not require_master(session) then return json.encode({error="forbidden"}) end
+  local revision, input_error
+  level, revision, input_error = selection_input(level)
+  if input_error then return json.encode({error=input_error}) end
   if remote_target(node) then return json.encode({error="reasoning_selection_requires_local_node"}) end
-  local ok,problem=provider.set_reasoning(level)
+  local ok,problem=provider.set_reasoning(level,revision)
   if not ok then return json.encode({error=problem}) end
   return wa_model("",session)
 end
