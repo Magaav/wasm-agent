@@ -173,3 +173,9 @@ CREATE TABLE IF NOT EXISTS orchestration_tasks (
   detail TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL,
   UNIQUE(owner, request_key)
 );
+-- One atomic, node-local selection document; never replicated with transcripts.
+CREATE TABLE IF NOT EXISTS node_selection (
+  node TEXT PRIMARY KEY,
+  revision INTEGER NOT NULL,
+  selections TEXT NOT NULL
+);
