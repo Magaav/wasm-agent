@@ -36,7 +36,7 @@ function finish(res,text){event(res,{choices:[{delta:{content:text},finish_reaso
   Object.assign(env,{WASM_AGENT_HOME:root,WASM_AGENT_LUA_ROOT:repo,WASM_AGENT_PROVIDER:'opencode-go',WASM_AGENT_LLM_MODEL:'fixture-model',WASM_AGENT_LLM_API_KEY:'fixture-only',WASM_AGENT_LLM_BASE_URL:'http://127.0.0.1:'+modelPort,OPENAI_BASE_URL:'http://127.0.0.1:'+modelPort,OPENAI_API_KEY:'fixture-only',WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_RELAY:'',WASM_AGENT_MANAGED:'0',WASM_AGENT_MODELS_DEV_URL:'off',WASM_AGENT_PROVIDER_RESPONSE_RETRIES:'0',WA_GRAPH_WATCH:'0'});
   node=spawn(binary,['--db',path.join(root,'memory.db'),'serve','--port',String(port),'--client-port',String(await freePort()),'--ui',path.join(repo,'ui')],{cwd:repo,env,windowsHide:true,stdio:['ignore',log,log]});children.push(node);fs.closeSync(log);
   await until(async()=>{try{return(await api('health')).ok;}catch{return false;}},'node ready');
-  proxy=http.createServer((req,res)=>{const upstream=http.request({host:'127.0.0.1',port,path:req.url,method:req.method,headers:req.headers},r=>{
+  proxy=http.createServer((req,res)=>{const upstream=http.request({host:'127.0.0.1',port,path:req.url,method:req.method,headers:{...req.headers,...(req.headers.origin?{origin:'http://127.0.0.1:'+port}:{})}},r=>{
    if(delayedWrite&&req.method==='POST'&&req.url==='/provider'){
     delayedWrite=false;let data='';r.on('data',b=>data+=b);r.on('end',()=>setTimeout(()=>{if(!res.destroyed){res.writeHead(r.statusCode,r.headers);res.end(data);}},350));
    }else{res.writeHead(r.statusCode,r.headers);r.pipe(res);}
@@ -57,7 +57,7 @@ function finish(res,text){event(res,{choices:[{delta:{content:text},finish_reaso
   check((await api('health')).runs.length===2,'recovery did not require run settlement');
   await evaluate(b,'apiTimeout=80; true');delayedWrite=true;
   await evaluate(b,"setProvider('gpt').then(()=>true)");
-  check(await evaluate(b,"settings.provider==='gpt' && document.getElementById('settings-error').textContent.includes('change unconfirmed')"),'applied write with delayed acknowledgement remains truthfully unconfirmed');
+  check(await evaluate(b,"settings.provider==='gpt' && document.getElementById('settings-error').textContent.includes('in effect') && document.getElementById('settings-error').textContent.includes('aborted')"),'delayed write acknowledgement is reconciled from the actually applied node state');
   await evaluate(b,'apiTimeout=8000; true');
   await until(()=>evaluate(a,"settings.provider==='gpt'").catch(()=>false),'other window versioned settings refresh');
   const current=await api('models');const stale=await api('model',{value:'fixture-next',revision:current.settings_revision-1});check(stale.error==='settings_conflict','stale cross-window selection refuses');
@@ -78,7 +78,7 @@ function finish(res,text){event(res,{choices:[{delta:{content:text},finish_reaso
  }catch(e){
   report.passed=false;report.error=e.stack;
   report.pages=await Promise.all(pages.map(async p=>{try{return {thread:p.thread,value:await evaluate(p.id,"({url:location.href,chatSession,conversationEpoch,synced,metaReady,transcriptReady,busy,followedSeq,liveRunId,liveEventSeq,liveCheckpointSeq,liveSyncFailed,text:document.body.innerText})")};}catch(error){return {thread:p.thread,error:String(error)};}}));
-  try{report.health=await api('health');report.replay=await api('run-events',{thread:'thread-A',run_id:report.health.runs.find(r=>r.conversation==='thread-A')?.run_id});}catch{}
+  try{report.health=await api('health');report.replay=await api('run-events',{thread:'thread-A',run_id:report.health.run_ids.find(r=>r.conversation==='thread-A'&&r.state==='running')?.run_id});}catch{}
   throw e;
  }
  finally{

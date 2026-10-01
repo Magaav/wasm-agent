@@ -2490,6 +2490,14 @@ function renderPopFoot() {
   popFoot.textContent = base + (settings.database ? "  ·  " + settings.database : "");
 }
 
+// What each settings route names in the payload, so a reconcile can compare what was asked for with
+// what the node reports afterwards.
+const SETTING_VALUE = {
+  provider: (payload) => payload.provider,
+  model: (payload) => payload.model,
+  reasoning: (payload) => (payload.reasoning || {}).selected,
+};
+
 // A settings change is confirmed or visibly refused - never silently dropped.
 //
 // It used to send the write and assume it landed. A rejected or aborted fetch became an unhandled
@@ -2522,7 +2530,6 @@ async function post(path, body) {
   const node = activeNode, target = chatSession, epoch = conversationEpoch;
   settingsChanging = true;
   let failure = "";
-  let refused = false;
   let payload = null;
   try {
     const response = await apiFetch(path, {
@@ -2532,8 +2539,8 @@ async function post(path, body) {
     });
     payload = await response.json();
     // The node's own words when it gives them; its status when it does not.
-    if (payload.error) { failure = String(payload.error); refused = true; }
-    else if (!response.ok) { failure = "the node answered HTTP " + response.status; refused = true; }
+    if (payload.error) failure = String(payload.error);
+    else if (!response.ok) failure = "the node answered HTTP " + response.status;
   } catch (error) {
     // A thrown fetch. The abort apiFetch raises at its own deadline (apiTimeout, 8s) arrives here
     // too, and is said as what it is: the node was never told no, so it may apply the change later.
@@ -2544,30 +2551,52 @@ async function post(path, body) {
   settingsChanging = false;
   if (activeNode !== node || chatSession !== target || conversationEpoch !== epoch) return;
   if (failure) {
-    await reconcileControls(refused ? "not applied \u2014 " + failure
-      : "change unconfirmed \u2014 " + failure + "; the node may have applied it");
+    await reconcileControls(failure, { asked: body, reads: SETTING_VALUE[path] });
     return;
   }
-  try { acceptSettings(payload); }
-  catch (error) { await reconcileControls("change unconfirmed \u2014 " + error.message); return; }
-  updateNodeLabel(settings.node_name, settings.node_worktree);
-  updateChip();
-  renderControls();
-  renderContext();
-  renderLimits();
-  renderUsage();
-  renderPopFoot();
+  try { if (!acceptSettings(payload)) return; }
+  catch (error) { await reconcileControls(error.message, {asked:body, reads:SETTING_VALUE[path]}); return; }
+  try {
+    updateNodeLabel(settings.node_name, settings.node_worktree);
+    updateChip();
+    renderControls();
+    renderContext();
+    renderLimits();
+    renderUsage();
+    renderPopFoot();
+  } catch (error) {
+    // The node accepted the change, so the merged settings are the truth even when drawing them
+    // throws. Say that rather than let the failure become an unhandled rejection that leaves the
+    // controls stale and the note silent - the same defect class this function exists to close.
+    settingsError.textContent = "the change was applied, but the controls could not be redrawn: " + String(error);
+    return;
+  }
   settingsError.textContent = payload.model_error || "";
 }
 
-// Draw the controls from the node's own answer after a change that was not confirmed. The note is
-// what the operator is told; when the node cannot be re-read either, the controls are still drawn
-// from the last answer this window has - a value the node never accepted must not stay on screen -
-// and the note says the node was not reached rather than implying it agreed.
-async function reconcileControls(note) {
-  const read = await refreshMeta();
+// Draw the controls from the node's own answer after a settings change, and say what that answer is.
+// The note is derived from the node's report, never from the write outcome alone: a request this
+// client aborted is still the node's to apply, and a note that read "not applied" while the screen
+// showed a provider the node had applied afterwards is the note the operator acts on. When the
+// answer is what was asked for it is said as in effect; when the node cannot be re-read either, the
+// controls are still drawn from the last answer this window has and the note says so.
+async function reconcileControls(reason, sent) {
+  const node=activeNode, target=chatSession, epoch=conversationEpoch;
   renderControls();
-  settingsError.textContent = read ? note : note + " \u00b7 the node could not be re-read";
+  settingsError.textContent = (sent ? 'not confirmed' : 'not sent') + ' - ' + reason;
+  const read = await refreshMeta();
+  if (node!==activeNode || target!==chatSession || epoch!==conversationEpoch) return;
+  renderControls();
+  const route = (settings.provider || "unknown provider") + " / " + (settings.model || "unknown model");
+  const landed = !!(sent && sent.asked && sent.reads && sent.reads(settings) === sent.asked);
+  if (!read) {
+    settingsError.textContent = (sent ? "not confirmed \u2014 " : "not sent \u2014 ") + reason +
+      "; the node could not be re-read, so this still shows " + route;
+    return;
+  }
+  settingsError.textContent = landed
+    ? "in effect \u2014 " + reason + "; the node reports " + route + ", which is what was asked for"
+    : (sent ? "not confirmed \u2014 " : "not sent \u2014 ") + reason + "; the node now reports " + route;
 }
 
 function setProvider(id) { return post("provider", id); }
@@ -3046,8 +3075,10 @@ statusBtn.addEventListener("click", () => {
   }
 });
 balloon.addEventListener("close", () => statusBtn.setAttribute("aria-expanded", "false"));
-providerSelect.addEventListener("change", () => setProvider(providerSelect.value));
-modelSelect.addEventListener("change", () => setModel(modelSelect.value));
+providerSelect.addEventListener("change", () => setProvider(providerSelect.value)
+  .catch((error) => { settingsError.textContent = "the change could not be sent: " + String(error); }));
+modelSelect.addEventListener("change", () => setModel(modelSelect.value)
+  .catch((error) => { settingsError.textContent = "the change could not be sent: " + String(error); }));
 reasoningSelect.addEventListener('change',()=>post('reasoning',reasoningSelect.value).catch(error=>{settingsError.textContent=String(error);}));
 harnessStatus.addEventListener('export',async event=>{
   settingsError.textContent='Exporting recorded events…';
