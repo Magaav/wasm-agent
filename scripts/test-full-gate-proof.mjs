@@ -32,6 +32,7 @@ try{
  const rawPath=path.join(root,'original.json');fs.writeFileSync(rawPath,JSON.stringify(receipt));
  const retained=retainFullProof(rawPath,owner,{candidateHead:head});
  check(fullProof(retained,tree,{ownerRepo:owner}).verified,'pinned real source proof accepted');
+ check(!fullProof({...retained,owner_repo:path.join(root,'nonexistent-storage')},tree).verified,'nonexistent storage identity rejected');
  check(fs.readFileSync(retained.source_receipt.path).equals(fs.readFileSync(rawPath)),'original receipt retained byte exactly');
  fs.writeFileSync(path.join(owner,'.git/wa-combined-gate.json'),JSON.stringify(retained));
  check(findFullProof(owner,tree).verified,'retained proof discoverable');

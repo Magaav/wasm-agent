@@ -36,7 +36,7 @@ export function fullProof(receipt,tree,{ownerRepo=null}={}){
   const gate=scopeBlob(scope.source,'scripts/test.sh');requireFact(digest(gate)===scope.input_scope.gate_sha256&&scope.input_scope.tree===tree&&scope.input_scope.command==='bash scripts/test.sh','retained gate input scope mismatch');
   if(original.input_scope)requireFact(JSON.stringify(original.input_scope)===JSON.stringify(scope.original_input_scope),'original input attestation changed');
   requireFact(scope.owner.repo===path.resolve(receipt.owner_repo),'storage owner annotation changed');
-  if(ownerRepo){const current=identity(ownerRepo);requireFact(current.common===scope.owner.common&&current.format===scope.owner.format,'retained proof belongs to a different shared Git repository');}
+  const current=identity(ownerRepo||receipt.owner_repo);requireFact(current.common===scope.owner.common&&current.format===scope.owner.format,'retained proof belongs to a different shared Git repository');
   const log=readRef(scope.log),verdict=terminal(original,log,tree);return {...result(original,verdict,scope.log.path),owner_repo:receipt.owner_repo,retained:true,original_receipt:receipt.source_receipt,retained_scope:receipt.scope,retention_host:scope.capture_host};
  }catch(error){return {verified:false,reason:error.message};}
 }
