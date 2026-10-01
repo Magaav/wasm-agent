@@ -169,8 +169,10 @@ for _ in $(seq 1 40); do
 done
 if [ "${code:-}" != "200" ]; then echo "  FAIL: the wedge-test server did not come up"; exit 1; fi
 
-# Stall it: any request that needs the interpreter trips the hook.
-curl -s -o /dev/null -m 3 "http://127.0.0.1:$WEDGE_PORT/sessions" 2>/dev/null
+# Stall the run interpreter explicitly. Reads have independent reserved capacity
+# and must not be the trigger: that would test the read lane while observing 0.
+# The empty /diff write has no effect; the hook stalls before its Lua handler.
+curl -s -o /dev/null -m 3 -X POST -H 'content-type: application/json' -d '{}' "http://127.0.0.1:$WEDGE_PORT/diff" 2>/dev/null
 sleep 2
 
 health="$(curl -s -m 3 "http://127.0.0.1:$WEDGE_PORT/health" 2>/dev/null)"
