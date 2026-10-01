@@ -328,6 +328,11 @@ impl Manager {
             self.fallback.as_deref(),
         );
         spec.cwd = start_directory.used.clone();
+        // Execution uses the effective directory, but the recorded `cwd` keeps the primary
+        // contract (scripts/test-start-directory.lua): a call that named no directory records
+        // "", and a call that named one records where it ran. The explicit-request and
+        // real-directory distinction is carried by cwd_requested and effective_cwd.
+        let recorded_cwd = if start_directory.requested.is_empty() { String::new() } else { spec.cwd.clone() };
         let index = self.index()?;
         let mut entries = self.entries.lock().map_err(error)?;
         if entries
@@ -359,7 +364,7 @@ impl Manager {
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         );
         let dir = self.root.join(&id);
-        let mut state = json!({"operation_id":id,"owner":spec.owner,"cwd":spec.cwd,"cwd_requested":start_directory.requested,"state":"accepted","settled":false,"timeout_ms":spec.timeout.as_millis() as u64,"cleanup_budget_ms":CLEANUP_MS,"containment":Process::containment(),"stdout_path":dir.join("stdout").to_string_lossy(),"stderr_path":dir.join("stderr").to_string_lossy(),"output_bytes":0,"timing":timing_payload()});
+        let mut state = json!({"operation_id":id,"owner":spec.owner,"cwd":recorded_cwd,"cwd_requested":start_directory.requested,"state":"accepted","settled":false,"timeout_ms":spec.timeout.as_millis() as u64,"cleanup_budget_ms":CLEANUP_MS,"containment":Process::containment(),"stdout_path":dir.join("stdout").to_string_lossy(),"stderr_path":dir.join("stderr").to_string_lossy(),"output_bytes":0,"timing":timing_payload()});
         state["owner_boot"] = json!(index.boot);
         state["owner_process_id"] = json!(std::process::id());
         state["effective_cwd"] = json!(fs::canonicalize(&spec.cwd)?.to_string_lossy().replace('\\', "/"));

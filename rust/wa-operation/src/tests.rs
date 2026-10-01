@@ -67,7 +67,10 @@ fn effective_cwd_prevents_self_blocking_unrelated_workspace() {
     let id = m.start(shell("sleep 30")).unwrap();
     let state = m.snapshot(&id).unwrap();
     assert_eq!(state["cwd_requested"], "");
-    assert!(!state["cwd"].as_str().unwrap().is_empty());
+    // The primary `cwd` contract stays empty for an inherited call; the real directory is
+    // effective_cwd, which is what the workspace-release index must key on.
+    assert_eq!(state["cwd"], "");
+    assert!(!state["effective_cwd"].as_str().unwrap().is_empty());
     assert!(state["owner_process_id"].is_number());
     assert!(state["owner_boot"].as_str().unwrap().starts_with("boot-"));
     let unrelated = root.join("unrelated");
