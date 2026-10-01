@@ -142,3 +142,11 @@ gaps (truncated) and 27 relevant unresolved calls. Shell/PowerShell/top-level ed
 dynamic dispatch remain outside its useful coverage; this is not a correctness certificate.
 Source inspection and the focused/full suites remain necessary. The audit artifact is
 `C:/Users/Victor/.codex/handoffs/throughput-graph-audit.json`.
+
+Bootstrap attempt 213 failed after 759,898.563 ms (n=1 incomplete run):
+`test-disk-floor.cjs` looked for a bare `cargo build` line and did not recognize
+its new transparent `gate_run` timing prefix. The floor still executed before
+any build; the wiring assertion now recognizes that prefix and still requires
+an actual build after preflight. Its other disk/refusal assertions are unchanged.
+The failed log and command timings are archived as `throughput-full-gate-213-*`
+under the external evidence directory. This failed attempt is not a smoke pass.
