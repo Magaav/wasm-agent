@@ -15,9 +15,10 @@ try {
   for(const patch of [{gate_exit:7},{passed:false},{kind:'producer-focused'},{skipped:0},{gate_runs:0},{gate_ms:-1}])assert(!fullProof({...receipt,...patch},receipt.tree).verified);
   const git=(...args)=>{const r=spawnSync('git',args,{cwd:root,encoding:'utf8',windowsHide:true});assert.equal(r.status,0,r.stderr);return r.stdout.trim();};
   git('init','-q','--initial-branch','main');
-  const bound={...receipt,repo:root};fs.writeFileSync(path.join(root,'.git','wa-combined-gate.json'),JSON.stringify(bound));
-  assert(findFullProof(root,receipt.tree).verified,'combined-tree evidence is discoverable by deployment');
+  const bound={...receipt,repo:path.join(root,'original-execution-source'),owner_repo:root};fs.writeFileSync(path.join(root,'.git','wa-combined-gate.json'),JSON.stringify(bound));
+  const discovered=findFullProof(root,receipt.tree);assert(discovered.verified,'combined-tree evidence is discoverable by deployment');
+  assert.equal(discovered.tested_repo,bound.repo,'original tested-directory provenance is preserved');
   assert(!findFullProof(root,'c'.repeat(40)).verified,'combined evidence never covers a changed source tree');
   fs.appendFileSync(log,'extra\n');assert(!fullProof(receipt,receipt.tree).verified);
-  console.log('full gate proof ok (11 checks, 0 skipped)');
+  console.log('full gate proof ok (12 checks, 0 skipped)');
 } finally{fs.rmSync(root,{recursive:true,force:true});}

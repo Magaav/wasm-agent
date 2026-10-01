@@ -57,6 +57,7 @@ import crypto from 'node:crypto';
 import {spawn, spawnSync} from 'node:child_process';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 
+import {checkWaveAdmission} from './lib/wave-guard.mjs';
 import {findFullProof} from './lib/full-gate-proof.mjs';
 import {evaluate} from './delivery-admission.mjs';
 import {readRecord} from './lib/delivery-store.mjs';
@@ -841,6 +842,8 @@ async function main() {
   const top = run('git', ['-C', repo, 'rev-parse', '--show-toplevel']);
   if (top.status !== 0) throw Object.assign(Error(`not a git repository: ${repo}`), {exit: 4});
   const gitDir = top.stdout.trim();
+  const wave=checkWaveAdmission(gitDir,{phase:'land'});
+  if(!wave.ok)throw Object.assign(Error(wave.reason),{exit:2});
 
   // 1. Discovery: the skill's audit, not a second one. It fetches, lists every tip, proves each
   // pending tip's mergeability against the target, and inspects worktrees.
@@ -1127,7 +1130,8 @@ async function main() {
     const metadata=requireGit(gitDir,['rev-parse','--git-path','wa-combined-gate.json'],'combined receipt path');
     const durableLog=path.resolve(gitDir,metadata+'.log');
     if(path.resolve(gate.log)!==durableLog)fs.copyFileSync(gate.log,durableLog);
-    const receipt={schema:1,kind:'full',repo:path.resolve(gitDir),head:candidateHead,tree:candidateTree,passed:true,
+    const receipt={schema:1,kind:'full',repo:gate.reused?gate.proof.tested_repo:clone.dir,owner_repo:path.resolve(gitDir),
+      head:gate.reused?gate.proof.head:candidateHead,candidate_head:candidateHead,tree:candidateTree,passed:true,
       gate_exit:0,gate_runs:1,gate_ms:gate.reused?gate.proof.gate_ms:gate.ms,skipped:gate.skipped,
       log:durableLog,log_sha256:gate.log_sha256,at:new Date().toISOString()};
     gate.full_receipt=path.resolve(gitDir,metadata);
@@ -1151,7 +1155,7 @@ async function main() {
   const retainClone = Boolean(clone) && (clone.disposable === false || options.keepClone
     || (exitCode !== 0 && options.keepClones !== 0));
   const result = {
-    schema: 1, lane: 'merge-lane', verdict, exit_code: exitCode,
+    schema: 1, lane: 'merge-lane', verdict, exit_code: exitCode, wave,
     repo: gitDir, base: {ref: options.base, sha: baseSha},
     base_ref_before: baseSha, base_ref_after: targetRefAfter,
     main_moved_by_this_run: mainMoved,

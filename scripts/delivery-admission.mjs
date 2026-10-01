@@ -36,6 +36,7 @@ import {spawnSync} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
 import {nowIso, readRecord, storeDir, writeRecord} from './lib/delivery-store.mjs';
 
+import {checkWaveAdmission} from './lib/wave-guard.mjs';
 import {verifyFocused} from './producer-admission.mjs';
 const SCHEMA = 1;
 
@@ -91,6 +92,8 @@ function refusal(delivery, condition, detail, remedy) {
 /// Read what the repository says, then decide. `tipRef` is the seam above.
 export function evaluate({repo, record, tipRef = null}) {
   if (!repo) throw Error('record names no repository: a record written before that field existed cannot be read');
+  const wave=checkWaveAdmission(repo,{phase:'admit'});
+  if(!wave.ok)return {schema:SCHEMA,delivery:record.delivery,decision:'refused',condition:'wave_admission_refused',refusal:wave.reason,wave,conditions:[],caveats:[],requires_combined_gate:true};
   const branch = record.branch || record.delivery;
   const pushedRef = `refs/remotes/origin/${branch}`;
   const refName = tipRef || pushedRef;
@@ -197,6 +200,7 @@ export function evaluate({repo, record, tipRef = null}) {
     review: review ? {reviewer: review.reviewer, commit: review.commit, tip: review.tip, tree: review.tree,
       verdict: review.verdict, findings: findings.length} : null,
     observed: observations,
+    wave,
     producer_checks: producerProof,
     requires_combined_gate: true,
     conditions,

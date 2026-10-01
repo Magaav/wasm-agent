@@ -1734,11 +1734,13 @@ fn request(args: &[String]) -> Result<()> {
         if verb!="deploy" {bail!("--if-no-pending is supported only for deploy");}
         if stop_path().exists() {bail!("sentinel intentionally stopped; no request written");}
         if watcher_state()?!=WatcherState::Running {bail!("no verified watcher lifetime lock; no request written");}
+        let mut pending=Vec::new();
         for folder in ["requests","claimed"] {
-            if let Some(existing)=deploy_requests_in(&sentinel_dir().join(folder))?.first() {
-                say(&format!("existing deploy request: {}",existing.display()));
-                say("no duplicate request was written");return Ok(());
-            }
+            pending.extend(deploy_requests_in(&sentinel_dir().join(folder))?);
+        }
+        if let Some(existing)=pending.first() {
+            say(&format!("existing deploy request: {}",existing.display()));
+            say("no duplicate request was written");return Ok(());
         }
     }
     static REQUEST_SEQUENCE:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);

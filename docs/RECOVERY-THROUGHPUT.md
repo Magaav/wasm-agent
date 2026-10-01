@@ -194,3 +194,38 @@ served and retain recycled-PID uncertainty. The held lifetime/start/dedupe inten
 and its useful classifier/pending-preservation tests remain. Unknown inventory
 now refuses instead of preserving the held test's old silent malformed-record
 skip. Per-conflict decisions are archived in `throughput-held-semantic-decisions.json`.
+
+Final follow-up proof preserves tested directory/head separately from receipt
+storage owner/candidate head; an identical-tree reuse never rewrites the original
+execution provenance. Combined receipts can be found after clone removal through
+`owner_repo`, while `tested_repo` still names where the actual source ran.
+
+Actual public finish check/gate/admit, delivery evaluation/admission and merged
+candidate entry now call the registered wave admission guard before execution or
+mutation. Shared registration is resolved from real Git common-dir, no alternate
+store or fresh automatic bootstrap. A registered missing/unreadable module is a
+refusal; unregistered legacy/isolated bootstrap is explicitly unverified. The
+convergence-owned helper controls freeze/baseline and bounded continuation. A
+private eight-check fixture drives the real hot entrypoints under registered
+freeze. Wave scripts and their literal relative dependency closure ship beside
+the sentinel, and verification compares shipped wave files to accepted source.
+Dynamic source references continue to use the recorded canonical runtime tree.
+
+The immutable primary `a991d9f` is a dependency merge parent in this producer
+branch, so new selection/two-window fixtures are runnable here rather than absent
+placeholders. Selection proof passed 9 checks and embedded two-window proof 13
+with source primary's matching compiled artifact; sentinel inventory suite passed
+35 Rust tests and real ownership/inventory fixture 29 checks. Source root update
+refusals passed 35 checks. Focused log validator, mutation/default-command and
+wave/canonical shipping fixtures are reported separately; final modified combined
+source still requires its own full gate before publication/deployment. Bootstrap
+214 is historical foundation proof, not a receipt for these later changes.
+
+Delivery tip steering now uses supported `delivery-record.mjs refresh` with the
+exact old expected tip, exact newly published descendant tip and existing
+producer. It uses the store's revision/snapshot CAS, preserves complete prior
+review/admission/failed-lane/check history, and clears stale current evidence.
+An immutable published landing cannot be refreshed into another delivery.
+The private published-record fixture passes 10 checks; production records are
+not manually overwritten. Wave monitor/shipping and closure adapters use the
+shared full-proof validator and original tested-directory provenance.

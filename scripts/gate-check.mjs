@@ -39,7 +39,7 @@ export async function executeChecks(repo, ids, {jobs=1, output=null, emit=true, 
       WASM_AGENT_LLM_BASE_URL:'http://127.0.0.1:1',WASM_AGENT_LLM_API_KEY:'fixture-only',HTTP_PROXY:'',HTTPS_PROXY:'',ALL_PROXY:'',NO_PROXY:'127.0.0.1,localhost,::1'});
     const log=path.join(root,`${check.id.replaceAll(/[^a-z0-9.-]/gi,'_')}.log`),fd=fs.openSync(log,'w'),begin=performance.now();
     const command=[...check.command];
-    if(check.binary)command.push(path.join(repo,'rust','target','release',process.platform==='win32'?'wa.exe':'wa'));
+    if(check.binary)command.splice(2,0,path.join(repo,'rust','target','release',process.platform==='win32'?'wa.exe':'wa'));
     if(check.verdict==='browser') {
       const freePort=()=>new Promise((resolve,reject)=>{const server=net.createServer();server.once('error',reject);server.listen(0,'127.0.0.1',()=>{const port=server.address().port;server.close(()=>resolve(port));});});
       const candidate=path.join(repo,'rust','target','release',process.platform==='win32'?'wa.exe':'wa');

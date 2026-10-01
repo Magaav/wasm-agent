@@ -189,6 +189,8 @@ gate_run node scripts/test-gate-check.mjs
 run_proof_fixture producer 16 node scripts/test-producer-admission.mjs
 gate_run node scripts/test-full-gate-proof.mjs
 gate_run node scripts/test-runtime-install-binding.mjs
+gate_run node scripts/test-wave-ship.mjs
+gate_run node scripts/test-wave-hot-guards.mjs
 gate_run node scripts/test-parallel-finish.mjs
 # The execution and automation contracts have native, model-free adversarial tests.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
@@ -1736,6 +1738,7 @@ gate_run node scripts/test-merge-lane.mjs
 gate_run node scripts/test-merge-gate-source.mjs
 gate_run node scripts/test-merge-lane-retention.mjs
 gate_run node scripts/test-delivery-admission.mjs
+gate_run node scripts/test-delivery-refresh.mjs
 env -u GATE_LANE_HELD node scripts/test-gate-lane-wiring.cjs
 gate_run node scripts/test-openai-sub.cjs "$BIN"
 # And the levels that route declares, read from the catalogue this repo owns
@@ -1882,6 +1885,7 @@ case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
     if [ -f scripts/test-recovery-two-window.cjs ]; then
       run_proof_fixture recoveryWindows 13 node scripts/test-recovery-two-window.cjs "$BIN"
+      run_proof_fixture recoveryWindows 13 node scripts/test-recovery-two-window.cjs "$BIN" --embedded
     else
       echo "two-window recovery proof SKIPPED - primary recovery fixture absent from this producer tree"
       SKIPPED=$((SKIPPED + 1))

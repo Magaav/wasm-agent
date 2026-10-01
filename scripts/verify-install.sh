@@ -168,6 +168,12 @@ if [ -n "$TREE" ] && git -C "$TREE" rev-parse --is-inside-work-tree >/dev/null 2
       record skip "shipped $rel == repo" "no $src in the tree"
     fi
   done
+  for src in "$TREE"/scripts/wave-* "$TREE"/scripts/lib/wave-* "$TREE/scripts/lib/full-gate-proof.mjs"; do
+    [ -f "$src" ] || continue
+    rel="${src#"$TREE/"}"; dst="$INSTALL_DIR/$rel"
+    record "$([ -f "$dst" ] && cmp -s "$src" "$dst" && echo ok || echo fail)" \
+      "shipped $rel == repo" "$dst"
+  done
   if [ -d "$TREE/skills" ]; then
     while IFS= read -r -d '' src; do
       rel="${src#"$TREE/"}"; dst="$CONFIG/$rel"
