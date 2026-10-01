@@ -96,7 +96,11 @@ Providers are chosen first, models second.
 The status balloon is about **the model and harness observability**, not memory storage. Required
 sections, in order:
 
-1. **provider**, **model** (§5), and model-supported **reasoning** selects;
+1. **provider**, **model** (§5), and model-supported **reasoning** selects. A change here is
+   seen by the **next** turn, never by the one in flight: the node pins provider, model and
+   reasoning when a run starts, so while a run streams the three controls are locked and the
+   balloon states the delay ("applies at the next turn") - a control that moves under a run
+   misreports what that run used;
 2. **context** — last measured request input and selected model capacity. Never
    substitute a whole run's cumulative input for one request's context;
 3. **limits** — the provider's rolling windows: `5h` (`rolling`), `7d`

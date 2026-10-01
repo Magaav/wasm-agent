@@ -666,6 +666,30 @@ $harness = @'
   reasoningPicker.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));
   document.dispatchEvent(new PointerEvent('pointerup',{bubbles:true}));
   check(statusBalloon.open,'a press inside a native picker released outside must stay open');
+  // Turn sovereignty: a run in flight owns the settings it started with, so the pickers lock and
+  // the balloon says when a change lands - a control that moves under a running turn misreports
+  // what that turn actually used.
+  window.setBusy(true);
+  check(document.getElementById('provider-select').disabled &&
+    document.getElementById('model-select').disabled &&
+    document.getElementById('reasoning-select').disabled,
+    'the model controls must lock while a run is in flight');
+  check(/applies at the next turn/.test(document.getElementById('settings-note').textContent),
+    'the balloon must say when a change applies, saw: ' +
+    document.getElementById('settings-note').textContent);
+  var callsWhileBusy=window.__calls.length;
+  await window.setModel('deepseek-v4.1-flash');
+  check(window.__calls.length===callsWhileBusy,
+    'a settings change must not be sent while a run is in flight');
+  check(/applies at the next turn/.test(document.getElementById('settings-error').textContent),
+    'the refused change must be visible, saw: ' +
+    document.getElementById('settings-error').textContent);
+  window.setBusy(false);
+  check(!document.getElementById('provider-select').disabled &&
+    !document.getElementById('model-select').disabled,
+    'the model controls must unlock when the run ends');
+  check(document.getElementById('settings-note').textContent==='',
+    'the note must clear when there is no run to protect');
   document.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));
   document.dispatchEvent(new PointerEvent('pointerup',{bubbles:true}));
   check(!statusBalloon.open && statusButton.getAttribute('aria-expanded')==='false',

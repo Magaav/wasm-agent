@@ -26,6 +26,7 @@ nodeSelect.className = "wa-select";
 const providerSelect = document.getElementById("provider-select");
 const modelSelect = document.getElementById("model-select");
 const reasoningSelect = document.getElementById("reasoning-select");
+const settingsNote = document.getElementById("settings-note");
 const harnessStatus = document.getElementById("harness-status");
 const settingsError = document.getElementById("settings-error");
 const contextBox = document.getElementById("context-box");
@@ -1863,6 +1864,20 @@ function setBusy(value) {
   // The shell owns the button; telling it keeps Enter and the send path in step with the run.
   chatShell.busy = value;
   if (value) startLiveness(); else stopLiveness();
+  applySettingsSovereignty();
+}
+
+// Turn sovereignty for the model controls: a switch is seen by the next run, never by the one
+// in flight. The node pins provider/model/reasoning at run start (`provider.pin()`), so a change
+// mid-run cannot reach the streaming turn - and a control that moves under it misreports what
+// that turn actually used. Locked while a run streams, with the delay stated rather than silent.
+function applySettingsSovereignty() {
+  const locked = busy;
+  providerSelect.disabled = locked;
+  modelSelect.disabled = locked;
+  reasoningSelect.disabled = locked || !(settings.reasoning || {}).supported || me.role !== "master";
+  settingsNote.textContent = locked
+    ? "a run is in flight \u2014 a change here applies at the next turn" : "";
 }
 
 // Whether this run is *working* or *stuck*, which looked identical from outside.
@@ -2300,6 +2315,7 @@ function renderModels() {
     option.selected=level===reasoning.selected; reasoningSelect.append(option);
   }
   reasoningSelect.disabled=!reasoning.supported || me.role!=='master';
+  applySettingsSovereignty();
   modelSelect.replaceChildren();
   const provider = activeProvider();
   const models = (provider && provider.models) || [];
@@ -2441,6 +2457,14 @@ function renderPopFoot() {
 }
 
 async function post(path, body) {
+  // The turn in flight owns the settings it started with - the node pins provider, model and
+  // reasoning when a run starts - so a change now would be seen by the next turn at the
+  // earliest, and sending it mid-run only makes the controls disagree with the run they are
+  // describing. Refuse it, and say when it will apply.
+  if (busy) {
+    settingsError.textContent = "a run is in flight \u2014 this change applies at the next turn";
+    return;
+  }
   const response = await apiFetch(path, {
     method: "POST",
     headers: apiHeaders({ "Content-Type": "text/plain; charset=utf-8" }),
