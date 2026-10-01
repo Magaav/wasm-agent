@@ -167,7 +167,7 @@ else
 fi
 
 ok "$([ "$(live_diagnostics)" = "$LIVE_DIAGNOSTICS_BEFORE" ] && echo 1 || echo 0)" \
-  "live deploy log and result are unchanged, including absence"
+  "live deployment log/result remain unchanged by refusal fixtures, including absence"
 printf '\n'
 if [ "$failed" -eq 0 ]; then
   echo "deploy downgrade gate ok ($checks checks)"
