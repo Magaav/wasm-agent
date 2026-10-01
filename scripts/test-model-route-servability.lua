@@ -251,14 +251,25 @@ provider.provider_override = 'opencode-go'
 provider.overrides = nil
 state.write('model.opencode-go', 'gpt-6-sol')
 check(provider.set_provider('opencode-go') == true, 'allow entering a stale route to repair its model')
-check(provider.settings().model == 'gpt-6-sol', 'provider switch must not silently replace the saved model')
+check(provider.settings().model == 'deepseek-v4.1-flash' and
+  provider.settings().model_error ~= nil and
+  provider.settings().model_error:find('model=gpt-6-sol', 1, true) ~= nil,
+  'a stored model the route cannot serve is reported and answered with the route default, got ' ..
+  tostring(provider.settings().model) .. ' / ' .. tostring(provider.settings().model_error))
+-- The reported symptom, in one assertion: a node-thread that once accepted a subscription id for
+-- OpenCode Go kept serving it from memory after the state on disk had been corrected.
+provider.overrides = { ['opencode-go'] = 'gpt-6-sol' }
+check(provider.settings().model == 'deepseek-v4.1-flash' and provider.settings().model_error ~= nil,
+  'an in-memory selection the route cannot serve must not shadow the route either, got ' ..
+  tostring(provider.settings().model))
+provider.overrides = nil
 local offered_go = provider.list_models('opencode-go')
 check(table.concat(offered_go, ',') == 'deepseek-v4.1-flash,new-uncatalogued-model',
   'picker filters only known mismatches: ' .. table.concat(offered_go, ','))
 local changed, selection_error = provider.set_model('gpt-6-luna')
 check(not changed and selection_error:find('model_not_servable', 1, true), 'reject mismatched selection')
-check(provider.settings().model == 'gpt-6-sol' and state.read('model.opencode-go') == 'gpt-6-sol',
-  'rejected selection leaves memory and persisted selection untouched')
+check(state.read('model.opencode-go') == 'gpt-6-sol',
+  'a rejected selection leaves the persisted selection untouched')
 check(provider.set_model('deepseek-v4.1-flash') == true, 'explicit supported selection repairs stale state')
 check(state.read('model.opencode-go') == 'deepseek-v4.1-flash', 'persist the explicit repair')
 check(provider.reasoning().supported and table.concat(provider.reasoning().levels, ',') == 'low,high,max',
@@ -297,8 +308,10 @@ check(not reasoning_route.error and reasoning_route.reasoning.selected == 'high'
 state.write('model.opencode-go', 'gpt-6-sol')
 provider.overrides = nil
 local stale_route = json.decode(wa_model('', ''))
-check(stale_route.model == 'gpt-6-sol' and stale_route.model_error:find('model_not_servable', 1, true),
-  'actual status payload discloses a stale persisted model without replacing it')
+check(stale_route.model == 'deepseek-v4.1-flash' and
+  stale_route.model_error ~= nil and stale_route.model_error:find('model=gpt-6-sol', 1, true) ~= nil,
+  'the status payload answers with the route default and names the value it refused, got ' ..
+  tostring(stale_route.model) .. ' / ' .. tostring(stale_route.model_error))
 provider.set_model('deepseek-v4.1-flash')
 
 -- Leave the shared home exactly as it was found (an empty value reads as absent).

@@ -42,11 +42,15 @@ compatibility is explicit; only supported reasoning levels are offered. The
 selected provider/model/reasoning are pinned for one user turn and refreshed at
 the next one, including on other workers. DeepSeek's supported default is high.
 The model picker filters known protocol mismatches, and selecting one directly is refused
-before the model is saved. A stale saved selection remains visible with a route error;
-choose an offered model explicitly (for OpenCode Go, `deepseek-v4.1-flash`) to recover,
-which also enables that model's catalogue-supported reasoning controls. Switching providers
-never silently replaces a saved model. Unknown catalogue entries remain undecided/allowed;
-a stale catalogue can still hide a newly supported protocol until it is refreshed.
+before the model is saved. A remembered model the active route cannot serve is reported and
+not used: the route answers with its own default (`deepseek-v4.1-flash` on OpenCode Go) and
+`model_error` names the value that was refused, so a provider switch cannot leave a
+subscription id and its reasoning levels standing under an OpenCode Go route. The persisted
+value is left for the operator to repair, never rewritten behind them.
+`WASM_AGENT_LLM_MODEL` is excluded from that fallback on purpose: it is an operator pin, and
+a pin that cannot run stays a loud pre-request refusal. Unknown catalogue entries remain
+undecided/allowed; a stale catalogue can still hide a newly supported protocol until it is
+refreshed.
 Prices are not inferred from a subscription or copied as zero from a catalogue.
 
 ## Accounting invariants

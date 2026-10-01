@@ -1060,7 +1060,7 @@ function wa_model(node, session, chat_session)
     usage = agentlib.usage(),
     observability=observation,
     reasoning=provider.reasoning(settings.model),
-    model_error=provider.unservable(settings.model),
+    model_error=settings.model_error or provider.unservable(settings.model),
     output_limit=tonumber(host.getenv("WASM_AGENT_LLM_MAX_OUTPUT")) or provider.capabilities(settings.model).max_output,
     compact_reserve=budget.reserve,
     compact_keep=budget.keep,
