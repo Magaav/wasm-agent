@@ -902,6 +902,7 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-tool-cues.lua" "$BIN" --db "$DB.too
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-worktree.lua" "$BIN" --db "$DB.session-worktree" | grep 'session worktree ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-fork.lua" "$BIN" --db "$DB.session-fork" | grep 'session fork ok'
 node scripts/test-session-workspaces.cjs "$BIN"
+node scripts/test-workspace-root-recovery.cjs "$BIN"
 # A placed child arrives at a node that never saw its parent, so the source it forks from is the tree
 # *that* node runs from - and a node with no usable checkout of its own must refuse by name rather
 # than leave a session shell behind. Two disposable checkouts, no model.

@@ -904,15 +904,15 @@ function wa_session_worktree(payload, session)
     local source_id = record.fork_parent_id
     if not source_id or source_id == "" then source_id = record.parent_session_id end
     if not source_id or source_id == "" then source_id = id end
-    memory.require_session_workspace(id)
-    local allocated, detail = workspaces.ensure(memory, id, source_id)
+    local allocated, detail = workspaces.ensure(memory, id, source_id,{root_recovery=source_id==id})
     if not allocated then return json.encode({error=workspaces.refusal_code(detail),detail=detail,
-      session_id=id,workspace=memory.session_workspace(id)}) end
+      session_id=id,workspace=memory.session_workspace(id),recovery=workspaces.recovery_hint(memory,id)}) end
     return json.encode({ok=true,session_id=id,workspace=allocated})
   end
   -- No `path` is a read; a string sets it ("" clears it). Managed bindings are immutable through
   -- this legacy manual setter, so a caller cannot make required isolation silently fall back to cwd.
-  if request.path == nil then return json.encode({ session_id = id, worktree = memory.session_worktree(id), workspace=workspace }) end
+  if request.path == nil then return json.encode({ session_id = id, worktree = memory.session_worktree(id), workspace=workspace,
+    recovery=workspaces.recovery_hint(memory,id) }) end
   if workspace and workspace.required then return json.encode({error="workspace_managed",state=workspace.state}) end
   local path = tostring(request.path)
   if path ~= "" then

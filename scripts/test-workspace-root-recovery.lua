@@ -1,0 +1,92 @@
+local json=dofile('lua/vendor/json.lua')
+local memory=dofile('lua/core/memory.lua')
+local workspaces=dofile('lua/core/workspaces.lua')
+local tools=dofile('lua/core/tools.lua')
+memory.setup()
+dofile('lua/core/server.lua')
+local checks=0
+local function ok(value,message) checks=checks+1;assert(value,message) end
+local source=assert(host.getenv('WASM_AGENT_TEST_SOURCE'))
+local baseline=assert(host.getenv('WASM_AGENT_TEST_BASELINE_WORKSPACES'))
+local function root(id,owner,required)
+  return memory.start_session('local','chat',{id=id,user_id=owner or 'master',node_id='root-test',workspace_required=required==true})
+end
+local id=root('root-broken','master',true)
+local old=assert(load(assert(host.read_file(baseline)),'@pinned pre-repair workspaces','t',_ENV))()
+local before,problem=old.ensure(memory,id,id)
+ok(not before and problem:find('workspace_source_unavailable',1,true),'pinned original reproduces circular root allocation')
+local saved=memory.session_workspace(id)
+ok(saved.required and saved.state=='failed' and saved.source_path=='','original leaves the demonstrated failed empty-source state')
+local unavailable=tools.dispatch(memory,'write',{path='must-not-write',content='no'},'master',{session_id=id,user_id='master',changes={}})
+ok(unavailable.error=='session_workspace_unavailable','failed binding cannot write through the shared source')
+local status=json.decode(wa_session_worktree(json.encode({session_id=id}),nil))
+ok(status.recovery and status.recovery.action=='recover' and status.recovery.actor=='session owner (master)',
+  'failed root visibly names its recovery action and owner')
+local repaired=json.decode(wa_session_worktree(json.encode({session_id=id,action='recover'}),nil))
+ok(repaired.ok==true and repaired.workspace.state=='allocated','explicit owned root recovery allocates: '..tostring(repaired.detail))
+ok(repaired.workspace.source_path:gsub('\\','/'):lower()==source:gsub('\\','/'):lower(),'the node-owned runtime source was recorded')
+ok(repaired.workspace.worktree~=source and repaired.workspace.start_state.source_fallback=='explicit owned root bootstrap',
+  'recovery creates its own tree and records explicit source provenance')
+local wrote=tools.dispatch(memory,'write',{path='owned.txt',content='isolated'},'master',{session_id=id,user_id='master',changes={files={}}})
+ok(wrote.ok and host.read_file(repaired.workspace.worktree..'/owned.txt')=='isolated','recovered session writes in its own tree')
+ok(host.read_file(source..'/owned.txt')==nil and host.read_file(source..'/must-not-write')==nil,'source work remains unchanged')
+local again=json.decode(wa_session_worktree(json.encode({session_id=id,action='recover'}),nil))
+ok(again.ok and again.workspace.worktree==repaired.workspace.worktree,'repeated recovery revalidates the same binding')
+
+local tool_id=root('root-tool-broken','master',true)
+local _,tool_problem=old.ensure(memory,tool_id,tool_id)
+ok(tool_problem:find('workspace_source_unavailable',1,true),'tool fixture reproduces the persisted failure')
+local tool_ctx={session_id=tool_id,user_id='master',changes={files={}}}
+local tool_status=tools.dispatch(memory,'session_worktree',{action='status'},'master',tool_ctx)
+ok(tool_status.recovery and tool_status.recovery.action=='recover','tool status names recovery')
+local tool_repaired=tools.dispatch(memory,'session_worktree',{action='recover'},'master',tool_ctx)
+ok(tool_repaired.ok and tool_repaired.workspace.state=='allocated','tool recovery allocates the failed root')
+local shell=tools.dispatch(memory,'bash',{command='git rev-parse --show-toplevel'},'master',tool_ctx)
+ok(shell.ok and shell.stdout:gsub('\\','/'):lower():find(tool_repaired.workspace.worktree:gsub('\\','/'):lower(),1,true),
+  'shell runs in recovered isolated workspace')
+local tool_again=tools.dispatch(memory,'session_worktree',{action='allocate'},'master',tool_ctx)
+ok(tool_again.ok and tool_again.workspace.worktree==tool_repaired.workspace.worktree,'tool allocation is idempotent')
+local fresh_tool=root('root-tool-fresh')
+local fresh_allocated=tools.dispatch(memory,'session_worktree',{action='allocate'},'master',
+  {session_id=fresh_tool,user_id='master',changes={}})
+ok(fresh_allocated.ok and fresh_allocated.workspace.state=='allocated','tool bootstraps a legacy unbound root')
+
+local foreign=root('root-foreign','other')
+local denied=json.decode(wa_session_worktree(json.encode({session_id=foreign,action='recover'}),nil))
+ok(denied.error=='forbidden' and not memory.session_workspace(foreign).required,'another principal cannot request root recovery')
+local child=memory.start_session('local','subagent',{id='root-child',user_id='master',node_id='root-test',parent_session_id=id})
+local no_child,child_error=workspaces.ensure(memory,child,child,{root_recovery=true})
+ok(not no_child and child_error:find('workspace_root_recovery_forbidden',1,true),'explicit root flag cannot bypass child preflight')
+local pending=root('root-pending','master',true)
+local preflight,preflight_error=workspaces.preflight_source(memory,pending,'master','root-test')
+ok(not preflight and preflight_error:find('workspace_source_unavailable',1,true),'ordinary child preflight still refuses unavailable required parent')
+local unknown=root('root-unknown','master',true)
+local unknown_ws=memory.session_workspace(unknown);unknown_ws.state='unknown';memory.set_session_workspace(unknown,unknown_ws)
+local uncertain=json.decode(wa_session_worktree(json.encode({session_id=unknown,action='recover'}),nil))
+ok(not uncertain.ok and memory.session_workspace(unknown).state=='unknown','unknown prior allocation is reconciled, not overwritten by root bootstrap')
+ok(not uncertain.recovery,'uncertain allocation is not advertised as a fresh root bootstrap')
+local bound=root('root-existing','master',true)
+local binding=memory.session_workspace(bound)
+binding.state,binding.worktree,binding.branch='failed',source,'existing-branch'
+memory.set_session_workspace(bound,binding)
+local retained=json.decode(wa_session_worktree(json.encode({session_id=bound,action='recover'}),nil))
+ok(retained.error=='workspace_root_recovery_existing_binding'
+  and memory.session_workspace(bound).worktree==source
+  and memory.session_workspace(bound).branch=='existing-branch','existing binding is preserved for inspection')
+local implicit=root('root-implicit')
+local implicit_result,implicit_error=workspaces.ensure(memory,implicit,implicit)
+ok(not implicit_result and implicit_error:find('workspace_root_recovery_required',1,true)
+  and not memory.session_workspace(implicit).required,'root bootstrap requires an explicit request')
+
+local fresh=root('root-fresh')
+host.write_file(source..'/dirty.txt','preserve\n')
+local dirty=json.decode(wa_session_worktree(json.encode({session_id=fresh,action='allocate'}),nil))
+ok(dirty.error=='workspace_source_dirty' and not memory.session_workspace(fresh).required,
+  'dirty source refuses at allocation before silently disabling a legacy root')
+ok(host.read_file(source..'/dirty.txt')=='preserve\n','dirty source is never stashed, cleaned or copied')
+local dirty_tool_id=root('root-tool-dirty')
+local dirty_tool=tools.dispatch(memory,'session_worktree',{action='allocate'},'master',
+  {session_id=dirty_tool_id,user_id='master',changes={}})
+ok(dirty_tool.error=='workspace_source_dirty' and not memory.session_workspace(dirty_tool_id).required,
+  'tool dirty-source refusal leaves a legacy root usable')
+print('root workspace recovery ok ('..checks..' checks, 0 skipped; pinned failure, real private worktrees)')

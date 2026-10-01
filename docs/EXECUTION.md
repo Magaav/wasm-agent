@@ -107,6 +107,13 @@ does not implicitly copy, stash, or discard uncommitted work. The caller may cle
 through `session_worktree{action:"recover"}`. A process interrupted during `git worktree add` is
 reconciled from Git's worktree registry; unresolved state is `unknown` and is not blindly retried.
 
+An owned root conversation may explicitly allocate or recover its workspace from the node's
+runtime checkout. The allocator inspects that clean source before marking a legacy root as
+requiring isolation; it never treats the root's own unavailable workspace as its source.
+Both the HTTP and tool entry points support recovery of older failed roots with no binding.
+An existing binding or uncertain allocation is never replaced by this bootstrap, and children
+still require a usable source parent. Status names the recovery action for an unavailable root.
+
 A node that did not create the source session — a placed child's destination — cannot use the path
 that session recorded: `C:/Users/.../wasm_the_first` is one machine's checkout and means nothing on
 another, and one path on two machines is two different repositories. There the source is the tree

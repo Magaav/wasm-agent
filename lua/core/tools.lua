@@ -992,7 +992,8 @@ function M.dispatch(memory, name, args, role, ctx)
     local workspace = memory.session_workspace(id)
     local action = args.action or "status"
     if action == "status" then
-      return { session_id = id, worktree = memory.session_worktree(id), workspace = workspace }
+      return { session_id = id, worktree = memory.session_worktree(id), workspace = workspace,
+        recovery = workspaces.recovery_hint(memory, id) }
     elseif action=='release' then
       local released,why,detail=workspaces.release(memory,id,user_id)
       if not released then return {error=why,detail=detail,session_id=id} end
@@ -1001,9 +1002,9 @@ function M.dispatch(memory, name, args, role, ctx)
       local source_id = record.fork_parent_id
       if not source_id or source_id == "" then source_id = record.parent_session_id end
       if not source_id or source_id == "" then source_id = id end
-      memory.require_session_workspace(id)
-      local allocated, detail = workspaces.ensure(memory, id, source_id)
-      if not allocated then return {error=workspaces.refusal_code(detail),detail=detail,workspace=memory.session_workspace(id)} end
+      local allocated, detail = workspaces.ensure(memory, id, source_id, {root_recovery=source_id==id})
+      if not allocated then return {error=workspaces.refusal_code(detail),detail=detail,
+        workspace=memory.session_workspace(id),recovery=workspaces.recovery_hint(memory,id)} end
       return {ok=true,session_id=id,workspace=allocated}
     elseif action == "set" then
       if workspace and workspace.required then return {error="workspace_managed",state=workspace.state} end
