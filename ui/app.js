@@ -134,6 +134,16 @@ function rememberSession(id) {
   return true;
 }
 
+function rememberNode(node) {
+  if (node === activeNode) return false;
+  detachConversationView();
+  activeNode = node;
+  conversationEpoch += 1;
+  resetConversationFollowState();
+  metaReady = false;
+  return true;
+}
+
 function rememberBlankSession(id) {
   blankSession = id || "";
   try {
@@ -160,8 +170,13 @@ let apiTimeout = 8000;
 function apiFetch(path, options = {}, timeout = apiTimeout) {
   if (!timeout || options.signal) return fetch(path, options);
   const control = new AbortController();
-  const timer = setTimeout(() => control.abort(), timeout);
+  const timer = setTimeout(() => control.abort(new DOMException((options.method || "GET") + " " + path + ": deadline " + timeout + "ms", "AbortError")), timeout);
   return fetch(path, Object.assign({}, options, { signal: control.signal }))
+    .catch((error) => {
+      const problem = new Error((options.method || "GET") + " " + path + ": " + String(control.signal.aborted ? control.signal.reason : error.message || error));
+      problem.name = error.name || "Error";
+      throw problem;
+    })
     .finally(() => clearTimeout(timer));
 }
 
@@ -1731,23 +1746,32 @@ const autoResumedTails = new Set();
 
 let restoringSession = null;
 let transcriptReady = false;
-async function restoreSession(target = chatSession) {
+let transcriptRetryAt = 0;
+let transcriptFailures = 0;
+let transcriptFailure = "";
+async function restoreSession(target = chatSession, retry = false) {
   const epoch = conversationEpoch;
-  if (restoringSession && restoringSession.target === target && restoringSession.epoch === epoch) {
+  const node = activeNode;
+  if (restoringSession && restoringSession.target === target && restoringSession.epoch === epoch && restoringSession.node === node) {
     return restoringSession.promise;
   }
-  const pending = { target, epoch, promise: restoreSessionOnce(target, epoch) };
+  if (retry && Date.now() < transcriptRetryAt) return false;
+  const pending = { target, epoch, node, promise: restoreSessionOnce(target, epoch, node) };
   restoringSession = pending;
   try { return await pending.promise; }
   finally { if (restoringSession === pending) restoringSession = null; }
 }
 
-async function restoreSessionOnce(target, epoch) {
+async function restoreSessionOnce(target, epoch, node = activeNode) {
+  let phase = "session discovery";
+  const viewing = () => chatSession === target && conversationEpoch === epoch && activeNode === node;
   try {
-    const payload = await (await apiFetch("sessions", { headers: apiHeaders() })).json();
+    // A known thread is already enough to read its authorized ledger. Discovery
+    // is only needed for a new window, never a prerequisite on every reconnect.
+    const payload = target && blankSession !== target ? {sessions:[{id:target}]} : await (await apiFetch("sessions", { headers: apiHeaders() })).json();
     const sessions = payload.sessions || [];
     if (payload.error) throw new Error(payload.error);
-    if (chatSession !== target || conversationEpoch !== epoch) return false;
+    if (!viewing()) return false;
     if (!sessions.length) { transcriptReady = true; return true; }
     const mine = sessions.filter((s) => !me.user || !s.user_id || s.user_id === me.user.id);
     let wanted = target ? sessions.find((s) => s.id === target) : (mine[0] || sessions[0]);
@@ -1763,17 +1787,23 @@ async function restoreSessionOnce(target, epoch) {
     if (!wanted) wanted = mine[0] || sessions[0];
     if (!wanted) { transcriptReady = true; return true; }
     if (!target || wanted.id !== target) {
+      const originalTarget=target, originalEpoch=epoch;
       rememberSession(wanted.id);
       target = wanted.id;
       epoch = conversationEpoch;
+      if (restoringSession?.target===originalTarget && restoringSession.epoch===originalEpoch && restoringSession.node===node) {
+        restoringSession.target=target;
+        restoringSession.epoch=epoch;
+      }
     }
     if (blankSession === wanted.id) rememberBlankSession("");
     const route = "session?id=" + encodeURIComponent(wanted.id);
+    phase = route;
     let [full, health] = await Promise.all([
       apiFetch(route, { headers: apiHeaders() }).then((response) => response.json()),
       nodeHealth(),
     ]);
-    if (chatSession !== target || conversationEpoch !== epoch) return false;
+    if (!viewing()) return false;
     if (!full || full.error || !Array.isArray(full.messages)) {
       throw new Error(full?.error || "invalid session response");
     }
@@ -1783,11 +1813,13 @@ async function restoreSessionOnce(target, epoch) {
     // briefly be displayed as a lost tool call.
     if (outcome.name === "unfinished" && health && !activeRun(health, wanted.id)) {
       const latest = await (await apiFetch(route, { headers: apiHeaders() })).json();
+      if (!viewing()) return false;
       if (latest && !latest.error && Array.isArray(latest.messages)) {
         full = latest;
         outcome = sessionOutcome(full);
       }
     }
+    const loadedSeq = (full.messages || []).reduce((last, row) => Math.max(last, Number(row.seq) || 0), 0);
     if (full && Array.isArray(full.messages) && full.messages.length) {
       repaintMessages(full.messages, { state: outcome.name, stateAt: full.state?.at,
         active: !!activeRun(health, wanted.id) });
@@ -1829,10 +1861,16 @@ async function restoreSessionOnce(target, epoch) {
         (runBubble || currentBubble()).body.append(notice);
       } else messages.append(notice);
     }
-    followedSeq = Number(wanted.last_seq) || (full.messages || []).reduce((last, row) => Math.max(last, Number(row.seq) || 0), 0);
+    // Advance only through rows actually read. A list or checkpoint observed
+    // later cannot prove its newer messages were included in this snapshot.
+    followedSeq = loadedSeq;
     transcriptReady = true;
+    transcriptFailures = 0;
+    transcriptRetryAt = 0;
+    if (transcriptFailure && statusLabel?.textContent.startsWith("transcript")) clearStatus();
+    transcriptFailure = "";
     if (autoResumeSeq !== null) {
-      const key = wanted.id + ":" + autoResumeSeq;
+      const key = node + ":" + wanted.id + ":" + autoResumeSeq;
       if (!autoResumedTails.has(key)) {
         autoResumedTails.add(key);
         void resumeSession(wanted.id, autoResumeSeq);
@@ -1840,9 +1878,13 @@ async function restoreSessionOnce(target, epoch) {
     }
     return true;
   } catch (error) {
-    if (chatSession !== target || conversationEpoch !== epoch) return false;
+    if (!viewing()) return false;
     transcriptReady = false;
-    setStatus("transcript not loaded - retrying (" + String(error) + ")");
+    transcriptFailures += 1;
+    const delay = Math.min(30000, 500 * (2 ** Math.min(transcriptFailures - 1, 6)));
+    transcriptRetryAt = Date.now() + delay;
+    transcriptFailure = phase + ": " + String(error.message || error);
+    setStatus("transcript " + (followedSeq ? "refresh failed; saved view kept" : "not loaded") + " - retrying in " + Math.ceil(delay / 1000) + "s (" + transcriptFailure + ")");
     return false;
   }
 }
@@ -2277,7 +2319,7 @@ function renderNodeSelect() {
   // Drop a stale selection (a node that is no longer a chat target) instead of
   // silently sending it as X-WA-Node and keying sessions under a phantom name.
   if (activeNode && !options.some((node) => node.name === activeNode)) {
-    activeNode = "";
+    rememberNode("");
     try { localStorage.removeItem("wa-node"); } catch (error) { /* ignore */ }
   }
   nodeSelect.replaceChildren();
@@ -2483,25 +2525,37 @@ const SETTING_VALUE = {
 // accepted beside the previous route's model ids and limits, and said nothing, for as long as it
 // stayed open. Every outcome that is not a success payload now reconciles: it re-reads the node and
 // draws the controls from the node's answer, because a request this client aborted may still be
-// applied by the node afterwards, and only the node's answer is the truth about where it is - so the
-// note says what the node reports, not just what the write did: an abort must not read as a denial of
-// a change the node has since applied.
+// applied by the node afterwards, and only the node's answer is the truth about where it is.
+let settingsChanging = false;
+let settingsNode = activeNode;
+let settingsReconciliation = null;
+function acceptSettings(payload) {
+  if (!payload || payload.error || typeof payload.provider !== "string" || typeof payload.model !== "string") throw new Error(payload?.error || "invalid model settings response");
+  if (settingsNode === activeNode && Number.isFinite(payload.settings_revision) && Number.isFinite(settings.settings_revision)
+      && payload.settings_revision < settings.settings_revision) return false;
+  settings = { ...settings, ...payload };
+  settingsNode = activeNode;
+  return true;
+}
 async function post(path, body) {
   // The turn in flight owns the settings it started with - the node pins provider, model and
   // reasoning when a run starts - so a change now would be seen by the next turn at the
   // earliest, and sending it mid-run only makes the controls disagree with the run they are
   // describing. Refuse it, say when it will apply, and draw the controls from the node's answer.
   if (busy) {
-    await reconcileControls("a run is in flight, so this change applies at the next turn");
+    await reconcileControls("not applied \u2014 a run is in flight, so this change applies at the next turn");
     return;
   }
+  if (settingsChanging) { await reconcileControls("another settings change is awaiting confirmation"); return; }
+  const node = activeNode, target = chatSession, epoch = conversationEpoch;
+  settingsChanging = true;
   let failure = "";
   let payload = null;
   try {
     const response = await apiFetch(path, {
       method: "POST",
-      headers: apiHeaders({ "Content-Type": "text/plain; charset=utf-8" }),
-      body: body,
+      headers: apiHeaders({ "Content-Type": Number.isFinite(settings.settings_revision) ? "application/json" : "text/plain; charset=utf-8" }),
+      body: Number.isFinite(settings.settings_revision) ? JSON.stringify({value:body, revision:settings.settings_revision}) : body,
     });
     payload = await response.json();
     // The node's own words when it gives them; its status when it does not.
@@ -2514,14 +2568,17 @@ async function post(path, body) {
       ? "no answer within " + Math.round(apiTimeout / 1000) + "s (the request was aborted)"
       : String(error);
   }
+  settingsChanging = false;
+  if (activeNode !== node || chatSession !== target || conversationEpoch !== epoch) return;
   if (failure) {
     await reconcileControls(failure, { asked: body, reads: SETTING_VALUE[path] });
     return;
   }
-  settings = { ...settings, ...payload };
-  updateNodeLabel(settings.node_name, settings.node_worktree);
-  updateChip();
+  try { if (!acceptSettings(payload)) return; }
+  catch (error) { await reconcileControls(error.message, {asked:body, reads:SETTING_VALUE[path]}); return; }
   try {
+    updateNodeLabel(settings.node_name, settings.node_worktree);
+    updateChip();
     renderControls();
     renderContext();
     renderLimits();
@@ -2535,6 +2592,7 @@ async function post(path, body) {
     return;
   }
   settingsError.textContent = payload.model_error || "";
+  settingsReconciliation = null;
 }
 
 // Draw the controls from the node's own answer after a settings change, and say what that answer is.
@@ -2544,8 +2602,24 @@ async function post(path, body) {
 // answer is what was asked for it is said as in effect; when the node cannot be re-read either, the
 // controls are still drawn from the last answer this window has and the note says so.
 async function reconcileControls(reason, sent) {
-  const read = await refreshMeta();
+  const node=activeNode, target=chatSession, epoch=conversationEpoch;
+  settingsReconciliation={node,target,epoch,reason,sent};
   renderControls();
+  settingsError.textContent = (sent ? 'not confirmed' : 'not sent') + ' - ' + reason;
+  const read = await refreshMeta();
+  if (node!==activeNode || target!==chatSession || epoch!==conversationEpoch) return;
+  renderControls();
+  renderSettingsReconciliation(read);
+}
+
+function renderSettingsReconciliation(read) {
+  const pending=settingsReconciliation;
+  if (!pending) { if (read) settingsError.textContent=settings.model_error || ""; return; }
+  if (pending.node!==activeNode || pending.target!==chatSession || pending.epoch!==conversationEpoch) {
+    settingsReconciliation=null;
+    return;
+  }
+  const {reason,sent}=pending;
   const route = (settings.provider || "unknown provider") + " / " + (settings.model || "unknown model");
   const landed = !!(sent && sent.asked && sent.reads && sent.reads(settings) === sent.asked);
   if (!read) {
@@ -3064,7 +3138,7 @@ harnessStatus.addEventListener('export',async event=>{
 nodeSelect.addEventListener("change", async () => {
   const value = nodeSelect.value;
   const local = nodeList.find((node) => node.name === value && node.local_node && node.kind === "host");
-  activeNode = local ? "" : value;
+  rememberNode(local ? "" : value);
   localStorage.setItem("wa-node", activeNode);
   await refreshMeta();
   renderControls();
@@ -3278,9 +3352,22 @@ function openUserMenu() {
   userBtn.setAttribute("aria-expanded", "true");
 }
 
+let metadataRefresh = null;
+let metadataRefreshedAt = 0;
+let metadataRetryAt = 0;
+let metadataFailures = 0;
 async function refreshMeta() {
+  const key = activeNode + ":" + chatSession + ":" + conversationEpoch;
+  if (metadataRefresh?.key === key) return metadataRefresh.promise;
+  const pending = {key, promise: refreshMetaOnce()};
+  metadataRefresh = pending;
+  try { return await pending.promise; }
+  finally { if (metadataRefresh === pending) metadataRefresh = null; }
+}
+async function refreshMetaOnce() {
   const target = chatSession;
   const epoch = conversationEpoch;
+  const node = activeNode;
   try {
     const query=new URLSearchParams({session_id:target});
     if (activeNode) query.set('node',activeNode);
@@ -3288,8 +3375,12 @@ async function refreshMeta() {
     const payload = await response.json();
     // A slower response for the thread we just left must not replace the selected thread's usage
     // and observability metadata. The new selection starts its own refresh.
-    if (chatSession !== target || conversationEpoch !== epoch) return true;
-    settings = { ...settings, ...payload };
+    if (chatSession !== target || conversationEpoch !== epoch || activeNode !== node) return false;
+    if (!response.ok) throw new Error(payload.error || "HTTP " + response.status);
+    acceptSettings(payload);
+    metadataFailures = 0;
+    metadataRetryAt = 0;
+    metadataRefreshedAt = Date.now();
     updateNodeLabel(settings.node_name, settings.node_worktree);
     // The account tooltip names the node, so it follows the same payload.
     renderUser();
@@ -3301,15 +3392,21 @@ async function refreshMeta() {
       renderUsage();
       renderPopFoot();
     }
+    // A timed-out write can apply after the immediate reconciliation read.
+    // Keep its note tied to the newly observed state on later refreshes too.
+    renderSettingsReconciliation(true);
     const provider = activeProvider();
     const label = provider ? provider.label : "local";
     const where = activeNode || "local";
-    meta.textContent = `${where} · ${label} · ${payload.model}`;
+    meta.textContent = `${where} · ${label} · ${settings.model}`;
     return true;
   } catch (error) {
+    if (chatSession !== target || conversationEpoch !== epoch || activeNode !== node) return false;
+    metadataFailures += 1;
+    metadataRetryAt = Date.now() + Math.min(30000, 500 * (2 ** Math.min(metadataFailures - 1, 6)));
     // The chat may still be healthy. A catalogue failure must describe only
     // this read, and the watch loop retries it without blocking the transcript.
-    meta.textContent = "model info unavailable · retrying";
+    meta.textContent = "model info unavailable · retrying (" + String(error.message || error) + ")";
     chipModel.textContent = "model info unavailable · retrying";
     return false;
   }
@@ -3437,7 +3534,7 @@ let metaReady = false;
 let metaRunning = false;
 
 async function ensureMeta() {
-  if (metaReady || metaRunning) return;
+  if (metaRunning || Date.now() < metadataRetryAt || (metaReady && Date.now() - metadataRefreshedAt < 5000)) return;
   metaRunning = true;
   try { metaReady = await refreshMeta(); }
   finally { metaRunning = false; }
@@ -3516,8 +3613,10 @@ let reconciledAt = 0;
 async function reconcile() {
   if (reconciling || !synced) return;
   reconciling = true;
+  const node=activeNode, target=chatSession, epoch=conversationEpoch;
   try {
     const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
+    if (node!==activeNode || target!==chatSession || epoch!==conversationEpoch) return;
     if (health && !activeRun(health)) {
       // What the live DOM still believes is worth checking *before* clearing it: if the page thought a message was
       // running, then whatever it is still showing - a tool topic waiting for a result that already arrived,
@@ -3536,7 +3635,7 @@ async function reconcile() {
       if (wasLive) restoreSession();
     }
   } catch (error) { /* the node is away; watchNode says so in the chat */ }
-  reconciling = false;
+  finally { reconciling = false; }
 }
 
 async function watch() {
@@ -3558,11 +3657,13 @@ async function watch() {
     // The node answered, so finish the first sync if it never finished. This loop always runs.
     if (!synced) sync("watch");
     else {
-      if (!metaReady) void ensureMeta();
-      if (!transcriptReady) restoreSession();
+      // Give durable recovery priority over optional model diagnostics. Periodic
+      // versioned reads also reconcile changes made by another window.
+      if (!transcriptReady) restoreSession(chatSession, true);
+      if (transcriptReady) void ensureMeta();
       // A live stream or update lock needs reconciliation. A durable unfinished notice does not:
       // polling and repainting an interrupted transcript forever would waste reads and restart its view.
-      else if (busy || document.getElementById("update-lock") || trace?.pending) {
+      if (transcriptReady && (busy || document.getElementById("update-lock") || trace?.pending)) {
         if (Date.now() - reconciledAt > 5000) { reconciledAt = Date.now(); reconcile(); }
       }
     }
@@ -3587,6 +3688,9 @@ let liveSyncFailed = false;
 
 function resetConversationFollowState() {
   transcriptReady = false;
+  transcriptRetryAt = 0;
+  transcriptFailures = 0;
+  transcriptFailure = "";
   sawTurnInFlight = false;
   followedSeq = null;
   lastFollowAt = 0;
@@ -3612,20 +3716,20 @@ function detachConversationView() {
 async function followRun() {
   const target = chatSession;
   const epoch = conversationEpoch;
+  const node = activeNode;
   if (!target) return;
   // /sessions is small and carries the thread's `last_seq`; the 1.5 MB /session read happens only
   // when there is something new. Redrawing an unchanged transcript would cost a megabyte every
   // three seconds and fight the reader's scroll for nothing.
   const list = await (await apiFetch("sessions", { headers: apiHeaders() })).json();
-  if (chatSession !== target || conversationEpoch !== epoch) return;
+  if (chatSession !== target || conversationEpoch !== epoch || activeNode !== node) return;
   const mine = (list.sessions || []).find((entry) => entry.id === target);
   if (!mine) return;
   const seq = Number(mine.last_seq) || 0;
   if (seq === followedSeq) return;
   rememberPlace();
-  if (await restoreSession(target)) {
-    if (chatSession !== target || conversationEpoch !== epoch) return;
-    followedSeq = seq;
+  if (await restoreSession(target, true)) {
+    if (chatSession !== target || conversationEpoch !== epoch || activeNode !== node) return;
     restorePlace();
   }
 }
@@ -3637,10 +3741,13 @@ async function syncLiveRun(current) {
   if (busy || !chatSession || !current || current.run_id == null || liveRunPolling) return;
   const target = chatSession;
   const epoch = conversationEpoch;
+  const node = activeNode;
   if (current.session && current.session !== target) return;
-  const poll = { target, epoch };
+  const poll = { target, epoch, node };
   liveRunPolling = poll;
   const id = Number(current.run_id);
+  const viewing = () => chatSession === target && conversationEpoch === epoch && activeNode === node
+    && liveRunId === id && liveRunPolling === poll && !busy;
   if (liveRunId !== id) {
     liveRunId = id;
     liveEventSeq = 0;
@@ -3653,12 +3760,14 @@ async function syncLiveRun(current) {
       body: JSON.stringify({ thread: target, run_id: id, after: liveEventSeq }),
     });
     const payload = await response.json();
-    if (chatSession !== target || conversationEpoch !== epoch) return;
+    if (!viewing()) return;
     if (!response.ok) {
       if (response.status === 404) {
         const latest = await nodeHealth();
+        if (!viewing()) return;
         if (!activeRun(latest)) {
           await followRun();
+          if (!viewing()) return;
           liveRunId = null;
           return;
         }
@@ -3674,6 +3783,7 @@ async function syncLiveRun(current) {
       // The checkpoint may have advanced after the preceding ledger poll. Read again before using
       // its tail, and wait another cycle if the read node-thread has not exposed that row yet.
       if (Number(payload.checkpoint_message_seq) > (Number(followedSeq) || 0)) await followRun();
+      if (!viewing()) return;
       if (Number(payload.checkpoint_message_seq) > (Number(followedSeq) || 0)) return;
       liveCheckpointSeq = payload.checkpoint_seq;
       liveEventSeq = Number(payload.checkpoint_seq) || 0;
@@ -3692,7 +3802,7 @@ async function syncLiveRun(current) {
       liveEventSeq = seq;
     }
   } catch (error) {
-    if (chatSession !== target || conversationEpoch !== epoch) return;
+    if (!viewing()) return;
     liveSyncFailed = true;
     setStatus("live sync retrying: " + String(error.message || error));
   } finally {
@@ -3705,9 +3815,12 @@ async function watchTurn() {
   // node runs one node-thread that is the difference between asking and queueing.
   if (runPolling) { setTimeout(watchTurn, 3000); return; }
   runPolling = true;
+  const node=activeNode, target=chatSession, epoch=conversationEpoch;
+  const viewing=()=>node===activeNode && target===chatSession && epoch===conversationEpoch;
   try {
     const response = await apiFetch("health");
     const health = await response.json();
+    if (!viewing()) return;
     // Keep the session list's live badges in step with the run this loop is already watching, with
     // no extra request: a thread turns "running" the moment a run is admitted and back when it ends.
     if (document.body.classList.contains("engine")) applySessionHealth(health);
@@ -3720,6 +3833,7 @@ async function watchTurn() {
         if (!followedSeq || Date.now() - lastFollowAt >= 3000) {
           lastFollowAt = Date.now();
           await followRun();
+          if (!viewing()) return;
         }
         await syncLiveRun(current);
       }
@@ -3732,12 +3846,15 @@ async function watchTurn() {
         clearStatus();
         rememberPlace();
         await restoreSession();
+        if (!viewing()) return;
         restorePlace();
       }
     }
   } catch (error) { /* the node is down; watchNode handles that */ }
-  runPolling = false;
-  setTimeout(watchTurn, 1000);
+  finally {
+    runPolling = false;
+    setTimeout(watchTurn, 1000);
+  }
 }
 
 // ---- native companion window (wa-window / WebView2) ----------------------
@@ -4242,7 +4359,7 @@ async function refreshAgentPane(pane,before_seq) {
   } catch(error) { pane.notice.textContent='Conversation unavailable: '+error.message; }
 }
 function mountOrchestrator() {
-  activeNode=''; // This node owns the dispatcher; each task carries its destination.
+  rememberNode(''); // This node owns the dispatcher; each task carries its destination.
   orchestratorPanel=document.createElement('wa-orchestrator');
   document.body.append(orchestratorPanel);
   if(native?.maximize)native.maximize();
@@ -4314,7 +4431,7 @@ function applyViewMode() {
   const target = parts[1] && parts[1] !== "this-node" ? parts.slice(1).join(":") : "";
   if (kind === "orchestrator") { mountOrchestrator(); return true; }
   if (kind === "control") {
-    if (target) activeNode = target;
+    if (target) rememberNode(target);
     document.body.append(control);
     openControl(target);
   }

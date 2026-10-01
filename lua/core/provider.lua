@@ -138,34 +138,39 @@ function M.configured()
   return settings.base_url ~= "" and settings.api_key ~= "" and settings.model ~= ""
 end
 
-function M.set_provider(id)
+function M.set_provider(id, revision)
+  local result = state.mutate(function()
   id = trim(id)
   for _, provider in ipairs(M.providers()) do
     if provider.id == id then
-      M.provider_override = id
       write_state("provider", id)
       -- The selection cache is process memory, not part of the route: dropping it here is what
       -- makes a switch read the new route's own persisted value, and what lets a repair of the
       -- state file become visible to an interpreter that had cached the old one.
+      M.provider_override = nil
       M.overrides = nil
-      return true
+      return {ok=true}
     end
   end
-  return false, "unknown_provider"
+  return {ok=false,error="unknown_provider"}
+  end, revision)
+  return result.ok, result.error
 end
 
-function M.set_model(name)
+function M.set_model(name, revision)
+  local result = state.mutate(function()
   name = trim(name)
-  if name == "" then return false, "empty_model" end
+  if name == "" then return {ok=false,error="empty_model"} end
   local provider = M.active()
   -- Reject a known protocol mismatch before persisting it. Unknown catalogue
   -- entries remain allowed, exactly as on the request path.
   local problem = M.unservable(name, provider)
-  if problem then return false, problem end
-  M.overrides = M.overrides or {}
-  M.overrides[provider.id] = name
+  if problem then return {ok=false,error=problem} end
   write_state("model." .. provider.id, name)
-  return true
+  M.overrides = nil
+  return {ok=true}
+  end, revision)
+  return result.ok, result.error
 end
 
 -- What a route can serve, decided by protocol.
@@ -658,22 +663,31 @@ function M.reasoning(model)
     replay=replay}
 end
 
-function M.set_reasoning(level)
+function M.set_reasoning(level, revision)
+  local result = state.mutate(function()
   local model=M.settings().model
   for _, allowed in ipairs(M.reasoning(model).levels) do
-    if level==allowed then write_state(reasoning_key(model),level); return true end
+    if level==allowed then write_state(reasoning_key(model),level); return {ok=true} end
   end
-  return nil,"unsupported_reasoning_level"
+  return {ok=false,error="unsupported_reasoning_level"}
+  end, revision)
+  return result.ok, result.error
 end
 
 -- Selection changes apply at the next user turn, not halfway through a tool
 -- exchange on another worker. Credentials remain only in memory, never telemetry.
 function M.pin()
+  state.with_snapshot(function()
   local profile,settings=M.active(),M.settings()
   local reasoning=M.reasoning(settings.model)
   M._pinned={provider=profile,settings=settings,reasoning=reasoning}
+  M._pinned.revision=state.revision()
+  end)
 end
 function M.unpin() M._pinned=nil end
+
+function M.selection_revision() return M._pinned and M._pinned.revision or state.revision() end
+function M.with_selection(fn) return state.with_snapshot(fn) end
 
 function M.request_options(model, messages, opts)
   opts=opts or {}
