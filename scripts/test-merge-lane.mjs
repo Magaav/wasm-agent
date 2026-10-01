@@ -43,7 +43,7 @@ function git(cwd, ...args) {
 const write = (file, text) => fs.writeFileSync(file, text);
 function lane(repo, args, environment = {}) {
   const result = spawnSync(process.execPath, [LANE, '--repo', repo, ...args],
-    {cwd: repo, encoding: 'utf8', windowsHide: true, env: {...process.env, ...environment}});
+    {cwd: repo, encoding: 'utf8', windowsHide: true, env: {...process.env, ...environment,WA_GATE_LANE_DIR:path.join(root,'gate-lane'),GATE_LANE_HELD:'',GATE_LANE_ORIGIN:'',WA_GATE_LANE_WAIT_SECONDS:'15',WA_GATE_LANE_SAMPLE_SECONDS:'0'}});
   let json = null;
   try { json = JSON.parse(result.stdout.trim()); } catch { /* a refusal is JSON too */ }
   return {status: result.status, json, stderr: result.stderr, stdout: result.stdout};
@@ -195,11 +195,23 @@ export function audit(repo,{target='main'}={}) {
   // ---- 3b. a gate that never finishes ------------------------------------------------------------------
   console.log('3b. a gate that is killed at its timeout');
   const timeout = lane(repo, ['--base', 'main', 'change/one', '--timeout-seconds', '1',
-    '--gate-command', 'echo starting; sleep 30; echo "smoke ok"'], env);
+    '--gate-command', 'echo starting; node -e \'console.log("owned-child:"+process.pid);setTimeout(()=>{},30000)\'; echo "smoke ok"' ], env);
   ok(timeout.status === 3 && timeout.json?.gate.exit === 'timeout_or_spawn_error',
     'a gate that did not exit is not a pass', JSON.stringify({exit: timeout.status, gate: timeout.json?.gate?.exit}));
   ok(Boolean(timeout.json?.gate.log) && fs.readFileSync(timeout.json.gate.log, 'utf8').includes('starting'),
     'and its partial output survived the kill');
+  ok(timeout.json.gate.drain_required===true,'timeout retains its reservation until owned descendant drain is proved');
+  const ownedPid=Number(fs.readFileSync(timeout.json.gate.log,'utf8').match(/owned-child:(\d+)/)?.[1]);
+  ok(Number.isInteger(ownedPid)&&ownedPid>0,'owned child recorded its native PID before the timeout');
+  try{process.kill(ownedPid);}catch(error){if(error.code!=='ESRCH')throw error;}
+  const deadline=Date.now()+5000;
+  while(true){try{process.kill(ownedPid,0);}catch(error){if(error.code==='ESRCH')break;throw error;}
+    if(Date.now()>deadline)throw Error('owned timeout child did not drain');await new Promise(r=>setTimeout(r,20));}
+  const reconciled=spawnSync(process.execPath,[path.join(path.dirname(fileURLToPath(import.meta.url)),'gate-lane.mjs'),'reconcile',
+    '--dir',path.join(root,'gate-lane'),'--id',String(timeout.json.gate.lane.request),'--evidence',`fixture owned native PID ${ownedPid} drained; timed-out holder exited; no effects were allowed`],
+    {encoding:'utf8',windowsHide:true});
+  ok(reconciled.status===0,'reservation reconciles only after explicit native child drain proof',reconciled.stderr);
+
 
   // ---- 3c. the lane's own environment does not ride into the gate --------------------------------------
   console.log('3c. the lane does not leak its own switches into the gate');

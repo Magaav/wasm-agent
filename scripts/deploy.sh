@@ -36,11 +36,13 @@
 #      in scripts/lib/service-target.sh, which is the one expression this project has for that question.
 set -uo pipefail
 
+REQUIRE_MAIN=0
 REASON=""
 SESSION=""
 PROMPT=""
 while [ $# -gt 0 ]; do
   case "$1" in
+    --require-main) REQUIRE_MAIN=1; shift ;;
     --reason) REASON="${2:-}"; shift 2 ;;
     --session) SESSION="${2:-}"; shift 2 ;;
     --prompt) PROMPT="${2:-}"; shift 2 ;;
@@ -203,7 +205,7 @@ if git rev-parse --verify -q origin/main >/dev/null; then
   # refused as a downgrade - measured twice in one day (8c13f19, 4d4753f). The live install
   # must be a commit that is on main: merge the change first. A scratch WA_INSTALL_DIR is a
   # test, not the operator's node, so it is exempt from this rule.
-  if [ -z "${WA_INSTALL_DIR:-}" ]; then
+  if [ -z "${WA_INSTALL_DIR:-}" ] || [ "$REQUIRE_MAIN" = "1" ]; then
     git merge-base --is-ancestor HEAD origin/main 2>/dev/null \
       || fail "this tree's commit $(git rev-parse --short HEAD) is not on origin/main; merge it to main and deploy from there - an unmerged deploy leaves main behind the live node"
   fi
@@ -284,6 +286,19 @@ fi
 
 # 4. Build.
 echo "deploy: building"
+# A real source build needs complete combined-tree verification. Scratch refusal
+# fixtures have no Rust workspace and can reach their mocked build boundary.
+if [ -f "$ROOT/rust/Cargo.toml" ]; then
+  SOURCE_TREE="$(git rev-parse HEAD^{tree})"
+  PROOF_REPO="$ROOT"; PROOF_SCRIPT="$ROOT/scripts/lib/full-gate-proof.mjs"
+  if command -v cygpath >/dev/null 2>&1; then
+    PROOF_REPO="$(cygpath -w "$PROOF_REPO")"; PROOF_SCRIPT="$(cygpath -w "$PROOF_SCRIPT")"
+  fi
+  GATE_PROOF="$(node "$PROOF_SCRIPT" "$PROOF_REPO" "$SOURCE_TREE" 2>&1)" \
+    || fail "complete gate proof required for source tree $SOURCE_TREE: $GATE_PROOF"
+  note "reusing complete exact-tree verification: $GATE_PROOF"
+fi
+
 ( cd rust && cargo build --release --offline -p wa-host ) || fail "the build failed"
 # The sentinel is its own crate, outside the `rust/` workspace (which lists only `wa-host`), so it is
 # built with its own manifest. Asking the workspace for `-p wa-sentinel` fails - "package ID

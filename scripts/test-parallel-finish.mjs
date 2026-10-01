@@ -21,6 +21,7 @@ const check=(condition,label)=>{assert.ok(condition,label);checks++;};
 const finish=(mode,revision=head())=>JSON.parse(run(process.execPath,[runner,mode,repo,revision]));
 try {
   fs.mkdirSync(repo);fs.mkdirSync(path.join(repo,'scripts'));
+  fs.copyFileSync('scripts/gate-lane.mjs',path.join(repo,'scripts/gate-lane.mjs'));
   run('git',['init','--bare','-q',remote],root);
   git('init','-q','--initial-branch','main');git('config','user.name','fixture');git('config','user.email','fixture@local');
   fs.writeFileSync(path.join(repo,'scripts/test.sh'),"printf 'smoke ok (1 skipped)\\n'\n");

@@ -37,12 +37,17 @@ esac
 if [ "$WINDOWS" = "1" ]; then
   INSTALL_DIR="${WA_INSTALL_DIR:-$LOCALAPPDATA/wasm-agent}"
   EXE="wa.exe"
-  HOME_DIR="${WASM_AGENT_HOME:-$USERPROFILE/.wasm-agent}"
+
 else
   INSTALL_DIR="${WA_INSTALL_DIR:-$HOME/.local/bin}"
   EXE="wa"
-  HOME_DIR="${WASM_AGENT_HOME:-$HOME/.wasm-agent}"
+
 fi
+# Runtime HOME is the parent of .wasm-agent, including under the sentinel.
+SERVICE_LIB="$ROOT/scripts/lib/service-target.sh"
+[ -f "$SERVICE_LIB" ] || { say "missing service-target.sh: cannot resolve runtime config safely"; exit 2; }
+. "$SERVICE_LIB"
+HOME_DIR="$(wa_config_dir)"
 INSTALLED="$INSTALL_DIR/$EXE"
 UI_DIR="${WA_UI_DIR:-$INSTALL_DIR/ui}"
 RUNTIME_ROOT="${WA_RUNTIME_WORKTREE:-$ROOT}"
@@ -359,8 +364,9 @@ if [ "$UI_OK" = "1" ] && wait_health; then
     if ! cmp -s "$0" "$INSTALL_DIR/scripts/upgrade.sh"; then
       cp -f "$0" "$INSTALL_DIR/scripts/upgrade.sh" || { say "node upgraded, but could not ship upgrade.sh"; exit 3; }
     fi
-    for skill in self-update parallel-evolution git-orchestrator; do
-      if [ -n "$SOURCE_ROOT" ] && [ -f "$SOURCE_ROOT/skills/$skill/SKILL.md" ]; then
+    for skill_source in "$SOURCE_ROOT"/skills/*; do
+      skill="${skill_source##*/}"
+      if [ -n "$SOURCE_ROOT" ] && [ -f "$skill_source/SKILL.md" ]; then
         mkdir -p "$HOME_DIR/skills/$skill"
         cp -R "$SOURCE_ROOT/skills/$skill/." "$HOME_DIR/skills/$skill/" \
           || { say "node upgraded, but could not ship $skill skill and its helpers"; exit 3; }
