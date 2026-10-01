@@ -223,9 +223,49 @@ end
 -- dies during git worktree add, the persisted 'allocating' record is reconciled, never
 -- blindly replayed. source_session_id must be owned by the same principal; its checkout is
 -- only used when that session is a session of this node (see inspect_source).
-function M.ensure(memory, session_id, source_session_id)
+function M.ensure(memory, session_id, source_session_id, options)
   local session = memory.session(session_id)
   if not session then return nil, "workspace_session_not_found" end
+  local current=memory.session_workspace(session_id)
+  local root_recovery=options and options.root_recovery==true
+  local is_root=tostring(session.parent_session_id or '')=='' and tostring(session.fork_parent_id or '')==''
+  if root_recovery and (not is_root or source_session_id~=session_id) then
+    return nil,'workspace_root_recovery_forbidden: explicit recovery is only for the owned root session'
+  end
+  local root_source=nil
+  if is_root and source_session_id==session_id and current
+      and (current.state=='unbound' or current.state=='pending' or current.state=='failed') then
+    if not root_recovery then
+      return nil,'workspace_root_recovery_required: the session owner must explicitly allocate or recover from the node runtime source'
+    end
+    if tostring(current.worktree or '')~='' then
+      return nil,'workspace_root_recovery_existing_binding: inspect the recorded worktree; it is never replaced by a runtime fallback'
+    end
+    -- Resolve a trusted source before making a legacy root required. Otherwise
+    -- its own source check would refuse the binding it is trying to create.
+    local problem
+    root_source,problem=inspect_source(memory,session.user_id,session.node_id,'')
+    if not root_source then return nil,problem end
+    if tostring(root_source.status or '')~='' then
+      return nil,'workspace_source_dirty: root allocation refused before requiring an unbound session'
+    end
+    root_source.fallback='explicit owned root bootstrap'
+    local saved=memory.transaction(function()
+      local latest=memory.session_workspace(session_id)
+      if not latest or latest.state~=current.state or latest.worktree~=current.worktree
+          or latest.source_path~=current.source_path or latest.base_commit~=current.base_commit then
+        return {error='workspace_root_recovery_changed: binding changed during source inspection; reconcile before retry'}
+      end
+      latest.source_path=root_source.path
+      latest.base_commit=root_source.head
+      latest.required,latest.state=true,'pending'
+      latest.start_state={source_root=root_source.root,source_path=root_source.path,
+        source_origin=root_source.origin,source_requested='',source_fallback=root_source.fallback,
+        base_commit=root_source.head,source_dirty=false,uncommitted_policy='refuse',inspected_at=host.now()}
+      return {workspace=memory.set_session_workspace(session_id,latest)}
+    end)
+    if saved.error then return nil,saved.error end
+  end
   local workspace = memory.require_session_workspace(session_id)
   if not workspace then return nil, "workspace_requirement_failed" end
   if workspace.state=="released" or workspace.state=="releasing" or workspace.state=="release_unknown" then
@@ -244,7 +284,8 @@ function M.ensure(memory, session_id, source_session_id)
   -- From here on every refusal is recorded on the child's own workspace record: a required
   -- workspace that stays `pending` while the reason sits in a return value nobody persisted is
   -- exactly the state a retrying dispatcher reads as "not finished yet".
-  local inspected, inspection_error = inspect_source(memory, session.user_id, session.node_id, source_session_id)
+  local inspected, inspection_error = root_source,nil
+  if not inspected then inspected,inspection_error=inspect_source(memory, session.user_id, session.node_id, source_session_id) end
   if not inspected then
     mark(memory, session_id, workspace, "failed", inspection_error)
     return nil, inspection_error
@@ -311,6 +352,20 @@ function M.ensure(memory, session_id, source_session_id)
   workspace.state = "allocated"
   workspace.error = ""
   return memory.set_session_workspace(session_id, workspace)
+end
+-- Read-only ownership/action hint for a failed root, including legacy broken
+-- records. It does not silently allocate or redirect any execution context.
+function M.recovery_hint(memory,session_id)
+  local session,workspace=memory.session(session_id),memory.session_workspace(session_id)
+  if session and workspace and workspace.required
+      and (workspace.state=='unbound' or workspace.state=='pending' or workspace.state=='failed')
+      and tostring(workspace.worktree or '')==''
+      and tostring(session.parent_session_id or '')=='' and tostring(session.fork_parent_id or '')=='' then
+    return {actor='session owner (master)',action='recover',session_id=session_id,
+      source='node-owned runtime checkout, inspected read-only',detail=workspace.error,
+      effect='allocate an isolated worktree; never write through an unavailable binding'}
+  end
+  return nil
 end
 
 function M.requires_write_tools(allowed)
