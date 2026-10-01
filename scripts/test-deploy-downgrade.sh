@@ -29,6 +29,12 @@ LIVE_INSTALL="${WA_LIVE_INSTALL_DIR:-${WA_INSTALL_DIR:-$HOME/AppData/Local/wasm-
 # Snapshotted before anything runs, so the isolation assertion compares against the state this test found.
 LIVE_HASH_BEFORE="$(sha256sum < "$LIVE_INSTALL/wa.exe" 2>/dev/null | awk '{print $1}')"
 LIVE_RECORD_BEFORE="$(cat "$LIVE_INSTALL/installed.txt" 2>/dev/null)"
+live_diagnostics() {
+  for file in deploy.log deploy-result.json; do
+    if [ -f "$LIVE_INSTALL/$file" ]; then sha256sum < "$LIVE_INSTALL/$file"; else printf 'absent:%s\n' "$file"; fi
+  done
+}
+LIVE_DIAGNOSTICS_BEFORE="$(live_diagnostics)"
 
 checks=0
 failed=0
@@ -79,7 +85,7 @@ last_exit=0
 last_out=""
 run_deploy() {
   ( cd "$ROOT" && env -u WASM_AGENT_IN_TURN PATH="$(dirname "$(command -v git)"):/usr/bin:/bin" \
-      WA_INSTALL_DIR="$S/install" WA_PORT=18991 WA_CLIENT_PORT=18992 \
+      WA_INSTALL_DIR="$S/install" WASM_AGENT_HOME="$S/home" WA_PORT=18991 WA_CLIENT_PORT=18992 \
       bash "$DEPLOY" --reason "downgrade gate test" ) >"$S/out.txt" 2>&1
   last_exit=$?
   last_out="$(cat "$S/out.txt")"
@@ -133,19 +139,20 @@ ok "$(grep -q 'downgrade refused' <<<"$last_out" && echo 0 || echo 1)" "an unres
 ok "$(grep -q 'does not have' <<<"$last_out" && echo 1 || echo 0)" "it names the case (shallow clone, other repo, unfetched branch)" "$(grep -m1 'does not have' <<<"$last_out" | cut -c1-110)"
 ok "$(grep -q 'note: ' "$S/install/deploy.log" 2>/dev/null && echo 1 || echo 0)" "and it is recorded as a note, not as a refusal"
 
-# --- 5b. a tree ahead of main: refused on the live install, naming the rule -----------------------
+# --- 5b. a tree ahead of main: refused on a private install, naming the rule -----------------------
 # An unmerged `change/` branch deploys fine and leaves main behind the live binary, so every
 # main-side deploy is then refused as a downgrade. The rule is checked before the build, so this
-# runs against the live install and must refuse without touching it. Only meaningful when the tree
+# runs against a private install and must refuse without touching it. Only meaningful when the tree
 # is ahead of main; on main there is nothing to refuse.
 if git merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
   echo "  note: this tree is on main, so the ahead-of-main refusal has nothing to refuse"
 else
   ( cd "$ROOT" && env -u WASM_AGENT_IN_TURN PATH="$(dirname "$(command -v git)"):/usr/bin:/bin" \
+      WA_INSTALL_DIR="$S/install" WASM_AGENT_HOME="$S/home" WA_PORT=18991 WA_CLIENT_PORT=18992 \
       bash "$DEPLOY" --reason "guard test" ) >"$S/guard.txt" 2>&1
   guard_exit=$?
   ok "$([ "$guard_exit" != "0" ] && grep -q 'is not on origin/main' "$S/guard.txt" && echo 1 || echo 0)" \
-    "a tree ahead of main is refused on the live install, naming the rule" "exit $guard_exit"
+    "a tree ahead of main is refused on a private install, naming the rule" "exit $guard_exit"
   ok "$(grep -q 'deploy: building' "$S/guard.txt" && echo 0 || echo 1)" "and it refused before the build"
 fi
 
@@ -158,6 +165,9 @@ if [ -x "$LIVE_INSTALL/wa.exe" ] || [ -f "$LIVE_INSTALL/installed.txt" ]; then
 else
   echo "  note: no live install at $LIVE_INSTALL - the isolation assertion is about the fixture only"
 fi
+
+ok "$([ "$(live_diagnostics)" = "$LIVE_DIAGNOSTICS_BEFORE" ] && echo 1 || echo 0)" \
+  "live deployment log/result remain unchanged by refusal fixtures"
 
 printf '\n'
 if [ "$failed" -eq 0 ]; then
