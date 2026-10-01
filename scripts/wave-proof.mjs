@@ -7,6 +7,9 @@ import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {DatabaseSync} from 'node:sqlite';
 import {listRecords} from './lib/delivery-store.mjs';
+import {verifyDelivered} from './lib/wave-delivery.mjs';
+import {frozenOwners,ownerInventory} from './lib/wave-owners.mjs';
+import {operationSafety} from './wave-adapter.mjs';
 const [kind,file]=process.argv.slice(2);
 const hash=data=>crypto.createHash('sha256').update(data).digest('hex');
 const key=value=>{const p=String(value || '').replaceAll('\\','/').replace(/^\/\/\?\//,'').replace(/\/$/,'');return process.platform==='win32'?p.toLowerCase():p;};
@@ -24,13 +27,7 @@ try {
   const target=process.env.WA_WAVE_TARGET;
   let unresolved=[],evidence={};
   if(kind==='operations') {
-    const db=new DatabaseSync(path.join(config.data,'operations/index.sqlite'),{readOnly:true});
-    try {
-      if(!db.prepare("SELECT value FROM meta WHERE key='complete'").get())fail('operation_index_import_required');
-      const pending=db.prepare('SELECT id,cwd,state,originals FROM operations o WHERE blocked=1 AND NOT EXISTS(SELECT 1 FROM reconciliation r WHERE r.id=o.id AND r.expected=o.state) ORDER BY id').all();
-      unresolved=pending.filter(row=>!target || !row.cwd || key(row.cwd)===key(target) || key(row.cwd).startsWith(key(target)+'/')).map(row=>({id:row.id,cwd:row.cwd,owner:JSON.parse(row.state).owner,originals_sha256:hash(row.originals)}));
-      evidence={lookup:'indexed-unresolved',target:target || 'all',total_pending:pending.length};
-    }finally{db.close();}
+    const safety=operationSafety(config,target);unresolved=safety.unresolved;evidence=safety;
   } else if(kind==='claims') {
     const claims=rows(path.join(config.data,'resources/claims.sqlite'),'SELECT key,principal,session,run,boot,uncertain FROM claims ORDER BY key');
     if(target) {
@@ -39,21 +36,13 @@ try {
     }else unresolved=claims;
     evidence={observed_claims:claims.length,note:'Lease/PID age never reconciles a claim; use the resource API with inspected effects.'};
   } else if(kind==='owners') {
-    if(!Array.isArray(config.orchestration_run_ids) || !config.orchestration_run_ids.length)fail('complete_owner_inventory_required');
-    const inventories=config.orchestration_run_ids.map(run_id=>JSON.parse(run([config.orca || 'orca','orchestration','worker-list','--run',run_id,'--include-remote','--json'],config.repo)));
-    const workers=[];
-    for(const inventory of inventories) {
-      if(inventory.ok!==true || inventory.result?.page?.hasMore!==false || !Array.isArray(inventory.result?.workers))fail('owner_inventory_incomplete');
-      workers.push(...inventory.result.workers);
-    }
-    unresolved=workers.filter(row=>row.dispatchStatus!=='completed' || !['succeeded','failed'].includes(row.workerState) || !['released','retained'].includes(row.terminalState) || row.projection?.stage?.activity==='working').map(row=>({dispatch:row.dispatchId,terminal:row.agentTerminalHandle,reason:'owner_unsettled_or_cleanup_decision_missing'}));
-    evidence={runs:config.orchestration_run_ids,workers:workers.length,note:'Retained idle terminals may be parked only after their current accepted settlement.'};
+    const owners=process.env.WA_WAVE_ADMISSION==='1'?ownerInventory(config):frozenOwners(config,wave_id,main);unresolved=owners.unresolved;evidence=owners;
   } else if(kind==='deliveries') {
     if(!config.delivery_store || !fs.existsSync(config.delivery_store))fail('delivery_store_missing');
     const records=listRecords(config.delivery_store);
     for(const record of records) {
-      const ancestry=record.landing?.sha && spawnSync('git',['-C',config.repo,'merge-base','--is-ancestor',record.landing.sha,main],{windowsHide:true}).status===0;
-      if(!ancestry || record.review?.reviewer===record.producer || !record.review?.reviewer || record.review?.verdict!=='passed')unresolved.push({delivery:record.delivery,tip:record.tip,reason:'unlanded_or_independent_review_unverified'});
+      const verified=verifyDelivered(config.repo,record,main);
+      if(!verified.ok)unresolved.push({delivery:record.delivery,tip:record.tip,reason:verified.reason});
     }
     evidence={records:records.length};
   } else if(kind==='registries') {

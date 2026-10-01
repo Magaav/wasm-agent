@@ -3,6 +3,7 @@
 mod process;
 mod redact;
 mod index;
+mod legacy;
 use process::Process;
 use redact::Redactor;
 use serde_json::{json, Value};
@@ -454,6 +455,9 @@ impl Manager {
         self.index()?.relevant(cwd, after, limit)
     }
     pub fn reconcile(&self, args: &Value) -> io::Result<Value> { self.index()?.reconcile(args) }
+    pub fn adjudicate_legacy(&self,args:&Value)->io::Result<Value>{self.index()?.adjudicate_legacy(args)}
+    pub fn allocation_safety(&self,args:&Value)->io::Result<Value>{self.index()?.allocation_safety(args)}
+    pub fn identity(&self)->io::Result<Value>{Ok(json!({"owner_boot":self.index()?.boot,"process_id":std::process::id(),"creation_stamp":legacy::creation(std::process::id())?,"cwd":std::env::current_dir()?.to_string_lossy()}))}
     pub fn snapshot(&self, id: &str) -> io::Result<Value> {
         validate_id(id)?;
         if let Some(entry) = self.entries.lock().map_err(error)?.get(id).cloned() {

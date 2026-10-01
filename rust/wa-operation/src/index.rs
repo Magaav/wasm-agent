@@ -34,6 +34,7 @@ impl Index {
           CREATE INDEX IF NOT EXISTS relevant ON operations(blocked,cwd,id);
           CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS reconciliation(id TEXT PRIMARY KEY,expected TEXT NOT NULL,evidence TEXT NOT NULL,at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+          CREATE TABLE IF NOT EXISTS legacy_quarantine(id TEXT PRIMARY KEY,expected TEXT NOT NULL,bundle TEXT NOT NULL,receipt TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS history(at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,action TEXT NOT NULL,id TEXT NOT NULL,evidence TEXT NOT NULL);").map_err(error)?;
         if empty { db.execute("INSERT OR IGNORE INTO meta VALUES('complete','new-store')", []).map_err(error)?; }
         Ok(Self { root: root.into(), boot, db: Mutex::new(db), _lease: Mutex::new(lease) })
@@ -99,19 +100,50 @@ impl Index {
         // and wildcard paths ambiguous. Empty legacy attribution is always relevant.
         let prefix = format!("{target}/");
         let upper = format!("{target}0");
-        let mut query = db.prepare("SELECT id,state,originals FROM operations o WHERE blocked=1 AND id>? AND (cwd='' OR cwd=? OR (cwd>=? AND cwd<?)) AND NOT EXISTS(SELECT 1 FROM reconciliation r WHERE r.id=o.id AND r.expected=o.state) ORDER BY id LIMIT ?").map_err(error)?;
-        let rows = query.query_map(params![after,target,prefix,upper,limit + 1], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?))).map_err(error)?;
+        let mut query = db.prepare("SELECT id,state,originals FROM operations o WHERE blocked=1 AND id>? AND (?='*' OR cwd='' OR cwd=? OR (cwd>=? AND cwd<?)) AND NOT EXISTS(SELECT 1 FROM reconciliation r WHERE r.id=o.id AND r.expected=o.state) ORDER BY id LIMIT 257").map_err(error)?;
+        let rows = query.query_map(params![after,target,target,prefix,upper], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?))).map_err(error)?;
         let mut operations = Vec::new();
+        let mut examined=0;let mut last=String::new();let mut quarantined=0;
         for row in rows {
             let (id, state, originals) = row.map_err(error)?;
+            examined+=1;last=id.clone();
+            let bundle=db.query_row("SELECT bundle FROM legacy_quarantine WHERE id=? AND expected=?",params![id,state],|r|r.get::<_,String>(0)).optional().map_err(error)?;
+            if let Some(bundle)=bundle {
+                let bundle:Value=serde_json::from_str(&bundle).map_err(error)?;
+                if crate::legacy::validate(&self.root,&bundle).is_ok(){quarantined+=1;continue;}
+            }
             let state: Value = serde_json::from_str(&state).map_err(error)?;
             let originals: Value = serde_json::from_str(&originals).map_err(error)?;
             operations.push(json!({"operation_id":id,"state":state,"originals":originals}));
         }
-        let more = operations.len() > limit;
+        let more = operations.len() > limit || examined>256;
         operations.truncate(limit);
-        let next = if more { operations.last().map(|v| v["operation_id"].clone()) } else { None };
-        Ok(json!({"ok":true,"operations":operations,"next":next,"truncated":more,"lookup":"indexed-unresolved"}))
+        let next = if more { Some(json!(operations.last().and_then(|v|v["operation_id"].as_str()).unwrap_or(&last))) } else { None };
+        Ok(json!({"ok":true,"operations":operations,"next":next,"truncated":more,"lookup":"indexed-unresolved","quarantined_unknown_outcomes":quarantined}))
+    }
+    pub fn adjudicate_legacy(&self,args:&Value)->io::Result<Value>{
+        let receipt=crate::legacy::validate(&self.root,args)?;
+        let id=args["id"].as_str().ok_or_else(||error("legacy_id_required"))?;
+        let mut db=self.db.lock().map_err(error)?;
+        let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(error)?;
+        let state:String=tx.query_row("SELECT state FROM operations WHERE id=?",[id],|r|r.get(0)).map_err(error)?;
+        if state!=args["expected_state"].to_string(){return Err(error("legacy_index_state_moved"));}
+        let previous=tx.query_row("SELECT bundle FROM legacy_quarantine WHERE id=?",[id],|r|r.get::<_,String>(0)).optional().map_err(error)?;
+        if let Some(previous)=previous {
+            if serde_json::from_str::<Value>(&previous).map_err(error)?!=*args{return Err(error("legacy_adjudication_bundle_moved"));}
+            return crate::legacy::validate(&self.root,args);
+        }
+        crate::legacy::validate(&self.root,args)?;
+        tx.execute("INSERT OR IGNORE INTO legacy_quarantine VALUES(?,?,?,?)",params![id,state,args.to_string(),receipt.to_string()]).map_err(error)?;
+        tx.execute("INSERT INTO history(action,id,evidence) VALUES('legacy_allocation_safety',?,?)",params![id,receipt.to_string()]).map_err(error)?;
+        tx.commit().map_err(error)?;
+        Ok(receipt)
+    }
+    pub fn allocation_safety(&self,args:&Value)->io::Result<Value>{
+        let id=args["id"].as_str().ok_or_else(||error("operation_id_required"))?;validate_id(id)?;
+        let db=self.db.lock().map_err(error)?;
+        let bundle=db.query_row("SELECT bundle FROM legacy_quarantine WHERE id=?",[id],|r|r.get::<_,String>(0)).optional().map_err(error)?;
+        match bundle {Some(bundle)=>crate::legacy::validate(&self.root,&serde_json::from_str::<Value>(&bundle).map_err(error)?),None=>Err(error("legacy_allocation_safety_not_adjudicated"))}
     }
     pub fn reconcile(&self, args: &Value) -> io::Result<Value> {
         let required = |name: &str| args[name].as_str().filter(|s| !s.trim().is_empty()).ok_or_else(|| error(format!("{name}_required")));

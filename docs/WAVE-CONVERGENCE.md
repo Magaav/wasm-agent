@@ -1,5 +1,125 @@
 # Durable evolution wave closure
 
+## Sanctioned entry and repaired proof boundaries
+
+Use `wave-entry.mjs register <canonical-main> <config> <bootstrap-admission>`
+once, then `start <repo> <manifest>`. Registration and the store live at the real
+shared Git directory's `wa-waves/registration.json` and `wa-waves/`; a caller
+cannot choose a new store to repeat bootstrap. Bootstrap admission binds current
+main/local-ref inventory and independent issuer/reviewer. No producer in this
+delivery activated live registration. Registration with no started wave,
+malformed/missing activation, blocked progress, and a closing freeze refuse
+actual new workspace allocation and producer/admission hooks. Private local
+temporary Git fixtures are identified explicitly and never claim production
+verification. The throughput dependency wires real finish/admission/merge
+consumers through `lib/wave-guard.mjs`; source Lua allocations and existing
+managed writers use the same `checkAdmission` guard.
+
+Public start registers the approved `wave-convergence` sentinel schedule using
+`wave-monitor.sh`. That external procedure resumes the registered shared wave,
+never creates another one. A dead runner's interrupted effect is unknown and
+blocked rather than replayed. At most three continuation admissions and 120
+liveness observations are allowed; exhausted observation preserves the owner
+and records an actionable blockage. Complete/blocked disables the scheduled
+job. A private local test may explicitly use `monitor_mode:external-cli-test`;
+this does not replace production watcher registration. `watcher-definition`
+prints the actual schedule/run procedure. Install must ship this shell and all
+transitive wave modules before activation; no running binary/window is replaced
+by these helpers.
+
+Full-gate proof now uses the shared `fullProof/findFullProof` implementation and
+the actual terminal `smoke ok` / `smoke ok (N skipped)` format. Retained and durable
+combined receipts preserve their tested repository/head separately from storage
+owner/candidate head, and explicit overrides must belong to the shared source
+registry. Wrong kind/tree/exit/skip/hash/source rejects proof. Observation retry
+counts and post argv/timeouts are validated as finite bounded integers before
+admission and again when consumed from durable progress.
+
+Delivery closure validates immutable tip/tree, actual reviewed tip/tree,
+independent published reviewer anchor, admission owner/tip/tree, and ancestry of
+the delivered tip inside both recorded landing and accepted main. A landing SHA
+of main cannot hide an unmerged delivery. The binding remains verifiable after
+its branch is retired. Final read-only observation is distinct from admitting
+new work under a closing freeze.
+
+Owner discovery pages all orchestration runs/workers, inventories every current
+Orca terminal/card for the repository, and requires positive current actor state.
+Unknown activity, orphaned/reused/taken-over panes and incomplete host/page scope
+are blockers. `wave-adapter.mjs freeze <config> <issuer> <reviewer>` records current
+pane incarnations/actor generations and exact tree-owner IDs after real combined
+operation/claim safety. Retirement rechecks that freeze. Runtime allocations now
+record native executor boot/process/creation identity; legacy path-only ownership
+is not silently promoted. Freeze is a cooperative repository admission fence,
+not an OS sandbox against arbitrary privileged file writes.
+
+Concrete adapters are `owner`, `owners`, `dependencies`, `safety`, `operations`,
+`runtime-retire`, `reconcile`, and `registry-post`. Hosting dependencies use complete
+GitHub pull pages bound to the configured origin namespace; actual local Git
+transport has no hosting PR namespace and is labelled as such. Missing hosting
+discovery is a refusal. Managed runtime removal/parking invokes real Lua under
+the session resource fence with expected immutable HEAD, before the mutation.
+Orca removal requires an exact detached owned tree so its API cannot delete an
+advanced feature ref implicitly; parking updates and refreshes the real card.
+Git/runtime/Orca postconditions are checked separately. Missing-tree ordinary
+release now reacquires the explicit reconciliation fence and checks relevant
+operations and branch ancestry; filesystem absence does not bypass either.
+
+## External legacy allocation-safety bridge
+
+`wave-legacy.mjs <config> <bundle>` invokes native `legacy_adjudicate` only from an
+external reviewed executor; a node turn or inherited in-turn marker refuses it.
+The fixed runtime operations directory's `legacy-authority.json` must explicitly
+contain trusted Ed25519 public keys and identity/drain/effects/review roles.
+Private keys are never shipped. No live authority file was created by this
+producer. The signer custody and genuine observer provenance are trusted operator
+boundaries; a signed observation must represent an actual inspected fact.
+
+A bundle pins ID, exact current state/object/hash, and every before-reconcile
+original name/hash. Each separately signed artifact binds operation ID, normalized
+canonical store identity, current state hash and the hash of sorted original
+inventory JSON. Identity observes original process ID, actual OS creation stamp,
+stable containment identity and preserved writer binary artifact/hash. Drain
+matches those identities and supplies positive signalled-wait, exact-handle and
+contained-member-exit observations. Current matching live identity is refused;
+absence alone is insufficient because the signed positive drain is also required.
+Windows stamps are `windows-filetime:<creation FILETIME64>`; Linux stamps include
+kernel boot ID and process start ticks. Unsupported observation fails closed.
+
+Effects supply nonempty scoped settled observations with actual artifact paths
+and verified preservation hashes, `original_execution_outcome:unknown`,
+`never_replay:true` and `quarantine_preserved:true`. A distinct authorized reviewer
+binds all three source artifact hashes and the verdict
+`allocation_safe_original_unknown`. Native validation checks signatures, role
+separation, source/store/identity binding, originals, live identity, actual
+preservation/binary bytes and evidence movement. It writes a separate
+`legacy_quarantine` receipt/history and never rewrites state/output/originals or
+claims execution success. Relevant lookup revalidates adjudicated evidence;
+missing/moved/invalid evidence is an unresolved blocker again. Explicit replay
+identities are rejected and every receipt remains visibly original-outcome-unknown.
+Indexed pages stay bounded; an incomplete page cannot mean zero blockers.
+
+`wave-legacy-map.mjs <data> <prior-evidence> <new-report>` reads full saved originals,
+exact tool-result/artifact references and process/source journal leads. The actual
+76-record mapping found three exact ledger bindings, seven PID/source leads, no
+additional artifact bindings and **zero independently verified stable identities**.
+Leads are not attestations. Neither age, mtime, elapsed time, empty output, a PID
+mention nor a synthetic boot permits adjudication. All 76 remain explicit pending
+proof in this producer task. The 46 uncertain resource claims continue through the
+existing resource API only after exact original boot-lease and scoped effect
+inspection; two missing-ledger cases remain visible. No live record/ref mutation
+or claimed live closure occurred here.
+
+The repair fixtures exercise actual native child identity/owned exit and signature
+refusal, original byte preservation, invalid/moved evidence, exact real Git
+review/admission/landing and actual retained/combined smoke schema, malformed
+retry budgets, public shared admission/restart/no replay, real live claim refusal
+and owned-drain reconciliation, native session-fenced removal, exact Git deletion,
+and actual Orca create/park/refresh. The public contract fixture proves those
+closure stages but intentionally lacks application deployment/full-gate evidence;
+the overall wave correctly remains blocked. It is not a production deployment
+receipt. Actual combined full gate/install/recovery and final legacy adjudication
+remain coordinator/finisher acceptance requirements.
+
 An authorized wave owns produce → independent verify → accept → land → deploy →
 converge. Branch delivery and command exit are intermediate outcomes. A wave is
 complete only after fresh proof of the clean next-wave baseline. The merge lane
@@ -151,8 +271,8 @@ Final verification freshly checks only `main` in remote/shared local heads,
 canonical main clean and equal to origin/main, clean integrated detached retained
 trees (or removed/released ones), and no locked/prunable/unresolved Git trees.
 Remote/local refs are read again around workspace/proof checks to detect movement.
-The combined full-gate receipt must match the actual accepted Git tree, successful
-exit, valid log hash, unchanged runner hash, one gate run and counted skip verdict.
+The shared `full-gate-proof.mjs` validator requires the actual accepted Git tree,
+successful exit, valid log hash, one gate run and terminal counted skip verdict.
 Focused admission cannot substitute for that receipt. `gate_receipt` can name an
 identical-tree retained receipt; otherwise canonical `wa-finish-gate.json` is used.
 
@@ -191,8 +311,9 @@ originals, 50 claims (46 uncertain), and 1,380 bindings (1,374 allocated). Count
 are a point-in-time observation during live work, not a completed closure receipt.
 No tree/ref/claim/operation was retired or rewritten by that audit.
 
-Focused proof: 39 real `wa-operation` tests; the Lua-root workspace integration
-has 34 release/reconciliation checks plus two-process/restart evidence;
+Focused repair proof: 40 real `wa-operation` tests (one helper is marked ignored
+and is launched explicitly by its parent identity/drain test); Lua-root workspace
+integration has 37 release/reconciliation checks plus 11 two-process/restart checks;
 `test-wave-executor.cjs` verifies 11 real native-child driver checks in a private
 home with the source Lua root;
 `test-wave-lifecycle.mjs` uses private Git/SQLite and stand-in effect/proof drivers
@@ -201,6 +322,14 @@ claims/deploy, stale next-wave baseline and ref movement;
 `test-wave-retire.mjs` uses real disposable Git for non-force advertisement/server
 CAS, preserved prior hooks, active-owner refusal, parking and durable partial
 retirement. Stand-in observation receipts are not production deployment proof.
+`test-wave-proof.mjs` uses real immutable review/landing Git objects and actual
+full-gate receipt schemas. `test-wave-restart.mjs` exercises bounded public
+continuation in external processes. `test-wave-public.mjs` ships the actual entry,
+registers a private local-transport repository, reconciles an exactly drained
+native claim, removes a native session workspace, parks and refreshes a real Orca
+card, and proves main-only local/remote refs. It then requires durable blocking
+because full application gate/deployment evidence is absent; this is contract
+closure proof, not a production completed-wave receipt.
 
 Risk: explicitly configured local proof adapters and external operator evidence
 remain trusted. These are cooperative evolution safeguards, not an OS security

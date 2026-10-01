@@ -1,5 +1,59 @@
 use super::*;
 #[test]
+#[ignore = "helper process only; parent exercises stable identity and exact owned drain"]
+fn legacy_writer_helper() {
+    let root=PathBuf::from(std::env::var("WA_LEGACY_TEST_ROOT").unwrap());
+    let id=format!("op-fixture-{}-0",std::process::id());
+    fs::create_dir_all(root.join(&id)).unwrap();
+    let state=json!({"operation_id":id,"owner":"legacy-worker","settled":false,"cleanup":"unknown","containment":"owned_helper_process_no_children","cwd":root.to_string_lossy()});
+    atomic_json(&root.join(&id).join("state.json"),&state).unwrap();
+    atomic_json(&root.join(&id).join("state.json.before-reconcile-fixture"),&state).unwrap();
+    std::thread::sleep(Duration::from_secs(30));
+}
+#[test]
+fn legacy_adjudication_preserves_unknown_outcome_and_requires_independent_native_evidence() {
+    use ring::{rand::SystemRandom,signature::{Ed25519KeyPair,KeyPair}};
+    let (m,root)=fixture();fs::create_dir_all(&root).unwrap();
+    let evidence=root.with_extension("evidence");fs::create_dir_all(&evidence).unwrap();
+    let mut child=std::process::Command::new(std::env::current_exe().unwrap()).args(["--ignored","--exact","tests::legacy_writer_helper","--nocapture"]).env("WA_LEGACY_TEST_ROOT",&root).stdout(std::process::Stdio::null()).spawn().unwrap();
+    let pid=child.id();let id=format!("op-fixture-{pid}-0");
+    let deadline=Instant::now()+Duration::from_secs(5);
+    while !root.join(&id).join("state.json.before-reconcile-fixture").exists(){assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
+    let stamp=legacy::creation(pid).unwrap().unwrap();
+    let raw=fs::read(root.join(&id).join("state.json")).unwrap();let state:Value=serde_json::from_slice(&raw).unwrap();
+    let state_hash=legacy::hash(&raw);
+    let originals_hash=legacy::hash(json!([{"name":"state.json.before-reconcile-fixture","sha256":state_hash}]).to_string().as_bytes());
+    let store=fs::canonicalize(&root).unwrap().to_string_lossy().replace('\\',"/");let store=store.strip_prefix("//?/").unwrap_or(&store);let store=if cfg!(windows){store.to_lowercase()}else{store.to_string()};
+    fs::copy(std::env::current_exe().unwrap(),evidence.join("writer-binary")).unwrap();
+    m.import_index("private writer fixture inventoried; no foreign legacy writer").unwrap();
+    let observer=Ed25519KeyPair::from_pkcs8(Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap().as_ref()).unwrap();
+    let reviewer=Ed25519KeyPair::from_pkcs8(Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap().as_ref()).unwrap();
+    let hex=|bytes:&[u8]|bytes.iter().map(|b|format!("{b:02x}")).collect::<String>();
+    atomic_json(&root.join("legacy-authority.json"),&json!({"schema":1,"keys":{"observer":{"public_key":hex(observer.public_key().as_ref()),"roles":["identity","drain","effects"]},"reviewer":{"public_key":hex(reviewer.public_key().as_ref()),"roles":["review"]}}})).unwrap();
+    let capture=|name:&str,value:Value,key:&Ed25519KeyPair,signer:&str|{let path=evidence.join(name);let bytes=value.to_string().into_bytes();fs::write(&path,&bytes).unwrap();json!({"path":path,"sha256":legacy::hash(&bytes),"signature":hex(key.sign(&bytes).as_ref()),"signer":signer})};
+    let identity=capture("identity.json",json!({"kind":"os-process-and-containment-identity","operation_id":id,"originals_sha256":originals_hash,"store_identity":store,"state_sha256":state_hash,"process_id":pid,"creation_stamp":stamp,"containment_identity":format!("owned Child handle {pid}:{stamp}"),"binary_artifact":evidence.join("writer-binary"),"binary_sha256":legacy::hash(&fs::read(evidence.join("writer-binary")).unwrap())}),&observer,"observer");
+    let drain=capture("drain.json",json!({"kind":"os-process-exit-and-containment-drain","operation_id":id,"originals_sha256":originals_hash,"store_identity":store,"state_sha256":state_hash,"process_id":pid,"creation_stamp":stamp,"containment_identity":format!("owned Child handle {pid}:{stamp}"),"wait_result":"signalled","contained_members_exited":true,"handles_bound_to_creation_identity":true}),&observer,"observer");
+    fs::write(evidence.join("original-preserved.json"),&raw).unwrap();
+    let effects=capture("effects.json",json!({"kind":"scoped-effect-preservation","operation_id":id,"originals_sha256":originals_hash,"store_identity":store,"state_sha256":state_hash,"original_execution_outcome":"unknown","never_replay":true,"quarantine_preserved":true,"scopes":[{"kind":"filesystem","settled":true,"artifact":evidence.join("original-preserved.json"),"sha256":state_hash}]}),&observer,"observer");
+    let review=capture("review.json",json!({"kind":"legacy-allocation-safety-review","operation_id":id,"originals_sha256":originals_hash,"store_identity":store,"state_sha256":state_hash,"identity_sha256":identity["sha256"],"drain_sha256":drain["sha256"],"effects_sha256":effects["sha256"],"verdict":"allocation_safe_original_unknown","never_replay":true}),&reviewer,"reviewer");
+    let args=json!({"id":id,"expected_state":state,"state_sha256":state_hash,"originals":[{"name":"state.json.before-reconcile-fixture","sha256":state_hash}],"identity":identity,"drain":drain,"effects":effects,"review":review});
+    assert!(m.adjudicate_legacy(&args).unwrap_err().to_string().contains("owner_still_live"));
+    child.kill().unwrap();child.wait().unwrap(); // Actual owned handle and positive exit, not PID absence.
+    let receipt=m.adjudicate_legacy(&args).unwrap();
+    assert_eq!(m.adjudicate_legacy(&args).unwrap(),receipt);
+    let mut replaced=args.clone();replaced["replacement_note"]=json!("different durable bundle");
+    assert!(m.adjudicate_legacy(&replaced).unwrap_err().to_string().contains("bundle_moved"));
+    assert_eq!(receipt["original_execution_outcome"],"unknown");assert_eq!(receipt["never_replay"],true);
+    assert_eq!(fs::read(root.join(&id).join("state.json")).unwrap(),raw);
+    assert!(m.relevant("*","",1).unwrap()["operations"].as_array().unwrap().is_empty());
+    let mut bad=args.clone();bad["review"]["signature"]=json!("00");assert!(m.adjudicate_legacy(&bad).is_err());
+    bad=args.clone();bad["originals"]=json!([]);assert!(m.adjudicate_legacy(&bad).is_err());
+    fs::write(evidence.join("original-preserved.json"),"changed effect evidence").unwrap();
+    assert!(m.allocation_safety(&args).is_err());
+    assert_eq!(m.relevant("*","",1).unwrap()["operations"][0]["operation_id"],id);
+    drop(m);remove_fixture(root);remove_fixture(evidence);
+}
+#[test]
 fn effective_cwd_prevents_self_blocking_unrelated_workspace() {
     let (m, root) = fixture();
     let id = m.start(shell("sleep 30")).unwrap();

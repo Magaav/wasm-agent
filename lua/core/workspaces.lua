@@ -40,6 +40,14 @@ local function trimmed(value)
   return tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
 end
 
+local function wave_admission(root,phase)
+  local lua_root=host.getenv('WASM_AGENT_LUA_ROOT')
+  local entry=(lua_root and lua_root~='') and (lua_root..'/scripts/wave-entry.mjs') or (dofile('lua/core/update.lua').install_dir()..'/scripts/wave-entry.mjs')
+  local result=run('node '..assert(quote(entry))..' check '..assert(quote(root))..' '..phase,root)
+  local decoded=result and json.decode(result.stdout or '{}')
+  return decoded and decoded.ok==true,decoded and decoded.reason or 'wave entrypoint unavailable'
+end
+
 local function mark(memory, id, current, state, error)
   current = current or {}
   current.required = true
@@ -268,10 +276,12 @@ function M.ensure(memory, session_id, source_session_id, options)
   end
   local workspace = memory.require_session_workspace(session_id)
   if not workspace then return nil, "workspace_requirement_failed" end
-  if workspace.state=="released" or workspace.state=="releasing" or workspace.state=="release_unknown" or workspace.state=="parked" then
+  if workspace.state=="released" or workspace.state=="releasing" or workspace.state=="release_unknown" or workspace.state=="parked" or workspace.state=="parking" or workspace.state=="park_unknown" then
     return nil,"workspace_released_or_release_unresolved"
   end
   if workspace.state == "allocated" then
+    local admitted,why=wave_admission(workspace.start_state.source_root,'produce')
+    if not admitted then return nil,'workspace_wave_admission_refused:'..tostring(why) end
     local valid, err = verify_binding(memory, session_id, workspace)
     if valid then return workspace end
     mark(memory, session_id, workspace, "failed", err)
@@ -291,8 +301,17 @@ function M.ensure(memory, session_id, source_session_id, options)
     return nil, inspection_error
   end
   local root = inspected.root
+  -- New allocations participate in the same shared-repository wave admission
+  -- used by producer/merge public entrypoints. No arbitrary alternate store.
+  local admitted,admission_why=wave_admission(root,'allocate')
+  if not admitted then
+    local why='workspace_wave_admission_refused:'..tostring(admission_why)
+    mark(memory,session_id,workspace,'failed',why)
+    return nil,why
+  end
   local dirty = tostring(inspected.status or "")
   local start_state = {
+    executor=json.decode(host.operation('identity','{}')),
     source_root = root, source_path = inspected.path,
     -- Where the tree actually came from, and why anything else was left alone.
     source_origin = inspected.origin, source_requested = inspected.requested,
@@ -470,7 +489,7 @@ end
 
 -- Release is explicit, fenced against participating runs, and never forced.
 -- The branch and transcript survive. Unknown process effects block cleanup.
-function M.release(memory,id,user_id)
+function M.release(memory,id,user_id,expected_head)
   local session=memory.session(id)
   if not session then return nil,'unknown_session' end
   if session.user_id~=user_id then return nil,'forbidden' end
@@ -484,8 +503,9 @@ function M.release(memory,id,user_id)
   local function release_body()
     local clean_id=tostring(id):gsub('[^%w-]','')
     local expected=paths.data()..'/wa-worktree-'..clean_id
+    local branch_name=workspace.branch~='' and workspace.branch or workspace.start_state.parked_branch
     if clean_id=='' or normalized(workspace.worktree)~=normalized(expected)
-        or workspace.branch~='change/wa-session-'..clean_id then
+        or branch_name~='change/wa-session-'..clean_id then
       return nil,'workspace_release_binding_mismatch'
     end
     local source=workspace.start_state.source_root
@@ -498,20 +518,30 @@ function M.release(memory,id,user_id)
     end
     local canonical=host.canonical_path(expected)
     if not canonical and not registered and (workspace.state=='releasing' or workspace.state=='release_unknown') then
-      workspace.state,workspace.error='released',''
-      return memory.set_session_workspace(id,workspace)
+      -- Do not settle missing-tree effects before the operation/ref fences below.
+      -- The explicit reconciliation path reacquires this session after our fence
+      -- is released and verifies filesystem/registry absence and exact ancestry.
+      return nil,'workspace_release_missing_requires_reconciliation'
     end
     local root=host.canonical_path(paths.data())
     if not canonical or not root or normalized(canonical)~=normalized(root..'/wa-worktree-'..clean_id) or not registered then
       return nil,'workspace_release_path_unverified'
     end
-    local verified,why=verify_binding(memory,id,workspace)
-    if not verified then return nil,why end
+    if workspace.state=='parked' then
+      local detached=json.decode(host.exec('git symbolic-ref --quiet HEAD',expected,120))
+      if tonumber(detached.code)~=1 then return nil,'workspace_park_not_detached_or_unverifiable' end
+      expected_head=expected_head or (workspace.start_state.park_reconciliation or {}).head
+      if not expected_head then return nil,'workspace_park_head_unverifiable' end
+    else
+      local verified,why=verify_binding(memory,id,workspace)
+      if not verified then return nil,why end
+    end
     local status,status_error=run('git status --porcelain --untracked-files=all --ignored',expected)
     if not status or status.code~=0 then return nil,'workspace_release_status_failed: '..tostring(status_error) end
     if tostring(status.stdout or '')~='' then return nil,'workspace_release_dirty_or_ignored_files' end
     local head,head_error=run('git rev-parse HEAD',expected)
     if not head or head.code~=0 then return nil,'workspace_release_head_failed: '..tostring(head_error) end
+    if expected_head and trimmed(head.stdout)~=expected_head then return nil,'workspace_release_expected_head_moved' end
     if trimmed(head.stdout)~=workspace.base_commit then
       local merged=run('git merge-base --is-ancestor HEAD refs/remotes/origin/main',expected)
       if not merged or merged.code~=0 then return nil,'workspace_release_unmerged_commits' end
@@ -529,6 +559,8 @@ function M.release(memory,id,user_id)
     if #operations.operations>0 then
       return nil,'workspace_release_operation_unresolved:'..tostring(operations.operations[1].operation_id)
     end
+    if operations.truncated then return nil,'workspace_release_operations_incomplete' end
+    workspace.start_state.release_head=trimmed(head.stdout)
     workspace.state,workspace.error='releasing',''
     memory.set_session_workspace(id,workspace)
     local removed,remove_error=run('git worktree remove '..assert(quote(expected)),source)
@@ -544,6 +576,9 @@ function M.release(memory,id,user_id)
   local released=resources.finish(ctx)
   if not released.ok then return nil,'workspace_release_claim_failed',released end
   if not ok then return nil,'workspace_release_exception: '..tostring(result) end
+  if why=='workspace_release_missing_requires_reconciliation' then
+    return M.reconcile_release(memory,id,user_id,'Release receipt recovery: filesystem and Git registration were absent; rechecking all fences')
+  end
   return result,why,detail
 end
 
@@ -560,7 +595,8 @@ function M.reconcile_release(memory,id,user_id,evidence)
   if workspace.state=='released' then return workspace end
   local clean_id=tostring(id):gsub('[^%w-]','')
   local expected=paths.data()..'/wa-worktree-'..clean_id
-  if clean_id=='' or normalized(workspace.worktree)~=normalized(expected) or workspace.branch~='change/wa-session-'..clean_id then
+  local branch_name=workspace.branch~='' and workspace.branch or workspace.start_state.parked_branch
+  if clean_id=='' or normalized(workspace.worktree)~=normalized(expected) or branch_name~='change/wa-session-'..clean_id then
     return nil,'workspace_release_binding_mismatch'
   end
   local ctx={user_id=user_id,session_id=id..':reconcile-release',run_id=host.uuid()}
@@ -580,20 +616,24 @@ function M.reconcile_release(memory,id,user_id,evidence)
     for path in tostring(listing.stdout):gmatch('worktree ([^\r\n]+)') do
       if normalized(path)==normalized(expected) then return nil,'workspace_reconcile_still_registered' end
     end
-    local branch=run('git show-ref --verify --hash '..assert(quote('refs/heads/'..workspace.branch)),source)
+    local branch=run('git show-ref --verify --hash '..assert(quote('refs/heads/'..branch_name)),source)
     if branch then
       local merged=run('git merge-base --is-ancestor '..assert(quote(trimmed(branch.stdout)))..' refs/remotes/origin/main',source)
       if not merged then return nil,'workspace_release_unmerged_commits' end
     else
       -- Only Git's exact missing-ref exit code is absence; storage/ref failures
       -- must not be mistaken for a branch that has safely disappeared.
-      local probe=host.exec('git show-ref --verify --quiet '..assert(quote('refs/heads/'..workspace.branch)),source,120)
+      local probe=host.exec('git show-ref --verify --quiet '..assert(quote('refs/heads/'..branch_name)),source,120)
       local state=json.decode(probe)
       if tonumber(state.code)~=1 then return nil,'workspace_reconcile_ref_unverifiable' end
+      local pinned=workspace.start_state.release_head or (workspace.start_state.park_reconciliation or {}).head
+      if not pinned then return nil,'workspace_reconcile_missing_ref_without_pinned_tip' end
+      if not run('git merge-base --is-ancestor '..assert(quote(pinned))..' refs/remotes/origin/main',source) then return nil,'workspace_release_unmerged_commits' end
     end
     local lookup=json.decode(host.operation('relevant',json.encode({cwd=expected,limit=1})))
     if type(lookup)~='table' or lookup.ok~=true or type(lookup.operations)~='table' then return nil,'workspace_release_operations_unavailable' end
     if #lookup.operations>0 then return nil,'workspace_release_operation_unresolved:'..tostring(lookup.operations[1].operation_id) end
+    if lookup.truncated then return nil,'workspace_release_operations_incomplete' end
     workspace.state,workspace.error='released',''
     workspace.start_state.release_reconciliation={evidence=evidence,at=host.now(),executor=host.runtime_info and host.runtime_info() or {}}
     return memory.set_session_workspace(id,workspace)
@@ -605,7 +645,7 @@ function M.reconcile_release(memory,id,user_id,evidence)
   return result,why
 end
 
-function M.reconcile_park(memory,id,user_id,expected_head,evidence)
+function M.reconcile_park(memory,id,user_id,expected_head,evidence,perform_detach)
   if type(evidence)~='string' or evidence:match('^%s*$') or type(expected_head)~='string' or not expected_head:match('^%x+$') then
     return nil,'workspace_park_exact_head_and_evidence_required'
   end
@@ -627,15 +667,32 @@ function M.reconcile_park(memory,id,user_id,expected_head,evidence)
     if not canonical or not root or normalized(canonical)~=normalized(root..'/wa-worktree-'..clean_id) then return nil,'workspace_release_path_unverified' end
     local status=run('git status --porcelain --untracked-files=all --ignored',expected)
     if not status or tostring(status.stdout or '')~='' then return nil,'workspace_release_dirty_or_ignored_files' end
+    local head=run('git rev-parse HEAD',expected)
+    if not head or trimmed(head.stdout)~=expected_head then return nil,'workspace_park_head_moved' end
+    if perform_detach then
+      local valid,why=verify_binding(memory,id,workspace)
+      if not valid then return nil,why end
+      if not run('git merge-base --is-ancestor '..assert(quote(expected_head))..' refs/remotes/origin/main',expected) then return nil,'workspace_release_unmerged_commits' end
+      local active=json.decode(host.operation('relevant',json.encode({cwd=canonical,limit=1})))
+      if type(active)~='table' or active.ok~=true or type(active.operations)~='table' or active.truncated then return nil,'workspace_release_operations_unavailable' end
+      if #active.operations>0 then return nil,'workspace_release_operation_unresolved:'..tostring(active.operations[1].operation_id) end
+      workspace.state='parking';memory.set_session_workspace(id,workspace)
+      if not run('git switch --detach '..assert(quote(expected_head)),expected) then
+        workspace.state,workspace.error='park_unknown','detach outcome requires reconciliation';memory.set_session_workspace(id,workspace)
+        resources.uncertain(ctx)
+        return nil,'workspace_park_effect_unknown'
+      end
+    end
     local detached=json.decode(host.exec('git symbolic-ref --quiet HEAD',expected,120))
     if tonumber(detached.code)~=1 then return nil,'workspace_park_not_detached_or_unverifiable' end
-    local head=run('git rev-parse HEAD',expected)
+    head=run('git rev-parse HEAD',expected)
     if not head or trimmed(head.stdout)~=expected_head then return nil,'workspace_park_head_moved' end
     local merged=run('git merge-base --is-ancestor '..assert(quote(expected_head))..' refs/remotes/origin/main',expected)
     if not merged then return nil,'workspace_release_unmerged_commits' end
     local lookup=json.decode(host.operation('relevant',json.encode({cwd=canonical,limit=1})))
     if type(lookup)~='table' or lookup.ok~=true or type(lookup.operations)~='table' then return nil,'workspace_release_operations_unavailable' end
     if #lookup.operations>0 then return nil,'workspace_release_operation_unresolved:'..tostring(lookup.operations[1].operation_id) end
+    if lookup.truncated then return nil,'workspace_release_operations_incomplete' end
     workspace.start_state.parked_branch=workspace.start_state.parked_branch or workspace.branch
     workspace.start_state.park_reconciliation={evidence=evidence,head=expected_head,at=host.now(),executor=host.runtime_info and host.runtime_info() or {}}
     workspace.state,workspace.branch,workspace.error='parked','',''

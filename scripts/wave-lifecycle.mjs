@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {DatabaseSync} from 'node:sqlite';
 import {fileURLToPath} from 'node:url';
+import {fullProof,findFullProof} from './lib/full-gate-proof.mjs';
 
 const hash = data => crypto.createHash('sha256').update(data).digest('hex');
 const requiredChecks = ['operations','claims','runtime','registries','deliveries','owners'];
@@ -91,6 +92,11 @@ function validate(manifest) {
   for (const step of [...manifest.steps,...Object.values(manifest.verifiers)]) {
     if (!Array.isArray(step.argv) || !step.argv.length || step.argv.some(x=>typeof x!=='string') || !step.post?.argv && manifest.steps.includes(step)) fail('step_argv_and_post_required');
     if (step.timeout_ms !== undefined && (!Number.isSafeInteger(step.timeout_ms) || step.timeout_ms<1 || step.timeout_ms>10800000)) fail('invalid_step_timeout');
+    if (manifest.steps.includes(step)) {
+      if(!Array.isArray(step.post.argv) || !step.post.argv.length || step.post.argv.some(x=>typeof x!=='string')) fail('post_argv_required');
+      if(step.post.max_attempts!==undefined && (!Number.isSafeInteger(step.post.max_attempts) || step.post.max_attempts<1 || step.post.max_attempts>5)) fail('invalid_post_attempts');
+      if(step.post.timeout_ms!==undefined && (!Number.isSafeInteger(step.post.timeout_ms) || step.post.timeout_ms<1 || step.post.timeout_ms>60000)) fail('invalid_post_timeout');
+    }
   }
   if (manifest.steps.some(s=>s.cwd && native(s.cwd)!==native(manifest.executor_cwd))) fail('executor_cwd_must_own_all_steps');
 }
@@ -99,16 +105,18 @@ function runProof(spec, cwd, env) {
   let proof; try { proof=JSON.parse(result.stdout); } catch { return {ok:false,result,reason:'invalid_proof_json'}; }
   return {ok:result.code===0 && proof.ok===true,result,proof,reason:result.error || proof.reason || 'postcondition_failed'};
 }
-export function verify(manifest, id=manifest.id) {
+export function verify(manifest, id=manifest.id,admission=false) {
   const baseline = gitBaseline(manifest.repo);
-  const gateFile=manifest.gate_receipt || git(manifest.repo,['rev-parse','--path-format=absolute','--git-path','wa-finish-gate.json']);
-  const gate=JSON.parse(fs.readFileSync(gateFile,'utf8'));
-  const gateLog=fs.readFileSync(gate.log);
-  const verdict=/\[smoke\]\s+ALL PASS(?:\s+\((\d+) skipped\))?/.exec(gateLog.toString());
-  if(gate.passed!==true || gate.gate_exit!==0 || gate.gate_runs!==1 || gate.tree!==git(manifest.repo,['rev-parse',`${baseline.main}^{tree}`]) ||
-      !Number.isSafeInteger(gate.skipped) || gate.skipped<0 || hash(gateLog)!==gate.log_sha256 || !verdict || Number(verdict[1] || 0)!==gate.skipped ||
-      !gate.runner?.path || hash(fs.readFileSync(gate.runner.path))!==gate.runner.sha256) fail('combined_full_gate_receipt_unverified');
-  const env = {WA_WAVE_ID:id,WA_WAVE_MAIN:baseline.main};
+  const sourceTree=git(manifest.repo,['rev-parse',`${baseline.main}^{tree}`]);
+  let gate;
+  if(manifest.gate_receipt) {
+    const receipt=JSON.parse(fs.readFileSync(manifest.gate_receipt,'utf8'));
+    const storageOwner=receipt.owner_repo || receipt.repo;
+    if(!storageOwner || native(git(storageOwner,['rev-parse','--path-format=absolute','--git-common-dir']))!==native(git(manifest.repo,['rev-parse','--path-format=absolute','--git-common-dir'])))fail('combined_full_gate_source_registry_mismatch');
+    gate={...fullProof(receipt,sourceTree),receipt:manifest.gate_receipt};
+  }else gate=findFullProof(manifest.repo,sourceTree);
+  if(!gate.verified)fail('combined_full_gate_receipt_unverified:'+gate.reason);
+  const env = {WA_WAVE_ID:id,WA_WAVE_MAIN:baseline.main,WA_WAVE_ADMISSION:admission?'1':'0'};
   const proofs={};
   for (const name of requiredChecks) {
     const observed=runProof(manifest.verifiers[name],manifest.executor_cwd,env);
@@ -121,7 +129,7 @@ export function verify(manifest, id=manifest.id) {
   }
   const after=gitBaseline(manifest.repo);
   if (hash(JSON.stringify(after))!==hash(JSON.stringify(baseline))) fail('baseline_moved_during_proofs');
-  return {ok:true,wave_id:id,main:baseline.main,git:baseline,gate:{tree:gate.tree,skipped:gate.skipped,log_sha256:gate.log_sha256,receipt:gateFile},proofs,verified_at:Date.now()};
+  return {ok:true,wave_id:id,main:baseline.main,git:baseline,gate:{tree:gate.tree,skipped:gate.skipped,log_sha256:gate.log_sha256,receipt:gate.receipt},proofs,verified_at:Date.now()};
 }
 export function create(dir, manifest) {
   validate(manifest);
@@ -132,7 +140,7 @@ export function create(dir, manifest) {
       if (previous.state!=='complete') fail(`previous_wave_${previous.state}:${previous.id}`);
       // Completion receipts can go stale. Recheck actual baseline, install, owners
       // and registries before admitting another wave.
-      verify(JSON.parse(previous.manifest),previous.id);
+      verify(JSON.parse(previous.manifest),previous.id,true);
     } else if (manifest.bootstrap !== true) {
       verify(manifest);
     }
@@ -187,7 +195,8 @@ export async function advance(dir,id) {
       }
       // Postconditions are observations and are safe to repeat. Their bounded
       // budget/backoff is persisted; commands with effects never retry here.
-      const retries=Math.min(5,Math.max(1,spec.post.max_attempts || 3));
+      const retries=spec.post.max_attempts===undefined?3:spec.post.max_attempts;
+      if(!Number.isSafeInteger(retries) || retries<1 || retries>5)fail('invalid_persisted_post_budget');
       for (;;) {
         const current=db.prepare('SELECT * FROM steps WHERE wave=? AND position=?').get(id,step.position);
         const postAttempts=current.post_attempts;

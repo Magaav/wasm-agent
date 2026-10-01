@@ -65,7 +65,7 @@ function runAsync(script, extras={}) {
       `fresh-process binding recovery failed (${restarted.status}): ${restarted.stderr}\n${restarted.stdout}`);
     checks+=4;
     const released=run('test-workspace-release.lua',{WASM_AGENT_TEST_SOURCE:source});
-    check(released.status===0 && released.stdout.includes('workspace release ok (34 checks)'),
+    check(released.status===0 && released.stdout.includes('workspace release ok (37 checks)'),
       `workspace release failed (${released.status}): ${released.stderr}\n${released.stdout}`);
     console.log(released.stdout.trim());
     console.log(`session workspaces integration ok (${checks} checks; real git worktrees, two concurrent processes, restart, no inference)`);

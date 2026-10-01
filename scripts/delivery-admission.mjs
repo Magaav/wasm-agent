@@ -90,9 +90,10 @@ function refusal(delivery, condition, detail, remedy) {
 }
 
 /// Read what the repository says, then decide. `tipRef` is the seam above.
-export function evaluate({repo, record, tipRef = null}) {
+export function evaluate({repo, record, tipRef = null,phase='admit'}) {
   if (!repo) throw Error('record names no repository: a record written before that field existed cannot be read');
-  const wave=checkWaveAdmission(repo,{phase:'admit'});
+  if(!['admit','observe'].includes(phase))throw Error('unsupported_delivery_evaluation_phase');
+  const wave=checkWaveAdmission(repo,{phase});
   if(!wave.ok)return {schema:SCHEMA,delivery:record.delivery,decision:'refused',condition:'wave_admission_refused',refusal:wave.reason,wave,conditions:[],caveats:[],requires_combined_gate:true};
   const branch = record.branch || record.delivery;
   const pushedRef = `refs/remotes/origin/${branch}`;

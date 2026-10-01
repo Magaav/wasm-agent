@@ -1,0 +1,24 @@
+import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import assert from 'node:assert/strict';import {spawnSync} from 'node:child_process';
+import {verifyDelivered} from './lib/wave-delivery.mjs';import {positiveCurrentOwner} from './lib/wave-owners.mjs';import {fullProof,findFullProof} from './lib/full-gate-proof.mjs';import crypto from 'node:crypto';
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-wave-proof-real-'));let checks=0,passed=false;
+const git=(...args)=>{const r=spawnSync('git',args,{cwd:root,encoding:'utf8',windowsHide:true});assert.equal(r.status,0,r.stderr);return r.stdout.trim();};
+const check=(value,label)=>{assert.ok(value,label);checks++;};
+try{
+ git('init','-q','-b','main');git('config','user.name','fixture');git('config','user.email','fixture@invalid');fs.writeFileSync(path.join(root,'seed'),'base');git('add','.');git('commit','-qm','base');const base=git('rev-parse','HEAD');
+ git('switch','-qc','change/fixture');fs.writeFileSync(path.join(root,'value'),'valuable');git('add','.');git('commit','-qm','tip');const tip=git('rev-parse','HEAD'),tree=git('rev-parse','HEAD^{tree}');
+ const review=git('commit-tree',tree,'-p',tip,'-m','Independent review\n\nAgent: codex session=reviewer');git('update-ref','refs/remotes/origin/review',review);git('switch','-q','main');git('merge','-q','--no-ff','change/fixture','-m','landing');const main=git('rev-parse','HEAD');
+ const record={delivery:'change/fixture',branch:'change/fixture',producer:'producer',tip,tree,review:{tip,tree,reviewer:'reviewer',commit:review,verdict:'passed',findings:[]},admission:{by:'admitter',tip,tree,state:'admitted'},landing:{sha:main}};
+ check(verifyDelivered(root,record,main).ok,'real immutable review/admission/landing prove delivery');git('branch','-d','change/fixture');check(verifyDelivered(root,record,main).ok,'delivery proof survives retirement of branch');
+ for(const bad of [{...record,review:{...record.review,tip:base}},{...record,review:{...record.review,tree:'f'.repeat(40)}},{...record,admission:{...record.admission,by:'producer'}},{...record,admission:{...record.admission,tip:base}}])check(!verifyDelivered(root,bad,main).ok,'stale or self-authorized delivery proof rejected');
+ const unmerged=git('commit-tree',tree,'-p',tip,'-m','unlanded');check(!verifyDelivered(root,{...record,tip:unmerged,review:{...record.review,tip:unmerged},admission:{...record.admission,tip:unmerged}},main).ok,'unmerged tip cannot borrow landing.sha main');
+ const terminal={connected:true,orphaned:false},card={agents:[{state:'done',interrupted:false}]},worker={dispatchStatus:'completed',workerState:'succeeded',terminalState:'retained',projection:{stage:{activity:'done'},liveness:{verdict:'live'}}};
+ check(positiveCurrentOwner(worker,terminal,card),'positive current owner can be frozen');check(!positiveCurrentOwner({...worker,projection:{stage:{activity:'unknown'},liveness:{verdict:'unverifiable'}}},terminal,card),'unverifiable old retained dispatch cannot authorize freeze');check(!positiveCurrentOwner(worker,terminal,{agents:[{state:'working'}]}),'new current activity rejects old settlement');
+ const log=path.join(root,'.git','smoke.log');fs.writeFileSync(log,'actual terminal\nsmoke ok (2 skipped)\n');const digest=crypto.createHash('sha256').update(fs.readFileSync(log)).digest('hex');
+ const receipt={schema:1,kind:'full',repo:root,tree:git('rev-parse','main^{tree}'),head:main,gate_exit:0,gate_runs:1,gate_ms:1,passed:true,skipped:2,log,log_sha256:digest};
+ check(fullProof(receipt,receipt.tree).verified,'actual smoke ok counted skip format accepted');
+ for(const bad of [{...receipt,kind:'producer-focused'},{...receipt,skipped:0},{...receipt,log_sha256:'0'.repeat(64)},{...receipt,tree:'f'.repeat(40)}])check(!fullProof(bad,receipt.tree).verified,'invalid full receipt rejected');
+ fs.writeFileSync(path.join(root,'.git','wa-finish-gate.json'),JSON.stringify(receipt));check(findFullProof(root,receipt.tree).verified,'actual retained receipt discovered');fs.unlinkSync(path.join(root,'.git','wa-finish-gate.json'));
+ fs.writeFileSync(path.join(root,'.git','wa-combined-gate.json'),JSON.stringify({...receipt,owner_repo:root,repo:path.join(root,'removed-tested-clone')}));check(findFullProof(root,receipt.tree).verified,'combined proof retains tested provenance while discovering durable owner');
+ fs.appendFileSync(log,'changed\n');check(!findFullProof(root,receipt.tree).verified,'corrupt terminal/log never reused');
+ passed=true;console.log(`wave proof adapters ok (${checks} checks; real Git review/landing objects, actual smoke schema, uncertainty negatives)`);
+}finally{if(passed)fs.rmSync(root,{recursive:true});else console.error(`retained ${root}`);}

@@ -29,9 +29,9 @@ function fixture(name) {
   // Stand-in receipt to exercise exact-tree/hash/skip checks. This fixture has
   // no application gate; it never claims production test coverage.
   const log=path.join(executor,'gate.log'),receipt=path.join(executor,'gate.json');
-  fs.writeFileSync(log,'[smoke] ALL PASS (0 skipped)\n');
+  fs.writeFileSync(log,'smoke ok\n');
   const hash=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-  fs.writeFileSync(receipt,JSON.stringify({passed:true,gate_exit:0,gate_runs:1,tree:git(repo,['rev-parse','HEAD^{tree}']),skipped:0,log,log_sha256:hash(log),runner:{path:driver,sha256:hash(driver)}}));
+  fs.writeFileSync(receipt,JSON.stringify({schema:1,passed:true,kind:'full',gate_ms:1,repo,gate_exit:0,gate_runs:1,tree:git(repo,['rev-parse','HEAD^{tree}']),skipped:0,log,log_sha256:hash(log),runner:{path:driver,sha256:hash(driver)}}));
   const manifest={id:name,owner:'fixture-owner',repo,executor_cwd:executor,bootstrap:true,
     gate_receipt:receipt,
     steps:['land','deploy','retire'].map(name=>({name,argv:[process.execPath,driver,'step',effects],post:{argv:[process.execPath,driver,'post']}})),
@@ -40,6 +40,15 @@ function fixture(name) {
 }
 let succeeded=false;
 try {
+  const malformed=fixture('malformed');
+  for(const budget of ['not-a-number',0,-1,6,Infinity,Number.MAX_SAFE_INTEGER+1]) {
+    const bad=JSON.parse(JSON.stringify(malformed.manifest));bad.steps[0].post.max_attempts=budget;
+    assert.throws(()=>create(malformed.store,bad),/invalid_post_attempts/);checks++;
+  }
+  const badPost=JSON.parse(JSON.stringify(malformed.manifest));badPost.steps[0].post.argv=[];
+  assert.throws(()=>create(malformed.store,badPost),/post_argv_required/);checks++;
+  badPost.steps[0].post.argv=[process.execPath];badPost.steps[0].post.timeout_ms='unbounded';
+  assert.throws(()=>create(malformed.store,badPost),/invalid_post_timeout/);checks++;
   const good=fixture('good');create(good.store,good.manifest);
   const result=await advance(good.store,'good');check(result.ok===true,'fresh complete Git and registry evidence settles wave');
   check(inspect(good.store,'good').state==='complete','completion is durable');

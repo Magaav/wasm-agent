@@ -1,0 +1,22 @@
+// Actual public monitor/finish processes and durable OS leases in private Git.
+// Effect driver is a stand-in here; real native/Git/Orca effects are in public test.
+import fs from 'node:fs';import path from 'node:path';import os from 'node:os';import crypto from 'node:crypto';import assert from 'node:assert/strict';import {spawn,spawnSync} from 'node:child_process';import {DatabaseSync} from 'node:sqlite';
+import {register,start,monitor,location,checkAdmission} from './wave-entry.mjs';import {inspect} from './wave-lifecycle.mjs';
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-wave-restart-')),repo=path.join(root,'repo'),executor=path.join(root,'executor');fs.mkdirSync(repo);fs.mkdirSync(executor);let passed=false,checks=0;
+const git=(...args)=>{const r=spawnSync('git',args,{cwd:repo,encoding:'utf8'});assert.equal(r.status,0,r.stderr);return r.stdout.trim();};const hash=x=>crypto.createHash('sha256').update(x).digest('hex');
+try {
+ git('init','-q','-b','main');git('config','user.name','fixture');git('config','user.email','fixture@invalid');fs.writeFileSync(path.join(repo,'seed'),'base');git('add','.');git('commit','-qm','base');
+ const configFile=path.join(executor,'config.json');fs.writeFileSync(configFile,JSON.stringify({repo,source_root:path.resolve('.'),monitor_mode:'external-cli-test'}));const ticketFile=path.join(executor,'bootstrap.json');fs.writeFileSync(ticketFile,JSON.stringify({schema:1,kind:'wave-bootstrap-admission',repo,main:git('rev-parse','HEAD'),refs_sha256:hash(git('for-each-ref','--format=%(objectname) %(refname)','refs/heads/')),issuer:'fixture',reviewer:'independent'}));register(repo,configFile,ticketFile);
+ const pidFile=path.join(executor,'child.pid'),driver=path.join(executor,'driver.cjs');fs.writeFileSync(driver,"require('fs').writeFileSync(process.argv[2],String(process.pid));setTimeout(()=>{},60000);");
+ const manifest={id:'restart',owner:'fixture',repo,executor_cwd:executor,bootstrap:true,steps:['land','deploy','retire'].map(name=>({name,argv:[process.execPath,driver,pidFile],post:{argv:[process.execPath,'-e','console.log(JSON.stringify({ok:false}))']}})),verifiers:Object.fromEntries(['operations','claims','runtime','registries','deliveries','owners'].map(name=>[name,{argv:[process.execPath,'-e','console.log(JSON.stringify({ok:false}))']}]))};const file=path.join(executor,'manifest.json');fs.writeFileSync(file,JSON.stringify(manifest));start(repo,file);
+ assert.throws(()=>start(repo,file),/bootstrap_cannot_be_repeated/);checks++;
+ const runner=spawn(process.execPath,[path.resolve('scripts/wave-entry.mjs'),'finish',repo,'restart'],{stdio:'ignore',windowsHide:true});
+ const end=Date.now()+10000;while(!fs.existsSync(pidFile) && Date.now()<end)await new Promise(r=>setTimeout(r,20));assert.ok(fs.existsSync(pidFile));
+ const closed=new Promise(r=>runner.once('exit',r));runner.kill();await closed;try{process.kill(Number(fs.readFileSync(pidFile)));}catch{}
+ const resumed=monitor(repo);assert.equal(resumed.state,'blocked');checks++;
+ const row=inspect(location(repo),'restart');assert.equal(row.steps[0].state,'unknown');checks++;assert.equal(row.events.filter(e=>e.type==='operation_admitted').length,1);checks++;assert.ok(row.reason.includes('interrupted_operation'));checks++;assert.equal(resumed.disable_monitor,true);checks++;assert.equal(checkAdmission(repo).ok,false);checks++;
+ // Corrupt monitor count never creates an infinite recovery budget.
+ const db=new DatabaseSync(path.join(location(repo),'waves.sqlite'));db.prepare("UPDATE waves SET state='pending',reason=NULL").run();db.prepare("UPDATE monitor SET attempts=3 WHERE id='restart'").run();db.close();assert.equal(monitor(repo).disable_monitor,true);checks++;
+ const corrupt=new DatabaseSync(path.join(location(repo),'waves.sqlite'));corrupt.prepare("UPDATE waves SET state='pending',reason=NULL").run();corrupt.prepare("UPDATE monitor SET attempts=0,observations='unverifiable' WHERE id='restart'").run();corrupt.close();assert.equal(monitor(repo).reason,'external_monitor_budget_unverifiable');checks++;
+ passed=true;console.log(`wave public restart ok (${checks} checks; real external processes, no effect replay, finite monitor and public fence)`);
+}finally{if(passed)fs.rmSync(root,{recursive:true});else console.error(`retained ${root}`);}

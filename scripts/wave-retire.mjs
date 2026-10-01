@@ -71,7 +71,9 @@ export function retire(plan,store,resolutions=[]) {
       action(`tree:${key(tree.path)}`,after=>{
         if(after) {
           if(tree.mode==='remove') {
-            if(fs.existsSync(tree.path) || git(plan.repo,'worktree','list','--porcelain').split(/\r?\n/).some(line=>line.startsWith('worktree ') && key(line.slice(9))===key(tree.path)))fail('worktree_removal_not_observed');
+            if(tree.registry_removes_tree) {
+              if(git(tree.path,'rev-parse','HEAD')!==tree.tip || spawnSync('git',['-C',tree.path,'symbolic-ref','--quiet','HEAD'],{windowsHide:true}).status!==1)fail('removal_stage_not_exact_detached_tip');
+            } else if(fs.existsSync(tree.path) || git(plan.repo,'worktree','list','--porcelain').split(/\r?\n/).some(line=>line.startsWith('worktree ') && key(line.slice(9))===key(tree.path)))fail('worktree_removal_not_observed');
           } else if(git(tree.path,'rev-parse','HEAD')!==tree.tip || spawnSync('git',['-C',tree.path,'symbolic-ref','HEAD'],{encoding:'utf8',windowsHide:true}).status===0)fail('parked_worktree_not_exact_detached_tip');
           return {postcondition:true};
         }
@@ -84,7 +86,8 @@ export function retire(plan,store,resolutions=[]) {
         if(safety.complete!==true || !Array.isArray(safety.unresolved) || safety.unresolved.length)fail('relevant_operations_or_claims_unresolved');
         return {owner,safety,tip:tree.tip,branch:tree.branch};
       },()=>{
-        if(tree.mode==='remove')git(plan.repo,'worktree','remove',tree.path);
+        if(tree.mutation_argv)proof(tree.mutation_argv,plan.repo,{WA_WAVE_ID:plan.wave_id,WA_WAVE_TARGET:tree.path,WA_WAVE_TIP:tree.tip});
+        else if(tree.mode==='remove' && !tree.registry_removes_tree)git(plan.repo,'worktree','remove',tree.path);
         else git(tree.path,'switch','--detach',tree.tip);
       });
       // Git's postcondition does not settle runtime/Orca ownership. The adapter
