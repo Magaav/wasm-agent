@@ -1343,7 +1343,7 @@ function handleEvent(event) {
       composerModel.title = "Model used for the latest request: " + event.model;
     }
     updateChip();
-    if (balloon.open) { renderUsage(); renderModels(); }
+    if (balloon.open) { renderUsage(); renderControls(); }
   } else if (event.type === "error") {
     markPendingTextIncomplete();
     markStreamedCommentaryIncomplete();
@@ -2294,9 +2294,14 @@ function renderNodeSelect() {
   }
 }
 
-function renderProviders() {
+// One renderer, one payload. Provider, reasoning and model are three views of the same `settings`
+// answer, so they are drawn together or not at all: drawing them from separate copies of it is how
+// the balloon came to show "OpenAI subscription" beside opencode-go's model ids and opencode-go's
+// rolling/weekly/monthly resets - a pair no payload from the node ever contained.
+function renderControls() {
+  const providers = settings.providers || [];
   providerSelect.replaceChildren();
-  for (const provider of settings.providers || []) {
+  for (const provider of providers) {
     const option = document.createElement("option");
     option.value = provider.id;
     option.textContent = provider.configured ? provider.label : provider.label +
@@ -2304,9 +2309,15 @@ function renderProviders() {
     if (provider.id === settings.provider) option.selected = true;
     providerSelect.append(option);
   }
-}
-
-function renderModels() {
+  // The node's provider is what the select must show even when the node's catalogue does not list
+  // it: falling back to the first option is the same disagreement one control over.
+  if (settings.provider && !providers.some((provider) => provider.id === settings.provider)) {
+    const option = document.createElement("option");
+    option.value = settings.provider;
+    option.textContent = settings.provider + " (not in this node's catalogue)";
+    option.selected = true;
+    providerSelect.append(option);
+  }
   reasoningSelect.replaceChildren();
   const reasoning=settings.reasoning || {};
   for (const level of reasoning.supported ? reasoning.levels : ['provider']) {
@@ -2456,37 +2467,66 @@ function renderPopFoot() {
   popFoot.textContent = base + (settings.database ? "  ·  " + settings.database : "");
 }
 
+// A settings change is confirmed or visibly refused - never silently dropped.
+//
+// It used to send the write and assume it landed. A rejected or aborted fetch became an unhandled
+// rejection (recorded only as `ui_error` by the page's reporter), nothing re-rendered, and the
+// select kept the value the operator had chosen - so the window showed a provider the node never
+// accepted beside the previous route's model ids and limits, and said nothing, for as long as it
+// stayed open. Every outcome that is not a success payload now reconciles: it re-reads the node and
+// draws the controls from the node's answer, because a request this client aborted may still be
+// applied by the node afterwards, and only the node's answer is the truth about where it is.
 async function post(path, body) {
   // The turn in flight owns the settings it started with - the node pins provider, model and
   // reasoning when a run starts - so a change now would be seen by the next turn at the
   // earliest, and sending it mid-run only makes the controls disagree with the run they are
-  // describing. Refuse it, and say when it will apply.
+  // describing. Refuse it, say when it will apply, and draw the controls from the node's answer.
   if (busy) {
-    settingsError.textContent = "a run is in flight \u2014 this change applies at the next turn";
+    await reconcileControls("not applied \u2014 a run is in flight, so this change applies at the next turn");
     return;
   }
-  const response = await apiFetch(path, {
-    method: "POST",
-    headers: apiHeaders({ "Content-Type": "text/plain; charset=utf-8" }),
-    body: body,
-  });
-  const payload = await response.json();
-  settingsError.textContent=payload.error || payload.model_error || '';
-  if (payload.error) {
-    renderProviders();
-    renderModels();
-    settingsError.textContent=payload.error;
-  } else {
-    settings = { ...settings, ...payload };
-    updateNodeLabel(settings.node_name, settings.node_worktree);
-    updateChip();
-    renderProviders();
-    renderModels();
-    renderContext();
-    renderLimits();
-    renderUsage();
-    renderPopFoot();
+  let failure = "";
+  let payload = null;
+  try {
+    const response = await apiFetch(path, {
+      method: "POST",
+      headers: apiHeaders({ "Content-Type": "text/plain; charset=utf-8" }),
+      body: body,
+    });
+    payload = await response.json();
+    // The node's own words when it gives them; its status when it does not.
+    if (payload.error) failure = String(payload.error);
+    else if (!response.ok) failure = "the node answered HTTP " + response.status;
+  } catch (error) {
+    // A thrown fetch. The abort apiFetch raises at its own deadline (apiTimeout, 8s) arrives here
+    // too, and is said as what it is: the node was never told no, so it may apply the change later.
+    failure = error && error.name === "AbortError"
+      ? "no answer within " + Math.round(apiTimeout / 1000) + "s (the request was aborted)"
+      : String(error);
   }
+  if (failure) {
+    await reconcileControls("not applied \u2014 " + failure);
+    return;
+  }
+  settings = { ...settings, ...payload };
+  updateNodeLabel(settings.node_name, settings.node_worktree);
+  updateChip();
+  renderControls();
+  renderContext();
+  renderLimits();
+  renderUsage();
+  renderPopFoot();
+  settingsError.textContent = payload.model_error || "";
+}
+
+// Draw the controls from the node's own answer after a change that was not confirmed. The note is
+// what the operator is told; when the node cannot be re-read either, the controls are still drawn
+// from the last answer this window has - a value the node never accepted must not stay on screen -
+// and the note says the node was not reached rather than implying it agreed.
+async function reconcileControls(note) {
+  const read = await refreshMeta();
+  renderControls();
+  settingsError.textContent = read ? note : note + " \u00b7 the node could not be re-read";
 }
 
 function setProvider(id) { return post("provider", id); }
@@ -2957,8 +2997,7 @@ statusBtn.addEventListener("click", () => {
   if (balloon.open) {
     refreshNodes();
     refreshMeta();
-    renderProviders();
-    renderModels();
+    renderControls();
     renderContext();
     renderLimits();
     renderUsage();
@@ -2997,8 +3036,7 @@ nodeSelect.addEventListener("change", async () => {
   activeNode = local ? "" : value;
   localStorage.setItem("wa-node", activeNode);
   await refreshMeta();
-  renderProviders();
-  renderModels();
+  renderControls();
 });
 
 // ---- voice input ---------------------------------------------------------
@@ -3226,8 +3264,7 @@ async function refreshMeta() {
     renderUser();
     updateChip();
     if (balloon.open) {
-      renderProviders();
-      renderModels();
+      renderControls();
       renderContext();
       renderLimits();
       renderUsage();
