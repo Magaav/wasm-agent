@@ -18,9 +18,9 @@ export function isolated(repo) {
   const origin=spawnSync('git',['-C',repo,'remote','get-url','origin'],{encoding:'utf8',windowsHide:true});
   // A repository with no `origin` cannot be the shared integration repository, so it
   // is a throwaway fixture whatever directory it lives in. A fixture that remaps TMPDIR
-  // (to isolate its own home) is no longer under `os.tmpdir()` here, so the temp-dir
-  // heuristic alone is too narrow. Production always has an `origin`, where the wave
-  // authority guard still applies.
+  // (to isolate its own home) is no longer under the process temporary root, so the
+  // temp-dir heuristic alone is too narrow. Production always has an `origin`, where the
+  // wave authority guard still applies.
   if(origin.status!==0)return true;
   return key(common).startsWith(key(os.tmpdir())+'/');
 }

@@ -123,6 +123,7 @@ export function retire(plan,store,resolutions=[]) {
           if(current!==row.tip)fail('remote_ref_moved');git(plan.repo,'merge-base','--is-ancestor',row.tip,plan.main);return row;
         },()=>git(plan.repo,'-c',`core.hooksPath=${hookDir}`,'push','origin',`:${row.ref}`));
       }
+      fs.rmSync(hookDir,{recursive:true,force:true});
     }
     return {ok:true,wave_id:plan.wave_id,main:plan.main,retired:plan.worktrees.length,local:plan.local.length,remote:plan.remote.length,note:'Retirement settled; final wave verification still required.'};
   } finally { db.close(); }

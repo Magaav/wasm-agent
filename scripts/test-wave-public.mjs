@@ -64,5 +64,5 @@ try {
  check(registry(config,orcaTree.path).reconciled,'actual Orca card is refreshed to exact detached parked tip');
  delete process.env.WA_WAVE_TARGET;delete process.env.WA_WAVE_TIP;
  const resumed=monitor(repo);check(resumed.state==='blocked','public external continuation refuses missing complete application verification');check(inspect(location(repo),'public').state==='blocked','missing deployment/full-gate proof is durably blocked, never success');check(!checkAdmission(repo).ok,'next production entrypoint is fenced by blocked wave');
- passed=true;console.log(`wave public adapters ok (${checks} checks; real Orca/Git/native runtime closure, missing application verification correctly blocked)\nevidence: ${root}`);
-}finally{delete process.env.WA_WAVE_ID;delete process.env.WA_WAVE_MAIN;delete process.env.WA_WAVE_TARGET;delete process.env.WA_WAVE_TIP;if(!passed)console.error(`retained real public fixture: ${root}`);}
+ passed=true;console.log(`wave public adapters ok (${checks} checks; real Orca/Git/native runtime closure, missing application verification correctly blocked)`);
+}finally{delete process.env.WA_WAVE_ID;delete process.env.WA_WAVE_MAIN;delete process.env.WA_WAVE_TARGET;delete process.env.WA_WAVE_TIP;if(passed)fs.rmSync(root,{recursive:true,force:true});else console.error(`retained real public fixture: ${root}`);}
