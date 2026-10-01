@@ -65,6 +65,18 @@ local unknown_ws=memory.session_workspace(unknown);unknown_ws.state='unknown';me
 local uncertain=json.decode(wa_session_worktree(json.encode({session_id=unknown,action='recover'}),nil))
 ok(not uncertain.ok and memory.session_workspace(unknown).state=='unknown','unknown prior allocation is reconciled, not overwritten by root bootstrap')
 ok(not uncertain.recovery,'uncertain allocation is not advertised as a fresh root bootstrap')
+local bound=root('root-existing','master',true)
+local binding=memory.session_workspace(bound)
+binding.state,binding.worktree,binding.branch='failed',source,'existing-branch'
+memory.set_session_workspace(bound,binding)
+local retained=json.decode(wa_session_worktree(json.encode({session_id=bound,action='recover'}),nil))
+ok(retained.error=='workspace_root_recovery_existing_binding'
+  and memory.session_workspace(bound).worktree==source
+  and memory.session_workspace(bound).branch=='existing-branch','existing binding is preserved for inspection')
+local implicit=root('root-implicit')
+local implicit_result,implicit_error=workspaces.ensure(memory,implicit,implicit)
+ok(not implicit_result and implicit_error:find('workspace_root_recovery_required',1,true)
+  and not memory.session_workspace(implicit).required,'root bootstrap requires an explicit request')
 
 local fresh=root('root-fresh')
 host.write_file(source..'/dirty.txt','preserve\n')
