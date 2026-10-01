@@ -405,6 +405,14 @@ Both retain the same deadline, cancellation, process-tree containment and durabl
 operation evidence. The subscription adapter launches Node directly, so a shell
 launcher cannot become the reported completion boundary for its response.
 
+The same capability exposes indexed `relevant {cwd,after?,limit?}` lookup,
+explicit legacy `index {evidence}` import, and exact-state `reconcile` with owner
+boot, drain and external-effect evidence. Admission is indexed before spawn;
+actual effective cwd and OS-held boot identity are durable. Import never trusts
+manual age/output-based settlement over unresolved saved originals, and a live
+or unknown owner refuses reconciliation. See [WAVE-CONVERGENCE.md](WAVE-CONVERGENCE.md)
+for inputs, migration/quiescence and preservation boundaries.
+
 `host.canonical_path(path)` resolves an existing path through symlinks and junctions
 and returns its absolute native location (with `/` separators), or `nil` if it
 cannot be resolved. Workspace removal compares this with the canonical managed

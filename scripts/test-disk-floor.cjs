@@ -68,9 +68,10 @@ assert.equal(floor('--nonsense').status, 2); count();
 // environment fence, so an ambient variable cannot move the floor the gate uses.
 const gate = fs.readFileSync(path.join(root, 'scripts/test.sh'), 'utf8').split('\n');
 const preflight = gate.findIndex(line => line.includes('scripts/check-disk-floor.sh'));
-const firstBuild = gate.findIndex(line => /^cargo build/.test(line));
+const firstBuild = gate.findIndex(line => /^\s*(?:gate_run\s+)?cargo\s+build\b/.test(line));
 const fence = gate.findIndex(line => line.includes('compgen -e'));
 assert.ok(preflight > 0, 'scripts/test.sh does not call scripts/check-disk-floor.sh'); count();
+assert.ok(firstBuild >= 0, 'scripts/test.sh must expose an actual cargo build command'); count();
 assert.ok(preflight < firstBuild, 'the preflight must run before the gate\'s first build'); count();
 assert.ok(preflight < fence, 'the preflight must run before the environment fence, not under it'); count();
 

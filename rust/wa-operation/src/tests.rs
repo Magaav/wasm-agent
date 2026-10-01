@@ -1,4 +1,133 @@
 use super::*;
+#[test]
+#[ignore = "helper process only; parent exercises stable identity and exact owned drain"]
+fn legacy_writer_helper() {
+    let root=PathBuf::from(std::env::var("WA_LEGACY_TEST_ROOT").unwrap());
+    let id=format!("op-fixture-{}-0",std::process::id());
+    fs::create_dir_all(root.join(&id)).unwrap();
+    let state=json!({"operation_id":id,"owner":"legacy-worker","settled":false,"cleanup":"unknown","containment":"owned_helper_process_no_children","cwd":root.to_string_lossy()});
+    atomic_json(&root.join(&id).join("state.json"),&state).unwrap();
+    atomic_json(&root.join(&id).join("state.json.before-reconcile-fixture"),&state).unwrap();
+    std::thread::sleep(Duration::from_secs(30));
+}
+#[test]
+fn legacy_adjudication_preserves_unknown_outcome_and_requires_independent_native_evidence() {
+    use ring::{rand::SystemRandom,signature::{Ed25519KeyPair,KeyPair}};
+    let (m,root)=fixture();fs::create_dir_all(&root).unwrap();
+    let evidence=root.with_extension("evidence");fs::create_dir_all(&evidence).unwrap();
+    let mut child=std::process::Command::new(std::env::current_exe().unwrap()).args(["--ignored","--exact","tests::legacy_writer_helper","--nocapture"]).env("WA_LEGACY_TEST_ROOT",&root).stdout(std::process::Stdio::null()).spawn().unwrap();
+    let pid=child.id();let id=format!("op-fixture-{pid}-0");
+    let deadline=Instant::now()+Duration::from_secs(5);
+    while !root.join(&id).join("state.json.before-reconcile-fixture").exists(){assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
+    let stamp=legacy::creation(pid).unwrap().unwrap();
+    let raw=fs::read(root.join(&id).join("state.json")).unwrap();let state:Value=serde_json::from_slice(&raw).unwrap();
+    let state_hash=legacy::hash(&raw);
+    let originals_hash=legacy::hash(json!([{"name":"state.json.before-reconcile-fixture","sha256":state_hash}]).to_string().as_bytes());
+    let store=fs::canonicalize(&root).unwrap().to_string_lossy().replace('\\',"/");let store=store.strip_prefix("//?/").unwrap_or(&store);let store=if cfg!(windows){store.to_lowercase()}else{store.to_string()};
+    fs::copy(std::env::current_exe().unwrap(),evidence.join("writer-binary")).unwrap();
+    m.import_index("private writer fixture inventoried; no foreign legacy writer").unwrap();
+    let observer=Ed25519KeyPair::from_pkcs8(Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap().as_ref()).unwrap();
+    let reviewer=Ed25519KeyPair::from_pkcs8(Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap().as_ref()).unwrap();
+    let hex=|bytes:&[u8]|bytes.iter().map(|b|format!("{b:02x}")).collect::<String>();
+    atomic_json(&root.join("legacy-authority.json"),&json!({"schema":1,"keys":{"observer":{"public_key":hex(observer.public_key().as_ref()),"roles":["identity","drain","effects"]},"reviewer":{"public_key":hex(reviewer.public_key().as_ref()),"roles":["review"]}}})).unwrap();
+    let capture=|name:&str,value:Value,key:&Ed25519KeyPair,signer:&str|{let path=evidence.join(name);let bytes=value.to_string().into_bytes();fs::write(&path,&bytes).unwrap();json!({"path":path,"sha256":legacy::hash(&bytes),"signature":hex(key.sign(&bytes).as_ref()),"signer":signer})};
+    let identity=capture("identity.json",json!({"kind":"os-process-and-containment-identity","operation_id":id,"originals_sha256":originals_hash,"store_identity":store,"state_sha256":state_hash,"process_id":pid,"creation_stamp":stamp,"containment_identity":format!("owned Child handle {pid}:{stamp}"),"binary_artifact":evidence.join("writer-binary"),"binary_sha256":legacy::hash(&fs::read(evidence.join("writer-binary")).unwrap())}),&observer,"observer");
+    let drain=capture("drain.json",json!({"kind":"os-process-exit-and-containment-drain","operation_id":id,"originals_sha256":originals_hash,"store_identity":store,"state_sha256":state_hash,"process_id":pid,"creation_stamp":stamp,"containment_identity":format!("owned Child handle {pid}:{stamp}"),"wait_result":"signalled","contained_members_exited":true,"handles_bound_to_creation_identity":true}),&observer,"observer");
+    fs::write(evidence.join("original-preserved.json"),&raw).unwrap();
+    let effects=capture("effects.json",json!({"kind":"scoped-effect-preservation","operation_id":id,"originals_sha256":originals_hash,"store_identity":store,"state_sha256":state_hash,"original_execution_outcome":"unknown","never_replay":true,"quarantine_preserved":true,"scopes":[{"kind":"filesystem","settled":true,"artifact":evidence.join("original-preserved.json"),"sha256":state_hash}]}),&observer,"observer");
+    let review=capture("review.json",json!({"kind":"legacy-allocation-safety-review","operation_id":id,"originals_sha256":originals_hash,"store_identity":store,"state_sha256":state_hash,"identity_sha256":identity["sha256"],"drain_sha256":drain["sha256"],"effects_sha256":effects["sha256"],"verdict":"allocation_safe_original_unknown","never_replay":true}),&reviewer,"reviewer");
+    let args=json!({"id":id,"expected_state":state,"state_sha256":state_hash,"originals":[{"name":"state.json.before-reconcile-fixture","sha256":state_hash}],"identity":identity,"drain":drain,"effects":effects,"review":review});
+    assert!(m.adjudicate_legacy(&args).unwrap_err().to_string().contains("owner_still_live"));
+    child.kill().unwrap();child.wait().unwrap(); // Actual owned handle and positive exit, not PID absence.
+    let receipt=m.adjudicate_legacy(&args).unwrap();
+    assert_eq!(m.adjudicate_legacy(&args).unwrap(),receipt);
+    // Independent review means a distinct KEY, not a distinct label. Signing the review
+    // with the observer's own key under another authorized alias must be refused.
+    let original_authority=fs::read(root.join("legacy-authority.json")).unwrap();
+    atomic_json(&root.join("legacy-authority.json"),&json!({"schema":1,"keys":{"observer":{"public_key":hex(observer.public_key().as_ref()),"roles":["identity","drain","effects"]},"reviewerAlias":{"public_key":hex(observer.public_key().as_ref()),"roles":["review"]}}})).unwrap();
+    let alias_review=capture("review-alias.json",json!({"kind":"legacy-allocation-safety-review","operation_id":id,"originals_sha256":originals_hash,"store_identity":store,"state_sha256":state_hash,"identity_sha256":identity["sha256"],"drain_sha256":drain["sha256"],"effects_sha256":effects["sha256"],"verdict":"allocation_safe_original_unknown","never_replay":true}),&observer,"reviewerAlias");
+    let mut alias_args=args.clone();alias_args["review"]=alias_review;
+    assert!(m.adjudicate_legacy(&alias_args).unwrap_err().to_string().contains("legacy_reviewer_key_not_distinct"));
+    fs::write(root.join("legacy-authority.json"),&original_authority).unwrap();
+    let mut replaced=args.clone();replaced["replacement_note"]=json!("different durable bundle");
+    assert!(m.adjudicate_legacy(&replaced).unwrap_err().to_string().contains("bundle_moved"));
+    assert_eq!(receipt["original_execution_outcome"],"unknown");assert_eq!(receipt["never_replay"],true);
+    assert_eq!(fs::read(root.join(&id).join("state.json")).unwrap(),raw);
+    assert!(m.relevant("*","",1).unwrap()["operations"].as_array().unwrap().is_empty());
+    let mut bad=args.clone();bad["review"]["signature"]=json!("00");assert!(m.adjudicate_legacy(&bad).is_err());
+    bad=args.clone();bad["originals"]=json!([]);assert!(m.adjudicate_legacy(&bad).is_err());
+    fs::write(evidence.join("original-preserved.json"),"changed effect evidence").unwrap();
+    assert!(m.allocation_safety(&args).is_err());
+    assert_eq!(m.relevant("*","",1).unwrap()["operations"][0]["operation_id"],id);
+    drop(m);remove_fixture(root);remove_fixture(evidence);
+}
+#[test]
+fn effective_cwd_prevents_self_blocking_unrelated_workspace() {
+    let (m, root) = fixture();
+    let id = m.start(shell("sleep 30")).unwrap();
+    let state = m.snapshot(&id).unwrap();
+    assert_eq!(state["cwd_requested"], "");
+    // The primary `cwd` contract stays empty for an inherited call; the real directory is
+    // effective_cwd, which is what the workspace-release index must key on.
+    assert_eq!(state["cwd"], "");
+    assert!(!state["effective_cwd"].as_str().unwrap().is_empty());
+    assert!(state["owner_process_id"].is_number());
+    assert!(state["owner_boot"].as_str().unwrap().starts_with("boot-"));
+    let unrelated = root.join("unrelated");
+    assert!(m.relevant(&unrelated.to_string_lossy(), "", 1).unwrap()["operations"].as_array().unwrap().is_empty());
+    assert_eq!(m.relevant(state["effective_cwd"].as_str().unwrap(), "", 1).unwrap()["operations"][0]["operation_id"], id);
+    m.cancel(&id).unwrap(); settled(&m, &id);
+    drop(m); remove_fixture(root);
+}
+#[test]
+fn migration_preserves_uncertain_originals_and_is_bounded_after_import() {
+    let (m, root) = fixture();
+    fs::create_dir_all(root.join("op-legacy")).unwrap();
+    let original = json!({"cwd":"","settled":false,"cleanup":"unknown"});
+    atomic_json(&root.join("op-legacy/state.json.before-reconcile-1"), &original).unwrap();
+    atomic_json(&root.join("op-legacy/state.json"), &json!({"settled":true,"cleanup":"never_spawned"})).unwrap();
+    for i in 0..1000 {
+        fs::create_dir_all(root.join(format!("op-history-{i}"))).unwrap();
+        atomic_json(&root.join(format!("op-history-{i}/state.json")), &json!({"settled":true,"cleanup":"terminated","cwd":"elsewhere"})).unwrap();
+    }
+    assert!(m.relevant("target", "", 1).unwrap_err().to_string().contains("import_required"));
+    assert!(m.import_index("").is_err());
+    assert_eq!(m.import_index("Fixture legacy writers stopped; inspected original states").unwrap()["imported"], 1001);
+    let result = m.relevant("target", "", 1).unwrap();
+    assert_eq!(result["operations"].as_array().unwrap().len(), 1);
+    assert_eq!(result["operations"][0]["operation_id"], "op-legacy");
+    assert_eq!(result["operations"][0]["originals"][0]["state"], original);
+    let legacy: Value=serde_json::from_slice(&fs::read(root.join("op-legacy/state.json")).unwrap()).unwrap();
+    let decision=json!({"id":"op-legacy","expected_state":legacy,"owner_boot":"boot-fiction","evidence":"zero output","drain_evidence":"mtime","effect_evidence":"age"});
+    assert!(m.reconcile(&decision).unwrap_err().to_string().contains("legacy_operation_owner_identity_unknown"));
+    // Query does not open settled files again. Missing historical evidence cannot
+    // become an apparent empty operation directory or trigger a full release scan.
+    fs::remove_file(root.join("op-history-0/state.json")).unwrap();
+    assert_eq!(m.relevant("target", "", 1).unwrap()["operations"][0]["operation_id"], "op-legacy");
+    drop(m); remove_fixture(root);
+}
+#[test]
+fn reconciliation_requires_dead_owner_exact_state_and_effect_evidence() {
+    let (m, root) = fixture();
+    let id = m.start(Spec::command("no-such-executable-reconcile", vec![])).unwrap();
+    settled(&m, &id);
+    let state: Value = serde_json::from_slice(&fs::read(root.join(&id).join("state.json")).unwrap()).unwrap();
+    let other = Manager::new(&root);
+    let mut args = json!({"id":id,"owner_boot":state["owner_boot"],"expected_state":state,"evidence":"fixture inspection","drain_evidence":"spawn failed before child existed","effect_evidence":"no effect: nonexistent program"});
+    assert!(other.reconcile(&args).unwrap_err().to_string().contains("owner_live"));
+    args["effect_evidence"] = json!("");
+    assert!(other.reconcile(&args).unwrap_err().to_string().contains("effect_evidence_required"));
+    args["effect_evidence"] = json!("no effect: nonexistent program");
+    let before = fs::read(root.join(&id).join("state.json")).unwrap();
+    drop(m);
+    args["expected_state"]["owner"] = json!("wrong-owner");
+    assert!(other.reconcile(&args).unwrap_err().to_string().contains("state_moved"));
+    args["expected_state"] = serde_json::from_slice(&before).unwrap();
+    assert_eq!(other.reconcile(&args).unwrap()["reconciled"], true);
+    assert_eq!(fs::read(root.join(&id).join("state.json")).unwrap(), before);
+    assert!(other.relevant(args["expected_state"]["effective_cwd"].as_str().unwrap(), "", 1).unwrap()["operations"].as_array().unwrap().is_empty());
+    drop(other); remove_fixture(root);
+}
 fn fixture() -> (Manager, PathBuf) {
     let root = std::env::temp_dir().join(format!(
         "wa-operation-test-{}-{}",
@@ -22,15 +151,14 @@ fn settled(m: &Manager, id: &str) -> Value {
     assert_eq!(value["settled"], true, "{value}");
     value
 }
-#[cfg(windows)]
-fn remove_executable_fixture(root: PathBuf) {
+fn remove_fixture(root: PathBuf) {
     // Windows may retain an image mapping briefly after the process is signalled.
     // Retry only the fixture deletion, never the operation or its assertions.
     let deadline=Instant::now()+Duration::from_secs(2);
     loop {
         match fs::remove_dir_all(&root) {
             Ok(())=>return,
-            Err(error) if error.kind()==std::io::ErrorKind::PermissionDenied && Instant::now()<deadline=>{
+            Err(error) if (error.kind()==std::io::ErrorKind::PermissionDenied || error.raw_os_error()==Some(32)) && Instant::now()<deadline=>{
                 std::thread::sleep(Duration::from_millis(20));
             }
             Err(error)=>panic!("fixture cleanup {}: {error}",root.display()),
@@ -54,7 +182,8 @@ fn settlement_wakes_all_observers_without_relaunch_or_lost_notification() {
     assert_eq!(m.wait(&id,Duration::from_secs(5)).unwrap()["settled"],true);
     assert!(before.elapsed()<Duration::from_secs(1),"settled state must not wait for another event");
     assert_eq!(m.list().as_array().unwrap().len(),1);
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn output_and_exit_are_distinct() {
@@ -68,7 +197,8 @@ fn output_and_exit_are_distinct() {
     assert_eq!(s["output_complete"], true);
     assert_eq!(s["stdout"], "hello");
     assert_eq!(s["stderr"], "warning");
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn normal_command_succeeds_and_closes_stdin() {
@@ -87,7 +217,8 @@ fn normal_command_succeeds_and_closes_stdin() {
     assert_eq!(timing["measured_ms"],measured,"{s}");
     assert_eq!(timing["total_ms"].as_u64().unwrap(),measured+timing["unattributed_ms"].as_u64().unwrap(),"{s}");
     assert_eq!(s["elapsed_ms"],timing["total_ms"],"{s}");
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn exited_shell_cannot_leave_descendant_or_lose_output() {
@@ -110,7 +241,8 @@ fn exited_shell_cannot_leave_descendant_or_lose_output() {
         .as_str()
         .unwrap()
         .contains("background_descendants"));
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn deadline_covers_both_streams_without_serial_graces() {
@@ -127,7 +259,8 @@ fn deadline_covers_both_streams_without_serial_graces() {
     // shell prints; both empty output and the complete prefix are valid.
     assert!(s["stdout"] == "" || s["stdout"] == "before", "{s}");
     assert_eq!(s["output_complete"], true);
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn cancel_is_independent_of_waiter_and_preserves_prefix() {
@@ -149,7 +282,8 @@ fn cancel_is_independent_of_waiter_and_preserves_prefix() {
     assert_eq!(s["state"], "cancelled");
     assert_eq!(s["stdout"], "ready");
     assert_eq!(s["cleanup"], "terminated");
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn flood_is_bounded_and_cannot_starve_control() {
@@ -161,7 +295,8 @@ fn flood_is_bounded_and_cannot_starve_control() {
     assert_eq!(s["error"], "output_limit_exceeded");
     assert_eq!(s["output_bytes"], 12000);
     assert_eq!(s["output_complete"], false);
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn quiet_operation_is_not_misdiagnosed() {
@@ -169,7 +304,8 @@ fn quiet_operation_is_not_misdiagnosed() {
     let id = m.start(shell("sleep 0.2; printf done")).unwrap();
     let s = settled(&m, &id);
     assert_eq!(s["ok"], true, "{s}");
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn cursor_read_and_restart_do_not_reexecute() {
@@ -191,7 +327,8 @@ fn cursor_read_and_restart_do_not_reexecute() {
         reopened.snapshot("op-interrupted").unwrap()["state"],
         "outcome_unknown"
     );
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn split_utf8_and_binary_pages_retain_exact_bytes() {
@@ -230,7 +367,8 @@ fn split_utf8_and_binary_pages_retain_exact_bytes() {
     assert_eq!(recovered, bytes);
     fs::write(root.join(&id).join("stdout"), "�").unwrap();
     assert_eq!(m.read(&id, "stdout", 0, 3).unwrap()["text_lossy"], false);
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn parallel_launches_do_not_inherit_each_others_pipes() {
@@ -244,7 +382,8 @@ fn parallel_launches_do_not_inherit_each_others_pipes() {
     }
     m.cancel(&long).unwrap();
     settled(&m, &long);
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[cfg(windows)]
 #[test]
@@ -274,7 +413,8 @@ fn native_shells_preserve_quoted_arguments() {
     let s = settled(&m, &ps);
     assert_eq!(s["ok"], true, "{s}");
     assert!(s["stdout"].as_str().unwrap().contains("hello world"), "{s}");
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 #[test]
 fn descendant_cannot_write_after_foreground_completion() {
@@ -290,7 +430,8 @@ fn descendant_cannot_write_after_foreground_completion() {
         !root.join("orphan-proof").exists(),
         "owned descendant survived settlement"
     );
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 
 #[test]
@@ -309,7 +450,8 @@ fn redirected_background_descendant_is_not_silent_success() {
             .contains("background_descendants"),
         "{s}"
     );
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 
 #[test]
@@ -351,7 +493,8 @@ fn promoted_descendants_are_adopted_not_failed() {
         !root.join("orphan-proof").exists(),
         "a cancelled adopted descendant survived"
     );
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 
 #[test]
@@ -372,7 +515,8 @@ fn adopted_tree_settles_when_it_exits_and_keeps_its_output() {
         out.contains("done"),
         "the adopted descendant's output must not be lost: {s}"
     );
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 
 #[test]
@@ -398,7 +542,8 @@ fn output_after_shell_exit_restarts_the_command_idle_window() {
     m.cancel(&id).unwrap();
     let result = settled(&m, &id);
     assert_eq!(result["state"], "cancelled", "{result}");
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 
 #[cfg(windows)]
@@ -443,7 +588,8 @@ fn compiler_telemetry_cannot_keep_a_completed_build_running() {
     assert!(result["auxiliary_cleanup"].as_array().unwrap().iter()
         .any(|image| image.as_str().unwrap().to_ascii_lowercase().ends_with("vctip.exe")));
     assert!(result["stdout"].as_str().unwrap().contains("build_done"), "{result}");
-    remove_executable_fixture(root);
+    drop(m);
+    remove_fixture(root);
 }
 
 #[cfg(windows)]
@@ -457,7 +603,8 @@ fn compiler_helper_cleanup_waits_for_real_work() {
     let result = settled(&m, &id);
     assert_eq!(result["ok"], true, "{result}");
     assert!(result["stdout"].as_str().unwrap().contains("actual_work_done"), "{result}");
-    remove_executable_fixture(root);
+    drop(m);
+    remove_fixture(root);
 }
 
 #[cfg(windows)]
@@ -471,7 +618,8 @@ fn a_process_named_vctip_outside_msvc_stays_adopted() {
     let result = settled(&m, &id);
     assert_eq!(result["state"], "cancelled", "{result}");
     assert!(result.get("auxiliary_cleanup").is_none());
-    remove_executable_fixture(root);
+    drop(m);
+    remove_fixture(root);
 }
 
 #[test]
@@ -494,7 +642,8 @@ fn launch_failure_is_visible() {
     let restored=Manager::new(&root).snapshot(&id).unwrap();
     assert_eq!(restored["state"],"failed");
     assert_eq!(restored["error"],s["error"]);
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 
 /// A command can print the node's own key. The transcript has its own redactor; this proves
@@ -515,7 +664,8 @@ fn a_secret_in_operation_output_is_redacted_on_disk_and_in_the_view() {
     let on_disk = fs::read_to_string(root.join(&id).join("stdout")).unwrap();
     assert!(!on_disk.contains("SECRETVALUE"), "the file holds the secret: {on_disk}");
     assert!(on_disk.contains("<redacted>"), "{on_disk}");
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 
 /// The 8 KiB read boundary can fall inside the key. Filler before it forces that split, and
@@ -538,7 +688,8 @@ fn a_secret_split_across_the_read_buffer_is_redacted() {
     assert!(stdout.contains("<redacted>"), "{stdout}");
     let on_disk = fs::read_to_string(root.join(&id).join("stdout")).unwrap();
     assert!(!on_disk.contains("SECRETVALUE"), "the split secret is on disk");
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 
 // ---- the starting directory ---------------------------------------------------------------
@@ -584,7 +735,8 @@ fn a_deleted_starting_directory_is_substituted_and_stated_in_the_result() {
     let note = s["cwd_note"].as_str().unwrap_or("");
     assert!(note.contains(&recorded_text), "the note must name what was asked for: {note}");
     assert!(note.contains(&fallback_text), "the note must name where it ran: {note}");
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 
 /// (c) a directory that exists is unchanged: the shell starts in it, the recorded path is
@@ -611,7 +763,8 @@ fn a_usable_starting_directory_is_unchanged() {
     assert_eq!(s["cwd_requested"], kept_text.as_str(), "{s}");
     assert!(s["cwd_substitution"].is_null(), "an unchanged call claimed a substitution: {s}");
     assert!(s["cwd_note"].is_null(), "{s}");
-    fs::remove_dir_all(root).unwrap();
+    drop(m);
+    remove_fixture(root);
 }
 
 /// The peer shape from the field report: the call names no directory, so the shell inherits the
@@ -644,7 +797,7 @@ fn an_unavailable_node_working_directory_is_substituted() {
     );
     // An ordinary call, with a node directory that exists, keeps today's behaviour exactly.
     let unchanged = resolve_start_directory("", Some(&here), Some(&fallback));
-    assert_eq!(unchanged.used, "");
+    assert_eq!(unchanged.used, here.to_string_lossy());
     assert!(unchanged.substitution.is_none());
     fs::remove_dir_all(root).unwrap();
 }

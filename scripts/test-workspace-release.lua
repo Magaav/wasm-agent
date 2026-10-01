@@ -35,19 +35,27 @@ memory.set_session_workspace(id,workspace)
 local escaped,escape_why=workspaces.release(memory,id,'owner')
 check(not escaped and escape_why=='workspace_release_binding_mismatch','tampered path cannot remove source')
 workspace.worktree=saved;memory.set_session_workspace(id,workspace)
-local opdir=paths.data()..'/operations/fixture-unresolved'
-host.write_file(opdir..'/state.json',json.encode({settled=false,cleanup='unknown'}))
+-- Release consumes only the bounded host projection, never scans historical files.
+local original_operation=host.operation
+local observed_cwd
+host.operation=function(action,args)
+  if action=='relevant' then
+    local request=json.decode(args);observed_cwd=request.cwd
+    check(request.limit==1,'release asks for one unresolved blocker')
+    return json.encode({ok=true,operations={{operation_id='op-fixture-unresolved'}}})
+  end
+  return original_operation(action,args)
+end
 local uncertain,uncertain_why=workspaces.release(memory,id,'owner')
-check(not uncertain and uncertain_why=='workspace_release_operation_unresolved:fixture-unresolved','unknown operation blocks removal')
-host.write_file(opdir..'/state.json',json.encode({settled=true,cleanup='terminated'}))
-local original_list=host.list_dir
-host.list_dir=function(path)
-  if path==paths.data()..'/operations' then return json.encode({entries={{name='unreadable',kind='other'}}}) end
-  return original_list(path)
+check(not uncertain and uncertain_why=='workspace_release_operation_unresolved:op-fixture-unresolved','unknown relevant operation blocks removal')
+check(observed_cwd==host.canonical_path(saved),'lookup uses actual canonical target')
+host.operation=function(action,args)
+  if action=='relevant' then return json.encode({ok=false,error='operation_index_import_required'}) end
+  return original_operation(action,args)
 end
 local unreadable,unreadable_why=workspaces.release(memory,id,'owner')
-host.list_dir=original_list
-check(not unreadable and unreadable_why=='workspace_release_operation_unreadable:unreadable','unreadable operation entry blocks removal')
+check(not unreadable and unreadable_why:find('workspace_release_operations_unavailable:',1,true)==1,'unavailable or incomplete index blocks removal')
+host.operation=original_operation
 local released,release_why=workspaces.release(memory,id,'owner')
 check(released and released.state=='released','clean inactive worktree released: '..tostring(release_why))
 check(host.canonical_path(saved)==nil,'released directory is gone')
@@ -71,6 +79,41 @@ local iw=assert(workspaces.ensure(memory,interrupted,parent))
 iw.state='releasing';memory.set_session_workspace(interrupted,iw)
 local removed=json.decode(host.exec('git worktree remove "'..iw.worktree..'"',source_path,30))
 check(removed.code==0,'simulate lost successful removal receipt in disposable managed tree')
+host.operation=function(action,args)
+  if action=='relevant' then return json.encode({ok=true,operations={{operation_id='op-legacy-unknown'}}}) end
+  return original_operation(action,args)
+end
+local absent_blocked,absent_why=workspaces.release(memory,interrupted,'owner')
+check(not absent_blocked and absent_why=='workspace_release_operation_unresolved:op-legacy-unknown','absent releasing tree still checks relevant uncertainty')
+host.operation=original_operation
 local reconciled=workspaces.release(memory,interrupted,'owner')
 check(reconciled and reconciled.state=='released','missing registered tree reconciles lost removal receipt')
+local missing=memory.start_session('local','subagent',{id='release-missing',user_id='owner',node_id='test-node',parent_session_id=parent,workspace_required=true})
+local mw=assert(workspaces.ensure(memory,missing,parent))
+local no_evidence,no_evidence_why=workspaces.reconcile_release(memory,missing,'owner','')
+check(not no_evidence and no_evidence_why=='workspace_reconcile_evidence_required','missing binding reconciliation requires explicit effect evidence')
+local exists,exists_why=workspaces.reconcile_release(memory,missing,'owner','inspected fixture')
+check(not exists and exists_why=='workspace_reconcile_tree_present_or_unverifiable','existing tree cannot be relabeled released')
+check(json.decode(host.exec('git worktree remove "'..mw.worktree..'"',source_path,30)).code==0,'simulate missing directory with allocated binding in private fixture')
+local live={user_id='owner',session_id=missing,run_id='missing-live-owner'}
+check(resources.begin(live).ok,'own missing session before reconciliation')
+local held,held_why=workspaces.reconcile_release(memory,missing,'owner','inspected fixture')
+check(not held and held_why=='resource_busy','active owner blocks missing-directory reconciliation')
+resources.finish(live)
+local reconciled_missing,missing_why=workspaces.reconcile_release(memory,missing,'owner','Git removal observed, branch integrated and operation effects settled')
+check(reconciled_missing and reconciled_missing.state=='released','allocated missing-directory binding reconciles: '..tostring(missing_why))
+check(reconciled_missing.start_state.release_reconciliation.evidence~='','reconciliation evidence is durable')
+cw.state='release_unknown';memory.set_session_workspace(committed,cw)
+check(json.decode(host.exec('git worktree remove "'..cw.worktree..'"',source_path,30)).code==0,'simulate missing unmerged tree while its commit remains referenced')
+local missing_unmerged,missing_unmerged_why=workspaces.release(memory,committed,'owner')
+check(not missing_unmerged and missing_unmerged_why=='workspace_release_unmerged_commits','absent tree never bypasses exact branch ancestry')
+local parked_id=memory.start_session('local','subagent',{id='release-parked',user_id='owner',node_id='test-node',parent_session_id=parent,workspace_required=true})
+local pw=assert(workspaces.ensure(memory,parked_id,parent))
+local attached,attached_why=workspaces.reconcile_park(memory,parked_id,'owner',pw.base_commit,'inspected retained terminal')
+check(not attached and attached_why=='workspace_park_not_detached_or_unverifiable','attached tree cannot be relabeled parked')
+check(json.decode(host.exec('git switch --detach '..pw.base_commit,pw.worktree,30)).code==0,'detach only private finished fixture')
+local parked,park_why=workspaces.reconcile_park(memory,parked_id,'owner',pw.base_commit,'owner settled, exact integrated detached tip inspected')
+check(parked and parked.state=='parked' and parked.branch=='','parked binding agrees with detached Git state: '..tostring(park_why))
+local allocate_parked,allocate_why=workspaces.ensure(memory,parked_id,parent)
+check(not allocate_parked and allocate_why=='workspace_released_or_release_unresolved','parked finished workspace cannot silently allocate another feature branch')
 print('workspace release ok ('..checks..' checks)')

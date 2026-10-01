@@ -2,7 +2,10 @@
 // A proxy delays only the settings acknowledgement, after the node has applied it.
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),http=require('node:http');
 const {spawn,spawnSync}=require('node:child_process');const {once}=require('node:events');const assert=require('node:assert/strict');
-const repo=path.resolve(__dirname,'..'),binary=path.resolve(process.argv[2]||'rust/target/release/wa.exe');
+const repo=path.resolve(__dirname,'..');let binary=path.resolve(process.argv[2]||'rust/target/release/wa.exe');
+// The gate passes the extensionless `$BIN` on every platform; the native Windows binary
+// is `wa.exe`, and this test hashes its bytes rather than only spawning it.
+if(process.platform==='win32'&&!binary.toLowerCase().endsWith('.exe')&&fs.existsSync(binary+'.exe'))binary+='.exe';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-two-window-'));const report={schema:1,root,checks:[],requests:[],models:[]};
 const embedded=process.argv.includes('--embedded');
 const keep=process.argv.includes('--keep');

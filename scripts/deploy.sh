@@ -286,6 +286,19 @@ fi
 
 # 4. Build.
 echo "deploy: building"
+# A real source build needs complete combined-tree verification. Scratch refusal
+# fixtures have no Rust workspace and can reach their mocked build boundary.
+if [ -f "$ROOT/rust/Cargo.toml" ]; then
+  SOURCE_TREE="$(git rev-parse HEAD^{tree})"
+  PROOF_REPO="$ROOT"; PROOF_SCRIPT="$ROOT/scripts/lib/full-gate-proof.mjs"
+  if command -v cygpath >/dev/null 2>&1; then
+    PROOF_REPO="$(cygpath -w "$PROOF_REPO")"; PROOF_SCRIPT="$(cygpath -w "$PROOF_SCRIPT")"
+  fi
+  GATE_PROOF="$(node "$PROOF_SCRIPT" "$PROOF_REPO" "$SOURCE_TREE" 2>&1)" \
+    || fail "complete gate proof required for source tree $SOURCE_TREE: $GATE_PROOF"
+  note "reusing complete exact-tree verification: $GATE_PROOF"
+fi
+
 ( cd rust && cargo build --release --offline -p wa-host ) || fail "the build failed"
 # The sentinel is its own crate, outside the `rust/` workspace (which lists only `wa-host`), so it is
 # built with its own manifest. Asking the workspace for `-p wa-sentinel` fails - "package ID
@@ -332,16 +345,28 @@ echo "deploy: the new binary answers on a scratch port"
 UPGRADE="$ROOT/scripts/upgrade.sh"
 [ -f "$UPGRADE" ] || fail "no scripts/upgrade.sh to perform the install"
 echo "deploy: installing through upgrade.sh"
-# Persist only the explicitly selected runtime location; never move its git branch.
-if [ -n "${WA_RUNTIME_WORKTREE:-}" ]; then
-  [ -d "$WA_RUNTIME_WORKTREE" ] || fail "runtime worktree does not exist"
-  RUNTIME_PATH="$(cd "$WA_RUNTIME_WORKTREE" && pwd)"
-  command -v cygpath >/dev/null 2>&1 && RUNTIME_PATH="$(cygpath -w "$RUNTIME_PATH")"
-  if [ -f "$INSTALL_DIR/runtime-worktree.txt" ]; then
-    cp -f "$INSTALL_DIR/runtime-worktree.txt" "$INSTALL_DIR/runtime-worktree.txt.pre-upgrade" || fail "cannot back up runtime location"
+# Default runtime source is canonical main, not the producer/integration lane that
+# happened to build this release. Selection is read-only and refuses dirty/stale
+# canonical state; explicit overrides remain deliberate active-wave knobs.
+if [ -z "${WA_RUNTIME_WORKTREE:-}" ]; then
+  BINDING_SCRIPT="$ROOT/scripts/runtime-install-binding.mjs"; BINDING_REPO="$ROOT"
+  if command -v cygpath >/dev/null 2>&1; then
+    BINDING_SCRIPT="$(cygpath -w "$BINDING_SCRIPT")"; BINDING_REPO="$(cygpath -w "$BINDING_REPO")"
   fi
-  printf '%s\n' "$RUNTIME_PATH" > "$INSTALL_DIR/runtime-worktree.txt" || fail "cannot record runtime location"
+  WA_RUNTIME_WORKTREE="$(node "$BINDING_SCRIPT" "$BINDING_REPO" 2>&1)" \
+    || fail "canonical runtime binding refused: $WA_RUNTIME_WORKTREE"
 fi
+[ -d "$WA_RUNTIME_WORKTREE" ] || fail "runtime worktree does not exist"
+RUNTIME_PATH="$(cd "$WA_RUNTIME_WORKTREE" && pwd)"
+command -v cygpath >/dev/null 2>&1 && RUNTIME_PATH="$(cygpath -w "$RUNTIME_PATH")"
+if [ -f "$INSTALL_DIR/runtime-worktree.txt" ]; then
+  cp -f "$INSTALL_DIR/runtime-worktree.txt" "$INSTALL_DIR/runtime-worktree.txt.pre-upgrade" || fail "cannot back up runtime location"
+fi
+RUNTIME_RECORD="$INSTALL_DIR/.runtime-worktree.txt.$$"
+printf '%s\n' "$RUNTIME_PATH" > "$RUNTIME_RECORD" && mv -f "$RUNTIME_RECORD" "$INSTALL_DIR/runtime-worktree.txt" \
+  || fail "could not atomically record runtime worktree"
+export WA_RUNTIME_WORKTREE="$RUNTIME_PATH"
+
 WA_INSTALL_DIR="$INSTALL_DIR" WA_PORT="$PORT" WA_CLIENT_PORT="$CLIENT_PORT" \
   WA_UPGRADE_REASON="$REASON" WA_UPGRADE_VIA=deploy.sh \
   # upgrade.sh writes to a *file*, not into a pipe. A deploy runs detached, and a detached process's stdout
@@ -590,6 +615,13 @@ if [ -d "$ROOT/jobs" ] && [ -d "$ROOT/scripts" ]; then
   # Durable, not only stdout: a deploy runs detached and its stdout belongs to nobody afterwards.
   note "shipped $PIPELINE pipeline file(s) into $INSTALL_DIR/scripts"
 fi
+
+# Ship wave continuation/entry scripts with their literal module closure.
+WAVE_SHIP="$ROOT/scripts/ship-wave.mjs"; WAVE_ROOT="$ROOT"; WAVE_INSTALL="$INSTALL_DIR"
+if command -v cygpath >/dev/null 2>&1; then
+  WAVE_SHIP="$(cygpath -w "$WAVE_SHIP")"; WAVE_ROOT="$(cygpath -w "$WAVE_ROOT")"; WAVE_INSTALL="$(cygpath -w "$WAVE_INSTALL")"
+fi
+node "$WAVE_SHIP" "$WAVE_ROOT" "$WAVE_INSTALL" || fail "node installed, but wave continuation scripts are not import-closed"
 
 RECORD_TMP="$INSTALL_DIR/.installed.txt.deploy.$$"
 REASON_LINE="$(printf '%s' "$REASON" | tr '\r\n' '  ')"

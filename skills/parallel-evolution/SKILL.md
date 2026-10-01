@@ -246,3 +246,16 @@ What a producer owes that lane, all provable from its own worktree:
 The lane may land several reviewed tips before it gates and pushes, so expect your commit to be part
 of a combined tree — and expect a re-gate of that tree, because a merge changes the tree and your
 receipt covers only your branch.
+
+## Focused producer admission after bootstrap
+
+The recovery throughput implementation must first pass the complete smoke gate.
+After that, `finish.mjs admit <own-repo> <exact-head>` can produce source-bound
+focused evidence for supported narrow paths. Unknown/shared changes still use
+`gate`. Carry `wa-producer-check.json` to the independent admission lane with
+`delivery-admission.mjs ... --producer-proof <receipt>`; it never authorizes self
+review or publication. A focused result has `admission_verified:true` but
+`gate_verified:false` and `requires_combined_gate:true`. The merge lane verifies
+actual records with `--delivery-store`, then completely gates the combined tree
+before publication. Only identical-tree full proof can avoid another full run.
+See `docs/RECOVERY-THROUGHPUT.md` for commands, coverage and measured limits.

@@ -160,6 +160,7 @@ fn main() -> io::Result<()> {
             "cases":cases}),
         )
     })();
+    drop(manager); // Release the OS-held SQLite identity before removing private evidence.
     if result.is_ok() {
         let _ = fs::remove_dir_all(&root);
     } else {

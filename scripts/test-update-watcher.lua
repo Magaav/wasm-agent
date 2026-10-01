@@ -25,6 +25,8 @@ local tree = home .. "/tree"
 -- ---- the host the module is given ------------------------------------------
 
 local vfs, issued, alive = {}, {}, {}
+local verified_lock = true
+local inventory_verified = true
 local request_answer   -- nil: the stub sentinel accepts. A table: a scripted answer.
 
 local function escaped(text)
@@ -57,6 +59,7 @@ local real_host = host
 -- make the module unloadable (`lua_root_unreadable`) - and the checks would then run against the
 -- embedded copy, passing while proving nothing about the file under test.
 local update = dofile("lua/core/update.lua")
+local json = dofile("lua/vendor/json.lua")
 
 host = {
   platform = function()
@@ -75,11 +78,18 @@ host = {
     if path then
       return wrapper((vfs[path] ~= nil and #vfs[path] > 0) and 0 or 1, "", "")
     end
-    local pid = command:match('^MSYS_NO_PATHCONV=1 tasklist /FI "PID eq (%d+)" /NH$')
-    if pid then
-      -- `tasklist` exits 0 either way; the answer to "is this pid there" is its output.
-      if alive[pid] then return wrapper(0, "wa-sentinel.exe  " .. pid .. "  Console  1  10,000 K\n", "") end
-      return wrapper(0, "INFO: No tasks are running which match the specified criteria.\n", "")
+    if command:find(" preflight", 1, true) then
+      local pid = (vfs[sentinel_dir .. "/sentinel.pid"] or ""):match("(%d+)")
+      local pending = {}
+      for path,text in pairs(vfs) do
+        if path:find(sentinel_dir .. "/requests/",1,true) == 1 or path:find(sentinel_dir .. "/claimed/",1,true) == 1 then
+          local ok, request = pcall(json.decode,text)
+          if ok and request.verb == "deploy" then pending[#pending+1]=path:sub(#sentinel_dir+2) end
+        end
+      end
+      return wrapper(0,json.encode({schema=1,watcher=alive[pid] and (verified_lock and "running" or "unverified") or "not_running",
+        watcher_pid=tonumber(pid),ownership="watcher_lifetime_lock",stop_file=vfs[sentinel_dir .. "/stop"] ~= nil,
+        pending_deploys=pending,inventory_verified=inventory_verified,inventory_error=not inventory_verified and "unknown_inventory: fixture claimed record" or nil,capabilities={health_free=true,atomic_deploy_dedupe=true}}),"")
     end
     local dir = command:match("^ls %-1 %-%- '(.*)' 2>/dev/null$")
     if dir then return wrapper(0, listing(dir), "") end
@@ -194,7 +204,23 @@ ok(report.error == "sentinel_refused" and not report.queued, "a refusing sentine
 request_answer = function() return "not JSON at all" end
 report = ask()
 ok(report.error == "sentinel_unreachable" and not report.queued, "a sentinel that answers nothing is not a success")
+request_answer = function() return wrapper(0,"existing deploy request: /fixture/claimed/concurrent.json\n","") end
+report = ask()
+ok(report.error == "already_pending" and not report.queued,"atomic concurrent duplicate is reported without a new queue")
+request_answer = function() return wrapper(0,"","") end
+report = ask()
+ok(report.error == "sentinel_unverifiable" and not report.queued,"exit zero without durable request evidence is refused")
 request_answer = nil
+inventory_verified = false
+report = ask()
+ok(report.error == "unknown_inventory" and not report.queued,"unknown claimed inventory refuses new deployment")
+ok(queued("request deploy") == 0,"unverifiable inventory never writes a request")
+inventory_verified = true
+verified_lock = false
+report = ask()
+ok(report.error == "no_watcher" and not report.queued,"a live recycled/legacy pid without a lifetime lock is refused")
+ok(queued("request deploy") == 0,"unverified watcher never writes a request")
+ok(queued("/health") == 0 and queued(sentinel .. "' status") == 0,"preflight never calls node health or sentinel status")
 
 print("update watcher decision ok (" .. checks .. " checks)")
 host = real_host

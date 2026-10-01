@@ -159,54 +159,40 @@ if [ -n "$TREE" ] && git -C "$TREE" rev-parse --is-inside-work-tree >/dev/null 2
     record skip "installed sentinel == built sentinel" "no built sentinel at $BUILT_SENT"
   fi
 
-  for pair in "scripts/deploy.sh:$TREE/scripts/deploy.sh" \
-              "scripts/upgrade.sh:$TREE/scripts/upgrade.sh" \
-              "skills/self-update/SKILL.md:$TREE/skills/self-update/SKILL.md" \
-              "skills/git-orchestrator/SKILL.md:$TREE/skills/git-orchestrator/SKILL.md" \
-              "skills/git-orchestrator/scripts/audit.mjs:$TREE/skills/git-orchestrator/scripts/audit.mjs"; do
-    rel="${pair%%:*}"; src="${pair#*:}"
-    dst="$INSTALL_DIR/$rel"
-    case "$rel" in skills/*) dst="$CONFIG/$rel" ;; esac
+  for rel in scripts/deploy.sh scripts/upgrade.sh; do
+    src="$TREE/$rel"; dst="$INSTALL_DIR/$rel"
     if [ -f "$src" ]; then
       record "$([ -f "$dst" ] && cmp -s "$src" "$dst" && echo ok || echo fail)" \
-        "shipped $rel == repo" "${dst:-missing}"
+        "shipped $rel == repo" "$dst"
     else
       record skip "shipped $rel == repo" "no $src in the tree"
     fi
   done
+  for src in "$TREE"/scripts/wave-* "$TREE"/scripts/lib/wave-* "$TREE/scripts/lib/full-gate-proof.mjs"; do
+    [ -f "$src" ] || continue
+    rel="${src#"$TREE/"}"; dst="$INSTALL_DIR/$rel"
+    record "$([ -f "$dst" ] && cmp -s "$src" "$dst" && echo ok || echo fail)" \
+      "shipped $rel == repo" "$dst"
+  done
+  if [ -d "$TREE/skills" ]; then
+    while IFS= read -r -d '' src; do
+      rel="${src#"$TREE/"}"; dst="$CONFIG/$rel"
+      record "$([ -f "$dst" ] && cmp -s "$src" "$dst" && echo ok || echo fail)" \
+        "shipped $rel == repo" "$dst"
+    done < <(find "$TREE/skills" -type f -print0)
+  else
+    record skip "shipped skills == repo" "no skills in the tree"
+  fi
 else
   record skip "worktree comparison" "no worktree resolvable (WA_DEPLOY_ROOT / runtime-worktree.txt) - hash calls not run"
 fi
 
-# 2b. Compare like with like: the skills a deploy writes must be the skills the node reads.
-#
-# This is the same defect as the install directory, in a smaller place, and it is measured rather than
-# theoretical. The node scans `<config>/skills` (lua/core/paths.lua: `paths.config() .. "/skills"`), and this
-# verifier compares against `<config>/skills` - but `upgrade.sh` computes its target as
-# `HOME_DIR="${WASM_AGENT_HOME:-$HOME/.wasm-agent}"`, treating that variable as the config directory when it
-# is the *home* (rust/wa-host/src/main.rs resolve_home). Every supervisor this project installs sets it: the
-# sentinel unit on the cloud node has `Environment=WASM_AGENT_HOME=/home/ubuntu`, and
-# scripts/install-sentinel-task.ps1 writes `set "WASM_AGENT_HOME=%USERPROFILE%"` into the Windows launcher. So
-# a deploy run by a supervisor writes `<home>/skills/...` while the node reads `<home>/.wasm-agent/skills/...`.
-#
-# Measured on the machine this was written on: both directories exist, and `git-orchestrator/SKILL.md`,
-# `git-orchestrator/scripts/audit.mjs` and `parallel-evolution/SKILL.md` differ between them. A verifier that
-# reads only one side reports ok about a pair nobody joined up.
-#
-# The check is against the *files*, not against this shell's environment, and that is deliberate: the presence
-# of `<home>/skills` is the durable trace of a deploy that ran with the variable set (its own supervisor's),
-# so an interactive run - where the variable is usually unset - still sees it. Naming both paths is the whole
-# point: this does not repair the disagreement, it stops it from being discoverable only by hand.
-if [ "$HAD_SERVICE_LIB" = "1" ]; then DEV_SKILLS="$(wa_home_dir)/skills"; else DEV_SKILLS="${WASM_AGENT_HOME:-$HOME}/skills"; fi
-if [ -d "$DEV_SKILLS" ] && ! wa_same_dir "$DEV_SKILLS" "$CONFIG/skills"; then
-  DEV_DIFFERENCE="$(diff -rq "$DEV_SKILLS" "$CONFIG/skills" 2>&1 | head -3 | tr '\r\n' '  ')"
-  record "$([ -z "$DEV_DIFFERENCE" ] && echo ok || echo fail)" \
-    "the skills a deploy writes are the skills the node reads" \
-    "a deploy writes $DEV_SKILLS; this node reads $CONFIG/skills${DEV_DIFFERENCE:+ - $DEV_DIFFERENCE}"
-else
-  record ok "the skills a deploy writes are the skills the node reads" \
-    "nothing outside $CONFIG/skills ($DEV_SKILLS does not exist), so the deploy's writer and this node's reader name one directory here"
-fi
+# The current writer and runtime reader share wa_config_dir. Legacy <home>/skills
+# may be unrelated user content; actual shipped skills above must match the tree.
+WRITER_CONFIG="$(wa_config_dir)"
+record "$(wa_same_dir "$WRITER_CONFIG" "$CONFIG" && echo ok || echo fail)" \
+  "the skills a deploy writes are the skills the node reads" \
+  "upgrade and runtime use $WRITER_CONFIG/skills"
 
 # 3. the node answers, and the pid answering is the pid the install recorded
 HEALTH="$(curl -s -m 6 "http://127.0.0.1:$PORT/health" 2>/dev/null || true)"

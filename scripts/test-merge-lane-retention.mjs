@@ -52,7 +52,7 @@ function git(cwd, ...args) {
 }
 // Every child runs with this file's temp root as its temp root, so the families below are the only
 // ones a sweep can see.
-const fenced = extra => ({...process.env, TEMP: temp, TMP: temp, TMPDIR: temp, ...extra});
+const fenced = extra => ({...process.env, TEMP: temp, TMP: temp, TMPDIR: temp, ...extra, WA_GATE_LANE_DIR:path.join(root,'gate-lane'),GATE_LANE_HELD:'',GATE_LANE_ORIGIN:'',WA_GATE_LANE_WAIT_SECONDS:'15',WA_GATE_LANE_SAMPLE_SECONDS:'0'});
 function lane(repo, args, extra = {}) {
   const result = spawnSync(process.execPath, [LANE, '--repo', repo, '--gate-command', 'exit 1', ...args],
     {cwd: repo, encoding: 'utf8', windowsHide: true, env: fenced(extra)});
@@ -79,12 +79,14 @@ try {
   const marker = source.findIndex(line => line.startsWith('# ---- end of the bounded gate-home block'));
   ok(marker > 0, 'the slice marker is in scripts/test.sh', String(marker));
   const slice = source.slice(0, marker).join('\n');
-  ok(slice.trimEnd().endsWith('trap gate_home_release EXIT'),
+  ok(slice.trimEnd().endsWith('trap gate_exit EXIT'),
     'the sliced block ends with the EXIT trap it is testing (the fixture cannot drift from the code)');
   ok(slice.includes('wa-gate-home-$$-XXXXXX') && slice.includes('WA_GATE_HOME_KEEP'),
     'the slice carries the pid lease and the bound');
+  fs.mkdirSync(path.join(root,'scripts'),{recursive:true});
+  fs.copyFileSync(path.join(here,'check-disk-floor.sh'),path.join(root,'scripts','check-disk-floor.sh'));
   function gateRun(name, body, extra = {}, directory = temp) {
-    const script = path.join(root, `${name}.sh`);
+    const script = path.join(root, 'scripts', `${name}.sh`);
     fs.writeFileSync(script, `${slice}\n${body}\n`);
     const result = spawnSync('bash', [script], {cwd: root, encoding: 'utf8', windowsHide: true, env: fenced(extra)});
     return {status: result.status, stdout: result.stdout || '', stderr: result.stderr || '', script};

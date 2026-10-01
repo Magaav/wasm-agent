@@ -41,7 +41,16 @@ REQUESTS="$HOME/.wasm-agent/sentinel/requests"
 BEFORE="$(ls "$REQUESTS" 2>/dev/null | wc -l)"
 STUB="$INST/$SENTINEL_NAME"
 ARGS="$W/sentinel-args.txt"
-printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "%s"\necho "  requested deploy: %s/requests/1789987058-0000.json"\necho "  the sentinel performs it - it is only a stub"\n' "$ARGS" "$W" > "$STUB"
+cat > "$STUB" <<STUB
+#!/bin/sh
+if [ "\$1" = "preflight" ]; then
+  echo '{"schema":1,"watcher":"running","watcher_pid":4242,"ownership":"watcher_lifetime_lock","stop_file":false,"pending_deploys":[],"inventory_verified":true,"capabilities":{"health_free":true,"atomic_deploy_dedupe":true}}'
+  exit 0
+fi
+printf '%s\n' "\$@" > "$ARGS"
+echo "  requested deploy: $W/requests/1789987058-0000.json"
+echo "  the sentinel performs it - it is only a stub"
+STUB
 chmod +x "$STUB"
 
 # The watcher this fixture claims, and its own application home. `/update` refuses before queueing when
@@ -88,6 +97,7 @@ echo "--- 1. a tree with nothing built in it ---"
 A="$(ask)"; show "$A" "status|queued|message"
 case "$A" in *'"queued":true'*) echo "  ok: an unbuilt tree queues - the gate builds it" ;;
   *) echo "  FAIL: expected a queued deploy, got: $A"; exit 1 ;; esac
+grep -qx -- '--if-no-pending' "$ARGS" || { echo "FAIL: update bypassed atomic deploy admission"; exit 1; }
 grep -qx -- '--session' "$ARGS" && grep -qx -- 'fixture-session' "$ARGS" \
   && grep -qx -- '--prompt' "$ARGS" \
   && echo "  ok: the replacement carries a durable session continuation" \
@@ -121,7 +131,15 @@ case "$D" in *'"request":"'*'1789987058-0000.json'*) echo "  ok: the request the
   *) echo "  FAIL: the request path must come from the sentinel's own output: $D"; exit 1 ;; esac
 
 echo "--- 5. a sentinel that refuses is not a success ---"
-printf '#!/bin/sh\necho "unknown verb" >&2\nexit 2\n' > "$STUB"
+cat > "$STUB" <<'STUB'
+#!/bin/sh
+if [ "$1" = "preflight" ]; then
+  echo '{"schema":1,"watcher":"running","watcher_pid":4242,"ownership":"watcher_lifetime_lock","stop_file":false,"pending_deploys":[],"inventory_verified":true,"capabilities":{"health_free":true,"atomic_deploy_dedupe":true}}'
+  exit 0
+fi
+echo "unknown verb" >&2
+exit 2
+STUB
 E="$(ask)"; show "$E" "status|error|observed"
 case "$E" in *'"sentinel_refused"'*) echo "  ok: a refusal by the sentinel refuses the command" ;;
   *) echo "  FAIL: expected sentinel_refused, got: $E"; exit 1 ;; esac

@@ -10,6 +10,7 @@
 //
 // Usage:
 //   node scripts/delivery-record.mjs create <branch> --repo <path> --tip <sha> --producer <session>
+//   node scripts/delivery-record.mjs refresh <branch> --tip <new> --expected-tip <old> --producer <owner>
 //   node scripts/delivery-record.mjs review <branch> --reviewer <session> --commit <review-sha>
 //                                              --tip <sha> [--verdict passed|narrowed|refused]
 //                                              [--finding <class>:<status>:<text>]...
@@ -29,6 +30,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
+import {checkWaveAdmission} from './lib/wave-guard.mjs';
 import {listRecords, nowIso, readRecord, recordPath, storeDir, writeRecord} from './lib/delivery-store.mjs';
 
 const SCHEMA = 1;
@@ -60,7 +62,7 @@ function parse(argv) {
     ['--repo', 'repo'], ['--store', 'store'], ['--json', 'json'], ['--tip', 'tip'],
     ['--producer', 'producer'], ['--reviewer', 'reviewer'], ['--commit', 'commit'],
     ['--verdict', 'verdict'], ['--tree', 'tree'], ['--exit', 'exit'], ['--report', 'report'],
-    ['--sha', 'sha'], ['--at', 'at'],
+    ['--sha', 'sha'], ['--at', 'at'], ['--expected-tip','expectedTip'],
   ]);
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -140,6 +142,32 @@ switch (verb) {
     writeRecord(store, record);
     note(`${delivery}: record created in ${store} (tip ${tip.slice(0, 7)}, tree ${tree.slice(0, 8)})`);
     emit({ok: true, action: 'create', store, record}, options);
+    break;
+  }
+
+  case 'refresh': {
+    if(!delivery||!options.tip||!options.expectedTip||!options.producer)fail(4,'usage','refresh needs delivery, --tip, --expected-tip and --producer');
+    const {store,repo}=open(options),directory=repo(),record=readRecord(store,delivery);
+    if(!record)fail(2,'record_missing',`no record for ${delivery}`);
+    if(record.producer!==options.producer)fail(2,'producer_mismatch','refresh must name the existing producer; identity is not rewritten');
+    if(record.tip!==options.expectedTip)fail(2,'tip_compare_mismatch',`expected ${options.expectedTip}; current ${record.tip}; reload rather than overwrite`);
+    if(record.landing)fail(2,'landing_immutable','a published delivery needs a new delivery record, not a refreshed landing');
+    const common=git(directory,['rev-parse','--path-format=absolute','--git-common-dir'],'shared repo');
+    const original=git(record.repository,['rev-parse','--path-format=absolute','--git-common-dir'],'record repo');
+    if(fs.realpathSync(common)!==fs.realpathSync(original))fail(2,'repository_mismatch','refresh cannot move a delivery to another shared repository');
+    const wave=checkWaveAdmission(directory,{phase:'produce'});if(!wave.ok)fail(2,'wave_admission_refused',wave.reason);
+    const tip=git(directory,['rev-parse','--verify',`${options.tip}^{commit}`],'new tip');
+    git(directory,['fetch','--quiet','origin'],'refresh published tip');
+    const published=git(directory,['rev-parse',`refs/remotes/origin/${record.branch||delivery}`],'published branch');
+    if(published!==tip)fail(2,'branch_not_pushed','new tip must be the exact published delivery branch tip');
+    try{git(directory,['merge-base','--is-ancestor',record.tip,tip],'preserve old intent');}
+    catch{fail(2,'tip_not_descendant','old delivery tip is not contained; reconcile intent before refresh');}
+    if(tip===record.tip)emit({ok:true,action:'refresh_unchanged',record},options);
+    record.tip_history=[...(record.tip_history||[]),{tip:record.tip,tree:record.tree,review:record.review,admission:record.admission,lane:record.lane,producer_checks:record.producer_checks||null,revision:record.revision,at:nowIso()}];
+    record.tip=tip;record.tree=git(directory,['rev-parse',`${tip}^{tree}`],'new tree');
+    record.review=null;record.admission=null;record.lane=null;delete record.producer_checks;
+    try{writeRecord(store,record);}catch(error){fail(2,'record_compare_conflict',error.message);}
+    emit({ok:true,action:'refresh',record,requires_independent_review:true,requires_combined_gate:true},options);
     break;
   }
 
@@ -230,5 +258,5 @@ switch (verb) {
   }
 
   default:
-    fail(4, 'usage', 'verbs: create | review | lane | land | get | list');
+    fail(4, 'usage', 'verbs: create | refresh | review | lane | land | get | list');
 }
