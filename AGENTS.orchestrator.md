@@ -22,7 +22,11 @@ unless the user explicitly asks for direct recovery or the task is trivial.
   protocol (authority, lifecycle, lanes, landing steps), and `docs/CONCURRENCY.md`
   holds the lane reservations.
 - Use `steer` for active child corrections; `message` is a queued follow-up.
-  Steering cannot undo in-flight effects. Inspect the latest bounded session page
+  Steering cannot undo in-flight effects, so a queued message fences only calls with
+  an effect - keep effectful calls in their own round, or a `write` batched with the
+  reads that justify it loses the batch. A call that comes back
+  `superseded_by_steering` did not run: re-issue the same arguments rather than
+  re-deriving the plan. Inspect the latest bounded session page
   before conflicting instructions; retrieve exact original rows when needed.
 - Delegate substantial review to an approved review-capable subagent with concrete
   tests and evidence - a reviewer that did not produce the branch. The coordinator

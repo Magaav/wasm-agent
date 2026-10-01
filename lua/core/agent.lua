@@ -1679,8 +1679,19 @@ function M:run_body(text, images)
           end
           return parallel_op.result or {error="parallel_operation_start_failed"}
         end
-        if not dispatch_ctx.steering_admit() then
-          return {error='superseded_by_steering',executed=false,effect='none',note='Reconsider this planned call after reading steering.'}
+        -- A fence is for effects. Steering cannot undo a call that has already run, so the
+        -- calls it must stop are the effectful ones; a read has nothing to undo, and voiding one
+        -- costs a whole model round - a batch of reads was re-issued verbatim a round later.
+        -- An unknown tool counts as effectful (tools.has_effect defaults that way).
+        if tools.has_effect(function_.name) and not dispatch_ctx.steering_admit() then
+          -- One actionable notice per batch: the protocol needs a result per call id, so the rows
+          -- stay, but only the first says what to do with them.
+          local first = not dispatch_ctx.steering_fenced
+          dispatch_ctx.steering_fenced = true
+          return {error='superseded_by_steering',executed=false,effect='none',fenced=true,
+            note=first and ('Reconsider this planned call after reading steering: this call, and '
+              ..'any later effectful call in the same batch, were not admitted. Re-issue the ones '
+              ..'that remain valid.') or nil}
         end
         return tools.dispatch(memory, function_.name, args, self.role,
         dispatch_ctx) end)

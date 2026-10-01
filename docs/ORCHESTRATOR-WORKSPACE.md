@@ -147,9 +147,15 @@ an expected `run_id`. Owner checks precede lookup and dispatch; remote callers
 must name a child, not an arbitrary session. The inbox and its run identity are
 durable. Only the active run consumes the original text into its own transcript,
 atomically with its read receipt, before the next model call. Pending steering
-fences each sequential/parallel tool admission. After admission an effect is
-in-flight: steering cannot undo it. Read means entered context, not obedience.
-Unread messages at settlement or boot mismatch are deferred, never replayed.
+fences each *effectful* tool admission, sequentially or in parallel: a read-only
+call has no effect to undo, so it runs and the steering is delivered with its
+results rather than costing the batch a whole model round. After admission an
+effect is in-flight: steering cannot undo it. A tool this file does not list as
+read-only keeps the fence. The first fenced call of a batch carries the
+instruction to re-issue what remains valid; the rest carry the bare code, because
+the transcript needs one result per call id. Read means entered context, not
+obedience. Unread messages at settlement or boot mismatch are deferred, never
+replayed.
 
 Main chat exposes **Steer** / Ctrl+Enter while busy; plain Enter keeps the draft
 and Stop remains explicit. Child panes distinguish **Send** (follow-up) from

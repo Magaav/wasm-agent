@@ -30,12 +30,12 @@ provider.complete_with=function(_,messages)
   if calls==1 then
     receipt=steering.control({session_id=sid,text='Use the corrected requirement',idempotency_key='one'},ctx)
     assert(receipt.state=='queued',json.encode(receipt))
-    return {content='',tool_calls={{id='stale',type='function',['function']={name='read',arguments='{"path":"AGENTS.md"}'}}},usage={prompt_tokens=10,completion_tokens=10,total_tokens=20}}
+    return {content='',tool_calls={{id='stale',type='function',['function']={name='write',arguments='{"path":"stale-probe.txt","content":"SHOULD-NOT-RUN"}'}}},usage={prompt_tokens=10,completion_tokens=10,total_tokens=20}}
   end
   assert(messages[#messages].content=='Use the corrected requirement','next call sees exact steering')
   return {content='corrected',tool_calls={},usage={prompt_tokens=10,completion_tokens=10,total_tokens=20}}
 end
-assert(bot:run('original')=='corrected' and calls==2 and dispatches==0,'stale tool fenced')
+assert(bot:run('original')=='corrected' and calls==2 and dispatches==0,'stale effect fenced')
 local status=steering.control({action='steering_status',session_id=sid},ctx)
 assert(status.receipts[1].state=='read' and status.target.state=='settled','durable receipt settled')
 local again=steering.control({session_id=sid,text='Use the corrected requirement',idempotency_key='one'},ctx)
@@ -60,10 +60,46 @@ steering.control({session_id=sid,text='interrupted',idempotency_key='third'},ctx
 host.sql_exec("UPDATE steering_runs SET boot='old-boot' WHERE session_id=?",json.encode({sid}))
 status=steering.control({action='steering_status',session_id=sid},ctx)
 assert(status.target.state=='unknown' and status.receipts[#status.receipts].state=='deferred','restart does not replay')
+-- The other half of the fence: a read has no effect for steering to undo, and voiding one costs a
+-- whole model round - a live batch of reads was re-issued verbatim one round later. The same
+-- stale plan, one read instead of one write, must reach the tool.
+local sid2=memory.start_session('','steering-read',{user_id='owner'})
+local bot2=agent.new(sid2,function() end,'master','owner','')
+local calls2,read_dispatches=0,0
+local dispatch2=tools.dispatch
+tools.dispatch=function(...) read_dispatches=read_dispatches+1;return dispatch2(...) end
+local receipt2
+provider.complete_with=function(_,messages)
+  calls2=calls2+1
+  if calls2==1 then
+    receipt2=steering.control({session_id=sid2,text='Use the corrected requirement',idempotency_key='read-one'},ctx)
+    assert(receipt2.state=='queued',json.encode(receipt2))
+    return {content='',tool_calls={{id='stale-read',type='function',['function']={name='read',arguments='{"path":"AGENTS.md"}'}}},usage={prompt_tokens=10,completion_tokens=10,total_tokens=20}}
+  end
+  assert(messages[#messages].content=='Use the corrected requirement','the read case must still see the exact steering')
+  return {content='corrected',tool_calls={},usage={prompt_tokens=10,completion_tokens=10,total_tokens=20}}
+end
+assert(bot2:run('original')=='corrected' and calls2==2 and read_dispatches==1,
+  'a read must not be voided by queued steering, got ' .. read_dispatches .. ' dispatch(es)')
+tools.dispatch=dispatch2
+
+-- The counter is per scenario: the read case above dispatched once, legitimately, and this batch
+-- must not dispatch at all.
+dispatches=0
 local batch=tools.start_parallel_bash({
  {id='a',['function']={name='bash',arguments='{"command":"echo SHOULD-NOT-RUN"}'}},
  {id='b',['function']={name='bash',arguments='{"command":"echo SHOULD-NOT-RUN"}'}}
 },memory,'master',{steering_admit=function() return false end})
 assert(batch.a.result.error=='superseded_by_steering' and batch.b.result.error=='superseded_by_steering','parallel dispatch fenced')
 assert(dispatches==0,'no stale side effects')
+-- The fence is for effects. A read has nothing steering could undo, and fencing one costs a whole
+-- model round: a steering message that arrived during a batch of reads voided the batch, reads
+-- included, and they were re-issued verbatim one round later.
+assert(tools.has_effect('bash') and tools.has_effect('write') and tools.has_effect('edit') and
+  tools.has_effect('subagent') and tools.has_effect('client'),'an effect must keep the fence')
+assert(not tools.has_effect('read') and not tools.has_effect('read_many') and
+  not tools.has_effect('grep') and not tools.has_effect('ls') and not tools.has_effect('graph') and
+  not tools.has_effect('recall') and not tools.has_effect('session'),'a read must not be fenced by steering')
+assert(tools.has_effect('some-plugin-tool-this-file-never-heard-of'),'an unknown tool must default to effectful')
+assert(tools.has_effect(nil),'a nameless call must default to effectful')
 print('durable steering ok')
