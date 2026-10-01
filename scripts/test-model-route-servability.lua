@@ -241,6 +241,12 @@ check(control_error:find('subagent_token_budget', 1, true) ~= nil,
 -- Picker/setter recovery: the provider can be selected with an old invalid
 -- saved model, but it must not silently substitute or accept a new mismatch.
 local state = dofile('lua/core/state.lua')
+-- This home is shared with every other gate step, so whatever selection it had is
+-- restored before this file ends. A suite that leaves `provider` changed makes a later
+-- suite's route depend on gate step order: this section's first version wrote
+-- `provider=opencode-go` and broke `scripts/test-openai-sub-levels.lua`, which resolves
+-- its route from this file before its own env override.
+local prior_provider, prior_go_model = state.read('provider'), state.read('model.opencode-go')
 provider.provider_override = 'opencode-go'
 provider.overrides = nil
 state.write('model.opencode-go', 'gpt-6-sol')
@@ -294,5 +300,12 @@ local stale_route = json.decode(wa_model('', ''))
 check(stale_route.model == 'gpt-6-sol' and stale_route.model_error:find('model_not_servable', 1, true),
   'actual status payload discloses a stale persisted model without replacing it')
 provider.set_model('deepseek-v4.1-flash')
+
+-- Leave the shared home exactly as it was found (an empty value reads as absent).
+state.write('provider', prior_provider or '')
+state.write('model.opencode-go', prior_go_model or '')
+check(state.read('provider') == prior_provider and state.read('model.opencode-go') == prior_go_model,
+  'the shared home selection must be restored, got ' .. tostring(state.read('provider')) .. '/' ..
+  tostring(state.read('model.opencode-go')))
 
 print('model route servability ok ('..checks..' checks)')
