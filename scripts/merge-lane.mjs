@@ -58,7 +58,7 @@ import {spawn, spawnSync} from 'node:child_process';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 
 import {checkWaveAdmission} from './lib/wave-guard.mjs';
-import {findFullProof} from './lib/full-gate-proof.mjs';
+import {findFullProof,retainFullProof} from './lib/full-gate-proof.mjs';
 import {evaluate} from './delivery-admission.mjs';
 import {readRecord} from './lib/delivery-store.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -1128,13 +1128,28 @@ async function main() {
     // Persist in this lane's Git metadata, before its disposable tree is removed.
     // Only the identical combined source tree can reuse this; focused checks never enter here.
     const metadata=requireGit(gitDir,['rev-parse','--git-path','wa-combined-gate.json'],'combined receipt path');
-    const durableLog=path.resolve(gitDir,metadata+'.log');
-    if(path.resolve(gate.log)!==durableLog)fs.copyFileSync(gate.log,durableLog);
-    const receipt={schema:1,kind:'full',repo:gate.reused?gate.proof.tested_repo:clone.dir,owner_repo:path.resolve(gitDir),
-      head:gate.reused?gate.proof.head:candidateHead,candidate_head:candidateHead,tree:candidateTree,passed:true,
-      gate_exit:0,gate_runs:1,gate_ms:gate.reused?gate.proof.gate_ms:gate.ms,skipped:gate.skipped,
-      log:durableLog,log_sha256:gate.log_sha256,at:new Date().toISOString()};
     gate.full_receipt=path.resolve(gitDir,metadata);
+    let receipt;
+    if(gate.reused){
+      receipt=retainFullProof(gate.proof.receipt,gitDir,{candidateHead});
+    }else{
+      const driverRepo=path.resolve(here,'..');
+      const driverHead=requireGit(driverRepo,['rev-parse','HEAD'],'gate driver HEAD');
+      const runnerPath=fileURLToPath(import.meta.url);
+      const original={schema:1,kind:'full',repo:clone.dir,head:candidateHead,tree:candidateTree,
+        passed:true,gate_exit:0,gate_runs:1,gate_ms:gate.ms,skipped:gate.skipped,
+        log:gate.log,log_sha256:gate.log_sha256,at:new Date().toISOString(),
+        runner:{path:runnerPath,sha256:sha256(fs.readFileSync(runnerPath)),platform:process.platform,
+          source_repo:driverRepo,source_head:driverHead},
+        shell:process.platform==='win32'?path.join(process.env.ProgramFiles||'C:/Program Files','Git','bin','bash.exe'):'bash',
+        host:{hostname:os.hostname(),platform:process.platform,arch:os.arch()},
+        input_scope:{tree:candidateTree,command:'bash scripts/test.sh',
+          gate_sha256:sha256(fs.readFileSync(path.join(clone.dir,'scripts/test.sh'))),jobs:options.jobs}};
+      // The raw receipt is archived byte-for-byte before this clone can be removed.
+      const originalPath=gate.full_receipt+'.original';
+      fs.writeFileSync(originalPath,JSON.stringify(original,null,2)+'\n');
+      receipt=retainFullProof(originalPath,gitDir,{candidateHead});
+    }
     fs.writeFileSync(gate.full_receipt,JSON.stringify(receipt,null,2)+'\n');
   }
   const verdict = blocked.length ? 'blocked'

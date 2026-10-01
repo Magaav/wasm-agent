@@ -241,6 +241,19 @@ SKIPPED=$((SKIPPED + INSTANCE_SKIPPED))
 rm -f "$INSTANCE_VERDICT"
 gate_phase_begin self-update
 BIN=rust/target/release/wa
+# Combined-tree wave fixtures are required when shipped; absence is explicit intermediate coverage.
+for wave_spec in 'lifecycle mjs waveLifecycle 40 no' 'retire mjs waveRetire 20 no' 'executor cjs waveExecutor 11 yes' 'proof mjs waveProof 18 no' 'restart mjs waveRestart 9 no' 'public mjs wavePublic 20 yes'; do
+  set -- $wave_spec
+  wave_fixture="scripts/test-wave-$1.$2"
+  if [ ! -f "$wave_fixture" ]; then
+    echo "SKIP: wave $1 fixture absent from this intermediate source tree"
+    SKIPPED=$((SKIPPED + 1))
+  elif [ "$5" = yes ]; then
+    run_proof_fixture "$3" "$4" node "$wave_fixture" "$BIN"
+  else
+    run_proof_fixture "$3" "$4" node "$wave_fixture"
+  fi
+done
 # A turn cannot deploy the process serving that same turn. The marker crosses
 # the Rust host's shell boundary; both entry points must refuse before waiting
 # for idle or touching an installed binary.

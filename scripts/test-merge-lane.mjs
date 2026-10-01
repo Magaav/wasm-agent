@@ -25,6 +25,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {fullProof} from './lib/full-gate-proof.mjs';
 
 const LANE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'merge-lane.mjs');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-merge-lane-test-'));
@@ -58,6 +59,8 @@ try {
   // that inherited the machine default would store LF whatever the test writes, and a CRLF case that
   // cannot store CRLF proves nothing. The fixture states the same setting the repository states.
   git(repo, 'config', 'core.autocrlf', 'false');
+  fs.mkdirSync(path.join(repo,'scripts'));
+  write(path.join(repo,'scripts/test.sh'),'#!/bin/sh\nprintf "fixture assertion passed\\nsmoke ok (2 skipped)\\n"\n');
   write(path.join(repo, 'a.txt'), 'base\n');
   write(path.join(repo, 'd.txt'), 'd-base\n');
   write(path.join(repo, 'keep.txt'), 'keep\n');
@@ -392,6 +395,18 @@ export function audit(repo,{target='main'}={}) {
   ok(git(repo, 'for-each-ref', '--format=%(refname)', 'refs/heads').split('\n').length === 7,
     'no branch was created in the source repository');
   ok(git(repo, 'stash', 'list') === '', 'nothing was stashed');
+  console.log('12. default-command proof persists actual disposable-source identity');
+  const actual=lane(repo,['--base','main','change/one','--no-reuse-tree'],env);
+  ok(actual.status===0,'real fixture test.sh default command passes',actual.stdout);
+  const receipt=JSON.parse(fs.readFileSync(actual.json.gate.full_receipt));
+  const proof=fullProof(receipt,actual.json.candidate.tree,{ownerRepo:repo});
+  ok(receipt.schema===2&&proof.verified,'retained proof verifies after actual clone removal',proof.reason);
+  ok(proof.tested_repo!==repo&&!fs.existsSync(proof.tested_repo),'original disposable tested repo preserved and actually retired');
+  ok(proof.head===actual.json.candidate.head,'actual tested HEAD remains immutable');
+  const again=lane(repo,['--base','main','change/one','--no-reuse-tree'],env);
+  ok(again.status===0&&again.json.gate.reused===true&&again.json.candidate.gate_run_count===0,'identical tree reuses original retained proof with zero new gate runs',again.stdout);
+  const derived=fullProof(JSON.parse(fs.readFileSync(again.json.gate.full_receipt)),again.json.candidate.tree,{ownerRepo:repo});
+  ok(derived.verified&&derived.original_receipt.sha256===proof.original_receipt.sha256&&derived.tested_repo===proof.tested_repo&&derived.head===proof.head,'derived receipt preserves untouched original identity');
 } catch (error) {
   failed += 1;
   console.log(`  FAIL harness - ${error.message}`);

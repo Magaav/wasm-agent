@@ -229,3 +229,11 @@ An immutable published landing cannot be refreshed into another delivery.
 The private published-record fixture passes 10 checks; production records are
 not manually overwritten. Wave monitor/shipping and closure adapters use the
 shared full-proof validator and original tested-directory provenance.
+
+### Immutable full-proof identity repair
+
+Full proof reuse validates the actual tested repository commit/tree and tracked finish or merge-lane runner bytes, native shell/platform, log digest and terminal skip count. Fresh merge-lane receipts record execution host and gate input scope. Historical receipts retain any missing host attestation explicitly; retention never invents an execution boot or host.
+
+Before retiring a disposable source tree, merge-lane retains the raw original receipt, log, runner, gate script and scoped Git commit/tree/blob objects as immutable SHA-256-addressed artifacts under the shared Git directory. A derived schema-2 wrapper separates storage owner and candidate HEAD from original tested repository and HEAD. Missing source without pinned provenance, corruption, unknown platform, runner mismatch and original-identity overrides fail closed. These artifacts are local evidence, not an authenticated signature against an actor able to replace the entire evidence envelope.
+
+The full gate and focused catalog name wave lifecycle (40), retirement (20), executor (11), proof adapters (18), restart (9) and public adapters (20). Intermediate absence counts explicit skips; it never establishes complete wave coverage. The public and executor fixtures receive the source-built runtime. Final combined-tree coverage and independent review remain required.
