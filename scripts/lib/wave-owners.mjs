@@ -9,10 +9,19 @@ export function orcaJSON(config,args) {
   let value;try{value=JSON.parse(r.stdout);}catch{throw Error('orca_inventory_unreadable');}
   if(r.status!==0 || value.ok!==true)throw Error('orca_inventory_unavailable:'+JSON.stringify(value.error));return value.result;
 }
+const nonemptyString=x=>typeof x==='string' && x.length>0;
+const finiteStamp=x=>typeof x==='number' && Number.isFinite(x) && x>0;
 export function positiveCurrentOwner(worker,terminal,card) {
   if(!terminal || terminal.orphaned || !terminal.connected || !card) return false;
+  // Absent identity is not a matching identity. A pane or actor generation that cannot
+  // name itself cannot prove quiescence, so it must fail closed rather than let
+  // frozenOwners compare undefined===undefined and admit an identity-less owner.
+  if(!nonemptyString(terminal.incarnationId))return false;
+  if(!nonemptyString(card.worktreeInstanceId))return false;
   const agents=card.agents;
   if(!Array.isArray(agents) || !agents.length || agents.some(a=>a.state!=='done' || a.interrupted))return false;
+  if(agents.some(a=>!nonemptyString(a.paneKey) || !finiteStamp(a.updatedAt)))return false;
+  if(new Set(agents.map(a=>a.paneKey)).size!==agents.length)return false;
   if(worker && (worker.dispatchStatus!=='completed' || !['succeeded','failed'].includes(worker.workerState) || !['released','retained'].includes(worker.terminalState) ||
       worker.projection?.stage?.activity!=='done' || worker.projection?.liveness?.verdict!=='live'))return false;
   return true;
@@ -40,16 +49,23 @@ export function ownerInventory(config) {
   const relevant=terminals.terminals.filter(t=>t.worktreeId?.startsWith(config.orca_repo_id+'::'));
   const cards=ps.worktrees.filter(t=>t.repoId===config.orca_repo_id);
   const unresolved=[];
+  const incarnationCount={};for(const t of relevant)incarnationCount[t.incarnationId||'']=(incarnationCount[t.incarnationId||'']||0)+1;
   for(const terminal of relevant) {
     const card=cards.find(c=>c.worktreeId===terminal.worktreeId);
     // Old settled dispatches cannot speak for a reused/taken-over current pane.
     // Current card agent status is mandatory even for ordinary coordinator panes.
     const active=workers.filter(w=>w.agentTerminalHandle===terminal.handle && w.dispatchStatus!=='completed');
-    if(active.length || !positiveCurrentOwner(null,terminal,card))unresolved.push({terminal:terminal.handle,worktree:terminal.worktreePath,reason:'current_owner_not_positively_idle'});
+    const duplicated=(incarnationCount[terminal.incarnationId||'']||0)>1;
+    if(active.length || duplicated || !positiveCurrentOwner(null,terminal,card))unresolved.push({terminal:terminal.handle,worktree:terminal.worktreePath,reason:duplicated?'current_actor_incarnation_duplicated':'current_owner_not_positively_idle'});
   }
-  for(const card of cards)if(card.agents?.some(a=>a.state!=='done') || card.status==='working') {
-    if(!unresolved.some(x=>x.worktree===card.path))unresolved.push({worktree:card.path,reason:'current_actor_working_or_unknown'});
-  }
+  const instanceCount={};for(const card of cards)instanceCount[card.worktreeInstanceId||'']=(instanceCount[card.worktreeInstanceId||'']||0)+1;
+  for(const card of cards){const duplicated=(instanceCount[card.worktreeInstanceId||'']||0)>1;
+    if(card.agents?.some(a=>a.state!=='done') || card.status==='working' || duplicated) {
+      if(!unresolved.some(x=>x.worktree===card.path))unresolved.push({worktree:card.path,reason:duplicated?'current_actor_generation_duplicated':'current_actor_working_or_unknown'});
+    }}
+  // Positive owner/freeze proof may only issue after the full roster names every
+  // incarnation/instance: missing generations fail closed here rather than later.
+  if(relevant.some(t=>!nonemptyString(t.incarnationId)) || cards.some(c=>!nonemptyString(c.worktreeInstanceId)))throw Error('current_actor_identity_incomplete');
   return {ok:!unresolved.length,complete:true,unresolved,terminals:relevant.map(t=>({handle:t.handle,incarnationId:t.incarnationId,worktree:t.worktreePath})),
     cards:cards.map(c=>({path:c.path,worktreeId:c.worktreeId,instance:c.worktreeInstanceId,agents:c.agents?.map(a=>({paneKey:a.paneKey,state:a.state,updatedAt:a.updatedAt}))})),
     discovered_runs:runs.map(r=>r.id),workers:workers.length};

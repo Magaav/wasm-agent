@@ -83,7 +83,13 @@ pub(crate) fn validate(root:&Path,args:&Value)->io::Result<Value> {
     }
     if effects["original_execution_outcome"]!="unknown" || effects["never_replay"]!=true || effects["quarantine_preserved"]!=true || review["verdict"]!="allocation_safe_original_unknown" || review["never_replay"]!=true {return Err(error("legacy_unknown_outcome_and_quarantine_required"));}
     let reviewer=field(&args["review"],"signer")?;
-    if [field(&args["identity"],"signer")?,field(&args["drain"],"signer")?,field(&args["effects"],"signer")?].contains(&reviewer){return Err(error("legacy_review_not_independent"));}
+    let evidence_signers=[field(&args["identity"],"signer")?,field(&args["drain"],"signer")?,field(&args["effects"],"signer")?];
+    if evidence_signers.contains(&reviewer){return Err(error("legacy_review_not_independent"));}
+    // A label is not identity. Independent review needs a distinct authorized key:
+    // otherwise one keypair can sign every fact under different aliases and appear
+    // to be four independent observers. Reject the reviewer key matching any evidence key.
+    let reviewer_key=hex(field(&authority["keys"][reviewer],"public_key")?)?;
+    for signer in evidence_signers {if hex(field(&authority["keys"][signer],"public_key")?)?==reviewer_key{return Err(error("legacy_reviewer_key_not_distinct"));}}
     for (key,fact) in [("identity",&identity_fact),("drain",&drain_fact),("effects",&effects_fact)] {if review[format!("{key}_sha256")]!=fact["sha256"]{return Err(error("legacy_review_evidence_binding_mismatch"));}}
     if fs::read(directory.join("state.json"))?!=raw{return Err(error("legacy_state_moved_during_validation"));}
     Ok(json!({"schema":1,"operation_id":id,"expected":current,"state_sha256":hash(&raw),"originals":observed,"authority_sha256":hash(&authority_raw),"observations":[identity_fact,drain_fact,effects_fact,review_fact],"allocation_safe":true,"original_execution_outcome":"unknown","never_replay":true,"quarantine_preserved":true}))

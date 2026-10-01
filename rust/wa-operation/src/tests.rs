@@ -41,6 +41,14 @@ fn legacy_adjudication_preserves_unknown_outcome_and_requires_independent_native
     child.kill().unwrap();child.wait().unwrap(); // Actual owned handle and positive exit, not PID absence.
     let receipt=m.adjudicate_legacy(&args).unwrap();
     assert_eq!(m.adjudicate_legacy(&args).unwrap(),receipt);
+    // Independent review means a distinct KEY, not a distinct label. Signing the review
+    // with the observer's own key under another authorized alias must be refused.
+    let original_authority=fs::read(root.join("legacy-authority.json")).unwrap();
+    atomic_json(&root.join("legacy-authority.json"),&json!({"schema":1,"keys":{"observer":{"public_key":hex(observer.public_key().as_ref()),"roles":["identity","drain","effects"]},"reviewerAlias":{"public_key":hex(observer.public_key().as_ref()),"roles":["review"]}}})).unwrap();
+    let alias_review=capture("review-alias.json",json!({"kind":"legacy-allocation-safety-review","operation_id":id,"originals_sha256":originals_hash,"store_identity":store,"state_sha256":state_hash,"identity_sha256":identity["sha256"],"drain_sha256":drain["sha256"],"effects_sha256":effects["sha256"],"verdict":"allocation_safe_original_unknown","never_replay":true}),&observer,"reviewerAlias");
+    let mut alias_args=args.clone();alias_args["review"]=alias_review;
+    assert!(m.adjudicate_legacy(&alias_args).unwrap_err().to_string().contains("legacy_reviewer_key_not_distinct"));
+    fs::write(root.join("legacy-authority.json"),&original_authority).unwrap();
     let mut replaced=args.clone();replaced["replacement_note"]=json!("different durable bundle");
     assert!(m.adjudicate_legacy(&replaced).unwrap_err().to_string().contains("bundle_moved"));
     assert_eq!(receipt["original_execution_outcome"],"unknown");assert_eq!(receipt["never_replay"],true);
