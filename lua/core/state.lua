@@ -110,7 +110,8 @@ function M.mutate(fn, expected_revision)
   writing = nil
   frozen = old
   if not ok then pcall(sql, 'sql_exec', 'ROLLBACK'); error(result) end
-  sql('sql_exec', 'COMMIT')
+  local committed, problem = pcall(sql, 'sql_exec', 'COMMIT')
+  if not committed then pcall(sql, 'sql_exec', 'ROLLBACK'); error(problem) end
   return result
 end
 

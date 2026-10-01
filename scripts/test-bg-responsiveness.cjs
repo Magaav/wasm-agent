@@ -215,8 +215,16 @@ async function routingProbe(port) {
   const zero = request(port, '/me', { session: 'hold-reader-zero', timeout: 6000 });
   await until(() => fs.existsSync(path.join(work, 'reader.entered')), 'worker 0 read barrier');
   const held = healthy(await request(port, '/health').promise);
-  assert.equal(threads(held).find((t) => t.id === 0)?.label, 'GET /me', 'read barrier must own worker 0');
-  const idleReaders = threads(held).filter((t) => t.id > 0 && t.id < 4 && !t.label);
+  const reader=threads(held).find(t=>t.label==='GET /me');
+  assert.ok(reader,'read barrier must own a real interpreter');
+  if(options.expect)assert.equal(reader.id,0,'historical reproduction holds worker 0');
+  else assert.ok(reader.id>=3,'a held read must use reserved capacity, never a run slot');
+  // In reserved-capacity mode the second reader grows on demand; one healthy
+  // read establishes that capacity without relying on idle warm run threads.
+  if(!options.expect)healthy(await request(port,'/me',{session:'reserved-paired'}).promise);
+  const pairedHealth=healthy(await request(port,'/health').promise);
+  const idleReaders = threads(pairedHealth).filter((t) => options.expect
+    ? t.id>0&&t.id<4&&!t.label : t.id>=3&&!t.label);
   assert.ok(idleReaders.length >= 1, 'must have an idle reader alongside held background worker');
   phase.held = snapshot(held);
   phase.idleReaderIds = idleReaders.map((t) => t.id);
@@ -241,8 +249,15 @@ async function routingProbe(port) {
   const backgroundInstance = healthy(bgResult).instance;
   assert.ok(backgroundInstance && bgResult.value.fixture, 'mock provider run must finish successfully');
   assert.equal(bgResult.value.content, 'fixture');
-  for (const r of reads) healthy(r);
-  for (const r of reads) assert.equal(r.value.session, r.session, 'read must return its fixture token');
+  for (const r of reads) {
+    if(!options.expect && r.status===503) {
+      assert.equal(r.value.error,'read_capacity_busy','saturation must name bounded read overload');
+      assert.ok(r.ms<300,'saturated read must refuse promptly, never queue behind a run');
+    } else {
+      healthy(r);
+      assert.equal(r.value.session,r.session,'read must return its fixture token');
+    }
+  }
   const queuedBehindBackground = reads.filter((r) => phase.pendingWhileHeld.includes(r.session) && r.value.instance === backgroundInstance);
   phase.reads = reads.map(json);
   phase.background = json(bgResult);
@@ -376,6 +391,22 @@ async function pressureProbe(port) {
   phase.passed = true;
 }
 
+async function retirementProbe(port) {
+  const phase=report.phases.retirement={};
+  await until(async()=>healthy(await request(port,'/health').promise).node_threads_retired>0,'idle reader retirement',1800);
+  const reads=Array.from({length:20},(_,i)=>request(port,'/me',{session:'retired-'+i,timeout:500}));
+  await Promise.all(reads.map(r=>r.promise));
+  for(const r of reads) {
+    assert.ok(r.ms<500&&!r.timedOut,'retirement/reselection must remain bounded');
+    if(r.status===503)assert.equal(r.value.error,'read_capacity_busy');
+    else {healthy(r);assert.equal(r.value.session,r.session);}
+  }
+  assert.ok(reads.some(r=>r.status===200),'retired read capacity must respawn and serve');
+  phase.reads=reads.map(json);
+  phase.health=snapshot(healthy(await request(port,'/health').promise));
+  phase.passed=true;
+}
+
 function stop() {
   if (stopPromise) return stopPromise;
   stopping = true;
@@ -438,8 +469,8 @@ async function main() {
     WA_GRAPH_DB: path.join(work, 'graph.db'), WASM_AGENT_LLM_MODEL: 'fixture',
     WASM_AGENT_LLM_BASE_URL: 'http://127.0.0.1:' + mock.address().port,
     WASM_AGENT_LLM_API_KEY: 'fixture-only', WASM_AGENT_WORKERS: '3', WASM_AGENT_WORKERS_MAX: '4',
-    WASM_AGENT_INTERACTIVE_RESERVE: '2', WASM_AGENT_CONTROL_WORKERS: '1',
-    WASM_AGENT_WORKERS_IDLE_SECONDS: '60', WASM_AGENT_WORKER_STALL_SECONDS: '30',
+    WASM_AGENT_INTERACTIVE_RESERVE: '2', WASM_AGENT_CONTROL_WORKERS: options.expect?'1':'2',
+    WASM_AGENT_WORKERS_IDLE_SECONDS: options.expect?'60':'1', WASM_AGENT_WORKER_STALL_SECONDS: '30',
     WASM_AGENT_WORKER_STALL_EXIT_SECONDS: '0', WASM_AGENT_ADMISSION_TIMEOUT_MS: String(report.bounds.admissionTimeoutMs),
     WASM_AGENT_ADMISSION_QUEUE_DEPTH: String(report.bounds.admissionQueueDepth) };
   await nodePort.release();
@@ -457,12 +488,13 @@ async function main() {
   child.on('error', (error) => { fatal = error; });
   child.on('exit', (code, signal) => { if (!stopping) fatal = new Error('scratch node exited: ' + code + '/' + signal); });
   await until(async () => (await request(nodePort.port, '/health', { timeout: 150 }).promise).status === 200, 'scratch listener', 3500);
-  await until(async () => threads(healthy(await request(nodePort.port, '/health').promise)).length >= 4, 'warm readers');
+  await until(async () => threads(healthy(await request(nodePort.port, '/health').promise)).length >= (options.expect?4:3), 'warm run capacity');
   assert.equal(healthy(await request(nodePort.port, '/me', { session: 'fixture-check' }).promise).fixture, true,
     'must load scratch Lua, not embedded application logic');
   if (['all', 'routing'].includes(options.phase)) await routingProbe(nodePort.port);
   if (['all', 'admission'].includes(options.phase)) await admissionProbe(nodePort.port);
   if (!options.expect && ['all', 'pressure'].includes(options.phase)) await pressureProbe(nodePort.port);
+  if (!options.expect && options.phase==='all') await retirementProbe(nodePort.port);
   for (const [name, phase] of Object.entries(report.phases)) {
     assert.ok(phase.passed, name + ': ' + (options.expect ? 'expected reproduction absent' : 'requests delayed while barrier held'));
   }

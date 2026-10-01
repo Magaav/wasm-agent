@@ -725,6 +725,13 @@ $harness = @'
   check(settingsErrBox.textContent==='not confirmed '+dash+' no answer within 8s (the request was aborted); the node now reports opencode-go / deepseek-v4.1-flash',
     'an unanswered change must be reported as unconfirmed with the node answer, never as not applied, saw: ' +
     settingsErrBox.textContent);
+  window.__fixtures.models=Object.assign({},nodeAnswer,{provider:'openai-sub',model:'gpt-6-luna'});
+  await refreshMeta();
+  check(providerPicker.value==='openai-sub' && settingsErrBox.textContent.includes('in effect') &&
+    settingsErrBox.textContent.includes('openai-sub / gpt-6-luna'),
+    'a write applied after the immediate reconciliation must update its note on a later read');
+  window.__fixtures.models=nodeAnswer;
+  await refreshMeta();
   // 1b. The write is never answered and the node has applied it anyway (its own queue, or another
   //     window): the screen and the note must both say what the node reports. A note derived from
   //     the write outcome alone reads as a denial here - "not applied" next to the applied pair -

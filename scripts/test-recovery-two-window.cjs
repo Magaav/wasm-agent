@@ -36,7 +36,9 @@ function finish(res,text){event(res,{choices:[{delta:{content:text},finish_reaso
   Object.assign(env,{WASM_AGENT_HOME:root,WASM_AGENT_LUA_ROOT:repo,WASM_AGENT_PROVIDER:'opencode-go',WASM_AGENT_LLM_MODEL:'fixture-model',WASM_AGENT_LLM_API_KEY:'fixture-only',WASM_AGENT_LLM_BASE_URL:'http://127.0.0.1:'+modelPort,OPENAI_BASE_URL:'http://127.0.0.1:'+modelPort,OPENAI_API_KEY:'fixture-only',WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_RELAY:'',WASM_AGENT_MANAGED:'0',WASM_AGENT_MODELS_DEV_URL:'off',WASM_AGENT_PROVIDER_RESPONSE_RETRIES:'0',WA_GRAPH_WATCH:'0'});
   node=spawn(binary,['--db',path.join(root,'memory.db'),'serve','--port',String(port),'--client-port',String(await freePort()),'--ui',path.join(repo,'ui')],{cwd:repo,env,windowsHide:true,stdio:['ignore',log,log]});children.push(node);fs.closeSync(log);
   await until(async()=>{try{return(await api('health')).ok;}catch{return false;}},'node ready');
-  proxy=http.createServer((req,res)=>{const upstream=http.request({host:'127.0.0.1',port,path:req.url,method:req.method,headers:{...req.headers,...(req.headers.origin?{origin:'http://127.0.0.1:'+port}:{})}},r=>{
+  // This private reverse proxy forwards a coherent upstream Host/Origin pair;
+  // production's same-origin guard stays enabled and is not under test here.
+  proxy=http.createServer((req,res)=>{const upstream=http.request({host:'127.0.0.1',port,path:req.url,method:req.method,headers:{...req.headers,host:'127.0.0.1:'+port,...(req.headers.origin?{origin:'http://127.0.0.1:'+port}:{})}},r=>{
    if(delayedWrite&&req.method==='POST'&&req.url==='/provider'){
     delayedWrite=false;let data='';r.on('data',b=>data+=b);r.on('end',()=>setTimeout(()=>{if(!res.destroyed){res.writeHead(r.statusCode,r.headers);res.end(data);}},350));
    }else{res.writeHead(r.statusCode,r.headers);r.pipe(res);}
@@ -74,7 +76,7 @@ function finish(res,text){event(res,{choices:[{delta:{content:text},finish_reaso
   await evaluate(b,"send('NEXT-RUN').then(()=>true)");
   check(report.models.filter(m=>m.name!=='NEXT').every(m=>m.model==='fixture-model'),'in-flight runs retain immutable model snapshot');
   check(report.models.some(m=>m.name==='NEXT'&&m.model==='fixture-next'),'next run uses confirmed settings');
-  report.passed=true;console.log('two-window recovery ok ('+report.checks.length+' checks, 0 skipped; real browser/node, owned mock inference)');
+  report.passed=true;
  }catch(e){
   report.passed=false;report.error=e.stack;
   report.pages=await Promise.all(pages.map(async p=>{try{return {thread:p.thread,value:await evaluate(p.id,"({url:location.href,chatSession,conversationEpoch,synced,metaReady,transcriptReady,busy,followedSeq,liveRunId,liveEventSeq,liveCheckpointSeq,liveSyncFailed,text:document.body.innerText})")};}catch(error){return {thread:p.thread,error:String(error)};}}));
@@ -87,6 +89,8 @@ function finish(res,text){event(res,{choices:[{delta:{content:text},finish_reaso
   for(const c of children)if(c.exitCode===null&&c.signalCode===null){const done=once(c,'exit');c.kill();await Promise.race([done,delay(3000)]);}
   for(const server of [proxy,provider])if(server){server.closeAllConnections();await new Promise(r=>server.close(r));}
   report.cleanup={ownedPids:children.map(c=>({pid:c.pid,exited:c.exitCode!==null||c.signalCode!==null})),browserClosed};
+  if(!report.cleanup.ownedPids.every(c=>c.exited)||!browserClosed){report.passed=false;report.cleanup.error='owned process shutdown unverified';process.exitCode=1;}
   fs.writeFileSync(path.join(root,'report.json'),JSON.stringify(report,null,2)+'\n');console.log('evidence: '+path.join(root,'report.json'));
+  if(report.passed)console.log('two-window recovery ok ('+report.checks.length+' checks, 0 skipped; real browser/node, owned mock inference)');
  }
 })().catch(e=>{console.error(e.stack);process.exitCode=1;});

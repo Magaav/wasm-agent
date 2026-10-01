@@ -34,7 +34,12 @@ const parse=s=>JSON.parse(s.split(/\r?\n/).at(-1));
     assert.ok(['gpt-6-sol','gpt-6-astra'].includes(observed.model));
     console.log('selection state ok (9 checks, 0 skipped; real concurrent processes, pinned run, version conflict)');
   } finally {
-    for(const c of children) if(c.exitCode===null&&c.signalCode===null)c.kill();
+    await Promise.all(children.map(async c=>{
+      if(c.exitCode!==null||c.signalCode!==null)return;
+      await new Promise(resolve=>{const timer=setTimeout(resolve,3000);c.once('exit',()=>{clearTimeout(timer);resolve();});c.kill();});
+    }));
+    if(children.some(c=>c.exitCode===null&&c.signalCode===null))throw new Error('owned process drain unverified; evidence retained at '+root);
+    assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir())+path.sep),'scratch deletion stays in temporary root');
     fs.rmSync(root,{recursive:true,force:true});
   }
 })().catch(e=>{console.error(e);process.exitCode=1;});

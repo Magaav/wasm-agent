@@ -2509,6 +2509,7 @@ const SETTING_VALUE = {
 // applied by the node afterwards, and only the node's answer is the truth about where it is.
 let settingsChanging = false;
 let settingsNode = activeNode;
+let settingsReconciliation = null;
 function acceptSettings(payload) {
   if (!payload || payload.error || typeof payload.provider !== "string" || typeof payload.model !== "string") throw new Error(payload?.error || "invalid model settings response");
   if (settingsNode === activeNode && Number.isFinite(payload.settings_revision) && Number.isFinite(settings.settings_revision)
@@ -2572,6 +2573,7 @@ async function post(path, body) {
     return;
   }
   settingsError.textContent = payload.model_error || "";
+  settingsReconciliation = null;
 }
 
 // Draw the controls from the node's own answer after a settings change, and say what that answer is.
@@ -2582,11 +2584,23 @@ async function post(path, body) {
 // controls are still drawn from the last answer this window has and the note says so.
 async function reconcileControls(reason, sent) {
   const node=activeNode, target=chatSession, epoch=conversationEpoch;
+  settingsReconciliation={node,target,epoch,reason,sent};
   renderControls();
   settingsError.textContent = (sent ? 'not confirmed' : 'not sent') + ' - ' + reason;
   const read = await refreshMeta();
   if (node!==activeNode || target!==chatSession || epoch!==conversationEpoch) return;
   renderControls();
+  renderSettingsReconciliation(read);
+}
+
+function renderSettingsReconciliation(read) {
+  const pending=settingsReconciliation;
+  if (!pending) { if (read) settingsError.textContent=settings.model_error || ""; return; }
+  if (pending.node!==activeNode || pending.target!==chatSession || pending.epoch!==conversationEpoch) {
+    settingsReconciliation=null;
+    return;
+  }
+  const {reason,sent}=pending;
   const route = (settings.provider || "unknown provider") + " / " + (settings.model || "unknown model");
   const landed = !!(sent && sent.asked && sent.reads && sent.reads(settings) === sent.asked);
   if (!read) {
@@ -3359,6 +3373,9 @@ async function refreshMetaOnce() {
       renderUsage();
       renderPopFoot();
     }
+    // A timed-out write can apply after the immediate reconciliation read.
+    // Keep its note tied to the newly observed state on later refreshes too.
+    renderSettingsReconciliation(true);
     const provider = activeProvider();
     const label = provider ? provider.label : "local";
     const where = activeNode || "local";

@@ -761,7 +761,7 @@ fn health_body() -> Vec<u8> {
                 }
                 node_threads.push(serde_json::json!({
                     "id": index,
-                    "role": if index == 0 || run { "runs" } else { "reads" },
+                    "role": if index < control_floor() { "runs" } else { "reads" },
                     "session": node_thread_session(index),
                     "run_id": node_thread_run_id(index),
                     "state": if age >= stall_seconds() * 1000 { "stalled" } else if age < 1000 { "alive" } else { "busy" },
@@ -1610,9 +1610,8 @@ fn dispatch_http(
         return;
     }
     QUEUED.fetch_add(1, Ordering::Relaxed);
-    // A node-thread can retire between being chosen and being sent to, so the send is attempted against the
-    // slot's current sender and falls back to node-thread 0. `try_send` hands the request back on failure,
-    // which is what makes the retry possible rather than a lost request.
+    // A node-thread can retire between selection and delivery. Independent
+    // requests reselect within reserved capacity, then refuse boundedly.
     let mut attempt = 0;
     let mut target = target;
     let admitted_run_id = request.run_id;
@@ -1637,7 +1636,7 @@ fn dispatch_http(
                     let _ = respond(&mut stream, 503, "application/json", body);
                     break;
                 }
-                // A read/write node-thread is gone (retired). Node-thread 0 always exists, so it is the honest fallback.
+                // Retirement never grants a read permission to queue on a run slot.
                 if independent { release_read_destination(target); }
                 if independent && attempt < 2 {
                     attempt += 1;
@@ -1677,7 +1676,7 @@ fn dispatch_http(
                     let _ = respond(&mut stream, 503, "application/json", body);
                     break;
                 }
-                // Retired while this request was on its way. Try node-thread 0 once, then refuse.
+                // Retry only independent capacity; no fallback behind a long run.
                 if independent { release_read_destination(target); }
                 if independent && attempt < 2 {
                     attempt += 1;
@@ -1873,7 +1872,7 @@ fn node_thread_loop(
             // A read node-thread retires itself once it has been idle long enough and the pool is above the warm
             // minimum. Two things make that safe: it clears its own slot *before* returning, so the
             // dispatcher stops choosing it, and a request already on its way to a retired node-thread is not
-            // lost - `try_send` reports Disconnected and the accept thread retries on node-thread 0.
+            // lost - `try_send` reports Disconnected and the accept thread reselects read capacity.
             if idle_since.elapsed().as_secs() >= read_idle_seconds() && node_thread_count() > warm_read_node_threads() + 1 {
                 if let Some(pool) = POOL.get() {
                     if let Ok(mut slots) = pool.slots.lock() {
