@@ -4,6 +4,9 @@ const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),http
 const {spawn}=require('node:child_process');const {once}=require('node:events');const assert=require('node:assert/strict');
 const repo=path.resolve(__dirname,'..'),binary=path.resolve(process.argv[2]||'rust/target/release/wa.exe');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-two-window-'));const report={schema:1,root,checks:[],requests:[],models:[]};
+const embedded=process.argv.includes('--embedded');
+report.lua=embedded?'embedded candidate modules':'explicit source Lua root';
+report.binary={path:binary,sha256:require('node:crypto').createHash('sha256').update(fs.readFileSync(binary)).digest('hex')};
 const delay=ms=>new Promise(r=>setTimeout(r,ms));const children=[],sockets=new Set();let node,provider,proxy,chrome,ws;
 let port,delayedWrite=false;const held=new Map();let sequence=0;const waiting=new Map();let browserClosed=false;
 const pages=[];
@@ -33,7 +36,7 @@ function finish(res,text){event(res,{choices:[{delta:{content:text},finish_reaso
   });});const modelPort=await listen(provider);
   port=await freePort();const log=fs.openSync(path.join(root,'node.log'),'w');const env={...process.env};
   for(const k of Object.keys(env))if(/^(WA_|WASM_AGENT_|OPENAI_|OPENCODE_|ANTHROPIC_)/.test(k))delete env[k];
-  Object.assign(env,{WASM_AGENT_HOME:root,WASM_AGENT_LUA_ROOT:repo,WASM_AGENT_PROVIDER:'opencode-go',WASM_AGENT_LLM_MODEL:'fixture-model',WASM_AGENT_LLM_API_KEY:'fixture-only',WASM_AGENT_LLM_BASE_URL:'http://127.0.0.1:'+modelPort,OPENAI_BASE_URL:'http://127.0.0.1:'+modelPort,OPENAI_API_KEY:'fixture-only',WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_RELAY:'',WASM_AGENT_MANAGED:'0',WASM_AGENT_MODELS_DEV_URL:'off',WASM_AGENT_PROVIDER_RESPONSE_RETRIES:'0',WA_GRAPH_WATCH:'0'});
+  Object.assign(env,{WASM_AGENT_HOME:root,...(embedded?{}:{WASM_AGENT_LUA_ROOT:repo}),WASM_AGENT_PROVIDER:'opencode-go',WASM_AGENT_LLM_MODEL:'fixture-model',WASM_AGENT_LLM_API_KEY:'fixture-only',WASM_AGENT_LLM_BASE_URL:'http://127.0.0.1:'+modelPort,OPENAI_BASE_URL:'http://127.0.0.1:'+modelPort,OPENAI_API_KEY:'fixture-only',WASM_AGENT_RENDEZVOUS:'',WASM_AGENT_RELAY:'',WASM_AGENT_MANAGED:'0',WASM_AGENT_MODELS_DEV_URL:'off',WASM_AGENT_PROVIDER_RESPONSE_RETRIES:'0',WA_GRAPH_WATCH:'0'});
   node=spawn(binary,['--db',path.join(root,'memory.db'),'serve','--port',String(port),'--client-port',String(await freePort()),'--ui',path.join(repo,'ui')],{cwd:repo,env,windowsHide:true,stdio:['ignore',log,log]});children.push(node);fs.closeSync(log);
   await until(async()=>{try{return(await api('health')).ok;}catch{return false;}},'node ready');
   // This private reverse proxy forwards a coherent upstream Host/Origin pair;
