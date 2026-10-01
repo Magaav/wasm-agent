@@ -35,7 +35,7 @@
 # --- the node's own directories ----------------------------------------------------------------
 # `WASM_AGENT_HOME` is the *home*, and the config lives under it - this is what the node itself uses
 # (rust/wa-host/src/main.rs resolve_home, lua/core/paths.lua paths.config()). `upgrade.sh` reads the same
-# variable as if it were the config directory itself (`HOME_DIR="${WASM_AGENT_HOME:-$HOME/.wasm-agent}"`),
+# variable as if it were the config directory itself (the former `HOME_DIR="${WASM_AGENT_HOME:-$HOME/.wasm-agent}"`),
 # which is the other half of this class: two expressions, one place. This function is the one expression.
 wa_home_dir() {
   if [ -n "${WASM_AGENT_HOME:-}" ]; then printf '%s' "$WASM_AGENT_HOME"; return 0; fi

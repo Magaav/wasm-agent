@@ -57,6 +57,9 @@ import crypto from 'node:crypto';
 import {spawn, spawnSync} from 'node:child_process';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 
+import {findFullProof} from './lib/full-gate-proof.mjs';
+import {evaluate} from './delivery-admission.mjs';
+import {readRecord} from './lib/delivery-store.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const AUDIT = process.env.WA_MERGE_LANE_AUDIT || path.join(here, '..', 'skills', 'git-orchestrator', 'scripts', 'audit.mjs');
 // A named identity, because an automatic merge has to be attributable. It is not the
@@ -279,19 +282,20 @@ function resolveRef(cwd, ref) {
 
 export function parseArgs(argv) {
   const options = {tips: [], base: 'origin/main', allPending: false, jobs: '2', gateCommand: 'bash scripts/test.sh',
-    timeoutSeconds: 3600, clone: null, keepClone: false, hooks: true, partial: false, json: null, repo: null,
+    timeoutSeconds: 3600, clone: null, keepClone: false, hooks: true, partial: false, json: null, repo: null, deliveryStore: null,
     keepClones: retentionKeep(process.env[CLONE_KEEP_VARIABLE], CLONE_KEEP_VARIABLE),
     reuse: true, reuseTreeNamed: false,
     reuseTree: String(process.env.WA_MERGE_LANE_TREE || '').trim() || path.join(os.homedir(), '.wasm-agent', 'merge-lane-tree')};
   if (String(process.env.WA_MERGE_LANE_TREE || '').trim()) options.reuseTreeNamed = true;
-  const needs = new Set(['--repo', '--base', '--jobs', '--gate-command', '--timeout-seconds', '--clone', '--json', '--reuse-tree']);
+  const needs = new Set(['--repo', '--base', '--jobs', '--gate-command', '--timeout-seconds', '--clone', '--json', '--reuse-tree', '--delivery-store']);
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (needs.has(arg)) {
       const value = argv[index + 1];
       if (value === undefined) throw Error(`${arg} needs a value`);
       index += 1;
-      if (arg === '--repo') options.repo = value;
+      if (arg === '--delivery-store') options.deliveryStore=value;
+      else if (arg === '--repo') options.repo = value;
       else if (arg === '--base') options.base = value;
       else if (arg === '--jobs') options.jobs = value;
       else if (arg === '--gate-command') options.gateCommand = value;
@@ -718,10 +722,21 @@ async function laneAcquire({cwd, label}) {
     return {obtained: false, refused: false, marker: 'off', record};
   }
   if (LANE_HELD) {
-    record.mode = 'inherited';
-    record.reason = `inherited ${LANE_HELD}: this gate runs inside a gate that already has its admission`;
+    let origin;
+    try { origin=JSON.parse(process.env.GATE_LANE_ORIGIN || ''); } catch {}
+    const validation=origin && LANE_HELD===`slot:${origin.id}`
+      ? spawnSync(process.execPath,[LANE_SCRIPT,'validate','--dir',origin.dir,'--id',String(origin.id),
+        '--lease',origin.lease,'--holder-pid',String(process.pid)],
+      {encoding:'utf8',windowsHide:true,timeout:20000}) : null;
+    if (!validation || validation.status !== 0) {
+      record.mode='refused';record.reason=`invalid_inheritance: ${LANE_HELD} has no verified live ancestor lease`;
+      laneNotice(`gate lane: ${record.reason}`);
+      return {obtained:false,refused:true,marker:null,record};
+    }
+    record.mode='inherited';record.request=origin.id;record.dir=origin.dir;
+    record.reason=`inherited ${LANE_HELD}: verified live ancestor lease`;
     laneNotice(`gate lane: ${record.reason}; no second slot is requested`);
-    return {obtained: false, refused: false, marker: LANE_HELD, record};
+    return {obtained:false,refused:false,marker:LANE_HELD,origin,record};
   }
   const started = Date.now();
   let child;
@@ -732,8 +747,8 @@ async function laneAcquire({cwd, label}) {
   } catch (error) {
     record.mode = 'unavailable';
     record.reason = `could not start ${LANE_SCRIPT}: ${error.message}`;
-    laneNotice(`gate lane: ${record.reason}; the merged tree is gated WITHOUT a slot - gates are not serialized for this run.`);
-    return {obtained: false, refused: false, marker: 'unavailable', record};
+    laneNotice(`gate lane: ${record.reason}; the merged tree was not gated.`);
+    return {obtained: false, refused: true, marker: null, record};
   }
   const outcome = await new Promise(resolve => {
     let out = '', err = '', settled = false;
@@ -758,7 +773,7 @@ async function laneAcquire({cwd, label}) {
     record.reason = `slot #${outcome.grant.id} granted`
       + (record.waited_ms >= 1000 ? ` after waiting ${(record.waited_ms / 1000).toFixed(1)}s` : ' at once');
     laneNotice(`gate lane: ${record.reason}; this process gates the merged tree and releases the slot when it ends.`);
-    return {obtained: true, refused: false, marker: `slot:${outcome.grant.id}`, child, record};
+    return {obtained: true, refused: false, marker: `slot:${outcome.grant.id}`, origin:outcome.grant.inheritance, child, record};
   }
   const words = String(outcome.error?.message || outcome.err || '').trim().split('\n').filter(Boolean).pop()
     || 'no reason given';
@@ -773,16 +788,9 @@ async function laneAcquire({cwd, label}) {
     laneNotice(`gate lane: no slot was granted and this is terminal, not a retry: ${words}`);
     return {obtained: false, refused: true, marker: null, record};
   }
-  // Not a decision: the lane could not be consulted at all (no script, an unreadable store, a
-  // version skew that rejected the call) or the acquirer died before it settled. The gate is what
-  // proves the merge, so it runs and says so, loudly. Refusing here would turn one unreadable store
-  // into a factory that can land nothing, which is worse than the contention this lane removes;
-  // `WA_GATE_LANE=off` produces this same outcome deliberately, by name.
-  record.mode = 'unavailable';
-  record.reason = words;
-  laneNotice(`gate lane: could not be consulted (${words}); the merged tree is gated WITHOUT a slot -`);
-  laneNotice('gate lane: gates are not serialized for this run. Set WA_GATE_LANE=off to say so on purpose.');
-  return {obtained: false, refused: false, marker: 'unavailable', record};
+  record.mode='unavailable';record.reason=words;
+  laneNotice(`gate lane: could not be consulted (${words}); the merged tree was not gated.`);
+  return {obtained:false,refused:true,marker:null,record};
 }
 
 // Give the slot back and record what the gate did with it. Best effort: the row is the lane's, the
@@ -873,6 +881,14 @@ async function main() {
     if (!input.sha || !/^[a-f0-9]{40,64}$/.test(input.sha)) {
       record.state = 'blocked'; record.reason = `cannot resolve ${input.name} to a commit in ${gitDir}`;
       blocked.push(record); inputs.push(record); continue;
+    }
+    if (options.deliveryStore) {
+      const delivery=readRecord(options.deliveryStore,input.name.replace(/^origin\//,''));
+      if (!delivery) { record.state='blocked';record.reason='delivery admission record missing';blocked.push(record);inputs.push(record);continue; }
+      record.admission=evaluate({repo:gitDir,record:delivery});
+      if(record.admission.decision==='refused'||record.admission.observed.tip!==input.sha) {
+        record.state='blocked';record.reason=record.admission.refusal||'admitted tip moved';blocked.push(record);inputs.push(record);continue;
+      }
     }
     const counts = git(gitDir, 'rev-list', '--left-right', '--count', `${baseSha}...${input.sha}`);
     if (counts.status !== 0) {
@@ -981,7 +997,14 @@ async function main() {
   // 4. The gate, on the MERGED tree. Invariant 2: a branch's receipt never covers the merge.
   let gate = {command: options.gateCommand, ran: false, refused: false, exit: null, ms: null, log: null, log_sha256: null,
     skipped: null, verdict_line: null, verdict_found: false, lane: null};
-  if (clone && crlf.state !== 'offenders' && (!blocked.length || options.partial)) {
+  const existingFull = clone && options.gateCommand==='bash scripts/test.sh'
+    ? findFullProof(gitDir,candidateTree) : {verified:false,reason:'no candidate or custom gate command'};
+  if (existingFull.verified) {
+    gate={...gate,reused:true,exit:0,ms:0,log:existingFull.log,log_sha256:existingFull.log_sha256,
+      skipped:existingFull.skipped,verdict_line:existingFull.verdict_line,verdict_found:true,proof:existingFull};
+    note(`merge-lane: complete identical-tree gate evidence reused from ${existingFull.receipt}; no new gate run`);
+  }
+  if (!gate.reused && clone && crlf.state !== 'offenders' && (!blocked.length || options.partial)) {
     // Inside `.git`, not the worktree: the gate asks for a clean tree (scripts/test-deploy-downgrade.sh
     // refuses on dirt), so the lane's own log must not be the dirt it reports.
     const logPath = path.join(clone.git_dir, 'wa-merge-lane-gate.log');
@@ -1027,6 +1050,7 @@ async function main() {
       note(`merge-lane: the merged tree was NOT gated - the gate lane granted no slot: ${slot.record.reason}`);
     } else {
       environment.GATE_LANE_HELD = slot.marker;
+      environment.GATE_LANE_ORIGIN = slot.origin ? JSON.stringify(slot.origin) : "";
       // Phase timing is the gate's own instrumentation (scripts/lib/gate-phases.sh); this lane only names
       // where the machine-readable copy goes and reads it back. The file is removed first, because a
       // previous run's table must never be read as this run's - the same reason
@@ -1042,14 +1066,24 @@ async function main() {
       const descriptor = fs.openSync(logPath, 'w');
       let spawned;
       try {
-        spawned = spawnSync('bash', ['-c', options.gateCommand], {cwd: clone.dir, env: environment,
+        spawned = spawnSync(process.platform==='win32' ? path.join(process.env.ProgramFiles || 'C:/Program Files','Git','bin','bash.exe') : 'bash', ['-c', options.gateCommand], {cwd: clone.dir, env: environment,
           timeout: options.timeoutSeconds * 1000, windowsHide: true, stdio: ['ignore', descriptor, descriptor]});
       } finally { fs.closeSync(descriptor); }
       gate.ms = elapsedMs(gateStarted);
       gate.ran = true;
       gate.exit = spawned.status === null ? 'timeout_or_spawn_error' : spawned.status;
       gate.detail = spawned.error ? spawned.error.message : null;
-      await laneRelease(slot, spawned.status, `merge-lane gate in ${clone.dir} exited ${gate.exit}`);
+      if(spawned.error && slot.obtained) {
+        const deferred=spawnSync(process.execPath,[LANE_SCRIPT,'defer','--id',String(slot.record.request),
+          '--gate-pid',String(spawned.pid||0),'--detail',`merge gate execution error: ${spawned.error.message}; descendant drain required`],
+          {encoding:'utf8',windowsHide:true,timeout:20000});
+        gate.drain_required=true;
+        if(deferred.status!==0) {
+          laneNotice(`gate lane: could not persist drain uncertainty: ${deferred.stderr||deferred.error?.message}; retaining owner`);
+          await new Promise(()=>{setInterval(()=>{},1000);});
+        }
+        slot.child?.unref();slot.child?.stdout?.destroy();slot.child?.stderr?.destroy();
+      } else {await laneRelease(slot, spawned.status, `merge-lane gate in ${clone.dir} exited ${gate.exit}`);}
       const log = fs.readFileSync(logPath, 'utf8');
       fs.writeFileSync(logPath, log);
       const verdict = parseGateVerdict(log);
@@ -1076,10 +1110,22 @@ async function main() {
   const mainMoved = targetRefAfter === null ? null : targetRefAfter !== baseSha;
   timings.total_ms = elapsedMs(started);
 
-  const gatePassed = gate.ran && gate.exit === 0 && gate.verdict_found;
+  const gatePassed = (gate.ran || gate.reused) && gate.exit === 0 && gate.verdict_found;
+  if (gatePassed && options.gateCommand==='bash scripts/test.sh') {
+    // Persist in this lane's Git metadata, before its disposable tree is removed.
+    // Only the identical combined source tree can reuse this; focused checks never enter here.
+    const metadata=requireGit(gitDir,['rev-parse','--git-path','wa-combined-gate.json'],'combined receipt path');
+    const durableLog=path.resolve(gitDir,metadata+'.log');
+    fs.copyFileSync(gate.log,durableLog);
+    const receipt={schema:1,kind:'full',repo:path.resolve(gitDir),head:candidateHead,tree:candidateTree,passed:true,
+      gate_exit:0,gate_runs:1,gate_ms:gate.reused?gate.proof.gate_ms:gate.ms,skipped:gate.skipped,
+      log:durableLog,log_sha256:gate.log_sha256,at:new Date().toISOString()};
+    gate.full_receipt=path.resolve(gitDir,metadata);
+    fs.writeFileSync(gate.full_receipt,JSON.stringify(receipt,null,2)+'\n');
+  }
   const verdict = blocked.length ? 'blocked'
     : !candidateMerges && !accepted.length ? 'nothing_to_merge'
-    : gate.ran ? (gatePassed ? 'pass' : 'gate_failed')
+    : (gate.ran || gate.reused) ? (gatePassed ? 'pass' : 'gate_failed')
     : gate.refused ? 'gate_refused'
     : 'merge_only';
   // A refused slot is neither a pass nor a gate failure: the merged tree was never gated, so the run
@@ -1104,7 +1150,7 @@ async function main() {
       conflicts: record.conflicts || record.merge?.conflicts || []})),
     skipped: skipped.map(record => ({name: record.name, sha: record.sha, reason: record.reason})),
     candidate: {branch: laneBranch, head: candidateHead, tree: candidateTree, merges: candidateMerges,
-      gated: gate.ran, stopped_before_merge: Boolean(accepted.length && !clone), steps},
+      gated: Boolean(gate.ran || gate.reused), gate_run_count: gate.ran ? 1 : 0, gate_reused: Boolean(gate.reused), stopped_before_merge: Boolean(accepted.length && !clone), steps},
     checks: {crlf, merge_subjects_judged_by: options.hooks && clone ? `${clone.dir}/.githooks` : null},
     gate, clone: clone ? {path: clone.dir, git_dir: clone.git_dir, clone_ms: clone.clone_ms,
       core_autocrlf: clone.core_autocrlf, reused: clone.reused === true, reuse_created: clone.reuse_created === true,
@@ -1151,7 +1197,7 @@ async function main() {
   if (options.json) fs.writeFileSync(path.resolve(options.json), `${JSON.stringify(result, null, 2)}\n`);
   note(`merge-lane: ${verdict} (exit ${exitCode}); candidate ${candidateTree}; gate ${gate.ran
     ? `exit ${gate.exit}, ${gate.skipped ?? '?'} skipped${gate.lane?.waited_ms >= 1000 ? ` after waiting ${(gate.lane.waited_ms / 1000).toFixed(0)}s for slot #${gate.lane.request}` : ''}`
-    : gate.refused ? 'not run, the gate lane granted no slot' : 'not run'}`);
+    : gate.reused ? 'identical-tree full proof reused; zero new runs' : gate.refused ? 'not run, the gate lane granted no slot' : 'not run'}`);
   process.stdout.write(`${JSON.stringify(result)}\n`);
   return exitCode;
 }

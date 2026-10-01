@@ -106,6 +106,7 @@ function finishFixture(name, gateScript) {
   git(dir, 'config', 'core.autocrlf', 'false');
   git(dir, 'config', 'user.name', 'fixture');
   git(dir, 'config', 'user.email', 'fixture@local.invalid');
+  fs.copyFileSync(laneCli,path.join(dir,'scripts','gate-lane.mjs'));
   fs.writeFileSync(path.join(dir, 'scripts', 'test.sh'), gateScript);
   git(dir, 'add', '-A');
   git(dir, 'commit', '-qm', `fixture: ${name}`);
@@ -323,6 +324,9 @@ async function main() {
   const broken = path.join(root, 'version-skew');
   fs.mkdirSync(path.join(broken, 'scripts'), {recursive: true});
   fs.copyFileSync(mergeRunner, path.join(broken, 'scripts', 'merge-lane.mjs'));
+  fs.mkdirSync(path.join(broken,'scripts','lib'),{recursive:true});
+  for(const file of ['delivery-admission.mjs','producer-admission.mjs','gate-check.mjs','gate-checks.mjs','lib/full-gate-proof.mjs','lib/delivery-store.mjs','lib/test-verdict.cjs'])
+    fs.copyFileSync(path.join(repo,'scripts',file),path.join(broken,'scripts',file));
   fs.writeFileSync(path.join(broken, 'scripts', 'gate-lane.mjs'),
     'process.stderr.write("gate lane: unknown option --holder-pid\\n");\nprocess.exit(76);\n');
   const unreadable = finishFixture('unavailable', "printf 'smoke ok (1 skipped)\\n'\n");
@@ -342,9 +346,9 @@ async function main() {
     '--repo', mergeFixtureA.dir, '--base', 'main', mergeFixtureA.tip, '--gate-command', passGate],
   {env: mergeFixtureA.env()});
   const skewJson = jsonOf(skewMerge.stdout);
-  check(skewMerge.status === 0 && skewJson.verdict === 'pass' && skewJson.gate.ran === true
+  check(skewMerge.status === 6 && skewJson.verdict === 'gate_refused' && skewJson.gate.ran === false
     && skewJson.gate.lane.mode === 'unavailable' && /unknown option --holder-pid/.test(skewJson.gate.lane.reason),
-  'a version skew between the lane and its consumer fails open too, and names the skew',
+  'a version skew refuses unreserved execution and names the skew',
   JSON.stringify({exit: skewMerge.status, verdict: skewJson.verdict, lane: skewJson.gate.lane}));
 
   // ---- 6. The transitions, from the lane's own history -------------------------------------------

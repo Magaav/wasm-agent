@@ -93,59 +93,17 @@ end
 -- while the install stayed on the old commit, and the command that wrote it had already said the
 -- sentinel would deploy the tree.
 --
--- The watcher writes its pid at `<config>/sentinel/sentinel.pid` when it starts and removes it when it
--- stops (`watch`/`stop` in `rust/wa-sentinel/src/main.rs`), and `wa-sentinel status` answers
--- "watching" by testing exactly that pid for liveness. So this asks the same question of the same
--- file rather than inventing a second definition of "running". It stays local on purpose: asking
--- `wa-sentinel status` would make the sentinel call this node's own `/health`, which is the one thing
--- an `/update` served by this node must not wait on.
-local function live_pid(pid)
-  if not host.exec then return nil end
-  -- `MSYS_NO_PATHCONV=1` is not decoration: this platform's bash rewrites the argument `/FI` into
-  -- `C:/Program Files/Git/FI` before `tasklist` ever sees it, so plain `tasklist /FI ...` answers
-  -- "Invalid argument/option" every time - measured on the machine this runs on, and a probe that
-  -- always fails is a refusal that never lifts. `kill -0` answers the same question everywhere else,
-  -- and unlike `/proc/<pid>` it is true on a platform that has no `/proc` (macOS).
-  local result = shell(platform.os() == "windows"
-    and ("MSYS_NO_PATHCONV=1 tasklist /FI \"PID eq " .. pid .. "\" /NH")
-    or ("kill -0 " .. pid .. " 2>/dev/null"))
-  if not result or (result.code or 0) ~= 0 then return nil end
-  -- `tasklist` exits 0 whether or not it matched anything; its answer is the output, which names the
-  -- pid when the process is there and says "no tasks" when it is not. `kill -0` is the exit code.
-  if platform.os() == "windows" and not tostring(result.stdout or ""):find(pid, 1, true) then return nil end
-  return pid
-end
-
--- The pid of a watcher that is alive right now, or nil. A stale pid file whose number now belongs to
--- some other process reads as running - that is the sentinel's own rule too (`pid_alive`), and the
--- alternative, a second opinion about what "the watcher" is, would be worse.
-local function watcher_pid(dir)
-  local pid = trim(first_line(read(dir .. "/sentinel.pid")))
-  if not pid:match("^%d+$") then return nil end
-  return live_pid(pid)
-end
-
--- Deploys already waiting to be performed, as box-relative names. `requests/` is waiting and
--- `claimed/` is being performed; `done/` and `failed/` are records, not queues. A request that cannot
--- be read as JSON is not counted: refusing every future `/update` because one file in the box is
--- garbage would be a worse failure than the duplicate this prevents.
-local function pending_deploys(dir)
-  local found = {}
-  for _, lane in ipairs({ "requests", "claimed" }) do
-    local listing = shell("ls -1 -- " .. quote(dir .. "/" .. lane) .. " 2>/dev/null")
-    if listing and (listing.code or 0) == 0 then
-      for name in tostring(listing.stdout or ""):gmatch("[^\r\n]+") do
-        name = trim(name)
-        if name:sub(-5) == ".json" then
-          local ok, request = pcall(json.decode, read(dir .. "/" .. lane .. "/" .. name) or "")
-          if ok and type(request) == "table" and tostring(request.verb or "") == "deploy" then
-            found[#found + 1] = lane .. "/" .. name
-          end
-        end
-      end
-    end
+-- The sentinel proves its own OS-held lifetime lock without asking this node's
+-- health route. Unknown/legacy identity is a refusal, never a recycled-PID claim.
+local function watcher_probe(binary)
+  local result = shell(quote(binary) .. " preflight")
+  if not result or result.code ~= 0 then return nil, result and trim(result.stderr or result.stdout) or "preflight unavailable" end
+  local ok, probe = pcall(json.decode, result.stdout or "")
+  if not ok or type(probe) ~= "table" or probe.schema ~= 1 or probe.ownership ~= "watcher_lifetime_lock" or
+     not probe.capabilities or not probe.capabilities.health_free or not probe.capabilities.atomic_deploy_dedupe then
+    return nil, "sentinel lacks verified health-free preflight and atomic deploy admission"
   end
-  return found
+  return probe
 end
 
 -- ---- where things are ------------------------------------------------------
@@ -227,9 +185,12 @@ function M.facts(options)
   facts.stop_file = sentinel_dir .. "/stop"
   facts.pid_file = sentinel_dir .. "/sentinel.pid"
   facts.sentinel_stopped = exists(facts.stop_file)
-  facts.sentinel_pid = watcher_pid(sentinel_dir)
-  facts.sentinel_running = facts.sentinel_pid ~= nil
-  facts.pending_deploys = pending_deploys(sentinel_dir)
+  local probe, probe_error = watcher_probe(facts.sentinel)
+  facts.sentinel_probe_error = probe_error
+  facts.sentinel_pid = probe and probe.watcher_pid or nil
+  facts.sentinel_running = probe and probe.watcher == "running" or false
+  facts.sentinel_stopped = facts.sentinel_stopped or (probe and probe.stop_file) or false
+  facts.pending_deploys = probe and probe.pending_deploys or {}
   return facts
 end
 
@@ -298,13 +259,13 @@ function M.preconditions(facts)
   if not facts.sentinel_running then
     return {
       ok = false, status = "no_watcher", error = "no_watcher", tree = facts.tree,
-      message = "no sentinel watcher is running, so nothing would perform a queued deploy: this request " ..
+      message = "no sentinel watcher ownership was verified, so nothing can safely accept this deploy: the request " ..
                 "was not queued.",
-      observed = "no live pid in " .. tostring(facts.pid_file) ..
+      observed = "no verified watcher ownership for " .. tostring(facts.pid_file) .. (facts.sentinel_probe_error and ("; " .. facts.sentinel_probe_error) or "") ..
                  ((facts.pending_deploys and #facts.pending_deploys > 0)
                    and ("; a deploy is already waiting there: " .. table.concat(facts.pending_deploys, ", "))
                    or ""),
-      next = "start the watcher, then ask again: " .. M.start_command(facts),
+      next = "inspect the watcher/service outside this node if identity or preflight is unverified; install the current sentinel through the deployment gate if needed, then start it and ask again: " .. M.start_command(facts),
     }
   end
   if facts.pending_deploys and #facts.pending_deploys > 0 then
@@ -408,7 +369,7 @@ function M.request_command(facts, reason, continuation)
   -- to name, and it is the only path that installs the sentinel, the scripts and the job templates
   -- and records a commit it verified.
   local command = {
-    quote(facts.sentinel), "request", "deploy",
+    quote(facts.sentinel), "request", "deploy", "--if-no-pending",
     "--reason", quote(reason),
   }
   local session_id = trim(continuation and continuation.session_id)
@@ -490,7 +451,21 @@ function M.run(options)
     return verdict
   end
   local output = tostring(result.stdout or "")
+  local existing = output:match("existing deploy request:%s*([^\r\n]+)")
+  if existing then
+    verdict.ok, verdict.queued, verdict.status, verdict.error = false, nil, "already_pending", "already_pending"
+    verdict.pending = existing
+    verdict.message = "a deploy was admitted concurrently, so this /update wrote nothing."
+    verdict.observed = existing
+    return verdict
+  end
   verdict.request = output:match("requested[^:]*:%s*([^\r\n]+)")
+  if not verdict.request then
+    verdict.ok, verdict.queued, verdict.status, verdict.error = false, nil, "sentinel_unverifiable", "sentinel_unverifiable"
+    verdict.observed = "sentinel exited successfully without naming a durable request"
+    verdict.next = "inspect the sentinel request box and log before retrying"
+    return verdict
+  end
   verdict.sentinel = trim(first_line(output))
   -- The stop file was checked before the request was written, so this is the race it cannot close: a
   -- stop that appeared in between. The request is on disk and will be performed by whoever starts the

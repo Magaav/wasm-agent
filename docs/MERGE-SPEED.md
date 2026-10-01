@@ -1,3 +1,8 @@
+> Current execution/admission changes and equivalent-workload evidence are in
+> [RECOVERY-THROUGHPUT.md](RECOVERY-THROUGHPUT.md). Historical phase costs below are
+> not individual-check timings or evidence for a whole-pipeline speedup; the missing
+> wrapper files named here are not used by the new measurements.
+
 # Merge speed: what the gate's own numbers price
 
 **This is a measurement and a recommendation. No behaviour was changed to produce it, and none of the

@@ -36,6 +36,7 @@ import {spawnSync} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
 import {nowIso, readRecord, storeDir, writeRecord} from './lib/delivery-store.mjs';
 
+import {verifyFocused} from './producer-admission.mjs';
 const SCHEMA = 1;
 
 /// The one finding class that blocks. It is the class the operator named: a summary that claims more
@@ -177,6 +178,14 @@ export function evaluate({repo, record, tipRef = null}) {
       `the recorded admission was written by the producer ${admission.by} (tip ${admission.tip})`);
   }
 
+  // New focused receipts are opt-in during bootstrap. They prove producer checks,
+  // never combined-tree verification; old reviewed records remain compatible.
+  let producerProof = null;
+  if (record.producer_checks) {
+    producerProof = verifyFocused(repo, record.producer_checks, refTip || record.tip);
+    add('producer_checks_verified', producerProof.admission_verified === true,
+      producerProof.error || `focused checks verified for tree ${producerProof.tree}`);
+  }
   const failed = conditions.find(item => item.blocking && !item.ok) || null;
   const decision = failed ? 'refused' : (caveats.length ? 'admitted_with_caveat' : 'admitted');
   return {
@@ -188,6 +197,8 @@ export function evaluate({repo, record, tipRef = null}) {
     review: review ? {reviewer: review.reviewer, commit: review.commit, tip: review.tip, tree: review.tree,
       verdict: review.verdict, findings: findings.length} : null,
     observed: observations,
+    producer_checks: producerProof,
+    requires_combined_gate: true,
     conditions,
     decision,
     condition: failed ? failed.name : 'admitted',
@@ -199,9 +210,9 @@ export function evaluate({repo, record, tipRef = null}) {
 
 // ------------------------------------------------------------------------------------------------
 function parse(argv) {
-  const options = {positional: [], store: null, repo: null, tipRef: null, json: null, by: null};
+  const options = {positional: [], store: null, repo: null, tipRef: null, json: null, by: null, producerProof: null};
   const flags = new Map([['--repo', 'repo'], ['--store', 'store'], ['--tip-ref', 'tipRef'],
-    ['--json', 'json'], ['--by', 'by']]);
+    ['--json', 'json'], ['--by', 'by'], ['--producer-proof','producerProof']]);
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     if (flags.has(token)) { options[flags.get(token)] = argv[index + 1] ?? ''; index += 1; continue; }
@@ -235,7 +246,10 @@ function main() {
   }
   const repo = options.repo ? path.resolve(options.repo) : record.repository;
   let result;
-  try { result = evaluate({repo, record, tipRef: options.tipRef}); }
+  try {
+    if (options.producerProof) record.producer_checks=JSON.parse(fs.readFileSync(path.resolve(options.producerProof),'utf8'));
+    result = evaluate({repo, record, tipRef: options.tipRef});
+  }
   catch (error) { note(`${delivery}: ${error.message}`); process.exit(4); }
 
   if (verb === 'admit') {

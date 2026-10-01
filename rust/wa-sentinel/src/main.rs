@@ -104,6 +104,100 @@ fn stop_path() -> PathBuf {
     sentinel_dir().join("stop")
 }
 
+fn watcher_lock_path() -> PathBuf {
+    sentinel_dir().join("watcher.lock")
+}
+
+fn start_lock_path() -> PathBuf {
+    sentinel_dir().join("start.lock")
+}
+
+fn request_lock_path() -> PathBuf {
+    sentinel_dir().join("request.lock")
+}
+
+fn open_lock(path: &Path) -> Result<std::fs::File> {
+    Ok(std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum WatcherState {
+    Running,
+    NotRunning,
+    LegacyUnverified(u32),
+}
+
+fn classify_watcher(lock_busy: bool, recorded_pid: Option<u32>, recorded_pid_alive: bool) -> WatcherState {
+    if lock_busy {
+        WatcherState::Running
+    } else if let Some(pid) = recorded_pid.filter(|_| recorded_pid_alive) {
+        // A pre-lock sentinel might still be watching. Do not start a second watcher based on
+        // incomplete evidence; require an operator to check status/service before retrying.
+        WatcherState::LegacyUnverified(pid)
+    } else {
+        WatcherState::NotRunning
+    }
+}
+
+/// Probe the lifetime lock held only by `watch`. The pid fallback detects an older installed build
+/// that predates the lock; in that ambiguous case, fail closed instead of launching a duplicate.
+fn watcher_state() -> Result<WatcherState> {
+    let file = open_lock(&watcher_lock_path())?;
+    let lock_busy = match file.try_lock() {
+        Ok(()) => false,
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        Err(std::fs::TryLockError::Error(error)) => {
+            return Err(error).context("prove whether the sentinel watcher is running")
+        }
+    };
+    drop(file);
+    if lock_busy {return Ok(WatcherState::Running);}
+    let pid = std::fs::read_to_string(pid_path()).ok()
+        .and_then(|text| text.trim().parse::<u32>().ok());
+    let alive = pid.map(pid_alive).unwrap_or(false);
+    Ok(classify_watcher(lock_busy, pid, alive))
+}
+
+fn queue_lock() -> Result<std::fs::File> {
+    let file=open_lock(&request_lock_path())?;
+    let until=Instant::now()+Duration::from_secs(2);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) if Instant::now()<until => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => bail!("request queue ownership unavailable: {error}"),
+        }
+    }
+}
+fn claim_request(path:&Path,claim:&Path) -> Result<bool> {
+    let _lock=queue_lock()?;
+    match std::fs::rename(path,claim) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).context("claim request without losing its evidence"),
+    }
+}
+fn preflight() -> Result<()> {
+    let state=watcher_state()?;
+    let pid=std::fs::read_to_string(pid_path()).ok().and_then(|p|p.trim().parse::<u32>().ok());
+    let _lock=queue_lock()?;
+    let mut pending=Vec::new();
+    for lane in ["requests","claimed"] {
+        for file in deploy_requests_in(&sentinel_dir().join(lane))? {
+            pending.push(format!("{lane}/{}",file.file_name().unwrap_or_default().to_string_lossy()));
+        }
+    }
+    println!("{}",json!({"schema":1,"watcher":match state {WatcherState::Running=>"running",WatcherState::NotRunning=>"not_running",WatcherState::LegacyUnverified(_)=>"unverified"},
+        "watcher_pid":pid,"ownership":"watcher_lifetime_lock","stop_file":stop_path().exists(),"pending_deploys":pending,
+        "capabilities":{"atomic_deploy_dedupe":true,"health_free":true}}));
+    Ok(())
+}
+
 /// Where the watcher records who owns its lifecycle, in the words `WA_SENTINEL_SUPERVISOR` uses.
 fn recorded_owner_path() -> PathBuf {
     sentinel_dir().join("supervisor")
@@ -1525,7 +1619,7 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
         // that differ per request, so each one is a distinct intent.
         if preview["verb"]=="upgrade" && newest_upgrade.as_deref()!=Some(path.as_path()) {
             let claim=sentinel_dir().join("claimed").join(path.file_name().unwrap_or_default());
-            if std::fs::rename(&path,&claim).is_ok() {
+            if claim_request(&path,&claim)? {
                 let record=json!({"request":preview,"ok":true,
                     "detail":"superseded by a newer upgrade request","at":now_epoch()});
                 let target=sentinel_dir().join("done").join(claim.file_name().unwrap_or_default());
@@ -1565,7 +1659,7 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
         // request record showed it had been performed once. The rename is the claim: it is atomic, so
         // whichever runner calls it first owns the file, and the other sees it gone.
         let claim = sentinel_dir().join("claimed").join(path.file_name().unwrap_or_default());
-        if std::fs::rename(&path, &claim).is_err() {
+        if !claim_request(&path, &claim)? {
             // Someone else got it, or it vanished. Either way it is not this runner's to perform.
             continue;
         }
@@ -1594,22 +1688,62 @@ fn process_requests(background: bool, held: &mut Held) -> Result<u32> {
 
 /// Write a request into the box. This is the agent's whole interface: it never stops the node itself,
 /// it asks, and the request survives whatever happens to the writer next.
+fn deploy_requests_in(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; }
+        let request: Value = match std::fs::read(&path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()) {
+            Some(value) => value,
+            None => continue,
+        };
+        if request["verb"] == "deploy" { found.push(path); }
+    }
+    found.sort();
+    Ok(found)
+}
+
 fn request(args: &[String]) -> Result<()> {
     let verb = args.first().cloned().unwrap_or_default();
     if verb.is_empty() || verb == "help" {
         print_help();
         return Ok(());
     }
+    let mut dedupe_deploy=false;
     let mut fields = serde_json::Map::new();
     fields.insert("verb".into(), json!(verb));
     let mut index = 1;
     while index < args.len() {
+        if args[index]=="--if-no-pending" {dedupe_deploy=true;index+=1;continue;}
         let key = args[index].trim_start_matches("--").to_string();
         let value = args.get(index + 1).cloned().unwrap_or_default();
         fields.insert(key, json!(value));
         index += 2;
     }
-    let stamp = format!("{}-{}", now_epoch(), std::process::id());
+    let _lifecycle_lock=if dedupe_deploy {
+        let file=open_lock(&start_lock_path())?;
+        file.try_lock().map_err(|e|anyhow::anyhow!("lifecycle change in progress; no request written: {e}"))?;
+        Some(file)
+    } else {None};
+    let _queue_lock=queue_lock()?;
+    if dedupe_deploy {
+        if verb!="deploy" {bail!("--if-no-pending is supported only for deploy");}
+        if stop_path().exists() {bail!("sentinel intentionally stopped; no request written");}
+        if watcher_state()?!=WatcherState::Running {bail!("no verified watcher lifetime lock; no request written");}
+        for folder in ["requests","claimed"] {
+            if let Some(existing)=deploy_requests_in(&sentinel_dir().join(folder))?.first() {
+                say(&format!("existing deploy request: {}",existing.display()));
+                say("no duplicate request was written");return Ok(());
+            }
+        }
+    }
+    static REQUEST_SEQUENCE:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
+    let nonce=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+    let stamp = format!("{nonce}-{}-{:020}",std::process::id(),REQUEST_SEQUENCE.fetch_add(1,std::sync::atomic::Ordering::Relaxed));
+    for folder in ["requests","claimed","done","failed"] {
+        if sentinel_dir().join(folder).join(format!("{stamp}.json")).exists() {bail!("request identity collision; existing evidence preserved");}
+    }
     let path = sentinel_dir().join("requests").join(format!("{stamp}.json"));
     // Read the reason before the map is moved into the file: the audit line is written from the same
     // request, and a supervisor's log must not depend on the order of two statements.
@@ -1771,10 +1905,12 @@ fn check_triggers(state: &mut TriggerState) {
 // ---------------------------------------------------------------- the loop
 
 fn watch() -> Result<()> {
+    let _watcher_lock=open_lock(&watcher_lock_path())?;
+    _watcher_lock.try_lock().map_err(|e|anyhow::anyhow!("another watcher owns this instance: {e}"))?;
+    if stop_path().exists() {bail!("sentinel intentionally stopped; watch cannot clear its stop file");}
     let _runner_lock=jobs::lock()?;
     jobs::store().recover(now_epoch() as i64).map_err(|e|anyhow::anyhow!(e.to_string()))?;
     let mut automations=jobs::Runner::new();
-    let _ = std::fs::remove_file(stop_path());
     std::fs::write(pid_path(), std::process::id().to_string())?;
     // Who owns this watcher, written down by the watcher itself: the fact a `stop` from an operator's shell
     // needs, and the only one that survives this process dying under `Restart=always`.
@@ -1859,6 +1995,11 @@ fn refusal(unit: &str) -> String {
 }
 
 fn start_self() -> Result<()> {
+    let _start_lock=open_lock(&start_lock_path())?;
+    _start_lock.try_lock().map_err(|e|anyhow::anyhow!("another lifecycle command owns this instance: {e}"))?;
+    start_self_unlocked()
+}
+fn start_self_unlocked() -> Result<()> {
     // A supervisor that already owns this role is asked, not emulated. This used to do the opposite - spawn
     // a second watcher beside the unit's own - and the unit lost: its watcher could not take the runner
     // lock, exited, and `Restart=always` started it again (observed as `activating`, `MainPID 0`,
@@ -1871,14 +2012,13 @@ fn start_self() -> Result<()> {
         role::Step::Refuse { unit } => bail!("{}", refusal(&unit)),
         role::Step::Direct => {}
     }
-    if let Ok(text) = std::fs::read_to_string(pid_path()) {
-        if let Ok(pid) = text.trim().parse::<u32>() {
-            if pid_alive(pid) {
-                say(&format!("already watching (pid {pid})"));
-                return Ok(());
-            }
-        }
+    match watcher_state()? {
+        WatcherState::Running => {if stop_path().exists(){bail!("watcher is stopping; wait for exit before explicit start");}say("already watching (verified lifetime lock)");return Ok(());}
+        WatcherState::LegacyUnverified(pid) => bail!("unverified live pid {pid}; refusing a second watcher; inspect service/task outside the node"),
+        WatcherState::NotRunning => {},
     }
+    // Explicit start is the operator's resume instruction; an unsolicited watch is not.
+    if stop_path().exists() {std::fs::remove_file(stop_path())?;}
     let me = std::env::current_exe().context("find my own binary")?;
     // The reservation is a property of the installation, not of whoever asked for this watcher: a
     // deploy's `restart` and a hand-run `start` both spawn the watcher as *their* child, so a value that
@@ -1888,28 +2028,32 @@ fn start_self() -> Result<()> {
     // what an operator checking the lane wants to see - "the launcher set it" is not a fact a child can
     // check.
     let (reserved, source) = jobs::reserved_child_capacity();
-    if cfg!(windows) {
-        std::process::Command::new("powershell")
-            .env("WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY", reserved.to_string())
-            .args([
-                "-NoProfile", "-Command",
-                &format!("Start-Process -FilePath '{}' -ArgumentList @('watch') -WindowStyle Hidden", me.display()),
-            ])
-            .status()?;
+    let spawned_pid = if cfg!(windows) {
+        let output=std::process::Command::new("powershell")
+            .env("WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY",reserved.to_string())
+            .args(["-NoProfile","-Command",&format!("$sentinelChild=Start-Process -FilePath '{}' -ArgumentList @('watch') -WindowStyle Hidden -PassThru; $sentinelChild.Id",me.display().to_string().replace("'","''"))]).output()?;
+        if !output.status.success() {bail!("watcher launch failed: {}",String::from_utf8_lossy(&output.stderr));}
+        String::from_utf8_lossy(&output.stdout).trim().parse::<u32>().context("watcher launch returned no pid")?
     } else {
-        std::process::Command::new(&me)
-            .arg("watch")
-            .env("WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY", reserved.to_string())
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
+        std::process::Command::new(&me).arg("watch").env("WA_SENTINEL_JOB_RESERVED_CHILD_CAPACITY",reserved.to_string())
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn()?.id()
+    };
+    for _ in 0..100 {
+        let recorded=std::fs::read_to_string(pid_path()).ok().and_then(|p|p.trim().parse::<u32>().ok());
+        if recorded==Some(spawned_pid)&&watcher_state()?==WatcherState::Running {
+            say(&format!("started the sentinel (pid {spawned_pid}, verified lifetime lock, reserved capacity {reserved}, from {source})"));return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
-    say(&format!("started the sentinel (reserved child capacity {reserved}, from {source})"));
-    Ok(())
+    bail!("spawned pid {spawned_pid}, but watcher ownership/readiness was not proved; inspect preflight before retrying")
 }
 
 fn stop_self() -> Result<()> {
+    let _start_lock=open_lock(&start_lock_path())?;
+    _start_lock.try_lock().map_err(|e|anyhow::anyhow!("another lifecycle command owns this instance: {e}"))?;
+    stop_self_unlocked()
+}
+fn stop_self_unlocked() -> Result<()> {
     // The file records the request - a deploy reads it before deciding to start a watcher - but the stop
     // itself belongs to the manager whenever one owns the watcher: under `Restart=always` a stop file is not
     // a stop, because the watcher exits on it and the manager immediately starts it again. That is a flap,
@@ -1936,6 +2080,11 @@ fn stop_self() -> Result<()> {
 }
 
 fn restart_self() -> Result<()> {
+    let _start_lock=open_lock(&start_lock_path())?;
+    _start_lock.try_lock().map_err(|e|anyhow::anyhow!("another lifecycle command owns this instance: {e}"))?;
+    if stop_path().exists() {bail!("sentinel intentionally stopped; use explicit start to resume before restart");}
+    if let WatcherState::LegacyUnverified(pid)=watcher_state()? {bail!("unverified live watcher pid {pid}; restart refused");}
+
     match role::step(&owner(), role::Lifecycle::Restart) {
         role::Step::Manager { command, unit, .. } => {
             let _ = std::fs::remove_file(stop_path());
@@ -1947,7 +2096,7 @@ fn restart_self() -> Result<()> {
     let old = std::fs::read_to_string(pid_path()).ok().and_then(|t| t.trim().parse::<u32>().ok());
     if let Some(pid) = old {
         if pid_alive(pid) {
-            stop_self()?;
+            stop_self_unlocked()?;
             for _ in 0..20 {
                 if !pid_alive(pid) {
                     break;
@@ -1960,7 +2109,7 @@ fn restart_self() -> Result<()> {
         }
     }
     let _ = std::fs::remove_file(stop_path());
-    start_self()
+    start_self_unlocked()
 }
 
 fn pid_alive(pid: u32) -> bool {
@@ -2042,7 +2191,7 @@ const HELP: &str = r#"wa-sentinel - the process outside the node.
   instance list | show <name> | remove <name> [--purge]
   instance start <name> | stop <name> | status <name>
   --instance <name>   run any verb against a named instance
-  once | watch | status | start | restart | stop | help
+  once | watch | status | preflight | start | restart | stop | help
 
 A node cannot restart itself: the turn doing the restarting runs on the node it is
 stopping, so the stop is the last command it ever executes. It asks instead -
@@ -2110,6 +2259,7 @@ fn main() -> Result<()> {
         "watch" => watch(),
         "once" => {let _lock=jobs::lock()?;process_requests(false,&mut Held::default()).map(|n| say(&format!("{n} request(s) handled"))) },
         "status" => status(),
+        "preflight" => preflight(),
         "start" => start_self(),
         // Replacing the binary does not change a running process: the watcher keeps executing the image
         // it started with, so a fixed sentinel needs its own restart. Found by replacing this binary and
@@ -2394,5 +2544,26 @@ mod self_update_tests {
             Path::new(r"C:\a\wa.exe"),
             Path::new(r"C:\b\wa.exe")
         ));
+    }
+}
+
+#[cfg(test)]
+mod watcher_ownership_tests {
+    use super::*;
+    #[test]
+    fn watcher_identity_never_promotes_a_recycled_pid() {
+        assert_eq!(classify_watcher(true,Some(22),true),WatcherState::Running);
+        assert_eq!(classify_watcher(false,Some(22),true),WatcherState::LegacyUnverified(22));
+        assert_eq!(classify_watcher(false,Some(22),false),WatcherState::NotRunning);
+    }
+    #[test]
+    fn deploy_scan_preserves_pending_and_claimed_evidence() {
+        let root=std::env::temp_dir().join(format!("wa-dedupe-scan-{}",std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("deploy.json"),r#"{"verb":"deploy"}"#).unwrap();
+        std::fs::write(root.join("other.json"),r#"{"verb":"wake"}"#).unwrap();
+        assert_eq!(deploy_requests_in(&root).unwrap(),vec![root.join("deploy.json")]);
+        assert!(root.join("deploy.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {spawn, spawnSync} from 'node:child_process';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 
 const [mode, directory, expectedHead] = process.argv.slice(2);
 const repo = path.resolve(directory || process.cwd());
@@ -78,7 +78,7 @@ function verify(state) {
 // while holding it; `release --id` ends the claim. `run` is not used for exactly that reason - it
 // spawns the gate itself, which would make the lane a second supervisor of a process this file
 // must keep.
-const LANE_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)),'..','..','..','scripts','gate-lane.mjs');
+const LANE_SCRIPT = path.join(repo,'scripts','gate-lane.mjs');
 const LANE_OFF = String(process.env.WA_GATE_LANE ?? '').trim().toLowerCase() === 'off';
 // A gate can contain gates: `scripts/test-parallel-finish.mjs` runs `finish.mjs gate` on fixture
 // trees, and the repository gate (scripts/test.sh) runs that suite. Those nested runs are inside
@@ -304,8 +304,16 @@ try {
   let result;
   if (mode === 'spell') result = spellDefinitions();
   else if (mode === 'check') result = inspect();
+  else if (mode === 'admit') {
+    const ready=inspect();
+    if (!ready.repository_ready) result={...ready,admission_verified:false,gate_verified:false,requires_combined_gate:true};
+    else {
+      const {runFocused}=await import(pathToFileURL(path.join(repo,'scripts','producer-admission.mjs')).href);
+      result={...ready,...await runFocused(repo,{jobs:Number(process.env.WA_CHECK_JOBS || 1)})};
+    }
+  }
   else if (mode === 'gate') result = await gate();
   else if (mode === 'verify') result = verify(inspect());
-  else throw Error('usage: finish.mjs spell|check|gate|verify <absolute-repo> <expected-HEAD>');
+  else throw Error('usage: finish.mjs spell|check|admit|gate|verify <absolute-repo> <expected-HEAD>');
   console.log(JSON.stringify(result));
 } catch (error) { console.log(JSON.stringify({repository_ready:false,gate_verified:false,error:error.message})); process.exitCode=1; }

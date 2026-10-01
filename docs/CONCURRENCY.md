@@ -222,7 +222,7 @@ What this section owns is how many of them fit, and what is serial.
 
 The reservation above is now enforced by a queue rather than by convention: `scripts/gate-lane.mjs` is a
 durable, node-wide admission lane for the CPU-heavy commands the serial resource runs. It decides *when*,
-never *what*: the command is the caller's, unchanged, `scripts/test.sh` is untouched - the gate is still
+never *what*: the command is the caller's; `scripts/test.sh` retains complete coverage - the gate is still
 the gate - and a skip count is still read out of the gate's own verdict line rather than counted by the
 lane. One state directory per node (`<home>/.wasm-agent/gate-lane`, `WA_GATE_LANE_DIR` to move it) holds
 one durable row per request: who asked, what it will run and where, which slot it is behind, how long
@@ -241,16 +241,23 @@ terminal, named with the holder, its elapsed time and the depth it gave up at, n
 last clause is the one that matters: a non-terminal refusal that came back every tick once created ~1322
 worktrees on this machine.
 
-Both consumers take a slot around the gate they run, and neither may overrule the lane. Unreachable - no
-script, an unreadable store, a version skew that rejects the call - is **fail open**: a named notice, and
-the gate runs without a slot; `WA_GATE_LANE=off` produces the same outcome on purpose, by name. Reached
-and *refusing* is **fail closed and terminal**: the gate does not run, the finish receipt records
-`gate_verified: false` with the holder named, and `scripts/merge-lane.mjs` exits `6` with verdict
-`gate_refused` rather than the `merge_only` that reads as "merged, nothing to gate" (`docs/FACTORY.md`,
-"The spine"). A gate started inside a gate inherits its parent's admission instead of asking for a second
-slot: the marker travels in the gate's environment as `GATE_LANE_HELD`, a name `scripts/test.sh`'s own
-`WA_*` fence does not unset. `gate_ms` stays the gate's own duration - the wait for a slot is recorded
-separately as `gate_lane.waited_ms` - so a duration still means the gate and not the queue.
+Both consumers take a slot around the gate they run. Missing scripts, unreadable stores and
+version skew refuse execution; no passing proof is manufactured. `WA_GATE_LANE=off` is the
+explicit named escape hatch and is never selected automatically. Reached/refused is terminal:
+`finish.mjs` reports `gate_verified:false`, and the merge lane exits 6 with `gate_refused`.
+Inheritance requires both `GATE_LANE_HELD` and `GATE_LANE_ORIGIN` naming a live ancestor-owned
+lease, validated by the reservation owner. A copied sibling marker is not admission. Timeout
+is not descendant drain: the source finisher and merge consumer retain uncertain acquisitions
+for explicit reconciliation. `gate_ms` excludes queue wait; `gate_lane.waited_ms` records it.
+
+Within the admitted complete gate, `WA_CHECK_JOBS=1..4` bounds independent JS fixture width
+(default 1). The discoverable `gate-check.mjs list` describes commands, isolation, CPU/memory
+estimates and exclusive resources; each fixture has private runtime/config paths and output.
+Declared memory sums bound admission, not process RSS. Unknown/shared inline/runtime checks
+remain serial. Focused producer proof never replaces complete verification of the combined
+candidate. Exact-tree full evidence can be reused with its log hash, actual exit and skip count;
+changed source requires execution. Bootstrap, entry points, measurements and limits are in
+[RECOVERY-THROUGHPUT.md](RECOVERY-THROUGHPUT.md).
 
 ## Cancellation
 

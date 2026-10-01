@@ -273,34 +273,25 @@ OLD_OUT="$( ( cd "$TREE" && env -u WASM_AGENT_IN_TURN HOME="$INSTALL_HOME" USERP
 ok "$(grep -q 'where the service runs' <<<"$OLD_OUT" && echo 0 || echo 1)" \
   "the verifier as it was before this check has no opinion about it at all - the same disagreement verifies clean"
 
-# --- the skills question is the same class, and the verifier now names both paths -----------------------
-# Two directories, one of which the node reads: `<home>/.wasm-agent/skills` (paths.config() .. "/skills") and
-# `<home>/skills`, which is where `upgrade.sh` writes when it runs with WASM_AGENT_HOME set - which every
-# supervisor this project installs does (the sentinel unit on Linux, the launcher install-sentinel-task.ps1
-# writes on Windows).
+# Skills must be compared at the runtime destination, never the obsolete home/skills.
 SKILL_HOME="$W/skill-home"
-mkdir -p "$SKILL_HOME/.wasm-agent/skills/self-update" "$SKILL_HOME/skills/self-update"
-printf 'what the node reads\n' > "$SKILL_HOME/.wasm-agent/skills/self-update/SKILL.md"
-printf 'what a deploy wrote\n' > "$SKILL_HOME/skills/self-update/SKILL.md"
+mkdir -p "$SKILL_HOME/.wasm-agent/skills/self-update" "$SKILL_HOME/skills/self-update" "$TREE/skills/self-update"
+printf 'accepted skill\n' > "$TREE/skills/self-update/SKILL.md"
+printf 'stale runtime skill\n' > "$SKILL_HOME/.wasm-agent/skills/self-update/SKILL.md"
+printf 'unrelated legacy skill\n' > "$SKILL_HOME/skills/self-update/SKILL.md"
 V_OUT="$(run_verify "$unit_target" "$SKILL_HOME" "$SKILL_HOME")"
+ok "$(grep -q '^  FAIL shipped skills/self-update/SKILL.md' <<<"$V_OUT" && echo 1 || echo 0)" \
+  "a stale runtime skill fails even when legacy skills exist"
 S_LINE="$(grep -F 'the skills a deploy writes are the skills the node reads' <<<"$V_OUT" | head -1)"
-ok "$(grep -q '^  FAIL the skills a deploy writes' <<<"$V_OUT" && echo 1 || echo 0)" \
-  "a deploy writing skills outside the node's scan root is reported, not compared one-sided"
-ok "$(grep -qF "$SKILL_HOME/skills" <<<"$S_LINE" && grep -qF "$SKILL_HOME/.wasm-agent/skills" <<<"$S_LINE" && echo 1 || echo 0)" \
-  "naming where the deploy writes and where the node reads" "${S_LINE:0:130}"
-
-# The same two directories, this time with WASM_AGENT_HOME unset - the way an operator at a shell has it, and
-# the way a verifier would have missed this entirely if it trusted its own environment instead of the files.
+ok "$(grep -qF "$SKILL_HOME/.wasm-agent/skills" <<<"$S_LINE" && echo 1 || echo 0)" \
+  "writer and runtime reader name the config destination" "${S_LINE:0:130}"
 V_OUT="$(run_verify "$unit_target" "$SKILL_HOME")"
-ok "$(grep -q '^  FAIL the skills a deploy writes' <<<"$V_OUT" && echo 1 || echo 0)" \
-  "with WASM_AGENT_HOME unset the durable trace is still found, not read off this shell" \
-  "$(grep -F 'the skills a deploy writes' <<<"$V_OUT" | head -1 | cut -c1-120)"
-
-rm -rf "$SKILL_HOME/skills"
+ok "$(grep -q '^  FAIL shipped skills/self-update/SKILL.md' <<<"$V_OUT" && echo 1 || echo 0)" \
+  "without an override the stale runtime skill still fails"
+cp "$TREE/skills/self-update/SKILL.md" "$SKILL_HOME/.wasm-agent/skills/self-update/SKILL.md"
 V_OUT="$(run_verify "$unit_target" "$SKILL_HOME")"
-ok "$(grep -q '^  ok   the skills a deploy writes are the skills the node reads' <<<"$V_OUT" && echo 1 || echo 0)" \
-  "with nothing outside the scan root the two expressions name one directory, and the check says so" \
-  "$(grep -F 'the skills a deploy writes are the skills the node reads' <<<"$V_OUT" | head -1 | cut -c1-120)"
+ok "$(grep -q '^  ok   shipped skills/self-update/SKILL.md' <<<"$V_OUT" && echo 1 || echo 0)" \
+  "correct runtime skill passes despite unrelated legacy content"
 
 printf '\n'
 if [ "$failed" -eq 0 ]; then

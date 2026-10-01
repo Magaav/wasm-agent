@@ -26,7 +26,7 @@ bash scripts/check-disk-floor.sh
 # runtime state.
 while IFS= read -r variable; do
   case "$variable" in
-    WASM_AGENT_SKIP_UI_TESTS|WASM_AGENT_IN_TURN|WA_GATE_JOBS|WA_GATE_HOME_KEEP) ;;
+    WASM_AGENT_SKIP_UI_TESTS|WASM_AGENT_IN_TURN|WA_GATE_JOBS|WA_GATE_HOME_KEEP|WA_CHECK_JOBS) ;;
     WASM_AGENT_*|WA_*|OPENAI_*|OPENCODE_*|ANTHROPIC_*) unset "$variable" ;;
   esac
 done < <(compgen -e)
@@ -103,7 +103,7 @@ echo "gate isolated home: $WASM_AGENT_HOME (a passing run removes it; a failing 
 # never change what the gate says about the tree; that is asserted by
 # scripts/test-merge-lane-retention.mjs against a sliced copy of this very block.
 gate_home_release() {
-  local status=$? home="$GATE_HOME" keep="$GATE_HOME_KEEP" root="${TMPDIR:-/tmp}"
+  local status=${1:-$?} home="$GATE_HOME" keep="$GATE_HOME_KEEP" root="${TMPDIR:-/tmp}"
   local ranked='' line='' path='' name='' pid='' index=0 own_kept=0 budget=0
   set +e
   # 1. This run's own home. A pass costs nothing; so does a failure when the bound is 0. `own_kept`
@@ -150,22 +150,34 @@ gate_home_release() {
   fi
   exit "$status"
 }
-trap gate_home_release EXIT
+gate_exit() {
+  local status=$?
+  if declare -F gate_fixture_cleanup >/dev/null; then gate_fixture_cleanup; fi
+  if declare -F gate_phase_summary >/dev/null; then gate_phase_summary; fi
+  gate_home_release "$status"
+}
+trap gate_exit EXIT
 # ---- end of the bounded gate-home block: scripts/test-merge-lane-retention.mjs slices this file at
 # the line above and runs these exact bytes with its own body, so the policy is tested where it lives.
 
 # Phase timing: instrumentation, not a redesign. Every phase marker below is a call between two
 # existing commands, so no check is added, removed, reordered or skipped; the table is printed into
 # this log before the verdict line (which must stay last) and written as JSON. scripts/lib/gate-phases.sh
+. scripts/lib/gate-timing.sh
 # carries the contract. Until this landed, a 21-minute gate log had no durations in it at all.
 . scripts/lib/gate-phases.sh
-trap gate_phase_summary EXIT
+. scripts/lib/gate-timing.sh
+# gate_exit retains phase reporting and the original exit status on failure.
 gate_phase_begin build
-cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
-node scripts/test-parallel-finish.mjs
+gate_run cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
+gate_run node scripts/test-install-isolation.mjs
+gate_run node scripts/test-gate-check.mjs
+gate_run node scripts/test-producer-admission.mjs
+gate_run node scripts/test-full-gate-proof.mjs
+gate_run node scripts/test-parallel-finish.mjs
 # The execution and automation contracts have native, model-free adversarial tests.
-cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
-cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host file_search::tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host file_search::tests
 # The line boundaries `host.http_sse` hands to the subscription wire are half of that route's
 # contract: this reader re-framing or dropping a line would mean the Lua parser is tested against a
 # stream that never existed. It was written, reported passing by hand, and run by *no* `cargo test`
@@ -173,35 +185,36 @@ cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host file_s
 # none, so four tests existed and the gate never executed one of them. The recorded fixtures under
 # `tests/fixtures/subscription/` are what it reads, so it belongs here beside the other wa-host
 # filters and not in a report.
-cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host sse_line_tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host sse_line_tests
 # The ticker's clock is the twin of `cli_view.duration` on the Lua side: the elapsed time of a
 # call that has not finished can only be computed by the host, so both sides pin the same three
 # values and a one-sided change fails here rather than on a screen.
-cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host ticker_tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host ticker_tests
 # The console size is the one number the CLI cannot learn for itself, and the only thing standing
 # between a detached console (which reports 0x0, not failure) and a screen wrapped to nothing.
-cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host terminal_tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host terminal_tests
 # The native editor is the only side that can edit input while Lua is blocked. Its
 # parser, history, multiline viewport and submit/clear behavior are not Lua tests.
-cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host terminal_editor::tests
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host terminal_editor::tests
 # The graph is a capability the agent navigates its own code with, so its extractor and
 # incremental reindex are part of the contract, not a side project.
-cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-graph
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-graph
 # Run the serve-level invariants, each a measured regression: routing by session (a wake carries its
 # conversation in the body's `thread`, not the auth header) and the UI version tracking content rather
 # than mtime (a `cp -f` of identical files must not force every open page to reload).
-cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host serve::
-cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host subagents::
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host serve::
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host subagents::
 # What an operation says about itself when its bound kills it: the measured phases, and never a
 # cause it cannot know. A pure function of the operation record, so it is tested as one - the
 # sentence it replaced was quoted onward as a diagnosis of a read-only `grep`.
-cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host deadline_note_tests
-cargo test --release --offline --manifest-path rust/wa-sentinel/Cargo.toml
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-host deadline_note_tests
+gate_run cargo test --release --offline --manifest-path rust/wa-sentinel/Cargo.toml
 # The named-instance lifecycle, against two real co-located nodes: separate homes, keys, databases
 # and ports; a refused wrong listener; and a stop/restart of one that cannot reach the other. No
 # model and no network, so it belongs in the hermetic gate rather than the on-demand guest e2e.
 gate_phase_begin instances
 CARGO_BUILD_JOBS=2 cargo build --release --offline --manifest-path rust/wa-sentinel/Cargo.toml >/dev/null
+gate_run node scripts/test-sentinel-ownership.cjs "rust/wa-sentinel/target/release/wa-sentinel"
 INSTANCE_VERDICT="$(mktemp)"
 rm -f "$INSTANCE_VERDICT" # The child must produce NEW evidence, never a previous run's verdict.
 INSTANCE_STATUS=0
@@ -234,7 +247,7 @@ echo "self-update turn guard ok"
 # and both directions of the check - a gate that refuses everything is as wrong as one that refuses nothing.
 # It stops at or before the build, so it costs about a second.
 set +e
-bash scripts/test-deploy-downgrade.sh
+gate_run bash scripts/test-deploy-downgrade.sh
 GATE_STATUS=$?
 set -e
 if [ "$GATE_STATUS" = "3" ]; then
@@ -259,7 +272,7 @@ fi
 # the two port suites above; the two pinned blobs have to be in this repository's object store, and a
 # shallow checkout fails here by name instead of reading as a pass.
 set +e
-bash scripts/test-deploy-service-target.sh
+gate_run bash scripts/test-deploy-service-target.sh
 SERVICE_TARGET_STATUS=$?
 set -e
 if [ "$SERVICE_TARGET_STATUS" = "3" ]; then
@@ -292,7 +305,7 @@ SDB="$(mktemp -u /tmp/wa-status-XXXXXX.db)"
 RDB="$(mktemp -u /tmp/wa-resume-XXXXXX.db)"
 QDB="$(mktemp -u /tmp/wa-resume-q-XXXXXX.db)"
 PLUGINS="$(mktemp -d)"
-trap 'rm -f "$DB" "$DB"-wal "$DB"-shm "$SDB" "$SDB"-wal "$SDB"-shm "$RDB" "$RDB"-wal "$RDB"-shm "$QDB" "$QDB"-wal "$QDB"-shm "$DB.title" "$DB.title"-wal "$DB.title"-shm "$DB.exec" "$DB.exec"-wal "$DB.exec"-shm; rm -rf "$PLUGINS" "$DB.home"' EXIT
+gate_fixture_cleanup() { rm -f "$DB" "$DB"-wal "$DB"-shm "$SDB" "$SDB"-wal "$SDB"-shm "$RDB" "$RDB"-wal "$RDB"-shm "$QDB" "$QDB"-wal "$QDB"-shm "$DB.title" "$DB.title"-wal "$DB.title"-shm "$DB.exec" "$DB.exec"-wal "$DB.exec"-shm; rm -rf "$PLUGINS" "$DB.home"; }
 
 # Fresh retained output + process status + terminal count evidence for every new
 # integrated proof. A child that silently exits 0 or drops checks cannot pass.
@@ -300,7 +313,7 @@ run_proof_fixture() {
   local kind="$1" minimum="$2" status=0 nested_skipped
   shift 2
   local log="$DB.$kind-proof.log"
-  "$@" > "$log" 2>&1 || status=$?
+  gate_run "$@" > "$log" 2>&1 || status=$?
   if ! nested_skipped="$(node scripts/lib/proof-verdict.cjs "$kind" "$status" "$minimum" < "$log")"; then
     echo "FAIL: $kind proof; retained output: $log" >&2
     tail -40 "$log" >&2
@@ -432,7 +445,7 @@ rm -f "$DB.client.lua"
 # The three states a control failure can be in are three different sentences with
 # three different remedies, and getting them the same way round is a unit test
 # rather than a guess.
-cargo test --release --offline --manifest-path rust/Cargo.toml --bin wa client_diagnosis >/dev/null
+gate_run cargo test --release --offline --manifest-path rust/Cargo.toml --bin wa client_diagnosis >/dev/null
 echo "client diagnosis ok"
 # And what the agent is *told* about the tool, since that is what decides whether
 # it reaches for `status` after a failure or guesses at `cdp` again.
@@ -618,8 +631,8 @@ host.write_file(state .. '/sentinel.pid', watcher .. '\n')
 report = update.run({ install = broken, reason = 'the update test', skip_source_sync = true,
   sentinel_dir = state })
 ok(report.ok == false, 'a sentinel that cannot run must not report success: ' .. tostring(report.message))
-ok(report.error == 'sentinel_refused' or report.error == 'sentinel_unreachable',
-  'the refusal must name what happened, got ' .. tostring(report.error) .. ' (' .. tostring(report.observed) .. ')')
+ok(report.error == 'no_watcher',
+  'a live recycled pid cannot prove watcher ownership, got ' .. tostring(report.error) .. ' (' .. tostring(report.observed) .. ')')
 ok(not report.queued, 'a refused request must not claim to be queued')
 ok(report.observed and #report.observed > 10, 'the refusal must carry what was seen')
 print('update decision ok')
@@ -637,7 +650,7 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-update-watcher.lua" "$BIN" --db "$D
 WA_BIN="$BIN" bash scripts/test-update.sh 8874 | grep "the real sentinel's request box is untouched"
 # The idle wait before an upgrade is bounded by *lack of progress*, not wall time. A legitimate
 # 40-minute turn must not make every queued upgrade wait, fail, and retry while the node stays busy.
-bash scripts/test-upgrade-idle.sh | grep 'upgrade idle-wait ok'
+gate_run bash scripts/test-upgrade-idle.sh | grep 'upgrade idle-wait ok'
 # The ledger ingest path, on a scratch database. An observer (WhatsApp's own store, a mail sync, a
 # bot) is exactly the caller that has a message with no reply target and sometimes no send time, and
 # that caller used to crash inside the encoder: a nil in the SQL parameter list makes the JSON array
@@ -901,14 +914,14 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-tool-cues.lua" "$BIN" --db "$DB.too
 # or this feature would silently relocate every existing session's files.
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-worktree.lua" "$BIN" --db "$DB.session-worktree" | grep 'session worktree ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-session-fork.lua" "$BIN" --db "$DB.session-fork" | grep 'session fork ok'
-node scripts/test-session-workspaces.cjs "$BIN"
-node scripts/test-workspace-root-recovery.cjs "$BIN"
+gate_run node scripts/test-session-workspaces.cjs "$BIN"
+gate_run node scripts/test-workspace-root-recovery.cjs "$BIN"
 # A placed child arrives at a node that never saw its parent, so the source it forks from is the tree
 # *that* node runs from - and a node with no usable checkout of its own must refuse by name rather
 # than leave a session shell behind. Two disposable checkouts, no model.
-node scripts/test-placed-child-workspace.cjs "$BIN"
-node scripts/test-run-recovery.cjs "$BIN"
-node scripts/test-resource-claims.cjs "$BIN"
+gate_run node scripts/test-placed-child-workspace.cjs "$BIN"
+gate_run node scripts/test-run-recovery.cjs "$BIN"
+gate_run node scripts/test-resource-claims.cjs "$BIN"
 # The tool-choice experiment's verifier must reject a plausible-looking wrong answer, and
 # its treatment must reach the child prompt the rig runs. Both are what make the arm's
 # result mean anything, so they are tested without a model and before any paid run.
@@ -939,7 +952,7 @@ WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-model-route-servability.lua" "$BIN"
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-tool.lua" "$BIN" --db "$DB.graph-tool" | grep 'graph tool ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-graph-freshness.lua" "$BIN" --db "$DB.graph-freshness" | grep 'graph freshness ok'
 # Offline accounting must run even when UI tests are explicitly skipped.
-node scripts/test-token-audit.cjs
+gate_run node scripts/test-token-audit.cjs
 WA_BIN="$BIN" node scripts/test-efficiency.cjs
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-patch-audit.lua" "$BIN" --db "$DB.patch-audit" | grep 'patch audit ok'
 WA_SCRIPT="$WASM_AGENT_LUA_ROOT/scripts/test-patch-audit-agent.lua" "$BIN" --db "$DB.patch-audit-agent" | grep 'patch audit agent ok'
@@ -1628,7 +1641,7 @@ stage_plugin() {  # stage_plugin <wasm-path> <name>
 # fail. That test reads the function above out of this file, so it cannot pass while the code here is
 # wrong.
 gate_phase_begin plugins
-bash scripts/test-plugin-staging.sh
+gate_run bash scripts/test-plugin-staging.sh
 # Build every plugin and assert one round trip through the WASM host.
 for crate in rust/plugins/*/; do
   [ -f "$crate/Cargo.toml" ] || continue
@@ -1666,35 +1679,35 @@ fi
 # than not doing it, so it is a check rather than a convention - and it greps for the old *names*, not for
 # the word "turn", which section 6 keeps for one speaker's contribution.
 bash scripts/check-naming.sh
-node scripts/test-naming-check.cjs
+gate_run node scripts/test-naming-check.cjs
 # A temporary family with no retention or cleanup path grows with every run of the suite, and no reviewer
 # sees it in a diff: on 2026-09-30 the OS temp directory held 13079 stale entries from these scripts,
 # 14 GB of them. The check fails a file that mints one and never bounds it; the 36 files that already do
 # are printed on every run and are not fatal (`scripts/check-temp-retention.mjs` names each one).
 node scripts/check-temp-retention.mjs
-node scripts/test-temp-retention-check.cjs
+gate_run node scripts/test-temp-retention-check.cjs
 # The reclaim pass's safety rule, on fixtures where the answer is known: an ended session's worktree is
 # the only tree whose rust/target may be pruned, and a live session's, the canonical checkout's and a
 # lane's are kept with the reason printed. Also the refusal that matters - a tree with no session row is
 # refused, because ownership unproven is not permission.
-node scripts/test-reclaim-disk.cjs
+gate_run node scripts/test-reclaim-disk.cjs
 # The disk floor's refusal, the numbers it must name, the `--json` shape an alarm would read, and that
 # the gate calls it before its first build rather than after one has failed.
-node scripts/test-disk-floor.cjs
-node scripts/test-execution-terminology.cjs
+gate_run node scripts/test-disk-floor.cjs
+gate_run node scripts/test-execution-terminology.cjs
 # Who may commit on `main` is decided by the host's answer about the process, not by a flag the
 # committing process types: the orchestrator session is allowed, a child is refused even when it
 # exports WASM_AGENT_ALLOW_MAIN=1, a person at a terminal keeps the visible override, and a merge is
 # still the normal landing path. Run directly rather than piped, so a failing check prints its own
 # name and what it saw instead of leaving one swallowed line. No build: its fixture is a throwaway
 # repository on `main` (the host export itself is measured by the wa-host test named in that file).
-bash scripts/test-main-guard.sh
+gate_run bash scripts/test-main-guard.sh
 # The window and this CLI offer the same `/` commands, and `/new` was missing from the CLI for as long
 # as nothing checked it. The rule is the window's list against the REPL's, plus the one sentence that
 # is deliberately written twice (the `/merge` brief).
-node scripts/test-command-parity.cjs
-node scripts/test-verify-install.mjs
-node scripts/test-merge-audit.mjs
+gate_run node scripts/test-command-parity.cjs
+gate_run node scripts/test-verify-install.mjs
+gate_run node scripts/test-merge-audit.mjs
 # The factory's lanes, tested where their answers are known in advance. Each of these was written and
 # then not run: scripts/test.sh discovers tests explicitly, so a delivery whose scope stopped short of
 # this file shipped a check that no gate executes - a test nobody runs is a comment. All four are
@@ -1709,11 +1722,12 @@ node scripts/test-merge-audit.mjs
 # deliberately leaves the admission marker alone for the gates nested inside it - so this gate, which
 # holds a slot and passes the marker on, has to say the marker is not there for this one file. Without
 # `env -u GATE_LANE_HELD` the run inherits a slot and fails on its first check.
-node scripts/test-gate-lane.cjs
-node scripts/test-merge-lane.mjs
-node scripts/test-delivery-admission.mjs
+gate_run node scripts/test-gate-lane.cjs
+gate_run node scripts/test-merge-lane.mjs
+gate_run node scripts/test-merge-lane-retention.mjs
+gate_run node scripts/test-delivery-admission.mjs
 env -u GATE_LANE_HELD node scripts/test-gate-lane-wiring.cjs
-node scripts/test-openai-sub.cjs "$BIN"
+gate_run node scripts/test-openai-sub.cjs "$BIN"
 # And the levels that route declares, read from the catalogue this repo owns
 # (`lua/core/openai_sub_catalogue.lua`) rather than from a third-party store at request time: the
 # fixture writes a *disagreeing* store where pi's store lives and none of it may reach the answer, so
@@ -1756,10 +1770,10 @@ node scripts/check-embedded-lua-closure.mjs
 # `wa subscription status` and `wa subscription login --browser` are exercised; the authorize URL is
 # built locally, so this needs no network, no credential and no model.
 env -u WASM_AGENT_LUA_ROOT bash scripts/test-subscription-login-door.sh "$BIN" "$DB.sub-login" | grep "subscription login door ok"
-node scripts/test-auth-sessions.cjs "$BIN"
-node scripts/test-fixture-verdict.cjs
-node scripts/test-suite-verdict.cjs
-node scripts/test-proof-verdict.cjs
+gate_run node scripts/test-auth-sessions.cjs "$BIN"
+gate_run node scripts/test-fixture-verdict.cjs
+gate_run node scripts/test-suite-verdict.cjs
+gate_run node scripts/test-proof-verdict.cjs
 
 # The image-attachment tests, plus the helper tests that came with them. They were
 # written, they passed when run by hand, and nothing ran them - which is how a test
@@ -1779,15 +1793,15 @@ echo "attach tests ok"
 
 # A real long-running tool must remain observable/cancellable through another worker.
 # Local mock provider only; no account, paid model or external browser required.
-node scripts/test-operation-control.cjs "$BIN"
-node scripts/test-operation-control.cjs "$BIN" --await
+gate_run node scripts/test-operation-control.cjs "$BIN"
+gate_run node scripts/test-operation-control.cjs "$BIN" --await
 
 # Actual child runtime and real sentinel deliveries, never a /subagents route stub.
 gate_phase_begin subagents
 run_proof_fixture policy 62 node scripts/test-subagents-policy.cjs "$BIN"
 run_proof_fixture children 18 node scripts/test-subagents.cjs "$BIN"
 run_proof_fixture fleet 20 node scripts/test-orchestrator.cjs "$BIN"
-node scripts/test-completion-wake.cjs "$BIN"
+gate_run node scripts/test-completion-wake.cjs "$BIN"
 for fixture in session-view durable-steering child-compaction child-budget-refusal completion-outbox orchestrator-defaults; do
   WA_SCRIPT="scripts/test-$fixture.lua" "$BIN" --db "$DB.$fixture"
 done
@@ -1803,30 +1817,30 @@ run_proof_fixture whatsapp 40 node scripts/test-whatsapp-subagent-e2e.cjs
 run_proof_fixture cursor 47 node scripts/test-whatsapp-cursor.cjs "$BIN"
 # Local audio bytes, WASM formatting, durable reservation, and exactly-once
 # verified sends. These use fake WhatsApp/STT adapters and no paid model.
-node scripts/test-whatsapp-audio.mjs
+gate_run node scripts/test-whatsapp-audio.mjs
 # Staged here, at its use, for the same reason as the plugin loop above: this module is read about
 # ninety sections after it was built, and the section does not assume the staging directory it
 # created earlier is still there. The copy is still fatal if the module cannot be staged.
 stage_plugin "$(ls rust/plugins/whatsapp-transcript/target/wasm32-unknown-unknown/release/*.wasm | head -1)" whatsapp-transcript
-node scripts/test-whatsapp-transcribe.cjs "$BIN" "$PLUGINS/whatsapp-transcript.wasm"
+gate_run node scripts/test-whatsapp-transcribe.cjs "$BIN" "$PLUGINS/whatsapp-transcript.wasm"
 # The pipeline seam: a `returns` list reaches the foreach, a step that produced nothing fails the
 # delivery, and a no-op run is distinguishable from a dropped result. Real sentinel, mock store, no model.
 run_proof_fixture pipeline 19 node scripts/test-job-pipeline.cjs
 # The source keeper's categorical refusals, hermetically: a port held by something that is not the agent
 # browser is refused and left alone, and a missing logon task is named with the command that registers it.
-node scripts/test-source-ensure.cjs
+gate_run node scripts/test-source-ensure.cjs
 # The deploy's own ship list, run for real on a scratch tree: the modules a shipped script imports must
 # be installed beside it, and both a missing module and an import this deploy cannot satisfy must be
 # refused by name. The block under test is read out of deploy.sh, so this cannot pass while the real
 # code is wrong - and it must not be a check that cannot fail (the live failure was a deploy that
 # reported success over a reader whose import was absent).
-bash scripts/test-deploy-ship.sh
-node scripts/test-source-ensure.cjs
+gate_run bash scripts/test-deploy-ship.sh
+gate_run node scripts/test-source-ensure.cjs
 
 # The Android build itself needs Termux, but its installer and launcher contracts
 # are hermetic: setup preserves an existing secret, keeps the env private, UI
 # arguments reach the native runtime, and both shell entrypoints parse.
-bash scripts/test-termux.sh
+gate_run bash scripts/test-termux.sh
 case "$(uname -o 2>/dev/null || true)" in
   Android) ;;
   *) SKIPPED=$((SKIPPED + 1)) ;;
@@ -1841,14 +1855,9 @@ if [ "${WASM_AGENT_SKIP_UI_TESTS:-}" = "1" ]; then
   echo "ui tests skipped by request (WASM_AGENT_SKIP_UI_TESTS=1)"
   SKIPPED=$((SKIPPED + 1))
 elif command -v node >/dev/null 2>&1; then
-  for t in tests/*.js; do
-    [ -e "$t" ] || continue
-    fixture_status=0
-    out=$(node "$t" 2>&1) || fixture_status=$?
-    if ! printf '%s' "$out" | node scripts/lib/test-verdict.cjs js "$fixture_status"; then
-      echo "FAIL $t (exit $fixture_status)"; printf '%s\n' "$out" | tail -8; exit 1
-    fi
-  done
+  CHECK_OUTPUT="$(git rev-parse --git-path wa-gate-ui-js)"
+  command -v cygpath >/dev/null 2>&1 && CHECK_OUTPUT="$(cygpath -w "$CHECK_OUTPUT")"
+  node scripts/gate-check.mjs run ui-js --jobs "${WA_CHECK_JOBS:-1}" --output "$CHECK_OUTPUT"
   echo "ui tests ok"
 else
   echo "ui tests SKIPPED - node not on PATH"
