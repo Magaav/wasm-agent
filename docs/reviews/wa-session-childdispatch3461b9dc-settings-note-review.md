@@ -101,7 +101,11 @@ reachability caveat as the previous review's residue 3.
   rather than rejecting.
 - The `not sent` prefix holds only when nothing was sent: with a run in flight, `postsSent=0` and the
   note began `not sent — a run is in flight, so this change applies at the next turn`.
-- No path writes `not applied` any more (`rg "not applied" ui/` → none).
+- No path writes `not applied` any more: the only occurrence in the tip's `ui/app.js` is the prose
+  of the comment at line 2542, and no `settingsError.textContent` assignment contains it (the writers
+  are lines 2534, 2537, 2552, 2556 and the two listeners' catches at 3038/3040). `reconcileControls`
+  has exactly two callers, both in `post()` (2495 busy, 2518 failure), so `in effect` can only be
+  printed after a reconcile.
 
 ## Not tested
 
