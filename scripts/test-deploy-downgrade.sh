@@ -149,7 +149,7 @@ if git merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
 else
   ( cd "$ROOT" && env -u WASM_AGENT_IN_TURN PATH="$(dirname "$(command -v git)"):/usr/bin:/bin" \
       WA_INSTALL_DIR="$S/install" WASM_AGENT_HOME="$S/home" WA_PORT=18991 WA_CLIENT_PORT=18992 \
-      bash "$DEPLOY" --reason "guard test" ) >"$S/guard.txt" 2>&1
+      bash "$DEPLOY" --require-main --reason "guard test" ) >"$S/guard.txt" 2>&1
   guard_exit=$?
   ok "$([ "$guard_exit" != "0" ] && grep -q 'is not on origin/main' "$S/guard.txt" && echo 1 || echo 0)" \
     "a tree ahead of main is refused on a private install, naming the rule" "exit $guard_exit"
