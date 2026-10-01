@@ -49,5 +49,7 @@ try{
   check(!fullProof(retained,tree,{ownerRepo:owner}).verified,'retired evidence corruption rejected');fs.writeFileSync(ref.path,bytes);
  }
  check(fullProof(retained,tree,{ownerRepo:owner}).verified,'restored fixture bytes verify');
+ fs.rmSync(owner,{recursive:true,force:true});
+ check(!fullProof(retained,tree).verified,'deleted storage repository fails direct verification closed');
  console.log(`full gate proof ok (${checks} checks, 0 skipped)`);
 }finally{fs.rmSync(root,{recursive:true,force:true});}
