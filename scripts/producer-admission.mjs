@@ -4,7 +4,7 @@ import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {catalog} from './gate-checks.mjs';
-import {executeChecks,hash} from './gate-check.mjs';
+import {executeChecks,hash,checkVerdict} from './gate-check.mjs';
 function git(repo,...args) {
   const r=spawnSync('git',args,{cwd:repo,encoding:'utf8',windowsHide:true,maxBuffer:16*1024*1024});
   if(r.status!==0)throw Error(r.stderr||r.error?.message||'git failed');return r.stdout.trim();
@@ -17,6 +17,9 @@ export function plan(repo,tip='HEAD',base='origin/main') {
     if(/^tests\/[^/]+\.js$/.test(file))checks.add(`js:${path.basename(file)}`);
     else if(/^ui\/(app|components)\.js$/.test(file)) {
       for(const c of catalog(repo).filter(c=>c.id.startsWith('js:')))checks.add(c.id);checks.add('ui-browser');
+      const integration=catalog(repo).filter(c=>['selection-state','recovery-windows'].includes(c.id));
+      if(integration.some(c=>c.available===false||(c.platform&&c.platform!==process.platform)))full=true;
+      else for(const c of integration)checks.add(c.id);
     } else full=true;
   }
   if(full||!files.length)return {head,tree,base:baseHead,files,checks:['full'],full_required:true,requires_combined_gate:true};
@@ -28,9 +31,12 @@ export function verifyFocused(repo,receipt,tip='HEAD') {
     if(receipt.schema!==1||receipt.kind!=='producer-focused'||receipt.tree!==current.tree||receipt.passed!==true||receipt.runner_identity!==identity)throw Error('missing, stale or untrusted focused evidence');
     if(current.full_required||JSON.stringify(receipt.checks)!==JSON.stringify(current.checks))throw Error('coverage changed or full gate required');
     if(!Array.isArray(receipt.results)||receipt.results.length!==current.checks.length)throw Error('missing check results');
+    const definitions=catalog(repo);
     for(const id of current.checks) {
       const result=receipt.results.find(r=>r.id===id);
       if(!result||result.passed!==true||result.exit!==0||result.skipped!==0||!Number.isFinite(result.ms)||result.ms<0||hash(fs.readFileSync(result.log))!==result.log_sha256)throw Error(`invalid check evidence ${id}`);
+      const definition=definitions.find(check=>check.id===id);
+      if(!definition||!checkVerdict(definition,result.exit,fs.readFileSync(result.log,'utf8')).ok)throw Error(`invalid terminal check verdict ${id}`);
     }
     return {admission_verified:true,gate_verified:false,requires_combined_gate:true,tree:current.tree,checks:current.checks};
   } catch(error){return {admission_verified:false,gate_verified:false,requires_combined_gate:true,error:error.message};}

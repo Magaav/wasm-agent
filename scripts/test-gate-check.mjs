@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
-import {executeChecks} from './gate-check.mjs';
+import {executeChecks,checkVerdict} from './gate-check.mjs';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'wa-check-runner-'));
 try {
   fs.mkdirSync(path.join(root,'tests'));
@@ -20,5 +20,8 @@ try {
   await assert.rejects(executeChecks(root,['full']),/reservation/);
   await assert.rejects(executeChecks(root,['js:one.js'],{jobs:5}),/1..4/);
   await assert.rejects(executeChecks(root,['js:one.js','js:one.js']),/distinct/);
-  console.log('gate check runner ok (12 checks, 0 skipped)');
+  const browser={verdict:'browser'};
+  assert(checkVerdict(browser,0,'  ok   UI structure, mid-run reload, and startup recovery\n').ok);
+  for(const [exit,text] of [[0,'silent'],[7,'  ok   UI structure, mid-run reload, and startup recovery\n'],[0,'  ok   UI structure, mid-run reload, and startup recovery\nFAIL evidence'],[0,'  ok   UI structure, mid-run reload, and startup recovery\n  ok   UI structure, mid-run reload, and startup recovery\n']])assert(!checkVerdict(browser,exit,text).ok);
+  console.log('gate check runner ok (17 checks, 0 skipped)');
 } finally {fs.rmSync(root,{recursive:true,force:true});}

@@ -41,6 +41,11 @@ async function probe(){const r=await run(['preflight']);check(r.code===0,'prefli
  await until(()=>fs.readdirSync(path.join(state,'failed')).some(f=>f!==files[0]),'independent claim settles with explicit refusal');
  const again=await run(['request','deploy','--if-no-pending','--reason','duplicate']);check(again.code===0&&/existing deploy request/.test(again.out),'dedupe survives concurrent watcher claims');
  check(fs.readFileSync(path.join(requests,files[0])).equals(bytes),'duplicate preserves original effect evidence');
+ const uncertain=path.join(state,'claimed','uncertain.json');fs.writeFileSync(uncertain,'malformed claimed effect evidence');
+ p=await probe();check(p.watcher==='running'&&p.inventory_verified===false&&p.inventory_error.includes('uncertain.json'),'preflight surfaces unknown claimed inventory without losing watcher identity');
+ const refusedInventory=await run(['request','deploy','--if-no-pending']);check(refusedInventory.code!==0&&/unknown_inventory/.test(refusedInventory.err),'unknown inventory refuses atomic deploy admission');
+ check(fs.readFileSync(uncertain,'utf8')==='malformed claimed effect evidence','uncertain intent remains untouched');
+ fs.unlinkSync(uncertain); // This private record was manufactured here and never executed.
  const stop=await run(['stop']);check(stop.code===0,'explicit stop accepted');
  await until(async()=>{const r=await run(['preflight']);return JSON.parse(r.out).watcher==='not_running';},'watcher drains after stop');
  p=await probe();check(p.stop_file===true,'intentional stop is durable');

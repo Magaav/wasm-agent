@@ -44,7 +44,7 @@ ARGS="$W/sentinel-args.txt"
 cat > "$STUB" <<STUB
 #!/bin/sh
 if [ "\$1" = "preflight" ]; then
-  echo '{"schema":1,"watcher":"running","watcher_pid":4242,"ownership":"watcher_lifetime_lock","stop_file":false,"pending_deploys":[],"capabilities":{"health_free":true,"atomic_deploy_dedupe":true}}'
+  echo '{"schema":1,"watcher":"running","watcher_pid":4242,"ownership":"watcher_lifetime_lock","stop_file":false,"pending_deploys":[],"inventory_verified":true,"capabilities":{"health_free":true,"atomic_deploy_dedupe":true}}'
   exit 0
 fi
 printf '%s\n' "\$@" > "$ARGS"
@@ -134,7 +134,7 @@ echo "--- 5. a sentinel that refuses is not a success ---"
 cat > "$STUB" <<'STUB'
 #!/bin/sh
 if [ "$1" = "preflight" ]; then
-  echo '{"schema":1,"watcher":"running","watcher_pid":4242,"ownership":"watcher_lifetime_lock","stop_file":false,"pending_deploys":[],"capabilities":{"health_free":true,"atomic_deploy_dedupe":true}}'
+  echo '{"schema":1,"watcher":"running","watcher_pid":4242,"ownership":"watcher_lifetime_lock","stop_file":false,"pending_deploys":[],"inventory_verified":true,"capabilities":{"health_free":true,"atomic_deploy_dedupe":true}}'
   exit 0
 fi
 echo "unknown verb" >&2

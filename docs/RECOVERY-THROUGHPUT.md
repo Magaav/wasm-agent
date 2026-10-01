@@ -150,3 +150,37 @@ any build; the wiring assertion now recognizes that prefix and still requires
 an actual build after preflight. Its other disk/refusal assertions are unchanged.
 The failed log and command timings are archived as `throughput-full-gate-213-*`
 under the external evidence directory. This failed attempt is not a smoke pass.
+
+Bootstrap 214 passed the complete original gate at `9bf1dd8`, tree
+`3d0df35f82c99abfd31498f172faab03f98533d1`: 843,906.577 ms, 2 skips,
+queue wait 59 ms, n=1 warm successful run. Individual phase and command timings
+are archived as `throughput-bootstrap-214-*`. It is not directly comparable to
+the different-source cold UI baseline and does not prove whole-pipeline speedup.
+
+Independent review of that exact tip required two corrections: focused receipt
+verification now re-parses terminal log evidence even when flags and recomputed
+hash match; combined gate proof now requires post-gate HEAD/tree and tracked plus
+untracked cleanliness to match the captured candidate. Synthetic JS/browser
+matching-hash invalid logs and three real default-command source mutations
+(tracked content, untracked content, moved HEAD) must refuse reusable proof.
+
+Pending/claimed malformed or unreadable records now surface `unknown_inventory`;
+preflight retains watcher identity but advertises unverified inventory, and
+atomic deployment admission refuses until the evidence is reconciled. Uncertain
+records remain untouched. Native read-error/malformed fixtures and the Lua update
+refusal prove this behavior rather than treating unknown as an empty queue.
+
+Deployment defaults its runtime binding to the sole clean canonical `main`
+checkout equal to fetched `origin/main`, chosen read-only. It atomically writes
+`runtime-worktree.txt` with the prior binding backed up. This keeps future `/update`
+source on canonical main without a permanent feature branch; an explicit runtime
+override remains a deliberate active-wave choice. No foreign checkout/ref moves.
+
+Requested primary checks are discoverable and wired with independent terminal
+proofs: selection state has minimum 9 checks; actual two-window recovery has
+minimum 13 and requires Windows Chromium. Absent dependency files or unsupported
+platform are explicit counted skips in a producer tree, never inferred passes.
+The final combined integration candidate must contain and execute these fixtures.
+Focused UI admission includes them when available; missing/unsupported critical
+integration coverage falls back to complete verification. The additional wiring
+and review fixes need new exact-tree verification and cannot reuse bootstrap 214.

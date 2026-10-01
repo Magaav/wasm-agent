@@ -191,6 +191,8 @@ function M.facts(options)
   facts.sentinel_running = probe and probe.watcher == "running" or false
   facts.sentinel_stopped = facts.sentinel_stopped or (probe and probe.stop_file) or false
   facts.pending_deploys = probe and probe.pending_deploys or {}
+  facts.inventory_verified = probe and probe.inventory_verified == true or false
+  facts.inventory_error = probe and probe.inventory_error or probe_error
   return facts
 end
 
@@ -267,6 +269,12 @@ function M.preconditions(facts)
                    or ""),
       next = "inspect the watcher/service outside this node if identity or preflight is unverified; install the current sentinel through the deployment gate if needed, then start it and ask again: " .. M.start_command(facts),
     }
+  end
+  if facts.inventory_verified == false then
+    return {ok=false,status="unknown_inventory",error="unknown_inventory",tree=facts.tree,
+      message="pending sentinel intent could not be verified, so this update wrote nothing.",
+      observed=tostring(facts.inventory_error or "inventory proof unavailable"),
+      next="inspect and reconcile the named queued/claimed evidence outside this run; preserve uncertain effects before retrying"}
   end
   if facts.pending_deploys and #facts.pending_deploys > 0 then
     return {
