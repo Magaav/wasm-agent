@@ -26,6 +26,7 @@ local tree = home .. "/tree"
 
 local vfs, issued, alive = {}, {}, {}
 local verified_lock = true
+local inventory_verified = true
 local request_answer   -- nil: the stub sentinel accepts. A table: a scripted answer.
 
 local function escaped(text)
@@ -88,7 +89,7 @@ host = {
       end
       return wrapper(0,json.encode({schema=1,watcher=alive[pid] and (verified_lock and "running" or "unverified") or "not_running",
         watcher_pid=tonumber(pid),ownership="watcher_lifetime_lock",stop_file=vfs[sentinel_dir .. "/stop"] ~= nil,
-        pending_deploys=pending,capabilities={health_free=true,atomic_deploy_dedupe=true}}),"")
+        pending_deploys=pending,inventory_verified=inventory_verified,inventory_error=not inventory_verified and "unknown_inventory: fixture claimed record" or nil,capabilities={health_free=true,atomic_deploy_dedupe=true}}),"")
     end
     local dir = command:match("^ls %-1 %-%- '(.*)' 2>/dev/null$")
     if dir then return wrapper(0, listing(dir), "") end
@@ -210,6 +211,11 @@ request_answer = function() return wrapper(0,"","") end
 report = ask()
 ok(report.error == "sentinel_unverifiable" and not report.queued,"exit zero without durable request evidence is refused")
 request_answer = nil
+inventory_verified = false
+report = ask()
+ok(report.error == "unknown_inventory" and not report.queued,"unknown claimed inventory refuses new deployment")
+ok(queued("request deploy") == 0,"unverifiable inventory never writes a request")
+inventory_verified = true
 verified_lock = false
 report = ask()
 ok(report.error == "no_watcher" and not report.queued,"a live recycled/legacy pid without a lifetime lock is refused")

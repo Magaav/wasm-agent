@@ -186,14 +186,18 @@ fn preflight() -> Result<()> {
     let state=watcher_state()?;
     let pid=std::fs::read_to_string(pid_path()).ok().and_then(|p|p.trim().parse::<u32>().ok());
     let _lock=queue_lock()?;
-    let mut pending=Vec::new();
-    for lane in ["requests","claimed"] {
-        for file in deploy_requests_in(&sentinel_dir().join(lane))? {
-            pending.push(format!("{lane}/{}",file.file_name().unwrap_or_default().to_string_lossy()));
+    let inventory=(|| -> Result<Vec<String>> {
+        let mut pending=Vec::new();
+        for lane in ["requests","claimed"] {
+            for file in deploy_requests_in(&sentinel_dir().join(lane))? {
+                pending.push(format!("{lane}/{}",file.file_name().unwrap_or_default().to_string_lossy()));
+            }
         }
-    }
+        Ok(pending)
+    })();
+    let (pending,inventory_error)=match inventory {Ok(pending)=>(pending,None),Err(error)=>(Vec::new(),Some(format!("{error:#}")))};
     println!("{}",json!({"schema":1,"watcher":match state {WatcherState::Running=>"running",WatcherState::NotRunning=>"not_running",WatcherState::LegacyUnverified(_)=>"unverified"},
-        "watcher_pid":pid,"ownership":"watcher_lifetime_lock","stop_file":stop_path().exists(),"pending_deploys":pending,
+        "watcher_pid":pid,"ownership":"watcher_lifetime_lock","stop_file":stop_path().exists(),"pending_deploys":pending,"inventory_verified":inventory_error.is_none(),"inventory_error":inventory_error,
         "capabilities":{"atomic_deploy_dedupe":true,"health_free":true}}));
     Ok(())
 }
@@ -1694,10 +1698,9 @@ fn deploy_requests_in(dir: &Path) -> Result<Vec<PathBuf>> {
         let entry = entry?;
         let path = entry.path();
         if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; }
-        let request: Value = match std::fs::read(&path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()) {
-            Some(value) => value,
-            None => continue,
-        };
+        let bytes=std::fs::read(&path).with_context(||format!("unknown_inventory: unreadable {}",path.display()))?;
+        let request:Value=serde_json::from_slice(&bytes).with_context(||format!("unknown_inventory: malformed {}",path.display()))?;
+        if !request.is_object() || request["verb"].as_str().is_none() {bail!("unknown_inventory: missing request verb in {}",path.display());}
         if request["verb"] == "deploy" { found.push(path); }
     }
     found.sort();
@@ -2563,6 +2566,12 @@ mod watcher_ownership_tests {
         std::fs::write(root.join("deploy.json"),r#"{"verb":"deploy"}"#).unwrap();
         std::fs::write(root.join("other.json"),r#"{"verb":"wake"}"#).unwrap();
         assert_eq!(deploy_requests_in(&root).unwrap(),vec![root.join("deploy.json")]);
+        assert!(root.join("deploy.json").exists());
+        std::fs::write(root.join("malformed.json"),"broken").unwrap();
+        assert!(format!("{:#}",deploy_requests_in(&root).unwrap_err()).contains("unknown_inventory"));
+        std::fs::remove_file(root.join("malformed.json")).unwrap();
+        std::fs::create_dir(root.join("unreadable.json")).unwrap();
+        assert!(format!("{:#}",deploy_requests_in(&root).unwrap_err()).contains("unreadable"));
         assert!(root.join("deploy.json").exists());
         std::fs::remove_dir_all(root).unwrap();
     }

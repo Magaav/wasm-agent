@@ -168,12 +168,27 @@ trap gate_exit EXIT
 . scripts/lib/gate-phases.sh
 . scripts/lib/gate-timing.sh
 # gate_exit retains phase reporting and the original exit status on failure.
+run_proof_fixture() {
+  local kind="$1" minimum="$2" status=0 nested_skipped
+  shift 2
+  local log="${DB:-$GATE_HOME/proof}.$kind-proof.log"
+  gate_run "$@" > "$log" 2>&1 || status=$?
+  if ! nested_skipped="$(node scripts/lib/proof-verdict.cjs "$kind" "$status" "$minimum" < "$log")"; then
+    echo "FAIL: $kind proof; retained output: $log" >&2
+    tail -40 "$log" >&2
+    exit 1
+  fi
+  SKIPPED=$((SKIPPED + nested_skipped))
+  tail -4 "$log"
+}
+
 gate_phase_begin build
 gate_run cargo build --release --offline --manifest-path rust/Cargo.toml >/dev/null
 gate_run node scripts/test-install-isolation.mjs
 gate_run node scripts/test-gate-check.mjs
-gate_run node scripts/test-producer-admission.mjs
+run_proof_fixture producer 16 node scripts/test-producer-admission.mjs
 gate_run node scripts/test-full-gate-proof.mjs
+gate_run node scripts/test-runtime-install-binding.mjs
 gate_run node scripts/test-parallel-finish.mjs
 # The execution and automation contracts have native, model-free adversarial tests.
 gate_run cargo test --release --offline --manifest-path rust/Cargo.toml -p wa-operation -p wa-jobs
@@ -309,19 +324,7 @@ gate_fixture_cleanup() { rm -f "$DB" "$DB"-wal "$DB"-shm "$SDB" "$SDB"-wal "$SDB
 
 # Fresh retained output + process status + terminal count evidence for every new
 # integrated proof. A child that silently exits 0 or drops checks cannot pass.
-run_proof_fixture() {
-  local kind="$1" minimum="$2" status=0 nested_skipped
-  shift 2
-  local log="$DB.$kind-proof.log"
-  gate_run "$@" > "$log" 2>&1 || status=$?
-  if ! nested_skipped="$(node scripts/lib/proof-verdict.cjs "$kind" "$status" "$minimum" < "$log")"; then
-    echo "FAIL: $kind proof; retained output: $log" >&2
-    tail -40 "$log" >&2
-    exit 1
-  fi
-  SKIPPED=$((SKIPPED + nested_skipped))
-  tail -4 "$log"
-}
+
 
 "$BIN" --db "$DB" init >/dev/null
 
@@ -921,6 +924,12 @@ gate_run node scripts/test-workspace-root-recovery.cjs "$BIN"
 # than leave a session shell behind. Two disposable checkouts, no model.
 gate_run node scripts/test-placed-child-workspace.cjs "$BIN"
 gate_run node scripts/test-run-recovery.cjs "$BIN"
+if [ -f scripts/test-selection-state.cjs ]; then
+  run_proof_fixture selection 9 node scripts/test-selection-state.cjs "$BIN"
+else
+  echo "selection state proof SKIPPED - primary selection fixture absent from this producer tree"
+  SKIPPED=$((SKIPPED + 1))
+fi
 gate_run node scripts/test-resource-claims.cjs "$BIN"
 # The tool-choice experiment's verifier must reject a plausible-looking wrong answer, and
 # its treatment must reach the child prompt the rig runs. Both are what make the arm's
@@ -1724,6 +1733,7 @@ gate_run node scripts/test-merge-audit.mjs
 # `env -u GATE_LANE_HELD` the run inherits a slot and fails on its first check.
 gate_run node scripts/test-gate-lane.cjs
 gate_run node scripts/test-merge-lane.mjs
+gate_run node scripts/test-merge-gate-source.mjs
 gate_run node scripts/test-merge-lane-retention.mjs
 gate_run node scripts/test-delivery-admission.mjs
 env -u GATE_LANE_HELD node scripts/test-gate-lane-wiring.cjs
@@ -1868,6 +1878,16 @@ fi
 # gate, so a green gate could say "ui tests ok" while it was failing. A machine that cannot run
 # it says so and counts the skip, rather than reporting a pass it did not earn.
 gate_phase_begin ui-browser
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if [ -f scripts/test-recovery-two-window.cjs ]; then
+      run_proof_fixture recoveryWindows 13 node scripts/test-recovery-two-window.cjs "$BIN"
+    else
+      echo "two-window recovery proof SKIPPED - primary recovery fixture absent from this producer tree"
+      SKIPPED=$((SKIPPED + 1))
+    fi ;;
+  *) echo "two-window recovery proof SKIPPED - Windows Chromium integration fixture"; SKIPPED=$((SKIPPED + 1)) ;;
+esac
 if [ "${WASM_AGENT_SKIP_UI_BROWSER:-}" = "1" ]; then
   echo "ui browser harness skipped by request (WASM_AGENT_SKIP_UI_BROWSER=1)"
   SKIPPED=$((SKIPPED + 1))

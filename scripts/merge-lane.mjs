@@ -1110,13 +1110,23 @@ async function main() {
   const mainMoved = targetRefAfter === null ? null : targetRefAfter !== baseSha;
   timings.total_ms = elapsedMs(started);
 
-  const gatePassed = (gate.ran || gate.reused) && gate.exit === 0 && gate.verdict_found;
+  if(clone && (gate.ran || gate.reused)) {
+    const postHead=resolveRef(clone.dir,'HEAD');
+    const postTree=git(clone.dir,'rev-parse','HEAD^{tree}');
+    const postStatus=git(clone.dir,'status','--porcelain','--untracked-files=all');
+    gate.source_observation={head:postHead,tree:postTree.status===0?postTree.stdout.trim():null,
+      status:postStatus.status===0?postStatus.stdout.trim():null};
+    gate.source_verified=postHead===candidateHead&&gate.source_observation.tree===candidateTree
+      &&postStatus.status===0&&gate.source_observation.status==='';
+    if(!gate.source_verified)gate.source_error='candidate HEAD/tree or tracked/untracked cleanliness changed during gate; no source-bound proof';
+  }
+  const gatePassed = (gate.ran || gate.reused) && gate.exit === 0 && gate.verdict_found && gate.source_verified===true;
   if (gatePassed && options.gateCommand==='bash scripts/test.sh') {
     // Persist in this lane's Git metadata, before its disposable tree is removed.
     // Only the identical combined source tree can reuse this; focused checks never enter here.
     const metadata=requireGit(gitDir,['rev-parse','--git-path','wa-combined-gate.json'],'combined receipt path');
     const durableLog=path.resolve(gitDir,metadata+'.log');
-    fs.copyFileSync(gate.log,durableLog);
+    if(path.resolve(gate.log)!==durableLog)fs.copyFileSync(gate.log,durableLog);
     const receipt={schema:1,kind:'full',repo:path.resolve(gitDir),head:candidateHead,tree:candidateTree,passed:true,
       gate_exit:0,gate_runs:1,gate_ms:gate.reused?gate.proof.gate_ms:gate.ms,skipped:gate.skipped,
       log:durableLog,log_sha256:gate.log_sha256,at:new Date().toISOString()};
