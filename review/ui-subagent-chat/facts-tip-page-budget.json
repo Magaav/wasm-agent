@@ -1,0 +1,94 @@
+{
+ "verdict": "PAGE BUDGET PASS (7 checks, 0 failures) phase=done",
+ "facts": {
+  "panes": [
+   {
+    "key": "child-a",
+    "messages": 2,
+    "answer": true,
+    "notice": "page 40 KiB refused (invalid_session_byte_limit): reading the page size the node chooses Working. Steer updates the active run; Send queues a follow-up.",
+    "noticeTitle": "This node bounds a transcript page by its own tool-output budget (WASM_AGENT_TOOL_OUTPUT_BYTES), which is smaller than the 40 KiB page this view asked for. The pane renders the page the node returns instead, so a child's transcript shows fewer rows here than it would on the default budget.",
+    "footerInsideBubble": false
+   },
+   {
+    "key": "child-b",
+    "messages": 2,
+    "answer": true,
+    "notice": "page 40 KiB refused (invalid_session_byte_limit): reading the page size the node chooses Working. Steer updates the active run; Send queues a follow-up.",
+    "noticeTitle": "This node bounds a transcript page by its own tool-output budget (WASM_AGENT_TOOL_OUTPUT_BYTES), which is smaller than the 40 KiB page this view asked for. The pane renders the page the node returns instead, so a child's transcript shows fewer rows here than it would on the default budget.",
+    "footerInsideBubble": false
+   },
+   {
+    "key": "child-c",
+    "messages": 2,
+    "answer": true,
+    "notice": "page 40 KiB refused (invalid_session_byte_limit): reading the page size the node chooses Working. Steer updates the active run; Send queues a follow-up.",
+    "noticeTitle": "This node bounds a transcript page by its own tool-output budget (WASM_AGENT_TOOL_OUTPUT_BYTES), which is smaller than the 40 KiB page this view asked for. The pane renders the page the node returns instead, so a child's transcript shows fewer rows here than it would on the default budget.",
+    "footerInsideBubble": false
+   }
+  ],
+  "counted": {
+   "session": 37,
+   "refusedSized": 6,
+   "acceptedUnsized": 31
+  },
+  "requestLog": [
+   {
+    "id": "child-a",
+    "byte_limit": 40960,
+    "outcome": "refused_sized"
+   },
+   {
+    "id": "child-a",
+    "byte_limit": 40960,
+    "outcome": "refused_sized"
+   },
+   {
+    "id": "child-b",
+    "byte_limit": 40960,
+    "outcome": "refused_sized"
+   },
+   {
+    "id": "child-a",
+    "byte_limit": 40960,
+    "outcome": "refused_sized"
+   },
+   {
+    "id": "child-b",
+    "byte_limit": 40960,
+    "outcome": "refused_sized"
+   },
+   {
+    "id": "child-c",
+    "byte_limit": 40960,
+    "outcome": "refused_sized"
+   },
+   {
+    "id": "child-a",
+    "byte_limit": null,
+    "outcome": "unsized_accepted"
+   },
+   {
+    "id": "child-a",
+    "byte_limit": null,
+    "outcome": "unsized_accepted"
+   },
+   {
+    "id": "child-b",
+    "byte_limit": null,
+    "outcome": "unsized_accepted"
+   },
+   {
+    "id": "child-c",
+    "byte_limit": null,
+    "outcome": "unsized_accepted"
+   }
+  ],
+  "bounded": {
+   "sizedAttempts": 6,
+   "firstUnsizedAt": 6,
+   "sizedAfterConvergence": 0
+  },
+  "failureNotice": "Conversation unavailable: fixture_page_unavailable"
+ }
+}

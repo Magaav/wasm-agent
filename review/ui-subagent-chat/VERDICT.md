@@ -1,5 +1,9 @@
 # Independent review — `change/ui-subagent-chat`
 
+> This is the review of tip **340b7c2**. The delivery moved to tip **afd0f0e** with the producer's
+> response; the re-verification of that tip is in `REVERIFY-afd0f0e.md`, which is the verdict that
+> applies to the current tip.
+
 - Delivery tip **340b7c2080f755832e05a32f7821314c98d6c798**, tree `c4031a7e196e7c06f511be6667aa895eb2496cb5` (both re-derived from the tip commit, and the tree matches the delivery record).
 - Reviewer session `child:dispatch:67be1595-571f-460f-9908-e0d123ceafa0`, in its own worktree
   `C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch67be1595-571f-460f-9908-e0d123ceafa0`, on

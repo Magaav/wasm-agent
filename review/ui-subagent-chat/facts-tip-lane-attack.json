@@ -1,0 +1,37 @@
+{
+ "verdict": "ATTACK PROBE PASS (3 checks, 0 failures) phase=done",
+ "facts": {
+  "lanes": [
+   {
+    "key": "C:/work/wt-gamma",
+    "path": "C:/work/wt-gamma",
+    "checklist": [
+     {
+      "outcome": "merged",
+      "state": "unknown",
+      "reason": "merged · unknown · this view reads no branch tip and no origin/main ref, so containment is not measured here"
+     },
+     {
+      "outcome": "retired",
+      "state": "no",
+      "reason": "retired · no · a child of this lane still holds a bound checkout"
+     },
+     {
+      "outcome": "clean",
+      "state": "unknown",
+      "reason": "clean · unknown · a checkout's own git status is measured by the node's settlement review, which this view is not given"
+     },
+     {
+      "outcome": "main-only",
+      "state": "no",
+      "reason": "main-only · no · this lane holds a checkout of its own (C:/work/wt-gamma)"
+     }
+    ]
+   }
+  ],
+  "observed": {
+   "mainOnly": "no",
+   "retired": "no"
+  }
+ }
+}

@@ -1,0 +1,25 @@
+One-thing-reverted mutations of the delivery's OWN scripts/test-ui.ps1, applied in a disposable copy of
+the tree's ui/ + scripts/test-ui.ps1 (never the delivery's files), run with
+powershell -NoProfile -ExecutionPolicy Bypass -File <copy>/scripts/test-ui.ps1.
+Runner: node review/ui-subagent-chat/controls-suite.mjs
+
+s1  main-only derived from the branch again (app.js)
+    RED  UI FAIL: each lane's four outcomes must come from its own recorded checkout, saw
+         alpha[merged=unknown retired=no clean=unknown main-only=no] beta[...]
+s2  the page-size adaptation removed again (app.js: refusal rethrown)
+    RED  UI FAIL: a lowered tool-output budget must cost page size, not the transcript, and the pane
+         must say so, saw: Conversation unavailable: invalid_session_byte_limit
+s3  every card in one lane (components.js groupByLane key fixed)
+    RED  UI FAIL: cards must be grouped by the child's recorded checkout (branch, else worktree),
+         saw ["one-lane"] ["one-lane:5"] ;; each lane's four outcomes ... alpha[no such lane]
+s4  the checklist not rendered (components.js laneElement loop emptied)
+    RED  UI FAIL: each lane's four outcomes must come from its own recorded checkout, saw
+         alpha[] beta[] gamma[] main[]
+s5  state right, REASON wrong (app.js: main-only detail back to the old lie)      *** GREEN ***
+    ok   UI structure, mid-run reload, and startup recovery      <- SURVIVES the durable block
+s6  the lane path not shown (components.js laneElement `if(lane.worktree)` -> `if(false)`)
+    RED  UI FAIL: a lane must show the recorded worktree it is keyed or grouped by, saw ["","",""]
+s7  the production refresh stops painting (app.js: `if(painted!==pane.painted)` -> `if(false)`)
+    RED  (harness error at the first pane check: the app's own refresh no longer paints)
+s2b control: only the memo made irrelevant (`request.byte_limit=40960` unconditional)
+    GREEN (correct: the adaptation still fires, so no behaviour was removed)
