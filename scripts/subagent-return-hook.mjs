@@ -9,8 +9,8 @@
 //    it should wake you up and instruct you if it should deploy" - the owner's instruction.
 //
 // Every step below is decidable without judgement: read the node's recorded children, read the child's
-// recorded branch and worktree, diff it against `origin/main`, match the paths against the deploy's own
-// shipped set, print a block. None of it needs an opinion, so none of it costs a model turn
+// recorded branch and worktree, diff it against `origin/main`, match the paths against the set a deploy
+// actually installs, print a block. None of it needs an opinion, so none of it costs a model turn
 // (skills/automation-jobs/SKILL.md: "if a step can be decided without judgement, it must not cost a
 // token"). The hook therefore *fires* on every settle in every state with no model call at all; the one
 // message it causes is the wake to the orchestrator, which is the judgement half and is budgeted there.
@@ -21,55 +21,54 @@
 //               record of every child (`POST /subagents {action:"list"}` plus one `status` per settled
 //               child for its completion packet), measures each child's diff against origin/main in the
 //               worktree the node recorded, and emits ONE `subagent.return` event per newly settled
-//               child. The event id is the child's own id, so the job store's own dedupe
-//               (UNIQUE(job_id,revision,event_id)) is what makes "one wake per settle" true - a poll
-//               that runs every 30 s cannot wake anyone twice for the same child.
+//               child. The event id IS the child's id, so the job store's own dedupe
+//               (UNIQUE(job_id,revision,event_id)) and the hook's wake-level dedupe both key on the same
+//               fact: a poll that runs every 30 s cannot wake anyone twice for the same child, and a
+//               definition re-put cannot either.
 //
 //   --compose   the `prepare` step of the `onSubagentReturn` job's wake action. Reads that event
 //               (`WA_JOB_EVENT_FILE`) and prints the instruction block the sentinel injects into the
 //               wake message. It makes no network call at all.
 //
+// THE THREE WAYS THIS MUST NOT LIE. "no install impact" is a claim about a measurement, so it may only
+// be said when the measurement was taken:
+//
+//   * the shipped set comes from `scripts/deploy-shipped.json`, which is derived from what
+//     `scripts/deploy.sh` and `scripts/upgrade.sh` actually install (`scripts/check-deploy-shipped.mjs`
+//     fails when an installer copies something the manifest does not cover). A manifest that cannot be
+//     read is `cannot be computed`, never "nothing is shipped";
+//   * the diff is taken against the child's merge base with `origin/main`. No merge base (an unrelated
+//     history, a shallow clone) is `cannot be computed` - a whole-tree two-dot diff answers a different
+//     question and answered it "no install impact";
+//   * the uncommitted half counts. A child whose tip equals main but whose worktree holds uncommitted
+//     shipped changes has install impact, and a checkout that reports uncommitted work the pass could
+//     not measure is `cannot be computed`.
+//
 // Exit codes: 0 a completed pass (including one that could not report anything, which says so in one
-// line with the numbers it did see - a closed source is an answer, not a failure); 4 usage, a
-// reachable source that answered something unusable, or a state this cannot be recorded from.
+// line with the numbers it did see - a closed source is an answer, not a failure); 4 usage, a reachable
+// source that answered something unusable, or a state this cannot be recorded from.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 
 const SCHEMA = 1;
 const TOPIC = 'subagent.return';
 const BLOCK_HEADER = '[onSubagentReturn]';
+const HOOK_JOB = 'onSubagentReturn';
 
 // ---------------------------------------------------------------------------------------------
-// THE DEPLOY RULE. One predicate, one place. A path is shipped when a deploy would install it.
+// THE DEPLOY RULE. One predicate, and one declaration of what a deploy installs.
 //
-// Derived from scripts/deploy.sh, which is the only thing that decides what a deploy copies:
-//   * ui/**, rust/**, lua/**, skills/** are installed (the window, the node and supervisor binaries
-//     built from rust/**, the embedded Lua core, and the skills the installed node loads);
-//   * of scripts/**, a deploy copies `scripts/deploy.sh` and `scripts/lib/service-target.sh` (the
-//     copies that perform the next deploy), every `scripts/whatsapp-*` file, the `scripts/lib/**`
-//     modules those import, the `scripts/wave-*` continuation scripts (shipped by
-//     scripts/ship-wave.mjs with their literal import closure), and this hook's own
-//     `scripts/subagent-return-*` files, which are shipped for the `onSubagentReturn` job below.
-//
-// `scripts/lib/**` is included as a whole rather than as the exact import closure: the closure is
-// computed by grep in deploy.sh (and by ship-wave.mjs for the wave scripts), so encoding it here
-// would be a second, silently diverging copy of that rule. Over-inclusion errs toward "deploy
-// required", which is the safe direction - the cost of a needless deploy is a deploy, the cost of a
-// missed one is a node that runs code the deliverable does not contain.
-const DEPLOY_SHIPPED_DIRECTORIES = ['ui/', 'rust/', 'lua/', 'skills/'];
-const DEPLOY_SHIPPED_SCRIPTS = ['scripts/deploy.sh', 'scripts/lib/service-target.sh'];
-const DEPLOY_SHIPPED_SCRIPT_PATTERNS = [
-  /^scripts\/whatsapp-[^/]+$/,
-  /^scripts\/lib\/[^/]+$/,
-  /^scripts\/wave-[^/]+$/,
-  /^scripts\/subagent-return-[^/]+$/,
-];
-
-// The verdicts. `unknown` is not a third flavour of "nothing to do": it exists so that a child whose
-// artifacts could not be read can never be reported as having no install impact. "We could not look"
-// and "we looked and there was nothing" are different answers, and only one of them is evidence.
+// `scripts/deploy-shipped.json` is the single source of truth for the shipped set, and it is derived
+// from the installers themselves - not maintained by hand beside them. The reason is a measured one:
+// the first version of this predicate carried a hand-written list of `scripts/**` patterns and missed
+// `jobs/**` (which `deploy.sh` installs into the job store) and `scripts/upgrade.sh` (which installs
+// itself), so a child that changed what the node *runs* was reported as having no install impact. A
+// hand list beside an installer drifts from it; a manifest with a check that fails when the installer
+// copies something the manifest does not cover does not.
+const MANIFEST_NAME = 'deploy-shipped.json';
 const VERDICT = {
   required: "deploy required at the wave's end",
   none: 'no install impact',
@@ -90,19 +89,55 @@ const OPERATING_INSTRUCTION = {
 const SETTLED_STATES = new Set(['completed', 'failed', 'cancelled', 'refused', 'unknown']);
 const MAX_PATHS = 200;
 
-// ---------------------------------------------------------------------------------------------
-// The predicate.
-function shipsToDeploy(candidate) {
-  const file = String(candidate || '').replace(/\\/g, '/').replace(/^\.\//, '');
-  if (file === '') return false;
-  if (DEPLOY_SHIPPED_DIRECTORIES.some((directory) => file.startsWith(directory))) return true;
-  if (DEPLOY_SHIPPED_SCRIPTS.includes(file)) return true;
-  return DEPLOY_SHIPPED_SCRIPT_PATTERNS.some((pattern) => pattern.test(file));
+export function manifestPath(scriptDir = path.dirname(fileURLToPath(import.meta.url))) {
+  return path.join(scriptDir, MANIFEST_NAME);
 }
 
-function deployVerdict(paths) {
+/// The shipped set, read from the manifest beside this script. `error` is explicit so a caller cannot
+/// mistake "could not read the rule" for "nothing is shipped".
+export function loadShipped(file = manifestPath()) {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (manifest.schema !== SCHEMA || !Array.isArray(manifest.directories) || !Array.isArray(manifest.files) || !Array.isArray(manifest.globs)) {
+      return {error: `shipped_manifest_malformed: ${file}`};
+    }
+    return {manifest, file};
+  } catch (error) {
+    return {error: `shipped_manifest_unreadable: ${file}: ${String(error.message || error)}`};
+  }
+}
+
+function normalize(candidate) {
+  return String(candidate || '').replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+/// A glob here is the deploy's own glob shape: one `*` standing for a file name inside one directory
+/// (no `/`), which is what `for source in "$ROOT"/scripts/lib/*` and the `./lib/<name>` grep mean. A
+/// nested path is therefore *not* covered by `scripts/lib/*`, matching the installer.
+function matchesGlob(file, glob) {
+  const pattern = normalize(glob);
+  if (!pattern.includes('*')) return file === pattern;
+  const [head, tail] = pattern.split('*');
+  if (tail !== '') return false;
+  if (!file.startsWith(head)) return false;
+  const rest = file.slice(head.length);
+  return rest !== '' && !rest.includes('/');
+}
+
+export function shipsToDeploy(candidate, manifest) {
+  const file = normalize(candidate);
+  if (file === '' || !manifest) return false;
+  if ((manifest.directories || []).some((directory) => file.startsWith(normalize(directory)))) return true;
+  if ((manifest.files || []).some((entry) => file === normalize(entry))) return true;
+  // The wave closure: files `scripts/ship-wave.mjs` writes because a shipped wave script imports them,
+  // which the check re-derives from ship-wave itself on every gate run.
+  if ((manifest.wave_closure_files || []).some((entry) => file === normalize(entry))) return true;
+  return (manifest.globs || []).some((glob) => matchesGlob(file, glob));
+}
+
+export function deployVerdict(paths, manifest) {
   const list = (paths || []).map((entry) => String(entry));
-  const shipped = list.filter(shipsToDeploy);
+  const shipped = list.filter((entry) => shipsToDeploy(entry, manifest));
   return {
     verdict: shipped.length > 0 ? VERDICT.required : VERDICT.none,
     shipped: shipped.slice(0, MAX_PATHS),
@@ -125,10 +160,30 @@ function artifactLine(artifacts) {
   parts.push(`worktree: ${worktree || (artifacts.managed === false ? 'none (unmanaged checkout)' : 'NOT REPORTED')}`);
   if (artifacts.ahead !== undefined) parts.push(`ahead_of_origin_main: ${artifacts.ahead}`);
   if (artifacts.dirty !== undefined) parts.push(`dirty: ${artifacts.dirty}`);
+  if (artifacts.untracked !== undefined) parts.push(`untracked: ${artifacts.untracked}`);
   if (Array.isArray(artifacts.unmeasured) && artifacts.unmeasured.length > 0) {
     parts.push(`unmeasured: ${artifacts.unmeasured.join(', ')}`);
   }
   return parts.join('  ');
+}
+
+/// The notification half: the same measured facts the completion outbox's own notice carries, so that
+/// this message IS the notification and the outbox one is redundant (the sentinel writes the marker the
+/// outbox reads while this hook is enabled).
+function notificationLine(event) {
+  const child = event.notification && event.notification.child ? event.notification.child : {};
+  const session = event.notification && event.notification.session ? event.notification.session : {};
+  const parts = [];
+  const model = child.served_model || child.model;
+  if (model) parts.push(`model: ${model}`);
+  if (child.provider) parts.push(`provider: ${child.provider}`);
+  if (child.reasoning) parts.push(`reasoning: ${child.reasoning}`);
+  if (child.profile) parts.push(`profile: ${child.profile}`);
+  if (child.error) parts.push(`child_error: ${child.error}`);
+  if (session.duration_s !== undefined) parts.push(`duration_s: ${session.duration_s}`);
+  if (event.notification && event.notification.usage) parts.push(`usage: ${JSON.stringify(event.notification.usage)}`);
+  if (event.notification && event.notification.review) parts.push(`outbox_review: ${JSON.stringify(event.notification.review)}`);
+  return parts.length > 0 ? parts.join('  ') : 'model/usage NOT REPORTED by the child record';
 }
 
 function changedLine(event) {
@@ -136,16 +191,32 @@ function changedLine(event) {
   if (Array.isArray(event.changed_paths)) {
     const shown = event.changed_paths.slice(0, MAX_PATHS).join(', ');
     const more = event.changed_paths.length > MAX_PATHS ? `, ... +${event.changed_paths.length - MAX_PATHS} more` : '';
-    return `changed paths vs origin/main: ${event.changed_paths.length}${source}: ${shown}${more}`;
+    const uncommitted = Array.isArray(event.uncommitted_paths) && event.uncommitted_paths.length > 0
+      ? `  uncommitted: ${event.uncommitted_paths.slice(0, MAX_PATHS).join(', ')}`
+      : '';
+    return `changed paths vs origin/main: ${event.changed_paths.length}${source}: ${shown}${more}${uncommitted}`;
   }
   return `changed paths vs origin/main: NOT MEASURED${source}: ${event.changed_paths_error || 'not reported'}`;
 }
 
-/// The verdict for one recorded child, and why. The three unmeasurable cases are named one by one
-/// rather than collapsed into "no install impact".
-export function childReturnVerdict(event) {
+function headLine(event) {
+  if (!event.worktree_head) return null;
+  if (event.head_moved && event.head_moved.recorded && event.head_moved.current) {
+    return `worktree head: ${event.head_moved.current} (moved since the settle: recorded ${event.head_moved.recorded})`;
+  }
+  return `worktree head: ${event.worktree_head}`;
+}
+
+/// The verdict for one recorded child, and why. The unmeasurable cases are named one by one rather than
+/// collapsed into "no install impact".
+export function childReturnVerdict(event, shipped) {
+  const manifest = shipped && shipped.manifest ? shipped.manifest : shipped;
+  const manifestError = shipped && shipped.error;
   if (!event || typeof event !== 'object') {
     return {verdict: VERDICT.unknown, reason: 'no_child_record', shipped: [], shipped_count: 0, paths: 0};
+  }
+  if (manifestError) {
+    return {verdict: VERDICT.unknown, reason: manifestError, shipped: [], shipped_count: 0, paths: 0};
   }
   const artifacts = event.artifacts;
   if (!artifacts || artifacts.available === false) {
@@ -162,47 +233,93 @@ export function childReturnVerdict(event) {
       shipped: [], shipped_count: 0, paths: 0,
     };
   }
-  return deployVerdict(event.changed_paths);
+  return deployVerdict(event.changed_paths, manifest);
 }
 
-export function instructionBlock(event) {
+export function instructionBlock(event, shipped = loadShipped()) {
   const facts = event || {};
   const state = String(facts.state || 'unknown');
-  const decided = childReturnVerdict(facts);
+  const decided = childReturnVerdict(facts, shipped);
   const lines = [
     `${BLOCK_HEADER} deterministic child-return hook (no model call fires it; this block is measured).`,
     `child: ${facts.child_id || 'NOT REPORTED'}   state: ${state}   settled: ${facts.settled === false ? 'no' : 'yes'}`,
+    `notification: ${notificationLine(facts)}`,
     `session: ${facts.session || 'NOT REPORTED'}   parent: ${facts.parent_session || 'NOT REPORTED'}`,
     artifactLine(facts.artifacts),
     changedLine(facts),
-    `DEPLOY VERDICT: ${decided.verdict}${decided.reason ? ` (${decided.reason})` : ''}`,
-    `OPERATING INSTRUCTION: ${OPERATING_INSTRUCTION[decided.verdict]}`,
   ];
+  const head = headLine(facts);
+  if (head) lines.push(head);
+  lines.push(`DEPLOY VERDICT: ${decided.verdict}${decided.reason ? ` (${decided.reason})` : ''}`);
+  lines.push(`OPERATING INSTRUCTION: ${OPERATING_INSTRUCTION[decided.verdict]}`);
   return {instruction: lines.join('\n'), verdict: decided.verdict, reason: decided.reason || null,
     shipped_count: decided.shipped_count, child_id: facts.child_id || null, state};
 }
 
 // ---------------------------------------------------------------------------------------------
-// Measuring a child's own tree. `git diff --name-only origin/main...HEAD` is the child's side of the
-// split since its merge base with the integration branch - what it would add to it. Both endpoints
-// come from the child's *record*, never from a branch someone else may have moved on.
+// Measuring a child's own tree.
+//
+// Three measurements, and all three are load-bearing:
+//   * the merge base with the integration branch - without one the diff below cannot be taken, and the
+//     answer is `cannot be computed` rather than a whole-tree diff of two unrelated histories;
+//   * `git diff --name-only <merge-base> <tip>` - what the child's own commits would add to main;
+//   * `git status --porcelain` - the uncommitted half, which a tip-only diff cannot see. A child whose
+//     tip equals main and whose worktree holds an uncommitted shipped change has install impact.
+function parseStatus(text) {
+  const paths = [];
+  for (const line of String(text).split(/\r?\n/)) {
+    if (line.trim() === '') continue;
+    let entry = line.slice(3).trim();
+    const rename = entry.split(' -> ');
+    entry = rename[rename.length - 1];
+    if (entry.startsWith('"') && entry.endsWith('"')) entry = entry.slice(1, -1);
+    if (entry !== '') paths.push(entry);
+    if (paths.length >= 2000) break;
+  }
+  return paths;
+}
+
 export function measureChangedPaths(worktree, tip) {
   if (!worktree) return {error: 'no_worktree_recorded'};
   const target = tip || 'HEAD';
   const run = (args) => spawnSync('git', ['-C', worktree, ...args], {encoding: 'utf8', timeout: 60000, windowsHide: true});
-  const probe = run(['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/main']);
-  const base = probe.status === 0 ? 'refs/remotes/origin/main' : 'main';
-  if (probe.status !== 0) {
-    const local = run(['rev-parse', '--verify', '--quiet', 'refs/heads/main']);
-    if (local.status !== 0) return {error: 'no_main_ref_in_child_worktree'};
+  let mainRef = 'refs/remotes/origin/main';
+  if (run(['rev-parse', '--verify', '--quiet', mainRef]).status !== 0) {
+    mainRef = 'refs/heads/main';
+    if (run(['rev-parse', '--verify', '--quiet', mainRef]).status !== 0) {
+      return {error: 'no_main_ref_in_child_worktree'};
+    }
   }
-  const diff = run(['diff', '--name-only', `${base}...${target}`]);
-  if (diff.status !== 0) {
-    const retry = run(['diff', '--name-only', `${base}`, `${target}`]);
-    if (retry.status !== 0) return {error: `git_diff_failed: ${String(diff.stderr || retry.stderr || '').trim().slice(0, 200)}`};
-    return {paths: retry.stdout.split(/\r?\n/).filter(Boolean), source: `git -C ${worktree} diff --name-only ${base} ${target}`};
+  const mergeBase = run(['merge-base', mainRef, target]);
+  if (mergeBase.status !== 0 || mergeBase.stdout.trim() === '') {
+    // No common ancestor: the three-dot diff has no base to stand on. A two-dot whole-tree diff would
+    // answer "what is different between two unrelated trees", which is not what a deploy verdict is
+    // about - it reported "no install impact" for exactly this case, which is why there is no fallback.
+    return {error: 'no_merge_base_with_origin_main'};
   }
-  return {paths: diff.stdout.split(/\r?\n/).filter(Boolean), source: `git -C ${worktree} diff --name-only ${base}...${target}`};
+  const base = mergeBase.stdout.trim();
+  const committed = run(['diff', '--name-only', base, target]);
+  if (committed.status !== 0) {
+    return {error: `git_diff_failed: ${String(committed.stderr || '').trim().slice(0, 200)}`};
+  }
+  // `--untracked-files=all`: a brand-new directory is otherwise reported as `?? dir/`, which names a
+  // directory the verdict has to guess about instead of the files the deploy would install.
+  const status = run(['status', '--porcelain', '--untracked-files=all']);
+  if (status.status !== 0) {
+    return {error: `git_status_failed: ${String(status.stderr || '').trim().slice(0, 200)}`};
+  }
+  const head = run(['rev-parse', 'HEAD']);
+  const committedPaths = committed.stdout.split(/\r?\n/).filter(Boolean);
+  const uncommittedPaths = parseStatus(status.stdout);
+  const union = [...new Set([...committedPaths, ...uncommittedPaths])];
+  return {
+    paths: union,
+    committed_paths: committedPaths,
+    uncommitted_paths: uncommittedPaths,
+    merge_base: base,
+    head: head.status === 0 ? head.stdout.trim() : null,
+    source: `git -C ${worktree} diff --name-only ${base}...${target} + git -C ${worktree} status --porcelain`,
+  };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -233,12 +350,17 @@ function statePath(options) {
   return path.join(home, '.wasm-agent', 'sentinel', 'subagent-return-reported.json');
 }
 
+function emptyState() {
+  return {schema: SCHEMA, reported: {}, pending: {}};
+}
+
 function readState(file) {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return parsed && typeof parsed === 'object' && parsed.reported ? parsed : {reported: {}};
+    if (!parsed || typeof parsed !== 'object') return emptyState();
+    return {schema: SCHEMA, reported: parsed.reported || {}, pending: parsed.pending || {}};
   } catch {
-    return {reported: {}};
+    return emptyState();
   }
 }
 
@@ -249,32 +371,56 @@ function writeState(file, state) {
   fs.renameSync(temporary, file);
 }
 
-/// One `wa-sentinel job emit`. The event id is the child's own id: the store's UNIQUE(job_id,
-/// revision, event_id) is the dedupe, so a second pass over the same child enqueues nothing.
+function sentinelCli(options, args) {
+  const result = spawnSync(options.emitCommand, ['job', ...args], {encoding: 'utf8', timeout: 60000, windowsHide: true});
+  if (result.status !== 0) {
+    return {error: String(result.stderr || result.stdout || result.error?.message || 'sentinel job call failed').trim()};
+  }
+  try {
+    return {value: JSON.parse(result.stdout)};
+  } catch (error) {
+    return {error: `sentinel answered nothing usable: ${String(result.stdout).trim().slice(0, 200)}`};
+  }
+}
+
+function eventIdFor(childId) {
+  // The child's own id, and nothing else: the store's dedupe is UNIQUE(job_id,revision,event_id), and a
+  // per-pass component here would make every pass a new event. The suite pins this by deleting the cursor
+  // and requiring the second pass to emit nothing.
+  return String(childId);
+}
+
 function emitEvent(options, childId, payload) {
   const file = path.join(os.tmpdir(), `subagent-return-${process.pid}-${Date.now()}.json`);
   fs.writeFileSync(file, JSON.stringify(payload));
   try {
-    const result = spawnSync(options.emitCommand, ['job', 'emit', TOPIC, childId, file], {
-      encoding: 'utf8', timeout: 60000, windowsHide: true,
-    });
-    if (result.status !== 0) {
-      return {queued: 0, error: String(result.stderr || result.stdout || result.error?.message || 'emit failed').trim()};
-    }
-    try {
-      return {queued: Number(JSON.parse(result.stdout).queued || 0)};
-    } catch (error) {
-      return {queued: 0, error: `emit answered nothing usable: ${String(result.stdout).trim().slice(0, 200)}`};
-    }
+    const answer = sentinelCli(options, ['emit', TOPIC, eventIdFor(childId), file]);
+    if (answer.error) return {queued: 0, error: answer.error};
+    return {queued: Number(answer.value.queued || 0)};
+  } finally {
+    fs.rmSync(file, {force: true});
+  }
+}
+
+/// Ask the store whether the effect for this exact (job, revision, event) already exists. This is what
+/// makes the pass converge: a crash between the emit and the cursor write leaves an intent, and the next
+/// pass observes the effect instead of emitting again for ever.
+function effectExists(options, revision, childId, payload) {
+  const file = path.join(os.tmpdir(), `subagent-return-receipt-${process.pid}-${Date.now()}.json`);
+  fs.writeFileSync(file, JSON.stringify(payload));
+  try {
+    const answer = sentinelCli(options, ['receipt', HOOK_JOB, String(revision), eventIdFor(childId), file]);
+    if (answer.error) return {error: answer.error};
+    const receipt = answer.value.receipt || {};
+    return {acknowledged: receipt.acknowledged === true, current: answer.value.current === true,
+      reason: receipt.reason || null, state: receipt.state || null};
   } finally {
     fs.rmSync(file, {force: true});
   }
 }
 
 function completionOf(view, listed) {
-  const fromStatus = view && view.completion;
-  const fromList = listed && listed.completion;
-  const raw = fromStatus || fromList;
+  const raw = (view && view.completion) || (listed && listed.completion);
   if (!raw) return null;
   if (typeof raw === 'object') return raw;
   try { return JSON.parse(String(raw)); } catch { return null; }
@@ -287,9 +433,60 @@ function packetOf(completion) {
   try { return JSON.parse(String(packet)); } catch { return null; }
 }
 
+/// Build the event for one settled child: the recorded facts (what the node wrote down when it settled),
+/// the measured facts (what the pass could see in the child's own checkout), and nothing invented.
+function childEvent(task, view, completion) {
+  const packet = packetOf(completion);
+  const artifacts = packet && packet.artifacts ? packet.artifacts : {available: false, reason: 'completion_packet_absent'};
+  const measured = artifacts && artifacts.available !== false
+    ? measureChangedPaths(artifacts.worktree, artifacts.head)
+    : {error: 'artifacts_unreadable'};
+  const recordedDirty = Number(artifacts.dirty || 0) + Number(artifacts.untracked || 0);
+  const event = {
+    schema: SCHEMA,
+    child_id: String(task.subagent_id || task.id || ''),
+    state: String(task.state || 'unknown'),
+    settled: true,
+    session: (packet && packet.session && packet.session.id) || view.session_id || task.session_id || '',
+    parent_session: (packet && packet.session && packet.session.parent) || view.parent_session_id || task.parent_session_id || '',
+    profile: view.profile || task.profile || '',
+    execution_node: view.execution_node || task.execution_node || 'local',
+    child_completion_state: completion ? completion.state : null,
+    artifacts,
+    notification: {
+      child: (packet && packet.child) || {},
+      session: (packet && packet.session) || {},
+      usage: (packet && packet.usage) || null,
+      review: (packet && packet.review) || null,
+    },
+  };
+  if (Array.isArray(measured.paths)) {
+    event.changed_paths = measured.paths;
+    event.committed_paths = measured.committed_paths;
+    event.uncommitted_paths = measured.uncommitted_paths;
+    event.changed_paths_source = measured.source;
+    event.merge_base = measured.merge_base;
+    event.worktree_head = measured.head;
+    if (measured.head && artifacts.head && measured.head !== artifacts.head) {
+      event.head_moved = {recorded: artifacts.head, current: measured.head};
+    }
+    // The recorded checkout said there was uncommitted work, and this pass could not see any: the two
+    // facts disagree, and the disagreement is a refusal to answer rather than an answer.
+    if (recordedDirty > 0 && measured.uncommitted_paths.length === 0) {
+      delete event.changed_paths;
+      event.changed_paths_error = `uncommitted_work_reported_but_not_measurable: recorded dirty+untracked=${recordedDirty}`;
+    }
+  } else {
+    event.changed_paths_error = measured.error;
+  }
+  return event;
+}
+
 async function observe(options) {
-  const seen = readState(statePath(options));
-  const report = {schema: SCHEMA, observed: 0, settled: 0, emitted: 0, duplicates: 0, unreadable: [], errors: [], source: nodeBaseUrl(options)};
+  const file = statePath(options);
+  const state = readState(file);
+  const report = {schema: SCHEMA, observed: 0, settled: 0, emitted: 0, duplicates: 0, reconciled: 0,
+    known: 0, unreadable: [], errors: [], source: nodeBaseUrl(options)};
   let listing;
   try {
     listing = await callNode(options, {action: 'list'});
@@ -314,13 +511,29 @@ async function observe(options) {
   const tasks = Array.isArray(parsed.subagents) ? parsed.subagents : null;
   if (!tasks) throw Object.assign(new Error('the node answered /subagents without a subagents list'), {code: 4});
   report.observed = tasks.length;
+  // The hook job's own revision, resolved once per pass and before any intent is written: the store's
+  // receipt is scoped to a revision, and an intent that carried `null` could never be reconciled (it made
+  // a child sit in `pending` for ever, reporting `receipt_unavailable: invalid digit found in string`).
+  let hookRevision;
+  const revisionOf = () => {
+    if (hookRevision === undefined) {
+      const listed = sentinelCli(options, ['list']);
+      const hook = listed.value && Array.isArray(listed.value) ? listed.value.find((job) => job.id === HOOK_JOB) : null;
+      hookRevision = hook && Number.isInteger(hook.revision) ? hook.revision : null;
+      if (hookRevision === null) report.errors.push(`hook_revision_unavailable: ${listed.error || 'the job is not in the store'}`);
+    }
+    return hookRevision;
+  };
   for (const task of tasks.slice(0, options.limit)) {
     const childId = String(task.subagent_id || task.id || '');
-    const state = String(task.state || 'unknown');
-    const settled = task.settled === true || SETTLED_STATES.has(state);
+    const state_name = String(task.state || 'unknown');
+    const settled = task.settled === true || SETTLED_STATES.has(state_name);
     if (!childId || !settled) continue;
     report.settled += 1;
-    if (seen.reported[childId]) continue;
+    if (state.reported[childId]) {
+      report.known += 1;
+      continue;
+    }
     let view = task;
     try {
       const answer = await callNode(options, {action: 'status', id: childId});
@@ -328,45 +541,56 @@ async function observe(options) {
     } catch (error) {
       report.errors.push(`${childId}: status_unavailable: ${String(error.message || error)}`);
     }
-    const completion = completionOf(view, task);
-    const packet = packetOf(completion);
-    const artifacts = packet && packet.artifacts ? packet.artifacts : {available: false, reason: 'completion_packet_absent'};
-    const worktree = artifacts && artifacts.available !== false ? artifacts.worktree : '';
-    const tip = artifacts && artifacts.available !== false ? artifacts.head : '';
-    const measured = worktree ? measureChangedPaths(worktree, tip) : {error: 'artifacts_unreadable'};
-    const session = (packet && packet.session && packet.session.id) || view.session_id || task.session_id || '';
-    const parent = (packet && packet.session && packet.session.parent) || view.parent_session_id || task.parent_session_id || '';
-    const payload = {
-      schema: SCHEMA,
-      child_id: childId,
-      state,
-      settled: true,
-      session,
-      parent_session: parent,
-      profile: view.profile || task.profile || '',
-      execution_node: view.execution_node || task.execution_node || 'local',
-      child_completion_state: completion ? completion.state : null,
-      artifacts,
-      recorded_report: completion ? completion.detail : null,
-    };
-    if (Array.isArray(measured.paths)) {
-      payload.changed_paths = measured.paths;
-      payload.changed_paths_source = measured.source;
-    } else {
-      payload.changed_paths_error = measured.error;
+    const event = childEvent(task, view, completionOf(view, task));
+    if (!event.session || !event.artifacts || event.artifacts.available === false) report.unreadable.push(childId);
+    // Reconcile an intent from an earlier pass before emitting anything for this child again.
+    const pending = state.pending[childId];
+    if (pending) {
+      const revision = Number.isInteger(pending.revision) ? pending.revision : revisionOf();
+      if (revision === null) {
+        report.errors.push(`${childId}: intent_revision_unavailable; emitting again`);
+      } else {
+        const receipt = effectExists(options, revision, childId, event);
+        if (receipt.acknowledged) {
+          state.reported[childId] = {state: state_name, at: new Date().toISOString(), via: 'receipt', revision};
+          delete state.pending[childId];
+          report.reconciled += 1;
+          continue;
+        }
+        if (receipt.error) report.errors.push(`${childId}: receipt_unavailable: ${receipt.error}`);
+      }
     }
-    if (!payload.session || !worktree) report.unreadable.push(childId);
-    const emitted = emitEvent(options, childId, payload);
+    // A durable intent precedes the emission, so a crash between the two is recoverable.
+    const revision = Number.isInteger(pending && pending.revision) ? pending.revision : revisionOf();
+    state.pending[childId] = {event_id: eventIdFor(childId), at: new Date().toISOString(), revision, payload: event};
+    writeState(file, state);
+    const emitted = emitEvent(options, childId, event);
     if (emitted.queued > 0) {
       report.emitted += emitted.queued;
-      seen.reported[childId] = {state, at: new Date().toISOString()};
+      state.reported[childId] = {state: state_name, at: new Date().toISOString(), via: 'emit', revision};
+      delete state.pending[childId];
     } else if (emitted.error) {
       report.errors.push(`${childId}: ${emitted.error}`);
     } else {
+      // The store answered "this exact event already exists" (queued 0). Confirm it through the receipt
+      // so the cursor converges instead of re-emitting this child on every tick for ever.
       report.duplicates += 1;
+      if (revision === null) {
+        report.errors.push(`${childId}: receipt_unavailable: the hook's revision could not be read`);
+      } else {
+        const receipt = effectExists(options, revision, childId, event);
+        if (receipt.acknowledged) {
+          state.reported[childId] = {state: state_name, at: new Date().toISOString(), via: 'receipt', revision};
+          delete state.pending[childId];
+          report.reconciled += 1;
+        } else if (receipt.error) {
+          report.errors.push(`${childId}: receipt_unavailable: ${receipt.error}`);
+        }
+      }
     }
+    writeState(file, state);
   }
-  if (report.emitted > 0) writeState(statePath(options), seen);
+  writeState(file, state);
   return report;
 }
 
@@ -374,14 +598,15 @@ function compose(options) {
   const file = options.event || process.env.WA_JOB_EVENT_FILE;
   if (!file) throw Object.assign(new Error('--compose needs --event <file> (or WA_JOB_EVENT_FILE)'), {code: 4});
   const event = JSON.parse(fs.readFileSync(file, 'utf8'));
-  const block = instructionBlock(event);
-  return {schema: SCHEMA, ...block};
+  const shipped = loadShipped(options.manifest || manifestPath());
+  const block = instructionBlock(event, shipped);
+  return {schema: SCHEMA, ...block, shipped_manifest: shipped.error || shipped.file};
 }
 
 // ---------------------------------------------------------------------------------------------
 function parse(argv) {
   const options = {
-    mode: null, event: null, node: null, limit: 64, state: null,
+    mode: null, event: null, node: null, limit: 64, state: null, manifest: null,
     emitCommand: process.env.WA_SENTINEL_BIN || 'wa-sentinel', paths: [], json: null,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -393,6 +618,7 @@ function parse(argv) {
     else if (token === '--node') options.node = argv[++index];
     else if (token === '--limit') options.limit = Number(argv[++index]);
     else if (token === '--state') options.state = argv[++index];
+    else if (token === '--manifest') options.manifest = argv[++index];
     else if (token === '--emit-command') options.emitCommand = argv[++index];
     else if (token === '--path') options.paths.push(argv[++index]);
     else if (token === '--json') options.json = argv[++index];
@@ -409,10 +635,15 @@ function print(value, options) {
   process.stdout.write(`${text}\n`);
 }
 
-async function main() {
-  const options = parse(process.argv.slice(2));
+export async function main(argv = process.argv.slice(2)) {
+  const options = parse(argv);
   if (options.mode === 'verdict') {
-    print({schema: SCHEMA, ...deployVerdict(options.paths)}, options);
+    const shipped = loadShipped(options.manifest || manifestPath());
+    if (shipped.error) {
+      print({schema: SCHEMA, verdict: VERDICT.unknown, reason: shipped.error, shipped: [], shipped_count: 0, paths: options.paths.length}, options);
+      return 0;
+    }
+    print({schema: SCHEMA, ...deployVerdict(options.paths, shipped.manifest), shipped_manifest: shipped.file}, options);
     return 0;
   }
   if (options.mode === 'compose') {
@@ -429,7 +660,11 @@ async function main() {
   return 0;
 }
 
-main().then((code) => { process.exitCode = code; }).catch((error) => {
-  process.stderr.write(`${error.message}\n`);
-  process.exitCode = error.code === 4 ? 4 : 1;
-});
+// Importable by `scripts/check-deploy-shipped.mjs` and the suite: the module does work only when it is
+// the program that was started.
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  main().then((code) => { process.exitCode = code; }).catch((error) => {
+    process.stderr.write(`${error.message}\n`);
+    process.exitCode = error.code === 4 ? 4 : 1;
+  });
+}

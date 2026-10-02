@@ -254,55 +254,83 @@ has to re-derive what a diff and a set membership already decided.
 {
   "id": "onSubagentReturn",
   "name": "onSubagentReturn",
+  "supersedes": "completion_wake",
   "trigger": {"kind": "event", "topic": "subagent.return"},
   "action": {
     "kind": "wake",
     "session": "COORDINATOR_SESSION_ID",
+    "dedupe_key": "child_id",
     "prepare": {"script": "<install>/scripts/subagent-return-prepare.sh", "timeout_seconds": 120},
     "prompt": "...the fixed operating instruction..."
   }
 }
 ```
 
-Four rules keep it a step rather than a second action language:
+Six rules keep it a step rather than a second action language:
 
 - **It is a `run` step in everything the boundary cares about.** The script must be absolute and inside
   `WA_SENTINEL_SCRIPTS`, it is started through the same shell a `run` action uses, its timeout is bounded
   the same way, it receives the delivery's event as `WA_JOB_EVENT_FILE`, it is cancelled if the job is
   disabled or revised while it runs, and what it prints is its result. A step that prints no `instruction`,
   or no JSON at all, **fails the delivery**: a wake with an empty instruction in it is worse than no wake.
-- **It exists only on `wake`.** Any other action carrying `prepare` is refused by name
-  (`prepare_is_only_for_a_wake_action`) rather than accepted and ignored - the same reason a control no
-  step reads is refused.
+- **It exists only as a top-level `wake` action's own step, and that is refused at `job put`.** A
+  `prepare` on a `run`, `subagent` or `pipeline` action - or inside a pipeline step - is refused by name
+  (`prepare_is_only_for_a_wake_action`, `step_<n>_prepare_is_only_for_a_wake_action`) when the definition
+  is installed, and again when it is executed. It used to be accepted at put and then silently ignored: the
+  step's script never ran and the delivery reported success. `job import` is checked the same way.
 - **It costs no model call.** The decidable half of the message is decided by a script; the wake that
   follows is the one budgeted turn, and it starts from the block instead of rebuilding it.
+- **`dedupe_key` names the event field one message per subject is keyed on.** The store's own dedupe is
+  `UNIQUE(job_id, revision, event_id)`, so editing a definition or re-enabling a job - both of which move
+  the revision - starts a fresh, empty guarantee. With `"dedupe_key": "child_id"` the sentinel also keeps
+  a ledger keyed on that field (`<sentinel>/wake-dedupe-<job id>.json`), and a delivery whose key is already
+  in it completes without submitting a second message (`already_woken:<key>` in `job history`). The ledger
+  is written only after a submission was confirmed, so the remaining window is a rare duplicate rather than
+  a lost message. Like `prepare`, it is refused anywhere but a top-level `wake`.
+- **`supersedes` is how a job replaces another notification path.** `"supersedes": "completion_wake"` makes
+  the watcher write `<sentinel>/completion-wake-superseded` (naming the enabled jobs, derived from the job
+  store's own enabled state) and remove it when none is enabled. `lua/core/completions.lua`'s
+  `wa_completion_run` reads that marker and does **not** send its own `[Child completion notice]` wake for a
+  settled child while it is present, recording `state='superseded'` on the outbox row instead. Without the
+  marker nothing changes. This is what stops one settle from producing two wakes.
 - **One place builds the message.** `wake_blocks` in `rust/wa-sentinel/src/jobs.rs` composes the
-  instruction half of every wake, and it is where the child-return **notification** moves when it leaves the
-  completion outbox (`lua/core/completions.lua`'s `wa_completion_run`, which today assembles its own
-  `[Child completion notice]` wake inside the node). It becomes one more block built from the same delivered
-  event, not a second message to the same conversation: two wakes for one settled child are two turns, and
-  the second one then spends its first sentence denying it is the first.
+  instruction half of every wake. The child-return **notification** has moved into it: the hook's block
+  carries a `notification:` line built from the same evaluation packet (state, session, model, provider,
+  duration, usage, the outbox's own review verdict), so the message the hook sends *is* the notice, and the
+  outbox one is suppressed rather than sent beside it.
 
 ### `onSubagentReturn`: the shipped hook, and what it decides
 
 `jobs/on-subagent-return.json` is the hook: every settled child - completed, refused, cancelled, failed,
-unknown - wakes the coordinator, with a block that names the child and its state, its recorded branch, tip
-and worktree, the diff against `origin/main` measured in that worktree, a **deploy verdict**, and the
-operating instruction for that verdict. `jobs/subagent-return-observe.json` is its deterministic source: a
-30-second `run` pass over the node's own record of its children (`POST /subagents {action:"list"}` plus one
-`status` per settled child) that emits one `subagent.return` event per child, keyed by the child's id - so
-the store's own `UNIQUE(job_id,revision,event_id)` dedupe is what makes "one wake per settle" true, however
-often the pass runs. Both install disabled, like every other definition.
+unknown - wakes the coordinator, with a block that names the child and its state, the notification facts,
+its recorded branch, tip and worktree, the diff against `origin/main` measured in that worktree, a
+**deploy verdict**, and the operating instruction for that verdict. `jobs/subagent-return-observe.json` is
+its deterministic source: a 30-second `run` pass over the node's own record of its children
+(`POST /subagents {action:"list"}` plus one `status` per settled child) that emits one `subagent.return`
+event per child, keyed by the child's id. The pass writes a durable intent before each emission and
+reconciles it afterwards through the store's own receipt (`wa-sentinel job receipt`), so a crash between
+the two converges on the next pass instead of re-emitting that child for ever. Both definitions install
+**disabled**, like every other definition: enabling is the operator's act.
 
-The verdict is one predicate in `scripts/subagent-return-hook.mjs`
-(`DEPLOY_SHIPPED_DIRECTORIES` / `DEPLOY_SHIPPED_SCRIPTS` / `DEPLOY_SHIPPED_SCRIPT_PATTERNS`, read through
-`shipsToDeploy`): a child that touched something a deploy ships (`ui/**`, `rust/**`, `lua/**`, `skills/**`,
-or the `scripts/**` files a deploy copies) is `deploy required at the wave's end` - one deploy at the end of
-the wave, never one per child, never from the child's branch; documentation and tests only is `no install
-impact`. A child whose artifacts could not be read is `cannot be computed`, never `no install impact`: "we
-could not look" and "we looked and found nothing" are different answers, and only one of them is evidence.
-`scripts/test-subagent-return-hook.cjs` drives every state through a real sentinel, falsifies a mutation of
-the predicate, and shows the firing costs no provider call.
+The verdict is read from one declaration of what a deploy installs: `scripts/deploy-shipped.json`, which
+`scripts/check-deploy-shipped.mjs` re-derives from `scripts/deploy.sh` and `scripts/upgrade.sh` on every
+gate run (it also runs `scripts/ship-wave.mjs` and checks every file it writes), failing when an installer
+copies something the manifest does not cover. The predicate is `shipsToDeploy` in
+`scripts/subagent-return-hook.mjs`. This replaced a hand-written list that missed `jobs/**` and
+`scripts/upgrade.sh` - two classes a deploy installs, both of which were answered `no install impact`,
+which is the direction this delivery exists to prevent.
+
+A child that touched something a deploy ships (`ui/**`, `rust/**`, `lua/**`, `skills/**`, `jobs/**`,
+`deploy/**`, or the `scripts/**` files a deploy copies) is `deploy required at the wave's end` - one deploy
+at the end of the wave, never one per child, never from the child's branch; documentation and tests only is
+`no install impact`. Everything that could not be measured is `cannot be computed`, never `no install
+impact`: unreadable artifacts, a branch with no merge base against `origin/main` (there is no whole-tree
+fallback), a checkout that reports uncommitted work the pass could not see, and a shipped-set manifest that
+cannot be read. The uncommitted half counts: a child whose tip equals `main` and whose worktree holds an
+uncommitted shipped change is deploy impact.
+`scripts/test-subagent-return-hook.cjs` drives every state through a real sentinel, pins the dedupe key,
+falsifies the manifest, and shows the firing costs no provider call; `scripts/test-completion-wake.cjs`
+shows the outbox going quiet while the hook's marker is present.
 
 ## Queue and recovery contract
 

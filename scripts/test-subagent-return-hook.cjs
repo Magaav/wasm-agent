@@ -7,21 +7,31 @@
 // home, a fake `/subagents` + `/chat` endpoint, and real git checkouts so the deploy verdict is measured
 // rather than asserted. What it proves:
 //
-//   * `jobs/on-subagent-return.json` is installed by the same path every other job uses and appears in
+//   * `jobs/on-subagent-return.json` is installed by the same path every other job uses, appears in
 //     `wa-sentinel job list` with its trigger (event `subagent.return`) and its action (a wake whose
-//     `prepare` step is the deterministic block);
+//     `prepare` step is the deterministic block, whose `dedupe_key` is the child id, and which declares
+//     that it supersedes the completion outbox's notice), and installs DISABLED;
 //   * the deterministic source (`jobs/subagent-return-observe.json` -> scripts/subagent-return-observe.sh)
 //     notices EVERY settled child, in every state - completed, refused, cancelled, error - and emits one
-//     event per child, deduplicated by the child's own id, while a child that has not settled is not
-//     reported at all;
+//     event per child, while a child that has not settled is not reported at all;
 //   * each event produces one wake, and the wake message carries the injected block: the child id and
-//     state, its branch and tip and worktree, the DEPLOY VERDICT, and the operating instruction for that
-//     verdict - computed from the child's own diff against origin/main;
-//   * both verdicts are driven: a child that changed `ui/**` is "deploy required at the wave's end", a
-//     child that changed only documentation or tests is "no install impact";
-//   * a child whose artifacts cannot be read says so, and never reports "no install impact";
-//   * the path predicate is load-bearing: adding or removing a path flips the verdict, and mutating the
-//     predicate constant itself flips it back (a mutation test, not a re-statement of the rule);
+//     state, the notification facts, its branch and tip and worktree, the DEPLOY VERDICT, and the
+//     operating instruction for that verdict - computed from the child's own diff against origin/main;
+//   * the shipped set is the one scripts/deploy-shipped.json declares, which
+//     scripts/check-deploy-shipped.mjs re-derives from the installers: `jobs/**` and `scripts/upgrade.sh`
+//     are deploy impact, and a manifest missing either makes that check go red;
+//   * both verdicts are driven, and every way of *not* knowing reads `cannot be computed` rather than
+//     "no install impact": unreadable artifacts, no merge base with origin/main, and a checkout that
+//     reports uncommitted work the pass cannot measure;
+//   * a child whose tip equals main but whose worktree holds an uncommitted shipped change IS deploy
+//     impact - the verdict line does not ignore the uncommitted half;
+//   * the dedupe is pinned: the event id is the child's id (a fresh cursor over the same children emits
+//     nothing), and a definition re-put plus a lost cursor cannot produce a second wake, because the
+//     sentinel's wake ledger is keyed on the child id rather than on the job revision;
+//   * the cursor converges: after a lost cursor the pass reconciles through the store's own receipt
+//     instead of re-emitting the same child for ever;
+//   * `prepare` is refused at `job put` when it is not a top-level wake's own step (a pipeline step
+//     carrying one used to be accepted and silently ignored);
 //   * firing the hook costs no provider call: the only outbound traffic is one wake message per settled
 //     child to the node, and the injection step completes with the node not listening at all.
 const fs = require("node:fs");
@@ -58,6 +68,10 @@ function cli(env, ...args) {
   if (result.status !== 0) throw new Error(`job ${args.join(" ")} failed: ${result.stderr || result.stdout || result.error?.message}`);
   return JSON.parse(result.stdout);
 }
+function cliFailure(env, ...args) {
+  const result = spawnSync(sentinel, ["job", ...args], { env, encoding: "utf8", timeout: 20000, windowsHide: true });
+  return { status: result.status, output: `${result.stdout || ""}${result.stderr || ""}` };
+}
 function child(exe, args, env) {
   const log = fs.openSync(path.join(root, `child-${children.length}.log`), "a");
   const handle = spawn(exe, args, { env, stdio: ["ignore", log, log], windowsHide: true });
@@ -80,8 +94,9 @@ function jobShell() {
 
 /// One real checkout: an integration branch `origin/main`, and a child branch whose commits differ from it
 /// in exactly one path. This is the input the hook's verdict is measured from; nothing about the diff is
-/// fabricated.
-function childCheckout(name, changedPath) {
+/// fabricated. `dirty` writes the change without committing it (the uncommitted half), `orphan` gives the
+/// branch a history with no common ancestor at all.
+function childCheckout(name, changedPath, { dirty = false, orphan = false } = {}) {
   const dir = path.join(root, name);
   fs.mkdirSync(dir, { recursive: true });
   git("init", "-q", "-b", "main", dir);
@@ -91,23 +106,39 @@ function childCheckout(name, changedPath) {
   git("-C", dir, "add", "-A");
   git("-C", dir, "commit", "-qm", "base");
   git("-C", dir, "update-ref", "refs/remotes/origin/main", "HEAD");
-  git("-C", dir, "checkout", "-qb", `change/${name}`);
-  const target = path.join(dir, changedPath);
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, `changed by ${name}\n`);
-  git("-C", dir, "add", "-A");
-  git("-C", dir, "commit", "-qm", `work from ${name}`);
+  const write = (target) => {
+    const file = path.join(dir, target);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, `changed by ${name}\n`);
+  };
+  if (orphan) {
+    git("-C", dir, "checkout", "-q", "--orphan", `change/${name}`);
+    git("-C", dir, "rm", "-rq", "--cached", ".");
+    write(changedPath);
+    git("-C", dir, "add", "-A");
+    git("-C", dir, "commit", "-qm", `orphan work from ${name}`);
+  } else {
+    git("-C", dir, "checkout", "-qb", `change/${name}`);
+    write(changedPath);
+    if (!dirty) {
+      git("-C", dir, "add", "-A");
+      git("-C", dir, "commit", "-qm", `work from ${name}`);
+    }
+  }
   return { worktree: dir, branch: `change/${name}`, head: git("-C", dir, "rev-parse", "HEAD") };
 }
 
 function packet(checkout, session, parent, extra = {}) {
   return {
-    child: { id: extra.child_id, state: extra.state, profile: "task-worker" },
-    session: { id: session, parent },
+    child: { id: extra.child_id, state: extra.state, profile: "task-worker", model: "fixture-model",
+      served_model: "fixture-model", provider: "mock", reasoning: "high" },
+    session: { id: session, parent, duration_s: 12.5, started_at: 1, settled_at: 13 },
+    usage: { available: true, prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 },
     artifacts: checkout === null
       ? { available: false, reason: "artifact_facts_failed: no session record" }
       : { available: true, managed: true, state: "clean", worktree: checkout.worktree, recorded_branch: checkout.branch,
-          branch: checkout.branch, head: checkout.head, ahead: 1, behind: 0, pushed: false, dirty: 0, untracked: 0 },
+          branch: checkout.branch, head: checkout.head, ahead: 1, behind: 0, pushed: false,
+          dirty: extra.dirty === undefined ? 0 : extra.dirty, untracked: 0 },
     review: { needs_wake: true, kind: "evaluation", reason: "delivery_ready_to_evaluate" },
   };
 }
@@ -117,19 +148,36 @@ function task(id, state, settled, extra = {}) {
     parent_session_id: "session-orchestrator", execution_node: "local", created_at: 1, ...extra };
 }
 
+const CHILDREN = [
+  { id: "child-completed-ui", state: "completed", changed: "ui/app.js", verdict: "deploy required at the wave's end", instruction: "exactly ONE deploy" },
+  { id: "child-refused-docs", state: "refused", changed: "docs/JOBS.md", verdict: "no install impact", instruction: "no deploy is owed for it" },
+  { id: "child-cancelled-script", state: "cancelled", changed: "scripts/whatsapp-read.mjs", verdict: "deploy required at the wave's end", instruction: "exactly ONE deploy" },
+  { id: "child-error-tests", state: "failed", changed: "tests/fixture.cjs", verdict: "no install impact", instruction: "no deploy is owed for it" },
+  { id: "child-unknown-unreadable", state: "unknown", changed: null, verdict: "cannot be computed", instruction: "NOT established" },
+  // The uncommitted half: the tip IS origin/main, and the shipped change is in the worktree.
+  { id: "child-dirty-shipped", state: "completed", changed: "ui/app.js", dirty: true, packetDirty: 1,
+    verdict: "deploy required at the wave's end", instruction: "exactly ONE deploy" },
+  // No common ancestor with origin/main: no base for the diff, so no verdict.
+  { id: "child-no-merge-base", state: "completed", changed: "rust/wa-sentinel/src/main.rs", orphan: true,
+    verdict: "cannot be computed", instruction: "NOT established" },
+  // The two classes the hand-written predicate missed (the reviewer's findings 1 and 2).
+  { id: "child-job-definition", state: "completed", changed: "jobs/whatsapp-copilot.json",
+    verdict: "deploy required at the wave's end", instruction: "exactly ONE deploy" },
+  { id: "child-upgrade-script", state: "completed", changed: "scripts/upgrade.sh",
+    verdict: "deploy required at the wave's end", instruction: "exactly ONE deploy" },
+  // The recorded checkout says there is uncommitted work; this pass can see none. The two disagree, and
+  // the disagreement is a refusal to answer.
+  { id: "child-dirty-unmeasurable", state: "completed", changed: "docs/notes.md", packetDirty: 1,
+    verdict: "cannot be computed", instruction: "NOT established" },
+];
+const LIVE = task("child-still-running", "running", false);
+
 async function main() {
   check(fs.existsSync(sentinel), `sentinel binary exists: ${sentinel}`);
-  const CHILDREN = [
-    { id: "child-completed-ui", state: "completed", settled: true, changed: "ui/app.js", verdict: "deploy required at the wave's end", instruction: "exactly ONE deploy" },
-    { id: "child-refused-docs", state: "refused", settled: true, changed: "docs/JOBS.md", verdict: "no install impact", instruction: "no deploy is owed for it" },
-    { id: "child-cancelled-script", state: "cancelled", settled: true, changed: "scripts/whatsapp-read.mjs", verdict: "deploy required at the wave's end", instruction: "exactly ONE deploy" },
-    { id: "child-error-tests", state: "failed", settled: true, changed: "tests/fixture.cjs", verdict: "no install impact", instruction: "no deploy is owed for it" },
-    { id: "child-unknown-unreadable", state: "unknown", settled: true, changed: null, verdict: "cannot be computed", instruction: "NOT established" },
-  ];
   for (const entry of CHILDREN) {
-    entry.checkout = entry.changed === null ? null : childCheckout(entry.id, entry.changed);
+    entry.checkout = entry.changed === null ? null
+      : childCheckout(entry.id, entry.changed, { dirty: entry.dirty === true, orphan: entry.orphan === true });
   }
-  const live = task("child-still-running", "running", false);
 
   let server;
   const requestSummary = () => [...new Set(requests.map((entry) => entry.path))].sort().join(",");
@@ -146,8 +194,8 @@ async function main() {
       const call = body ? JSON.parse(body) : {};
       response.setHeader("content-type", "application/json");
       if ((call.action || "list") === "list") {
-        const tasks = CHILDREN.map((entry) => task(entry.id, entry.state, entry.settled)) ;
-        tasks.push(live);
+        const tasks = CHILDREN.map((entry) => task(entry.id, entry.state, true));
+        tasks.push(LIVE);
         response.end(JSON.stringify({ subagents: tasks }));
         return;
       }
@@ -157,10 +205,10 @@ async function main() {
         return;
       }
       response.end(JSON.stringify({
-        ...task(entry.id, entry.state, entry.settled),
+        ...task(entry.id, entry.state, true),
         completion: { child_id: entry.id, state: entry.state, run_id: 1, detail: `{"state":"${entry.state}"}`,
           packet: JSON.stringify(packet(entry.checkout, `session-${entry.id}`, "session-orchestrator",
-            { child_id: entry.id, state: entry.state })) },
+            { child_id: entry.id, state: entry.state, dirty: entry.packetDirty })) },
       }));
       return;
     }
@@ -188,6 +236,11 @@ async function main() {
   delete env.WA_SCRIPT;
   delete env.WASM_AGENT_LUA_ROOT;
 
+  const stateFile = env.WA_SENTINEL_RETURN_STATE;
+  const sentinelDir = path.join(root, ".wasm-agent", "sentinel");
+  const markerFile = path.join(sentinelDir, "completion-wake-superseded");
+  const ledgerFile = path.join(sentinelDir, "wake-dedupe-onSubagentReturn.json");
+
   // The shipped definitions, installed exactly as an install would: the placeholder names the directory
   // the hook's scripts live in, and the coordinator conversation is bound locally.
   const definitions = ["on-subagent-return", "subagent-return-observe"].map((name) => {
@@ -209,6 +262,8 @@ async function main() {
     "the hook's action is a wake to the bound coordinator conversation");
   check(hook.action.prepare.script.endsWith("scripts/subagent-return-prepare.sh"),
     "the hook's wake carries the deterministic prepare step");
+  check(hook.action.dedupe_key === "child_id", "the hook's wake names the child id as its dedupe key");
+  check(hook.supersedes === "completion_wake", "the hook declares that it supersedes the outbox notice");
   check(hook.action.prompt.includes("never one install per child"),
     "the hook's action carries the fixed operating instruction");
   check(hook.enabled === false && source.enabled === false, "a freshly installed definition is disabled");
@@ -216,6 +271,28 @@ async function main() {
     "the deterministic source is listed as a schedule -> run job");
   process.stdout.write(`--- wa-sentinel job list (the two hook rows) ---\n${JSON.stringify(
     listed.filter((job) => job.id === "onSubagentReturn" || job.id === "subagent-return-observe"), null, 2)}\n`);
+
+  // `prepare` is a wake's own step. A pipeline step carrying one used to be accepted by `job put` and
+  // then silently ignored, so the definition boundary refuses it by name.
+  const misuse = { id: "fixture-pipeline-prepare", name: "a prepare inside a pipeline step is refused",
+    trigger: { kind: "event", topic: "fixture.pipeline" },
+    action: { kind: "pipeline", steps: [{ kind: "run", script: path.join(repo, "scripts", "subagent-return-observe.sh"),
+      timeout_seconds: 30, prepare: { script: path.join(repo, "scripts", "subagent-return-prepare.sh") } }] } };
+  const misuseFile = path.join(root, "pipeline-prepare.json");
+  fs.writeFileSync(misuseFile, JSON.stringify(misuse));
+  const refusedPut = cliFailure(env, "put", misuseFile);
+  check(refusedPut.status !== 0, "job put refuses a prepare inside a pipeline step");
+  check(refusedPut.output.includes("prepare_is_only_for_a_wake_action"),
+    `the refusal names the rule: ${refusedPut.output.trim().slice(0, 160)}`);
+  check(!cli(env, "list").some((job) => job.id === "fixture-pipeline-prepare"),
+    "and the refused definition was not stored");
+  const misuseWake = { ...misuse, id: "fixture-run-prepare",
+    action: { kind: "run", script: path.join(repo, "scripts", "subagent-return-observe.sh"), timeout_seconds: 30,
+      prepare: { script: path.join(repo, "scripts", "subagent-return-prepare.sh") } } };
+  const misuseWakeFile = path.join(root, "run-prepare.json");
+  fs.writeFileSync(misuseWakeFile, JSON.stringify(misuseWake));
+  check(cliFailure(env, "put", misuseWakeFile).output.includes("prepare_is_only_for_a_wake_action"),
+    "job put refuses a prepare on a run action too");
 
   // A fixture copy of the source with a short interval, so the schedule lane itself is what runs it.
   const fixtureSource = JSON.parse(fs.readFileSync(definitions[1], "utf8"));
@@ -242,13 +319,13 @@ async function main() {
     check(text.includes("[onSubagentReturn] deterministic child-return hook"),
       `${entry.id}: the injected instruction block is in the message`);
     check(text.includes(`state: ${entry.state}   settled: yes`), `${entry.id}: the child's state is in the block`);
-    check(text.includes("DEPLOY VERDICT: ") , `${entry.id}: the block carries a deploy verdict`);
+    check(text.includes("notification: model: fixture-model") && text.includes("duration_s: 12.5"),
+      `${entry.id}: the notification facts are in the block, so this message IS the notice`);
+    check(text.includes("DEPLOY VERDICT: "), `${entry.id}: the block carries a deploy verdict`);
     if (entry.checkout) {
       check(text.includes(`branch: ${entry.checkout.branch}`) && text.includes(`tip: ${entry.checkout.head}`),
         `${entry.id}: the branch and tip of its own checkout are in the block`);
-      check(text.includes(`worktree: ${entry.checkout.worktree.replaceAll("\\", "/")}`)
-        || text.includes(entry.checkout.worktree), `${entry.id}: its worktree is named`);
-      check(text.includes(`changed paths vs origin/main: 1`), `${entry.id}: the diff against origin/main was measured`);
+      check(text.includes(entry.checkout.worktree), `${entry.id}: its worktree is named`);
     }
     check(text.includes(`DEPLOY VERDICT: ${entry.verdict}`), `${entry.id}: verdict "${entry.verdict}"`);
     check(text.includes(entry.instruction), `${entry.id}: the operating instruction for that verdict is injected`);
@@ -257,20 +334,45 @@ async function main() {
     check(text.indexOf("[onSubagentReturn]") < text.indexOf("BEGIN UNTRUSTED EVENT DATA"),
       `${entry.id}: the instruction block sits before the untrusted event block`);
   }
-  process.stdout.write(`--- the injected block, as it reached the orchestrator for ${CHILDREN[0].id} ---\n`
-    + `${wakes.find((wake) => wake.text.includes(CHILDREN[0].id)).text.split("BEGIN UNTRUSTED EVENT DATA")[0]}\n`
-    + `--- and for the child whose artifacts could not be read ---\n`
-    + `${wakes.find((wake) => wake.text.includes("child-unknown-unreadable")).text.split("BEGIN UNTRUSTED EVENT DATA")[0]}\n`);
-  const unreadable = wakes.find((wake) => wake.text.includes("child-unknown-unreadable")).text;
+  const blockFor = (id) => wakes.find((wake) => wake.text.includes(id)).text.split("BEGIN UNTRUSTED EVENT DATA")[0];
+  check(blockFor("child-dirty-shipped").includes("uncommitted: ui/app.js"),
+    "the uncommitted half is measured and named for a tip that equals main");
+  check(blockFor("child-dirty-shipped").includes("changed paths vs origin/main: 1"),
+    "an uncommitted shipped change counts as a changed path");
+  check(blockFor("child-no-merge-base").includes("no_merge_base_with_origin_main"),
+    "a branch with no merge base names that as the reason");
+  check(blockFor("child-dirty-unmeasurable").includes("uncommitted_work_reported_but_not_measurable"),
+    "recorded uncommitted work the pass could not see is named, not ignored");
+  check(blockFor("child-job-definition").includes("jobs/whatsapp-copilot.json"),
+    "a job definition is deploy impact end to end");
+  check(blockFor("child-upgrade-script").includes("scripts/upgrade.sh"),
+    "upgrade.sh is deploy impact end to end");
+  const unreadable = blockFor("child-unknown-unreadable");
   check(unreadable.includes("artifacts: UNREADABLE"), "an unreadable checkout is named as unreadable");
-  check(unreadable.includes("not measured") || unreadable.includes("NOT MEASURED"),
-    "an unreadable checkout does not report a measured diff");
+  check(unreadable.includes("NOT MEASURED"), "an unreadable checkout does not report a measured diff");
   check(!unreadable.includes("DEPLOY VERDICT: no install impact"),
     "an unreadable checkout never reports 'no install impact'");
-  check(wakes.filter((wake) => wake.text.includes("DEPLOY VERDICT: deploy required at the wave's end")).length === 2,
-    "both deploy-shipping children were reported as deploy-required");
-  check(wakes.filter((wake) => wake.text.includes("DEPLOY VERDICT: no install impact")).length === 2,
-    "both non-shipping children were reported as having no install impact");
+  const verdicts = (name) => wakes.filter((wake) => wake.text.includes(`DEPLOY VERDICT: ${name}`)).length;
+  check(verdicts("deploy required at the wave's end") === 5, "every deploy-shipping child was reported as deploy-required");
+  check(verdicts("no install impact") === 2, "both non-shipping children were reported as having no install impact");
+  check(verdicts("cannot be computed") === 3, "all three unmeasurable children read cannot be computed");
+  process.stdout.write(`--- the injected block for ${CHILDREN[0].id} ---\n${blockFor(CHILDREN[0].id)}\n`
+    + `--- and for the child whose tip equals main with an uncommitted shipped change ---\n${blockFor("child-dirty-shipped")}\n`);
+
+  // The shipped set: the manifest the predicate reads, checked against the installers themselves.
+  const shippedCheck = spawnSync(process.execPath, [path.join(repo, "scripts", "check-deploy-shipped.mjs")],
+    { encoding: "utf8", windowsHide: true, timeout: 120000 });
+  check(shippedCheck.status === 0, `check-deploy-shipped passes: ${(shippedCheck.stdout || shippedCheck.stderr).trim()}`);
+  const mutantManifest = JSON.parse(fs.readFileSync(path.join(repo, "scripts", "deploy-shipped.json"), "utf8"));
+  mutantManifest.directories = mutantManifest.directories.filter((entry) => entry !== "jobs/");
+  mutantManifest.files = mutantManifest.files.filter((entry) => entry !== "scripts/upgrade.sh");
+  const mutantFile = path.join(root, "deploy-shipped-mutant.json");
+  fs.writeFileSync(mutantFile, JSON.stringify(mutantManifest));
+  const mutantCheck = spawnSync(process.execPath, [path.join(repo, "scripts", "check-deploy-shipped.mjs"), mutantFile],
+    { encoding: "utf8", windowsHide: true, timeout: 120000 });
+  check(mutantCheck.status !== 0, "dropping jobs/** and upgrade.sh from the shipped set makes the check go red");
+  check(/FAIL the predicate covers (jobs\/|scripts\/upgrade\.sh)/.test(mutantCheck.stderr || ""),
+    `the failure names the copied path that is missing: ${(mutantCheck.stderr || "").trim().split("\n")[0]}`);
 
   // Firing the hook is a script and a diff, never an inference call.
   const paths = new Set(requests.map((entry) => entry.path));
@@ -281,72 +383,71 @@ async function main() {
   const history = cli(env, "history").filter((entry) => entry.job_id === "onSubagentReturn");
   check(history.some((entry) => entry.state === "completed"), "the hook's deliveries settle completed in the job history");
 
-  // A second, explicit observation pass: the child ids are the event ids, so the job store's own dedupe
-  // is what stops a wake per poll. Spawned asynchronously on purpose: this fixture *is* the fake node, and
-  // a blocking spawn would freeze the event loop the observation pass has to reach.
-  const direct = await new Promise((resolve) => {
+  // While the hook is enabled the sentinel marks the outbox notice superseded; the marker is derived from
+  // the job store's own enabled state, and the outbox reads it (scripts/test-completion-wake.cjs proves
+  // that half against a real node).
+  await until(() => fs.existsSync(markerFile), "the supersede marker is written while the hook is enabled");
+  const marker = JSON.parse(fs.readFileSync(markerFile, "utf8"));
+  check(Array.isArray(marker.by) && marker.by.includes("onSubagentReturn"),
+    `the marker names the job that supersedes the notice: ${JSON.stringify(marker.by)}`);
+  check(fs.existsSync(ledgerFile), "the wake ledger is written beside the sentinel's own state");
+  check(Object.keys(JSON.parse(fs.readFileSync(ledgerFile, "utf8")).keys).length === CHILDREN.length,
+    "the ledger holds one key per settled child");
+
+  // A second, explicit observation pass: the child ids are the event ids, so the store's own dedupe is
+  // what stops a wake per poll. Spawned asynchronously on purpose: this fixture *is* the fake node, and a
+  // blocking spawn would freeze the event loop the observation pass has to reach. The fixture's scheduled
+  // copy of the source is disabled first: two passes writing one cursor file at once would race, and the
+  // guarantee under test is the one a single pass gives.
+  cli(env, "disable", "subagent-return-observe-fixture");
+  const runObserver = (extraEnv = {}) => new Promise((resolve) => {
     const shell = jobShell();
     const handle = spawn(shell.program, [...shell.args, path.join(repo, "scripts", "subagent-return-observe.sh")],
-      { env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+      { env: { ...env, ...extraEnv }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     let stdout = "";
     let stderr = "";
     handle.stdout.on("data", (chunk) => { stdout += chunk; });
     handle.stderr.on("data", (chunk) => { stderr += chunk; });
     handle.on("close", (code) => resolve({ status: code, stdout, stderr }));
   });
+  const direct = await runObserver();
   check(direct.status === 0, `the source's own pass runs clean (exit ${direct.status}: ${direct.stderr.trim().slice(0, 300)})`);
   check(JSON.parse(direct.stdout).emitted === 0, "a second pass over the same children emits nothing new");
   await sleep(2500);
   check(wakes.length === CHILDREN.length, "a repeated observation pass wakes nobody twice");
 
-  // The rules that keep `prepare` a step and not a second action language: a wake without one is unchanged,
-  // a `prepare` outside a wake is refused by name, and a step that hands on nothing refuses the wake rather
-  // than sending a message with an empty instruction in it.
-  const putJob = (definition) => {
-    const file = path.join(root, `${definition.id}.json`);
-    fs.writeFileSync(file, JSON.stringify(definition));
-    return cli(env, "put", file);
-  };
-  const emit = (topic, id, payload) => {
-    const file = path.join(root, `event-${id}.json`);
-    fs.writeFileSync(file, JSON.stringify(payload));
-    return cli(env, "emit", topic, id, file);
-  };
-  putJob({ id: "fixture-plain-wake", name: "fixture plain wake", trigger: { kind: "event", topic: "fixture.plain" },
-    action: { kind: "wake", session: "fixture-orchestrator", prompt: "PLAIN WAKE FIXTURE" } });
-  cli(env, "enable", "fixture-plain-wake");
-  emit("fixture.plain", "plain-1", { text: "data" });
-  await until(() => wakes.some((wake) => wake.text.includes("PLAIN WAKE FIXTURE")), "plain wake delivered");
-  const plainWake = wakes.find((wake) => wake.text.includes("PLAIN WAKE FIXTURE"));
-  check(!plainWake.text.includes("[onSubagentReturn]"), "a wake with no prepare carries no injected block");
-  check(plainWake.text.includes('Automation job "fixture-plain-wake"') && plainWake.text.includes("BEGIN UNTRUSTED EVENT DATA"),
-    "a wake with no prepare is unchanged in shape");
-  putJob({ id: "fixture-prepare-misuse", name: "a prepare outside a wake is refused",
-    trigger: { kind: "event", topic: "fixture.misuse" },
-    action: { kind: "run", script: path.join(repo, "scripts", "subagent-return-prepare.sh"), timeout_seconds: 30,
-      prepare: { script: path.join(repo, "scripts", "subagent-return-prepare.sh") } } });
-  cli(env, "enable", "fixture-prepare-misuse");
-  emit("fixture.misuse", "misuse-1", {});
-  await until(() => cli(env, "history").some((entry) => entry.job_id === "fixture-prepare-misuse" && entry.state === "failed"),
-    "a prepare on a run action is refused");
-  check(cli(env, "history").find((entry) => entry.job_id === "fixture-prepare-misuse").detail.includes("prepare_is_only_for_a_wake_action"),
-    "the refusal names the rule instead of ignoring the knob");
-  const brokenPrepare = path.join(root, "broken-prepare.sh");
-  // A step that succeeds and hands on nothing: the delivery must fail rather than wake someone with an
-  // empty instruction block in the message.
-  fs.writeFileSync(brokenPrepare, "#!/usr/bin/env bash\nset -uo pipefail\nprintf ''\nexit 0\n");
-  putJob({ id: "fixture-broken-prepare", name: "a prepare that hands on nothing refuses the wake",
-    trigger: { kind: "event", topic: "fixture.broken" },
-    action: { kind: "wake", session: "fixture-orchestrator", prompt: "SHOULD NOT BE SENT",
-      prepare: { script: brokenPrepare, timeout_seconds: 30 } } });
-  cli(env, "enable", "fixture-broken-prepare");
-  emit("fixture.broken", "broken-1", {});
-  await until(() => cli(env, "history").some((entry) => entry.job_id === "fixture-broken-prepare" && entry.state === "failed"),
-    "a prepare that hands on nothing fails the delivery");
-  check(cli(env, "history").find((entry) => entry.job_id === "fixture-broken-prepare").detail.includes("wake prepare step"),
-    "the failing delivery says which step failed");
-  check(!wakes.some((wake) => wake.text.includes("SHOULD NOT BE SENT")),
-    "no message was submitted for the wake whose instruction block could not be built");
+  // The dedupe key is pinned: with the cursor deleted, the event id is still the child's id, so the store
+  // answers "this exact event exists" and the pass reconciles through its receipt instead of emitting.
+  fs.rmSync(stateFile, { force: true });
+  const lost = JSON.parse((await runObserver()).stdout);
+  check(lost.emitted === 0 && lost.duplicates === CHILDREN.length,
+    `a lost cursor emits nothing and reports the duplicates (${JSON.stringify({ emitted: lost.emitted, duplicates: lost.duplicates, reconciled: lost.reconciled })})`);
+  check(lost.reconciled === CHILDREN.length, "and the pass reconciles each child through the store's receipt");
+  const converged = JSON.parse((await runObserver()).stdout);
+  check(converged.emitted === 0 && converged.duplicates === 0 && converged.known === CHILDREN.length,
+    `the cursor converges: the next pass knows every child instead of re-emitting (${JSON.stringify(converged)})`);
+  await sleep(1500);
+  check(wakes.length === CHILDREN.length, "none of that produced a second wake");
+
+  // The revision-independent guarantee: a definition re-put (or a disable/enable, which also moves the
+  // revision) plus a lost cursor used to mean two deliveries and two wakes for one child. The sentinel's
+  // ledger is keyed on the child id, so the second delivery completes without a second message.
+  cli(env, "disable", "onSubagentReturn");
+  cli(env, "enable", "onSubagentReturn");
+  fs.rmSync(stateFile, { force: true });
+  const afterRevision = JSON.parse((await runObserver()).stdout);
+  check(afterRevision.emitted > 0, `a new revision lets the observer emit again (${JSON.stringify({ emitted: afterRevision.emitted })})`);
+  await until(() => cli(env, "history").filter((entry) => entry.job_id === "onSubagentReturn")
+    .some((entry) => (entry.detail || "").includes("already_woken")), "the second delivery is suppressed");
+  await sleep(1500);
+  check(wakes.length === CHILDREN.length, "a re-put plus a lost cursor does NOT produce a second wake per child");
+  check(cli(env, "history").filter((entry) => entry.job_id === "onSubagentReturn")
+    .every((entry) => !(entry.detail || "").includes("already_woken") || entry.state === "completed"),
+    "the suppressed deliveries completed rather than failing");
+
+  // Disabling the hook removes the marker: the outbox notice is not suppressed by a job that is off.
+  cli(env, "disable", "onSubagentReturn");
+  await until(() => !fs.existsSync(markerFile), "the marker is removed when the hook is disabled");
 
   // The path predicate, falsified two ways: a path added or removed from the same diff, and the
   // predicate constant itself mutated.
@@ -360,14 +461,15 @@ async function main() {
   check(verdict("scripts/delivery-record.mjs").verdict === "no install impact",
     "a script a deploy does not copy is not deploy impact");
   check(verdict("scripts/deploy.sh").verdict === "deploy required at the wave's end", "deploy.sh itself is shipped");
-  const mutantFile = path.join(root, "mutant-hook.mjs");
-  fs.writeFileSync(mutantFile, fs.readFileSync(path.join(repo, "scripts", "subagent-return-hook.mjs"), "utf8")
-    .replace("const DEPLOY_SHIPPED_DIRECTORIES = ['ui/', 'rust/', 'lua/', 'skills/'];",
-      "const DEPLOY_SHIPPED_DIRECTORIES = ['ui-x/', 'rust/', 'lua/', 'skills/'];"));
-  const mutant = JSON.parse(spawnSync(process.execPath, [mutantFile, "--verdict", "--path", "ui/app.js"],
+  check(verdict("jobs/delivery-admission.json").verdict === "deploy required at the wave's end",
+    "every job definition is shipped, not only the hook's");
+  const mutantHook = path.join(root, "mutant-hook.mjs");
+  fs.writeFileSync(mutantHook, fs.readFileSync(path.join(repo, "scripts", "subagent-return-hook.mjs"), "utf8")
+    .replace("MANIFEST_NAME = 'deploy-shipped.json'", "MANIFEST_NAME = 'deploy-shipped-missing.json'"));
+  const mutant = JSON.parse(spawnSync(process.execPath, [mutantHook, "--verdict", "--path", "ui/app.js"],
     { encoding: "utf8", windowsHide: true }).stdout);
-  check(mutant.verdict === "no install impact",
-    "mutating the predicate's directory constant flips the verdict for the same path - the rule is load-bearing");
+  check(mutant.verdict === "cannot be computed",
+    "a predicate that cannot read the shipped set answers cannot be computed, never no install impact");
   const original = JSON.parse(spawnSync(process.execPath,
     [path.join(repo, "scripts", "subagent-return-hook.mjs"), "--verdict", "--path", "ui/app.js"],
     { encoding: "utf8", windowsHide: true }).stdout);
@@ -388,7 +490,7 @@ async function main() {
   const composed = JSON.parse(offline.stdout);
   check(composed.verdict === "deploy required at the wave's end" && composed.instruction.includes("DEPLOY VERDICT"),
     "with nothing listening it still composes the verdict and instruction - no provider call to fire the hook");
-  check(requests.filter((entry) => entry.path === "/chat").length === CHILDREN.length + 1,
+  check(requests.filter((entry) => entry.path === "/chat").length === CHILDREN.length,
     "the unreachable-node pass added no wake and no model call");
   check(spawnSync(process.execPath, [path.join(repo, "scripts", "subagent-return-hook.mjs"), "--compose"],
     { encoding: "utf8", windowsHide: true }).status === 4, "a compose with no event is refused, not guessed");

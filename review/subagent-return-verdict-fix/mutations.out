@@ -1,0 +1,32 @@
+== m1 ==
+    at async C:\Users\Victor\AppData\Local\Temp\wa-reverify-ffda98e4\m1\scripts\test-subagent-return-hook.cjs:503:5
+evidence: C:\Users\Victor\AppData\Local\Temp\wa-subagent-return-EgxDzv
+== m2 ==
+deploy-shipped: note: rule config/new-thing.json has no example in this tree (nothing to check)
+deploy shipped ok (51 checks; 8 rules from the installers, 6 examples, 26 from ship-wave.mjs)
+== m3 ==
+deploy-shipped: note: rule config/extra.json has no example in this tree (nothing to check)
+deploy shipped ok (51 checks; 8 rules from the installers, 6 examples, 26 from ship-wave.mjs)
+== m4 ==
+deploy-shipped: note: rule rust/plugins/whatsapp-transcript/target/wasm32-unknown-unknown/release/wa_plugin_whatsapp_transcript.wasm has no example in this tree (nothing to check)
+deploy-shipped: FAIL the predicate covers docs/JOBS.md (rule docs/JOBS.md)
+== m5 ==
+deploy-shipped: note: rule rust/plugins/whatsapp-transcript/target/wasm32-unknown-unknown/release/wa_plugin_whatsapp_transcript.wasm has no example in this tree (nothing to check)
+deploy shipped ok (51 checks; 7 rules from the installers, 6 examples, 26 from ship-wave.mjs)
+== m6 ==
+deploy-shipped: note: rule rust/plugins/whatsapp-transcript/target/wasm32-unknown-unknown/release/wa_plugin_whatsapp_transcript.wasm has no example in this tree (nothing to check)
+deploy shipped ok (51 checks; 7 rules from the installers, 6 examples, 26 from ship-wave.mjs)
+== m7 ==
+deploy-shipped: FAIL the predicate covers scripts/deploy.sh (rule scripts/deploy.sh)
+== m9 ==
+deploy-shipped: note: rule rust/plugins/whatsapp-transcript/target/wasm32-unknown-unknown/release/wa_plugin_whatsapp_transcript.wasm has no example in this tree (nothing to check)
+deploy-shipped: FAIL the predicate covers scripts/delivery-admission.mjs (written by ship-wave.mjs)
+== m9b ==
+deploy-shipped: note: rule rust/plugins/whatsapp-transcript/target/wasm32-unknown-unknown/release/wa_plugin_whatsapp_transcript.wasm has no example in this tree (nothing to check)
+deploy-shipped: FAIL the predicate covers scripts/wave-adapter.mjs (written by ship-wave.mjs)
+== m9c ==
+deploy-shipped: note: rule rust/plugins/whatsapp-transcript/target/wasm32-unknown-unknown/release/wa_plugin_whatsapp_transcript.wasm has no example in this tree (nothing to check)
+deploy shipped ok (51 checks; 7 rules from the installers, 6 examples, 26 from ship-wave.mjs)
+== m10 ==
+deploy-shipped: note: rule rust/plugins/whatsapp-transcript/target/wasm32-unknown-unknown/release/wa_plugin_whatsapp_transcript.wasm has no example in this tree (nothing to check)
+deploy-shipped: FAIL the predicate covers scripts/upgrade.sh (rule scripts/upgrade.sh)

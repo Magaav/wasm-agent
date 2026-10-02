@@ -236,6 +236,18 @@ function wa_completion_run(raw)
     return json.encode({error='completion_forbidden'})
   end
   exec("UPDATE child_completions SET state='running' WHERE child_id=?",{row.child_id})
+  -- The hook's own wake supersedes this notice while it is enabled: `onSubagentReturn` carries the same
+  -- measured facts (its block has a notification line built from this same packet) *and* the deploy
+  -- instruction this path never had. The marker is written by the sentinel from the job store's own enabled
+  -- state (`Runner::tick` in rust/wa-sentinel/src/jobs.rs, for a definition that declares
+  -- "supersedes": "completion_wake"), so it is a fact about the installation rather than a second setting
+  -- that can disagree with the job list. Without the marker this path behaves exactly as before.
+  local superseded=host.read_file(dofile('lua/core/paths.lua').config()..'/sentinel/completion-wake-superseded')
+  if superseded and tostring(superseded)~='' then
+    exec("UPDATE child_completions SET state='superseded',detail=? WHERE child_id=?",
+      {'onSubagentReturn is enabled; the child-return notification and its instruction live in that hook',row.child_id})
+    return json.encode({superseded=true,marker='completion-wake-superseded'})
+  end
   -- The packet rides the wake body; the row is the fallback for a wake queued before this existed.
   local packet=tostring(args.packet or '')
   if packet=='' then packet=tostring(row.packet or '') end

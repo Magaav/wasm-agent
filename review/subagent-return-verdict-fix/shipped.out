@@ -1,0 +1,3 @@
+== check-deploy-shipped (216ed3e) ==
+deploy-shipped: note: rule rust/plugins/whatsapp-transcript/target/wasm32-unknown-unknown/release/wa_plugin_whatsapp_transcript.wasm has no example in this tree (nothing to check)
+deploy shipped ok (51 checks; 7 rules from the installers, 6 examples, 26 from ship-wave.mjs)
