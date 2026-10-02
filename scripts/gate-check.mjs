@@ -14,7 +14,12 @@ export function checkVerdict(check, exit, output) {
   const text=String(output);
   if(check.verdict==='js')return verdict('js',exit,text);
   if(check.verdict==='browser') {
-    const markers=text.split(/\r?\n/).filter(line=>/^\s*ok   UI structure, mid-run reload, and startup recovery\s*$/.test(line));
+    // The browser check's terminal verdict line, matched on its *stable prefix* ("ok   UI structure") and
+    // not on the whole sentence. The sentence behind it names the stages test-ui.ps1 covers, and those
+    // grow: an anchored end-of-line match turned an honest added stage (the inspector window) into a gate
+    // FAIL that only the full gate could see. The prefix is what identifies the verdict; `markers.length===1`
+    // and the FAIL guard below are what keep this from accepting a mangled or repeated report.
+    const markers=text.split(/\r?\n/).filter(line=>/^\s*ok   UI structure\b/.test(line));
     return {ok:exit===0&&markers.length===1&&!/^\s*(?:FAIL(?:[:\s]|$)|ALL FAIL(?:[:\s]|$)|DEPENDENCY_MISSING)/m.test(text),reason:'browser_terminal_verdict_required'};
   }
   if(check.verdict==='proof') {

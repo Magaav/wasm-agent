@@ -4279,17 +4279,19 @@ function viewUrl(view) {
 
 // ---- the inspector window ----------------------------------------------------------------
 //
-// The node's own page as a *view*: the shell keys a view by this name, so asking for it again reuses the
-// window that is already open rather than stacking a second one (`rust/wa-window`'s `open_view` refuses a
-// name it already has), and nothing here reloads, navigates or otherwise disturbs it. The running window
-// is never touched: this only asks the shell for a window of its own.
+// The node's own page as a *view*. The reuse is the **shell's**, not this page's: `rust/wa-window/src/main.rs`
+// `open_view` (:404-421) returns early when `state.views` already holds a window whose title is this view's
+// name (:406 `if state.views.iter().any(|open| open.window.title() == view)`), logging "view … is already
+// open" and opening nothing. So this page's half is only the constant name below - asking twice asks for the
+// same window - and nothing here reloads, navigates or otherwise disturbs the window that is already open.
+// The running window is never touched: this only asks the shell for a window of its own.
 const INSPECT_VIEW = "inspect";
 
-// A second wa-window on the node's page, where the shell's Chromium webview keeps its *default* context
-// menu - Chrome's own, `Inspect element` included - so the parts of the UI can be navigated and polished
-// in a real inspector. That is the whole difference from the window you were in: this page is not a DOM
-// panel pretending to inspect, the browser's own DevTools do the inspecting, and the page rule that makes
-// it reachable is that a view window leaves the browser's menu alone (see the `contextmenu` listener).
+// A second wa-window on the node's page. Each view's webview is created with Chromium's *default* context
+// menu enabled (`main.rs:506`, `.with_default_context_menus(true)` - the main window's is disabled at :611),
+// so in the inspector the browser's own menu - `Inspect element` included - is what the reader gets, and the
+// parts of the UI can be navigated and polished in the real DevTools rather than in a DOM panel that only
+// looks like one. This page must therefore *not* suppress that event; see the `contextmenu` listener.
 //
 // Never from inside a view, for the reason the patch and control views refuse it too: a window opening a
 // window is how you get two of them, and the second is the one that stacks.
@@ -5557,21 +5559,26 @@ userBtn.addEventListener("click", openUserMenu);
 userMenu.addEventListener("close", () => userBtn.setAttribute("aria-expanded", "false"));
 
 document.addEventListener("contextmenu", (event) => {
-  // The main window draws this app's own menu; a browser without a shell keeps its native one. A *view*
-  // window does neither - the shell enables Chromium's default menu for every view, and in the inspector
-  // window that menu IS the feature: `Inspect element` opens the real DevTools. Suppressing it there would
-  // leave the inspector with a DOM panel and no inspection.
-  if (!native || viewMode()) return;
+  // A window with no shell keeps the browser's own menu, and so does the *inspector* window: the shell
+  // enables Chromium's default menu for every view, and in the inspector that menu IS the feature -
+  // `Inspect element` opens the real DevTools. Every other window is this app's own surface and draws
+  // this app's menu, exactly as it always has, the other views included (DESIGN.md §3).
+  if (!native || viewMode() === INSPECT_VIEW) return;
   event.preventDefault();
-  contextMenu.items = [
+  const items = [
     { label: "Collapse to avatar", action: () => { applyMode("compact"); native.compact(); } },
     { label: "Reload window", action: () => reload() },
+  ];
+  // The inspector is asked for from the window that owns the conversation: `openInspectWindow` refuses
+  // from inside a view (a window opening a window is how you get two), so the item is offered where it
+  // does something rather than offered everywhere and refused.
+  if (!viewMode()) {
     // Immediately after the reload: both are "open this page again", and the inspector is the one that
     // opens it in a window the browser itself owns - with Chrome's own element inspection on it.
-    { label: "inspect", action: () => openInspectWindow() },
-    { separator: true },
-    { label: "Close wasm-agent", danger: true, action: () => native.quit() },
-  ];
+    items.push({ label: "inspect", action: () => openInspectWindow() });
+  }
+  items.push({ separator: true }, { label: "Close wasm-agent", danger: true, action: () => native.quit() });
+  contextMenu.items = items;
   contextMenu.openAt(event.clientX, event.clientY);
 });
 

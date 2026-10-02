@@ -71,6 +71,28 @@ $harness = @'
     document.body.append(inspectLog);
     return;
   }
+  // A VIEW WINDOW THAT IS NOT THE INSPECTOR. Every other view is this app's own page too, so it draws this
+  // app's own right-click menu - and it does not offer `inspect`, because `openInspectWindow` refuses to open
+  // a window from inside a view. The rule was changed for every view once; this is the stage that says so.
+  if (new URLSearchParams(location.search).get("view") === "orchestrator") {
+    window.__setShell(window.__makeShell());
+    await window.rendererLoaded;
+    for (var viewTick = 0; viewTick < 200 && !document.body.classList.contains("view-only"); viewTick++) await tick();
+    check(document.body.classList.contains("view-only"),
+      "an orchestrator view must be a view page, saw body: " + document.body.className);
+    var viewMenuEvent = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 20, clientY: 20 });
+    var viewSwallowed = !document.dispatchEvent(viewMenuEvent);
+    check(viewSwallowed && viewMenuEvent.defaultPrevented === true,
+      "a view window that is not the inspector must still draw this app's own menu, saw prevented=" + viewMenuEvent.defaultPrevented);
+    var viewItems = (document.getElementById("context-menu").items || []).map(function (item) { return item.label || (item.separator ? "---" : ""); });
+    check(viewItems.join(",") === "Collapse to avatar,Reload window,---,Close wasm-agent",
+      "and it must be the menu it held before the inspector existed, saw " + JSON.stringify(viewItems));
+    var viewLog = document.createElement("pre");
+    viewLog.id = "harness-log";
+    viewLog.textContent = problems.length ? ("UI FAIL: " + problems.join(" ;; ")) : "UI PASS (view window)";
+    document.body.append(viewLog);
+    return;
+  }
   // The provider, reasoning and model controls have one renderer now (renderControls): they are
   // three views of one settings payload, so the harness draws them through it - and through the two
   // it replaced when this page is an older app.js, so a case added for it fails on the behaviour
@@ -1269,6 +1291,72 @@ $harness = @'
       + (freshAttach?freshAttach.className+' '+boxOf(freshAttach).h:'none') + ' / '
       + (freshAction?freshAction.className+' '+boxOf(freshAction).h:'none'));
   freshShell.remove(); freshRow.remove();
+
+  // BEYOND GEOMETRY: WHICH RULES STATE A CONTROL'S BOX. The measurements above cannot tell "one rule states
+  // the box" from "the same box is stated twice with identical values" (a duplicate reads as agreement), and
+  // they say nothing about one control recoloured alone. So the stylesheet is read the way the browser reads
+  // it: every rule that matches one of the four controls is listed with the properties it declares, and the
+  // assertions are about *which* rules are allowed to state the box and the paint. A duplicate box, a
+  // higher-specificity rule that only happens to lose today, and a one-control recolour all fail here.
+  var carriesBox=function(prop){ return prop==='height'||prop==='min-width'||prop==='border-radius'||prop.indexOf('border')===0; };
+  var carriesPaint=function(prop){ return prop==='color'||prop.indexOf('background')===0||prop.indexOf('font')===0; };
+  var declaredProperties=function(rule){ var props=[]; for (var i=0;i<rule.style.length;i++) props.push(rule.style[i]); return props; };
+  var collectRules=function(el,rules,out){
+    for (var i=0;i<rules.length;i++) {
+      var rule=rules[i];
+      // A rule that carries a selector is a style rule. Chromium gives even a style rule an (empty)
+      // `cssRules`, so the selector - not `cssRules` - is what tells a style rule from a group one; a
+      // group rule (media, supports, layer) is entered when its condition holds.
+      if (!rule.selectorText) {
+        if (rule.cssRules && (!rule.conditionText || window.matchMedia(rule.conditionText).matches)) collectRules(el,rule.cssRules,out);
+        continue;
+      }
+      if (!rule.style) continue;
+      var matches=false;
+      try { matches=el.matches(rule.selectorText); } catch (error) { matches=false; }
+      if (matches) out.push({selector:rule.selectorText,props:declaredProperties(rule)});
+    }
+    return out;
+  };
+  var statingRules=function(el,isCarried){
+    var found=[];
+    for (var s=0;s<document.styleSheets.length;s++) {
+      var rules=null;
+      try { rules=document.styleSheets[s].cssRules; } catch (error) { rules=null; }
+      if (rules) collectRules(el,rules,found);
+    }
+    var carriers=found.filter(function(rule){ return rule.props.some(isCarried); }).map(function(rule){ return rule.selector; });
+    return carriers.filter(function(name,index,all){ return all.indexOf(name)===index; });
+  };
+  // The main chat's Steer is hidden until a run is active; unhiding it is the only thing that changes, and
+  // the state is put back so the checks below see the app's own reveal.
+  var steerWasHidden=mainSteer.hidden;
+  mainSteer.hidden=false;
+  var auditTargets=[{name:'main append-file',el:mainAttach,labelled:false},{name:'main action',el:mainSteer,labelled:true},
+    {name:'child append-file',el:paneAttach,labelled:false},{name:'child action',el:paneSteer,labelled:true}];
+  var boxAudit=auditTargets.map(function(target){ return target.name+' -> '+statingRules(target.el,carriesBox).join(' + '); });
+  check(boxAudit.every(function(line){ return line.split(' -> ')[1]==='.chat-control'; }),
+    'exactly one rule may state a footer control\'s height, border and radius - the shared .chat-control - saw '
+      + JSON.stringify(boxAudit));
+  var paintAudit=auditTargets.map(function(target){ return target.name+' -> '+statingRules(target.el,carriesPaint).join(' + '); });
+  check(paintAudit.every(function(line,index){
+      var rules=line.split(' -> ')[1].split(' + ');
+      var allowed=rules.every(function(name){ return name==='.chat-control'||name==='.chat-control[data-label]'; });
+      return allowed && (auditTargets[index].labelled ? rules.indexOf('.chat-control[data-label]')>=0 : rules.length===1);
+    }),
+    'a footer control\'s colour, background and font must come from the shared control (and, when labelled, its own variant), saw ' + JSON.stringify(paintAudit));
+  var appearanceProperties=['height','min-width','padding-top','padding-bottom','padding-left','padding-right',
+    'border-top-width','border-right-width','border-bottom-width','border-left-width','border-top-color',
+    'border-right-color','border-bottom-color','border-left-color','border-top-style','border-bottom-style',
+    'border-radius','background-color','background-image','color','display','align-items','justify-content',
+    'flex-grow','flex-shrink','flex-basis','cursor','box-sizing'];
+  var appearance=function(el){ var style=getComputedStyle(el); return appearanceProperties.map(function(name){ return name+'='+style.getPropertyValue(name); }).join(';'); };
+  var appearances={ 'main action':appearance(mainSteer), 'child action':appearance(paneSteer),
+    'main append-file':appearance(mainAttach), 'child append-file':appearance(paneAttach) };
+  check(appearances['main action']===appearances['child action'] && appearances['main append-file']===appearances['child append-file'],
+    'the same kind of control must compute the same appearance on both surfaces - a recolour or an inline style on one alone is not the shared control, saw '
+      + JSON.stringify({mainAction:appearances['main action'],childAction:appearances['child action']}));
+  mainSteer.hidden=steerWasHidden;
   // Requirement: a child panel's header is its own two controls, with the icons asked for.
   var header=panes[1].querySelector('.agent-pane-head');
   var headerButtons=header?Array.prototype.slice.call(header.querySelectorAll('button')):[];
@@ -1658,7 +1746,8 @@ $harness = @'
   if(engineWasOpen) document.body.classList.add('engine');
   check(Math.round(busySteerRect.height)===Math.round(busyAttachRect.height) && Math.round(busyAttachRect.height)===30,
     'the main chat\'s Steer must measure the append-file control\'s height while a run is active, saw steer '
-      + Math.round(busySteerRect.height) + 'px (w ' + Math.round(busySteerRect.width) + ') and append-file '
+      + Math.round(busySteerRect.height) + 'px (w ' + Math.round(busySteerRect.width) + ' - the label\'s own width, '
+      + 'which follows the ambient font and is reported, not asserted) and append-file '
       + Math.round(busyAttachRect.height) + 'px (w ' + Math.round(busyAttachRect.width) + '), body '
       + document.body.className);
   document.getElementById('steer').click();
@@ -3185,7 +3274,28 @@ try {
     Write-Host "  FAIL $inspectResult" -ForegroundColor Red
     exit 1
   }
-  Write-Host "  ok   UI structure, mid-run reload, startup recovery, and the inspect window" -ForegroundColor Green
+  # A view window that is not the inspector, as a third load: it must keep the app's own right-click menu,
+  # which is what it drew before the inspector existed. Three loads, one verdict line.
+  $viewDump = ""
+  $viewPrevious = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $viewDump = & $edge --headless=new --disable-gpu --virtual-time-budget=10000 "--user-data-dir=$profile" --dump-dom "http://127.0.0.1:$Port/?view=orchestrator" 2>$null | Out-String
+  } finally { $ErrorActionPreference = $viewPrevious }
+  $viewMatch = [regex]::Match($viewDump, '<pre id="harness-log"[^>]*>([\s\S]*?)</pre>')
+  if (-not $viewMatch.Success) {
+    $viewDebug = Join-Path $env:TEMP "wa-ui-view-dump.html"
+    Set-Content -Path $viewDebug -Value $viewDump
+    Write-Host "  !  the view-window stage did not run (no log in the DOM dump)" -ForegroundColor Red
+    Write-Host ("     dump written to " + $viewDebug + " (" + $viewDump.Length + " chars)")
+    exit 1
+  }
+  $viewResult = $viewMatch.Groups[1].Value.Trim()
+  if ($viewResult -ne "UI PASS (view window)") {
+    Write-Host "  FAIL $viewResult" -ForegroundColor Red
+    exit 1
+  }
+  Write-Host "  ok   UI structure, mid-run reload, startup recovery, the inspect window, and a view window" -ForegroundColor Green
 } finally {
   if ($server) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
   Remove-Item Env:WASM_AGENT_HOME -ErrorAction SilentlyContinue

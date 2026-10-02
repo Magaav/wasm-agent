@@ -66,6 +66,19 @@ patch opens a window and says so, and every panel that can be promoted also
 offers the other container as a control. Never move a panel under the reader's
 pointer without telling them.
 
+**Whose context menu a window draws.** Which right-click menu appears is a property of the *page*, and the
+rule is one sentence: a window draws **this app's** menu, and the **inspector** window draws the browser's.
+The app's menu is the chat's own (collapse to avatar, reload the window, `inspect`, close) and the main window
+offers the `inspect` item — the second wa-window on the node's page, where Chrome's own element inspection
+lives — immediately after the reload. A **view** window (orchestrator, patch, control) is still this app's
+page and draws the same menu, minus the item it could not carry out: `openInspectWindow` refuses from inside a
+view, and a control that is always refused is worse than one that is not offered. The **inspector** view is the
+exception, and it is the whole point of it: its webview keeps Chromium's default context menu
+(`rust/wa-window/src/main.rs:506`; the main window disables it at `:611`), because `Inspect element` is in that
+menu — a page that suppressed the event would leave a DOM panel and no inspector. The reuse is the shell's too:
+`open_view` (`main.rs:404-421`, the title check at `:406`) refuses a second window for a view name it already
+has open, so the inspector is reused rather than stacked.
+
 
 ## 4. Spacing
 
@@ -181,12 +194,17 @@ window's own conversation and a delegated child. A child panel therefore differs
 one place only: its header, which is the panel's own two controls (close, expand into its own window)
 instead of the window's topbar (engine, shell, orchestrator window, collapse-to-avatar).
 
-**One footer, one control.** The composer footer's controls are one implementation, not a family of rules
-that agree today: `chatControl()` in `components.js` builds the append-file control the shell ships and every
-button of `<wa-chat-actions>`, all of them `.chat-control`, and `style.css` states that box once. The action
-row is `<wa-chat-actions>` on the main chat and in every child pane, authored the same way (a
-`data-slot="footer-right"` child of the shell). A labelled control is the same height, border and radius and
-differs only in the width its own label needs; an icon control is the square `--control-size` (30px).
+**One footer, one control — for the controls the shell owns.** `chatControl()` in `components.js` builds the
+append-file control the shell ships and every button of `<wa-chat-actions>`; all of them are `.chat-control`,
+and `style.css` states that box once (one place, and no other rule may state it: the orchestrator's generic
+`button` rule excludes `.chat-control` by selector rather than out-specifying it). The action row is
+`<wa-chat-actions>` on the main chat and in every child pane, authored the same way (a `data-slot="footer-right"`
+child of the shell). A labelled control is the same height, border and radius and differs only in the width its
+own label needs; an icon control is the square `--control-size` (30px). The **host's own** footer children are
+not part of this: the audio control (`#mic`), the account chip and the status chip are authored by `app.js` and
+styled as they were (`.icon-btn` and the chip classes), because they are not per-message controls the shell
+builds. "One implementation" here means one factory and one box for what the factory makes, not every button
+that happens to sit on that row.
 
 The engine view's topics (nodes, spells, tools) are expandable cards rendered in
 `app.js`; each loads its data on first expand (`GET /nodes`, `/spells`, `/tools`).

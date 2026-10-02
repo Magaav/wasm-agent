@@ -112,8 +112,12 @@ wa-agent-session { min-width:0; min-height:0; display:flex; flex-direction:colum
    `.chat-control` live in the composer section, beside the append-file control they must follow. */
 .agent-notice { padding:0 var(--space); color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
 .agent-preview { padding:var(--pad); white-space:pre-wrap; overflow:auto; max-height:40%; overflow-wrap:anywhere; }
-wa-orchestrator button { cursor:pointer; color:var(--text); background:var(--panel-2); border:1px solid var(--line); border-radius:var(--radius-sm); padding:var(--space); font:inherit; }
-wa-orchestrator button:disabled { opacity:.5; cursor:default; }
+/* The orchestrator's own buttons (sidebar cards, live children, lanes). `.chat-control` is excluded rather
+   than out-specified: a composer-footer control's box is the shared factory's (`.chat-control` beside the
+   append-file control), and a rule here that stated that box for the same element a second time would be a
+   duplicate that happens to lose today and moves the pane's actions the moment it wins. */
+wa-orchestrator button:not(.chat-control) { cursor:pointer; color:var(--text); background:var(--panel-2); border:1px solid var(--line); border-radius:var(--radius-sm); padding:var(--space); font:inherit; }
+wa-orchestrator button:not(.chat-control):disabled { opacity:.5; cursor:default; }
 @media(max-width:700px) { .orchestrator-sidebar { width:200px; min-width:150px; } .orchestrator-canvas[data-count] { grid-template-columns:minmax(0,1fr); } }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
