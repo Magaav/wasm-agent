@@ -1,0 +1,28 @@
+check js:one.js: PASS exit=0 ms=201.3 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-YCDOKY\pass\js_one.js.log
+ALL PASS
+check js:two.js: PASS exit=0 ms=201.9 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-YCDOKY\pass\js_two.js.log
+ALL PASS
+check js:three.js: PASS exit=0 ms=186.1 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-YCDOKY\pass\js_three.js.log
+ALL PASS
+check js:silent.js: FAIL exit=0 ms=33.8 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-YCDOKY\fail\js_silent.js.log
+
+check js:failure.js: FAIL exit=7 ms=39.6 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-YCDOKY\fail\js_failure.js.log
+ALL PASS
+check js:one.js: PASS exit=0 ms=194.7 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-YCDOKY\fail\js_one.js.log
+ALL PASS
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+AssertionError [ERR_ASSERTION]: a line that names no stage of this check is not its verdict
+    at file:///C:/Users/Victor/.wasm-agent/wa-worktree-childdispatch46c83946-b1d1-416f-a451-e643dc484dc8/scripts/test-gate-check.mjs:30:3
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+
+Node.js v24.19.0

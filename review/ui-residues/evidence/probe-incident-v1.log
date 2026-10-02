@@ -1,0 +1,91 @@
+stage C:\Users\Victor\AppData\Local\Temp\wa-probe-Q6bmOx  browser msedge.exe  exit 0  dom 37307 bytes
+---- probe result ----
+{
+  "probe": "incident-and-neighbours",
+  "stage": "done",
+  "ticks": 90,
+  "boot": {
+    "thread": "aaaaaaaa-0000-0000-0000-000000000001",
+    "watch": "function",
+    "standing": "function",
+    "input": true
+  },
+  "A": {
+    "send": {
+      "posted": true,
+      "posts": 1,
+      "busy": true,
+      "stream": 1
+    },
+    "alarmsBefore": 0,
+    "alarmsAfter": 0,
+    "status": "the node is busy with a run I cannot identify; still listening",
+    "busy": true,
+    "tail": "\n      ↓ latest\n      \n      \n      \n      \n      \n      \n      \n      \n    youa turn the node accepted (A)the node is busy with a run I cannot identify; still listening0:00",
+    "streamRendered": true,
+    "alarmsAtEnd": 0
+  },
+  "B": {
+    "alarmsBefore": 0,
+    "busyBefore": true,
+    "alarmsAfter": 1,
+    "status": "the local node is not answering - start it with `wa ui`",
+    "tail": "    \n      \n      \n    youa turn the node accepted (A)wasm-agentAFTER-ASK-DELTA-Awasm-agentthe node is no longer running this run (alive). Checking the recorded result for recovery.the local node is not answering - start it with `wa ui`0:00",
+    "streamRendered": true,
+    "runEnded": false,
+    "busyAfter": true
+  },
+  "C": {
+    "send": {
+      "posted": true,
+      "posts": 1,
+      "busy": true,
+      "stream": 2
+    },
+    "alarmsBefore": 1,
+    "alarmsAfter": 2,
+    "tail": "ot loaded - retrying in 1s (session?id=aaaaaaaa-0000-0000-0000-000000000001: GET session?id=aaaaaaaa-0000-0000-0000-000000000001: no fixture for session?id=aaaaaaaa-0000-0000-0000-000000000001 - the harness does not reach the real node)0:00",
+    "status": "transcript not loaded - retrying in 1s (session?id=aaaaaaaa-0000-0000-0000-000000000001: GET session?id=aaaaaaaa-0000-0000-0000-000000000001: no fixture for session?id=aaaaaaaa-0000-0000-0000-000000000001 - the harness does not reach the real node)"
+  },
+  "D": {
+    "busyUnidentifiable": "busy-unknown",
+    "aliveUnidentifiable": "over",
+    "idleNoRun": "over",
+    "finished": "finished",
+    "stalled": "busy-unknown",
+    "foreignTerminalAccepted": "over",
+    "mineLiveInBaseline": "over",
+    "mineLiveNotInBaseline": "running",
+    "mineThread": "running"
+  },
+  "E": {
+    "held": true,
+    "doneSeen": false,
+    "alarmsAfter": 1,
+    "status": null,
+    "tail": "e node is no longer running this run (alive). Checking the recorded result for recovery.youa turn the node accepted (C)wasm-agentyoua turn the node accepted (E)"
+  },
+  "S": {
+    "send": {
+      "posted": true,
+      "posts": 1,
+      "busy": true,
+      "stream": 4
+    },
+    "alarmsBefore": 1,
+    "ticksAtStart": 0,
+    "waited": 45,
+    "ticks": 45,
+    "sawCannotIdentify": true,
+    "alarmsAfter": 1,
+    "status": "transcript not loaded - retrying in 30s (session?id=aaaaaaaa-0000-0000-0000-000000000001: GET session?id=aaaaaaaa-0000-0000-0000-000000000001: no fixture for session?id=aaaaaaaa-0000-0000-0000-000000000001 - the harness does not reach the real node)",
+    "streamRendered": true,
+    "busy": true,
+    "verdict": "timer path: no alarm, the stream still rendered what arrived after the ask"
+  }
+}
+---- browser stderr (first 800 chars) ----
+[18128:3080:1002/203817.668:ERROR:components\edge_ess\vbs_encoder.cc:100] LoadEnclaveImageW failed, error code 577
+[18128:3080:1002/203817.960:ERROR:components\edge_auth\edge_auth_errors.cc:553] EDGE_IDENTITY: Image Fetch FAILED: Error: Primary Error: kAccountImageFetchFailure, Secondary Error: kUnspecified, Platform error: 0, Error string: [empty]
+
+

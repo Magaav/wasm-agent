@@ -1,0 +1,13 @@
+diff --git a/scripts/gate-check.mjs b/scripts/gate-check.mjs
+index f2acd52..4994e93 100644
+--- a/scripts/gate-check.mjs
++++ b/scripts/gate-check.mjs
+@@ -23,7 +23,7 @@ export function checkVerdict(check, exit, output) {
+     // and the FAIL guard below are what reject a mangled or repeated report.
+     const prefix=/^\s*ok   UI structure\b/;
+     const subjects=[/mid-run reload/i,/startup recovery/i];
+-    const markers=text.split(/\r?\n/).filter(line=>prefix.test(line)&&subjects.some(subject=>subject.test(line)));
++    const markers=text.split(/\r?\n/).filter(line=>prefix.test(line));
+     return {ok:exit===0&&markers.length===1&&!/^\s*(?:FAIL(?:[:\s]|$)|ALL FAIL(?:[:\s]|$)|DEPENDENCY_MISSING)/m.test(text),reason:'browser_terminal_verdict_required'};
+   }
+   if(check.verdict==='proof') {

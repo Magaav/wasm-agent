@@ -1,0 +1,104 @@
+stage C:\Users\Victor\AppData\Local\Temp\wa-probe-sPOyac  browser msedge.exe  exit 0  dom 40633 bytes
+---- probe result ----
+{
+  "probe": "incident-and-neighbours",
+  "stage": "done",
+  "ticks": 90,
+  "boot": {
+    "thread": "aaaaaaaa-0000-0000-0000-000000000001",
+    "watch": "function",
+    "standing": "function",
+    "input": true
+  },
+  "A": {
+    "send": {
+      "posted": true,
+      "posts": 1,
+      "busy": true,
+      "stream": 1
+    },
+    "alarmsBefore": 0,
+    "abortedBefore": 0,
+    "alarmsAfter": 0,
+    "status": "the node is busy with a run I cannot identify; still listening",
+    "busy": true,
+    "tail": "\n      ↓ latest\n      \n      \n      \n      \n      \n      \n      \n      \n    youa turn the node accepted (A)the node is busy with a run I cannot identify; still listening0:00",
+    "abortedAfter": 0,
+    "streamRendered": true,
+    "alarmsAtEnd": 0
+  },
+  "B": {
+    "alarmsBefore": 0,
+    "busyBefore": true,
+    "abortedBefore": 0,
+    "alarmsAfter": 1,
+    "status": null,
+    "tail": "est\n      \n      \n      \n      \n      \n      \n      \n      \n    youa turn the node accepted (A)wasm-agentAFTER-ASK-DELTA-Awasm-agentthe node is no longer running this run (alive). Checking the recorded result for recovery.wasm-agentstopped.",
+    "abortedAfter": 1,
+    "enqueueAfterAbort": false,
+    "streamRendered": false,
+    "runEnded": true,
+    "busyAfter": false,
+    "stopped": true,
+    "alarmsAtEnd": 1
+  },
+  "C": {
+    "send": {
+      "posted": true,
+      "posts": 1,
+      "busy": true,
+      "stream": 2
+    },
+    "alarmsBefore": 1,
+    "alarmsAfter": 2,
+    "tail": "nger running this run (alive). Checking the recorded result for recovery.wasm-agentstopped.youa turn the node accepted (C)wasm-agentthe node is no longer running this run (alive). Checking the recorded result for recovery.wasm-agentstopped.",
+    "status": null
+  },
+  "D": {
+    "busyUnidentifiable": "busy-unknown",
+    "aliveUnidentifiable": "over",
+    "idleNoRun": "over",
+    "finished": "finished",
+    "stalled": "busy-unknown",
+    "foreignTerminalAccepted": "over",
+    "mineLiveInBaseline": "over",
+    "mineLiveNotInBaseline": "running",
+    "mineThread": "running"
+  },
+  "E": {
+    "held": true,
+    "replySeen": true,
+    "alarmsBeforeRelease": 1,
+    "alarmsAfter": 1,
+    "status": "finishing…",
+    "tail": "very.wasm-agentstopped.youa turn the node accepted (C)wasm-agentwasm-agentstopped.youa turn the node accepted (E)wasm-agentthe answer is on screenfinishing…0:00"
+  },
+  "S": {
+    "send": {
+      "posted": true,
+      "posts": 1,
+      "busy": true,
+      "stream": 4
+    },
+    "alarmsBefore": 1,
+    "healthBefore": 11,
+    "statusAtStart": "transcript not loaded - retrying in 4s (session?id=aaaaaaaa-0000-0000-0000-000000000001: GET session?id=aaaaaaaa-0000-0000-0000-000000000001: no fixture for session?id=aaaaaaaa-0000-0000-0000-000000000001 - the harness does not reach the real node)",
+    "ticksAtStart": 0,
+    "waited": 45,
+    "ticks": 45,
+    "healthDuring": 50,
+    "sawCannotIdentify": true,
+    "firstCannotIdentifyStatus": "the node is busy with a run I cannot identify; still listening",
+    "alarmsAfter": 1,
+    "healthAfter": 50,
+    "status": "the node is busy with a run I cannot identify; still listening",
+    "streamRendered": true,
+    "busy": true,
+    "verdict": "timer path: the watchdog asked after 30 s of silence, printed no alarm, and the stream still rendered what arrived after the ask"
+  }
+}
+---- browser stderr (first 800 chars) ----
+[19444:18788:1002/203939.034:ERROR:components\edge_ess\vbs_encoder.cc:100] LoadEnclaveImageW failed, error code 577
+[19444:18788:1002/203939.338:ERROR:components\edge_auth\edge_auth_errors.cc:553] EDGE_IDENTITY: Image Fetch FAILED: Error: Primary Error: kAccountImageFetchFailure, Secondary Error: kUnspecified, Platform error: 0, Error string: [empty]
+
+

@@ -1,0 +1,13 @@
+check js:two.js: PASS exit=0 ms=197.7 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-RNyiB2\pass\js_two.js.log
+ALL PASS
+check js:one.js: PASS exit=0 ms=207.7 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-RNyiB2\pass\js_one.js.log
+ALL PASS
+check js:three.js: PASS exit=0 ms=202.0 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-RNyiB2\pass\js_three.js.log
+ALL PASS
+check js:silent.js: FAIL exit=0 ms=41.3 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-RNyiB2\fail\js_silent.js.log
+
+check js:failure.js: FAIL exit=7 ms=48.3 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-RNyiB2\fail\js_failure.js.log
+ALL PASS
+check js:one.js: PASS exit=0 ms=198.4 log=C:\Users\Victor\AppData\Local\Temp\wa-check-runner-RNyiB2\fail\js_one.js.log
+ALL PASS
+gate check runner ok (21 checks, 0 skipped)

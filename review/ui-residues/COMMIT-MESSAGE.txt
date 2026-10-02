@@ -1,0 +1,34 @@
+review(ui-residues): independent attack on 2a5c5ea - the incident is fixed and not vacuous, and the same false alarm survives on worker "alive"
+
+All three claims reproduce, each with its failing case shown first, and every instrument here is mine
+(a temp copy of ui/ served to a headless browser, the delivered suites unmodified, then mutated).
+
+1. The incident. worker "busy", a busy POST /chat thread belonging to another conversation, no run id
+   for this conversation: no notice, the status says "the node is busy with a run I cannot identify;
+   still listening", and a delta sent after the ask still renders. The control is not vacuous - an idle
+   node with no run of this conversation is still reported (probe C), a run that finished stays silent
+   including when the /health answer arrives after `reply` (probe E), and the real 30-second interval
+   fires in 45 s of virtual silence and produces the same result with no seam call at all (probe S).
+
+2. The same shape with worker "alive" is NOT fixed. health_body() computes alive/busy from the
+   node-thread beat age (< 1000 ms = "alive"), and Heartbeat beats once a second during a host call, so
+   the same healthy run answers "busy" or "alive" depending on which side of the beat the poll lands.
+   The notice is printed - "the node is no longer running this run (alive)" - the fetch is aborted, the
+   stream is errored, and what the stream sent next never renders. A node-thread executing POST /chat
+   right now (busy_ms 9100) is not read as evidence by the `over` verdict at all. Two more shapes are
+   open: worker missing (an older node), and a live run of this conversation that sits in the pre-submit
+   baseline, which the run-list lookup discards. Narrowing, not introduced here: a run the node calls
+   "stalled" with this conversation's thread or run id present is never reported over by this check.
+
+3. The two coverage residues are pinned (margin-top and letter-spacing on the pane's controls alone each
+   turn the suite red) and a neighbouring one is not: the rule audit collects a rule only when
+   el.matches(selectorText) is true, so a ::before glyph on the pane's append-file control alone, or a
+   :hover rule on the pane's controls alone, leaves the delivered suite green while the control visibly
+   changes (screenshots in review/ui-residues/evidence/). The parser's subject is a substring: a
+   sentence that denies the stage is accepted, and the delivered negative case is refused as claimed.
+
+Three suites green at this tree (test-ui.ps1's one line, gate-check.mjs run ui-browser, test-gate-check.mjs
+21 checks); 5 mutations red, 3 green where red was expected. No push, no deploy, nothing pointed at the
+running window or the installed UI. Full evidence and the exact commands: review/ui-residues/README.md.
+
+Agent: wasm-agent node=wasm_the_first role=reviewer session=child:dispatch:46c83946-b1d1-416f-a451-e643dc484dc8

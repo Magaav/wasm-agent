@@ -1,0 +1,39 @@
+stage C:\Users\Victor\AppData\Local\Temp\wa-probe-IN38ym  browser msedge.exe  exit 0  dom 28798 bytes
+---- probe result ----
+{
+  "probe": "coverage",
+  "stage": "done",
+  "paneFound": true,
+  "mainFound": true,
+  "paneControlClass": "chat-control",
+  "paneBefore": {
+    "content": "\"!\"",
+    "width": "3.71875px",
+    "color": "rgb(255, 0, 0)",
+    "display": "block"
+  },
+  "mainBefore": {
+    "content": "none",
+    "width": "auto",
+    "color": "rgb(139, 147, 167)",
+    "display": "block"
+  },
+  "paneLetterSpacing": "normal",
+  "mainLetterSpacing": "normal",
+  "paneMarginTop": "0px",
+  "mainMarginTop": "0px",
+  "matchesPseudoSelector": false,
+  "matchesPseudoSelectorThrows": false,
+  "matchesHoverSelector": false,
+  "mediaWideHolds": false,
+  "viewport": {
+    "w": 874,
+    "h": 607
+  }
+}
+---- browser stderr (first 800 chars) ----
+[12308:19252:1002/204238.212:ERROR:components\edge_ess\vbs_encoder.cc:100] LoadEnclaveImageW failed, error code 577
+[12308:19252:1002/204238.526:ERROR:components\edge_auth\edge_auth_errors.cc:553] EDGE_IDENTITY: Image Fetch FAILED: Error: Primary Error: kAccountImageFetchFailure, Secondary Error: kUnspecified, Platform error: 0, Error string: [empty]
+
+17816 bytes written to file C:\Users\Victor\.wasm-agent\wa-worktree-childdispatch46c83946-b1d1-416f-a451-e643dc484dc8\review\ui-residues\evidence\m7-pane-attach-glyph.png
+

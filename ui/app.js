@@ -104,6 +104,11 @@ let streamBody = null;
 let streamText = "";
 let phasePendingText = new Map();
 let controller = null;
+// The one check that may decide the run this window is watching is over. `send()` arms it for the run it
+// starts and clears it when the run ends; anything outside that closure (the UI harness) can run exactly
+// one check through it, which is how the false-alarm decision is exercised without waiting for the
+// 30-second silence the timer waits for.
+let checkWatchedRun = null;
 // The attachment list and its strip are the shell's; these two names stay because the draft's undo
 // stack and the harness's probe address them.
 const attachments = chatShell.attachments;
@@ -2166,6 +2171,58 @@ function clearActiveRunNotice() {
   for (const notice of document.querySelectorAll(".active-run-notice")) notice.remove();
 }
 
+// What the node's own answer says about the run this window is watching.
+//
+// `view` is everything the page knows: the conversation it submitted to (`session`), the run id the node
+// accepted for it (`runId`, from `run_ids` minus the pre-submit baseline `submitted`), and whether this
+// window has already seen the run finish (`finished`).
+//
+// The verdicts are `running`, `busy-unknown`, `finished` and `over`, and only `over` is a claim that the run
+// has ended - so only `over` may end the stream. The order matters: what this window watched finish wins,
+// then what the node says about *this run*, and only then the node's aggregate word about being busy.
+//
+// This is the decision the owner's incident got wrong. `/health` answered `worker: "busy"` while the busy
+// node-thread carried an identity this window could not match to its conversation, and the page announced
+// "the node is no longer running this run (busy)" and aborted a healthy stream - printing the node's own
+// word for *working* in the sentence that said the run was over. An answer this page cannot interpret is
+// not evidence of death: the node was busy, so it was working on something, and the only thing the page
+// knew for certain was that it could not tell whose work it was.
+function runStanding(health, view = {}) {
+  if (view.finished) return "finished";
+  // A node-thread on this conversation, or one carrying the run id the node accepted for it: this run.
+  const thread = activeRun(health, view.session);
+  if (thread && health?.worker !== "stalled") return "running";
+  const accepted = view.runId === null || view.runId === undefined ? null : view.runId;
+  if (accepted !== null && threadOfRun(health, accepted)) return "running";
+  const ids = Array.isArray(health?.run_ids) ? health.run_ids : null;
+  if (ids) {
+    // The run the node accepted for this conversation is the node's own record of it, and it outranks the
+    // thread list: a thread is an implementation detail that a respawn or a re-queue may change.
+    if (accepted !== null) {
+      const mine = ids.find((run) => run && Number(run.run_id) === Number(accepted));
+      if (mine) return /^(queued|running|not_started)$/.test(String(mine.state || "")) ? "running" : "over";
+    }
+    // Not identified yet: a live run of this conversation that this window did not submit before is the
+    // node's own answer that its newest run belongs here (`identifySubmittedRun` makes that exact match).
+    const fresh = ids.filter((run) => run && run.conversation === view.session
+      && !(view.submitted && view.submitted.has(Number(run.run_id))));
+    if (fresh.some((run) => /^(queued|running|not_started)$/.test(String(run.state || "")))) return "running";
+  }
+  // The node says something is running that this window cannot name as its own run. "Busy but I cannot
+  // identify it" is keep waiting - never "over". The node is not idle, so the run has not been observed
+  // to end, and a page may not end a stream it cannot contradict.
+  const worker = String(health?.worker || "");
+  if (worker && worker !== "alive") return "busy-unknown";
+  return "over";
+}
+
+// The node-thread carrying one run id, when the node names it there (`/health` puts `run_id` on both
+// `current` and each `node_threads` entry). Absent on an older node, and then this is simply no evidence.
+function threadOfRun(health, runId) {
+  const carries = (entry) => entry && entry.run_id != null && Number(entry.run_id) === Number(runId);
+  return (health?.node_threads || []).find(carries) || (carries(health?.current) ? health.current : null);
+}
+
 async function send(text, options = {}) {
   const runThread = options.session || chatSession;
   const runEpoch = conversationEpoch;
@@ -2218,8 +2275,7 @@ async function send(text, options = {}) {
   // that had finished. The gate's bug hunt found it; the product would only have shown it as "stuck".
   let watchdog = null;
   let sawDone = false;
-  let lostRun = false;
-  try {
+  let lostRun = false;  try {
     const headers = { "Content-Type": outgoing.contentType, "Accept": "text/event-stream" };
     // Which thread this run belongs to travels in the body (`composedBody`), not here: the header
     // this used to set is the *account* one, and a thread id in it resolved to no user and fell back
@@ -2242,12 +2298,15 @@ async function send(text, options = {}) {
     // unfinished" - about a run whose answer was already on screen. The message said `(alive)`, which
     // was the tell.
     let turnFinished = false;
-    const watchdogTick = async () => {
+    // One check, callable without the timer: `watchdogTick` only decides *when* to ask, so the UI harness
+    // can run an ask itself with a fixture answer instead of waiting half a minute of silence for the
+    // interval to fire. The decision below is the part that was wrong in the live incident, so the decision
+    // is the part that gets a seam.
+    const watchdogCheck = async () => {
       if (turnFinished) { clearInterval(watchdog); return; }
       // The reader chose another conversation. The node still owns this run and the stream is still
       // drained below, but its watchdog and notices no longer belong to the visible thread.
       if (!stillViewingRun()) { clearInterval(watchdog); return; }
-      if (asking || Date.now() - lastEvent < 30000) return;
       asking = true;
       try {
         const health = await (await apiFetch("health", { headers: apiHeaders() })).json();
@@ -2255,10 +2314,17 @@ async function send(text, options = {}) {
         // Asked and answered while the run was ending: say nothing. The run finished; there is
         // nothing to report and nothing to continue.
         if (turnFinished) { clearInterval(watchdog); asking = false; return; }
-        const running = activeRun(health, runThread);
-        if (running && health.worker !== "stalled") {
-          // Working, and quiet because the work is quiet. Keep waiting, and start counting again.
+        const standing = runStanding(health, { session: runThread, runId: activeRunId,
+          submitted: submittedRunIds, finished: turnFinished });
+        if (standing === "running" || standing === "busy-unknown") {
+          // Working, and quiet because the work is quiet. Keep waiting, and start counting again. For
+          // `busy-unknown` the page says the one thing it actually knows, and keeps the stream: it cannot
+          // tell whose work the node is busy with, and an answer it cannot interpret must not cost the
+          // reader a run that is still running.
           lastEvent = Date.now();
+          if (standing === "busy-unknown") {
+            setStatus("the node is busy with a run I cannot identify; still listening");
+          }
           asking = false;
           return;
         }
@@ -2281,8 +2347,13 @@ async function send(text, options = {}) {
       asking = false;
     };
     // Armed here, assigned to the outer `watchdog` so the `finally` can always clear it - including when
-    // the fetch below throws before a single event arrives.
-    watchdog = setInterval(watchdogTick, 5000);
+    // the fetch below throws before a single event arrives. `checkWatchedRun` is the same function for
+    // anyone outside this closure that has to run one check (the UI harness does).
+    checkWatchedRun = watchdogCheck;
+    watchdog = setInterval(() => {
+      if (asking || Date.now() - lastEvent < 30000) return;
+      void watchdogCheck();
+    }, 5000);
     const response = await fetch("chat", {
       method: "POST",
       headers: apiHeaders(headers),
@@ -2331,6 +2402,9 @@ async function send(text, options = {}) {
     }
   } finally {
     clearInterval(watchdog);
+    // This closure's run is over: the check goes with it, so nothing can run a check for a run that has
+    // already settled. A later run arms its own.
+    if (controller === runController) checkWatchedRun = null;
     if (stillViewingRun()) {
       setBusy(false);
       refreshMeta();

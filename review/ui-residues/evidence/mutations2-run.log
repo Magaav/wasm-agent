@@ -1,0 +1,30 @@
+== M7: a glyph on the pane's append-file control alone - a control whose box the glyph does not change ==
+diff --git a/ui/style.css b/ui/style.css
+index 0ea2651..12ea4a9 100644
+--- a/ui/style.css
++++ b/ui/style.css
+@@ -1086,3 +1086,5 @@ wa-tasks summary { cursor: pointer; padding: var(--space); }
+ .task-card[data-state="unknown"] .task-state, .task-card[data-state="failed"] .task-state { color: var(--warn); }
+ .task-actions { display: flex; flex-wrap: wrap; gap: var(--gap); }
+ .task-evidence { white-space: pre-wrap; overflow-wrap: anywhere; padding: var(--pad); background: var(--panel-2); }
++
++wa-agent-session [data-part="attach"]::before { content: "!"; color: red; }
+  M7 glyph on the pane append-file control alone
+  test-ui.ps1 exit=0 verdict:   ok   UI structure, mid-run reload, startup recovery, the inspect window, and a view window
+  M7 coverage probe exit=0
+== M8: a hover rule on the pane's controls alone ==
+diff --git a/ui/style.css b/ui/style.css
+index 0ea2651..292f2b1 100644
+--- a/ui/style.css
++++ b/ui/style.css
+@@ -1086,3 +1086,5 @@ wa-tasks summary { cursor: pointer; padding: var(--space); }
+ .task-card[data-state="unknown"] .task-state, .task-card[data-state="failed"] .task-state { color: var(--warn); }
+ .task-actions { display: flex; flex-wrap: wrap; gap: var(--gap); }
+ .task-evidence { white-space: pre-wrap; overflow-wrap: anywhere; padding: var(--pad); background: var(--panel-2); }
++
++wa-agent-session .chat-control:hover { letter-spacing: 3px; color: red; }
+  M8 hover rule on the pane's controls alone
+  test-ui.ps1 exit=0 verdict:   ok   UI structure, mid-run reload, startup recovery, the inspect window, and a view window
+
+clean tree after the run:
+?? review/ui-residues/

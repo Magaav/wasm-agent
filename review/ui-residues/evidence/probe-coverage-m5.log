@@ -1,0 +1,38 @@
+stage C:\Users\Victor\AppData\Local\Temp\wa-probe-6uW4K2  browser msedge.exe  exit 0  dom 28798 bytes
+---- probe result ----
+{
+  "probe": "coverage",
+  "stage": "done",
+  "paneFound": true,
+  "mainFound": true,
+  "paneControlClass": "chat-control",
+  "paneBefore": {
+    "content": "\"!\"",
+    "width": "9.71875px",
+    "color": "rgb(255, 0, 0)",
+    "display": "block"
+  },
+  "mainBefore": {
+    "content": "none",
+    "width": "auto",
+    "color": "rgb(139, 147, 167)",
+    "display": "block"
+  },
+  "paneLetterSpacing": "normal",
+  "mainLetterSpacing": "normal",
+  "paneMarginTop": "0px",
+  "mainMarginTop": "0px",
+  "matchesPseudoSelector": false,
+  "matchesPseudoSelectorThrows": false,
+  "matchesHoverSelector": false,
+  "mediaWideHolds": false,
+  "viewport": {
+    "w": 874,
+    "h": 607
+  }
+}
+---- browser stderr (first 800 chars) ----
+[3372:6424:1002/204156.280:ERROR:components\edge_ess\vbs_encoder.cc:100] LoadEnclaveImageW failed, error code 577
+[3372:6424:1002/204156.562:ERROR:components\edge_auth\edge_auth_errors.cc:553] EDGE_IDENTITY: Image Fetch FAILED: Error: Primary Error: kAccountImageFetchFailure, Secondary Error: kUnspecified, Platform error: 0, Error string: [empty]
+
+

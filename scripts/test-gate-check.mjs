@@ -21,11 +21,14 @@ try {
   await assert.rejects(executeChecks(root,['js:one.js'],{jobs:5}),/1..4/);
   await assert.rejects(executeChecks(root,['js:one.js','js:one.js']),/distinct/);
   const browser={verdict:'browser'};
-  // The verdict line is matched on its stable prefix, so the sentence may name more stages than it used
-  // to - the change that added the inspector window's own page load broke the gate when it was anchored.
+  // The verdict line is identified by its prefix plus a subject the stage owns, so the sentence may name more
+  // stages than it used to and may reorder them - the change that added the inspector window's own page load
+  // broke the gate when the whole sentence was anchored - while a line that names no stage at all is refused.
   assert(checkVerdict(browser,0,'  ok   UI structure, mid-run reload, and startup recovery\n').ok);
   assert(checkVerdict(browser,0,'  ok   UI structure, mid-run reload, startup recovery, and the inspect window\n').ok,'a longer verdict sentence is still the same verdict');
+  assert(checkVerdict(browser,0,'  ok   UI structure, startup recovery and mid-run reload, with the inspector window and a view window\n').ok,'an honest reordering of the same stages is still the same verdict');
+  assert(!checkVerdict(browser,0,'  ok   UI structure, and then something else entirely\n').ok,'a line that names no stage of this check is not its verdict');
   assert(!checkVerdict(browser,0,'  ok   Engine structure is fine\n').ok,'another check\'s ok line is not this verdict');
   for(const [exit,text] of [[0,'silent'],[7,'  ok   UI structure, mid-run reload, and startup recovery\n'],[0,'  ok   UI structure, mid-run reload, and startup recovery\nFAIL evidence'],[0,'  ok   UI structure, mid-run reload, and startup recovery\n  ok   UI structure, mid-run reload, and startup recovery\n']])assert(!checkVerdict(browser,exit,text).ok);
-  console.log('gate check runner ok (19 checks, 0 skipped)');
+  console.log('gate check runner ok (21 checks, 0 skipped)');
 } finally {fs.rmSync(root,{recursive:true,force:true});}

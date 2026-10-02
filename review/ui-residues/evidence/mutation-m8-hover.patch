@@ -1,0 +1,10 @@
+diff --git a/ui/style.css b/ui/style.css
+index 0ea2651..292f2b1 100644
+--- a/ui/style.css
++++ b/ui/style.css
+@@ -1086,3 +1086,5 @@ wa-tasks summary { cursor: pointer; padding: var(--space); }
+ .task-card[data-state="unknown"] .task-state, .task-card[data-state="failed"] .task-state { color: var(--warn); }
+ .task-actions { display: flex; flex-wrap: wrap; gap: var(--gap); }
+ .task-evidence { white-space: pre-wrap; overflow-wrap: anywhere; padding: var(--pad); background: var(--panel-2); }
++
++wa-agent-session .chat-control:hover { letter-spacing: 3px; color: red; }
