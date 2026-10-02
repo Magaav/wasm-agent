@@ -183,6 +183,13 @@ installing the node and writing its own record (that happened on 2026-10-02 19:3
 was `cp`ed over itself while running, which killed the shell mid-file). `scripts/verify-install.sh` fails an
 interim record by name.
 
+A `final` record is not by itself a finished deploy: the record is written as soon as its facts are true
+(before the pipeline, the wave scripts and the job definitions ship), so `scripts/verify-install.sh` also
+reads the deploy's own verdict, `<install>/deploy-result.json`, and fails by name when it is missing, older
+than the record, or not `ok`. And `upgrade.sh` will not overwrite a deploy's `final` record with `interim`
+while the bytes that record names are still the installed ones: an interim record means the installed bytes
+CHANGED under a deploy that has not finished, which is the only thing it has ever meant.
+
 **A POSIX path handed to a native Windows process is silently unusable.** An upgrade once started this node
 with `--ui /c/Users/...`, so it could not read `index.html` and answered 404 for `/` - the window showed
 "not found", ran no JavaScript, and looked like a dead shell for an afternoon. `upgrade.sh` converts it with

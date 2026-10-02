@@ -1770,6 +1770,13 @@ gate_run bash scripts/test-deploy-preconditions.sh
 # must finish (the 2026-10-02 deploy died there and left `commit=unknown` while serving 2f02b4c).
 gate_run bash scripts/test-deploy-record.sh
 gate_run bash scripts/test-deploy-self-ship.sh
+# The residue pass on the deploy record: the on-main rule may not be waived by WA_INSTALL_DIR (it was), the
+# knob is read by value (0 used to be ON), and a killed run's staged copies are collected under a bound
+# (a 248 MB sentinel image could sit there for ever). check-deploy-docs fails when the doc, the skill and the
+# script stop saying the same thing about a deploy's release proof.
+gate_run bash scripts/test-deploy-on-main.sh
+gate_run bash scripts/test-deploy-staging-sweep.sh
+gate_run node scripts/check-deploy-docs.mjs
 gate_run node scripts/test-delivery-refresh.mjs
 env -u GATE_LANE_HELD node scripts/test-gate-lane-wiring.cjs
 gate_run node scripts/test-openai-sub.cjs "$BIN"

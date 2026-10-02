@@ -52,10 +52,14 @@ After this implementation passes the unchanged complete coverage requirement for
    exact Git tree, real exit/run count, duration, terminal verdict, skips and log hash. A custom
    stand-in gate never creates reusable production evidence. Merge receipts/logs survive clone
    removal under `wa-combined-gate.json` in the invoking lane's Git metadata; source-tree changes
-   require execution. `deploy.sh` *looks up* discoverable complete proof for a real Rust source
-   workspace and records what it found, but does not require it: a deploy is the preview path, so the
-   operator sees a landed change now, and `WA_DEPLOY_REQUIRE_RELEASE_PROOF=1` restores the refusal by
-   name. The proof a release needs is produced and verified by `scripts/wave-release.mjs` (2026-10-02).
+   require execution. A deploy does **not** consult a release proof at all: `scripts/deploy.sh` hands the tree
+   to the proof lookup only when `WA_DEPLOY_REQUIRE_RELEASE_PROOF` is ON (`1`, `true`, `yes`, `on`; unset,
+   empty, `0`, `false`, `no`, `off` are OFF - `0` used to be truthy, which is finding F5 of the review of
+   `change/deploy-unbound`), and only then is a tree without a complete exact-tree receipt refused by name.
+   A deploy is the preview path - the operator sees a landed change now - and what still guards it is state:
+   a clean tree, a HEAD that is an ancestor of `origin/main`, no downgrade of what is installed, the install
+   directory the service runs the node from, and a port no other install holds. The proof a release needs is
+   produced and verified by `scripts/wave-release.mjs` (2026-10-02).
    A deploy still proves the built binary on a scratch port and verifies the actual installed
    PID/artifact. No focused receipt authorizes installation.
 

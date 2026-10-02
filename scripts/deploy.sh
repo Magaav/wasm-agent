@@ -140,6 +140,56 @@ note() {
     >> "$INSTALL_DIR/deploy.log" 2>/dev/null
 }
 
+# A staged copy that never reached its rename is residue, and nothing used to look for one.
+#
+# WHY (finding F6 of the review of change/deploy-unbound). Every install here stages a file beside its
+# destination and renames it into place - `ship_file` as `<name>.ship.<pid>`, upgrade.sh's self-ship as
+# `upgrade.sh.new.<pid>`, and the SENTINEL as a whole binary under `<name>.new.<pid>`. A SIGKILL between the
+# copy and the rename leaves the staged file behind, and the sentinel is the size of a binary: the review
+# measured a single leftover at 248 MB. Leftovers are now bounded, not ignored.
+#
+# The sweep can only touch a file one of our staging names would produce, and it is deliberately shy:
+#   * the name must end in a numeric suffix (the pid) - an operator's own `.new` note is never touched;
+#   * the file must be older than WA_DEPLOY_STAGING_AGE seconds (default 600), so a deploy running right now
+#     - this one or a concurrent one - never has its staging eaten mid-install;
+#   * at most WA_DEPLOY_STAGING_MAX files (default 8) and WA_DEPLOY_STAGING_BYTES bytes (default 536870912,
+#     512 MiB) go per deploy, and hitting either bound is SAID in deploy.log rather than passed over;
+#   * only $INSTALL_DIR and the three levels under it are searched, which covers scripts/lib - the deepest
+#     place a staging name is written.
+# Anything it cannot establish is left where it is: this is housekeeping, and a deploy that refused because
+# of junk it could not classify would be worse than the junk.
+sweep_stale_staging() {
+  local age_minutes max_files max_bytes candidate suffix size removed=0 bytes=0 size_bytes
+  age_minutes=$(( ${WA_DEPLOY_STAGING_AGE:-600} / 60 ))
+  [ "$age_minutes" -ge 1 ] || age_minutes=1
+  max_files="${WA_DEPLOY_STAGING_MAX:-8}"
+  max_bytes="${WA_DEPLOY_STAGING_BYTES:-536870912}"
+  while IFS= read -r candidate; do
+    [ -f "$candidate" ] || continue
+    suffix="${candidate##*.}"
+    case "$suffix" in ''|*[!0-9]*) continue ;; esac
+    [ "$suffix" = "$$" ] && continue
+    [ -n "$(find "$candidate" -mmin +"$age_minutes" 2>/dev/null)" ] || continue
+    if [ "$removed" -ge "$max_files" ]; then
+      note "staging residue: the sweep stopped at its $max_files file bound; the rest is left in place"
+      return 0
+    fi
+    size_bytes="$(wc -c < "$candidate" 2>/dev/null | tr -d ' ')"
+    [ -n "$size_bytes" ] || size_bytes=0
+    if [ $((bytes + size_bytes)) -gt "$max_bytes" ]; then
+      note "staging residue: the sweep stopped at its $max_bytes byte bound with $bytes byte(s) removed; the rest is left in place"
+      return 0
+    fi
+    if rm -f "$candidate"; then
+      removed=$((removed + 1))
+      bytes=$((bytes + size_bytes))
+      note "staging residue swept: $(basename "$candidate") ($size_bytes byte(s)) - a staged copy whose rename never happened"
+    fi
+  done < <(find "$INSTALL_DIR" -maxdepth 3 -type f \( -name '*.ship.*' -o -name '*.new.*' \) 2>/dev/null)
+  [ "$removed" -gt 0 ] && note "staging residue: removed $removed file(s), $bytes byte(s)"
+  return 0
+}
+
 if [ "${WASM_AGENT_IN_TURN:-}" = "1" ]; then
   fail "cannot deploy from a running turn: it cannot become idle while this command waits. Build, then request an upgrade through wa-sentinel; see skills/self-update/SKILL.md"
 fi
@@ -181,6 +231,11 @@ fi
 if [ ! -d "$INSTALL_DIR" ]; then
   fail "refused(install_dir_missing): the install directory does not exist and carries no install record: $INSTALL_DIR (installed.txt: absent, serve.pid: absent, source: ${WA_SERVICE_CLAIM:-no service and no node on :$PORT named one}). A deploy writes installed.txt, the scripts and the binary into this directory, so every write would fail one at a time and none of them would say why. Either this is a first install - create the directory first (mkdir -p) or run scripts/install.sh, which does - or the machine's own answer is being read in the wrong vocabulary: state it explicitly (WA_INSTALL_DIR=<where the node lives>) after checking it yourself with scripts/lib/service-target.sh. Nothing was written."
 fi
+
+# Before this deploy builds anything: collect what a killed earlier deploy left staged (see the rule above).
+# It runs this early on purpose - a 248 MB leftover should not sit through a build, and the bound means the
+# sweep's own cost cannot grow with the junk.
+sweep_stale_staging
 
 # 0. The machine's own answer to "where does the node live" is the service that runs it, and a deploy that
 #    disagrees with that must refuse instead of installing quietly beside the running node. Two installs on
@@ -241,12 +296,16 @@ if git rev-parse --verify -q origin/main >/dev/null; then
   # ... and a tree AHEAD of main is the other half of the same failure. An unmerged `change/`
   # branch deploys fine, and then main lags the live binary, so the next main-side deploy is
   # refused as a downgrade - measured twice in one day (8c13f19, 4d4753f). The live install
-  # must be a commit that is on main: merge the change first. A scratch WA_INSTALL_DIR is a
-  # test, not the operator's node, so it is exempt from this rule.
-  if [ -z "${WA_INSTALL_DIR:-}" ] || [ "$REQUIRE_MAIN" = "1" ]; then
-    git merge-base --is-ancestor HEAD origin/main 2>/dev/null \
-      || fail "this tree's commit $(git rev-parse --short HEAD) is not on origin/main; merge it to main and deploy from there - an unmerged deploy leaves main behind the live node"
-  fi
+  # must be a commit that is on main: merge the change first.
+  #
+  # This check used to be waived by `WA_INSTALL_DIR` being set ("a scratch directory is a test, not the
+  # operator's node"), which made the rule switchable off with an environment variable - so the very
+  # deploy that needed it most, one into some other directory, was the one that skipped it (finding F5 of
+  # the review of change/deploy-unbound). It is unconditional now. `--require-main` is still accepted, as a
+  # no-op kept for callers that pass it; the *rule* has its own test (scripts/test-deploy-on-main.sh)
+  # rather than an exemption any caller can take.
+  git merge-base --is-ancestor HEAD origin/main 2>/dev/null \
+    || fail "this tree's commit $(git rev-parse --short HEAD) is not on origin/main; merge it to main and deploy from there - an unmerged deploy leaves main behind the live node"
 fi
 COMMIT="$(git rev-parse --short HEAD)"
 
@@ -343,7 +402,16 @@ echo "deploy: building"
 # release-only machine, or an operator who will not install without an exact-tree receipt: the proof
 # is then looked up, and a tree without one is refused BY NAME. It is OFF by default because speed is
 # the default path, and nothing selects it automatically.
-if [ -n "${WA_DEPLOY_REQUIRE_RELEASE_PROOF:-}" ] && [ -f "$ROOT/rust/Cargo.toml" ]; then
+#
+# The knob is read by VALUE, not by emptiness (finding F5 of the review of change/deploy-unbound):
+# `-n "${WA_DEPLOY_REQUIRE_RELEASE_PROOF:-}"` made `WA_DEPLOY_REQUIRE_RELEASE_PROOF=0` truthy, so an
+# operator who wrote 0 to say "off" got the strict path and a refusal about a receipt they had just
+# switched off. Only the values below are ON; unset, empty, 0, false, no and off are OFF.
+REQUIRE_PROOF=0
+case "$(printf '%s' "${WA_DEPLOY_REQUIRE_RELEASE_PROOF:-}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on) REQUIRE_PROOF=1 ;;
+esac
+if [ "$REQUIRE_PROOF" = "1" ] && [ -f "$ROOT/rust/Cargo.toml" ]; then
   echo "deploy: WA_DEPLOY_REQUIRE_RELEASE_PROOF is set - this deploy refuses a tree without a release proof"
   SOURCE_TREE="$(git rev-parse HEAD^{tree})"
   PROOF_REPO="$ROOT"; PROOF_SCRIPT="$ROOT/scripts/lib/full-gate-proof.mjs"
@@ -513,14 +581,17 @@ if [ -f "$INSTALL_DIR/$SENTINEL_NAME" ]; then
           "$INSTALL_DIR/$SENTINEL_NAME" start >/dev/null 2>&1 || true
           ;;
         *)
-          cp -f "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME.new" 2>/dev/null || true
-          mv -f "$INSTALL_DIR/$SENTINEL_NAME.new" "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null || true
+          cp -f "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME.new.$$" 2>/dev/null || true
+          mv -f "$INSTALL_DIR/$SENTINEL_NAME.new.$$" "$INSTALL_DIR/$SENTINEL_NAME" 2>/dev/null || true
           ;;
       esac
     fi
     if cmp -s "$NEW_SENTINEL" "$INSTALL_DIR/$SENTINEL_NAME"; then
       echo "deploy: sentinel $SENTINEL_NAME updated (the running watcher keeps its old image until the restart below)"
     else
+      # Do not leave the staged image behind for a failure that is about to be reported: it is a whole
+      # binary. What a SIGKILL here would leave is swept by sweep_stale_staging() on the next deploy.
+      rm -f "$INSTALL_DIR/$SENTINEL_NAME.new.$$" 2>/dev/null || true
       fail "could not install $SENTINEL_NAME - it is still the old build; the node and its supervisor would disagree"
     fi
   fi

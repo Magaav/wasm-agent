@@ -41,13 +41,27 @@ failed=0
 ok() { checks=$((checks + 1)); if [ "$1" = "1" ]; then printf '  ok   %s\n' "$2"; else failed=$((failed + 1)); printf '  FAIL %s%s\n' "$2" "${3:+ - $3}"; fi; }
 
 # The gate asks about the tree before it asks about the install, so this test needs a tree that passes those
-# two questions. Exit 3, not 1: this is "the check could not be reached in this tree", which is a skip and is
+# questions. Exit 3, not 1: this is "the check could not be reached in this tree", which is a skip and is
 # reported as one - the suite counts it instead of printing the verdict a run that tested something prints.
 # It is not inferred from a missing tool; it is the tree's own state.
+#
+# `HEAD on origin/main` joined that list with the residue pass: the on-main rule used to be waived whenever
+# WA_INSTALL_DIR was set, so a private-install fixture on a lane branch could reach the downgrade check. The
+# rule is unconditional now (finding F5 of the review of change/deploy-unbound), so on a lane branch this
+# suite refuses at that rule before it can ask anything about an installed record - and a fixture that worked
+# around it with an environment variable is exactly what the finding removed. The branch state is a SKIP with
+# the reason, not nine red checks; the rule itself is pinned from both directions, on a scratch repository,
+# by scripts/test-deploy-on-main.sh, which runs in either state.
 DIRTY="$(git status --porcelain | wc -l | tr -d ' ')"
 BEHIND="$(git rev-list --count HEAD..origin/main 2>/dev/null || echo unknown)"
-if [ "$DIRTY" != "0" ] || { [ "$BEHIND" != "unknown" ] && [ "$BEHIND" != "0" ]; }; then
-  echo "deploy downgrade gate SKIPPED - needs a clean tree that is not behind origin/main (here: $DIRTY uncommitted file(s), $BEHIND commit(s) behind)"
+if git rev-parse --verify -q origin/main >/dev/null; then
+  if ! git merge-base --is-ancestor HEAD origin/main 2>/dev/null; then ON_MAIN=0; else ON_MAIN=1; fi
+else
+  ON_MAIN=1
+fi
+if [ "$DIRTY" != "0" ] || { [ "$BEHIND" != "unknown" ] && [ "$BEHIND" != "0" ]; } || [ "$ON_MAIN" != "1" ]; then
+  echo "deploy downgrade gate SKIPPED - needs a clean tree that is on (and not behind) origin/main (here: $DIRTY uncommitted file(s), $BEHIND commit(s) behind, on-main: $([ "$ON_MAIN" = "1" ] && echo yes || echo no))"
+  echo "  note: the on-main rule that refused this tree is tested in both directions by scripts/test-deploy-on-main.sh"
   exit 3
 fi
 
@@ -139,22 +153,13 @@ ok "$(grep -q 'downgrade refused' <<<"$last_out" && echo 0 || echo 1)" "an unres
 ok "$(grep -q 'does not have' <<<"$last_out" && echo 1 || echo 0)" "it names the case (shallow clone, other repo, unfetched branch)" "$(grep -m1 'does not have' <<<"$last_out" | cut -c1-110)"
 ok "$(grep -q 'note: ' "$S/install/deploy.log" 2>/dev/null && echo 1 || echo 0)" "and it is recorded as a note, not as a refusal"
 
-# --- 5b. a tree ahead of main: refused on a private install, naming the rule -----------------------
-# An unmerged `change/` branch deploys fine and leaves main behind the live binary, so every
-# main-side deploy is then refused as a downgrade. The rule is checked before the build, so this
-# runs against a private install and must refuse without touching it. Only meaningful when the tree
-# is ahead of main; on main there is nothing to refuse.
-if git merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
-  echo "  note: this tree is on main, so the ahead-of-main refusal has nothing to refuse"
-else
-  ( cd "$ROOT" && env -u WASM_AGENT_IN_TURN PATH="$(dirname "$(command -v git)"):/usr/bin:/bin" \
-      WA_INSTALL_DIR="$S/install" WASM_AGENT_HOME="$S/home" WA_PORT=18991 WA_CLIENT_PORT=18992 \
-      bash "$DEPLOY" --require-main --reason "guard test" ) >"$S/guard.txt" 2>&1
-  guard_exit=$?
-  ok "$([ "$guard_exit" != "0" ] && grep -q 'is not on origin/main' "$S/guard.txt" && echo 1 || echo 0)" \
-    "a tree ahead of main is refused on a private install, naming the rule" "exit $guard_exit"
-  ok "$(grep -q 'deploy: building' "$S/guard.txt" && echo 0 || echo 1)" "and it refused before the build"
-fi
+# --- 5b. a tree ahead of main: the rule now lives in its own test ---------------------------------
+# This case used to live here, because a private install exempted the tree from the on-main rule and
+# `--require-main` was the only way to get the refusal measured. The rule is unconditional now, and a tree
+# that is not on origin/main never reaches this file's other cases at all (see the skip above) - so the rule
+# is pinned where it can be exercised in either state, from both directions, on a scratch repository:
+# scripts/test-deploy-on-main.sh. Kept as a pointer so the missing case is not read as an oversight.
+echo "  note: the ahead-of-main refusal is pinned by scripts/test-deploy-on-main.sh (scratch repository, both directions)"
 
 # --- 6. isolation: the real install was never the fixture's business -------------------------------
 if [ -x "$LIVE_INSTALL/wa.exe" ] || [ -f "$LIVE_INSTALL/installed.txt" ]; then

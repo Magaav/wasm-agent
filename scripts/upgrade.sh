@@ -92,7 +92,7 @@ fi
 
 file_hash() { [ -f "$1" ] && sha256sum < "$1" 2>/dev/null | awk '{print $1}' || true; }
 record_install() {
-  local hash sentinel_hash upgrade_hash commit branch source_hint reason via role stamp record
+  local hash sentinel_hash upgrade_hash commit branch source_hint reason via role provenance stamp record
   hash="$(file_hash "$INSTALLED")"
   sentinel_hash="$(file_hash "$INSTALL_DIR/wa-sentinel.exe")"
   [ -n "$sentinel_hash" ] || sentinel_hash="$(file_hash "$INSTALL_DIR/wa-sentinel")"
@@ -104,7 +104,12 @@ record_install() {
   # A sentinel upgrade knows the exact installed bytes, but cannot prove that a
   # separately built binary corresponds to the checkout's current HEAD.
   source_hint="${SOURCE_COMMIT:-unknown}"
-  if [ "$NEW" -ef "$INSTALLED" ] && [ "$(sed -n 's/^sha256=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)" = "$hash" ]; then
+  # The record's OWN identity is reused when the bytes it names are the bytes this script is placing: its
+  # `sha256=` field is that claim and it is checkable here. `-ef` covers the hard-link case (the installed
+  # file IS the built file); the wider check covers a deploy's build, which is a DIFFERENT file with
+  # identical bytes - the case that used to leave `record_role=final` beside `commit=unknown`, which no
+  # verifier can reconcile.
+  if [ "$(sed -n 's/^sha256=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)" = "$hash" ]; then
     commit="${PREVIOUS_COMMIT:-unknown}"
     branch="$(sed -n 's/^branch=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)"
     branch="${branch:-unknown}"
@@ -126,10 +131,27 @@ record_install() {
   # commit was unknown. With the role on disk, a verifier reads "a deploy was in flight and did not
   # finish" instead of "nobody knows".
   if [ "$via" = "deploy.sh" ]; then role=interim; else role=final; fi
+  provenance=unverified-binary
+  # MONOTONE, and this is finding F4 of the review of change/deploy-unbound: an interim write may not
+  # DOWNGRADE a record that is still true. A deploy whose build is byte-identical to what is installed
+  # calls this script only for the restart ("the new binary is byte-identical to ... - nothing to swap,
+  # restarting it", measured on the live node on 2026-10-02), and the record it finds already says
+  # `record_role=final` with `source_provenance=clean-built-by-deploy` FOR THESE EXACT BYTES. Overwriting
+  # that with "a deploy was in flight" asserts a death that has not happened, and `verify-install.sh`
+  # fails it by name. Nothing about what is installed changed, so the role and the provenance are kept -
+  # the record is refreshed around them (at/via/reason/hashes), which is what lets a LATER death be seen.
+  # A new binary still gets interim, because that is the fact then.
+  if [ "$via" = "deploy.sh" ] \
+     && [ "$(sed -n 's/^record_role=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)" = "final" ] \
+     && [ "$(sed -n 's/^source_provenance=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)" = "clean-built-by-deploy" ] \
+     && [ "$(sed -n 's/^sha256=//p' "$INSTALL_DIR/installed.txt" 2>/dev/null | head -1)" = "$hash" ]; then
+    role=final
+    provenance=clean-built-by-deploy
+  fi
   stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   record="$INSTALL_DIR/.installed.txt.$$"
-  printf 'commit=%s\nbranch=%s\ndirty=unknown\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\nsource_commit_hint=%s\nsource_provenance=unverified-binary\nrecord_role=%s\nvia=%s\nat=%s\nreason=%s\n' \
-    "$commit" "$branch" "$hash" "$sentinel_hash" "$upgrade_hash" "$source_hint" "$role" "$via" "$stamp" "$reason" > "$record" \
+  printf 'commit=%s\nbranch=%s\ndirty=unknown\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\nsource_commit_hint=%s\nsource_provenance=%s\nrecord_role=%s\nvia=%s\nat=%s\nreason=%s\n' \
+    "$commit" "$branch" "$hash" "$sentinel_hash" "$upgrade_hash" "$source_hint" "$provenance" "$role" "$via" "$stamp" "$reason" > "$record" \
     && mv -f "$record" "$INSTALL_DIR/installed.txt"
 }
 
