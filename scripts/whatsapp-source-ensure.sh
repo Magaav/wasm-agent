@@ -117,10 +117,35 @@ wait_for_cdp() {
 }
 
 # ---- 1. already up? the fast path: one probe, and the page has to be the page -----------------------
+# "DevTools answers and a WhatsApp page is open" is not the same fact as "the chain the jobs depend on is
+# up": the document-start hook can be missing from that page while all three are true, and the hook is what
+# the adapter binds to. This used to answer `already-up` here and never ask - so the hook was only ever
+# rebound when the browser was restarted, which is exactly the gap a browser restart (a new target id)
+# exposed. The preflight is that question, and it also rebinds what it finds missing.
+PREFLIGHT="${WA_PREFLIGHT_SCRIPT:-$ROOT/scripts/whatsapp-preflight.sh}"
 if cdp_answers; then
   if whatsapp_page; then
-    verdict true "already-up" "cdp_answering" null
-    exit 0
+    preflight="$(timeout 90 bash "$PREFLIGHT" 2>&1 | head -1)"
+    case "$preflight" in
+      "whatsapp preflight ok"*)
+        chats="$(printf '%s' "$preflight" | sed -n 's/.*chats=\([0-9]*\).*/\1/p')"
+        if [ "${chats:-0}" -gt 0 ]; then
+          verdict true "already-up" "preflight_ok" "${chats:-0}"
+          exit 0
+        fi
+        verdict false "reported" "store_unreadable_chats_zero" "${chats:-0}"
+        say "whatsapp source: the page is up but the store has no conversations - WhatsApp Web is probably"
+        say "  logged out in the agent browser. That needs a human: scan the QR once, then this keeps it up."
+        exit 1
+        ;;
+      *)
+        reason="$(printf '%s' "$preflight" | sed -n 's/.*reason=\([^ ]*\).*/\1/p' | head -1)"
+        [ -n "$reason" ] || reason="preflight_unavailable"
+        verdict false "failed" "$reason" null
+        say "whatsapp source: $preflight"
+        exit 1
+        ;;
+    esac
   fi
   say "whatsapp source: DevTools answers but no WhatsApp page is open - opening it over CDP"
   curl -s --max-time 5 -X PUT "http://$CDP/json/new?https://web.whatsapp.com" >/dev/null 2>&1 || true

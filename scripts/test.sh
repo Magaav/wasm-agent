@@ -1851,13 +1851,20 @@ gate_run node scripts/test-whatsapp-audio.mjs
 # created earlier is still there. The copy is still fatal if the module cannot be staged.
 stage_plugin "$(ls rust/plugins/whatsapp-transcript/target/wasm32-unknown-unknown/release/*.wasm | head -1)" whatsapp-transcript
 gate_run node scripts/test-whatsapp-transcribe.cjs "$BIN" "$PLUGINS/whatsapp-transcript.wasm"
+# The silent skip: a voice note whose browser download fails must stay reachable, and a pass that loses one
+# has to say so - with the id, the step and the underlying error - instead of {"ok":true,"pending":0,
+# "refused":[]}. Fake media/STT/send adapters, real Lua, real ledger.
+gate_run node scripts/test-whatsapp-audio-loss.cjs "$BIN" "$PLUGINS/whatsapp-transcript.wasm"
 # The pipeline seam: a `returns` list reaches the foreach, a step that produced nothing fails the
 # delivery, and a no-op run is distinguishable from a dropped result. Real sentinel, mock store, no model.
 run_proof_fixture pipeline 19 node scripts/test-job-pipeline.cjs
 # The source keeper's categorical refusals, hermetically: a port held by something that is not the agent
 # browser is refused and left alone, and a missing logon task is named with the command that registers it.
 gate_run node scripts/test-source-ensure.cjs
-# The deploy's own ship list, run for real on a scratch tree: the modules a shipped script imports must
+# The prevention: step 1 asks the preflight (which rebinds the document-start hook) instead of exiting on
+# "DevTools answered", and a trigger pin that names a dead target is re-pinned rather than merely reported.
+# A fake DevTools endpoint; the real adapter, trigger, preflight and sentinel CLI.
+gate_run node scripts/test-whatsapp-hook-rebind.cjs
 # be installed beside it, and both a missing module and an import this deploy cannot satisfy must be
 # refused by name. The block under test is read out of deploy.sh, so this cannot pass while the real
 # code is wrong - and it must not be a check that cannot fail (the live failure was a deploy that

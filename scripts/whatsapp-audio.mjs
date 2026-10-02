@@ -15,10 +15,31 @@ const chatId = arg("--chat");
 const out = arg("--out");
 const port = Number(process.env.WA_CDP_PORT) || 9222;
 
+// A rejection raised inside the page arrives as `exceptionDetails.text === "Uncaught (in promise)"` - the
+// wrapper, not the reason. The app's own error is a typed object whose class name is minified (measured:
+// className "t"), so the reason has to be read from the object's preview (`name`/`message`) and only then
+// from the description. Reporting `text` alone is what made a typed InvalidMediaFileType indistinguishable
+// from a broken page, and is the reason the retained job history says nothing useful about this failure.
+export function browserExceptionReason(details) {
+  const exception = details && details.exception;
+  const properties = (exception && exception.preview && exception.preview.properties) || [];
+  const field = (name) => {
+    const hit = properties.find((property) => property.name === name);
+    return hit && typeof hit.value === "string" ? hit.value : "";
+  };
+  const name = field("name");
+  const message = field("message");
+  if (message) return `${name ? name + ": " : ""}${message}`.slice(0, 200);
+  const description = String((exception && exception.description) || "").trim();
+  if (description) return description.slice(0, 200);
+  return String((details && details.text) || "unknown").slice(0, 200);
+}
+
 export function audioExpression(id, chat) {
   return `(async () => {
     const ID = ${JSON.stringify(id)};
     const CHAT = ${JSON.stringify(chat)};
+    try {
     const messages = window.require('WAWebMsgCollection').MsgCollection.getModelsArray() || [];
     const message = messages.find((item) => {
       const key = item.id || {};
@@ -40,10 +61,18 @@ export function audioExpression(id, chat) {
       await message.downloadMedia({downloadEvenIfExpensive:true, rmrReason:1});
     }
     if (/ERROR|FETCHING/.test(String(message.mediaData.mediaStage || ''))) return JSON.stringify({error:'media_download_incomplete'});
+    // The declared mimetype is part of this build's contract, not decoration: the function this call
+    // delegates to reads 'e.mimetype' (defaulting to application/octet-stream) and checks it against the
+    // msg-type allowlist (WAWebMmsMediaTypes.getValidMimeTypes) *before* fetching. Omitting it made every
+    // voice note fail with InvalidMediaFileType - measured on the live build, whose ptt allowlist is
+    // audio/ogg; codecs=opus, audio/mp4, audio/mpeg, audio/aac, audio/amr, with the parameter verbatim.
+    const mime = String(message.mimetype || (message.mediaData && message.mediaData.mimetype) || '').trim();
+    if (!mime) return JSON.stringify({error:'audio_mimetype_missing'});
     const qpl = {addAnnotations(){return this},addPoint(){return this}};
     const raw = await window.require('WAWebDownloadManager').downloadManager.downloadAndMaybeDecrypt({
       directPath:message.directPath, encFilehash:message.encFilehash, filehash:message.filehash,
       mediaKey:message.mediaKey, mediaKeyTimestamp:message.mediaKeyTimestamp, type:message.type,
+      mimetype:mime,
       signal:new AbortController().signal, downloadQpl:qpl
     });
     const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
@@ -52,7 +81,15 @@ export function audioExpression(id, chat) {
     for (let offset=0; offset<bytes.length; offset+=32768) {
       binary += String.fromCharCode(...bytes.subarray(offset, offset+32768));
     }
-    return JSON.stringify({ok:true,base64:btoa(binary),bytes:bytes.length,mime:String(message.mimetype || 'audio/ogg')});
+    return JSON.stringify({ok:true,base64:btoa(binary),bytes:bytes.length,mime:mime});
+    } catch (error) {
+      // The app's actions reject with typed errors (InvalidMediaFileType, MediaDecryptionError, ...).
+      // Returning the reason here is the difference between "the download failed" and the wrapper text
+      // "Uncaught (in promise)", which named nothing and hid this lane's failure for months.
+      return JSON.stringify({error:'audio_download_failed',
+        name:String((error && error.name) || 'Error').slice(0,60),
+        message:String((error && error.message) || error).slice(0,200)});
+    }
   })()`;
 }
 
@@ -94,9 +131,14 @@ async function main() {
       } }));
     });
   } finally { ws.close(); }
-  if (result.exceptionDetails) throw new Error("audio_browser_exception:" + String(result.exceptionDetails.text || "unknown").slice(0, 100));
+  if (result.exceptionDetails) throw new Error("audio_browser_exception:" + browserExceptionReason(result.exceptionDetails));
   const payload = JSON.parse(result.result.value);
-  if (payload.error) throw new Error(payload.error);
+  // A structured failure from inside the page keeps its type and message, so the step result names what
+  // the build rejected instead of a bare "download failed".
+  if (payload.error) {
+    const detail = payload.message ? `:${payload.name || "Error"}: ${payload.message}` : "";
+    throw new Error(`${payload.error}${detail}`.slice(0, 300));
+  }
   const bytes = Buffer.from(String(payload.base64 || ""), "base64");
   if (!bytes.length || bytes.length > MAX_AUDIO_BYTES || bytes.length !== payload.bytes) throw new Error("audio_bytes_invalid");
   const mime = String(payload.mime || "");

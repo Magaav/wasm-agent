@@ -10,7 +10,7 @@ steps: the deterministic ones first, judgement last.
 
 | # | step | kind | what it is |
 | --- | --- | --- | --- |
-| 1 | `scripts/whatsapp-source-ensure.sh` | `run` | keeps the source up: Chrome on the agent profile, DevTools on 9222, the WhatsApp page bound |
+| 1 | `scripts/whatsapp-source-ensure.sh` | `run` | keeps the source up: Chrome on the agent profile, DevTools on 9222, the WhatsApp page bound - and, through the preflight, the document-start hook bound |
 | 2 | `scripts/whatsapp-transcribe.sh` | `run` | local speech-to-text for voice notes, sent back through the injected app action (no model or input events) |
 | 3 | `scripts/whatsapp-copilot-read.sh` | `run`, `returns: events` | reads the store, diffs it against the cursor, hands on the eligible messages |
 | 4 | `foreach` → `subagent` (`whatsapp-responder`) | judgement | answers one message: read, decide, and at most one verified reply |
@@ -27,6 +27,17 @@ its own children would lose:
 
 It was four records (`whatsapp-ingest`, `whatsapp-message`, `whatsapp-source`, `whatsapp-transcribe`)
 plus two retired rows. One trigger, one action, one place to look and to polish.
+
+Step 1 also carries the two half-failures that look like success. It asks `scripts/whatsapp-preflight.sh` on
+**every** path, including the one where DevTools already answers: "DevTools answered and the WhatsApp page is
+open" is not the same fact as "the document-start hook is in the page", and the fast path used to exit
+`already-up` before that question - so the hook was only ever rebound when the browser was restarted, which is
+exactly the gap a browser restart (a new target id) opened. A preflight that cannot bind the hook is a named
+refusal (`hook_not_in_the_page_and_not_bound`), not a green line. The preflight also repairs the cdp trigger
+when its pin names a target that is not there (a restart replaces the target id, and then nothing is listening
+and nothing installs the hook): `whatsapp-trigger.mjs repair` re-pins the installed job to the live target,
+idempotently, and a repair it could not hand to the sentinel is named (`job_put_failed`) instead of the drift
+being reported and passed over.
 
 **Turn the copilot on and off with `whatsapp-copilot`** — there is nothing else to switch.
 
