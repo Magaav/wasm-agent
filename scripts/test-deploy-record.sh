@@ -93,8 +93,8 @@ interim_record() { # destination
 
 # The deploy's own environment, as deploy.sh has it when step 8 runs. The wrapper calls the extracted
 # record step `calls` times, which is how "written early" and "written again last" are both exercised.
-run_record() { # calls -> the record step's output
-  local calls="$1"
+run_record() { # calls [path-prefix] -> the record step's output; the prefix shadows a command for that run
+  local calls="$1" prefix="${2:-}"
   {
     echo 'set -uo pipefail'
     echo "INSTALL_DIR=\"$INSTALL\""
@@ -111,7 +111,7 @@ run_record() { # calls -> the record step's output
     local i
     for i in $(seq 1 "$calls"); do echo 'record_installed'; done
   } > "$WORK/run-record.sh"
-  bash "$WORK/run-record.sh" 2>&1
+  if [ -n "$prefix" ]; then PATH="$prefix:$PATH" bash "$WORK/run-record.sh" 2>&1; else bash "$WORK/run-record.sh" 2>&1; fi
 }
 
 # 1. Whatever upgrade.sh recorded first, the deploy's record is the one that stands, and it names the
@@ -157,18 +157,54 @@ check "$([ -n "$EARLY_LINE" ] && [ -n "$SHIP_LINE" ] && [ "$EARLY_LINE" -lt "$SH
   "the record is written before the steps that can die after the install" \
   "record at line $EARLY_LINE, the self-ship that killed the 2026-10-02 deploy at line $SHIP_LINE"
 
-# 6. Atomic: the staging file is renamed into place, and none survives.
+# 6. Atomic: the record reaches the name `installed.txt` by being RENAMED there, so a reader never sees a
+#    half-written record. This is observed, not described (finding F3 of the review of change/deploy-unbound:
+#    the earlier version of this check only asserted that no staging file survived, and the reviewer's
+#    mutation M8 - a direct `> installed.txt`, no staging and no rename - kept all 24 checks green). For one
+#    run `mv` is shadowed by a wrapper that records the rename and the state of the destination at that
+#    instant, then does the real rename. A writer that truncates installed.txt directly is caught twice
+#    over: it never renames anything, and the destination would be observed as a prefix, not as a record.
+WATCH="$WORK/bin"; mkdir -p "$WATCH"
+REAL_MV="$(command -v mv)"
+cat > "$WATCH/mv" <<'MVWATCH'
+#!/usr/bin/env bash
+src=""; dst=""
+for a in "$@"; do case "$a" in -*) ;; *) if [ -z "$src" ]; then src="$a"; else dst="$a"; fi ;; esac; done
+{
+  printf 'rename src=%s dst=%s\n' "$src" "$dst"
+  printf 'staged-complete=%s\n' "$(grep -c '^reason=' "$src" 2>/dev/null)"
+  printf 'dest-before-complete=%s\n' "$( [ -f "$dst" ] && grep -c '^commit=' "$dst" 2>/dev/null || echo absent)"
+  printf 'dest-before-lines=%s\n' "$( [ -f "$dst" ] && wc -l < "$dst" | tr -d ' ' || echo absent)"
+} >> "$MV_WATCH_LOG"
+exec "$REAL_MV" "$@"
+MVWATCH
+chmod +x "$WATCH/mv"
+interim_record "$INSTALL/installed.txt"
+INTERIM_LINES="$(wc -l < "$INSTALL/installed.txt" | tr -d ' ')"
+export REAL_MV MV_WATCH_LOG="$WORK/mv-watch.log"
+rm -f "$MV_WATCH_LOG"
+run_record 1 "$WATCH" >/dev/null 2>&1 || true
+check "$([ -s "$MV_WATCH_LOG" ] && echo 1)" \
+  "the record is committed by renaming, not by writing the name directly" \
+  "a direct > installed.txt (mutation M8) calls no mv at all, and fails this check"
+check "$([ "$(grep -c '^rename src=[^ ]*\.installed\.txt\.deploy\.[0-9]* ' "$MV_WATCH_LOG" 2>/dev/null)" = "1" ] && echo 1)" \
+  "the rename takes a staged sibling into place" "$(grep '^rename ' "$MV_WATCH_LOG" 2>/dev/null | head -1 | cut -c1-120)"
+check "$([ "$(grep -c '^staged-complete=[1-9]' "$MV_WATCH_LOG" 2>/dev/null)" = "1" ] && echo 1)" \
+  "the staged file was already a complete record when it was renamed"
+check "$([ "$(grep -c '^dest-before-complete=[1-9]' "$MV_WATCH_LOG" 2>/dev/null)" = "1" ] && echo 1)" \
+  "the destination held a COMPLETE record at the instant of the rename" \
+  "the interim record is $INTERIM_LINES line(s); a truncate-then-write is observed here as a prefix of one"
 check "$([ "$(ls "$INSTALL"/.installed.txt.deploy.* 2>/dev/null | wc -l | tr -d ' ')" = "0" ] && echo 1)" \
   "no half-written record is left behind" "no .installed.txt.deploy.* in $INSTALL"
 
 # 4. upgrade.sh's side of the ownership: interim under a deploy, final on its own. Both run the real
 #    record_install out of upgrade.sh against the same fixture install.
-run_upgrade_record() { # via -> the record_install block's output, record in installed.txt
+run_upgrade_record() { # via [new-binary] -> the record_install block's output, record in installed.txt
   {
     echo 'set -uo pipefail'
     echo "INSTALL_DIR=\"$INSTALL\""
     echo "INSTALLED=\"$INSTALL/wa\""
-    echo "NEW=\"$INSTALL/wa\""
+    echo "NEW=\"${2:-$INSTALL/wa}\""
     echo "PREVIOUS_COMMIT=\"$COMMIT\""
     echo "SOURCE_COMMIT=\"$(git -C "$TREE" rev-parse HEAD)\""
     if [ -n "$1" ]; then echo "WA_UPGRADE_VIA=\"$1\""; fi
@@ -195,6 +231,42 @@ OUT="$(run_upgrade_record '')"; STATUS=$?
 [ "$STATUS" = "0" ] || fail "upgrade.sh's record path refused on its own: status $STATUS - $OUT"
 check "$([ "$(field record_role "$INSTALL/installed.txt")" = "final" ] && echo 1)" \
   "a hand-run upgrade is its own final record" "record_role=$(field record_role "$INSTALL/installed.txt") via=$(field via "$INSTALL/installed.txt")"
+
+# 4b. F4 of the review: the role is MONOTONE. A deploy whose build is byte-identical to what is installed
+#     (the live node did exactly that on 2026-10-02: "the new binary is byte-identical to ... - nothing to
+#     swap, restarting it") calls upgrade.sh only for the restart, and the record it finds is a deploy's own
+#     final one FOR THESE BYTES. Overwriting that with `interim` asserts a death that has not happened - and
+#     `verify-install.sh` then fails an install that is fine. A new binary still gets `interim`, because
+#     that is the fact then.
+deploy_final_record() { # commit -> a deploy's own final record, for the bytes the install carries now
+  printf 'commit=%s\nbranch=%s\ndirty=0\nsha256=%s\nsentinel_sha256=%s\nupgrade_sha256=%s\ninstall_dir=%s\nservice_install_dir=%s\nsource_provenance=clean-built-by-deploy\nrecord_role=final\nvia=deploy.sh\nat=2026-10-02T19:31:00Z\nreason=the deploy that finished\n' \
+    "$1" "$BRANCH" "$(sha "$INSTALL/wa")" "$(sha "$INSTALL/wa-sentinel")" "$UPGRADE_HASH" "$INSTALL" "$INSTALL" > "$INSTALL/installed.txt"
+}
+deploy_final_record "$COMMIT"
+OUT="$(run_upgrade_record deploy.sh "$INSTALL/wa")"; STATUS=$?
+[ "$STATUS" = "0" ] || fail "upgrade.sh's record path refused on identical bytes: status $STATUS - $OUT"
+check "$([ "$(field record_role "$INSTALL/installed.txt")" = "final" ] && echo 1)" \
+  "an interim write cannot downgrade a final record for the SAME bytes" \
+  "record_role=$(field record_role "$INSTALL/installed.txt") - before the fix this read interim, which names a deploy death that did not happen"
+check "$([ "$(field source_provenance "$INSTALL/installed.txt")" = "clean-built-by-deploy" ] && echo 1)" \
+  "the kept record keeps the provenance that was true of those bytes" \
+  "source_provenance=$(field source_provenance "$INSTALL/installed.txt")"
+check "$([ "$(field commit "$INSTALL/installed.txt")" = "$COMMIT" ] && echo 1)" \
+  "the kept record still names the commit those bytes came from" "commit=$(field commit "$INSTALL/installed.txt") of $COMMIT"
+
+# ... and the downgrade signal still fires when it is TRUE: the installed bytes are no longer the ones the
+# final record names (this is the state after upgrade.sh has swapped a new build in, before the deploy
+# writes its own record).
+deploy_final_record "$COMMIT"
+printf '\n# a different build\n' >> "$INSTALL/wa"
+OUT="$(run_upgrade_record deploy.sh "$INSTALL/wa")"; STATUS=$?
+[ "$STATUS" = "0" ] || fail "upgrade.sh's record path refused on a new binary: status $STATUS - $OUT"
+check "$([ "$(field record_role "$INSTALL/installed.txt")" = "interim" ] && echo 1)" \
+  "a NEW binary still gets an interim record" "record_role=$(field record_role "$INSTALL/installed.txt")"
+check "$([ "$(field source_provenance "$INSTALL/installed.txt")" = "unverified-binary" ] && echo 1)" \
+  "and the interim record claims only what upgrade.sh can prove" "source_provenance=$(field source_provenance "$INSTALL/installed.txt")"
+check "$([ "$(field commit "$INSTALL/installed.txt")" = "unknown" ] && echo 1)" \
+  "the interim record does not borrow the old commit for new bytes" "commit=$(field commit "$INSTALL/installed.txt")"
 
 # 5. The caller identity reaches upgrade.sh. The invocation is read out of deploy.sh and run against a stub
 #    that prints the environment it received.

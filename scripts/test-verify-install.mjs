@@ -41,7 +41,15 @@ try {
   git('add','.');git('commit','-qm','built artifact fixture');
   const installedCommit=git('rev-parse','--short','HEAD');
   const hash=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-  fs.writeFileSync(path.join(install,'installed.txt'),`commit=${installedCommit}\nsha256=${hash(path.join(install,'wa'))}\nsentinel_sha256=${hash(path.join(install,'wa-sentinel'))}\ninstall_dir=${install}\nsource_provenance=clean-built-by-deploy\nrecord_role=final\nvia=deploy.sh\n`);
+  const nodeHash=hash(path.join(install,'wa')), sentinelHash=hash(path.join(install,'wa-sentinel'));
+  // The record a deploy writes, and the deploy's own verdict beside it. `at=` is what lets the verdict be
+  // compared with the record (see the verdict check below): the record is written EARLY, so the verdict has
+  // to be newer than it to be about this deploy.
+  const finalRecord=(at='2026-10-02T19:30:02Z')=>`commit=${installedCommit}\nbranch=main\ndirty=0\nsha256=${nodeHash}\nsentinel_sha256=${sentinelHash}\ninstall_dir=${install}\nsource_provenance=clean-built-by-deploy\nrecord_role=final\nvia=deploy.sh\nat=${at}\nreason=fixture deploy\n`;
+  const verdict=(at,ok,detail)=>`{"ok":${ok},"commit":"${installedCommit}","detail":"${detail}","at":"${at}"}\n`;
+  const VERDICT=path.join(install,'deploy-result.json');
+  fs.writeFileSync(path.join(install,'installed.txt'),finalRecord());
+  fs.writeFileSync(VERDICT,verdict('2026-10-02T19:31:00Z',true,'installed the fixture node'));
   fs.writeFileSync(path.join(install,'serve.pid'),'1234');
 
   writeExec(path.join(mock,'curl'),'#!/usr/bin/env bash\necho \'{"ok":true}\'\n');
@@ -66,13 +74,38 @@ try {
   // An INTERIM record is the state a deploy that died after installing the node leaves behind: upgrade.sh
   // recorded the bytes it placed, the deploy that owns the record never wrote its exact-commit one. The
   // verdict must name that, not only report a commit it cannot resolve.
-  const finalRecord=fs.readFileSync(path.join(install,'installed.txt'),'utf8');
-  fs.writeFileSync(path.join(install,'installed.txt'),finalRecord.replace('record_role=final','record_role=interim').replace('source_provenance=clean-built-by-deploy','source_provenance=unverified-binary').replace('commit='+installedCommit,'commit=unknown'));
+  fs.writeFileSync(path.join(install,'installed.txt'),
+    finalRecord().replace('record_role=final','record_role=interim').replace('source_provenance=clean-built-by-deploy','source_provenance=unverified-binary').replace('commit='+installedCommit,'commit=unknown'));
   const interim=verify();
   const interimCheck=interim.result.results.find(item=>item.name==="the install record is its owner's final one");
   check(interim.status===1&&interimCheck?.status==='fail','an interim record fails verification');
   check(/did not reach its own record step/.test(interimCheck.detail),`the failure names the cause: ${interimCheck.detail}`);
-  fs.writeFileSync(path.join(install,'installed.txt'),finalRecord);
+
+  // F1 of the review of change/deploy-unbound: `record_role=final` says the deploy reached its record step,
+  // NOT that it finished - the record is written early, on purpose. The deploy's own verdict
+  // (deploy-result.json) is what says it finished, and nothing read it. Every state a death after the early
+  // write can leave must be named by the verifier, and a matching verdict must pass.
+  for(const rel of shipped.filter(item=>item.includes('git-orchestrator'))){fs.copyFileSync(path.join(tree,rel),path.join(home,'.wasm-agent',rel));}
+  const verdictCases=[
+    ['missing',()=>fs.rmSync(VERDICT,{force:true}),/does not exist/],
+    ['stale',()=>fs.writeFileSync(VERDICT,verdict('2026-10-02T19:29:00Z',true,'an earlier deploy')),/OLDER than the record/],
+    ['not ok',()=>fs.writeFileSync(VERDICT,verdict('2026-10-02T19:31:00Z',false,'upgrade.sh failed')),/ok=false/],
+  ];
+  for(const [label,mutate,expected] of verdictCases){
+    fs.writeFileSync(path.join(install,'installed.txt'),finalRecord());
+    mutate();
+    const run=verify();
+    const found=run.result.results.find(item=>item.name==="the deploy's verdict matches the record");
+    check(found?.status==='fail',`a ${label} deploy verdict fails verification: ${JSON.stringify(found)}`);
+    check(expected.test(found?.detail??''),`the ${label} case says which state it found: ${found?.detail}`);
+  }
+  fs.writeFileSync(path.join(install,'installed.txt'),finalRecord());
+  fs.writeFileSync(VERDICT,verdict('2026-10-02T19:31:00Z',true,'installed the fixture node'));
+  const consistent=verify();
+  check(consistent.status===0&&consistent.result.failed===0,
+    `a final record with a matching verdict passes: ${JSON.stringify(consistent.result.results.filter(item=>item.status!=='ok'))}`);
+  check(consistent.result.results.find(item=>item.name==="the deploy's verdict matches the record")?.status==='ok',
+    'the matching verdict is reported as ok, not skipped');
   console.log(`verify install checks ok (${checks} checks, 0 skipped; isolated source/install fixture)`);
 } finally {
   assert.equal(path.dirname(path.resolve(root)),path.resolve(os.tmpdir()));

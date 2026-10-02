@@ -118,6 +118,40 @@ if [ -f "$INSTALL_DIR/installed.txt" ]; then
       "installed.txt has no record_role - a record written before that field existed, so its role cannot be read" ;;
     *) record skip "the install record is its owner's final one" "unrecognized record_role=$RECORD_ROLE" ;;
   esac
+
+  # 1b. AND THE RECORD IS NOT THE DEPLOY'S OUTCOME. `record_role=final` says the deploy reached its record
+  #     step, not that it finished: the record is written as soon as its facts are true (before the pipeline,
+  #     the wave scripts and the job definitions are shipped), so a deploy that dies in those steps leaves a
+  #     `final` record behind. The deploy's own verdict is `<install>/deploy-result.json`, written by
+  #     write_result on BOTH sides of the outcome - and nothing read it (finding F1 of the review of
+  #     change/deploy-unbound). So a final record with a missing, stale or failing verdict read as a healthy
+  #     install. This check names which of the three it found; it is scoped to a record the DEPLOY wrote, so
+  #     a hand-run upgrade (which writes no verdict, and is not trying to) is not judged by it.
+  if [ "$(sed_field via)" = "deploy.sh" ] && [ "$RECORD_ROLE" = "final" ]; then
+    RECORD_AT="$(sed_field at)"
+    RESULT_FILE="$INSTALL_DIR/deploy-result.json"
+    if [ ! -f "$RESULT_FILE" ]; then
+      record fail "the deploy's verdict matches the record" \
+        "the record was written by a deploy (via=deploy.sh, record_role=final) and $RESULT_FILE does not exist: the deploy that wrote this record never wrote a verdict, so the record does not establish that it finished"
+    else
+      RESULT_OK="$(sed -n 's/.*"ok":\([a-z]*\).*/\1/p' "$RESULT_FILE" 2>/dev/null | head -1)"
+      RESULT_AT="$(sed -n 's/.*"at":"\([^"]*\)".*/\1/p' "$RESULT_FILE" 2>/dev/null | head -1)"
+      RESULT_DETAIL="$(sed -n 's/.*"detail":"\([^"]*\)".*/\1/p' "$RESULT_FILE" 2>/dev/null | head -1)"
+      if [ "$RESULT_OK" != "true" ]; then
+        record fail "the deploy's verdict matches the record" \
+          "the deploy's last verdict is ok=$RESULT_OK (at=$RESULT_AT, \"$RESULT_DETAIL\"): the record names a deploy that did not succeed"
+      elif [ -n "$RESULT_AT" ] && [ -n "$RECORD_AT" ] && [ "$RESULT_AT" \< "$RECORD_AT" ]; then
+        record fail "the deploy's verdict matches the record" \
+          "the record was written at $RECORD_AT and the newest verdict at $RESULT_AT: the verdict is OLDER than the record, so it belongs to an earlier deploy and this one did not finish"
+      else
+        record ok "the deploy's verdict matches the record" \
+          "verdict ok at $RESULT_AT, record at $RECORD_AT"
+      fi
+    fi
+  else
+    record skip "the deploy's verdict matches the record" \
+      "the record is not a deploy's own final one (record_role=${RECORD_ROLE:-absent}, via=$(sed_field via)) - a hand-run upgrade writes no deploy verdict"
+  fi
 else
   record fail "installed.txt present" "no $INSTALL_DIR/installed.txt - nothing to verify against"
   RECORD_COMMIT=""
