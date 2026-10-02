@@ -30,6 +30,15 @@ wa-sentinel request wake     --session <id> --prompt "..." --reason "why"
 wa-sentinel request run      --script /path/to/script.sh --reason "why"
 ```
 
+That list is the whole set of verbs, and it is enforced at both doors that can write a request. `request
+--help` (and `-h`, and `help`) prints the usage and writes **nothing**, and a verb outside the list is
+refused by name before any file exists — a request whose only possible outcome is the worker's `unknown
+verb` refusal is durable state created by a question or a typo, not by an effect that was attempted
+(measured 2026-10-02: `request --help` wrote a real request with `verb: "--help"`, which the worker then
+filed under `failed/`). A **trigger** is judged by the same list: `triggers.json` decides *when*, never
+*what*, so a trigger naming a verb this sentinel cannot perform is recorded as `triggers-bad-verb` and
+fires no request at all — the trigger stays in the file, visible and fixable.
+
 ### More than one node on a machine
 
 A node's home, key, database, ports and supervisor records are per **instance**, so one machine can

@@ -1865,6 +1865,25 @@ fn fire(trigger: &Value, event: &str) {
         }
     }
     let reason = object.get("reason").and_then(Value::as_str).unwrap_or("a trigger fired").to_string();
+    // The same door as `request`, closed here too. A trigger decides *when*, never *what*, and its verbs are
+    // the same fixed list - but a verb this sentinel cannot perform used to be written into a real request
+    // anyway, so a typo in `triggers.json` produced durable state whose only outcome was the worker's
+    // `unknown verb` refusal: the defect this delivery reproduced and fixed at the command line, one file
+    // over (the reviewer's `trigger-verb-parity` finding). The trigger is now refused by name, the audit line
+    // is the only trace, and the trigger stays in the file - visible and fixable - instead of firing into a
+    // request that cannot be performed.
+    let verb = object.get("verb").and_then(Value::as_str).unwrap_or("");
+    if !REQUEST_VERBS.contains(&verb) {
+        audit(
+            "triggers-bad-verb",
+            event,
+            &format!(
+                "unknown verb {verb:?}; no request was written. The verbs are: {}",
+                REQUEST_VERBS.join(", ")
+            ),
+        );
+        return;
+    }
     audit("trigger", &format!("{event}"), &reason);
     let stamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
     let path=sentinel_dir().join("requests").join(format!("{stamp}-trigger.json"));
@@ -2678,6 +2697,34 @@ mod request_verb_tests {
         request(&["wake".to_string(),"--session".to_string(),"fixture".to_string()])
             .expect("a known verb must still be accepted");
         assert_eq!(written(),1,"a known verb must still write one request");
+        match previous {
+            Some(value)=>std::env::set_var("WASM_AGENT_HOME",value),
+            None=>std::env::remove_var("WASM_AGENT_HOME"),
+        }
+        let _=std::fs::remove_dir_all(&home);
+    }
+
+    /// The same door, one file over. Falsifies the reviewer's `trigger-verb-parity` finding: `fire()` used to
+    /// write whatever verb `triggers.json` named, so a typo produced a durable request whose only outcome was
+    /// the worker's `unknown verb` refusal - the defect this delivery fixed at the command line.
+    #[test]
+    fn a_trigger_with_an_unknown_verb_writes_no_durable_state() {
+        let _alone=ENV_LOCK.lock().unwrap_or_else(|poisoned|poisoned.into_inner());
+        let home=std::env::temp_dir().join(format!("wa-trigger-verb-{}",std::process::id()));
+        let _=std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("temp home");
+        let previous=std::env::var("WASM_AGENT_HOME").ok();
+        std::env::set_var("WASM_AGENT_HOME",&home);
+        let requests=|| std::fs::read_dir(sentinel_dir().join("requests")).map(|entries|entries.count()).unwrap_or(0);
+        fire(&json!({"verb":"restartt","reason":"a typo in triggers.json"}),"fixture.json");
+        assert_eq!(requests(),0,"a trigger with an unknown verb wrote a request");
+        // The audit line is what remains, and it names the verb the file asked for.
+        let log=std::fs::read_to_string(sentinel_dir().join("sentinel.log")).unwrap_or_default();
+        assert!(log.contains("triggers-bad-verb"),"the refusal must be recorded: {log}");
+        assert!(log.contains("restartt"),"the record must name the verb: {log}");
+        // A known verb still fires, so the refusal above is about the verb and not about triggers.
+        fire(&json!({"verb":"wake","session":"fixture","prompt":"fixture"}),"fixture.json");
+        assert_eq!(requests(),1,"a trigger with a known verb must still write one request");
         match previous {
             Some(value)=>std::env::set_var("WASM_AGENT_HOME",value),
             None=>std::env::remove_var("WASM_AGENT_HOME"),

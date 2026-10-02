@@ -12,18 +12,27 @@
 //   * The boundary does not re-derive any integration check: it runs the declared command and parses the
 //     audit's own JSON. That is asserted against the module's source, because a re-derivation would be a
 //     new git call in a file that has none.
-//   * The wiring is in the two entrypoints the wave already has: `scripts/wave-lifecycle.mjs` create (the
-//     next wave's entry) and its completion check (the landing's exit).
+//   * The wiring is in the two entrypoints the wave already has - `scripts/wave-lifecycle.mjs` create (the
+//     next wave's entry) and its completion check (the landing's exit) - and it is exercised by RUNNING
+//     them on a wave fixture: a refused entry, an admitted entry, a bootstrap entry (the recorded
+//     exemption), a refused exit that blocks the wave durably, and a passing exit that completes it. An
+//     earlier version of this file pinned the wiring by grepping the entrypoint's source text, which the
+//     reviewer's `test-strength` finding correctly called out: that assertion would pass with the behaviour
+//     removed.
 //   * Retirement stays ONE command: the only non-test script in `scripts/` that deletes a remote ref is
 //     `scripts/wave-retire.mjs`, and there is no second retirement implementation beside it.
 //
-// Hermetic: one private Git repository with a local bare remote per case, no network, no model, no sentinel.
+// Hermetic: private Git repositories with local bare remotes, private SQLite wave stores and stand-in
+// effect/proof drivers, no network, no model, no sentinel, no registered wave.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import {DatabaseSync} from 'node:sqlite';
 import {spawnSync} from 'node:child_process';
 import {boundary,readPolicy,detectorArgs,detectorFacts,BOUNDARY_PHASES} from './lib/lane-boundary.mjs';
+import {create,advance,inspect} from './wave-lifecycle.mjs';
 
 let checks=0;
 const check=(value,label)=>{assert.ok(value,label);checks++;};
@@ -86,6 +95,73 @@ function withPolicy(target,declared) {
 }
 function removal(target) {
   fs.rmSync(path.join(target,'lane-policy.json'),{force:true});
+}
+
+// ---------------------------------------------------------------- a wave fixture that reaches the boundary
+// It satisfies everything `create`/`advance` ask for BEFORE the boundary: a canonical repository on main, a
+// bare origin carrying main only, a valid combined-gate receipt for that tree, and stand-in
+// land/deploy/retire drivers whose postconditions pass. Its lane policy is COMMITTED, so the tree stays clean
+// - and the two declared checks after the detector read a flag file OUTSIDE the repository, which is how a
+// phase is made to fail without dirtying the tree that the next `verify()` would judge.
+const STUB_AUDIT="console.log(JSON.stringify({discovery_complete:true,integration_complete:true,origin_main_only:true,origin_main_matches_target:true}));\n";
+const STUB_FLAG="import fs from 'node:fs';\n"+
+  "if(fs.existsSync(process.argv[2])){console.error('declared check refused: '+process.argv[2]);process.exit(1);}\n"+
+  "process.exit(0);\n";
+const STUB_DRIVER=`const fs=require('fs'); const mode=process.argv[2];
+  if(mode==='step') { fs.appendFileSync(process.argv[3],process.env.WA_WAVE_OPERATION_ID+'\\n'); console.log(JSON.stringify({ok:true,settled:true,cleanup:'self_exited',operation_id:process.env.WA_WAVE_OPERATION_ID})); }
+  if(mode==='post') console.log(JSON.stringify({ok:true}));
+  if(mode==='proof') console.log(JSON.stringify({ok:true,main:process.env.WA_WAVE_MAIN,wave_id:process.env.WA_WAVE_ID,complete:true,unresolved:[]}));`;
+function waveFixture(name) {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),`wa-lane-boundary-wave-${name}-`));
+  roots.push(dir);
+  const repo=path.join(dir,'canonical'),remote=path.join(dir,'remote.git'),executor=path.join(dir,'executor'),store=path.join(dir,'state');
+  fs.mkdirSync(executor,{recursive:true});
+  fs.mkdirSync(repo);
+  git(repo,'init','-b','main');
+  git(repo,'config','user.name','lane-boundary-fixture');
+  git(repo,'config','user.email','lane-boundary@invalid');
+  git(repo,'config','core.autocrlf','false');
+  const enterFlag=path.join(dir,'enter.flag'),exitFlag=path.join(dir,'exit.flag');
+  fs.mkdirSync(path.join(repo,'stub'));
+  fs.writeFileSync(path.join(repo,'stub','audit.mjs'),STUB_AUDIT);
+  fs.writeFileSync(path.join(repo,'stub','flag-check.mjs'),STUB_FLAG);
+  fs.writeFileSync(path.join(repo,'lane-policy.json'),`${JSON.stringify({
+    schema:1,contract:'fixture: what a lane must reach to be ended',end_state:{statement:'origin carries only main'},
+    gate:{on:'release'},deploy:{when:'after the release gate'},remote:{main_only:true},
+    checks:{enter:[['node','stub/audit.mjs','verify','.','origin/main'],['node','stub/flag-check.mjs',enterFlag]],
+      exit:[['node','stub/audit.mjs','verify','.','origin/main'],['node','stub/flag-check.mjs',exitFlag]]},
+  },null,2)}\n`);
+  fs.mkdirSync(path.join(repo,'scripts'),{recursive:true});
+  fs.mkdirSync(path.join(repo,'skills','parallel-evolution','scripts'),{recursive:true});
+  fs.writeFileSync(path.join(repo,'skills','parallel-evolution','scripts','finish.mjs'),'// lane-boundary fixture gate driver\n');
+  fs.writeFileSync(path.join(repo,'scripts','test.sh'),'#!/bin/sh\nprintf "smoke ok\\n"\n');
+  fs.writeFileSync(path.join(repo,'seed'),'fixture\n');
+  git(repo,'add','.');
+  git(repo,'commit','-m','fixture: baseline, policy and gate');
+  git(dir,'init','--bare',remote);
+  git(repo,'remote','add','origin',remote);
+  git(repo,'push','-u','origin','main');
+  const head=git(repo,'rev-parse','HEAD'),tree=git(repo,'rev-parse','HEAD^{tree}');
+  const driver=path.join(executor,'driver.cjs');
+  fs.writeFileSync(driver,STUB_DRIVER);
+  const effects=path.join(executor,'effects');
+  const log=path.join(executor,'gate.log');
+  fs.writeFileSync(log,'smoke ok\n');
+  const sha=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  const shell=process.platform==='win32'?path.join(process.env.ProgramFiles||'C:/Program Files','Git','bin','bash.exe'):'bash';
+  const receipt=path.join(executor,'gate.json');
+  fs.writeFileSync(receipt,JSON.stringify({schema:1,passed:true,kind:'full',gate_ms:1,repo,head,tree,gate_exit:0,gate_runs:1,skipped:0,log,log_sha256:sha(log),shell,
+    host:{hostname:os.hostname(),platform:process.platform,arch:os.arch()},
+    runner:{path:path.join(repo,'skills','parallel-evolution','scripts','finish.mjs'),sha256:sha(path.join(repo,'skills','parallel-evolution','scripts','finish.mjs')),platform:process.platform},
+    input_scope:{tree,command:'bash scripts/test.sh',gate_sha256:sha(path.join(repo,'scripts','test.sh'))}}));
+  const manifest={id:name,owner:'fixture-owner',repo,executor_cwd:executor,bootstrap:false,gate_receipt:receipt,
+    steps:['land','deploy','retire'].map(stage=>({name:stage,argv:[process.execPath,driver,'step',effects],post:{argv:[process.execPath,driver,'post']}})),
+    verifiers:Object.fromEntries(['operations','claims','runtime','registries','deliveries','owners'].map(verifier=>[verifier,{argv:[process.execPath,driver,'proof']}]))};
+  return {dir,repo,remote,executor,store,manifest,enterFlag,exitFlag,effects};
+}
+function waveRows(store) {
+  const db=new DatabaseSync(path.join(store,'waves.sqlite'),{readOnly:true});
+  try { return db.prepare('SELECT id,state,reason,receipt FROM waves').all(); } finally { db.close(); }
 }
 
 let succeeded=false;
@@ -172,15 +248,69 @@ try {
   }
   check(own.policy.remote.main_only===true,'this repository declares origin main-only (the push guard reads this)');
 
-  // ---------------------------------------------------------------- the two entrypoints are wired
-  const lifecycle=fs.readFileSync('scripts/wave-lifecycle.mjs','utf8');
-  const createBody=lifecycle.slice(lifecycle.indexOf('export function create'),lifecycle.indexOf('export async function advance'));
-  const advanceBody=lifecycle.slice(lifecycle.indexOf('export async function advance'),lifecycle.indexOf('export function reconcile'));
-  check(createBody.includes("boundary(manifest.repo,{phase:'enter'})"),"create() runs the boundary as the next wave's entry");
-  check(createBody.includes('lane_boundary_enter_refused:'),'a refused entry is named, not silently admitted');
-  check(advanceBody.includes("boundary(manifest.repo,{phase:'exit'})"),"the completion check runs the boundary as the landing's exit");
-  check(advanceBody.includes('lane_boundary_exit_refused:'),'a refused exit blocks the wave by name');
-  check(/convergence_failed:\$\{e\.message\}/.test(advanceBody),'the exit refusal blocks durably through the existing block path');
+  // ---------------------------------------------------------------- the two entrypoints, RUN
+  // An earlier version of this file asserted these by grepping `wave-lifecycle.mjs`'s source text. The
+  // reviewer's `test-strength` finding was right: that would still pass with the behaviour removed. These
+  // five cases run the real `create()`/`advance()` on a wave fixture, so the boundary's enforcement is
+  // observed in the wave's own state and durable reasons.
+
+  // (a) THE NEXT WAVE'S ENTRY, refused: the repository's declared enter check fails, so the wave is not
+  //     admitted and no wave row exists to admit.
+  const refusedEntry=waveFixture('enter-refused');
+  fs.writeFileSync(refusedEntry.enterFlag,'the declared enter check fails\n');
+  let entryError=null;
+  try { create(refusedEntry.store,refusedEntry.manifest); } catch(error) { entryError=error; }
+  check(entryError!==null,'a wave whose declared enter check fails is not admitted');
+  check(/lane_boundary_enter_refused:/.test(entryError?.message || ''),'the refusal names the boundary and the phase');
+  check(/lane_boundary_check_failed:enter:node stub\/flag-check\.mjs/.test(entryError?.message || ''),'the refusal names the exact failing check');
+  check(/lane_boundary_check_stderr:declared check refused/.test(entryError?.message || ''),"the refusal carries the failing check's own words");
+  check(waveRows(refusedEntry.store).length===0,'a refused entry admits no wave row at all');
+
+  // (b) THE SAME ENTRY, PASSING: the same fixture without the flag admits the wave, and the receipt records
+  //     the boundary verdict it was admitted against.
+  const passingEntry=waveFixture('enter-passing');
+  const admitted=create(passingEntry.store,passingEntry.manifest);
+  check(admitted.ok===true && admitted.state==='pending','a wave is admitted when the declared enter check passes');
+  check(admitted.boundary.ok===true && admitted.boundary.policy_present===true,'the admitted receipt carries the entry boundary verdict');
+  check(admitted.boundary.checks.some(entry=>entry.detector===true),'the admitted receipt records the detector that ran');
+  check(waveRows(passingEntry.store).length===1,'exactly one wave row exists after an admitted entry');
+
+  // (c) THE BOOTSTRAP EXEMPTION, recorded as a property rather than left as prose (the reviewer's
+  //     `bootstrap-exit-asymmetry`): a bootstrap entry RECORDS the verdict instead of being refused by it,
+  //     because it exists for a repository whose baseline is already dirty. `advance()` has no such
+  //     exemption, which case (d) exercises.
+  const bootstrap=waveFixture('bootstrap-exempt');
+  bootstrap.manifest.bootstrap=true;
+  fs.writeFileSync(bootstrap.enterFlag,'the declared enter check fails\n');
+  const bootstrapAdmitted=create(bootstrap.store,bootstrap.manifest);
+  check(bootstrapAdmitted.ok===true,'a bootstrap entry is admitted even when its declared enter check fails');
+  check(bootstrapAdmitted.boundary.ok===false,'...and its receipt records that the boundary refused');
+  check(bootstrapAdmitted.boundary.reasons.some(reason=>reason.startsWith('lane_boundary_check_failed:enter:')),'...naming the failing check it was admitted over');
+
+  // (d) THE LANDING'S EXIT, refused: every stage settles, the convergence proof passes, and then the
+  //     repository's own exit check fails - so the wave is blocked by name instead of being called complete.
+  const refusedExit=waveFixture('exit-refused');
+  create(refusedExit.store,refusedExit.manifest);
+  fs.writeFileSync(refusedExit.exitFlag,'the declared exit check fails\n');
+  const blocked=await advance(refusedExit.store,'exit-refused');
+  check(blocked.ok===false && blocked.state==='blocked','a failed exit boundary blocks the wave');
+  const blockedRow=inspect(refusedExit.store,'exit-refused');
+  check(blockedRow.state==='blocked','the block is durable, not only reported');
+  check(/lane_boundary_exit_refused/.test(blockedRow.reason || ''),'the durable reason names the exit boundary');
+  check(/lane_boundary_check_failed:exit:/.test(blockedRow.reason || ''),'the durable reason names the failing check');
+  check(/lane_boundary_check_stderr:declared check refused/.test(blockedRow.reason || ''),'the durable reason keeps the failing check\'s own words');
+  check(!blockedRow.receipt,'a blocked wave carries no completion receipt');
+  check(fs.readFileSync(refusedExit.effects,'utf8').trim().split('\n').length===3,'all three ordered stages ran before the boundary judged the landing');
+
+  // (e) THE SAME EXIT, PASSING: the wave completes and its receipt carries the boundary it passed.
+  const passingExit=waveFixture('exit-passing');
+  create(passingExit.store,passingExit.manifest);
+  const completed=await advance(passingExit.store,'exit-passing');
+  check(completed.ok===true,'a wave completes when both boundaries pass');
+  check(completed.boundary.ok===true && completed.boundary.phase==='exit','the completion receipt carries the exit boundary verdict');
+  const completedRow=inspect(passingExit.store,'exit-passing');
+  check(completedRow.state==='complete','completion is durable');
+  check(JSON.parse(completedRow.receipt).boundary.ok===true,'the durable receipt carries the exit boundary verdict too');
 
   // ---------------------------------------------------------------- retirement stays one command
   const scripts=fs.readdirSync('scripts');
@@ -199,7 +329,7 @@ try {
   check(!/^import .*retire/m.test(retireSource),'the retirement engine imports no second retirement implementation');
 
   succeeded=true;
-  console.log(`lane boundary ok (${checks} checks; absent policy adds no requirement and runs nothing, a declared one is refused by name, the detector is not re-derived, both entrypoints are wired, retirement stays one command)`);
+  console.log(`lane boundary ok (${checks} checks; absent policy adds no requirement and runs nothing, a declared one is refused by name with the failing check's own words, both entrypoints are exercised end to end - refused entry, admitted entry, bootstrap exemption, blocked exit, completed exit - the detector is not re-derived, retirement stays one command)`);
 } finally {
   for(const root of roots) {
     if(succeeded) fs.rmSync(root,{recursive:true,force:true});

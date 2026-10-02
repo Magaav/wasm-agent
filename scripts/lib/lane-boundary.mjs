@@ -23,6 +23,11 @@
 // would become a claim about a file rather than a property of the run. `lane_policy_invalid:checks.<phase>`
 // names that refusal.
 //
+// A REFUSAL CARRIES THE FAILING COMMAND'S OWN WORDS. `lane_boundary_check_failed:<phase>:<argv>` says which
+// check failed; `lane_boundary_check_stderr:<first 400 characters>` says why, because the durable reason a
+// blocked wave keeps is built from these tokens (scripts/wave-lifecycle.mjs) and a reviewer debugging one
+// found only `lane_boundary_detector_report_unparseable` where the cause was `Cannot find module`.
+//
 // Usage (the command form exists so an operator or a finisher can ask the same question without a module
 // import; there is deliberately no second implementation behind it):
 //   node scripts/lib/lane-boundary.mjs <repo> <enter|exit>
@@ -125,6 +130,12 @@ export function boundary(repo,{phase,timeoutMs=900000}={}) {
       stdout_bytes:Buffer.byteLength(result.stdout,'utf8'),stderr:result.exit===0?'':String(result.stderr).slice(0,4000)});
     if(result.exit!==0) {
       const reasons=[`lane_boundary_check_failed:${phase}:${argv.join(' ')}`];
+      // The failing command's own words, bounded and on one line. A durable refusal reason that names only the
+      // argv left a reviewer reading `lane_boundary_detector_report_unparseable` while the cause was
+      // `Cannot find module` - and a blocked wave keeps that reason. 400 characters is the first line of a
+      // real diagnostic; the untruncated form stays in `checks[].stderr` below.
+      const stderr=String(result.stderr || '').replace(/\s+/g,' ').trim().slice(0,400);
+      if(stderr) reasons.push(`lane_boundary_check_stderr:${stderr}`);
       if(detection?.reason) reasons.push(detection.reason);
       return {ok:false,schema:1,phase,repo:absolute,policy_present:true,policy_file:declared.file,checks:[...detections],
         reasons,detections,note:declared.policy.contract};

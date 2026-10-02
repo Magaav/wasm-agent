@@ -293,6 +293,28 @@ is **convenience, not a boundary**: `--no-verify`, `-c core.hooksPath=<empty>` a
 `scripts/test-push-guard.sh`. The enforcement point that cannot be skipped stays remote-side (branch
 protection on `origin/main`, or a `pre-receive` check) and naming it is the owner's decision.
 
+**A hook that is not executable is not a hook.** Git consults `<hooksPath>/pre-push` only when it carries
+the executable bit (`git githooks(5)`), and the index mode is what a clone materialises - so all three
+hooks must be committed `100755`. The first version of this guard was committed `100644` while its siblings
+were `100755`; on this Windows node MSYS synthesises the bit from the shebang, so running the hook here
+proved nothing, and the defect was invisible until the reviewer read the index. `scripts/test-push-guard.sh`
+now asserts the mode and reaches the hook through the repository's own `core.hooksPath` (a plain
+`git push`), not through a per-command override that selects the hook by hand.
+
+### Recorded residues of this boundary
+
+- **The bootstrap exemption is one-sided, deliberately.** `wave-lifecycle.mjs` `create()` records the entry
+  boundary's verdict instead of being refused by it when `manifest.bootstrap === true` - a bootstrap exists
+  for a repository whose baseline is already dirty, which is exactly the state `checks.exit` refuses. The
+  completion check has no such exemption. A reviewer could not construct a reachable case for the
+  asymmetry (`verify()` and `gitBaseline` refuse a dirty or non-main-only baseline first), so it is recorded
+  here and asserted as a property in `scripts/test-lane-boundary.mjs` rather than "fixed" into a path that
+  would break bootstrap recovery.
+- **A refusal carries the failing check's own words.** `lane_boundary_check_failed:<phase>:<argv>` names the
+  check; `lane_boundary_check_stderr:<first 400 characters>` says why, because a blocked wave keeps the
+  reason built from those tokens. Before this, a declared check that could not resolve its own script left a
+  reviewer reading `lane_boundary_detector_report_unparseable` where the cause was `Cannot find module`.
+
 ## Cancellation
 
 `POST /runs {action:"status"|"cancel", thread|conversation:"<id>", run_id?}` is answered on

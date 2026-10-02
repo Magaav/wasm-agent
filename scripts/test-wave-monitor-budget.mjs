@@ -9,10 +9,21 @@
 // a reason ("owner preserved") that describes the opposite of what happened. A blocked wave then fails
 // every future admission (`wave_blocked:...`), so the cost is not one delayed tick but the whole wave.
 //
-// WHAT THE BUDGET IS FOR. Its name says it: "120 liveness observations ... exhausted observation preserves
-// the owner and records an actionable blockage" (docs/WAVE-CONVERGENCE.md). The observation that matters is
-// a *liveness* observation - a tick that looked for the owner and did not find one. A tick that found the
-// owner alive has answered the question the budget exists to answer, so it must not spend it.
+// WHAT THE BUDGET IS FOR, AND WHERE IT IS REACHED. Its name says it: "120 liveness observations ...
+// exhausted observation preserves the owner and records an actionable blockage"
+// (docs/WAVE-CONVERGENCE.md). The observation that matters is a *liveness* observation - a tick that looked
+// for the owner and did not find one. A tick that found the owner alive has answered the question the budget
+// exists to answer, so it must not spend it.
+//
+// BOTH BOUNDS ARE EXERCISED THROUGH THE REAL `monitor()`, not through a replayed copy of its loop (the
+// reviewer's `test-strength` finding: a replayed loop passes with the behaviour removed). The restart
+// budget is reached by calling `monitor()` four times with an owner identity the lease proves absent; the
+// observation budget is reached by presetting the counter past its bound on such a fixture, which is what
+// the reviewer did independently. That second one is also the honest statement of reachability: a dead
+// owner is normally blocked by the restart budget (three continuation admissions) long before 120
+// observations accumulate, so the observation bound is a backstop rather than the binding limit - and a
+// counter already past the bound is not a fence while the owner is alive again, because a live tick
+// returns before the check. Both facts are asserted below rather than left in prose.
 //
 // HOW THIS TEST FAILS ON THE PRE-CHANGE CODE (measured, in that order, on this machine):
 //   * `monitor` -> `external_monitor_observation_budget_exhausted_owner_preserved` after the 121st call, with
@@ -121,26 +132,53 @@ try {
   // empty, so that continuation ends without admitting an effect; whatever it ends as, the budget was spent,
   // which is the point of this half of the test.
 
-  // 3. The 120-observation cap is unchanged and still blocks - it is simply spent by observations that found
-  //    no owner. Replayed on its own fixture so this assertion cannot hide behind the fix.
-  const capped=fixture('capped');
-  const db=new DatabaseSync(path.join(capped.store,'waves.sqlite'));
-  try {
-    db.exec("CREATE TABLE IF NOT EXISTS monitor(id TEXT PRIMARY KEY,attempts INTEGER NOT NULL DEFAULT 0,observations INTEGER NOT NULL DEFAULT 0,state TEXT NOT NULL,reason TEXT)");
-    db.prepare("INSERT OR IGNORE INTO monitor(id,state) VALUES(?,'pending')").run(capped.id);
-    for(let tick=0;tick<121;tick++) {
-      db.prepare('UPDATE monitor SET observations=observations+1 WHERE id=?').run(capped.id);
-      if(db.prepare('SELECT observations FROM monitor WHERE id=?').get(capped.id).observations>120) {
-        db.prepare("UPDATE waves SET state='blocked',reason='external_monitor_observation_budget_exhausted_owner_preserved' WHERE id=?").run(capped.id);
-        break;
-      }
-    }
-  } finally { db.close(); }
-  check(observationsOf(capped)===121,'the cap still trips on the 121st spent observation');
-  check(stateOf(capped).state==='blocked','an exhausted budget still blocks, durably, with the owner preserved');
+  // 3. The RESTART budget, through the real `monitor()`: a dead owner is admitted a bounded number of times
+  //    and then blocked durably. This is the bound a dead owner actually meets first, so it is asserted here
+  //    rather than described: three admissions, the fourth tick blocks.
+  monitor(dead.repo);
+  monitor(dead.repo);
+  const fourth=monitor(dead.repo);
+  check(fourth.state==='blocked' && fourth.disable_monitor===true,'a dead owner is blocked once the restart budget is spent');
+  check(stateOf(dead).reason==='external_monitor_restart_budget_exhausted','the durable reason names the restart budget');
+  check(observationsOf(dead)===4,'four dead-owner ticks spent four observations, and no more');
+
+  // 4. The OBSERVATION budget, through the real `monitor()`: the counter is preset past its bound (121) on a
+  //    fixture whose owner identity is absent, and the real code blocks - naming the observation budget, not
+  //    the restart one, because that check comes first. This is the reviewer's independent check, kept here
+  //    so the delivery carries it.
+  const capped=fixture('capped',{boot:null});
+  {
+    const db=new DatabaseSync(path.join(capped.store,'waves.sqlite'));
+    try {
+      db.exec("CREATE TABLE IF NOT EXISTS monitor(id TEXT PRIMARY KEY,attempts INTEGER NOT NULL DEFAULT 0,observations INTEGER NOT NULL DEFAULT 0,state TEXT NOT NULL,reason TEXT)");
+      db.prepare("INSERT OR IGNORE INTO monitor(id,state) VALUES(?,'pending')").run(capped.id);
+      db.prepare('UPDATE monitor SET observations=121 WHERE id=?').run(capped.id);
+    } finally { db.close(); }
+  }
+  const cappedResult=monitor(capped.repo);
+  check(cappedResult.ok===false && cappedResult.state==='blocked' && cappedResult.disable_monitor===true,'the real monitor() blocks a wave whose spent observations are past the bound');
+  check(stateOf(capped).state==='blocked','the block is durable, not only reported');
+  check(stateOf(capped).reason==='external_monitor_observation_budget_exhausted_owner_preserved','the durable reason names the observation budget and the preserved owner');
+  check(observationsOf(capped)===122,'the blocked tick is counted before it is judged (121 + this tick)');
+
+  // 5. The hysteresis the reviewer found, asserted as a property rather than left in a report: a counter
+  //    already past the bound is NOT a fence while the owner is alive again, because a live tick returns
+  //    before the budget is read - and the next tick that finds no owner blocks immediately.
+  const aliveAgain=fixture('alive-again');
+  {
+    const db=new DatabaseSync(path.join(aliveAgain.store,'waves.sqlite'));
+    try {
+      db.exec("CREATE TABLE IF NOT EXISTS monitor(id TEXT PRIMARY KEY,attempts INTEGER NOT NULL DEFAULT 0,observations INTEGER NOT NULL DEFAULT 0,state TEXT NOT NULL,reason TEXT)");
+      db.prepare("INSERT OR IGNORE INTO monitor(id,state) VALUES(?,'pending')").run(aliveAgain.id);
+      db.prepare('UPDATE monitor SET observations=121 WHERE id=?').run(aliveAgain.id);
+    } finally { db.close(); }
+  }
+  const livePastBound=monitor(aliveAgain.repo);
+  check(livePastBound.state==='owner_live_or_unverifiable' && livePastBound.disable_monitor===false,'an owner that is alive again is not fenced by a counter past the bound');
+  check(stateOf(aliveAgain).state==='running' && observationsOf(aliveAgain)===121,'the live tick neither blocks the wave nor spends the counter');
 
   succeeded=true;
-  console.log(`wave monitor budget ok (${checks} checks; a live owner spends 0 of 120 observations over 200 ticks, a dead one spends 1, the cap still blocks at 121; private Git/SQLite, no registered wave, no sentinel)`);
+  console.log(`wave monitor budget ok (${checks} checks; a live owner spends 0 of 120 observations over 200 real monitor() ticks, an absent owner spends one per tick, the restart budget blocks the fourth dead-owner tick, a counter preset past the bound blocks the real monitor(), and an owner alive again is not fenced by it; private Git/SQLite, no registered wave, no sentinel)`);
 } finally {
   for(const root of roots) {
     if(succeeded) fs.rmSync(root,{recursive:true,force:true});

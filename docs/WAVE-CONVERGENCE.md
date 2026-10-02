@@ -28,9 +28,23 @@ being driven by a live owner reached
 tick - about one hour at the schedule's own declared `every_seconds: 30` - and a
 blocked wave then fences every future admission. The observation that spends the
 budget is now the one that did *not* find the owner, and the cap still blocks
-(`scripts/test-wave-monitor-budget.mjs`: 200 ticks with a live owner spend 0, an
-owner identity the lease proves absent spends 1, the 121st spent observation
-still blocks durably). Complete/blocked disables the scheduled
+(`scripts/test-wave-monitor-budget.mjs`: 200 real `monitor()` ticks with a live
+owner spend 0, an owner identity the lease proves absent spends 1 per tick, and
+a counter preset past the bound blocks on the real `monitor()` call).
+
+**Where each bound is actually met, recorded because the numbers above read as
+if 120 were the binding limit.** A dead owner is normally blocked by the
+*restart* budget first: three continuation admissions, so the fourth tick blocks
+with `external_monitor_restart_budget_exhausted` and the wave stops being
+observed at all. The 120-observation bound is therefore a backstop for a wave
+whose owner identity cannot be resolved at all, not the limit an operator will
+meet in practice. Two consequences of the fix are also worth stating rather than
+leaving to be rediscovered: a counter already past the bound is **not** a fence
+while the owner is alive again (a live tick returns before the budget is read,
+and the counter is preserved, so the next tick that finds no owner blocks
+immediately), and a live tick neither spends the counter nor blocks the wave.
+All three are asserted in `scripts/test-wave-monitor-budget.mjs`.
+Complete/blocked disables the scheduled
 job. A private local test may explicitly use `monitor_mode:external-cli-test`;
 this does not replace production watcher registration. `watcher-definition`
 prints the actual schedule/run procedure. Install must ship this shell and all
