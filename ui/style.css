@@ -15,6 +15,8 @@
   --assistant: #171b24;
   --space: 5px;
   --pad: 10px;
+  /* The one size every square control takes, and the height every footer control takes. */
+  --control-size: 30px;
   --gap: 5px;
   --radius: 10px;
   --radius-sm: 5px;
@@ -105,18 +107,17 @@ wa-agent-session { min-width:0; min-height:0; display:flex; flex-direction:colum
 .agent-transcript wa-message.assistant { width:min(760px,100%); }
 .agent-transcript wa-run { width:100%; }
 .agent-transcript pre { overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
-/* A pane's own per-message actions (Steer, Cancel task), where the main chat keeps its Steer. They
-   sit on the composer's footer row, beside the control that appends a file, so they are the height
-   of that control: 30px, the shell's own control size (`.icon-btn`), padding on the 5px scale. A row
-   of 31px buttons next to a 30px control reads as two rows that do not line up. */
-.chat-actions { display:flex; align-items:center; gap:var(--gap); }
-.chat-action { display:inline-flex; align-items:center; height:30px; padding:0 var(--pad); border:1px solid var(--line); border-radius:var(--radius); background:var(--panel-2); color:var(--text); cursor:pointer; font:inherit; font-size:12px; }
-.chat-action:hover { border-color:var(--accent); }
-.chat-action:disabled { opacity:.5; cursor:default; }
+/* A pane's per-message actions (Steer, Cancel task) are the shared row: the same element and the same
+   control as the main chat's Steer. Nothing about their size is stated here - `.chat-actions` and
+   `.chat-control` live in the composer section, beside the append-file control they must follow. */
 .agent-notice { padding:0 var(--space); color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
 .agent-preview { padding:var(--pad); white-space:pre-wrap; overflow:auto; max-height:40%; overflow-wrap:anywhere; }
-wa-orchestrator button { cursor:pointer; color:var(--text); background:var(--panel-2); border:1px solid var(--line); border-radius:var(--radius-sm); padding:var(--space); font:inherit; }
-wa-orchestrator button:disabled { opacity:.5; cursor:default; }
+/* The orchestrator's own buttons (sidebar cards, live children, lanes). `.chat-control` is excluded rather
+   than out-specified: a composer-footer control's box is the shared factory's (`.chat-control` beside the
+   append-file control), and a rule here that stated that box for the same element a second time would be a
+   duplicate that happens to lose today and moves the pane's actions the moment it wins. */
+wa-orchestrator button:not(.chat-control) { cursor:pointer; color:var(--text); background:var(--panel-2); border:1px solid var(--line); border-radius:var(--radius-sm); padding:var(--space); font:inherit; }
+wa-orchestrator button:not(.chat-control):disabled { opacity:.5; cursor:default; }
 @media(max-width:700px) { .orchestrator-sidebar { width:200px; min-width:150px; } .orchestrator-canvas[data-count] { grid-template-columns:minmax(0,1fr); } }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -176,7 +177,6 @@ body.compact {
 a[href] { color: #8bbcff; text-decoration: underline; text-underline-offset: .15em; }
 a[href]:hover { opacity: .8; }
 a[href]:focus-visible { outline: 2px solid #8bbcff; outline-offset: 2px; }
-#steer { border: 1px solid var(--line); border-radius: var(--radius); padding: var(--pad); background: var(--panel-2); color: var(--text); cursor: pointer; }
 
 .topbar {
   display: flex; align-items: center; justify-content: space-between;
@@ -702,6 +702,27 @@ wa-chat-shell.dropping .composer { border-color: var(--accent); }
 .composer-footer { display: flex; align-items: center; justify-content: space-between; gap: var(--gap); min-height: 30px; }
 .footer-left, .footer-right { display: flex; align-items: center; gap: var(--gap); min-width: 0; }
 .footer-right { justify-content: flex-end; margin-left: auto; }
+
+/* The row of per-message actions (`<wa-chat-actions>`): the main chat's Steer, and a child pane's Steer
+   and Cancel task. One row element on both surfaces. */
+.chat-actions { display: flex; align-items: center; gap: var(--gap); }
+
+/* The footer's controls, and the only place one of them is sized: the append-file button and every
+   action in the row are `.chat-control`, stamped by `chatControl()` in components.js - one factory, so
+   a change to this box is a change to all of them. Height, border and radius are shared; a labelled
+   control (`data-label`) differs only in the width its own label needs, and an icon control is the
+   square `--control-size`. */
+.chat-control {
+  flex: none; height: var(--control-size); min-width: var(--control-size); padding: 0;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel-2);
+  color: var(--muted); cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.chat-control svg { width: 15px; height: 15px; fill: currentColor; display: block; }
+.chat-control[data-label] { padding: 0 var(--pad); font: inherit; font-size: 12px; color: var(--text); }
+.chat-control:hover { color: var(--text); border-color: var(--accent); }
+.chat-control:disabled { opacity: .35; cursor: default; border-color: var(--line); color: var(--muted); }
+.chat-control:disabled:hover { color: var(--muted); border-color: var(--line); }
 .composer-model {
   max-width: min(40vw, 240px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums;
@@ -709,7 +730,7 @@ wa-chat-shell.dropping .composer { border-color: var(--accent); }
 .composer-model::before { content: "·"; color: var(--accent); margin-right: var(--space); }
 
 .icon-btn {
-  flex: none; width: 30px; height: 30px; border-radius: var(--radius-sm);
+  flex: none; width: var(--control-size); height: var(--control-size); border-radius: var(--radius-sm);
   border: 1px solid var(--line); background: var(--panel-2); color: var(--muted);
   cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
 }

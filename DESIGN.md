@@ -66,6 +66,19 @@ patch opens a window and says so, and every panel that can be promoted also
 offers the other container as a control. Never move a panel under the reader's
 pointer without telling them.
 
+**Whose context menu a window draws.** Which right-click menu appears is a property of the *page*, and the
+rule is one sentence: a window draws **this app's** menu, and the **inspector** window draws the browser's.
+The app's menu is the chat's own (collapse to avatar, reload the window, `inspect`, close) and the main window
+offers the `inspect` item — the second wa-window on the node's page, where Chrome's own element inspection
+lives — immediately after the reload. A **view** window (orchestrator, patch, control) is still this app's
+page and draws the same menu, minus the item it could not carry out: `openInspectWindow` refuses from inside a
+view, and a control that is always refused is worse than one that is not offered. The **inspector** view is the
+exception, and it is the whole point of it: its webview keeps Chromium's default context menu
+(`rust/wa-window/src/main.rs:506`; the main window disables it at `:611`), because `Inspect element` is in that
+menu — a page that suppressed the event would leave a DOM panel and no inspector. The reuse is the shell's too:
+`open_view` (`main.rs:404-421`, the title check at `:406`) refuses a second window for a view name it already
+has open, so the inspector is reused rather than stacked.
+
 
 ## 4. Spacing
 
@@ -165,6 +178,7 @@ same shape, and the same rule: the row says which device the choice belongs to.
 | `<wa-orchestrator>` | External workspace with node priority controls, an agent sidebar whose cards are grouped by lane (the child's recorded branch or worktree, with that lane's end-state checklist) and stable tiled sessions. Two of that checklist's four outcomes are measurements of that record (`retired` from the recorded workspace state, `main-only` from whether the lane holds a branch or worktree of its own); `merged` and `clean` are git facts about refs which this view is never given, so they read `unknown` with the reason for every lane - they are not outcomes it is withholding. | `.data`, `.message`, `.configure(fleet)`, `.policy`, `.panes`, `.windows` (promoted conversations), `.allPanes()`, `.promote(pane)`, `.unpin(key, pane)` | `orchestrator-action` |
 | `<wa-chat-shell>` | **The** chat surface: transcript region, composer (text area, send, attach/paste/drop intake), attachment chips, model readout and picker, notification sound. The main conversation and every child session host the same element, so a chat improvement lands in one place. | `.content`, `.host` (the host's own rows between transcript and composer), `.form`, `.input`, `.send`, `.attach`, `.file`, `.attachments` (the live list), `.attachmentsEl`, `.modelEl`, `modelChip`, `.busy`, `.enterLocked`, `.addFiles(files)`, `.renderAttachments()`, `.clearAttachments()`, `.composedText(text)`, `.autosize()`, `.notify()`, `.setModelPicker(facts, label)`; author-provided children take `data-slot` (`footer-left`, `footer-right`, `balloon`, or none for the transcript) | `chat-send` (`{text, busy}`), `chat-files` (`{files}`), `chat-attachments` (`{action, …}`) |
 | `<wa-agent-session>` | Child conversation, original tool evidence, live preview and independent composer. **Hosts the shared `<wa-chat-shell>`** rather than its own composer; its own header is the panel's two controls (close as an `x`, expand as a square that promotes it into its own `<wa-window>`), never the window's topbar. Its transcript is drawn by the window's own renderer (`app.js`'s `paintChildTranscript`), so a child's bubble, its run topic and its run-status footer are the same DOM as the main chat's - one implementation, not a parallel one. | `.task`, `.promoted`, `.clearDraft()`, `.input`, `.form`, `.transcript`, `.notice`, `.preview`, `.statusLine` | `agent-action` |
+| `<wa-chat-actions>` | **The** row of per-message actions a chat footer carries: the main chat's Steer, and a child pane's Steer and Cancel task. One element on both surfaces, and its controls come from the shell's own `chatControl()` factory, so an action and the append-file control beside it are the same control - one class, `.chat-control`, is the whole box in `style.css`, and a change to one moves all of them. A host authors *declarations* (one child per action: `data-action`, its label as its text, and any `id`/`title`/`hidden` it addresses) and hears `chat-action`, never one particular button. | `data-slot="footer-right"` on the row, `data-action` on a declaration; `.controls`; `#steer` is the main chat's own control | `chat-action` (`{action, control}`) |
 | `<wa-jobs>` | Reviewed automation definitions, enabled state, queue/source/outcome evidence. Engine topic immediately after tools. | `.items` | `job-toggle` |
 
 Keyboard selection belongs to `<wa-menu>`, not to its caller: the highlight and the click target
@@ -179,6 +193,18 @@ streaming — and how one ledger row becomes a bubble, because those are what ac
 window's own conversation and a delegated child. A child panel therefore differs from the main chat in
 one place only: its header, which is the panel's own two controls (close, expand into its own window)
 instead of the window's topbar (engine, shell, orchestrator window, collapse-to-avatar).
+
+**One footer, one control — for the controls the shell owns.** `chatControl()` in `components.js` builds the
+append-file control the shell ships and every button of `<wa-chat-actions>`; all of them are `.chat-control`,
+and `style.css` states that box once (one place, and no other rule may state it: the orchestrator's generic
+`button` rule excludes `.chat-control` by selector rather than out-specifying it). The action row is
+`<wa-chat-actions>` on the main chat and in every child pane, authored the same way (a `data-slot="footer-right"`
+child of the shell). A labelled control is the same height, border and radius and differs only in the width its
+own label needs; an icon control is the square `--control-size` (30px). The **host's own** footer children are
+not part of this: the audio control (`#mic`), the account chip and the status chip are authored by `app.js` and
+styled as they were (`.icon-btn` and the chip classes), because they are not per-message controls the shell
+builds. "One implementation" here means one factory and one box for what the factory makes, not every button
+that happens to sit on that row.
 
 The engine view's topics (nodes, spells, tools) are expandable cards rendered in
 `app.js`; each loads its data on first expand (`GET /nodes`, `/spells`, `/tools`).

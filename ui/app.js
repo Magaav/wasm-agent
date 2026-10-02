@@ -4277,6 +4277,37 @@ function viewUrl(view) {
   return location.origin + location.pathname + "?view=" + encodeURIComponent(view);
 }
 
+// ---- the inspector window ----------------------------------------------------------------
+//
+// The node's own page as a *view*. The reuse is the **shell's**, not this page's: `rust/wa-window/src/main.rs`
+// `open_view` (:404-421) returns early when `state.views` already holds a window whose title is this view's
+// name (:406 `if state.views.iter().any(|open| open.window.title() == view)`), logging "view … is already
+// open" and opening nothing. So this page's half is only the constant name below - asking twice asks for the
+// same window - and nothing here reloads, navigates or otherwise disturbs the window that is already open.
+// The running window is never touched: this only asks the shell for a window of its own.
+const INSPECT_VIEW = "inspect";
+
+// A second wa-window on the node's page. Each view's webview is created with Chromium's *default* context
+// menu enabled (`main.rs:506`, `.with_default_context_menus(true)` - the main window's is disabled at :611),
+// so in the inspector the browser's own menu - `Inspect element` included - is what the reader gets, and the
+// parts of the UI can be navigated and polished in the real DevTools rather than in a DOM panel that only
+// looks like one. This page must therefore *not* suppress that event; see the `contextmenu` listener.
+//
+// Never from inside a view, for the reason the patch and control views refuse it too: a window opening a
+// window is how you get two of them, and the second is the one that stacks.
+function openInspectWindow() {
+  if (!native || typeof native.openView !== "function") {
+    setStatus("This window has no shell to open a second window in; the inspector needs the desktop window.");
+    return false;
+  }
+  if (viewMode()) {
+    setStatus("This window is a view of its own; open the inspector from the main chat window.");
+    return false;
+  }
+  native.openView(INSPECT_VIEW, viewUrl(INSPECT_VIEW));
+  return true;
+}
+
 function openOrchestrator() {
   const url=viewUrl('orchestrator');
   if(native && typeof native.openView==='function') native.openView('orchestrator',url);
@@ -4632,9 +4663,14 @@ function controlViewName(name) {
 function applyViewMode() {
   const wanted = viewMode();
   if (!wanted) return false;
-  document.body.classList.add("view-only");
   const parts = wanted.split(":");
   const kind = parts[0];
+  // The inspector window is the chat *itself* - the surface being inspected is the whole one - so nothing
+  // is unmounted or stripped here, and the menu it keeps is the browser's. What it does need said is the
+  // mode: a fresh window profile boots compact, and compact hides the panel, which would leave the
+  // inspector pointed at an empty page.
+  if (kind === INSPECT_VIEW) { applyMode("expanded"); return true; }
+  document.body.classList.add("view-only");
   const target = parts[1] && parts[1] !== "this-node" ? parts.slice(1).join(":") : "";
   if (kind === "orchestrator") { mountOrchestrator(); return true; }
   if (kind === "control") {
@@ -5523,14 +5559,26 @@ userBtn.addEventListener("click", openUserMenu);
 userMenu.addEventListener("close", () => userBtn.setAttribute("aria-expanded", "false"));
 
 document.addEventListener("contextmenu", (event) => {
-  if (!native) return; // keep the normal browser menu outside the shell
+  // A window with no shell keeps the browser's own menu, and so does the *inspector* window: the shell
+  // enables Chromium's default menu for every view, and in the inspector that menu IS the feature -
+  // `Inspect element` opens the real DevTools. Every other window is this app's own surface and draws
+  // this app's menu, exactly as it always has, the other views included (DESIGN.md §3).
+  if (!native || viewMode() === INSPECT_VIEW) return;
   event.preventDefault();
-  contextMenu.items = [
+  const items = [
     { label: "Collapse to avatar", action: () => { applyMode("compact"); native.compact(); } },
     { label: "Reload window", action: () => reload() },
-    { separator: true },
-    { label: "Close wasm-agent", danger: true, action: () => native.quit() },
   ];
+  // The inspector is asked for from the window that owns the conversation: `openInspectWindow` refuses
+  // from inside a view (a window opening a window is how you get two), so the item is offered where it
+  // does something rather than offered everywhere and refused.
+  if (!viewMode()) {
+    // Immediately after the reload: both are "open this page again", and the inspector is the one that
+    // opens it in a window the browser itself owns - with Chrome's own element inspection on it.
+    items.push({ label: "inspect", action: () => openInspectWindow() });
+  }
+  items.push({ separator: true }, { label: "Close wasm-agent", danger: true, action: () => native.quit() });
+  contextMenu.items = items;
   contextMenu.openAt(event.clientX, event.clientY);
 });
 
@@ -5540,7 +5588,11 @@ document.addEventListener("contextmenu", (event) => {
 setupVoice();
 restoreDraft();
 input.addEventListener("input", saveDraft);
-const openingView = !!viewMode();
+// A view page normally drops the chat and renders the one component it is for. The inspector is the
+// exception: it is a view whose content *is* the chat, so it boots like the main window (transcript,
+// settings, watchers) and only differs in the menu its window keeps.
+const inspectWindow = viewMode() === INSPECT_VIEW;
+const openingView = !!viewMode() && !inspectWindow;
 if (!openingView) {
   sync("boot");
   setTimeout(openFromQuery, 400);
@@ -5548,7 +5600,7 @@ if (!openingView) {
 // Views can wait for the renderer. Chat first draws readable fallback text;
 // later transcript updates use Markdown once the renderer is ready.
 window.rendererLoaded = loadRenderer().then(() => {
-  if (openingView) applyViewMode();
+  if (openingView || inspectWindow) applyViewMode();
 });
 window.addEventListener("online", () => sync("online"));
 watch();
