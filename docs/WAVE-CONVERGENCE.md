@@ -32,34 +32,73 @@ separately from a hard inconsistency.
 
 | field | values | meaning |
 | --- | --- | --- |
-| `activity` | `on` \| `off` \| `unverifiable` | the ON/OFF fact. `unverifiable` means the node records could not be read at all - it is named, never guessed |
+| `activity` | `on` \| `off` \| `unverifiable` | the ON/OFF fact. `unverifiable` means the node records could not be read, **or** a claim of current work could not be resolved positively - it is named, never guessed, and never treated as OFF |
 | `convergence` | `verified` \| `unverified` \| `legacy-unverified` \| `open` | whether the wave's own completion was proved |
-| `runtime_state` | `complete` \| `active` \| `unverified` \| `idle` | what the wave reports. `active` is only ever derived from real activity |
+| `runtime_state` | `complete` \| `active` \| `unverified` \| `idle` \| `unknown` | what the wave reports. `active` is only ever derived from real activity, and `unknown` is what an unobservable activity answer reports - never `idle` |
 
 A wave whose convergence genuinely could not be verified is a **named** state (`blocked`
 durably, `unverified` in the derived report, with its exact reason - an unknown effect, an
 unresolved claim, a missing full-gate receipt). It is never silently treated as complete.
 
+### An activity claim that cannot be resolved positively is NAMED, and can be resolved
+
+A claim of current work is an open session with a running turn (or an unsettled child
+completion). Every way it fails to be *positive* has a name, and none of them reads as OFF:
+
+| claim | when |
+| --- | --- |
+| `activity_claim_without_a_registered_worktree` | the turn runs in a tree that is missing, unregistered, or mid-release |
+| `activity_claim_during_binding_transition_<state>` | the binding is `releasing`/`release_unknown`/`parking`/`park_unknown` |
+| `activity_claim_on_a_resolved_binding_<state>` | a turn on a binding already `released`/`parked` |
+| `in_flight_binding_state_<state>` | a turn on a binding that is not `allocated` |
+| `child_completion_claim_without_a_live_turn_or_process` | only a `child_completions` row claims it, and no local process names the tree |
+
+An unresolved claim makes the activity answer `unverifiable` (`runtime_state: unknown`), which
+**never** admits the next wave, and it is reported with a ready-made resolution command:
+
+```text
+node scripts/wave-activity.mjs observe <config.json>            # read-only: every claim, its identity and its resolution
+node scripts/wave-activity.mjs resolve <config.json> <session> "<what you observed>" [--child|--run|--boot VALUE]
+```
+
+`resolve` refuses without evidence, refuses without the identity that distinguishes this claim
+from a later one, and writes only the wave store's `activity-resolutions.json`. The resolution
+binds the claim's exact identity, so a **new** claim (a different run, child, boot or tree) can
+never borrow it, and a process that appears later makes the claim positive again by itself. This
+is what closes the "false ON that never clears": a stale completion is not a permanent fence, it
+is a named claim with a one-line resolution - and the same claim read as OFF would have admitted
+a second wave over live work.
+
 ### What each boundary does with it
 
-* `create()` refuses only when the previous wave is **ON** (`previous_wave_active:<id>`). An
-  idle wave never blocks starting the next one, whatever its bookkeeping says; its named
-  convergence is recorded in the new wave's creation event and returned as `previous`.
-  When no activity source can be resolved at all it fails closed
-  (`previous_wave_activity_unverifiable`), and production `start` requires a concrete source.
-* `checkAdmission()` admits producing and allocating while the wave is ON (that is how lanes
-  work under an umbrella) and while it is OFF (`produce`/`allocate` keep being admitted, so an
-  idle row cannot fence live lanes). A closing freeze and a `complete` row still refuse as
-  before. The repository-level acts - `land` (the merge lane) and `admit` (independent
-  delivery admission) - stay refused while the convergence is unverified, with the named
-  reason `wave_convergence_unverified:<reason>`.
+* `create()` reads **every unfinished row**, not just the newest, and refuses when any is **ON**
+  (`previous_wave_active:<id>`) or when any is **`unverifiable`** - an unobservable answer is not
+  an OFF one, and the refusal carries the named claim (`previous_wave_activity_unverifiable:<id>:unresolved_activity_claims:<claim>:<session>`).
+  An idle wave never blocks starting the next one, whatever its bookkeeping says; the verdict of
+  the newest row is returned as `previous` and **every** unfinished row as `unfinished`.
+* `checkAdmission()` consults **every unfinished row** and reports the whole set. Producing and
+  allocating are admitted while the wave is ON (that is how lanes work under an umbrella) and
+  while it is OFF or unobservable (so an idle row cannot fence live lanes). A closing freeze and
+  a `complete` row still refuse as before. The repository-level acts - `land` (the merge lane)
+  and `admit` (independent delivery admission) - are refused whenever **any** unfinished row's
+  convergence is not `verified`/`open`, i.e. `unverified` or `legacy-unverified`, with the named
+  reason `wave_convergence_unverified:<wave-id>:<state>:<reason>`. That holds **whether or not
+  agents are working**: a live umbrella does not make an unverified convergence verified.
+* `monitor()` drives the **oldest** unfinished wave (deterministic, one at a time, each row with
+  its own budget) and reports the whole unfinished set; `list` prints every row with its derived
+  verdict, and `inspect(id)` reports the store's other unfinished rows as `unfinished`. A second
+  unfinished wave is never a silent orphan of a newest-only read.
 * `inspect()` never reports an active state with nothing running: a durable `running` row
   whose owner is provably gone and whose inventory is empty is reported as `idle`, with the
   durable value preserved as `bookkeeping_state`.
 * The one-row-per-repository unique index (`active_repo`) is **replaced** by a lookup index.
   It encoded "at most one unfinished wave per repository", which is exactly the rule that is
   gone; a SQL index cannot see whether agents are working. The refusal moved into `create()`,
-  which reads real activity. `scripts/wave-migrate.mjs` reports this and can restore it.
+  which reads real activity. `scripts/wave-migrate.mjs` reports this and can restore it - and
+  that restoration is **transient**, because `wave-lifecycle open()` drops the index again on the
+  next `create`/`advance`/`reconcile`/`resume`. `revert` says so in its own report
+  (`one_row_per_repository_index: {restored, transient: true, note}`) and `plan` states it too;
+  the reversal is not a durable one and must not be read as one.
 
 ## Migration of a legacy durable row (explicit, non-destructive, reversible)
 
@@ -77,12 +116,24 @@ node scripts/wave-migrate.mjs revert <store-dir> <wave-id>
 `apply` moves **no original column**: `state`, `reason`, `receipt`, `owner`, `created_at`,
 `updated_at`, `manifest` and every step row are left exactly as they were. It records the
 exact original bookkeeping in a new additive `legacy` column and in the append-only event
-journal, and writes `migration.json` beside the store (never overwritten). The row then
-reports `convergence: legacy-unverified`, which is a named state: its steps never ran and its
-convergence was never verified. `revert` refuses if anything moved since the migration,
-clears `legacy`, removes the record and (when it still can) restores the `active_repo` index -
-the original columns were never touched, so the reversal is exact by construction. Admission
-keeps admitting producing and allocating throughout.
+journal, and writes one record **per wave** (`migration-<wave-id>.json`, never overwritten);
+the single `migration.json` name this first shipped under is still read and removed for its own
+wave. The row then reports `convergence: legacy-unverified`, which is a named state: its steps
+never ran and its convergence was never verified. A **second `apply` of the same wave is
+idempotent** (`{ok: true, already_migrated: true}`) - it is the same request, not an error - and
+a record that exists **without** its migration is refused *before* the transaction
+(`migration_record_without_migration`, `migration_record_belongs_to_another_wave`), so a store
+can never be left migrated with no record. `revert` refuses if anything moved since the
+migration, clears `legacy`, removes whichever record names this wave, and attempts to restore
+the `active_repo` index (transiently, as above) - the original columns were never touched, so
+the reversal is exact by construction.
+
+**What the migration means for landing.** A migrated row is `legacy-unverified`, so while it is
+the umbrella, `checkAdmission` refuses `land` and `admit` by name (produce/allocate keep being
+admitted). Landing resumes when that row's convergence is verified, when it is reverted, or when
+a **fresh** wave is started - and a fresh wave can only be started while the activity answer is
+`off`: no agents working, and no unresolved activity claim (a stale claim is resolvable in one
+command, printed with its own reason).
 
 ## Sanctioned entry and repaired proof boundaries
 
